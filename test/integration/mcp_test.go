@@ -17,31 +17,22 @@ package integration_test
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
-	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // mcpToolNames is the exact surface the MCP face must expose: the twelve
@@ -64,172 +55,33 @@ var mcpToolNames = []string{
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
 
-// mcpStderrBuf is a mutex-guarded stderr sink: the daemon writes from its own
-// process while the test goroutine polls the buffer for the proxy port, and a
-// plain bytes.Buffer is not safe for that.
-type mcpStderrBuf struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *mcpStderrBuf) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *mcpStderrBuf) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-// tail returns the last n bytes, for failure messages.
-func (b *mcpStderrBuf) tail(n int) string {
-	s := b.String()
-	if len(s) > n {
-		return s[len(s)-n:]
-	}
-	return s
-}
-
-// mcpDaemon is a test daemon plus the proxy face's resolved URL and captured
-// stderr. The stderr is carried, not dropped, because every failure mode of
-// the proxy face (bad listen address, cert trouble, a panicking face) reads
-// downstream as "MCP endpoint unreachable" — the stderr is the only place the
-// real cause is written.
-type mcpDaemon struct {
-	*daemon
-	proxyURL string
-	stderr   *mcpStderrBuf
-}
-
-// mcpProxyListenLog matches the daemon's "proxy face listening" startup line,
-// whose addr field is the only place the kernel-picked port (the suite boots
-// every daemon with RAFIKI_PROXY_LISTEN=127.0.0.1:0) is ever announced.
-var mcpProxyListenLog = regexp.MustCompile(`addr=127\.0\.0\.1:(\d+)`)
-
-// bootMCPDaemon boots a database-backed daemon with the proxy face on an
-// ephemeral loopback port, waits for BOTH the control UDS and the proxy face
-// to accept, and returns the resolved proxy URL.
-//
-// It mirrors bootDaemonDB (same env shape, same migration step, same skip)
-// because bootDaemonDB itself cannot be reused: the proxy port is only ever
-// announced on the daemon's stderr, which that harness does not capture. The
-// provider-blanking env from noRealProviderEnv is applied so a spawned child's
-// turn can never reach (or spend against) a real provider.
-func bootMCPDaemon(t *testing.T) *mcpDaemon {
+// bootMCPDaemon boots the DB-backed daemon the MCP tests drive, over the
+// shared bootDaemonDB path: migrations, an ephemeral loopback proxy port,
+// stderr capture, and both readiness waits (control UDS accepting, proxy face
+// announcing its resolved port on stderr — read back as d.proxyURL). What
+// remains here is this file's business, not harness material: noRealProviderEnv,
+// so a spawned child's turn can never reach (or spend against) a real
+// provider, and removal of the state dir on cleanup, which bootDaemonDB
+// deliberately skips so its restart tests can come back against the same tree.
+func bootMCPDaemon(t *testing.T) *daemon {
 	t.Helper()
-
-	dsn := os.Getenv("RAFIKI_TEST_DSN")
-	if dsn == "" {
-		t.Skip("RAFIKI_TEST_DSN not set")
-	}
-
-	// Migrations are not run by the daemon on startup; without them the daemon
-	// carries on degraded and every later step fails with confusing errors.
-	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		pool.Close()
-		t.Fatalf("migrate: %v", err)
-	}
-	pool.Close()
-
-	daemonID := nextDaemonID()
-	dropDaemonRows(t, daemonID)
-
-	base := ""
-	if runtime.GOOS == "darwin" {
-		base = "/tmp"
-	}
-	homeDir, err := os.MkdirTemp(base, "rafiki-it-mcp")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
-
-	appDir := filepath.Join(homeDir, "rafiki")
-	socketPath := filepath.Join(appDir, "controller.sock")
-	if len(socketPath) > 100 {
-		os.RemoveAll(homeDir)
-		t.Fatalf("socket path too long (%d bytes) for UDS: %s", len(socketPath), socketPath)
-	}
-
-	stderr := &mcpStderrBuf{}
-	cmd := exec.Command(binaryPath)
-	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(),
-		"HOME="+homeDir,
-		"XDG_RUNTIME_DIR="+homeDir,
-		"XDG_STATE_HOME="+homeDir,
-		"XDG_DATA_HOME="+homeDir,
-		"RAFIKI_DB="+dsn,
-		"RAFIKI_DAEMON_ID="+daemonID,
-		// Ephemeral loopback port: parallel daemons must never fight over a
-		// fixed one. The real port is read back from the startup log below.
-		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
-	)
-	cmd.Env = append(cmd.Env, noRealProviderEnv()...)
-
-	if err := cmd.Start(); err != nil {
-		os.RemoveAll(homeDir)
-		t.Fatalf("start daemon: %v", err)
-	}
-
-	d := &daemon{
-		socketPath: socketPath,
-		proc:       cmd,
-		homeDir:    homeDir,
-		logsDir:    filepath.Join(appDir, "logs"),
-	}
-	md := &mcpDaemon{daemon: d, stderr: stderr}
+	d := bootDaemonDB(t, nextDaemonID(), noRealProviderEnv()...)
 	t.Cleanup(func() {
-		d.stopDaemon()
-		os.RemoveAll(homeDir)
+		// Stop first, then remove: this cleanup runs before bootDaemonDB's own
+		// (LIFO), and stopping an already-stopped daemon is a no-op.
+		d.stopDaemonNoRemove()
+		os.RemoveAll(d.homeDir)
 	})
-
-	// Wait for the control UDS exactly the way bootDaemon does: dialing, not
-	// stat-ing, is the only proof something is behind the socket file.
-	deadline := time.Now().Add(10 * time.Second)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		conn, err := net.Dial("unix", socketPath)
-		if err == nil {
-			_ = conn.Close()
-			lastErr = nil
-			break
-		}
-		lastErr = err
-		time.Sleep(20 * time.Millisecond)
-	}
-	if lastErr != nil {
-		t.Fatalf("daemon never accepted on %s: %v\nstderr:\n%s", socketPath, lastErr, stderr.tail(4000))
-	}
-
-	// The proxy face announces itself on stderr once it is serving. A daemon
-	// whose face failed to bind still passes the UDS wait above, so this wait
-	// is what actually gates the MCP endpoint's existence.
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if m := mcpProxyListenLog.FindStringSubmatch(stderr.String()); m != nil {
-			md.proxyURL = "http://127.0.0.1:" + m[1]
-			return md
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("proxy face never announced a listen address\nstderr:\n%s", stderr.tail(4000))
-	return nil
+	return d
 }
 
 // createMCPUser mints a user over the control UDS and returns its bearer
 // token. The UDS is the daemon's trust boundary, so the frame needs no
 // credential; the token is what the MCP face authenticates with.
-func (md *mcpDaemon) createMCPUser(t *testing.T) string {
+func (d *daemon) createMCPUser(t *testing.T) string {
 	t.Helper()
 	username := fmt.Sprintf("mcp-it-%d", time.Now().UnixNano())
-	raw := md.request(t, fmt.Sprintf(`{"type":"ctrl_user_create","id":"u1","username":%q}`, username))
+	raw := d.request(t, fmt.Sprintf(`{"type":"ctrl_user_create","id":"u1","username":%q}`, username))
 	var r protocol.Response
 	mustUnmarshal(t, raw, &r)
 	if !r.Success {
@@ -244,7 +96,7 @@ func (md *mcpDaemon) createMCPUser(t *testing.T) string {
 	// re-derive later; remove the user on cleanup so the shared test database
 	// does not accumulate active test identities.
 	t.Cleanup(func() {
-		raw := md.request(t, fmt.Sprintf(`{"type":"ctrl_user_rm","id":"u2","username":%q}`, username))
+		raw := d.request(t, fmt.Sprintf(`{"type":"ctrl_user_rm","id":"u2","username":%q}`, username))
 		var rm protocol.Response
 		if json.Unmarshal(raw, &rm) == nil && !rm.Success {
 			t.Logf("ctrl_user_rm(%s): %+v", username, rm.Error)
@@ -335,9 +187,9 @@ func mcpResultText(res *mcp.CallToolResult) string {
 // finish with a kill that reaches exited.
 func TestMCPSurfaceEndToEnd(t *testing.T) {
 	t.Parallel()
-	md := bootMCPDaemon(t)
-	token := md.createMCPUser(t)
-	sess := mcpConnect(t, md.proxyURL, token)
+	d := bootMCPDaemon(t)
+	token := d.createMCPUser(t)
+	sess := mcpConnect(t, d.proxyURL, token)
 
 	// 3. ListTools must be the exact twelve.
 	list, err := sess.ListTools(context.Background(), nil)
@@ -376,7 +228,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		resp, err := md.connectClient().ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+		resp, err := d.connectClient().ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
 		if err != nil {
 			t.Fatalf("ListChildren: %v", err)
 		}
@@ -451,7 +303,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 		t.Fatalf("agent_set_budget: unexpected output %q", budgetText)
 	}
 
-	kidID := md.spawnChildUnder(t, childID)
+	kidID := d.spawnChildUnder(t, childID)
 	res, kidText := mcpCallTool(t, sess, "agent_set_budget", map[string]any{"agent": kidID, "max_cost": 5.0})
 	if !res.IsError {
 		t.Fatalf("agent_set_budget on parented child %s succeeded; want IsError; output:\n%s", kidID, kidText)
@@ -506,11 +358,11 @@ func mcpFirstTaskHandle(t *testing.T, text string) string {
 // JSON-RPC payload — so no server object was ever built and no tool ran.
 func TestMCPSurfaceRejectsAMissingToken(t *testing.T) {
 	t.Parallel()
-	md := bootMCPDaemon(t)
+	d := bootMCPDaemon(t)
 
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-it","version":"0"}}}`
 	for name, token := range map[string]string{"no credential": "", "garbage credential": "mcp-it-not-a-real-token"} {
-		resp, body := mcpRawBody(t, md.proxyURL, token, "", initBody)
+		resp, body := mcpRawBody(t, d.proxyURL, token, "", initBody)
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s: initialize status = %d, want 401 (body: %.200s)", name, resp.StatusCode, body)
 		}
@@ -527,7 +379,7 @@ func TestMCPSurfaceRejectsAMissingToken(t *testing.T) {
 	for name, token := range map[string]string{"no credential": "", "garbage credential": "mcp-it-not-a-real-token"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		transport := &mcp.StreamableClientTransport{
-			Endpoint:   md.proxyURL + "/mcp",
+			Endpoint:   d.proxyURL + "/mcp",
 			HTTPClient: &http.Client{Transport: mcpBearerTransport{token: token}},
 		}
 		_, err := mcp.NewClient(&mcp.Implementation{Name: "mcp-it", Version: "0.0.1"}, nil).Connect(ctx, transport, nil)
@@ -558,13 +410,13 @@ const sseLegTimeout = 15 * time.Second
 // demand, so the POST response stream is the leg that can be exercised.
 func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 	t.Parallel()
-	md := bootMCPDaemon(t)
-	token := md.createMCPUser(t)
+	d := bootMCPDaemon(t)
+	token := d.createMCPUser(t)
 
 	// initialize — the response names the session and carries the result as a
 	// flushed SSE data frame.
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-it-raw","version":"0"}}}`
-	resp := mcpRawPost(t, md.proxyURL, token, "", initBody)
+	resp := mcpRawPost(t, d.proxyURL, token, "", initBody)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("initialize status = %d, want 200", resp.StatusCode)
 	}
@@ -579,7 +431,7 @@ func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 
 	// The client's initialized notification (no call in it) is accepted
 	// out-of-band with 202 and no stream.
-	notifResp := mcpRawPost(t, md.proxyURL, token, sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	notifResp := mcpRawPost(t, d.proxyURL, token, sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	_, _ = io.Copy(io.Discard, notifResp.Body)
 	_ = notifResp.Body.Close()
 	if notifResp.StatusCode != http.StatusAccepted {
@@ -587,7 +439,7 @@ func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 	}
 
 	// tools/list — its response must arrive over the stream within the bound.
-	resp = mcpRawPost(t, md.proxyURL, token, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	resp = mcpRawPost(t, d.proxyURL, token, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("tools/list status = %d, want 200", resp.StatusCode)
 	}

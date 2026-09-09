@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -21,10 +24,76 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// bootDaemonDB is bootDaemon with a RAFIKI_DB and RAFIKI_DAEMON_ID. extraEnv
-// entries are appended last, so ("KEY=value") after os.Environ() overrides
-// whatever the ambient shell set for KEY (exec.Cmd.Env: "If Env contains
-// duplicate environment keys, only the last value ... is used").
+// ─── daemon harness: stderr capture and the proxy face's port ─────────────
+
+// stderrBuf is a mutex-guarded stderr sink: the daemon writes from its own
+// process while the test goroutine polls the buffer for the proxy face's
+// announced port (or just for a failure tail), and a plain bytes.Buffer is
+// not safe for that.
+type stderrBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *stderrBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *stderrBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// tail returns the last n bytes, for failure messages.
+func (b *stderrBuf) tail(n int) string {
+	s := b.String()
+	if len(s) > n {
+		return s[len(s)-n:]
+	}
+	return s
+}
+
+// proxyListenLog matches the daemon's "proxy face listening" startup line,
+// whose addr field is the only place the kernel-picked port (bootDaemonDB
+// boots every daemon with RAFIKI_PROXY_LISTEN=127.0.0.1:0) is ever announced.
+// The TCP control listener and the broadcast receiver also log an addr, but
+// only when RAFIKI_CONTROL_LISTEN / the broadcast port are set, which no test
+// daemon does — this is the only 127.0.0.1 addr in a test boot.
+var proxyListenLog = regexp.MustCompile(`addr=127\.0\.0\.1:(\d+)`)
+
+// waitProxyListen polls a captured stderr for the proxy face's listen
+// announcement and returns the resolved loopback URL, failing the test with
+// the stderr tail if the face never announces. A daemon whose face failed to
+// bind passes the control-UDS wait and comes up degraded, so this wait is
+// what actually gates the face's existence.
+func waitProxyListen(t *testing.T, stderr *stderrBuf) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if m := proxyListenLog.FindStringSubmatch(stderr.String()); m != nil {
+			return "http://127.0.0.1:" + m[1]
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("proxy face never announced a listen address\nstderr:\n%s", stderr.tail(4000))
+	return ""
+}
+
+// bootDaemonDB is bootDaemon with a RAFIKI_DB and RAFIKI_DAEMON_ID, the
+// database migrated first (the daemon does not migrate on startup), the
+// daemon's stderr captured, and BOTH readiness waits run before returning:
+// the control UDS accepting, and the proxy face announcing its ephemeral
+// port. extraEnv entries are appended last, so ("KEY=value") after
+// os.Environ() overrides whatever the ambient shell set for KEY (exec.Cmd.Env:
+// "If Env contains duplicate environment keys, only the last value ... is
+// used") — including RAFIKI_PROXY_LISTEN, which this boot defaults to an
+// ephemeral loopback port so parallel daemons never fight over a fixed one
+// and a developer's own `rafiki serve` on :8035 cannot degrade this one.
+// bootDaemonDB never removes homeDir, so a test can restart the daemon
+// against the same tree; callers without a restart remove it themselves.
 func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 	t.Helper()
 
@@ -39,6 +108,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		t.Fatalf("pool: %v", err)
 	}
 	if err := store.Migrate(context.Background(), pool); err != nil {
+		pool.Close()
 		t.Fatalf("migrate: %v", err)
 	}
 	pool.Close()
@@ -61,13 +131,22 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		t.Fatalf("socket path too long (%d bytes) for UDS: %s", len(socketPath), socketPath)
 	}
 
+	// stderr is captured for every boot: it is the only place the proxy face
+	// announces its port, and the only place a degraded boot's real cause is
+	// written — the failure messages below carry its tail.
+	stderr := &stderrBuf{}
 	cmd := exec.Command(binaryPath)
+	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
 		"XDG_RUNTIME_DIR="+homeDir,
 		"XDG_STATE_HOME="+homeDir,
 		"XDG_DATA_HOME="+homeDir,
 		"RAFIKI_DB="+dsn,
+		// Ephemeral loopback port: parallel daemons must never fight over a
+		// fixed one. The real port is read back from the startup log below;
+		// an extraEnv entry still overrides it.
+		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
@@ -82,20 +161,32 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		proc:       cmd,
 		homeDir:    homeDir,
 		logsDir:    filepath.Join(appDir, "logs"),
+		stderr:     stderr,
 	}
+	// Registered before the waits so a failed boot still stops the process.
+	t.Cleanup(d.stopDaemonNoRemove)
+	// Don't auto-remove homeDir so we can restart the daemon against the same dir.
 
+	// Wait for the control UDS exactly the way bootDaemon does: dialing, not
+	// stat-ing, is the only proof something is behind the socket file.
 	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		conn, err := net.Dial("unix", socketPath)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
+			lastErr = nil
 			break
 		}
+		lastErr = err
 		time.Sleep(20 * time.Millisecond)
 	}
+	if lastErr != nil {
+		t.Fatalf("daemon never accepted on %s: %v\nstderr:\n%s", socketPath, lastErr, stderr.tail(4000))
+	}
 
-	t.Cleanup(d.stopDaemonNoRemove)
-	// Don't auto-remove homeDir so we can restart the daemon against the same dir.
+	// The proxy face announces itself on stderr once it is serving.
+	d.proxyURL = waitProxyListen(t, stderr)
 	return d
 }
 

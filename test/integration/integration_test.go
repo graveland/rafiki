@@ -101,6 +101,14 @@ type daemon struct {
 	// logsDir is the daemon's per-child log tree. Derived once here rather than
 	// rebuilt at each use site, so a future layout move has one place to change.
 	logsDir string
+	// stderr captures the daemon process's stderr. bootDaemonDB always sets it:
+	// the proxy face announces its resolved port only on stderr, and every boot
+	// failure carries the tail. bootDaemon leaves it nil and discards stderr.
+	stderr *stderrBuf
+	// proxyURL is the proxy face's resolved loopback URL. Set by bootDaemonDB,
+	// which waits for the face's announce line before returning; zero for
+	// bootDaemon, whose tests do not dial the face.
+	proxyURL string
 }
 
 // bootDaemon starts the binary with a fresh temp HOME and a test DSN. It waits
