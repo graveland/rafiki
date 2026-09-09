@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package agentcli defines the transport-agnostic seam between the CLI and
-// backend services, plus the typed renderers for stats/search/export output.
+// Package conversationview defines the transport-agnostic seam between the
+// CLI and backend services, plus the typed renderers for stats/search/export
+// output.
 package conversationview
 
 import (
@@ -11,11 +12,10 @@ import (
 	"io"
 	"slices"
 
-	"github.com/jedib0t/go-pretty/v6/table"
-
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 // RenderStats renders a stats bundle as a designed, human-first layout:
@@ -34,31 +34,31 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 		insightstypes.CompactTokens(st.Volume.Conversations), insightstypes.CompactTokens(st.Volume.Turns), pct(st.Tokens.CacheHitRatio))
 
 	if len(st.Adoption.PerOwner) > 0 {
-		t := newAgentTable(w, "Owners")
-		t.AppendHeader(table.Row{"Owner", "Convs", "Turns"})
+		t := newTable(ew, "Owners")
+		t.Header("OWNER", "CONVS", "TURNS")
 		for _, o := range st.Adoption.PerOwner {
 			owner := o.Owner
 			if owner == "" {
 				owner = "(unattributed)"
 			}
-			t.AppendRow(table.Row{owner, insightstypes.CompactTokens(o.Conversations), insightstypes.CompactTokens(o.Turns)})
+			t.Row(owner, insightstypes.CompactTokens(o.Conversations), insightstypes.CompactTokens(o.Turns))
 		}
-		t.Render()
+		ew.render(t)
 	}
 
-	t := newAgentTable(w, "Tokens")
-	t.AppendHeader(table.Row{"", "Input", "Output", "Cache Read", "Cache Write", "Hit"})
-	t.AppendRow(tokenRow("overall", st.Tokens))
+	t := newTable(ew, "Tokens")
+	t.Header("", "INPUT", "OUTPUT", "CACHE READ", "CACHE WRITE", "HIT")
+	t.Row(tokenRow("overall", st.Tokens)...)
 	for _, path := range []string{"proxy", "direct"} {
 		if ts, ok := st.ByPath[path]; ok {
-			t.AppendRow(tokenRow(path, ts))
+			t.Row(tokenRow(path, ts)...)
 		}
 	}
-	t.Render()
+	ew.render(t)
 
 	if len(st.Cost) > 0 {
-		t = newAgentTable(w, "Cost by model")
-		t.AppendHeader(table.Row{"Model", "Turns", "Input", "Output", "Cache Read", "Cost"})
+		t = newTable(ew, "Cost by model")
+		t.Header("MODEL", "TURNS", "INPUT", "OUTPUT", "CACHE READ", "COST")
 		// The server orders by token volume; cost is what the reader ranks by.
 		rows := slices.Clone(st.Cost)
 		slices.SortStableFunc(rows, func(a, b insightstypes.CostRow) int {
@@ -69,12 +69,12 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 		})
 		var total float64
 		for _, c := range rows {
-			t.AppendRow(table.Row{c.Model, insightstypes.CompactTokens(c.Turns), insightstypes.CompactTokens(c.InputTokens),
-				insightstypes.CompactTokens(c.OutputTokens), insightstypes.CompactTokens(c.CacheReadTokens), costfmt.Format(c.CostUSD, cur)})
+			t.Row(c.Model, insightstypes.CompactTokens(c.Turns), insightstypes.CompactTokens(c.InputTokens),
+				insightstypes.CompactTokens(c.OutputTokens), insightstypes.CompactTokens(c.CacheReadTokens), costfmt.Format(c.CostUSD, cur))
 			total += c.CostUSD
 		}
-		t.AppendFooter(table.Row{"TOTAL", "", "", "", "", costfmt.Format(total, cur)})
-		t.Render()
+		t.Row("TOTAL", "", "", "", "", costfmt.Format(total, cur))
+		ew.render(t)
 	}
 
 	ew.printf("Reliability    %s errors / %s turns (%s) · failover %s · cache waste %s turns / %s tokens\n",
@@ -87,16 +87,16 @@ func RenderStats(w io.Writer, st *insightstypes.Stats) error {
 	return ew.err
 }
 
-func newAgentTable(w io.Writer, title string) table.Writer {
-	t := table.NewWriter()
-	t.SetOutputMirror(w)
-	t.SetStyle(table.StyleRounded)
-	t.SetTitle(title)
-	return t
+// newTable prints a section title on its own line and returns a builder
+// writing through ew. go-pretty rendered the title as a row inside the box;
+// pkg/table has no title, so the line sits above the table.
+func newTable(ew *errWriter, title string) *table.Builder {
+	ew.println(title)
+	return table.New(ew, table.Options{})
 }
 
-func tokenRow(label string, ts insightstypes.TokenStats) table.Row {
-	return table.Row{label, insightstypes.CompactTokens(ts.InputTokens), insightstypes.CompactTokens(ts.OutputTokens),
+func tokenRow(label string, ts insightstypes.TokenStats) []string {
+	return []string{label, insightstypes.CompactTokens(ts.InputTokens), insightstypes.CompactTokens(ts.OutputTokens),
 		insightstypes.CompactTokens(ts.CacheReadTokens), insightstypes.CompactTokens(ts.CacheCreationTokens), pct(ts.CacheHitRatio)}
 }
 
