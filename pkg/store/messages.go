@@ -48,12 +48,20 @@ type Message struct {
 	Param      anthropic.MessageParam
 	ToolUseIDs []string
 	StopReason string // assistant rows: stop reason of the turn that produced it
+	// Kind tags a row as something other than an ordinary turn message. Only
+	// "compaction_summary" is written today (by pkg/capture's boundary-write
+	// path), on the one row inserted at a rebase boundary. Nil on every
+	// ordinary row.
+	Kind *string
+	// InputTokens is set only on a kind='compaction_summary' row: the
+	// approximate size of the context that boundary replaced. Nil otherwise.
+	InputTokens *int
 }
 
 // Load returns the conversation's messages in ordinal order.
 func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, error) {
 	rows, err := m.pool.Query(ctx, `
-		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, '')
+		SELECT ordinal, role, content, coalesce(tool_use_ids, '{}'), coalesce(stop_reason, ''), kind, input_tokens
 		  FROM conversations.conversation_message
 		 WHERE conversation_id = $1::uuid ORDER BY ordinal`, conversationID)
 	if err != nil {
@@ -67,7 +75,7 @@ func (m *Messages) Load(ctx context.Context, conversationID string) ([]Message, 
 			role    string
 			content []byte
 		)
-		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason); err != nil {
+		if err := rows.Scan(&msg.Ordinal, &role, &content, &msg.ToolUseIDs, &msg.StopReason, &msg.Kind, &msg.InputTokens); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		wire, err := json.Marshal(map[string]json.RawMessage{

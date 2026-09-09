@@ -21,6 +21,16 @@ func EventsFromMessages(childID string, msgs []store.Message) []*rafikiv1.Event 
 			ChildId: childID,
 			Ordinal: proto.Int32(int32(m.Ordinal)),
 		}
+		if m.Kind != nil && *m.Kind == "compaction_summary" {
+			cb := &rafikiv1.CompactionBoundary{}
+			if m.InputTokens != nil {
+				pre := int32(*m.InputTokens)
+				cb.PreTokens = &pre
+			}
+			ev.Payload = &rafikiv1.Event_CompactionBoundary{CompactionBoundary: cb}
+			out = append(out, ev)
+			continue
+		}
 		blocks := BlocksFromParam(m.Param)
 		if m.Param.Role == "assistant" {
 			ev.Payload = &rafikiv1.Event_AssistantMessage{

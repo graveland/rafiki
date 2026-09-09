@@ -102,3 +102,63 @@ func TestStopReasonNormalizes(t *testing.T) {
 		}
 	}
 }
+
+func ptr[T any](v T) *T { return &v }
+
+// A kind='compaction_summary' row maps to a CompactionBoundary event, not to
+// the ordinary UserMessage branch its role would otherwise land in. Only
+// pre_tokens is ever set here — a reattach-synthesized boundary cannot know
+// the post size — which is what makes the renderer pick the one-sided format.
+func TestEventsFromMessagesMapsCompactionSummaryRow(t *testing.T) {
+	msgs := []store.Message{
+		{Ordinal: 0, Param: anthropic.NewUserMessage(anthropic.NewTextBlock("old context"))},
+		{Ordinal: 1, Kind: ptr("compaction_summary"), InputTokens: ptr(182000),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
+	}
+
+	evs := eventconv.EventsFromMessages("c_test", msgs)
+
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2", len(evs))
+	}
+	if evs[0].GetUserMessage() == nil {
+		t.Fatalf("event 0 is %T, want an ordinary user message", evs[0].Payload)
+	}
+	ev := evs[1]
+	if ev.GetOrdinal() != 1 {
+		t.Fatalf("event 1 ordinal = %d, want 1", ev.GetOrdinal())
+	}
+	cb := ev.GetCompactionBoundary()
+	if cb == nil {
+		t.Fatalf("event 1 is %T, want Event_CompactionBoundary", ev.Payload)
+	}
+	if cb.GetPreTokens() != 182000 || cb.PreTokens == nil {
+		t.Fatalf("pre_tokens = %v, want 182000", cb.PreTokens)
+	}
+	if cb.PostTokens != nil {
+		t.Fatalf("post_tokens = %v, want unset (the renderer's one-sided format relies on it)", cb.PostTokens)
+	}
+	if cb.Trigger != "" {
+		t.Fatalf("trigger = %q, want empty (the stored row carries no trigger)", cb.Trigger)
+	}
+}
+
+// A summary row with no recorded input_tokens still becomes a boundary, with
+// pre_tokens unset rather than a zero that would read as "compaction dropped
+// everything".
+func TestEventsFromMessagesCompactionSummaryWithoutTokens(t *testing.T) {
+	msgs := []store.Message{
+		{Ordinal: 4, Kind: ptr("compaction_summary"),
+			Param: anthropic.NewUserMessage(anthropic.NewTextBlock("summary"))},
+	}
+
+	ev := eventconv.EventsFromMessages("c_test", msgs)[0]
+
+	cb := ev.GetCompactionBoundary()
+	if cb == nil {
+		t.Fatalf("event is %T, want Event_CompactionBoundary", ev.Payload)
+	}
+	if cb.PreTokens != nil || cb.PostTokens != nil {
+		t.Fatalf("pre_tokens=%v post_tokens=%v, want both unset", cb.PreTokens, cb.PostTokens)
+	}
+}
