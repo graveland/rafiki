@@ -1217,3 +1217,204 @@ func TestCostFieldsUnpricedModelIsSilent(t *testing.T) {
 		t.Errorf("costFields for an unpriced model = %v, want nil", got)
 	}
 }
+
+// TestMessagesProxyCompactionRebases drives the REAL MessagesProxy over
+// ServeHTTP against the REAL (Postgres-backed) *capture.CaptureStore — not the
+// fakeProxyStore pattern the fixtures above use — because its whole point is
+// the wiring: the proxy consuming DecomposeRequest's horizon-aware return
+// value when Claude Code really drives it. pkg/capture's own tests cover
+// DecomposeRequest's mechanics directly; this one covers the end-to-end path
+// ServeHTTP → streamAndCapture → DecomposeRequest → AppendResponseMessage for
+// a post-compaction request whose message 0 differs from the stored anchor.
+//
+// The pre-fix behavior being guarded against: the proxy used to append the
+// response at captureRef.nextOrdinal (the request's message count, computed
+// I/O-free in beginCapture). For a two-message post-compaction request that
+// was ordinal 2 — colliding with the compaction_summary boundary row and
+// putting the response before the horizon instead of after it.
+func TestMessagesProxyCompactionRebases(t *testing.T) {
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
+		}
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// Fake Anthropic upstream: the same minimal SSE stream
+	// TestMessagesProxyStreamsAndCaptures uses — message_start carries input
+	// usage, message_delta the stop reason and cumulative output tokens.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = capture.NewCaptureStore(pool) // the REAL store, unlike the fakeProxyStore fixtures
+
+	// Unique per run: EnsureConversationByExternalRef resolves conversations by
+	// (external_ref, driven_by), so a fixed string would collide across runs
+	// against the shared test DB.
+	session := "compaction-test-" + time.Now().Format(time.RFC3339Nano)
+
+	// Turn 1 — the pre-compaction conversation: "hello" lands at ordinal 0,
+	// the turn's response at ordinal 1 (horizon 0 + 1 request message).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("X-Rafiki-Session", session)
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first request: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Turn 2 — the post-compaction request, exactly how Claude Code drives the
+	// proxy after its own context compaction: full history replaced by a
+	// summary, re-sent under the same X-Rafiki-Session. Message 0 differs from
+	// everything stored, so the anchor comparison diverges and a boundary must
+	// be recorded; the re-anchor guard finds no positional rematch and falls
+	// through to the genuine boundary path.
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[`+
+			`{"role":"user","content":"[summary text, different from \"hello\"]"},`+
+			`{"role":"user","content":"continue"}]}`))
+	req2.Header.Set("X-Rafiki-Session", session)
+	p.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second request: status = %d, body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	// Resolve the conversation the session header created.
+	var convID string
+	if err := pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.conversation WHERE external_ref = $1`,
+		session).Scan(&convID); err != nil {
+		t.Fatalf("resolve conversation by external_ref %q: %v", session, err)
+	}
+
+	// A boundary was recorded: the horizon is non-zero.
+	var horizon int
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
+		convID).Scan(&horizon); err != nil {
+		t.Fatalf("read resume_from_ordinal: %v", err)
+	}
+	if horizon == 0 {
+		t.Fatalf("resume_from_ordinal = 0, want non-zero: the post-compaction request diverged from the anchor but no boundary was recorded")
+	}
+
+	// Load through the same API the reattach display path uses, so the
+	// assertions below are about what a reader of the conversation sees.
+	msgs, err := store.NewMessages(pool).Load(ctx, convID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(msgs) != 5 {
+		t.Fatalf("Load returned %d messages, want 5 (ordinals 0..4 dense); ordinals seen: %v",
+			len(msgs), func() []int {
+				out := make([]int, 0, len(msgs))
+				for _, m := range msgs {
+					out = append(out, m.Ordinal)
+				}
+				return out
+			}())
+	}
+	byOrdinal := make(map[int]store.Message, len(msgs))
+	for _, m := range msgs {
+		byOrdinal[m.Ordinal] = m
+	}
+
+	// The ORIGINAL first message is still present at its original ordinal with
+	// its content intact — the exact regression design §5 exists to prevent
+	// (Load serves GetHistory/reattach; it must never be horizon-filtered).
+	// Checked two ways: the Load shape a reader sees, and the same JSONB
+	// equality resolveHorizon's own anchor comparison uses.
+	if m0 := byOrdinal[0]; m0.Param.Role != "user" {
+		t.Errorf("ordinal 0 role = %q, want user", m0.Param.Role)
+	} else if b, merr := json.Marshal(m0.Param.Content); merr != nil || !strings.Contains(string(b), "hello") {
+		t.Errorf("ordinal 0 content = %s (marshal err %v), want the original %q message still present", b, merr, "hello")
+	}
+	var helloPresent bool
+	if err := pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message
+		   WHERE conversation_id=$1::uuid AND ordinal=0 AND role='user' AND content='"hello"'::jsonb)`,
+		convID).Scan(&helloPresent); err != nil {
+		t.Fatalf("check original message survived: %v", err)
+	}
+	if !helloPresent {
+		t.Errorf(`original message "hello" no longer present at ordinal 0 — pre-compaction history was lost (design §5 regression)`)
+	}
+
+	// The row at the horizon is the compaction summary boundary.
+	mb := byOrdinal[horizon]
+	if mb.Kind == nil || *mb.Kind != "compaction_summary" {
+		t.Errorf("row at resume_from_ordinal %d: kind = %v, want compaction_summary", horizon, mb.Kind)
+	}
+	if mb.InputTokens == nil {
+		t.Errorf("compaction_summary row at %d carries no input_tokens (the replaced-context size), want non-nil", horizon)
+	}
+
+	// The second request's messages and response landed at horizon-relative
+	// ordinals: continuation at horizon+1, response at horizon+2. The pre-fix
+	// proxy would have appended the response at the request-message count (2),
+	// colliding with the boundary row at the horizon.
+	if mc := byOrdinal[horizon+1]; mc.Param.Role != "user" {
+		t.Errorf("ordinal %d role = %q, want user (the continuation message)", horizon+1, mc.Param.Role)
+	}
+	if mr := byOrdinal[horizon+2]; mr.Param.Role != "assistant" {
+		t.Errorf("ordinal %d role = %q, want assistant (the second request's response)", horizon+2, mr.Param.Role)
+	}
+
+	// Each turn recorded its response at the right ordinal — turn 1 at 1 (the
+	// pre-compaction path unchanged), turn 2 at horizon+2. The turn row is the
+	// direct witness that AppendResponseMessage consumed DecomposeRequest's
+	// return value rather than a precomputed request-message count.
+	var turnCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_turn WHERE conversation_id=$1`,
+		convID).Scan(&turnCount); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if turnCount != 2 {
+		t.Fatalf("conversation has %d turns, want 2", turnCount)
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT coalesce(response_ordinal,-1) FROM conversations.conversation_turn
+		  WHERE conversation_id=$1 ORDER BY created_at, id`, convID)
+	if err != nil {
+		t.Fatalf("read turn response ordinals: %v", err)
+	}
+	defer rows.Close()
+	var respOrdinals []int
+	for rows.Next() {
+		var o int
+		if err := rows.Scan(&o); err != nil {
+			t.Fatalf("scan response_ordinal: %v", err)
+		}
+		respOrdinals = append(respOrdinals, o)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read turn response ordinals: %v", err)
+	}
+	if len(respOrdinals) != 2 || respOrdinals[0] != 1 || respOrdinals[1] != horizon+2 {
+		t.Errorf("turn response ordinals = %v, want [1 %d] (turn 1 pre-compaction; turn 2 horizon-relative, not the request-message count 2)", respOrdinals, horizon+2)
+	}
+}
