@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // cliStateDir is a scratch XDG_STATE_HOME shared by every CLI invocation in
@@ -174,7 +176,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 
 	// `rafiki stop` no longer closes: `smoke` must still be listed, exited.
-	// `get` always emits indented JSON (it ignores --output), hence the space.
+	// These gets ask for JSON explicitly, which renders indented — hence the space.
 	getCmd := cliCmd(t, d, "--output", "json", "get", "smoke")
 	out, err = getCmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
@@ -234,10 +236,13 @@ func TestCLI_CreateDetached(t *testing.T) {
 	d := bootDaemon(t)
 
 	// create --detached: should spawn the child and print JSON without attaching.
+	// The explicit --output json is the wave-4 contract: auto on a pipe now
+	// means table, so a consumer unmarshaling stdout must ask for JSON.
 	// Capture stdout and stderr separately — rafiki may emit a best-effort warning
 	// on stderr (e.g. active-marker directory not found) that we don't want to
 	// confuse with the JSON payload on stdout.
 	createCmd := cliCmd(t, d,
+		"--output", "json",
 		"create", "test-detached",
 		"--cwd", "/tmp",
 		"--no-session",
@@ -293,7 +298,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	}
 
 	// `rafiki stop` no longer closes: the child must still be listed, exited.
-	// `get` always emits indented JSON (it ignores --output), hence the space.
+	// These gets ask for JSON explicitly, which renders indented — hence the space.
 	getCmd := cliCmd(t, d, "--output", "json", "get", "test-detached")
 	out, err = getCmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
@@ -434,7 +439,8 @@ func TestCLI_BudgetSet(t *testing.T) {
 		t.Fatalf("budget set output %q does not mention the new amount", setOut)
 	}
 
-	// read the cap back through get — `get` always emits indented JSON.
+	// read the cap back through get — asked for JSON explicitly, which renders
+	// indented.
 	getCmd := cliCmd(t, d, "--output", "json", "get", childID)
 	getOut, err := getCmd.CombinedOutput()
 	if err != nil {
@@ -465,4 +471,199 @@ func TestCLI_BudgetSet(t *testing.T) {
 	// cleanup: kill to avoid leftover processes
 	killCmd := cliCmd(t, d, "kill", "budget-smoke")
 	_, _ = killCmd.CombinedOutput()
+}
+
+// jsonlTestLabel is the label every child this test creates carries, so the
+// list assertions below are immune to children OTHER tests' daemons create
+// concurrently: the test daemons share one database and ctrl_list is not
+// daemon-scoped (childstoredb's listSQL has no WHERE beyond deleted_at), so
+// an unfiltered `rafiki list` sees the whole shared set and can change between
+// two invocations as parallel tests spawn and exit their own children.
+const jsonlTestLabel = "cli-tables=jsonl"
+
+// splitJSONLines splits writeJSONL output into one string per record. A
+// zero-row payload yields no lines (writeJSONL emits nothing, not "null").
+func splitJSONLines(t *testing.T, out []byte) []string {
+	t.Helper()
+	trimmed := strings.TrimSuffix(string(out), "\n")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
+// TestCLI_JSONLAndTextModes pins the other two faces of the three-way output
+// contract end to end against a real daemon:
+//
+//   - -J (JSONL) emits one compact, UNWRAPPED record per line for every
+//     list-shaped verb (list, models, get), and its row count agrees with the
+//     same verb's -o json envelope;
+//   - the DEFAULT mode with piped stdout is now a TABLE, not JSON — the
+//     wave-4 flip — proven by `rafiki tasks` with no flags, which no longer
+//     parses as JSON and draws pkg/table's border instead;
+//   - -j and -J together are a user-input error with an exact message.
+//
+// Every CLI stdout here is JSON only because a flag or shorthand asked for
+// it: auto on a pipe must never be assumed machine-readable again.
+func TestCLI_JSONLAndTextModes(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	// Two detached children, both carrying jsonlTestLabel. `--output json` is
+	// itself part of the contract under test: the record must be asked for.
+	names := []string{"jsonl-a", "jsonl-b"}
+	for _, name := range names {
+		var stderr bytes.Buffer
+		cmd := cliCmd(t, d,
+			"--output", "json",
+			"create", name,
+			"--cwd", "/tmp",
+			"--no-session",
+			"--no-extensions",
+			"--model", "anthropic/claude-sonnet-4-5",
+			"--no-local-executor",
+			"--detached",
+			"--label", jsonlTestLabel,
+		)
+		cmd.Stderr = &stderr
+		out, err := cmd.Output() // stdout only
+		if err != nil {
+			t.Fatalf("create %s failed: %v\nstderr: %s", name, err, stderr.String())
+		}
+		var resp struct {
+			ChildID string `json:"childId"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("decode create response for %s: %v\noutput: %s", name, err, out)
+		}
+		if resp.ChildID == "" {
+			t.Fatalf("create %s returned empty childId; output: %s", name, out)
+		}
+	}
+	t.Cleanup(func() {
+		for _, name := range names {
+			cmd := cliCmd(t, d, "kill", name)
+			_, _ = cmd.CombinedOutput()
+		}
+	})
+
+	// ── list: -J line count == -o json children count ─────────────────────
+	jsonOut, err := cliCmd(t, d, "--output", "json", "list", "--label", jsonlTestLabel).Output()
+	if err != nil {
+		t.Fatalf("list -o json failed: %v", err)
+	}
+	var envelope struct {
+		Children []protocol.ChildSummary `json:"children"`
+	}
+	if err := json.Unmarshal(jsonOut, &envelope); err != nil {
+		t.Fatalf("decode list -o json envelope: %v\noutput: %s", err, jsonOut)
+	}
+
+	jsonlOut, err := cliCmd(t, d, "-J", "list", "--label", jsonlTestLabel).Output()
+	if err != nil {
+		t.Fatalf("list -J failed: %v", err)
+	}
+	lines := splitJSONLines(t, jsonlOut)
+	if len(lines) != len(envelope.Children) {
+		t.Fatalf("list -J emitted %d lines for %d children in -o json's envelope; JSONL must carry every row",
+			len(lines), len(envelope.Children))
+	}
+	for i, line := range lines {
+		var ch protocol.ChildSummary
+		if err := json.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("list -J line %d is not a bare ChildSummary object (JSONL must unwrap the envelope): %v\nline: %s", i, err, line)
+		}
+		if ch.ChildID == "" {
+			t.Fatalf("list -J line %d has an empty childId: %s", i, line)
+		}
+	}
+
+	// ── models: -J emits one ModelRow per line, none wrapped ─────────────
+	modelsOut, err := cliCmd(t, d, "-J", "models").Output()
+	if err != nil {
+		t.Fatalf("models -J failed: %v", err)
+	}
+	modelLines := splitJSONLines(t, modelsOut)
+	if len(modelLines) == 0 {
+		t.Fatalf("models -J emitted no rows; the builtin source must always serve at least one model")
+	}
+	for i, line := range modelLines {
+		var row struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("models -J line %d is not a ModelRow object: %v\nline: %s", i, err, line)
+		}
+		if row.ID == "" {
+			t.Fatalf("models -J line %d has an empty id: %s", i, line)
+		}
+	}
+
+	// ── get: -J with two targets emits two lines ─────────────────────────
+	getOut, err := cliCmd(t, d, "-J", "get", names[0], names[1]).Output()
+	if err != nil {
+		t.Fatalf("get -J with two targets failed: %v", err)
+	}
+	getLines := splitJSONLines(t, getOut)
+	if len(getLines) != 2 {
+		t.Fatalf("get -J with two targets emitted %d lines, want 2\noutput: %s", len(getLines), getOut)
+	}
+	for i, line := range getLines {
+		var ch protocol.ChildSummary
+		if err := json.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("get -J line %d is not a bare ChildSummary object: %v\nline: %s", i, err, line)
+		}
+	}
+
+	// ── get: a failing target never reaches stdout ───────────────────────
+	// stdout and stderr must be captured separately — the point is which
+	// stream carries the failure. The good sibling's row is still emitted
+	// (data is never withheld because a target failed), the failed target is
+	// named only on stderr, and the command exits nonzero.
+	var badOut, badErrBuf bytes.Buffer
+	badCmd := cliCmd(t, d, "-J", "get", names[0], "no-such-child-xyz")
+	badCmd.Stdout = &badOut
+	badCmd.Stderr = &badErrBuf
+	if err := badCmd.Run(); err == nil {
+		t.Fatalf("get with a failing target must exit nonzero; stdout: %s", badOut.String())
+	}
+	if badOut.Len() == 0 || !strings.Contains(badOut.String(), names[0]) {
+		t.Fatalf("get -J should still emit the good sibling's row on stdout; got: %q", badOut.String())
+	}
+	if strings.Contains(badOut.String(), "no-such-child-xyz") {
+		t.Fatalf("failing target leaked onto stdout: %s", badOut.String())
+	}
+	if !strings.Contains(badErrBuf.String(), "no-such-child-xyz") {
+		t.Fatalf("failing target's diagnostic missing from stderr: %s", badErrBuf.String())
+	}
+
+	// ── tasks with NO flags: the default flip, end to end ─────────────────
+	// auto on a pipe used to mean JSON; it now means table. A consumer that
+	// pipes `rafiki tasks` and unmarshals must fail — and read a table border.
+	tasksOut, err := cliCmd(t, d, "tasks").Output()
+	if err != nil {
+		t.Fatalf("tasks failed: %v", err)
+	}
+	var probe any
+	if err := json.Unmarshal(tasksOut, &probe); err == nil {
+		t.Fatalf("rafiki tasks with no flags must NOT parse as JSON after the default flip; output: %s", tasksOut)
+	}
+	firstLine := string(tasksOut)
+	if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
+		firstLine = firstLine[:i]
+	}
+	if !strings.HasPrefix(firstLine, "┌") {
+		t.Fatalf("rafiki tasks text output should start with a table border; first line: %q", firstLine)
+	}
+
+	// ── -j and -J together are refused, with the exact message ────────────
+	var bothErrBuf bytes.Buffer
+	bothCmd := cliCmd(t, d, "-j", "-J", "list")
+	bothCmd.Stderr = &bothErrBuf
+	if err := bothCmd.Run(); err == nil {
+		t.Fatalf("combining -j and -J must fail; output: %s", bothErrBuf.String())
+	}
+	if !strings.Contains(bothErrBuf.String(), "cannot combine -j and -J") {
+		t.Fatalf("-j -J error text changed; got: %s", bothErrBuf.String())
+	}
 }
