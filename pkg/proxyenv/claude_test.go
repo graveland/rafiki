@@ -3,6 +3,7 @@
 package proxyenv
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -45,6 +46,7 @@ func TestClaude_SetsProxyAndStrips(t *testing.T) {
 		"ANTHROPIC_BASE_URL=http://stale",
 		"ANTHROPIC_CUSTOM_HEADERS=X-Rafiki-Session: OUTER",
 		"ANTHROPIC_MODEL=stale",
+		"RAFIKI_MCP_TOKEN=OUTER",
 		"HOME=/h",
 	}
 	env, _ := Claude(in, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
@@ -62,6 +64,10 @@ func TestClaude_SetsProxyAndStrips(t *testing.T) {
 	}
 	if _, ok := got["ANTHROPIC_MODEL"]; ok {
 		t.Error("ANTHROPIC_MODEL must never be set — it is allowlist-validated client-side")
+	}
+	if got["RAFIKI_MCP_TOKEN"] != "tok" {
+		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q (the outer value must not survive stripping)",
+			got["RAFIKI_MCP_TOKEN"], "tok")
 	}
 	if got["HOME"] != "/h" {
 		t.Errorf("unrelated variable lost: HOME=%q", got["HOME"])
@@ -112,8 +118,67 @@ func TestClaude_ModelUsesCustomOption(t *testing.T) {
 	if _, ok := got["ANTHROPIC_MODEL"]; ok {
 		t.Error("ANTHROPIC_MODEL set; it would be rejected before the request leaves")
 	}
-	if !slices.Equal(args, []string{"--model", "moonshotai/kimi-k3"}) {
-		t.Errorf("args = %v, want the --model pair activating the registered option", args)
+	wantPair := []string{"--model", "moonshotai/kimi-k3"}
+	if i := slices.Index(args, "--model"); i < 0 || !slices.Equal(args[i:i+2], wantPair) {
+		t.Errorf("args = %v, want %v present as a contiguous pair", args, wantPair)
+	}
+}
+
+// Gated on URL, not Model: a session with no model chosen must still get
+// agent control, or a bare "rafiki claude" (no --model) would silently lose
+// the surface.
+func TestClaude_MCPConfigPresentWithNoModel(t *testing.T) {
+	_, args := Claude(nil, ClaudeOptions{URL: "http://x", Token: "tok"})
+	if !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "--mcp-config=") }) {
+		t.Errorf("args = %v, want an --mcp-config= element even with no model", args)
+	}
+}
+
+func TestClaude_MCPConfigJSONShape(t *testing.T) {
+	env, args := Claude(nil, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	got, _ := envMap(t, env)
+	if got["RAFIKI_MCP_TOKEN"] != "tok" {
+		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "tok")
+	}
+	i := slices.IndexFunc(args, func(a string) bool { return strings.HasPrefix(a, "--mcp-config=") })
+	if i < 0 {
+		t.Fatalf("args = %v, missing --mcp-config", args)
+	}
+	raw := strings.TrimPrefix(args[i], "--mcp-config=")
+	var doc struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("--mcp-config value is not valid JSON: %v (%s)", err, raw)
+	}
+	rafiki, ok := doc.MCPServers["rafiki"]
+	if !ok {
+		t.Fatalf("mcpServers = %v, missing \"rafiki\" key", doc.MCPServers)
+	}
+	if rafiki.Type != "http" {
+		t.Errorf("type = %q, want http", rafiki.Type)
+	}
+	if rafiki.URL != "http://localhost:8035/mcp" {
+		t.Errorf("url = %q, want http://localhost:8035/mcp", rafiki.URL)
+	}
+	if rafiki.Headers["Authorization"] != "Bearer ${RAFIKI_MCP_TOKEN}" {
+		t.Errorf("Authorization header = %q, want the RAFIKI_MCP_TOKEN placeholder", rafiki.Headers["Authorization"])
+	}
+}
+
+// No URL means unproxied: RAFIKI_MCP_TOKEN must not appear from nowhere.
+func TestClaude_MCPTokenAbsentWhenUnproxied(t *testing.T) {
+	env, args := Claude([]string{"HOME=/h"}, ClaudeOptions{})
+	got, _ := envMap(t, env)
+	if _, ok := got["RAFIKI_MCP_TOKEN"]; ok {
+		t.Error("RAFIKI_MCP_TOKEN set with no URL configured")
+	}
+	if args != nil {
+		t.Errorf("args = %v, want none", args)
 	}
 }
 

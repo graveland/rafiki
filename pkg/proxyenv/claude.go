@@ -11,6 +11,7 @@
 package proxyenv
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -31,6 +32,7 @@ var Managed = []string{
 	"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
 	"ANTHROPIC_MODEL",
 	"CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+	"RAFIKI_MCP_TOKEN",
 }
 
 // Credentials must not reach a proxied child. Claude Code presents
@@ -71,6 +73,25 @@ var Defaults = []string{
 // (claude v2.1.220: s3() → `!ENABLE_TOOL_SEARCH && provider==="firstParty" &&
 // !Yd()`; a falsy value short-circuits via WKr()==="standard".)
 const toolSearchEnv = "ENABLE_TOOL_SEARCH"
+
+// mcpTokenEnv is the variable Claude carries the proxy's own bearer as, for
+// the MCP agent-control server's Authorization header. It must be in
+// Managed: without stripping, a nested launch from inside a proxied session
+// would adopt the outer session's MCP token, exactly as ANTHROPIC_BASE_URL
+// would without the same treatment.
+const mcpTokenEnv = "RAFIKI_MCP_TOKEN"
+
+// mcpServerName is the JSON key under mcpServers, and — by Claude Code's own
+// convention — the prefix every tool it exposes appears under
+// (mcp__rafiki__agent_spawn, etc).
+const mcpServerName = "rafiki"
+
+// mcpPath is the MCP agent-control surface's mount path. It cannot be
+// imported from cmd/rafikid/mcp_face.go's mcpFacePath constant: proxyenv is
+// a leaf package used by both the rafiki and rafikid binaries, and
+// cmd/rafikid is a main package neither may import. Grep the other side
+// before changing either.
+const mcpPath = "/mcp"
 
 // AnthropicModel reports whether model is served by Anthropic, and so can use
 // the deferred tools Claude Code would otherwise send to a model that cannot
@@ -127,6 +148,42 @@ type ClaudeOptions struct {
 	Headers map[string]string
 }
 
+// mcpServerConfig is one entry of a Claude Code --mcp-config document's
+// "mcpServers" map, for the "http" transport.
+type mcpServerConfig struct {
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+// mcpConfigArg returns the --mcp-config=<json> argv element that wires the
+// rafiki agent-control MCP surface into a Claude Code session pointed at
+// baseURL. The token travels as a placeholder Claude Code expands from the
+// RAFIKI_MCP_TOKEN environment variable at connect time, never inline —
+// argv is world-readable via ps on this machine.
+func mcpConfigArg(baseURL string) string {
+	doc := struct {
+		MCPServers map[string]mcpServerConfig `json:"mcpServers"`
+	}{
+		MCPServers: map[string]mcpServerConfig{
+			mcpServerName: {
+				Type: "http",
+				URL:  baseURL + mcpPath,
+				Headers: map[string]string{
+					"Authorization": "Bearer ${" + mcpTokenEnv + "}",
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		// doc's only variable content is baseURL, an ordinary string;
+		// json.Marshal cannot fail on this shape.
+		panic("proxyenv: marshaling mcp config: " + err.Error())
+	}
+	return "--mcp-config=" + string(b)
+}
+
 // Claude returns a complete environment derived from environ with the proxy
 // wired in, plus the arguments to pass to the claude binary.
 //
@@ -150,6 +207,11 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 	}
 
 	env = append(env, "ANTHROPIC_BASE_URL="+o.URL)
+	// The MCP agent-control surface's token travels by environment, never
+	// inline in argv: argv is world-readable via ps on this machine, and
+	// --mcp-config below carries only a placeholder Claude Code expands.
+	env = append(env, mcpTokenEnv+"="+o.Token)
+	args = append(args, mcpConfigArg(o.URL))
 	if !o.PassthroughAuth {
 		token := o.Token
 		if token == "" {
