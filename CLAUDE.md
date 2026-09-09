@@ -1191,6 +1191,32 @@
   (`ChildSummary.latest_ordinal`), so a turn landing mid-fetch can at worst
   appear twice — a visible duplicate beats a silent gap. An empty history falls
   back to replaying the whole log, which is what a freshly created child needs.
+- **`conversation_message.ordinal = index-in-request` assumes a stable
+  prefix, and Claude Code's own compaction is exactly the event that breaks
+  it — `resume_from_ordinal` (`conversations.conversation`) and
+  `conversation_message.kind` (migration 0029) are the fix, not a
+  workaround.** Every proxied request replays the full history from index 0;
+  `pkg/capture.CaptureStore.DecomposeRequest` used to insert at
+  `ordinal = index` unconditionally with `ON CONFLICT (conversation_id,
+  ordinal) DO NOTHING`, which silently assumed every request repeats the
+  previous one at the same indices. Compaction rewrites message 0 to a
+  summary and shifts everything after it — every index then collides with a
+  DIFFERENT pre-compaction row and is dropped, including the assistant
+  response (whose ordinal is now smaller than before). The fix is an
+  append-only rebase: `DecomposeRequest`'s `resolveHorizon` compares request
+  message 0 against the stored row at the conversation's horizon
+  (`coalesce(resume_from_ordinal, 0)`) via Postgres JSONB equality; on a
+  match, ordinals are `horizon + index` as before (inert for every
+  uncompacted conversation — horizon stays 0). On a mismatch, it records a
+  NEW boundary — `resume_from_ordinal` bumped to `max(ordinal)+1`, the new
+  message 0 inserted at that ordinal with `kind='compaction_summary'` — and
+  all subsequent post-compact requests match positionally from there. Nothing
+  is ever deleted or renumbered; old rows stay exactly where they were.
+  **`store.Messages.Load` is NOT filtered by this horizon and must never be**
+  — it is shared by `GetHistory` (reattach) and `dbRecentForFundi`
+  (`ctrl_get_recent`), both of which need the full pre-compaction history to
+  render a divider inline with it; only a future fundi compactor's own
+  working-context loader (not yet built) should ever read the horizon.
 - **fundi published only HALF the native event vocabulary, and the missing
   half was the assistant's replies.** `publishNative` (`pkg/fundi/native.go`)
   carried switch arms for `AssistantMessage`, `TurnEnd` and `ContentBlockDelta`

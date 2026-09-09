@@ -316,7 +316,20 @@ Every event payload is classified into a tier:
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
 | `Error` | durable | Turn or engine level error event |
+| `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
 | `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
+
+`CompactionBoundary.pre_tokens`/`post_tokens` are both `optional`, and
+deliberately asymmetric across the two ways this event reaches a client.
+The LIVE event (emitted when Claude Code's own `system/compact_boundary`
+frame arrives) carries both. A REATTACH-synthesized instance of this event
+— built from a stored `conversation_message` row tagged
+`kind='compaction_summary'`, not from the live stream — carries only
+`pre_tokens` (an approximation: the previous turn's `input_tokens`, the
+size of the context the boundary replaced), because the stored row has no
+post-compaction count. A client renders the two-sided and one-sided cases
+differently for exactly this reason — see `pkg/tui/session`'s
+`formatCompactionBoundary`.
 
 `AgentStatus.state` is one of the eight `protocol.Status` values: `spawning`, `idle`,
 `streaming`, `tool_running`, `compacting`, `blocked_ui`, `shutting_down`, `exited`.
