@@ -257,8 +257,15 @@
   set only by the SDK's `RequireBearerToken` middleware, which rafiki never
   runs (`UserTokenAuth` is the one credential path), so without the wrap any
   authenticated caller presenting another caller's session id would execute
-  that caller's bound tool set. Two consequences worth knowing
-  before debugging this surface: the `task_*` tools scope by a durable,
+  that caller's bound tool set. **Only a `ProvenanceUser` identity passes the
+  agent-control gates** (`server.Identity.IsUserCredential`, stamped by
+  `UserTokenAuth.resolve`): `getServer` serves the toolless server and Connect
+  `Spawn`/`ListExecutors` answer a named permission error for a
+  child-attributed identity — per-boot child token + `X-Rafiki-Session`
+  resolves to the OWNER's user id, which is exactly why a non-empty-UserID
+  check must never stand in for provenance. `/v1/messages` attribution
+  consumes that UserID and is deliberately unchanged. Two consequences worth
+  knowing before debugging this surface: the `task_*` tools scope by a durable,
   turn-less conversation row per user keyed
   `external_ref = "mcp:user:<user-id>"` (there is no migration — it rides the
   existing `(external_ref, driven_by)` partial unique index via

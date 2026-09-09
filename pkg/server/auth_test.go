@@ -58,7 +58,7 @@ func TestMessagesProxyAuthenticatorSetsOwnerUserID(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &recordingStore{}
-	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{UserID: "9f1c7b2e-0000-4000-8000-000000000001", Username: "brent"}}, "real-key", upstream.URL, "", nil, logger)
+	p := NewMessagesProxy(nil, staticAuthenticator{id: &Identity{UserID: "9f1c7b2e-0000-4000-8000-000000000001", Username: "brent", Via: ProvenanceUser}}, "real-key", upstream.URL, "", nil, logger)
 	p.store = fs
 
 	rec := httptest.NewRecorder()

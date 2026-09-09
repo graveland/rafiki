@@ -15,6 +15,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/mcpserver"
 	"go.graveland.dev/rafiki/pkg/quota"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -153,25 +154,21 @@ func (f *mcpFace) forgetSession(sid string) {
 // has already authenticated the request and stored it there. Reading the
 // Authorization header here would be a second credential path.
 func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
-	owner := spawnOwner(r.Context())
-
-	// A toolless server, never nil: StreamableHTTPHandler answers a nil from
-	// getServer with a bare 400 "no server available", which tells an MCP
-	// client nothing it can recover from. The daemon is still starting
-	// (no Controller yet) → an empty server. A credential that resolves to a
-	// zero identity → an empty server too: the per-boot child token WITHOUT
-	// X-Rafiki-Session does exactly that (usertoken.go's constant-time path),
-	// and a child process must not get agent control. BEWARE the exception:
-	// a child token WITH X-Rafiki-Session resolves through childOwnerLookup to
-	// the child's OWNER user identity — pre-existing proxy-face behavior that
-	// lets a child attribute its LLM turns — and on this surface that means a
-	// spawned agent CAN reach the full tool set as its owner. Documented in
-	// docs/reference/control-protocol.md §2.4; scoping child-token attribution
-	// away from control surfaces is an escalated operator decision.
+	// The gate reads the credential's provenance, never the resolved UserID: a
+	// child-attributed identity carries the owner's UserID (that is exactly
+	// the attribution path /v1/messages bills turns through), so a
+	// non-empty-UserID check would hand the full tool set to whatever holds
+	// the per-boot child token plus its own child id. One rule governs the
+	// whole surface — only a real user credential gets agent control — and
+	// the toolless server is every other identity's answer, never a 403: the
+	// daemon still starting (no Controller yet) and a non-user credential are
+	// the same shape to an MCP client that cannot recover from either.
+	id := server.IdentityFromContext(r.Context())
 	ctrl := f.controller()
-	if ctrl == nil || !owner.IsUser() {
+	if ctrl == nil || id == nil || !id.IsUserCredential() {
 		return mcpserver.New(mcpserver.Options{Version: f.version})
 	}
+	owner := users.Identity{UserID: id.UserID, Username: id.Username}
 
 	spawner := newUserSpawner(ctrl, owner)
 	// A nil *quota.Store must yield a nil INTERFACE value so

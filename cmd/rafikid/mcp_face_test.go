@@ -69,7 +69,7 @@ func mcpRequestFor(userID string) *http.Request {
 	if userID == "" {
 		return r
 	}
-	return r.WithContext(server.WithIdentity(r.Context(), &server.Identity{UserID: userID, Username: userID}))
+	return r.WithContext(server.WithIdentity(r.Context(), &server.Identity{UserID: userID, Username: userID, Via: server.ProvenanceUser}))
 }
 
 // mcpConnect drives the SDK's initialize handshake against srv over an
@@ -107,8 +107,10 @@ func mcpToolNames(t *testing.T, cs *mcp.ClientSession) []string {
 // mcpPost sends one authenticated JSON-RPC message to the mounted face and
 // returns the raw status, headers and every data payload the SSE stream
 // carried. The middleware requires a credential on EVERY request, sessions
-// included.
-func mcpPost(t *testing.T, mux *http.ServeMux, sessionID, token, body string) (int, http.Header, []map[string]any) {
+// included. The variadic hooks exist for the request shapes only the
+// provenance tests need — X-Rafiki-Session riding alongside a credential —
+// and no existing call site passes one.
+func mcpPost(t *testing.T, mux *http.ServeMux, sessionID, token, body string, extra ...func(*http.Request)) (int, http.Header, []map[string]any) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, mcpFacePath, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -118,6 +120,9 @@ func mcpPost(t *testing.T, mux *http.ServeMux, sessionID, token, body string) (i
 	}
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	for _, set := range extra {
+		set(req)
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -256,6 +261,31 @@ func TestMCPFaceIsReachedThroughUserTokenAuth(t *testing.T) {
 	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 1 {
 		t.Fatalf("authenticated task_add did not reach the ledger: %d rows", n)
 	}
+
+	// A user token that ALSO carries X-Rafiki-Session stays ProvenanceUser —
+	// provenance is a property of the credential, not the header — so a
+	// hand-configured client sending the child-attribution header keeps the
+	// full surface.
+	withSession := func(r *http.Request) { r.Header.Set("X-Rafiki-Session", "c_child2") }
+	code, hdr, _ := mcpPost(t, mux, "", "tok-alice", mcpInitializeBody, withSession)
+	if code != http.StatusOK {
+		t.Fatalf("user-token initialize with session header: got %d, want 200", code)
+	}
+	sid2 := hdr.Get("Mcp-Session-Id")
+	if sid2 == "" {
+		t.Fatal("user-token initialize with session header returned no Mcp-Session-Id")
+	}
+	mcpPost(t, mux, sid2, "tok-alice", mcpInitializedBody, withSession)
+	code, _, msgs = mcpPost(t, mux, sid2, "tok-alice", mcpTaskAddBody, withSession)
+	if code != http.StatusOK {
+		t.Fatalf("user token with session header: got %d, want 200", code)
+	}
+	if text, isErr := mcpResultText(t, msgs, 3); isErr {
+		t.Fatalf("user token with session header lost the surface: %s", text)
+	}
+	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 2 {
+		t.Fatalf("user token with session header did not execute: %d rows, want 2", n)
+	}
 }
 
 // mcpLedgerCount counts the rows one synthetic ledger key holds.
@@ -274,6 +304,10 @@ func TestMCPFaceAnonymousCallerGetsNoTools(t *testing.T) {
 	// resolves to carries an empty UserID, which is exactly the non-user
 	// credential that must not get agent control.
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{}, "child-secret", time.Second)
+	// The daemon wires childOwnerLookup so the child token + X-Rafiki-Session
+	// pair attributes to the owner — the path that bills the child's LLM
+	// turns. The face must refuse the resulting identity all the same.
+	tokenAuth.SetChildOwnerLookup(func(string) (string, bool) { return "u-owner", true })
 	mux := http.NewServeMux()
 	h := &server.Handler{}
 	h.MCPPath, h.MCP = face.Routes()
@@ -298,6 +332,25 @@ func TestMCPFaceAnonymousCallerGetsNoTools(t *testing.T) {
 	_, _, msgs := mcpPost(t, mux, sid, "child-secret", mcpListToolsBody)
 	if names := mcpListedToolNames(t, msgs, 2); len(names) != 0 {
 		t.Fatalf("anonymous caller sees %v, want no tools", names)
+	}
+
+	// S1 regression pin: the child token WITH X-Rafiki-Session resolves to
+	// the owner's identity — attribution, not authority. Before provenance
+	// this identity carried a non-empty UserID and sailed through the face's
+	// check to the full tool surface acting as its owner.
+	withSession := func(r *http.Request) { r.Header.Set("X-Rafiki-Session", "c_child1") }
+	code, hdr, _ := mcpPost(t, mux, "", "child-secret", mcpInitializeBody, withSession)
+	if code != http.StatusOK {
+		t.Fatalf("child-attributed initialize: got %d, want 200", code)
+	}
+	sid2 := hdr.Get("Mcp-Session-Id")
+	if sid2 == "" {
+		t.Fatal("child-attributed initialize returned no Mcp-Session-Id")
+	}
+	mcpPost(t, mux, sid2, "child-secret", mcpInitializedBody, withSession)
+	_, _, msgs2 := mcpPost(t, mux, sid2, "child-secret", mcpListToolsBody, withSession)
+	if names := mcpListedToolNames(t, msgs2, 2); len(names) != 0 {
+		t.Fatalf("child-attributed caller sees %v, want no tools", names)
 	}
 }
 

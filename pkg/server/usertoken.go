@@ -167,7 +167,11 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		subtle.ConstantTimeCompare([]byte(token), []byte(a.childToken)) == 1 {
 		if a.childOwnerLookup != nil && childID != "" {
 			if uid, ok := a.childOwnerLookup(childID); ok && uid != "" {
-				return Identity{UserID: uid}, nil
+				// Attribution, not authority: the UserID bills the child's LLM
+				// turns to its owner, and the provenance is what keeps the
+				// agent-control surfaces from mistaking that for a user
+				// credential.
+				return Identity{UserID: uid, Via: ProvenanceChildAttributed}, nil
 			}
 		}
 		return Identity{}, nil
@@ -197,7 +201,7 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		return Identity{}, errAuthUnavailable
 	}
 
-	id := Identity{UserID: uid.UserID, Username: uid.Username}
+	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser}
 	a.mu.Lock()
 	a.cache[key] = cachedIdentity{id: id, expires: now.Add(a.ttl)}
 	// Opportunistic sweep: entries are tiny and the population is the number

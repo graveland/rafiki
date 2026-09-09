@@ -380,16 +380,23 @@ is 503, never 401, because a 401 tells clients their credential is bad and
 they respond by discarding it — a database blip answered with 401 logs
 everyone out at once. The identity reaches the face on the request context,
 never by re-reading the `Authorization` header, which would be a second
-credential path. The daemon's **per-boot child token** also authenticates: on
-its own it resolves to a non-user identity and gets the toolless server — a
-child process must not get agent control — but a child that presents its
-`X-Rafiki-Session` header resolves through the proxy face's pre-existing
-child-owner attribution (the path that makes its LLM turns bill to its owner)
-to that OWNER's user identity, and therefore reaches the full tool surface
-**acting as its owner**, including steering verbs outside its own subtree —
-greater delegated power over `/mcp` than the in-process `agent_spawn` tool
-(subtree-scoped). Scoping child-token attribution away from control surfaces
-is an open operator decision. Each MCP session is bound
+credential path. The daemon's **per-boot child token** also authenticates, and
+the credential's provenance (`server.Identity.Via`, stamped by
+`UserTokenAuth.resolve`) decides what it may reach. On its own it resolves to
+`ProvenanceUnknown` and gets the toolless server; with `X-Rafiki-Session` it
+resolves through the proxy face's pre-existing child-owner attribution — the
+path that makes its LLM turns bill to its owner — to
+`ProvenanceChildAttributed`, an identity carrying the owner's user id but NOT
+the owner's powers: every agent-control surface refuses it. `getServer` serves
+the toolless server (never a 403 — one rule governs the whole surface: only
+`ProvenanceUser`, a real user token, passes `server.Identity.IsUserCredential`),
+and the Connect plane's `Spawn` and `ListExecutors` answer a named permission
+error ("agent-control verbs require a user credential; this identity is
+child-attributed"). Attribution and authority are separate: `/v1/messages`
+billing, raw-trace capture and quota attribution consume the UserID and are
+deliberately unchanged, and a user token that also carries `X-Rafiki-Session`
+stays `ProvenanceUser` — provenance is a property of the credential, not the
+header — so hand-configured clients keep working. Each MCP session is bound
 to the identity that initialized it, and a
 later request presenting a session id owned by another caller — or an unknown
 one — is refused with 403 before dispatch. The face keeps this map itself

@@ -425,3 +425,48 @@ func TestIdentifyOptionalNilOnStoreOutage(t *testing.T) {
 		t.Fatalf("IdentifyOptional during a store outage = %+v, want nil, not an error", id)
 	}
 }
+
+// S1: provenance is a property of the credential, stamped by resolve(). The
+// zero value must stay with every identity that did not come from a user
+// token — the agent-control gates fail closed on it — and the child-attribution
+// path must be distinguishable from a user token even though both carry a
+// UserID.
+func TestProvenanceFollowsTheCredential(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildOwnerLookup(func(childID string) (string, bool) {
+		if childID == "c_known" {
+			return "u_owner1", true
+		}
+		return "", false
+	})
+
+	cases := []struct {
+		name    string
+		token   string
+		session string
+		wantVia CredentialProvenance
+		wantID  string
+	}{
+		{"user token", "rfk_good", "", ProvenanceUser, "u1"},
+		{"user token with session header stays user", "rfk_good", "c_known", ProvenanceUser, "u1"},
+		{"child token with session is child-attributed", "childsecret", "c_known", ProvenanceChildAttributed, "u_owner1"},
+		{"child token alone is unknown", "childsecret", "", ProvenanceUnknown, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/v1/messages", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			if tc.session != "" {
+				req.Header.Set("X-Rafiki-Session", tc.session)
+			}
+			rec, id := serve(a, req)
+			if rec.Code != 200 {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if id == nil || id.Via != tc.wantVia || id.UserID != tc.wantID {
+				t.Fatalf("identity = %+v, want Via %v with UserID %q", id, tc.wantVia, tc.wantID)
+			}
+		})
+	}
+}
