@@ -176,11 +176,11 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	spawner := newUserSpawner(ctrl, owner)
 	// A nil *quota.Store must yield a nil INTERFACE value so
 	// QuotaStatusBlueprint's documented decline fires on a DB-less daemon;
-	// a non-nil mcpQuota wrapping a nil store would materialize a tool that
+	// a non-nil quotaReader wrapping a nil store would materialize a tool that
 	// can only ever answer "no data captured yet".
 	var quotaReader tools.QuotaReader
 	if f.quota != nil {
-		quotaReader = mcpQuota{store: f.quota, owner: owner}
+		quotaReader = newMCPQuotaReader(f.quota, owner)
 	}
 	opts := tools.ToolOpts{
 		Agents: spawner,
@@ -396,35 +396,4 @@ func settlementHooksFor(owner users.Identity) *mcp.ServerOptions {
 			}()
 		},
 	}
-}
-
-// mcpQuota implements tools.QuotaReader for the MCP caller, bound to owner at
-// construction — NOT resolved from ctx, so no tool argument can read another
-// user's usage. This is the simpler half of the split controllerQuotaReader
-// documents: an MCP call always has the real owner id on hand, where a resumed
-// fundi child may not.
-type mcpQuota struct {
-	store *quota.Store
-	owner users.Identity
-}
-
-func (q mcpQuota) RateLimitStatus(ctx context.Context) (tools.QuotaStatus, bool, error) {
-	if q.owner.UserID == "" {
-		return tools.QuotaStatus{}, false, nil
-	}
-	st, ok, err := q.store.Get(ctx, q.owner.UserID)
-	if err != nil || !ok {
-		return tools.QuotaStatus{}, ok, err
-	}
-	return tools.QuotaStatus{
-		OrganizationID: st.OrganizationID,
-		FiveH: tools.QuotaWindow{
-			Utilization: st.FiveH.Utilization, ResetAt: st.FiveH.ResetAt, Status: st.FiveH.Status,
-		},
-		SevenD: tools.QuotaWindow{
-			Utilization: st.SevenD.Utilization, ResetAt: st.SevenD.ResetAt, Status: st.SevenD.Status,
-		},
-		OverallStatus: st.OverallStatus,
-		UpdatedAt:     st.UpdatedAt,
-	}, true, nil
 }

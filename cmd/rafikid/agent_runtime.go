@@ -397,7 +397,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// evidence beats false evidence, same rule ProviderGuard follows.
 	//
 	// Guarded on c.pool != nil, and NOT folded into newControllerQuotaReader
-	// itself: that constructor returning a typed-nil *controllerQuotaReader
+	// itself: that constructor returning a typed-nil *quotaReader
 	// would still produce a non-nil tools.QuotaReader interface value here
 	// (the classic nil-pointer-in-non-nil-interface trap), which is exactly
 	// what would make quota_status materialize on a DB-less daemon and
