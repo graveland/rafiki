@@ -167,8 +167,9 @@ git worktree add -b <branch> .worktrees/<name> <base>
 agent_spawn(cwd: "<absolute path to .worktrees/<name>>", ...)
 ```
 
-Worktrees share the object store, cost nothing to create, and merge with
-ordinary `git merge`.
+Worktrees share the object store, cost nothing to create, and integrate with
+`git rebase` + `git merge --ff-only` — never a merge commit. The mechanics
+live in `subagent-driven-development`'s *Merging a wave*.
 
 **Then do not trust `cwd:` to enforce it.** Probed and confirmed: a child
 spawned with `cwd: <worktree>` still ran `pwd` in the daemon's cwd, and the

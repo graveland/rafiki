@@ -58,8 +58,9 @@ You run **in the main repo**. You never `cd` into a worktree.
    anything runs. Then one read pass for what globs cannot see: does a later
    wave consume an interface no earlier wave produces? Write what you checked
    into the ledger; "the scan was clean" without the rows is not a scan.
-6. **Integration branch** off `main`, one per plan. Every wave merges into it.
-   `main` is never touched.
+6. **Integration branch** off `main`, one per plan. Every wave lands on it
+   linearly — rebase plus `--ff-only`, never a merge commit (see *Merging a
+   wave*). `main` is never touched.
 7. `task_add` every task with `metadata: {rung: "<n>", plan: "<basename>"}`.
    Metadata is write-once — it cannot be added later.
 
@@ -160,17 +161,33 @@ round on a model that has failed four times.
 
 ## Merging a wave
 
-Per task, before its branch merges:
+Per task, before its branch lands:
 
 1. `git -C <wt> status --porcelain` — **strays, including untracked files.**
    This is what catches a `docs/` or `tasks/` file written inside a worktree,
    where it will be destroyed with the worktree.
 2. `git -C <wt> diff --name-only <BASE>..HEAD` against `touches:`. Anything
    outside the declaration is a plan defect: `PROCESS layer=plan`, a ruling,
-   and the wave's remaining merges get read rather than trusted.
-3. Merge into the integration branch.
+   and the wave's remaining branches get read rather than trusted.
+3. Land it linearly. The worktree holds the task branch, so rebase there, then
+   fast-forward from the main repo:
 
-Then run the wave's `gate:` on the **merged** result, with `-count=1`.
+   ```
+   git -C <wt> rebase <integration-branch>
+   git merge --ff-only <task-branch>
+   ```
+
+   The rebase replays the task's commits onto the current integration head —
+   another task in the wave may have landed first — and `--ff-only` moves the
+   branch without a commit of its own. Resolve a conflict during the rebase or
+   rule on it; never dissolve one into a merge.
+
+Then run the wave's `gate:` on the **landed** result, with `-count=1`.
+
+**Linear is the rule, not a preference.** Each task's work should be
+reviewable and bisectable as its own commits; a merge commit wraps a
+subagent's work in a topology nobody reviewed, and undoing one is a history
+rewrite and a force-push of `main`. `--no-ff` is never the right flag here.
 
 **A gate outside the main checkout needs its environment carried in.** A fresh
 worktree has no `.env` — it is gitignored — so a suite needing a DSN either
@@ -180,8 +197,8 @@ a daemon regression and is not one. Source the main checkout's `.env` before
 gating (`set -a; . <main-checkout>/.env; set +a`) and check the skip count, not
 just the exit code.
 
-**If the gate fails, do not debug the merged tree.** Reset the integration
-branch to the wave's start and re-merge one branch at a time, re-running the
+**If the gate fails, do not debug the landed tree.** Reset the integration
+branch to the wave's start and re-land one branch at a time, re-running the
 gate; the first failure names the culprit. Slow in wall-clock, cheap in
 judgement, and impossible to get wrong.
 
@@ -203,8 +220,10 @@ task by exactly one gate.
    `layer=skill` lines are already in `tasks/skill-problems.md`; do not copy
    them again.
 6. Remove every worktree and branch. Delete the plan file.
-7. **Stop.** The integration branch is not merged to `main` without your human
-   partner saying so.
+7. **Stop.** The integration branch is not landed on `main` without your human
+   partner saying so. When it is, the same rule: fast-forward if `main` has
+   not moved; if it has, rebase the integration branch onto `main`, re-run
+   the gate, then fast-forward. A merge commit on `main` is a defect.
 
 ## The ledgers
 
