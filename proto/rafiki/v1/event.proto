@@ -207,7 +207,7 @@ message CompactionBoundary {
 
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — eleven types as of C1a-1, not the two
+// ordinal is set on DURABLE-tier events — twelve durable types as of the claude-compaction work, not the two
 // this comment used to name. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration

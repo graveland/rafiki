@@ -22,6 +22,10 @@ func TestTierOf(t *testing.T) {
 		{Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{}}},
 		{Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{}}},
 		{Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{}}},
+		// TypeName's switch arm is load-bearing: TierOf classifies via
+		// durableTypes[TypeName(ev)], so a deleted arm silently reclassifies the
+		// event ephemeral behind a green TestEveryEventTypeHasATier.
+		{Payload: &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{}}},
 	}
 	for _, ev := range durable {
 		if got := eventlog.TierOf(ev); got != eventlog.TierDurable {
