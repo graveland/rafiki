@@ -395,3 +395,130 @@ func TestTurnEndSettlesBlocksWithUnansweredToolCalls(t *testing.T) {
 			s.Finalized, len(s.Blocks))
 	}
 }
+
+// ── compaction boundaries (design §7) ─────────────────────────────────────
+
+func compactionEvent(childID string, pre, post *int32) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{
+			Trigger:    "auto",
+			PreTokens:  pre,
+			PostTokens: post,
+		}},
+	}
+}
+
+func i32(v int32) *int32 { return &v }
+
+// A live event carries both tokens: the divider shows the rewrite as a ratio.
+func TestCompactionBoundaryShowsBothTokenCounts(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(compactionEvent("c_test", i32(150000), i32(12000)))
+
+	if len(s.Blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1", len(s.Blocks))
+	}
+	b := s.Blocks[0]
+	if b.Kind != session.KindSystem || !b.Final {
+		t.Errorf("block = kind %v final %v, want KindSystem final=true", b.Kind, b.Final)
+	}
+	if b.Text != "— context compacted · 150k → 12k tokens —" {
+		t.Errorf("text = %q, want the both-tokens divider", b.Text)
+	}
+}
+
+// A reattach-synthesized event (built from a stored kind='compaction_summary'
+// row, not the live stream) can only ever supply pre_tokens, approximate: no
+// "→" and no post count.
+func TestCompactionBoundaryWithPreTokensOnlyIsApproximate(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(compactionEvent("c_test", i32(90000), nil))
+
+	b := s.Blocks[0]
+	if !strings.Contains(b.Text, "~") || strings.Contains(b.Text, "→") {
+		t.Errorf("text = %q, want the approximate pre-only divider", b.Text)
+	}
+}
+
+func TestCompactionBoundaryWithoutTokensIsBare(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(compactionEvent("c_test", nil, nil))
+
+	if got := s.Blocks[0].Text; got != "— context compacted —" {
+		t.Errorf("text = %q, want the bare divider", got)
+	}
+}
+
+// The cockpit clears its ⏳ pending echo only when an event appends a KindUser
+// block — that predicate is the whole pending state machine, and the session's
+// only contribution to it is which Kind it appends. A compaction boundary is
+// mid-conversation, never the acknowledgement of a sent prompt, so it lands as
+// a KindSystem divider and leaves the echo (and the user_message that finally
+// confirms it) alone.
+func TestCompactionBoundaryDoesNotClearPending(t *testing.T) {
+	s := session.New("c_test")
+	// A prompt is in flight: the pending echo sits at the tail of the blocks.
+	// The session never creates one itself (the cockpit renders its own ⏳ from
+	// its pending field), so seed it by hand the way the state machine sees it.
+	s.Blocks = append(s.Blocks, session.Block{Kind: session.KindPendingUser, Text: "go for it"})
+	n := len(s.Blocks)
+
+	s.Apply(compactionEvent("c_test", i32(150000), i32(12000)))
+	if len(s.Blocks) != n+1 {
+		t.Fatalf("blocks = %d, want %d: the divider must append exactly one block", len(s.Blocks), n+1)
+	}
+	if last := s.Blocks[len(s.Blocks)-1]; last.Kind != session.KindSystem {
+		t.Errorf("compaction appended kind %v; a KindUser block here would clear the cockpit's ⏳ as if the sent message had come back", last.Kind)
+	}
+
+	// The confirming user_message still lands after the divider.
+	s.Apply(textEvent("c_test", "go for it"))
+	if len(s.Blocks) != n+2 {
+		t.Fatalf("blocks = %d, want %d: the confirming message must still append", len(s.Blocks), n+2)
+	}
+	if last := s.Blocks[len(s.Blocks)-1]; last.Kind != session.KindUser || last.Text != "go for it" {
+		t.Errorf("last block = kind %v text %q, want the confirming KindUser message", last.Kind, last.Text)
+	}
+	if s.Blocks[0].Kind != session.KindPendingUser || s.Blocks[0].Text != "go for it" {
+		t.Errorf("pending echo = kind %v text %q, want it untouched by the compaction event", s.Blocks[0].Kind, s.Blocks[0].Text)
+	}
+}
+
+// A compaction boundary is mid-conversation: unlike the Error and ChildExited
+// cases it must NOT settleAll, or every tool call still in flight would be
+// forced to resolve early. settleAll moves the watermark rather than touching
+// Running, so the watermark — not Running alone — is what proves it was not
+// called.
+func TestCompactionBoundaryDoesNotSettleRunningToolCalls(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c_test",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_1", Name: "bash", InputJson: `{"command":"sleep 60"}`,
+					}},
+				}},
+			},
+		},
+	})
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c_test",
+		Payload: &rafikiv1.Event_ToolExecutionStart{ToolExecutionStart: &rafikiv1.ToolExecutionStart{
+			ToolUseId: "tu_1", Name: "bash",
+		}},
+	})
+
+	s.Apply(compactionEvent("c_test", i32(150000), i32(12000)))
+
+	last := s.LastAssistant()
+	if !last.ToolCalls[0].Running {
+		t.Error("the tool call's Running was cleared by a compaction boundary; nothing mid-conversation may resolve an in-flight call")
+	}
+	if s.Finalized == len(s.Blocks) {
+		t.Errorf("Finalized = %d = len(blocks): settleAll ran and would mark every in-flight call resolved", s.Finalized)
+	}
+}

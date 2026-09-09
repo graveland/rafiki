@@ -10,6 +10,7 @@ package session
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	_ "image/gif"  // registered for DecodeConfig
 	_ "image/jpeg" // registered for DecodeConfig
@@ -260,6 +261,18 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 			Final: true,
 		})
 		s.settleAll()
+	case *rafikiv1.Event_CompactionBoundary:
+		// A compaction boundary is mid-conversation, not a turn-ending event:
+		// unlike the Error case above, do NOT settleAll here — that would force
+		// every in-flight tool call to resolve early. KindSystem (never KindUser)
+		// is also what keeps the cockpit's ⏳ pending echo untouched: it clears
+		// only on an appended KindUser block.
+		s.Blocks = append(s.Blocks, Block{
+			Kind:  KindSystem,
+			At:    time.Now(),
+			Text:  formatCompactionBoundary(p.CompactionBoundary),
+			Final: true,
+		})
 	case *rafikiv1.Event_ChildExited:
 		// A dead child answers no more tool calls.
 		s.settleAll()
@@ -496,6 +509,22 @@ func ImagePlaceholder(img *rafikiv1.ImageBlock) string {
 		out += " (" + humanBytes(n) + ")"
 	}
 	return out
+}
+
+// formatCompactionBoundary renders the two token-format variants design §7
+// specifies: live events carry both pre and post tokens; a reattach-
+// synthesized event (from a stored kind='compaction_summary' row) carries
+// only pre, approximate. N/M are tokens/1000, integer division.
+func formatCompactionBoundary(cb *rafikiv1.CompactionBoundary) string {
+	pre, post := cb.PreTokens, cb.PostTokens
+	switch {
+	case pre != nil && post != nil:
+		return fmt.Sprintf("— context compacted · %dk → %dk tokens —", *pre/1000, *post/1000)
+	case pre != nil:
+		return fmt.Sprintf("— context compacted · ~%dk tokens —", *pre/1000)
+	default:
+		return "— context compacted —"
+	}
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
