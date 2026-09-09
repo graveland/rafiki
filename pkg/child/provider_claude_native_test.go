@@ -88,14 +88,107 @@ func TestNativeAssistantEmitsMessageBeforeToolStart(t *testing.T) {
 	}
 }
 
-// A user frame carries only tool_result blocks and must not open a turn.
-func TestNativeUserEmitsToolEndOnly(t *testing.T) {
+// A user frame carries only tool_result blocks and must not open a turn. Each
+// tool_result emits its ToolExecutionEnd FIRST, then a UserMessage carrying the
+// flattened output — the exact shape fundi's publishToolResult uses. Without the
+// second event the cockpit's reducer never sets HasResult and a claude child
+// renders "⋯ no result" forever.
+func TestNativeUserEmitsToolEndAndResultMessage(t *testing.T) {
 	p := newClaudeProvider()
 	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]}}`)
 
 	evs := p.BusFramesNative(line, 1000)
 
-	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end"})
+	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
+
+	end := evs[0].GetToolExecutionEnd()
+	if end == nil {
+		t.Fatal("first event is not a ToolExecutionEnd")
+	}
+	if got := end.GetToolUseId(); got != "tu_1" {
+		t.Fatalf("tool_use_id = %q, want %q", got, "tu_1")
+	}
+
+	um := evs[1].GetUserMessage()
+	if um == nil {
+		t.Fatal("second event is not a UserMessage")
+	}
+	if len(um.GetContent()) != 1 {
+		t.Fatalf("content blocks = %d, want 1", len(um.GetContent()))
+	}
+	tr := um.GetContent()[0].GetToolResult()
+	if tr == nil {
+		t.Fatal("UserMessage block is not a ToolResult")
+	}
+	if got := tr.GetToolUseId(); got != "tu_1" {
+		t.Fatalf("tool_result tool_use_id = %q, want %q", got, "tu_1")
+	}
+	if got := tr.GetIsError(); got {
+		t.Fatalf("tool_result is_error = %v, want false", got)
+	}
+	if got := tr.GetContent()[0].GetText().GetText(); got != "ok" {
+		t.Fatalf("tool_result text = %q, want %q", got, "ok")
+	}
+}
+
+// Two tool_result blocks in one frame pair each end with its own result
+// message, in per-block order: End, then the UserMessage (fundi's ToolEnd
+// order). ToolUseIds must not cross.
+func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
+	p := newClaudeProvider()
+	line := []byte(`{"type":"user","message":{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"tu_1","content":"first output"},` +
+		`{"type":"tool_result","tool_use_id":"tu_2","content":"second output","is_error":true}]}}`)
+
+	evs := p.BusFramesNative(line, 1000)
+
+	assertTypes(t, nativeTypeNames(evs),
+		[]string{"tool_execution_end", "user_message", "tool_execution_end", "user_message"})
+
+	want := []struct {
+		id      string
+		isError bool
+		text    string
+	}{{"tu_1", false, "first output"}, {"tu_2", true, "second output"}}
+	for i, w := range want {
+		end := evs[i*2].GetToolExecutionEnd()
+		if end == nil || end.GetToolUseId() != w.id || end.GetIsError() != w.isError {
+			t.Fatalf("event %d: end = %+v, want tool_use_id=%q is_error=%v", i*2, evs[i*2], w.id, w.isError)
+		}
+		tr := evs[i*2+1].GetUserMessage().GetContent()[0].GetToolResult()
+		if tr == nil || tr.GetToolUseId() != w.id {
+			t.Fatalf("event %d: result message not paired with %q", i*2+1, w.id)
+		}
+		if tr.GetIsError() != w.isError {
+			t.Fatalf("event %d: is_error = %v, want %v", i*2+1, tr.GetIsError(), w.isError)
+		}
+		if got := tr.GetContent()[0].GetText().GetText(); got != w.text {
+			t.Fatalf("event %d: text = %q, want %q", i*2+1, got, w.text)
+		}
+	}
+}
+
+// An empty-content tool_result still emits the result message with an empty
+// text block: a call that ran and returned nothing is a completed call, and the
+// reducer's HasResult must be true rather than "⋯ no result".
+func TestNativeUserEmitsResultMessageForEmptyContent(t *testing.T) {
+	p := newClaudeProvider()
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""}]}}`)
+
+	evs := p.BusFramesNative(line, 1000)
+
+	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
+
+	tr := evs[1].GetUserMessage().GetContent()[0].GetToolResult()
+	if tr == nil {
+		t.Fatal("UserMessage block is not a ToolResult")
+	}
+	if len(tr.GetContent()) != 1 {
+		t.Fatalf("tool_result content blocks = %d, want 1", len(tr.GetContent()))
+	}
+	if got := tr.GetContent()[0].GetText().GetText(); got != "" {
+		t.Fatalf("tool_result text = %q, want empty", got)
+	}
 }
 
 // Guard the whole rule in one place: the native claude vocabulary is fundi's

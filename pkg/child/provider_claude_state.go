@@ -660,6 +660,28 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 				},
 			},
 		})
+		// The result's OUTPUT rides a UserMessage carrying a tool_result block,
+		// exactly the shape fundi's publishToolResult emits (pkg/fundi/native.go):
+		// ToolExecutionEnd carries no text, and the cockpit's session reducer only
+		// sets HasResult/Result from that user turn — without it a claude child
+		// renders "⋯ no result" forever. Emitted even when the text flattens to "":
+		// a call that ran and returned nothing is still a completed call.
+		out = append(out, &rafikiv1.Event{
+			TsUnixMs: ts,
+			Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+						ToolUseId: b.ToolUseID,
+						IsError:   b.IsError,
+						Content: []*rafikiv1.ContentBlock{{
+							Index: 0,
+							Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: toolResultText(b.Content)}},
+						}},
+					}},
+				}},
+			}},
+		})
 	}
 	return out
 }
