@@ -27,6 +27,14 @@ func TestSingleLineBorders(t *testing.T) {
 	if strings.Contains(out, "╭") {
 		t.Errorf("expected no rounded border, got:\n%s", out)
 	}
+	// Cells are padded one space each side, the width naturalWidth budgets
+	// for and what go-pretty's tables looked like.
+	if !strings.Contains(out, " A ") {
+		t.Errorf("expected padded cell, got:\n%s", out)
+	}
+	if !strings.HasSuffix(out, "\n") {
+		t.Errorf("expected render to end with a newline, got:\n%q", out)
+	}
 }
 
 func TestNoANSIWhenColorDisabled(t *testing.T) {
@@ -64,13 +72,19 @@ func TestWidthDropsInDeclaredOrder(t *testing.T) {
 func TestNeverDropsLastColumn(t *testing.T) {
 	header := []string{"only", "wide-extra-column-name"}
 	rows := [][]string{{"v", "another quite long cell value"}}
-	// Drop order names only column 1, so column 0 can never go.
+	// Drop order names only column 1, so column 0 can never go. It does not
+	// fit the 5-column cap either, so its over-wide header truncates — the
+	// guarantee is that column 1 was dropped and the frame stayed valid,
+	// not that every survivor fits inside Width.
 	out := renderTable(t, Options{Width: 5, Drop: []int{1}}, header, rows)
-	if !strings.Contains(out, "only") {
-		t.Errorf("expected column 0 to survive, got:\n%s", out)
-	}
 	if strings.Contains(out, "wide-extra-column-name") {
 		t.Errorf("expected column 1 dropped, got:\n%s", out)
+	}
+	if !strings.Contains(out, "│ v │") {
+		t.Errorf("expected column 0's cell to survive, got:\n%s", out)
+	}
+	if !strings.Contains(out, "┐") {
+		t.Errorf("expected a complete frame with the right border intact, got:\n%s", out)
 	}
 }
 
@@ -87,6 +101,7 @@ func TestNoWidthCapKeepsAllColumns(t *testing.T) {
 
 func TestDimHeaderWhenColor(t *testing.T) {
 	out := renderTable(t, Options{Color: true}, []string{"H", "B"}, [][]string{{"x", "y"}})
+	// Padding renders outside the dim span: "│ \x1b[2mH\x1b[m │".
 	if !strings.Contains(out, "\x1b[2mH\x1b[m") {
 		t.Errorf("expected dimmed header, got:\n%q", out)
 	}

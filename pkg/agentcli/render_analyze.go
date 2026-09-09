@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/dustin/go-humanize"
-	"github.com/jedib0t/go-pretty/v6/table"
 
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
@@ -40,6 +40,15 @@ func (e *errWriter) println(args ...any) {
 		return
 	}
 	_, e.err = fmt.Fprintln(e.w, args...)
+}
+
+// table renders one table section through WriteTable, stopping at the
+// first error like every other errWriter method.
+func (e *errWriter) table(title string, numeric []int, header []string, rows [][]string) {
+	if e.err != nil {
+		return
+	}
+	e.err = WriteTable(e.w, title, numeric, header, rows)
 }
 
 // RenderProgress renders one Analyze progress event as a single line: the
@@ -79,20 +88,22 @@ func RenderAnalyzeSummary(w io.Writer, s *Summary) error {
 		return err
 	}
 
+	ew := &errWriter{w: w}
 	if len(s.Ranked) > 0 {
-		t := newAgentTable(w, "Findings")
-		t.AppendHeader(table.Row{"Axis", "Title", "Occurrences", "Savings", "Draft"})
+		header := []string{"Axis", "Title", "Occurrences", "Savings", "Draft"}
+		rows := make([][]string, 0, len(s.Ranked))
 		for _, rf := range s.Ranked {
 			draft := ""
 			if rf.Draft != nil {
 				draft = "yes"
 			}
-			t.AppendRow(table.Row{rf.Axis, rf.Title, rf.Occurrences, humanize.Comma(rf.Score), draft})
+			rows = append(rows, []string{rf.Axis, rf.Title, strconv.Itoa(rf.Occurrences), humanize.Comma(rf.Score), draft})
 		}
-		t.Render()
+		// Occurrences is the one column go-pretty right-aligned (its only
+		// all-int column); the padding keeps that alignment.
+		ew.table("Findings", []int{2}, header, rows)
 	}
 
-	ew := &errWriter{w: w}
 	ew.printf("Analyzed %d/%d  skipped %d  failed %d  tokens %s/%s  cost %s\n",
 		s.Analyzed, s.Population, s.Skipped, s.Failed,
 		humanize.Comma(s.Totals.InputTokens), humanize.Comma(s.Totals.OutputTokens), dollars(s.Totals.CostUSD))
@@ -102,19 +113,18 @@ func RenderAnalyzeSummary(w io.Writer, s *Summary) error {
 	return ew.err
 }
 
-// RenderFindings renders a []store.FindingRow as a rounded table.
+// RenderFindings renders a []store.FindingRow as a single-line table.
 func RenderFindings(w io.Writer, rows []store.FindingRow) error {
 	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "no findings")
 		return err
 	}
-	t := newAgentTable(w, "Findings")
-	t.AppendHeader(table.Row{"Axis", "Skill", "Title", "Savings", "Status", "ID"})
+	header := []string{"Axis", "Skill", "Title", "Savings", "Status", "ID"}
+	out := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		t.AppendRow(table.Row{r.Axis, r.SkillName, r.Title, humanize.Comma(r.ExpectedSavingsTokens), r.Status, r.ID})
+		out = append(out, []string{r.Axis, r.SkillName, r.Title, humanize.Comma(r.ExpectedSavingsTokens), r.Status, r.ID})
 	}
-	t.Render()
-	return nil
+	return WriteTable(w, "Findings", nil, header, out)
 }
 
 // WriteArtifacts writes payload's raw JSON plus a rendered markdown summary

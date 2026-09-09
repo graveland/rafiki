@@ -50,10 +50,14 @@ func (b *Builder) Row(cells ...string) {
 }
 
 func (b *Builder) style(row, col int) lipgloss.Style {
+	// One space of padding each side: what naturalWidth budgets for, and
+	// what go-pretty's tables looked like before the migration. lipgloss's
+	// default cell style has no padding at all, so it is set here.
+	s := lipgloss.NewStyle().Padding(0, 1)
 	if row == table.HeaderRow && b.opts.Color {
-		return lipgloss.NewStyle().Faint(true)
+		return s.Faint(true)
 	}
-	return lipgloss.NewStyle()
+	return s
 }
 
 func (b *Builder) pick(cells []string, live []int) []string {
@@ -126,6 +130,6 @@ func (b *Builder) Render() error {
 		t.Width(b.opts.Width)
 	}
 
-	_, err := io.WriteString(b.w, t.Render())
+	_, err := io.WriteString(b.w, t.Render()+"\n")
 	return err
 }

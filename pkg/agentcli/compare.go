@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dustin/go-humanize"
-	"github.com/jedib0t/go-pretty/v6/table"
 
 	"go.graveland.dev/rafiki/pkg/analyze"
 )
@@ -149,11 +149,11 @@ func modelSlug(model string) string {
 // (skill-gap/knowledge-to-persist/grind), in/out tokens, cost, and status —
 // ERROR plus the failure message when the model's run failed.
 func RenderCompare(w io.Writer, runs []CompareRun) error {
-	t := newAgentTable(w, "Model Compare")
-	t.AppendHeader(table.Row{"Model", "Findings", "Skill-gap", "Knowledge", "Grind", "Analyzed", "Failed", "In", "Out", "Cost", "Status"})
+	header := []string{"Model", "Findings", "Skill-gap", "Knowledge", "Grind", "Analyzed", "Failed", "In", "Out", "Cost", "Status"}
+	rows := make([][]string, 0, len(runs))
 	for _, r := range runs {
 		if r.Err != nil {
-			t.AppendRow(table.Row{r.Model, "-", "-", "-", "-", "-", "-", "-", "-", "-", "ERROR: " + r.Err.Error()})
+			rows = append(rows, []string{r.Model, "-", "-", "-", "-", "-", "-", "-", "-", "-", "ERROR: " + r.Err.Error()})
 			continue
 		}
 
@@ -187,8 +187,8 @@ func RenderCompare(w io.Writer, runs []CompareRun) error {
 		if r.failed() {
 			status = fmt.Sprintf("FAILED (%d/%d analyzed)", r.Analyzed, r.Analyzed+r.Failed)
 		}
-		t.AppendRow(table.Row{r.Model, findings, skillGap, knowledge, grind, r.Analyzed, r.Failed, humanize.Comma(in), humanize.Comma(out), dollars(cost), status})
+		rows = append(rows, []string{r.Model, strconv.Itoa(findings), strconv.Itoa(skillGap), strconv.Itoa(knowledge),
+			strconv.Itoa(grind), strconv.Itoa(r.Analyzed), strconv.Itoa(r.Failed), humanize.Comma(in), humanize.Comma(out), dollars(cost), status})
 	}
-	t.Render()
-	return nil
+	return WriteTable(w, "Model Compare", nil, header, rows)
 }
