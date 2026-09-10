@@ -327,7 +327,7 @@ func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ strin
 	return nil
 }
 
-func (f *recordingChatStore) RecordThread(_ context.Context, _, _ string, _ time.Time, _, _ string) error {
+func (f *recordingChatStore) RecordThread(_ context.Context, _, _, _ string, _ time.Time, _, _ string, _ bool) error {
 	return nil
 }
 

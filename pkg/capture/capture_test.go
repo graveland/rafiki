@@ -1422,54 +1422,73 @@ func TestRecordThreadLinksConsecutiveTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureConversation: %v", err)
 	}
-
-	// Turn 1: a thread root. No previous_message_id.
-	t1, t1At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
-	if err != nil {
-		t.Fatalf("InsertTurnIntent: %v", err)
-	}
-	if err := s.RecordThread(ctx, convID, t1, t1At, "", "msg_one"); err != nil {
-		t.Fatalf("RecordThread turn 1: %v", err)
-	}
-
-	// Turn 2: chains to turn 1.
-	t2, t2At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
-	if err != nil {
-		t.Fatalf("InsertTurnIntent: %v", err)
-	}
-	if err := s.RecordThread(ctx, convID, t2, t2At, "msg_one", "msg_two"); err != nil {
-		t.Fatalf("RecordThread turn 2: %v", err)
-	}
-
-	// Turn 3: a SECOND root, as a concurrent subagent's first turn is.
-	t3, t3At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
-	if err != nil {
-		t.Fatalf("InsertTurnIntent: %v", err)
-	}
-	if err := s.RecordThread(ctx, convID, t3, t3At, "", "msg_three"); err != nil {
-		t.Fatalf("RecordThread turn 3: %v", err)
-	}
+	// No session header, so the predecessor lookup scopes to the turn's own
+	// conversation: the pre-session shape of the same rule.
+	const session = ""
 
 	threadOf := func(turnID string) string {
 		var got string
 		if err := pool.QueryRow(ctx,
-			`SELECT thread_id::text FROM conversations.conversation_turn WHERE id=$1::uuid`,
+			`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
 			turnID).Scan(&got); err != nil {
 			t.Fatalf("read thread_id: %v", err)
 		}
 		return got
 	}
-	if threadOf(t1) != t1 {
-		t.Errorf("turn 1 thread = %s, want its own id %s", threadOf(t1), t1)
+
+	// Turn 1: the main thread's first turn. thread_id NULL is the convention
+	// that keeps the session's root conversation on the bare external_ref.
+	t1, t1At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
 	}
-	if threadOf(t2) != t1 {
-		t.Errorf("turn 2 thread = %s, want turn 1's id %s", threadOf(t2), t1)
+	if err := s.RecordThread(ctx, session, convID, t1, t1At, "", "msg_one", false); err != nil {
+		t.Fatalf("RecordThread turn 1: %v", err)
 	}
-	if threadOf(t3) == t1 {
-		t.Errorf("turn 3 is a separate thread root; it must not share turn 1's thread %s", t1)
+
+	// Turn 2: chains to turn 1. The predecessor IS the main thread (its
+	// thread_id is NULL), so turn 2 keeps NULL too.
+	t2, t2At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, convID, t2, t2At, "msg_one", "msg_two", false); err != nil {
+		t.Fatalf("RecordThread turn 2: %v", err)
+	}
+
+	// Turn 3: a SECOND root, as a concurrent subagent's first turn is. The
+	// billing header marks it cc_is_subagent, so it founds its own thread.
+	t3, t3At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, convID, t3, t3At, "", "msg_three", true); err != nil {
+		t.Fatalf("RecordThread turn 3: %v", err)
+	}
+
+	// Turn 4: the subagent's second turn, chaining to its own first.
+	t4, t4At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, convID, t4, t4At, "msg_three", "msg_four", true); err != nil {
+		t.Fatalf("RecordThread turn 4: %v", err)
+	}
+
+	if threadOf(t1) != "" {
+		t.Errorf("turn 1 (main thread root) thread_id = %s, want NULL", threadOf(t1))
+	}
+	if threadOf(t2) != "" {
+		t.Errorf("turn 2 (main thread, chained) thread_id = %s, want NULL: a NULL predecessor thread stays the main thread", threadOf(t2))
+	}
+	if threadOf(t3) == "" {
+		t.Error("turn 3 (subagent first turn) thread_id is NULL, want its own id: a subagent with no predecessor founds a new thread")
 	}
 	if threadOf(t3) != t3 {
 		t.Errorf("turn 3 thread = %s, want its own id %s", threadOf(t3), t3)
+	}
+	if threadOf(t4) != t3 {
+		t.Errorf("turn 4 thread = %s, want turn 3's id %s: the subagent thread continues", threadOf(t4), t3)
 	}
 }
 
@@ -1513,27 +1532,46 @@ func TestRequestMessageReplayStaysLenient(t *testing.T) {
 	}
 }
 
-func TestRecordThreadTreatsAnUnresolvablePredecessorAsARoot(t *testing.T) {
+func TestRecordThreadUnresolvablePredecessorStaysMainThreadUnlessSubagent(t *testing.T) {
 	// A predecessor from before this column existed, or from a conversation the
 	// proxy did not capture, must not silently attach the turn to an unrelated
-	// thread. It becomes its own root.
+	// thread. For the main thread that means staying the main thread (thread_id
+	// NULL, on the conversation the routing already chose); for a subagent it
+	// means founding a new thread with its own id.
 	s, pool := newTestStore(t)
 	ctx := context.Background()
 	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+
 	id, at, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
 	if err != nil {
-		t.Fatalf("InsertTurnIntent: %v", err)
+		t.Fatalf("InsertTurnIntent main: %v", err)
 	}
-	if err := s.RecordThread(ctx, convID, id, at, "msg_never_seen", "msg_mine"); err != nil {
-		t.Fatalf("RecordThread: %v", err)
+	if err := s.RecordThread(ctx, "", convID, id, at, "msg_never_seen", "msg_mine", false); err != nil {
+		t.Fatalf("RecordThread main: %v", err)
 	}
-	var got string
-	if err := pool.QueryRow(ctx,
-		`SELECT thread_id::text FROM conversations.conversation_turn WHERE id=$1::uuid`, id).Scan(&got); err != nil {
-		t.Fatalf("read thread_id: %v", err)
+
+	subID, subAt, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent subagent: %v", err)
 	}
-	if got != id {
-		t.Errorf("thread_id = %s, want its own id %s", got, id)
+	if err := s.RecordThread(ctx, "", convID, subID, subAt, "msg_also_never_seen", "msg_sub_mine", true); err != nil {
+		t.Fatalf("RecordThread subagent: %v", err)
+	}
+
+	threadOf := func(turnID string) string {
+		var got string
+		if err := pool.QueryRow(ctx,
+			`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+			turnID).Scan(&got); err != nil {
+			t.Fatalf("read thread_id: %v", err)
+		}
+		return got
+	}
+	if got := threadOf(id); got != "" {
+		t.Errorf("main thread with an unresolvable predecessor: thread_id = %s, want NULL (not the unrelated thread a guess would attach)", got)
+	}
+	if got := threadOf(subID); got != subID {
+		t.Errorf("subagent with an unresolvable predecessor: thread_id = %s, want its own id %s (a new thread root)", got, subID)
 	}
 }
 
@@ -1612,4 +1650,280 @@ func TestRootThreadKeepsTheBareSessionExternalRef(t *testing.T) {
 	if ref != session {
 		t.Errorf("root external_ref = %q, want the bare session %q", ref, session)
 	}
+}
+
+// TestChainedMainThreadRequestsStayOnTheBareSessionRow pins the routing rule
+// end to end against the real database: the main thread's second and later
+// requests DO carry a resolvable predecessor, and that predecessor's thread_id
+// is NULL, so every one of them keeps landing on the bare-ref conversation and
+// the bare ref is never suffixed. Before the NULL-thread_id convention, the
+// resolver forked a fresh conversation per request and cost rollups keyed on
+// external_ref counted only the first one.
+func TestChainedMainThreadRequestsStayOnTheBareSessionRow(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name()
+	ref := ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session}
+
+	root, err := s.ResolveThreadConversation(ctx, ref, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation root: %v", err)
+	}
+
+	// Request 1: no predecessor (the main thread's first turn).
+	t1, t1At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent 1: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, t1, t1At, "", "msg_"+t1, false); err != nil {
+		t.Fatalf("RecordThread 1: %v", err)
+	}
+
+	// Request 2: chains to request 1's response, exactly as Claude Code does.
+	tid1, err := s.ThreadOfPredecessorInSession(ctx, session, "msg_"+t1)
+	if err != nil {
+		t.Fatalf("ThreadOfPredecessorInSession 1: %v", err)
+	}
+	if tid1 != "" {
+		t.Fatalf("turn 1 is the main thread: lookup = %q, want the empty thread (root row)", tid1)
+	}
+	conv2, err := s.ResolveThreadConversation(ctx, ref, tid1)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation 2: %v", err)
+	}
+	if conv2 != root {
+		t.Fatalf("request 2 landed on %s, want the root row %s", conv2, root)
+	}
+	t2, t2At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: conv2, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent 2: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, conv2, t2, t2At, "msg_"+t1, "msg_"+t2, false); err != nil {
+		t.Fatalf("RecordThread 2: %v", err)
+	}
+
+	// Request 3: same again, proving the chain stays main-thread past turn 2.
+	tid2, err := s.ThreadOfPredecessorInSession(ctx, session, "msg_"+t2)
+	if err != nil {
+		t.Fatalf("ThreadOfPredecessorInSession 2: %v", err)
+	}
+	if tid2 != "" {
+		t.Fatalf("turn 2 chains to the main thread: lookup = %q, want the empty thread", tid2)
+	}
+	conv3, err := s.ResolveThreadConversation(ctx, ref, tid2)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation 3: %v", err)
+	}
+	if conv3 != root {
+		t.Fatalf("request 3 landed on %s, want the root row %s", conv3, root)
+	}
+
+	for i, turnID := range []string{t1, t2} {
+		var got string
+		if err := pool.QueryRow(ctx,
+			`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+			turnID).Scan(&got); err != nil {
+			t.Fatalf("read thread_id %d: %v", i+1, err)
+		}
+		if got != "" {
+			t.Errorf("main-thread turn %d thread_id = %s, want NULL", i+1, got)
+		}
+	}
+
+	// The bare ref itself, and that no branch row was ever created for this
+	// session: the invariant every external_ref-keyed consumer relies on.
+	var refVal string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref FROM conversations.conversation WHERE id=$1::uuid`, root).Scan(&refVal); err != nil {
+		t.Fatalf("read external_ref: %v", err)
+	}
+	if refVal != session {
+		t.Errorf("root external_ref = %q, want the unsuffixed %q", refVal, session)
+	}
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation WHERE external_ref = $1 OR external_ref LIKE $1 || ':%'`,
+		session).Scan(&n); err != nil {
+		t.Fatalf("count family: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("session family has %d conversations, want 1: chained main-thread requests must never fork a branch", n)
+	}
+}
+
+// TestSubagentTurn2RoutesToItsOwnBranch pins the other half: a subagent whose
+// first turn sat on the root row (no predecessor to resolve) is routed to its
+// own branch the moment its second turn chains back, and its thread id is what
+// names the branch.
+func TestSubagentTurn2RoutesToItsOwnBranch(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name()
+	ref := ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session}
+
+	root, err := s.ResolveThreadConversation(ctx, ref, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation root: %v", err)
+	}
+
+	// Subagent turn 1: no predecessor, so it lands on the root row for this
+	// one request and is stamped a new thread root with its own id.
+	t1, t1At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent 1: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, t1, t1At, "", "msg_"+t1, true); err != nil {
+		t.Fatalf("RecordThread 1: %v", err)
+	}
+	var t1Thread string
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+		t1).Scan(&t1Thread); err != nil {
+		t.Fatalf("read thread_id 1: %v", err)
+	}
+	if t1Thread != t1 {
+		t.Fatalf("subagent turn 1 thread_id = %s, want its own id %s", t1Thread, t1)
+	}
+
+	// Subagent turn 2: predecessor = turn 1's response, whose thread_id is
+	// turn 1's own id. The lookup must answer exactly that id and route to the
+	// branch named after it, while turn 1's messages stay on the root row.
+	tid, err := s.ThreadOfPredecessorInSession(ctx, session, "msg_"+t1)
+	if err != nil {
+		t.Fatalf("ThreadOfPredecessorInSession: %v", err)
+	}
+	if tid != t1 {
+		t.Fatalf("lookup = %q, want the predecessor's thread id %q", tid, t1)
+	}
+	branch, err := s.ResolveThreadConversation(ctx, ref, tid)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation branch: %v", err)
+	}
+	if branch == root {
+		t.Fatal("subagent turn 2 must leave the root row: its thread got a branch")
+	}
+	var branchRef string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref FROM conversations.conversation WHERE id=$1::uuid`, branch).Scan(&branchRef); err != nil {
+		t.Fatalf("read branch external_ref: %v", err)
+	}
+	if want := session + ":" + t1; branchRef != want {
+		t.Errorf("branch external_ref = %q, want %q", branchRef, want)
+	}
+
+	// The branch turn records its membership through the family-scoped lookup:
+	// its predecessor's turn lives on the ROOT conversation, so a lookup scoped
+	// to the turn's own row would miss and fork yet another thread.
+	t2, t2At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: branch, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent 2: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, branch, t2, t2At, "msg_"+t1, "msg_"+t2, true); err != nil {
+		t.Fatalf("RecordThread 2: %v", err)
+	}
+	var t2Thread string
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+		t2).Scan(&t2Thread); err != nil {
+		t.Fatalf("read thread_id 2: %v", err)
+	}
+	if t2Thread != t1 {
+		t.Errorf("subagent turn 2 thread_id = %s, want the predecessor's %s: the chain must survive the conversation boundary", t2Thread, t1)
+	}
+	tid3, err := s.ThreadOfPredecessorInSession(ctx, session, "msg_"+t2)
+	if err != nil {
+		t.Fatalf("ThreadOfPredecessorInSession 3: %v", err)
+	}
+	if tid3 != t1 {
+		t.Fatalf("turn 3 lookup = %q, want %q: the subagent thread stays on its branch", tid3, t1)
+	}
+	branch3, err := s.ResolveThreadConversation(ctx, ref, tid3)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation 3: %v", err)
+	}
+	if branch3 != branch {
+		t.Errorf("subagent turn 3 landed on %s, want the same branch %s", branch3, branch)
+	}
+}
+
+// TestThreadOfPredecessorInSessionEscapesTheSessionWildcard calls the lookup
+// against the real database with a session carrying both LIKE wildcards. The
+// escape literal in the SQL is a raw-string backslash: get it wrong twice and
+// PostgreSQL rejects every call with SQLSTATE 22025, get the replacer wrong
+// and a decoy conversation of another session over-matches. Either regression
+// fails here.
+func TestThreadOfPredecessorInSessionEscapesTheSessionWildcard(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	// % inside and _ at the end, so the UNESCAPED pattern is all wildcards.
+	session := "c_esc%" + t.Name() + "_"
+	ref := ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session}
+
+	root, err := s.ResolveThreadConversation(ctx, ref, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation root: %v", err)
+	}
+
+	// The session's own family: a main-thread turn on the root, a subagent
+	// root beside it, and the subagent's second turn on its branch.
+	tr, atr, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent main: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, tr, atr, "", "msg_"+tr, false); err != nil {
+		t.Fatalf("RecordThread main: %v", err)
+	}
+	ts, ats, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent subagent: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, ts, ats, "", "msg_"+ts, true); err != nil {
+		t.Fatalf("RecordThread subagent: %v", err)
+	}
+	branch, err := s.ResolveThreadConversation(ctx, ref, ts)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation branch: %v", err)
+	}
+	tb, atb, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: branch, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent branch: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, branch, tb, atb, "msg_"+ts, "msg_"+tb, true); err != nil {
+		t.Fatalf("RecordThread branch: %v", err)
+	}
+
+	// A decoy conversation of ANOTHER session that the unescaped pattern
+	// matches: c_esc [any] <name> [one] : [any]. Only the escaped pattern may
+	// keep it out.
+	decoyRef := "c_escX" + t.Name() + "Z:decoy"
+	decoy, err := s.EnsureConversationByExternalRef(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: decoyRef,
+	})
+	if err != nil {
+		t.Fatalf("EnsureConversationByExternalRef decoy: %v", err)
+	}
+	td, atd, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: decoy, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent decoy: %v", err)
+	}
+	if err := s.RecordThread(ctx, decoyRef, decoy, td, atd, "", "msg_"+td, true); err != nil {
+		t.Fatalf("RecordThread decoy: %v", err)
+	}
+
+	lookup := func(prevMessageID, want string) {
+		t.Helper()
+		got, err := s.ThreadOfPredecessorInSession(ctx, session, prevMessageID)
+		if err != nil {
+			t.Fatalf("ThreadOfPredecessorInSession(%q): %v", prevMessageID, err)
+		}
+		if got != want {
+			t.Errorf("ThreadOfPredecessorInSession(%q) = %q, want %q", prevMessageID, got, want)
+		}
+	}
+
+	lookup("msg_"+tr, "")        // found on the root: the main thread
+	lookup("msg_"+ts, ts)        // found on the root: a new thread root's id, verbatim
+	lookup("msg_"+tb, ts)        // found on the branch through the LIKE arm
+	lookup("msg_"+td, "")        // the decoy is another session's family; it must not match
+	lookup("msg_never_seen", "") // a miss, never a most-recent-turn guess
 }

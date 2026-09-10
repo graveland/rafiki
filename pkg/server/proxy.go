@@ -36,7 +36,7 @@ type proxyStore interface {
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
 	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
-	RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error
+	RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 }
 
@@ -435,6 +435,7 @@ type captureRef struct {
 	turnID         string
 	createdAt      time.Time
 	on             bool
+	session        string // X-Rafiki-Session the thread was routed on; the family RecordThread scopes its lookup to
 	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
 	prefixHash     string
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
@@ -1092,20 +1093,25 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
 	}
-	// Thread observation (wave 2 of the native-subagent attribution plan).
-	// Records which thread this turn belongs to without acting on it, so the
-	// mechanism can be evaluated on live traffic before capture routes on it.
+	// Thread classification and routing (native-subagent attribution). The
+	// lookup in beginCapture chose the conversation row; this write is what
+	// later turns resolve their own conversation from: prevMessageID chains
+	// backwards, ownMsg is the chain key this turn publishes, and isSubagent
+	// (cc_is_subagent, present only when true) decides whether an absent
+	// predecessor is a new subagent thread root or the main thread.
 	prevMsg := claudethread.PreviousMessageID(cr.reqBody)
 	ownMsg := capture.MessageIDFromCanonical(canonical)
-	if terr := p.store.RecordThread(capCtx, cr.convID, cr.turnID, cr.createdAt, prevMsg, ownMsg); terr != nil {
-		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
-	}
+	isSubagent := false
 	if b, ok := claudethread.BillingFromRequest(cr.reqBody); ok {
+		isSubagent = b.IsSubagent
 		p.logger.Debug("claude thread",
 			"conversation", cr.convID, "turn", cr.turnID,
 			"is_subagent", b.IsSubagent, "entrypoint", b.Entrypoint,
 			"prev_message_id", prevMsg, "own_message_id", ownMsg,
 			"chained", prevMsg != "")
+	}
+	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, prevMsg, ownMsg, isSubagent); terr != nil {
+		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
 	}
 }
 
@@ -1400,7 +1406,7 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	return captureRef{
 		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
-		reqBody: reqBody, prefixHash: prefixHash,
+		session: session, reqBody: reqBody, prefixHash: prefixHash,
 		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
 	}
 }

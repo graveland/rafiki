@@ -547,12 +547,20 @@ never meet; the cost is one-directional — a DELETE unbinds the sid
 immediately while the pointer lingers until Wait returns, and a Log to a
 closed session fails at debug and is skipped.
 
-A client-driven conversation's `external_ref` is the `X-Rafiki-Session` value,
+On the proxy face (the `/v1/messages` capture path, not the MCP surface above),
+a client-driven conversation's `external_ref` is the `X-Rafiki-Session` value,
 optionally suffixed `:<threadID>`. Claude Code runs several conversational
 threads in one process (the main thread, each Task subagent, the titler) under
 one session header; each non-root thread gets its own conversation row so it
-gets its own ordinal space. The root thread keeps the bare session value, so
-cost rollup by `external_ref` and `rafiki logs <child>` are unchanged.
+gets its own ordinal space. Which thread a request belongs to is decided from
+`diagnostics.previous_message_id` and the request's `cc_is_subagent` billing
+flag: a turn whose predecessor is the main thread keeps the bare session value
+(that convention is `thread_id IS NULL` on the turn row), and a turn of a
+subagent thread resolves to the branch named after the turn that founded the
+thread. Concurrent thread roots share the root row's ordinal space for their
+first request only. The `:<threadID>` suffix namespace is daemon-reserved: a
+caller that puts `:<id>` inside its own `X-Rafiki-Session` value collides with
+branch refs of the session it names.
 
 ## 3. Framing
 

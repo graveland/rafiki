@@ -43,27 +43,46 @@ type fakeProxyStore struct {
 	decomposes           int    // DecomposeRequest call count
 	completeErr          error  // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
 	threads              int    // RecordThread call count
+	lastSession          string // session passed to the last RecordThread
 	lastPrevMsg          string // prevMessageID passed to the last RecordThread
 	lastOwnMsg           string // ownMessageID passed to the last RecordThread
+	lastIsSubagent       bool   // isSubagent passed to the last RecordThread
 	threadErr            error  // when set, RecordThread returns it (to exercise the swallow)
 	appendErr            error  // when set, AppendResponseMessage returns it (to exercise the FailTurn path)
+
+	threadID        string // ThreadOfPredecessorInSession answers this; empty keeps every routing test on the root row
+	lastThreadID    string // threadID the last ResolveThreadConversation received
+	lastResolvedRef string // external_ref the last ResolveThreadConversation received
+	lastIntentConv  string // conversation the last InsertTurnIntent landed on
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
 	return "conv-1", nil
 }
 func (s *fakeProxyStore) ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error) {
+	s.lastThreadID = threadID
+	// Model the store's contract: the effective external_ref is the session
+	// value suffixed with the thread id, which the real method applies inside.
+	effective := ref.ExternalRef
+	if threadID != "" && effective != "" {
+		effective = effective + ":" + threadID
+	}
+	s.lastResolvedRef = effective
+	if threadID != "" {
+		return "conv-branch", nil
+	}
 	return s.EnsureConversationByExternalRef(ctx, ref)
 }
 
 func (s *fakeProxyStore) ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error) {
 	_ = session
 	_ = prevMessageID
-	return "", nil
+	return s.threadID, nil
 }
 
 func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.intents++
+	f.lastIntentConv = t.ConversationID
 	f.lastIntentModel = t.Model
 	f.lastIntentSource = t.Source
 	f.lastIntentAuthorKind = t.AuthorKind
@@ -94,10 +113,12 @@ func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turn
 	return f.appendErr
 }
 
-func (f *fakeProxyStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+func (f *fakeProxyStore) RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error {
 	f.threads++
+	f.lastSession = session
 	f.lastPrevMsg = prevMessageID
 	f.lastOwnMsg = ownMessageID
+	f.lastIsSubagent = isSubagent
 	return f.threadErr
 }
 
@@ -1702,6 +1723,93 @@ func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
 	}
 	if fs.lastOwnMsg != "msg_own" {
 		t.Errorf("ownMessageID = %q, want %q (the response's assistant message id)", fs.lastOwnMsg, "msg_own")
+	}
+	if fs.lastSession != "" {
+		t.Errorf("session = %q, want empty (no X-Rafiki-Session header sent)", fs.lastSession)
+	}
+	if fs.lastIsSubagent {
+		t.Error("isSubagent = true, want false (no billing header on the request)")
+	}
+}
+
+// TestProxyClassifiesTheThreadFromTheBillingHeader pins the other half of the
+// wiring: the X-Rafiki-Session value and the parsed cc_is_subagent flag reach
+// RecordThread, because the routing decision depends on both and a proxy that
+// drops either one silently routes every turn to the main thread.
+func TestProxyClassifiesTheThreadFromTheBillingHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_own","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[],
+			"system":[{"type":"text","text":"x-anthropic-billing-header:cc_version=2.1.267.019;cc_entrypoint=sdk-cli;cc_is_subagent=true;cc_prev_req=req_1;cc_prompt_id=p_1"}],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	req.Header.Set("X-Rafiki-Session", "c_wiring_test")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if fs.threads != 1 {
+		t.Fatalf("RecordThread calls = %d, want 1", fs.threads)
+	}
+	if fs.lastSession != "c_wiring_test" {
+		t.Errorf("session = %q, want the X-Rafiki-Session value %q", fs.lastSession, "c_wiring_test")
+	}
+	if !fs.lastIsSubagent {
+		t.Error("isSubagent = false, want true (cc_is_subagent=true in the billing header)")
+	}
+}
+
+// TestProxyRoutesTheTurnIntentToTheResolvedThreadRow pins the beginCapture
+// seam end to end: the threadID the lookup answers is what selects the
+// conversation row the turn intent lands on, and the ref it resolves carries
+// the thread suffix. Without this pin, reverting beginCapture to a bare
+// EnsureConversationByExternalRef (the pre-3.1 single-row behavior) passes
+// the suite silently.
+func TestProxyRoutesTheTurnIntentToTheResolvedThreadRow(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_own","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{threadID: "thread-b"}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	req.Header.Set("X-Rafiki-Session", "c_route_test")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if fs.lastThreadID != "thread-b" {
+		t.Errorf("ResolveThreadConversation threadID = %q, want the lookup's answer %q", fs.lastThreadID, "thread-b")
+	}
+	if want := "c_route_test:thread-b"; fs.lastResolvedRef != want {
+		t.Errorf("resolved external_ref = %q, want %q", fs.lastResolvedRef, want)
+	}
+	if fs.lastIntentConv != "conv-branch" {
+		t.Errorf("turn intent landed on conversation %q, want the thread's own row %q", fs.lastIntentConv, "conv-branch")
 	}
 }
 

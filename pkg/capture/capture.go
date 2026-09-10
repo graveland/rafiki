@@ -200,6 +200,12 @@ func (s *CaptureStore) ResolveThreadConversation(ctx context.Context, ref Conver
 // scoped to the root alone finds nothing and would restart the thread on every
 // turn.
 //
+// The predecessor's thread_id is returned verbatim: "" means the predecessor
+// IS the session's main thread, whose turns carry thread_id NULL by
+// convention (RecordThread), so the caller keeps the conversation on the bare
+// session external_ref. Only a non-NULL thread_id routes to a branch. A miss
+// (no predecessor row) also answers "", for a thread root.
+//
 // Reads only columns migration 0030 fills. A miss must never fall back to "the
 // most recent turn": guessing is what put concurrent subagents on one thread
 // to begin with.
@@ -209,15 +215,16 @@ func (s *CaptureStore) ThreadOfPredecessorInSession(ctx context.Context, session
 	}
 	// The LIKE arm must match the session verbatim, so % and _ have to lose
 	// their wildcard meaning: a session id is client-supplied (claude.go takes
-	// an arbitrary X-Rafiki-Session).
-	like := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(session)
+	// an arbitrary X-Rafiki-Session). escapeLikePattern and the ESCAPE clause
+	// are a pair; one backslash in the raw-string SQL literal is load-bearing.
+	like := escapeLikePattern(session)
 	var threadID string
 	err := s.pool.QueryRow(ctx,
-		`SELECT coalesce(t.thread_id::text, t.id::text)
+		`SELECT coalesce(t.thread_id::text, '')
 		   FROM conversations.conversation_turn t
 		   JOIN conversations.conversation c ON c.id = t.conversation_id
 		  WHERE c.driven_by = 'client'
-		    AND (c.external_ref = $1 OR c.external_ref LIKE $2 || ':%' ESCAPE '\\')
+		    AND (c.external_ref = $1 OR c.external_ref LIKE $2 || ':%' ESCAPE '\')
 		    AND t.response_message_id = $3
 		  ORDER BY t.created_at DESC LIMIT 1`,
 		session, like, prevMessageID).Scan(&threadID)
@@ -770,37 +777,58 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 	})
 }
 
-// RecordThread stores this turn's own assistant message id and resolves which
-// thread it belongs to, by walking prevMessageID back one hop to the turn that
-// produced it.
+// RecordThread classifies this turn into its thread and stamps the row:
+// response_message_id (the chain key later turns resolve) and thread_id.
 //
-// Claude Code sends the main thread, every Task subagent and the titler under
-// one X-Rafiki-Session value, so one conversation row carries several
-// independent threads. diagnostics.previous_message_id is the client's own
-// statement of which one this is: measured over 3583 linked turns, only 6
-// share a predecessor (retries), max fan-out 4.
+// Classification, from the two signals the request carries:
 //
-// An absent or unresolvable predecessor makes the turn its own thread root.
+//   - A resolvable predecessor (diagnostics.previous_message_id resolves to a
+//     turn anywhere in the session's family, root row or branch) continues
+//     that turn's thread, and its thread_id is copied verbatim: NULL means the
+//     main thread, so this turn keeps NULL and stays on the bare session row;
+//     a set id means a subagent thread and is inherited.
+//   - No resolvable predecessor makes the turn a thread root: thread_id NULL
+//     (main thread) when the billing header does not mark it a subagent, its
+//     own id (a new thread) when it does. A new thread still lands on the root
+//     row for this one request; its own id is what the thread's later turns
+//     resolve to a branch.
+//
+// The predecessor lookup is family-scoped (the session's root conversation and
+// every "<session>:<threadID>" branch, same shape as
+// ThreadOfPredecessorInSession), not scoped to the turn's own conversation: a
+// thread's later turns live on a branch while their predecessor's turn lives
+// on the root, and a per-conversation lookup would break every chain at that
+// boundary and fork a fresh thread per request.
+//
+// isSubagent is the cc_is_subagent flag parsed from the request's billing
+// header (claudethread.BillingFromRequest), decided by the caller so this
+// store method never learns to parse Claude Code request bodies. The flag is
+// present only when true, so absent means the main thread.
+//
 // Unresolvable must never fall back to "the most recent turn": that is exactly
 // the guess that put concurrent subagents on one thread to begin with.
-//
-// Observation only. Nothing reads thread_id yet.
-func (s *CaptureStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+func (s *CaptureStore) RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error {
 	return retryDB(ctx, "recordThread", func(ctx context.Context) error {
-		threadID := turnID
+		// Main thread by default: thread_id NULL is the convention that keeps
+		// the session's root conversation on the bare external_ref.
+		threadID := ""
+		if isSubagent && prevMessageID == "" {
+			// A concurrent subagent's first turn: a new thread root.
+			threadID = turnID
+		}
 		if prevMessageID != "" {
-			var prevThread string
-			err := s.pool.QueryRow(ctx,
-				`SELECT coalesce(thread_id::text, id::text) FROM conversations.conversation_turn
-				  WHERE conversation_id=$1::uuid AND response_message_id=$2
-				  ORDER BY created_at DESC LIMIT 1`,
-				convID, prevMessageID).Scan(&prevThread)
+			prevThread, err := s.predecessorThreadID(ctx, session, convID, prevMessageID)
 			switch {
 			case err == nil:
+				// Continue the predecessor's thread, NULL and all.
 				threadID = prevThread
 			case errors.Is(err, pgx.ErrNoRows):
-				// Root: a first turn, a pre-0030 predecessor, or a chain broken by
-				// a failed turn that never recorded its id.
+				// Root: a first turn, a pre-0030 predecessor, or a chain broken
+				// by a failed turn that never recorded its id. A subagent here
+				// is still a new thread root; the main thread stays NULL.
+				if isSubagent {
+					threadID = turnID
+				}
 			default:
 				return fmt.Errorf("record thread: resolve predecessor: %w", err)
 			}
@@ -809,7 +837,7 @@ func (s *CaptureStore) RecordThread(ctx context.Context, convID, turnID string, 
 			`UPDATE conversations.conversation_turn
 			    SET response_message_id = NULLIF($3,''), thread_id = $4::uuid
 			  WHERE id=$1::uuid AND created_at=$2`,
-			turnID, createdAt, ownMessageID, threadID)
+			turnID, createdAt, ownMessageID, nullUUID(threadID))
 		if err != nil {
 			return fmt.Errorf("record thread: update: %w", err)
 		}
@@ -818,6 +846,44 @@ func (s *CaptureStore) RecordThread(ctx context.Context, convID, turnID string, 
 		}
 		return nil
 	})
+}
+
+// predecessorThreadID resolves prevMessageID one hop back to the turn that
+// produced it and answers that turn's thread_id, "" when the predecessor is
+// the main thread. ErrNoRows means the predecessor does not resolve; anything
+// else is a database error the caller must not swallow into a root decision.
+func (s *CaptureStore) predecessorThreadID(ctx context.Context, session, convID, prevMessageID string) (string, error) {
+	if session == "" {
+		// No session header: the conversation has no external_ref, so there is
+		// no family and the turn's own conversation is the whole scope.
+		var prevThread string
+		err := s.pool.QueryRow(ctx,
+			`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn
+			  WHERE conversation_id=$1::uuid AND response_message_id=$2
+			  ORDER BY created_at DESC LIMIT 1`,
+			convID, prevMessageID).Scan(&prevThread)
+		return prevThread, err
+	}
+	var prevThread string
+	err := s.pool.QueryRow(ctx,
+		`SELECT coalesce(t.thread_id::text, '')
+		   FROM conversations.conversation_turn t
+		   JOIN conversations.conversation c ON c.id = t.conversation_id
+		  WHERE c.driven_by = 'client'
+		    AND (c.external_ref = $1 OR c.external_ref LIKE $2 || ':%' ESCAPE '\')
+		    AND t.response_message_id = $3
+		  ORDER BY t.created_at DESC LIMIT 1`,
+		session, escapeLikePattern(session), prevMessageID).Scan(&prevThread)
+	return prevThread, err
+}
+
+// escapeLikePattern escapes the SQL LIKE wildcards in a client-supplied
+// session id so the LIKE arm matches it verbatim. The query's ESCAPE '\'
+// clause must agree: one backslash, since in a Go raw string the SQL literal
+// is what you see and PostgreSQL rejects any other escape length
+// (SQLSTATE 22025).
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(s)
 }
 
 // MessageIDFromCanonical reads the assistant message id out of a canonical

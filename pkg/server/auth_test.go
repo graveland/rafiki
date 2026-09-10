@@ -51,7 +51,7 @@ func (s *recordingStore) AppendResponseMessage(ctx context.Context, convID, turn
 	return nil
 }
 
-func (s *recordingStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+func (s *recordingStore) RecordThread(ctx context.Context, session, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string, isSubagent bool) error {
 	return nil
 }
 
