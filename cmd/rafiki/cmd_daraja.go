@@ -109,7 +109,7 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	// local-subprocess daemon path can only ever APPEND to its own inherited
 	// env (proxyChildEnv), which can never unset ANTHROPIC_API_KEY. See
 	// proxyenv.Claude's own doc comment.
-	env, proxyModelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
+	env, values := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
 		URL:               proxyURL,
 		Token:             proxyToken,
 		PassthroughAuth:   passthrough,
@@ -117,15 +117,17 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 		AutoCompactWindow: autoCompact,
 		Headers:           headers,
 	})
-	// proxyModelArgs is already nil when proxyURL == "" (proxyenv.Claude's own
-	// early return), so ChildSpec.argv()'s plain --model is used unproxied.
+	// values.MCPConfig and values.ModelArgs are already empty when proxyURL
+	// == "" (proxyenv.ClaudeEnv's own early return), so ChildSpec.argv()'s
+	// plain --model is used unproxied.
 
 	host := daraja.NewHost(daraja.HostOptions{
-		Binary:         binary,
-		Cwd:            cwd,
-		Env:            env,
-		EnvOverride:    true,
-		ProxyModelArgs: proxyModelArgs,
+		Binary:      binary,
+		Cwd:         cwd,
+		Env:         env,
+		EnvOverride: true,
+		MCPConfig:   values.MCPConfig,
+		ModelArgs:   values.ModelArgs,
 		Spec: daraja.ChildSpec{
 			Kind:           kind,
 			Model:          model,

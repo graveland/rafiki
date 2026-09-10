@@ -53,6 +53,17 @@ func collectStdout(t *testing.T, h *Host, want string, d time.Duration) string {
 	}
 }
 
+// assertPair checks argv carries flag immediately followed by value.
+func assertPair(t *testing.T, argv []string, flag, value string) {
+	t.Helper()
+	for i, a := range argv {
+		if a == flag && i+1 < len(argv) && argv[i+1] == value {
+			return
+		}
+	}
+	t.Errorf("argv %v missing pair [%s %s]", argv, flag, value)
+}
+
 // The host runs a process and relays what it writes.
 func TestHostRelaysStdout(t *testing.T) {
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
@@ -71,19 +82,17 @@ func TestHostRelaysStdout(t *testing.T) {
 	}
 }
 
-// TestProxyModelArgsReplacesPlainModelFlag proves the suppression startLocked
-// applies: with ProxyModelArgs set, the spawned process's argv carries the
-// proxy's own --model pair (matching its custom-model-option env vars) and
-// does NOT also carry a second, plain --model from claudeargv.Build — which
+// TestArgvSingleModelWithModelArgs proves the suppression claudeargv.Params
+// applies: with HostOptions.ModelArgs set, the spawned process's argv carries
+// ModelArgs' own --model pair (matching its custom-model-option env vars) and
+// does NOT also carry a second, plain --model from the spec's Model — which
 // would risk Claude Code's client-side allowlist rejecting the model before
-// the custom option is even consulted (see HostOptions.ProxyModelArgs).
-func TestProxyModelArgsReplacesPlainModelFlag(t *testing.T) {
+// the custom option is even consulted (see HostOptions.ModelArgs).
+func TestArgvSingleModelWithModelArgs(t *testing.T) {
 	h := NewHost(HostOptions{
-		Binary: testEchoBinary(t),
-		Spec:   ChildSpec{Kind: KindClaude, Model: "openai/gpt-4o"},
-		ProxyModelArgs: []string{
-			"--model", "rafiki: openai/gpt-4o",
-		},
+		Binary:    testEchoBinary(t),
+		Spec:      ChildSpec{Kind: KindClaude, Model: "openai/gpt-4o"},
+		ModelArgs: []string{"--model", "rafiki: openai/gpt-4o"},
 	})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -96,17 +105,17 @@ func TestProxyModelArgsReplacesPlainModelFlag(t *testing.T) {
 		t.Fatalf("argv %q contains %d occurrences of --model, want exactly 1", argv, got)
 	}
 	if !strings.Contains(argv, "rafiki: openai/gpt-4o") {
-		t.Fatalf("argv %q missing the proxy's own --model value", argv)
+		t.Fatalf("argv %q missing the ModelArgs' own --model value", argv)
 	}
-	if strings.Contains(argv, "--model openai/gpt-4o") {
+	if strings.Contains(argv, "--model openai/gpt-4o ") || strings.HasSuffix(strings.TrimSpace(argv), "--model openai/gpt-4o") {
 		t.Fatalf("argv %q carries the PLAIN --model claudeargv.Build would add unsuppressed", argv)
 	}
 }
 
-// TestNilProxyModelArgsLeavesPlainModelFlagAlone is the control case: with no
-// ProxyModelArgs (every caller before Phase 2, and any unproxied daraja
-// today), Model must still produce claudeargv.Build's ordinary --model.
-func TestNilProxyModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
+// TestNoModelArgsLeavesPlainModelFlagAlone is the control case: with no
+// ModelArgs (every unproxied daraja), Model must still produce
+// claudeargv.Build's ordinary --model.
+func TestNoModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	h := NewHost(HostOptions{
 		Binary: testEchoBinary(t),
 		Spec:   ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
@@ -122,17 +131,15 @@ func TestNilProxyModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	}
 }
 
-// TestProxyModelArgsWithoutModelLeavesPlainModelFlagAlone is the case Wave 1
-// of the MCP-injection plan introduced: ProxyModelArgs can now be non-nil
-// while carrying NO --model pair (just --mcp-config), and that must not
-// suppress the plain --model claudeargv.Build would otherwise add.
-func TestProxyModelArgsWithoutModelLeavesPlainModelFlagAlone(t *testing.T) {
+// TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone is the case Wave 1
+// of the MCP-injection plan introduced: MCPConfig can be non-empty while
+// carrying NO --model (just the MCP config JSON), and that must not suppress
+// the plain --model claudeargv.Build would otherwise add.
+func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	h := NewHost(HostOptions{
-		Binary: testEchoBinary(t),
-		Spec:   ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
-		ProxyModelArgs: []string{
-			"--mcp-config={\"mcpServers\":{}}",
-		},
+		Binary:    testEchoBinary(t),
+		Spec:      ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
+		MCPConfig: `{"mcpServers":{}}`,
 	})
 	if err := h.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -141,11 +148,37 @@ func TestProxyModelArgsWithoutModelLeavesPlainModelFlagAlone(t *testing.T) {
 
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
 	if !strings.Contains(argv, "--model claude-sonnet-5") {
-		t.Errorf("argv %q missing the plain --model; ProxyModelArgs without a "+
-			"--model pair must not suppress it", argv)
+		t.Errorf("argv %q missing the plain --model; MCPConfig without a "+
+			"ModelArgs pair must not suppress it", argv)
 	}
-	if !strings.Contains(argv, "--mcp-config") {
-		t.Errorf("argv %q missing the mcp-config ProxyModelArgs carried", argv)
+	if !strings.Contains(argv, "--mcp-config={\"mcpServers\":{}}") {
+		t.Errorf("argv %q missing the --mcp-config pair the MCPConfig value "+
+			"should have produced", argv)
+	}
+}
+
+// A spec's AppendSystemPrompt and ExtraArgs must both reach the built argv:
+// the prompt as its own pair, the extra args appended after everything else.
+func TestArgvCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
+	argv := ChildSpec{
+		Kind:               KindClaude,
+		AppendSystemPrompt: "be terse",
+		ExtraArgs:          []string{"--foo", "bar"},
+	}.argv("", nil)
+	assertPair(t, argv, "--append-system-prompt", "be terse")
+	if len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar" {
+		t.Fatalf("want ExtraArgs last, got %v", argv)
+	}
+}
+
+// IsZero is the Restart reuse predicate. A struct comparison cannot be used:
+// ChildSpec carries a slice and is no longer comparable.
+func TestChildSpecIsZero(t *testing.T) {
+	if !(ChildSpec{}).IsZero() {
+		t.Error("the zero ChildSpec should report IsZero()")
+	}
+	if (ChildSpec{ExtraArgs: []string{"--foo"}}).IsZero() {
+		t.Error("a ChildSpec with only ExtraArgs set should not report IsZero()")
 	}
 }
 

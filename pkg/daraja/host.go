@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -70,23 +69,41 @@ type ChildSpec struct {
 	Model          string
 	ResumeSession  string
 	PermissionMode string
+
+	AppendSystemPrompt string
+	ExtraArgs          []string
+}
+
+// IsZero reports whether spec carries nothing, which Restart reads as "reuse
+// the spec I already hold". A method rather than `spec == (ChildSpec{})`
+// because ChildSpec carries a slice and is no longer comparable.
+func (s ChildSpec) IsZero() bool {
+	return s.Kind == "" && s.Model == "" && s.ResumeSession == "" &&
+		s.PermissionMode == "" && s.AppendSystemPrompt == "" && len(s.ExtraArgs) == 0
 }
 
 // KindClaude is the only child protocol daraja hosts today.
 const KindClaude = "claude"
 
-// argv builds the child's command line for this spec. An unknown kind returns
-// nil, which startLocked reports as an error rather than launching a bare
+// argv builds the child's command line for this spec. mcpConfig and modelArgs
+// ride in from HostOptions — they are launch-wide rather than spec state, and
+// claudeargv.Params reconciles them with the spec's own Model, so there is
+// exactly one producer of --model. An unknown kind returns nil, which
+// startLocked reports as an error rather than launching a bare
 // binary with no arguments — a claude with no --output-format runs, and emits
 // something nothing downstream can parse.
-func (s ChildSpec) argv() []string {
+func (s ChildSpec) argv(mcpConfig string, modelArgs []string) []string {
 	if s.Kind != KindClaude {
 		return nil
 	}
 	return claudeargv.Build(claudeargv.Params{
-		Model:          s.Model,
-		ResumeSession:  s.ResumeSession,
-		PermissionMode: s.PermissionMode,
+		Model:              s.Model,
+		ResumeSession:      s.ResumeSession,
+		PermissionMode:     s.PermissionMode,
+		AppendSystemPrompt: s.AppendSystemPrompt,
+		ExtraArgs:          s.ExtraArgs,
+		MCPConfig:          mcpConfig,
+		ModelArgs:          modelArgs,
 	})
 }
 
@@ -109,24 +126,11 @@ type HostOptions struct {
 	// needs.
 	EnvOverride bool
 
-	// ProxyModelArgs, when it contains a --model pair, replaces the plain
-	// `--model X` argv() would otherwise add; the pair it carries is the one
-	// that matches its custom-model-option env vars. Set from proxyenv.Claude's
-	// own returned args whenever this daraja is proxied: a proxied model's
-	// selection travels through Claude Code's custom-model-option mechanism
-	// (ANTHROPIC_CUSTOM_MODEL_OPTION + a matching --model, both required
-	// together), which is what makes an OpenRouter slash id or any other
-	// non-Anthropic model acceptable to Claude Code's own client-side
-	// allowlist at all. A second, PLAIN --model from claudeargv.Build here
-	// would risk that allowlist rejecting the model before the custom
-	// option's env vars are even consulted, so argv() is told to omit its own
-	// --model whenever this carries a model pair — see startLocked.
-	//
-	// ProxyModelArgs may also carry argv unrelated to the model (e.g.
-	// --mcp-config), and with no model pair at all it still must be appended
-	// in full — only the plain --model is ever suppressed, and only when a
-	// pair is actually present.
-	ProxyModelArgs []string
+	// MCPConfig and ModelArgs come from proxyenv.ClaudeEnv's Values and go
+	// straight into claudeargv.Params. They are values, not argv, so there is
+	// exactly one producer of --model and nothing to reconcile.
+	MCPConfig string
+	ModelArgs []string
 
 	// RespawnLimit and RespawnBackoff bound recovery from unexpected exits.
 	// Zero means the package default.
@@ -216,20 +220,10 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	if h.running {
 		return nil, errors.New("daraja: already running")
 	}
-	argvSpec := spec
-	if slices.Contains(h.opts.ProxyModelArgs, "--model") {
-		// Suppress claudeargv.Build's own --model: ProxyModelArgs supplies the
-		// one that matches its custom-model-option env vars instead. A
-		// ProxyModelArgs without a --model pair (e.g. --mcp-config only, on a
-		// session with no model configured) suppresses nothing. See
-		// HostOptions.ProxyModelArgs's doc comment.
-		argvSpec.Model = ""
-	}
-	argv := argvSpec.argv()
+	argv := spec.argv(h.opts.MCPConfig, h.opts.ModelArgs)
 	if argv == nil {
 		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}
-	argv = append(argv, h.opts.ProxyModelArgs...)
 	h.spec = spec
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
 		PiBinary:    h.opts.Binary,
@@ -391,7 +385,7 @@ func (h *Host) Restart(spec ChildSpec, grace time.Duration) (int, error) {
 // must not clear the streak it is in the middle of extending.
 func (h *Host) restart(spec ChildSpec, grace time.Duration) (int, error) {
 	h.mu.Lock()
-	if spec == (ChildSpec{}) {
+	if spec.IsZero() {
 		spec = h.spec
 	}
 	if h.running {

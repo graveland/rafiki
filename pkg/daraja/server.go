@@ -69,10 +69,12 @@ func specFromProto(p *darajapb.ChildSpec) ChildSpec {
 	}
 	c := p.GetClaude()
 	return ChildSpec{
-		Kind:           KindClaude,
-		Model:          c.GetModel(),
-		ResumeSession:  c.GetResumeSession(),
-		PermissionMode: c.GetPermissionMode(),
+		Kind:               KindClaude,
+		Model:              c.GetModel(),
+		ResumeSession:      c.GetResumeSession(),
+		PermissionMode:     c.GetPermissionMode(),
+		AppendSystemPrompt: c.GetAppendSystemPrompt(),
+		ExtraArgs:          c.GetExtraArgs(),
 	}
 }
 
