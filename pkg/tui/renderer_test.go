@@ -280,6 +280,25 @@ func TestToolArgKeysNameRealTools(t *testing.T) {
 	}
 }
 
+func TestToolArgKeysNameRealSchemaProperties(t *testing.T) {
+	// The value side of toolArgKeys was never checked, so agent_send/view/kill
+	// all carried "child_id" while every one of those tools declares "agent".
+	want := map[string][]string{
+		"agent_send": {"agent"},
+		"agent_view": {"agent"},
+		"agent_kill": {"agent"},
+	}
+	for tool, keys := range want {
+		got, ok := toolArgKeys[tool]
+		if !ok {
+			t.Fatalf("toolArgKeys has no entry for %q", tool)
+		}
+		if got[0] != keys[0] {
+			t.Errorf("toolArgKeys[%q][0] = %q, want %q", tool, got[0], keys[0])
+		}
+	}
+}
+
 // The batch tools carry arrays of objects, not strings; their raw JSON is long
 // and unreadable and a count is the honest summary.
 func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {

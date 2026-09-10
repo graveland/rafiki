@@ -42,9 +42,9 @@ var toolArgKeys = map[string][]string{
 	"webfetch":    {"url"},
 	"skill":       {"name"},
 	"agent_spawn": {"name", "prompt"},
-	"agent_send":  {"child_id", "message"},
-	"agent_view":  {"child_id"},
-	"agent_kill":  {"child_id"},
+	"agent_send":  {"agent", "message"},
+	"agent_view":  {"agent"},
+	"agent_kill":  {"agent"},
 }
 
 // maxToolArgWidth is the FLOOR for the inline argument summary, used when the
