@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -1079,6 +1081,151 @@ func TestRailEventsDoNotAdvanceTheSessionCursor(t *testing.T) {
 
 	if s := c.sessions["c_1"]; s.HasCursor {
 		t.Errorf("rail delivery advanced the session cursor to %d; the cursor belongs to the focus stream", s.Cursor)
+	}
+}
+
+// ── the rail feed's plumbing ─────────────────────────────────────────────────
+
+// runCmdDeep runs cmd (which may be a tea.Batch) and returns every message it
+// produced. Each sub-command runs in its own goroutine behind a timeout, so a
+// wrongly-armed blocking wait fails the test instead of hanging it.
+func runCmdDeep(t *testing.T, cmd tea.Cmd) []tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	bm, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{msg}
+	}
+	var mu sync.Mutex
+	var out []tea.Msg
+	var wg sync.WaitGroup
+	for _, sub := range bm {
+		wg.Add(1)
+		go func(sub tea.Cmd) {
+			defer wg.Done()
+			done := make(chan tea.Msg, 1)
+			go func() { done <- sub() }()
+			select {
+			case m := <-done:
+				mu.Lock()
+				out = append(out, m)
+				mu.Unlock()
+			case <-time.After(3 * time.Second):
+			}
+		}(sub)
+	}
+	wg.Wait()
+	return out
+}
+
+// The rail channel must produce railEventMsg, never eventMsg. The message type
+// is the only thing telling Update which feed an event came from; the shape of
+// the original bug was both channels sharing one waitForEvent that returned
+// eventMsg, which made case railEventMsg unreachable and every rail event
+// misroute through eventMsg's handler.
+func TestWaitForRailEventReturnsRailEventMsg(t *testing.T) {
+	ch := make(chan *rafikiv1.Event, 8)
+	ch <- statusEventFor("c_1", "streaming", 1)
+	ch <- statusEventFor("c_1", "idle", 2)
+
+	msg := waitForRailEvent(ch)()
+	rm, ok := msg.(railEventMsg)
+	if !ok {
+		t.Fatalf("waitForRailEvent() = %T, want railEventMsg", msg)
+	}
+	if len(rm.evs) != 2 || rm.evs[0].GetOrdinal() != 1 || rm.evs[1].GetOrdinal() != 2 {
+		t.Fatalf("drained %d events; order and count must survive the drain", len(rm.evs))
+	}
+}
+
+// The rail waiter must survive its own delivery. This test drives the REAL
+// path -- an event written to c.railCh, the waiter the cockpit actually armed,
+// Update on what that waiter returns -- because the bug this pins shipped
+// green: the tests above constructed railEventMsg directly, and nothing
+// exercised the fact that waitForEvent answered eventMsg for BOTH channels.
+// The consequence was that the first rail event consumed the rail waiter,
+// eventMsg's handler re-armed only the focus side, and every child_spawned
+// after the first sat unread in railCh -- the rail stopped tracking children
+// coming and going after exactly one event, and the reconnect re-seed
+// sentinel was dropped with it.
+func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
+
+	// First rail event through the real channel.
+	c.railCh <- statusEventFor("c_1", "streaming", 148)
+	delivered := runCmdDeep(t, waitForRailEvent(c.railCh))
+	if len(delivered) != 1 {
+		t.Fatalf("first delivery produced %d messages, want 1", len(delivered))
+	}
+	rm, ok := delivered[0].(railEventMsg)
+	if !ok {
+		t.Fatalf("rail delivery arrived as %T, want railEventMsg", delivered[0])
+	}
+
+	// Feeding it through Update must re-arm a rail waiter that still reads the
+	// RAIL channel -- the second event must come back as railEventMsg too.
+	_, cmd := c.Update(rm)
+	if cmd == nil {
+		t.Fatal("Update returned no command: the rail waiter was consumed and never re-armed")
+	}
+	c.railCh <- statusEventFor("c_1", "idle", 149)
+	second := runCmdDeep(t, cmd)
+	var gotRail bool
+	for _, m := range second {
+		em, ok := m.(eventMsg)
+		if ok {
+			t.Fatalf("the re-armed waiter delivered %T carrying %d events; rail events must arrive as railEventMsg", m, len(em.evs))
+		}
+		if rm2, ok := m.(railEventMsg); ok {
+			gotRail = true
+			if len(rm2.evs) != 1 || rm2.evs[0].GetOrdinal() != 149 {
+				t.Fatalf("re-armed waiter delivered %v, want the second event", rm2.evs)
+			}
+			// Fold it the way Update would: the rail must see it, the session
+			// must not.
+			c.Update(rm2)
+		}
+	}
+	if !gotRail {
+		t.Fatalf("the re-armed waiter never delivered a second rail event; got %d messages", len(second))
+	}
+
+	if n, _ := c.rail.Get("c_1"); n.RailCursor != 149 {
+		t.Errorf("rail cursor = %d, want 149", n.RailCursor)
+	}
+	if s := c.sessions["c_1"]; s.HasCursor {
+		t.Errorf("rail delivery advanced the session cursor to %d", s.Cursor)
+	}
+}
+
+// The reconnect sentinel (streams.StartRail's nil) must arrive on the rail
+// channel as a railEventMsg carrying nil, and must arm the re-seed -- it used
+// to be dropped on the eventMsg path, so children spawned during a disconnect
+// never appeared.
+func TestNilSentinelThroughTheRealRailChannelRequestsAReSeed(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+
+	c.railCh <- nil
+	delivered := runCmdDeep(t, waitForRailEvent(c.railCh))
+	if len(delivered) != 1 {
+		t.Fatalf("sentinel delivery produced %d messages, want 1", len(delivered))
+	}
+	rm, ok := delivered[0].(railEventMsg)
+	if !ok || len(rm.evs) != 1 || rm.evs[0] != nil {
+		t.Fatalf("sentinel arrived as %T, want railEventMsg carrying nil", delivered[0])
+	}
+
+	c.Update(rm)
+	// maybeReseed consumes the request synchronously: reseeding flips to
+	// reseedInFlight and a ListChildren rides out with the returned command.
+	if !c.reseeding && !c.reseedInFlight {
+		t.Fatal("nil sentinel did not arm the re-seed")
 	}
 }
 

@@ -164,7 +164,10 @@ type eventMsg struct{ evs []*rafikiv1.Event }
 
 // railEventMsg is eventMsg for the RAIL stream. It updates the rail and
 // nothing else — see applyRailEvent for why the session must never be fed
-// from this side.
+// from this side. waitForRailEvent is its only producer; before that existed
+// the Update case below was dead code — no error, no failing test, just rail
+// events misrouted into eventMsg's handler, which re-arms only the focus
+// waiter.
 type railEventMsg struct{ evs []*rafikiv1.Event }
 type tickMsg time.Time
 
@@ -501,7 +504,7 @@ func (c *Cockpit) setNotice(s string) {
 
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
-	cmds := []tea.Cmd{c.seedCmd(), waitForEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
+	cmds := []tea.Cmd{c.seedCmd(), waitForRailEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
 	if c.form != nil {
 		// A form opened at CONSTRUCTION never saw the `n` keypress that
 		// normally starts the catalog fetch, so its typeahead would sit empty
@@ -707,7 +710,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			c.applyRailEvent(ev)
 		}
-		return c, tea.Batch(waitForEvent(c.railCh), c.maybeReseed(nil))
+		return c, tea.Batch(waitForRailEvent(c.railCh), c.maybeReseed(nil))
 
 	case eventMsg:
 		for _, ev := range msg.evs {
@@ -2172,9 +2175,10 @@ func lastN(lines []string, n int) []string {
 
 // ── Plumbing ────────────────────────────────────────────────────────────────
 
-// waitForEvent blocks for the first event, then drains whatever else is
-// ALREADY queued on ch before returning -- a non-blocking loop, not a second
-// blocking wait, so it never delays a genuinely single, isolated live event.
+// waitForEvent blocks for the first event on the FOCUS channel, then drains
+// whatever else is ALREADY queued on ch before returning -- a non-blocking
+// loop, not a second blocking wait, so it never delays a genuinely single,
+// isolated live event.
 //
 // This is what stops a large conversation's history-fallback replay (see
 // historyMsg's err/zero-events branches) from visibly scrolling past frame by
@@ -2185,6 +2189,25 @@ func lastN(lines []string, n int) []string {
 // ceil(N/cap(ch)) renders instead of N, with no change to WHAT gets applied
 // or the order it applies in.
 func waitForEvent(ch <-chan *rafikiv1.Event) tea.Cmd {
+	return waitForEvents(ch, false)
+}
+
+// waitForRailEvent is waitForEvent for the RAIL channel. The message type is
+// HOW Update tells the two feeds apart: if this returned eventMsg,
+// case railEventMsg would be dead code, case eventMsg would fold rail events
+// into the focused session, and it would re-arm only the focus waiter -- so
+// the first rail event consumed the rail waiter and every child_spawned after
+// it sat unread in railCh while the rail froze for every child you were not
+// looking at. That is exactly what shipped, because both channels shared one
+// waitForEvent returning eventMsg. The drain discipline is identical to the
+// focus side and described there.
+func waitForRailEvent(ch <-chan *rafikiv1.Event) tea.Cmd {
+	return waitForEvents(ch, true)
+}
+
+// waitForEvents is the shared drain. isRail picks the message type, which is
+// the only thing distinguishing the two channels at the Update switch.
+func waitForEvents(ch <-chan *rafikiv1.Event, isRail bool) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
@@ -2202,6 +2225,9 @@ func waitForEvent(ch <-chan *rafikiv1.Event) tea.Cmd {
 			default:
 				break drain
 			}
+		}
+		if isRail {
+			return railEventMsg{evs}
 		}
 		return eventMsg{evs}
 	}

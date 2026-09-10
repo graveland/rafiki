@@ -1262,6 +1262,29 @@ opens on its full transcript rather than on whatever the event log happens to
 still hold. The two are different stores with different, unrelated ordinal
 sequences; the cockpit keeps them apart deliberately.
 
+### Watching without the cockpit
+
+`rafiki watch [id|name]` subscribes to the same lifecycle events the rail is
+built from — spawns, status transitions, turns, errors, retries, exits — and
+prints them to stdout as they happen, one line per event:
+
+```
+14:32:01  spawn   c_01ABC  impl-auth  parent=c_root
+14:32:02  status  c_01ABC  impl-auth  spawning → streaming
+14:33:14  turn    c_01ABC  impl-auth  cost=$0.0142 stop=END_TURN (1m12s)
+14:33:14  status  c_01ABC  impl-auth  streaming → idle (1m12s)
+14:40:02  exit    c_01ABC  impl-auth  code=0 (lifetime 8m01s)
+```
+
+The `status` lines carry how long the previous state lasted, so the transition
+out of a working state reads as the duration of the turn's work. It is not a
+TUI and replays nothing — it follows live events only, from every child you
+can see, or from one child's subtree when you name it. Notes about connecting
+and reconnecting go to stderr, so a piped stdout carries exactly the events;
+`-J` emits one raw event per line instead. It is also an honest window on what
+the rail should be showing: an event that appears here but never reaches the
+cockpit's rail is a cockpit bug, not a daemon one.
+
 ### Keys
 
 The cockpit has two focus targets — the input box and the agent rail — and

@@ -1677,6 +1677,27 @@
   `TestRailEventsDoNotAdvanceTheSessionCursor`; the clear-on-echo itself has
   `TestPendingClearsWhenTheMessageComesBack`.
 
+- **A message case with no producer is dead code, and the two rail/focus
+  feeds shipped exactly that way — the message TYPE is the dispatch, so the
+  waiter must name its channel.** `waitForEvent` returned `eventMsg` for BOTH
+  `railCh` and `focusCh`, so `case railEventMsg:` in Update was unreachable
+  from production (only tests constructed that type directly — which is why
+  the suite stayed green while the behavior was broken): the first rail event
+  arrived on the `case eventMsg:` path, folded into the focused session, and
+  re-armed only the focus waiter. One rail event ever got delivered; every
+  later one queued in the buffered `railCh` until the pump stalled, so
+  children spawned by agents never appeared in the rail and exits never
+  marked their rows, and the reconnect nil-sentinel (re-seed request) was
+  dropped too. There are now two producers — `waitForEvent` (focus →
+  `eventMsg`) and `waitForRailEvent` (rail → `railEventMsg`) — over one
+  shared drain, and each Update case re-arms its own. Lesson generalised:
+  when a message type's only evidence of life is tests that build it by hand,
+  grep for a producer before trusting the feature; and pin plumbing with the
+  REAL channel path (`TestRailWaiterSurvivesItsOwnDelivery` pushes to
+  `c.railCh`, runs the returned cmd, and feeds what comes back back through
+  Update), not by constructing the message. `rafiki watch` exists to see this
+  class of gap from the outside.
+
 - **Everything drawn as transcript content goes through
   `sanitizeControlChars` first — tool results, tool arguments, and the model's
   prose quoting them.** The renderer's wrapping is ANSI-aware BY DESIGN (it
