@@ -329,3 +329,85 @@ func TestClaude_NoPassthroughKeepsAuthToken(t *testing.T) {
 		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want no X-Rafiki-Token", got["ANTHROPIC_CUSTOM_HEADERS"])
 	}
 }
+
+// renderValues is the argv rendering Claude does over a Values: the literal
+// shape ClaudeEnv's caller is expected to reproduce.
+func renderValues(v Values) []string {
+	var args []string
+	if v.MCPConfig != "" {
+		args = append(args, v.MCPConfig)
+	}
+	return append(args, v.ModelArgs...)
+}
+
+// ClaudeEnv is the factored body of Claude, so for every option shape the two
+// must agree exactly — the environments byte for byte and the argv exactly —
+// or one of the two entry points is a second source of truth.
+func TestClaudeEnvMatchesClaude(t *testing.T) {
+	in := []string{"HOME=/h", "ANTHROPIC_MODEL=stale", "RAFIKI_MCP_TOKEN=OUTER"}
+	cases := []struct {
+		name string
+		opts ClaudeOptions
+	}{
+		{"no url", ClaudeOptions{}},
+		{"url, no model", ClaudeOptions{URL: "http://localhost:8035", Token: "tok"}},
+		{"url, model", ClaudeOptions{
+			URL:               "http://localhost:8035",
+			Token:             "tok",
+			Model:             "moonshotai/kimi-k3",
+			AutoCompactWindow: 180000,
+			Headers:           map[string]string{"X-Rafiki-Session": "s1"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, args := Claude(in, tc.opts)
+			env2, v := ClaudeEnv(in, tc.opts)
+			if !slices.Equal(env, env2) {
+				t.Errorf("environments differ:\n Claude: %v\nClaudeEnv: %v", env, env2)
+			}
+			if want := renderValues(v); !slices.Equal(args, want) {
+				t.Errorf("args = %v, want the Values rendered back as %v", args, want)
+			}
+		})
+	}
+}
+
+// The child paths must be able to split the two credentials: the proxy bearer
+// (which billing attribution keys on) stays Token, while the MCP config
+// authenticates as the child. In the default path the bearer is
+// ANTHROPIC_AUTH_TOKEN; under PassthroughAuth it moves to the X-Rafiki-Token
+// header — both must keep the proxy value while RAFIKI_MCP_TOKEN carries the
+// child's.
+func TestMCPTokenOverridesToken(t *testing.T) {
+	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "proxy", MCPToken: "child"})
+	got, _ := envMap(t, env)
+	if got["RAFIKI_MCP_TOKEN"] != "child" {
+		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "child")
+	}
+	if got["ANTHROPIC_AUTH_TOKEN"] != "proxy" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (the proxy bearer must not change)",
+			got["ANTHROPIC_AUTH_TOKEN"], "proxy")
+	}
+
+	env, _ = ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "proxy", MCPToken: "child", PassthroughAuth: true})
+	got, _ = envMap(t, env)
+	if got["RAFIKI_MCP_TOKEN"] != "child" {
+		t.Errorf("passthrough: RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "child")
+	}
+	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: proxy") {
+		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want the proxy bearer in X-Rafiki-Token",
+			got["ANTHROPIC_CUSTOM_HEADERS"])
+	}
+}
+
+// Empty MCPToken falls back to Token, so the interactive path — where the two
+// credentials are the same user token — behaves exactly as it did before the
+// field existed.
+func TestMCPTokenFallsBackToToken(t *testing.T) {
+	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "tok"})
+	got, _ := envMap(t, env)
+	if got["RAFIKI_MCP_TOKEN"] != "tok" {
+		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "tok")
+	}
+}

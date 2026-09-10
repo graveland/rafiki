@@ -133,6 +133,12 @@ type ClaudeOptions struct {
 	// to send anything to a custom base URL at all, so an empty one is
 	// replaced with a placeholder rather than omitted.
 	Token string
+	// MCPToken is the credential the injected MCP config authenticates with.
+	// Empty falls back to Token, which is what keeps the interactive path (where
+	// the two are the same user token) unchanged. The child paths set it
+	// separately because their proxy bearer must stay the per-boot secret for
+	// billing attribution while their MCP credential identifies one child.
+	MCPToken string
 	// PassthroughAuth leaves the client's own upstream credential in charge.
 	// ANTHROPIC_AUTH_TOKEN is not set at all — its presence is exactly what
 	// makes Claude Code choose API-key auth over its OAuth subscription — and
@@ -184,6 +190,19 @@ func mcpConfigArg(baseURL string) string {
 	return "--mcp-config=" + string(b)
 }
 
+// Values are the argv-shaped decisions Claude makes, returned as data so the
+// caller can put them in claudeargv.Params instead of appending pre-rendered
+// argv. Returning argv is what let two producers emit --model and forced
+// daraja to reconcile them by scanning argv at launch.
+type Values struct {
+	// MCPConfig is the inline JSON for claudeargv.Params.MCPConfig. Empty
+	// when no proxy URL is configured.
+	MCPConfig string
+	// ModelArgs is the custom-model-option --model pair for
+	// claudeargv.Params.ModelArgs, or nil when no model override applies.
+	ModelArgs []string
+}
+
 // Claude returns a complete environment derived from environ with the proxy
 // wired in, plus the arguments to pass to the claude binary.
 //
@@ -191,11 +210,22 @@ func mcpConfigArg(baseURL string) string {
 // stripping is half the job and you cannot un-set a variable by appending to a
 // list.
 func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
+	env, v := ClaudeEnv(environ, o)
+	if v.MCPConfig != "" {
+		args = append(args, v.MCPConfig)
+	}
+	args = append(args, v.ModelArgs...)
+	return env, args
+}
+
+// ClaudeEnv returns the same environment Claude returns, plus its argv
+// decisions as data rather than as argv.
+func ClaudeEnv(environ []string, o ClaudeOptions) ([]string, Values) {
 	if o.URL == "" {
-		return slices.Clone(environ), nil // not proxied: leave everything alone
+		return slices.Clone(environ), Values{} // not proxied: leave everything alone
 	}
 
-	env = make([]string, 0, len(environ)+8)
+	env := make([]string, 0, len(environ)+8)
 	present := make(map[string]bool, len(environ))
 	for _, e := range environ {
 		k, _, _ := strings.Cut(e, "=")
@@ -210,8 +240,13 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 	// The MCP agent-control surface's token travels by environment, never
 	// inline in argv: argv is world-readable via ps on this machine, and
 	// --mcp-config below carries only a placeholder Claude Code expands.
-	env = append(env, mcpTokenEnv+"="+o.Token)
-	args = append(args, mcpConfigArg(o.URL))
+	mcpToken := o.Token
+	if o.MCPToken != "" {
+		mcpToken = o.MCPToken
+	}
+	env = append(env, mcpTokenEnv+"="+mcpToken)
+	var v Values
+	v.MCPConfig = mcpConfigArg(o.URL)
 	if !o.PassthroughAuth {
 		token := o.Token
 		if token == "" {
@@ -258,14 +293,14 @@ func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 			"ANTHROPIC_CUSTOM_MODEL_OPTION="+o.Model,
 			"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=rafiki: "+o.Model,
 		)
-		args = append(args, "--model", o.Model)
+		v.ModelArgs = []string{"--model", o.Model}
 		if o.AutoCompactWindow > 0 {
 			// Claude Code assumes a 200K context for a proxied model it cannot
 			// verify, so it compacts at the wrong point for the real window.
 			env = append(env, fmt.Sprintf("CLAUDE_CODE_AUTO_COMPACT_WINDOW=%d", o.AutoCompactWindow))
 		}
 	}
-	return env, args
+	return env, v
 }
 
 // FormatHeaders renders headers for ANTHROPIC_CUSTOM_HEADERS.
