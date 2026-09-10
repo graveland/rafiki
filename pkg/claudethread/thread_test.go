@@ -16,18 +16,25 @@ x-anthropic-billing-header: cc_version=2.1.259.cf7; cc_entrypoint=cli; cch=d05e5
 
 func TestParseBillingHeader(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		in         string
-		wantOK     bool
-		isSubagent bool
-		prevReq    string
-		entrypoint string
+		name        string
+		in          string
+		wantOK      bool
+		isSubagent  bool
+		prevReq     string
+		entrypoint  string
+		wantVersion string
+		wantPrompt  string
 	}{
-		{"parent", realParentSystem, true, false, "req_011CefhtWhZTvjE51gZAqXTG", "cli"},
-		{"subagent", realSubagentSystem, true, true, "req_011Cev1T3UA8yhHDZxKuGutn", "sdk-cli"},
-		{"root turn has no prev_req", realRootSystem, true, false, "", "cli"},
-		{"no header at all", "You are a helpful assistant.", false, false, "", ""},
-		{"empty", "", false, false, "", ""},
+		{"parent", realParentSystem, true, false, "req_011CefhtWhZTvjE51gZAqXTG", "cli", "2.1.259.b07", "9139dce9-4ba8-4a85-898f-b743016fb58e"},
+		{"subagent", realSubagentSystem, true, true, "req_011Cev1T3UA8yhHDZxKuGutn", "sdk-cli", "2.1.267.019", "989e877e-bce4-4908-8224-0f81ce4dd64c"},
+		{"root turn has no prev_req", realRootSystem, true, false, "", "cli", "2.1.259.cf7", ""},
+		{"no header at all", "You are a helpful assistant.", false, false, "", "", "", ""},
+		{"empty", "", false, false, "", "", "", ""},
+		// A duplicate key must not clear a set flag, whatever the later value.
+		{"duplicate subagent key keeps true", "x-anthropic-billing-header: cc_is_subagent=true; cc_is_subagent=false;", true, true, "", "", "", ""},
+		// The prefix is line-anchored: prose quoting the literal mid-line is
+		// not the header.
+		{"literal quoted mid-line is not the header", "Prose mentions x-anthropic-billing-header: cc_is_subagent=true in passing.\nx-anthropic-billing-header: cc_version=9;", true, false, "", "", "9", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := ParseBillingHeader(tc.in)
@@ -42,6 +49,12 @@ func TestParseBillingHeader(t *testing.T) {
 			}
 			if got.Entrypoint != tc.entrypoint {
 				t.Errorf("Entrypoint = %q, want %q", got.Entrypoint, tc.entrypoint)
+			}
+			if got.Version != tc.wantVersion {
+				t.Errorf("Version = %q, want %q", got.Version, tc.wantVersion)
+			}
+			if got.PromptID != tc.wantPrompt {
+				t.Errorf("PromptID = %q, want %q", got.PromptID, tc.wantPrompt)
 			}
 		})
 	}

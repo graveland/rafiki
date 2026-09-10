@@ -35,34 +35,39 @@ type Billing struct {
 // times in 4922 measured turns, so an absent key means the main thread, not
 // an unknown one.
 func ParseBillingHeader(systemText string) (Billing, bool) {
-	idx := strings.Index(systemText, billingPrefix)
-	if idx < 0 {
-		return Billing{}, false
-	}
-	line := systemText[idx+len(billingPrefix):]
-	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-		line = line[:nl]
-	}
-	var b Billing
-	for _, field := range strings.Split(line, ";") {
-		k, v, ok := strings.Cut(strings.TrimSpace(field), "=")
-		if !ok {
+	for _, text := range strings.Split(systemText, "\n") {
+		if !strings.HasPrefix(text, billingPrefix) {
 			continue
 		}
-		switch k {
-		case "cc_version":
-			b.Version = v
-		case "cc_entrypoint":
-			b.Entrypoint = v
-		case "cc_is_subagent":
-			b.IsSubagent = v == "true"
-		case "cc_prev_req":
-			b.PrevReq = v
-		case "cc_prompt_id":
-			b.PromptID = v
+		// Line-anchored on purpose: the literal can appear mid-line in prose
+		// (a future block 0 quoting the header), and a substring match would
+		// read the wrong line.
+		line := text[len(billingPrefix):]
+		var b Billing
+		for _, field := range strings.Split(line, ";") {
+			k, v, ok := strings.Cut(strings.TrimSpace(field), "=")
+			if !ok {
+				continue
+			}
+			switch k {
+			case "cc_version":
+				b.Version = v
+			case "cc_entrypoint":
+				b.Entrypoint = v
+			case "cc_is_subagent":
+				// Monotonic: a duplicate key must not clear a set flag.
+				if v == "true" {
+					b.IsSubagent = true
+				}
+			case "cc_prev_req":
+				b.PrevReq = v
+			case "cc_prompt_id":
+				b.PromptID = v
+			}
 		}
+		return b, true
 	}
-	return b, true
+	return Billing{}, false
 }
 
 // BillingFromRequest reads system block 0 out of an Anthropic Messages request
