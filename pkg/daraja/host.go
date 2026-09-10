@@ -85,14 +85,19 @@ func (s ChildSpec) IsZero() bool {
 // KindClaude is the only child protocol daraja hosts today.
 const KindClaude = "claude"
 
-// argv builds the child's command line for this spec. mcpConfig and modelArgs
+// Argv builds the child's command line for this spec. mcpConfig and modelArgs
 // ride in from HostOptions — they are launch-wide rather than spec state, and
 // claudeargv.Params reconciles them with the spec's own Model, so there is
 // exactly one producer of --model. An unknown kind returns nil, which
 // startLocked reports as an error rather than launching a bare
 // binary with no arguments — a claude with no --output-format runs, and emits
 // something nothing downstream can parse.
-func (s ChildSpec) argv(mcpConfig string, modelArgs []string) []string {
+//
+// Exported (with SpecFromProto) because it is the last stage of the daraja
+// path's argv pipeline, which test/integration's
+// TestClaudeArgvIdenticalAcrossPaths drives end to end against the
+// local-subprocess builder so the two cannot drift on flags again.
+func (s ChildSpec) Argv(mcpConfig string, modelArgs []string) []string {
 	if s.Kind != KindClaude {
 		return nil
 	}
@@ -220,7 +225,7 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	if h.running {
 		return nil, errors.New("daraja: already running")
 	}
-	argv := spec.argv(h.opts.MCPConfig, h.opts.ModelArgs)
+	argv := spec.Argv(h.opts.MCPConfig, h.opts.ModelArgs)
 	if argv == nil {
 		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}

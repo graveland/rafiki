@@ -120,7 +120,7 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	// lifetime — this is what makes passthrough billing possible at all: the
 	// local-subprocess daemon path can only ever APPEND to its own inherited
 	// env (proxyChildEnv), which can never unset ANTHROPIC_API_KEY. See
-	// proxyenv.Claude's own doc comment.
+	// proxyenv.ClaudeEnv's own doc comment.
 	env, values := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
 		URL:               proxyURL,
 		Token:             proxyToken,

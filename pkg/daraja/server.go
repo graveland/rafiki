@@ -52,7 +52,7 @@ func (s *Server) Restart(
 	ctx context.Context, req *connect.Request[darajapb.RestartRequest],
 ) (*connect.Response[darajapb.RestartResponse], error) {
 	pid, err := s.host.Restart(
-		specFromProto(req.Msg.GetSpec()),
+		SpecFromProto(req.Msg.GetSpec()),
 		time.Duration(req.Msg.GetGraceMs())*time.Millisecond,
 	)
 	if err != nil {
@@ -61,9 +61,15 @@ func (s *Server) Restart(
 	return connect.NewResponse(&darajapb.RestartResponse{Pid: int32(pid)}), nil
 }
 
-// specFromProto maps the wire spec onto the host's. A nil message yields the
+// SpecFromProto maps the wire spec onto the host's. A nil message yields the
 // zero ChildSpec, which Restart reads as "reuse what you hold".
-func specFromProto(p *darajapb.ChildSpec) ChildSpec {
+//
+// Exported because it is half of the daraja path's argv pipeline —
+// ClaudeParamsForRequest's wire params ride a ChildSpec across the Restart RPC
+// and come out here — and test/integration's TestClaudeArgvIdenticalAcrossPaths
+// drives that whole chain against the local-subprocess builder, so the wire→
+// host mapping cannot drift from what production sends.
+func SpecFromProto(p *darajapb.ChildSpec) ChildSpec {
 	if p == nil || p.GetKind() != darajapb.Kind_KIND_CLAUDE {
 		return ChildSpec{}
 	}

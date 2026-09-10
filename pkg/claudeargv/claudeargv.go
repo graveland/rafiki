@@ -10,11 +10,20 @@
 // by construction rather than several kept in step by discipline.
 package claudeargv
 
-import "strings"
+import (
+	"strings"
 
-// bypassPermissions is claude's own spelling for the mode that has its own
-// flag rather than a --permission-mode value.
-const bypassPermissions = "bypassPermissions"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
+)
+
+// PermissionModeBypass is claude's own spelling for the mode that has its own
+// flag rather than a --permission-mode value. Exported because every path that
+// builds a daemon-managed claude child — the local-subprocess mapping
+// (ParamsFromSpawnRequest, here) and the daraja wire mapping
+// (daraja.ClaudeParamsForRequest) — must state the mode in the same words, or
+// the two paths launch children that answer permission prompts differently.
+const PermissionModeBypass = "bypassPermissions"
 
 // Mode selects the argv shape.
 type Mode int
@@ -100,7 +109,7 @@ func Build(p Params) []string {
 	}
 	if p.Mode == ModeHeadless {
 		switch p.PermissionMode {
-		case "", bypassPermissions:
+		case "", PermissionModeBypass:
 			// A daemon-managed claude child has no human to answer an
 			// interactive permission prompt, so bypass is the default, not an
 			// opt-in — claude blocks forever in headless mode waiting for an
@@ -120,4 +129,28 @@ func Build(p Params) []string {
 	argv = append(argv, p.ExtraArgs...)
 	argv = append(argv, p.UserArgs...)
 	return argv
+}
+
+// ParamsFromSpawnRequest maps a daemon SpawnRequest and the proxy's argv
+// decisions (proxyenv.ClaudeEnv's Values) onto Params. It is the local-subprocess
+// spawn path's mapping — cmd/rafikid's buildClaudeArgv is exactly
+// Build(ParamsFromSpawnRequest(req, vals)) and must stay a delegation, so the
+// mapping is pinned by the same tests that drive the daraja path
+// (test/integration's TestClaudeArgvIdenticalAcrossPaths) rather than drifting
+// from it again.
+//
+// vals.MCPConfig is the BARE inline JSON — Build itself prepends the
+// --mcp-config= prefix — and vals.ModelArgs, when non-empty, REPLACES the
+// plain --model pair req.Model would otherwise emit, so a proxied child
+// carries exactly one --model and one --mcp-config element.
+func ParamsFromSpawnRequest(req protocol.SpawnRequest, vals proxyenv.Values) Params {
+	return Params{
+		Model:              req.Model,
+		ResumeSession:      req.ResumeSession,
+		PermissionMode:     PermissionModeBypass,
+		AppendSystemPrompt: req.AppendSystemPrompt,
+		ExtraArgs:          req.ExtraArgs,
+		MCPConfig:          vals.MCPConfig,
+		ModelArgs:          vals.ModelArgs,
+	}
 }

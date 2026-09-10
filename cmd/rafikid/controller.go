@@ -2802,8 +2802,9 @@ func buildDarajaAbortSpec(snap childstore.Snapshot, sessionID string) *darajapb.
 			ResumeSession: sessionID,
 			// Matches claudeRunner's own default exactly (agent_runtime.go) —
 			// a daemon-managed child has no human to answer an interactive
-			// permission prompt, restarted or not.
-			PermissionMode: "bypassPermissions",
+			// permission prompt, restarted or not. The constant, not a literal:
+			// the same word the two launch paths state.
+			PermissionMode: claudeargv.PermissionModeBypass,
 			// AppendSystemPrompt and ExtraArgs are argv-shaped RESTART fields,
 			// unlike the launch-only block below: daraja rebuilds the child's
 			// argv from this spec on every Restart, so dropping either here
@@ -3564,27 +3565,19 @@ func resolveClaudeBinaryIfNeeded(req protocol.SpawnRequest, runner child.Runner)
 // claude child builds its argv the exact same way, through this same
 // function, so the two paths cannot drift on flags again.
 //
+// The req→Params mapping itself lives in claudeargv.ParamsFromSpawnRequest,
+// NOT here: it must be reachable from test/integration, whose
+// TestClaudeArgvIdenticalAcrossPaths drives this path and the daraja path
+// (daraja.ClaudeParamsForRequest → SpecFromProto → ChildSpec.Argv) against
+// each other. Keep this a delegation — any field mapping added here instead
+// of there is mapping the cross-path test cannot see.
+//
 // vals carries the proxy's argv decisions (proxyChildEnv → buildEnv →
 // resolveSpawnPlan): MCPConfig becomes the single --mcp-config element and
 // ModelArgs REPLACES the plain --model pair req.Model would otherwise emit,
-// so a proxied child carries exactly one --model. PermissionMode is stated
-// explicitly here rather than left to claudeargv's default, so this path and
-// darajaClaudeParams say the same thing in the same words.
+// so a proxied child carries exactly one --model.
 func buildClaudeArgv(req protocol.SpawnRequest, vals proxyenv.Values) []string {
-	return claudeargv.Build(claudeargv.Params{
-		Model:              req.Model,
-		ResumeSession:      req.ResumeSession,
-		PermissionMode:     "bypassPermissions",
-		AppendSystemPrompt: req.AppendSystemPrompt,
-		ExtraArgs:          req.ExtraArgs,
-		// Values.MCPConfig is the bare inline JSON (proxyenv renders the flag
-		// only in its own argv path); Params.MCPConfig is the same bare JSON,
-		// and Build itself prepends "--mcp-config=" to it — which is what keeps
-		// the element from coming out doubled. No stripping here: the producer's
-		// shape is already the shape Params wants.
-		MCPConfig: vals.MCPConfig,
-		ModelArgs: vals.ModelArgs,
-	})
+	return claudeargv.Build(claudeargv.ParamsFromSpawnRequest(req, vals))
 }
 
 // resolveSpawnPlan picks the binary, argv, and ProtocolProvider for a spawn

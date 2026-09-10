@@ -195,7 +195,7 @@ func TestArgvCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 		Kind:               KindClaude,
 		AppendSystemPrompt: "be terse",
 		ExtraArgs:          []string{"--foo", "bar"},
-	}.argv("", nil)
+	}.Argv("", nil)
 	assertPair(t, argv, "--append-system-prompt", "be terse")
 	if len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar" {
 		t.Fatalf("want ExtraArgs last, got %v", argv)

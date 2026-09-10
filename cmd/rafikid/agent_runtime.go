@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/daraja"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -173,28 +174,21 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 }
 
 // darajaClaudeParams builds the ClaudeParams a daraja-hosted claude child
-// launches with, including Phase 2's passthrough-billing fields. Unlike the
-// local-subprocess path's proxyChildEnv (which only ever APPENDS to the
-// daemon's own inherited env and so can never unset ANTHROPIC_API_KEY), daraja
-// builds a COMPLETE environment on the executor's own machine — see
-// proxyenv.Claude's doc comment — which is what makes passthrough actually
-// achievable here.
+// launches with, including Phase 2's passthrough-billing fields. The
+// req→wire mapping itself lives in daraja.ClaudeParamsForRequest — reachable
+// from test/integration, whose TestClaudeArgvIdenticalAcrossPaths drives this
+// path and the local-subprocess path (claudeargv.ParamsFromSpawnRequest)
+// against each other — so this method only layers the Controller-derived
+// fields on top. Keep it that way: an argv-shaped field mapped here instead
+// of there is mapping the cross-path test cannot see.
+//
+// Unlike the local-subprocess path's proxyChildEnv (which only ever APPENDS
+// to the daemon's own inherited env and so can never unset
+// ANTHROPIC_API_KEY), daraja builds a COMPLETE environment on the executor's
+// own machine — see proxyenv.ClaudeEnv's doc comment — which is what makes
+// passthrough actually achievable here.
 func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest, childID string) *darajapb.ClaudeParams {
-	p := &darajapb.ClaudeParams{
-		Model:         req.Model,
-		ResumeSession: req.ResumeSession,
-		// Always bypass: a daemon-managed child has no human to answer an
-		// interactive permission prompt (see pkg/claudeargv's identical
-		// default for the local-subprocess path). No typed field carries
-		// a caller override yet — nothing has needed one.
-		PermissionMode: "bypassPermissions",
-		// daraja rebuilds argv on every Restart, so both are re-read each
-		// time — dropping either here would silently strip the flag from
-		// every child spawned through an executor pool.
-		AppendSystemPrompt: req.AppendSystemPrompt,
-		ExtraArgs:          req.ExtraArgs,
-		RecordRequests:     req.RecordRequests,
-	}
+	p := daraja.ClaudeParamsForRequest(req)
 
 	url, token := c.proxyEndpoint()
 	if url == "" || !proxyRoutesKind(req.Kind) {

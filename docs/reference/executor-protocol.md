@@ -511,7 +511,7 @@ by a durable credential on first successful hello.
 `ChildSpec.ClaudeParams` also carries Phase 2's passthrough-billing fields —
 `proxy_url`, `proxy_token`, `passthrough_auth`, `auto_compact_window`,
 `record_requests` — all LAUNCH-ONLY (daraja reads them once, at its own
-process startup, to build the environment `proxyenv.Claude` produces; a later
+process startup, to build the environment `proxyenv.ClaudeEnv` produces; a later
 `Restart`'s spec may leave them unset and daraja ignores them there, since env
 is fixed for a daraja process while only argv is rebuilt per restart). The
 executor forwards the four non-secret ones as `daraja serve` flags

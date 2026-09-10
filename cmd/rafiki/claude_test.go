@@ -530,7 +530,7 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 		t.Errorf("argv %v: a user arg leaked ahead of the user tail", argv)
 	}
 
-	// The switch from proxyenv.Claude to ClaudeEnv must not have dropped the
+	// ClaudeEnv (the only proxyenv entry point) must not have dropped the
 	// environment half: the proxy wiring and the session correlation header
 	// still arrive.
 	envJoined := strings.Join(captured.Env, "\n")

@@ -2,13 +2,13 @@
 
 package integration_test
 
-// Proves the seam the claude MCP injection wires together: proxyenv.Claude's
-// returned --mcp-config JSON, dialed for real against a live daemon with the
+// Proves the seam the claude MCP injection wires together: proxyenv.ClaudeEnv's
+// Values.MCPConfig (rendered into --mcp-config= by the argv producer, exactly
+// as the real spawn paths do), dialed for real against a live daemon with the
 // RAFIKI_MCP_TOKEN placeholder substituted, must reach the exact 12-tool
 // agent-control surface a real user token gets. Nothing else in this package
-// calls proxyenv.Claude — mcp_test.go's own tests build their MCP client
-// directly against the daemon's real /mcp mount and never touch the
-// argv/env-injection path.
+// touches the argv/env-injection path — mcp_test.go's own tests build their
+// MCP client directly against the daemon's real /mcp mount.
 
 import (
 	"context"
@@ -25,7 +25,7 @@ func TestMCPInjectedConfigReachesTwelveTools(t *testing.T) {
 	d := bootMCPDaemon(t)
 	token := d.createMCPUser(t)
 
-	env, args := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
+	env, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
 		URL:   d.proxyURL,
 		Token: token,
 	})
@@ -45,14 +45,10 @@ func TestMCPInjectedConfigReachesTwelveTools(t *testing.T) {
 	}
 
 	var mcpConfigJSON string
-	for _, a := range args {
-		if v, ok := strings.CutPrefix(a, "--mcp-config="); ok {
-			mcpConfigJSON = v
-		}
+	if vals.MCPConfig == "" {
+		t.Fatalf("values = %+v, missing MCPConfig", vals)
 	}
-	if mcpConfigJSON == "" {
-		t.Fatalf("args = %v, missing --mcp-config", args)
-	}
+	mcpConfigJSON = vals.MCPConfig
 
 	var doc struct {
 		MCPServers map[string]struct {

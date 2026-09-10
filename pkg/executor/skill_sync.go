@@ -33,7 +33,7 @@ const managedMarker = ".rafiki-managed"
 // inherits: paths.LoadEnvFile/LoadEnvFileOverrides apply executor.env and
 // executor-overrides.env to this process, AdminService.Launch starts daraja
 // with cmd.Env = append(os.Environ(), ...), and daraja calls
-// proxyenv.Claude(os.Environ(), ...) where CLAUDE_CONFIG_DIR is in neither
+// proxyenv.ClaudeEnv(os.Environ(), ...) where CLAUDE_CONFIG_DIR is in neither
 // Managed nor Credentials and so passes through untouched.
 //
 // Do NOT point this at a private directory: ~/.claude is where Claude Code

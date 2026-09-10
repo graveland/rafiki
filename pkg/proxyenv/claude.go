@@ -166,11 +166,12 @@ type mcpServerConfig struct {
 // the rafiki agent-control MCP surface into a Claude Code session pointed at
 // baseURL. It is the shape claudeargv.Params.MCPConfig expects — Build itself
 // prepends the "--mcp-config=" prefix — so rendering the flag belongs to the
-// argv producer (Claude below), never to this value: a caller that feeds the
-// returned string to Params verbatim must get one --mcp-config element, not a
-// doubled one. The token travels as a placeholder Claude Code expands from the
-// RAFIKI_MCP_TOKEN environment variable at connect time, never inline —
-// argv is world-readable via ps on this machine.
+// argv producers (claudeargv.Build for daemon-managed children, and the
+// caller-side render of Values for anything else), never to this value: a
+// caller that feeds the returned string to Params verbatim must get one
+// --mcp-config element, not a doubled one. The token travels as a placeholder
+// Claude Code expands from the RAFIKI_MCP_TOKEN environment variable at
+// connect time, never inline — argv is world-readable via ps on this machine.
 func mcpConfigJSON(baseURL string) string {
 	doc := struct {
 		MCPServers map[string]mcpServerConfig `json:"mcpServers"`
@@ -211,28 +212,15 @@ type Values struct {
 	ModelArgs []string
 }
 
-// Claude returns a complete environment derived from environ with the proxy
-// wired in, plus the arguments to pass to the claude binary.
+// ClaudeEnv returns the proxied environment derived from environ, plus its
+// argv decisions as data. It is the package's ONLY entry point: callers that
+// need argv render what Values carries (claudeargv.Build prepends the
+// --mcp-config= prefix to MCPConfig; ModelArgs is already the --model pair),
+// which keeps the env and the argv from being two producers of the same flags.
 //
 // The returned environment is complete rather than a set of additions, because
 // stripping is half the job and you cannot un-set a variable by appending to a
 // list.
-func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
-	env, v := ClaudeEnv(environ, o)
-	if v.MCPConfig != "" {
-		// The prefix is rendered HERE, at the argv producer, against the bare
-		// JSON Values.MCPConfig carries — mirroring claudeargv.Build, which
-		// prepends the same prefix to Params.MCPConfig. The rendered element
-		// is byte-identical to the mcpConfigArg element this wrapper used to
-		// append.
-		args = append(args, "--mcp-config="+v.MCPConfig)
-	}
-	args = append(args, v.ModelArgs...)
-	return env, args
-}
-
-// ClaudeEnv returns the same environment Claude returns, plus its argv
-// decisions as data rather than as argv.
 func ClaudeEnv(environ []string, o ClaudeOptions) ([]string, Values) {
 	if o.URL == "" {
 		return slices.Clone(environ), Values{} // not proxied: leave everything alone
