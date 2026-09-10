@@ -1386,9 +1386,10 @@ func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (au
 //
 //  3. No resolvable predecessor AND the family exists AND the request carries
 //     cc_is_subagent → an INDEPENDENT thread founding its first request (a
-//     Task subagent, the titler, the quota probe): the turn id is pre-minted
-//     HERE, threadID = that id, and the request routes to <session>:<id> from
-//     its first request. Founding on
+//     Task subagent; the titler and the quota probe do NOT carry the flag in
+//     measured traffic and keep the root-row behavior): the turn id is
+//     pre-minted HERE, threadID = that id, and the request routes to
+//     <session>:<id> from its first request. Founding on
 //     the branch is what keeps the founding request's ordinal space off the
 //     main thread's rows: landed on the root, its small message count collides
 //     with ordinals the main thread already occupies and the strict response
@@ -1462,11 +1463,13 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 			threadID = tid
 		default:
 			// No resolvable predecessor. Family absent → the session's main
-			// founding turn (bare ref, threadID ""). Family present → an
-			// independent thread (subagent, titler, quota probe): pre-mint the
-			// founding turn's id and route this request to the branch named
-			// after it, so its ordinal space never touches the main thread's
-			// rows. A probe error is treated as family-absent (the pre-fix
+			// founding turn (bare ref, threadID ""). Family present AND the
+			// request carries cc_is_subagent → an independent thread (Task
+			// subagent): pre-mint the founding turn's id and route this request
+			// to the branch named after it, so its ordinal space never touches
+			// the main thread's rows. An unflagged founder (the titler and the
+			// quota probe in measured traffic) keeps the pre-fix root-row
+			// behavior. A probe error is treated as family-absent (the pre-fix
 			// behavior), never as evidence of a thread.
 			family := false
 			if probe, ok := p.store.(interface {

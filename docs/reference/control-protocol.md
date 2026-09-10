@@ -560,10 +560,13 @@ subagent thread resolves to the branch named after the turn that founded the
 thread. A turn with no resolvable predecessor is a thread root: when the
 session's family of conversations does not exist yet it is the main thread's
 founding turn (bare session value, `thread_id IS NULL`); when the family
-exists it is an independent thread (a Task subagent, the titler, the quota
-probe), and the proxy pre-mints that turn's id and routes the request to the
-branch named after it from its first request, so a founding request never
-shares the main thread's ordinal space. The `:<threadID>` suffix namespace is daemon-reserved: a
+exists AND the request carries `cc_is_subagent` it is an independent thread
+(a Task subagent), and the proxy pre-mints that turn's id and routes the
+request to the branch named after it from its first request, so a founding
+request never shares the main thread's ordinal space. A predecessor-less
+auxiliary request that does NOT carry the flag (the titler and the quota
+probe in measured traffic) keeps the pre-routing behavior: it lands on the
+root row and its response append fails loudly if it collides. The `:<threadID>` suffix namespace is daemon-reserved: a
 caller that puts `:<id>` inside its own `X-Rafiki-Session` value collides with
 branch refs of the session it names.
 

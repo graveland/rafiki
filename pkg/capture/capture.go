@@ -243,8 +243,9 @@ func (s *CaptureStore) ThreadOfPredecessorInSession(ctx context.Context, session
 // unique index, run pre-upstream in the proxy's beginCapture; it is the
 // discriminator between the session's MAIN founding turn (family absent:
 // bare ref, thread_id NULL) and an INDEPENDENT thread's founding turn
-// (family present, no resolvable predecessor: a Task subagent, the titler,
-// the quota probe, which route to their own branch). A probe error is the
+// (family present, no resolvable predecessor, AND the request carries
+// cc_is_subagent: a Task subagent; the titler and the quota probe do not
+// carry the flag in measured traffic). A probe error is the
 // caller's to classify, never a root decision made here.
 func (s *CaptureStore) SessionFamilyExists(ctx context.Context, session string) (bool, error) {
 	if session == "" {
