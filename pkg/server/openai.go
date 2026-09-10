@@ -240,9 +240,10 @@ func (p *ChatCompletionsProxy) beginCapture(r *http.Request, reqBody []byte, mod
 		p.logger.Warn("openai proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
 	}
+	authorKind, turnSource := authorAttribution(reqBody, source)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: reqBody,
-		Source: source, AuthorUserID: ownerUserID, AuthorKind: "human",
+		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind,
 		PrefixHash: routing.PrefixHash(reqBody), Protocol: string(store.ProtocolOpenAI),
 	})
 	if err != nil {

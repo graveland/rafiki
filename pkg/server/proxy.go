@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/claudethread"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
@@ -1291,6 +1292,28 @@ func surfaceProviderError(body []byte) ([]byte, bool) {
 // DecomposeRequest resolves the (possibly rebased) horizon itself, post-stream,
 // where the DB read belongs. cr.on=false (proxy still forwards) on any failure
 // setting up the turn itself.
+// authorAttribution decides a turn's author_kind and source from the request.
+//
+// author_kind exists to separate "the human typed this" from "the human's agent
+// typed this" (migration 0001: 'human' | 'agent' | 'system'), and it was
+// hardcoded "human", so every Claude Code Task subagent turn was recorded as
+// human-authored. cc_is_subagent is present-only-when-true, so an absent key
+// and an absent header both mean the main thread.
+//
+// The source suffix is applied ONLY to a claude entrypoint: X-Rafiki-Source is
+// how one proxy serves a TUI, a slack bot and diagnose, and a subagent marker
+// must not overwrite an entrypoint it did not set.
+func authorAttribution(reqBody []byte, source string) (authorKind, outSource string) {
+	b, ok := claudethread.BillingFromRequest(reqBody)
+	if !ok || !b.IsSubagent {
+		return "human", source
+	}
+	if source == "claude" {
+		return "agent", "claude-subagent"
+	}
+	return "agent", source
+}
+
 func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
@@ -1332,9 +1355,10 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// Request is no longer stored verbatim on the turn row — DecomposeRequest
 	// below covers it as conversation_message rows.
 	prefixHash := routing.PrefixHash(reqBody)
+	authorKind, turnSource := authorAttribution(reqBody, source)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
 		ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
-		Source: source, AuthorUserID: ownerUserID, AuthorKind: "human", PrefixHash: prefixHash,
+		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind, PrefixHash: prefixHash,
 	})
 	if err != nil {
 		p.logger.Warn("proxy capture: insert-intent failed", "conversation", convID, "error", err)

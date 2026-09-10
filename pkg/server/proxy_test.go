@@ -1550,3 +1550,66 @@ func TestRawTraceRecordsACaptureParseFailure(t *testing.T) {
 		t.Errorf("resp body = %q, want the unparseable body", got)
 	}
 }
+
+func TestSubagentTurnsAreAttributedToAnAgent(t *testing.T) {
+	// 1782 subagent turns in the investigated database are recorded
+	// author_kind='human'. Claude Code states which it is in every request.
+	for _, tc := range []struct {
+		name       string
+		systemText string
+		wantKind   string
+		wantSource string
+	}{
+		{
+			name:       "main thread",
+			systemText: "x-anthropic-billing-header: cc_version=2.1.259.b07; cc_entrypoint=cli; cch=42c51;",
+			wantKind:   "human",
+			wantSource: "claude",
+		},
+		{
+			name:       "task subagent",
+			systemText: "x-anthropic-billing-header: cc_version=2.1.267.019; cc_entrypoint=sdk-cli; cch=6d579; cc_is_subagent=true;",
+			wantKind:   "agent",
+			wantSource: "claude-subagent",
+		},
+		{
+			name:       "not claude code at all",
+			systemText: "You are a helpful assistant.",
+			wantKind:   "human",
+			wantSource: "claude",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mustMarshal(t, map[string]any{
+				"model":    "claude-sonnet-5",
+				"system":   []any{map[string]any{"type": "text", "text": tc.systemText}},
+				"messages": []any{},
+			})
+			kind, source := authorAttribution(body, "claude")
+			if kind != tc.wantKind {
+				t.Errorf("author_kind = %q, want %q", kind, tc.wantKind)
+			}
+			if source != tc.wantSource {
+				t.Errorf("source = %q, want %q", source, tc.wantSource)
+			}
+		})
+	}
+}
+
+func TestAuthorAttributionKeepsANonClaudeSourceIntact(t *testing.T) {
+	// X-Rafiki-Source is how one proxy serves a TUI, a slack bot and diagnose.
+	// A subagent suffix must never overwrite an entrypoint it did not set.
+	body := mustMarshal(t, map[string]any{"messages": []any{}})
+	if _, source := authorAttribution(body, "slack"); source != "slack" {
+		t.Errorf("source = %q, want %q", source, "slack")
+	}
+}
+
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
