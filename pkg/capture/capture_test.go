@@ -84,6 +84,15 @@ func newTestStore(t *testing.T) (*CaptureStore, *pgxpool.Pool) {
 	return NewCaptureStore(pool), pool
 }
 
+func mustTurn(t *testing.T, s *CaptureStore, convID string) string {
+	t.Helper()
+	id, _, err := s.InsertTurnIntent(context.Background(), TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	return id
+}
+
 func testEnsureConversationByExternalRef(t *testing.T, ctx context.Context, cs *CaptureStore) {
 	ref1 := "ext-ref-" + time.Now().Format(time.RFC3339Nano)
 	id1a, err := cs.EnsureConversationByExternalRef(ctx, ConversationRef{
@@ -676,17 +685,6 @@ func runTurn(t *testing.T, ctx context.Context, s *CaptureStore, convID string, 
 	return next
 }
 
-// appendResponse calls AppendResponseMessage the way the proxy does post-stream
-// (proxy.go: DecomposeRequest's returned ordinal, the canonical assistant
-// message, usage, stop reason). Errors are fatal — the leniency under test lives
-// in a silent DO NOTHING drop, not in an error return.
-func appendResponse(t *testing.T, ctx context.Context, s *CaptureStore, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64) {
-	t.Helper()
-	if err := s.AppendResponseMessage(ctx, convID, turnID, createdAt, ordinal, canonical, in, out, "end_turn"); err != nil {
-		t.Fatalf("AppendResponseMessage: %v", err)
-	}
-}
-
 // requireKindRow reads one message row's kind/role/content/input_tokens.
 func requireKindRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, convID string, ordinal int) (kind, role *string, inTok *int64, content string) {
 	t.Helper()
@@ -946,15 +944,18 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 	}
 }
 
-// TestDecomposeRequest_RewindResponseCollisionIsDropped pins the response-side
-// consequence of the re-anchor rewind (review finding 1, coordinator-accepted as
-// design §3's documented leniency): a rewound request re-anchors to an earlier
-// horizon, so DecomposeRequest's returned ordinal lands on an already-occupied
-// row, and AppendResponseMessage at that ordinal is silently DROPPED by
-// ON CONFLICT DO NOTHING — no error, no assistant row, occupant's first-seen
-// content wins. runTurn never calls AppendResponseMessage, which is why the
-// other horizon tests cannot see this behavior.
-func TestDecomposeRequest_RewindResponseCollisionIsDropped(t *testing.T) {
+// TestDecomposeRequest_RewindResponseCollisionIsLoud pins the response-side
+// consequence of the re-anchor rewind, strict since task 4.2: a rewound request
+// re-anchors to an earlier horizon, so DecomposeRequest's returned ordinal lands
+// on an already-occupied row, and AppendResponseMessage at that ordinal FAILS
+// with ErrOrdinalOccupied rather than silently dropping the reply. The earlier
+// lenient pin (review finding 1, coordinator-accepted then as design §3's
+// documented leniency) recorded 22 dropped responses on one real conversation
+// before it was reversed. runTurn never calls AppendResponseMessage, which is
+// why the other horizon tests cannot see this behavior; the request-side
+// inserts of the same rewind stay lenient (the "r1" row DO NOTHINGs against the
+// stored SUMMARY-A boundary row and DecomposeRequest still returns 4).
+func TestDecomposeRequest_RewindResponseCollisionIsLoud(t *testing.T) {
 	ctx, pool, s := horizonTestEnv(t)
 	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
 	if err != nil {
@@ -1001,12 +1002,19 @@ func TestDecomposeRequest_RewindResponseCollisionIsDropped(t *testing.T) {
 		t.Fatalf("CompleteTurn: %v", err)
 	}
 
-	// The colliding response: reports success while being dropped.
+	// The colliding response must surface, not vanish: a response landing on an
+	// occupied ordinal is always a lost reply, never a benign replay.
 	canonical := []byte(`{"content":[{"type":"text","text":"rewound assistant reply"}]}`)
-	appendResponse(t, ctx, s, convID, turnID, createdAt, next, canonical, 14, 2)
+	err = s.AppendResponseMessage(ctx, convID, turnID, createdAt, next, canonical, 14, 2, "end_turn")
+	if err == nil {
+		t.Fatal("a rewind response at an occupied ordinal must not be silently dropped")
+	}
+	if !errors.Is(err, ErrOrdinalOccupied) {
+		t.Fatalf("err = %v, want ErrOrdinalOccupied", err)
+	}
 
-	// The response row is ABSENT at that ordinal — no assistant row exists
-	// there at all, so the insert was dropped rather than relocated.
+	// No assistant row exists at that ordinal: the insert is refused, not
+	// relocated.
 	var present bool
 	if err := pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message WHERE conversation_id=$1 AND ordinal=$2 AND role='assistant')`,
@@ -1014,7 +1022,7 @@ func TestDecomposeRequest_RewindResponseCollisionIsDropped(t *testing.T) {
 		t.Fatalf("read response row: %v", err)
 	}
 	if present {
-		t.Fatalf("assistant row present at ordinal %d, want absent (ON CONFLICT DO NOTHING drops the colliding response)", next)
+		t.Fatalf("assistant row present at ordinal %d, want absent (the collision must write no row)", next)
 	}
 	// The pre-existing occupant's first-seen content wins, untouched.
 	_, role, _, content := requireKindRow(t, ctx, pool, convID, next)
@@ -1022,6 +1030,17 @@ func TestDecomposeRequest_RewindResponseCollisionIsDropped(t *testing.T) {
 		t.Fatalf("ordinal %d role = %v, want user (occupant untouched by the collision)", next, role)
 	}
 	requireJSONEqual(t, content, `"q2"`)
+
+	// A refused append must not stamp the turn row: previously both turns kept
+	// response_ordinal pointing at a user row.
+	var respOrd *int
+	if err := pool.QueryRow(ctx,
+		`SELECT response_ordinal FROM conversations.conversation_turn WHERE id=$1::uuid`, turnID).Scan(&respOrd); err != nil {
+		t.Fatalf("read response_ordinal: %v", err)
+	}
+	if respOrd != nil {
+		t.Fatalf("response_ordinal = %d, want NULL (the failed append must not stamp the turn)", *respOrd)
+	}
 }
 
 // TestDecomposeRequest_BootstrapNoBoundary: a brand-new conversation's first
@@ -1449,6 +1468,46 @@ func TestRecordThreadLinksConsecutiveTurns(t *testing.T) {
 	}
 	if threadOf(t3) != t3 {
 		t.Errorf("turn 3 thread = %s, want its own id %s", threadOf(t3), t3)
+	}
+}
+
+func TestOrdinalCollisionOnAResponseIsLoud(t *testing.T) {
+	// A replayed request prefix legitimately re-inserts identical content and
+	// stays lenient. A SECOND assistant reply at one ordinal is always a lost
+	// response, so it must surface rather than vanish.
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+
+	t1, at1, _ := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	first := []byte(`{"id":"msg_a","content":[{"type":"text","text":"first"}]}`)
+	if err := s.AppendResponseMessage(ctx, convID, t1, at1, 5, first, 1, 1, "end_turn"); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+
+	t2, at2, _ := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	second := []byte(`{"id":"msg_b","content":[{"type":"text","text":"second"}]}`)
+	err := s.AppendResponseMessage(ctx, convID, t2, at2, 5, second, 1, 1, "end_turn")
+	if err == nil {
+		t.Fatal("a second response at ordinal 5 must not be silently dropped")
+	}
+	if !errors.Is(err, ErrOrdinalOccupied) {
+		t.Fatalf("err = %v, want ErrOrdinalOccupied", err)
+	}
+}
+
+func TestRequestMessageReplayStaysLenient(t *testing.T) {
+	// The other half of the rule: re-decomposing the same request is normal and
+	// must stay silent, or every turn of a conversation errors.
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	if _, err := s.DecomposeRequest(ctx, convID, mustTurn(t, s, convID), time.Now(), body, "h"); err != nil {
+		t.Fatalf("first decompose: %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, convID, mustTurn(t, s, convID), time.Now(), body, "h"); err != nil {
+		t.Fatalf("replay decompose must stay lenient, got: %v", err)
 	}
 }
 

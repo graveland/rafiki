@@ -35,6 +35,14 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 	return &cp
 }
 
+// ErrOrdinalOccupied reports that a response could not be written because its
+// ordinal already held a different message. Request-message inserts stay
+// lenient (a replayed prefix re-inserts identical content and first-seen wins),
+// but a second assistant reply at one ordinal is always a lost response: nine
+// such collisions dropped 22 model replies before threads were separated, and
+// nothing reported it.
+var ErrOrdinalOccupied = errors.New("capture: ordinal already occupied by a different message")
+
 // appendMessage is the single guarded insert both message write sites use.
 // inTok, outTok, stopReason and kind are nil/nil-able for the
 // request-decomposition path's ordinary rows (kind is set only on a
@@ -78,6 +86,26 @@ func (s *CaptureStore) appendMessage(ctx context.Context, convID string, ordinal
 // appendMessageForTest exposes appendMessage to this package's tests.
 func (s *CaptureStore) appendMessageForTest(ctx context.Context, convID string, ordinal int, role string, content []byte) error {
 	return s.appendMessage(ctx, convID, ordinal, role, content, nil, nil, nil, nil)
+}
+
+// appendMessageStrict is appendMessage that distinguishes a conflict from a
+// lost lease. appendMessage cannot: both yield RowsAffected() == 0.
+func (s *CaptureStore) appendMessageStrict(ctx context.Context, convID string, ordinal int, role string, content []byte, inTok, outTok *int64, stopReason, kind any) error {
+	err := s.appendMessage(ctx, convID, ordinal, role, content, inTok, outTok, stopReason, kind)
+	if err != nil {
+		return err
+	}
+	var occupied bool
+	if qerr := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message
+		   WHERE conversation_id=$1::uuid AND ordinal=$2 AND content IS DISTINCT FROM $3::jsonb)`,
+		convID, ordinal, content).Scan(&occupied); qerr != nil {
+		return qerr
+	}
+	if occupied {
+		return fmt.Errorf("%w: conversation %s ordinal %d", ErrOrdinalOccupied, convID, ordinal)
+	}
+	return nil
 }
 
 const captureAppendSQL = `
@@ -651,12 +679,13 @@ func stripNUL(v any) any {
 // AppendResponseMessage appends the canonical assistant Message (canonical, an
 // anthropic.Message JSON) as a conversation_message at `ordinal`, content
 // stored verbatim from canonical.content, plus token usage and stop_reason.
-// Insert is ON CONFLICT (conversation_id, ordinal) DO NOTHING — lenient,
-// best-effort, matching DecomposeRequest's message-insert semantics. Also
-// sets the turn's response_ordinal to `ordinal`. `ordinal` is expected to be
-// DecomposeRequest's return value (the horizon-aware ordinal the response
-// belongs at), so the assistant lands right after the request's
-// horizon..ordinal-1 messages.
+// Unlike DecomposeRequest's request rows, a response that lands on an occupied
+// ordinal is never a benign replay: it is a lost reply, so appendMessageStrict
+// surfaces it as ErrOrdinalOccupied and the caller fails the turn rather than
+// dropping the reply silently. Also sets the turn's response_ordinal to
+// `ordinal`. `ordinal` is expected to be DecomposeRequest's return value (the
+// horizon-aware ordinal the response belongs at), so the assistant lands right
+// after the request's horizon..ordinal-1 messages.
 func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
 	var msg struct {
 		Content json.RawMessage `json:"content"`
@@ -669,7 +698,7 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 		content = json.RawMessage(`null`)
 	}
 	return retryDB(ctx, "appendResponse", func(ctx context.Context) error {
-		if err := s.appendMessage(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason), nil); err != nil {
+		if err := s.appendMessageStrict(ctx, convID, ordinal, "assistant", jsonbSafe(content), &in, &out, nullify(stopReason), nil); err != nil {
 			return fmt.Errorf("append response: insert: %w", err)
 		}
 		if _, err := s.pool.Exec(ctx,
@@ -809,6 +838,8 @@ func retryDB(ctx context.Context, op string, fn func(context.Context) error) err
 // shape — mirrors agentloop.isRetryable, and (unlike relying on retryDB's
 // own select against ctx.Done()) makes cancellation deterministic rather
 // than racing time.After when both fire on an already-canceled context.
+// ErrOrdinalOccupied is likewise deliberately not retryable: a reply that lost
+// its ordinal will lose it again.
 func isRetryableDB(err error, ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
