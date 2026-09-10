@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.graveland.dev/rafiki/pkg/capture"
+	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -1416,5 +1417,136 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 	}
 	if len(respOrdinals) != 2 || respOrdinals[0] != 1 || respOrdinals[1] != horizon+2 {
 		t.Errorf("turn response ordinals = %v, want [1 %d] (turn 1 pre-compaction; turn 2 horizon-relative, not the request-message count 2)", respOrdinals, horizon+2)
+	}
+}
+
+type fakeRawTrace struct {
+	mu       sync.Mutex
+	inserted []rawtrace.RawHTTPRequest
+}
+
+func (f *fakeRawTrace) Insert(_ context.Context, r rawtrace.RawHTTPRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inserted = append(f.inserted, r)
+	return nil
+}
+
+func TestRawTraceRecordsAMalformedSuccess(t *testing.T) {
+	// A 2xx wearing the wrong Content-Type is a gateway error page. It is
+	// surfaced to the client as a 502 and, before this, recorded nowhere.
+	rec := &fakeRawTrace{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>upstream is unwell</html>"))
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = &fakeProxyStore{} // inject fake; capture stays off, only the trace is asserted
+	p.SetRawTrace(rec, true)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	if len(rec.inserted) != 1 {
+		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
+	}
+	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "upstream is unwell") {
+		t.Errorf("resp body = %q, want the upstream error page", got)
+	}
+}
+
+func TestRawTraceRecordsATruncatedStream(t *testing.T) {
+	// Upstream dies mid-stream: the partial body is the forensic value, and the
+	// trace's Error should name the same read failure the turn reason does.
+	rec := &fakeRawTrace{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close() // cut the stream before message_stop
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+	p.SetRawTrace(rec, true)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	p.ServeHTTP(w, req)
+
+	// The bytes streamed before the cut were already forwarded, so the client
+	// saw a 200 head; the turn must still be failed and the trace still stored.
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if fs.fails != 1 || !strings.Contains(fs.lastFailMsg, "mid-stream read error") {
+		t.Fatalf("fail msg = %q, want the mid-stream read error", fs.lastFailMsg)
+	}
+	if len(rec.inserted) != 1 {
+		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
+	}
+	if got := rec.inserted[0].Error; !strings.Contains(got, "mid-stream read error") {
+		t.Errorf("trace error = %q, want the mid-stream read error", got)
+	}
+	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "message_start") {
+		t.Errorf("resp body = %q, want the partial stream", got)
+	}
+}
+
+func TestRawTraceRecordsACaptureParseFailure(t *testing.T) {
+	// A stream the parser cannot reassemble fails the turn; the stored body
+	// prefix is the only forensic record of what the upstream actually sent.
+	rec := &fakeRawTrace{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "gateway says: nothing resembling an SSE stream here")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+	p.SetRawTrace(rec, true)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the bytes were forwarded)", w.Code)
+	}
+	if fs.fails != 1 || !strings.Contains(fs.lastFailMsg, "capture parse failed") {
+		t.Fatalf("fail msg = %q, want the capture parse failure", fs.lastFailMsg)
+	}
+	if len(rec.inserted) != 1 {
+		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
+	}
+	if got := rec.inserted[0].Error; !strings.Contains(got, "capture parse failed") {
+		t.Errorf("trace error = %q, want the capture parse failure", got)
+	}
+	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "nothing resembling an SSE stream") {
+		t.Errorf("resp body = %q, want the unparseable body", got)
 	}
 }

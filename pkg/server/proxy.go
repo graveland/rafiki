@@ -36,6 +36,13 @@ type proxyStore interface {
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 }
 
+// rawTraceRecorder is the one method the proxy needs from
+// *rawtrace.RawTraceStore, extracted so the four uncovered failure paths can
+// be pinned by a test. Insert is best-effort and returns nil on failure.
+type rawTraceRecorder interface {
+	Insert(ctx context.Context, r rawtrace.RawHTTPRequest) error
+}
+
 type MessagesProxy struct {
 	store       proxyStore
 	auth        Authenticator // nil → anonymous capture (no owner)
@@ -63,8 +70,8 @@ type MessagesProxy struct {
 
 	metrics *Metrics // optional Prometheus instrumentation
 
-	rawTrace    *rawtrace.RawTraceStore // nil when no pool configured
-	rawTraceAll bool                    // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
+	rawTrace    rawTraceRecorder // nil when no pool configured
+	rawTraceAll bool             // record all sessions (RAFIKI_RECORD_REQUESTS=1); else per-session via X-Rafiki-Record-Requests header
 
 	guard *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
 
@@ -78,7 +85,7 @@ func (p *MessagesProxy) SetMetrics(m *Metrics) { p.metrics = m }
 
 // SetRawTrace enables raw HTTP request/response capture for debug. Pass nil to
 // disable (the default).
-func (p *MessagesProxy) SetRawTrace(s *rawtrace.RawTraceStore, recordAll bool) {
+func (p *MessagesProxy) SetRawTrace(s rawTraceRecorder, recordAll bool) {
 	p.rawTrace = s
 	p.rawTraceAll = recordAll
 }
@@ -805,6 +812,9 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 		reason += ": " + bodyPreview
 	}
 	p.failTurn(r, cr, reason)
+	rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+	p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, raw, bodyPreview, elapsed)
+	rawCancel()
 	msg := "upstream returned HTTP " + strconv.Itoa(resp.StatusCode) + " with an unexpected content type (" + resp.Header.Get("Content-Type") + ")"
 	if bodyPreview != "" {
 		msg += ": " + bodyPreview
@@ -855,6 +865,33 @@ func (p *MessagesProxy) captureQuota(r *http.Request, resp *http.Response, upstr
 			p.logger.Warn("proxy: quota upsert failed", "conversation", convID, "user", id.Username, "error", err)
 		}
 	}()
+}
+
+// recordRawTrace writes the debug request/response pair, if recording is on
+// for this request. Every terminal path in streamAndCapture calls it, because
+// the turns worth switching this on for are the ones that fail: a mislabeled
+// 2xx, a truncated stream, an unparseable body. respBody may be partial.
+func (p *MessagesProxy) recordRawTrace(ctx context.Context, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, respBody []byte, errText string, elapsed time.Duration) {
+	if p.rawTrace == nil || (!p.rawTraceAll && !cr.recordRequests) {
+		return
+	}
+	respStatus := resp.StatusCode
+	convID := cr.convID
+	_ = p.rawTrace.Insert(ctx, rawtrace.RawHTTPRequest{
+		Source:         "proxy",
+		Model:          model,
+		Upstream:       upstream,
+		ReqMethod:      "POST",
+		ReqPath:        "/v1/messages",
+		ReqHeaders:     upstreamReqHeaders(r),
+		ReqBody:        cr.reqBody,
+		RespStatus:     &respStatus,
+		RespHeaders:    upstreamRespHeaders(resp),
+		RespBody:       respBody,
+		Error:          errText,
+		LatencyMS:      int(elapsed.Milliseconds()),
+		ConversationID: &convID,
+	})
 }
 
 func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request, resp *http.Response, cr captureRef, upstream, model string, start time.Time, stream bool) {
@@ -935,12 +972,20 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 			// read. Upstream is not implicated.
 			p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client canceled", "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 			p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
-			p.failTurn(r, cr, "client canceled mid-stream (last upstream byte "+stall+" earlier)")
+			reason := "client canceled mid-stream (last upstream byte " + stall + " earlier)"
+			rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+			p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
+			rawCancel()
+			p.failTurn(r, cr, reason)
 			return
 		}
 		p.logger.Warn("llm turn truncated", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "error", streamErr, "bytes", acc.Len(), "last_byte_ago", stall, "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
-		p.failTurn(r, cr, "mid-stream read error: "+streamErr.Error())
+		reason := "mid-stream read error: " + streamErr.Error()
+		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
+		rawCancel()
+		p.failTurn(r, cr, reason)
 		return
 	}
 	if clientGone {
@@ -949,6 +994,9 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// truncated turns don't pollute the capture store as clean completions.
 		p.logger.Warn("llm turn aborted", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "reason", "client disconnected mid-stream", "bytes", acc.Len(), "last_byte_ago", latency(time.Since(lastByte)), "latency", latency(elapsed))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), "client disconnected mid-stream", elapsed)
+		rawCancel()
 		p.failTurn(r, cr, "client disconnected mid-stream")
 		return
 	}
@@ -961,7 +1009,11 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		// actually sent; without it the body vanishes with the connection.
 		p.logger.Warn("llm turn capture-parse failed", "conversation", cr.convID, "upstream", upstream, "model", model, "error", perr, "body_prefix", boundedErrorBody(acc.Bytes()))
 		p.metrics.ObserveTurn(upstream, "error", "anthropic", time.Since(start), routing.CapturedUsage{})
-		p.failTurn(r, cr, "capture parse failed: "+perr.Error())
+		reason := "capture parse failed: " + perr.Error()
+		rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+		p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, acc.Bytes(), reason, elapsed)
+		rawCancel()
+		p.failTurn(r, cr, reason)
 		return
 	}
 	if len(repaired) > 0 {
@@ -994,24 +1046,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 	defer cancel()
 	// Raw trace: record the debug request/response pair.
-	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
-		respStatus := resp.StatusCode
-		convID := cr.convID
-		_ = p.rawTrace.Insert(capCtx, rawtrace.RawHTTPRequest{
-			Source:         "proxy",
-			Model:          model,
-			Upstream:       upstream,
-			ReqMethod:      "POST",
-			ReqPath:        "/v1/messages",
-			ReqHeaders:     upstreamReqHeaders(r),
-			ReqBody:        cr.reqBody,
-			RespStatus:     &respStatus,
-			RespHeaders:    upstreamRespHeaders(resp),
-			RespBody:       acc.Bytes(),
-			LatencyMS:      int(elapsed.Milliseconds()),
-			ConversationID: &convID,
-		})
-	}
+	p.recordRawTrace(capCtx, r, resp, cr, upstream, model, acc.Bytes(), "", elapsed)
 	if !cr.on {
 		return
 	}
@@ -1168,25 +1203,7 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	capCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 	defer cancel()
 	// Raw trace: record the failed request/response pair.
-	if p.rawTrace != nil && (p.rawTraceAll || cr.recordRequests) {
-		respStatus := resp.StatusCode
-		convID := cr.convID
-		_ = p.rawTrace.Insert(capCtx, rawtrace.RawHTTPRequest{
-			Source:         "proxy",
-			Model:          model,
-			Upstream:       upstream,
-			ReqMethod:      "POST",
-			ReqPath:        "/v1/messages",
-			ReqHeaders:     upstreamReqHeaders(r),
-			ReqBody:        cr.reqBody,
-			RespStatus:     &respStatus,
-			RespHeaders:    upstreamRespHeaders(resp),
-			RespBody:       raw,
-			Error:          errBody,
-			LatencyMS:      int(elapsed.Milliseconds()),
-			ConversationID: &convID,
-		})
-	}
+	p.recordRawTrace(capCtx, r, resp, cr, upstream, model, raw, errBody, elapsed)
 	// Resolve the failed turn and decompose the request (so the turn is inspectable —
 	// the messages/prefix that triggered the error are what you need to see) under the
 	// same shared detached context.
