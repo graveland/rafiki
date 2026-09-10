@@ -55,12 +55,24 @@ func backoffFor(attempt int) time.Duration {
 	return backoff[attempt]
 }
 
+// BackoffFor exposes the reconnect schedule to callers retrying other daemon
+// calls after a stream failure. The cockpit's ListChildren re-seed uses the
+// same capped schedule so a struggling daemon meets one idea of politeness,
+// not two.
+func BackoffFor(attempt int) time.Duration { return backoffFor(attempt) }
+
 // StartRail opens the long-lived rail subscription and keeps it open.
 //
 // cursor is a FUNC, not a value, and is called fresh on every reconnect
 // attempt: children spawn while you are disconnected, and a cursor captured at
 // open time would resume from a map that does not mention them. It is called
 // from this goroutine, which is why rail.Rail is mutex-guarded.
+//
+// After every pump completes a nil sentinel is sent on out. The stream has
+// ended, so children spawned during the gap are invisible to replay -- replay
+// enumerates only the cursor's children -- and the cockpit treats the sentinel
+// as a re-seed request. It fires after a failed open too: a re-seed against a
+// down daemon is idempotent and backoff-governed.
 func StartRail(
 	ctx context.Context,
 	cfg Config,
@@ -85,6 +97,20 @@ func StartRail(
 				attempt = 0 // delivered something; the connection was healthy
 			} else {
 				attempt++
+			}
+			// A completed pump means the subscription was interrupted at
+			// least briefly. The next open replays from the cursor, but the
+			// cursor only names children this client already knows -- a child
+			// spawned mid-gap would stay invisible for the rest of the
+			// session. The nil sentinel tells the cockpit to re-seed from
+			// ListChildren; nil cannot be mistaken for a real event, and
+			// rail.Apply already ignores nil.
+			if ctx.Err() == nil {
+				select {
+				case out <- nil:
+				case <-ctx.Done():
+					return
+				}
 			}
 			if !sleepCtx(ctx, backoffFor(attempt)) {
 				return

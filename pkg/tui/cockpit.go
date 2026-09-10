@@ -185,6 +185,9 @@ type seedMsg struct {
 	children []*rafikiv1.ChildSummary
 	err      error
 }
+
+// seedRetryMsg fires when a failed seed's backoff timer expires.
+type seedRetryMsg struct{}
 type sendFailedMsg struct{ err error }
 
 type tasksLoadedMsg struct {
@@ -342,8 +345,12 @@ type Cockpit struct {
 	// Both are needed: without the second, every event arriving during the RPC
 	// queues another one, and the cockpit self-amplifies against a daemon that
 	// is already slow -- which is the exact condition the self-heal exists for.
+	// seedAttempt counts consecutive ListChildren failures so the retry backs
+	// off on the same capped schedule as the stream layer, and resets on any
+	// success.
 	reseeding      bool
 	reseedInFlight bool
+	seedAttempt    int
 
 	// form is the open create modal, nil when none. A modal owns every key
 	// while it is up, so this is checked before the global bindings.
@@ -631,9 +638,16 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case seedMsg:
 		c.reseedInFlight = false
 		if msg.err != nil {
+			c.seedAttempt++
 			c.status = "list children: " + msg.err.Error()
-			return c, nil
+			// A failed seed must not wait for the next unrelated event to retry
+			// -- against the slow daemon the self-heal exists for, the next
+			// event may be a long time coming. This also covers the INITIAL
+			// seed, which today leaves a cockpit with no rail stream at all when
+			// it fails.
+			return c, c.retrySeed()
 		}
+		c.seedAttempt = 0
 		first := c.stopRail == nil
 		c.rail.Seed(c.inSubject(msg.children))
 		// Seed each child's spend before any turn_end arrives: the rail resumes
@@ -664,12 +678,33 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return c, c.landRailFirst()
 		}
-		return c, nil
+		// A re-seed request that arrived while this RPC was in flight must
+		// not be dropped -- maybeReseed picks it up.
+		return c, c.maybeReseed(nil)
+
+	case seedRetryMsg:
+		// The timer fired. If a seed is already running -- an unknown-child
+		// event may have fired one during the backoff -- let it: its
+		// completion re-checks reseeding, so skipping loses nothing.
+		if c.reseedInFlight {
+			return c, nil
+		}
+		c.reseedInFlight = true
+		return c, c.seedCmd()
 
 	case railEventMsg:
 		// Rail-stream events update the rail ONLY. The session is fed by the
 		// focus stream alone; see applyRailEvent.
 		for _, ev := range msg.evs {
+			if ev == nil {
+				// streams.StartRail's resync sentinel: the rail stream
+				// re-opened, and replay enumerates only the cursor's
+				// children, so anything that spawned mid-gap stays invisible
+				// until ListChildren says otherwise. The sentinel must not
+				// reach applyRailEvent -- it is not an event from any child.
+				c.reseeding = true
+				continue
+			}
 			c.applyRailEvent(ev)
 		}
 		return c, tea.Batch(waitForEvent(c.railCh), c.maybeReseed(nil))
@@ -869,6 +904,17 @@ func (c *Cockpit) maybeReseed(cmd tea.Cmd) tea.Cmd {
 		cmd = tea.Batch(cmd, c.seedCmd())
 	}
 	return cmd
+}
+
+// retrySeed schedules the next ListChildren attempt after the same capped
+// backoff the stream layer reconnects with. The attempt count is read here,
+// not carried through the message, so a resync signal arriving mid-backoff
+// cannot reset the schedule to its fast end.
+func (c *Cockpit) retrySeed() tea.Cmd {
+	attempt := c.seedAttempt
+	return tea.Tick(streams.BackoffFor(attempt), func(time.Time) tea.Msg {
+		return seedRetryMsg{}
+	})
 }
 
 // applyEvent routes one event from the FOCUS stream to the rail and, when it

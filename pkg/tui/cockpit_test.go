@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -638,6 +639,65 @@ func TestSeedIsNarrowedToTheSubject(t *testing.T) {
 }
 
 func ptr32(v int32) *int32 { return &v }
+
+var errSeedDown = errors.New("daemon unreachable")
+
+// A failed seed used to end the flow: the cockpit waited for the next
+// unrelated event to re-attempt ListChildren, and against the slow daemon the
+// self-heal exists for that event may be a long time coming -- an initial
+// seed that failed left a cockpit with no rail stream at all. The retry now
+// schedules itself on the stream layer's capped backoff and the attempt count
+// resets on the first success.
+func TestFailedSeedRetriesOnTheBackoffSchedule(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+
+	// First failure: the attempt count climbs and a retry is scheduled --
+	// nothing else would re-attempt ListChildren on a quiet daemon.
+	_, cmd := c.Update(seedMsg{err: errSeedDown})
+	if c.reseedInFlight {
+		t.Fatal("a failed seed must release reseedInFlight")
+	}
+	if c.seedAttempt != 1 {
+		t.Fatalf("seedAttempt = %d after one failure, want 1", c.seedAttempt)
+	}
+	if cmd == nil {
+		t.Fatal("a failed seed must schedule a retry, not wait for the next event")
+	}
+
+	// The timer fires and re-dispatches ListChildren. Nothing is listening on
+	// this BaseURL, so driving the seed command to completion fails fast.
+	msg := cmd()
+	if _, ok := msg.(seedRetryMsg); !ok {
+		t.Fatalf("retry command produced %T, want seedRetryMsg", msg)
+	}
+	_, seedCmd := c.Update(seedRetryMsg{})
+	if !c.reseedInFlight || seedCmd == nil {
+		t.Fatal("seedRetryMsg with no seed running must dispatch ListChildren")
+	}
+
+	// That attempt fails too; the count climbs and another retry is scheduled.
+	if sm, ok := seedCmd().(seedMsg); !ok || sm.err == nil {
+		t.Fatalf("seed command produced %T, want a failing seedMsg", seedCmd())
+	}
+	_, cmd2 := c.Update(seedMsg{err: errSeedDown})
+	if c.seedAttempt != 2 || cmd2 == nil {
+		t.Fatalf("after a second failure seedAttempt = %d, cmd = %v; want 2 and a retry", c.seedAttempt, cmd2)
+	}
+
+	// A retry timer arriving while a seed IS in flight must not queue a second
+	// one -- its completion re-checks reseeding instead.
+	c.reseeding, c.reseedInFlight = false, true
+	if _, cmd := c.Update(seedRetryMsg{}); cmd != nil || !c.reseedInFlight {
+		t.Fatal("seedRetryMsg during an in-flight seed must defer to it")
+	}
+
+	// Success resets the schedule to its fast end.
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
+	if c.seedAttempt != 0 {
+		t.Fatalf("seedAttempt = %d after a successful seed, want 0", c.seedAttempt)
+	}
+}
 
 func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary {
 	s.Labels[rail.ParentLabel] = parent

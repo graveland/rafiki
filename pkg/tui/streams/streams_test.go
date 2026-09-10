@@ -86,3 +86,30 @@ func TestRailCallsTheCursorFuncOnEveryAttempt(t *testing.T) {
 		}
 	}
 }
+
+// After every pump completes -- including one whose OPEN failed, since a
+// re-seed against a down daemon is idempotent -- StartRail sends a nil
+// sentinel on out. Replay enumerates only the cursor's children, so a child
+// spawned mid-gap would stay invisible until ListChildren re-seeds the rail;
+// the sentinel is the cockpit's signal to do exactly that.
+func TestRailSendsNilResyncSentinelAfterEveryAttempt(t *testing.T) {
+	out := make(chan *rafikiv1.Event, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := streams.StartRail(ctx, streams.Config{BaseURL: "http://127.0.0.1:1"},
+		&rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_All{All: true}},
+		func() *rafikiv1.EventCursor { return &rafikiv1.EventCursor{} }, out)
+	defer stop()
+
+	// Two sentinels means it fires on every attempt, not once at startup.
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-out:
+			if ev != nil {
+				t.Fatalf("attempt %d delivered %T, want the nil resync sentinel", i, ev)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no resync sentinel after attempt %d", i)
+		}
+	}
+}
