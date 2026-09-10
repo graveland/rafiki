@@ -1300,14 +1300,6 @@ func surfaceProviderError(body []byte) ([]byte, bool) {
 	return out, true
 }
 
-// beginCapture correlates the session and write-aheads the request
-// (InsertTurnIntent — deliberately synchronous, before the upstream call).
-// Decomposing reqBody into conversation_message rows is DB I/O and is
-// deferred to streamAndCapture's post-stream block so it never gates the
-// proxied request; beginCapture computes NO response ordinal at all —
-// DecomposeRequest resolves the (possibly rebased) horizon itself, post-stream,
-// where the DB read belongs. cr.on=false (proxy still forwards) on any failure
-// setting up the turn itself.
 // authorAttribution decides a turn's author_kind and source from the request.
 //
 // author_kind exists to separate "the human typed this" from "the human's agent
@@ -1330,6 +1322,14 @@ func authorAttribution(reqBody []byte, source string) (authorKind, outSource str
 	return "agent", source
 }
 
+// beginCapture correlates the session and write-aheads the request
+// (InsertTurnIntent — deliberately synchronous, before the upstream call).
+// Decomposing reqBody into conversation_message rows is DB I/O and is
+// deferred to streamAndCapture's post-stream block so it never gates the
+// proxied request; beginCapture computes NO response ordinal at all —
+// DecomposeRequest resolves the (possibly rebased) horizon itself, post-stream,
+// where the DB read belongs. cr.on=false (proxy still forwards) on any failure
+// setting up the turn itself.
 func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)

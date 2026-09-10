@@ -68,7 +68,7 @@ func newTestStore(t *testing.T) (*CaptureStore, *pgxpool.Pool) {
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is; the integration job must provide it")
 		}
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
