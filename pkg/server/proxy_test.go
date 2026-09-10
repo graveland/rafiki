@@ -42,6 +42,10 @@ type fakeProxyStore struct {
 	lastFailMsg          string // errMsg passed to the last FailTurn
 	decomposes           int    // DecomposeRequest call count
 	completeErr          error  // when set, CompleteTurn returns it (to exercise the FailTurn fallback)
+	threads              int    // RecordThread call count
+	lastPrevMsg          string // prevMessageID passed to the last RecordThread
+	lastOwnMsg           string // ownMessageID passed to the last RecordThread
+	threadErr            error  // when set, RecordThread returns it (to exercise the swallow)
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
@@ -78,6 +82,13 @@ func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID st
 
 func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
 	return nil
+}
+
+func (f *fakeProxyStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+	f.threads++
+	f.lastPrevMsg = prevMessageID
+	f.lastOwnMsg = ownMessageID
+	return f.threadErr
 }
 
 func TestMessagesProxyStreamsAndCaptures(t *testing.T) {
@@ -1612,4 +1623,76 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+// TestProxyRecordsTheThreadAfterAppendingTheResponse pins the one wiring call
+// that makes thread observation live: without it, RecordThread exists and its
+// store tests pass, and real traffic records nothing, erroring nowhere.
+func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_own","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if fs.threads != 1 {
+		t.Fatalf("RecordThread calls = %d, want 1", fs.threads)
+	}
+	if fs.lastPrevMsg != "msg_prev" {
+		t.Errorf("prevMessageID = %q, want %q (the request's diagnostics.previous_message_id)", fs.lastPrevMsg, "msg_prev")
+	}
+	if fs.lastOwnMsg != "msg_own" {
+		t.Errorf("ownMessageID = %q, want %q (the response's assistant message id)", fs.lastOwnMsg, "msg_own")
+	}
+}
+
+// TestRecordThreadFailureIsLoggedAndSwallowed: thread observation must never be
+// able to fail a turn that otherwise succeeded, so its own write failure is
+// logged and dropped rather than routed through failTurn.
+func TestRecordThreadFailureIsLoggedAndSwallowed(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"msg_own","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{threadErr: errors.New("record thread: update: boom")}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a thread write failure must not fail the turn)", rec.Code)
+	}
+	if fs.fails != 0 {
+		t.Fatalf("FailTurn calls = %d, want 0 (observation is never failTurn)", fs.fails)
+	}
 }

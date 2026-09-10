@@ -42,6 +42,10 @@ func (s *recordingStore) AppendResponseMessage(ctx context.Context, convID, turn
 	return nil
 }
 
+func (s *recordingStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+	return nil
+}
+
 type staticAuthenticator struct{ id *Identity }
 
 func (a staticAuthenticator) Identify(*http.Request) *Identity { return a.id }

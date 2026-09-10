@@ -60,6 +60,30 @@ func TestCaptureStore(t *testing.T) {
 	})
 }
 
+// newTestStore connects a CaptureStore to the RAFIKI_TEST_DSN database,
+// following TestCaptureStore's setup above: skip without the DSN, migrate, and
+// hand back both the store and the pool the tests read through.
+func newTestStore(t *testing.T) (*CaptureStore, *pgxpool.Pool) {
+	t.Helper()
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
+			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
+		}
+		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	return NewCaptureStore(pool), pool
+}
+
 func testEnsureConversationByExternalRef(t *testing.T, ctx context.Context, cs *CaptureStore) {
 	ref1 := "ext-ref-" + time.Now().Format(time.RFC3339Nano)
 	id1a, err := cs.EnsureConversationByExternalRef(ctx, ConversationRef{
@@ -1365,5 +1389,89 @@ func TestConversationTokensGroupsByModel(t *testing.T) {
 	}
 	if s := byModel["deepseek/deepseek-v4-pro"]; s.InputTokens != 300 || s.CacheReadTokens != 3000 {
 		t.Errorf("deepseek = %+v, want in=300 cr=3000", s)
+	}
+}
+
+func TestRecordThreadLinksConsecutiveTurns(t *testing.T) {
+	s, pool := newTestStore(t) // follow the file's existing helper
+	ctx := context.Background()
+	convID, err := s.EnsureConversation(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client",
+	})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	// Turn 1: a thread root. No previous_message_id.
+	t1, t1At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, convID, t1, t1At, "", "msg_one"); err != nil {
+		t.Fatalf("RecordThread turn 1: %v", err)
+	}
+
+	// Turn 2: chains to turn 1.
+	t2, t2At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, convID, t2, t2At, "msg_one", "msg_two"); err != nil {
+		t.Fatalf("RecordThread turn 2: %v", err)
+	}
+
+	// Turn 3: a SECOND root, as a concurrent subagent's first turn is.
+	t3, t3At, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, convID, t3, t3At, "", "msg_three"); err != nil {
+		t.Fatalf("RecordThread turn 3: %v", err)
+	}
+
+	threadOf := func(turnID string) string {
+		var got string
+		if err := pool.QueryRow(ctx,
+			`SELECT thread_id::text FROM conversations.conversation_turn WHERE id=$1::uuid`,
+			turnID).Scan(&got); err != nil {
+			t.Fatalf("read thread_id: %v", err)
+		}
+		return got
+	}
+	if threadOf(t1) != t1 {
+		t.Errorf("turn 1 thread = %s, want its own id %s", threadOf(t1), t1)
+	}
+	if threadOf(t2) != t1 {
+		t.Errorf("turn 2 thread = %s, want turn 1's id %s", threadOf(t2), t1)
+	}
+	if threadOf(t3) == t1 {
+		t.Errorf("turn 3 is a separate thread root; it must not share turn 1's thread %s", t1)
+	}
+	if threadOf(t3) != t3 {
+		t.Errorf("turn 3 thread = %s, want its own id %s", threadOf(t3), t3)
+	}
+}
+
+func TestRecordThreadTreatsAnUnresolvablePredecessorAsARoot(t *testing.T) {
+	// A predecessor from before this column existed, or from a conversation the
+	// proxy did not capture, must not silently attach the turn to an unrelated
+	// thread. It becomes its own root.
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	convID, _ := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	id, at, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: convID, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, convID, id, at, "msg_never_seen", "msg_mine"); err != nil {
+		t.Fatalf("RecordThread: %v", err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx,
+		`SELECT thread_id::text FROM conversations.conversation_turn WHERE id=$1::uuid`, id).Scan(&got); err != nil {
+		t.Fatalf("read thread_id: %v", err)
+	}
+	if got != id {
+		t.Errorf("thread_id = %s, want its own id %s", got, id)
 	}
 }

@@ -34,6 +34,7 @@ type proxyStore interface {
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
 	DecomposeRequest(ctx context.Context, convID, turnID string, createdAt time.Time, reqBody []byte, prefixHash string) (int, error)
 	AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error
+	RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error
 	ConversationTokens(ctx context.Context, convID string) ([]capture.ModelTokens, error)
 }
 
@@ -1088,6 +1089,21 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
+	}
+	// Thread observation (wave 2 of the native-subagent attribution plan).
+	// Records which thread this turn belongs to without acting on it, so the
+	// mechanism can be evaluated on live traffic before capture routes on it.
+	prevMsg := claudethread.PreviousMessageID(cr.reqBody)
+	ownMsg := capture.MessageIDFromCanonical(canonical)
+	if terr := p.store.RecordThread(capCtx, cr.convID, cr.turnID, cr.createdAt, prevMsg, ownMsg); terr != nil {
+		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
+	}
+	if b, ok := claudethread.BillingFromRequest(cr.reqBody); ok {
+		p.logger.Debug("claude thread",
+			"conversation", cr.convID, "turn", cr.turnID,
+			"is_subagent", b.IsSubagent, "entrypoint", b.Entrypoint,
+			"prev_message_id", prevMsg, "own_message_id", ownMsg,
+			"chained", prevMsg != "")
 	}
 }
 

@@ -681,6 +681,70 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 	})
 }
 
+// RecordThread stores this turn's own assistant message id and resolves which
+// thread it belongs to, by walking prevMessageID back one hop to the turn that
+// produced it.
+//
+// Claude Code sends the main thread, every Task subagent and the titler under
+// one X-Rafiki-Session value, so one conversation row carries several
+// independent threads. diagnostics.previous_message_id is the client's own
+// statement of which one this is: measured over 3583 linked turns, only 6
+// share a predecessor (retries), max fan-out 4.
+//
+// An absent or unresolvable predecessor makes the turn its own thread root.
+// Unresolvable must never fall back to "the most recent turn": that is exactly
+// the guess that put concurrent subagents on one thread to begin with.
+//
+// Observation only. Nothing reads thread_id yet.
+func (s *CaptureStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
+	return retryDB(ctx, "recordThread", func(ctx context.Context) error {
+		threadID := turnID
+		if prevMessageID != "" {
+			var prevThread string
+			err := s.pool.QueryRow(ctx,
+				`SELECT coalesce(thread_id::text, id::text) FROM conversations.conversation_turn
+				  WHERE conversation_id=$1::uuid AND response_message_id=$2
+				  ORDER BY created_at DESC LIMIT 1`,
+				convID, prevMessageID).Scan(&prevThread)
+			switch {
+			case err == nil:
+				threadID = prevThread
+			case errors.Is(err, pgx.ErrNoRows):
+				// Root: a first turn, a pre-0030 predecessor, or a chain broken by
+				// a failed turn that never recorded its id.
+			default:
+				return fmt.Errorf("record thread: resolve predecessor: %w", err)
+			}
+		}
+		tag, err := s.pool.Exec(ctx,
+			`UPDATE conversations.conversation_turn
+			    SET response_message_id = NULLIF($3,''), thread_id = $4::uuid
+			  WHERE id=$1::uuid AND created_at=$2`,
+			turnID, createdAt, ownMessageID, threadID)
+		if err != nil {
+			return fmt.Errorf("record thread: update: %w", err)
+		}
+		if n := tag.RowsAffected(); n != 1 {
+			return fmt.Errorf("record thread: expected 1 row, updated %d (stale/skewed key)", n)
+		}
+		return nil
+	})
+}
+
+// MessageIDFromCanonical reads the assistant message id out of a canonical
+// response. Both branches of routing.ParseCapturedResponse carry it: the SSE
+// branch marshals an accumulated anthropic.Message, the JSON branch is the
+// upstream body verbatim.
+func MessageIDFromCanonical(canonical []byte) string {
+	var m struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(canonical, &m); err != nil {
+		return ""
+	}
+	return m.ID
+}
+
 // nullUUID renders an empty id as SQL NULL. Kept separate from nullify to
 // mark the columns it feeds as UUID foreign keys, where an empty string is
 // not merely "unattributed" — it is a cast error at insert time.

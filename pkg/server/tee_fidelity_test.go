@@ -318,6 +318,10 @@ func (f *recordingChatStore) AppendResponseMessage(_ context.Context, _, _ strin
 	return nil
 }
 
+func (f *recordingChatStore) RecordThread(_ context.Context, _, _ string, _ time.Time, _, _ string) error {
+	return nil
+}
+
 // When the client sends no x-session-id, the OpenRouter path falls back to
 // rafiki's own conversation id — so a client that never sets the header
 // (e.g. Claude Code) still gets a stable, correlatable session pin.
