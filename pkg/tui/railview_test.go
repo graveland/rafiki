@@ -212,6 +212,17 @@ func TestRailWidthCountsDepthAndCost(t *testing.T) {
 	}
 }
 
+func TestNativeSubagentsAreMarked(t *testing.T) {
+	native := rail.Node{ChildID: "c_a:t1", Name: "task:t1", Status: "idle", Kind: "claude", Native: true}
+	real := rail.Node{ChildID: "c_b", Name: "worker", Status: "idle", Kind: "claude"}
+	if nativeTag(native) == "" {
+		t.Error("a native subagent must carry a marker")
+	}
+	if nativeTag(real) != "" {
+		t.Error("a real rafiki agent must not carry the native marker")
+	}
+}
+
 func TestRailWidthCountsTheKindTag(t *testing.T) {
 	plain := []rail.Node{{ChildID: "c_a", Name: "worker", Status: "idle"}}
 	tagged := []rail.Node{{ChildID: "c_a", Name: "worker", Status: "idle", Kind: "claude"}}

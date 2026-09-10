@@ -21,6 +21,10 @@ import (
 // reconstructs the tree from parent edges.
 const ParentLabel = "rafiki/parent"
 
+// NativeSubagentLabel marks a child summary as a Claude Code Task subagent the
+// proxy synthesized from a captured thread, rather than a child rafiki spawned.
+const NativeSubagentLabel = "rafiki/native-subagent"
+
 // LiveStatuses is every protocol.Status except "exited".
 //
 // The set of eight is CLOSED and there is NO "running" status. A filter written
@@ -55,8 +59,14 @@ type Node struct {
 	Depth    int
 
 	// Status is the last known agent state, one of protocol.Status's eight.
-	Status   string
-	Kind     string // protocol kind: "claude" | "fundi". "pi" is retired; an old row still renders. Empty until seeded.
+	Status string
+	Kind   string // protocol kind: "claude" | "fundi". "pi" is retired; an old row still renders. Empty until seeded.
+
+	// Native marks a Claude Code Task subagent the proxy synthesized from a
+	// captured thread. It is a bounded sidebar returning one tool_result into
+	// its parent's context, not a budgeted cross-process agent, and the tree
+	// must not imply otherwise.
+	Native   bool
 	Exited   bool
 	ExitCode *int32
 	Retrying bool
@@ -208,6 +218,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			if p := s.GetLabels()[ParentLabel]; p != "" {
 				existing.ParentID = p
 			}
+			existing.Native = s.GetLabels()[NativeSubagentLabel] == "1"
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
 			existing.Status = s.GetStatus()
@@ -221,6 +232,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			ParentID:  s.GetLabels()[ParentLabel],
 			Status:    s.GetStatus(),
 			Kind:      s.GetKind(),
+			Native:    s.GetLabels()[NativeSubagentLabel] == "1",
 			SessionID: s.GetSessionId(),
 			Cwd:       s.GetCwd(),
 			MaxCost:   s.GetMaxCost(),

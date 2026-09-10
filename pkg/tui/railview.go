@@ -45,6 +45,16 @@ func kindTag(kind string) string {
 	}
 }
 
+// nativeTag marks a synthesized Task subagent. Distinct from kindTag: both a
+// real claude child and a native subagent are kind "claude", and only the
+// former is a budgeted cross-process agent.
+func nativeTag(n rail.Node) string {
+	if n.Native {
+		return "~"
+	}
+	return ""
+}
+
 // renderRail draws the tree.
 //
 // It renders whatever rows it is given. The "stay hidden below two rows" look
@@ -73,7 +83,7 @@ func kindTag(kind string) string {
 // The clamp matters in both directions: railMin keeps a two-agent cockpit from
 // a sliver, and railMaxFrac stops one absurdly-named agent eating the
 // transcript. The budget counts everything renderRail puts in the plain row —
-// cursor, indent, glyph, name, kind tag, badge and cost — because those are what get
+// cursor, indent, glyph, name, native tag, kind tag, badge and cost — because those are what get
 // clipped.
 func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 	want := railMin
@@ -82,7 +92,7 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 		if name == "" {
 			name = n.ChildID
 		}
-		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(kindTag(n.Kind))
+		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(nativeTag(n)) + ansi.StringWidth(kindTag(n.Kind))
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
 		}
@@ -129,7 +139,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// like the cursor and the badge. Rows are clipped before styling, so
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
-		left := cursor + strings.Repeat("  ", n.Depth) + rail.AnimatedGlyph(n, tick) + " " + name + kindTag(n.Kind) + badge
+		left := cursor + strings.Repeat("  ", n.Depth) + rail.AnimatedGlyph(n, tick) + " " + nativeTag(n) + name + kindTag(n.Kind) + badge
 		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {
