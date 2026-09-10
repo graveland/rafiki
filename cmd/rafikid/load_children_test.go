@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -734,4 +736,94 @@ func TestRecoverOneDoesNotStampALiveForeignRow(t *testing.T) {
 	if len(store.adoptions) != 0 {
 		t.Fatalf("AdoptOwnership called for a foreign-live row: %v", store.adoptions)
 	}
+}
+
+// startOrphanStandIn launches a real process the signal path can address, so
+// the pin observes an actual SIGTERM rather than trusting the log line. A
+// surviving stand-in is reaped in the cleanup either way.
+func startOrphanStandIn(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("sleep", "120")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep stand-in: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	return cmd
+}
+
+// procAlive asserts a stand-in is STILL running. Kill(pid, 0) is reliable
+// for liveness while the process runs.
+func procAlive(t *testing.T, pid int) {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("pid %d should still be alive: %v", pid, err)
+	}
+}
+
+// waitOrphanDeath waits for the stand-in to actually EXIT — not Kill(pid,0):
+// the test binary is the stand-in's parent, so a SIGTERM'd sleep lingers as a
+// zombie whose pid still answers Kill(0) until it is reaped, and a liveness
+// poll would report the kill a failure.
+func waitOrphanDeath(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+		return
+	case <-time.After(2 * time.Second):
+		t.Fatalf("pid %d survived the orphan signal", cmd.Process.Pid)
+	}
+}
+
+// TestRecoverOneDoesNotSignalAnotherDaemonsLiveChild pins the daemon_id half
+// of the orphan-signal predicate: a foreign daemon's row whose pid is alive
+// in OUR namespace must not be signalled. The ns_token half alone cannot
+// carry this — on darwin it is the machine's boot time and in one Linux
+// container every daemon shares it, so without this half every boot SIGTERMs
+// every other live daemon's children (a parallel-boot storm on a shared
+// database killed sibling daemons' live claude children mid-test, which is
+// what the child-token integration tests surfaced).
+func TestRecoverOneDoesNotSignalAnotherDaemonsLiveChild(t *testing.T) {
+	standIn := startOrphanStandIn(t)
+	c := newTestController(t)
+	c.daemonID = "me"
+	c.nsToken = "test-ns"
+
+	const conv = "33333333-3333-3333-3333-333333333333"
+	c.recoverOne(context.Background(), childstore.ChildRecord{
+		ChildID:        "c_foreign",
+		Kind:           protocol.KindFundi,
+		DaemonID:       "other-daemon",
+		NSToken:        "test-ns",
+		PID:            standIn.Process.Pid,
+		ConversationID: conv,
+		Status:         "idle", // reads as ALIVE: the old code killed exactly this
+	}, map[string]bool{conv: true})
+
+	procAlive(t, standIn.Process.Pid)
+}
+
+// TestRecoverOneSignalsItsOwnRestartOrphan pins the half the fix must not
+// swallow: this daemon's OWN row (same daemon_id, same namespace) with a
+// still-live pid is the crash-restart orphan the signal exists for.
+func TestRecoverOneSignalsItsOwnRestartOrphan(t *testing.T) {
+	standIn := startOrphanStandIn(t)
+	c := newTestController(t)
+	c.daemonID = "me"
+	c.nsToken = "test-ns"
+
+	c.recoverOne(context.Background(), childstore.ChildRecord{
+		ChildID:  "c_mine_orphan",
+		Kind:     protocol.KindFundi,
+		DaemonID: "me",
+		NSToken:  "test-ns",
+		PID:      standIn.Process.Pid,
+		Status:   "idle", // reads as ALIVE: my restart's leftover child
+	}, nil)
+
+	waitOrphanDeath(t, standIn)
 }

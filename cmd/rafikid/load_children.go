@@ -275,12 +275,25 @@ func (c *Controller) loadChildren(ctx context.Context) {
 
 // recoverOne loads a single record into the store and decides whether to resume.
 func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord, live map[string]bool) {
-	// Signal a still-live orphan only when the recorded pid provably belongs to
-	// THIS PID namespace. daemon_id is not that proof — it is pinned across pod
-	// restarts, and a restarted pod has the same id with a fresh namespace.
+	// Signal a still-live orphan of THIS daemon's own past life: the row must
+	// carry BOTH proofs. ns_token proves the recorded pid is in a namespace we
+	// actually observe — without it, a stale row's pid number could name an
+	// unrelated live process in our namespace and Kill(0) would bless the
+	// wrong victim. daemon_id proves the child is OURS: daemon_id is pinned
+	// across pod restarts, which is exactly why it works here — a restarted
+	// daemon reclaims its own rows (see LeaseStore.Acquire's holder clause) and
+	// a restarted pod's fresh namespace fails the ns_token half, so a pid
+	// number that only coincidentally matches stays untouched. ns_token alone
+	// cannot carry this: on darwin it is the machine's boot time (every daemon
+	// on the machine agrees since boot) and in one Linux container every
+	// daemon shares it, so without the daemon_id half every boot SIGTERMs
+	// every other live daemon's children — a parallel-boot storm on a shared
+	// database killed sibling daemons' live claude children mid-test, which is
+	// what the child-token integration tests surfaced (their secret dies with
+	// the child, by design, so the kill read as an authentication failure).
 	// An unknown token never signals: a missed orphan is harmless, a wrong
 	// signal kills a live process.
-	if rec.PID > 0 && c.nsToken != "" && rec.NSToken == c.nsToken {
+	if rec.PID > 0 && c.nsToken != "" && rec.NSToken == c.nsToken && rec.DaemonID == c.daemonID {
 		if err := syscall.Kill(rec.PID, 0); err == nil {
 			_ = syscall.Kill(rec.PID, syscall.SIGTERM)
 			slog.Info("sigterm orphan", "childId", rec.ChildID, "pid", rec.PID)
