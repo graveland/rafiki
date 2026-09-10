@@ -1690,3 +1690,66 @@
   lipgloss's own styling legitimately carries escapes; assert the INPUT's
   fragments (`\x1b[2K`, `\x1b[1merror`, `\r`) are gone and the stripped text
   survived.
+
+- **Claude Code runs every thread of one session under ONE `X-Rafiki-Session`,
+  which is set per PROCESS, not per thread** (the main thread, every Task
+  subagent, the titler, the quota probe). Three set sites
+  (`cmd/rafikid/controller.go` proxyChildEnv, `cmd/rafiki/cmd_daraja.go`,
+  `cmd/rafiki/claude.go`); only the two childID-valued sites can host
+  synthetic thread children, and the interactive site takes a user-supplied
+  value (a `:` in it collides with the daemon-reserved branch-ref namespace).
+- **`cc_is_subagent` is present-only-when-true** (zero `=false` values in 4922
+  measured turns, so absent = parent), and it is ALSO the routing conjunct:
+  only a flagged, predecessor-less request on an EXISTING session family is
+  treated as an independent thread founder. A parser keying on the literal
+  `false` never fires; a router keying on family existence alone forks the
+  main thread's post-compaction continuation onto a branch.
+- **`diagnostics.previous_message_id` is ONE hop of the thread chain,
+  family-scoped** (`ThreadOfPredecessorInSession`: exact session match plus
+  the escaped `<session>:%` branches). The chain lives in
+  `conversation_turn.response_message_id` (migration 0030, written by
+  `RecordThread`); the canonical response id is read by
+  `capture.MessageIDFromCanonical`. `cc_prev_req` names a request id rafiki
+  captures nowhere. Founding turns are routed to their own branch at
+  beginCapture with a pre-minted turn id (`TurnIntent.ID`; `uuidv7()` default
+  otherwise), which is why single-turn subagents still appear.
+- **`conversations.child` has no CHECK on `status` and a nullable `pid`**, so
+  a process-less synthetic child faces no schema rejection. The real
+  constraints are `kind NOT NULL`, `spawned_at NOT NULL` and the
+  `conversation_id` FK, which is why the thread's conversation row must exist
+  before the child record.
+- **`RenderRecent` has returned nil since B4**, and every rendered read path
+  for a normalizing child went through it. Rendered reads for a resolvable
+  child are served from `conversation_message` now (`Controller.dbRecent`,
+  routed by resolvability, not kind; fundi stays db-bound even when the id
+  does not resolve).
+- **`ON CONFLICT (conversation_id, ordinal) DO NOTHING` is correct for request
+  messages and was corruption for responses.** Request rows stay lenient
+  (first-seen wins on replay); response appends are STRICT:
+  `ErrOrdinalOccupied`, non-retryable (`isRetryableDB` deliberately excludes
+  it), the proxy failTurns. Never close the asymmetry from either side.
+- **`authorAttribution` (pkg/server) is the single decision point both capture
+  entry points route through**; it was a hardcoded `"human"` literal at both,
+  so every Claude Code subagent turn was recorded human-authored (4988 vs 6
+  in the investigated database). Any NEW capture entry point must decide
+  author_kind, never default it.
+- **Two independent witnesses to the subagent tree join on `message.id`**: the
+  proxy sees HTTP and knows the thread; the child supervisor sees stream-json
+  and knows the spawning `parent_tool_use_id` (`SubagentFrame`). The
+  supervisor's `OnSubagent` hook fires ASYNCHRONOUSLY per qualifying frame and
+  dedupes after the DB lookup (each frame carries a NEW message id, so a
+  pre-lookup dedupe is impossible and a post-first-success short-circuit is
+  wrong with concurrent subagents). The stream-json `request_id` (`req_...`,
+  cc_prev_req's target) is still decoded by nothing.
+- **The label `rafiki/native-subagent` is spelled in two packages that cannot
+  import each other**: `labelNativeSubagent` writes it (cmd/rafikid),
+  `rail.NativeSubagentLabel` reads it (pkg/tui). Grep the other side before
+  changing either (the `mcpPath`/`mcpFacePath` drift class).
+- **A thread's founding request never shares the main thread's ordinal space:
+  the proxy pre-mints its turn id and routes it to its own branch**, creating
+  the synthetic child in beginCapture on the founding request itself. The
+  discriminator is family existence + cc_is_subagent; an unflagged auxiliary
+  founder (the titler and quota probe in measured traffic) keeps the root-row
+  behavior and its response append fails LOUDLY on collision. Confirmed
+  against eval traffic 2026-09-10; if a future Claude Code flags those
+  helpers, they branch automatically with no code change.
