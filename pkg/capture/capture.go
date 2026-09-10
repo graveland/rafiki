@@ -237,6 +237,30 @@ func (s *CaptureStore) ThreadOfPredecessorInSession(ctx context.Context, session
 	return threadID, nil
 }
 
+// SessionFamilyExists reports whether any conversation of the session's
+// family exists yet: the bare "<session>" root row (branches are only ever
+// created after it). One indexed lookup on the (external_ref, driven_by)
+// unique index, run pre-upstream in the proxy's beginCapture; it is the
+// discriminator between the session's MAIN founding turn (family absent:
+// bare ref, thread_id NULL) and an INDEPENDENT thread's founding turn
+// (family present, no resolvable predecessor: a Task subagent, the titler,
+// the quota probe, which route to their own branch). A probe error is the
+// caller's to classify, never a root decision made here.
+func (s *CaptureStore) SessionFamilyExists(ctx context.Context, session string) (bool, error) {
+	if session == "" {
+		return false, nil
+	}
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM conversations.conversation
+		    WHERE external_ref = $1 AND driven_by = 'client')`, session).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("session family exists: %w", err)
+	}
+	return exists, nil
+}
+
 // EnsureConversationByExternalRef correlates a client session (external_ref,
 // e.g. X-Rafiki-Session) to one conversation: it reuses an existing row with
 // the same external_ref + driven_by, else creates a fresh conversation. Used by
@@ -276,6 +300,7 @@ func (s *CaptureStore) EnsureConversationByExternalRef(ctx context.Context, ref 
 }
 
 type TurnIntent struct {
+	ID             string // optional pre-minted turn id (UUID); empty keeps the DB default (uuidv7())
 	ConversationID string
 	Ordinal        int
 	Model          string
@@ -290,6 +315,9 @@ type TurnIntent struct {
 // InsertTurnIntent write-aheads the turn's request row and returns its
 // surrogate id plus created_at, which together are the update key for the later
 // CompleteTurn/FailTurn call (the pair prunes the update to a single chunk).
+// t.ID, when set, reserves that UUID as the row's id instead of the uuidv7()
+// default: the proxy pre-mints a founding turn's id so it can route the
+// founding request to the branch named after it before the row exists.
 // Ordinal is retained only as an ordering hint, not an update key — intra-turn
 // retries and cross-run correlation must never collide on it.
 func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turnID string, createdAt time.Time, err error) {
@@ -298,10 +326,11 @@ func (s *CaptureStore) InsertTurnIntent(ctx context.Context, t TurnIntent) (turn
 		protocol = string(store.ProtocolAnthropic)
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.conversation_turn (conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol)
-		 VALUES ($1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9) RETURNING id::text, created_at`,
+		`INSERT INTO conversations.conversation_turn (id, conversation_id, ordinal, status, model, request, source, author_user_id, author_kind, prefix_hash, protocol)
+		 VALUES (COALESCE($10::uuid, uuidv7()),$1,$2,'pending',$3,$4,$5,$6::uuid,$7,$8,$9) RETURNING id::text, created_at`,
 		t.ConversationID, t.Ordinal, nullify(t.Model), nullifyBytes(jsonbSafe(t.Request)),
-		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol).Scan(&turnID, &createdAt)
+		nullify(t.Source), nullUUID(t.AuthorUserID), nullify(t.AuthorKind), nullify(t.PrefixHash), protocol,
+		nullUUID(t.ID)).Scan(&turnID, &createdAt)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -835,9 +864,12 @@ func (s *CaptureStore) AppendResponseMessage(ctx context.Context, convID, turnID
 //     a set id means a subagent thread and is inherited.
 //   - No resolvable predecessor makes the turn a thread root: thread_id NULL
 //     (main thread) when the billing header does not mark it a subagent, its
-//     own id (a new thread) when it does. A new thread still lands on the root
-//     row for this one request; its own id is what the thread's later turns
-//     resolve to a branch.
+//     own id (a new thread) when it does. The proxy pre-mints that founding
+//     turn's id and routes the founding REQUEST to the branch named after it
+//     (beginCapture), so a new thread never shares the root row's ordinal
+//     space at all; this method still stamps thread_id = turnID on the row so
+//     later turns resolve, and so a founding request whose response was lost
+//     (its append failed) keeps its thread identity.
 //
 // The predecessor lookup is family-scoped (the session's root conversation and
 // every "<session>:<threadID>" branch, same shape as

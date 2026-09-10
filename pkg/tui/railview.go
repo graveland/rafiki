@@ -83,7 +83,7 @@ func nativeTag(n rail.Node) string {
 // The clamp matters in both directions: railMin keeps a two-agent cockpit from
 // a sliver, and railMaxFrac stops one absurdly-named agent eating the
 // transcript. The budget counts everything renderRail puts in the plain row —
-// cursor, indent, glyph, name, native tag, kind tag, badge and cost — because those are what get
+// cursor, indent, glyph, name, native tag, kind tag, badge and cost, because those are what get
 // clipped.
 func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 	want := railMin

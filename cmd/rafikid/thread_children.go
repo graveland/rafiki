@@ -46,6 +46,13 @@ func threadChildID(parentChildID, threadID string) string {
 // the supervisor hook, which fires on every frame the subagent emits and
 // re-applies both on the next one; a silent loss would need the whole turn to
 // end inside that window.
+//
+// conversationID is the branch conversation row the founding turn landed on.
+// Reserved for the persisting-children future (the documented
+// rafiki/native-subagent durability key): today the synthetic child lives only
+// in the in-memory store, which has nowhere to carry a conversation id, so the
+// parameter is accepted and dropped. It must never be read as "the child
+// records this conversation".
 func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID string) error {
 	if parentChildID == "" || threadID == "" {
 		return fmt.Errorf("ensure thread child: parent and thread are both required")

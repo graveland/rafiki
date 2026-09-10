@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/net/http2"
 
 	"go.graveland.dev/rafiki/pkg/capture"
@@ -453,6 +454,10 @@ type captureRef struct {
 	createdAt      time.Time
 	on             bool
 	session        string // X-Rafiki-Session the thread was routed on; the family RecordThread scopes its lookup to
+	prevMessageID  string // diagnostics.previous_message_id, parsed once in beginCapture
+	isSubagent     bool   // cc_is_subagent, parsed once in beginCapture (absent billing header means false)
+	hasBilling     bool   // a billing header was present (gates the claude thread debug log)
+	billing        claudethread.Billing
 	reqBody        []byte // decomposed post-stream in streamAndCapture (see beginCapture)
 	prefixHash     string
 	recordRequests bool // per-session recording opt-in (X-Rafiki-Record-Requests)
@@ -1098,6 +1103,31 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	// (append) or a response orphaned past missing request rows (decompose).
 	// Re-mark the turn errored instead, so the gap is visible rather than a silent
 	// complete-without-response.
+	// Thread classification and routing (native-subagent attribution). The
+	// lookup in beginCapture chose the conversation row; this write is what
+	// later turns resolve their own conversation from: prevMessageID chains
+	// backwards, ownMsg is the chain key this turn publishes, and isSubagent
+	// (cc_is_subagent, present only when true) decides whether an absent
+	// predecessor is a new subagent thread root or the main thread. Both ids
+	// were parsed once in beginCapture and ride the captureRef.
+	//
+	// RecordThread runs BEFORE the append-error early returns below, on
+	// purpose: the thread identity must not be a casualty of a capture write
+	// failure. A founding turn whose response is lost (an ordinal collision, a
+	// decompose failure) still gets its thread_id stamped here, so the
+	// thread's next turn resolves to the branch instead of re-founding on the
+	// root row. RecordThread is best-effort and never fails the turn.
+	ownMsg := capture.MessageIDFromCanonical(canonical)
+	if cr.hasBilling {
+		p.logger.Debug("claude thread",
+			"conversation", cr.convID, "turn", cr.turnID,
+			"is_subagent", cr.isSubagent, "entrypoint", cr.billing.Entrypoint,
+			"prev_message_id", cr.prevMessageID, "own_message_id", ownMsg,
+			"chained", cr.prevMessageID != "")
+	}
+	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, cr.prevMessageID, ownMsg, cr.isSubagent); terr != nil {
+		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
+	}
 	nextOrdinal, derr := p.store.DecomposeRequest(capCtx, cr.convID, cr.turnID, cr.createdAt, cr.reqBody, cr.prefixHash)
 	if derr != nil {
 		p.logger.Warn("proxy capture: decompose request failed", "conversation", cr.convID, "error", derr)
@@ -1109,26 +1139,6 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 		p.logger.Warn("proxy capture: append response message failed", "conversation", cr.convID, "error", aerr)
 		p.failTurn(r, cr, "append response failed: "+aerr.Error())
 		return
-	}
-	// Thread classification and routing (native-subagent attribution). The
-	// lookup in beginCapture chose the conversation row; this write is what
-	// later turns resolve their own conversation from: prevMessageID chains
-	// backwards, ownMsg is the chain key this turn publishes, and isSubagent
-	// (cc_is_subagent, present only when true) decides whether an absent
-	// predecessor is a new subagent thread root or the main thread.
-	prevMsg := claudethread.PreviousMessageID(cr.reqBody)
-	ownMsg := capture.MessageIDFromCanonical(canonical)
-	isSubagent := false
-	if b, ok := claudethread.BillingFromRequest(cr.reqBody); ok {
-		isSubagent = b.IsSubagent
-		p.logger.Debug("claude thread",
-			"conversation", cr.convID, "turn", cr.turnID,
-			"is_subagent", b.IsSubagent, "entrypoint", b.Entrypoint,
-			"prev_message_id", prevMsg, "own_message_id", ownMsg,
-			"chained", prevMsg != "")
-	}
-	if terr := p.store.RecordThread(capCtx, cr.session, cr.convID, cr.turnID, cr.createdAt, prevMsg, ownMsg, isSubagent); terr != nil {
-		p.logger.Warn("proxy capture: record thread failed", "conversation", cr.convID, "error", terr)
 	}
 }
 
@@ -1338,6 +1348,15 @@ func surfaceProviderError(body []byte) ([]byte, bool) {
 // must not overwrite an entrypoint it did not set.
 func authorAttribution(reqBody []byte, source string) (authorKind, outSource string) {
 	b, ok := claudethread.BillingFromRequest(reqBody)
+	return authorAttributionParsed(b, ok, source)
+}
+
+// authorAttributionParsed is the decision table behind authorAttribution,
+// taking an already-parsed billing header so the client-driven path (which
+// parses the body once in beginCapture) does not lex the request body a
+// second time. The reqBody variant remains for callers with no parsed header
+// in hand (the OpenAI face) and for the unit tests pinning the table.
+func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (authorKind, outSource string) {
 	if !ok || !b.IsSubagent {
 		return "human", source
 	}
@@ -1355,6 +1374,38 @@ func authorAttribution(reqBody []byte, source string) (authorKind, outSource str
 // DecomposeRequest resolves the (possibly rebased) horizon itself, post-stream,
 // where the DB read belongs. cr.on=false (proxy still forwards) on any failure
 // setting up the turn itself.
+//
+// Thread routing (three cases):
+//
+//  1. The request's diagnostics.previous_message_id resolves to a turn in the
+//     session's family → that turn's thread (the main thread keeps the bare
+//     session ref; a subagent thread resolves to its branch).
+//
+//  2. No resolvable predecessor AND the session family does not exist yet →
+//     the session's MAIN founding turn: bare ref, thread_id NULL.
+//
+//  3. No resolvable predecessor AND the family exists AND the request carries
+//     cc_is_subagent → an INDEPENDENT thread founding its first request (a
+//     Task subagent, the titler, the quota probe): the turn id is pre-minted
+//     HERE, threadID = that id, and the request routes to <session>:<id> from
+//     its first request. Founding on
+//     the branch is what keeps the founding request's ordinal space off the
+//     main thread's rows: landed on the root, its small message count collides
+//     with ordinals the main thread already occupies and the strict response
+//     append fails, which (before the pre-mint) both lost the founding
+//     response and destroyed the thread identity. The synthetic child is
+//     materialized here too, so a single-turn subagent still appears in the
+//     rail, rafiki list and the cost rollup.
+//
+//     The cc_is_subagent requirement is load-bearing, not decorative: a
+//     MAIN-thread request can also arrive with no resolvable predecessor on
+//     an existing family (Claude Code's post-compaction request, whose
+//     history was replaced by a summary (TestMessagesProxyCompactionRebases)
+//     drives exactly that shape). The flag is absent on every main-thread
+//     turn and present on every non-main one, so it is what separates "the
+//     main thread continues" from "an independent thread starts". A founder
+//     that omits the flag keeps the pre-fix behavior (root row), never a
+//     spuriously forked main thread.
 func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model string) captureRef {
 	if p.store == nil {
 		return captureRef{} // capture-less (no store configured)
@@ -1393,14 +1444,44 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// thread, every Task subagent and the titler under one session header, so
 	// without this they share a conversation row and race on one ordinal space.
 	// One indexed lookup; a miss is a thread root, never a guess.
+	// PreviousMessageID and BillingFromRequest are parsed ONCE here and carried
+	// on the captureRef: streamAndCapture and RecordThread's call site use the
+	// carried values, so a multi-MB conversation body is not re-lexed per
+	// request just to re-read the same two fields.
+	prevMsg := claudethread.PreviousMessageID(reqBody)
+	billing, hasBilling := claudethread.BillingFromRequest(reqBody)
+	isSubagent := billing.IsSubagent
 	threadID := ""
+	mintedTurnID := "" // set only for an independent thread's founding request
 	if session != "" {
-		prevMsg := claudethread.PreviousMessageID(reqBody)
 		tid, terr := p.store.ThreadOfPredecessorInSession(r.Context(), session, prevMsg)
-		if terr != nil {
+		switch {
+		case terr != nil:
 			p.logger.Warn("proxy capture: thread lookup failed", "session", session, "error", terr)
-		} else {
+		case tid != "":
 			threadID = tid
+		default:
+			// No resolvable predecessor. Family absent → the session's main
+			// founding turn (bare ref, threadID ""). Family present → an
+			// independent thread (subagent, titler, quota probe): pre-mint the
+			// founding turn's id and route this request to the branch named
+			// after it, so its ordinal space never touches the main thread's
+			// rows. A probe error is treated as family-absent (the pre-fix
+			// behavior), never as evidence of a thread.
+			family := false
+			if probe, ok := p.store.(interface {
+				SessionFamilyExists(ctx context.Context, session string) (bool, error)
+			}); ok {
+				family, terr = probe.SessionFamilyExists(r.Context(), session)
+				if terr != nil {
+					p.logger.Warn("proxy capture: session family probe failed", "session", session, "error", terr)
+					family = false
+				}
+			}
+			if family && isSubagent {
+				mintedTurnID = uuid.Must(uuid.NewV7()).String()
+				threadID = mintedTurnID
+			}
 		}
 	}
 	convID, err := p.store.ResolveThreadConversation(r.Context(), baseRef, threadID)
@@ -1410,7 +1491,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	// A non-root thread is a Task subagent. Give it a child record so lineage,
 	// the rail, rafiki list, agent_list and cost rollup all see it. Never for
-	// the root thread, which is already a real child.
+	// the root thread, which is already a real child. Called from here (not
+	// only after a later turn resolves) so a single-turn subagent's synthetic
+	// child materializes on its founding request.
 	if threadID != "" && p.threadObserver != nil {
 		if eerr := p.threadObserver.EnsureThreadChild(session, threadID, convID); eerr != nil {
 			p.logger.Warn("proxy capture: ensure thread child failed",
@@ -1421,9 +1504,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	// Request is no longer stored verbatim on the turn row — DecomposeRequest
 	// below covers it as conversation_message rows.
 	prefixHash := routing.PrefixHash(reqBody)
-	authorKind, turnSource := authorAttribution(reqBody, source)
+	authorKind, turnSource := authorAttributionParsed(billing, hasBilling, source)
 	turnID, createdAt, err := p.store.InsertTurnIntent(r.Context(), capture.TurnIntent{
-		ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
+		ID: mintedTurnID, ConversationID: convID, Ordinal: 0, Model: model, Request: nil,
 		Source: turnSource, AuthorUserID: ownerUserID, AuthorKind: authorKind, PrefixHash: prefixHash,
 	})
 	if err != nil {
@@ -1432,7 +1515,9 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 	return captureRef{
 		convID: convID, turnID: turnID, createdAt: createdAt, on: true,
-		session: session, reqBody: reqBody, prefixHash: prefixHash,
+		session: session, prevMessageID: prevMsg,
+		isSubagent: isSubagent, hasBilling: hasBilling, billing: billing,
+		reqBody: reqBody, prefixHash: prefixHash,
 		recordRequests: r.Header.Get("X-Rafiki-Record-Requests") == "1",
 	}
 }

@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/google/uuid"
+
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -1998,4 +2000,189 @@ func TestThreadOfPredecessorInSessionEscapesTheSessionWildcard(t *testing.T) {
 	lookup("msg_"+tb, ts)        // found on the branch through the LIKE arm
 	lookup("msg_"+td, "")        // the decoy is another session's family; it must not match
 	lookup("msg_never_seen", "") // a miss, never a most-recent-turn guess
+}
+
+// TestSessionFamilyExistsIsTheFoundingDiscriminator pins the one-query
+// discriminator the proxy's beginCapture runs pre-upstream: family absent on
+// a fresh session (the main thread's founding turn), present once the bare
+// root row exists, empty session never a family.
+func TestSessionFamilyExistsIsTheFoundingDiscriminator(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name() + "_" + time.Now().Format("150405.000000000")
+
+	if got, err := s.SessionFamilyExists(ctx, ""); err != nil || got {
+		t.Fatalf("empty session: got (%v, %v), want (false, nil)", got, err)
+	}
+	if got, err := s.SessionFamilyExists(ctx, session); err != nil || got {
+		t.Fatalf("fresh session: got (%v, %v), want (false, nil): family absent means MAIN turn 1", got, err)
+	}
+	if _, err := s.ResolveThreadConversation(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session,
+	}, ""); err != nil {
+		t.Fatalf("ResolveThreadConversation: %v", err)
+	}
+	if got, err := s.SessionFamilyExists(ctx, session); err != nil || !got {
+		t.Fatalf("after root creation: got (%v, %v), want (true, nil): family present means an unresolvable predecessor is an INDEPENDENT thread", got, err)
+	}
+}
+
+// TestIndependentFoundingRequestLandsOnItsOwnBranch is the reviewer's probe
+// scenario, now green: with the main thread's rows occupying ordinals 0..2 on
+// the root row, an independent thread's founding request (its turn id
+// pre-minted by the proxy) routes to its own branch, its response appends
+// there without colliding, its thread_id is its own id, its turn 2 resolves
+// to the same branch, and nothing it wrote appears on the root conversation
+// the parent child renders.
+func TestIndependentFoundingRequestLandsOnItsOwnBranch(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name() + "_" + time.Now().Format("150405.000000000")
+	ref := ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session}
+
+	// Main turn 1 on the bare ref, then occupy the root row's ordinals 0..2
+	// exactly as a two-message main request plus its response does.
+	root, err := s.ResolveThreadConversation(ctx, ref, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation root: %v", err)
+	}
+	tMain, atMain, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent main: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, tMain, atMain, "", "msg_main", false); err != nil {
+		t.Fatalf("RecordThread main: %v", err)
+	}
+	next, err := s.DecomposeRequest(ctx, root, tMain, atMain, []byte(`{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}`), "h")
+	if err != nil {
+		t.Fatalf("decompose main: %v", err)
+	}
+	if next != 2 {
+		t.Fatalf("root horizon = %d, want 2", next)
+	}
+	if err := s.AppendResponseMessage(ctx, root, tMain, atMain, next, []byte(`{"id":"msg_main","role":"assistant","content":[]}`), 1, 1, "end_turn"); err != nil {
+		t.Fatalf("append main response: %v", err)
+	}
+
+	// The founding request: family exists, no resolvable predecessor. The
+	// proxy mints the turn id and routes to <session>:<id> BEFORE the row
+	// exists; InsertTurnIntent must reserve that id.
+	exists, err := s.SessionFamilyExists(ctx, session)
+	if err != nil || !exists {
+		t.Fatalf("SessionFamilyExists = (%v, %v), want (true, nil)", exists, err)
+	}
+	minted := uuid.Must(uuid.NewV7()).String()
+	branch, err := s.ResolveThreadConversation(ctx, ref, minted)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation branch: %v", err)
+	}
+	if branch == root {
+		t.Fatal("an independent founding request must land on its own branch row, not the root")
+	}
+	tF, atF, err := s.InsertTurnIntent(ctx, TurnIntent{ID: minted, ConversationID: branch, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent founding: %v", err)
+	}
+	if tF != minted {
+		t.Fatalf("founding turn id = %s, want the pre-minted %s (the DB default must not re-mint)", tF, minted)
+	}
+	if err := s.RecordThread(ctx, session, branch, tF, atF, "", "msg_sub1", true); err != nil {
+		t.Fatalf("RecordThread founding: %v", err)
+	}
+
+	// The probe's failing step, now green: the founding response appends on
+	// the BRANCH at ordinal 1 even though the root row holds ordinals 0..2.
+	nextF, err := s.DecomposeRequest(ctx, branch, tF, atF, []byte(`{"messages":[{"role":"user","content":"quick task"}]}`), "h")
+	if err != nil {
+		t.Fatalf("decompose founding: %v", err)
+	}
+	if err := s.AppendResponseMessage(ctx, branch, tF, atF, nextF, []byte(`{"id":"msg_sub1","role":"assistant","content":[]}`), 1, 1, "end_turn"); err != nil {
+		t.Fatalf("append founding response: %v (the collision this fix removes)", err)
+	}
+
+	// Thread identity: the founding turn is its own thread root, and turn 2
+	// resolves to the same branch.
+	var thread string
+	if err := pool.QueryRow(ctx,
+		`SELECT coalesce(thread_id::text, '') FROM conversations.conversation_turn WHERE id=$1::uuid`,
+		tF).Scan(&thread); err != nil {
+		t.Fatalf("read founding thread_id: %v", err)
+	}
+	if thread != minted {
+		t.Errorf("founding turn thread_id = %s, want its own pre-minted id %s", thread, minted)
+	}
+	tid2, err := s.ThreadOfPredecessorInSession(ctx, session, "msg_sub1")
+	if err != nil {
+		t.Fatalf("ThreadOfPredecessorInSession turn 2: %v", err)
+	}
+	if tid2 != minted {
+		t.Fatalf("subagent turn 2 resolved thread %q, want the founding turn's branch %s", tid2, minted)
+	}
+	conv2, err := s.ResolveThreadConversation(ctx, ref, tid2)
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation turn 2: %v", err)
+	}
+	if conv2 != branch {
+		t.Fatalf("subagent turn 2 landed on %s, want the founding branch %s", conv2, branch)
+	}
+
+	// MINOR 4's assertion: nothing the founding turn wrote is on the root
+	// conversation, so the parent child's rendered logs carry no ghost reply.
+	var rootMsgs int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
+		root).Scan(&rootMsgs); err != nil {
+		t.Fatalf("count root messages: %v", err)
+	}
+	if rootMsgs != 3 {
+		t.Errorf("root conversation has %d messages, want the main thread's 3 only", rootMsgs)
+	}
+	var wantRef string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref FROM conversations.conversation WHERE id=$1::uuid`, branch).Scan(&wantRef); err != nil {
+		t.Fatalf("read branch external_ref: %v", err)
+	}
+	if wantRef != session+":"+minted {
+		t.Errorf("branch external_ref = %q, want %q", wantRef, session+":"+minted)
+	}
+}
+
+// TestMainTurn1OnAFreshSessionKeepsNullThreadID pins the root invariant the
+// founding discriminator must preserve: the session's MAIN turn 1 (family
+// absent, no predecessor) stays on the bare session row with thread_id NULL,
+// and the pre-minted-id path is never taken for it.
+func TestMainTurn1OnAFreshSessionKeepsNullThreadID(t *testing.T) {
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name() + "_" + time.Now().Format("150405.000000000")
+	ref := ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session}
+
+	exists, err := s.SessionFamilyExists(ctx, session)
+	if err != nil || exists {
+		t.Fatalf("SessionFamilyExists on a fresh session = (%v, %v), want (false, nil)", exists, err)
+	}
+	root, err := s.ResolveThreadConversation(ctx, ref, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation: %v", err)
+	}
+	t1, at1, err := s.InsertTurnIntent(ctx, TurnIntent{ConversationID: root, Model: "m"})
+	if err != nil {
+		t.Fatalf("InsertTurnIntent: %v", err)
+	}
+	if err := s.RecordThread(ctx, session, root, t1, at1, "", "msg_"+t1, false); err != nil {
+		t.Fatalf("RecordThread: %v", err)
+	}
+	var got, threadID string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref, coalesce(thread_id::text, '') FROM conversations.conversation c
+		   JOIN conversations.conversation_turn t ON t.conversation_id = c.id
+		  WHERE t.id=$1::uuid`, t1).Scan(&got, &threadID); err != nil {
+		t.Fatalf("read turn row: %v", err)
+	}
+	if got != session {
+		t.Errorf("conversation external_ref = %q, want the bare session %q", got, session)
+	}
+	if threadID != "" {
+		t.Errorf("main turn 1 thread_id = %s, want NULL", threadID)
+	}
 }

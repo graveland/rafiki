@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
@@ -54,9 +55,12 @@ type fakeProxyStore struct {
 	// answers with, standing in for a request on a Claude Code subagent thread.
 	// Empty (the default) is a root-thread request.
 	threadID        string
+	familyExists    bool   // what SessionFamilyExists answers (default false: a fresh session)
+	familyErr       error  // when set, SessionFamilyExists returns it
 	lastThreadID    string // threadID the last ResolveThreadConversation received
 	lastResolvedRef string // external_ref the last ResolveThreadConversation received
 	lastIntentConv  string // conversation the last InsertTurnIntent landed on
+	lastIntentID    string // TurnIntent.ID the last InsertTurnIntent received (a pre-minted founding turn)
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
@@ -83,9 +87,19 @@ func (s *fakeProxyStore) ThreadOfPredecessorInSession(ctx context.Context, sessi
 	return s.threadID, nil
 }
 
+// SessionFamilyExists models the real store's discriminator. Implementing it
+// on the fake keeps the default FALSE: a fresh session, the main-thread
+// founding case, which is what every pre-existing test assumes.
+func (s *fakeProxyStore) SessionFamilyExists(ctx context.Context, session string) (bool, error) {
+	_ = ctx
+	_ = session
+	return s.familyExists, s.familyErr
+}
+
 func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.intents++
 	f.lastIntentConv = t.ConversationID
+	f.lastIntentID = t.ID
 	f.lastIntentModel = t.Model
 	f.lastIntentSource = t.Source
 	f.lastIntentAuthorKind = t.AuthorKind
@@ -199,7 +213,7 @@ func TestMessagesProxySourceHeaderOverridesEntrypoint(t *testing.T) {
 
 func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
 	// A successful stream whose CompleteTurn write fails must not strand the turn
-	// as 'pending' — the proxy falls back to FailTurn so it lands as 'error'.
+	// as 'pending'; the proxy falls back to FailTurn so it lands as 'error'.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -230,7 +244,7 @@ func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
 
 func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
 	// A successful stream whose response write fails must not strand the turn
-	// as 'pending' — the proxy falls back to FailTurn so it lands as 'error'.
+	// as 'pending'; the proxy falls back to FailTurn so it lands as 'error'.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1941,4 +1955,166 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 			t.Errorf("FailTurn calls = %d, want 0", fs.fails)
 		}
 	})
+}
+
+// newStreamUpstream returns an Anthropic-shaped SSE upstream answering one
+// assistant message with the given id, the shape every thread-routing test
+// below replays.
+func newStreamUpstream(msgID string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"id":"`+msgID+`","usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n")
+	}))
+}
+
+// TestMainThreadTurn1OnAFreshSessionKeepsTheBareRef pins routing case 2: a
+// request with no resolvable predecessor on a session whose family does not
+// exist yet is the session's MAIN founding turn. It keeps the bare session
+// external_ref, mints nothing, and never notifies the observer (the root
+// thread is already a real child).
+func TestMainThreadTurn1OnAFreshSessionKeepsTheBareRef(t *testing.T) {
+	upstream := newStreamUpstream("msg_own")
+	defer upstream.Close()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	obs := &stubThreadObserver{}
+	fs := &fakeProxyStore{familyExists: false}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+	p.SetThreadObserver(obs)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "c_fresh_main")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if fs.lastThreadID != "" {
+		t.Errorf("ResolveThreadConversation threadID = %q, want \"\" (main turn 1 keeps the bare ref)", fs.lastThreadID)
+	}
+	if fs.lastResolvedRef != "c_fresh_main" {
+		t.Errorf("resolved external_ref = %q, want the bare session value", fs.lastResolvedRef)
+	}
+	if fs.lastIntentID != "" {
+		t.Errorf("TurnIntent.ID = %q, want empty (the DB default mints the main thread's turn id)", fs.lastIntentID)
+	}
+	if len(obs.calls) != 0 {
+		t.Errorf("observer calls = %v, want none: the root thread is a real child", obs.calls)
+	}
+}
+
+// TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread pins the
+// discriminator's conservative arm: a request with no resolvable predecessor
+// on an existing family that does NOT carry cc_is_subagent is a MAIN-thread
+// turn, not an independent founder. This is Claude Code's post-compaction
+// shape (history replaced by a summary, previous_message_id gone); routing it
+// to a branch would strand every later main turn off the root row.
+func TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread(t *testing.T) {
+	upstream := newStreamUpstream("msg_own")
+	defer upstream.Close()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	obs := &stubThreadObserver{}
+	fs := &fakeProxyStore{familyExists: true} // family exists, flag absent
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+	p.SetThreadObserver(obs)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "c_compacted")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if fs.lastThreadID != "" {
+		t.Errorf("ResolveThreadConversation threadID = %q, want empty: without cc_is_subagent a predecessorless turn is the main thread", fs.lastThreadID)
+	}
+	if fs.lastResolvedRef != "c_compacted" {
+		t.Errorf("resolved external_ref = %q, want the bare session value", fs.lastResolvedRef)
+	}
+	if fs.lastIntentID != "" {
+		t.Errorf("TurnIntent.ID = %q, want empty: the main thread never pre-mints", fs.lastIntentID)
+	}
+	if len(obs.calls) != 0 {
+		t.Errorf("observer calls = %v, want none", obs.calls)
+	}
+}
+
+// TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver pins
+// routing case 3, the reviewer's probe scenario: a request with no resolvable
+// predecessor on a session whose family ALREADY exists is an independent
+// thread's founding request (a Task subagent, the titler, the quota probe).
+// The proxy mints the founding turn's id in Go, routes the request to the
+// branch named after it from its first request, hands that id to
+// InsertTurnIntent, and tells the observer HERE, so a single-turn subagent's
+// synthetic child materializes on the founding request itself. Landed on the
+// root row instead, the founding request's small message count collides with
+// ordinals the main thread already occupies, the strict response append
+// fails, and (before the pre-mint) the lost response destroyed the thread
+// identity with it.
+func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing.T) {
+	upstream := newStreamUpstream("msg_own")
+	defer upstream.Close()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	obs := &stubThreadObserver{}
+	fs := &fakeProxyStore{familyExists: true}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+	p.SetThreadObserver(obs)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true,
+		"system":[{"type":"text","text":"x-anthropic-billing-header:cc_version=2.1.267.019;cc_entrypoint=sdk-cli;cc_is_subagent=true"}]}`))
+	req.Header.Set("X-Rafiki-Session", "c_found")
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if _, err := uuid.Parse(fs.lastIntentID); err != nil {
+		t.Fatalf("InsertTurnIntent received TurnIntent.ID = %q, want a pre-minted UUID", fs.lastIntentID)
+	}
+	if want := "c_found:" + fs.lastIntentID; fs.lastResolvedRef != want {
+		t.Errorf("resolved external_ref = %q, want the branch named after the pre-minted turn %q", fs.lastResolvedRef, want)
+	}
+	if fs.lastIntentConv != "conv-branch" {
+		t.Errorf("turn intent landed on conversation %q, want the founding turn's own branch row", fs.lastIntentConv)
+	}
+	if len(obs.calls) != 1 || obs.calls[0] != "c_found|"+fs.lastIntentID+"|conv-branch" {
+		t.Errorf("observer calls = %v, want [%s] on the founding request itself (single-turn subagents must still appear)", obs.calls, "c_found|"+fs.lastIntentID+"|conv-branch")
+	}
+}
+
+// TestRecordThreadRunsBeforeAFailedResponseAppend pins the insurance reorder:
+// a capture-write failure after a successful stream must not destroy the
+// thread identity. RecordThread runs before the append-error early return, so
+// even a founding turn whose response could not be appended is stamped and
+// the thread's next turn resolves to the branch instead of re-founding.
+func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
+	upstream := newStreamUpstream("msg_own")
+	defer upstream.Close()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{
+		appendErr: fmt.Errorf("%w: conversation c ordinal 5", capture.ErrOrdinalOccupied),
+	}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","stream":true,"messages":[],
+			"diagnostics":{"previous_message_id":"msg_prev"}}`))
+	p.ServeHTTP(rec, req)
+
+	if fs.fails == 0 {
+		t.Fatal("FailTurn calls = 0, want 1 (the append failure is still loud)")
+	}
+	if fs.threads != 1 {
+		t.Errorf("RecordThread calls = %d, want 1: the thread stamp must precede the append-error return", fs.threads)
+	}
 }

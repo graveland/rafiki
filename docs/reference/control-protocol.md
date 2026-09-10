@@ -557,10 +557,13 @@ gets its own ordinal space. Which thread a request belongs to is decided from
 flag: a turn whose predecessor is the main thread keeps the bare session value
 (that convention is `thread_id IS NULL` on the turn row), and a turn of a
 subagent thread resolves to the branch named after the turn that founded the
-thread. A turn with no resolvable predecessor is a thread root: the main
-thread when `cc_is_subagent` is absent, a new thread when it is set (that
-turn still lands on the root row for its first request). Concurrent thread
-roots share the root row's ordinal space for their first request only. The `:<threadID>` suffix namespace is daemon-reserved: a
+thread. A turn with no resolvable predecessor is a thread root: when the
+session's family of conversations does not exist yet it is the main thread's
+founding turn (bare session value, `thread_id IS NULL`); when the family
+exists it is an independent thread (a Task subagent, the titler, the quota
+probe), and the proxy pre-mints that turn's id and routes the request to the
+branch named after it from its first request, so a founding request never
+shares the main thread's ordinal space. The `:<threadID>` suffix namespace is daemon-reserved: a
 caller that puts `:<id>` inside its own `X-Rafiki-Session` value collides with
 branch refs of the session it names.
 
