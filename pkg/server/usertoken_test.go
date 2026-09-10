@@ -470,3 +470,124 @@ func TestProvenanceFollowsTheCredential(t *testing.T) {
 		})
 	}
 }
+
+// A registered per-child secret resolves to a ProvenanceChildToken identity
+// naming exactly one child — no X-Rafiki-Session header involved, unlike the
+// per-boot attribution path.
+func TestChildTokenResolvesToChildProvenance(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildTokenLookup(func(token string) (string, string, bool) {
+		if token == "child-c-secret-1" {
+			return "c_1", "u_owner1", true
+		}
+		return "", "", false
+	})
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer child-c-secret-1")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if id == nil || id.ChildID != "c_1" || id.UserID != "u_owner1" || id.Via != ProvenanceChildToken {
+		t.Fatalf("identity = %+v, want Via ProvenanceChildToken with ChildID c_1 and UserID u_owner1", id)
+	}
+}
+
+// The per-child secret must NEVER reach the TTL cache: a cached entry
+// outlives the child and keeps answering for a dead id. The lookup is
+// consulted on every resolve, so a secret that stops resolving — child
+// closed, secret expired — stops resolving on the very next request.
+func TestChildTokenNotCached(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Minute)
+	var calls atomic.Int64
+	a.SetChildTokenLookup(func(token string) (string, string, bool) {
+		if token != "child-c-secret-1" {
+			return "", "", false
+		}
+		if calls.Add(1) == 1 {
+			return "c_1", "u_owner1", true
+		}
+		return "", "", false // the child died between the two requests
+	})
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer child-c-secret-1")
+	rec, id := serve(a, req)
+	if rec.Code != 200 {
+		t.Fatalf("first request: status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.Via != ProvenanceChildToken || id.ChildID != "c_1" {
+		t.Fatalf("first request: identity = %+v, want the child identity", id)
+	}
+
+	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer child-c-secret-1")
+	rec2, id2 := serve(a, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("second request: status = %d, want 401 — a cached child identity would still answer here", rec2.Code)
+	}
+	if id2 != nil && id2.Via == ProvenanceChildToken {
+		t.Fatalf("second request: identity = %+v, the child secret was served from cache", id2)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("lookup calls = %d, want 2 (both resolves must consult it)", calls.Load())
+	}
+}
+
+// ProvenanceChildToken is a child credential, not a user one: it must fail
+// the same IsUserCredential gate every other child path fails.
+func TestChildTokenIsNotUserCredential(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildTokenLookup(func(token string) (string, string, bool) {
+		if token == "child-c-secret-1" {
+			return "c_1", "u_owner1", true
+		}
+		return "", "", false
+	})
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer child-c-secret-1")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.IsUserCredential() {
+		t.Fatalf("identity = %+v, IsUserCredential must be false for ProvenanceChildToken", id)
+	}
+}
+
+// The new lookup sits BEFORE the per-boot comparison, so it must not shadow
+// the existing per-boot path: the shared secret plus X-Rafiki-Session still
+// resolves to ProvenanceChildAttributed, with the child-token lookup wired
+// and answering false for the boot secret.
+func TestPerBootSecretStillChildAttributed(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildOwnerLookup(func(childID string) (string, bool) {
+		if childID == "c_known" {
+			return "u_owner1", true
+		}
+		return "", false
+	})
+	a.SetChildTokenLookup(func(token string) (string, string, bool) {
+		return "", "", false // never claims the per-boot secret
+	})
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer childsecret")
+	req.Header.Set("X-Rafiki-Session", "c_known")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.UserID != "u_owner1" || id.Via != ProvenanceChildAttributed {
+		t.Fatalf("identity = %+v, want Via ProvenanceChildAttributed with UserID u_owner1", id)
+	}
+}

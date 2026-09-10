@@ -30,6 +30,11 @@ const (
 	// it, but the credential itself is the daemon's shared boot secret, so
 	// agent-control surfaces refuse it.
 	ProvenanceChildAttributed
+	// ProvenanceChildToken: a per-child secret minted by the daemon at spawn.
+	// Unlike ProvenanceChildAttributed it names exactly ONE child without
+	// consulting any header, so agent-control surfaces accept it and bind to
+	// that child's own position in the tree. It dies with the child.
+	ProvenanceChildToken
 )
 
 // Identity is the authenticated caller of a proxy face.
@@ -43,7 +48,12 @@ const (
 type Identity struct {
 	UserID   string
 	Username string
-	Via      CredentialProvenance
+	// ChildID names the ONE child this identity is bound to. Set only for
+	// ProvenanceChildToken; empty for every other provenance, including a
+	// real user credential, which is what marks the interactive caller as
+	// outside the forest.
+	ChildID string
+	Via     CredentialProvenance
 }
 
 // IsUserCredential reports whether the identity was resolved from a real user

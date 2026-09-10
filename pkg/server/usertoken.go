@@ -21,6 +21,10 @@ import (
 // fail the request.
 type ChildOwnerLookup func(childID string) (userID string, ok bool)
 
+// ChildTokenLookup resolves a per-child secret to the child that holds it and
+// that child's owner. ok is false for an unknown or expired secret.
+type ChildTokenLookup func(token string) (childID, ownerUserID string, ok bool)
+
 // DefaultAuthCacheTTL bounds how long a verified token is trusted without
 // re-checking the store. It is also exactly the revocation lag: `user rm`
 // takes effect on the face within this window.
@@ -46,6 +50,7 @@ type UserTokenAuth struct {
 	cache map[string]cachedIdentity
 
 	childOwnerLookup ChildOwnerLookup
+	childTokenLookup ChildTokenLookup
 }
 
 type cachedIdentity struct {
@@ -75,6 +80,17 @@ func NewUserTokenAuth(store users.Store, childToken string, ttl time.Duration) *
 // SetQuotaStore.
 func (a *UserTokenAuth) SetChildOwnerLookup(lookup ChildOwnerLookup) {
 	a.childOwnerLookup = lookup
+}
+
+// SetChildTokenLookup wires the daemon-level lookup that resolves a per-child
+// secret — minted by the daemon at spawn and delivered to the child by
+// environment only — to the child that holds it and that child's owner. Nil
+// (the zero value, before this is called) is a supported configuration:
+// resolve() then never matches a per-child secret, exactly as before this
+// hook existed. Call once before serving traffic — not safe to change
+// concurrently with requests in flight, same as SetChildOwnerLookup.
+func (a *UserTokenAuth) SetChildTokenLookup(lookup ChildTokenLookup) {
+	a.childTokenLookup = lookup
 }
 
 // errAuthUnavailable distinguishes "I could not check" from "invalid".
@@ -158,8 +174,22 @@ func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *
 	return &id
 }
 
-// resolve returns the identity for token, consulting the cache first.
+// resolve returns the identity for token, consulting the cache first. The
+// per-child and per-boot child credentials are both checked before it.
 func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID string) (Identity, error) {
+	// A per-child secret resolves BEFORE the per-boot comparison, so it can
+	// never be shadowed by (or collapse into) the shared boot secret, and
+	// before the cache below. Deliberately never cached: a cached entry
+	// outlives the child and keeps answering for a dead id, so closing or
+	// revoking a child must take effect on the next request rather than
+	// after the TTL. The lookup is an in-memory daemon map, not the users
+	// store, so skipping the cache here is not a database round trip.
+	if a.childTokenLookup != nil {
+		if cid, uid, ok := a.childTokenLookup(token); ok && cid != "" && uid != "" {
+			return Identity{UserID: uid, ChildID: cid, Via: ProvenanceChildToken}, nil
+		}
+	}
+
 	// The child secret never reaches the store: it is a daemon-internal
 	// credential minted per boot, and it must keep working in bootstrap mode
 	// when no users exist at all. Constant-time so it is not timing-probeable.
