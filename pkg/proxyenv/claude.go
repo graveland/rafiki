@@ -162,12 +162,16 @@ type mcpServerConfig struct {
 	Headers map[string]string `json:"headers"`
 }
 
-// mcpConfigArg returns the --mcp-config=<json> argv element that wires the
-// rafiki agent-control MCP surface into a Claude Code session pointed at
-// baseURL. The token travels as a placeholder Claude Code expands from the
+// mcpConfigJSON returns the bare inline MCP-server JSON document that wires
+// the rafiki agent-control MCP surface into a Claude Code session pointed at
+// baseURL. It is the shape claudeargv.Params.MCPConfig expects — Build itself
+// prepends the "--mcp-config=" prefix — so rendering the flag belongs to the
+// argv producer (Claude below), never to this value: a caller that feeds the
+// returned string to Params verbatim must get one --mcp-config element, not a
+// doubled one. The token travels as a placeholder Claude Code expands from the
 // RAFIKI_MCP_TOKEN environment variable at connect time, never inline —
 // argv is world-readable via ps on this machine.
-func mcpConfigArg(baseURL string) string {
+func mcpConfigJSON(baseURL string) string {
 	doc := struct {
 		MCPServers map[string]mcpServerConfig `json:"mcpServers"`
 	}{
@@ -187,7 +191,7 @@ func mcpConfigArg(baseURL string) string {
 		// json.Marshal cannot fail on this shape.
 		panic("proxyenv: marshaling mcp config: " + err.Error())
 	}
-	return "--mcp-config=" + string(b)
+	return string(b)
 }
 
 // Values are the argv-shaped decisions Claude makes, returned as data so the
@@ -195,7 +199,11 @@ func mcpConfigArg(baseURL string) string {
 // argv. Returning argv is what let two producers emit --model and forced
 // daraja to reconcile them by scanning argv at launch.
 type Values struct {
-	// MCPConfig is the inline JSON for claudeargv.Params.MCPConfig. Empty
+	// MCPConfig is the bare inline MCP-server JSON for
+	// claudeargv.Params.MCPConfig, which itself prepends the --mcp-config=
+	// prefix when it renders argv. This is the bare document, NOT the rendered
+	// element — every consumer feeds it to Params verbatim, and a prefix here
+	// would come out of Build doubled (--mcp-config=--mcp-config={...}). Empty
 	// when no proxy URL is configured.
 	MCPConfig string
 	// ModelArgs is the custom-model-option --model pair for
@@ -212,7 +220,12 @@ type Values struct {
 func Claude(environ []string, o ClaudeOptions) (env []string, args []string) {
 	env, v := ClaudeEnv(environ, o)
 	if v.MCPConfig != "" {
-		args = append(args, v.MCPConfig)
+		// The prefix is rendered HERE, at the argv producer, against the bare
+		// JSON Values.MCPConfig carries — mirroring claudeargv.Build, which
+		// prepends the same prefix to Params.MCPConfig. The rendered element
+		// is byte-identical to the mcpConfigArg element this wrapper used to
+		// append.
+		args = append(args, "--mcp-config="+v.MCPConfig)
 	}
 	args = append(args, v.ModelArgs...)
 	return env, args
@@ -246,7 +259,7 @@ func ClaudeEnv(environ []string, o ClaudeOptions) ([]string, Values) {
 	}
 	env = append(env, mcpTokenEnv+"="+mcpToken)
 	var v Values
-	v.MCPConfig = mcpConfigArg(o.URL)
+	v.MCPConfig = mcpConfigJSON(o.URL)
 	if !o.PassthroughAuth {
 		token := o.Token
 		if token == "" {

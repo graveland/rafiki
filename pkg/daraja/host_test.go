@@ -157,6 +157,37 @@ func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	}
 }
 
+// TestHostMCPConfigYieldsExactlyOneElementNotDoubled pins the standalone
+// daraja path's consumption of proxyenv.Values.MCPConfig through
+// HostOptions.MCPConfig: the value is BARE JSON and must render as EXACTLY ONE
+// --mcp-config= element in the child's argv. The pre-fix producer assigned the
+// full rendered element, so this path — which feeds the value to
+// claudeargv.Params.MCPConfig verbatim — emitted --mcp-config=--mcp-config={...},
+// a live bug invisible to host-level fixtures that constructed bare JSON
+// directly.
+func TestHostMCPConfigYieldsExactlyOneElementNotDoubled(t *testing.T) {
+	h := NewHost(HostOptions{
+		Binary:    testEchoBinary(t),
+		Spec:      ChildSpec{Kind: KindClaude},
+		MCPConfig: `{"mcpServers":{"rafiki":{"type":"http","url":"http://127.0.0.1:8035/mcp"}}}`,
+	})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	argv := collectStdout(t, h, "stream-json", 5*time.Second)
+	if got := strings.Count(argv, "--mcp-config="); got != 1 {
+		t.Fatalf("child argv %q carries %d --mcp-config= elements, want exactly 1 (a doubled prefix means the host was fed a rendered element instead of bare JSON)", argv, got)
+	}
+	if strings.Contains(argv, "--mcp-config=--mcp-config=") {
+		t.Fatalf("child argv %q carries the doubled --mcp-config prefix", argv)
+	}
+	if !strings.Contains(argv, `--mcp-config={"mcpServers"`) {
+		t.Fatalf("child argv %q missing the bare-JSON --mcp-config element", argv)
+	}
+}
+
 // A spec's AppendSystemPrompt and ExtraArgs must both reach the built argv:
 // the prompt as its own pair, the extra args appended after everything else.
 func TestArgvCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {

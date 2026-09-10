@@ -73,12 +73,14 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	if !strings.Contains(h, "\n") {
 		t.Error("headers not newline-separated; a comma silently collapses them into one")
 	}
-	// vals carries the argv decisions as data now: an --mcp-config element
-	// and, with Model set, the --model pair that buildClaudeArgv puts in the
-	// child's argv as ModelArgs — REPLACING the plain pair, so the child
+	// vals carries the argv decisions as data now: MCPConfig is the BARE
+	// inline JSON (buildClaudeArgv feeds it to claudeargv.Params.MCPConfig,
+	// whose Build prepends the flag — a rendered element here would come out
+	// doubled) and, with Model set, the --model pair that buildClaudeArgv puts
+	// in the child's argv as ModelArgs — REPLACING the plain pair, so the child
 	// carries exactly one --model.
-	if !strings.HasPrefix(vals.MCPConfig, "--mcp-config=") {
-		t.Errorf("vals.MCPConfig = %q, want an --mcp-config= element", vals.MCPConfig)
+	if !strings.HasPrefix(vals.MCPConfig, "{") {
+		t.Errorf("vals.MCPConfig = %q, want the bare inline JSON document", vals.MCPConfig)
 	}
 	if !slices.Equal(vals.ModelArgs, []string{"--model", "glm-5.2"}) {
 		t.Errorf("vals.ModelArgs = %v, want the --model pair", vals.ModelArgs)

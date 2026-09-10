@@ -224,6 +224,21 @@ func (a *AdminServer) Launch(
 	if c.GetRecordRequests() {
 		argv = append(argv, "--record-requests")
 	}
+	if c.GetAppendSystemPrompt() != "" {
+		argv = append(argv, "--append-system-prompt", c.GetAppendSystemPrompt())
+	}
+	// ExtraArgs are the operator escape hatch and carry no serve-side flag of
+	// their own: they are appended verbatim after a bare "--" separator, which
+	// pflag treats as the end of flags — runDarajaServe receives them as
+	// positional args and they land in HostOptions.Spec.ExtraArgs
+	// (claudeargv.Params.ExtraArgs, appended last so they can override
+	// anything). Without the separator a flag-shaped extra ("--model", "x")
+	// would be parsed as a SERVE flag — mangling the mapped --model above or
+	// dying on an unknown flag — instead of surviving into the child's argv.
+	if len(c.GetExtraArgs()) > 0 {
+		argv = append(argv, "--")
+		argv = append(argv, c.GetExtraArgs()...)
+	}
 
 	// The ticket is one-shot auth for the daraja's reverse dial. It must not
 	// travel in argv because every process on the machine can read it via ps —

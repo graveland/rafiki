@@ -52,7 +52,7 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", "glm-5.2", // vals.ModelArgs — exactly one --model
-		vals.MCPConfig, // the full --mcp-config=<json> element, in canonical position
+		"--mcp-config=" + vals.MCPConfig, // Build renders the flag against the bare-JSON Values
 		"--resume", "sess-abc",
 		"--append-system-prompt", "be brief",
 		"--dangerously-skip-permissions",

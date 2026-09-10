@@ -48,7 +48,7 @@ func newDarajaServeCmd() *cobra.Command {
 			"from argv: 1b-i's Launch builds a command line anyone on the machine\n" +
 			"can read with ps. The ticket is replaced by a reconnect credential on\n" +
 			"the first successful hello, which is held in memory only.",
-		Args: cobra.NoArgs,
+		Args: cobra.ArbitraryArgs,
 		RunE: runDarajaServe,
 	}
 	cmd.Flags().String("connect", "", "rafi kID address to connect to (host:port)")
@@ -60,6 +60,7 @@ func newDarajaServeCmd() *cobra.Command {
 	cmd.Flags().String("model", "", "model to pass to the child")
 	cmd.Flags().String("resume", "", "session id to resume")
 	cmd.Flags().String("permission-mode", "", "child permission mode")
+	cmd.Flags().String("append-system-prompt", "", "system prompt to append to the child's own")
 	cmd.Flags().String("proxy-url", "", "rafiki proxy URL to point the child at (empty: talk to Anthropic directly)")
 	cmd.Flags().Bool("passthrough", false, "omit ANTHROPIC_AUTH_TOKEN so the child's own Claude subscription bills instead of rafiki's proxy token")
 	cmd.Flags().Int("auto-compact-window", 0, "override Claude Code's assumed context window for a proxied model (0: leave its default)")
@@ -67,7 +68,7 @@ func newDarajaServeCmd() *cobra.Command {
 	return cmd
 }
 
-func runDarajaServe(cmd *cobra.Command, _ []string) error {
+func runDarajaServe(cmd *cobra.Command, args []string) error {
 	connect, connectSocket, err := resolveDarajaConnectFlags(
 		mustGetString(cmd, "connect"),
 		mustGetString(cmd, "connect-socket"))
@@ -87,6 +88,7 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	model := mustGetString(cmd, "model")
 	resume := mustGetString(cmd, "resume")
 	permMode := mustGetString(cmd, "permission-mode")
+	appendPrompt := mustGetString(cmd, "append-system-prompt")
 	proxyURL := mustGetString(cmd, "proxy-url")
 	passthrough, _ := cmd.Flags().GetBool("passthrough")
 	autoCompact, _ := cmd.Flags().GetInt("auto-compact-window")
@@ -119,7 +121,10 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 	})
 	// values.MCPConfig and values.ModelArgs are already empty when proxyURL
 	// == "" (proxyenv.ClaudeEnv's own early return), so ChildSpec.argv()'s
-	// plain --model is used unproxied.
+	// plain --model is used unproxied. values.MCPConfig is the BARE inline
+	// JSON — the shape HostOptions.MCPConfig and claudeargv.Params.MCPConfig
+	// both expect, with Build prepending the flag — so the rendered child argv
+	// carries exactly one --mcp-config element, never a doubled prefix.
 
 	host := daraja.NewHost(daraja.HostOptions{
 		Binary:      binary,
@@ -129,10 +134,16 @@ func runDarajaServe(cmd *cobra.Command, _ []string) error {
 		MCPConfig:   values.MCPConfig,
 		ModelArgs:   values.ModelArgs,
 		Spec: daraja.ChildSpec{
-			Kind:           kind,
-			Model:          model,
-			ResumeSession:  resume,
-			PermissionMode: permMode,
+			Kind:               kind,
+			Model:              model,
+			ResumeSession:      resume,
+			PermissionMode:     permMode,
+			AppendSystemPrompt: appendPrompt,
+			// Positional args (everything after the "--" the executor puts
+			// before the spec's ExtraArgs) are the operator escape hatch and
+			// are handed to the child verbatim, appended last by
+			// claudeargv.Build so they can override anything above them.
+			ExtraArgs: args,
 		},
 	})
 	if err := host.Start(); err != nil {

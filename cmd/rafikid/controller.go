@@ -2708,11 +2708,19 @@ func buildDarajaAbortSpec(snap childstore.Snapshot, sessionID string) *darajapb.
 			// a daemon-managed child has no human to answer an interactive
 			// permission prompt, restarted or not.
 			PermissionMode: "bypassPermissions",
-			// Deliberately NOT populating ProxyUrl/ProxyToken/PassthroughAuth/
-			// AutoCompactWindow/RecordRequests here: those are launch-only
-			// (see the proto comment on ClaudeParams) — daraja's environment
-			// is fixed at ITS OWN process startup and a Restart never rebuilds
-			// it, only argv. The Restart RPC's spec is used purely for argv.
+			// AppendSystemPrompt and ExtraArgs are argv-shaped RESTART fields,
+			// unlike the launch-only block below: daraja rebuilds the child's
+			// argv from this spec on every Restart, so dropping either here
+			// silently restarts the child without the system-prompt appendix
+			// and operator flags it was launched with. (Contrast the
+			// launch-only block — ProxyUrl/ProxyToken/PassthroughAuth/
+			// AutoCompactWindow/RecordRequests — which this function
+			// deliberately omits: those are launch-only (see the proto comment
+			// on ClaudeParams) — daraja's environment is fixed at ITS OWN
+			// process startup and a Restart never rebuilds it, only argv. The
+			// Restart RPC's spec is used purely for argv.)
+			AppendSystemPrompt: snap.AppendSystemPrompt,
+			ExtraArgs:          snap.ExtraArgs,
 		},
 	}
 }
@@ -3468,11 +3476,12 @@ func buildClaudeArgv(req protocol.SpawnRequest, vals proxyenv.Values) []string {
 		PermissionMode:     "bypassPermissions",
 		AppendSystemPrompt: req.AppendSystemPrompt,
 		ExtraArgs:          req.ExtraArgs,
-		// Values.MCPConfig is the FULL --mcp-config=<json> argv element
-		// (proxyenv.mcpConfigArg renders the flag prefix); Params.MCPConfig is
-		// the bare JSON Build itself prepends "--mcp-config=" to. Stripping
-		// the prefix here is what keeps the element from coming out doubled.
-		MCPConfig: strings.TrimPrefix(vals.MCPConfig, "--mcp-config="),
+		// Values.MCPConfig is the bare inline JSON (proxyenv renders the flag
+		// only in its own argv path); Params.MCPConfig is the same bare JSON,
+		// and Build itself prepends "--mcp-config=" to it — which is what keeps
+		// the element from coming out doubled. No stripping here: the producer's
+		// shape is already the shape Params wants.
+		MCPConfig: vals.MCPConfig,
 		ModelArgs: vals.ModelArgs,
 	})
 }

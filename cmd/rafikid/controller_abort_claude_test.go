@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -218,5 +219,32 @@ func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
 	}
 	if got := err.Error(); got != "daraja pool not wired" {
 		t.Fatalf("err = %q, want the daraja-pool-not-wired refusal (proves the label routed to handleDarajaClaudeAbort, not the local-subprocess path)", got)
+	}
+}
+
+// TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields pins the two
+// argv-shaped restart fields the abort spec must round-trip from the snapshot:
+// daraja rebuilds the child's argv from this spec on every Restart, so
+// dropping AppendSystemPrompt or ExtraArgs here silently restarts the child
+// without the system-prompt appendix and operator flags it was launched with.
+// (The launch-only block — proxy URL/token, passthrough, auto-compact,
+// record-requests — stays deliberately omitted: Restart never rebuilds the
+// environment, only argv.)
+func TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields(t *testing.T) {
+	snap := childstore.Snapshot{
+		Model:              "claude-sonnet-5",
+		AppendSystemPrompt: "be terse",
+		ExtraArgs:          []string{"--foo", "bar"},
+	}
+	spec := buildDarajaAbortSpec(snap, "sess-live-sniffed")
+
+	if spec.Claude == nil {
+		t.Fatal("Claude params must not be nil")
+	}
+	if spec.Claude.AppendSystemPrompt != "be terse" {
+		t.Errorf("AppendSystemPrompt = %q, want the snapshot's value preserved across the restart", spec.Claude.AppendSystemPrompt)
+	}
+	if !slices.Equal(spec.Claude.ExtraArgs, []string{"--foo", "bar"}) {
+		t.Errorf("ExtraArgs = %v, want the snapshot's operator args preserved across the restart", spec.Claude.ExtraArgs)
 	}
 }

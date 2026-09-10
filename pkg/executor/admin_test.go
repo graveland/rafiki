@@ -532,3 +532,78 @@ func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
 		}
 	}
 }
+
+// TestLaunchCarriesAppendSystemPromptAndExtraArgs pins the executor launch
+// path's two remaining argv-shaped fields: the appended system prompt as its
+// own --append-system-prompt pair, and the operator's ExtraArgs verbatim after
+// the "--" separator pflag treats as end-of-flags — the separator is what lets
+// a flag-shaped extra survive into the child's argv instead of being parsed as
+// a SERVE flag (mangling a mapped flag or dying on an unknown one). A spec
+// carrying neither must build neither.
+func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-argv",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind: darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{
+				AppendSystemPrompt: "be terse",
+				ExtraArgs:          []string{"--foo", "bar"},
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	cmdline := string(out)
+	for _, want := range []string{
+		"--append-system-prompt be terse",
+		// The separator itself: extras must ride as POSITIONAL args after
+		// "--", not be parsed as serve flags.
+		" -- --foo bar",
+	} {
+		if !strings.Contains(cmdline, want) {
+			t.Errorf("cmdline %q missing %q", cmdline, want)
+		}
+	}
+
+	// The empty case: neither field may appear when the spec does not set it.
+	resp, err = a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-argv-empty",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Launch (empty): %v", err)
+	}
+	pid = int(resp.Msg.GetPid())
+	out, err = exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	cmdline = string(out)
+	for _, unwanted := range []string{"--append-system-prompt", " -- "} {
+		if strings.Contains(cmdline, unwanted) {
+			t.Errorf("empty spec: cmdline %q carries %q", cmdline, unwanted)
+		}
+	}
+}

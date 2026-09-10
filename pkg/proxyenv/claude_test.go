@@ -331,11 +331,13 @@ func TestClaude_NoPassthroughKeepsAuthToken(t *testing.T) {
 }
 
 // renderValues is the argv rendering Claude does over a Values: the literal
-// shape ClaudeEnv's caller is expected to reproduce.
+// shape ClaudeEnv's caller is expected to reproduce. The --mcp-config= prefix
+// is rendered here against the bare JSON Values.MCPConfig carries — mirroring
+// claudeargv.Build, which prepends the same prefix to Params.MCPConfig.
 func renderValues(v Values) []string {
 	var args []string
 	if v.MCPConfig != "" {
-		args = append(args, v.MCPConfig)
+		args = append(args, "--mcp-config="+v.MCPConfig)
 	}
 	return append(args, v.ModelArgs...)
 }
@@ -409,5 +411,42 @@ func TestMCPTokenFallsBackToToken(t *testing.T) {
 	got, _ := envMap(t, env)
 	if got["RAFIKI_MCP_TOKEN"] != "tok" {
 		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "tok")
+	}
+}
+
+// Values.MCPConfig is the BARE inline JSON — the shape claudeargv.Params.MCPConfig
+// expects, with Build itself prepending the flag — while Claude's rendered argv
+// still carries exactly one full --mcp-config=<json> element. The pre-fix
+// producer assigned the rendered element, so every consumer that fed the value
+// to Params verbatim (the daraja standalone host, `rafiki claude`) emitted
+// --mcp-config=--mcp-config={...} and only the daemon's compensating TrimPrefix
+// shim kept the local-subprocess path correct.
+func TestClaudeEnvMCPConfigIsBareJSON(t *testing.T) {
+	_, v := ClaudeEnv(nil, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	if v.MCPConfig == "" {
+		t.Fatal("Values.MCPConfig empty for a proxied session")
+	}
+	if strings.HasPrefix(v.MCPConfig, "--mcp-config=") {
+		t.Errorf("Values.MCPConfig = %q, want the bare JSON document (the flag prefix is the argv renderer's job)", v.MCPConfig)
+	}
+	if !strings.HasPrefix(v.MCPConfig, "{") {
+		t.Errorf("Values.MCPConfig = %q, want an inline JSON document starting with '{'", v.MCPConfig)
+	}
+	if !json.Valid([]byte(v.MCPConfig)) {
+		t.Errorf("Values.MCPConfig is not valid JSON: %q", v.MCPConfig)
+	}
+
+	_, args := Claude(nil, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	count := 0
+	for _, a := range args {
+		if strings.HasPrefix(a, "--mcp-config=") {
+			count++
+			if raw := strings.TrimPrefix(a, "--mcp-config="); raw != v.MCPConfig {
+				t.Errorf("rendered element %q does not carry Values.MCPConfig verbatim (%q)", a, v.MCPConfig)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("args = %v, want exactly one --mcp-config= element, got %d", args, count)
 	}
 }
