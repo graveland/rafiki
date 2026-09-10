@@ -298,15 +298,14 @@ func mcpLedgerCount(t *testing.T, store tasks.Store, userID string) int {
 	return len(rows)
 }
 
-func TestMCPFaceAnonymousCallerGetsNoTools(t *testing.T) {
+// TestUnentitledReturns403 covers the attribution path:
+// the daemon wires childOwnerLookup so the child token + X-Rafiki-Session pair
+// attributes to the owner — the path that bills the child's LLM turns. The
+// resulting identity carries the owner's REAL UserID, so any non-empty-UserID
+// check would admit it; provenance is what refuses it.
+func TestUnentitledReturns403(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
-	// The per-boot child token authenticates against nothing: the identity it
-	// resolves to carries an empty UserID, which is exactly the non-user
-	// credential that must not get agent control.
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{}, "child-secret", time.Second)
-	// The daemon wires childOwnerLookup so the child token + X-Rafiki-Session
-	// pair attributes to the owner — the path that bills the child's LLM
-	// turns. The face must refuse the resulting identity all the same.
 	tokenAuth.SetChildOwnerLookup(func(string) (string, bool) { return "u-owner", true })
 	mux := http.NewServeMux()
 	h := &server.Handler{}
@@ -314,43 +313,10 @@ func TestMCPFaceAnonymousCallerGetsNoTools(t *testing.T) {
 	h.Mount(mux, func(next http.Handler) http.Handler {
 		return tokenAuth.Middleware(traceMiddleware(next))
 	})
-
-	req := httptest.NewRequest(http.MethodPost, mcpFacePath, strings.NewReader(mcpInitializeBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer child-secret")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("child-token initialize: got %d, want 200", rec.Code)
-	}
-	sid := rec.Header().Get("Mcp-Session-Id")
-	if sid == "" {
-		t.Fatal("child-token initialize returned no Mcp-Session-Id")
-	}
-	mcpPost(t, mux, sid, "child-secret", mcpInitializedBody)
-	_, _, msgs := mcpPost(t, mux, sid, "child-secret", mcpListToolsBody)
-	if names := mcpListedToolNames(t, msgs, 2); len(names) != 0 {
-		t.Fatalf("anonymous caller sees %v, want no tools", names)
-	}
-
-	// S1 regression pin: the child token WITH X-Rafiki-Session resolves to
-	// the owner's identity — attribution, not authority. Before provenance
-	// this identity carried a non-empty UserID and sailed through the face's
-	// check to the full tool surface acting as its owner.
 	withSession := func(r *http.Request) { r.Header.Set("X-Rafiki-Session", "c_child1") }
-	code, hdr, _ := mcpPost(t, mux, "", "child-secret", mcpInitializeBody, withSession)
-	if code != http.StatusOK {
-		t.Fatalf("child-attributed initialize: got %d, want 200", code)
-	}
-	sid2 := hdr.Get("Mcp-Session-Id")
-	if sid2 == "" {
-		t.Fatal("child-attributed initialize returned no Mcp-Session-Id")
-	}
-	mcpPost(t, mux, sid2, "child-secret", mcpInitializedBody, withSession)
-	_, _, msgs2 := mcpPost(t, mux, sid2, "child-secret", mcpListToolsBody, withSession)
-	if names := mcpListedToolNames(t, msgs2, 2); len(names) != 0 {
-		t.Fatalf("child-attributed caller sees %v, want no tools", names)
+	code, _, _ := mcpPost(t, mux, "", "child-secret", mcpInitializeBody, withSession)
+	if code != http.StatusForbidden {
+		t.Fatalf("child-attributed initialize: got %d, want 403", code)
 	}
 }
 
@@ -408,15 +374,22 @@ func mcpCallText(t *testing.T, res *mcp.CallToolResult) string {
 	return tc.Text
 }
 
-func TestMCPFaceWithoutControllerServesNoTools(t *testing.T) {
+func TestNoControllerReturns503(t *testing.T) {
 	face := newMCPFace(discardLogger(), nil, nil, "test")
-	srv := face.getServer(mcpRequestFor("u-alice"))
-	if srv == nil {
-		t.Fatal("getServer returned nil before SetController; StreamableHTTPHandler would answer 400")
+	if srv := face.getServer(mcpRequestFor("u-alice")); srv != nil {
+		t.Fatal("getServer built a server before SetController; the nil must reach Routes so it can answer 503")
 	}
-	names := mcpToolNames(t, mcpConnect(t, srv))
-	if len(names) != 0 {
-		t.Fatalf("toolless server exposed %v", names)
+	// The status, not the nil server, is the answer an MCP client reads.
+	mux := http.NewServeMux()
+	h := &server.Handler{}
+	h.MCPPath, h.MCP = face.Routes()
+	h.Mount(mux, func(next http.Handler) http.Handler { return next })
+	code, hdr, _ := mcpPost(t, mux, "", "tok-alice", mcpInitializeBody)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("initialize before the controller is wired: got %d, want 503", code)
+	}
+	if ra := hdr.Get("Retry-After"); ra == "" {
+		t.Fatal("503 carried no Retry-After; a client cannot know to retry")
 	}
 }
 
@@ -489,6 +462,12 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 	}
 }
 
+// TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
+// identity binding. The SDK's own hijack guard never fires on this mount:
+// sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
+// the SDK's RequireBearerToken middleware populates, and rafiki authenticates
+// with UserTokenAuth instead — so the face binds each Mcp-Session-Id to the
+// identity that initialized it and rejects mismatches before dispatch.
 // TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
 // identity binding. The SDK's own hijack guard never fires on this mount:
 // sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
@@ -599,5 +578,102 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 				t.Errorf("%s: promises a settlement notification this surface does not deliver", name)
 			}
 		}
+	}
+}
+
+// TestChildTokenGetsTwelveTools: a per-child token identity binds a
+// controllerSpawner scoped to the child's own subtree, and the surface is the
+// same twelve-tool set a user credential gets — scope comes from
+// controllerSpawner.authorize, never a per-tool allowlist. The exact twelve
+// names are the assertion of record (test/integration/mcp_test.go).
+func TestChildTokenGetsTwelveTools(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	// The DB-less fixture's *quota.Store is nil, so quota_status declines by
+	// its own rule; stub the reader for the full-set assertion, exactly as
+	// TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists does.
+	opts := tools.ToolOpts{
+		Agents: newControllerSpawner(face.controller(), "c-child"),
+		Tasks:  face.taskStoreFor(face.controller()),
+		Quota:  mcpStubQuota{},
+	}
+	var names []string
+	for _, tool := range mcpToolset(opts, discardLogger()) {
+		names = append(names, tool.Name())
+	}
+	slices.Sort(names)
+	want := []string{
+		"agent_kill",
+		"agent_list",
+		"agent_models",
+		"agent_send",
+		"agent_set_budget",
+		"agent_spawn",
+		"agent_view",
+		"quota_status",
+		"task_add",
+		"task_drop",
+		"task_list",
+		"task_update",
+	}
+	if !slices.Equal(names, want) {
+		t.Fatalf("child-token tool set = %v, want %v", names, want)
+	}
+
+	// The identity, not just the spawner, drives the binding: a
+	// ProvenanceChildToken request through getServer must materialize a
+	// server (its only decline here would be the DB-less quota one, never a
+	// credential refusal).
+	r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	ctx := server.WithIdentity(r.Context(), &server.Identity{UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken})
+	if srv := face.getServer(r.WithContext(ctx)); srv == nil {
+		t.Fatal("a ProvenanceChildToken identity got no server from getServer")
+	}
+}
+
+// TestSiblingCannotUseSiblingSession pins the (UserID, ChildID) rekey: two
+// children of one owner share a UserID, so a UserID-keyed session map let
+// child B present child A's Mcp-Session-Id and execute against A's bound
+// spawner — a privilege-escalation path between siblings.
+func TestSiblingCannotUseSiblingSession(t *testing.T) {
+	face, ledger := mcpFaceFixture(t)
+	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{}, "child-secret", time.Second)
+	tokenAuth.SetChildTokenLookup(func(token string) (string, string, bool) {
+		switch token {
+		case "child-secret-a":
+			return "c-a", "u-owner", true
+		case "child-secret-b":
+			return "c-b", "u-owner", true
+		}
+		return "", "", false
+	})
+	mux := http.NewServeMux()
+	h := &server.Handler{}
+	h.MCPPath, h.MCP = face.Routes()
+	h.Mount(mux, func(next http.Handler) http.Handler {
+		return tokenAuth.Middleware(traceMiddleware(next))
+	})
+
+	sid := mcpHandshake(t, mux, "child-secret-a")
+
+	// Child B, same owner, child A's session id: refused before any tool
+	// runs, even though the UserIDs match exactly.
+	code, _, _ := mcpPost(t, mux, sid, "child-secret-b", mcpTaskAddBody)
+	if code != http.StatusForbidden {
+		t.Fatalf("sibling on sibling's session: got %d, want 403", code)
+	}
+	if n := mcpLedgerCount(t, ledger, "u-owner"); n != 0 {
+		t.Fatalf("sibling ride-along executed a tool: %d rows", n)
+	}
+
+	// Positive control: child A on its own session still executes.
+	code, _, msgs := mcpPost(t, mux, sid, "child-secret-a", mcpTaskAddBody)
+	if code != http.StatusOK {
+		t.Fatalf("child A on its own session: got %d, want 200", code)
+	}
+	if text, isErr := mcpResultText(t, msgs, 3); isErr {
+		t.Fatalf("task_add failed for the session's own child: %s", text)
+	}
+	if n := mcpLedgerCount(t, ledger, "u-owner"); n != 1 {
+		t.Fatalf("child A's task_add did not reach the ledger: %d rows", n)
 	}
 }

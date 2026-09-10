@@ -49,13 +49,22 @@ type mcpFace struct {
 	fallbackTasks   tasks.Store
 	fallbackTasksMu sync.Mutex
 
-	// sessions binds each Mcp-Session-Id to the user id that initialized it.
+	// sessions binds each Mcp-Session-Id to the caller that initialized it.
 	// The SDK's own hijack guard never fires here — see sessionOwnedBy — so
 	// this map is the per-session identity check. Entries live as long as
 	// their session (pruned on DELETE; cleared by a restart, which also
 	// clears the SDK's own session table).
 	sessionsMu sync.Mutex
-	sessions   map[string]string
+	sessions   map[string]principal
+}
+
+// principal identifies the caller a session is bound to. UserID alone is not
+// enough once children hold credentials: two children of one owner share a
+// UserID, so a UserID-keyed map lets child B present child A's session id and
+// execute against A's bound spawner. An empty ChildID is the interactive user.
+type principal struct {
+	UserID  string
+	ChildID string
 }
 
 func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *quota.Store, ver string) *mcpFace {
@@ -64,7 +73,7 @@ func newMCPFace(logger *slog.Logger, capture *capture.CaptureStore, quotaStore *
 		ledger:   newMCPLedger(capture),
 		quota:    quotaStore,
 		version:  ver,
-		sessions: make(map[string]string),
+		sessions: make(map[string]principal),
 	}
 }
 
@@ -84,8 +93,26 @@ func (f *mcpFace) SetController(c *Controller) {
 func (f *mcpFace) Routes() (string, http.Handler) {
 	sdk := mcp.NewStreamableHTTPHandler(f.getServer, nil)
 	return mcpFacePath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A nil server is an answer, not an empty tool list: MCP clients can
+		// read a status, and the two nil reasons deserve different ones.
+		// ctrl == nil is genuinely transient — the proxy face is built before
+		// the controller is wired (see SetController) and a client can retry
+		// and recover, contrary to what the old toolless-fallback comment
+		// claimed. Every other nil is a credential that authenticated but is
+		// not entitled to agent control.
+		if f.controller() == nil {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "mcp agent-control surface is starting; retry shortly", http.StatusServiceUnavailable)
+			return
+		}
+		id := server.IdentityFromContext(r.Context())
+		if id == nil || (id.Via != server.ProvenanceUser && id.Via != server.ProvenanceChildToken) {
+			http.Error(w, "credential is not entitled to rafiki agent control", http.StatusForbidden)
+			return
+		}
+		p := principal{UserID: id.UserID, ChildID: id.ChildID}
 		sid := r.Header.Get("Mcp-Session-Id")
-		if sid != "" && !f.sessionOwnedBy(sid, spawnOwner(r.Context()).UserID) {
+		if sid != "" && !f.sessionOwnedBy(sid, p) {
 			http.Error(w, "mcp session belongs to another caller or is unknown", http.StatusForbidden)
 			return
 		}
@@ -101,7 +128,7 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 			// handler has returned. Nobody can present the id before this
 			// response reaches them.
 			if newSID := w.Header().Get("Mcp-Session-Id"); newSID != "" {
-				f.bindSession(newSID, spawnOwner(r.Context()).UserID)
+				f.bindSession(newSID, p)
 			}
 		}
 	})
@@ -119,20 +146,20 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 // sessInfo.userID is therefore always empty here and the guard is skipped,
 // so without this map the session id alone would route bob onto alice's
 // bound tools.
-func (f *mcpFace) sessionOwnedBy(sid, userID string) bool {
+func (f *mcpFace) sessionOwnedBy(sid string, p principal) bool {
 	f.sessionsMu.Lock()
 	defer f.sessionsMu.Unlock()
 	owner, ok := f.sessions[sid]
 	// An unknown sid is refused, never dispatched unvalidated: the SDK would
 	// answer "session not found", and a miss here must not be the one path
 	// that bypasses the check.
-	return ok && owner == userID
+	return ok && owner == p
 }
 
-func (f *mcpFace) bindSession(sid, userID string) {
+func (f *mcpFace) bindSession(sid string, p principal) {
 	f.sessionsMu.Lock()
 	defer f.sessionsMu.Unlock()
-	f.sessions[sid] = userID
+	f.sessions[sid] = p
 }
 
 func (f *mcpFace) forgetSession(sid string) {
@@ -144,33 +171,47 @@ func (f *mcpFace) forgetSession(sid string) {
 // getServer builds an MCP server bound to ONE caller, per request.
 //
 // The binding is the point: tools.AgentSpawner takes no caller identity in any
-// method, so the only way to serve two users from one process is to construct
-// a different tool set per request. A single server built at startup and
-// shared would put a user id back into a method parameter, which is one
-// refactor from being a tool argument the model can be prompt-injected into
-// naming.
+// method, so the only way to serve two callers from one process is to
+// construct a different tool set per request. A single server built at
+// startup and shared would put a user id back into a method parameter, which
+// is one refactor from being a tool argument the model can be
+// prompt-injected into naming.
 //
 // The identity arrives on the context, not the headers: UserTokenAuth.Middleware
 // has already authenticated the request and stored it there. Reading the
 // Authorization header here would be a second credential path.
+//
+// The gate reads the credential's provenance, never the resolved UserID: a
+// child-attributed identity carries the owner's UserID (that is exactly
+// the attribution path /v1/messages bills turns through), so a
+// non-empty-UserID check would hand the full tool set to whatever holds
+// the per-boot child token plus its own child id. Two provenances get agent
+// control: a real user credential binds the user spawner, and a per-child
+// token binds a controllerSpawner scoped to that child's own position in the
+// tree — its spawns are authorized against its subtree, nothing more.
+// Every other identity returns nil, which Routes answers with a status (503
+// for a not-yet-wired controller, 403 for an unentitled credential) rather
+// than a toolless server: an MCP client can read a status, and the two
+// reasons deserve different answers.
 func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
-	// The gate reads the credential's provenance, never the resolved UserID: a
-	// child-attributed identity carries the owner's UserID (that is exactly
-	// the attribution path /v1/messages bills turns through), so a
-	// non-empty-UserID check would hand the full tool set to whatever holds
-	// the per-boot child token plus its own child id. One rule governs the
-	// whole surface — only a real user credential gets agent control — and
-	// the toolless server is every other identity's answer, never a 403: the
-	// daemon still starting (no Controller yet) and a non-user credential are
-	// the same shape to an MCP client that cannot recover from either.
 	id := server.IdentityFromContext(r.Context())
 	ctrl := f.controller()
-	if ctrl == nil || id == nil || !id.IsUserCredential() {
-		return mcpserver.New(mcpserver.Options{Version: f.version})
+	if ctrl == nil {
+		return nil // caller returns 503; see Routes
+	}
+	if id == nil {
+		return nil
 	}
 	owner := users.Identity{UserID: id.UserID, Username: id.Username}
-
-	spawner := newUserSpawner(ctrl, owner)
+	var spawner tools.AgentSpawner
+	switch {
+	case id.IsUserCredential():
+		spawner = newUserSpawner(ctrl, owner)
+	case id.Via == server.ProvenanceChildToken:
+		spawner = newControllerSpawner(ctrl, id.ChildID)
+	default:
+		return nil
+	}
 	// A nil *quota.Store must yield a nil INTERFACE value so
 	// QuotaStatusBlueprint's documented decline fires on a DB-less daemon;
 	// a non-nil quotaReader wrapping a nil store would materialize a tool that
