@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -135,4 +137,96 @@ func (c *Controller) HandleSubagentObservation(parentChildID string, obs child.S
 		return
 	}
 	c.noteSubagentToolCall(parentChildID, threadID, obs.ParentToolUseID)
+}
+
+// nativeChildrenOf returns the ids of parentChildID's synthetic thread
+// children. Reads the parent label directly rather than st.Descendants, which
+// walks the whole subtree: a native child can only ever be one hop from the
+// session it was captured on, and it never has children of its own.
+func (c *Controller) nativeChildrenOf(parentChildID string) []string {
+	if parentChildID == "" {
+		return nil
+	}
+	var out []string
+	for _, snap := range c.st.List() {
+		if snap.Native && snap.Labels[childstore.LabelParent] == parentChildID {
+			out = append(out, snap.ChildID)
+		}
+	}
+	return out
+}
+
+// exitNativeChild ends a synthetic thread child. It reports whether the child
+// existed and was not already exited.
+//
+// A native child has no process, so ending it IS a store write: there is
+// nothing to signal and nothing to reap. That also means none of
+// handleChildExit's work applies — no ring to snapshot, no log dump, no MCP
+// secret, no inbox to reset, no executor binding, no lease. What does apply is
+// the pair of exit events, because the rail and every ctrl_child_exited
+// subscriber learn about the transition from those alone.
+//
+// Exit code 0 with no signal: the thread ended, and inventing a signal would
+// claim a death this child never had.
+func (c *Controller) exitNativeChild(childID string) bool {
+	snap, ok := c.st.Get(childID)
+	if !ok || !snap.Native || snap.Status == protocol.StatusExited {
+		return false
+	}
+	now := time.Now()
+	if !c.st.MarkExited(childID, now, 0, "", nil, nil) {
+		return false
+	}
+
+	zero := 0
+	evt := protocol.CtrlChildExited{
+		Type:       protocol.TypeCtrlChildExited,
+		ChildID:    childID,
+		ExitCode:   &zero,
+		LastStatus: string(snap.Status),
+		At:         now.UnixMilli(),
+	}
+	if b, err := json.Marshal(evt); err == nil {
+		c.cm.DeliverToChild(childID, b)
+		c.cm.DeliverToGlobal(b)
+		c.cm.DeliverToMatching(childID, snap.Labels, b)
+	}
+	var code int32
+	c.publishEvent(childID, &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
+			ChildId:  childID,
+			ExitCode: &code,
+		}},
+	})
+	return true
+}
+
+// exitNativeChildrenOf ends every synthetic thread child of parentChildID.
+// Called when the parent exits: a Task subagent runs inside its parent's
+// process, so it cannot outlive it, and leaving it idle forever is what made
+// these children unkillable and uncloseable in the first place.
+func (c *Controller) exitNativeChildrenOf(parentChildID string) {
+	for _, id := range c.nativeChildrenOf(parentChildID) {
+		if c.exitNativeChild(id) {
+			slog.Debug("native subagent ended with its parent", "child", id, "parent", parentChildID)
+		}
+	}
+}
+
+// closeNativeChildrenOf deletes every synthetic thread child of parentChildID
+// and returns the ids it took. Called when the parent is CLOSED, not merely
+// exited: these rows carry a parent label, so a close that left them behind
+// would strand them at the top of the rail pointing at a session that no longer
+// exists. Their transcripts survive, exactly as the parent's does, because
+// nothing references conversations.child.
+//
+// No durable delete: a native child lives only in the in-memory store
+// (EnsureThreadChild never calls writeRecord), so there is no row to remove.
+func (c *Controller) closeNativeChildrenOf(parentChildID string) []string {
+	taken := c.nativeChildrenOf(parentChildID)
+	for _, id := range taken {
+		c.st.Delete(id)
+	}
+	return taken
 }

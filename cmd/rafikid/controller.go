@@ -808,18 +808,22 @@ func (c *Controller) forgetMCPToken(childID string) {
 }
 
 // ConversationID satisfies connectapi.ConversationResolver: it maps a child
-// id to the fundi conversation UUID that owns its persisted message history.
-// Only fundi children have a conversation as their session id (see
-// pkg/fundi/engine.go, which sets SessionID: conv.ID) — a pi or claude
-// child's SessionID means something else entirely (a session file path/id),
-// so this deliberately excludes non-fundi kinds rather than handing their
-// SessionID to a query expecting a UUID.
+// id to the conversation UUID that owns its persisted message history.
+//
+// Delegates to conversationIDForChild, which GetRecent already used, rather
+// than keeping a second resolver: this one gated on KindFundi, so Connect
+// GetHistory answered NotFound for every claude child while GetRecent served
+// the same child's rows happily. A real claude child at least streamed live
+// through the event log and merely lost its backfill; a synthetic thread child
+// (rafiki/native-subagent) has no event log entries at all, so GetHistory is
+// its ONLY source and the cockpit rendered it permanently empty.
 func (c *Controller) ConversationID(childID string) (string, bool) {
 	snap, ok := c.st.Get(childID)
-	if !ok || snap.Kind != protocol.KindFundi || snap.SessionID == "" {
+	if !ok {
 		return "", false
 	}
-	return snap.SessionID, true
+	id := c.conversationIDForChild(snap)
+	return id, id != ""
 }
 
 // recentSource reads the GetRecent branch seam atomically. "" before the
@@ -2166,6 +2170,22 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		c.darajaReg.Forget(childID)
 	}
 
+	// A synthetic thread child has no process, so every lookup below misses and
+	// this used to answer "child not found" for a child the operator could see
+	// in the rail. Ending one is a store write; exitNativeChild does it and
+	// emits the same exit events a real one does.
+	if snap, ok := c.st.Get(childID); ok && snap.Native {
+		if snap.Status == protocol.StatusExited {
+			return control.KillResult{}, &control.ControllerError{
+				Code:    protocol.ErrChildExited,
+				Message: "child has already exited",
+			}
+		}
+		c.exitNativeChild(childID)
+		code := 0
+		return control.KillResult{ExitCode: &code}, nil
+	}
+
 	ch, ok := c.cm.Get(childID)
 	if !ok {
 		if snap, ok2 := c.st.Get(childID); ok2 && snap.Status == protocol.StatusExited {
@@ -2378,6 +2398,16 @@ func (c *Controller) Close(childID string) error {
 		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
 
+	// A synthetic thread child exists only in the in-memory store: no durable
+	// row (EnsureThreadChild never calls writeRecord), no inbox, no daraja, no
+	// executor binding, no log dump. Everything below would be a round trip
+	// asking a database to forget something it was never told, so the store
+	// delete IS the close.
+	if snap.Native {
+		c.st.Delete(childID)
+		return nil
+	}
+
 	// Revoke the daraja's ability to reconnect — the row is going away.
 	// Must run before st.Delete; once the row is gone the OnDisconnect handler
 	// (fired if the daraja was still connected) has no child to label.
@@ -2386,6 +2416,11 @@ func (c *Controller) Close(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	// Its synthetic thread children go with it: they carry a parent label, so
+	// leaving them would strand them at the top of the rail pointing at a
+	// session that no longer exists. Their transcripts survive, exactly as this
+	// child's does.
+	c.closeNativeChildrenOf(childID)
 	// Its watcher entry goes with it: nothing else will poll a binding whose
 	// child cannot receive the news.
 	c.forgetBoundExecutor(childID)
@@ -2464,7 +2499,23 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 				continue
 			}
 		}
+		// snaps was read before the loop, and an earlier iteration's cascade may
+		// already have taken this row: an exited native child appears in
+		// FindByStatus in its own right AND is deleted with its parent, so
+		// without this it would be reported closed twice.
+		if _, still := c.st.Get(s.ChildID); !still {
+			continue
+		}
 		c.st.Delete(s.ChildID)
+		// A cascaded child is closed and belongs in the answer; the guard above
+		// is what keeps it from being named a second time on its own iteration.
+		closed = append(closed, c.closeNativeChildrenOf(s.ChildID)...)
+		// A synthetic thread child has no durable footprint at all, so the
+		// store delete above is its whole close. Same reasoning as Close.
+		if s.Native {
+			closed = append(closed, s.ChildID)
+			continue
+		}
 		// The other deletion path, and the one that leaks without this: a row
 		// for a child forgotten here is never pending-for-a-live-child again
 		// and never terminal, so the retention sweep can never reach it.
@@ -3359,6 +3410,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 			slog.Warn("log dump failed", "child", childID, "error", err)
 		}
 	}
+
+	// A Task subagent runs inside this process, so it dies with it. Before the
+	// exit events below purely for ordering legibility: a subscriber that sees
+	// the parent gone has already been told about its threads.
+	c.exitNativeChildrenOf(childID)
 
 	var exitCode *int
 	if res.Signal == "" {

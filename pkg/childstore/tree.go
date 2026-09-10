@@ -164,9 +164,11 @@ func (s *Store) LiveDescendantCount(ancestorID string) int {
 // depth. The root label narrows the candidate set to one subtree with an
 // O(1) test per child; the chain walk then runs only over that set.
 //
-// Native children (Claude Code Task subagents the proxy synthesized) are not
-// returned: callers walk this list to reason about budgeted cross-process
-// agents, which a synthetic thread child is not.
+// Native children (Claude Code Task subagents the proxy synthesized) ARE
+// returned: agent_list, subtreeSelector and the budget member lists all walk
+// this, and a synthesized Task subagent is a real conversation with real cost.
+// LiveDescendantCount is the one caller that excludes them, because it is the
+// one that feeds the MaxChildren grant.
 //
 // Store has no label index (see store.go) so this scans List(). That is
 // intentional and fine — the store holds tens of children in memory.
@@ -183,11 +185,6 @@ func (s *Store) Descendants(ancestorID string) []Snapshot {
 		if snap.ChildID == ancestorID {
 			continue
 		}
-		// Native rows STAY here: agent_list, subtreeSelector and the budget
-		// member lists walk this function, and a synthesized Task subagent is
-		// a real conversation with real cost that those surfaces must see.
-		// Only LiveDescendantCount excludes them, because only that one feeds
-		// the MaxChildren grant.
 		if r, ok := labelLookup(snap.Labels, LabelRoot, legacyLabelRoot); !ok || r != root {
 			continue
 		}
