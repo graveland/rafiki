@@ -296,7 +296,9 @@ type Controller struct {
 	// lastRecentSource records which branch GetRecent took ("db", "live",
 	// "exited"). Test seam: the branches are otherwise indistinguishable when
 	// every source is empty, which is exactly the failure this guards against.
-	lastRecentSource string
+	// Atomic because GetRecent runs concurrently per control connection; reset
+	// at entry so a not-found call cannot report the previous call's branch.
+	lastRecentSource atomic.Value
 }
 
 type workspaceLabels struct {
@@ -803,7 +805,15 @@ func (c *Controller) ConversationID(childID string) (string, bool) {
 	return snap.SessionID, true
 }
 
+// recentSource reads the GetRecent branch seam atomically. "" before the
+// first call of this Controller.
+func (c *Controller) recentSource() string {
+	v, _ := c.lastRecentSource.Load().(string)
+	return v
+}
+
 func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.RecentResult, error) {
+	c.lastRecentSource.Store("")
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return control.RecentResult{}, &control.ControllerError{
@@ -827,14 +837,14 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 		// Fundi children stay in this branch even when the conversation id does
 		// not resolve (an exited-before-first-turn child): their contract is
 		// db-only, with no disk fallback (TestGetRecentFundiNoDB).
-		c.lastRecentSource = "db"
+		c.lastRecentSource.Store("db")
 		events = c.dbRecent(convID, q)
 		total = len(events)
 		if len(events) > 0 {
 			oldestTS = events[0].Timestamp
 		}
 	} else if alive {
-		c.lastRecentSource = "live"
+		c.lastRecentSource.Store("live")
 		if q.Rendered && ch.Normalizes() {
 			events = ch.RenderRecent(ring.Query{Limit: q.Limit, Since: q.Since})
 			total, oldestTS = ch.RenderStats()
@@ -844,7 +854,7 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 			total, _, oldestTS = r.Stats()
 		}
 	} else {
-		c.lastRecentSource = "exited"
+		c.lastRecentSource.Store("exited")
 		// Exited: pick the snapshot, falling back to the on-disk dump for
 		// orphans reloaded after a restart (in-memory snapshots are lost then).
 		var all []ring.Event

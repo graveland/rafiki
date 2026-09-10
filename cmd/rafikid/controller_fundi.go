@@ -52,6 +52,11 @@ func (c *Controller) conversationIDForChild(snap childstore.Snapshot) string {
 //
 // Not filtered by the compaction horizon, deliberately: callers render the
 // full history with the boundary inline.
+//
+// Honours q.Limit only. q.Since cannot be honoured here (DBToPiFrames stamps
+// render-time timestamps, not capture time), q.Rendered has no raw alternative
+// on this branch, and --raw on a resolvable child receives pi vocabulary rather
+// than the child's backend frames.
 func (c *Controller) dbRecent(conversationID string, q control.RecentQuery) []ring.Event {
 	if c.pool == nil || conversationID == "" {
 		return nil

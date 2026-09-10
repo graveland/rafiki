@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
@@ -149,8 +151,8 @@ func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
 	if res.TotalInBuffer != 0 {
 		t.Fatalf("total = %d, want 0 with no pool", res.TotalInBuffer)
 	}
-	if c.lastRecentSource != "exited" {
-		t.Fatalf("source = %q, want %q", c.lastRecentSource, "exited")
+	if c.recentSource() != "exited" {
+		t.Fatalf("source = %q, want %q", c.recentSource(), "exited")
 	}
 }
 
@@ -168,12 +170,16 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 	childID := "c_claude_dbtest"
 	ctx := t.Context()
 	cleanup := func() {
-		if _, err := pool.Exec(ctx,
+		// t.Context() is canceled before Cleanup functions run, so the deletes
+		// need their own live context or they leak rows into the shared test DB.
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		if _, err := pool.Exec(cctx,
 			`DELETE FROM conversations.conversation_message WHERE conversation_id IN
 			   (SELECT id FROM conversations.conversation WHERE external_ref = $1)`, childID); err != nil {
 			t.Logf("cleanup messages: %v", err)
 		}
-		if _, err := pool.Exec(ctx, `DELETE FROM conversations.conversation WHERE external_ref = $1`, childID); err != nil {
+		if _, err := pool.Exec(cctx, `DELETE FROM conversations.conversation WHERE external_ref = $1`, childID); err != nil {
 			t.Logf("cleanup conversation: %v", err)
 		}
 	}
@@ -210,8 +216,8 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRecent: %v", err)
 	}
-	if c.lastRecentSource != "db" {
-		t.Fatalf("source = %q, want %q", c.lastRecentSource, "db")
+	if c.recentSource() != "db" {
+		t.Fatalf("source = %q, want %q", c.recentSource(), "db")
 	}
 	if res.TotalInBuffer == 0 {
 		t.Fatalf("total = 0, want the persisted frames")
@@ -220,7 +226,7 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 	for _, ev := range res.Events {
 		switch {
 		case bytes.Contains(ev, []byte(`"type":"message_end"`)):
-			sawEnd = bytes.Contains(ev, []byte("hi from the database"))
+			sawEnd = sawEnd || bytes.Contains(ev, []byte("hi from the database"))
 		case bytes.Contains(ev, []byte(`"type":"agent_end"`)):
 			sawAgentEnd = true
 		}

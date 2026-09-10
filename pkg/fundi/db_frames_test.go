@@ -210,7 +210,7 @@ func TestDBToPiFrames_UserWithToolResult(t *testing.T) {
 
 func TestDBToPiFrames_Limit(t *testing.T) {
 	// This test verifies that limit filtering is applied by the caller
-	// (dbRecentForFundi), not by DBToPiFrames itself. DBToPiFrames returns
+	// (dbRecent), not by DBToPiFrames itself. DBToPiFrames returns
 	// all frames; the caller slices.
 	msgs := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock("msg1")),
