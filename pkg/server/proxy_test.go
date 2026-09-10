@@ -1362,13 +1362,17 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 	// Turn 2 — the post-compaction request, exactly how Claude Code drives the
 	// proxy after its own context compaction: full history replaced by a
 	// summary, re-sent under the same X-Rafiki-Session. Message 0 differs from
-	// everything stored, so the anchor comparison diverges and a boundary must
-	// be recorded; the re-anchor guard finds no positional rematch and falls
-	// through to the genuine boundary path.
+	// everything stored, so the anchor comparison diverges; the re-anchor guard
+	// finds no positional rematch and the genuine boundary path runs. The
+	// summary text is the prose Claude Code's real summaries open with: task
+	// 5.1's classifier requires it, and the bare "[summary text]" fixture this
+	// test carried before encoded the mis-tagging bug (any divergent message 0
+	// was tagged a boundary, which is how 19 session preambles became
+	// compaction_summary rows).
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages",
 		strings.NewReader(`{"model":"claude","stream":true,"messages":[`+
-			`{"role":"user","content":"[summary text, different from \"hello\"]"},`+
+			`{"role":"user","content":[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below: Analysis: the user asked about the proxy"}]},`+
 			`{"role":"user","content":"continue"}]}`))
 	req2.Header.Set("X-Rafiki-Session", session)
 	p.ServeHTTP(rec2, req2)

@@ -509,6 +509,12 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 	// That degraded outcome is acceptable; a torn write that bumped nothing
 	// while a marker row existed would not be, which is why the horizon bump
 	// itself is transactional.
+	if !looksLikeCompactionSummary(msg0) {
+		// Structurally divergent but not a summary: a new thread's preamble, or
+		// a client that rewrote its head. Insert at the existing horizon
+		// untagged rather than moving the resume point onto it.
+		return h, false, nil
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("resolve horizon: begin: %w", err)
@@ -529,6 +535,37 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 		return 0, false, fmt.Errorf("resolve horizon: commit: %w", err)
 	}
 	return hPrime, true, nil
+}
+
+// compactionMarkers are the phrases Claude Code's own compaction summary opens
+// with. Structural divergence alone is not enough to tag a boundary: a thread's
+// first message is its own session preamble and always diverges, which is how
+// 19 preambles came to be tagged compaction_summary while the two real
+// summaries in the same database were tagged NULL.
+var compactionMarkers = []string{
+	"This session is being continued from a previous conversation",
+	"ran out of context",
+	"The conversation is summarized below",
+}
+
+// looksLikeCompactionSummary reports whether a message's content reads as a
+// compaction summary rather than a session preamble. Conservative in the safe
+// direction: a missed boundary leaves the horizon where it was and the next
+// request re-anchors, while a false boundary moves the resume point onto an
+// unrelated message and loses the history before it.
+func looksLikeCompactionSummary(content []byte) bool {
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil || len(blocks) == 0 {
+		return false
+	}
+	for _, m := range compactionMarkers {
+		if strings.Contains(blocks[0].Text, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // reanchorHorizon searches for a positional re-match of the request's head

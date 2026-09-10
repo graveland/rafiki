@@ -712,6 +712,16 @@ func requireJSONEqual(t *testing.T, got, want string) {
 	}
 }
 
+// summaryContent renders message-0 content that reads as a genuine Claude Code
+// compaction summary: one text block opening with the phrases a real summary
+// carries. The fixtures these tests used before ("SUMMARY: earlier
+// conversation", "SUMMARY-A") encoded the bug resolveHorizon's classifier
+// exists to fix: structurally divergent, but no summary prose, so they must
+// not be tagged a boundary.
+func summaryContent(analysis string) string {
+	return `[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below: Analysis: ` + analysis + `"}]`
+}
+
 // TestDecomposeRequest_FirstPostCompactRebases: the first request whose message
 // 0 diverges from the stored anchor rebases to a new horizon, tags message 0
 // kind='compaction_summary', and returns horizon+len(messages).
@@ -733,7 +743,7 @@ func TestDecomposeRequest_FirstPostCompactRebases(t *testing.T) {
 	}
 
 	// Post-compact: Claude Code sends a compaction summary as message 0.
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY: earlier conversation"},{"role":"user","content":"next question"}]}`)
+	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("the user asked for a refactor") + `},{"role":"user","content":"next question"}]}`)
 	next := runTurn(t, ctx, s, convID, req3, 90, 8)
 	if next != 5 {
 		t.Fatalf("turn 3 next ordinal = %d, want 5 (horizon 3 + two messages)", next)
@@ -761,7 +771,7 @@ func TestDecomposeRequest_FirstPostCompactRebases(t *testing.T) {
 	if inTok == nil || *inTok != 1400 {
 		t.Fatalf("ordinal 3 input_tokens = %v, want 1400 (the immediately prior turn's usage)", inTok)
 	}
-	requireJSONEqual(t, content, `"SUMMARY: earlier conversation"`)
+	requireJSONEqual(t, content, summaryContent("the user asked for a refactor"))
 
 	// The post-boundary ordinary row carries no kind.
 	kind4, _, _, content4 := requireKindRow(t, ctx, pool, convID, 4)
@@ -786,7 +796,7 @@ func TestDecomposeRequest_SecondPostCompactDedups(t *testing.T) {
 	if next := runTurn(t, ctx, s, convID, req1, 1234, 10); next != 2 {
 		t.Fatalf("turn 1 next ordinal = %d, want 2", next)
 	}
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY: earlier conversation"},{"role":"user","content":"next question"}]}`)
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("the user asked for a refactor") + `},{"role":"user","content":"next question"}]}`)
 	if next := runTurn(t, ctx, s, convID, req2, 90, 8); next != 4 {
 		t.Fatalf("turn 2 next ordinal = %d, want 4", next)
 	}
@@ -838,13 +848,13 @@ func TestDecomposeRequest_SecondDifferentSummaryRebasesAgain(t *testing.T) {
 	if next := runTurn(t, ctx, s, convID, req1, 1234, 10); next != 2 {
 		t.Fatalf("turn 1 next ordinal = %d, want 2", next)
 	}
-	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY-A"},{"role":"user","content":"q1"}]}`)
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q1"}]}`)
 	if next := runTurn(t, ctx, s, convID, req2, 90, 8); next != 4 {
 		t.Fatalf("turn 2 next ordinal = %d, want 4", next)
 	}
 
 	// A different summary: rebase again.
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY-B"},{"role":"user","content":"q2"}]}`)
+	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-B details") + `},{"role":"user","content":"q2"}]}`)
 	next := runTurn(t, ctx, s, convID, req3, 60, 6)
 	if next != 6 {
 		t.Fatalf("turn 3 next ordinal = %d, want 6 (horizon 4 + two messages)", next)
@@ -864,7 +874,7 @@ func TestDecomposeRequest_SecondDifferentSummaryRebasesAgain(t *testing.T) {
 	if kind == nil || *kind != "compaction_summary" || role == nil || *role != "user" {
 		t.Fatalf("ordinal 2 kind/role = %v/%v, want compaction_summary/user (first boundary preserved)", kind, role)
 	}
-	requireJSONEqual(t, content, `"SUMMARY-A"`)
+	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
 	if inTok == nil || *inTok != 1234 {
 		t.Fatalf("ordinal 2 input_tokens = %v, want 1234 (first boundary preserved)", inTok)
 	}
@@ -874,7 +884,7 @@ func TestDecomposeRequest_SecondDifferentSummaryRebasesAgain(t *testing.T) {
 	if kind == nil || *kind != "compaction_summary" {
 		t.Fatalf("ordinal 4 kind = %v, want compaction_summary", kind)
 	}
-	requireJSONEqual(t, content, `"SUMMARY-B"`)
+	requireJSONEqual(t, content, summaryContent("SUMMARY-B details"))
 	// Prior turn by created_at is turn 2 (turn 1 is older), whose usage was 90.
 	if inTok == nil || *inTok != 90 {
 		t.Fatalf("ordinal 4 input_tokens = %v, want 90 (the immediately prior turn's usage)", inTok)
@@ -900,7 +910,7 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 	if next := runTurn(t, ctx, s, convID, req2, 110, 11); next != 3 {
 		t.Fatalf("turn 2 next ordinal = %d, want 3", next)
 	}
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY-A"},{"role":"user","content":"q2"}]}`)
+	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q2"}]}`)
 	if next := runTurn(t, ctx, s, convID, req3, 120, 12); next != 5 {
 		t.Fatalf("turn 3 next ordinal = %d, want 5 (boundary at 3 + two messages)", next)
 	}
@@ -931,7 +941,7 @@ func TestDecomposeRequest_ReAnchorRewind(t *testing.T) {
 		t.Fatalf("boundary rows = %d, want 1 (re-anchor records no marker)", boundaryCount)
 	}
 	_, _, _, content := requireKindRow(t, ctx, pool, convID, 3)
-	requireJSONEqual(t, content, `"SUMMARY-A"`)
+	requireJSONEqual(t, content, summaryContent("SUMMARY-A details"))
 
 	// Re-anchor is returned-only in this implementation: the stored horizon is
 	// untouched, so the next request re-resolves from it.
@@ -971,7 +981,7 @@ func TestDecomposeRequest_RewindResponseCollisionIsLoud(t *testing.T) {
 	if next := runTurn(t, ctx, s, convID, req2, 110, 11); next != 3 {
 		t.Fatalf("turn 2 next ordinal = %d, want 3", next)
 	}
-	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":"SUMMARY-A"},{"role":"user","content":"q2"}]}`)
+	req3 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + summaryContent("SUMMARY-A details") + `},{"role":"user","content":"q2"}]}`)
 	if next := runTurn(t, ctx, s, convID, req3, 120, 12); next != 5 {
 		t.Fatalf("turn 3 next ordinal = %d, want 5 (boundary at 3 + two messages)", next)
 	}
@@ -1075,6 +1085,68 @@ func TestDecomposeRequest_BootstrapNoBoundary(t *testing.T) {
 	}
 	if kindCount != 0 {
 		t.Fatalf("kind-tagged rows = %d, want 0 (bootstrap records no boundary)", kindCount)
+	}
+}
+
+// TestASessionPreambleIsNotACompactionBoundary pins the classifier on the
+// shape that mis-tagged 19 rows: a thread's first message is its own session
+// preamble, and it always diverges structurally.
+func TestASessionPreambleIsNotACompactionBoundary(t *testing.T) {
+	// All 19 compaction_summary rows in the investigated database were session
+	// preambles: CLAUDE.md contents, the userEmail system-reminder, the
+	// environment block. Not one was a summary.
+	preamble := `[{"type":"text","text":"<system-reminder>\nCodebase and user instructions are shown below.\n# userEmail\nThe user's email address is someone@example.com.\n</system-reminder>"}]`
+	if looksLikeCompactionSummary([]byte(preamble)) {
+		t.Error("a session preamble must not be classified as a compaction summary")
+	}
+}
+
+func TestARealCompactionSummaryIsRecognised(t *testing.T) {
+	summary := `[{"type":"text","text":"This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:\nAnalysis: the user asked for..."}]`
+	if !looksLikeCompactionSummary([]byte(summary)) {
+		t.Error("a real compaction summary must be recognised")
+	}
+}
+
+// TestDecomposeRequest_DivergentPreambleDoesNotRebase pins the guard itself,
+// end to end: a request whose message 0 diverges from the stored anchor but
+// carries no summary prose (a thread's own session preamble, the shape all 19
+// mis-tagged rows had) inserts at the existing horizon untagged. Without the
+// prose check this request would move the resume point and tag a boundary.
+func TestDecomposeRequest_DivergentPreambleDoesNotRebase(t *testing.T) {
+	ctx, pool, s := horizonTestEnv(t)
+	convID, err := s.EnsureConversation(ctx, ConversationRef{OriginEntrypoint: "claude", DrivenBy: "client"})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+
+	req1 := []byte(`{"model":"claude","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]}`)
+	if next := runTurn(t, ctx, s, convID, req1, 1234, 10); next != 2 {
+		t.Fatalf("turn 1 next ordinal = %d, want 2", next)
+	}
+
+	preamble := `[{"type":"text","text":"<system-reminder>\nCodebase and user instructions are shown below.\n</system-reminder>"}]`
+	req2 := []byte(`{"model":"claude","messages":[{"role":"user","content":` + preamble + `},{"role":"user","content":"q1"}]}`)
+	if next := runTurn(t, ctx, s, convID, req2, 90, 8); next != 2 {
+		t.Fatalf("turn 2 next ordinal = %d, want 2 (existing horizon 0 + two messages, no rebase)", next)
+	}
+
+	// The horizon did not move: resume_from_ordinal is still NULL.
+	var resume *int
+	if err := pool.QueryRow(ctx,
+		`SELECT resume_from_ordinal FROM conversations.conversation WHERE id=$1`, convID).Scan(&resume); err != nil {
+		t.Fatalf("read resume_from_ordinal: %v", err)
+	}
+	if resume != nil {
+		t.Fatalf("resume_from_ordinal = %d, want NULL (a preamble must not move the horizon)", *resume)
+	}
+	var kindCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1 AND kind IS NOT NULL`, convID).Scan(&kindCount); err != nil {
+		t.Fatalf("count kind rows: %v", err)
+	}
+	if kindCount != 0 {
+		t.Fatalf("kind-tagged rows = %d, want 0 (a preamble must not be tagged a boundary)", kindCount)
 	}
 }
 
