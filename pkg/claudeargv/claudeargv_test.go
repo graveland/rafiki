@@ -94,6 +94,83 @@ func TestBuildAppendsExtraArgsLast(t *testing.T) {
 	}
 }
 
+// The additive wave's pin: a Params that sets only Model must produce argv
+// byte-identical to the pre-Mode, pre-MCPConfig builder, so every existing
+// caller that leaves the new fields zero is unaffected.
+func TestBuildHeadlessUnchanged(t *testing.T) {
+	got := Build(Params{Model: "x"})
+	want := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--model", "x",
+		"--dangerously-skip-permissions",
+		"--disallowedTools", "AskUserQuestion",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Build(Params{Model: %q}) = %v, want %v", "x", got, want)
+	}
+}
+
+// ModelArgs REPLACES the plain --model pair, never adds a second one — a
+// duplicated --model would depend on claude's last-flag-wins tie-break instead
+// of being unambiguous.
+func TestBuildModelArgsSuppressesPlainModel(t *testing.T) {
+	got := Build(Params{Model: "x", ModelArgs: []string{"--model", "y"}})
+	n := 0
+	for i, a := range got {
+		if a != "--model" {
+			continue
+		}
+		n++
+		if i+1 >= len(got) || got[i+1] != "y" {
+			t.Errorf("argv %v: --model is not followed by %q", got, "y")
+		}
+	}
+	if n != 1 {
+		t.Errorf("Build(Model: x, ModelArgs: [--model y]) = %v, want exactly one --model, got %d", got, n)
+	}
+}
+
+// --mcp-config is variadic, so the value must ride the SAME argv element via
+// '=' — a two-element pair would swallow whatever flag follows it.
+func TestBuildMCPConfigIsSingleElement(t *testing.T) {
+	got := Build(Params{MCPConfig: `{"a":1}`})
+	n := 0
+	for _, a := range got {
+		if !strings.HasPrefix(a, "--mcp-config") {
+			continue
+		}
+		n++
+		if a != `--mcp-config={"a":1}` {
+			t.Errorf("Build(MCPConfig) = %v, want one element --mcp-config={\"a\":1}, got %q", got, a)
+		}
+	}
+	if n != 1 {
+		t.Errorf("Build(MCPConfig) = %v, want exactly one --mcp-config element, got %d", got, n)
+	}
+}
+
+// ModeInteractive keeps the TTY: a human answers permission prompts, so none
+// of the headless stream-json contract, the bypass default or the
+// disallowedTools pair may appear.
+func TestBuildInteractiveOmitsHeadlessFlags(t *testing.T) {
+	got := Build(Params{Mode: ModeInteractive})
+	for _, unwanted := range []string{
+		"-p",
+		"--input-format",
+		"--output-format",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--disallowedTools",
+	} {
+		if slices.Contains(got, unwanted) {
+			t.Errorf("Build(interactive) = %v, should not carry %q", got, unwanted)
+		}
+	}
+}
+
 func assertPair(t *testing.T, argv []string, flag, value string) {
 	t.Helper()
 	for i, a := range argv {
