@@ -43,7 +43,9 @@ func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
 	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
 		t.Fatalf("second EnsureThreadChild: %v", err)
 	}
-	if n := len(c.st.Descendants("c_parent")); n != 0 {
-		t.Errorf("Descendants = %d, want 0", n)
+	// Descendants KEEPS the synthetic child (agent_list and the budget member
+	// lists must see it); only the MaxChildren gate above excludes it.
+	if n := len(c.st.Descendants("c_parent")); n != 1 {
+		t.Errorf("Descendants = %d, want 1: the synthetic child is a real member of the tree", n)
 	}
 }

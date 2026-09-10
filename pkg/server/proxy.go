@@ -107,6 +107,8 @@ type ThreadObserver interface {
 }
 
 // SetThreadObserver attaches the daemon's child-record synthesizer (optional).
+// Written once during daemon startup before any child can exist, the same
+// ordering guarantee SetMetrics and SetRawTrace rely on; not synchronized.
 func (p *MessagesProxy) SetThreadObserver(o ThreadObserver) { p.threadObserver = o }
 
 // SetQuotaStore enables capture of Anthropic's per-account subscription

@@ -183,9 +183,11 @@ func (s *Store) Descendants(ancestorID string) []Snapshot {
 		if snap.ChildID == ancestorID {
 			continue
 		}
-		if snap.Native {
-			continue
-		}
+		// Native rows STAY here: agent_list, subtreeSelector and the budget
+		// member lists walk this function, and a synthesized Task subagent is
+		// a real conversation with real cost that those surfaces must see.
+		// Only LiveDescendantCount excludes them, because only that one feeds
+		// the MaxChildren grant.
 		if r, ok := labelLookup(snap.Labels, LabelRoot, legacyLabelRoot); !ok || r != root {
 			continue
 		}

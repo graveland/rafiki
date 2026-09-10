@@ -23,13 +23,21 @@ func threadChildID(parentChildID, threadID string) string {
 
 // EnsureThreadChild creates, idempotently, the synthetic child record standing
 // for one Claude Code Task subagent. Lineage rides the same labels a real child
-// uses, so the TUI rail, rafiki list, agent_list and the cost rollup all work
-// unchanged: making native subagents children is the whole point.
+// uses, so the TUI rail, rafiki list, agent_list and the cost rollup all see it
+// through Descendants and st.List: making native subagents children is the
+// whole point.
 //
 // The child has no process (PID 0, stored NULL) and is marked Native, which
-// keeps it out of LiveDescendantCount: a bounded sidebar returning one
+// keeps it out of LiveDescendantCount ONLY: a bounded sidebar returning one
 // tool_result into its parent's context is not a budgeted cross-process agent
-// and must not consume the parent's MaxChildren grant.
+// and must not consume the parent's MaxChildren grant. Every other descendant
+// walk still returns it.
+//
+// The Get-then-Insert below is deliberately not locked: two concurrent turns
+// of the same thread can both miss Get and both Insert, but the store's Insert
+// is an idempotent overwrite and nothing mutates a synthetic session between
+// the miss and the write, so both racers land equivalent records. Do not add
+// a mutation path (SetLabels, SetStatus) without revisiting that.
 func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID string) error {
 	if parentChildID == "" || threadID == "" {
 		return fmt.Errorf("ensure thread child: parent and thread are both required")

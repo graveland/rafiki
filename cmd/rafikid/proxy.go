@@ -127,7 +127,7 @@ type proxyFace struct {
 	TokenAuth *server.UserTokenAuth
 
 	// messages is the /v1/messages proxy, retained so main.go can wire the
-	// Controller into it after construction — the face is built before the
+	// Controller into it after construction. The face is built before the
 	// Controller exists, for the same reason as Control and MCP above.
 	messages *server.MessagesProxy
 }
@@ -424,12 +424,17 @@ func (f *proxyFace) Close(ctx context.Context) {
 	}
 }
 
-// SetController binds the daemon's controller, once main.go has built it —
-// the face is constructed first (see proxyFace.messages), so this cannot be a
+// SetController binds the daemon's controller, once main.go has built it. The
+// face is constructed first (see proxyFace.messages), so this cannot be a
 // constructor argument. It threads the Controller into the messages proxy as
 // the ThreadObserver that materializes a child record per captured thread.
 func (f *proxyFace) SetController(c *Controller) {
 	if f == nil || f.messages == nil {
+		return
+	}
+	if c == nil {
+		// A typed-nil Controller would enter the interface as non-nil and the
+		// hook's nil check would pass, dereferencing nil inside the request path.
 		return
 	}
 	f.messages.SetThreadObserver(c)
