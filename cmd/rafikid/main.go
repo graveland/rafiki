@@ -470,6 +470,9 @@ func runDaemon(opts runDaemonOpts) error {
 		ctrl.SetProxy(face.URL, face.Token)
 		if face.TokenAuth != nil {
 			face.TokenAuth.SetChildOwnerLookup(ctrl.OwnerUserIDForChild)
+			// Per-child MCP secrets minted at spawn resolve here; the proxy
+			// face's MCP agent-control surface authenticates on them.
+			face.TokenAuth.SetChildTokenLookup(ctrl.ChildForMCPToken)
 		}
 		if face.Control != nil {
 			face.Control.SetChildResolver(ctrl)

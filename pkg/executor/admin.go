@@ -245,10 +245,17 @@ func (a *AdminServer) Launch(
 	// set it in the child's environment instead. Replaced by a credential on
 	// first successful hello. The proxy token gets the SAME treatment and for
 	// the same reason: it authenticates this child's traffic to rafiki's
-	// proxy, and ps is world-readable.
+	// proxy, and ps is world-readable. The per-child MCP secret gets the same
+	// treatment too: runDarajaServe reads it back out of this process's
+	// environment and proxyenv renders it as the child's RAFIKI_MCP_TOKEN,
+	// where the injected --mcp-config's ${RAFIKI_MCP_TOKEN} placeholder
+	// expands — never argv.
 	envVars := []string{
 		"RAFIKI_DARAJA_TICKET=" + req.Msg.GetTicket(),
 		"RAFIKI_DARAJA_PROXY_TOKEN=" + c.GetProxyToken(),
+	}
+	if mcpToken := c.GetMcpToken(); mcpToken != "" {
+		envVars = append(envVars, "RAFIKI_MCP_TOKEN="+mcpToken)
 	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)

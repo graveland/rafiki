@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,6 +125,20 @@ type Controller struct {
 	// startup via SetProxy; empty means no face was started.
 	proxyURL   string
 	proxyToken string
+
+	// mcpTokens maps a per-child MCP secret to the child that holds it. In
+	// memory and per boot, matching the lifetime of the proxy bearer these
+	// same children carry: a child that survives a daemon restart has a stale
+	// proxy token and cannot reach /v1/messages regardless, so persisting
+	// this one would widen its lifetime past anything that can use it.
+	// mcpTokensByChild is the reverse index mintMCPToken consults, so resume
+	// and RespawnChild — which rebuild the spawn environment through the same
+	// proxyChildEnv/darajaClaudeParams path — reuse the secret the child
+	// already holds instead of minting a second one it can never learn about.
+	// Both guarded by mcpTokensMu.
+	mcpTokensMu      sync.RWMutex
+	mcpTokens        map[string]string // secret -> childID
+	mcpTokensByChild map[string]string // childID -> secret
 
 	// catalog answers ContextWindow (ctrl_get/ctrl_list's ContextWindow/
 	// MaxCompletionTokens fields). Set once at startup via SetCatalog, from
@@ -634,6 +650,86 @@ func (c *Controller) OwnerUserIDForChild(childID string) (string, bool) {
 		return "", false
 	}
 	return snap.OwnerUserID, true
+}
+
+// mintMCPToken returns the per-child MCP secret for childID, minting one on
+// the first call for that child and REUSING it on every later call. Resume and
+// RespawnChild rebuild the spawn environment through the same proxyChildEnv /
+// darajaClaudeParams path a fresh spawn takes, and the design requires resume
+// to reuse the stored secret rather than mint a fresh one — a second secret
+// would orphan the credential the still-running child holds and break its next
+// MCP connection. The secret is 32 crypto/rand bytes, hex encoded; it is never
+// logged and never reaches argv (it travels to the child by environment only).
+//
+// The maps are lazily initialized here rather than in NewController because a
+// hand-built Controller (the proxyenv tests' zero-value literal) also mints.
+func (c *Controller) mintMCPToken(childID string) string {
+	c.mcpTokensMu.RLock()
+	if tok, ok := c.mcpTokensByChild[childID]; ok && tok != "" {
+		c.mcpTokensMu.RUnlock()
+		return tok
+	}
+	c.mcpTokensMu.RUnlock()
+
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		// A per-child credential that cannot be random must not ship: better
+		// a loud spawn failure than a predictable MCP credential.
+		panic(fmt.Sprintf("mintMCPToken: crypto/rand failed: %v", err))
+	}
+	tok := hex.EncodeToString(secret)
+
+	c.mcpTokensMu.Lock()
+	defer c.mcpTokensMu.Unlock()
+	if c.mcpTokens == nil {
+		c.mcpTokens = make(map[string]string)
+	}
+	if c.mcpTokensByChild == nil {
+		c.mcpTokensByChild = make(map[string]string)
+	}
+	c.mcpTokens[tok] = childID
+	c.mcpTokensByChild[childID] = tok
+	return tok
+}
+
+// ChildForMCPToken implements server.ChildTokenLookup: it resolves a per-child
+// MCP secret to the child that holds it and that child's owner. ok is false
+// for an unknown secret, a child that has exited, or a child with no recorded
+// owner (the anonymous-spawn case OwnerUserIDForChild also refuses).
+func (c *Controller) ChildForMCPToken(token string) (childID, ownerUserID string, ok bool) {
+	c.mcpTokensMu.RLock()
+	childID, known := c.mcpTokens[token]
+	c.mcpTokensMu.RUnlock()
+	if !known || childID == "" {
+		return "", "", false
+	}
+	// forgetMCPToken runs in handleChildExit beside MarkExited, so a dead
+	// child's mapping is normally already gone; the status check covers the
+	// ordering window an exit record and the forget can land in either order
+	// around.
+	if snap, exists := c.st.Get(childID); !exists || snap.Status == protocol.StatusExited {
+		return "", "", false
+	}
+	owner, owned := c.OwnerUserIDForChild(childID)
+	if !owned {
+		return "", "", false
+	}
+	return childID, owner, true
+}
+
+// forgetMCPToken drops childID's per-child MCP secret, called from
+// handleChildExit — already the one place an exit is recorded — so a dead
+// child's secret stops resolving. Both indexes go together: keeping the
+// child->secret half would make the next mint for a respawned child return a
+// credential whose secret->child half no longer exists, i.e. one that can
+// never authenticate.
+func (c *Controller) forgetMCPToken(childID string) {
+	c.mcpTokensMu.Lock()
+	defer c.mcpTokensMu.Unlock()
+	if tok, ok := c.mcpTokensByChild[childID]; ok {
+		delete(c.mcpTokensByChild, childID)
+		delete(c.mcpTokens, tok)
+	}
 }
 
 // ConversationID satisfies connectapi.ConversationResolver: it maps a child
@@ -3125,6 +3221,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// observe Status=Exited with ExitedRing still nil.
 	c.st.MarkExited(childID, now, res.ExitCode, res.Signal, ringSnapshot, renderEvents)
 
+	// A dead child's per-child MCP secret stops resolving (the proxy face
+	// consults it on every request). handleChildExit is already the one place
+	// an exit is recorded, so no new exit hook is added.
+	c.forgetMCPToken(childID)
+
 	// Persist AFTER MarkExited so the row records the exit itself: rec.Status
 	// comes off the snapshot as "exited", which is the one durable fact the
 	// recovery predicate reads — "this child ended while a daemon was alive to
@@ -3785,8 +3886,14 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (e
 		// resolveSpawnPlan, not appended here: ModelArgs replaces the plain
 		// --model pair instead of duplicating it, and MCPConfig lands in
 		// claudeargv.Build's canonical position rather than the end of argv.
+		// MCPToken is the per-child MCP secret, distinct from the proxy bearer
+		// above (which stays the per-boot secret for billing attribution). It
+		// is mint-or-reused per child so a resume/respawn of the same child
+		// keeps the credential it already holds, and proxyenv renders it into
+		// RAFIKI_MCP_TOKEN plus the --mcp-config placeholder — never argv.
 		env, vals = proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
 			URL: url, Token: token, Model: req.Model, Headers: headers,
+			MCPToken: c.mintMCPToken(childID),
 		})
 		return env, vals
 	default:

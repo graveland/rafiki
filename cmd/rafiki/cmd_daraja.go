@@ -47,7 +47,10 @@ func newDarajaServeCmd() *cobra.Command {
 			"The ticket arrives from the environment (RAFIKI_DARAJA_TICKET), never\n" +
 			"from argv: 1b-i's Launch builds a command line anyone on the machine\n" +
 			"can read with ps. The ticket is replaced by a reconnect credential on\n" +
-			"the first successful hello, which is held in memory only.",
+			"the first successful hello, which is held in memory only.\n\n" +
+			"Trailing positional arguments after a bare \"--\" are passed to the\n" +
+			"child verbatim — the operator escape hatch for flags daraja does\n" +
+			"not map itself.",
 		Args: cobra.ArbitraryArgs,
 		RunE: runDarajaServe,
 	}
@@ -96,7 +99,14 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 
 	// The proxy token travels by environment, never argv, for the same
 	// reason RAFIKI_DARAJA_TICKET does: ps is world-readable on this machine.
+	// The per-child MCP secret rides the same route: AdminService.Launch put
+	// it in this process's environment (from the Launch RPC's mcp_token — the
+	// same authenticated channel proxy_token arrives over), and it becomes the
+	// child's RAFIKI_MCP_TOKEN below, where the injected --mcp-config's
+	// ${RAFIKI_MCP_TOKEN} placeholder expands. Empty means no per-child secret
+	// was minted; ClaudeEnv then falls back to the proxy bearer.
 	proxyToken := os.Getenv("RAFIKI_DARAJA_PROXY_TOKEN")
+	mcpToken := os.Getenv("RAFIKI_MCP_TOKEN")
 
 	headers := map[string]string{
 		"X-Rafiki-Session": childID,
@@ -114,6 +124,7 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	env, values := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
 		URL:               proxyURL,
 		Token:             proxyToken,
+		MCPToken:          mcpToken,
 		PassthroughAuth:   passthrough,
 		Model:             model,
 		AutoCompactWindow: autoCompact,

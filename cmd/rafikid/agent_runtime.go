@@ -153,7 +153,7 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 	}
 	spec := &darajapb.ChildSpec{
 		Kind:   darajapb.Kind_KIND_CLAUDE,
-		Claude: c.darajaClaudeParams(req),
+		Claude: c.darajaClaudeParams(req, childID),
 	}
 	result, err := darajapool.Launch(c.baseCtx, darajapool.LaunchParams{
 		ExecPool:   c.execPoolConn,
@@ -179,7 +179,7 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 // builds a COMPLETE environment on the executor's own machine — see
 // proxyenv.Claude's doc comment — which is what makes passthrough actually
 // achievable here.
-func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest) *darajapb.ClaudeParams {
+func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest, childID string) *darajapb.ClaudeParams {
 	p := &darajapb.ClaudeParams{
 		Model:         req.Model,
 		ResumeSession: req.ResumeSession,
@@ -206,6 +206,12 @@ func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest) *darajapb.Cla
 	}
 	p.ProxyUrl = url
 	p.ProxyToken = token
+	// The per-child MCP secret rides the same authenticated RPC proxy_token
+	// takes (see daraja.proto's proxy_token comment): over the launch, then
+	// into the daraja process's environment by AdminService.Launch — never
+	// argv, which ps renders world-readable. Minted per child and reused
+	// across resume/respawn (mintMCPToken).
+	p.McpToken = c.mintMCPToken(childID)
 
 	mode, err := proxyenv.ParsePassthroughMode(req.PassthroughAuth)
 	if err != nil {

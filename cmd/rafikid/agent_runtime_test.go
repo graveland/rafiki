@@ -25,7 +25,7 @@ import (
 func TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty(t *testing.T) {
 	c := newTestController(t)
 	// c.proxyURL is "" by default in newTestController — no proxy face wired.
-	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "claude-sonnet-5"})
+	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "claude-sonnet-5"}, "c_noproxy")
 	if p.ProxyUrl != "" || p.ProxyToken != "" || p.PassthroughAuth {
 		t.Errorf("darajaClaudeParams with no proxy configured = %+v, want no proxy fields set", p)
 	}
@@ -56,7 +56,7 @@ func TestDarajaClaudeParams_PassthroughTriState(t *testing.T) {
 			c.proxyURL, c.proxyToken = "http://127.0.0.1:1/", "tok"
 			p := c.darajaClaudeParams(protocol.SpawnRequest{
 				Kind: protocol.KindClaude, Model: tc.model, PassthroughAuth: tc.passthroughAuth,
-			})
+			}, "c_passthrough")
 			if p.PassthroughAuth != tc.want {
 				t.Errorf("PassthroughAuth = %v, want %v", p.PassthroughAuth, tc.want)
 			}
@@ -74,7 +74,7 @@ func TestDarajaClaudeParams_PassthroughTriState(t *testing.T) {
 func TestDarajaClaudeParams_RecordRequestsThreadsThrough(t *testing.T) {
 	c := newTestController(t)
 	c.proxyURL = "http://127.0.0.1:1/"
-	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, RecordRequests: true})
+	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, RecordRequests: true}, "c_record")
 	if !p.RecordRequests {
 		t.Error("RecordRequests did not thread through darajaClaudeParams")
 	}
@@ -92,7 +92,7 @@ func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing
 		Model:              "claude-sonnet-5",
 		AppendSystemPrompt: "be brief",
 		ExtraArgs:          []string{"--foo"},
-	})
+	}, "c_argv")
 	if p.AppendSystemPrompt != "be brief" {
 		t.Errorf("AppendSystemPrompt = %q, want threaded through", p.AppendSystemPrompt)
 	}
@@ -103,6 +103,37 @@ func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing
 	// launch-only flags above are new; everything else stays as before.
 	if p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions" {
 		t.Errorf("Model/PermissionMode = %q/%q, want preserved unchanged", p.Model, p.PermissionMode)
+	}
+}
+
+// TestDarajaClaudeParams_CarriesPerChildMCPToken pins the executor path's
+// delivery of the per-child MCP secret: it rides ClaudeParams beside
+// ProxyToken (same authenticated RPC, then into the daraja process's
+// environment by AdminService.Launch — never argv), is minted per child, is
+// reused when the same child's params are rebuilt (resume/respawn), is never
+// the shared proxy bearer, and is absent on the unproxied path where daraja
+// leaves the environment alone.
+func TestDarajaClaudeParams_CarriesPerChildMCPToken(t *testing.T) {
+	c := newTestController(t)
+
+	if p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_unproxied"); p.McpToken != "" {
+		t.Fatalf("unproxied darajaClaudeParams McpToken = %q, want empty", p.McpToken)
+	}
+
+	c.proxyURL, c.proxyToken = "http://127.0.0.1:1/", "boot-secret"
+	pA := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_a")
+	pB := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_b")
+	if pA.McpToken == "" || pB.McpToken == "" {
+		t.Fatalf("proxied params must carry an MCP secret, got %q and %q", pA.McpToken, pB.McpToken)
+	}
+	if pA.McpToken == pB.McpToken {
+		t.Fatal("two children must carry different MCP secrets")
+	}
+	if pA.McpToken == c.proxyToken {
+		t.Fatal("the per-child MCP secret must never be the shared proxy bearer")
+	}
+	if again := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_a"); again.McpToken != pA.McpToken {
+		t.Fatalf("rebuilt params for the same child = %q, want %q (resume must reuse the minted secret)", again.McpToken, pA.McpToken)
 	}
 }
 

@@ -174,8 +174,8 @@ func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *
 	return &id
 }
 
-// resolve returns the identity for token, consulting the cache first. The
-// per-child and per-boot child credentials are both checked before it.
+// resolve returns the identity for token; the per-child and per-boot child
+// credentials are both checked before any cache access.
 func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID string) (Identity, error) {
 	// A per-child secret resolves BEFORE the per-boot comparison, so it can
 	// never be shadowed by (or collapse into) the shared boot secret, and

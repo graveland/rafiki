@@ -607,3 +607,153 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 		}
 	}
 }
+
+// buildEnvDumpStub is buildSelfStub with one difference: the stub records its
+// own environment to a file before waiting to be signalled, so a test can
+// assert a secret arrived by ENVIRONMENT — the positive half
+// TestLaunchKeepsTheTicketOutOfArgv could only argue structurally (its kernel
+// check proves absence from argv; only the process's own environ proves
+// presence in env). The dump path rides the inherited environment, which
+// Launch passes through to the stub unchanged.
+func buildEnvDumpStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	dump := filepath.Join(dir, "environ.txt")
+	t.Setenv("RAFIKI_TEST_ENV_DUMP", dump)
+	if err := os.WriteFile(src, []byte(`package main
+
+import (
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+)
+
+func main() {
+	_ = os.WriteFile(os.Getenv("RAFIKI_TEST_ENV_DUMP"), []byte(strings.Join(os.Environ(), "\n")), 0o600)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+	<-ch
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "stub")
+	if out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput(); err != nil {
+		t.Fatalf("build stub: %v (output: %s)", err, out)
+	}
+	return bin
+}
+
+// mcp_token travels by the same route as proxy_token: over the authenticated
+// Launch RPC, then into the daraja process's ENVIRONMENT — never argv, which
+// ps renders world-readable on this machine. Both halves are asserted against
+// the launched process itself: the kernel's command line for the absence, the
+// stub's own environ dump for the presence.
+func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
+	token := "per-child-mcp-secret-must-not-reach-argv"
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumpStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-mcp-token",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{McpToken: token},
+		},
+		Ticket: "tk-irrelevant-here",
+	}))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	pid := int(resp.Msg.GetPid())
+
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
+	}
+	if strings.Contains(string(out), token) {
+		t.Errorf("mcp_token %q found in kernel cmdline:\n%s", token, out)
+	}
+	if strings.Contains(string(out), "RAFIKI_MCP_TOKEN") {
+		t.Errorf("env var name RAFIKI_MCP_TOKEN found in kernel cmdline:\n%s", out)
+	}
+
+	// The positive half: the stub's environ dump must carry the variable.
+	// Line-based, because the token is the LAST entry Launch appends and the
+	// dump is newline-joined with no trailing newline.
+	dumpPath := os.Getenv("RAFIKI_TEST_ENV_DUMP")
+	var envDump []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		envDump, err = os.ReadFile(dumpPath)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stub environ dump never appeared at %s: %v", dumpPath, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	want := "RAFIKI_MCP_TOKEN=" + token
+	found := false
+	for _, line := range strings.Split(string(envDump), "\n") {
+		if line == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("launched process environment missing RAFIKI_MCP_TOKEN=%s; got:\n%s", token, envDump)
+	}
+}
+
+// A spec with no mcp_token must set nothing: the env var's absence is what
+// tells runDarajaServe no per-child secret was minted (ClaudeEnv then falls
+// back to the proxy bearer).
+func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumpStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-no-mcp-token",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+		Ticket:   "tk-irrelevant-here",
+	})); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var envDump []byte
+	var readErr error
+	for {
+		envDump, readErr = os.ReadFile(os.Getenv("RAFIKI_TEST_ENV_DUMP"))
+		if readErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stub environ dump never appeared: %v", readErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, line := range strings.Split(string(envDump), "\n") {
+		if strings.HasPrefix(line, "RAFIKI_MCP_TOKEN=") {
+			t.Errorf("spec carried no mcp_token, but the environment has %q", line)
+		}
+	}
+}

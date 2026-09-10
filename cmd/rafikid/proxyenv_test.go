@@ -73,6 +73,29 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	if !strings.Contains(h, "\n") {
 		t.Error("headers not newline-separated; a comma silently collapses them into one")
 	}
+	// The per-child MCP secret travels as RAFIKI_MCP_TOKEN and is distinct
+	// from the proxy bearer (which stays the per-boot secret): the two are
+	// different credentials with different lifetimes, and the MCP config's
+	// Authorization placeholder expands from this variable.
+	if envMap["RAFIKI_MCP_TOKEN"] == "" {
+		t.Error("RAFIKI_MCP_TOKEN not set; the child's MCP calls would authenticate as nobody")
+	}
+	if envMap["RAFIKI_MCP_TOKEN"] == envMap["ANTHROPIC_AUTH_TOKEN"] {
+		t.Error("RAFIKI_MCP_TOKEN == the proxy bearer; the per-child credential must not collapse into it")
+	}
+	// The MCP config carries the placeholder, never the token itself: argv is
+	// world-readable via ps on this machine.
+	if strings.Contains(vals.MCPConfig, envMap["RAFIKI_MCP_TOKEN"]) {
+		t.Error("vals.MCPConfig carries the raw MCP secret; it must hold only the ${RAFIKI_MCP_TOKEN} placeholder")
+	}
+	// A rebuild for the SAME child must reuse the secret (resume/respawn
+	// rebuild the spawn env through this path; a fresh mint would orphan the
+	// credential the running child holds).
+	env2, _ := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc")
+	if envKeys(env2)["RAFIKI_MCP_TOKEN"] != envMap["RAFIKI_MCP_TOKEN"] {
+		t.Error("second proxyChildEnv for the same child minted a different MCP secret")
+	}
+
 	// vals carries the argv decisions as data now: MCPConfig is the BARE
 	// inline JSON (buildClaudeArgv feeds it to claudeargv.Params.MCPConfig,
 	// whose Build prepends the flag — a rendered element here would come out

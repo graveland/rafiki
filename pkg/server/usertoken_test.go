@@ -496,6 +496,48 @@ func TestChildTokenResolvesToChildProvenance(t *testing.T) {
 	}
 }
 
+// ChildID is reserved for ProvenanceChildToken — the credential that names
+// exactly one child. A user-credential resolve and a child-ATTRIBUTED (per-boot
+// secret plus X-Rafiki-Session) resolve both carry a real UserID, so neither
+// may set ChildID: attribution is not a child credential, and a non-empty
+// ChildID on an attributed identity would blur the provenance the
+// agent-control gates read.
+func TestChildIDEmptyForUserAndChildAttributedIdentities(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{
+		"rfk_good": {UserID: "u_user1", Username: "brent"},
+	}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+	a.SetChildOwnerLookup(func(childID string) (string, bool) {
+		if childID == "c_known" {
+			return "u_owner1", true
+		}
+		return "", false
+	})
+
+	// A real user credential.
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer rfk_good")
+	rec, id := serve(a, req)
+	if rec.Code != 200 {
+		t.Fatalf("user credential: status = %d, want 200", rec.Code)
+	}
+	if id == nil || id.Via != ProvenanceUser || id.ChildID != "" {
+		t.Fatalf("user credential resolve = %+v, want ProvenanceUser with ChildID == \"\"", id)
+	}
+
+	// The per-boot child secret with a session header: attributed, not bound.
+	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer childsecret")
+	req2.Header.Set("X-Rafiki-Session", "c_known")
+	rec2, id2 := serve(a, req2)
+	if rec2.Code != 200 {
+		t.Fatalf("child-attributed resolve: status = %d, want 200: %s", rec2.Code, rec2.Body.String())
+	}
+	if id2 == nil || id2.Via != ProvenanceChildAttributed || id2.ChildID != "" {
+		t.Fatalf("child-attributed resolve = %+v, want ProvenanceChildAttributed with ChildID == \"\"", id2)
+	}
+}
+
 // The per-child secret must NEVER reach the TTL cache: a cached entry
 // outlives the child and keeps answering for a dead id. The lookup is
 // consulted on every resolve, so a secret that stops resolving — child
