@@ -157,9 +157,13 @@ var mcpSettlements = newMCPSessions()
 // owned by the settling child's user.
 //
 // An MCP caller is not a rafiki child and has no inbox, so the existing
-// parent-gated push cannot reach it — and every MCP-spawned child is
-// top-level, so the parent gate would skip it every time. This fan-out runs
-// BEFORE that gate, independently of lineage and of the event buffer.
+// parent-gated push cannot reach it. The caller that spawned the child is
+// simply not in the lineage: a user credential spawns top-level children,
+// and since the child-token face landed, a CHILD credential spawns parented
+// children whose OwnerUserID is empty (the controller spawner passes an
+// empty identity) — both fan out to nobody here, and a child-caller's
+// descendants reach it through agent_list instead. This fan-out runs BEFORE
+// the parent gate, independently of lineage and of the event buffer.
 //
 // The owner comes from STORED STATE — childstore.Snapshot.OwnerUserID, the
 // conversations.child.owner_user_id column — never from an argument: this

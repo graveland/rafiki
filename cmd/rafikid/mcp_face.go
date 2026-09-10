@@ -106,7 +106,7 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 			return
 		}
 		id := server.IdentityFromContext(r.Context())
-		if id == nil || (id.Via != server.ProvenanceUser && id.Via != server.ProvenanceChildToken) {
+		if !mcpEntitled(id) {
 			http.Error(w, "credential is not entitled to rafiki agent control", http.StatusForbidden)
 			return
 		}
@@ -194,13 +194,25 @@ func (f *mcpFace) forgetSession(sid string) {
 // for a not-yet-wired controller, 403 for an unentitled credential) rather
 // than a toolless server: an MCP client can read a status, and the two
 // reasons deserve different answers.
+// mcpEntitled is the ONE spelling of "may this credential reach the
+// agent-control surface": exactly ProvenanceUser (a real user token, via
+// IsUserCredential) or ProvenanceChildToken (a per-child secret). Routes
+// refuses everything else with 403 before dispatch, and getServer builds the
+// spawner, so the two gates must admit the same set -- writing the set once
+// is what keeps a widened IsUserCredential from silently falling through to
+// the SDK's bare 400 on a request Routes already admitted (the divergence
+// the final review flagged as fail-closed but unrecognizable).
+func mcpEntitled(id *server.Identity) bool {
+	return id != nil && (id.IsUserCredential() || id.Via == server.ProvenanceChildToken)
+}
+
 func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	id := server.IdentityFromContext(r.Context())
 	ctrl := f.controller()
 	if ctrl == nil {
 		return nil // caller returns 503; see Routes
 	}
-	if id == nil {
+	if !mcpEntitled(id) {
 		return nil
 	}
 	owner := users.Identity{UserID: id.UserID, Username: id.Username}

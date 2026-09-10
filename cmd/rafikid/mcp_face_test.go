@@ -652,3 +652,26 @@ func TestSiblingCannotUseSiblingSession(t *testing.T) {
 		t.Fatalf("child A's task_add did not reach the ledger: %d rows", n)
 	}
 }
+
+// TestMCPEntitlementIsOneSpelling pins mcpEntitled against every identity
+// shape, so a widened IsUserCredential or a new provenance cannot silently
+// diverge between Routes' 403 gate and getServer's spawner choice: the two
+// gates must admit exactly {ProvenanceUser, ProvenanceChildToken}.
+func TestMCPEntitlementIsOneSpelling(t *testing.T) {
+	cases := []struct {
+		name string
+		id   *server.Identity
+		want bool
+	}{
+		{"nil identity", nil, false},
+		{"user credential", &server.Identity{UserID: "u1", Via: server.ProvenanceUser}, true},
+		{"per-child token", &server.Identity{UserID: "u1", ChildID: "c1", Via: server.ProvenanceChildToken}, true},
+		{"child-attributed (per-boot secret alone)", &server.Identity{UserID: "u-owner", Via: server.ProvenanceChildAttributed}, false},
+		{"unknown provenance", &server.Identity{}, false},
+	}
+	for _, tc := range cases {
+		if got := mcpEntitled(tc.id); got != tc.want {
+			t.Errorf("%s: mcpEntitled = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
