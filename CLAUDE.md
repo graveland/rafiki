@@ -700,11 +700,31 @@
 - **`RAFIKI_DAEMON_ID` cannot prove two rows are on the same machine —
   `ns_token` does.** Two daemons inside the same shared-PID-namespace
   container (a sidecar, a debug shell) see each other's PIDs, and PID alone
-  cannot tell them apart. `ns_token` is a random UUID written at daemon
-  startup; two processes that share every PID but disagree on `ns_token` are
+  cannot tell them apart. `ns_token` is a per-NAMESPACE token: on Linux the
+  `/proc/self/ns/pid` link (unique per namespace), but **on darwin it is
+  `kern.boottime` — the machine's boot time — so every daemon on one Mac
+  carries the SAME token since boot** and the token discriminates nothing
+  there. Two processes that share every PID but disagree on `ns_token` are
   not the same daemon, and `Forget` checks both columns before deciding the
   row belongs to the caller. `RAFIKI_DAEMON_ID` alone would let a sidecar
   `Forget` another process's children as its own.
+
+- **Boot-time orphan signaling needs BOTH `ns_token` and `daemon_id` —
+  `ns_token` alone kills other daemons' children on one machine.**
+  `recoverOne` (`cmd/rafikid/load_children.go`) SIGTERMs a row's recorded pid
+  when it is still alive; gated on ns_token alone, darwin's boot-time token
+  (above) made every same-machine daemon match every row, so each boot
+  SIGTERMed every other live daemon's children — real production hazard for
+  two daemons sharing a machine and DB, and what the MCP child-token
+  integration tests surfaced (the child dies → its per-boot secret is
+  forgotten → its credential 401s, reading like an auth bug). The signal
+  requires `rec.NSToken == c.nsToken` (can I even trust this pid — it is in
+  the namespace I observe, guarding against pid reuse across namespaces)
+  AND `rec.DaemonID == c.daemonID` (is this child mine — a restarted daemon
+  reclaims its own rows; a restarted pod's fresh namespace fails the first
+  half, and a foreign daemon's row fails the second). Pinned by
+  `TestRecoverOneDoesNotSignalAnotherDaemonsLiveChild` (a real process
+  survives) and `TestRecoverOneSignalsItsOwnRestartOrphan` (dies).
 
 - **A pinned child never changes machines, and restart recovery is not an
   exception — but it IS a resume.** `recoveryAction` returns `planResumeBound`

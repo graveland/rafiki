@@ -327,8 +327,11 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		// holdsLease gate is skipped entirely, and recoveryOwnership refuses
 		// every claimed row instead.
 		//
-		// The pid was already left alone: the orphan signal above is
-		// ns_token-gated and a foreign daemon's token never matches ours.
+		// The pid was already left alone: the orphan signal above requires
+		// ns_token AND rec.DaemonID == c.daemonID, and this row's daemon_id is
+		// foreign — see the signal's comment for why ns_token alone cannot
+		// carry that (on darwin it is the machine's boot time, so every
+		// same-machine daemon matches).
 		sess := childstore.SessionFromRecord(rec)
 		sess.Status = protocol.StatusExited
 		c.st.Insert(sess)

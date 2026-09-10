@@ -490,10 +490,14 @@ func TestMCPChildSessionNotShared(t *testing.T) {
 
 // TestMCPChildArgvFlagsSurviveDaraja: a child spawned with AppendSystemPrompt
 // and ExtraArgs set has both in its ACTUAL argv — the wire-to-process hop no
-// unit test observes. The harness has no executor pool, so this child takes
-// the local-subprocess path; the daraja path builds argv through the same
-// claudeargv builder, and TestClaudeArgvIdenticalAcrossPaths pins the two
-// byte-identical.
+// unit test observes. Despite the name, the harness has no executor pool, so
+// this child takes the LOCAL-subprocess path and the assertion is about the
+// daemon's spawn composition; the daraja-side hops are pinned separately
+// (TestLaunchCarriesAppendSystemPromptAndExtraArgs at the ps level,
+// TestDarajaServeDropsTheSeparatorAndKeepsThePositionals at the serve parse),
+// and TestClaudeArgvIdenticalAcrossPaths pins local and daraja argv
+// byte-identical — which is what makes local-path evidence carry the daraja
+// surface.
 func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	t.Parallel()
 	d, dumps := bootMCPChildDaemon(t)
