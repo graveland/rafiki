@@ -128,6 +128,23 @@ func TestSeedPopulatesMaxCost(t *testing.T) {
 	}
 }
 
+func TestSeedCarriesKind(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_a", Name: "worker", Kind: "claude", Status: "idle"},
+		{ChildId: "c_b", Name: "native", Kind: "fundi", Status: "idle"},
+	})
+	for _, tc := range []struct{ id, want string }{{"c_a", "claude"}, {"c_b", "fundi"}} {
+		n, ok := r.Get(tc.id)
+		if !ok {
+			t.Fatalf("no node for %q", tc.id)
+		}
+		if n.Kind != tc.want {
+			t.Errorf("Node(%q).Kind = %q, want %q", tc.id, n.Kind, tc.want)
+		}
+	}
+}
+
 func TestSetMaxCostAssignsDirectly(t *testing.T) {
 	r := rail.New()
 	capVal := 10.0

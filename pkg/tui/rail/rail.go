@@ -56,6 +56,7 @@ type Node struct {
 
 	// Status is the last known agent state, one of protocol.Status's eight.
 	Status   string
+	Kind     string // protocol kind: "claude" | "fundi" | "pi". Empty until seeded.
 	Exited   bool
 	ExitCode *int32
 	Retrying bool
@@ -210,6 +211,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.SessionID = s.GetSessionId()
 			existing.Cwd = s.GetCwd()
 			existing.Status = s.GetStatus()
+			existing.Kind = s.GetKind()
 			existing.MaxCost = s.GetMaxCost()
 			continue
 		}
@@ -218,6 +220,7 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			Name:      s.GetName(),
 			ParentID:  s.GetLabels()[ParentLabel],
 			Status:    s.GetStatus(),
+			Kind:      s.GetKind(),
 			SessionID: s.GetSessionId(),
 			Cwd:       s.GetCwd(),
 			MaxCost:   s.GetMaxCost(),
@@ -262,6 +265,7 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 	// does not know; see Cockpit.applyEvent.
 	if cs := ev.GetChildSpawned(); cs != nil {
 		if _, exists := r.nodes[cid]; !exists {
+			// No Kind: child_spawned does not carry one. The next Seed fills it.
 			r.nodes[cid] = &Node{
 				ChildID:  cid,
 				Name:     cs.GetName(),

@@ -32,6 +32,19 @@ func fmtCost(usd float64, cur *clientstate.Currency) string {
 	return costfmt.Format(usd, cur)
 }
 
+// kindTag is the rail's one-character kind marker. Empty for fundi, which is
+// the default kind and would otherwise pay a column on every row to say so.
+func kindTag(kind string) string {
+	switch kind {
+	case "claude":
+		return " ᶜ"
+	case "pi":
+		return " ᵖ"
+	default:
+		return ""
+	}
+}
+
 // renderRail draws the tree.
 //
 // It renders whatever rows it is given. The "stay hidden below two rows" look
@@ -69,7 +82,7 @@ func railWidthFor(nodes []rail.Node, total int, cur *clientstate.Currency) int {
 		if name == "" {
 			name = n.ChildID
 		}
-		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name)
+		w := 2 + 2*n.Depth + ansi.StringWidth(rail.Glyph(n)) + 1 + ansi.StringWidth(name) + ansi.StringWidth(kindTag(n.Kind))
 		if n.Attention > 0 {
 			w += 2 + len(strconv.Itoa(n.Attention))
 		}
@@ -116,7 +129,7 @@ func renderRail(nodes []rail.Node, focused, selected string, width int, paneFocu
 		// like the cursor and the badge. Rows are clipped before styling, so
 		// anything appended afterwards escapes the pane and bleeds colour into
 		// the transcript.
-		left := cursor + strings.Repeat("  ", n.Depth) + rail.AnimatedGlyph(n, tick) + " " + name + badge
+		left := cursor + strings.Repeat("  ", n.Depth) + rail.AnimatedGlyph(n, tick) + " " + name + kindTag(n.Kind) + badge
 		cost := fmtCost(n.TotalCost(), cur)
 		row := clip(left, width)
 		if cost != "" {

@@ -211,3 +211,17 @@ func TestRailWidthCountsDepthAndCost(t *testing.T) {
 		t.Error("the cost readout did not count against the width budget")
 	}
 }
+
+func TestRailWidthCountsTheKindTag(t *testing.T) {
+	plain := []rail.Node{{ChildID: "c_a", Name: "worker", Status: "idle"}}
+	tagged := []rail.Node{{ChildID: "c_a", Name: "worker", Status: "idle", Kind: "claude"}}
+	// The floor would mask the difference, so use a name long enough to clear it.
+	for i := range plain {
+		plain[i].Name = strings.Repeat("n", railMin)
+		tagged[i].Name = plain[i].Name
+	}
+	if railWidthFor(tagged, 200, nil) <= railWidthFor(plain, 200, nil) {
+		t.Fatalf("a kind tag must widen the rail: tagged=%d plain=%d",
+			railWidthFor(tagged, 200, nil), railWidthFor(plain, 200, nil))
+	}
+}
