@@ -134,7 +134,8 @@ func (f *mcpFace) Routes() (string, http.Handler) {
 	})
 }
 
-// sessionOwnedBy reports whether userID may use sid.
+// sessionOwnedBy reports whether the principal p (user id + child id) may
+// use sid.
 //
 // SDK evidence for why the face must check this itself (vendored v1.6.1):
 // the handler's hijack guard (mcp/streamable.go:311-315) runs only when

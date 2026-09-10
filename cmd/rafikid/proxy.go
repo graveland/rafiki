@@ -108,7 +108,8 @@ type proxyFace struct {
 	// MCP is the MCP agent-control surface, exposed for the same reason as
 	// Control: built here, before the Controller exists, and wired by main.go
 	// with SetController once it does. An MCP client reaching it before that
-	// binding gets a usable, toolless server rather than an error.
+	// binding gets 503 with Retry-After: 1 — a transient it can retry, not a
+	// server that answers like a real one.
 	MCP *mcpFace
 
 	// QuotaStore is the same store instance the proxy captures into, exposed

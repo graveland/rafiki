@@ -467,13 +467,9 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 // sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
 // the SDK's RequireBearerToken middleware populates, and rafiki authenticates
 // with UserTokenAuth instead — so the face binds each Mcp-Session-Id to the
-// identity that initialized it and rejects mismatches before dispatch.
-// TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
-// identity binding. The SDK's own hijack guard never fires on this mount:
-// sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
-// the SDK's RequireBearerToken middleware populates, and rafiki authenticates
-// with UserTokenAuth instead — so the face binds each Mcp-Session-Id to the
-// identity that initialized it and rejects mismatches before dispatch.
+// full principal (user id + child id) that initialized it and rejects
+// mismatches before dispatch — a sibling presenting another child's session
+// id fails on the child-id half of the comparison.
 func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
 	face, ledger := mcpFaceFixture(t)
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{tokens: map[string]users.Identity{

@@ -382,11 +382,11 @@ routes, under the same `UserTokenAuth` wrap. It is deliberately NOT mounted in
 face's authentication, because ServeMux prefers the longer pattern — the trap
 §2.3 records for `/rafiki.v1.Control/`. `main.go` serves the whole proxy-face
 mux at `"/"` on the TLS listener and wires the Controller in afterwards
-(`face.MCP.SetController`); until that lands, the face answers with a usable
-**toolless** server rather than an error — a nil returned from `getServer`
-would earn a bare 400 from the SDK that tells an MCP client nothing it can
-recover from. Once the Controller is bound, a toolless server is still the
-answer for a non-user identity (below).
+(`face.MCP.SetController`); until that lands, `getServer` answers nil and
+`Routes` turns it into **503 with `Retry-After: 1`** — a genuinely transient
+condition a client can back off and recover from, unlike a bare 400 from the
+SDK, which tells an MCP client nothing it can recover from. Once the
+Controller is bound, an unentitled identity gets **403** (below).
 
 **Auth.** A rafiki user token as a bearer credential (`Authorization: Bearer`,
 `x-api-key` or `X-Rafiki-Token`) — the same credential the Connect plane
@@ -399,13 +399,20 @@ never by re-reading the `Authorization` header, which would be a second
 credential path. The daemon's **per-boot child token** also authenticates, and
 the credential's provenance (`server.Identity.Via`, stamped by
 `UserTokenAuth.resolve`) decides what it may reach. On its own it resolves to
-`ProvenanceUnknown` and gets the toolless server; with `X-Rafiki-Session` it
+`ProvenanceUnknown` and gets **403**; with `X-Rafiki-Session` it
 resolves through the proxy face's pre-existing child-owner attribution — the
 path that makes its LLM turns bill to its owner — to
 `ProvenanceChildAttributed`, an identity carrying the owner's user id but NOT
-the owner's powers: every agent-control surface refuses it. `getServer` serves
-the toolless server (never a 403 — one rule governs the whole surface: only
-`ProvenanceUser`, a real user token, passes `server.Identity.IsUserCredential`),
+the owner's powers: every agent-control surface refuses it with 403. Two
+provenances are entitled to the surface: `ProvenanceUser`, a real user token
+(passing `server.Identity.IsUserCredential`), and `ProvenanceChildToken`, a
+per-child secret minted at spawn by the Controller (`mintMCPToken`, delivered
+as the child's `RAFIKI_MCP_TOKEN`) and resolved through `UserTokenAuth`'s
+`ChildTokenLookup` to `Identity{UserID: owner, ChildID: child, Via:
+ProvenanceChildToken}` — never cached, dying with the child. Any other
+provenance gets **403**: the credential authenticated and is not entitled to
+agent control — a status an MCP client can read, never a server that would
+render the refusal as an empty tool list.
 and the Connect plane's `Spawn` and `ListExecutors` answer a named permission
 error ("agent-control verbs require a user credential; this identity is
 child-attributed"). Attribution and authority are separate: `/v1/messages`
@@ -413,35 +420,52 @@ billing, raw-trace capture and quota attribution consume the UserID and are
 deliberately unchanged, and a user token that also carries `X-Rafiki-Session`
 stays `ProvenanceUser` — provenance is a property of the credential, not the
 header — so hand-configured clients keep working. Each MCP session is bound
-to the identity that initialized it, and a
+to the full principal that initialized it — user id AND child id, with an
+empty child id denoting the interactive user — and a
 later request presenting a session id owned by another caller — or an unknown
-one — is refused with 403 before dispatch. The face keeps this map itself
+one — is refused with 403 before dispatch. Keying on the user id alone would
+be a sibling-escalation path once children hold credentials: two children of
+one owner share a user id, so child B presenting child A's session id would
+execute against A's bound spawner. The face keeps this map itself
 because the SDK's own session-hijack guard keys on the bearer middleware
 rafiki does not run, so without it the session id alone would route one caller
 onto another caller's bound tools.
 
-**Scope.** Every call acts as the authenticated user with no parent — the same
-shape as `rafiki create` from the CLI: a top-level child owned by that user.
-The tools are served by a user-bound `tools.AgentSpawner`
-(`newUserSpawner`, `cmd/rafikid/user_spawner.go`) that closes over the
-identity at construction; no method on it takes a user id, a username or an
-`*http.Request` — an identity in a method parameter is one refactor away from
-being a tool argument the model can be prompt-injected into naming, the same
-rule the fundi-side binding enforces. There is **no per-user scoping of
-anything**: `agent_list` and the steering verbs (`agent_view`, `agent_send`,
-`agent_kill`) see **every child on the daemon**, not only the caller's, because
-rafiki has no per-user ownership filter and this surface does not invent one.
-That is the daemon's current single-operator posture, stated as what it is —
-not a guard. When ownership filtering arrives it lands in the user-bound
-spawner as a predicate over `childstore.Snapshot` — `owner_user_id` is already
-a column on `conversations.child` — and nowhere else.
+**Scope.** Two caller shapes, keyed on the credential's provenance:
 
-`agent_set_budget` is the one exception: **top-level children only**. Any
-parented child is refused — a parented child's budget belongs to the agent
-that spawned it, and reaching into another agent's subtree to re-budget its
-worker is a different act from operating your own fleet. The refusal names the
-fix: change the budget through that agent, or set the budget of the top-level
-agent that owns the subtree.
+- **User credential** — every call acts as the authenticated user with no
+  parent — the same shape as `rafiki create` from the CLI: a top-level child
+  owned by that user. The tools are served by a user-bound
+  `tools.AgentSpawner` (`newUserSpawner`, `cmd/rafikid/user_spawner.go`) that
+  closes over the identity at construction; no method on it takes a user id, a
+  username or an `*http.Request` — an identity in a method parameter is one
+  refactor away from being a tool argument the model can be prompt-injected
+  into naming, the same rule the fundi-side binding enforces. There is **no
+  per-user scoping of anything**: `agent_list` and the steering verbs
+  (`agent_view`, `agent_send`, `agent_kill`) see **every child on the daemon**,
+  not only the caller's, because rafiki has no per-user ownership filter and
+  this surface does not invent one. That is the daemon's current
+  single-operator posture, stated as what it is — not a guard.
+- **Child credential** (`ProvenanceChildToken`) — the caller is an agent IN the
+  forest: its spawns are parented under it (`ParentChildID` = its own child id)
+  by the same `controllerSpawner` fundi children use
+  (`newControllerSpawner(ctrl, id.ChildID)`), so spawn budgets descend and
+  every verb authorizes against the caller's position in the tree via
+  `controllerSpawner.authorize` — a child sees and drives only its own
+  subtree, never a sibling's and never the whole daemon, no matter what its
+  prompt is injected into asking for. The task ledger is keyed by the caller's
+  OWNER (the conversation the `/v1/messages` attribution path already
+  resolves), so a child shares its owner's ledger, exactly as a fundi child
+  does.
+
+`agent_set_budget` remains an exception for the user caller: **top-level
+children only**. Any parented child is refused — a parented child's budget
+belongs to the agent that spawned it, and reaching into another agent's
+subtree to re-budget its worker is a different act from operating your own
+fleet. The refusal names the fix: change the budget through that agent, or set
+the budget of the top-level agent that owns the subtree. A child caller's own
+spawns are already parented, so the same refusal reaches it from the other
+side.
 
 **Tools.** Twelve, materialized per caller from the same blueprints the fundi
 registry serves (`mcpBlueprints`); descriptions are reworded on this surface
