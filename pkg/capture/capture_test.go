@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"reflect"
@@ -1244,6 +1245,7 @@ func TestIsRetryableDB(t *testing.T) {
 		{"deadline exceeded", context.DeadlineExceeded, liveCtx, true},
 		{"net.OpError", &net.OpError{Op: "read", Err: errors.New("connection refused")}, liveCtx, true},
 		{"plain error", errors.New("something failed"), liveCtx, false},
+		{"ErrOrdinalOccupied wrapped as the proxy delivers it", fmt.Errorf("append response: insert: %w", ErrOrdinalOccupied), liveCtx, false},
 		{"pgconn deadlock", &pgconn.PgError{Code: "40P01"}, liveCtx, true},
 		{"pgconn serialization", &pgconn.PgError{Code: "40001"}, liveCtx, true},
 		{"pgconn not-null violation", &pgconn.PgError{Code: "23502"}, liveCtx, false},

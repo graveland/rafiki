@@ -46,6 +46,7 @@ type fakeProxyStore struct {
 	lastPrevMsg          string // prevMessageID passed to the last RecordThread
 	lastOwnMsg           string // ownMessageID passed to the last RecordThread
 	threadErr            error  // when set, RecordThread returns it (to exercise the swallow)
+	appendErr            error  // when set, AppendResponseMessage returns it (to exercise the FailTurn path)
 }
 
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
@@ -81,7 +82,7 @@ func (f *fakeProxyStore) DecomposeRequest(ctx context.Context, convID, turnID st
 }
 
 func (f *fakeProxyStore) AppendResponseMessage(ctx context.Context, convID, turnID string, createdAt time.Time, ordinal int, canonical []byte, in, out int64, stopReason string) error {
-	return nil
+	return f.appendErr
 }
 
 func (f *fakeProxyStore) RecordThread(ctx context.Context, convID, turnID string, createdAt time.Time, prevMessageID, ownMessageID string) error {
@@ -191,6 +192,37 @@ func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
 	}
 	if fs.fails != 1 {
 		t.Errorf("FailTurn fallback should fire on CompleteTurn failure, got fails=%d", fs.fails)
+	}
+}
+
+func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
+	// A successful stream whose response write fails must not strand the turn
+	// as 'pending' — the proxy falls back to FailTurn so it lands as 'error'.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	fs := &fakeProxyStore{appendErr: fmt.Errorf("%w: conversation c ordinal 5", capture.ErrOrdinalOccupied)}
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "" /*defaultModel*/, nil /*catalog*/, logger)
+	p.store = fs
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+	req.Header.Set("X-Rafiki-Session", "sess-cappend")
+	p.ServeHTTP(rec, req)
+
+	if fs.fails != 1 {
+		t.Errorf("FailTurn fallback should fire on AppendResponseMessage failure, got fails=%d", fs.fails)
+	}
+	if !strings.Contains(fs.lastFailMsg, "append response failed:") {
+		t.Errorf("fail message = %q, want the append-response prefix", fs.lastFailMsg)
 	}
 }
 

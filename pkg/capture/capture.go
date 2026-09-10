@@ -41,6 +41,11 @@ func (s *CaptureStore) WithLease(l store.Lease) *CaptureStore {
 // but a second assistant reply at one ordinal is always a lost response: nine
 // such collisions dropped 22 model replies before threads were separated, and
 // nothing reported it.
+//
+// Residual case: the conflict test is content-only (IS DISTINCT FROM), so an
+// occupant whose content is jsonb-equal to the incoming reply stays a silent
+// success. That needs a client retry re-emitting byte-identical content and is
+// not covered here.
 var ErrOrdinalOccupied = errors.New("capture: ordinal already occupied by a different message")
 
 // appendMessage is the single guarded insert both message write sites use.
