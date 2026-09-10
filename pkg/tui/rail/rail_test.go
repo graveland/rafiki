@@ -143,6 +143,14 @@ func TestSeedCarriesKind(t *testing.T) {
 			t.Errorf("Node(%q).Kind = %q, want %q", tc.id, n.Kind, tc.want)
 		}
 	}
+	// Re-seed refresh: a node introduced by child_spawned arrives Kind-less and
+	// only a later Seed fills it, so the refresh path must update Kind too.
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_a", Name: "worker", Kind: "fundi", Status: "idle"},
+	})
+	if n, ok := r.Get("c_a"); !ok || n.Kind != "fundi" {
+		t.Errorf("Kind after re-seed = %q (ok=%v), want fundi", n.Kind, ok)
+	}
 }
 
 func TestSetMaxCostAssignsDirectly(t *testing.T) {

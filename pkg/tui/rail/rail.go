@@ -56,7 +56,7 @@ type Node struct {
 
 	// Status is the last known agent state, one of protocol.Status's eight.
 	Status   string
-	Kind     string // protocol kind: "claude" | "fundi" | "pi". Empty until seeded.
+	Kind     string // protocol kind: "claude" | "fundi". "pi" is retired; an old row still renders. Empty until seeded.
 	Exited   bool
 	ExitCode *int32
 	Retrying bool

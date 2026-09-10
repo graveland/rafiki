@@ -220,8 +220,10 @@ func TestRailWidthCountsTheKindTag(t *testing.T) {
 		plain[i].Name = strings.Repeat("n", railMin)
 		tagged[i].Name = plain[i].Name
 	}
-	if railWidthFor(tagged, 200, nil) <= railWidthFor(plain, 200, nil) {
-		t.Fatalf("a kind tag must widen the rail: tagged=%d plain=%d",
-			railWidthFor(tagged, 200, nil), railWidthFor(plain, 200, nil))
+	tw, pw := railWidthFor(tagged, 200, nil), railWidthFor(plain, 200, nil)
+	// Exact: ansi.StringWidth (2 columns for " ᶜ"), not len (4 bytes). An
+	// inequality alone cannot tell a len regression from a correct width.
+	if want := ansi.StringWidth(kindTag("claude")); tw-pw != want {
+		t.Fatalf("tag width = %d, want exactly %d (ansi, not len)", tw-pw, want)
 	}
 }
