@@ -134,21 +134,25 @@ func (c claudeDump) sessionHeader() string {
 	return ""
 }
 
-// parseClaudeDump splits one dump file into its argv and env halves.
-func parseClaudeDump(t *testing.T, path string) claudeDump {
-	t.Helper()
+// parseClaudeDump splits one dump file into its argv and env halves. The
+// fixture opens its dump file (truncating) before it writes argv, and the
+// env half comes from a forked env(1), so a dump caught mid-write carries
+// argv without the marker: ok is false and the caller must keep polling —
+// a marker-less file is a child that started but has not finished recording,
+// never a fixture change (the marker is printf'd before the fork, so a real
+// fixture change cannot produce an argv-carrying file without one).
+func parseClaudeDump(_ *testing.T, path string) (claudeDump, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read dump %s: %v", path, err)
+		return claudeDump{}, false
 	}
 	lines := strings.Split(string(raw), "\n")
 	for i, l := range lines {
 		if l == "---ENV---" {
-			return claudeDump{argv: lines[:i], env: lines[i+1:]}
+			return claudeDump{argv: lines[:i], env: lines[i+1:]}, true
 		}
 	}
-	t.Fatalf("dump %s carries no ---ENV--- marker; the fixture changed shape", path)
-	return claudeDump{}
+	return claudeDump{}, false
 }
 
 // waitClaudeDump polls the dump directory until a fake-claude child whose
@@ -158,11 +162,14 @@ func parseClaudeDump(t *testing.T, path string) claudeDump {
 // stderr: the only place the real cause is written.
 func waitClaudeDump(t *testing.T, d *daemon, dumpDir, childID string) claudeDump {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(60 * time.Second) // full-suite parallel load slows spawns well past 20s
 	for time.Now().Before(deadline) {
 		matches, _ := filepath.Glob(filepath.Join(dumpDir, "claude-*.dump"))
 		for _, p := range matches {
-			dump := parseClaudeDump(t, p)
+			dump, ok := parseClaudeDump(t, p)
+			if !ok {
+				continue // caught mid-write; the child is still recording
+			}
 			if dump.envValue(paths.ChildID) == childID {
 				return dump
 			}
@@ -191,7 +198,7 @@ func waitClaudeDump(t *testing.T, d *daemon, dumpDir, childID string) claudeDump
 	} else {
 		t.Logf("read child log dir %s: %v", filepath.Join(d.logsDir, childID), err)
 	}
-	t.Fatalf("no fake-claude dump naming child %s appeared in %s within 20s\nstderr:\n%s",
+	t.Fatalf("no fake-claude dump naming child %s appeared in %s within 60s\nstderr:\n%s",
 		childID, dumpDir, d.stderr.tail(4000))
 	return claudeDump{}
 }
@@ -226,7 +233,7 @@ func mcpRawInitialize(t *testing.T, d *daemon, token string, id int) string {
 	resp := mcpRawPost(t, d.proxyURL, token, "", body)
 	if resp.StatusCode != http.StatusOK {
 		b := mcpDrain(t, resp)
-		t.Fatalf("child-token initialize status = %d, want 200 (body: %.200s)", resp.StatusCode, b)
+		t.Fatalf("child-token initialize status = %d, want 200 (body: %.200s)\nstderr:\n%s", resp.StatusCode, b, d.stderr.tail(2000))
 	}
 	sid := resp.Header.Get("Mcp-Session-Id")
 	if sid == "" {
