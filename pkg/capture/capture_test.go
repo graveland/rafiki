@@ -1536,3 +1536,80 @@ func TestRecordThreadTreatsAnUnresolvablePredecessorAsARoot(t *testing.T) {
 		t.Errorf("thread_id = %s, want its own id %s", got, id)
 	}
 }
+
+func TestConcurrentThreadsDoNotShareAnOrdinalSpace(t *testing.T) {
+	// The corruption this closes: two threads with equal message counts computed
+	// identical ordinals, and ON CONFLICT DO NOTHING dropped the loser's reply.
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name()
+
+	root, err := s.ResolveThreadConversation(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session,
+	}, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation root: %v", err)
+	}
+	branch, err := s.ResolveThreadConversation(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session,
+	}, "thread-b")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation branch: %v", err)
+	}
+	if root == branch {
+		t.Fatal("a non-root thread must get its own conversation row")
+	}
+
+	// Both threads write a message at ordinal 0. Before the fix, the second was
+	// silently dropped.
+	body := []byte(`{"messages":[{"role":"user","content":"same shape"}]}`)
+	if _, err := s.DecomposeRequest(ctx, root, mustTurn(t, s, root), time.Now(), body, "h"); err != nil {
+		t.Fatalf("decompose root: %v", err)
+	}
+	if _, err := s.DecomposeRequest(ctx, branch, mustTurn(t, s, branch), time.Now(), body, "h"); err != nil {
+		t.Fatalf("decompose branch: %v", err)
+	}
+	for _, c := range []struct{ name, id string }{{"root", root}, {"branch", branch}} {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM conversations.conversation_message WHERE conversation_id=$1::uuid`,
+			c.id).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", c.name, err)
+		}
+		if n != 1 {
+			t.Errorf("%s conversation has %d messages, want 1", c.name, n)
+		}
+	}
+
+	// The branch must be discoverable from the session for cost rollup.
+	var ref string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref FROM conversations.conversation WHERE id=$1::uuid`, branch).Scan(&ref); err != nil {
+		t.Fatalf("read external_ref: %v", err)
+	}
+	if want := session + ":thread-b"; ref != want {
+		t.Errorf("branch external_ref = %q, want %q", ref, want)
+	}
+}
+
+func TestRootThreadKeepsTheBareSessionExternalRef(t *testing.T) {
+	// Every existing conversation, every cost rollup keyed on external_ref and
+	// every `rafiki logs <child>` depends on this staying unchanged.
+	s, pool := newTestStore(t)
+	ctx := context.Background()
+	session := "c_" + t.Name()
+	id, err := s.ResolveThreadConversation(ctx, ConversationRef{
+		OriginEntrypoint: "claude", DrivenBy: "client", ExternalRef: session,
+	}, "")
+	if err != nil {
+		t.Fatalf("ResolveThreadConversation: %v", err)
+	}
+	var ref string
+	if err := pool.QueryRow(ctx,
+		`SELECT external_ref FROM conversations.conversation WHERE id=$1::uuid`, id).Scan(&ref); err != nil {
+		t.Fatalf("read external_ref: %v", err)
+	}
+	if ref != session {
+		t.Errorf("root external_ref = %q, want the bare session %q", ref, session)
+	}
+}

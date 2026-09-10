@@ -547,6 +547,13 @@ never meet; the cost is one-directional — a DELETE unbinds the sid
 immediately while the pointer lingers until Wait returns, and a Log to a
 closed session fails at debug and is skipped.
 
+A client-driven conversation's `external_ref` is the `X-Rafiki-Session` value,
+optionally suffixed `:<threadID>`. Claude Code runs several conversational
+threads in one process (the main thread, each Task subagent, the titler) under
+one session header; each non-root thread gets its own conversation row so it
+gets its own ordinal space. The root thread keeps the bare session value, so
+cost rollup by `external_ref` and `rafiki logs <child>` are unchanged.
+
 ## 3. Framing
 
 JSON Lines (`application/jsonl`).

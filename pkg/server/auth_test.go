@@ -25,6 +25,15 @@ func (s *recordingStore) EnsureConversationByExternalRef(ctx context.Context, re
 	s.lastOwnerUserID = ref.OwnerUserID
 	return "conv-1", nil
 }
+func (s *recordingStore) ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error) {
+	return s.EnsureConversationByExternalRef(ctx, ref)
+}
+
+func (s *recordingStore) ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error) {
+	_ = session
+	_ = prevMessageID
+	return "", nil
+}
 
 func (s *recordingStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	s.lastAuthorUserID = t.AuthorUserID

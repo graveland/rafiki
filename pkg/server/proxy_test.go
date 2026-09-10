@@ -52,6 +52,15 @@ type fakeProxyStore struct {
 func (f *fakeProxyStore) EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error) {
 	return "conv-1", nil
 }
+func (s *fakeProxyStore) ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error) {
+	return s.EnsureConversationByExternalRef(ctx, ref)
+}
+
+func (s *fakeProxyStore) ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error) {
+	_ = session
+	_ = prevMessageID
+	return "", nil
+}
 
 func (f *fakeProxyStore) InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.intents++

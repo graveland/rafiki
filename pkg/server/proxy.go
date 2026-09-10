@@ -29,6 +29,8 @@ import (
 
 type proxyStore interface {
 	EnsureConversationByExternalRef(ctx context.Context, ref capture.ConversationRef) (string, error)
+	ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error)
+	ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error)
 	InsertTurnIntent(ctx context.Context, t capture.TurnIntent) (turnID string, createdAt time.Time, err error)
 	CompleteTurn(ctx context.Context, r capture.TurnResult) error
 	FailTurn(ctx context.Context, turnID string, createdAt time.Time, errMsg string) error
@@ -1359,10 +1361,26 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	if source == "" {
 		source = "claude"
 	}
-	convID, err := p.store.EnsureConversationByExternalRef(r.Context(), capture.ConversationRef{
+	session := r.Header.Get("X-Rafiki-Session")
+	baseRef := capture.ConversationRef{
 		OriginEntrypoint: source, DrivenBy: "client",
-		OwnerUserID: ownerUserID, ExternalRef: r.Header.Get("X-Rafiki-Session"),
-	})
+		OwnerUserID: ownerUserID, ExternalRef: session,
+	}
+	// Which of the session's threads is this? Claude Code sends the main
+	// thread, every Task subagent and the titler under one session header, so
+	// without this they share a conversation row and race on one ordinal space.
+	// One indexed lookup; a miss is a thread root, never a guess.
+	threadID := ""
+	if session != "" {
+		prevMsg := claudethread.PreviousMessageID(reqBody)
+		tid, terr := p.store.ThreadOfPredecessorInSession(r.Context(), session, prevMsg)
+		if terr != nil {
+			p.logger.Warn("proxy capture: thread lookup failed", "session", session, "error", terr)
+		} else {
+			threadID = tid
+		}
+	}
+	convID, err := p.store.ResolveThreadConversation(r.Context(), baseRef, threadID)
 	if err != nil {
 		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}

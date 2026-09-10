@@ -293,6 +293,15 @@ type recordingChatStore struct {
 func (f *recordingChatStore) EnsureConversationByExternalRef(_ context.Context, _ capture.ConversationRef) (string, error) {
 	return "conv-openai", nil
 }
+func (s *recordingChatStore) ResolveThreadConversation(ctx context.Context, ref capture.ConversationRef, threadID string) (string, error) {
+	return s.EnsureConversationByExternalRef(ctx, ref)
+}
+
+func (s *recordingChatStore) ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error) {
+	_ = session
+	_ = prevMessageID
+	return "", nil
+}
 
 func (f *recordingChatStore) InsertTurnIntent(_ context.Context, t capture.TurnIntent) (string, time.Time, error) {
 	f.lastIntent = t

@@ -175,6 +175,61 @@ func (s *CaptureStore) EnsureConversation(ctx context.Context, ref ConversationR
 	return id, err
 }
 
+// ResolveThreadConversation returns the conversation row a thread's turns
+// belong to. threadID is the conversation_turn.id that begins the thread, or
+// "" for the session's root thread.
+//
+// The root thread keeps the bare session external_ref, so every existing
+// conversation, every cost rollup keyed on external_ref
+// (pkg/insights/subtree.go) and every `rafiki logs <child>` is unchanged. A
+// non-root thread gets "<session>:<threadID>", which is a distinct row and
+// therefore a distinct ordinal space. That separation is the whole fix: the
+// dropped replies, the phantom compaction boundaries and the ordinal
+// collisions are one bug, concurrent writers sharing an ordinal space.
+func (s *CaptureStore) ResolveThreadConversation(ctx context.Context, ref ConversationRef, threadID string) (string, error) {
+	if threadID != "" && ref.ExternalRef != "" {
+		ref.ExternalRef = ref.ExternalRef + ":" + threadID
+	}
+	return s.EnsureConversationByExternalRef(ctx, ref)
+}
+
+// ThreadOfPredecessorInSession is ThreadOfPredecessor across every conversation
+// belonging to one session: the root ("<session>") and each branch
+// ("<session>:<threadID>"). A thread's first turn chains to a message on the
+// root conversation; its second chains to one on its own branch, so a lookup
+// scoped to the root alone finds nothing and would restart the thread on every
+// turn.
+//
+// Reads only columns migration 0030 fills. A miss must never fall back to "the
+// most recent turn": guessing is what put concurrent subagents on one thread
+// to begin with.
+func (s *CaptureStore) ThreadOfPredecessorInSession(ctx context.Context, session, prevMessageID string) (string, error) {
+	if prevMessageID == "" || session == "" {
+		return "", nil
+	}
+	// The LIKE arm must match the session verbatim, so % and _ have to lose
+	// their wildcard meaning: a session id is client-supplied (claude.go takes
+	// an arbitrary X-Rafiki-Session).
+	like := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(session)
+	var threadID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT coalesce(t.thread_id::text, t.id::text)
+		   FROM conversations.conversation_turn t
+		   JOIN conversations.conversation c ON c.id = t.conversation_id
+		  WHERE c.driven_by = 'client'
+		    AND (c.external_ref = $1 OR c.external_ref LIKE $2 || ':%' ESCAPE '\\')
+		    AND t.response_message_id = $3
+		  ORDER BY t.created_at DESC LIMIT 1`,
+		session, like, prevMessageID).Scan(&threadID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("thread of predecessor in session: %w", err)
+	}
+	return threadID, nil
+}
+
 // EnsureConversationByExternalRef correlates a client session (external_ref,
 // e.g. X-Rafiki-Session) to one conversation: it reuses an existing row with
 // the same external_ref + driven_by, else creates a fresh conversation. Used by
