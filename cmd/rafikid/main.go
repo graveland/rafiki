@@ -495,6 +495,10 @@ func runDaemon(opts runDaemonOpts) error {
 		if face.MCP != nil {
 			face.MCP.SetController(ctrl)
 		}
+		// The proxy face's thread observer: a captured request on a non-root
+		// Claude Code thread materializes a child record so lineage, the rail
+		// and the cost rollup all see the subagent.
+		face.SetController(ctrl)
 	}
 	// The executor pool no longer owns a listener. It is reached at a PATH on
 	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control

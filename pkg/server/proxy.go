@@ -82,6 +82,12 @@ type MessagesProxy struct {
 	set *providers.Set // the provider registry; nil = routing via the old slash rule
 
 	quotaStore *quota.Store // nil = no agent database; quota capture disabled
+
+	// threadObserver is told when a captured request belongs to a Claude Code
+	// thread other than the session's root, so the daemon can materialize a
+	// child record for it. Optional: nil in a proxy with no daemon behind it,
+	// which is the client-driven path.
+	threadObserver ThreadObserver
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -93,6 +99,15 @@ func (p *MessagesProxy) SetRawTrace(s rawTraceRecorder, recordAll bool) {
 	p.rawTrace = s
 	p.rawTraceAll = recordAll
 }
+
+// ThreadObserver is notified the first time a request is seen for a non-root
+// Claude Code thread. Implemented by the daemon's Controller.
+type ThreadObserver interface {
+	EnsureThreadChild(parentChildID, threadID, conversationID string) error
+}
+
+// SetThreadObserver attaches the daemon's child-record synthesizer (optional).
+func (p *MessagesProxy) SetThreadObserver(o ThreadObserver) { p.threadObserver = o }
 
 // SetQuotaStore enables capture of Anthropic's per-account subscription
 // rate-limit headers off OAuth-passthrough responses. Pass nil to disable
@@ -1390,6 +1405,15 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	if err != nil {
 		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
+	}
+	// A non-root thread is a Task subagent. Give it a child record so lineage,
+	// the rail, rafiki list, agent_list and cost rollup all see it. Never for
+	// the root thread, which is already a real child.
+	if threadID != "" && p.threadObserver != nil {
+		if eerr := p.threadObserver.EnsureThreadChild(session, threadID, convID); eerr != nil {
+			p.logger.Warn("proxy capture: ensure thread child failed",
+				"session", session, "thread", threadID, "error", eerr)
+		}
 	}
 	// Ordering on the client path is by created_at; ordinal is unused here.
 	// Request is no longer stored verbatim on the turn row — DecomposeRequest

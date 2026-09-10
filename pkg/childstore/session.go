@@ -25,6 +25,12 @@ type Session struct {
 	Cwd     string
 	Kind    string // "pi" (default) or "claude"; selects the child protocol
 
+	// Native marks a child that has no OS process: a Claude Code Task subagent
+	// the proxy synthesized from a captured thread. It is a real conversation
+	// with a real cost, and it is not a budgeted cross-process agent, so it is
+	// excluded from LiveDescendantCount and Descendants.
+	Native bool
+
 	// OwnerUserID is the id of the user who spawned this child (empty for an
 	// anonymous/unauthenticated spawn, e.g. from the local unix socket).
 	// Populated at fresh spawn (Controller.Spawn) and carried across
@@ -160,6 +166,10 @@ type Snapshot struct {
 	Kind      string
 	ConfigDir string
 
+	// Native marks a child that has no OS process: a Claude Code Task subagent
+	// the proxy synthesized from a captured thread. See Session.Native.
+	Native bool
+
 	// OwnerUserID mirrors Session.OwnerUserID — see its doc comment.
 	OwnerUserID string
 
@@ -254,6 +264,7 @@ func (s *Session) Snapshot() Snapshot {
 	return Snapshot{
 		ChildID: s.ChildID, Name: s.Name, Cwd: s.Cwd, PID: s.PID,
 		Kind: s.Kind, ConfigDir: s.ConfigDir,
+		Native:      s.Native,
 		OwnerUserID: s.OwnerUserID,
 		Provider:    s.Provider, Model: s.Model, Thinking: s.Thinking,
 		SessionID: s.SessionID, SessionFile: s.SessionFile,

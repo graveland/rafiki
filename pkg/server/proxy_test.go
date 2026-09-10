@@ -50,7 +50,10 @@ type fakeProxyStore struct {
 	threadErr            error  // when set, RecordThread returns it (to exercise the swallow)
 	appendErr            error  // when set, AppendResponseMessage returns it (to exercise the FailTurn path)
 
-	threadID        string // ThreadOfPredecessorInSession answers this; empty keeps every routing test on the root row
+	// threadID, when non-empty, is the thread id ThreadOfPredecessorInSession
+	// answers with, standing in for a request on a Claude Code subagent thread.
+	// Empty (the default) is a root-thread request.
+	threadID        string
 	lastThreadID    string // threadID the last ResolveThreadConversation received
 	lastResolvedRef string // external_ref the last ResolveThreadConversation received
 	lastIntentConv  string // conversation the last InsertTurnIntent landed on
@@ -1848,4 +1851,94 @@ func TestRecordThreadFailureIsLoggedAndSwallowed(t *testing.T) {
 	if fs.fails != 0 {
 		t.Fatalf("FailTurn calls = %d, want 0 (observation is never failTurn)", fs.fails)
 	}
+}
+
+// stubThreadObserver records what beginCapture told it, so the synthetic
+// child-record hook is pinned end to end.
+type stubThreadObserver struct {
+	calls []string // "parent|thread|conversation" per call
+	err   error
+}
+
+func (s *stubThreadObserver) EnsureThreadChild(parentChildID, threadID, conversationID string) error {
+	s.calls = append(s.calls, parentChildID+"|"+threadID+"|"+conversationID)
+	return s.err
+}
+
+// TestThreadObserverIsToldAboutNonRootThreads pins the beginCapture hook that
+// materializes a child record per captured Claude Code thread. If it silently
+// stopped happening, native subagents would fall out of lineage, the rail,
+// rafiki list and the cost rollup with nothing erroring anywhere.
+func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
+			"event: message_delta\n"+
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}`+"\n\n"+
+			"event: message_stop\n"+`data: {"type":"message_stop"}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	t.Run("non-root thread", func(t *testing.T) {
+		obs := &stubThreadObserver{}
+		fs := &fakeProxyStore{threadID: "thread-9"}
+		p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+		p.store = fs
+		p.SetThreadObserver(obs)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req.Header.Set("X-Rafiki-Session", "c_parent")
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if len(obs.calls) != 1 {
+			t.Fatalf("observer calls = %d, want 1", len(obs.calls))
+		}
+		if obs.calls[0] != "c_parent|thread-9|conv-1" {
+			t.Errorf("call = %q, want %q", obs.calls[0], "c_parent|thread-9|conv-1")
+		}
+	})
+
+	t.Run("root thread is never observed", func(t *testing.T) {
+		obs := &stubThreadObserver{}
+		fs := &fakeProxyStore{} // threadID empty: the root thread
+		p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+		p.store = fs
+		p.SetThreadObserver(obs)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req.Header.Set("X-Rafiki-Session", "c_root")
+		p.ServeHTTP(rec, req)
+
+		if len(obs.calls) != 0 {
+			t.Errorf("observer calls = %v, want none: the root thread is already a real child", obs.calls)
+		}
+	})
+
+	t.Run("observer failure does not fail the turn", func(t *testing.T) {
+		obs := &stubThreadObserver{err: errors.New("parent not found")}
+		fs := &fakeProxyStore{threadID: "thread-9"}
+		p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+		p.store = fs
+		p.SetThreadObserver(obs)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req.Header.Set("X-Rafiki-Session", "c_parent")
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (a missing child record must never be a dead turn)", rec.Code)
+		}
+		if fs.fails != 0 {
+			t.Errorf("FailTurn calls = %d, want 0", fs.fails)
+		}
+	})
 }

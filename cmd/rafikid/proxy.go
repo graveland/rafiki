@@ -125,6 +125,11 @@ type proxyFace struct {
 	// with identity when a credential happens to be attached, which is what
 	// lets a per-user read like GetRateLimitStatus work locally.
 	TokenAuth *server.UserTokenAuth
+
+	// messages is the /v1/messages proxy, retained so main.go can wire the
+	// Controller into it after construction — the face is built before the
+	// Controller exists, for the same reason as Control and MCP above.
+	messages *server.MessagesProxy
 }
 
 // defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
@@ -401,6 +406,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		MCP:        mcpFace,
 		QuotaStore: quotaStore,
 		TokenAuth:  tokenAuth,
+		messages:   messages,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)
@@ -416,6 +422,17 @@ func (f *proxyFace) Close(ctx context.Context) {
 	if err := f.srv.Shutdown(ctx); err != nil {
 		slog.Warn("proxy face shutdown", "error", err)
 	}
+}
+
+// SetController binds the daemon's controller, once main.go has built it —
+// the face is constructed first (see proxyFace.messages), so this cannot be a
+// constructor argument. It threads the Controller into the messages proxy as
+// the ThreadObserver that materializes a child record per captured thread.
+func (f *proxyFace) SetController(c *Controller) {
+	if f == nil || f.messages == nil {
+		return
+	}
+	f.messages.SetThreadObserver(c)
 }
 
 // startBroadcastListener binds a dedicated HTTP listener for OpenRouter's OTLP

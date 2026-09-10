@@ -146,10 +146,14 @@ func (s *Store) AbsoluteDepth(childID string) int {
 // cap is a leak rather than a limit. Exited children are still in the store
 // (ctrl_get_recent serves their rings after exit) so they must be filtered
 // here rather than assumed absent.
+//
+// Native children are also excluded: a Claude Code Task subagent the proxy
+// synthesized is a real conversation with a real cost, but it is not one of
+// the cross-process agents the MaxChildren grant budgets.
 func (s *Store) LiveDescendantCount(ancestorID string) int {
 	n := 0
 	for _, snap := range s.Descendants(ancestorID) {
-		if snap.Status != protocol.StatusExited {
+		if snap.Status != protocol.StatusExited && !snap.Native {
 			n++
 		}
 	}
@@ -159,6 +163,10 @@ func (s *Store) LiveDescendantCount(ancestorID string) int {
 // Descendants returns snapshots for every child beneath ancestorID at any
 // depth. The root label narrows the candidate set to one subtree with an
 // O(1) test per child; the chain walk then runs only over that set.
+//
+// Native children (Claude Code Task subagents the proxy synthesized) are not
+// returned: callers walk this list to reason about budgeted cross-process
+// agents, which a synthetic thread child is not.
 //
 // Store has no label index (see store.go) so this scans List(). That is
 // intentional and fine — the store holds tens of children in memory.
@@ -173,6 +181,9 @@ func (s *Store) Descendants(ancestorID string) []Snapshot {
 	var out []Snapshot
 	for _, snap := range s.List() {
 		if snap.ChildID == ancestorID {
+			continue
+		}
+		if snap.Native {
 			continue
 		}
 		if r, ok := labelLookup(snap.Labels, LabelRoot, legacyLabelRoot); !ok || r != root {
