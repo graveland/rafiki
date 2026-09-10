@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -205,7 +206,10 @@ func runClaude(cmd *cobra.Command, args []string) error {
 		autoCompact = claudeAutoCompactWindow(context.Background(), cmd, model)
 	}
 
-	env, modelArgs := proxyenv.Claude(os.Environ(), proxyenv.ClaudeOptions{
+	// ClaudeEnv returns the same decisions as data (Values) rather than
+	// pre-rendered argv, so the interactive build goes through the one shared
+	// builder below instead of appending a second producer's flags by hand.
+	env, vals := proxyenv.ClaudeEnv(os.Environ(), proxyenv.ClaudeOptions{
 		URL:               url,
 		Token:             token,
 		Model:             model,
@@ -219,7 +223,18 @@ func runClaude(cmd *cobra.Command, args []string) error {
 			"X-Rafiki-Source":  "rafiki-claude",
 		},
 	})
-	return execClaude(claudeInvocation{Env: env, Args: append(modelArgs, args...)})
+	// ModeInteractive is what keeps this path free of -p, stream-json,
+	// --dangerously-skip-permissions and --disallowedTools: a human owns this
+	// TTY and answers permission prompts, and AskUserQuestion has a renderer
+	// here and must stay callable.
+	argv := claudeargv.Build(claudeargv.Params{
+		Mode:      claudeargv.ModeInteractive,
+		Model:     model,
+		MCPConfig: vals.MCPConfig,
+		ModelArgs: vals.ModelArgs,
+		UserArgs:  args,
+	})
+	return execClaude(claudeInvocation{Env: env, Args: argv})
 }
 
 // passthroughMode aliases proxyenv.PassthroughMode: the parsing/resolution
@@ -285,8 +300,13 @@ func claudePreflight(url string) error {
 }
 
 // execClaude runs the local claude binary with the assembled env and args,
-// handing over the TTY.
-func execClaude(inv claudeInvocation) error {
+// handing over the TTY. A variable for the same reason runOSCmd is: tests
+// capture the assembled invocation instead of spawning a real claude binary.
+var execClaude = func(inv claudeInvocation) error {
+	return launchClaude(inv)
+}
+
+func launchClaude(inv claudeInvocation) error {
 	cmd := exec.Command("claude", inv.Args...) //nolint:gosec // launching the user's own claude
 	cmd.Env = inv.Env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr

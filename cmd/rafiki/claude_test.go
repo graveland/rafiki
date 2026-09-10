@@ -3,8 +3,11 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -443,6 +446,114 @@ func TestRunClaude_InvalidPassthroughModeIsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "auto, on, or off") {
 		t.Errorf("error = %v, want it to list the valid values", err)
 	}
+}
+
+func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
+	isolateProfiles(t)
+	resetProfileCache()
+
+	// claudePreflight must see a live /healthz before runClaude gets as far
+	// as building argv; without this the test would measure the preflight
+	// failure, not the argv.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var captured claudeInvocation
+	origExec := execClaude
+	execClaude = func(inv claudeInvocation) error {
+		captured = inv
+		return nil
+	}
+	t.Cleanup(func() { execClaude = origExec })
+
+	cmd := newClaudeCmd()
+	for flag, val := range map[string]string{
+		"url":     srv.URL,
+		"token":   "tok",
+		"model":   "claude-opus-5",
+		"session": "sess-1",
+	} {
+		if err := cmd.Flags().Set(flag, val); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// What pflag hands back for everything after `--`: claude-side flags
+	// rafiki never parses. --resume doubles as the "resume arg it was given"
+	// of the review finding; with a proxied model the builder routes the model
+	// through vals.ModelArgs, so this also proves the pair survived the switch
+	// from pre-rendered argv to claudeargv.Params.
+	userArgs := []string{"--resume", "abc-123", "--permission-mode", "plan"}
+	if err := runClaude(cmd, userArgs); err != nil {
+		t.Fatalf("runClaude: %v", err)
+	}
+
+	argv := captured.Args
+	if len(argv) <= len(userArgs) {
+		t.Fatalf("argv %v is degenerate: an interactive build must still carry the model, mcp-config and user args it was given", argv)
+	}
+	for _, unwanted := range []string{
+		"-p",
+		"--input-format",
+		"--output-format",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--disallowedTools",
+	} {
+		if slices.Contains(argv, unwanted) {
+			t.Errorf("interactive argv %v carries headless flag %q", argv, unwanted)
+		}
+	}
+	// (a) the model pair it was given is still there...
+	assertArgvPair(t, argv, "--model", "claude-opus-5")
+	// ...and so is the MCP config, emitted as a single --mcp-config=<json>
+	// element (the variadic flag makes a two-element pair swallow the next one).
+	mcpCount := 0
+	for _, a := range argv {
+		if strings.HasPrefix(a, "--mcp-config=") {
+			mcpCount++
+			if a == "--mcp-config=" {
+				t.Errorf("argv %v carries an empty --mcp-config=", argv)
+			}
+		}
+	}
+	if mcpCount != 1 {
+		t.Errorf("argv %v: want exactly one --mcp-config element, got %d", argv, mcpCount)
+	}
+	// (b) the user's own args come last, after everything the builder emits.
+	if !slices.Equal(argv[len(argv)-len(userArgs):], userArgs) {
+		t.Errorf("argv %v: want user args %v last, got tail %v", argv, userArgs, argv[len(argv)-len(userArgs):])
+	}
+	if slices.Contains(argv[:len(argv)-len(userArgs)], "--resume") {
+		t.Errorf("argv %v: a user arg leaked ahead of the user tail", argv)
+	}
+
+	// The switch from proxyenv.Claude to ClaudeEnv must not have dropped the
+	// environment half: the proxy wiring and the session correlation header
+	// still arrive.
+	envJoined := strings.Join(captured.Env, "\n")
+	if !slices.Contains(captured.Env, "ANTHROPIC_BASE_URL="+srv.URL) {
+		t.Errorf("env does not point ANTHROPIC_BASE_URL at the proxy; got:\n%s", envJoined)
+	}
+	if !strings.Contains(envJoined, "X-Rafiki-Session: sess-1") {
+		t.Errorf("env is missing the X-Rafiki-Session correlation header; got:\n%s", envJoined)
+	}
+}
+
+// assertArgvPair asserts argv carries flag immediately followed by value.
+func assertArgvPair(t *testing.T, argv []string, flag, value string) {
+	t.Helper()
+	for i, a := range argv {
+		if a == flag {
+			if i+1 >= len(argv) || argv[i+1] != value {
+				t.Errorf("argv %v: %s is not followed by %q", argv, flag, value)
+			}
+			return
+		}
+	}
+	t.Errorf("argv %v: missing %s", argv, flag)
 }
 
 // With no token resolvable from any source, runClaude must fail before ever
