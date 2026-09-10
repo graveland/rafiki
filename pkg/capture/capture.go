@@ -512,7 +512,15 @@ func (s *CaptureStore) resolveHorizon(ctx context.Context, convID string, messag
 	if !looksLikeCompactionSummary(msg0) {
 		// Structurally divergent but not a summary: a new thread's preamble, or
 		// a client that rewrote its head. Insert at the existing horizon
-		// untagged rather than moving the resume point onto it.
+		// untagged rather than moving the resume point onto it. The divergent
+		// head itself is NOT captured (its inserts DO NOTHING against the rows
+		// at the horizon) and nothing re-anchors later: the append never wrote
+		// it, so reanchorHorizon cannot match it. That is still the safe
+		// direction: no false resume point, no readable history lost. The warn
+		// is the only signal this happened, so a marker list gone stale shows
+		// up in the log instead of only in a manual DB scan.
+		slog.Warn("capture: divergent message 0 is not a compaction summary; leaving the horizon untagged",
+			"conversation", convID, "head_first_120", string(msg0[:min(len(msg0), 120)]))
 		return h, false, nil
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -550,9 +558,10 @@ var compactionMarkers = []string{
 
 // looksLikeCompactionSummary reports whether a message's content reads as a
 // compaction summary rather than a session preamble. Conservative in the safe
-// direction: a missed boundary leaves the horizon where it was and the next
-// request re-anchors, while a false boundary moves the resume point onto an
-// unrelated message and loses the history before it.
+// direction: a missed boundary leaves the horizon where it was, the divergent
+// head goes uncaptured, and no false resume point is recorded, while a false
+// boundary moves the resume point onto an unrelated message and loses the
+// history before it.
 func looksLikeCompactionSummary(content []byte) bool {
 	var blocks []struct {
 		Text string `json:"text"`
