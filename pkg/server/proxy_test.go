@@ -1900,8 +1900,8 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		if len(obs.calls) != 1 {
 			t.Fatalf("observer calls = %d, want 1", len(obs.calls))
 		}
-		if obs.calls[0] != "c_parent|thread-9|conv-1" {
-			t.Errorf("call = %q, want %q", obs.calls[0], "c_parent|thread-9|conv-1")
+		if obs.calls[0] != "c_parent|thread-9|conv-branch" {
+			t.Errorf("call = %q, want %q: the hook gets the branch row the turn intent lands on", obs.calls[0], "c_parent|thread-9|conv-branch")
 		}
 	})
 
