@@ -49,3 +49,36 @@ func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
 		t.Errorf("Descendants = %d, want 1: the synthetic child is a real member of the tree", n)
 	}
 }
+
+func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
+	})
+	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
+		t.Fatalf("EnsureThreadChild: %v", err)
+	}
+	id := threadChildID("c_parent", "thread-a")
+
+	// The join: message msg_sub1 belongs to thread-a, and the frame carrying it
+	// named toolu_ABC as its spawning call.
+	c.noteSubagentToolCall("c_parent", "thread-a", "toolu_ABC")
+
+	snap, ok := c.st.Get(id)
+	if !ok {
+		t.Fatalf("no synthetic child %q", id)
+	}
+	if got := snap.Labels[labelSpawnedByTool]; got != "toolu_ABC" {
+		t.Errorf("%s = %q, want %q", labelSpawnedByTool, got, "toolu_ABC")
+	}
+	if snap.Name != "task:toolu_ABC" {
+		t.Errorf("name = %q, want %q: an opaque thread uuid is not findable in the parent's transcript",
+			snap.Name, "task:toolu_ABC")
+	}
+
+	// Idempotent: the hook fires on every frame of the subagent's output.
+	c.noteSubagentToolCall("c_parent", "thread-a", "toolu_ABC")
+	if snap2, _ := c.st.Get(id); snap2.Name != "task:toolu_ABC" {
+		t.Errorf("name changed on a repeat call: %q", snap2.Name)
+	}
+}

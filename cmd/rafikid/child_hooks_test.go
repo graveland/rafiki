@@ -13,13 +13,16 @@ import (
 func TestChildHooksAreInstalledForEveryKind(t *testing.T) {
 	c := &Controller{st: childstore.New(), cm: newChildManager()}
 
-	sink, onMeta := c.childHooks("c_test")
+	sink, onMeta, onSubagent := c.childHooks("c_test")
 
 	if sink == nil {
 		t.Error("NativeSink hook is nil; the claude translator would never run")
 	}
 	if onMeta == nil {
 		t.Error("OnMeta hook is nil; a claude session id would never reach the store")
+	}
+	if onSubagent == nil {
+		t.Error("OnSubagent hook is nil; a native subagent would keep its opaque thread-uuid name")
 	}
 }
 
@@ -30,7 +33,7 @@ func TestChildHooksMetaIgnoresEmptySessionID(t *testing.T) {
 	st.Insert(&childstore.Session{ChildID: "c_test", SessionID: "sess-good"})
 	c := &Controller{st: st, cm: newChildManager()}
 
-	_, onMeta := c.childHooks("c_test")
+	_, onMeta, _ := c.childHooks("c_test")
 	onMeta(child.SnifferMetadata{Model: "claude-opus-5"})
 
 	snap, ok := c.st.Get("c_test")

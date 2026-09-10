@@ -76,6 +76,14 @@ type SpawnSpec struct {
 	// optimisation, because Parse reports metadata on every claude `result`
 	// frame — once per turn — not just on `system/init`.
 	OnMeta func(SnifferMetadata)
+
+	// OnSubagent fires when a stdout frame names the Task tool call that
+	// spawned it. Unlike OnMeta this is called ASYNCHRONOUSLY, from a
+	// goroutine: the daemon's implementation does a database join, and losing
+	// one tool-call attribution to a crash costs a label, not a conversation,
+	// so it does not earn the stalled-pipe risk OnMeta's comment describes.
+	// May fire many times per subagent; the implementation dedupes.
+	OnSubagent func(SubagentObservation)
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -229,6 +237,7 @@ type Child struct {
 	provider   ProtocolProvider
 	nativeSink func(*rafikiv1.Event)
 	onMeta     func(SnifferMetadata)
+	onSubagent func(SubagentObservation)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
 	// streaming, etc.) rather than "shutting_down" which is an artifact of the
@@ -326,6 +335,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		provider:     prov,
 		nativeSink:   spec.NativeSink,
 		onMeta:       spec.OnMeta,
+		onSubagent:   spec.OnSubagent,
 		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
@@ -766,6 +776,16 @@ func (c *Child) readStdout() {
 		c.resetProviderIfDue()
 		if !isMessageUpdate(line) {
 			c.ring.Append(line, ts)
+		}
+		// Optional provider capability: only the claude provider produces
+		// subagent frames, so this is an interface assertion rather than a
+		// method on Provider, which IdentityProvider would have to stub.
+		if sn, ok := c.provider.(interface {
+			SubagentFrame([]byte) (SubagentObservation, bool)
+		}); ok && c.onSubagent != nil {
+			if obs, found := sn.SubagentFrame(line); found {
+				go c.onSubagent(obs)
+			}
 		}
 		for _, f := range c.provider.BusFrames(line, ts) {
 			c.publishBus(f, ts)

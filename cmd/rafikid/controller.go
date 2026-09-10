@@ -26,6 +26,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/childstoredb"
@@ -76,6 +77,11 @@ type Controller struct {
 	// agent child (fundi.RuntimeOptions.Pool). Nil means every agent
 	// conversation is in-memory. Owned and closed by main.go, not here.
 	pool *pgxpool.Pool
+
+	// captureStore, when non-nil, resolves which captured thread a supervisor
+	// observation belongs to (HandleSubagentObservation). Nil on a DB-less
+	// daemon, which captures no turns and so never attributes a subagent.
+	captureStore *capture.CaptureStore
 
 	// children is the durable child-state store. Nil when pool is nil, which
 	// means children live in memory only and do not survive a restart.
@@ -403,6 +409,12 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	}
 	// After the literal: the queue's Validate and Deliver are methods on c.
 	c.inbox = c.newInboxQueue(inboxStore(pool))
+	// Pool-gated like taskStore: a nil pool must leave captureStore nil, not a
+	// store over a nil pool, because HandleSubagentObservation's nil check is
+	// the only thing between a supervisor hook and a panic.
+	if pool != nil {
+		c.captureStore = capture.NewCaptureStore(pool)
+	}
 	c.bound = make(map[string]*boundExecutor)
 	c.jobs = c.newControllerJobWatcher()
 
@@ -566,8 +578,8 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 
 // childHooks builds the per-child callbacks every SpawnSpec carries.
 //
-// Both are installed for EVERY kind, deliberately. NativeSink used to be set
-// only inside `if runner != nil` — which is fundi-only, since agentRunner
+// All three are installed for EVERY kind, deliberately. NativeSink used to be
+// set only inside `if runner != nil` — which is fundi-only, since agentRunner
 // returns a nil Runner for every other kind — so the claude translator in
 // pkg/child was unreachable and attaching to a claude child showed an empty
 // pane. A child whose provider has no native translation simply produces no
@@ -577,7 +589,10 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 // in monitorChild off BUS frames, and claude's system/init produces none, so
 // without this the id reaches the database only on the first bus frame of the
 // first turn — and resume reads that column.
-func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(child.SnifferMetadata)) {
+//
+// OnSubagent attributes a native subagent to the Task call that spawned it.
+// Unlike the other two it runs on its own goroutine (see SpawnSpec.OnSubagent).
+func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(child.SnifferMetadata), func(child.SubagentObservation)) {
 	sink := func(ev *rafikiv1.Event) {
 		if ev.GetChildId() == "" {
 			ev.ChildId = childID
@@ -609,7 +624,9 @@ func (c *Controller) childHooks(childID string) (func(*rafikiv1.Event), func(chi
 			slog.Warn("write state record (after session sniff)", "childId", childID, "error", err)
 		}
 	}
-	return sink, onMeta
+	return sink, onMeta, func(obs child.SubagentObservation) {
+		c.HandleSubagentObservation(childID, obs)
+	}
 }
 
 func (c *Controller) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -1235,7 +1252,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Provider:    prov,
 		Runner:      runner,
 	}
-	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
+	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -1955,7 +1972,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		Provider:    prov,
 		Runner:      runner,
 	}
-	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
+	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -2080,7 +2097,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Provider: prov,
 		Runner:   runner,
 	}
-	spec.NativeSink, spec.OnMeta = c.childHooks(childID)
+	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.

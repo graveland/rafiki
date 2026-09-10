@@ -179,6 +179,7 @@ type claudeStreamFrame struct {
 	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
 	Usage        *claudeUsage `json:"usage,omitempty"`
 	Message      *struct {
+		ID      string               `json:"id"`
 		Role    string               `json:"role"`
 		Model   string               `json:"model,omitempty"`
 		Content []claudeContentBlock `json:"content"`
@@ -200,6 +201,30 @@ type claudeUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
+// SubagentObservation pairs a Claude Code assistant message with the Task tool
+// call that spawned the subagent producing it. The message id is the join key
+// to conversation_turn.response_message_id, which is how the daemon finds the
+// thread and therefore the synthetic child.
+type SubagentObservation struct {
+	MessageID       string
+	ParentToolUseID string
+}
+
+// SubagentFrame reports whether a stdout line came from a Task subagent, and if
+// so which tool call spawned it. ok is false for a main-thread frame
+// (parent_tool_use_id is null there), for malformed input, and for a frame
+// carrying no message id, which cannot be joined to anything.
+func (p *claudeProvider) SubagentFrame(line []byte) (SubagentObservation, bool) {
+	var f claudeStreamFrame
+	if err := json.Unmarshal(line, &f); err != nil {
+		return SubagentObservation{}, false
+	}
+	if f.ParentToolUseID == "" || f.Message == nil || f.Message.ID == "" {
+		return SubagentObservation{}, false
+	}
+	return SubagentObservation{MessageID: f.Message.ID, ParentToolUseID: f.ParentToolUseID}, true
 }
 
 // claudeContentBlock is one assistant/user content block in claude's wire shape.
