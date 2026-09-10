@@ -579,11 +579,11 @@ func (c *Controller) publishEvent(childID string, ev *rafikiv1.Event) {
 // childHooks builds the per-child callbacks every SpawnSpec carries.
 //
 // All three are installed for EVERY kind, deliberately. NativeSink used to be
-// set only inside `if runner != nil` — which is fundi-only, since agentRunner
-// returns a nil Runner for every other kind — so the claude translator in
-// pkg/child was unreachable and attaching to a claude child showed an empty
-// pane. A child whose provider has no native translation simply produces no
-// events; there is nothing to gate.
+// set only inside `if runner != nil`, which is fundi-only (agentRunner returns
+// a nil Runner for every other kind), so the claude translator in pkg/child
+// was unreachable and attaching to a claude child showed an empty pane. A
+// child whose provider has no native translation simply produces no events;
+// there is nothing to gate.
 //
 // OnMeta persists the sniffed session id immediately. The store's own sync runs
 // in monitorChild off BUS frames, and claude's system/init produces none, so
