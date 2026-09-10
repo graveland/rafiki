@@ -557,8 +557,10 @@ gets its own ordinal space. Which thread a request belongs to is decided from
 flag: a turn whose predecessor is the main thread keeps the bare session value
 (that convention is `thread_id IS NULL` on the turn row), and a turn of a
 subagent thread resolves to the branch named after the turn that founded the
-thread. Concurrent thread roots share the root row's ordinal space for their
-first request only. The `:<threadID>` suffix namespace is daemon-reserved: a
+thread. A turn with no resolvable predecessor is a thread root: the main
+thread when `cc_is_subagent` is absent, a new thread when it is set (that
+turn still lands on the root row for its first request). Concurrent thread
+roots share the root row's ordinal space for their first request only. The `:<threadID>` suffix namespace is daemon-reserved: a
 caller that puts `:<id>` inside its own `X-Rafiki-Session` value collides with
 branch refs of the session it names.
 
