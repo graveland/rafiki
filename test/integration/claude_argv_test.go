@@ -51,9 +51,9 @@ import (
 func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 	t.Parallel()
 
-	// Every argv-shaping field set to a distinct non-zero value. Model is a
-	// non-Anthropic slash id on purpose: it is the spelling that forces the
-	// custom-model-option ModelArgs pair, the shape most likely to drift.
+	// Every argv-shaping field set to a distinct non-zero value. A non-empty
+	// Model is what forces the ModelArgs pair (the gate is o.Model != "", not
+	// model shape); the slash id exercises the custom-model-option spelling.
 	req := protocol.SpawnRequest{
 		Kind:               "claude",
 		Model:              "anthropic/sonnet-latest",
