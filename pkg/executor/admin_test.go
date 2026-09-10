@@ -757,3 +757,139 @@ func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
 		}
 	}
 }
+
+// waitForStubEnvDump reads the dump buildEnvDumpStub's binary writes, polling
+// until it appears — the same loop the tests above inline, factored for the
+// scrub tests.
+func waitForStubEnvDump(t *testing.T) []byte {
+	t.Helper()
+	dumpPath := os.Getenv("RAFIKI_TEST_ENV_DUMP")
+	deadline := time.Now().Add(5 * time.Second)
+	var envDump []byte
+	var err error
+	for {
+		envDump, err = os.ReadFile(dumpPath)
+		if err == nil {
+			return envDump
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stub environ dump never appeared at %s: %v", dumpPath, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// countEnvLines counts the dump lines carrying a variable and returns them.
+func countEnvLines(t *testing.T, envDump []byte, name string) []string {
+	t.Helper()
+	var got []string
+	for _, line := range strings.Split(string(envDump), "\n") {
+		if strings.HasPrefix(line, name+"=") {
+			got = append(got, line)
+		}
+	}
+	return got
+}
+
+// The executor's own environment can carry stale copies of the credential
+// names Launch manages: an executor launched from inside a proxied session's
+// shell holds that session's RAFIKI_MCP_TOKEN, and a mis-curated
+// executor-overrides.env can carry any of the three. Go's environ is
+// first-match-wins, so without a scrub the inherited copy — which comes FIRST
+// in the launched process's environ — shadows the fresh per-child value
+// appended after it. t.Setenv seeds the stale inherited values in THIS test
+// process, which Launch inherits through os.Environ(); the assertion is that
+// the launched environ shows each name EXACTLY ONCE, valued with the fresh
+// secret.
+func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) {
+	staleMCP := "stale-inherited-mcp"
+	staleTicket := "stale-inherited-ticket"
+	staleProxy := "stale-inherited-proxy-token"
+	t.Setenv("RAFIKI_MCP_TOKEN", staleMCP)
+	t.Setenv("RAFIKI_DARAJA_TICKET", staleTicket)
+	t.Setenv("RAFIKI_DARAJA_PROXY_TOKEN", staleProxy)
+
+	freshMCP := "fresh-per-child-mcp-secret"
+	freshTicket := "fresh-one-shot-tk"
+	freshProxy := "fresh-per-child-proxy-token"
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumpStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-scrub-fresh-wins",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind: darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{
+				McpToken:   freshMCP,
+				ProxyToken: freshProxy,
+				ProxyUrl:   "http://127.0.0.1:1",
+			},
+		},
+		Ticket: freshTicket,
+	})); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	envDump := waitForStubEnvDump(t)
+	for _, tc := range []struct{ name, want string }{
+		{"RAFIKI_MCP_TOKEN", "RAFIKI_MCP_TOKEN=" + freshMCP},
+		{"RAFIKI_DARAJA_TICKET", "RAFIKI_DARAJA_TICKET=" + freshTicket},
+		{"RAFIKI_DARAJA_PROXY_TOKEN", "RAFIKI_DARAJA_PROXY_TOKEN=" + freshProxy},
+	} {
+		got := countEnvLines(t, envDump, tc.name)
+		if len(got) != 1 {
+			t.Errorf("%s appears %d times in the launched environ, want exactly once with the fresh value; dump:\n%s",
+				tc.name, len(got), envDump)
+			continue
+		}
+		if got[0] != tc.want {
+			t.Errorf("%s entry is %q, want the fresh %q (stale inherited copies must not shadow it)",
+				tc.name, got[0], tc.want)
+		}
+	}
+}
+
+// The scrub must also cover the spec-has-no-token case: with a stale inherited
+// RAFIKI_MCP_TOKEN in the executor's own environment, the pre-scrub environ
+// carried that value through as if the daemon had minted a per-child secret —
+// the case TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone could not see,
+// because its test process carried no such variable. The launched daraja
+// environ must carry NO RAFIKI_MCP_TOKEN at all.
+func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T) {
+	staleMCP := "stale-inherited-mcp"
+	t.Setenv("RAFIKI_MCP_TOKEN", staleMCP)
+	t.Setenv("RAFIKI_DARAJA_PROXY_TOKEN", "stale-inherited-proxy-token")
+
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumpStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-scrub-no-token",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+		Ticket:   "tk-irrelevant-here",
+	})); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	envDump := waitForStubEnvDump(t)
+	if got := countEnvLines(t, envDump, "RAFIKI_MCP_TOKEN"); len(got) != 0 {
+		t.Errorf("spec carried no mcp_token, but the launched environ has %v — the stale inherited copy leaked through", got)
+	}
+	if strings.Contains(string(envDump), staleMCP) {
+		t.Errorf("stale inherited mcp token %q found anywhere in the launched environ:\n%s", staleMCP, envDump)
+	}
+}

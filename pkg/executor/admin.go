@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -259,7 +260,17 @@ func (a *AdminServer) Launch(
 	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
-	cmd.Env = append(os.Environ(), envVars...)
+	// Scrub inherited copies of the three credential names this Launch manages
+	// BEFORE the fresh values are appended: Go's environ is first-match-wins
+	// (os.Getenv and every libc reader take the FIRST occurrence, and execve
+	// hands duplicates through), so a stale copy already in this executor's own
+	// environment would shadow the fresh per-child value appended after it. All
+	// three are rafiki credentials whose inherited copies are stale by
+	// definition — this executor's copy belongs to whatever process launched
+	// IT — so they are dropped, not overridden; a spec without a token then
+	// yields no entry at all rather than leaking the stale one as if it had
+	// been minted. Everything else (PATH, HOME, ...) passes through unchanged.
+	cmd.Env = append(scrubRafikiCredentialEnv(os.Environ()), envVars...)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit
@@ -309,6 +320,32 @@ func (a *AdminServer) Launch(
 		Pid:  int32(pid),
 		Pgid: int32(pid),
 	}), nil
+}
+
+// rafikiCredentialEnvNames are the environment variables Launch itself
+// manages for the daraja it spawns. Any copy inherited from the executor's
+// own environment is stale by definition — it belongs to whatever process
+// launched this executor — and, because environ lookups take the first
+// match, would shadow the fresh per-child value.
+var rafikiCredentialEnvNames = []string{
+	"RAFIKI_DARAJA_TICKET",
+	"RAFIKI_DARAJA_PROXY_TOKEN",
+	"RAFIKI_MCP_TOKEN",
+}
+
+// scrubRafikiCredentialEnv returns environ without any entry whose key is one
+// of rafikiCredentialEnvNames, passing everything else (PATH, HOME, ...)
+// through unchanged. See Launch for why the scrub happens before the fresh
+// values are appended.
+func scrubRafikiCredentialEnv(environ []string) []string {
+	kept := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		if key, _, _ := strings.Cut(kv, "="); slices.Contains(rafikiCredentialEnvNames, key) {
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	return kept
 }
 
 // Reap ends one launched daraja and its child, on demand.
