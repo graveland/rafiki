@@ -351,8 +351,22 @@ type ClaudeParams struct {
 	// traffic (X-Rafiki-Record-Requests), mirroring the local-subprocess path's
 	// same request-level opt-in.
 	RecordRequests bool `protobuf:"varint,8,opt,name=record_requests,json=recordRequests,proto3" json:"record_requests,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// append_system_prompt and extra_args are NOT launch-only, unlike the block
+	// above: daraja rebuilds argv on every Restart, so both are re-read each
+	// time. A field absent from this message is a flag silently dropped for
+	// every child spawned through an executor pool.
+	AppendSystemPrompt string `protobuf:"bytes,9,opt,name=append_system_prompt,json=appendSystemPrompt,proto3" json:"append_system_prompt,omitempty"`
+	// extra_args is the operator escape hatch, appended last so it can override
+	// anything above it, matching the local-subprocess path's convention.
+	ExtraArgs []string `protobuf:"bytes,10,rep,name=extra_args,json=extraArgs,proto3" json:"extra_args,omitempty"`
+	// mcp_token is the per-child secret the injected MCP config authenticates
+	// with. Same handling constraint as proxy_token above: it travels over this
+	// authenticated RPC and then into the daraja process's ENVIRONMENT via
+	// AdminService.Launch, and must never reach any argv, because ps is
+	// world-readable. Launch-only, like proxy_token.
+	McpToken      string `protobuf:"bytes,11,opt,name=mcp_token,json=mcpToken,proto3" json:"mcp_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ClaudeParams) Reset() {
@@ -439,6 +453,27 @@ func (x *ClaudeParams) GetRecordRequests() bool {
 		return x.RecordRequests
 	}
 	return false
+}
+
+func (x *ClaudeParams) GetAppendSystemPrompt() string {
+	if x != nil {
+		return x.AppendSystemPrompt
+	}
+	return ""
+}
+
+func (x *ClaudeParams) GetExtraArgs() []string {
+	if x != nil {
+		return x.ExtraArgs
+	}
+	return nil
+}
+
+func (x *ClaudeParams) GetMcpToken() string {
+	if x != nil {
+		return x.McpToken
+	}
+	return ""
 }
 
 // ChildSpec is everything needed to (re)build the child's command line.
@@ -799,7 +834,7 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"D\n" +
 	"\rProcessExited\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
-	"\x06signal\x18\x02 \x01(\tR\x06signal\"\xb6\x02\n" +
+	"\x06signal\x18\x02 \x01(\tR\x06signal\"\xa4\x03\n" +
 	"\fClaudeParams\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12%\n" +
 	"\x0eresume_session\x18\x02 \x01(\tR\rresumeSession\x12'\n" +
@@ -809,7 +844,12 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"proxyToken\x12)\n" +
 	"\x10passthrough_auth\x18\x06 \x01(\bR\x0fpassthroughAuth\x12.\n" +
 	"\x13auto_compact_window\x18\a \x01(\x05R\x11autoCompactWindow\x12'\n" +
-	"\x0frecord_requests\x18\b \x01(\bR\x0erecordRequests\"o\n" +
+	"\x0frecord_requests\x18\b \x01(\bR\x0erecordRequests\x120\n" +
+	"\x14append_system_prompt\x18\t \x01(\tR\x12appendSystemPrompt\x12\x1d\n" +
+	"\n" +
+	"extra_args\x18\n" +
+	" \x03(\tR\textraArgs\x12\x1b\n" +
+	"\tmcp_token\x18\v \x01(\tR\bmcpToken\"o\n" +
 	"\tChildSpec\x12*\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x16.rafiki.daraja.v1.KindR\x04kind\x126\n" +
 	"\x06claude\x18\x02 \x01(\v2\x1e.rafiki.daraja.v1.ClaudeParamsR\x06claude\"\\\n" +

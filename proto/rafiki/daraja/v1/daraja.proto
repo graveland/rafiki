@@ -109,6 +109,21 @@ message ClaudeParams {
   // traffic (X-Rafiki-Record-Requests), mirroring the local-subprocess path's
   // same request-level opt-in.
   bool record_requests = 8;
+
+  // append_system_prompt and extra_args are NOT launch-only, unlike the block
+  // above: daraja rebuilds argv on every Restart, so both are re-read each
+  // time. A field absent from this message is a flag silently dropped for
+  // every child spawned through an executor pool.
+  string append_system_prompt = 9;
+  // extra_args is the operator escape hatch, appended last so it can override
+  // anything above it, matching the local-subprocess path's convention.
+  repeated string extra_args = 10;
+  // mcp_token is the per-child secret the injected MCP config authenticates
+  // with. Same handling constraint as proxy_token above: it travels over this
+  // authenticated RPC and then into the daraja process's ENVIRONMENT via
+  // AdminService.Launch, and must never reach any argv, because ps is
+  // world-readable. Launch-only, like proxy_token.
+  string mcp_token = 11;
 }
 
 // ChildSpec is everything needed to (re)build the child's command line.
