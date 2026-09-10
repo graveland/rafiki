@@ -794,13 +794,63 @@ func countEnvLines(t *testing.T, envDump []byte, name string) []string {
 // The executor's own environment can carry stale copies of the credential
 // names Launch manages: an executor launched from inside a proxied session's
 // shell holds that session's RAFIKI_MCP_TOKEN, and a mis-curated
-// executor-overrides.env can carry any of the three. Go's environ is
-// first-match-wins, so without a scrub the inherited copy — which comes FIRST
-// in the launched process's environ — shadows the fresh per-child value
-// appended after it. t.Setenv seeds the stale inherited values in THIS test
-// process, which Launch inherits through os.Environ(); the assertion is that
-// the launched environ shows each name EXACTLY ONCE, valued with the fresh
-// secret.
+// executor-overrides.env can carry any of the three. t.Setenv seeds the stale
+// inherited values in THIS test process, which Launch inherits through
+// os.Environ(); the assertion is that the launched environ shows each name
+// EXACTLY ONCE, valued with the fresh secret.
+//
+// This test cannot fail against pre-scrub code (verified by a build overlay
+// against the pre-scrub admin.go): os/exec dedups the child environ keeping
+// the LAST duplicate, so the appended fresh value won even unscrubbed. The
+// exactly-once assertion is therefore not what stops shadowing — it pins the
+// scrub's EXPLICIT single-entry invariant, independent of exec.Cmd's dedup
+// internals and append order. The shadowing-shaped failure class is pinned
+// where it is genuinely reachable, at the composition level in
+// TestScrubbedEnvCompositionFreshWinsBelow, and the no-token leak — the one
+// pre-scrub failure — is pinned by
+// TestScrubbedEnvCompositionFreshValuesWinBelow pins the scrub+append
+// composition DIRECTLY — the level where the stale-shadows-fresh class is
+// genuinely reachable (a plain []string duplicate, which os.Getenv's
+// first-match-wins semantics WOULD read as the stale value). This is the
+// load-bearing half of the fresh-wins pin; the process-level test above
+// cannot fail pre-scrub because exec.Cmd dedups keeping the last entry.
+func TestScrubbedEnvCompositionFreshValuesWinBelow(t *testing.T) {
+	inherited := []string{
+		"PATH=/usr/bin",
+		"RAFIKI_MCP_TOKEN=stale",
+		"RAFIKI_DARAJA_TICKET=stale-ticket",
+		"RAFIKI_DARAJA_PROXY_TOKEN=stale-proxy",
+		"HOME=/home/executor",
+	}
+	fresh := []string{
+		"RAFIKI_DARAJA_TICKET=fresh-ticket",
+		"RAFIKI_DARAJA_PROXY_TOKEN=fresh-proxy",
+		"RAFIKI_MCP_TOKEN=fresh-mcp",
+	}
+	got := append(scrubRafikiCredentialEnv(inherited), fresh...)
+
+	want := map[string]string{
+		"RAFIKI_MCP_TOKEN":          "fresh-mcp",
+		"RAFIKI_DARAJA_TICKET":      "fresh-ticket",
+		"RAFIKI_DARAJA_PROXY_TOKEN": "fresh-proxy",
+	}
+	for name, wantVal := range want {
+		var hits []string
+		for _, l := range got {
+			if v, ok := strings.CutPrefix(l, name+"="); ok {
+				hits = append(hits, v)
+			}
+		}
+		if len(hits) != 1 || hits[0] != wantVal {
+			t.Fatalf("%s carries %v, want exactly [%s] — the stale copy must be dropped and the fresh value must win", name, hits, wantVal)
+		}
+	}
+	if !slices.Contains(got, "PATH=/usr/bin") || !slices.Contains(got, "HOME=/home/executor") {
+		t.Fatalf("the scrub dropped non-credential entries: %v", got)
+	}
+}
+
+// TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken.
 func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) {
 	staleMCP := "stale-inherited-mcp"
 	staleTicket := "stale-inherited-ticket"
@@ -864,8 +914,9 @@ func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) 
 // environ must carry NO RAFIKI_MCP_TOKEN at all.
 func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T) {
 	staleMCP := "stale-inherited-mcp"
+	staleProxy := "stale-inherited-proxy-token"
 	t.Setenv("RAFIKI_MCP_TOKEN", staleMCP)
-	t.Setenv("RAFIKI_DARAJA_PROXY_TOKEN", "stale-inherited-proxy-token")
+	t.Setenv("RAFIKI_DARAJA_PROXY_TOKEN", staleProxy)
 
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildEnvDumpStub(t),
@@ -889,7 +940,17 @@ func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T)
 	if got := countEnvLines(t, envDump, "RAFIKI_MCP_TOKEN"); len(got) != 0 {
 		t.Errorf("spec carried no mcp_token, but the launched environ has %v — the stale inherited copy leaked through", got)
 	}
+	// Finding 5: the same no-entry assertion for the second name the brief's
+	// fixture seeds — the scrub + unconditional-append interplay for
+	// RAFIKI_DARAJA_PROXY_TOKEN (one empty-valued entry, never the stale one).
+	proxyLines := countEnvLines(t, envDump, "RAFIKI_DARAJA_PROXY_TOKEN")
+	if len(proxyLines) != 1 {
+		t.Fatalf("RAFIKI_DARAJA_PROXY_TOKEN carried %v, want exactly one entry (appended unconditionally)", proxyLines)
+	}
 	if strings.Contains(string(envDump), staleMCP) {
 		t.Errorf("stale inherited mcp token %q found anywhere in the launched environ:\n%s", staleMCP, envDump)
+	}
+	if strings.Contains(string(envDump), staleProxy) {
+		t.Errorf("stale inherited proxy token %q found anywhere in the launched environ:\n%s", staleProxy, envDump)
 	}
 }

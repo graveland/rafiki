@@ -261,15 +261,21 @@ func (a *AdminServer) Launch(
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
 	// Scrub inherited copies of the three credential names this Launch manages
-	// BEFORE the fresh values are appended: Go's environ is first-match-wins
-	// (os.Getenv and every libc reader take the FIRST occurrence, and execve
-	// hands duplicates through), so a stale copy already in this executor's own
-	// environment would shadow the fresh per-child value appended after it. All
-	// three are rafiki credentials whose inherited copies are stale by
-	// definition — this executor's copy belongs to whatever process launched
-	// IT — so they are dropped, not overridden; a spec without a token then
-	// yields no entry at all rather than leaking the stale one as if it had
-	// been minted. Everything else (PATH, HOME, ...) passes through unchanged.
+	// BEFORE the fresh values are appended, so the launched environ carries
+	// each name AT MOST ONCE and always with THIS spec's value. Note this is
+	// an explicit invariant, not a shadowing fix: os/exec dedups the child
+	// environ keeping the LAST duplicate (exec.environs), so the appended
+	// fresh value would win even without the scrub — but that is an accident
+	// of Cmd internals and append order, not a contract; the scrub makes the
+	// single-entry/fresh property hold regardless of how the child environ is
+	// built or which environ reader (Go os.Getenv, libc getenv) runs, and it
+	// is what makes the spec-without-a-token case safe: a stale inherited
+	// copy is DROPPED, not overridden, so a spec without a token yields no
+	// entry at all rather than leaking the executor's own stale copy as if it
+	// had been minted. All three are rafiki credentials whose inherited copies
+	// are stale by definition — this executor's copy belongs to whatever
+	// process launched IT. Everything else (PATH, HOME, ...) passes through
+	// unchanged.
 	cmd.Env = append(scrubRafikiCredentialEnv(os.Environ()), envVars...)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
