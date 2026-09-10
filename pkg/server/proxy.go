@@ -812,9 +812,6 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 		reason += ": " + bodyPreview
 	}
 	p.failTurn(r, cr, reason)
-	rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
-	p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, raw, bodyPreview, elapsed)
-	rawCancel()
 	msg := "upstream returned HTTP " + strconv.Itoa(resp.StatusCode) + " with an unexpected content type (" + resp.Header.Get("Content-Type") + ")"
 	if bodyPreview != "" {
 		msg += ": " + bodyPreview
@@ -829,6 +826,12 @@ func (p *MessagesProxy) handleMalformedSuccess(w http.ResponseWriter, r *http.Re
 	if _, werr := w.Write(clientBody); werr != nil {
 		p.logger.Warn("proxy: client write failed on malformed-success response", "conversation", cr.convID, "error", werr)
 	}
+	// After the client write: the insert has a 60s retry budget, and the client
+	// must not wait on it for an error response it is owed now (same shape as
+	// handleUpstreamError).
+	rawCtx, rawCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+	p.recordRawTrace(rawCtx, r, resp, cr, upstream, model, raw, bodyPreview, elapsed)
+	rawCancel()
 }
 
 // streamAndCapture transparently streams the upstream response to the client

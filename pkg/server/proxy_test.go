@@ -1445,7 +1445,7 @@ func TestRawTraceRecordsAMalformedSuccess(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
-	p.store = &fakeProxyStore{} // inject fake; capture stays off, only the trace is asserted
+	p.store = &fakeProxyStore{} // fake makes the turn capturable; only the trace is asserted
 	p.SetRawTrace(rec, true)
 
 	w := httptest.NewRecorder()
