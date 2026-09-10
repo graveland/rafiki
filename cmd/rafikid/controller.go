@@ -135,10 +135,13 @@ type Controller struct {
 	// and RespawnChild — which rebuild the spawn environment through the same
 	// proxyChildEnv/darajaClaudeParams path — reuse the secret the child
 	// already holds instead of minting a second one it can never learn about.
-	// Both guarded by mcpTokensMu.
+	// Both guarded by mcpTokensMu. mcpSweepAt is the size at which the next
+	// lazy sweep fires; zero means "not armed", which sweepMCPTokensIfDue
+	// treats as mcpTokenSweepThreshold.
 	mcpTokensMu      sync.RWMutex
 	mcpTokens        map[string]string // secret -> childID
 	mcpTokensByChild map[string]string // childID -> secret
+	mcpSweepAt       int
 
 	// catalog answers ContextWindow (ctrl_get/ctrl_list's ContextWindow/
 	// MaxCompletionTokens fields). Set once at startup via SetCatalog, from
@@ -690,6 +693,54 @@ func (c *Controller) mintMCPToken(childID string) string {
 	c.mcpTokens[tok] = childID
 	c.mcpTokensByChild[childID] = tok
 	return tok
+}
+
+// mcpTokenSweepThreshold is how much the credential map grows past its last
+// sweep before the next one runs. Sweeping is O(map size) store lookups on
+// the spawn path, so it must not fire per mint — the offset after each sweep
+// keeps the cost amortized over that many new mints and bounds the map at
+// roughly live-children + one threshold.
+const mcpTokenSweepThreshold = 256
+
+// sweepMCPTokensIfDue drops credential entries whose child no longer exists
+// or has exited, both of which ChildForMCPToken already refuses — the sweep
+// is memory hygiene, not a correctness fix. Triggered lazily from
+// mintMCPToken: the daemon spawns a child, and if the map has grown one
+// threshold past the last sweep it pays one bounded scan. A controller with
+// no store (the hand-built zero-value fixtures that mint) never sweeps.
+func (c *Controller) sweepMCPTokensIfDue() {
+	if c.st == nil {
+		return
+	}
+	c.mcpTokensMu.RLock()
+	at := c.mcpSweepAt
+	if at == 0 {
+		at = mcpTokenSweepThreshold
+	}
+	n := len(c.mcpTokensByChild)
+	var children []string
+	if n >= at {
+		children = make([]string, 0, n)
+		for id := range c.mcpTokensByChild {
+			children = append(children, id)
+		}
+	}
+	c.mcpTokensMu.RUnlock()
+	if children == nil {
+		return
+	}
+
+	for _, id := range children {
+		// forgetMCPToken takes the write lock itself, so the candidate list is
+		// snapshotted first and the lock is released — see the mint call site.
+		if snap, ok := c.st.Get(id); !ok || snap.Status == protocol.StatusExited {
+			c.forgetMCPToken(id)
+		}
+	}
+
+	c.mcpTokensMu.Lock()
+	c.mcpSweepAt = len(c.mcpTokensByChild) + mcpTokenSweepThreshold
+	c.mcpTokensMu.Unlock()
 }
 
 // ChildForMCPToken implements server.ChildTokenLookup: it resolves a per-child
@@ -3888,6 +3939,10 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (e
 			URL: url, Token: token, Model: req.Model, Headers: headers,
 			MCPToken: c.mintMCPToken(childID),
 		})
+		// A mint grew the credential map; the sweep that bounds it hangs off
+		// the mints that grew it (see sweepMCPTokensIfDue — forget only runs
+		// from handleChildExit, so failed spawns and sibling-closed rows leak).
+		c.sweepMCPTokensIfDue()
 		return env, vals
 	default:
 		// Only claude is proxied. Fundi runs in-process (no HTTP face to point

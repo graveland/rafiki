@@ -206,6 +206,10 @@ func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest, childID strin
 	// argv, which ps renders world-readable. Minted per child and reused
 	// across resume/respawn (mintMCPToken).
 	p.McpToken = c.mintMCPToken(childID)
+	// Same bound as proxyChildEnv's mint: the credential map grows one entry
+	// per mint, and a spawn that fails after the mint leaks it (forget only
+	// runs from handleChildExit).
+	c.sweepMCPTokensIfDue()
 
 	mode, err := proxyenv.ParsePassthroughMode(req.PassthroughAuth)
 	if err != nil {

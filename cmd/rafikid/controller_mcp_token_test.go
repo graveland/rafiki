@@ -108,3 +108,58 @@ func spawnProxiedTestChild(t *testing.T, c *Controller, ownerUserID string) stri
 	}
 	return res.ChildID
 }
+
+// TestMCPTokenSweepDropsEntriesForDeadChildren pins the credential map's
+// memory bound. Two leak shapes exist: a mint whose spawn failed before the
+// child row existed (forgetMCPToken only runs from handleChildExit), and a
+// child whose row was closed by a sibling daemon. Both resolve ok=false
+// forever and are pure memory; the sweep drops them when the map grows one
+// threshold past its last sweep, and keeps entries whose child is alive.
+func TestMCPTokenSweepDropsEntriesForDeadChildren(t *testing.T) {
+	c := newTestController(t)
+	c.mcpSweepAt = 3 // small threshold: the three entries this test mints reach it
+
+	tokA := c.mintMCPToken("c_sweep_a")
+	c.mintMCPToken("c_sweep_b") // never registered: the leak shape
+	tokC := c.mintMCPToken("c_sweep_c")
+
+	// A and C get store rows; A exits; B has no row at all — the two leak
+	// shapes the sweep exists for, plus the live control.
+	for _, id := range []string{"c_sweep_a", "c_sweep_c"} {
+		// OwnerUserID must be non-empty: ChildForMCPToken refuses a child with
+		// no recorded owner, and the surviving entry must still resolve.
+		c.st.Insert(&childstore.Session{ChildID: id, OwnerUserID: "u-sweep", Status: protocol.StatusIdle})
+	}
+	if _, ok := c.st.SetStatus("c_sweep_a", protocol.StatusExited); !ok {
+		t.Fatal("child A has no store row to exit")
+	}
+
+	if got := c.mcpTokensByChild["c_sweep_a"]; got != tokA {
+		t.Fatalf("A's entry missing before the sweep")
+	}
+
+	c.sweepMCPTokensIfDue()
+
+	if _, ok := c.mcpTokensByChild["c_sweep_a"]; ok {
+		t.Fatal("the sweep kept an entry whose child has exited")
+	}
+	if _, ok := c.mcpTokensByChild["c_sweep_b"]; ok {
+		t.Fatal("the sweep kept an entry whose child never registered (the spawn-failure leak shape)")
+	}
+	if _, ok := c.mcpTokensByChild["c_sweep_c"]; !ok {
+		t.Fatal("the sweep dropped an entry whose child is alive")
+	}
+	if _, _, ok := c.ChildForMCPToken(tokC); !ok {
+		t.Fatal("the surviving entry no longer resolves")
+	}
+	// The sweep must also drop both halves of a dropped entry: the secret key
+	// in mcpTokens is gone, not orphaned.
+	if got := len(c.mcpTokens); got != 1 {
+		t.Fatalf("mcpTokens holds %d entries after the sweep, want 1 (both indexes move together)", got)
+	}
+	// And the next sweep is amortized: it must not fire again until the map
+	// grows one threshold past the post-sweep size.
+	if c.mcpSweepAt != 1+mcpTokenSweepThreshold {
+		t.Fatalf("post-sweep trigger = %d, want live-set(1) + threshold", c.mcpSweepAt)
+	}
+}
