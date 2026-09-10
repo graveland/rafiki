@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,32 @@ func TestDarajaClaudeParams_RecordRequestsThreadsThrough(t *testing.T) {
 	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, RecordRequests: true})
 	if !p.RecordRequests {
 		t.Error("RecordRequests did not thread through darajaClaudeParams")
+	}
+}
+
+// TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs pins the
+// fix this task exists for: AppendSystemPrompt and ExtraArgs were silently
+// dropped from every ClaudeParams before the proto was widened, so every
+// child spawned through an executor pool lost its custom system prompt and
+// operator escape-hatch flags with no error anywhere.
+func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing.T) {
+	c := newTestController(t)
+	p := c.darajaClaudeParams(protocol.SpawnRequest{
+		Kind:               protocol.KindClaude,
+		Model:              "claude-sonnet-5",
+		AppendSystemPrompt: "be brief",
+		ExtraArgs:          []string{"--foo"},
+	})
+	if p.AppendSystemPrompt != "be brief" {
+		t.Errorf("AppendSystemPrompt = %q, want threaded through", p.AppendSystemPrompt)
+	}
+	if !slices.Equal(p.ExtraArgs, []string{"--foo"}) {
+		t.Errorf("ExtraArgs = %v, want [--foo]", p.ExtraArgs)
+	}
+	// Unproxied child (no proxy face in newTestController): only the two
+	// launch-only flags above are new; everything else stays as before.
+	if p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions" {
+		t.Errorf("Model/PermissionMode = %q/%q, want preserved unchanged", p.Model, p.PermissionMode)
 	}
 }
 

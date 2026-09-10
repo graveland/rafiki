@@ -188,7 +188,12 @@ func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest) *darajapb.Cla
 		// default for the local-subprocess path). No typed field carries
 		// a caller override yet — nothing has needed one.
 		PermissionMode: "bypassPermissions",
-		RecordRequests: req.RecordRequests,
+		// daraja rebuilds argv on every Restart, so both are re-read each
+		// time — dropping either here would silently strip the flag from
+		// every child spawned through an executor pool.
+		AppendSystemPrompt: req.AppendSystemPrompt,
+		ExtraArgs:          req.ExtraArgs,
+		RecordRequests:     req.RecordRequests,
 	}
 
 	url, token := c.proxyEndpoint()

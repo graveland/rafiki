@@ -1011,15 +1011,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// before) because the "fundi" kind needs it to pin --spill-dir
 	// (see buildAgentArgv/agentSpillDir).
 	childID := newChildID()
-	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
-	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "spawn plan: " + err.Error(),
-		}
-	}
-
-	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
+	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// claudeEnv is only meaningful for the local-subprocess path — once
 	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
 	// reads spec.Env at all (see the "if runner != nil" branch below), so
@@ -1027,6 +1019,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// future reader to think it does something.
 	if req.Kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
+
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
+	if err != nil {
+		return control.SpawnResult{}, &control.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "spawn plan: " + err.Error(),
+		}
 	}
 
 	// Computed here, before agentRunner, rather than alongside the rest of
@@ -1054,8 +1054,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			}
 		}
 	}
-
-	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1735,15 +1733,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	req := resumeRequestFromSnapshot(snap, apiKey)
 
-	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
-	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "spawn plan: " + err.Error(),
-		}
-	}
-
-	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
+	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// claudeEnv is only meaningful for the local-subprocess path — once
 	// claudeRunner returns a non-nil daraja-backed Runner, child.Spawn never
 	// reads spec.Env at all (see the "if runner != nil" branch below), so
@@ -1751,6 +1741,14 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// future reader to think it does something.
 	if kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
+
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
+	if err != nil {
+		return control.SpawnResult{}, &control.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "spawn plan: " + err.Error(),
+		}
 	}
 
 	// The owner was already attested at the child's original spawn (see
@@ -1776,8 +1774,6 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 			}
 		}
 	}
-
-	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:     childID,
@@ -1871,20 +1867,20 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		kind = protocol.KindFundi
 	}
 
-	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir)
-	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
-			Code:    protocol.ErrSpawnFailed,
-			Message: "spawn plan: " + err.Error(),
-		}
-	}
-
-	env, extraArgv := c.buildEnv(req, childID, c.socketPath)
+	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// See Resume's identical guard: claudeEnv is dead weight once
 	// claudeRunner returns a daraja-backed Runner (child.Spawn never reads
 	// spec.Env in that case).
 	if kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
+	}
+
+	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
+	if err != nil {
+		return control.SpawnResult{}, &control.ControllerError{
+			Code:    protocol.ErrSpawnFailed,
+			Message: "spawn plan: " + err.Error(),
+		}
 	}
 
 	// See Resume's identical call: the owner was attested at the child's
@@ -1904,8 +1900,6 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 			}
 		}
 	}
-
-	argv = append(argv, extraArgv...)
 
 	spec := child.SpawnSpec{
 		ChildID:  childID,
@@ -3460,12 +3454,26 @@ func resolveClaudeBinaryIfNeeded(req protocol.SpawnRequest, runner child.Runner)
 // pool configured at all (see claudeRunner in agent_runtime.go); every other
 // claude child builds its argv the exact same way, through this same
 // function, so the two paths cannot drift on flags again.
-func buildClaudeArgv(req protocol.SpawnRequest) []string {
+//
+// vals carries the proxy's argv decisions (proxyChildEnv → buildEnv →
+// resolveSpawnPlan): MCPConfig becomes the single --mcp-config element and
+// ModelArgs REPLACES the plain --model pair req.Model would otherwise emit,
+// so a proxied child carries exactly one --model. PermissionMode is stated
+// explicitly here rather than left to claudeargv's default, so this path and
+// darajaClaudeParams say the same thing in the same words.
+func buildClaudeArgv(req protocol.SpawnRequest, vals proxyenv.Values) []string {
 	return claudeargv.Build(claudeargv.Params{
 		Model:              req.Model,
 		ResumeSession:      req.ResumeSession,
+		PermissionMode:     "bypassPermissions",
 		AppendSystemPrompt: req.AppendSystemPrompt,
 		ExtraArgs:          req.ExtraArgs,
+		// Values.MCPConfig is the FULL --mcp-config=<json> argv element
+		// (proxyenv.mcpConfigArg renders the flag prefix); Params.MCPConfig is
+		// the bare JSON Build itself prepends "--mcp-config=" to. Stripping
+		// the prefix here is what keeps the element from coming out doubled.
+		MCPConfig: strings.TrimPrefix(vals.MCPConfig, "--mcp-config="),
+		ModelArgs: vals.ModelArgs,
 	})
 }
 
@@ -3475,8 +3483,9 @@ func buildClaudeArgv(req protocol.SpawnRequest) []string {
 //
 // childID and stateDir are only used by the "fundi" kind, which needs both to
 // pin --spill-dir to a location Forget can find deterministically later (see
-// buildAgentArgv/agentSpillDir). claude ignores them.
-func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin string, argv []string, prov child.ProtocolProvider, err error) {
+// buildAgentArgv/agentSpillDir). claude ignores them but consumes vals, the
+// proxy's argv decisions (see buildClaudeArgv); the other kinds ignore it.
+func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string, vals proxyenv.Values) (bin string, argv []string, prov child.ProtocolProvider, err error) {
 	kind := req.Kind
 	if kind == "" {
 		kind = protocol.KindFundi
@@ -3493,7 +3502,7 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string) (bin 
 		// to route it through daraja instead — bin/argv from here are
 		// discarded anyway once a non-nil Runner is returned (see the
 		// "if runner != nil" clearing at each call site).
-		return "", buildClaudeArgv(req), child.ClaudeProvider{}, nil
+		return "", buildClaudeArgv(req, vals), child.ClaudeProvider{}, nil
 	case protocol.KindFundi:
 		// The fundi runtime is `rafikid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc
@@ -3651,10 +3660,14 @@ func claudeEnv(configDir string) []string {
 // buildEnv assembles the per-process env var additions for a child process.
 // The slice is passed to SpawnSpec.Env. Whether these additions replace or
 // extend the parent environment is controlled by SpawnSpec.EnvOverride
-// (honoured in child.Spawn, not here). The second return value carries argv
-// additions (claude children get --mcp-config); the caller must append them
-// to the child's argv, and they take effect only on the local-subprocess
-// path (a non-nil runner discards argv entirely).
+// (honoured in child.Spawn, not here). The second return value carries the
+// proxy's argv decisions as data (proxyenv.Values, empty when no proxy
+// applies); the caller threads them into resolveSpawnPlan, whose
+// buildClaudeArgv turns them into the child's argv — there is no post-hoc
+// argv append any more, so the flags land in claudeargv.Build's canonical
+// positions and --mcp-config/--model are emitted exactly once. They take
+// effect only on the local-subprocess path (a non-nil runner discards argv
+// entirely; the daraja path rebuilds argv from ClaudeParams instead).
 //
 // The two reserved controller vars are always injected regardless of mode.
 //
@@ -3675,7 +3688,7 @@ func claudeEnv(configDir string) []string {
 // senderOptions): an "anthropic/" prefixed model needs ANTHROPIC_API_KEY,
 // anything else needs OPENROUTER_API_KEY - there is no separate --provider
 // concept any more.
-func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath string) (env []string, extraArgv []string) {
+func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath string) (env []string, vals proxyenv.Values) {
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
 	}
@@ -3690,17 +3703,18 @@ func (c *Controller) buildEnv(req protocol.SpawnRequest, childID, socketPath str
 		}
 		env = append(env, envVar+"="+req.APIKey)
 	}
-	proxyEnv, extraArgv := c.proxyChildEnv(req, childID)
+	proxyEnv, vals := c.proxyChildEnv(req, childID)
 	env = append(env, proxyEnv...)
-	return env, extraArgv
+	return env, vals
 }
 
-// proxyChildEnv returns the environment variables and argv additions that
-// point a child at the rafiki proxy, or nothing for both when no proxy is
-// configured or this kind is not routed. The env additions are appended to
-// SpawnSpec.Env; the argv additions must be appended to the child's argv and
-// matter only on the local-subprocess path (they are discarded with the rest
-// of argv whenever a runner routes the child elsewhere).
+// proxyChildEnv returns the environment variables and argv decisions that
+// point a child at the rafiki proxy, or nothing when no proxy is configured
+// or this kind is not routed. The env additions are appended to SpawnSpec.Env;
+// the argv decisions travel as proxyenv.Values and reach the child's argv only
+// through buildClaudeArgv (via resolveSpawnPlan) on the local-subprocess path
+// — never appended after the fact, which is what used to emit a second,
+// duplicate --model.
 //
 // The agent kind is never routed: it reaches rafiki in-process through pkg/llm
 // and pkg/routing, so there is no HTTP face to point it at, and doing so would
@@ -3720,10 +3734,10 @@ func (c *Controller) proxyEndpoint() (url, token string) {
 	return url, token
 }
 
-func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (env []string, extraArgv []string) {
+func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (env []string, vals proxyenv.Values) {
 	url, token := c.proxyEndpoint()
 	if url == "" || req.Kind == protocol.KindFundi || !proxyRoutesKind(req.Kind) {
-		return nil, nil
+		return nil, proxyenv.Values{}
 	}
 
 	// childID rather than the session id: it exists before the child does, is
@@ -3758,21 +3772,18 @@ func (c *Controller) proxyChildEnv(req protocol.SpawnRequest, childID string) (e
 		// the daemon's ANTHROPIC_API_KEY today, and only Claude Code's own
 		// precedence (ANTHROPIC_AUTH_TOKEN outranks it) keeps that harmless.
 		//
-		// The returned args carry --mcp-config unconditionally (Wave 1 of
-		// docs/plans/2026-09-09-claude-mcp-injection-plan.md gates it on URL,
-		// not Model) and, when req.Model != "", a --model pair identical to
-		// the one buildClaudeArgv already put in this child's argv via
-		// claudeargv.Params.Model — appending both is an inert, harmless
-		// duplicate (last-value-wins on an identical value); only
-		// --mcp-config is new information this path did not have before.
-		env, args := proxyenv.Claude(nil, proxyenv.ClaudeOptions{
+		// vals (MCPConfig, ModelArgs) is consumed by buildClaudeArgv through
+		// resolveSpawnPlan, not appended here: ModelArgs replaces the plain
+		// --model pair instead of duplicating it, and MCPConfig lands in
+		// claudeargv.Build's canonical position rather than the end of argv.
+		env, vals = proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
 			URL: url, Token: token, Model: req.Model, Headers: headers,
 		})
-		return env, args
+		return env, vals
 	default:
 		// Only claude is proxied. Fundi runs in-process (no HTTP face to point
 		// it at), and anything else is not a routeable kind.
-		return nil, nil
+		return nil, proxyenv.Values{}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 func TestResolveSpawnPlan_Claude(t *testing.T) {
@@ -14,7 +15,7 @@ func TestResolveSpawnPlan_Claude(t *testing.T) {
 		Kind:     "claude",
 		PiBinary: "/custom/claude",
 		Model:    "claude-opus-4-8",
-	}, "", "")
+	}, "", "", proxyenv.Values{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -27,7 +28,7 @@ func TestResolveSpawnPlan_Claude(t *testing.T) {
 }
 
 func TestResolveSpawnPlan_DefaultKind(t *testing.T) {
-	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", Model: "anthropic/test"}, "", "st")
+	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", Model: "anthropic/test"}, "", "st", proxyenv.Values{})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestResolveSpawnPlan_DefaultKind(t *testing.T) {
 }
 
 func TestResolveSpawnPlan_UnknownKind(t *testing.T) {
-	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}, "", ""); err == nil {
+	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}, "", "", proxyenv.Values{}); err == nil {
 		t.Fatal("expected error for unknown kind")
 	}
 }

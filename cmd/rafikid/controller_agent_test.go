@@ -14,6 +14,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 // TestResolveSpawnPlanAgentKind covers R1: the "fundi" case resolves to the
@@ -32,7 +33,7 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 		ExtraArgs:          []string{"--fake-turns", "/tmp/turns.ndjson"},
 	}
 
-	bin, argv, prov, err := resolveSpawnPlan(req, "c_test123", "/var/rafiki-state")
+	bin, argv, prov, err := resolveSpawnPlan(req, "c_test123", "/var/rafiki-state", proxyenv.Values{})
 	if err != nil {
 		t.Fatalf("resolveSpawnPlan: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 // error.
 func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi}
-	if _, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/rafiki-state"); err == nil {
+	if _, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/rafiki-state", proxyenv.Values{}); err == nil {
 		t.Fatal("resolveSpawnPlan(agent kind, no model): want error, got nil")
 	}
 }
@@ -99,7 +100,7 @@ func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 // --model through ExtraArgs instead of SpawnRequest.Model.
 func TestResolveSpawnPlanAgentKindModelViaExtraArgs(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: []string{"--model", "anthropic/sonnet-latest"}}
-	if _, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/rafiki-state"); err != nil {
+	if _, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/rafiki-state", proxyenv.Values{}); err != nil {
 		t.Fatalf("resolveSpawnPlan(agent kind, model via ExtraArgs): unexpected error: %v", err)
 	}
 }
@@ -120,7 +121,7 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: tc.extraArgs}
-			if _, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/rafiki-state"); err == nil {
+			if _, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/rafiki-state", proxyenv.Values{}); err == nil {
 				t.Fatalf("resolveSpawnPlan(agent kind, %s): want error, got nil", tc.name)
 			}
 		})
@@ -134,7 +135,7 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 // or double-prefixed onto the reported model.
 func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/sonnet-latest", Provider: "anthropic"}
-	if _, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/rafiki-state"); err == nil {
+	if _, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/rafiki-state", proxyenv.Values{}); err == nil {
 		t.Fatal("resolveSpawnPlan(agent kind, Provider set): want error, got nil")
 	}
 }
@@ -172,7 +173,7 @@ func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
 	if req.Model != "anthropic/sonnet-latest" {
 		t.Errorf("Model = %q, want %q (provider rejoined onto the model id)", req.Model, "anthropic/sonnet-latest")
 	}
-	if _, _, _, err := resolveSpawnPlan(req, "c_resume", "/var/rafiki-state"); err != nil {
+	if _, _, _, err := resolveSpawnPlan(req, "c_resume", "/var/rafiki-state", proxyenv.Values{}); err != nil {
 		t.Fatalf("resolveSpawnPlan(resumed agent request): %v\nresume must produce a request the spawn planner accepts", err)
 	}
 }

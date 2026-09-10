@@ -24,8 +24,9 @@ func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 	t.Setenv(paths.URL, "")
 	ctl := &Controller{} // no face started
 	for _, kind := range []string{protocol.KindClaude, protocol.KindFundi} {
-		if got, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1"); got != nil || argv != nil {
-			t.Errorf("kind %q with no proxy configured: got env %v / argv %v, want neither", kind, got, argv)
+		env, vals := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: kind}, "c_1")
+		if env != nil || vals.MCPConfig != "" || vals.ModelArgs != nil {
+			t.Errorf("kind %q with no proxy configured: got env %v / vals %+v, want neither", kind, env, vals)
 		}
 	}
 }
@@ -34,8 +35,9 @@ func TestProxyChildEnv_NothingWhenNoFaceAndNoOverride(t *testing.T) {
 // put a network hop in front of a library call.
 func TestProxyChildEnv_NeverRoutesAgent(t *testing.T) {
 	ctl := &Controller{proxyURL: "http://127.0.0.1:1", proxyToken: "t"}
-	if got, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindFundi}, "c_1"); got != nil || argv != nil {
-		t.Errorf("fundi kind was routed through the proxy: env %v / argv %v", got, argv)
+	env, vals := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindFundi}, "c_1")
+	if env != nil || vals.MCPConfig != "" || vals.ModelArgs != nil {
+		t.Errorf("fundi kind was routed through the proxy: env %v / vals %+v", env, vals)
 	}
 }
 
@@ -46,7 +48,7 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	t.Setenv(paths.URL, "")
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 
-	env, argv := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc")
+	env, vals := ctl.proxyChildEnv(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}, "c_abc")
 	envMap := envKeys(env)
 	if envMap["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
 		t.Errorf("ANTHROPIC_BASE_URL = %q", envMap["ANTHROPIC_BASE_URL"])
@@ -71,14 +73,15 @@ func TestProxyChildEnv_Claude(t *testing.T) {
 	if !strings.Contains(h, "\n") {
 		t.Error("headers not newline-separated; a comma silently collapses them into one")
 	}
-	// The argv additions must carry an --mcp-config element (one =-form token)
-	// and, with Model set, the --model pair — a duplicate of what
-	// buildClaudeArgv appends, which is expected and harmless.
-	if !slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "--mcp-config=") }) {
-		t.Errorf("argv = %v, want an --mcp-config= element", argv)
+	// vals carries the argv decisions as data now: an --mcp-config element
+	// and, with Model set, the --model pair that buildClaudeArgv puts in the
+	// child's argv as ModelArgs — REPLACING the plain pair, so the child
+	// carries exactly one --model.
+	if !strings.HasPrefix(vals.MCPConfig, "--mcp-config=") {
+		t.Errorf("vals.MCPConfig = %q, want an --mcp-config= element", vals.MCPConfig)
 	}
-	if !slices.Contains(argv, "--model") {
-		t.Errorf("argv = %v, want the --model pair (duplicate of buildClaudeArgv's own is expected and harmless)", argv)
+	if !slices.Equal(vals.ModelArgs, []string{"--model", "glm-5.2"}) {
+		t.Errorf("vals.ModelArgs = %v, want the --model pair", vals.ModelArgs)
 	}
 }
 

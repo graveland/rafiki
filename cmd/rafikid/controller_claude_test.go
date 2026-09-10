@@ -1,16 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 func TestBuildClaudeArgv_Defaults(t *testing.T) {
-	got := buildClaudeArgv(protocol.SpawnRequest{})
+	got := buildClaudeArgv(protocol.SpawnRequest{}, proxyenv.Values{})
 	want := []string{
 		"-p",
 		"--input-format", "stream-json",
@@ -26,21 +30,29 @@ func TestBuildClaudeArgv_Defaults(t *testing.T) {
 
 // Order matches pkg/claudeargv.Build's canonical order — buildClaudeArgv is
 // now a thin wrapper over it (see that package's doc comment on why there is
-// exactly one builder), so this pins the delegation rather than a
-// second, independent flag order.
+// exactly one builder), so this pins the delegation rather than a second,
+// independent flag order. vals is the shape a proxied child actually gets
+// (proxyChildEnv → buildEnv → resolveSpawnPlan): ModelArgs REPLACES the plain
+// --model pair req.Model would emit, and --mcp-config sits between the model
+// and --resume — Build's canonical position, not appended at the end the way
+// the old post-hoc append did it.
 func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
+	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
+		URL: "http://localhost:8035", Token: "tok", Model: "glm-5.2",
+	})
 	got := buildClaudeArgv(protocol.SpawnRequest{
-		Model:              "claude-opus-4-8",
+		Model:              "glm-5.2",
 		ResumeSession:      "sess-abc",
 		AppendSystemPrompt: "be brief",
 		ExtraArgs:          []string{"--foo"},
-	})
+	}, vals)
 	want := []string{
 		"-p",
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--model", "claude-opus-4-8",
+		"--model", "glm-5.2", // vals.ModelArgs — exactly one --model
+		vals.MCPConfig, // the full --mcp-config=<json> element, in canonical position
 		"--resume", "sess-abc",
 		"--append-system-prompt", "be brief",
 		"--dangerously-skip-permissions",
@@ -49,6 +61,32 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %v\nwant %v", got, want)
+	}
+}
+
+// TestBuildClaudeArgvCarriesMCPConfig pins the proxied child's argv against
+// the double-emission failure class this rewiring exists to kill: a request
+// with a proxy configured must yield EXACTLY ONE argv element beginning
+// --mcp-config=, and its value must be the inline JSON document (Build
+// prepends the flag to Params.MCPConfig, so a full element fed in verbatim
+// would come out doubled).
+func TestBuildClaudeArgvCarriesMCPConfig(t *testing.T) {
+	t.Setenv(paths.URL, "")
+	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
+	req := protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}
+	_, vals := ctl.proxyChildEnv(req, "c_abc")
+	argv := buildClaudeArgv(req, vals)
+	count := 0
+	for _, a := range argv {
+		if strings.HasPrefix(a, "--mcp-config=") {
+			count++
+			if !json.Valid([]byte(strings.TrimPrefix(a, "--mcp-config="))) {
+				t.Errorf("--mcp-config value is not valid JSON: %q", a)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("argv = %v, want exactly one --mcp-config= element, got %d", argv, count)
 	}
 }
 
@@ -133,7 +171,7 @@ func TestResolveSpawnPlan_ClaudeNeverFailsOnMissingBinary(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("CLAUDE_BINARY", "")
 
-	bin, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c1", t.TempDir())
+	bin, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c1", t.TempDir(), proxyenv.Values{})
 	if err != nil {
 		t.Fatalf("resolveSpawnPlan(claude) with no claude on PATH: %v", err)
 	}
