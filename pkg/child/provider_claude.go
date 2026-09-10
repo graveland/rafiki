@@ -54,7 +54,8 @@ type claudeFrame struct {
 
 // Normalizes is true: claude's stdout is its native stream-json, translated to
 // pi vocabulary on the bus by the per-child translator. The raw ring is not
-// renderable, so the Child captures the bus output into a render-ring.
+// renderable, so rendered reads are served from conversation_message
+// (Controller.dbRecent), not from the child process.
 func (ClaudeProvider) Normalizes() bool { return true }
 
 // Parse classifies one claude stdout line:

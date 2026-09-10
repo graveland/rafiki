@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
+	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
+	"go.graveland.dev/rafiki/pkg/store"
 )
 
 // TestController_GetStreams_StoreMiss verifies that GetStreams returns a
@@ -62,10 +67,13 @@ func TestGetRecentRenderedExited(t *testing.T) {
 
 	ctrl := newTestController(t)
 	ctrl.st.Insert(&childstore.Session{
-		ChildID:          "c1",
-		Kind:             "claude",
-		Status:           protocol.StatusExited,
-		ExitedRing:       []ring.Event{{Bytes: []byte(`{"type":"system"}`)}},
+		ChildID:    "c1",
+		Kind:       "claude",
+		Status:     protocol.StatusExited,
+		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`)}},
+		// Hand-built: nothing populates ExitedRenderRing since B4. This pins the
+		// exited branch's own behaviour given a non-empty ring, not a reachable
+		// production state.
 		ExitedRenderRing: []ring.Event{{Bytes: []byte(`{"type":"message_end"}`)}},
 	})
 
@@ -94,9 +102,11 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 
 	ctrl := newTestController(t)
 	ctrl.st.Insert(&childstore.Session{
-		ChildID:    "c2",
-		Kind:       "claude",
-		Status:     protocol.StatusExited,
+		ChildID: "c2",
+		Kind:    "claude",
+		Status:  protocol.StatusExited,
+		// With no pool, conversationIDForChild answers "" and the exited branch
+		// still refuses to dump raw claude frames into a rendered view.
 		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`)}},
 		// ExitedRenderRing intentionally empty; no logsDir dump.
 	})
@@ -115,6 +125,109 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 	}
 	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
 		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
+	}
+}
+
+// TestGetRecentClaudeUnresolvableFallsThrough pins the fallthrough the db
+// branch relies on: a claude child whose conversation cannot be resolved (no
+// pool here) takes the exited branch exactly as before, so nothing regresses
+// for a child the proxy never saw.
+func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
+	t.Parallel()
+
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID:   "c_claude",
+		Kind:      protocol.KindClaude,
+		Status:    protocol.StatusExited,
+		SessionID: "/tmp/session-file.json",
+	})
+	res, err := c.GetRecent("c_claude", control.RecentQuery{Limit: 10, Rendered: true})
+	if err != nil {
+		t.Fatalf("GetRecent: %v", err)
+	}
+	if res.TotalInBuffer != 0 {
+		t.Fatalf("total = %d, want 0 with no pool", res.TotalInBuffer)
+	}
+	if c.lastRecentSource != "exited" {
+		t.Fatalf("source = %q, want %q", c.lastRecentSource, "exited")
+	}
+}
+
+// TestGetRecentClaudeUsesTheDatabaseBranch pins the routing decision that
+// fixes agent_view/rafiki logs/rafiki tail for claude children: a claude
+// child whose conversation resolves by external_ref takes the db branch and
+// gets pi-vocabulary frames out of conversation_message. Needs a database,
+// because the claude route is the external_ref lookup.
+func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
+	pool := openTestPool(t)
+
+	c := newTestController(t)
+	c.pool = pool
+
+	childID := "c_claude_dbtest"
+	ctx := t.Context()
+	cleanup := func() {
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM conversations.conversation_message WHERE conversation_id IN
+			   (SELECT id FROM conversations.conversation WHERE external_ref = $1)`, childID); err != nil {
+			t.Logf("cleanup messages: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM conversations.conversation WHERE external_ref = $1`, childID); err != nil {
+			t.Logf("cleanup conversation: %v", err)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	// Same route the proxy face uses to attribute client-driven traffic:
+	// external_ref is the child id stamped into X-Rafiki-Session.
+	cs := capture.NewCaptureStore(pool)
+	convID, err := cs.EnsureConversationByExternalRef(ctx, capture.ConversationRef{
+		OriginEntrypoint: "test",
+		DrivenBy:         "client",
+		ExternalRef:      childID,
+	})
+	if err != nil {
+		t.Fatalf("EnsureConversationByExternalRef: %v", err)
+	}
+	ms := store.NewMessages(pool)
+	if err := ms.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil); err != nil {
+		t.Fatalf("append user message: %v", err)
+	}
+	if err := ms.Append(ctx, convID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil); err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+
+	c.st.Insert(&childstore.Session{
+		ChildID:   childID,
+		Kind:      protocol.KindClaude,
+		Status:    protocol.StatusExited,
+		SessionID: "/tmp/session-file.json",
+	})
+
+	res, err := c.GetRecent(childID, control.RecentQuery{Limit: 10, Rendered: true})
+	if err != nil {
+		t.Fatalf("GetRecent: %v", err)
+	}
+	if c.lastRecentSource != "db" {
+		t.Fatalf("source = %q, want %q", c.lastRecentSource, "db")
+	}
+	if res.TotalInBuffer == 0 {
+		t.Fatalf("total = 0, want the persisted frames")
+	}
+	var sawEnd, sawAgentEnd bool
+	for _, ev := range res.Events {
+		switch {
+		case bytes.Contains(ev, []byte(`"type":"message_end"`)):
+			sawEnd = bytes.Contains(ev, []byte("hi from the database"))
+		case bytes.Contains(ev, []byte(`"type":"agent_end"`)):
+			sawAgentEnd = true
+		}
+	}
+	if !sawEnd || !sawAgentEnd {
+		t.Fatalf("events missing message_end/agent_end pi frames: sawEnd=%v sawAgentEnd=%v, events=%s",
+			sawEnd, sawAgentEnd, res.Events)
 	}
 }
 

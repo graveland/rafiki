@@ -292,6 +292,11 @@ type Controller struct {
 	// from inside Controller.Spawn/Resume rather than over a Connect call.
 	darajaPool     *darajapool.Pool
 	darajaDialAddr string
+
+	// lastRecentSource records which branch GetRecent took ("db", "live",
+	// "exited"). Test seam: the branches are otherwise indistinguishable when
+	// every source is empty, which is exactly the failure this guards against.
+	lastRecentSource string
 }
 
 type workspaceLabels struct {
@@ -809,20 +814,27 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 
 	ch, alive := c.cm.Get(childID)
 
-	// Select the source event slice based on kind and liveness.
-	// Fundi children read from the database (canonical store); pi and
-	// claude children keep the ring-buffer + on-disk-dump path.
+	// Select the source event slice based on whether the child's persisted
+	// conversation resolves, then on liveness. A resolvable conversation (fundi
+	// children, claude children the proxy captured) reads from the database
+	// (canonical store); the rest keep the ring-buffer + on-disk-dump path.
 	var events []ring.Event
 	var total int
 	var oldestTS int64
 
-	if snap.Kind == protocol.KindFundi {
-		events = c.dbRecentForFundi(snap.SessionID, q)
+	convID := c.conversationIDForChild(snap)
+	if convID != "" || snap.Kind == protocol.KindFundi {
+		// Fundi children stay in this branch even when the conversation id does
+		// not resolve (an exited-before-first-turn child): their contract is
+		// db-only, with no disk fallback (TestGetRecentFundiNoDB).
+		c.lastRecentSource = "db"
+		events = c.dbRecent(convID, q)
 		total = len(events)
 		if len(events) > 0 {
 			oldestTS = events[0].Timestamp
 		}
 	} else if alive {
+		c.lastRecentSource = "live"
 		if q.Rendered && ch.Normalizes() {
 			events = ch.RenderRecent(ring.Query{Limit: q.Limit, Since: q.Since})
 			total, oldestTS = ch.RenderStats()
@@ -832,6 +844,7 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 			total, _, oldestTS = r.Stats()
 		}
 	} else {
+		c.lastRecentSource = "exited"
 		// Exited: pick the snapshot, falling back to the on-disk dump for
 		// orphans reloaded after a restart (in-memory snapshots are lost then).
 		var all []ring.Event
@@ -3263,9 +3276,9 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Snapshot the ring before removing the child so ctrl_get_recent continues
 	// to work after the child is gone (spec §11.4).
 	ringSnapshot := ch.Ring().Recent(ring.Query{})
-	// RenderRecent returns the render-ring events WITH real timestamps (nil for
-	// pi children that have no render-ring), so Since-filtering on the in-memory
-	// ExitedRenderRing stays consistent with the live render path.
+	// RenderRecent has returned nil since B4 removed the render ring; the call
+	// is kept so MarkExited's signature stays honest about what it stores.
+	// Rendered reads for an exited child are served from conversation_message.
 	renderEvents := ch.RenderRecent(ring.Query{})
 
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing

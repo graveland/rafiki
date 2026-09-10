@@ -258,7 +258,7 @@ func (s *controllerSpawner) View(ctx context.Context, childID string, limit int)
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, control.RecentQuery{Limit: limit, Rendered: false})
+	res, err := s.c.GetRecent(childID, control.RecentQuery{Limit: limit, Rendered: true})
 	if err != nil {
 		return "", err
 	}
