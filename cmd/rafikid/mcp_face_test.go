@@ -203,27 +203,6 @@ func mcpResultText(t *testing.T, msgs []map[string]any, id float64) (string, boo
 	return text, res["isError"] == true
 }
 
-// mcpListedToolNames decodes a tools/list result carried over HTTP.
-func mcpListedToolNames(t *testing.T, msgs []map[string]any, id float64) []string {
-	t.Helper()
-	res := mcpResponseFor(t, msgs, id)
-	raw, err := json.Marshal(res["tools"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tools []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(raw, &tools); err != nil {
-		t.Fatalf("decode tools/list result: %v", err)
-	}
-	names := make([]string, 0, len(tools))
-	for _, tl := range tools {
-		names = append(names, tl.Name)
-	}
-	return names
-}
-
 func TestMCPFaceIsReachedThroughUserTokenAuth(t *testing.T) {
 	face, ledger := mcpFaceFixture(t)
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{tokens: map[string]users.Identity{
