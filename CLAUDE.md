@@ -966,6 +966,23 @@
   imagined: a leaked query made a sort test fail on a key it never set, and a
   leaked model made `TestPreset_MergeOrder` fail on a model no fixture mentions.
 
+- **`XDG_CONFIG_HOME` leaks the same way, and `providers.toml` decides where a
+  test's LLM request actually goes.** `cmd/rafikid`'s `resolveUpstream` loads
+  `paths.ProvidersFile()` (under `ConfigDir()`), so an un-isolated test reads
+  the developer's real `~/.config/rafiki/providers.toml` — and a
+  `default_provider` there outranks the senders the function explicitly
+  registered. Observed: a file setting `default_provider = "ollama"` routed
+  `TestResolveUpstreamProxyDoesNotLeakAPIKey`'s send to `localhost:11434`
+  instead of its own `httptest` server, reporting "proxy server saw 0
+  requests", and took the two `TestAgentAnalyze*` tests down with it ("all 2
+  model(s) failed"). All three pass on a machine with NO providers.toml, which
+  is what makes this invisible in CI and maddening locally — the symptom looks
+  like a broken proxy branch, not a config leak. `cmd/rafikid` carries a
+  `TestMain` for it now, matching `cmd/rafiki`'s. When a test that builds an
+  LLM client fails in a way that implies the request went nowhere, print the
+  error the test discards before reading any code: the host in it names the
+  culprit immediately.
+
 - **The filter+sort panel is VERTICAL — one row per field — and that is what
   removes the wrapping problem rather than managing it.** The first version was
   two horizontal bands of cells; the filter band alone needed sixteen side by

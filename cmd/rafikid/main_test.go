@@ -1,10 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
+	"os"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
 )
+
+// TestMain isolates the config directory for the whole package.
+//
+// resolveUpstream loads paths.ProvidersFile(), which resolves under
+// XDG_CONFIG_HOME — so without this the tests read the DEVELOPER'S real
+// ~/.config/rafiki/providers.toml, and whatever default_provider it names
+// decides where an analyze run's request actually goes. That is not
+// hypothetical: a providers.toml setting default_provider = "ollama" routed
+// TestResolveUpstreamProxyDoesNotLeakAPIKey's send to localhost:11434 instead
+// of its own httptest server, so the test reported "proxy server saw 0
+// requests" and the two AgentAnalyze tests failed with every model unservable.
+// All three pass on a machine with no providers.toml, which is exactly what
+// makes the leak easy to miss.
+//
+// Package-wide, because the coupling is inside resolveUpstream rather than in
+// any one test. The handful of tests that set XDG_CONFIG_HOME themselves still
+// win: t.Setenv applies after this.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "rafikid-config-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // TestParseControlListenAddr covers every spelling of RAFIKI_CONTROL_LISTEN
 // documented in .env.example, README.md, and
