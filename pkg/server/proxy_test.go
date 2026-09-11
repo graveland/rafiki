@@ -1883,7 +1883,15 @@ func (s *stubThreadObserver) EnsureThreadChild(parentChildID, threadID, conversa
 // materializes a child record per captured Claude Code thread. If it silently
 // stopped happening, native subagents would fall out of lineage, the rail,
 // rafiki list and the cost rollup with nothing erroring anywhere.
+//
+// Every request here declares a client tool, because the hook fires only for a
+// thread that can ACT (TestToolLessFounderForksWithoutASyntheticChild covers
+// the other side). The tool is what makes these subagents rather than Claude
+// Code's per-tool-call helpers.
 func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
+	const bodyWithTool = `{"model":"claude","stream":true,
+		"tools":[{"name":"Bash","input_schema":{"type":"object"}}]}`
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1904,7 +1912,7 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		p.SetThreadObserver(obs)
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(bodyWithTool))
 		req.Header.Set("X-Rafiki-Session", "c_parent")
 		p.ServeHTTP(rec, req)
 
@@ -1927,7 +1935,7 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		p.SetThreadObserver(obs)
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(bodyWithTool))
 		req.Header.Set("X-Rafiki-Session", "c_root")
 		p.ServeHTTP(rec, req)
 
@@ -1944,7 +1952,7 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		p.SetThreadObserver(obs)
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(bodyWithTool))
 		req.Header.Set("X-Rafiki-Session", "c_parent")
 		p.ServeHTTP(rec, req)
 
@@ -2048,15 +2056,18 @@ func TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread(t *testing.T) {
 // TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver pins
 // routing case 3, the reviewer's probe scenario: a request with no resolvable
 // predecessor on a session whose family ALREADY exists is an independent
-// thread's founding request (a Task subagent, the titler, the quota probe).
-// The proxy mints the founding turn's id in Go, routes the request to the
-// branch named after it from its first request, hands that id to
-// InsertTurnIntent, and tells the observer HERE, so a single-turn subagent's
-// synthetic child materializes on the founding request itself. Landed on the
-// root row instead, the founding request's small message count collides with
-// ordinals the main thread already occupies, the strict response append
-// fails, and (before the pre-mint) the lost response destroyed the thread
-// identity with it.
+// thread's founding request (a Task subagent). The proxy mints the founding
+// turn's id in Go, routes the request to the branch named after it from its
+// first request, hands that id to InsertTurnIntent, and tells the observer
+// HERE, so a single-turn subagent's synthetic child materializes on the
+// founding request itself. Landed on the root row instead, the founding
+// request's small message count collides with ordinals the main thread
+// already occupies, the strict response append fails, and (before the
+// pre-mint) the lost response destroyed the thread identity with it.
+//
+// The tool declaration is load-bearing, not scenery: the observer is called
+// only for a founder that can ACT — see
+// TestToolLessFounderForksWithoutASyntheticChild.
 func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing.T) {
 	upstream := newStreamUpstream("msg_own")
 	defer upstream.Close()
@@ -2069,6 +2080,7 @@ func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true,
+		"tools":[{"name":"Bash","input_schema":{"type":"object"}}],
 		"system":[{"type":"text","text":"x-anthropic-billing-header:cc_version=2.1.267.019;cc_entrypoint=sdk-cli;cc_is_subagent=true"}]}`))
 	req.Header.Set("X-Rafiki-Session", "c_found")
 	p.ServeHTTP(rec, req)
@@ -2087,6 +2099,61 @@ func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing
 	}
 	if len(obs.calls) != 1 || obs.calls[0] != "c_found|"+fs.lastIntentID+"|conv-branch" {
 		t.Errorf("observer calls = %v, want [%s] on the founding request itself (single-turn subagents must still appear)", obs.calls, "c_found|"+fs.lastIntentID+"|conv-branch")
+	}
+}
+
+// TestToolLessFounderForksWithoutASyntheticChild pins the two halves of the
+// WebFetch/WebSearch fix, which pull in opposite directions.
+//
+// cc_is_subagent means "not the main thread", not "Task subagent": Claude Code
+// stamps it on the haiku one-shots it fires to summarize a fetched page and to
+// drive a web search. Those still have to FORK — a 2-message request landed on
+// the root collides with ordinals the main thread occupies and the strict
+// response append rejects it — but they are not agents and must not appear in
+// the rail. Without the gate one measured session grew 299 single-turn
+// synthetic children against 10 real subagents.
+//
+// The WebSearch shape is the sharp case: it DOES declare a tool, but a
+// server-executed one with no input_schema, so "tools is non-empty" is the
+// wrong test and "has a client tool" is the right one.
+func TestToolLessFounderForksWithoutASyntheticChild(t *testing.T) {
+	for _, tc := range []struct {
+		name, tools string
+	}{
+		{"webfetch summarizer declares no tools at all", `[]`},
+		{"websearch helper declares only a server tool",
+			`[{"name":"web_search","type":"web_search_20250305","max_uses":8}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := newStreamUpstream("msg_own")
+			defer upstream.Close()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			obs := &stubThreadObserver{}
+			fs := &fakeProxyStore{familyExists: true}
+			p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+			p.store = fs
+			p.SetThreadObserver(obs)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+				`{"model":"claude-haiku-4-5-20251001","stream":true,"tools":`+tc.tools+`,
+				"system":[{"type":"text","text":"x-anthropic-billing-header:cc_version=2.1.268.a5d;cc_entrypoint=sdk-cli;cc_is_subagent=true"}]}`))
+			req.Header.Set("X-Rafiki-Session", "c_helper")
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if _, err := uuid.Parse(fs.lastIntentID); err != nil {
+				t.Fatalf("TurnIntent.ID = %q, want a pre-minted UUID: the helper still forks", fs.lastIntentID)
+			}
+			if want := "c_helper:" + fs.lastIntentID; fs.lastResolvedRef != want {
+				t.Errorf("resolved external_ref = %q, want %q: a tool-less founder keeps its own ordinal space off the root", fs.lastResolvedRef, want)
+			}
+			if len(obs.calls) != 0 {
+				t.Errorf("observer calls = %v, want none: a founder that declares no client tool cannot act and is not an agent", obs.calls)
+			}
+		})
 	}
 }
 

@@ -92,6 +92,88 @@ func TestCostsForCountsOneConversationOnce(t *testing.T) {
 	}
 }
 
+// A thread branch with no child of its own is a tool call the parent made --
+// Claude Code's WebFetch summarizer and WebSearch driver fork a branch each and
+// get no synthetic child, because they declare no client tools and so are not
+// agents. Their spend must land on the parent: TOTAL is summed from child rows,
+// so a branch nothing claims is money that silently leaves the report.
+func TestCostsForRollsUnclaimedBranchesIntoTheParent(t *testing.T) {
+	cap := &capturingCoster{rows: []insights.ConversationCost{
+		{ConversationID: "66666666-6666-6666-6666-666666666666",
+			ExternalRef: "c_parent", Cost: 1.0},
+		{ConversationID: "77777777-7777-7777-7777-777777777777",
+			ExternalRef: "c_parent:aaaa", Cost: 0.25},
+		{ConversationID: "88888888-8888-8888-8888-888888888888",
+			ExternalRef: "c_parent:bbbb", Cost: 0.75},
+	}}
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_parent"})
+	c := &Controller{coster: cap, st: st}
+
+	// The prefix route is what reaches those branches at all; without it the
+	// query never returns them and there is nothing to attribute.
+	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
+	if !slices.Contains(cap.sel.ExternalRefPrefixes, "c_parent:") {
+		t.Errorf("ExternalRefPrefixes = %v, want it to carry %q",
+			cap.sel.ExternalRefPrefixes, "c_parent:")
+	}
+	if got["c_parent"] != 2.0 {
+		t.Errorf("c_parent = %v, want 2.0 (own 1.0 plus two unclaimed branches)",
+			got["c_parent"])
+	}
+}
+
+// A branch a real subagent DOES claim is that subagent's spend, not the
+// parent's -- otherwise every Task subagent's cost is reported twice, once on
+// its own row and once folded into its parent's.
+func TestCostsForLeavesAClaimedBranchOnItsOwnChild(t *testing.T) {
+	branch := "c_parent:cccc"
+	cap := &capturingCoster{rows: []insights.ConversationCost{
+		{ConversationID: "99999999-9999-9999-9999-999999999999",
+			ExternalRef: "c_parent", Cost: 1.0},
+		{ConversationID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			ExternalRef: branch, Cost: 3.0},
+	}}
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_parent"})
+	st.Insert(&childstore.Session{ChildID: branch, Native: true})
+	c := &Controller{coster: cap, st: st}
+
+	got := c.costsFor([]childstore.Snapshot{
+		{ChildID: "c_parent"},
+		{ChildID: branch},
+	})
+	if got["c_parent"] != 1.0 {
+		t.Errorf("c_parent = %v, want 1.0: a claimed branch is its own child's spend",
+			got["c_parent"])
+	}
+	if got[branch] != 3.0 {
+		t.Errorf("%s = %v, want 3.0", branch, got[branch])
+	}
+}
+
+// Claimed-ness is a property of the CHILDSTORE, never of the snapshot slice:
+// snaps is routinely status-filtered, and a real subagent filtered out of the
+// list must not have its cost slide onto its parent as if it were a helper.
+func TestCostsForChecksClaimsAgainstTheStoreNotTheFilteredList(t *testing.T) {
+	branch := "c_parent:dddd"
+	cap := &capturingCoster{rows: []insights.ConversationCost{
+		{ConversationID: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			ExternalRef: branch, Cost: 3.0},
+	}}
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_parent"})
+	st.Insert(&childstore.Session{ChildID: branch, Native: true})
+	c := &Controller{coster: cap, st: st}
+
+	// Only the parent is listed -- the subagent exists but was filtered out.
+	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
+	if got["c_parent"] != 0 {
+		t.Errorf("c_parent = %v, want 0: a filtered-out subagent still owns its branch",
+			got["c_parent"])
+	}
+}
+
 // No cost source means NOT KNOWN, which must leave CostUSD nil rather than
 // reporting a zero the rail would then adopt.
 func TestCostsForWithNoCosterIsAbsentNotZero(t *testing.T) {

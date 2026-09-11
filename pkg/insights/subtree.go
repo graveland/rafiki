@@ -18,17 +18,35 @@ import (
 //     conversation UUID directly (childstore.Snapshot.SessionID).
 //   - ExternalRefs — the proxy path, where the daemon sets
 //     X-Rafiki-Session: <childID> and the row correlates on external_ref.
+//   - ExternalRefPrefixes — the proxy path's THREAD BRANCHES, whose ref is
+//     "<childID>:<turn-uuid>". Most branches are a real Task subagent with a
+//     synthetic child of its own, already named by ExternalRefs; this list
+//     exists for the ones that are not. Claude Code's WebFetch and WebSearch
+//     helpers fork a branch per call and get no child record (they declare no
+//     client tools, so they are not agents), and without a prefix nothing
+//     reaches their spend — ~2.3M haiku tokens on one measured session. They
+//     are a tool call the parent made, so they are the parent's spend.
 //
 // A rollup that follows only one of these under-reports a mixed subtree, and
 // under-reporting a budget is the failure direction that costs money.
 type SubtreeSelector struct {
-	ConversationIDs []string
-	ExternalRefs    []string
+	ConversationIDs     []string
+	ExternalRefs        []string
+	ExternalRefPrefixes []string
 }
 
 func (s SubtreeSelector) empty() bool {
-	return len(s.ConversationIDs) == 0 && len(s.ExternalRefs) == 0
+	return len(s.ConversationIDs) == 0 && len(s.ExternalRefs) == 0 &&
+		len(s.ExternalRefPrefixes) == 0
 }
+
+// refMatch is the WHERE clause shared by both rollup queries. starts_with
+// rather than LIKE because a child id contains '_' ("c_01M2…"), which LIKE
+// reads as a single-character wildcard — an escaping bug that would silently
+// over-match a sibling.
+const refMatch = `(c.id = ANY($1::uuid[])
+	 OR c.external_ref = ANY($2::text[])
+	 OR EXISTS (SELECT 1 FROM unnest($3::text[]) p WHERE starts_with(c.external_ref, p)))`
 
 // SubtreeCost returns the total USD spend across the selected conversations.
 // An empty selector is 0, not an error: a coordinator with no children has
@@ -53,9 +71,10 @@ func (i *Insights) SubtreeCostDetailed(ctx context.Context, sel SubtreeSelector)
 
 	rows, err := i.pool.Query(ctx,
 		`SELECT coalesce(t.model,''), `+tokenSums+` `+statsFrom+`
-		 WHERE c.id = ANY($1::uuid[]) OR c.external_ref = ANY($2::text[])
+		 WHERE `+refMatch+`
 		 GROUP BY t.model`,
-		nonNilUUIDs(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs))
+		nonNilUUIDs(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs),
+		nonNilStrings(sel.ExternalRefPrefixes))
 	if err != nil {
 		return 0, nil, fmt.Errorf("subtree cost: %w", err)
 	}
@@ -151,9 +170,10 @@ func (i *Insights) CostsByConversation(ctx context.Context, sel SubtreeSelector)
 	// poison one row.
 	rows, err := i.pool.Query(ctx,
 		`SELECT c.id::text, coalesce(c.external_ref,''), coalesce(t.model,''), `+tokenSums+` `+statsFrom+`
-		 WHERE c.id = ANY($1::uuid[]) OR c.external_ref = ANY($2::text[])
+		 WHERE `+refMatch+`
 		 GROUP BY c.id, c.external_ref, t.model`,
-		uuidsOnly(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs))
+		uuidsOnly(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs),
+		nonNilStrings(sel.ExternalRefPrefixes))
 	if err != nil {
 		return nil, fmt.Errorf("costs by conversation: %w", err)
 	}

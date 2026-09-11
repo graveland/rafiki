@@ -91,6 +91,49 @@ func BillingFromRequest(reqBody []byte) (Billing, bool) {
 	return ParseBillingHeader(blocks[0].Text)
 }
 
+// DeclaresClientTools reports whether the request declares at least one tool
+// the CLIENT must execute — an entry carrying an input_schema.
+//
+// This separates a Task subagent from Claude Code's per-tool-call model
+// helpers, which cc_is_subagent alone does not: the flag means "not the main
+// thread", and Claude Code stamps it on the haiku one-shots it fires to
+// summarize a WebFetch page and to drive a WebSearch. Measured on one session
+// (c_01M28E9XZQTHR7SRFZE0N5S0VE, 2026-09-11): 299 helper branches, every one
+// with zero client tools, against 10 real subagents with 7-11 each. The
+// WebSearch helper does carry a tool, but a SERVER one
+// ({"name":"web_search","type":"web_search_20250305"}) — the model never
+// hands it back to the caller, so it does not make the request an agent.
+//
+// The rule is "can this request act", which is why it keys on input_schema
+// rather than on the prompt text or the model: an agent that cannot call a
+// tool can only answer once, which is the same argument that keeps a
+// skill-less skill tool out of tools[].
+//
+// Anthropic's type-shorthand CLIENT tools (computer_*, text_editor_*, bash_*)
+// carry no input_schema and would read as no-tools here. Claude Code does not
+// use them — it declares its own Bash with a full schema — and the failure
+// direction is a real subagent losing its rail row, never a helper gaining
+// one.
+func DeclaresClientTools(reqBody []byte) bool {
+	var req struct {
+		Tools []struct {
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(reqBody, &req); err != nil {
+		return false
+	}
+	for _, t := range req.Tools {
+		// A literal null decodes to the four bytes "null", not to an empty
+		// RawMessage, so length alone would read a malformed declaration as a
+		// client tool.
+		if len(t.InputSchema) > 0 && string(t.InputSchema) != "null" {
+			return true
+		}
+	}
+	return false
+}
+
 // PreviousMessageID returns diagnostics.previous_message_id, the id of the
 // assistant message this request's thread last received, or "" when absent.
 //

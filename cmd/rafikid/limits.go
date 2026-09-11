@@ -241,11 +241,19 @@ const budgetQueryTimeout = 5 * time.Second
 // subtreeSelector collects every conversation belonging to rootChildID's
 // subtree, INCLUDING rootChildID's own.
 //
-// Two routes, because a subtree routinely mixes execution models: a fundi
+// Three routes, because a subtree routinely mixes execution models: a fundi
 // child's conversation id is on its snapshot (SessionID), while a claude or
 // pi child's row correlates by external_ref, which the daemon sets to the
-// childID (controller.go's X-Rafiki-Session header). Following only one
-// under-reports, and under-reporting a budget is the expensive direction.
+// childID (controller.go's X-Rafiki-Session header). The third is the branch
+// prefix "<childID>:", which catches a claude child's thread branches that
+// have no synthetic child of their own — Claude Code's WebFetch and WebSearch
+// helpers fork one per call and are deliberately not agents, but their spend
+// is the parent's. Following only one under-reports, and under-reporting a
+// budget is the expensive direction.
+//
+// A real subagent's branch is named by BOTH its own ExternalRef and its
+// parent's prefix; the query ORs the three lists in one pass, so a row
+// matching twice is still one row.
 func (c *Controller) subtreeSelector(rootChildID string) insights.SubtreeSelector {
 	var sel insights.SubtreeSelector
 	add := func(snap childstore.Snapshot) {
@@ -253,6 +261,7 @@ func (c *Controller) subtreeSelector(rootChildID string) insights.SubtreeSelecto
 			sel.ConversationIDs = append(sel.ConversationIDs, snap.SessionID)
 		}
 		sel.ExternalRefs = append(sel.ExternalRefs, snap.ChildID)
+		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, snap.ChildID+threadRefSep)
 	}
 	if snap, ok := c.st.Get(rootChildID); ok {
 		add(snap)

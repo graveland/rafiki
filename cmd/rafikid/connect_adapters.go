@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -128,6 +129,7 @@ func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
 			sel.ConversationIDs = append(sel.ConversationIDs, s.SessionID)
 		}
 		sel.ExternalRefs = append(sel.ExternalRefs, s.ChildID)
+		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, s.ChildID+threadRefSep)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
@@ -139,10 +141,30 @@ func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
 
 	byConv := make(map[string]insights.ConversationCost, len(rows))
 	byRef := make(map[string]insights.ConversationCost, len(rows))
+	// orphanBranches sums, per parent child id, the branch conversations that
+	// belong to no child of their own. Those are Claude Code's WebFetch and
+	// WebSearch helpers: they fork a branch per call and get no synthetic child
+	// (they declare no client tools, so they are not agents), and the spend is
+	// a tool call the PARENT made. Rolling it into the parent's own cost is
+	// both where it belongs and the only way it stays in TOTAL, which is summed
+	// from child rows.
+	//
+	// Claimed-ness is checked against the whole childstore, never against
+	// snaps: snaps may be status-filtered, and a real subagent filtered out of
+	// the list must not have its cost slide onto its parent.
+	orphanBranches := make(map[string]float64)
 	for _, r := range rows {
 		byConv[r.ConversationID] = r
-		if r.ExternalRef != "" {
-			byRef[r.ExternalRef] = r
+		if r.ExternalRef == "" {
+			continue
+		}
+		byRef[r.ExternalRef] = r
+		parent, _, isBranch := strings.Cut(r.ExternalRef, threadRefSep)
+		if !isBranch {
+			continue
+		}
+		if _, claimed := c.st.Get(r.ExternalRef); !claimed {
+			orphanBranches[parent] += r.Cost
 		}
 	}
 
@@ -161,7 +183,7 @@ func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
 		if r, ok := byRef[s.ChildID]; ok && r.ConversationID != counted {
 			total += r.Cost
 		}
-		out[s.ChildID] = total
+		out[s.ChildID] = total + orphanBranches[s.ChildID]
 	}
 	return out
 }

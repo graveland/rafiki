@@ -118,3 +118,38 @@ func TestPreviousMessageID(t *testing.T) {
 		})
 	}
 }
+
+// TestDeclaresClientTools pins the discriminator that separates a Task
+// subagent from Claude Code's per-tool-call model helpers. Both carry
+// cc_is_subagent and both found a thread; only one can act.
+//
+// The bodies are the real measured shapes: the web-search helper's lone tool
+// is SERVER-executed and schema-less, which is why "tools is non-empty" would
+// be the wrong test.
+func TestDeclaresClientTools(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"task subagent declares client tools",
+			`{"tools":[{"name":"Bash","description":"run","input_schema":{"type":"object"}},
+			           {"name":"Read","input_schema":{"type":"object"}}]}`, true},
+		{"webfetch summarizer declares none", `{"tools":[]}`, false},
+		{"webfetch summarizer omits the key", `{"model":"claude-haiku-4-5-20251001"}`, false},
+		{"websearch helper declares only a server tool",
+			`{"tools":[{"name":"web_search","type":"web_search_20250305","max_uses":8}]}`, false},
+		{"one client tool among server tools",
+			`{"tools":[{"name":"web_search","type":"web_search_20250305"},
+			           {"name":"Grep","input_schema":{"type":"object"}}]}`, true},
+		{"input_schema null is not a client tool",
+			`{"tools":[{"name":"Broken","input_schema":null}]}`, false},
+		{"tools null", `{"tools":null}`, false},
+		{"not json", `{{{`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DeclaresClientTools([]byte(tc.body)); got != tc.want {
+				t.Errorf("DeclaresClientTools = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

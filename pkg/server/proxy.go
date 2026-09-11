@@ -1394,9 +1394,11 @@ func authorAttributionParsed(b claudethread.Billing, ok bool, source string) (au
 //     main thread's rows: landed on the root, its small message count collides
 //     with ordinals the main thread already occupies and the strict response
 //     append fails, which (before the pre-mint) both lost the founding
-//     response and destroyed the thread identity. The synthetic child is
-//     materialized here too, so a single-turn subagent still appears in the
-//     rail, rafiki list and the cost rollup.
+//     response and destroyed the thread identity. A synthetic child is
+//     materialized here too — but only when the founder DECLARES CLIENT TOOLS,
+//     so a single-turn subagent still appears in the rail while Claude Code's
+//     tool-call helpers (WebFetch, WebSearch), which carry the same flag and
+//     fork the same way, do not. See the EnsureThreadChild call below.
 //
 //     The cc_is_subagent requirement is load-bearing, not decorative: a
 //     MAIN-thread request can also arrive with no resolvable predecessor on
@@ -1492,12 +1494,22 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 		p.logger.Warn("proxy capture: ensure-conversation failed", "error", err)
 		return captureRef{}
 	}
-	// A non-root thread is a Task subagent. Give it a child record so lineage,
-	// the rail, rafiki list, agent_list and cost rollup all see it. Never for
-	// the root thread, which is already a real child. Called from here (not
-	// only after a later turn resolves) so a single-turn subagent's synthetic
-	// child materializes on its founding request.
-	if threadID != "" && p.threadObserver != nil {
+	// A non-root thread that can ACT is a Task subagent. Give it a child record
+	// so lineage, the rail, rafiki list, agent_list and cost rollup all see it.
+	// Never for the root thread, which is already a real child. Called from
+	// here (not only after a later turn resolves) so a single-turn subagent's
+	// synthetic child materializes on its founding request.
+	//
+	// The client-tools gate is what keeps Claude Code's per-tool-call model
+	// helpers out of the rail: the WebFetch summarizer and the WebSearch driver
+	// both carry cc_is_subagent (the flag means "not the main thread"), both
+	// arrive predecessor-less, and both correctly fork — but neither declares a
+	// tool it could call, so neither is an agent. Without the gate one session
+	// grew 299 single-turn synthetic children against 10 real subagents. Their
+	// spend is not lost: it folds into the parent child's own cost through
+	// SubtreeSelector.ExternalRefPrefixes, which is where a tool call the
+	// parent made belongs anyway.
+	if threadID != "" && p.threadObserver != nil && claudethread.DeclaresClientTools(reqBody) {
 		if eerr := p.threadObserver.EnsureThreadChild(session, threadID, convID); eerr != nil {
 			p.logger.Warn("proxy capture: ensure thread child failed",
 				"session", session, "thread", threadID, "error", eerr)

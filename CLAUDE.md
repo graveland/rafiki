@@ -1742,6 +1742,35 @@
   treated as an independent thread founder. A parser keying on the literal
   `false` never fires; a router keying on family existence alone forks the
   main thread's post-compaction continuation onto a branch.
+- **`cc_is_subagent` means "not the main thread", NOT "Task subagent" — the
+  discriminator for a RAIL ROW is `claudethread.DeclaresClientTools`.** Claude
+  Code stamps the flag on the per-tool-call haiku one-shots it fires to
+  summarize a WebFetch page and to drive a WebSearch. Each arrives
+  predecessor-less on an existing family, so each correctly FORKS (the fork is
+  load-bearing: a 2-message helper landing on the root collides with the main
+  thread's ordinals and the strict response append rejects it with
+  `ErrOrdinalOccupied`) — but neither is an agent, because neither declares a
+  tool it could call. Measured on one session
+  (`c_01M28E9XZQTHR7SRFZE0N5S0VE`, 2026-09-11): 299 single-turn helper
+  branches with zero client tools against 10 real subagents with 7-11 each,
+  which is 299 spurious rows in `rafiki list` and the rail. The predicate keys
+  on a `tools[]` entry carrying `input_schema`, which is what separates a
+  CLIENT tool from an Anthropic SERVER one (`web_search_20250305` carries
+  `type` and no schema; the model never hands it back to the caller). Same
+  argument that keeps a skill-less `skill` tool out of `tools[]`: an agent
+  that cannot call a tool can only answer once.
+- **A tool-less branch's spend folds into its PARENT, via
+  `SubtreeSelector.ExternalRefPrefixes`.** Dropping the child rows would have
+  dropped ~$2.70 of haiku spend (2.24M in / 91k out over 299 branches on the
+  measured session) out of both budget rollups and `rafiki list`'s TOTAL,
+  which is summed client-side from child rows. The third selector route
+  matches branch conversations by the `<childID>:` prefix
+  (`threadRefSep`, the one constant both the id builder and the prefix read);
+  `costsFor` then attributes a branch to the parent only when NO child claims
+  it, and claimed-ness is checked against the whole childstore rather than the
+  possibly-status-filtered snapshot list, or a filtered-out real subagent's
+  cost slides onto its parent. `starts_with`, never `LIKE`: a child id contains
+  `_`, which LIKE reads as a single-char wildcard.
 - **`diagnostics.previous_message_id` is ONE hop of the thread chain,
   family-scoped** (`ThreadOfPredecessorInSession`: exact session match plus
   the escaped `<session>:%` branches). The chain lives in
@@ -1786,8 +1815,10 @@
 - **A thread's founding request never shares the main thread's ordinal space:
   the proxy pre-mints its turn id and routes it to its own branch**, creating
   the synthetic child in beginCapture on the founding request itself. The
-  discriminator is family existence + cc_is_subagent; an unflagged auxiliary
-  founder (the titler and quota probe in measured traffic) keeps the root-row
-  behavior and its response append fails LOUDLY on collision. Confirmed
-  against eval traffic 2026-09-10; if a future Claude Code flags those
-  helpers, they branch automatically with no code change.
+  FORK's discriminator is family existence + cc_is_subagent; the synthetic
+  CHILD's is that plus `DeclaresClientTools` (see the two bullets above — the
+  flag alone admits Claude Code's WebFetch/WebSearch helpers). An unflagged
+  auxiliary founder (the titler and the quota probe in measured traffic) keeps
+  the root-row behavior and its response append fails LOUDLY on collision.
+  Confirmed against eval traffic 2026-09-10; if a future Claude Code flags
+  those helpers, they branch automatically with no code change.

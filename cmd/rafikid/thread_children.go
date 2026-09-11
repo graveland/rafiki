@@ -20,11 +20,18 @@ import (
 // it to avoid implying these are budgeted cross-process agents.
 const labelNativeSubagent = "rafiki/native-subagent"
 
+// threadRefSep joins a parent child id to a thread id, in both the synthetic
+// child's id and the branch conversation's external_ref. One constant because
+// the cost rollup selects branch conversations by the "<childID>:" prefix
+// (subtreeSelector, costsFor) and a separator that drifts from this one
+// silently stops matching.
+const threadRefSep = ":"
+
 // threadChildID is the deterministic id of a thread's synthetic child. It must
 // be a pure function of (parent, thread) because the proxy calls
 // EnsureThreadChild on every turn of the thread and must land on the same row.
 func threadChildID(parentChildID, threadID string) string {
-	return parentChildID + ":" + threadID
+	return parentChildID + threadRefSep + threadID
 }
 
 // EnsureThreadChild creates, idempotently, the synthetic child record standing
