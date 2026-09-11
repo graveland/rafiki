@@ -139,6 +139,56 @@ exact values, exact formats, and stated relationships between components. This
 block is handed to every implementer and every reviewer as their attention
 lens. Summarising it is how a constraint quietly stops binding.
 
+## Read the plan as one document, before anyone runs it
+
+Every check above is local: a body, a field, a wave. A plan's worst defects are
+not local. They live between two task bodies, where no implementer and no
+reviewer will ever see both, and a Global Constraints block quoting the violated
+rule correctly does not catch them.
+
+So make one pass over the finished plan, reading it as a single document. Seven
+questions, roughly in order of what they cost when missed:
+
+1. **Does each prescribed mechanism deliver the property its own prose claims?**
+   Check the mechanism, not the sentence. A body prescribing a two-arm `select`
+   and asserting the first arm is preferred is wrong, because Go picks uniformly
+   at random — the prose is fine and the code holds ~50% of the time. A body
+   claiming a second range "terminates immediately" over code that closes an
+   already-closed channel describes a panic. Both read as correct prose.
+2. **Do the Global Constraints actually bind the code?** Same move, one level
+   up. Re-read each quoted constraint against every body it touches, as a
+   mechanism. A plan that quotes "nothing blocks without a `ctx.Done()` arm"
+   verbatim and then prescribes a `select` without one has a constraints block
+   that is decorative. Copying the rule is not the check; applying it is.
+3. **Do two tasks assert incompatible things?** Each is self-consistent, so
+   nothing catches this but reading both. A package doc promising "cancellation
+   propagates and the run-level error reports `context.Canceled`" is a defect if
+   another task's dispatcher is specified to prevent exactly that. Doc comments
+   are the usual site, because they are where a plan states guarantees far from
+   the code that implements them.
+4. **Would each prescribed test fail against the bug it is named for?** Write
+   the test's failure, not its success. A cancellation test specified over a
+   *bounded* input passes against the unbounded-input livelock it is named
+   after, and it will pass on day one and stay green forever.
+5. **Is every guard pinned by a test that dies without it?** Specify tests per
+   production **line**, not per behaviour: for each guard, clause, and early
+   return, name the test that fails when it is deleted. "Behaviour X is tested"
+   routinely means a happy path that a mutated guard sails straight through.
+6. **Does every file named in a body appear in exactly one `touches:`?** The
+   disjointness check under *Waves* catches two tasks declaring one file. This
+   catches its mirror image: a file specified in two bodies and declared in
+   neither, where both implementers must report BLOCKED to obey their own
+   isolation rules. Walk the bodies, not the `touches:` lines.
+7. **Is every `max_cost` priced for the seat that fills it, and everything that
+   seat reads?** A cap is a number about a model, and the plan does not name
+   models. When a review seat is described as an expensive model in one
+   paragraph and priced at a flat rung rate in another, the coordinator
+   discovers it mid-flight and raises budgets under time pressure.
+
+This pass is cheap and it is not optional. It is the only place these defects
+are visible at all, and each one that survives it costs a dispatch, a review
+round, or a shipped bug.
+
 ## The plan is scaffolding
 
 Write it to `docs/plans/YYYY-MM-DD-<topic>-plan.md`. **Do not commit it** —

@@ -159,6 +159,22 @@ round on a model that has failed four times.
 - Minor findings go in the ledger, never into the fix loop, and get handed to
   the final review to triage.
 
+**Order the review dispatch so the file fills itself in.** Rank the sections in
+the prompt, highest-value first, and mandate one write per section:
+
+> Resolve question A, write section A to disk, then start question B. Write the
+> most valuable section first. For anything you have not settled, write the row
+> with `UNDECIDED` and what you would need to check, rather than leaving it
+> blank or waiting.
+
+The ranking is the mechanism: a budget death truncates the cheap end of the
+file instead of destroying all of it. Do not substitute an exhortation to be
+diligent. "Write the skeleton first and fill it in as you go" produces a
+skeleton and nothing else, because writing feels like the thing you do once you
+know the answer, and warning the reviewer about that does not prevent it.
+`UNDECIDED` plus a next step is a finding you can dispatch against; an
+UNRESOLVED marker is not.
+
 ## Merging a wave
 
 Per task, before its branch lands:
