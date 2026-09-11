@@ -1110,6 +1110,21 @@ func TestARealCompactionSummaryIsRecognised(t *testing.T) {
 	}
 }
 
+// TestABareStringCompactionSummaryIsRecognised pins the shape observed in
+// production: Claude Code sends the compaction summary with `content` as a bare
+// JSON string, not a block array. The array-only decode returned false, so the
+// boundary went unrecorded and the response append collided with a
+// pre-compaction row (ErrOrdinalOccupied), failing the turn.
+func TestABareStringCompactionSummaryIsRecognised(t *testing.T) {
+	summary := `"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier turns.\nAnalysis: ..."`
+	if !looksLikeCompactionSummary([]byte(summary)) {
+		t.Error("a bare-string compaction summary must be recognised")
+	}
+	if looksLikeCompactionSummary([]byte(`"take a look at ssh greyshift and check on the cluster"`)) {
+		t.Error("an ordinary bare-string prompt must not be classified as a summary")
+	}
+}
+
 // TestDecomposeRequest_DivergentPreambleDoesNotRebase pins the guard itself,
 // end to end: a request whose message 0 diverges from the stored anchor but
 // carries no summary prose (a thread's own session preamble, the shape all 19

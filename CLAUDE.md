@@ -1262,6 +1262,18 @@
   (`pkg/llm/conversation.go`), which never reads the horizon; only a future
   fundi compactor's own working-context loader (not yet built) should ever
   read the horizon.
+  **A message's `content` arrives in BOTH shapes the Anthropic API allows — a
+  bare JSON string and a block array — and Claude Code sends the compaction
+  summary as the bare string.** `looksLikeCompactionSummary` decoded only the
+  array, so a real boundary read as "not a summary": the horizon stayed put,
+  the whole compacted request's inserts DO NOTHING against the pre-compaction
+  rows, and the response append then hit `ErrOrdinalOccupied` and failed the
+  turn. `headText` handles both shapes; any new content parser in
+  `pkg/capture` must too. The symptom pair to recognise is the
+  `divergent message 0 is not a compaction summary` warn followed immediately
+  by `ordinal already occupied by a different message` on the same
+  conversation. It self-heals on the next request once the classifier is
+  right — no DB repair, since nothing was renumbered.
 - **fundi published only HALF the native event vocabulary, and the missing
   half was the assistant's replies.** `publishNative` (`pkg/fundi/native.go`)
   carried switch arms for `AssistantMessage`, `TurnEnd` and `ContentBlockDelta`

@@ -593,18 +593,41 @@ var compactionMarkers = []string{
 // boundary moves the resume point onto an unrelated message and loses the
 // history before it.
 func looksLikeCompactionSummary(content []byte) bool {
-	var blocks []struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(content, &blocks); err != nil || len(blocks) == 0 {
+	head := headText(content)
+	if head == "" {
 		return false
 	}
 	for _, m := range compactionMarkers {
-		if strings.Contains(blocks[0].Text, m) {
+		if strings.Contains(head, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// headText returns the leading text of a message's content, accepting BOTH
+// shapes the Anthropic API allows for `content`: a bare JSON string, and an
+// array of content blocks (first block's text). Claude Code sends its
+// compaction summary as the bare-string form, so an array-only decode read a
+// real boundary as "not a summary", left the horizon where it was, and the
+// response append then collided with a pre-compaction row at the same ordinal
+// (ErrOrdinalOccupied, which fails the turn).
+func headText(content []byte) string {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return ""
+		}
+		return s
+	}
+	var blocks []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(trimmed, &blocks); err != nil || len(blocks) == 0 {
+		return ""
+	}
+	return blocks[0].Text
 }
 
 // reanchorHorizon searches for a positional re-match of the request's head
