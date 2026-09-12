@@ -1554,21 +1554,35 @@
   still there and any other bind failure reproduces it.
 
 - **`quota_status` (Anthropic subscription rate-limit capture, `pkg/quota`)
-  only knows a child's owner USER ID at fresh spawn time, never on
+  resolves a child's owner USER ID on every path now — spawn AND
   resume/recovery.** `agentRuntimeOptions`'s `ownerUserID` parameter comes
   from `owner.UserID` (the authenticated `users.Identity`) at the `Spawn`
-  call site only; the two resume/recovery call sites in `controller.go` pass
-  `""` because a resumed child's snapshot carries only `Labels["owner"]` (a
-  username) and `users.Store` has no username→id lookup to resolve it with.
-  A resumed child's `quota_status` tool call and `RateLimitStatus` therefore
-  always answer "no data captured" even when the daemon has real data for
-  that user — a conservative degrade (no evidence beats false evidence, same
-  rule `ProviderGuard` follows), not a crash, but worth knowing before
-  spending time debugging why a coordinator "lost" its quota visibility
-  across a daemon restart. Fixing it for real needs either a username→id
-  store method or threading `owner_user_id` onto `childstore.Snapshot`
-  itself (it is already a column on `conversations.child`, just not surfaced
-  there).
+  call site, and from `resumeOwnerUserID` (`cmd/rafikid/controller.go`) at the
+  two resume/recovery call sites: `snap.OwnerUserID` when the child row
+  carries the column (it does, and the upsert's COALESCE keeps it alive), else
+  the owner's USERNAME from `Labels["owner"]` resolved through
+  `users.Store.LookupUsername` — an active-rows-only lookup, so a tombstone
+  never receives an attribution. An unresolvable name logs and continues
+  unattributed rather than refusing the resume. Before the fix the resume
+  sites passed `""` and `quota_status`/`RateLimitStatus` always answered "no
+  data captured" for any restarted child — conservative (no evidence beats
+  false evidence, same rule `ProviderGuard` follows), but it read as a
+  coordinator "losing" quota visibility across a daemon restart. It doesn't
+  any more; both degrade only when the id genuinely cannot be resolved.
+
+- **Owner attribution travels via `llm.NewConversation`, and `llm.Entrypoint`
+  alone leaves a conversation unowned — invisible at the call site.**
+  `fundi.Config.OwnerUserID` → `llm.NewConversation(c.OwnerUserID, "agent")`
+  (`pkg/fundi/config.go`'s BuildEngine) is the ONLY way `cfg.ownerUserID` is
+  ever populated; `llm.Entrypoint` sets the entrypoint and nothing else, so a
+  conversation built with it is silently unattributed (`owner_user_id` NULL)
+  while looking perfectly wired. The whole pipe for a spawned fundi child:
+  `Spawn`'s `owner.UserID` (or `resumeOwnerUserID` on resume) →
+  `agentRuntimeOptions`' `ro.OwnerUserID` → `fundi.RuntimeOptions.OwnerUserID`
+  → `fundi.Config` → the conversation row. Empty stays valid and means
+  unattributed — an anonymous spawn is legitimate, never an error. Pinned by
+  `TestBuildEngineAttributesTheConversationToItsOwner` (the row, not the
+  option, is what the test asserts).
 - **The proxy's Anthropic rate-limit capture (`MessagesProxy.captureQuota`,
   `pkg/server/proxy.go`) runs BEFORE the 4xx/5xx branch in
   `streamAndCapture`, on every response shape (error, malformed, success) —

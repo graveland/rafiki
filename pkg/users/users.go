@@ -53,6 +53,21 @@ type Store interface {
 	List(ctx context.Context, includeDeleted bool, limit int) ([]User, error)
 	Delete(ctx context.Context, username string) error
 	CountActive(ctx context.Context) (int, error)
+	// LookupUsername resolves an ACTIVE username to its id.
+	//
+	// Returns only the active row, deliberately: a username is unique only
+	// among active users (partial index users_username_active), so one name
+	// can own one active row plus any number of tombstones, and a lookup that
+	// resolved to a tombstone would attribute work to a deleted account.
+	// pkg/insights/search.go's ORDER BY created_at DESC LIMIT 1 is the right
+	// behaviour for a human-typed FILTER (which deliberately matches
+	// tombstones) and the wrong behaviour here — do not copy it.
+	//
+	// ErrNotFound means "no such active user" — an ANSWER. Any other error is
+	// "I could not check", which a caller must never treat as a negative:
+	// answering a database blip by unattributing a child is the same mistake
+	// as answering it with 401 on the auth path.
+	LookupUsername(ctx context.Context, username string) (string, error)
 }
 
 // MaxUsernameLen bounds a username. Generous rather than opinionated: the

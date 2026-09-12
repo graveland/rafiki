@@ -396,15 +396,20 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
-	// Bound to the resolved owner, same reasoning. ownerUserID is only ever
-	// known at spawn time (from the authenticated caller's users.Identity);
-	// the two recovery/resume call sites into agentRunner currently pass ""
-	// because a resumed child's snapshot carries only its owner's USERNAME
-	// (Labels["owner"]), not their id, and users.Store has no
-	// username-to-id lookup to resolve it with. quota_status simply reports
-	// "no data captured" for those children rather than guessing — no
-	// evidence beats false evidence, same rule ProviderGuard follows.
-	//
+	// The owner's user id, resolved by the caller: owner.UserID at a fresh
+	// spawn (from the authenticated caller's users.Identity), and on resume
+	// snap.OwnerUserID — or, for rows predating that column, the owner's
+	// USERNAME from snap.Labels["owner"] resolved through the users store
+	// (resumeOwnerUserID). It drives two things downstream, both per-child:
+	// the conversation row's owner_user_id (ro.OwnerUserID -> fundi.Config ->
+	// llm.NewConversation) and quota_status's rate-limit snapshot
+	// (newControllerQuotaReader below). Both degrade to empty/unattributed
+	// rather than guessing when the id is unknown — no evidence beats false
+	// evidence, same rule ProviderGuard follows.
+	ro.OwnerUserID = ownerUserID
+	// Bound to the resolved owner, same reasoning: the reader takes no caller
+	// id in its methods, so the constructor is the binding — see
+	// ro.OwnerUserID above for where the id comes from on each path.
 	// Guarded on c.pool != nil, and NOT folded into newControllerQuotaReader
 	// itself: that constructor returning a typed-nil *quotaReader
 	// would still produce a non-nil tools.QuotaReader interface value here

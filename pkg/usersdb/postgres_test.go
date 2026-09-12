@@ -285,6 +285,91 @@ func TestDeleteAlreadyTombstonedUsernameIsErrNotFound(t *testing.T) {
 	}
 }
 
+// LookupUsername resolves ACTIVE rows only. A username is unique only among
+// active users, so a lookup landing on a tombstone would attribute work to a
+// deleted account — the whole reason this method exists beside List.
+func TestLookupUsernameResolvesTheActiveRow(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+
+	u, _, err := s.Create(ctx, "brent")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.LookupUsername(ctx, "brent")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got != u.ID {
+		t.Fatalf("lookup = %q, want the active row's id %q", got, u.ID)
+	}
+}
+
+func TestLookupUsernameMissesATombstone(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	if _, _, err := s.Create(ctx, "brent"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.Delete(ctx, "brent"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.LookupUsername(ctx, "brent"); !errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("lookup of a tombstoned name: err = %v, want ErrNotFound (a deleted account must never be attributed)", err)
+	}
+}
+
+// One name, one active row plus any number of tombstones: the lookup must
+// return the ACTIVE row, never the most recent row overall — created_at DESC
+// over the whole table would hand back the tombstone here.
+func TestLookupUsernameWithActiveAndTombstonesReturnsTheActiveRow(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+
+	if _, _, err := s.Create(ctx, "brent"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if err := s.Delete(ctx, "brent"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	again, _, err := s.Create(ctx, "brent")
+	if err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+
+	got, err := s.LookupUsername(ctx, "brent")
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got != again.ID {
+		t.Fatalf("lookup = %q, want the ACTIVE row's id %q (a tombstone under the same name must not win)", got, again.ID)
+	}
+}
+
+func TestLookupUsernameUnknownIsErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	if _, err := s.LookupUsername(ctx, "nobody"); !errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// Same rule as Authenticate: a store that cannot reach the database has not
+// learned the name is absent.
+func TestLookupUsernameOnClosedPoolIsNotErrNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, pool := testStore(t)
+	pool.Close()
+
+	_, err := s.LookupUsername(ctx, "brent")
+	if err == nil {
+		t.Fatal("expected an error against a closed pool, got nil")
+	}
+	if errors.Is(err, users.ErrNotFound) {
+		t.Fatalf("closed-pool error must not be ErrNotFound (that means no such active user, not that the check failed): %v", err)
+	}
+}
+
 // The guard lives in the store so every caller gets it, not just the CLI.
 func TestCreateNormalizesAndRejectsBadUsernames(t *testing.T) {
 	ctx := context.Background()

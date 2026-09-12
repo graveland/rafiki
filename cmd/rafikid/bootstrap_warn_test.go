@@ -31,6 +31,9 @@ func (c *countingStore) Authenticate(context.Context, string) (users.Identity, e
 }
 func (c *countingStore) List(context.Context, bool, int) ([]users.User, error) { panic("unused") }
 func (c *countingStore) Delete(context.Context, string) error                  { panic("unused") }
+func (c *countingStore) LookupUsername(context.Context, string) (string, error) {
+	panic("unused")
+}
 
 func drain(t *testing.T, ch chan struct{}, want int) {
 	t.Helper()

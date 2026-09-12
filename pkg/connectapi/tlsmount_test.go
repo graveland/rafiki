@@ -54,6 +54,9 @@ func (s oneUserStore) Create(context.Context, string) (users.User, string, error
 func (s oneUserStore) List(context.Context, bool, int) ([]users.User, error) { return nil, nil }
 func (s oneUserStore) Delete(context.Context, string) error                  { return nil }
 func (s oneUserStore) CountActive(context.Context) (int, error)              { return 1, nil }
+func (s oneUserStore) LookupUsername(context.Context, string) (string, error) {
+	panic("unused")
+}
 
 // identityLifecycle records the identity the face's middleware put on the
 // request context by the time a Connect handler reached the lifecycle seam.

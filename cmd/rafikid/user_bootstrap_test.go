@@ -40,6 +40,9 @@ func (b *bootstrapStore) Authenticate(context.Context, string) (users.Identity, 
 }
 func (b *bootstrapStore) List(context.Context, bool, int) ([]users.User, error) { panic("unused") }
 func (b *bootstrapStore) Delete(context.Context, string) error                  { panic("unused") }
+func (b *bootstrapStore) LookupUsername(context.Context, string) (string, error) {
+	panic("unused")
+}
 
 // The re-check belongs with the store, not with the connection: admission was
 // decided once, at accept time, and a peer that holds that connection open

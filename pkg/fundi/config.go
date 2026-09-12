@@ -90,6 +90,15 @@ type Config struct {
 	Ref string
 	// Name is the session name reported through get_state.
 	Name string
+	// OwnerUserID is the conversations.users id of the person this child runs
+	// for — an id, never a username. It is stamped onto the conversation row
+	// at creation via llm.NewConversation; empty means unattributed, which is
+	// a legitimate shape (an anonymous spawn, or the standalone `rafikid
+	// fundi` process, which runs as the daemon). The wiring is invisible at
+	// the call site: llm.Entrypoint alone sets the entrypoint and leaves the
+	// owner empty, and NewConversation is the ONLY way cfg.ownerUserID is ever
+	// populated — see CLAUDE.md's owner-attribution entry.
+	OwnerUserID string
 
 	// Pool is the database pool backing conversation persistence, supplied by
 	// the owning process. A nil Pool means an in-memory (capture-less)
@@ -221,7 +230,10 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	}
 
 	convOpts := []llm.ConvOption{
-		llm.Entrypoint("agent"),
+		// NewConversation, never bare Entrypoint: it sets the entrypoint AND
+		// the owner, and is the only way cfg.ownerUserID is populated. Empty
+		// OwnerUserID stays valid and means unattributed, exactly as before.
+		llm.NewConversation(c.OwnerUserID, "agent"),
 		llm.Model(c.Model),
 		llm.ThinkingBudget(c.ThinkingBudget),
 		llm.WithName(c.Name),

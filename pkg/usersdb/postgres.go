@@ -132,3 +132,25 @@ func (s *pgStore) CountActive(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// LookupUsername resolves an active username to its id. The WHERE clause
+// covers active rows only — see users.Store.LookupUsername's doc comment for
+// why a tombstone must never satisfy this lookup. pgx.ErrNoRows is the
+// answer, everything else is the store failing.
+func (s *pgStore) LookupUsername(ctx context.Context, username string) (string, error) {
+	username, err := users.NormalizeUsername(username)
+	if err != nil {
+		return "", err
+	}
+	var id string
+	err = s.pool.QueryRow(ctx,
+		`SELECT id::text FROM conversations.users
+		  WHERE username = $1 AND deleted_at IS NULL`, username).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", users.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("lookup user %q: %w", username, err)
+	}
+	return id, nil
+}

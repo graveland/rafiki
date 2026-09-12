@@ -38,11 +38,18 @@ type RuntimeOptions struct {
 	Cwd                  string // must be absolute
 	Ref                  string
 	Name                 string
-	SpillDir             string   // defaults to paths.SpillDir(Ref) when empty
-	SkillsDirs           []string // already assembled; see assembleSkillDirs in cmd/rafikid
-	Skills               string   // comma-separated allowlist; empty means all
-	NoSkills             bool
-	NoContextFiles       bool
+	// OwnerUserID is the conversations.users id of the person this child runs
+	// for (an id, never a username). The daemon sets it from the
+	// authenticated caller's identity at spawn, and re-resolves it on resume
+	// (see cmd/rafikid's resumeOwnerUserID). Empty means unattributed, which
+	// is legitimate — the standalone `rafikid fundi` process runs as the
+	// daemon, not as a person.
+	OwnerUserID    string
+	SpillDir       string   // defaults to paths.SpillDir(Ref) when empty
+	SkillsDirs     []string // already assembled; see assembleSkillDirs in cmd/rafikid
+	Skills         string   // comma-separated allowlist; empty means all
+	NoSkills       bool
+	NoContextFiles bool
 	// ContextFilesBudget is the approximate token budget context files may
 	// occupy; 0 means no cap. Set from a model's declared alias — see
 	// cmd/rafikid's resolveModelDefaults — never computed here.
@@ -565,6 +572,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Workspace:              opts.Workspace,
 		Ref:                    opts.Ref,
 		Name:                   opts.Name,
+		OwnerUserID:            opts.OwnerUserID,
 		FakeTurns:              opts.FakeTurns,
 		Providers:              opts.Providers,
 		APIKeyOverride:         opts.APIKeyOverride,

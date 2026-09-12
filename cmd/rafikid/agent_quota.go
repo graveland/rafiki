@@ -15,16 +15,17 @@ import (
 // argument — the same reasoning as controllerSpawner's selfID: a caller-supplied
 // id would let one agent read another user's usage. Which constructor built the
 // reader is the binding story, and the two stay separate: the fundi surface
-// derives the owner from the child's spawn-time caller (empty on the resume
-// paths, where quota_status answers "no data captured" rather than guess); the
-// MCP surface binds the request's authenticated identity directly.
+// derives the owner from the child's spawn-time caller, or on the resume paths
+// from resumeOwnerUserID (snap.OwnerUserID, else the owner LABEL resolved
+// through the users store — see its doc comment); the MCP surface binds the
+// request's authenticated identity directly.
 type quotaReader struct {
 	store  *quota.Store
 	userID string
 }
 
 // newControllerQuotaReader builds a reader for userID. userID may be empty
-// (owner unknown, or unresolved on a resume path) — RateLimitStatus then
+// (owner unknown, or unresolvable on a resume path) — RateLimitStatus then
 // always answers not-found rather than querying with an empty key.
 func newControllerQuotaReader(c *Controller, userID string) *quotaReader {
 	return &quotaReader{store: quota.NewStore(c.pool), userID: userID}

@@ -1870,6 +1870,44 @@ func (s *childClaimSet) release(id string) {
 	s.mu.Unlock()
 }
 
+// resumeOwnerUserID resolves the owner's user id for a resumed child.
+//
+// snap.OwnerUserID is authoritative when present: it was written at the
+// child's original spawn by a daemon new enough to carry the column, and the
+// upsert's COALESCE keeps it alive across later resume upserts. Older rows
+// carry only the owner's USERNAME in Labels["owner"] — resolved through the
+// users store here, active rows only, because a tombstone must never receive
+// an attribution (see users.Store.LookupUsername).
+//
+// A failed resolution is NOT fatal: this is a best-effort recovery of a name
+// an older daemon wrote, and refusing a resume over attribution would trade a
+// working child for a bookkeeping field. The child continues unattributed,
+// exactly the shape an anonymous spawn has always been. The same resolution
+// feeds quota_status (agentRuntimeOptions), which is why a resumed child's
+// quota_status returns real data after a daemon restart instead of always
+// reporting "no data captured".
+func (c *Controller) resumeOwnerUserID(ctx context.Context, childID string, snap childstore.Snapshot) string {
+	if snap.OwnerUserID != "" {
+		return snap.OwnerUserID
+	}
+	name := snap.Labels["owner"]
+	if name == "" || c.users == nil {
+		return ""
+	}
+	id, err := c.users.LookupUsername(ctx, name)
+	if err != nil {
+		if errors.Is(err, users.ErrNotFound) {
+			slog.Warn("resume: owner label does not name an active user; continuing unattributed",
+				"child", childID, "owner", name)
+		} else {
+			slog.Warn("resume: owner lookup failed; continuing unattributed",
+				"child", childID, "owner", name, "error", err)
+		}
+		return ""
+	}
+	return id
+}
+
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (control.SpawnResult, error) {
 	return c.resumeInternal(ctx, childID, apiKey, false)
 }
@@ -1946,11 +1984,11 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// Spawn's ownerName computation) and lives on in snap.Labels; a resume
 	// re-derives nothing, it reuses that value so chooseExecutor's admission
 	// check (for an ExecutorSelector carried over from snap) sees the same
-	// owner the executor's row was minted to admit. The trailing "" is the
-	// owner's USER ID, not carried in snap.Labels (only the username is) —
-	// quota_status simply reports "no data captured" for a resumed child
-	// rather than guessing.
-	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], "", &snap)
+	// owner the executor's row was minted to admit. The owner's USER ID comes
+	// from resumeOwnerUserID: snap.OwnerUserID when the row carries it, else
+	// the Labels["owner"] username resolved through the users store — which
+	// is what attributes the resumed conversation and feeds quota_status.
+	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
@@ -2075,8 +2113,10 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	}
 
 	// See Resume's identical call: the owner was attested at the child's
-	// original spawn and lives on in snap.Labels.
-	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], "", &snap)
+	// original spawn and lives on in snap.Labels; the USER ID comes from
+	// resumeOwnerUserID (snap.OwnerUserID, else the label resolved through
+	// the users store).
+	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
 		return control.SpawnResult{}, &control.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
