@@ -18,6 +18,10 @@ hope for.
 Spec: docs/plans/2026-09-07-<topic>-design.md
 Budget: $2.40 across 9 tasks in 3 waves
 
+## Coverage
+<One row per item in the design's scoped slice: covered here, deliberately
+excluded, or missing. See the design pass below.>
+
 ## Global Constraints
 <Binding requirements, verbatim. Exact values, exact formats, and the CLAUDE.md
 invariants this plan touches — quoted, not summarised.>
@@ -188,6 +192,43 @@ questions, roughly in order of what they cost when missed:
 This pass is cheap and it is not optional. It is the only place these defects
 are visible at all, and each one that survives it costs a dispatch, a review
 round, or a shipped bug.
+
+## Then read the plan against the design
+
+Everything above reads the plan against itself. None of it can catch the plan
+disagreeing with the thing it was written from, because the task bodies
+involved are each perfectly self-consistent, which is what makes this failure
+convincing rather than obvious. Internal consistency and fidelity to the spec
+are different properties, and a plan is at its most persuasive exactly where it
+is wrong in the second way.
+
+So make a second pass with the design open, in **both directions**. They find
+different defects and neither substitutes for the other.
+
+**Design → plan: walk the scoped slice item by item.** Mark each item covered,
+deliberately excluded, or missing, and put that table in the plan. This is the
+only direction that finds a *dropped* requirement, because a requirement nobody
+wrote down leaves no trace in the plan to notice, and re-reading the plan more
+carefully will never surface it. The table is not bookkeeping: without it the
+coordinator infers the scope, and a deliberate partial is indistinguishable
+from an oversight. State each partial as one, with its reason and with what it
+leaves unproven. "This lands the credential plugin and not the file that calls
+it, because the naming source is still open" is a decision the plan hands on;
+silence is a bug someone finds at merge.
+
+**Plan → design: re-read every guarantee the plan prescribes against the design
+section it touches.** Doc comments first. They are where a plan states a promise
+furthest from the code that implements it, and an implementer copies them
+verbatim into the codebase having never read the design. A helper documented as
+producing "a stable context name" is a defect when the design says context names
+come from topology rather than from string surgery on an API response: correct
+implementation, good test table, wrong claim, and nothing inside the plan
+disagrees with it.
+
+The design is the binding authority. Where the plan is right and the design is
+wrong, say so in the plan explicitly with the command or measurement that
+settles it, **and amend the design in the same pass**. A correction recorded in
+both places survives; one that lives only in a plan dies with the scaffold.
 
 ## The plan is scaffolding
 
