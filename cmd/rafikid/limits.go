@@ -324,22 +324,30 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // checkKindNarrowing refuses a child whose kind would escape its parent's
 // executor grant.
 //
-// claude is forked on the daemon's own host: agentRunner returns a nil
-// Runner for it, so resolveExecutor is never called and ExecutorSelector is
-// ignored outright. A confined parent
-// could therefore spawn an unconfined sibling simply by naming a kind — and
+// Kinds split by how they host. A fundi child honours the grant directly:
+// resolveExecutor -> chooseExecutor admits it against the selector
+// inheritExecutorGrant copied from the parent. A claude child honours the
+// grant exactly when this daemon is executor-routed (claudeExecutorRouted):
+// its daraja — and the claude process the daraja hosts — launch on the pool's
+// machine via chooseLaunchExecutor, which runs the same
+// admission/lineage/workspace-mode pipeline against that inherited selector,
+// so no live executor admitting the parent's grant refuses the spawn there
+// (the safe direction). Without a pool connection claudeRunner falls back to
+// a local subprocess on the daemon's own host, which IS the widening this
+// guard refuses: a confined parent could otherwise spawn a child running
+// outside every executor it is restricted to simply by naming a kind — and
 // agent_spawn exposes `kind` to the model, so the escape is one prompt
 // injection away.
 //
 // This is the same monotonicity effectiveExecutorSet enforces for selectors: a
 // descendant may narrow, never widen. It reads only the parent row the daemon
-// stamped — nothing from the caller, nothing from the model — so ctrl_spawn,
-// ctrl_resume and agent_spawn are all covered by the one check, with no route
-// left to enumerate.
-func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
+// stamped and daemon-local pool state — nothing from the caller, nothing from
+// the model — so ctrl_spawn, ctrl_resume and agent_spawn are all covered by
+// the one check, with no route left to enumerate.
+func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executorPoolConnected bool) error {
 	// An omitted kind is fundi (spawnKindLabel), so normalize it the same way
-	// resolveSpawnPlan and spawnKindLabel do before testing against the one
-	// kind that honours an executor grant.
+	// resolveSpawnPlan and spawnKindLabel do before testing against the kinds
+	// that honour an executor grant.
 	kind := req.Kind
 	if kind == "" {
 		kind = protocol.KindFundi
@@ -360,10 +368,29 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest) error {
 		return nil // parent is already unconfined on this host
 	}
 
+	// claude honours the grant whenever the daemon is executor-routed: the
+	// launch executor is picked by chooseLaunchExecutor against the inherited
+	// selector, so no executor admitting the parent's grant refuses the spawn
+	// there — never widens it. Only the local-subprocess fallback forks on
+	// the daemon's own host.
+	if kind == protocol.KindClaude && executorPoolConnected {
+		return nil
+	}
+
+	if kind == protocol.KindClaude {
+		return &control.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: "spawn refused: the parent runs under an executor grant, and kind claude has " +
+				"no executor pool connection — its local-subprocess fallback would fork on the " +
+				"daemon's own host with the daemon's filesystem. Configure an executor pool " +
+				"(RAFIKI_EXECUTORS_ENABLED) or run this spawn top-level.",
+		}
+	}
 	return &control.ControllerError{
 		Code: protocol.ErrInvalidArgs,
 		Message: "spawn refused: the parent runs under an executor grant, and kind " + kind +
 			" ignores executors entirely — it would fork on the daemon's own host with the " +
-			"daemon's filesystem. Only kind \"fundi\" can honour an executor grant.",
+			"daemon's filesystem. Only kind \"fundi\" (and kind \"claude\" with an executor " +
+			"pool configured) can honour an executor grant.",
 	}
 }

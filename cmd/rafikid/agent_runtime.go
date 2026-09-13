@@ -138,6 +138,16 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 	}
 }
 
+// claudeExecutorRouted reports whether a claude child would be hosted on the
+// executor pool rather than falling back to a local subprocess on the
+// daemon's own host. This is the same predicate claudeRunner's fallback
+// branch tests, and checkKindNarrowing (limits.go) refuses a claude spawn
+// under an executor-granted parent exactly when it is false — one definition,
+// so the guard and the fallback can never drift apart.
+func (c *Controller) claudeExecutorRouted() bool {
+	return c.execPoolConn != nil && c.darajaPool != nil
+}
+
 // claudeRunner returns a daraja-backed Runner for a claude child, or (nil,
 // nil) to fall back to the local-subprocess path when this daemon has no
 // executor pool configured at all (the common case for a lone developer's
@@ -145,7 +155,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 // every claude spawn goes through daraja, proxied and passthrough-billed per
 // darajaClaudeParams (Phase 2).
 func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName string, snap *childstore.Snapshot) (child.Runner, error) {
-	if c.execPoolConn == nil || c.darajaPool == nil {
+	if !c.claudeExecutorRouted() {
 		return nil, nil
 	}
 	exec, err := c.darajaLaunchExecutor(req, ownerName, snap)

@@ -1180,7 +1180,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// Before the grant is inherited, not after: this asks what the PARENT was
 	// confined to, and inheritExecutorGrant would copy that grant onto a child
 	// whose kind cannot honour it, making the two indistinguishable.
-	if err := checkKindNarrowing(c.st, req); err != nil {
+	if err := checkKindNarrowing(c.st, req, c.claudeExecutorRouted()); err != nil {
 		return control.SpawnResult{}, err
 	}
 
