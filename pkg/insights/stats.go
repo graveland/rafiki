@@ -142,12 +142,12 @@ func pathForDrivenBy(drivenBy string) string {
 }
 
 // GlobalStats computes the aggregate bundle over conversations matching f.
-func (i *Insights) GlobalStats(ctx context.Context, f StatsFilter) (*Stats, error) {
+func (i *Insights) GlobalStats(ctx context.Context, scope Scope, f StatsFilter) (*Stats, error) {
 	if err := f.Path.validate(); err != nil {
 		return nil, err
 	}
 	var a argList
-	conds := []string{"1=1"}
+	conds := []string{"1=1", scope.cond(&a, "c.owner_user_id")}
 	if db := f.Path.drivenBy(); db != "" {
 		conds = append(conds, "c.driven_by = "+a.next(db))
 	}
@@ -176,10 +176,12 @@ func (i *Insights) GlobalStats(ctx context.Context, f StatsFilter) (*Stats, erro
 // the cross-conversation prefix analytics. Returns ErrNotFound when the
 // conversation does not exist (rather than a zeroed bundle indistinguishable
 // from a real conversation with no turns).
-func (i *Insights) ConversationStats(ctx context.Context, conversationID string) (*Stats, error) {
+func (i *Insights) ConversationStats(ctx context.Context, scope Scope, conversationID string) (*Stats, error) {
+	var pa argList
+	probeWhere := "id = " + pa.next(conversationID) + "::uuid AND " + scope.cond(&pa, "owner_user_id")
 	var exists bool
 	if err := i.pool.QueryRow(ctx,
-		`SELECT true FROM conversations.conversation WHERE id = $1::uuid`, conversationID).Scan(&exists); err != nil {
+		`SELECT true FROM conversations.conversation WHERE `+probeWhere, pa.args...).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("conversation %s: %w", conversationID, ErrNotFound)
 		}

@@ -61,7 +61,7 @@ const defaultSearchLimit = 50
 // Search returns conversations matching f, most recent first. Token counts and
 // turn counts come from a per-conversation aggregate over conversation_turn;
 // FirstMessage is the leading 200 chars of the earliest user message.
-func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSummary, error) {
+func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]ConversationSummary, error) {
 	if err := f.Path.validate(); err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func (i *Insights) Search(ctx context.Context, f SearchFilter) ([]ConversationSu
 	// turn-level EXISTS folded in), and conds that reference the LATERAL
 	// aggregates and so can only apply outside the conversation scan.
 	var a argList
-	convConds := []string{"1=1"}
+	convConds := []string{"1=1", scope.cond(&a, "c.owner_user_id")}
 	if db := f.Path.drivenBy(); db != "" {
 		convConds = append(convConds, "c.driven_by = "+a.next(db))
 	}

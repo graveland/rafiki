@@ -31,7 +31,7 @@ func TestGlobalStats_CacheHitByPath(t *testing.T) {
 	seedTurns(t, pool, "client", 100, 900) // proxy: 900/(100+900) = 0.9
 	seedTurns(t, pool, "server", 100, 0)   // direct: 0/(100+0) = 0.0
 
-	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
 	if err != nil {
 		t.Fatalf("global stats: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestGlobalStats_PathFilterAndFacets(t *testing.T) {
 	seedTurns(t, pool, "client", 100, 900)
 	seedTurns(t, pool, "server", 100, 0)
 
-	proxy, err := New(pool).GlobalStats(ctx, StatsFilter{Path: PathProxy})
+	proxy, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{Path: PathProxy})
 	if err != nil {
 		t.Fatalf("proxy stats: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestGlobalStats_CacheWasteAndPrefix(t *testing.T) {
 	c2 := insertConversation(t, pool, "client", "dave")
 	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", inTok: 10000, cacheRead: 500, prefixHash: "shared"})
 
-	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestConversationStats_Scoped(t *testing.T) {
 	convID := seedConversation(t, pool, "client", "erin") // two turns, in 100+120, cacheRead 0+80
 	seedConversation(t, pool, "server", "frank")          // must be excluded
 
-	s, err := New(pool).ConversationStats(ctx, convID)
+	s, err := New(pool).ConversationStats(ctx, ScopeAll(), convID)
 	if err != nil {
 		t.Fatalf("conversation stats: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestGlobalStats_CostFromPricer(t *testing.T) {
 	}
 	ins := New(pool).WithPricer(pricer)
 
-	s, err := ins.GlobalStats(ctx, StatsFilter{})
+	s, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{})
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestGlobalStats_UnpricedWithoutPricer(t *testing.T) {
 		"nil-pricer":     New(pool).WithPricer(nil),
 		"unknown-pricer": New(pool).WithPricer(func(string) (routing.ModelPricing, bool) { return routing.ModelPricing{}, false }),
 	} {
-		s, err := ins.GlobalStats(ctx, StatsFilter{})
+		s, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{})
 		if err != nil {
 			t.Fatalf("%s: stats: %v", name, err)
 		}
@@ -203,17 +203,17 @@ func TestStats_InvalidPathErrors(t *testing.T) {
 	pool := newTestPool(t)
 	ins := New(pool)
 
-	if _, err := ins.GlobalStats(ctx, StatsFilter{Path: Path("server")}); err == nil {
+	if _, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{Path: Path("server")}); err == nil {
 		t.Error("GlobalStats with an invalid path must error")
 	}
-	if _, err := ins.Search(ctx, SearchFilter{Path: Path("client")}); err == nil {
+	if _, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: Path("client")}); err == nil {
 		t.Error("Search with an invalid path (raw driven_by value) must error")
 	}
 	// The valid aliases still work.
-	if _, err := ins.GlobalStats(ctx, StatsFilter{Path: PathProxy}); err != nil {
+	if _, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{Path: PathProxy}); err != nil {
 		t.Errorf("GlobalStats(proxy) = %v, want nil", err)
 	}
-	if _, err := ins.Search(ctx, SearchFilter{Path: PathAny}); err != nil {
+	if _, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: PathAny}); err != nil {
 		t.Errorf("Search(any) = %v, want nil", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestStats_InvalidPathErrors(t *testing.T) {
 func TestConversationStats_NotFound(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
-	_, err := New(pool).ConversationStats(ctx, "00000000-0000-0000-0000-000000000000")
+	_, err := New(pool).ConversationStats(ctx, ScopeAll(), "00000000-0000-0000-0000-000000000000")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("ConversationStats on a missing conversation err = %v, want ErrNotFound", err)
 	}
@@ -237,7 +237,7 @@ func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
 	c2 := insertConversation(t, pool, "client", "zoe")
 	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", upstream: "openrouter", inTok: 100})
 
-	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
 	second := insertConversation(t, pool, "server", "zoe")
 	insertTurn(t, pool, second, seedTurn{ordinal: 0, model: "m", inTok: 100})
 
-	s, err := New(pool).GlobalStats(ctx, StatsFilter{})
+	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -300,5 +300,49 @@ func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
 	}
 	if zoeRows != 2 {
 		t.Errorf("per-owner rows for 'zoe' = %d, want 2; rows = %+v", zoeRows, s.Adoption.PerOwner)
+	}
+}
+
+// TestGlobalStatsScopeOwnerDegradesAdoptionToOneRow pins that GlobalStats
+// scoped to one owner enumerates only that owner's adoption facet — the
+// cross-tenant read this task closes was GlobalStats counting every owner
+// unconditionally.
+func TestGlobalStatsScopeOwnerDegradesAdoptionToOneRow(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	bobID := ensureUser(t, pool, "bob")
+	cBob := insertConversation(t, pool, "client", "bob")
+	insertTurn(t, pool, cBob, seedTurn{ordinal: 0, model: "m", inTok: 100})
+	cCarol := insertConversation(t, pool, "client", "carol")
+	insertTurn(t, pool, cCarol, seedTurn{ordinal: 0, model: "m", inTok: 100})
+
+	s, err := New(pool).GlobalStats(ctx, ScopeOwner(bobID), StatsFilter{})
+	if err != nil {
+		t.Fatalf("global stats scoped to bob: %v", err)
+	}
+	if s.Adoption.DistinctOwners != 1 {
+		t.Errorf("distinct owners = %d, want 1 (scope hides carol)", s.Adoption.DistinctOwners)
+	}
+	if len(s.Adoption.PerOwner) != 1 {
+		t.Fatalf("per-owner rows = %d, want 1", len(s.Adoption.PerOwner))
+	}
+	if s.Adoption.PerOwner[0].Owner != "bob" {
+		t.Errorf("per-owner owner = %q, want bob", s.Adoption.PerOwner[0].Owner)
+	}
+}
+
+// TestConversationStatsScopeMissReturnsNotFound pins that a conversation
+// existing but outside the caller's scope folds into the same ErrNotFound
+// answer a bad id gets — never a permission error that would confirm the id
+// belongs to someone.
+func TestConversationStatsScopeMissReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	bobID := ensureUser(t, pool, "bob")
+	carolConvID := seedConversation(t, pool, "client", "carol")
+
+	_, err := New(pool).ConversationStats(ctx, ScopeOwner(bobID), carolConvID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ConversationStats on another owner's conversation err = %v, want ErrNotFound (a scope miss reads as not-found)", err)
 	}
 }

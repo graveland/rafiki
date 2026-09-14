@@ -37,7 +37,7 @@ func TestExport_SkillUsage(t *testing.T) {
 	pool := newTestPool(t)
 	convID := seedConversationWithSkill(t, pool)
 
-	tr, err := New(pool).Export(ctx, convID)
+	tr, err := New(pool).Export(ctx, ScopeAll(), convID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestExport_AttachesTurnMetrics(t *testing.T) {
 	pool := newTestPool(t)
 	convID := seedConversationWithSkill(t, pool)
 
-	tr, err := New(pool).Export(ctx, convID)
+	tr, err := New(pool).Export(ctx, ScopeAll(), convID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestExport_AttachesTurnMetrics(t *testing.T) {
 func TestExport_NotFound(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
-	_, err := New(pool).Export(ctx, "00000000-0000-0000-0000-000000000000")
+	_, err := New(pool).Export(ctx, ScopeAll(), "00000000-0000-0000-0000-000000000000")
 	if err == nil {
 		t.Fatal("export of a missing conversation must error")
 	}
@@ -152,7 +152,7 @@ func TestExport_DirectPathMetrics(t *testing.T) {
 		inTok: 321, outTok: 88, cacheRead: 200, latencyMS: 1717,
 	})
 
-	tr, err := New(pool).Export(ctx, convID)
+	tr, err := New(pool).Export(ctx, ScopeAll(), convID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestExport_DuplicateOrdinalNewestWins(t *testing.T) {
 	insertTurn(t, pool, convID, seedTurn{ordinal: 1, model: "new", inTok: 999, latencyMS: 20, createdAt: base.Add(time.Minute)})
 
 	for range 3 { // stable across repeated runs
-		tr, err := New(pool).Export(ctx, convID)
+		tr, err := New(pool).Export(ctx, ScopeAll(), convID)
 		if err != nil {
 			t.Fatalf("export: %v", err)
 		}
@@ -201,5 +201,20 @@ func TestExport_DuplicateOrdinalNewestWins(t *testing.T) {
 		if assistant == nil || assistant.Model != "new" || assistant.InputTokens != 999 {
 			t.Fatalf("assistant = %+v, want newest turn (model new, in 999)", assistant)
 		}
+	}
+}
+
+// TestExportScopeMissReturnsNotFound pins that Export of another owner's
+// conversation folds into the same ErrNotFound a missing id gets — Export used
+// to take no identity at all, reading any conversation on the daemon.
+func TestExportScopeMissReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	bobID := ensureUser(t, pool, "bob")
+	carolConvID := seedConversation(t, pool, "client", "carol")
+
+	_, err := New(pool).Export(ctx, ScopeOwner(bobID), carolConvID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Export of another owner's conversation err = %v, want ErrNotFound (a scope miss reads as not-found)", err)
 	}
 }

@@ -56,17 +56,18 @@ type turnMetrics struct {
 // Export reconstructs a conversation as an ordered, decomposed transcript.
 // Works for both paths: the proxy path decomposes requests into
 // conversation_message rows just as the in-process path does.
-func (i *Insights) Export(ctx context.Context, conversationID string) (*Transcript, error) {
+func (i *Insights) Export(ctx context.Context, scope Scope, conversationID string) (*Transcript, error) {
 	tr := &Transcript{ConversationID: conversationID}
 
+	var a argList
+	where := "c.id = " + a.next(conversationID) + "::uuid AND " + scope.cond(&a, "c.owner_user_id")
 	err := i.pool.QueryRow(ctx, `
 		SELECT coalesce(u.username,''), coalesce(c.persona,''), c.driven_by,
 		       coalesce((SELECT min(source) FROM conversations.conversation_turn
 		                  WHERE conversation_id = c.id), '')
 		  FROM conversations.conversation c
 		  LEFT JOIN conversations.users u ON u.id = c.owner_user_id
-		 WHERE c.id = $1::uuid`,
-		conversationID).Scan(&tr.Owner, &tr.Persona, &tr.DrivenBy, &tr.Source)
+		 WHERE `+where, a.args...).Scan(&tr.Owner, &tr.Persona, &tr.DrivenBy, &tr.Source)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("export: conversation %s: %w", conversationID, ErrNotFound)
