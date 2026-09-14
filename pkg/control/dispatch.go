@@ -103,10 +103,13 @@ type Controller interface {
 	// Conversation insights, backed by the daemon's agent database.
 	// Implementations return a *ControllerError with Code: protocol.ErrNoAgentDB
 	// when no database is configured (RAFIKI_DB unset).
-	ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)
-	ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error)
-	ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)
-	ConversationExport(ctx context.Context, id string) (*insights.Transcript, error)
+	//
+	// scope is derived per connection by scopeForConnection below — never from
+	// request content (Scope is never on the wire: confused-deputy avoidance).
+	ConversationStats(ctx context.Context, scope insights.Scope, f insights.StatsFilter) (*insights.Stats, error)
+	ConversationStatsByID(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error)
+	ConversationSearch(ctx context.Context, scope insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error)
+	ConversationExport(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error)
 
 	// Task ledger.
 	TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error)
@@ -290,11 +293,11 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 	case protocol.TypeCtrlStatus:
 		return d.ctrlStatus(frame, hdr.ID)
 	case protocol.TypeCtrlConversationStats:
-		return d.conversationStats(frame, hdr.ID)
+		return d.conversationStats(conn, frame, hdr.ID)
 	case protocol.TypeCtrlConversationSearch:
-		return d.conversationSearch(frame, hdr.ID)
+		return d.conversationSearch(conn, frame, hdr.ID)
 	case protocol.TypeCtrlConversationExport:
-		return d.conversationExport(frame, hdr.ID)
+		return d.conversationExport(conn, frame, hdr.ID)
 	case protocol.TypeCtrlTaskList:
 		return d.taskList(frame, hdr.ID)
 	case protocol.TypeCtrlSend:
@@ -629,15 +632,16 @@ func unixToTime(sec int64) *time.Time {
 	return &t
 }
 
-func (d *dispatcher) conversationStats(frame []byte, id string) []byte {
+func (d *dispatcher) conversationStats(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ConversationStatsRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlConversationStats, id, protocol.ErrInvalidArgs, "malformed request")
 	}
+	scope := scopeForConnection(conn)
 	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
 	defer cancel()
 	if req.ConversationID != "" {
-		st, err := d.c.ConversationStatsByID(ctx, req.ConversationID)
+		st, err := d.c.ConversationStatsByID(ctx, scope, req.ConversationID)
 		if err != nil {
 			return mapErr(protocol.TypeCtrlConversationStats, id, err, protocol.ErrInternal)
 		}
@@ -652,14 +656,14 @@ func (d *dispatcher) conversationStats(frame []byte, id string) []byte {
 		Model:   req.Model,
 		Path:    insights.Path(req.Path),
 	}
-	st, err := d.c.ConversationStats(ctx, f)
+	st, err := d.c.ConversationStats(ctx, scope, f)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlConversationStats, id, err, protocol.ErrInternal)
 	}
 	return okResponse(protocol.TypeCtrlConversationStats, id, st)
 }
 
-func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
+func (d *dispatcher) conversationSearch(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ConversationSearchRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlConversationSearch, id, protocol.ErrInvalidArgs, "malformed request")
@@ -683,7 +687,7 @@ func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
 	defer cancel()
-	rows, err := d.c.ConversationSearch(ctx, f)
+	rows, err := d.c.ConversationSearch(ctx, scopeForConnection(conn), f)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlConversationSearch, id, err, protocol.ErrInternal)
 	}
@@ -695,7 +699,7 @@ func (d *dispatcher) conversationSearch(frame []byte, id string) []byte {
 	}{Rows: rows})
 }
 
-func (d *dispatcher) conversationExport(frame []byte, id string) []byte {
+func (d *dispatcher) conversationExport(conn Connection, frame []byte, id string) []byte {
 	var req protocol.ConversationExportRequest
 	if err := json.Unmarshal(frame, &req); err != nil {
 		return errResponse(protocol.TypeCtrlConversationExport, id, protocol.ErrInvalidArgs, "malformed request")
@@ -705,7 +709,7 @@ func (d *dispatcher) conversationExport(frame []byte, id string) []byte {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), conversationQueryTimeout)
 	defer cancel()
-	tr, err := d.c.ConversationExport(ctx, req.ConversationID)
+	tr, err := d.c.ConversationExport(ctx, scopeForConnection(conn), req.ConversationID)
 	if err != nil {
 		return mapErr(protocol.TypeCtrlConversationExport, id, err, protocol.ErrInternal)
 	}
@@ -1117,6 +1121,25 @@ func connIdentity(conn Connection) users.Identity {
 		return users.Identity{}
 	}
 	return conn.Identity()
+}
+
+// scopeForConnection derives the conversation-query Scope for a framed
+// control connection from its authenticated identity: an empty identity means
+// the UDS/local-trust path (a token-less TLS connection is admitted only in
+// bootstrap mode, where a conversation verb is unreachable — handle()'s
+// Restricted() gate rejects it — so an empty identity reaching here is
+// necessarily local), a non-admin user is scoped to their own conversations,
+// and an admin sees everything. The scope is derived from the credential,
+// never from request content: no ctrl_* request carries a scope field.
+func scopeForConnection(conn Connection) insights.Scope {
+	id := connIdentity(conn)
+	if !id.IsUser() {
+		return insights.ScopeAll()
+	}
+	if id.IsAdmin {
+		return insights.ScopeAll()
+	}
+	return insights.ScopeOwner(id.UserID)
 }
 
 func (d *dispatcher) executorSession(conn Connection, frame []byte, id string) []byte {

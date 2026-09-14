@@ -17,10 +17,10 @@ import (
 // today, leaving room for a gRPC one. It powers agent CLI commands with
 // insights queries, analysis, and finding management.
 type Backend interface {
-	Stats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error)
-	ConversationStats(ctx context.Context, id string) (*insights.Stats, error)
-	Search(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error)
-	Export(ctx context.Context, id string) (*insights.Transcript, error)
+	Stats(ctx context.Context, scope insights.Scope, f insights.StatsFilter) (*insights.Stats, error)
+	ConversationStats(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error)
+	Search(ctx context.Context, scope insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error)
+	Export(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error)
 	Analyze(ctx context.Context, req AnalyzeRequest) (<-chan AnalyzeEvent, error)
 	Findings(ctx context.Context, f store.FindingFilter) ([]store.FindingRow, error)
 	SetFindingStatus(ctx context.Context, id, status string) (store.FindingRow, error)

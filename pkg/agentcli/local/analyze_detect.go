@@ -35,7 +35,9 @@ func (b *Backend) analyzeOne(ctx context.Context, send func(agentcli.AnalyzeEven
 	tr := it.transcript
 	if tr == nil {
 		var err error
-		tr, err = b.ins.Export(ctx, it.id)
+		// ScopeAll: the analyze pipeline runs on the daemon's own trust level
+		// (same as the CLI operator holding the DSN) — see Backend.Stats.
+		tr, err = b.ins.Export(ctx, insights.ScopeAll(), it.id)
 		if err != nil {
 			// insights.ErrNotFound means the conversation row itself is
 			// gone: there is nothing for a failed-analysis row to FK

@@ -234,7 +234,10 @@ func (b *Backend) population(ctx context.Context, req agentcli.AnalyzeRequest, p
 			f.ExcludeEntrypoint = "analyze"
 		}
 
-		rows, serr := b.ins.Search(ctx, f)
+		// ScopeAll: the analyze pipeline's population search runs on the
+		// daemon's own trust level (same as the CLI operator holding the DSN)
+		// — see Backend.Stats.
+		rows, serr := b.ins.Search(ctx, insights.ScopeAll(), f)
 		if serr != nil {
 			return nil, 0, 0, fmt.Errorf("agentcli/local: analyze search: %w", serr)
 		}

@@ -1104,32 +1104,36 @@ func translateInsightsErr(err error) error {
 	return err
 }
 
-func (c *Controller) ConversationStats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error) {
-	st, err := c.insights.Stats(ctx, f)
+// The scope threading through these four methods is derived per connection by
+// pkg/control's scopeForConnection (empty identity → ScopeAll, admin →
+// ScopeAll, user → ScopeOwner) and passed through untouched — the Controller
+// adds no scope decision of its own.
+func (c *Controller) ConversationStats(ctx context.Context, scope insights.Scope, f insights.StatsFilter) (*insights.Stats, error) {
+	st, err := c.insights.Stats(ctx, scope, f)
 	if err != nil {
 		return nil, translateInsightsErr(err)
 	}
 	return st, nil
 }
 
-func (c *Controller) ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error) {
-	st, err := c.insights.ConversationStats(ctx, id)
+func (c *Controller) ConversationStatsByID(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error) {
+	st, err := c.insights.ConversationStats(ctx, scope, id)
 	if err != nil {
 		return nil, translateInsightsErr(err)
 	}
 	return st, nil
 }
 
-func (c *Controller) ConversationSearch(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
-	rows, err := c.insights.Search(ctx, f)
+func (c *Controller) ConversationSearch(ctx context.Context, scope insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
+	rows, err := c.insights.Search(ctx, scope, f)
 	if err != nil {
 		return nil, translateInsightsErr(err)
 	}
 	return rows, nil
 }
 
-func (c *Controller) ConversationExport(ctx context.Context, id string) (*insights.Transcript, error) {
-	tr, err := c.insights.Export(ctx, id)
+func (c *Controller) ConversationExport(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error) {
+	tr, err := c.insights.Export(ctx, scope, id)
 	if err != nil {
 		return nil, translateInsightsErr(err)
 	}

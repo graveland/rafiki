@@ -39,19 +39,19 @@ func TestBackendInterfaceIsImplementable(t *testing.T) {
 // nopBackend is a stub implementing Backend with zero returns.
 type nopBackend struct{}
 
-func (*nopBackend) Stats(context.Context, insights.StatsFilter) (*insights.Stats, error) {
+func (*nopBackend) Stats(context.Context, insights.Scope, insights.StatsFilter) (*insights.Stats, error) {
 	return nil, nil
 }
 
-func (*nopBackend) ConversationStats(context.Context, string) (*insights.Stats, error) {
+func (*nopBackend) ConversationStats(context.Context, insights.Scope, string) (*insights.Stats, error) {
 	return nil, nil
 }
 
-func (*nopBackend) Search(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error) {
+func (*nopBackend) Search(context.Context, insights.Scope, insights.SearchFilter) ([]insights.ConversationSummary, error) {
 	return nil, nil
 }
 
-func (*nopBackend) Export(context.Context, string) (*insights.Transcript, error) {
+func (*nopBackend) Export(context.Context, insights.Scope, string) (*insights.Transcript, error) {
 	return nil, nil
 }
 

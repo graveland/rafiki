@@ -1442,6 +1442,13 @@ Global stats over persisted conversation history, or stats for one conversation 
 seconds (0/absent = unbounded). `owner` is a **username** from `conversations.users` — the
 daemon resolves it to a user id server-side; rows store the id, never the name.
 
+**Scope.** What these three verbs can see is bounded server-side by the connection's own
+identity, never by a request field: an empty identity (the daemon's own UDS/local-trust path)
+and an admin connection see every owner's conversations; a non-admin user connection is scoped
+to its own. `owner`/`persona`/… above are caller-supplied *filters* ANDed on top of that bound.
+The derivation (`scopeForConnection` in `pkg/control/dispatch.go`) never appears on the wire
+and is pinned by pkg/control's scope tests.
+
 ```jsonc
 {
   "type":      "ctrl_conversation_stats",
@@ -1463,7 +1470,7 @@ Errors: `no_agent_db` (§8) means the daemon has no database configured; `not_fo
 
 **fundi-specific** (see §6.17). Searches persisted conversation history — the opposite
 population from `ctrl_search` (§6.15), which is live-only and explicitly does not scan
-historical sessions.
+historical sessions. Results are bounded by the same server-derived scope as §6.17.
 
 ```jsonc
 {
@@ -1492,7 +1499,9 @@ Error `no_agent_db` (§8) means the daemon has no database configured.
 
 ### 6.19 `ctrl_conversation_export`
 
-**fundi-specific** (see §6.17). Fetches one persisted conversation's full transcript.
+**fundi-specific** (see §6.17). Fetches one persisted conversation's full transcript. A
+conversation outside the connection's server-derived scope (§6.17) answers `not_found`, the
+same answer a bad id gets.
 
 ```jsonc
 { "type": "ctrl_conversation_export", "id": "35", "conversationId": "conv-abc" }

@@ -116,7 +116,7 @@ func newAgentStatsCmd() *cobra.Command {
 			b := local.New(local.Options{Pool: pool})
 
 			if len(args) > 0 {
-				st, err := b.ConversationStats(ctx, args[0])
+				st, err := b.ConversationStats(ctx, insights.ScopeAll(), args[0])
 				if err != nil {
 					return err
 				}
@@ -128,7 +128,7 @@ func newAgentStatsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st, err := b.Stats(ctx, f)
+			st, err := b.Stats(ctx, insights.ScopeAll(), f)
 			if err != nil {
 				return err
 			}
@@ -165,7 +165,7 @@ func newAgentSearchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rows, err := b.Search(ctx, f)
+			rows, err := b.Search(ctx, insights.ScopeAll(), f)
 			if err != nil {
 				return err
 			}
@@ -198,7 +198,7 @@ func newAgentExportCmd() *cobra.Command {
 			defer pool.Close()
 			b := local.New(local.Options{Pool: pool})
 
-			tr, err := b.Export(ctx, args[0])
+			tr, err := b.Export(ctx, insights.ScopeAll(), args[0])
 			if err != nil {
 				return err
 			}
@@ -281,7 +281,7 @@ func parseAnalyzeArgsFromCmd(cmd *cobra.Command, args []string) (analyzeArgs, er
 	var compareModels []string
 	if compare != "" {
 		if corpus == "" {
-			return analyzeArgs{}, errors.New("agent analyze: --compare requires --corpus (re-analyzing a stored population per model would thrash the skip key)")
+			return analyzeArgs{}, errors.New("agent analyze: --compare requires --corpus (a comparison sweep writes one evaluation analysis per model into conversation_analysis, the operational table the pipeline reads to decide what still needs analyzing -- corpus mode keeps throwaway comparison runs out of that state)")
 		}
 		for _, m := range strings.Split(compare, ",") {
 			if m = strings.TrimSpace(m); m != "" {
@@ -509,7 +509,7 @@ func parseAnalyzeArgs(args []string) (analyzeArgs, error) {
 	var compareModels []string
 	if *compare != "" {
 		if *corpus == "" {
-			return analyzeArgs{}, errors.New("agent analyze: --compare requires --corpus (re-analyzing a stored population per model would thrash the skip key)")
+			return analyzeArgs{}, errors.New("agent analyze: --compare requires --corpus (a comparison sweep writes one evaluation analysis per model into conversation_analysis, the operational table the pipeline reads to decide what still needs analyzing -- corpus mode keeps throwaway comparison runs out of that state)")
 		}
 		for _, m := range strings.Split(*compare, ",") {
 			if m = strings.TrimSpace(m); m != "" {

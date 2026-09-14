@@ -161,19 +161,19 @@ func TestBackendReadPaths(t *testing.T) {
 	b := New(Options{Pool: pool})
 	ctx := context.Background()
 
-	st, err := b.Stats(ctx, insights.StatsFilter{})
+	st, err := b.Stats(ctx, insights.ScopeAll(), insights.StatsFilter{})
 	if err != nil || st.Volume.Turns != 2 {
 		t.Fatalf("stats = %+v, %v; want 2 turns", st, err)
 	}
-	one, err := b.ConversationStats(ctx, convID)
+	one, err := b.ConversationStats(ctx, insights.ScopeAll(), convID)
 	if err != nil || one.Volume.Conversations != 1 {
 		t.Fatalf("conversation stats = %+v, %v", one, err)
 	}
-	rows, err := b.Search(ctx, insights.SearchFilter{})
+	rows, err := b.Search(ctx, insights.ScopeAll(), insights.SearchFilter{})
 	if err != nil || len(rows) != 1 || rows[0].ID != convID {
 		t.Fatalf("search = %+v, %v", rows, err)
 	}
-	tr, err := b.Export(ctx, convID)
+	tr, err := b.Export(ctx, insights.ScopeAll(), convID)
 	if err != nil || tr.ConversationID != convID {
 		t.Fatalf("export = %+v, %v", tr, err)
 	}
@@ -222,16 +222,16 @@ func TestBackendNilPool(t *testing.T) {
 
 	ctx := context.Background()
 	// Read methods should return ErrNoPool
-	if _, err := b.Stats(ctx, insights.StatsFilter{}); !errors.Is(err, ErrNoPool) {
+	if _, err := b.Stats(ctx, insights.ScopeAll(), insights.StatsFilter{}); !errors.Is(err, ErrNoPool) {
 		t.Fatalf("Stats err = %v, want ErrNoPool", err)
 	}
-	if _, err := b.ConversationStats(ctx, "x"); !errors.Is(err, ErrNoPool) {
+	if _, err := b.ConversationStats(ctx, insights.ScopeAll(), "x"); !errors.Is(err, ErrNoPool) {
 		t.Fatalf("ConversationStats err = %v, want ErrNoPool", err)
 	}
-	if _, err := b.Search(ctx, insights.SearchFilter{}); !errors.Is(err, ErrNoPool) {
+	if _, err := b.Search(ctx, insights.ScopeAll(), insights.SearchFilter{}); !errors.Is(err, ErrNoPool) {
 		t.Fatalf("Search err = %v, want ErrNoPool", err)
 	}
-	if _, err := b.Export(ctx, "x"); !errors.Is(err, ErrNoPool) {
+	if _, err := b.Export(ctx, insights.ScopeAll(), "x"); !errors.Is(err, ErrNoPool) {
 		t.Fatalf("Export err = %v, want ErrNoPool", err)
 	}
 	if _, err := b.Findings(ctx, store.FindingFilter{}); !errors.Is(err, ErrNoPool) {

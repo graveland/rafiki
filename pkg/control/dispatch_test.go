@@ -68,10 +68,10 @@ type fakeController struct {
 	modelInfoFn             func(string) protocol.ModelInfoResponseData
 	getStreamsResult        control.GetStreamsResult
 	getStreamsErr           error
-	conversationStatsFn     func(context.Context, insights.StatsFilter) (*insights.Stats, error)
-	conversationStatsByIDFn func(context.Context, string) (*insights.Stats, error)
-	conversationSearchFn    func(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error)
-	conversationExportFn    func(context.Context, string) (*insights.Transcript, error)
+	conversationStatsFn     func(context.Context, insights.Scope, insights.StatsFilter) (*insights.Stats, error)
+	conversationStatsByIDFn func(context.Context, insights.Scope, string) (*insights.Stats, error)
+	conversationSearchFn    func(context.Context, insights.Scope, insights.SearchFilter) ([]insights.ConversationSummary, error)
+	conversationExportFn    func(context.Context, insights.Scope, string) (*insights.Transcript, error)
 	lastUserListLimit       int
 }
 
@@ -117,30 +117,30 @@ func (f *fakeController) Status() control.ControllerStatus {
 	return control.ControllerStatus{}
 }
 
-func (f *fakeController) ConversationStats(ctx context.Context, filter insights.StatsFilter) (*insights.Stats, error) {
+func (f *fakeController) ConversationStats(ctx context.Context, scope insights.Scope, filter insights.StatsFilter) (*insights.Stats, error) {
 	if f.conversationStatsFn != nil {
-		return f.conversationStatsFn(ctx, filter)
+		return f.conversationStatsFn(ctx, scope, filter)
 	}
 	return &insights.Stats{}, nil
 }
 
-func (f *fakeController) ConversationStatsByID(ctx context.Context, id string) (*insights.Stats, error) {
+func (f *fakeController) ConversationStatsByID(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error) {
 	if f.conversationStatsByIDFn != nil {
-		return f.conversationStatsByIDFn(ctx, id)
+		return f.conversationStatsByIDFn(ctx, scope, id)
 	}
 	return &insights.Stats{}, nil
 }
 
-func (f *fakeController) ConversationSearch(ctx context.Context, filter insights.SearchFilter) ([]insights.ConversationSummary, error) {
+func (f *fakeController) ConversationSearch(ctx context.Context, scope insights.Scope, filter insights.SearchFilter) ([]insights.ConversationSummary, error) {
 	if f.conversationSearchFn != nil {
-		return f.conversationSearchFn(ctx, filter)
+		return f.conversationSearchFn(ctx, scope, filter)
 	}
 	return nil, nil
 }
 
-func (f *fakeController) ConversationExport(ctx context.Context, id string) (*insights.Transcript, error) {
+func (f *fakeController) ConversationExport(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error) {
 	if f.conversationExportFn != nil {
-		return f.conversationExportFn(ctx, id)
+		return f.conversationExportFn(ctx, scope, id)
 	}
 	return &insights.Transcript{}, nil
 }
@@ -988,7 +988,7 @@ func TestDispatch_Search_EmptyHitsIsArray(t *testing.T) {
 
 func TestDispatch_ConversationStats_Global_Success(t *testing.T) {
 	c := &fakeController{
-		conversationStatsFn: func(_ context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+		conversationStatsFn: func(_ context.Context, _ insights.Scope, f insights.StatsFilter) (*insights.Stats, error) {
 			if f.Owner != "brent" {
 				t.Fatalf("owner: %s", f.Owner)
 			}
@@ -1010,7 +1010,7 @@ func TestDispatch_ConversationStats_Global_Success(t *testing.T) {
 
 func TestDispatch_ConversationStats_Global_TimeAndPathConversion(t *testing.T) {
 	c := &fakeController{
-		conversationStatsFn: func(_ context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+		conversationStatsFn: func(_ context.Context, _ insights.Scope, f insights.StatsFilter) (*insights.Stats, error) {
 			if f.Since == nil || f.Since.Unix() != 1716000000 {
 				t.Fatalf("since: %v", f.Since)
 			}
@@ -1030,7 +1030,7 @@ func TestDispatch_ConversationStats_Global_TimeAndPathConversion(t *testing.T) {
 
 func TestDispatch_ConversationStats_ByID_Success(t *testing.T) {
 	c := &fakeController{
-		conversationStatsByIDFn: func(_ context.Context, id string) (*insights.Stats, error) {
+		conversationStatsByIDFn: func(_ context.Context, _ insights.Scope, id string) (*insights.Stats, error) {
 			if id != "conv-abc" {
 				t.Fatalf("id: %s", id)
 			}
@@ -1052,7 +1052,7 @@ func TestDispatch_ConversationStats_ByID_Success(t *testing.T) {
 
 func TestDispatch_ConversationStats_NoAgentDB(t *testing.T) {
 	c := &fakeController{
-		conversationStatsFn: func(context.Context, insights.StatsFilter) (*insights.Stats, error) {
+		conversationStatsFn: func(context.Context, insights.Scope, insights.StatsFilter) (*insights.Stats, error) {
 			return nil, controllerErr(protocol.ErrNoAgentDB, "no agent database configured")
 		},
 	}
@@ -1065,7 +1065,7 @@ func TestDispatch_ConversationStats_NoAgentDB(t *testing.T) {
 
 func TestDispatch_ConversationSearch_Success(t *testing.T) {
 	c := &fakeController{
-		conversationSearchFn: func(_ context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
+		conversationSearchFn: func(_ context.Context, _ insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
 			if f.Text != "skill gap" {
 				t.Fatalf("text: %s", f.Text)
 			}
@@ -1089,7 +1089,7 @@ func TestDispatch_ConversationSearch_Success(t *testing.T) {
 
 func TestDispatch_ConversationSearch_EmptyRowsIsArray(t *testing.T) {
 	c := &fakeController{
-		conversationSearchFn: func(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error) {
+		conversationSearchFn: func(context.Context, insights.Scope, insights.SearchFilter) ([]insights.ConversationSummary, error) {
 			return nil, nil
 		},
 	}
@@ -1108,7 +1108,7 @@ func TestDispatch_ConversationSearch_EmptyRowsIsArray(t *testing.T) {
 
 func TestDispatch_ConversationExport_Success(t *testing.T) {
 	c := &fakeController{
-		conversationExportFn: func(_ context.Context, id string) (*insights.Transcript, error) {
+		conversationExportFn: func(_ context.Context, _ insights.Scope, id string) (*insights.Transcript, error) {
 			if id != "conv-abc" {
 				t.Fatalf("id: %s", id)
 			}
@@ -1132,6 +1132,31 @@ func TestDispatch_ConversationExport_MissingConversationID(t *testing.T) {
 	d := control.NewDispatch(&fakeController{})
 	resp := d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_conversation_export","id":"x"}`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
+}
+
+// TestConversationSearchThreadsScopeToController proves the connection's
+// identity genuinely reaches the Controller call — not just the scope helper
+// in isolation. The fake captures the scope it was handed; the test compares
+// it (struct equality on constructor outputs, legal across packages because
+// every operand comes from insights.Scope's own constructors) against the
+// ScopeOwner a user identity implies.
+func TestConversationSearchThreadsScopeToController(t *testing.T) {
+	var captured insights.Scope
+	c := &fakeController{
+		conversationSearchFn: func(_ context.Context, scope insights.Scope, _ insights.SearchFilter) ([]insights.ConversationSummary, error) {
+			captured = scope
+			return nil, nil
+		},
+	}
+	d := control.NewDispatch(c)
+	mustSuccess(t, d.HandleFrame(identityConn{id: users.Identity{UserID: "u1"}},
+		[]byte(`{"type":"ctrl_conversation_search","id":"36"}`)))
+	if captured != insights.ScopeOwner("u1") {
+		t.Errorf("captured scope = %+v, want ScopeOwner(u1)", captured)
+	}
+	if captured == insights.ScopeAll() {
+		t.Error("a user identity's scope must not be ScopeAll")
+	}
 }
 
 // ─── ctrl_spawn ───────────────────────────────────────────────────────────────

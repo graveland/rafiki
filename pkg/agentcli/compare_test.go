@@ -23,19 +23,19 @@ type fakeBackend struct {
 	failFor map[string]bool
 }
 
-func (*fakeBackend) Stats(context.Context, insights.StatsFilter) (*insights.Stats, error) {
+func (*fakeBackend) Stats(context.Context, insights.Scope, insights.StatsFilter) (*insights.Stats, error) {
 	return nil, nil
 }
 
-func (*fakeBackend) ConversationStats(context.Context, string) (*insights.Stats, error) {
+func (*fakeBackend) ConversationStats(context.Context, insights.Scope, string) (*insights.Stats, error) {
 	return nil, nil
 }
 
-func (*fakeBackend) Search(context.Context, insights.SearchFilter) ([]insights.ConversationSummary, error) {
+func (*fakeBackend) Search(context.Context, insights.Scope, insights.SearchFilter) ([]insights.ConversationSummary, error) {
 	return nil, nil
 }
 
-func (*fakeBackend) Export(context.Context, string) (*insights.Transcript, error) {
+func (*fakeBackend) Export(context.Context, insights.Scope, string) (*insights.Transcript, error) {
 	return nil, nil
 }
 

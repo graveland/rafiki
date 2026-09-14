@@ -75,36 +75,41 @@ func New(o Options) *Backend {
 	}
 }
 
-// Stats delegates to insights.GlobalStats.
-func (b *Backend) Stats(ctx context.Context, f insights.StatsFilter) (*insights.Stats, error) {
+// Stats delegates to insights.GlobalStats. The local backend is unconditionally
+// trusted: it is reached only by an operator who already holds direct database
+// access (a DSN on the same machine), which is the same trust the framed
+// protocol's "empty identity → ScopeAll" rule grants the daemon's own host —
+// but the scope is still threaded rather than fixed here, so a future
+// transport with narrower provenance can pass its own.
+func (b *Backend) Stats(ctx context.Context, scope insights.Scope, f insights.StatsFilter) (*insights.Stats, error) {
 	if b.pool == nil {
 		return nil, ErrNoPool
 	}
-	return b.ins.GlobalStats(ctx, f)
+	return b.ins.GlobalStats(ctx, scope, f)
 }
 
-// ConversationStats delegates to insights.ConversationStats.
-func (b *Backend) ConversationStats(ctx context.Context, id string) (*insights.Stats, error) {
+// ConversationStats delegates to insights.ConversationStats, scoped.
+func (b *Backend) ConversationStats(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error) {
 	if b.pool == nil {
 		return nil, ErrNoPool
 	}
-	return b.ins.ConversationStats(ctx, id)
+	return b.ins.ConversationStats(ctx, scope, id)
 }
 
-// Search delegates to insights.Search.
-func (b *Backend) Search(ctx context.Context, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
+// Search delegates to insights.Search, scoped.
+func (b *Backend) Search(ctx context.Context, scope insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error) {
 	if b.pool == nil {
 		return nil, ErrNoPool
 	}
-	return b.ins.Search(ctx, f)
+	return b.ins.Search(ctx, scope, f)
 }
 
-// Export delegates to insights.Export.
-func (b *Backend) Export(ctx context.Context, id string) (*insights.Transcript, error) {
+// Export delegates to insights.Export, scoped.
+func (b *Backend) Export(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error) {
 	if b.pool == nil {
 		return nil, ErrNoPool
 	}
-	return b.ins.Export(ctx, id)
+	return b.ins.Export(ctx, scope, id)
 }
 
 // Findings delegates to store.ListFindings.
