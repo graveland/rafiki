@@ -1194,6 +1194,35 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// stored on the new session.
 	req = c.inheritExecutorGrant(req)
 
+	// Computed before the executor-grant normalization and before agentRunner,
+	// rather than alongside the rest of initLabels below: the normalization's
+	// ref resolution and agentRunner's own executor selection (chooseExecutor)
+	// both run admission against labels this child does not have a childstore
+	// entry to carry yet (see admissionLabels). The owner must already be in
+	// hand or a session executor's "admits: owner=<user>" (every one — see
+	// ExecutorSession) refuses every top-level spawn outright.
+	ownerName := attestOwner(c.st, req, owner)
+
+	// A bare machine name is a REF, not a selector: ParseSelector would read
+	// "greyshift" as "must carry a label named greyshift" — a guaranteed zero
+	// match against {owner, machine} labels, and exactly why an MCP caller's
+	// executor: "greyshift" was refused while the same word works on the CLI
+	// (--executor is a ref). Promotion rewrites it so resolveRef matches the
+	// machine label against the SAME confinement-narrowed candidate set.
+	req = promoteBareExecutorRef(req)
+
+	// A ref-only grant is persisted as a selector, or it never reaches the
+	// stored session: lineage narrowing would see "" and the whole subtree
+	// would escape the pin, and resume/respawn would rebuild without it.
+	// Runs while nothing is minted, so a refusal starts no process.
+	req, err = c.persistRefAsSelector(req, ownerName)
+	if err != nil {
+		return control.SpawnResult{}, &control.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: "executor grant: " + err.Error(),
+		}
+	}
+
 	// Resource admission. Deliberately before the childID is minted and long
 	// before anything is registered: a refusal must leave no process, no
 	// store entry, no record and — with phase 04's ordering — no task
@@ -1223,16 +1252,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 			Message: "spawn plan: " + err.Error(),
 		}
 	}
-
-	// Computed here, before agentRunner, rather than alongside the rest of
-	// initLabels below: agentRunner resolves this child's OWN executor
-	// (resolveExecutor -> chooseExecutor), and for a top-level spawn that
-	// admission check runs against labels this child does not have a
-	// childstore entry to carry yet (see admissionLabels). The owner must
-	// already be in hand at that point or a session executor's
-	// "admits: owner=<user>" (every one — see ExecutorSession) refuses every
-	// top-level spawn outright.
-	ownerName := attestOwner(c.st, req, owner)
 
 	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID, nil)
 	if err != nil {

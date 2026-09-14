@@ -58,11 +58,15 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "max_children", Type: "integer",
 				Description: "How many agents may be alive beneath it at once. Default 4."},
 			{Name: "executor", Type: "string",
-				Description: "Where to run this agent, as a label selector over machines " +
-					"(e.g. \"env=work,os=linux\"). Omit to confine it to the same machines " +
-					"you are confined to — omitting narrows it to your reach, it does not " +
-					"free it. You can only ever narrow: a selector naming a machine you " +
-					"cannot reach is refused, and the refusal says which machine and why."},
+				Description: "Where to run this agent: a label selector over machines " +
+					"(e.g. \"env=work,os=linux\"), or a bare machine name (e.g. \"greyshift\") " +
+					"to target that one executor by name, like the CLI's --executor. " +
+					"Omit to use the machines you already reach: a spawned agent " +
+					"inherits your confinement, and a top-level agent (no parent, e.g. " +
+					"one spawned via MCP) gets any live executor that admits it. You " +
+					"can only ever narrow: naming a machine you cannot reach is " +
+					"refused, and the refusal says which machine and why. On a daemon " +
+					"with no executor pool the agent has no filesystem tools."},
 			{Name: "workspace", Type: "string",
 				Description: "Which executors may serve this agent, by the workspace_mode their " +
 					"operator declared, and what happens if that executor is lost. " +

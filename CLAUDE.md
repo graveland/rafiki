@@ -1849,3 +1849,22 @@
   the root-row behavior and its response append fails LOUDLY on collision.
   Confirmed against eval traffic 2026-09-10; if a future Claude Code flags
   those helpers, they branch automatically with no code change.
+- **An `agent_spawn`/`ctrl_spawn` executor grant is normalized at spawn, and a
+  fundi child on a daemon WITH an executor pool always gets a `boundExecutor`.**
+  Three rules landed 2026-09-14 after an MCP caller's `executor: "greyshift"`
+  was refused (ParseSelector read the bare word as "label named greyshift" —
+  zero match against `{owner, machine}` labels) while its sibling spawn with
+  the executor OMITTED started silently with NO workspace tier (top-level =
+  nothing to inherit, and the old gate was `req.ExecutorSelector != ""`):
+  (1) a bare word selector is promoted to `ExecutorRef` and resolved by
+  machine name/id against the confinement-narrowed set (fresh spawns only —
+  stored grants are read as written); (2) a ref-only grant is persisted as
+  `machine=<label>` on the stored selector (kept as a ref only when the row
+  has no machine label), or lineage narrowing and resume would lose the pin;
+  (3) `agentRuntimeOptions` keys the boundExecutor off `c.execPool != nil`,
+  never off the selector — an empty selector means the child's EFFECTIVE SET
+  (top-level: everything the attested owner's executors admit), and only a
+  pool-LESS daemon still spawns toolless children. Selection/normalization
+  live in cmd/rafikid/executor_select.go (promoteBareExecutorRef,
+  persistRefAsSelector); the top-level + empty-selector + zero-live-executor
+  spawn is now REFUSED with explainNoMatch instead of starting toolless.

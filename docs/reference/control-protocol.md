@@ -909,13 +909,19 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // can only ever narrow. A spawn matching
                                             // nothing is refused naming the excluding
                                             // predicate per candidate; it does not queue.
+                                            // A BARE word ("greyshift") is not selector
+                                            // syntax: it is promoted to an executorRef and
+                                            // resolved by machine name, like the CLI's
+                                            // --executor.
                                             //
-                                            // nil means NO workspace tier: the child is
-                                            // registered with no read, write, edit, glob,
-                                            // grep, ls, bash or lsp_* tools at all. That
-                                            // is an answer, not an error — a caller that
-                                            // wants a pure reasoning agent over the
-                                            // daemon tier gets exactly that.
+                                            // On a daemon with an executor pool, null means
+                                            // the child's EFFECTIVE SET: it gets a workspace
+                                            // tier and binds to any live executor that admits
+                                            // it (for a top-level spawn, everything the
+                                            // attested owner may use). Only a daemon with NO
+                                            // executor pool registers the child with no read,
+                                            // write, edit, glob, grep, ls, bash or lsp_*
+                                            // tools at all.
   "executorRef":         null,             // pin this spawn to ONE executor by machine
                                             // label (e.g. "greyshift") or raw id. Resolved
                                             // BEFORE selector narrowing, and only against the
@@ -925,7 +931,12 @@ the client sees the response, the child is fully ready for `ctrl_send`.
                                             // would. A ref bypasses SEARCH, never confinement.
                                             // The CLI keeps --executor and --executor-selector
                                             // mutually exclusive; a hand-built request naming
-                                            // both is resolved by ref first.
+                                            // both is resolved by ref first. A ref-only grant is
+                                            // persisted as `machine=<label>` on the child's
+                                            // stored selector — so lineage narrowing and
+                                            // resume/respawn keep the pin — unless the row has
+                                            // no machine label, in which case the ref is kept
+                                            // as-is (claude's inherently-pinned posture).
   "workspaceMode":       null,             // "ephemeral" or "pinned". Empty = pinned.
                                             // Decides whether the child can be rescheduled
                                             // when its executor goes away. The resolved
@@ -965,7 +976,7 @@ Errors: `spawn_failed`, `invalid_args`.
 | **Pi binary location** | `piBinary` field → `$PI_BINARY` env → `exec.LookPath("pi")`. Resolved per-spawn. |
 | **Working directory** | `cwd` required, absolute, exists, readable. Set via `cmd.Dir`. Pi has no `--cwd` flag. |
 | **Kind may not widen confinement** | A `ctrl_spawn` whose `parentChildId` names a child carrying an executor grant (`executorSelector`) is refused with `invalid_args` unless `kind` is `fundi`. `claude` and `pi` are forked on the daemon's own host and ignore executors entirely, so allowing one would let a confined agent spawn an unconfined sibling. Applies identically to `ctrl_resume` and to the `agent_spawn` tool, because the check reads the stored parent row rather than anything the caller supplied. Top-level spawns have no parent and are unaffected. |
-| **Executor ref resolution** | `executorRef` names one executor by machine label (checked first; exact match, unique per owner via `executors_owner_machine_unique`) or raw id. It is resolved against the SAME narrowed candidate set a selector would produce — disabled, admission, workspace-mode, selector and, for a launch-required kind, `LaunchKinds` exclusions all still apply — so an explicit pin bypasses search, never confinement. A miss distinguishes "no executor named \"x\"" from "executor \"x\" exists but is not usable for this spawn", naming the per-candidate exclusion reason. |
+| **Executor ref resolution** | `executorRef` names one executor by machine label (checked first; exact match, unique per owner via `executors_owner_machine_unique`) or raw id. It is resolved against the SAME narrowed candidate set a selector would produce — disabled, admission, workspace-mode, selector and, for a launch-required kind, `LaunchKinds` exclusions all still apply — so an explicit pin bypasses search, never confinement. A miss distinguishes "no executor named \"x\"" from "executor \"x\" exists but is not usable for this spawn", naming the per-candidate exclusion reason. A BARE-WORD `executorSelector` (no `=`, `!=`, `!`, `in`/`notin`, comma) is promoted to a ref at spawn, so the machine-name spelling behaves identically on every surface. A ref-only grant is then persisted as `machine=<label>` on the stored session — kept as-is only when the resolved row has no machine label — so lineage narrowing and resume keep the pin. |
 | **Model / thinking / API key** | Never defaulted by the controller. Omitted fields are passed to pi as missing flags; pi resolves from `auth.json`, `settings.json`, env, etc. State record stores requested values; response reports pi's resolved choice. |
 | **API key persistence** | `apiKey` is **never** written to the on-disk state record. `ctrl_resume` of a child originally spawned with a per-call `apiKey` requires re-supplying it (see §6.4). |
 | **Environment** | Full inherit from the controller's `os.Environ()` by default. `env` field merges additions/overrides. `envOverride: true` replaces entirely. Controller always injects `PI_CONTROLLER_CHILD_ID=<id>` and `PI_CONTROLLER_SOCKET=<path>`; these are reserved and silently override any user value. |

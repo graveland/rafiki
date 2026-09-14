@@ -27,6 +27,44 @@ type executorPool interface {
 	Evict(executorID string)
 }
 
+// isBareExecutorRef reports whether s is a bare word — a machine name or an
+// executor id — rather than selector syntax. A selector term always carries an
+// operator (=, !=, in/notin, leading !) or a comma joining terms; anything
+// else cannot match an executor's labels as a key-presence term in any useful
+// way, and every spawn surface that accepts a bare word means "that one
+// machine" (the CLI's --executor). A lone key like "env" is therefore
+// promoted to a REF and refused as "no executor named \"env\"" rather than
+// matching executors that carry an env label — the grammar loses one obscure
+// spelling and the common case (the machine's name) stops being a
+// silent-zero-match trap.
+func isBareExecutorRef(s string) bool {
+	if s == "" {
+		return false
+	}
+	return !strings.ContainsAny(s, "=,!()&|")
+}
+
+// promoteBareExecutorRef rewrites a bare-word selector into an ExecutorRef so
+// it resolves through matchExecutorRef — machine label first, then id —
+// against the SAME confinement-narrowed candidate set a selector would have
+// produced (resolveRef runs on the eligible set, never the raw pool). This is
+// the spawn-time normalization for the incident where an MCP caller passed
+// executor: "greyshift" and ParseSelector read it as "must carry a label named
+// greyshift", a guaranteed zero match against labels {owner, machine}.
+//
+// Deliberately called from Controller.Spawn ONLY, never from chooseExecutor:
+// the binder re-runs selection on stored state, and a row that legitimately
+// stored a bare-word selector before this rule existed (an executor that
+// really does carry that label key) must keep binding exactly as it did.
+// Promotion is a fresh-spawn reading of the caller's intent; stored grants are
+// read as written.
+func promoteBareExecutorRef(req protocol.SpawnRequest) protocol.SpawnRequest {
+	if req.ExecutorRef == "" && isBareExecutorRef(req.ExecutorSelector) {
+		req.ExecutorRef, req.ExecutorSelector = req.ExecutorSelector, ""
+	}
+	return req
+}
+
 // chooseExecutor returns the executor the request's selector admits, computed
 // by narrowing the parent's effective set. It is the single place the choice
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,
@@ -290,8 +328,9 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 // inherited mode no live executor's ROW offers excludes every candidate in
 // narrowByWorkspaceMode, refusing the spawn, which is the safe direction.
 //
-// A top-level spawn (no parent) has nothing to inherit and keeps today's
-// behaviour: no selector, tools in-process.
+// A top-level spawn (no parent) has nothing to inherit; on a daemon with an
+// executor pool it still gets an executor — an empty selector means "any live
+// executor that admits this child" (see agentRuntimeOptions), never "none".
 func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.SpawnRequest {
 	if req.ParentChildID == "" {
 		return req
@@ -309,6 +348,52 @@ func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.Sp
 		req.WorkspaceMode = parent.WorkspaceMode
 	}
 	return req
+}
+
+// persistRefAsSelector resolves a ref-only executor grant — a bare machine
+// name promoted by promoteBareExecutorRef, or the CLI's --executor — into a
+// selector that says the same thing, and clears the ref. A ref that stays
+// ref-only silently breaks three things, because ONLY the selector column
+// reaches them:
+//
+//  1. the stored session (childstore.Session.ExecutorSelector): a "" selector
+//     puts the child's whole subtree outside lineage narrowing — the exact
+//     escape inheritExecutorGrant's doc comment describes — and loses the pin
+//     on resume/respawn, which rebuild the request from the snapshot;
+//  2. the workspace block, whose row fallback reads the request;
+//  3. nothing else, since agentRuntimeOptions keys off the pool, not the
+//     selector — but "the selector is the grant" is the invariant every other
+//     reader (limits, ListExecutorRows) is written against.
+//
+// The selector chosen is the resolved row's machine label: machine labels are
+// unique per owner (executors_owner_machine_unique), so `machine=<label>`
+// admits exactly that row among the executors this child may reach, and the
+// binder's later re-selection (ChooseFor re-runs chooseExecutor) lands on the
+// same machine. The resolution is the SAME confinement-checked pipeline a
+// selector would go through — chooseExecutor with the ref set — so a ref
+// naming a machine outside the caller's reach is refused here, at spawn, with
+// resolveRef's legible diagnostic, and never becomes a stored selector.
+//
+// A row without a machine label cannot be expressed as a selector (selectors
+// match labels, never ids), so the ref survives as-is: the child still binds
+// through it this generation, with claude's inherently-pinned posture — its
+// stored selector stays "" and nothing constrains its descendants. Rows
+// without machine labels are operator errors the enrollment flow warns about;
+// refusing the spawn for them would trade a documented edge for a new
+// failure mode.
+func (c *Controller) persistRefAsSelector(req protocol.SpawnRequest, ownerName string) (protocol.SpawnRequest, error) {
+	if req.ExecutorRef == "" || req.ExecutorSelector != "" || c.execPool == nil {
+		return req, nil
+	}
+	chosen, err := c.chooseExecutor(req, ownerName)
+	if err != nil {
+		return protocol.SpawnRequest{}, err
+	}
+	if lbl := chosen.Labels["machine"]; lbl != "" {
+		req.ExecutorSelector = "machine=" + lbl
+		req.ExecutorRef = ""
+	}
+	return req, nil
 }
 
 // lineageChain returns the stored executor selectors from the root down to

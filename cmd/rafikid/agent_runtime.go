@@ -306,7 +306,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent flags: %w", err)
 	}
-	ro, err := f.toRuntimeOptions(req.Cwd, c.pool, req.ExecutorSelector != "", c.providers)
+	ro, err := f.toRuntimeOptions(req.Cwd, c.pool, c.execPool != nil, c.providers)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
 	}
@@ -437,7 +437,16 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if c.pool != nil {
 		ro.Conversations = newControllerConversationReader(c, ownerUserID)
 	}
-	// A child with a selector gets a boundExecutor, ALWAYS non-nil.
+	// A child on a daemon with an executor pool gets a boundExecutor, ALWAYS
+	// non-nil — selector or not. The selector (possibly empty) narrows where
+	// the child may bind, never WHETHER it binds: an empty selector is the
+	// caller's effective set (every live executor that admits it — for a
+	// top-level MCP spawn that is the whole attested fleet; for a parented
+	// spawn the inherited grant has already been copied onto the request), and
+	// it must not degrade into "no executor", which is how an MCP-spawned
+	// agent ended up running with the entire workspace tier missing and no
+	// error anywhere. A daemon with NO pool keeps the toolless in-process
+	// posture for lone-developer setups — the pool-nil case below.
 	//
 	// This bypasses MaterializeAll's `opts.Executor == nil` check, which is a
 	// security guard and not a capability check: it is what stops workspace
@@ -449,7 +458,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// live right now, so a child that starts unbound and acquires an executor
 	// later needs no tools[] change and no prompt-cache break.
 	var exec tools.ExecutorClient
-	if req.ExecutorSelector != "" && c.execPool != nil {
+	if c.execPool != nil {
 		be := newBoundExecutor(childID, c.binderFor(req, ownerName))
 		exec = be
 		// Retain for the job watcher: a watch needs to poll JobOutput through
@@ -470,7 +479,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 				return fundi.RuntimeOptions{}, bindErr
 			}
 			slog.Warn("child starts with no executor bound; its workspace tools "+
-				"will fail until one matching its selector connects",
+				"will fail until an executor its grant admits connects",
 				"child", childID, "selector", req.ExecutorSelector, "reason", bindErr)
 			c.markUnbound(childID)
 		}
