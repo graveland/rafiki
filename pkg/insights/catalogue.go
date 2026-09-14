@@ -35,8 +35,9 @@ type Column struct {
 // (proto encode, JSON encode, pkg/table formatting) is exhaustive, and a
 // stray value that doesn't belong in a cell fails to compile rather than
 // panicking three layers downstream in a renderer. Do NOT add a fourth
-// concrete type without also handling it at every existing switch site
-// (there are none yet in this task; Wave 4/5 add the first two).
+// concrete type without also handling it at every existing switch site --
+// the first ones arrive with the wire/tool/CLI consumers (proto encode,
+// tool encode, pkg/table formatting).
 type Entry interface{ isEntry() }
 
 type StringEntry string
@@ -100,11 +101,14 @@ func registerQuery(name string, class Class, run func(ctx context.Context, pool 
 }
 
 // Query is the ONE admission-checked entry point for the named-query
-// catalogue; nothing else may call a catalogQuery.run directly. An unknown
-// name or a ClassUnset registration both refuse with ErrNotFound -- folding
-// "no such query" into the same not-found shape ConversationStats/Export
-// already use for a scope miss, rather than inventing a new error shape
-// here.
+// catalogue; nothing else may call a catalogQuery.run directly. It refuses
+// with ErrNotFound on an unknown name, a ClassUnset registration, a
+// ClassAdminOnly query under a non-all scope, a ClassOwnerScoped query under
+// an invalid scope, or an unrecognized Class -- folding "no such query" into
+// the same not-found shape ConversationStats/Export already use for a scope
+// miss, rather than inventing a new error shape here. The default arm of the
+// admission switch is what makes a future Class constant added without an
+// arm fail closed rather than run ungated.
 func (i *Insights) Query(ctx context.Context, scope Scope, name string, f StatsFilter) (QueryResult, error) {
 	q, ok := catalogue[name]
 	if !ok || q.class == ClassUnset {
@@ -121,6 +125,8 @@ func (i *Insights) Query(ctx context.Context, scope Scope, name string, f StatsF
 		if !scope.valid() {
 			return QueryResult{}, fmt.Errorf("query %q: %w", name, ErrNotFound)
 		}
+	default:
+		return QueryResult{}, fmt.Errorf("query %q: %w", name, ErrNotFound)
 	}
 	return q.run(ctx, i.pool, scope, f)
 }

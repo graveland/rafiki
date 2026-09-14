@@ -97,6 +97,41 @@ func TestQueryAdminOnlyRunsUnderScopeAll(t *testing.T) {
 	}
 }
 
+func TestQueryOwnerScopedRunsUnderScopeAll(t *testing.T) {
+	called := false
+	catalogue["__test_owner_scoped_all"] = catalogQuery{class: ClassOwnerScoped, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
+		called = true
+		return QueryResult{}, nil
+	}}
+	defer delete(catalogue, "__test_owner_scoped_all")
+
+	ins := &Insights{}
+	if _, err := ins.Query(context.Background(), ScopeAll(), "__test_owner_scoped_all", StatsFilter{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !called {
+		t.Fatal("run must be called under ScopeAll: the predicate is dropped, never refused")
+	}
+}
+
+func TestQueryPassesTheCallersScopeToRun(t *testing.T) {
+	captured := Scope{}
+	catalogue["__test_scope_passthrough"] = catalogQuery{class: ClassOwnerScoped, run: func(_ context.Context, _ *pgxpool.Pool, scope Scope, _ StatsFilter) (QueryResult, error) {
+		captured = scope
+		return QueryResult{}, nil
+	}}
+	defer delete(catalogue, "__test_scope_passthrough")
+
+	ins := &Insights{}
+	want := ScopeOwner("someone")
+	if _, err := ins.Query(context.Background(), want, "__test_scope_passthrough", StatsFilter{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured != want {
+		t.Fatalf("run saw scope %+v, want the caller's %+v", captured, want)
+	}
+}
+
 func TestQueryGlobalFactRunsUnderZeroValueScope(t *testing.T) {
 	catalogue["__test_global_fact"] = catalogQuery{class: ClassGlobalFact, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		return QueryResult{}, nil
