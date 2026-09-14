@@ -219,12 +219,15 @@ rafikid agent analyze --corpus DIR \
 ```
 
 Runs the same corpus once per model in the comma-separated list, overriding
-only `DetectorModel` per run. Requires `--corpus` (re-analyzing a stored
-population per model would thrash the skip key). Each model's artifacts
-land in `<out>/<model-slug>/` (`/` and `~` become `-`); a failed model is
-recorded and does not stop the rest of the sweep. Prints one row per model:
-findings count broken down by axis (skill-gap/knowledge-to-persist/grind),
-tokens, cost, and status (`ok` or `ERROR: ...`).
+only `DetectorModel` per run. Requires `--corpus`: a comparison sweep writes
+one evaluation analysis per model into `conversation_analysis`, the
+operational table the pipeline reads to decide what still needs analyzing —
+corpus mode keeps throwaway comparison runs out of that state. Each model's
+artifacts land in `<out>/<model-slug>/` (`/` and `~` become `-`); a failed
+model is recorded and does not stop the rest of the sweep. Prints one row
+per model: findings count broken down by axis
+(skill-gap/knowledge-to-persist/grind), tokens, cost, and status (`ok` or
+`ERROR: ...`).
 
 ## `findings`
 
