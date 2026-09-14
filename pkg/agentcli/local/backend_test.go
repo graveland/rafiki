@@ -242,6 +242,16 @@ func TestBackendNilPool(t *testing.T) {
 	}
 }
 
+// TestBackendQueryNoPool mirrors TestBackendNilPool for the catalogue-query
+// read path: a corpus-only backend (nil Pool) must return ErrNoPool from
+// Query rather than panic on the nil *insights.Insights.
+func TestBackendQueryNoPool(t *testing.T) {
+	b := New(Options{Pool: nil})
+	if _, err := b.Query(context.Background(), insights.ScopeAll(), "tools", insights.StatsFilter{}); !errors.Is(err, ErrNoPool) {
+		t.Fatalf("Query err = %v, want ErrNoPool", err)
+	}
+}
+
 // TestAnalyzeNilPoolByIDsErrors covers the guard added for the nil-pool
 // Analyze panic: a corpus-only backend (nil Pool) given a DB-backed
 // population (explicit ConversationIDs here) must return ErrNoPool up

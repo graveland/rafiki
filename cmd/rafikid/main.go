@@ -231,6 +231,7 @@ findings (triage analysis output).`,
 	cmd.AddCommand(newAgentStatsCmd())
 	cmd.AddCommand(newAgentSearchCmd())
 	cmd.AddCommand(newAgentExportCmd())
+	cmd.AddCommand(newAgentQueryCmd())
 	cmd.AddCommand(newAgentAnalyzeCmd())
 	cmd.AddCommand(newAgentFindingsCmd())
 

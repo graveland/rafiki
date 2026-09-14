@@ -39,6 +39,10 @@ func (*fakeBackend) Export(context.Context, insights.Scope, string) (*insights.T
 	return nil, nil
 }
 
+func (*fakeBackend) Query(context.Context, insights.Scope, string, insights.StatsFilter) (insights.QueryResult, error) {
+	return insights.QueryResult{}, nil
+}
+
 func (f *fakeBackend) Analyze(_ context.Context, req AnalyzeRequest) (<-chan AnalyzeEvent, error) {
 	model := req.Profile.DetectorModel
 	ch := make(chan AnalyzeEvent, 4)

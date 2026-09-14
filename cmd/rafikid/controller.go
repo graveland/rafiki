@@ -1104,7 +1104,7 @@ func translateInsightsErr(err error) error {
 	return err
 }
 
-// The scope threading through these four methods is derived per connection by
+// The scope threading through these five methods is derived per connection by
 // pkg/control's scopeForConnection (empty identity → ScopeAll, admin →
 // ScopeAll, user → ScopeOwner) and passed through untouched — the Controller
 // adds no scope decision of its own.
@@ -1138,6 +1138,14 @@ func (c *Controller) ConversationExport(ctx context.Context, scope insights.Scop
 		return nil, translateInsightsErr(err)
 	}
 	return tr, nil
+}
+
+func (c *Controller) ConversationQuery(ctx context.Context, scope insights.Scope, name string, f insights.StatsFilter) (insights.QueryResult, error) {
+	res, err := c.insights.Query(ctx, scope, name, f)
+	if err != nil {
+		return insights.QueryResult{}, translateInsightsErr(err)
+	}
+	return res, nil
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {

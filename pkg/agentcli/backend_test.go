@@ -55,6 +55,10 @@ func (*nopBackend) Export(context.Context, insights.Scope, string) (*insights.Tr
 	return nil, nil
 }
 
+func (*nopBackend) Query(context.Context, insights.Scope, string, insights.StatsFilter) (insights.QueryResult, error) {
+	return insights.QueryResult{}, nil
+}
+
 func (*nopBackend) Analyze(context.Context, AnalyzeRequest) (<-chan AnalyzeEvent, error) {
 	return nil, nil
 }

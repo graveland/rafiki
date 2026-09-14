@@ -112,6 +112,14 @@ func (b *Backend) Export(ctx context.Context, scope insights.Scope, id string) (
 	return b.ins.Export(ctx, scope, id)
 }
 
+// Query delegates to insights.Query, scoped.
+func (b *Backend) Query(ctx context.Context, scope insights.Scope, name string, f insights.StatsFilter) (insights.QueryResult, error) {
+	if b.pool == nil {
+		return insights.QueryResult{}, ErrNoPool
+	}
+	return b.ins.Query(ctx, scope, name, f)
+}
+
 // Findings delegates to store.ListFindings.
 func (b *Backend) Findings(ctx context.Context, f store.FindingFilter) ([]store.FindingRow, error) {
 	if b.pool == nil {

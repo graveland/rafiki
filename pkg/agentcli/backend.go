@@ -21,6 +21,7 @@ type Backend interface {
 	ConversationStats(ctx context.Context, scope insights.Scope, id string) (*insights.Stats, error)
 	Search(ctx context.Context, scope insights.Scope, f insights.SearchFilter) ([]insights.ConversationSummary, error)
 	Export(ctx context.Context, scope insights.Scope, id string) (*insights.Transcript, error)
+	Query(ctx context.Context, scope insights.Scope, name string, f insights.StatsFilter) (insights.QueryResult, error)
 	Analyze(ctx context.Context, req AnalyzeRequest) (<-chan AnalyzeEvent, error)
 	Findings(ctx context.Context, f store.FindingFilter) ([]store.FindingRow, error)
 	SetFindingStatus(ctx context.Context, id, status string) (store.FindingRow, error)

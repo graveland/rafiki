@@ -207,6 +207,39 @@ func newAgentExportCmd() *cobra.Command {
 	}
 }
 
+// newAgentQueryCmd returns `rafikid agent query <name>`.
+func newAgentQueryCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "query <name>",
+		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage) over persisted history",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runAgentQuery,
+	}
+	registerFilterFlags(cmd.Flags())
+	return cmd
+}
+
+func runAgentQuery(cmd *cobra.Command, args []string) error {
+	db := dbFromCmd(cmd)
+	pool, err := connectPool(cmd.Context(), db)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	b := local.New(local.Options{Pool: pool})
+
+	v := filterValsFromCmd(cmd)
+	f, err := agentcli.BindStatsFilter(*v)
+	if err != nil {
+		return err
+	}
+	result, err := b.Query(cmd.Context(), insights.ScopeAll(), args[0], f)
+	if err != nil {
+		return err
+	}
+	return renderQueryResult(os.Stdout, jsonModeFromCmd(cmd), result)
+}
+
 // newAgentAnalyzeCmd returns `rafikid agent analyze <conv-id>... | --corpus DIR`.
 func newAgentAnalyzeCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -1147,4 +1180,11 @@ func agentFindingsSetStatusCmd(verb, db string, ids []string, indent, compact bo
 	// single-finding mutation is an object, and only the table wraps it.
 	return agentcli.Render(os.Stdout, row, jsonMode(indent, compact),
 		func(w io.Writer, r store.FindingRow) error { return agentcli.RenderFindings(w, []store.FindingRow{r}) })
+}
+
+// renderQueryResult prints a catalogue QueryResult as a table or JSON. Stub:
+// the real renderer lands with Task 5.1, which replaces this body without
+// touching the call site above.
+func renderQueryResult(w io.Writer, m agentcli.Mode, res insights.QueryResult) error {
+	return fmt.Errorf("not yet implemented")
 }
