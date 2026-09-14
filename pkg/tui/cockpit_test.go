@@ -36,6 +36,17 @@ func turnEndFor(id string, ord int32) *rafikiv1.Event {
 		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{}}}
 }
 
+// turnEndWithUsageFor is a turn_end carrying token usage, for driving
+// contextReadout through the rail's Apply path.
+func turnEndWithUsageFor(id string, ord int32, input, cacheRead, cacheWrite int64) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: id, Ordinal: &ord,
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{Usage: &rafikiv1.Usage{
+			InputTokens:      &input,
+			CacheReadTokens:  &cacheRead,
+			CacheWriteTokens: &cacheWrite,
+		}}}}
+}
+
 func textEventFor(id, text string) *rafikiv1.Event {
 	return &rafikiv1.Event{ChildId: id,
 		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
@@ -191,6 +202,76 @@ func TestCostReadoutOmitsCapWhenUnset(t *testing.T) {
 	got := c.costReadout()
 	if !strings.Contains(got, "1.23") || strings.Contains(got, "/") {
 		t.Errorf("costReadout() = %q, want spend with no cap suffix", got)
+	}
+}
+
+// Nothing has completed a turn yet, so there is no prompt size to show.
+func TestContextReadoutEmptyBeforeAnyTurn(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "scout", 0)})
+
+	if got := c.contextReadout(); got != "" {
+		t.Errorf("contextReadout() = %q, want empty before any completed turn", got)
+	}
+}
+
+// With a known context window, the readout shows current/max and a percent.
+func TestContextReadoutShowsWindowAndPercent(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", ContextWindow: 200_000},
+	})
+	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 50_000, 12_000, 0)) // 62000 total
+
+	got := c.contextReadout()
+	if got != "ctx:62k/200k (31%)" {
+		t.Errorf("contextReadout() = %q, want ctx:62k/200k (31%%)", got)
+	}
+}
+
+// No catalog entry means no known window -- every locally-served model has
+// none -- so the readout shows the token count alone rather than guessing a
+// percentage against an unknown denominator.
+func TestContextReadoutOmitsPercentWhenWindowUnknown(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "scout", 0)}) // ContextWindow 0
+	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 10_000, 0, 0))
+
+	got := c.contextReadout()
+	if got != "ctx:10k" {
+		t.Errorf("contextReadout() = %q, want ctx:10k (no percent against an unknown window)", got)
+	}
+	if strings.Contains(got, "%") || strings.Contains(got, "/") {
+		t.Errorf("contextReadout() = %q, must not guess a percent or a max", got)
+	}
+}
+
+// CtxTokens == 0 is the same "nothing to show yet" case as before any turn --
+// guarded explicitly so a completed turn reporting zero usage never renders
+// "ctx:0".
+func TestContextReadoutEmptyWhenTokensAreZero(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", ContextWindow: 200_000},
+	})
+	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 0, 0, 0))
+
+	if got := c.contextReadout(); got != "" {
+		t.Errorf("contextReadout() = %q, want empty when CtxTokens is 0", got)
+	}
+}
+
+// Rounding: 1000/128000 rounds to 1%, not truncates to 0.
+func TestContextReadoutRoundsThePercent(t *testing.T) {
+	c := newTestCockpit("c_1")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "scout", Status: "idle", ContextWindow: 128_000},
+	})
+	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 645, 0, 0)) // 645/128000 = 0.504% -> rounds to 1%
+
+	got := c.contextReadout()
+	if !strings.HasSuffix(got, "(1%)") {
+		t.Errorf("contextReadout() = %q, want a rounded 1%%", got)
 	}
 }
 
@@ -1419,12 +1500,15 @@ func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
 // were. The readout is bottom-RIGHT and reports the CONTENT's length: a short
 // transcript is padded to bottom-anchor it, and the viewport counts that
 // padding as real, so asking it would report 12/12 for a one-line conversation.
+//
+// At the bottom the readout is hidden entirely -- that slot belongs to
+// contextReadout there -- and it reappears only once you scroll back.
 func TestScrollPositionReportsWhereYouAre(t *testing.T) {
 	c := newTestCockpit("c_1")
 	paneWithContent(t, c) // 200 lines, pane is 24 tall
 
-	if got := c.scrollPosition(); !strings.HasSuffix(got, "200/200 100%") {
-		t.Errorf("at the bottom the readout = %q, want it to end 200/200 100%%", got)
+	if got := c.scrollPosition(); got != "" {
+		t.Errorf("at the bottom the readout = %q, want empty", got)
 	}
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
@@ -1440,15 +1524,17 @@ func TestScrollPositionReportsWhereYouAre(t *testing.T) {
 	}
 }
 
-// A transcript shorter than the pane is padded to sit at the bottom; the
-// readout must count the transcript, not the padding.
-func TestScrollPositionIgnoresBottomAnchorPadding(t *testing.T) {
+// A transcript shorter than the pane is padded to sit at the bottom -- and a
+// short transcript is ALWAYS at the bottom, so the readout is hidden for it
+// unconditionally now rather than needing to prove it ignores the padding
+// rows in its count.
+func TestScrollPositionHiddenForShortPaddedTranscript(t *testing.T) {
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.syncViewport(c.pane("c_1"), []string{"one", "two"})
 
-	if got := c.scrollPosition(); !strings.HasSuffix(got, "2/2 100%") {
-		t.Errorf("readout = %q, want 2/2 100%% — the blank padding rows are not transcript", got)
+	if got := c.scrollPosition(); got != "" {
+		t.Errorf("readout = %q, want empty -- a short transcript never leaves the bottom", got)
 	}
 }
 
@@ -1456,11 +1542,12 @@ func TestScrollPositionIgnoresBottomAnchorPadding(t *testing.T) {
 func TestScrollPositionIsRightAligned(t *testing.T) {
 	c := newTestCockpit("c_1")
 	paneWithContent(t, c)
+	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp}) // scroll back: hidden at the bottom now
 	view := ansi.Strip(c.View().Content)
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
 	last := lines[len(lines)-1]
 
-	if !strings.HasSuffix(strings.TrimRight(last, " "), "100%") {
+	if !strings.HasSuffix(strings.TrimRight(last, " "), "%") {
 		t.Errorf("footer does not end with the position readout:\n%q", last)
 	}
 }

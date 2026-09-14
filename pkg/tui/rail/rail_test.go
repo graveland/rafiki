@@ -313,6 +313,33 @@ func assistantMessageWithCost(childID string, ordinal int32, cost float64) *rafi
 	}
 }
 
+// turnEndWithUsage is a turn_end carrying token usage but no cost, for
+// exercising CtxTokens/CtxThrough independently of the cost fold.
+func turnEndWithUsage(childID string, ordinal int32, input, cacheRead, cacheWrite int64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{Usage: &rafikiv1.Usage{
+			InputTokens:      &input,
+			CacheReadTokens:  &cacheRead,
+			CacheWriteTokens: &cacheWrite,
+		}}},
+	}
+}
+
+// turnEndWithUsageNoOrdinal is turnEndWithUsage but without an ordinal --
+// the unreproducible-event case the reading/bill distinction admits.
+func turnEndWithUsageNoOrdinal(childID string, input, cacheRead, cacheWrite int64) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_TurnEnd{TurnEnd: &rafikiv1.TurnEnd{Usage: &rafikiv1.Usage{
+			InputTokens:      &input,
+			CacheReadTokens:  &cacheRead,
+			CacheWriteTokens: &cacheWrite,
+		}}},
+	}
+}
+
 func TestLiveCostMovesOnEveryReplyWithinATurn(t *testing.T) {
 	r := rail.New()
 	r.Apply(spawned("c1", "", "root", 0))
@@ -487,5 +514,125 @@ func TestRemoveIsIdempotent(t *testing.T) {
 	r.Remove("c_1") // must not panic
 	if r.Len() != 0 {
 		t.Errorf("Len() = %d, want 0", r.Len())
+	}
+}
+
+// turn_end usage sets CtxTokens to the prompt size the NEXT call will carry:
+// input + cache-read + cache-write, and records the watermark it landed at.
+func TestTurnEndUsageSetsCtxTokens(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(turnEndWithUsage("c1", 1, 10_000, 50_000, 2_000))
+
+	n, _ := r.Get("c1")
+	if n.CtxTokens != 62_000 {
+		t.Errorf("CtxTokens = %d, want 62000 (input+cache_read+cache_write)", n.CtxTokens)
+	}
+	if n.CtxThrough != 1 {
+		t.Errorf("CtxThrough = %d, want 1", n.CtxThrough)
+	}
+}
+
+// The rail and focus subscriptions overlap on the durable tier, so an older
+// turn_end can arrive after a newer one already landed. The watermark must
+// stop it from regressing the displayed figure, same as CostThrough.
+func TestTurnEndUsageReplayDoesNotRegressCtxTokens(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(turnEndWithUsage("c1", 5, 100_000, 0, 0))
+	r.Apply(turnEndWithUsage("c1", 2, 1_000, 0, 0)) // stale replay, lower ordinal
+
+	n, _ := r.Get("c1")
+	if n.CtxTokens != 100_000 {
+		t.Errorf("CtxTokens = %d, want 100000: a lower-ordinal replay must not regress it", n.CtxTokens)
+	}
+	if n.CtxThrough != 5 {
+		t.Errorf("CtxThrough = %d, want 5", n.CtxThrough)
+	}
+}
+
+// Unlike Cost, CtxTokens is a reading, not a running total -- ordinal 0 is
+// both a legal ordinal and CtxThrough's zero value, so the child's very
+// first turn_end must still be admitted. HasCtx is what makes that so.
+func TestTurnEndUsageAtOrdinalZeroIsAccepted(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(turnEndWithUsage("c1", 0, 42_000, 0, 0))
+
+	n, _ := r.Get("c1")
+	if n.CtxTokens != 42_000 {
+		t.Errorf("CtxTokens = %d, want 42000: the first turn_end, even at ordinal 0, must be accepted", n.CtxTokens)
+	}
+	if !n.HasCtx {
+		t.Error("HasCtx = false, want true after the first turn_end")
+	}
+}
+
+// An ordinal-less turn_end can never be deduped by ordinal, but taking it is
+// safe: CtxTokens converges on the latest reading rather than accumulating,
+// so there is nothing to double. CtxThrough stays untouched -- it has no
+// ordinal to record.
+func TestTurnEndUsageWithoutOrdinalIsAccepted(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(turnEndWithUsageNoOrdinal("c1", 7_000, 0, 0))
+
+	n, _ := r.Get("c1")
+	if n.CtxTokens != 7_000 {
+		t.Errorf("CtxTokens = %d, want 7000: an ordinal-less turn_end must still be accepted", n.CtxTokens)
+	}
+	if n.CtxThrough != 0 {
+		t.Errorf("CtxThrough = %d, want 0: an ordinal-less turn_end carries no watermark", n.CtxThrough)
+	}
+
+	// A later ordinalized turn_end still replaces it normally.
+	r.Apply(turnEndWithUsage("c1", 3, 20_000, 0, 0))
+	n, _ = r.Get("c1")
+	if n.CtxTokens != 20_000 {
+		t.Errorf("CtxTokens = %d, want 20000 after a later ordinalized turn_end", n.CtxTokens)
+	}
+	if n.CtxThrough != 3 {
+		t.Errorf("CtxThrough = %d, want 3", n.CtxThrough)
+	}
+}
+
+// A turn_end with no usage (Usage nil) must leave CtxTokens untouched -- it
+// says nothing about the prompt size, so there is nothing to fold.
+func TestTurnEndWithoutUsageLeavesCtxTokensAlone(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(turnEndWithUsage("c1", 1, 10_000, 0, 0))
+	r.Apply(costTurnEnd("c1", 2, 0.10)) // no Usage set
+
+	n, _ := r.Get("c1")
+	if n.CtxTokens != 10_000 {
+		t.Errorf("CtxTokens = %d, want 10000 unchanged by a usage-less turn_end", n.CtxTokens)
+	}
+	if n.CtxThrough != 1 {
+		t.Errorf("CtxThrough = %d, want 1 unchanged by a usage-less turn_end", n.CtxThrough)
+	}
+}
+
+// Seed copies ContextWindow into both a freshly-discovered node and one
+// already in the rail -- the daemon is authoritative for it either way.
+func TestSeedCopiesContextWindow(t *testing.T) {
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "fresh", Status: "idle", ContextWindow: 200_000},
+	})
+	n, ok := r.Get("c_1")
+	if !ok {
+		t.Fatal("c_1 not seeded")
+	}
+	if n.ContextWindow != 200_000 {
+		t.Errorf("ContextWindow = %d, want 200000", n.ContextWindow)
+	}
+
+	r.Seed([]*rafikiv1.ChildSummary{
+		{ChildId: "c_1", Name: "fresh", Status: "idle", ContextWindow: 1_000_000},
+	})
+	n, _ = r.Get("c_1")
+	if n.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow after re-seed = %d, want 1000000", n.ContextWindow)
 	}
 }

@@ -11,6 +11,7 @@ package tui
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1834,13 +1835,6 @@ func (c *Cockpit) syncViewport(p *paneState, lines []string) {
 	p.atBottom = p.vp.AtBottom()
 }
 
-// scrollPosition is the bottom-right readout: how far down the transcript the
-// last visible line is, and how long the transcript is.
-//
-// It reports the CONTENT's length, never the viewport's, because a short
-// transcript is padded to bottom-anchor it and the viewport counts that padding
-// as real. Lines rather than blocks: the reader is looking at lines, and a
-// percentage of blocks jumps unevenly when one block is a 500-line tool result.
 // costReadout is the footer's spend for the focused agent: self, then what
 // this agent's subagents spent on its behalf. Two numbers only when there is a
 // second one to show, and nothing at all while every total is zero -- a wall
@@ -1871,34 +1865,73 @@ func (c *Cockpit) costReadout() string {
 	return ""
 }
 
+// contextReadout is the footer's context-window usage for the focused agent:
+// the prompt size implied by its last completed turn (Node.CtxTokens), against
+// the model's context window when the daemon reported one. Empty until a turn
+// has completed -- there is nothing to size before that -- and the percent is
+// omitted rather than guessed when the window is unknown (every locally-served
+// model has none), the same show-nothing-rather-than-guess rule quotaReadout
+// follows.
+func (c *Cockpit) contextReadout() string {
+	f := c.focused()
+	if f == "" {
+		return ""
+	}
+	n, ok := c.rail.Get(f)
+	if !ok || n.CtxTokens == 0 {
+		return ""
+	}
+	cur := fmtTok(n.CtxTokens)
+	if n.ContextWindow <= 0 {
+		return "ctx:" + cur
+	}
+	pct := int(math.Round(100 * float64(n.CtxTokens) / float64(n.ContextWindow)))
+	return "ctx:" + cur + "/" + fmtTok(int64(n.ContextWindow)) + " (" + itoa(int64(pct)) + "%)"
+}
+
+// fmtTok formats a token count the way modelpicker's tokCell does: >=1000
+// rounds down to the nearest thousand with a k suffix, else the raw count.
+func fmtTok(n int64) string {
+	if n >= 1000 {
+		return itoa(n/1000) + "k"
+	}
+	return itoa(n)
+}
+
+// scrollPosition is the bottom-right readout: how far down the transcript the
+// last visible line is, and how long the transcript is.
+//
+// It reports the CONTENT's length, never the viewport's, because a short
+// transcript is padded to bottom-anchor it and the viewport counts that padding
+// as real. Lines rather than blocks: the reader is looking at lines, and a
+// percentage of blocks jumps unevenly when one block is a 500-line tool result.
+//
+// Hidden entirely at the bottom -- that is the steady state, and a readout
+// that always reads "100%" there is noise; contextReadout owns that slot
+// instead. It reappears the instant you scroll back, which is also the only
+// time the number can tell you anything you don't already know.
 func (c *Cockpit) scrollPosition() string {
 	f := c.focused()
 	if f == "" {
 		return ""
 	}
 	p := c.panes[f]
-	if p == nil || p.contentLines == 0 {
+	if p == nil || p.contentLines == 0 || p.atBottom {
 		return ""
 	}
 	total := p.contentLines
 	last := total
-	if !p.atBottom {
-		// Only meaningful while scrolled: at the bottom the last visible line
-		// IS the last line, and deriving it from the offset would disagree by
-		// the padding on a short transcript.
-		if seen := p.vp.YOffset() + p.vp.Height(); seen < total {
-			last = seen
-		}
+	// Only meaningful while scrolled: at the bottom the last visible line IS
+	// the last line, and deriving it from the offset would disagree by the
+	// padding on a short transcript.
+	if seen := p.vp.YOffset() + p.vp.Height(); seen < total {
+		last = seen
 	}
 	pct := 100
 	if total > 0 {
 		pct = last * 100 / total
 	}
-	arrow := " "
-	if !p.atBottom {
-		arrow = "↓"
-	}
-	return arrow + " " + itoa(int64(last)) + "/" + itoa(int64(total)) +
+	return "↓ " + itoa(int64(last)) + "/" + itoa(int64(total)) +
 		" " + itoa(int64(pct)) + "%"
 }
 
@@ -2096,6 +2129,12 @@ func (c *Cockpit) View() tea.View {
 	// old marker said only "↓ more below", which answers whether you are at the
 	// bottom and not where you are.
 	readout := c.costReadout()
+	if ctx := c.contextReadout(); ctx != "" {
+		if readout != "" {
+			readout += "  "
+		}
+		readout += ctx
+	}
 	if pos := c.scrollPosition(); pos != "" {
 		if readout != "" {
 			readout += "  "

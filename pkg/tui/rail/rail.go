@@ -127,6 +127,24 @@ type Node struct {
 	// row is a plain snapshot with nothing to distinguish nil from unset.
 	MaxCost float64
 
+	// CtxTokens is the context size implied by the last completed turn --
+	// InputTokens + CacheReadTokens + CacheWriteTokens, the prompt size the
+	// NEXT call will carry, same semantics as the compaction boundary's
+	// PreTokens.
+	//
+	// Unlike Cost, this is a READING, not a running total: a replayed turn_end
+	// converges on the same value rather than adding to it, so CtxThrough only
+	// needs to stop a REGRESSION, never a double-count. HasCtx exists for the
+	// same reason HasCostFloor does -- ordinal 0 is both a legal ordinal and
+	// the zero value of CtxThrough, so "ord > CtxThrough" alone would silently
+	// drop a child's very first turn_end. ContextWindow is the child's model
+	// context window, seeded from ListChildren -- the daemon is authoritative
+	// for it, there is no event-stream source.
+	CtxTokens     int64
+	CtxThrough    int32
+	HasCtx        bool
+	ContextWindow int
+
 	Attention int
 }
 
@@ -224,18 +242,20 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 			existing.Status = s.GetStatus()
 			existing.Kind = s.GetKind()
 			existing.MaxCost = s.GetMaxCost()
+			existing.ContextWindow = int(s.GetContextWindow())
 			continue
 		}
 		n := &Node{
-			ChildID:   s.GetChildId(),
-			Name:      s.GetName(),
-			ParentID:  s.GetLabels()[ParentLabel],
-			Status:    s.GetStatus(),
-			Kind:      s.GetKind(),
-			Native:    s.GetLabels()[NativeSubagentLabel] == "1",
-			SessionID: s.GetSessionId(),
-			Cwd:       s.GetCwd(),
-			MaxCost:   s.GetMaxCost(),
+			ChildID:       s.GetChildId(),
+			Name:          s.GetName(),
+			ParentID:      s.GetLabels()[ParentLabel],
+			Status:        s.GetStatus(),
+			Kind:          s.GetKind(),
+			Native:        s.GetLabels()[NativeSubagentLabel] == "1",
+			SessionID:     s.GetSessionId(),
+			Cwd:           s.GetCwd(),
+			MaxCost:       s.GetMaxCost(),
+			ContextWindow: int(s.GetContextWindow()),
 		}
 		// Seeding is a CLEAN BOARD: everything that happened before you attached
 		// counts as read. Attaching is not a claim to have read anything; it is
@@ -342,6 +362,29 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 		// duplicate/rejected-by-ordinal-guard TurnEnd means live tracking
 		// for it is done.
 		n.CostLive = 0
+
+		// The prompt size the NEXT call will carry.
+		//
+		// Unlike Cost, this is a LATEST READING, not a running total, so the
+		// watermark only needs to stop a REGRESSION, never a double-count.
+		// An ordinal-less turn_end is an unreproducible event -- it can never
+		// be deduped by ordinal, but taking it is safe precisely because it
+		// is a reading rather than a sum. !n.HasCtx admits a child's very
+		// first turn_end even when it lands at ordinal 0, the same reason
+		// HasCostFloor exists for Cost.
+		if u := p.TurnEnd.Usage; u != nil {
+			ord, hasOrd := int32(0), false
+			if ev.Ordinal != nil {
+				ord, hasOrd = ev.GetOrdinal(), true
+			}
+			if !hasOrd || !n.HasCtx || ord > n.CtxThrough {
+				n.CtxTokens = u.GetInputTokens() + u.GetCacheReadTokens() + u.GetCacheWriteTokens()
+				if hasOrd {
+					n.CtxThrough = ord
+				}
+				n.HasCtx = true
+			}
+		}
 	}
 
 	r.countAttention(n, ev)
