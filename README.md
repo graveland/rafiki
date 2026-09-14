@@ -1136,7 +1136,7 @@ bare `rafiki claude` gets it too. `RAFIKI_MCP_TOKEN` is stripped from the
 inherited environment before being set, so a session launched from inside
 another proxied session cannot adopt the outer session's MCP bearer. The
 token `rafiki claude` holds is a real user token, so the surface serves the
-full twelve-tool agent-control set under the `mcp__rafiki__*` prefix;
+full fourteen-tool agent-control set under the `mcp__rafiki__*` prefix;
 daemon-spawned `--kind claude` children carry the per-boot child secret
 instead, whose credential the same gate answers with a toolless server.
 

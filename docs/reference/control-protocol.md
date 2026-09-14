@@ -1448,7 +1448,7 @@ daemon resolves it to a user id server-side; rows store the id, never the name.
 
 **Scope.** What these three verbs can see is bounded server-side by the connection's own
 identity, never by a request field: an empty identity (the daemon's own UDS/local-trust path)
-and an admin connection see every owner's conversations; a non-admin user connection is scoped
+and an admin connection sees every owner's conversations; a non-admin user connection is scoped
 to its own. `owner`/`persona`/… above are caller-supplied *filters* ANDed on top of that bound.
 The derivation (`scopeForConnection` in `pkg/control/dispatch.go`) never appears on the wire
 and is pinned by pkg/control's scope tests.
@@ -1468,7 +1468,8 @@ volume, adoption, token, cost, failure, latency, cache-waste, and prefix-reuse f
 same struct.
 
 Errors: `no_agent_db` (§8) means the daemon has no database configured; `not_found` (§8) means
-`conversationId` was given but no such conversation exists.
+`conversationId` was given but no such conversation exists, or it lies outside the connection's
+scope (the Scope fold above — a scope miss answers not-found, never a permission error).
 
 ### 6.18 `ctrl_conversation_search`
 

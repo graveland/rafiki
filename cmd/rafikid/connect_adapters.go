@@ -562,8 +562,12 @@ func conversationReadNotFound(err error) bool {
 // plane -- so forwarding it is safe. Any error that is NOT a ControllerError
 // is returned unchanged; the handler (connectapi.queryError) redacts it, so
 // a pgx failure cannot name the database through this surface either. The
-// translation lives HERE rather than in pkg/connectapi because that package
-// must never reach pkg/control, which imports pkg/insights directly.
+// translation lives HERE for the same reasons as translateSkillErr and
+// scopeFor beside it: the ControllerError is produced by this package's own
+// Controller, and the protocol-code-to-connect-code table is knowledge the
+// adapter plane already owns -- keeping it here holds conversations.go to a
+// no-new-imports discipline even though pkg/connectapi does (pre-existing)
+// import pkg/control elsewhere.
 func controllerConnectError(err error) error {
 	var ce *control.ControllerError
 	if !errors.As(err, &ce) {
