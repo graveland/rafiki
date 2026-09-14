@@ -406,6 +406,50 @@ message ConversationExportResponse {
   repeated string available_skills = 7;
 }
 
+// ConversationQueryRequest names one catalogue query and carries the same
+// StatsFilter shape ConversationSearchRequest mirrors SearchFilter with.
+// Scope is never on the wire (see docs/plans/2026-09-12-conversation-query-
+// layer-design.md §3) -- the daemon derives it from the caller's own
+// authenticated identity.
+message ConversationQueryRequest {
+  string name = 1; // "tools" | "skills" | "classes" | "models" | "sizes" | "coverage"
+  optional int64 since_unix = 2;
+  optional int64 until_unix = 3;
+  string owner   = 4;
+  string persona = 5;
+  string source  = 6;
+  string model   = 7;
+  string path    = 8; // "" | "proxy" | "direct"
+}
+
+// QueryColumn declares one column's name and value kind. kind is one of
+// "string" | "int" | "float"; format is a rendering hint only ("" | "usd" |
+// "pct"), never interpreted by anything that isn't formatting for display.
+message QueryColumn {
+  string name   = 1;
+  string kind   = 2;
+  string format = 3;
+}
+
+// QueryValue carries exactly one of its three fields, selected by the
+// corresponding QueryColumn.kind at the same position in the row.
+message QueryValue {
+  oneof v {
+    string str_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+  }
+}
+
+message QueryRow {
+  repeated QueryValue cells = 1;
+}
+
+message ConversationQueryResponse {
+  repeated QueryColumn columns = 1;
+  repeated QueryRow rows = 2;
+}
+
 // ExecutorRow is one executor the daemon's pool currently knows about, plus
 // whether it could serve a spawn of a given kind right now.
 //
@@ -576,6 +620,7 @@ service Control {
   rpc SetSkillEnabled(SetSkillEnabledRequest) returns (SetSkillEnabledResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
+  rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
   rpc DarajaLaunch(DarajaLaunchRequest) returns (DarajaLaunchResponse);
   rpc DarajaSend(DarajaSendRequest) returns (DarajaSendResponse);
   rpc DarajaWatch(DarajaWatchRequest) returns (stream DarajaWatchResponse);

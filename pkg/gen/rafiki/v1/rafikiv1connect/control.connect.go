@@ -76,6 +76,9 @@ const (
 	// ControlConversationExportProcedure is the fully-qualified name of the Control's
 	// ConversationExport RPC.
 	ControlConversationExportProcedure = "/rafiki.v1.Control/ConversationExport"
+	// ControlConversationQueryProcedure is the fully-qualified name of the Control's ConversationQuery
+	// RPC.
+	ControlConversationQueryProcedure = "/rafiki.v1.Control/ConversationQuery"
 	// ControlDarajaLaunchProcedure is the fully-qualified name of the Control's DarajaLaunch RPC.
 	ControlDarajaLaunchProcedure = "/rafiki.v1.Control/DarajaLaunch"
 	// ControlDarajaSendProcedure is the fully-qualified name of the Control's DarajaSend RPC.
@@ -106,6 +109,7 @@ type ControlClient interface {
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
+	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
@@ -242,6 +246,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ConversationExport")),
 			connect.WithClientOptions(opts...),
 		),
+		conversationQuery: connect.NewClient[v1.ConversationQueryRequest, v1.ConversationQueryResponse](
+			httpClient,
+			baseURL+ControlConversationQueryProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationQuery")),
+			connect.WithClientOptions(opts...),
+		),
 		darajaLaunch: connect.NewClient[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse](
 			httpClient,
 			baseURL+ControlDarajaLaunchProcedure,
@@ -285,6 +295,7 @@ type controlClient struct {
 	setSkillEnabled    *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
 	conversationSearch *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
 	conversationExport *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
+	conversationQuery  *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
 	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
 	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
 	darajaWatch        *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
@@ -390,6 +401,11 @@ func (c *controlClient) ConversationExport(ctx context.Context, req *connect.Req
 	return c.conversationExport.CallUnary(ctx, req)
 }
 
+// ConversationQuery calls rafiki.v1.Control.ConversationQuery.
+func (c *controlClient) ConversationQuery(ctx context.Context, req *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error) {
+	return c.conversationQuery.CallUnary(ctx, req)
+}
+
 // DarajaLaunch calls rafiki.v1.Control.DarajaLaunch.
 func (c *controlClient) DarajaLaunch(ctx context.Context, req *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
 	return c.darajaLaunch.CallUnary(ctx, req)
@@ -427,6 +443,7 @@ type ControlHandler interface {
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
+	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
@@ -559,6 +576,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ConversationExport")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlConversationQueryHandler := connect.NewUnaryHandler(
+		ControlConversationQueryProcedure,
+		svc.ConversationQuery,
+		connect.WithSchema(controlMethods.ByName("ConversationQuery")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlDarajaLaunchHandler := connect.NewUnaryHandler(
 		ControlDarajaLaunchProcedure,
 		svc.DarajaLaunch,
@@ -619,6 +642,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlConversationSearchHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
 			controlConversationExportHandler.ServeHTTP(w, r)
+		case ControlConversationQueryProcedure:
+			controlConversationQueryHandler.ServeHTTP(w, r)
 		case ControlDarajaLaunchProcedure:
 			controlDarajaLaunchHandler.ServeHTTP(w, r)
 		case ControlDarajaSendProcedure:
@@ -712,6 +737,10 @@ func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.
 
 func (UnimplementedControlHandler) ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationExport is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationQuery is not implemented"))
 }
 
 func (UnimplementedControlHandler) DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {

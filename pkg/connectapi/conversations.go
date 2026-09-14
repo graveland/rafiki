@@ -50,6 +50,38 @@ type TranscriptRow struct {
 	AvailableSkills                                  []string
 }
 
+// CatalogueFilter mirrors insights.StatsFilter. Named CatalogueFilter, not
+// ConversationSearchFilter, to keep it visibly distinct from that existing
+// type -- this is a different filter shape used by a different RPC.
+type CatalogueFilter struct {
+	SinceUnix, UntilUnix                int64
+	Owner, Persona, Source, Model, Path string
+}
+
+// QueryColumnMeta mirrors insights.Column.
+type QueryColumnMeta struct {
+	Name, Kind, Format string
+}
+
+// QueryRowValue mirrors insights.Entry: exactly one of these three is set,
+// matching the field the row's Kind names. A plain Go union (not an
+// interface) is enough here -- this type crosses exactly one boundary
+// (Controller to proto) and is never stored or passed further, unlike
+// insights.Entry which is read by every catalogue query.
+type QueryRowValue struct {
+	Str     string
+	Int     int64
+	Float   float64
+	IsInt   bool
+	IsFloat bool
+}
+
+// CatalogueResult mirrors insights.QueryResult.
+type CatalogueResult struct {
+	Columns []QueryColumnMeta
+	Rows    [][]QueryRowValue
+}
+
 // ConversationInsights answers scoped conversation reads. The daemon derives
 // scope from the caller's own authenticated identity server-side -- neither
 // method takes one, matching QuotaReader's "no caller-supplied id" shape.
@@ -59,6 +91,7 @@ type ConversationInsights interface {
 	// outside the caller's scope -- the two must be indistinguishable (a
 	// scope miss reads exactly like not-found, never a permission error).
 	Export(ctx context.Context, conversationID string) (TranscriptRow, bool, error)
+	RunQuery(ctx context.Context, name string, f CatalogueFilter) (CatalogueResult, error)
 }
 
 // SetConversationInsights attaches the conversation-query source.
@@ -133,6 +166,49 @@ func (s *Server) ConversationExport(
 		ConversationId: tr.ConversationID, Owner: tr.Owner, Persona: tr.Persona,
 		Source: tr.Source, DrivenBy: tr.DrivenBy, Turns: turns, AvailableSkills: tr.AvailableSkills,
 	}), nil
+}
+
+func (s *Server) ConversationQuery(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.ConversationQueryRequest],
+) (*connect.Response[rafikiv1.ConversationQueryResponse], error) {
+	p := s.conversations.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable, errors.New("conversation insights not yet wired"))
+	}
+	name := req.Msg.GetName()
+	if name == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("name is required"))
+	}
+	f := CatalogueFilter{
+		SinceUnix: req.Msg.GetSinceUnix(), UntilUnix: req.Msg.GetUntilUnix(),
+		Owner: req.Msg.GetOwner(), Persona: req.Msg.GetPersona(), Source: req.Msg.GetSource(),
+		Model: req.Msg.GetModel(), Path: req.Msg.GetPath(),
+	}
+	res, err := (*p).RunQuery(ctx, name, f)
+	if err != nil {
+		return nil, queryError(err)
+	}
+	cols := make([]*rafikiv1.QueryColumn, 0, len(res.Columns))
+	for _, c := range res.Columns {
+		cols = append(cols, &rafikiv1.QueryColumn{Name: c.Name, Kind: c.Kind, Format: c.Format})
+	}
+	rows := make([]*rafikiv1.QueryRow, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		cells := make([]*rafikiv1.QueryValue, 0, len(r))
+		for _, v := range r {
+			switch {
+			case v.IsInt:
+				cells = append(cells, &rafikiv1.QueryValue{V: &rafikiv1.QueryValue_IntValue{IntValue: v.Int}})
+			case v.IsFloat:
+				cells = append(cells, &rafikiv1.QueryValue{V: &rafikiv1.QueryValue_FloatValue{FloatValue: v.Float}})
+			default:
+				cells = append(cells, &rafikiv1.QueryValue{V: &rafikiv1.QueryValue_StrValue{StrValue: v.Str}})
+			}
+		}
+		rows = append(rows, &rafikiv1.QueryRow{Cells: cells})
+	}
+	return connect.NewResponse(&rafikiv1.ConversationQueryResponse{Columns: cols, Rows: rows}), nil
 }
 
 // internalRedactedText is what a genuinely uncoded error says on the wire.

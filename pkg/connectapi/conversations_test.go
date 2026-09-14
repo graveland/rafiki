@@ -16,11 +16,15 @@ import (
 type fakeConversationInsights struct {
 	gotFilter connectapi.ConversationSearchFilter
 	gotID     string
+	gotName   string
+	gotQuery  connectapi.CatalogueFilter
 
 	rows []connectapi.ConversationSummaryRow
 	tr   connectapi.TranscriptRow
 	ok   bool
 	err  error
+
+	result connectapi.CatalogueResult
 }
 
 func (f *fakeConversationInsights) Search(_ context.Context, flt connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
@@ -33,11 +37,20 @@ func (f *fakeConversationInsights) Export(_ context.Context, conversationID stri
 	return f.tr, f.ok, f.err
 }
 
+func (f *fakeConversationInsights) RunQuery(_ context.Context, name string, flt connectapi.CatalogueFilter) (connectapi.CatalogueResult, error) {
+	f.gotName = name
+	f.gotQuery = flt
+	return f.result, f.err
+}
+
 func newConversationsServer(f *fakeConversationInsights) *connectapi.Server {
 	s := connectapi.NewServer(nil)
 	s.SetConversationInsights(f)
 	return s
 }
+
+// ptrInt64 builds the *int64 a proto `optional int64` field decodes to.
+func ptrInt64(v int64) *int64 { return &v }
 
 func TestConversationSearchNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
@@ -224,5 +237,91 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 	}
 	if len(msg.GetAvailableSkills()) != 2 || msg.GetAvailableSkills()[0] != "brainstorming" {
 		t.Errorf("available_skills = %v, want [brainstorming writing-plans]", msg.GetAvailableSkills())
+	}
+}
+
+func TestConversationQueryNotWiredFailsUnavailable(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	_, err := s.ConversationQuery(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationQueryRequest{Name: "tools"}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("ConversationQuery unwired err = %v, want %v", err, connect.CodeUnavailable)
+	}
+}
+
+// Empty name on the QUERY request: the catalogue is addressed by name and no
+// default exists.
+func TestConversationQueryEmptyNameFailsInvalidArgument(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{})
+	_, err := s.ConversationQuery(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationQueryRequest{}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("ConversationQuery empty name err = %v, want %v", err, connect.CodeInvalidArgument)
+	}
+}
+
+// A successful query must carry the declared columns through verbatim and
+// land each cell in the oneof variant its QueryRowValue flags select.
+func TestConversationQueryMapsColumnsAndCellVariants(t *testing.T) {
+	f := &fakeConversationInsights{result: connectapi.CatalogueResult{
+		Columns: []connectapi.QueryColumnMeta{
+			{Name: "tool", Kind: "string"},
+			{Name: "calls", Kind: "int"},
+			{Name: "avg_cost", Kind: "float", Format: "usd"},
+		},
+		Rows: [][]connectapi.QueryRowValue{{
+			{Str: "bash"},
+			{Int: 42, IsInt: true},
+			{Float: 0.125, IsFloat: true},
+		}},
+	}}
+	s := newConversationsServer(f)
+
+	resp, err := s.ConversationQuery(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationQueryRequest{
+			Name: "tools", SinceUnix: ptrInt64(1757000000), Owner: "brent", Path: "proxy",
+		}))
+	if err != nil {
+		t.Fatalf("ConversationQuery: %v", err)
+	}
+	if f.gotName != "tools" {
+		t.Errorf("got name %q, want tools", f.gotName)
+	}
+	if f.gotQuery.Owner != "brent" || f.gotQuery.SinceUnix != 1757000000 || f.gotQuery.Path != "proxy" {
+		t.Errorf("filter = %+v, want owner=brent since=1757000000 path=proxy", f.gotQuery)
+	}
+	cols := resp.Msg.GetColumns()
+	if len(cols) != 3 || cols[0].GetName() != "tool" || cols[1].GetKind() != "int" || cols[2].GetFormat() != "usd" {
+		t.Errorf("columns = %+v, want (tool,string)(calls,int)(avg_cost,float,usd)", cols)
+	}
+	rows := resp.Msg.GetRows()
+	if len(rows) != 1 || len(rows[0].GetCells()) != 3 {
+		t.Fatalf("rows = %+v, want one row of three cells", rows)
+	}
+	cells := rows[0].GetCells()
+	if cells[0].GetStrValue() != "bash" || cells[1].GetIntValue() != 42 || cells[2].GetFloatValue() != 0.125 {
+		t.Errorf("cells = (%q,%d,%v), want (bash,42,0.125)",
+			cells[0].GetStrValue(), cells[1].GetIntValue(), cells[2].GetFloatValue())
+	}
+	if cells[0].GetV() == nil || cells[1].GetV() == nil || cells[2].GetV() == nil {
+		t.Errorf("oneof not set on every cell: %+v", cells)
+	}
+}
+
+// An error from the source rides queryError: uncoded becomes a redacted
+// internal, exactly like Search and Export.
+func TestConversationQueryErrorFailsInternalAndRedacts(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down: host=db.internal user=rafiki")})
+	_, err := s.ConversationQuery(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationQueryRequest{Name: "tools"}))
+	if connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("ConversationQuery error err = %v, want %v", err, connect.CodeInternal)
+	}
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("want a *connect.Error, got %T", err)
+	}
+	if msg := ce.Message(); msg != "internal error; see the daemon log" {
+		t.Errorf("internal error text = %q, want the mapErr redaction", msg)
 	}
 }

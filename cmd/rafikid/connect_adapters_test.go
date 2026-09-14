@@ -215,6 +215,11 @@ type fakeInsightsBackend struct {
 
 	searchRows []insights.ConversationSummary
 	searchErr  error
+
+	gotName   string
+	gotFilter insights.StatsFilter
+	queryRows insights.QueryResult
+	queryErr  error
 }
 
 func (f *fakeInsightsBackend) Search(_ context.Context, scope insights.Scope, _ insights.SearchFilter) ([]insights.ConversationSummary, error) {
@@ -226,6 +231,13 @@ func (f *fakeInsightsBackend) Export(_ context.Context, scope insights.Scope, id
 	f.gotScope = scope
 	f.gotExport = id
 	return f.transcript, f.exportErr
+}
+
+func (f *fakeInsightsBackend) Query(_ context.Context, scope insights.Scope, name string, flt insights.StatsFilter) (insights.QueryResult, error) {
+	f.gotScope = scope
+	f.gotName = name
+	f.gotFilter = flt
+	return f.queryRows, f.queryErr
 }
 
 // TestConversationReadNotFoundClassifiesTheControllersNotFoundAnswer covers
@@ -421,5 +433,89 @@ func TestConversationSearchOverUDSRefusesAChildAttributedCredential(t *testing.T
 	req.Header().Set("X-Rafiki-Session", "c_child")
 	if _, err := client.ConversationSearch(ctx, req); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("ConversationSearch over UDS with a child-attributed credential err = %v, want permission_denied", err)
+	}
+}
+
+// TestConnectConversationsQueryMapsEntryTypes drives the full adapter: one
+// StringEntry, one IntEntry and one FloatEntry must round-trip into the
+// matching QueryRowValue fields, with the kind flags selecting the wire oneof
+// further down. The scope must also be threaded down -- RunQuery derives it
+// from ctx, never from the filter.
+func TestConnectConversationsQueryMapsEntryTypes(t *testing.T) {
+	fb := &fakeInsightsBackend{queryRows: insights.QueryResult{
+		Columns: []insights.Column{
+			{Name: "tool", Kind: insights.ColString},
+			{Name: "calls", Kind: insights.ColInt},
+			{Name: "cost", Kind: insights.ColFloat, Format: "usd"},
+		},
+		Rows: [][]insights.Entry{{
+			insights.StringEntry("bash"),
+			insights.IntEntry(42),
+			insights.FloatEntry(0.125),
+		}},
+	}}
+	a := connectConversations{c: &Controller{insights: fb}}
+
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
+	got, err := a.RunQuery(ctx, "tools", connectapi.CatalogueFilter{Owner: "brent", Path: "proxy"})
+	if err != nil {
+		t.Fatalf("RunQuery: %v", err)
+	}
+	if fb.gotScope != insights.ScopeOwner("u1") {
+		t.Errorf("backend scope = %v, want ScopeOwner(u1)", fb.gotScope)
+	}
+	if fb.gotName != "tools" {
+		t.Errorf("backend got name %q, want tools", fb.gotName)
+	}
+	if fb.gotFilter.Owner != "brent" || fb.gotFilter.Path != insights.Path("proxy") {
+		t.Errorf("backend filter = %+v, want owner=brent path=proxy", fb.gotFilter)
+	}
+
+	wantCols := []connectapi.QueryColumnMeta{
+		{Name: "tool", Kind: "string"},
+		{Name: "calls", Kind: "int"},
+		{Name: "cost", Kind: "float", Format: "usd"},
+	}
+	if len(got.Columns) != len(wantCols) {
+		t.Fatalf("columns = %+v, want %+v", got.Columns, wantCols)
+	}
+	for i, wc := range wantCols {
+		if got.Columns[i] != wc {
+			t.Errorf("column[%d] = %+v, want %+v", i, got.Columns[i], wc)
+		}
+	}
+	if len(got.Rows) != 1 || len(got.Rows[0]) != 3 {
+		t.Fatalf("rows = %+v, want one row of three cells", got.Rows)
+	}
+	cells := got.Rows[0]
+	if cells[0] != (connectapi.QueryRowValue{Str: "bash"}) {
+		t.Errorf("cell[0] = %+v, want Str=bash (flags clear)", cells[0])
+	}
+	if cells[1] != (connectapi.QueryRowValue{Int: 42, IsInt: true}) {
+		t.Errorf("cell[1] = %+v, want Int=42 IsInt", cells[1])
+	}
+	if cells[2] != (connectapi.QueryRowValue{Float: 0.125, IsFloat: true}) {
+		t.Errorf("cell[2] = %+v, want Float=0.125 IsFloat", cells[2])
+	}
+}
+
+// A child-attributed identity carries its owner's UserID, so scopeFor's
+// refusal -- not a scope -- is what RunQuery must answer it.
+func TestConnectConversationsQueryRequiresUserCredential(t *testing.T) {
+	fb := &fakeInsightsBackend{}
+	a := connectConversations{c: &Controller{insights: fb}}
+
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
+	got, err := a.RunQuery(ctx, "tools", connectapi.CatalogueFilter{})
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("RunQuery(child-attributed) err = %v, want %v", err, connect.CodePermissionDenied)
+	}
+	if got.Columns != nil || got.Rows != nil {
+		t.Errorf("RunQuery refused returned a result %+v, want zero", got)
+	}
+	if fb.gotName != "" || fb.gotScope != (insights.Scope{}) {
+		t.Errorf("backend reached (name %q, scope %v), want untouched", fb.gotName, fb.gotScope)
 	}
 }

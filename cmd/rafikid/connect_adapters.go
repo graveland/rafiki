@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -531,6 +532,56 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 		ConversationID: tr.ConversationID, Owner: tr.Owner, Persona: tr.Persona,
 		Source: tr.Source, DrivenBy: tr.DrivenBy, Turns: turns, AvailableSkills: tr.AvailableSkills,
 	}, true, nil
+}
+
+// RunQuery adapts Controller.ConversationQuery onto connectapi's catalogue
+// mirror types. Scope is derived HERE, from the caller's own identity -- the
+// wire carries a query name and a filter, never a scope. An Entry the switch
+// does not name is a programming error upstream (insights.Entry's marker
+// interface keeps a stray value out at compile time elsewhere); failing loud
+// here beats guessing a cell's type.
+func (a connectConversations) RunQuery(ctx context.Context, name string, f connectapi.CatalogueFilter) (connectapi.CatalogueResult, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return connectapi.CatalogueResult{}, err
+	}
+	res, err := a.c.ConversationQuery(ctx, scope, name, insights.StatsFilter{
+		Since: unixToTimePtr(f.SinceUnix), Until: unixToTimePtr(f.UntilUnix),
+		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
+		Path: insights.Path(f.Path),
+	})
+	if err != nil {
+		return connectapi.CatalogueResult{}, controllerConnectError(err)
+	}
+	cols := make([]connectapi.QueryColumnMeta, 0, len(res.Columns))
+	for _, c := range res.Columns {
+		kind := "string"
+		switch c.Kind {
+		case insights.ColInt:
+			kind = "int"
+		case insights.ColFloat:
+			kind = "float"
+		}
+		cols = append(cols, connectapi.QueryColumnMeta{Name: c.Name, Kind: kind, Format: c.Format})
+	}
+	rows := make([][]connectapi.QueryRowValue, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		row := make([]connectapi.QueryRowValue, 0, len(r))
+		for _, e := range r {
+			switch v := e.(type) {
+			case insights.IntEntry:
+				row = append(row, connectapi.QueryRowValue{Int: int64(v), IsInt: true})
+			case insights.FloatEntry:
+				row = append(row, connectapi.QueryRowValue{Float: float64(v), IsFloat: true})
+			case insights.StringEntry:
+				row = append(row, connectapi.QueryRowValue{Str: string(v)})
+			default:
+				return connectapi.CatalogueResult{}, fmt.Errorf("connect_adapters: unhandled insights.Entry type %T", e)
+			}
+		}
+		rows = append(rows, row)
+	}
+	return connectapi.CatalogueResult{Columns: cols, Rows: rows}, nil
 }
 
 // conversationReadNotFound reports whether err is the Controller's not-found
