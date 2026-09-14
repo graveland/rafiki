@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
@@ -86,7 +87,7 @@ func (s *Server) ConversationSearch(
 	}
 	rows, err := (*p).Search(ctx, f)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, queryError(err)
 	}
 	out := make([]*rafikiv1.ConversationSummary, 0, len(rows))
 	for _, r := range rows {
@@ -115,7 +116,7 @@ func (s *Server) ConversationExport(
 	}
 	tr, ok, err := (*p).Export(ctx, id)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, queryError(err)
 	}
 	if !ok {
 		return nil, connect.NewError(connect.CodeNotFound, errors.New("conversation not found"))
@@ -132,4 +133,30 @@ func (s *Server) ConversationExport(
 		ConversationId: tr.ConversationID, Owner: tr.Owner, Persona: tr.Persona,
 		Source: tr.Source, DrivenBy: tr.DrivenBy, Turns: turns, AvailableSkills: tr.AvailableSkills,
 	}), nil
+}
+
+// internalRedactedText is what a genuinely uncoded error says on the wire.
+// Its raw text is logged, never forwarded: a pgx failure names the database
+// host, user and database, which a caller has no business learning from a
+// failed request. Mirrors pkg/control's mapErr, whose comment explains the
+// allowlist discipline -- an error that must reach the caller is promoted to
+// a curated error at its source (the *control.ControllerError the daemon's
+// adapter translates), and everything else is redacted by default. This
+// package deliberately does not import pkg/control to inspect that type: it
+// imports pkg/insights, which this package must never reach, so the
+// curated-error translation lives in the adapter layer instead.
+const internalRedactedText = "internal error; see the daemon log"
+
+// queryError passes an already-coded error through untouched -- scopeFor's
+// CodePermissionDenied refusal must reach the wire as permission_denied, not
+// be re-wrapped into internal -- and redacts everything else. A *connect.Error
+// was built by code that chose its code deliberately; any other error is
+// infrastructure text this package did not author.
+func queryError(err error) error {
+	var ce *connect.Error
+	if errors.As(err, &ce) {
+		return err
+	}
+	slog.Error("connect: conversation query failed", "error", err)
+	return connect.NewError(connect.CodeInternal, errors.New(internalRedactedText))
 }

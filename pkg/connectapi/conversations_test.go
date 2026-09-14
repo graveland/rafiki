@@ -99,12 +99,52 @@ func TestConversationSearchClampsLimit(t *testing.T) {
 	}
 }
 
-func TestConversationSearchErrorFailsInternal(t *testing.T) {
-	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down")})
+func TestConversationSearchErrorFailsInternalAndRedacts(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down: host=db.internal user=rafiki")})
 	_, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
 	if connect.CodeOf(err) != connect.CodeInternal {
 		t.Fatalf("ConversationSearch error err = %v, want %v", err, connect.CodeInternal)
+	}
+	// The raw error's text must not reach the peer: a pgx failure names the
+	// database host, user and database.
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("want a *connect.Error, got %T", err)
+	}
+	if msg := ce.Message(); msg != "internal error; see the daemon log" {
+		t.Errorf("internal error text = %q, want the mapErr redaction", msg)
+	}
+}
+
+// An error the source already coded -- scopeFor's refusal, or a ControllerError
+// the adapter translated -- must reach the wire under its own code and message,
+// never re-wrapped as internal.
+func TestConversationSearchPreservesACodedError(t *testing.T) {
+	coded := connect.NewError(connect.CodePermissionDenied,
+		errors.New("conversation queries require a user credential"))
+	s := newConversationsServer(&fakeConversationInsights{err: coded})
+	_, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("coded error err = %v, want %v", err, connect.CodePermissionDenied)
+	}
+	if err.Error() != coded.Error() {
+		t.Errorf("coded error text = %q, want %q", err.Error(), coded.Error())
+	}
+}
+
+func TestConversationExportPreservesACodedError(t *testing.T) {
+	coded := connect.NewError(connect.CodePermissionDenied,
+		errors.New("conversation queries require a user credential"))
+	s := newConversationsServer(&fakeConversationInsights{err: coded})
+	_, err := s.ConversationExport(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "c1"}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("coded error err = %v, want %v", err, connect.CodePermissionDenied)
+	}
+	if err.Error() != coded.Error() {
+		t.Errorf("coded error text = %q, want %q", err.Error(), coded.Error())
 	}
 }
 

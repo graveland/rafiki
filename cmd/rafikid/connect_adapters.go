@@ -492,7 +492,7 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 		Text: f.Text, Limit: f.Limit,
 	})
 	if err != nil {
-		return nil, err
+		return nil, controllerConnectError(err)
 	}
 	out := make([]connectapi.ConversationSummaryRow, 0, len(rows))
 	for _, r := range rows {
@@ -517,7 +517,7 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 		return connectapi.TranscriptRow{}, false, nil
 	}
 	if err != nil {
-		return connectapi.TranscriptRow{}, false, err
+		return connectapi.TranscriptRow{}, false, controllerConnectError(err)
 	}
 	turns := make([]connectapi.TranscriptTurnRow, 0, len(tr.Turns))
 	for _, t := range tr.Turns {
@@ -553,6 +553,40 @@ func conversationReadNotFound(err error) bool {
 		return ce.Code == protocol.ErrNotFound
 	}
 	return false
+}
+
+// controllerConnectError maps the Controller's *control.ControllerError onto
+// a connect error so its curated Message reaches the peer under its protocol
+// code. The ControllerError contract (pkg/control/dispatch.go) is that the
+// codebase wrote the message -- the same promise mapErr honors on the framed
+// plane -- so forwarding it is safe. Any error that is NOT a ControllerError
+// is returned unchanged; the handler (connectapi.queryError) redacts it, so
+// a pgx failure cannot name the database through this surface either. The
+// translation lives HERE rather than in pkg/connectapi because that package
+// must never reach pkg/control, which imports pkg/insights directly.
+func controllerConnectError(err error) error {
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) {
+		return err
+	}
+	return connect.NewError(controllerConnectCode(ce.Code), errors.New(ce.Message))
+}
+
+// controllerConnectCode translates the protocol codes a ControllerError can
+// carry onto connect codes. ErrNoAgentDB is a daemon configuration gap, not
+// a transient failure -- the request is fine and the operator must set
+// RAFIKI_DB -- so FailedPrecondition, never Unavailable: a retry cannot
+// heal it. Unrecognized codes stay Internal; their messages are still
+// curated, so the text forwards unchanged.
+func controllerConnectCode(code string) connect.Code {
+	switch code {
+	case protocol.ErrNotFound:
+		return connect.CodeNotFound
+	case protocol.ErrNoAgentDB:
+		return connect.CodeFailedPrecondition
+	default:
+		return connect.CodeInternal
+	}
 }
 
 // unixToTimePtr converts a wire Unix-seconds value to *time.Time, treating 0
