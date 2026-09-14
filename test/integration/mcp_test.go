@@ -35,7 +35,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// mcpToolNames is the exact surface the MCP face must expose: the twelve
+// mcpToolNames is the exact surface the MCP face must expose: the
 // agent-control blueprints (cmd/rafikid/mcp_face.go's mcpBlueprints), no more
 // and no fewer. ListTools must agree with this list exactly.
 var mcpToolNames = []string{
@@ -51,6 +51,8 @@ var mcpToolNames = []string{
 	"task_drop",
 	"task_list",
 	"quota_status",
+	"conversation_search",
+	"conversation_export",
 }
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────

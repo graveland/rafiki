@@ -215,7 +215,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	if !mcpEntitled(id) {
 		return nil
 	}
-	owner := users.Identity{UserID: id.UserID, Username: id.Username}
+	owner := users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
 	var spawner tools.AgentSpawner
 	switch {
 	case id.IsUserCredential():
@@ -233,10 +233,16 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	if f.quota != nil {
 		quotaReader = newMCPQuotaReader(f.quota, owner)
 	}
+	// Conversations is unconditional, unlike Quota: newMCPConversationReader
+	// degrades to a deny-all Scope{} internally rather than needing a nil check
+	// at the call site, matching how Tasks and Agents are always set in this
+	// same literal. The reader takes no caller id in any method, so this
+	// construction is the binding -- see its doc comment.
 	opts := tools.ToolOpts{
-		Agents: spawner,
-		Tasks:  f.taskStoreFor(ctrl),
-		Quota:  quotaReader,
+		Agents:        spawner,
+		Tasks:         f.taskStoreFor(ctrl),
+		Quota:         quotaReader,
+		Conversations: newMCPConversationReader(ctrl, owner),
 	}
 
 	return mcpserver.New(mcpserver.Options{
@@ -325,6 +331,8 @@ var mcpBlueprints = []tools.Tool{
 	&tools.TaskDropBlueprint{},
 	&tools.TaskListBlueprint{},
 	&tools.QuotaStatusBlueprint{},
+	&tools.ConversationSearchBlueprint{},
+	&tools.ConversationExportBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint

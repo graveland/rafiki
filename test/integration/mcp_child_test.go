@@ -10,8 +10,8 @@ package integration_test
 // What only this file can prove, because everything below drives a REAL daemon
 // subprocess over real HTTP and a REAL child process:
 //   - the token a real spawn actually delivered to a real child authenticates
-//     a real MCP session, and tools/list is exactly the twelve tools
-//     mcpToolNames pins;
+//     a real MCP session, and tools/list is exactly the agent-control tool
+//     set mcpToolNames pins;
 //   - that session binds a CONTROLLER spawner scoped to the child's own
 //     subtree, not a user spawner with daemon-wide scope (coordinator
 //     amendment A1) — the regression the unit tests cannot see;
@@ -281,9 +281,9 @@ func mcpDrain(t *testing.T, resp *http.Response) string {
 	return string(raw)
 }
 
-// mcpAssertTwelveTools fails the test unless got is exactly the assertion of
+// mcpAssertExactToolSet fails the test unless got is exactly the assertion of
 // record. Both credential kinds assert against the one list.
-func mcpAssertTwelveTools(t *testing.T, where string, got []string) {
+func mcpAssertExactToolSet(t *testing.T, where string, got []string) {
 	t.Helper()
 	want := slices.Clone(mcpToolNames)
 	slices.Sort(want)
@@ -295,10 +295,10 @@ func mcpAssertTwelveTools(t *testing.T, where string, got []string) {
 
 // ─── the tests ───────────────────────────────────────────────────────────────
 
-// TestMCPChildTokenReachesTwelveTools is the test whose failure was the whole
-// bug: a child spawned through the daemon holds a per-child MCP secret, and a
-// session established with it must reach the twelve-tool agent-control
-// surface.
+// TestMCPChildTokenReachesTheAgentControlSurface is the test whose failure was
+// the whole bug: a child spawned through the daemon holds a per-child MCP
+// secret, and a session established with it must reach the full agent-control
+// tool surface.
 //
 // The negative legs carry the two coordinator amendments:
 //
@@ -310,7 +310,7 @@ func mcpAssertTwelveTools(t *testing.T, where string, got []string) {
 //	A2 — the bare per-boot proxy secret (the child's ANTHROPIC_AUTH_TOKEN,
 //	     no X-Rafiki-Session header) is NOT an agent-control credential:
 //	     tools/list with it alone gets 403, never a tool list or a stream.
-func TestMCPChildTokenReachesTwelveTools(t *testing.T) {
+func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 	t.Parallel()
 	d, dumps := bootMCPChildDaemon(t)
 	token := d.createMCPUser(t)
@@ -346,7 +346,7 @@ func TestMCPChildTokenReachesTwelveTools(t *testing.T) {
 	}
 
 	// Headline: tools/list through the child-token session is exactly the
-	// twelve tools mcpToolNames pins — no more, no fewer.
+	// tool set mcpToolNames pins — no more, no fewer.
 	sessA := mcpConnect(t, d.proxyURL, mcpToken)
 	tools, err := sessA.ListTools(context.Background(), nil)
 	if err != nil {
@@ -356,7 +356,7 @@ func TestMCPChildTokenReachesTwelveTools(t *testing.T) {
 	for _, tl := range tools.Tools {
 		got = append(got, tl.Name)
 	}
-	mcpAssertTwelveTools(t, "child-token session", got)
+	mcpAssertExactToolSet(t, "child-token session", got)
 
 	// A1: seed a child parented OUTSIDE the spawned child — a top-level row.
 	outsider := d.spawnChild(t)
@@ -477,14 +477,14 @@ func TestMCPChildSessionNotShared(t *testing.T) {
 	}
 
 	// The principal check is what refused it, not the session id or the verb:
-	// A's own token on its own session still lists the twelve tools...
-	mcpAssertTwelveTools(t, "own principal on its own session",
+	// A's own token on its own session still lists the full tool set...
+	mcpAssertExactToolSet(t, "own principal on its own session",
 		mcpRawToolsListNames(t, d, tokA, sid, 3))
 
 	// ...and B can establish its OWN session on its own credential — siblings
 	// coexist; only the cross-principal reuse is refused.
 	sidB := mcpRawInitialize(t, d, tokB, 4)
-	mcpAssertTwelveTools(t, "sibling's own session",
+	mcpAssertExactToolSet(t, "sibling's own session",
 		mcpRawToolsListNames(t, d, tokB, sidB, 5))
 }
 

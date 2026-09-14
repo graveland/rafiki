@@ -431,6 +431,12 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if c.pool != nil {
 		ro.Quota = newControllerQuotaReader(c, ownerUserID)
 	}
+	// Same binding and same guard as Quota above: bound to the resolved owner,
+	// refused (left nil) on a DB-less daemon. Kept as a separate `if` block so
+	// a future removal of one never touches the other.
+	if c.pool != nil {
+		ro.Conversations = newControllerConversationReader(c, ownerUserID)
+	}
 	// A child with a selector gets a boundExecutor, ALWAYS non-nil.
 	//
 	// This bypasses MaterializeAll's `opts.Executor == nil` check, which is a

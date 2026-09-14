@@ -299,6 +299,12 @@ type ToolOpts struct {
 	// its whole purpose is informing a spawn decision an agent with no
 	// subtree has no use for.
 	Quota QuotaReader
+
+	// Conversations, when non-nil, gives this agent the conversation_search and
+	// conversation_export tools -- reads over its OWN conversation history.
+	// nil means no conversation-insights source is configured (a DB-less
+	// daemon), matching Quota's degrade rule.
+	Conversations ConversationReader
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the

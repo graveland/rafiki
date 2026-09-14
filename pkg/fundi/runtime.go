@@ -179,6 +179,13 @@ type RuntimeOptions struct {
 	// (a DB-less daemon) or for the standalone `rafikid fundi` process.
 	Quota tools.QuotaReader
 
+	// Conversations, when non-nil, gives this child the conversation_search and
+	// conversation_export tools -- reads over its OWN conversation history.
+	// Supplied by the daemon as a per-owner adapter; nil when no
+	// conversation-insights source is configured (a DB-less daemon) or for the
+	// standalone `rafikid fundi` process.
+	Conversations tools.ConversationReader
+
 	// Executor, when non-nil, runs the filesystem and shell tools in a
 	// separate process. nil means no workspace tier at all: the workspace
 	// tools are not registered, so the child reasons over the daemon tier
@@ -526,6 +533,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		ChildID:         opts.Ref,
 		Agents:          opts.Agents,
 		Quota:           opts.Quota,
+		Conversations:   opts.Conversations,
 		Executor:        opts.Executor,
 		ExecutorTools:   executorToolSet(opts.ExecutorTools),
 		RemoteSkillBody: opts.RemoteSkillBody,

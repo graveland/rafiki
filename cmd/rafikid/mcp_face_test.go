@@ -389,6 +389,12 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"agent_set_budget",
 		"agent_spawn",
 		"agent_view",
+		// Deliberate on a DB-less face, unlike quota_status: Conversations is
+		// set unconditionally in getServer (newMCPConversationReader degrades
+		// to a deny-all Scope internally), so these two materialize and answer
+		// an ErrNoPool error at call time instead of declining.
+		"conversation_export",
+		"conversation_search",
 		"task_add",
 		"task_drop",
 		"task_list",
@@ -408,14 +414,15 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 }
 
 // The complete surface — every blueprint, quota_status included — materializes
-// when a quota source exists, so the DB-less decline above cannot hide a
+// when its source exists, so the DB-less declines above cannot hide a
 // blueprint that stopped materializing for some other reason.
 func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 	face, ledger := mcpFaceFixture(t)
 	opts := tools.ToolOpts{
-		Agents: newUserSpawner(face.controller(), users.Identity{UserID: "u-alice", Username: "alice"}),
-		Tasks:  ledger,
-		Quota:  mcpStubQuota{},
+		Agents:        newUserSpawner(face.controller(), users.Identity{UserID: "u-alice", Username: "alice"}),
+		Tasks:         ledger,
+		Quota:         mcpStubQuota{},
+		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-alice"}),
 	}
 	var names []string
 	for _, tool := range mcpToolset(opts, discardLogger()) {
@@ -430,6 +437,8 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"agent_set_budget",
 		"agent_spawn",
 		"agent_view",
+		"conversation_export",
+		"conversation_search",
 		"quota_status",
 		"task_add",
 		"task_drop",
@@ -556,20 +565,24 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 	}
 }
 
-// TestChildTokenGetsTwelveTools: a per-child token identity binds a
+// TestChildTokenGetsTheUserToolSet: a per-child token identity binds a
 // controllerSpawner scoped to the child's own subtree, and the surface is the
-// same twelve-tool set a user credential gets — scope comes from
-// controllerSpawner.authorize, never a per-tool allowlist. The exact twelve
-// names are the assertion of record (test/integration/mcp_test.go).
-func TestChildTokenGetsTwelveTools(t *testing.T) {
+// same tool set a user credential gets — scope comes from
+// controllerSpawner.authorize, never a per-tool allowlist. The exact names are
+// the assertion of record (test/integration/mcp_test.go).
+func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
 	// The DB-less fixture's *quota.Store is nil, so quota_status declines by
 	// its own rule; stub the reader for the full-set assertion, exactly as
-	// TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists does.
+	// TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists does. The
+	// conversation reader is set unconditionally, exactly as getServer does:
+	// a child-attributed identity carries the OWNER's user id, so the reader
+	// binds that owner's scope.
 	opts := tools.ToolOpts{
-		Agents: newControllerSpawner(face.controller(), "c-child"),
-		Tasks:  face.taskStoreFor(face.controller()),
-		Quota:  mcpStubQuota{},
+		Agents:        newControllerSpawner(face.controller(), "c-child"),
+		Tasks:         face.taskStoreFor(face.controller()),
+		Quota:         mcpStubQuota{},
+		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-owner"}),
 	}
 	var names []string
 	for _, tool := range mcpToolset(opts, discardLogger()) {
@@ -584,6 +597,8 @@ func TestChildTokenGetsTwelveTools(t *testing.T) {
 		"agent_set_budget",
 		"agent_spawn",
 		"agent_view",
+		"conversation_export",
+		"conversation_search",
 		"quota_status",
 		"task_add",
 		"task_drop",

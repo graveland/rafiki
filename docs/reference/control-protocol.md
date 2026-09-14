@@ -467,7 +467,7 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Twelve, materialized per caller from the same blueprints the fundi
+**Tools.** Fourteen, materialized per caller from the same blueprints the fundi
 registry serves (`mcpBlueprints`); descriptions are reworded on this surface
 for a caller that is not a fundi child (`mcpToolDescriptions`). A tool failure
 is `CallToolResult.IsError = true` carrying the diagnostic — never a JSON-RPC
@@ -487,6 +487,8 @@ transport error, and never a successful result carrying the text.
 | `task_drop` | Abandon a task with a required `reason`; drops its subtasks |
 | `task_list` | Read the ledger; filter by status, metadata or assignee; dropped rows hidden unless `include_dropped` |
 | `quota_status` | The caller's own captured Anthropic subscription rate-limit snapshot; omitted when the daemon has no quota capture (a Materializer decline) |
+| `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
+| `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist.
