@@ -454,3 +454,115 @@ func (q connectQuota) RateLimitStatus(ctx context.Context) (connectapi.RateLimit
 		UpdatedAt:     st.UpdatedAt,
 	}, true, nil
 }
+
+// errNotAUserCredential is scopeFor's refusal for any identity that is not a
+// real user credential -- the only provenance the design's Scope mechanism
+// accepts. See requireUserCredential for the identical reasoning applied to
+// the agent-control verbs.
+var errNotAUserCredential = errors.New("conversation queries require a user credential")
+
+// scopeFor is the ONE place the Connect plane turns an authenticated
+// identity into an insights.Scope. See design doc §3: IsUserCredential, not
+// a non-empty UserID (a child-attributed identity carries its owner's
+// UserID and must never inherit that owner's scope); IsAdmin is a column
+// read that only Authenticate ever sets.
+func scopeFor(ctx context.Context) (insights.Scope, error) {
+	id := server.IdentityFromContext(ctx)
+	if id == nil || !id.IsUserCredential() {
+		return insights.Scope{}, connect.NewError(connect.CodePermissionDenied, errNotAUserCredential)
+	}
+	if id.IsAdmin {
+		return insights.ScopeAll(), nil
+	}
+	return insights.ScopeOwner(id.UserID), nil
+}
+
+// connectConversations adapts *Controller to connectapi.ConversationInsights.
+type connectConversations struct{ c *Controller }
+
+func (a connectConversations) Search(ctx context.Context, f connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := a.c.ConversationSearch(ctx, scope, insights.SearchFilter{
+		Since: unixToTimePtr(f.SinceUnix), Until: unixToTimePtr(f.UntilUnix),
+		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
+		Status: f.Status, Path: insights.Path(f.Path), MinTokens: f.MinTokens,
+		Text: f.Text, Limit: f.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]connectapi.ConversationSummaryRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, connectapi.ConversationSummaryRow{
+			ID: r.ID, Name: r.Name, Owner: r.Owner, Persona: r.Persona, Source: r.Source,
+			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAtUnix: r.CreatedAt.Unix(),
+			Turns: r.Turns, InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+			CacheReadTokens: r.CacheReadTokens, CacheHitRatio: r.CacheHitRatio, TotalCostUSD: r.TotalCostUSD,
+			FirstMessage: r.FirstMessage,
+		})
+	}
+	return out, nil
+}
+
+func (a connectConversations) Export(ctx context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return connectapi.TranscriptRow{}, false, err
+	}
+	tr, err := a.c.ConversationExport(ctx, scope, conversationID)
+	if conversationReadNotFound(err) {
+		return connectapi.TranscriptRow{}, false, nil
+	}
+	if err != nil {
+		return connectapi.TranscriptRow{}, false, err
+	}
+	turns := make([]connectapi.TranscriptTurnRow, 0, len(tr.Turns))
+	for _, t := range tr.Turns {
+		turns = append(turns, connectapi.TranscriptTurnRow{
+			Ordinal: t.Ordinal, Role: t.Role, Content: t.Content, Skills: t.Skills,
+			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
+			LatencyMS: t.LatencyMS, Model: t.Model, PrefixHash: t.PrefixHash,
+		})
+	}
+	return connectapi.TranscriptRow{
+		ConversationID: tr.ConversationID, Owner: tr.Owner, Persona: tr.Persona,
+		Source: tr.Source, DrivenBy: tr.DrivenBy, Turns: turns, AvailableSkills: tr.AvailableSkills,
+	}, true, nil
+}
+
+// conversationReadNotFound reports whether err is the Controller's not-found
+// answer for a conversation read. The Controller translates
+// insights.ErrNotFound into a *control.ControllerError carrying only a
+// message string -- ControllerError does not Unwrap its original -- so
+// errors.Is against the sentinel never matches through the translation and
+// must be paired with the code comparison dispatch's mapErr uses. A bare
+// errors.Is check would send every scope miss and every missing id down the
+// CodeInternal path, turning the design's "a scope miss reads as not-found"
+// rule into "reads as a server error". The sentinel branch stays first so a
+// future Controller that passes the sentinel through untouched still
+// matches.
+func conversationReadNotFound(err error) bool {
+	if errors.Is(err, insights.ErrNotFound) {
+		return true
+	}
+	var ce *control.ControllerError
+	if errors.As(err, &ce) {
+		return ce.Code == protocol.ErrNotFound
+	}
+	return false
+}
+
+// unixToTimePtr converts a wire Unix-seconds value to *time.Time, treating 0
+// as unset -- matches pkg/control/dispatch.go's unixToTime (duplicated here
+// rather than exported, since pkg/control and cmd/rafikid have no shared
+// leaf package for it and it is three lines).
+func unixToTimePtr(sec int64) *time.Time {
+	if sec == 0 {
+		return nil
+	}
+	t := time.Unix(sec, 0)
+	return &t
+}

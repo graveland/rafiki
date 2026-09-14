@@ -70,6 +70,12 @@ const (
 	ControlDeleteSkillProcedure = "/rafiki.v1.Control/DeleteSkill"
 	// ControlSetSkillEnabledProcedure is the fully-qualified name of the Control's SetSkillEnabled RPC.
 	ControlSetSkillEnabledProcedure = "/rafiki.v1.Control/SetSkillEnabled"
+	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
+	// ConversationSearch RPC.
+	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
+	// ControlConversationExportProcedure is the fully-qualified name of the Control's
+	// ConversationExport RPC.
+	ControlConversationExportProcedure = "/rafiki.v1.Control/ConversationExport"
 	// ControlDarajaLaunchProcedure is the fully-qualified name of the Control's DarajaLaunch RPC.
 	ControlDarajaLaunchProcedure = "/rafiki.v1.Control/DarajaLaunch"
 	// ControlDarajaSendProcedure is the fully-qualified name of the Control's DarajaSend RPC.
@@ -98,6 +104,8 @@ type ControlClient interface {
 	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
+	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
+	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
@@ -222,6 +230,18 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
 			connect.WithClientOptions(opts...),
 		),
+		conversationSearch: connect.NewClient[v1.ConversationSearchRequest, v1.ConversationSearchResponse](
+			httpClient,
+			baseURL+ControlConversationSearchProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationSearch")),
+			connect.WithClientOptions(opts...),
+		),
+		conversationExport: connect.NewClient[v1.ConversationExportRequest, v1.ConversationExportResponse](
+			httpClient,
+			baseURL+ControlConversationExportProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationExport")),
+			connect.WithClientOptions(opts...),
+		),
 		darajaLaunch: connect.NewClient[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse](
 			httpClient,
 			baseURL+ControlDarajaLaunchProcedure,
@@ -263,6 +283,8 @@ type controlClient struct {
 	upsertSkill        *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
 	deleteSkill        *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
 	setSkillEnabled    *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	conversationSearch *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	conversationExport *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
 	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
 	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
 	darajaWatch        *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
@@ -358,6 +380,16 @@ func (c *controlClient) SetSkillEnabled(ctx context.Context, req *connect.Reques
 	return c.setSkillEnabled.CallUnary(ctx, req)
 }
 
+// ConversationSearch calls rafiki.v1.Control.ConversationSearch.
+func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
+	return c.conversationSearch.CallUnary(ctx, req)
+}
+
+// ConversationExport calls rafiki.v1.Control.ConversationExport.
+func (c *controlClient) ConversationExport(ctx context.Context, req *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error) {
+	return c.conversationExport.CallUnary(ctx, req)
+}
+
 // DarajaLaunch calls rafiki.v1.Control.DarajaLaunch.
 func (c *controlClient) DarajaLaunch(ctx context.Context, req *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
 	return c.darajaLaunch.CallUnary(ctx, req)
@@ -393,6 +425,8 @@ type ControlHandler interface {
 	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
+	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
+	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
@@ -513,6 +547,18 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlConversationSearchHandler := connect.NewUnaryHandler(
+		ControlConversationSearchProcedure,
+		svc.ConversationSearch,
+		connect.WithSchema(controlMethods.ByName("ConversationSearch")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlConversationExportHandler := connect.NewUnaryHandler(
+		ControlConversationExportProcedure,
+		svc.ConversationExport,
+		connect.WithSchema(controlMethods.ByName("ConversationExport")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlDarajaLaunchHandler := connect.NewUnaryHandler(
 		ControlDarajaLaunchProcedure,
 		svc.DarajaLaunch,
@@ -569,6 +615,10 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlDeleteSkillHandler.ServeHTTP(w, r)
 		case ControlSetSkillEnabledProcedure:
 			controlSetSkillEnabledHandler.ServeHTTP(w, r)
+		case ControlConversationSearchProcedure:
+			controlConversationSearchHandler.ServeHTTP(w, r)
+		case ControlConversationExportProcedure:
+			controlConversationExportHandler.ServeHTTP(w, r)
 		case ControlDarajaLaunchProcedure:
 			controlDarajaLaunchHandler.ServeHTTP(w, r)
 		case ControlDarajaSendProcedure:
@@ -654,6 +704,14 @@ func (UnimplementedControlHandler) DeleteSkill(context.Context, *connect.Request
 
 func (UnimplementedControlHandler) SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetSkillEnabled is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationSearch is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationExport is not implemented"))
 }
 
 func (UnimplementedControlHandler) DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {

@@ -491,6 +491,7 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 			face.Control.SetModelLister(connectModels{c: ctrl})
+			face.Control.SetConversationInsights(connectConversations{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
 			if skillStore != nil {
 				face.Control.SetSkillManager(connectSkills{st: skillStore, version: version.String()})

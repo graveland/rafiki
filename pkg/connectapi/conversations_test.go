@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package connectapi_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"connectrpc.com/connect"
+
+	"go.graveland.dev/rafiki/pkg/connectapi"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+)
+
+type fakeConversationInsights struct {
+	gotFilter connectapi.ConversationSearchFilter
+	gotID     string
+
+	rows []connectapi.ConversationSummaryRow
+	tr   connectapi.TranscriptRow
+	ok   bool
+	err  error
+}
+
+func (f *fakeConversationInsights) Search(_ context.Context, flt connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
+	f.gotFilter = flt
+	return f.rows, f.err
+}
+
+func (f *fakeConversationInsights) Export(_ context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {
+	f.gotID = conversationID
+	return f.tr, f.ok, f.err
+}
+
+func newConversationsServer(f *fakeConversationInsights) *connectapi.Server {
+	s := connectapi.NewServer(nil)
+	s.SetConversationInsights(f)
+	return s
+}
+
+func TestConversationSearchNotWiredFailsUnavailable(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	_, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("ConversationSearch unwired err = %v, want %v", err, connect.CodeUnavailable)
+	}
+}
+
+func TestConversationSearchMapsRowsAndFilter(t *testing.T) {
+	f := &fakeConversationInsights{rows: []connectapi.ConversationSummaryRow{{
+		ID: "c1", Name: "fix the lease", Owner: "brent", Persona: "worker",
+		Source: "proxy", Model: "openrouter/x/glm", Status: "idle", DrivenBy: "fundi",
+		CreatedAtUnix: 1757000000, Turns: 7,
+		InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 800,
+		CacheHitRatio: 0.8, TotalCostUSD: 0.0123, FirstMessage: "please fix",
+	}}}
+	s := newConversationsServer(f)
+
+	resp, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Owner: "brent", Limit: 20}))
+	if err != nil {
+		t.Fatalf("ConversationSearch: %v", err)
+	}
+	if f.gotFilter.Owner != "brent" {
+		t.Errorf("filter Owner = %q, want brent", f.gotFilter.Owner)
+	}
+	if f.gotFilter.Limit != 20 {
+		t.Errorf("filter Limit = %d, want 20", f.gotFilter.Limit)
+	}
+	got := resp.Msg.GetRows()
+	if len(got) != 1 {
+		t.Fatalf("rows = %d, want 1", len(got))
+	}
+	if got[0].GetId() != "c1" {
+		t.Errorf("Id = %q, want c1", got[0].GetId())
+	}
+	if got[0].GetOwner() != "brent" {
+		t.Errorf("Owner = %q, want brent", got[0].GetOwner())
+	}
+	if got[0].GetTotalCostUsd() != 0.0123 {
+		t.Errorf("TotalCostUsd = %v, want 0.0123", got[0].GetTotalCostUsd())
+	}
+}
+
+// The server clamps a caller's limit; it never forwards an unbounded one.
+func TestConversationSearchClampsLimit(t *testing.T) {
+	f := &fakeConversationInsights{}
+	s := newConversationsServer(f)
+
+	_, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Limit: 100000}))
+	if err != nil {
+		t.Fatalf("ConversationSearch: %v", err)
+	}
+	if f.gotFilter.Limit != 500 {
+		t.Errorf("filter Limit = %d, want clamped to 500", f.gotFilter.Limit)
+	}
+}
+
+func TestConversationSearchErrorFailsInternal(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down")})
+	_, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
+	if connect.CodeOf(err) != connect.CodeInternal {
+		t.Fatalf("ConversationSearch error err = %v, want %v", err, connect.CodeInternal)
+	}
+}
+
+func TestConversationExportNotWiredFailsUnavailable(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	_, err := s.ConversationExport(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "c1"}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("ConversationExport unwired err = %v, want %v", err, connect.CodeUnavailable)
+	}
+}
+
+// Empty id on the EXPORT request — there is no such field on search.
+func TestConversationExportEmptyIDFailsInvalidArgument(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{})
+	_, err := s.ConversationExport(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("ConversationExport empty id err = %v, want %v", err, connect.CodeInvalidArgument)
+	}
+}
+
+// ok=false must read as not-found: a scope miss and a missing conversation are
+// deliberately indistinguishable.
+func TestConversationExportOkFalseReadsAsNotFound(t *testing.T) {
+	s := newConversationsServer(&fakeConversationInsights{ok: false})
+	_, err := s.ConversationExport(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "someone-elses"}))
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("ConversationExport ok=false err = %v, want %v", err, connect.CodeNotFound)
+	}
+}
+
+func TestConversationExportMapsTranscript(t *testing.T) {
+	f := &fakeConversationInsights{
+		ok: true,
+		tr: connectapi.TranscriptRow{
+			ConversationID: "conv-1", Owner: "brent", Persona: "worker",
+			Source: "proxy", DrivenBy: "claude",
+			Turns: []connectapi.TranscriptTurnRow{{
+				Ordinal: 3, Role: "assistant", Content: []byte(`[{"type":"text"}]`),
+				Skills:      []string{"brainstorming"},
+				InputTokens: 100, OutputTokens: 20, CacheReadTokens: 80,
+				LatencyMS: 1500, Model: "openrouter/x/glm", PrefixHash: "abc123",
+			}},
+			AvailableSkills: []string{"brainstorming", "writing-plans"},
+		},
+	}
+	s := newConversationsServer(f)
+
+	resp, err := s.ConversationExport(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "conv-1"}))
+	if err != nil {
+		t.Fatalf("ConversationExport: %v", err)
+	}
+	if f.gotID != "conv-1" {
+		t.Errorf("got conversation id %q, want conv-1", f.gotID)
+	}
+	msg := resp.Msg
+	if msg.GetConversationId() != "conv-1" || msg.GetOwner() != "brent" || msg.GetDrivenBy() != "claude" {
+		t.Errorf("header = (%q,%q,%q), want (conv-1,brent,claude)",
+			msg.GetConversationId(), msg.GetOwner(), msg.GetDrivenBy())
+	}
+	if len(msg.GetTurns()) != 1 {
+		t.Fatalf("turns = %d, want 1", len(msg.GetTurns()))
+	}
+	turn := msg.GetTurns()[0]
+	if turn.GetOrdinal() != 3 || turn.GetRole() != "assistant" || string(turn.GetContent()) != `[{"type":"text"}]` {
+		t.Errorf("turn = (%d,%q,%s), want (3,assistant,[{\"type\":\"text\"}])",
+			turn.GetOrdinal(), turn.GetRole(), turn.GetContent())
+	}
+	if len(turn.GetSkills()) != 1 || turn.GetSkills()[0] != "brainstorming" {
+		t.Errorf("turn skills = %v, want [brainstorming]", turn.GetSkills())
+	}
+	if turn.GetLatencyMs() != 1500 || turn.GetPrefixHash() != "abc123" {
+		t.Errorf("turn metrics = (%d,%q), want (1500,abc123)", turn.GetLatencyMs(), turn.GetPrefixHash())
+	}
+	if len(msg.GetAvailableSkills()) != 2 || msg.GetAvailableSkills()[0] != "brainstorming" {
+		t.Errorf("available_skills = %v, want [brainstorming writing-plans]", msg.GetAvailableSkills())
+	}
+}
