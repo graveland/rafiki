@@ -27,7 +27,7 @@ type pgStore struct {
 // uniqueViolation is Postgres SQLSTATE 23505.
 const uniqueViolation = "23505"
 
-func (s *pgStore) Create(ctx context.Context, username string) (users.User, string, error) {
+func (s *pgStore) Create(ctx context.Context, username string, isAdmin bool) (users.User, string, error) {
 	username, err := users.NormalizeUsername(username)
 	if err != nil {
 		return users.User{}, "", err
@@ -38,9 +38,9 @@ func (s *pgStore) Create(ctx context.Context, username string) (users.User, stri
 	}
 	var u users.User
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.users (username, token_sha256)
-		 VALUES ($1,$2) RETURNING id::text, username, created_at`,
-		username, users.HashToken(token)).Scan(&u.ID, &u.Username, &u.CreatedAt)
+		`INSERT INTO conversations.users (username, token_sha256, is_admin)
+		 VALUES ($1,$2,$3) RETURNING id::text, username, created_at, is_admin`,
+		username, users.HashToken(token), isAdmin).Scan(&u.ID, &u.Username, &u.CreatedAt, &u.IsAdmin)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		// The partial unique index is the ONLY thing enforcing name
@@ -62,9 +62,9 @@ func (s *pgStore) Create(ctx context.Context, username string) (users.User, stri
 func (s *pgStore) Authenticate(ctx context.Context, token string) (users.Identity, error) {
 	var id users.Identity
 	err := s.pool.QueryRow(ctx,
-		`SELECT id::text, username FROM conversations.users
+		`SELECT id::text, username, is_admin FROM conversations.users
 		  WHERE token_sha256 = $1 AND deleted_at IS NULL`,
-		users.HashToken(token)).Scan(&id.UserID, &id.Username)
+		users.HashToken(token)).Scan(&id.UserID, &id.Username, &id.IsAdmin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.Identity{}, users.ErrNotFound
 	}
@@ -80,7 +80,7 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 	if limit <= 0 {
 		limit = 100
 	}
-	q := `SELECT id::text, username, created_at, deleted_at
+	q := `SELECT id::text, username, is_admin, created_at, deleted_at
 	        FROM conversations.users`
 	if !includeDeleted {
 		q += ` WHERE deleted_at IS NULL`
@@ -99,7 +99,7 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 	for rows.Next() {
 		var u users.User
 		var deletedAt *time.Time
-		if err := rows.Scan(&u.ID, &u.Username, &u.CreatedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		u.DeletedAt = deletedAt

@@ -4623,14 +4623,22 @@ var errNoUserStore = &control.ControllerError{
 }
 
 func (c *Controller) UserCreate(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	return c.createUser(ctx, username, false)
+}
+
+// createUser is the one place a users row is minted. isAdmin is never
+// inferred: the bootstrap path passes true because the daemon's first
+// operator must be able to review every owner's conversations, and every
+// ordinary authenticated create passes false. Nothing else may set the bit.
+func (c *Controller) createUser(ctx context.Context, username string, isAdmin bool) (protocol.UserCreateResponseData, error) {
 	if c.users == nil {
 		return protocol.UserCreateResponseData{}, errNoUserStore
 	}
-	u, token, err := c.users.Create(ctx, username)
+	u, token, err := c.users.Create(ctx, username, isAdmin)
 	if err != nil {
 		return protocol.UserCreateResponseData{}, err
 	}
-	slog.Info("user created", "username", u.Username, "id", u.ID)
+	slog.Info("user created", "username", u.Username, "id", u.ID, "is_admin", u.IsAdmin)
 	return protocol.UserCreateResponseData{
 		ID: u.ID, Username: u.Username, Token: token,
 		CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
@@ -4670,7 +4678,12 @@ func (c *Controller) UserCreateBootstrap(ctx context.Context, username string) (
 	if n > 0 {
 		return protocol.UserCreateResponseData{}, errBootstrapClosed
 	}
-	return c.UserCreate(ctx, username)
+	// The bootstrap user is the daemon's first operator and already owns it
+	// outright (an unauthenticated TLS connection may only call this verb
+	// until a user exists) -- admin here is what makes ANY admin reachable at
+	// all, since granting the bit later needs an admin caller or a
+	// hand-edited row.
+	return c.createUser(ctx, username, true)
 }
 
 func (c *Controller) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {

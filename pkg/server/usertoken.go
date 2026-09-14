@@ -231,7 +231,7 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		return Identity{}, errAuthUnavailable
 	}
 
-	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser}
+	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser, IsAdmin: uid.IsAdmin}
 	a.mu.Lock()
 	a.cache[key] = cachedIdentity{id: id, expires: now.Add(a.ttl)}
 	// Opportunistic sweep: entries are tiny and the population is the number

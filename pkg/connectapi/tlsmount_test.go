@@ -48,7 +48,7 @@ func (s oneUserStore) Authenticate(_ context.Context, token string) (users.Ident
 	}
 	return users.Identity{}, users.ErrNotFound
 }
-func (s oneUserStore) Create(context.Context, string) (users.User, string, error) {
+func (s oneUserStore) Create(context.Context, string, bool) (users.User, string, error) {
 	return users.User{}, "", users.ErrNotFound
 }
 func (s oneUserStore) List(context.Context, bool, int) ([]users.User, error) { return nil, nil }

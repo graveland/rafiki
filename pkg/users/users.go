@@ -25,6 +25,7 @@ import (
 type User struct {
 	ID        string     `json:"id"`
 	Username  string     `json:"username"`
+	IsAdmin   bool       `json:"is_admin"`
 	CreatedAt time.Time  `json:"created_at"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
@@ -35,6 +36,10 @@ type User struct {
 type Identity struct {
 	UserID   string `json:"user_id,omitempty"`
 	Username string `json:"username,omitempty"`
+	// IsAdmin is populated ONLY by Store.Authenticate, from the users row --
+	// never a request field, never a claim. An admin sees every owner's
+	// conversations; see pkg/insights.Scope.
+	IsAdmin bool `json:"is_admin,omitempty"`
 }
 
 // IsUser reports whether the identity names a row in the users table. Only a
@@ -48,7 +53,11 @@ func (i Identity) IsUser() bool { return i.UserID != "" }
 // surface as 503/internal rather than 401. See the design doc: answering a
 // database blip with 401 makes clients discard working credentials.
 type Store interface {
-	Create(ctx context.Context, username string) (User, string, error)
+	// Create mints a user and returns its plaintext token once. isAdmin is
+	// never inferred — every caller states it explicitly: the bootstrap
+	// creator (the daemon's first operator) passes true, every ordinary
+	// authenticated create passes false. Nothing else may set the bit.
+	Create(ctx context.Context, username string, isAdmin bool) (User, string, error)
 	Authenticate(ctx context.Context, token string) (Identity, error)
 	List(ctx context.Context, includeDeleted bool, limit int) ([]User, error)
 	Delete(ctx context.Context, username string) error

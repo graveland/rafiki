@@ -65,7 +65,7 @@ func TestCreateReturnsPlaintextOnceAndAuthenticates(t *testing.T) {
 	ctx := context.Background()
 	s, pool := testStore(t)
 
-	u, token, err := s.Create(ctx, "brent")
+	u, token, err := s.Create(ctx, "brent", false)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -109,10 +109,10 @@ func TestAuthenticateUnknownTokenIsErrNotFound(t *testing.T) {
 func TestDuplicateActiveUsernameIsRejected(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	if _, _, err := s.Create(ctx, "brent"); !errors.Is(err, users.ErrUsernameTaken) {
+	if _, _, err := s.Create(ctx, "brent", false); !errors.Is(err, users.ErrUsernameTaken) {
 		t.Fatalf("err = %v, want ErrUsernameTaken", err)
 	}
 }
@@ -121,7 +121,7 @@ func TestDeleteTombstonesRevokesAndFreesTheName(t *testing.T) {
 	ctx := context.Background()
 	s, pool := testStore(t)
 
-	u, token, err := s.Create(ctx, "brent")
+	u, token, err := s.Create(ctx, "brent", false)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestDeleteTombstonesRevokesAndFreesTheName(t *testing.T) {
 	}
 
 	// And the name is reusable.
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("recreate after tombstone: %v", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestCountActiveIgnoresTombstones(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("CountActive on empty table = %d, want 0", n)
 	}
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := s.Delete(ctx, "brent"); err != nil {
@@ -179,10 +179,10 @@ func TestCountActiveIgnoresTombstones(t *testing.T) {
 func TestListExcludesTombstonesUnlessAsked(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, _, err := s.Create(ctx, "alice"); err != nil {
+	if _, _, err := s.Create(ctx, "alice", false); err != nil {
 		t.Fatalf("create alice: %v", err)
 	}
-	if _, _, err := s.Create(ctx, "bob"); err != nil {
+	if _, _, err := s.Create(ctx, "bob", false); err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
 	if err := s.Delete(ctx, "bob"); err != nil {
@@ -212,7 +212,7 @@ func TestTokensAreDistinctAcrossUsers(t *testing.T) {
 	s, _ := testStore(t)
 	seen := map[string]bool{}
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
-		_, tok, err := s.Create(ctx, name)
+		_, tok, err := s.Create(ctx, name, false)
 		if err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
@@ -249,7 +249,7 @@ func TestListRespectsLimit(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
 	for _, name := range []string{"a", "b", "c"} {
-		if _, _, err := s.Create(ctx, name); err != nil {
+		if _, _, err := s.Create(ctx, name, false); err != nil {
 			t.Fatalf("create %s: %v", name, err)
 		}
 	}
@@ -274,7 +274,7 @@ func TestDeleteUnknownUsernameIsErrNotFound(t *testing.T) {
 func TestDeleteAlreadyTombstonedUsernameIsErrNotFound(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := s.Delete(ctx, "brent"); err != nil {
@@ -292,7 +292,7 @@ func TestLookupUsernameResolvesTheActiveRow(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
 
-	u, _, err := s.Create(ctx, "brent")
+	u, _, err := s.Create(ctx, "brent", false)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestLookupUsernameResolvesTheActiveRow(t *testing.T) {
 func TestLookupUsernameMissesATombstone(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := s.Delete(ctx, "brent"); err != nil {
@@ -326,13 +326,13 @@ func TestLookupUsernameWithActiveAndTombstonesReturnsTheActiveRow(t *testing.T) 
 	ctx := context.Background()
 	s, _ := testStore(t)
 
-	if _, _, err := s.Create(ctx, "brent"); err != nil {
+	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 	if err := s.Delete(ctx, "brent"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	again, _, err := s.Create(ctx, "brent")
+	again, _, err := s.Create(ctx, "brent", false)
 	if err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
@@ -377,20 +377,61 @@ func TestCreateNormalizesAndRejectsBadUsernames(t *testing.T) {
 
 	// Padding is trimmed, not stored — otherwise "brent" and "brent " would be
 	// two different people and the partial unique index would allow both.
-	u, _, err := s.Create(ctx, "  brent\t")
+	u, _, err := s.Create(ctx, "  brent\t", false)
 	if err != nil {
 		t.Fatalf("create with padding: %v", err)
 	}
 	if u.Username != "brent" {
 		t.Fatalf("username = %q, want %q (padding must be trimmed before insert)", u.Username, "brent")
 	}
-	if _, _, err := s.Create(ctx, "brent  "); !errors.Is(err, users.ErrUsernameTaken) {
+	if _, _, err := s.Create(ctx, "brent  ", false); !errors.Is(err, users.ErrUsernameTaken) {
 		t.Fatalf("a padded duplicate was accepted (err = %v); trimming must happen BEFORE the uniqueness check", err)
 	}
 
 	for _, bad := range []string{"", "   ", "\t\n"} {
-		if _, _, err := s.Create(ctx, bad); !errors.Is(err, users.ErrInvalidUsername) {
+		if _, _, err := s.Create(ctx, bad, false); !errors.Is(err, users.ErrInvalidUsername) {
 			t.Errorf("Create(%q) error = %v, want ErrInvalidUsername", bad, err)
 		}
+	}
+}
+
+// The admin bit must survive the full round trip: minted by Create, stored in
+// the row, and read back by Authenticate — the ONLY path that ever populates
+// Identity.IsAdmin. A plain user's identity must carry the bit false.
+func TestCreateAdminSetsIsAdmin(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+
+	u, token, err := s.Create(ctx, "root", true)
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	if !u.IsAdmin {
+		t.Fatalf("returned User = %+v, want IsAdmin true", u)
+	}
+
+	id, err := s.Authenticate(ctx, token)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if id.UserID != u.ID || !id.IsAdmin {
+		t.Fatalf("identity = %+v, want IsAdmin true for %s", id, u.ID)
+	}
+
+	// The ordinary user created in the same database stays non-admin, so the
+	// assertion above cannot be passing on a default-true column.
+	plain, plainToken, err := s.Create(ctx, "peon", false)
+	if err != nil {
+		t.Fatalf("create plain user: %v", err)
+	}
+	if plain.IsAdmin {
+		t.Fatalf("returned User = %+v, want IsAdmin false", plain)
+	}
+	plainID, err := s.Authenticate(ctx, plainToken)
+	if err != nil {
+		t.Fatalf("authenticate plain: %v", err)
+	}
+	if plainID.IsAdmin {
+		t.Fatalf("plain identity = %+v, want IsAdmin false", plainID)
 	}
 }

@@ -141,7 +141,7 @@ func TestResumedChildQuotaStatusReturnsCapturedData(t *testing.T) {
 	pool := openTestPool(t)
 	store := usersdb.NewPostgresStore(pool)
 	username := fmt.Sprintf("resume-quota-it-%d", time.Now().UnixNano())
-	u, _, err := store.Create(t.Context(), username)
+	u, _, err := store.Create(t.Context(), username, false)
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
@@ -210,7 +210,7 @@ func resumedConversation(t *testing.T, ctrl *Controller, childID string) string 
 // returns its id.
 func seedControllerUser(t *testing.T, pool *pgxpool.Pool, username string) string {
 	t.Helper()
-	id, _, err := usersdb.NewPostgresStore(pool).Create(t.Context(), username)
+	id, _, err := usersdb.NewPostgresStore(pool).Create(t.Context(), username, false)
 	if err != nil {
 		t.Fatalf("seed user %s: %v", username, err)
 	}

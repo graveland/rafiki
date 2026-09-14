@@ -23,7 +23,7 @@ func (c *countingStore) CountActive(context.Context) (int, error) {
 	return step()
 }
 
-func (c *countingStore) Create(context.Context, string) (users.User, string, error) {
+func (c *countingStore) Create(context.Context, string, bool) (users.User, string, error) {
 	panic("unused")
 }
 func (c *countingStore) Authenticate(context.Context, string) (users.Identity, error) {

@@ -48,6 +48,11 @@ const (
 type Identity struct {
 	UserID   string
 	Username string
+	// IsAdmin is populated ONLY by resolve(), copied from the users row via
+	// Store.Authenticate -- never a request field, never inferred. Meaningful
+	// only alongside IsUserCredential(): a child-attributed identity is never
+	// treated as admin regardless of this bit.
+	IsAdmin bool
 	// ChildID names the ONE child this identity is bound to. Set only for
 	// ProvenanceChildToken; empty for every other provenance, including a
 	// real user credential, which is what marks the interactive caller as

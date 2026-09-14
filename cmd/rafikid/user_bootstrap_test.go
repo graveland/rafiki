@@ -17,6 +17,7 @@ type bootstrapStore struct {
 	active     int
 	countErr   error
 	created    []string
+	adminBits  []bool // parallel to created: what the caller asked for
 	createErr  error
 	countCalls int
 }
@@ -26,13 +27,14 @@ func (b *bootstrapStore) CountActive(context.Context) (int, error) {
 	return b.active, b.countErr
 }
 
-func (b *bootstrapStore) Create(_ context.Context, username string) (users.User, string, error) {
+func (b *bootstrapStore) Create(_ context.Context, username string, isAdmin bool) (users.User, string, error) {
 	if b.createErr != nil {
 		return users.User{}, "", b.createErr
 	}
 	b.created = append(b.created, username)
+	b.adminBits = append(b.adminBits, isAdmin)
 	b.active++
-	return users.User{ID: "u" + username, Username: username}, "rfk_tok", nil
+	return users.User{ID: "u" + username, Username: username, IsAdmin: isAdmin}, "rfk_tok", nil
 }
 
 func (b *bootstrapStore) Authenticate(context.Context, string) (users.Identity, error) {
@@ -65,6 +67,11 @@ func TestUserCreateBootstrapRefusesOnceAUserExists(t *testing.T) {
 	}
 	if len(st.created) != 1 {
 		t.Fatalf("created = %v, want exactly one user", st.created)
+	}
+	// The bootstrap user is the daemon's first operator: it must be minted
+	// admin, or no admin is reachable at all once the window closes.
+	if !st.adminBits[0] {
+		t.Fatalf("bootstrap created %v with admin bits %v, want the first user admin", st.created, st.adminBits)
 	}
 }
 

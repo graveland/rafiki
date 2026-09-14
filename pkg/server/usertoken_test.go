@@ -54,6 +54,41 @@ func serve(a *UserTokenAuth, req *http.Request) (*httptest.ResponseRecorder, *Id
 	return rec, got
 }
 
+// IsAdmin is copied from the users row by resolve() and only for
+// ProvenanceUser: every child path (per-boot attribution, per-child secret)
+// leaves the bit false, which is what makes "admin regardless of provenance"
+// unexpressable — a child-attributed identity is never treated as admin.
+func TestUserTokenAuthResolvesAdminFlag(t *testing.T) {
+	st := &stubStore{tokens: map[string]users.Identity{
+		"rfk_admin": {UserID: "u1", Username: "root", IsAdmin: true},
+	}}
+	a := NewUserTokenAuth(st, "childsecret", time.Second)
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer rfk_admin")
+	rec, id := serve(a, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if id == nil || id.UserID != "u1" || !id.IsAdmin {
+		t.Fatalf("identity = %+v, want IsAdmin true", id)
+	}
+
+	// The ordinary-user token in the same store resolves with the bit false,
+	// so the assertion above cannot be passing on a shared struct.
+	st.tokens["rfk_peat"] = users.Identity{UserID: "u2", Username: "peon"}
+	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer rfk_peat")
+	rec2, id2 := serve(a, req2)
+	if rec2.Code != 200 {
+		t.Fatalf("plain user: status = %d, want 200", rec2.Code)
+	}
+	if id2 == nil || id2.IsAdmin {
+		t.Fatalf("plain identity = %+v, want IsAdmin false", id2)
+	}
+}
+
 func TestUserTokenAuthResolvesIdentity(t *testing.T) {
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
