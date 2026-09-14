@@ -115,6 +115,12 @@ message TurnEnd {
   string turn_id = 1;
   StopReason stop_reason = 2;
   string raw_stop_reason = 3;
+  // usage is the FINAL LLM call's usage of the turn — the prompt size the
+  // NEXT call will carry — not a turn total. An agentic turn makes one call
+  // per tool round and every call re-reads the cached prefix, so a summed
+  // cache_read would count the context once per call and read many times
+  // larger than the real context size. The turn's summed cost still rides
+  // cost_usd below; per-call usage lives in conversation_turn.
   Usage usage = 4;
   optional double cost_usd = 5;
 }

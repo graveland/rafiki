@@ -36,7 +36,16 @@ type Emitter struct {
 
 	messages []json.RawMessage
 	usage    child.PiUsage
-	native   NativeSink
+	// lastUsage is the FINAL assistant message's usage of the turn — the
+	// prompt size the NEXT call will carry — published on the turn_end event
+	// for the rail's context readout. usage above stays the turn's summed
+	// throughput (agent_end's agent_stats and turn_end's cost_usd keep sum
+	// semantics): a 45-call agentic turn re-reads its whole cached prefix
+	// once per call, so summing cache_read across calls yields ~45x the real
+	// context size and would read as "3888k of a 1M window" for a
+	// conversation that never sent more than ~104k in one request.
+	lastUsage child.PiUsage
+	native    NativeSink
 
 	// toolStarts records when each tool call began, keyed by tool_use id, so
 	// ToolEnd can report a duration. Entries are deleted on ToolEnd. No mutex:
@@ -220,6 +229,7 @@ func (e *Emitter) AgentEnd() {
 	e.fe.Emit(child.PiAgentSettled())
 	e.publishTurnEnd()
 	e.usage = child.PiUsage{}
+	e.lastUsage = child.PiUsage{}
 	// Also reset the streaming guard: a stream that failed or was aborted
 	// after content arrived never reaches StreamEnd, and a surviving
 	// `started` would suppress the NEXT turn's message_start entirely.
@@ -255,6 +265,9 @@ func (e *Emitter) addUsage(u child.PiUsage) {
 	e.usage.Cost.CacheRead += u.Cost.CacheRead
 	e.usage.Cost.CacheWrite += u.Cost.CacheWrite
 	e.usage.Cost.Total += u.Cost.Total
+	// The final call's reading, for turn_end. Overwritten per call; see the
+	// lastUsage field doc for why this is not the sum.
+	e.lastUsage = u
 }
 
 // costOf prices usage for the model that actually served the response, using

@@ -82,11 +82,22 @@ func (e *Emitter) publishAssistant(resp *anthropic.Message, turnCostUSD float64)
 // publishTurnEnd closes the turn for durable consumers. The TUI does not need
 // it -- an assistant message already finalizes its block -- but a turn
 // boundary is one of the things the event plane exists to give a non-TUI
-// consumer, and the usage rides along so a cost consumer needs no second
-// source. Every field of Usage is optional in the proto because a reported
-// zero and an unreported count are different facts; these are all reported.
+// consumer, and the usage rides along so the rail's context readout needs no
+// second source.
+//
+// Usage is the FINAL call's usage -- input + cache_read + cache_write of the
+// last assistant message is the prompt size the NEXT call carries, which is
+// what the readout plots against the model's context window. It is
+// deliberately NOT the turn total: an agentic turn makes one LLM call per tool
+// round and each call re-reads the cached prefix, so summed cache_read counts
+// the context once per call and reads as many times the real size. The turn's
+// summed throughput still rides cost_usd, which keeps turn-total semantics
+// (matching agent_end's agent_stats), and per-call usage remains in
+// conversation_turn for analytics. Every field of Usage is optional in the
+// proto because a reported zero and an unreported count are different facts;
+// these are all reported.
 func (e *Emitter) publishTurnEnd() {
-	u := e.usage
+	u := e.lastUsage
 	e.publishNative(&rafikiv1.TurnEnd{
 		StopReason:    eventconv.StopReasonFromString(e.lastStop),
 		RawStopReason: e.lastStop,
@@ -96,7 +107,7 @@ func (e *Emitter) publishTurnEnd() {
 			CacheReadTokens:  proto.Int64(int64(u.CacheRead)),
 			CacheWriteTokens: proto.Int64(int64(u.CacheWrite)),
 		},
-		CostUsd: proto.Float64(u.Cost.Total),
+		CostUsd: proto.Float64(e.usage.Cost.Total),
 	})
 }
 

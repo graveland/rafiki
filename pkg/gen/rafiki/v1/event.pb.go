@@ -769,8 +769,14 @@ type TurnEnd struct {
 	TurnId        string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	StopReason    StopReason             `protobuf:"varint,2,opt,name=stop_reason,json=stopReason,proto3,enum=rafiki.v1.StopReason" json:"stop_reason,omitempty"`
 	RawStopReason string                 `protobuf:"bytes,3,opt,name=raw_stop_reason,json=rawStopReason,proto3" json:"raw_stop_reason,omitempty"`
-	Usage         *Usage                 `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
-	CostUsd       *float64               `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
+	// usage is the FINAL LLM call's usage of the turn — the prompt size the
+	// NEXT call will carry — not a turn total. An agentic turn makes one call
+	// per tool round and every call re-reads the cached prefix, so a summed
+	// cache_read would count the context once per call and read many times
+	// larger than the real context size. The turn's summed cost still rides
+	// cost_usd below; per-call usage lives in conversation_turn.
+	Usage         *Usage   `protobuf:"bytes,4,opt,name=usage,proto3" json:"usage,omitempty"`
+	CostUsd       *float64 `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
