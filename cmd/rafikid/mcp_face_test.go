@@ -528,13 +528,40 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		t.Errorf("agent_spawn: the blueprint remainder after the excision was cut too; cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
 	}
 
+	// conversation_search is composed like agent_spawn: scope note + blueprint
+	// text with the fundi-only ownership claim excised. A verbatim-containment
+	// check (the pairs loop below) would FAIL the excision, so it gets its own
+	// bespoke assertions instead: the note present, the claim gone, the rest
+	// intact. A vacuous check here is how the ownership falsehood would ship —
+	// the claim is true for a fundi child and false for an admin caller on
+	// this surface (newMCPConversationReader grants ScopeAll).
+	searchDesc := mcpToolDescriptions["conversation_search"]
+	if searchDesc == "" {
+		t.Fatal("conversation_search: no override; the fundi-only ownership claim ships verbatim")
+	}
+	if !strings.Contains(searchDesc, mcpConversationScopeNote) {
+		t.Errorf("conversation_search: the scope-aware note is gone")
+	}
+	for _, phrase := range []string{
+		"Results are scoped to conversations you own",
+		"there is no way to search another user's",
+	} {
+		if strings.Contains(searchDesc, phrase) {
+			t.Errorf("conversation_search: ships the fundi-only ownership claim %q, false for an admin caller", phrase)
+		}
+	}
+	if !strings.Contains(searchDesc, "use conversation_export to read a specific conversation's full transcript") {
+		t.Errorf("conversation_search: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
+	}
+
 	pairs := map[string]tools.Tool{
-		"agent_send":  &tools.AgentSendBlueprint{},
-		"agent_kill":  &tools.AgentKillBlueprint{},
-		"task_add":    &tools.TaskAddBlueprint{},
-		"task_update": &tools.TaskUpdateBlueprint{},
-		"task_drop":   &tools.TaskDropBlueprint{},
-		"task_list":   &tools.TaskListBlueprint{},
+		"agent_send":          &tools.AgentSendBlueprint{},
+		"agent_kill":          &tools.AgentKillBlueprint{},
+		"conversation_export": &tools.ConversationExportBlueprint{},
+		"task_add":            &tools.TaskAddBlueprint{},
+		"task_update":         &tools.TaskUpdateBlueprint{},
+		"task_drop":           &tools.TaskDropBlueprint{},
+		"task_list":           &tools.TaskListBlueprint{},
 	}
 	for name, bp := range pairs {
 		desc, overridden := mcpToolDescriptions[name]

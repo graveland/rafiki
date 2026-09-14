@@ -380,6 +380,33 @@ const mcpSpawnNotifyStart = "You will be notified"
 // mcpSpawnKeepDoing begins the sentence after the excised span.
 const mcpSpawnKeepDoing = "Keep doing your own work"
 
+// mcpConversationScopeNote replaces the fundi-only ownership claim inside the
+// conversation tools' blueprint descriptions. Those claims ("Results are
+// scoped to conversations you own; there is no way to search another
+// user's") are written for a fundi child, whose scope is always its owner's
+// -- but newMCPConversationReader grants ScopeAll to an admin caller, so on
+// this surface the truthful scope story is the CALLING credential's: a user
+// token reads its own conversations, an admin token reads the whole daemon's.
+// The not-found-not-permission framing of the export description stays
+// verbatim (a conversation outside the caller's scope answers not-found),
+// which is correct for both provenances -- for an admin nothing is ever out
+// of scope, so the sentence never bites.
+const mcpConversationScopeNote = "Scope: results cover the conversations the " +
+	"credential you are calling with can see -- your own conversations, or, when " +
+	"you hold an admin credential, the whole daemon's. A conversation outside " +
+	"that scope answers not-found, never a permission error."
+
+// mcpSearchScopeStart begins the fundi-only ownership claim inside the
+// conversation_search blueprint text. Note and the remainder of the blueprint
+// text stay verbatim; the ownership sentence from this marker to the end goes,
+// exactly as the spawn override drops the notification promise between its
+// markers -- appending it unchanged would ship the falsehood the note exists
+// to replace, and letting the two contradict on one tool's description is
+// worse than either sentence alone. If the blueprint text drifts and the
+// marker stops matching, TestMCPFaceDescriptionsCarryTheBlueprintText fails
+// loudly rather than letting the claim ship silently.
+const mcpSearchScopeStart = "Results are scoped to conversations you own"
+
 // mcpToolDescriptions overrides a tool's model-facing description on this
 // surface. The blueprint texts are written for a fundi child, which has a
 // native task tool of its own and a live notification channel; an MCP client
@@ -394,6 +421,15 @@ var mcpToolDescriptions = func() map[string]string {
 	taskList := &tools.TaskListBlueprint{}
 	send := &tools.AgentSendBlueprint{}
 	kill := &tools.AgentKillBlueprint{}
+	search := &tools.ConversationSearchBlueprint{}
+	export := &tools.ConversationExportBlueprint{}
+	// Note and the remainder of the blueprint text stay verbatim; the
+	// fundi-only ownership sentence (from mcpSearchScopeStart to the end) is
+	// excised, the same composition the spawn override performs.
+	searchText := search.Description()
+	if start := strings.Index(searchText, mcpSearchScopeStart); start >= 0 {
+		searchText = strings.TrimRight(searchText[:start], " ")
+	}
 	// Prefix and the remainder of the blueprint text stay verbatim; only the
 	// two-sentence notification promise between the markers goes.
 	spawnText := spawn.Description()
@@ -416,6 +452,12 @@ var mcpToolDescriptions = func() map[string]string {
 			"what the agent decided, where this is a wall of transcript you have to interpret.",
 		"agent_send": mcpSurfacePrefix + send.Description(),
 		"agent_kill": mcpSurfacePrefix + kill.Description(),
+		// conversation_search/export DO get overrides: their blueprint texts
+		// state an absolute ownership scope that is false for an admin caller
+		// here (ScopeAll), unlike on a fundi child. See
+		// mcpConversationScopeNote.
+		"conversation_search": mcpConversationScopeNote + "\n\n" + searchText,
+		"conversation_export": mcpConversationScopeNote + "\n\n" + export.Description(),
 		// agent_set_budget, agent_models and quota_status have no native-client
 		// equivalent to be confused with, so their blueprint texts stand as-is.
 		"task_add":    mcpLedgerPrefix + "\n\n" + taskAdd.Description(),

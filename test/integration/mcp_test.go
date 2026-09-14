@@ -193,7 +193,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 	token := d.createMCPUser(t)
 	sess := mcpConnect(t, d.proxyURL, token)
 
-	// 3. ListTools must be the exact twelve.
+	// 3. ListTools must be the exact fourteen mcpToolNames pins.
 	list, err := sess.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
