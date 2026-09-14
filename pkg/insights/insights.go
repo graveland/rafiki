@@ -2,7 +2,7 @@
 
 // Package insights reads the captured conversations schema (conversation,
 // conversation_turn, conversation_message) for analysis surfaces: search,
-// transcript export, aggregate stats, and a sanitized read-only query executor.
+// transcript export, and aggregate stats.
 // It is read-only — nothing here writes to the store.
 package insights
 
