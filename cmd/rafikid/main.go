@@ -373,7 +373,14 @@ func runDaemon(opts runDaemonOpts) error {
 	// Controller (ctrl_get/list's ContextWindow field) — built here,
 	// independent of whether the proxy face itself manages to start, so a
 	// failed face doesn't also cost ctrl_get its context-window data.
-	catalog := routing.NewModelCatalog(http.DefaultClient, modelCatalogTTL, slog.Default())
+	//
+	// WithCache loads the on-disk snapshot immediately, so a freshly started
+	// or restarted daemon doesn't spawn agents against an empty catalog: without
+	// it, ModelInfo can't resolve a context window until the first refresh
+	// completes, silently leaving AutoCompactWindow at 0 and Claude Code
+	// compacting at its own 200K assumption instead of the model's real window.
+	catalogStore := routing.FileSnapshotStore{Path: filepath.Join(paths.CacheDir(), "openrouter_catalog.json")}
+	catalog := routing.NewModelCatalog(http.DefaultClient, modelCatalogTTL, slog.Default()).WithCache(catalogStore)
 
 	// Raw request/response trace store. Created whenever the daemon has a
 	// database pool so per-session opt-in via --record-requests always works.
