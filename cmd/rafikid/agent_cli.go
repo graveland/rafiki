@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 // dbDSNDefault returns the default DSN for agent subcommands, checking
@@ -1182,9 +1184,68 @@ func agentFindingsSetStatusCmd(verb, db string, ids []string, indent, compact bo
 		func(w io.Writer, r store.FindingRow) error { return agentcli.RenderFindings(w, []store.FindingRow{r}) })
 }
 
-// renderQueryResult prints a catalogue QueryResult as a table or JSON. Stub:
-// the real renderer lands with Task 5.1, which replaces this body without
-// touching the call site above.
+// renderQueryResult prints a catalogue QueryResult as a table or as JSON with
+// real typed values (ints and floats decode as numbers, never strings — design
+// doc §3). No wire hop for this DSN-direct surface, so the type switch runs
+// over insights.Entry's three concrete types rather than the wire's QueryValue
+// oneof, kept beside the pkg/table formatting switch immediately below so the
+// two can't drift apart silently.
 func renderQueryResult(w io.Writer, m agentcli.Mode, res insights.QueryResult) error {
-	return fmt.Errorf("not yet implemented")
+	headers := make([]string, len(res.Columns))
+	for i, c := range res.Columns {
+		headers[i] = c.Name
+	}
+
+	if m == agentcli.ModeJSON || m == agentcli.ModeJSONCompact {
+		type row = []any
+		out := struct {
+			Columns []string `json:"columns"`
+			Rows    []row    `json:"rows"`
+		}{Columns: headers}
+		for _, r := range res.Rows {
+			jr := make(row, 0, len(r))
+			for _, cell := range r {
+				switch v := cell.(type) {
+				case insights.IntEntry:
+					jr = append(jr, int64(v))
+				case insights.FloatEntry:
+					jr = append(jr, float64(v))
+				case insights.StringEntry:
+					jr = append(jr, string(v))
+				}
+			}
+			out.Rows = append(out.Rows, jr)
+		}
+		enc := json.NewEncoder(w)
+		if m == agentcli.ModeJSON {
+			enc.SetIndent("", "  ")
+		}
+		return enc.Encode(out)
+	}
+
+	tb := table.New(w, table.Options{})
+	tb.Header(headers...)
+	for _, r := range res.Rows {
+		cells := make([]string, len(r))
+		for i, cell := range r {
+			col := res.Columns[i]
+			switch v := cell.(type) {
+			case insights.IntEntry:
+				cells[i] = fmt.Sprintf("%d", int64(v))
+			case insights.FloatEntry:
+				switch col.Format {
+				case "usd":
+					cells[i] = fmt.Sprintf("$%.4f", float64(v))
+				case "pct":
+					cells[i] = fmt.Sprintf("%.0f%%", float64(v)*100)
+				default:
+					cells[i] = fmt.Sprintf("%.2f", float64(v))
+				}
+			case insights.StringEntry:
+				cells[i] = string(v)
+			}
+		}
+		tb.Row(cells...)
+	}
+	return tb.Render()
 }

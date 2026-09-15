@@ -211,11 +211,11 @@ Claude Code. Normally spawned by the rafiki daemon rather than invoked directly.
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: "DSN-backed insights CLI: stats, search, export, analyze, findings",
+		Short: "DSN-backed insights CLI: stats, search, export, query, analyze, findings",
 		Long: `DSN-backed CLI over the same conversation store the proxy captures into.
 Subcommands: stats (aggregates), search (full-text + filters),
-export (single transcript), analyze (LLM-driven skill-gap detector),
-findings (triage analysis output).`,
+export (single transcript), query (named catalogue queries),
+analyze (LLM-driven skill-gap detector), findings (triage analysis output).`,
 		SilenceUsage: true,
 	}
 

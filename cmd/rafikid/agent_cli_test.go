@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/analyze"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
 )
 
@@ -492,5 +495,92 @@ func TestAgentAnalyzeCompareRejectsUnservableModel(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a slash-id model direct-to-Anthropic can't serve must be rejected before any per-conversation work")
+	}
+}
+
+// sampleQueryResult is one result exercising every cell shape insights.Entry
+// carries: a string, a bare int, and floats in all three render formats.
+func sampleQueryResult() insights.QueryResult {
+	return insights.QueryResult{
+		Columns: []insights.Column{
+			{Name: "tool", Kind: insights.ColString},
+			{Name: "calls", Kind: insights.ColInt},
+			{Name: "cost", Kind: insights.ColFloat, Format: "usd"},
+			{Name: "hit", Kind: insights.ColFloat, Format: "pct"},
+			{Name: "ratio", Kind: insights.ColFloat},
+		},
+		Rows: [][]insights.Entry{
+			{
+				insights.StringEntry("bash"), insights.IntEntry(606),
+				insights.FloatEntry(0.0042), insights.FloatEntry(0.5), insights.FloatEntry(0.727),
+			},
+		},
+	}
+}
+
+func TestRenderQueryResultTable(t *testing.T) {
+	var got bytes.Buffer
+	if err := renderQueryResult(&got, agentcli.ModeTable, sampleQueryResult()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, want string
+	}{
+		{"string cell", "bash"},
+		{"int cell renders bare, no decimals", "606"},
+		{"usd format", "$0.0042"},
+		{"pct format", "50%"},
+		{"unformatted float", "0.73"},
+	} {
+		if !strings.Contains(got.String(), tc.want) {
+			t.Errorf("%s: output missing %q:\n%s", tc.name, tc.want, got.String())
+		}
+	}
+}
+
+// The JSON path must emit real typed values — int and float cells decode as
+// numbers, never strings — which is the whole reason Q2/Q3 typed the wire.
+// Both JSON modes carry the same typed shape; only the indentation differs.
+func TestRenderQueryResultJSONTypedValues(t *testing.T) {
+	for _, tc := range []struct {
+		mode         agentcli.Mode
+		wantIndented bool
+	}{
+		{agentcli.ModeJSON, true},
+		{agentcli.ModeJSONCompact, false},
+	} {
+		var got bytes.Buffer
+		if err := renderQueryResult(&got, tc.mode, sampleQueryResult()); err != nil {
+			t.Fatalf("mode %v: %v", tc.mode, err)
+		}
+		if tc.wantIndented != strings.Contains(got.String(), "\n  ") {
+			t.Errorf("mode %v: indentation wrong:\n%s", tc.mode, got.String())
+		}
+
+		var back struct {
+			Columns []string `json:"columns"`
+			Rows    [][]any  `json:"rows"`
+		}
+		if err := json.Unmarshal(got.Bytes(), &back); err != nil {
+			t.Fatalf("mode %v: output is not valid JSON: %v\n%s", tc.mode, err, got.String())
+		}
+		if len(back.Columns) != 5 || back.Columns[2] != "cost" {
+			t.Errorf("mode %v: columns did not survive: %+v", tc.mode, back.Columns)
+		}
+		row := back.Rows[0]
+		if len(row) != 5 {
+			t.Fatalf("mode %v: row width %d, want 5", tc.mode, len(row))
+		}
+		if s, ok := row[0].(string); !ok || s != "bash" {
+			t.Errorf("mode %v: cell 0: got %#v, want string \"bash\"", tc.mode, row[0])
+		}
+		if _, ok := row[1].(float64); !ok {
+			t.Errorf("mode %v: cell 1 (int): got %#v, want a number, not a string", tc.mode, row[1])
+		}
+		for i := 2; i < 5; i++ {
+			if _, ok := row[i].(float64); !ok {
+				t.Errorf("mode %v: cell %d (float): got %#v, want a number, not a string", tc.mode, i, row[i])
+			}
+		}
 	}
 }

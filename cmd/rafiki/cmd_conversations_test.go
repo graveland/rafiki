@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/conversationview"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -253,5 +255,117 @@ func TestUnixOrZero(t *testing.T) {
 	tm := time.Unix(1716000000, 0)
 	if got := unixOrZero(&tm); got != 1716000000 {
 		t.Errorf("got %d, want 1716000000", got)
+	}
+}
+
+func TestUnixPtrOrNil(t *testing.T) {
+	if got := unixPtrOrNil(nil); got != nil {
+		t.Errorf("nil: got %v, want nil", got)
+	}
+	tm := time.Unix(1716000000, 0)
+	got := unixPtrOrNil(&tm)
+	if got == nil || *got != 1716000000 {
+		t.Errorf("got %v, want 1716000000", got)
+	}
+}
+
+func TestConversationsQueryCmd_FlagsRegistered(t *testing.T) {
+	cmd := newConversationsQueryCmd()
+	for _, name := range []string{"since", "until", "owner", "persona", "source", "model", "path"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("flag --%s not registered", name)
+		}
+	}
+	if cmd.Args == nil {
+		t.Fatal("Args validator not set")
+	}
+	if err := cmd.Args(cmd, []string{"tools"}); err != nil {
+		t.Errorf("one arg should validate: %v", err)
+	}
+	if err := cmd.Args(cmd, nil); err == nil {
+		t.Error("expected error with zero args")
+	}
+
+	root := newRootCmd()
+	if _, _, err := root.Find([]string{"conversations", "query"}); err != nil {
+		t.Errorf("query not reachable from the command tree: %v", err)
+	}
+}
+
+// sampleQueryResponse is one response exercising every cell shape the wire
+// carries: a string, a bare int, and floats in all three render formats.
+func sampleQueryResponse() *rafikiv1.ConversationQueryResponse {
+	return &rafikiv1.ConversationQueryResponse{
+		Columns: []*rafikiv1.QueryColumn{
+			{Name: "tool", Kind: "string"},
+			{Name: "calls", Kind: "int"},
+			{Name: "cost", Kind: "float", Format: "usd"},
+			{Name: "hit", Kind: "float", Format: "pct"},
+			{Name: "ratio", Kind: "float"},
+		},
+		Rows: []*rafikiv1.QueryRow{
+			{Cells: []*rafikiv1.QueryValue{
+				{V: &rafikiv1.QueryValue_StrValue{StrValue: "bash"}},
+				{V: &rafikiv1.QueryValue_IntValue{IntValue: 606}},
+				{V: &rafikiv1.QueryValue_FloatValue{FloatValue: 0.0042}},
+				{V: &rafikiv1.QueryValue_FloatValue{FloatValue: 0.5}},
+				{V: &rafikiv1.QueryValue_FloatValue{FloatValue: 0.727}},
+			}},
+		},
+	}
+}
+
+func TestRenderQueryResponseTable(t *testing.T) {
+	var got bytes.Buffer
+	if err := renderQueryResponse(&got, conversationview.ModeTable, sampleQueryResponse()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, want string
+	}{
+		{"string cell", "bash"},
+		{"int cell renders bare, no decimals", "606"},
+		{"usd format", "$0.0042"},
+		{"pct format", "50%"},
+		{"unformatted float", "0.73"},
+	} {
+		if !strings.Contains(got.String(), tc.want) {
+			t.Errorf("%s: output missing %q:\n%s", tc.name, tc.want, got.String())
+		}
+	}
+}
+
+// The JSON path must emit real typed values — int and float cells decode as
+// numbers, never strings — which is the whole reason Q2/Q3 typed the wire.
+func TestRenderQueryResponseJSONTypedValues(t *testing.T) {
+	var got bytes.Buffer
+	if err := renderQueryResponse(&got, conversationview.ModeJSON, sampleQueryResponse()); err != nil {
+		t.Fatal(err)
+	}
+
+	var back struct {
+		Columns []string `json:"columns"`
+		Rows    [][]any  `json:"rows"`
+	}
+	if err := json.Unmarshal(got.Bytes(), &back); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, got.String())
+	}
+	if len(back.Columns) != 5 || back.Columns[2] != "cost" {
+		t.Errorf("columns did not survive: %+v", back.Columns)
+	}
+	row := back.Rows[0]
+	if len(row) != 5 {
+		t.Fatalf("row width %d, want 5", len(row))
+	}
+	if s, ok := row[0].(string); !ok || s != "bash" {
+		t.Errorf("cell 0: got %#v, want string \"bash\"", row[0])
+	}
+	if _, ok := row[1].(float64); !ok {
+		t.Errorf("cell 1 (int): got %#v, want a number, not a string", row[1])
+	}
+	for i := 2; i < 5; i++ {
+		if _, ok := row[i].(float64); !ok {
+			t.Errorf("cell %d (float): got %#v, want a number, not a string", i, row[i])
+		}
 	}
 }

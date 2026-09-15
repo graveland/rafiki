@@ -7,12 +7,15 @@ import (
 	"os"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/conversationview"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/table"
 )
 
 func newConversationsCmd() *cobra.Command {
@@ -33,6 +36,7 @@ terminal, JSON when piped.`,
 		newConversationsStatsCmd(),
 		newConversationsSearchCmd(),
 		newConversationsExportCmd(),
+		newConversationsQueryCmd(),
 	)
 	return cmd
 }
@@ -76,6 +80,18 @@ func unixOrZero(t *time.Time) int64 {
 		return 0
 	}
 	return t.Unix()
+}
+
+// unixPtrOrNil converts a resolved filter timestamp to the Connect wire's
+// optional int64: nil means unset, so the field is absent rather than sent as
+// 0. The proto's optional int64 generates *int64, where a bare unixOrZero
+// would wrongly send "unset" as a present zero.
+func unixPtrOrNil(t *time.Time) *int64 {
+	if t == nil {
+		return nil
+	}
+	u := t.Unix()
+	return &u
 }
 
 // conversationsMode maps the global --output flag (and its -j/-J shorthands)
@@ -274,4 +290,114 @@ func runConversationsExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return renderConversationResponse(os.Stdout, mode, resp, conversationview.RenderTranscriptMD)
+}
+
+// ─── query ────────────────────────────────────────────────────────────────
+
+// newConversationsQueryCmd returns `rafiki conversations query <name>`, the
+// client half of the conversation-query catalogue. Unlike its stats/search
+// siblings it goes over Connect rather than the framed protocol — the framed
+// protocol is frozen and takes no new verbs.
+func newConversationsQueryCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "query <name>",
+		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runConversationsQuery,
+	}
+	bindConversationFilterFlags(cmd)
+	return cmd
+}
+
+func runConversationsQuery(cmd *cobra.Command, args []string) error {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	client := ep.control()
+	ctx := cmdCtx(cmd)
+
+	v := conversationFilterVals(cmd)
+	f, err := conversationview.BindStatsFilter(v)
+	if err != nil {
+		return err
+	}
+	resp, err := client.ConversationQuery(ctx, connect.NewRequest(&rafikiv1.ConversationQueryRequest{
+		Name: args[0], SinceUnix: unixPtrOrNil(f.Since), UntilUnix: unixPtrOrNil(f.Until),
+		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model, Path: string(f.Path),
+	}))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
+	}
+	mode, err := conversationsMode(cmd)
+	if err != nil {
+		return err
+	}
+	return renderQueryResponse(os.Stdout, mode, resp.Msg)
+}
+
+// renderQueryResponse prints a ConversationQueryResponse as a table or as JSON
+// with real typed values (ints and floats decode as numbers, never strings —
+// design doc §3). A bare marker interface (insights.Entry, mirrored on the
+// wire by QueryValue's oneof) does not marshal to clean JSON on its own, so
+// this is the one explicit type switch, kept beside the pkg/table formatting
+// switch immediately below so the two can't drift apart silently.
+func renderQueryResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.ConversationQueryResponse) error {
+	headers := make([]string, len(resp.GetColumns()))
+	for i, c := range resp.GetColumns() {
+		headers[i] = c.GetName()
+	}
+
+	if m != conversationview.ModeTable {
+		type row = []any
+		out := struct {
+			Columns []string `json:"columns"`
+			Rows    []row    `json:"rows"`
+		}{Columns: headers}
+		for _, r := range resp.GetRows() {
+			jr := make(row, 0, len(r.GetCells()))
+			for _, cell := range r.GetCells() {
+				switch v := cell.GetV().(type) {
+				case *rafikiv1.QueryValue_IntValue:
+					jr = append(jr, v.IntValue)
+				case *rafikiv1.QueryValue_FloatValue:
+					jr = append(jr, v.FloatValue)
+				default:
+					jr = append(jr, cell.GetStrValue())
+				}
+			}
+			out.Rows = append(out.Rows, jr)
+		}
+		enc := json.NewEncoder(w)
+		if m == conversationview.ModeJSON {
+			enc.SetIndent("", "  ")
+		}
+		return enc.Encode(out)
+	}
+
+	tb := table.New(w, table.Options{})
+	tb.Header(headers...)
+	for _, r := range resp.GetRows() {
+		cells := make([]string, len(r.GetCells()))
+		for i, cell := range r.GetCells() {
+			col := resp.GetColumns()[i]
+			switch v := cell.GetV().(type) {
+			case *rafikiv1.QueryValue_IntValue:
+				cells[i] = fmt.Sprintf("%d", v.IntValue)
+			case *rafikiv1.QueryValue_FloatValue:
+				switch col.GetFormat() {
+				case "usd":
+					cells[i] = fmt.Sprintf("$%.4f", v.FloatValue)
+				case "pct":
+					cells[i] = fmt.Sprintf("%.0f%%", v.FloatValue*100)
+				default:
+					cells[i] = fmt.Sprintf("%.2f", v.FloatValue)
+				}
+			default:
+				cells[i] = cell.GetStrValue()
+			}
+		}
+		tb.Row(cells...)
+	}
+	return tb.Render()
 }
