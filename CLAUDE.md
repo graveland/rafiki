@@ -771,8 +771,11 @@
   plan split them and had to rule the wave-2 gate down to exactly that). Same
   class, smaller blast radius: extending a `connectapi` interface such as
   `ChildLifecycle` forces stubs on EVERY test implementer of that interface —
-  grep the package's `_test.go` files for all implementers, not just the fake
-  the task names (tlsmount_test.go's `identityLifecycle` was missed once).
+  enumerate the implementers with the COMPILER, not a grep: `go build ./... &&
+  go vet ./...` after the edit names every fake that lost conformance
+  (tlsmount_test.go's `identityLifecycle` was missed once by a grep; a plan's
+  pre-verified "exactly one test fake" claim missed two fakes in the interface's
+  own package a second time — only the build is authoritative).
 
 - **Recovery is scoped by daemon ownership, and the gate's job is to stop the
   ATTEMPT.** `childstoredb`'s `listSQL` is `FROM conversations.child` with no
