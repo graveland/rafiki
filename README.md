@@ -1140,6 +1140,19 @@ full fourteen-tool agent-control set under the `mcp__rafiki__*` prefix;
 daemon-spawned `--kind claude` children carry the per-boot child secret
 instead, whose credential the same gate answers with a toolless server.
 
+Daemon-spawned `--kind claude` children are also told, in their own system
+prompt, to prefer this surface: rafiki merges a short coordination prompt
+(`claudeargv.CoordinationPrompt` — use `agent_spawn` rather than the built-in
+`Task` tool when delegating, track delegated work with the `task_*` ledger)
+into the child's `--append-system-prompt`, sharing that one element with any
+caller-supplied appendix (the flag is last-wins, so the merge must be one
+text). The injection is gated on the MCP config being present — the prompt
+names tools the config is what carries — and interactive `rafiki claude`
+sessions get none of it: a human drives those. The MCP face's own tool
+descriptions carry the same preference for any other MCP client, where a
+carve-out deferring "lightweight" delegation to the client's native tool read
+as the whole rule and the surface was never used.
+
 Any other Anthropic-protocol client works the same way via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 

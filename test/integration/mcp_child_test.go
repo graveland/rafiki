@@ -37,6 +37,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +51,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -98,8 +100,9 @@ func fakeClaudeBin(t *testing.T) string {
 }
 
 // claudeDump is what one fake-claude child recorded about its own launch: the
-// argv it was exec'd with (before the marker) and its effective environment
-// (after it).
+// argv it was exec'd with (before the marker, each element base64-encoded — a
+// value may contain newlines, which a raw line-per-element dump cannot
+// represent) and its effective environment (after it).
 type claudeDump struct {
 	argv []string
 	env  []string
@@ -134,13 +137,15 @@ func (c claudeDump) sessionHeader() string {
 	return ""
 }
 
-// parseClaudeDump splits one dump file into its argv and env halves. The
-// fixture opens its dump file (truncating) before it writes argv, and the
-// env half comes from a forked env(1), so a dump caught mid-write carries
-// argv without the marker: ok is false and the caller must keep polling —
-// a marker-less file is a child that started but has not finished recording,
-// never a fixture change (the marker is printf'd before the fork, so a real
-// fixture change cannot produce an argv-carrying file without one).
+// parseClaudeDump splits one dump file into its argv and env halves, decoding
+// each argv line from base64. The fixture opens its dump file (truncating)
+// before it writes argv, and the env half comes from a forked env(1), so a
+// dump caught mid-write carries argv without the marker: ok is false and the
+// caller must keep polling — a marker-less file is a child that started but
+// has not finished recording, never a fixture change (the marker is printf'd
+// before the fork, so a real fixture change cannot produce an argv-carrying
+// file without one). An undecodable argv line gets the same treatment: the
+// file predates the fixture change, not evidence of a real launch.
 func parseClaudeDump(_ *testing.T, path string) (claudeDump, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -148,9 +153,18 @@ func parseClaudeDump(_ *testing.T, path string) (claudeDump, bool) {
 	}
 	lines := strings.Split(string(raw), "\n")
 	for i, l := range lines {
-		if l == "---ENV---" {
-			return claudeDump{argv: lines[:i], env: lines[i+1:]}, true
+		if l != "---ENV---" {
+			continue
 		}
+		argv := make([]string, 0, i)
+		for _, a := range lines[:i] {
+			decoded, err := base64.StdEncoding.DecodeString(a)
+			if err != nil {
+				return claudeDump{}, false
+			}
+			argv = append(argv, string(decoded))
+		}
+		return claudeDump{argv: argv, env: lines[i+1:]}, true
 	}
 	return claudeDump{}, false
 }
@@ -521,10 +535,22 @@ func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	}
 
 	dump := waitClaudeDump(t, d, dumps, data.ChildID)
-	for _, want := range []string{"--append-system-prompt", wantPrompt, "--foo", "bar"} {
+	for _, want := range []string{"--append-system-prompt", "--foo", "bar"} {
 		if !slices.Contains(dump.argv, want) {
 			t.Errorf("claude argv %q is missing %q; the spawn path dropped it", dump.argv, want)
 		}
+	}
+	// The caller's appendix rides the SAME element as the daemon's coordination
+	// prompt (--append-system-prompt is last-wins, so the merge must be one
+	// text; a second element would silently drop one of the two). The
+	// coordination prompt rides because this daemon serves the proxy face, so
+	// the child carries the MCP agent-control surface the prompt names.
+	appendValue := argvValue(dump.argv, "--append-system-prompt")
+	if !strings.Contains(appendValue, wantPrompt) {
+		t.Errorf("claude argv's --append-system-prompt value %q is missing the caller's appendix %q", appendValue, wantPrompt)
+	}
+	if !strings.Contains(appendValue, claudeargv.CoordinationPrompt) {
+		t.Errorf("claude argv's --append-system-prompt value %q is missing the coordination prompt", appendValue)
 	}
 
 	// The same dump pins the security invariant on the real launch: the

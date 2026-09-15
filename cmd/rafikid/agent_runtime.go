@@ -198,10 +198,17 @@ func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName 
 // own machine — see proxyenv.ClaudeEnv's doc comment — which is what makes
 // passthrough actually achievable here.
 func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest, childID string) *darajapb.ClaudeParams {
-	p := daraja.ClaudeParamsForRequest(req)
-
 	url, token := c.proxyEndpoint()
-	if url == "" || !proxyRoutesKind(req.Kind) {
+	// The same gate the local-subprocess path derives from vals.MCPConfig !=
+	// "" (proxyChildEnv returns empty Values under exactly this condition):
+	// whether the executor-side env build will inject the MCP agent-control
+	// surface, which is what decides whether the coordination prompt joins
+	// the system prompt. Both paths must answer it identically — that is what
+	// TestClaudeArgvIdenticalAcrossPaths drives.
+	mcpAgentControl := url != "" && proxyRoutesKind(req.Kind)
+	p := daraja.ClaudeParamsForRequest(req, mcpAgentControl)
+
+	if !mcpAgentControl {
 		// No proxy configured (or claude not in RAFIKI_PROXY_KINDS): daraja
 		// leaves the environment alone and this child talks to Anthropic (or
 		// whatever base URL is already ambient on the executor) directly,

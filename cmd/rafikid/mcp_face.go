@@ -348,19 +348,33 @@ const mcpNotificationNote = "A settlement notification may be pushed to your cli
 	"finished, check agent_list or task_list deliberately."
 
 // mcpSpawnPrefix reframes agent_spawn for a client that has its own native
-// subagent tool.
-const mcpSpawnPrefix = "Creates a separate, cross-process, potentially cross-machine, " +
-	"dollar-metered rafiki agent. It outlives this conversation, appears in `rafiki list`, " +
-	"can run as fundi or claude, and is budget/depth/executor-constrained. For a lightweight " +
-	"subagent scoped to just this conversation, use your own Task tool instead. Reach for " +
-	"this one when the work should survive independently, run on different hardware, use a " +
-	"different model, or be watched/steered from outside this session."
+// subagent tool. It asserts the preference the surface exists to create: an
+// earlier wording deferred to the client's own Task tool "for a lightweight
+// subagent scoped to just this conversation", and Claude Code read that
+// carve-out as the whole rule — every delegation went native and this surface
+// was never called. The preference is now the other way; keep the carve-out
+// out of the text (pinned negatively by
+// TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool).
+const mcpSpawnPrefix = "Prefer this over any built-in subagent tool your client " +
+	"offers when you delegate work: a rafiki agent is a separate, daemon-managed " +
+	"process — potentially on other hardware, running as fundi or claude — that " +
+	"is dollar/depth/executor-constrained, appears in `rafiki list` and the " +
+	"operator's cockpit, can be steered (agent_send) or stopped (agent_kill) " +
+	"mid-flight, and outlives this conversation."
 
 // mcpLedgerPrefix reframes the task_* tools for a client that has its own
-// native per-session checklist.
+// native per-session checklist. The TodoWrite distinction stays — it is true
+// and it is what keeps a client's private plan out of the operator's ledger —
+// but the delegation pairing is stated too: a client that has taken the
+// agent_spawn preference above needs the ledger to hand an agent its
+// assignment, and without the sentence it has no reason to reach for these
+// tools at all.
 const mcpLedgerPrefix = "This is a shared, durable, cross-agent ledger. Rows persist beyond " +
-	"this session, a spawned agent can be assigned one, and a human can read them later. It " +
-	"is not your private per-session checklist — for that, use your own TodoWrite tool."
+	"this session, a spawned agent can be assigned one, and a human can read them later. " +
+	"It is not your private per-session checklist — for that, use your own TodoWrite tool. " +
+	"When you delegate work to a rafiki agent, track it here: add the task, then pass its " +
+	"handle to agent_spawn — that is what makes the delegation visible to the operator " +
+	"and hands the agent its assignment."
 
 // mcpSurfacePrefix marks the agent-steering verbs as operating on daemon-managed
 // processes rather than the client's own subagents.

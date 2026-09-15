@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
 // The base flags are what makes claude speak the stream-json protocol daraja
@@ -149,6 +152,65 @@ func TestBuildMCPConfigIsSingleElement(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("Build(MCPConfig) = %v, want exactly one --mcp-config element, got %d", got, n)
+	}
+}
+
+// The coordination prompt rides a proxied child's argv, keyed on the MCP
+// config the proxy decided: it names the agent-control tools, so a child
+// without the MCP surface must not carry it. This pins the local-subprocess
+// half of the gate; the daraja half is pinned by test/integration's
+// TestClaudeArgvIdenticalAcrossPaths, which drives both mappings.
+func TestParamsFromSpawnRequestInjectsTheCoordinationPrompt(t *testing.T) {
+	_, proxied := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	if proxied.MCPConfig == "" {
+		t.Fatal("fixture: ClaudeEnv produced no MCP config for a proxied session")
+	}
+
+	got := ParamsFromSpawnRequest(protocol.SpawnRequest{}, proxied)
+	if got.AppendSystemPrompt != CoordinationPrompt {
+		t.Errorf("proxied, no caller prompt: AppendSystemPrompt = %q, want the coordination prompt", got.AppendSystemPrompt)
+	}
+
+	got = ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, proxied)
+	want := CoordinationPrompt + "\n\nbe terse"
+	if got.AppendSystemPrompt != want {
+		t.Errorf("proxied, caller prompt: AppendSystemPrompt = %q, want %q", got.AppendSystemPrompt, want)
+	}
+
+	got = ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, proxyenv.Values{})
+	if got.AppendSystemPrompt != "be terse" {
+		t.Errorf("unproxied: AppendSystemPrompt = %q, want the caller's text untouched", got.AppendSystemPrompt)
+	}
+	got = ParamsFromSpawnRequest(protocol.SpawnRequest{}, proxyenv.Values{})
+	if got.AppendSystemPrompt != "" {
+		t.Errorf("unproxied, no caller prompt: AppendSystemPrompt = %q, want empty", got.AppendSystemPrompt)
+	}
+}
+
+// The flag is last-wins, so the merge must land as ONE --append-system-prompt
+// element carrying both texts — a second element would silently drop whichever
+// text came first.
+func TestBuildRendersOneAppendSystemPromptElement(t *testing.T) {
+	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	argv := Build(ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, vals))
+	n := 0
+	for i, a := range argv {
+		if a != "--append-system-prompt" {
+			continue
+		}
+		n++
+		if i+1 >= len(argv) {
+			t.Fatalf("argv %v: --append-system-prompt has no value", argv)
+		}
+		v := argv[i+1]
+		for _, want := range []string{CoordinationPrompt, "be terse"} {
+			if !strings.Contains(v, want) {
+				t.Errorf("--append-system-prompt value %q missing %q", v, want)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("argv %v: want exactly one --append-system-prompt element, got %d", argv, n)
 	}
 }
 

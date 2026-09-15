@@ -478,7 +478,7 @@ transport error, and never a successful result carrying the text.
 
 | Tool | Purpose |
 |---|---|
-| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to point clients with their own native subagent tool at the difference |
+| `agent_spawn` | Start a top-level rafiki agent — daemon-managed, cross-process, budget/depth/executor-constrained; reworded to assert preference over a client's own native subagent tool (an earlier wording deferred to it for "lightweight" work, which Claude Code read as the whole rule and the surface was never used) |
 | `agent_list` | Every agent the daemon knows: id, name, model, current status, working directory, assigned task handle |
 | `agent_view` | Recent transcript of one agent — prompts, replies, tool calls with their results; a deliberate check, not a polling loop |
 | `agent_send` | Deliver a prompt to a running agent |
@@ -495,7 +495,23 @@ transport error, and never a successful result carrying the text.
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
-and cross-agent — not the client's private per-session checklist.
+and cross-agent — not the client's private per-session checklist (the native
+checklist keeps that job), and the description now pairs the ledger with
+delegation: add the task, pass its handle to `agent_spawn`.
+
+This surface competes with a client's own native subagent machinery — Claude
+Code's built-in `Task` tool especially — and tool descriptions alone lose that
+fight, because the client's system prompt features its own tool far more
+heavily than any description can. Two channels carry the preference therefore:
+these descriptions (for any MCP client), and for daemon-spawned `--kind claude`
+children a **coordination prompt** (`claudeargv.CoordinationPrompt`) merged
+into the child's `--append-system-prompt` — same preference, delivered where
+the client's own tool guidance lives. It is injected only when the child
+carries the MCP surface (the `--mcp-config` injection above; on the daraja
+path, iff `ProxyUrl` is set), it shares the ONE `--append-system-prompt`
+element with any caller text (the flag is last-wins; two elements would drop
+one text), and interactive `rafiki claude` sessions get neither the prompt nor
+the gate (a human drives those).
 
 **The task ledger.** The `task_*` tools scope by conversation id, and that
 column is a UUID, so a per-user ledger cannot be a synthetic string. Each user

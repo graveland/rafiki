@@ -25,6 +25,48 @@ import (
 // the two paths launch children that answer permission prompts differently.
 const PermissionModeBypass = "bypassPermissions"
 
+// CoordinationPrompt is the system-prompt appendix every daemon-managed claude
+// child that carries the MCP agent-control surface gets. It exists because tool
+// descriptions alone lose to the client's own system prompt: Claude Code's
+// built-in Task tool is heavily featured there, and an MCP description that
+// merely states a difference loses the choice every time (the MCP face's own
+// descriptions originally deferred to Task outright and won zero delegations).
+// This prompt states the preference where the client's own tool guidance lives.
+//
+// It must stay consistent with the MCP face's agent_spawn description
+// (cmd/rafikid/mcp_face.go's mcpSpawnPrefix): the two are the same preference
+// delivered through two channels — this one to daemon-spawned children, that
+// one to any MCP client. It is deliberately NOT injected for interactive
+// `rafiki claude` sessions: a human drives those and builds Params by hand.
+const CoordinationPrompt = "You are running under rafiki, which exposes its agent-control " +
+	"surface as MCP tools (agent_spawn, agent_send, agent_list, agent_view, agent_kill, " +
+	"agent_models, task_*). When you delegate work to a subagent, use rafiki's agent_spawn " +
+	"rather than your built-in Task tool: a rafiki agent is a separate daemon-managed " +
+	"process, visible in the operator's cockpit, budgetable in dollars, steerable and " +
+	"stoppable mid-flight, and it outlives this conversation. Track delegated work with " +
+	"rafiki's task_* ledger and pass the handle to agent_spawn."
+
+// WithCoordinationPrompt prepends CoordinationPrompt to s when the child
+// carries the MCP agent-control surface (mcpAgentControl), else returns s
+// unchanged. Both argv producers — ParamsFromSpawnRequest here and
+// daraja.ClaudeParamsForRequest — call this with the same gate so the two
+// launch paths stay byte-identical (test/integration's
+// TestClaudeArgvIdenticalAcrossPaths drives exactly that).
+//
+// The prompt and the caller's own appendix ride ONE --append-system-prompt
+// element: the flag is last-wins, so two elements would silently drop one of
+// the two texts. Prepended, not appended, so the daemon's standing policy
+// reads before whatever the caller asked for.
+func WithCoordinationPrompt(mcpAgentControl bool, s string) string {
+	if !mcpAgentControl {
+		return s
+	}
+	if s == "" {
+		return CoordinationPrompt
+	}
+	return CoordinationPrompt + "\n\n" + s
+}
+
 // Mode selects the argv shape.
 type Mode int
 
@@ -143,12 +185,19 @@ func Build(p Params) []string {
 // --mcp-config= prefix — and vals.ModelArgs, when non-empty, REPLACES the
 // plain --model pair req.Model would otherwise emit, so a proxied child
 // carries exactly one --model and one --mcp-config element.
+//
+// vals.MCPConfig being set is also the gate for the coordination prompt (see
+// WithCoordinationPrompt): the MCP config is what carries the agent-control
+// tools the prompt names, so a child without one gets neither. The snapshot
+// stores req.AppendSystemPrompt as the caller wrote it — the merge happens
+// here, at argv-build time, so a respawn that re-runs this mapping does not
+// double-append.
 func ParamsFromSpawnRequest(req protocol.SpawnRequest, vals proxyenv.Values) Params {
 	return Params{
 		Model:              req.Model,
 		ResumeSession:      req.ResumeSession,
 		PermissionMode:     PermissionModeBypass,
-		AppendSystemPrompt: req.AppendSystemPrompt,
+		AppendSystemPrompt: WithCoordinationPrompt(vals.MCPConfig != "", req.AppendSystemPrompt),
 		ExtraArgs:          req.ExtraArgs,
 		MCPConfig:          vals.MCPConfig,
 		ModelArgs:          vals.ModelArgs,

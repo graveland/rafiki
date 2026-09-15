@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/child"
+	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
@@ -35,7 +36,9 @@ func TestBuildClaudeArgv_Defaults(t *testing.T) {
 // (proxyChildEnv → buildEnv → resolveSpawnPlan): ModelArgs REPLACES the plain
 // --model pair req.Model would emit, and --mcp-config sits between the model
 // and --resume — Build's canonical position, not appended at the end the way
-// the old post-hoc append did it.
+// the old post-hoc append did it. A proxied child also carries the
+// coordination prompt merged into its --append-system-prompt element (the
+// caller's text after it, one element — the flag is last-wins).
 func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{
 		URL: "http://localhost:8035", Token: "tok", Model: "glm-5.2",
@@ -54,7 +57,7 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--model", "glm-5.2", // vals.ModelArgs — exactly one --model
 		"--mcp-config=" + vals.MCPConfig, // Build renders the flag against the bare-JSON Values
 		"--resume", "sess-abc",
-		"--append-system-prompt", "be brief",
+		"--append-system-prompt", claudeargv.CoordinationPrompt + "\n\nbe brief",
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion",
 		"--foo",

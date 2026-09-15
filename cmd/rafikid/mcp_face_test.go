@@ -613,6 +613,47 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 	}
 }
 
+// TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool pins the preference
+// flip. The surface originally disambiguated itself from the client's native
+// subagent tool by DEFERRING to it ("For a lightweight subagent scoped to just
+// this conversation, use your own Task tool instead"), and Claude Code read
+// that carve-out as the whole rule: every delegation went native, the MCP
+// surface was never called, and the operator saw none of the visibility the
+// surface exists to provide. The descriptions now assert the preference; these
+// phrases are the deferral coming back, and they fail loudly rather than
+// shipping silently again.
+func TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool(t *testing.T) {
+	for _, name := range []string{"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill"} {
+		desc, ok := mcpToolDescriptions[name]
+		if !ok {
+			t.Errorf("%s: no override; the fundi blueprint text ships verbatim", name)
+			continue
+		}
+		for _, phrase := range []string{
+			"use your own Task tool instead",
+			"For a lightweight subagent scoped to just this conversation",
+		} {
+			if strings.Contains(desc, phrase) {
+				t.Errorf("%s: defers to the client's native subagent tool (%q); the preference is rafiki's", name, phrase)
+			}
+		}
+	}
+	if !strings.Contains(mcpToolDescriptions["agent_spawn"], "Prefer this over any built-in subagent tool") {
+		t.Errorf("agent_spawn: the preference assertion is gone; the surface is back to competing silently with the client's own Task tool")
+	}
+	// The ledger keeps its TodoWrite distinction — that one is true and load-
+	// bearing (it keeps a private plan out of the operator's ledger) — but the
+	// delegation pairing with agent_spawn must ride beside it, or a client that
+	// took the agent_spawn preference has no stated reason to reach for these
+	// tools when it delegates.
+	ledger := mcpToolDescriptions["task_add"]
+	for _, phrase := range []string{"use your own TodoWrite tool", "pass its handle to agent_spawn"} {
+		if !strings.Contains(ledger, phrase) {
+			t.Errorf("task_add: missing %q; the ledger's reframe is incomplete", phrase)
+		}
+	}
+}
+
 // TestChildTokenGetsTheUserToolSet: a per-child token identity binds a
 // controllerSpawner scoped to the child's own subtree, and the surface is the
 // same tool set a user credential gets — scope comes from

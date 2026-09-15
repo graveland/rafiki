@@ -14,12 +14,21 @@
 # FAKE_CLAUDE_DIR names the dump directory. The test daemon is booted with it
 # set, and every child inherits it through buildEnv, so each daemon's children
 # dump into that test's own directory. One file per process, named by PID.
+#
+# Each argv element is recorded base64-encoded, one per line: a value may
+# legitimately contain newlines (the daemon merges its coordination prompt
+# into --append-system-prompt, and a caller may pass "$(cat file)"), and a
+# raw one-element-per-line dump cannot represent that — the value would split
+# into several phantom elements.
 
 set -u
 dir="${FAKE_CLAUDE_DIR:-/tmp/fake-claude-it}"
 mkdir -p "$dir" || exit 1
 {
-  printf '%s\n' "$@"
+  for a in "$@"; do
+    printf '%s' "$a" | base64 | tr -d '\n'
+    printf '\n'
+  done
   printf '%s\n' '---ENV---'
   env
 } > "$dir/claude-$$.dump"

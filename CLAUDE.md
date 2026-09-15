@@ -1880,3 +1880,24 @@
   carry the default now, and any NEW boot helper needs it too. Tests that do
   want the plane pass `RAFIKI_EXECUTORS_ENABLED=1` in extraEnv, which appends
   last and overrides the default.
+- **The agent-control preference is asserted in TWO channels, and the old
+  deferral must not come back.** Claude Code children chose their native
+  `Task` tool over rafiki's MCP surface because `mcpSpawnPrefix`
+  (cmd/rafikid/mcp_face.go) told them to ("for a lightweight subagent… use
+  your own Task tool instead") — descriptions compete poorly against the
+  client's own system prompt, and a carve-out loses outright. The descriptions
+  now assert the preference (pinned negatively by
+  `TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool`), and
+  daemon-spawned claude children additionally get `claudeargv.CoordinationPrompt`
+  merged into `--append-system-prompt` by `claudeargv.WithCoordinationPrompt`,
+  called from BOTH argv mappings (`ParamsFromSpawnRequest` gated on
+  `vals.MCPConfig != ""`, `daraja.ClaudeParamsForRequest(req, mcpAgentControl)`
+  gated on `url != "" && proxyRoutesKind(kind)`) so
+  `TestClaudeArgvIdenticalAcrossPaths` still holds. Three traps: the flag is
+  LAST-WINS, so the merge must stay one element carrying both texts — a second
+  element silently drops one; the childstore session keeps the CALLER's
+  original `AppendSystemPrompt`, and the merge happens at argv-build time, so
+  a respawn that re-runs the mapping does not double-append; and the
+  `fake-claude.sh` dump records argv base64-encoded one element per line
+  (decoded by `parseClaudeDump`) because a multi-line element is legitimate —
+  a raw line-per-element dump split it into phantom elements.

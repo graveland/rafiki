@@ -96,10 +96,12 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 
 			// Daraja path: the wire spec production composes, the host maps
 			// and rebuilds — the chain a Restart (and every launch through an
-			// executor pool) actually runs.
+			// executor pool) actually runs. The MCP-agent-control gate is
+			// derived from the same vals on both paths: MCPConfig is what
+			// carries the agent-control tools the coordination prompt names.
 			wire := &darajapb.ChildSpec{
 				Kind:   darajapb.Kind_KIND_CLAUDE,
-				Claude: daraja.ClaudeParamsForRequest(req),
+				Claude: daraja.ClaudeParamsForRequest(req, tc.vals.MCPConfig != ""),
 			}
 			darajaArgv := daraja.SpecFromProto(wire).Argv(tc.vals.MCPConfig, tc.vals.ModelArgs)
 
@@ -128,6 +130,29 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 			if tc.vals.MCPConfig == "" && argvCarries(local, "--mcp-config=") {
 				t.Errorf("unproxied argv carries an --mcp-config element: %q", local)
 			}
+
+			// The coordination prompt rides a proxied child exactly once,
+			// inside the single --append-system-prompt element, and never
+			// reaches an unproxied one (there it would name tools that do not
+			// exist). Both halves of the gate are the identity above; this is
+			// the property the gate exists to protect.
+			appendCount := 0
+			for i, a := range local {
+				if a != "--append-system-prompt" {
+					continue
+				}
+				appendCount++
+				value := local[i+1]
+				if tc.vals.MCPConfig != "" && !strings.Contains(value, claudeargv.CoordinationPrompt) {
+					t.Errorf("proxied argv carries no coordination prompt: %q", value)
+				}
+				if tc.vals.MCPConfig == "" && strings.Contains(value, claudeargv.CoordinationPrompt) {
+					t.Errorf("unproxied argv carries the coordination prompt: %q", value)
+				}
+			}
+			if appendCount != 1 {
+				t.Errorf("argv %q: want exactly one --append-system-prompt element, got %d", local, appendCount)
+			}
 		})
 	}
 }
@@ -142,4 +167,17 @@ func argvCarries(argv []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// argvValue returns the element following flag in argv, or "" when the flag is
+// absent or valueless — for asserting on the VALUE of a pair-flag such as
+// --append-system-prompt, whose value is a merged text rather than a whole
+// element worth finding with argvCarries.
+func argvValue(argv []string, flag string) string {
+	for i, a := range argv {
+		if a == flag && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
 }
