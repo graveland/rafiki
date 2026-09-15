@@ -1,0 +1,22 @@
+# Default analyzer profile, embedded into the rafiki binary (see
+# ../embedded.go) and seeded to ~/.config/rafiki/profiles/<name>/analyzer/
+# on first use -- see resolveProfile in cmd/rafikid/agent_cli.go. Once
+# seeded, this copy is yours: edit it freely, it is never overwritten.
+#
+# Schema: ../analyze.go (Profile) + ../profile.go (LoadAnalyzerDirFS).
+
+# default: cheap, fast iteration. Every stage uses a small, direct-Anthropic
+# model (needs only ANTHROPIC_API_KEY, no rafiki proxy) and a tight
+# compaction budget, so a zero-config `rafikid agent analyze <ids>` run
+# stays quick and near-free. resolveProfile falls back to this name when
+# neither --analyzer-dir nor --profile names one.
+default:
+  detector_model: claude-haiku-4-5
+  rank_model: claude-haiku-4-5 # reserved/unused today -- analyze.Rank is code-only, no LLM rank stage yet
+  draft_model: claude-haiku-4-5
+  limit: 5 # cap the batch to 5 conversations per run
+  compact:
+    max_tool_result_bytes: 1024 # smaller per-tool_result head+tail split
+    max_transcript_bytes: 65536 # 64KiB whole-transcript budget (vs the 300KiB default)
+    keep_first_turns: 2
+    keep_last_turns: 8

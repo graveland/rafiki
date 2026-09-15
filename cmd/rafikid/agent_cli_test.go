@@ -175,8 +175,15 @@ func TestResolveProfileFromAnalyzerDir(t *testing.T) {
 	if _, err := resolveProfile(dir, "nope", "", true); err == nil {
 		t.Fatal("unknown profile name must error")
 	}
-	if _, err := resolveProfile("", "", "", true); err == nil {
-		t.Fatal("no model and no analyzer dir must error")
+	// No --analyzer-dir no longer means "no config": it auto-seeds and loads
+	// ~/.config/rafiki/profiles/<name>/analyzer/ from the embedded default,
+	// which names a real model.
+	auto, err := resolveProfile("", "", "", true)
+	if err != nil {
+		t.Fatalf("no analyzer dir must fall back to the auto-seeded default, got: %v", err)
+	}
+	if auto.DetectorModel == "" {
+		t.Fatal("auto-seeded default profile must name a detector model")
 	}
 }
 
@@ -470,8 +477,17 @@ func TestAgentAnalyzeCompareRequiresDraftModel(t *testing.T) {
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 
+	// The auto-seeded default profile (no --analyzer-dir) now always names a
+	// draft_model, so reconstructing "no draft model configured" needs an
+	// explicit analyzer dir whose profile sets only a detector model.
+	analyzerDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(analyzerDir, "profiles.yaml"),
+		[]byte("default:\n  detector_model: claude-haiku-4-5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	err := agentAnalyzeCmd([]string{
-		"--corpus", dir, "--compare", "model-a",
+		"--corpus", dir, "--compare", "model-a", "--analyzer-dir", analyzerDir,
 		"--proxy-url", "http://127.0.0.1:0", "--proxy-token", "tok",
 		// No --model, no --draft/--detect/--rank: full pipeline, no draft model configured.
 	})

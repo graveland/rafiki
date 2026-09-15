@@ -26,6 +26,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -589,9 +590,12 @@ func parseAnalyzeArgs(args []string) (analyzeArgs, error) {
 	}, nil
 }
 
-// errNoDetectorModel is returned by resolveProfile when neither --model nor
-// --profile/--analyzer-dir resolved a model to run the detector with.
-var errNoDetectorModel = errors.New("no detector model: pass --model, --profile, or --analyzer-dir")
+// errNoDetectorModel is returned by resolveProfile when nothing resolved a
+// model to run the detector with. Realistically reachable only when the
+// auto-seeded default profile (or an explicit --analyzer-dir/--profile) has
+// been hand-edited to remove its model fields, since the shipped default
+// always names one.
+var errNoDetectorModel = errors.New("no detector model: pass --model, or check that your analyzer profile (--profile/--analyzer-dir, or the auto-seeded default) names one")
 
 // resolveProfile resolves --analyzer-dir/--profile/--model into a real
 // *analyze.Profile, applying the brief's precedence: --model overrides all
@@ -602,6 +606,16 @@ var errNoDetectorModel = errors.New("no detector model: pass --model, --profile,
 // error. The analyzer dir's detector.md/draft.md base prompts are attached
 // onto the resolved profile here — LoadAnalyzerDir deliberately leaves that
 // to its caller.
+//
+// With NO --analyzer-dir, this no longer means "no config at all": it
+// auto-resolves and seeds ~/.config/rafiki/profiles/<name>/analyzer/ (see
+// analyzerProfileDirName) from analyze.EmbeddedDefaultDir on first use, then
+// loads it exactly like an explicit --analyzer-dir. That seeded copy is the
+// caller's from then on — EnsureAnalyzerDir never overwrites an existing
+// profiles.yaml — so --profile still means what it always meant (pick a
+// named profile out of whichever dir is in play), and pointing
+// --analyzer-dir at a real checkout still fully overrides it for iteration.
+//
 // profileNames returns cfg's profile names, sorted, for an
 // unknown/missing-profile error to enumerate.
 func profileNames(cfg *analyze.AnalyzerConfig) []string {
@@ -613,13 +627,40 @@ func profileNames(cfg *analyze.AnalyzerConfig) []string {
 	return names
 }
 
+// analyzerProfileDirName resolves which named client profile's directory the
+// auto-seeded analyzer config lives under, when --analyzer-dir is not given:
+// $RAFIKI_PROFILE if set, else the current-profile pointer file, else
+// profile.DefaultName. This is a LOCAL FILE read only, never a daemon
+// connection — rafikid agent stays unaffected by client profiles for
+// everything else (see docs/agent-cli.md); this is the one place it borrows
+// the profile NAME, purely to scope where a local analyzer config lives, so
+// a laptop juggling -P work / -P home naturally gets separate analyzer
+// configs too.
+func analyzerProfileDirName() string {
+	if v := os.Getenv("RAFIKI_PROFILE"); v != "" {
+		return v
+	}
+	if v := profile.LoadPointer(); v != "" {
+		return v
+	}
+	return profile.DefaultName
+}
+
 func resolveProfile(analyzerDir, profileName, model string, needModel bool) (*analyze.Profile, error) {
 	var (
 		p   analyze.Profile
 		cfg *analyze.AnalyzerConfig
 	)
 
-	if analyzerDir != "" {
+	if analyzerDir == "" {
+		autoDir := filepath.Join(profile.Dir(analyzerProfileDirName()), "analyzer")
+		if err := analyze.EnsureAnalyzerDir(autoDir); err != nil {
+			return nil, fmt.Errorf("agent analyze: %w", err)
+		}
+		analyzerDir = autoDir
+	}
+
+	{
 		var err error
 		cfg, err = analyze.LoadAnalyzerDir(analyzerDir)
 		if err != nil {
@@ -652,8 +693,6 @@ func resolveProfile(analyzerDir, profileName, model string, needModel bool) (*an
 		}
 		p.DetectorPromptBase = cfg.DetectorBase
 		p.DraftPromptBase = cfg.DraftBase
-	} else if profileName != "" {
-		return nil, fmt.Errorf("agent analyze: --profile %q given without --analyzer-dir", profileName)
 	}
 
 	if model != "" {

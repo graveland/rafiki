@@ -5,9 +5,11 @@ package analyze
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 
 	"gopkg.in/yaml.v3"
 )
@@ -72,50 +74,62 @@ type AnalyzerConfig struct {
 	DraftBase    string
 }
 
-// LoadAnalyzerDir loads an analyzer directory: dir/profiles.yaml (required,
-// same strict schema as LoadProfiles) plus dir/detector.md and dir/draft.md
-// (optional BASE prompts for the two LLM stages; "" if absent).
+// LoadAnalyzerDir loads an analyzer directory from disk: dir/profiles.yaml
+// (required, same strict schema as LoadProfiles) plus dir/detector.md and
+// dir/draft.md (optional BASE prompts for the two LLM stages; "" if absent).
+// A thin wrapper over LoadAnalyzerDirFS(os.DirFS(dir)) — see that function
+// for the full behavior (prompt-file resolution, base-prompt precedence).
+func LoadAnalyzerDir(dir string) (*AnalyzerConfig, error) {
+	return LoadAnalyzerDirFS(os.DirFS(dir))
+}
+
+// LoadAnalyzerDirFS loads an analyzer directory from fsys: profiles.yaml
+// (required, same strict schema as LoadProfiles) plus detector.md and
+// draft.md (optional BASE prompts for the two LLM stages; "" if absent).
+// fsys works equally over a real directory (os.DirFS) or an embedded one
+// (embed.FS, optionally narrowed with fs.Sub) -- io/fs paths are always
+// forward-slash, which is why this function and its helpers use "path", not
+// "path/filepath".
 //
 // Per profile, the *_file fields (detector_prompt_file,
 // detector_prompt_extra_file, draft_prompt_file, draft_prompt_extra_file)
-// name a file, RELATIVE to dir, whose contents are read into the
+// name a file, RELATIVE to fsys's root, whose contents are read into the
 // corresponding inline field (detector_prompt, detector_prompt_extra,
 // draft_prompt, draft_prompt_extra); the _file field is then zeroed. Paths
 // must not be absolute, must not use "\", and must not contain any ".."
 // segment (same policy as draft.go's validateRelativePath). Setting both an
 // inline field and its _file twin is an error ("choose one").
 //
-// LoadAnalyzerDir does NOT set DetectorPromptBase/DraftPromptBase on the
+// LoadAnalyzerDirFS does NOT set DetectorPromptBase/DraftPromptBase on the
 // returned profiles — those live on AnalyzerConfig, not on each Profile.
 // Attaching the base to a profile is a resolution-layer concern: each
 // consumer (CLI inline profile, corpus run, server) may layer in a local
 // override of the analyzer dir's base before resolving prompts, so the
 // loader hands back the raw base text and lets the caller decide.
-func LoadAnalyzerDir(dir string) (*AnalyzerConfig, error) {
-	profilesPath := filepath.Join(dir, "profiles.yaml")
-	data, err := os.ReadFile(profilesPath)
+func LoadAnalyzerDirFS(fsys fs.FS) (*AnalyzerConfig, error) {
+	data, err := fs.ReadFile(fsys, "profiles.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("analyze: load analyzer dir: %w", err)
 	}
 
 	profiles, err := decodeProfilesYAML(data)
 	if err != nil {
-		return nil, fmt.Errorf("analyze: load analyzer dir: %s: %w", profilesPath, err)
+		return nil, fmt.Errorf("analyze: load analyzer dir: profiles.yaml: %w", err)
 	}
 
 	for name, p := range profiles {
-		p, err := resolvePromptFiles(dir, name, p)
+		p, err := resolvePromptFiles(fsys, name, p)
 		if err != nil {
 			return nil, fmt.Errorf("analyze: load analyzer dir: %w", err)
 		}
 		profiles[name] = p
 	}
 
-	detectorBase, err := readOptionalFile(filepath.Join(dir, "detector.md"))
+	detectorBase, err := readOptionalFile(fsys, "detector.md")
 	if err != nil {
 		return nil, fmt.Errorf("analyze: load analyzer dir: %w", err)
 	}
-	draftBase, err := readOptionalFile(filepath.Join(dir, "draft.md"))
+	draftBase, err := readOptionalFile(fsys, "draft.md")
 	if err != nil {
 		return nil, fmt.Errorf("analyze: load analyzer dir: %w", err)
 	}
@@ -127,10 +141,10 @@ func LoadAnalyzerDir(dir string) (*AnalyzerConfig, error) {
 	}, nil
 }
 
-// resolvePromptFiles resolves a profile's *_file fields against dir, one at
+// resolvePromptFiles resolves a profile's *_file fields against fsys, one at
 // a time, returning the profile with each inline field populated and its
 // _file twin cleared.
-func resolvePromptFiles(dir, name string, p Profile) (Profile, error) {
+func resolvePromptFiles(fsys fs.FS, name string, p Profile) (Profile, error) {
 	resolve := func(inline, file, fieldName string) (string, error) {
 		if file == "" {
 			return inline, nil
@@ -141,7 +155,7 @@ func resolvePromptFiles(dir, name string, p Profile) (Profile, error) {
 		if err := validateRelativePath(file); err != nil {
 			return "", fmt.Errorf("profile %q: %s_file %q: %w", name, fieldName, file, err)
 		}
-		content, err := os.ReadFile(filepath.Join(dir, file))
+		content, err := fs.ReadFile(fsys, path.Clean(file))
 		if err != nil {
 			return "", fmt.Errorf("profile %q: %s_file %q: %w", name, fieldName, file, err)
 		}
@@ -169,11 +183,12 @@ func resolvePromptFiles(dir, name string, p Profile) (Profile, error) {
 	return p, nil
 }
 
-// readOptionalFile reads path, returning "" (no error) if it doesn't exist.
-func readOptionalFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+// readOptionalFile reads name from fsys, returning "" (no error) if it
+// doesn't exist.
+func readOptionalFile(fsys fs.FS, name string) (string, error) {
+	data, err := fs.ReadFile(fsys, name)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
