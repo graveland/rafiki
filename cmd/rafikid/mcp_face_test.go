@@ -556,6 +556,25 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		t.Errorf("conversation_search: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 	}
 
+	// conversation_query is composed exactly like conversation_search: scope
+	// note + blueprint text with the fundi-only ownership claim excised. Same
+	// bespoke assertions for the same reason — a vacuous check here is how the
+	// ownership falsehood would ship beside the scope-aware note.
+	queryDesc := mcpToolDescriptions["conversation_query"]
+	if queryDesc == "" {
+		t.Fatal("conversation_query: no override; the fundi-only ownership claim ships verbatim")
+	}
+	if !strings.Contains(queryDesc, mcpConversationScopeNote) {
+		t.Errorf("conversation_query: the scope-aware note is gone")
+	}
+	if strings.Contains(queryDesc, "Results are scoped to conversations you own") {
+		t.Errorf("conversation_query: ships the fundi-only ownership claim, false for an admin caller")
+	}
+	if !strings.Contains(queryDesc, "agent-kind conversations only") ||
+		!strings.Contains(queryDesc, "coverage filters conversation creation week") {
+		t.Errorf("conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
+	}
+
 	pairs := map[string]tools.Tool{
 		"agent_send":          &tools.AgentSendBlueprint{},
 		"agent_kill":          &tools.AgentKillBlueprint{},
