@@ -14,11 +14,17 @@ func init() {
 	registerQuery("tools", ClassOwnerScoped, queryTools)
 }
 
-// queryTools counts tool_use blocks by tool name. Casing is preserved
-// DELIBERATELY, never merged (e.g. "Bash" and "bash" stay separate rows):
-// capitalized names are Claude Code's own tools seen through the proxy,
-// lowercase are fundi's, and merging them would erase which agent framework
-// actually ran the call -- see tasks/conversation-queries.md §4.2.
+// queryTools counts tool_use blocks by tool name, merged CASE-INSENSITIVELY:
+// "Bash" and "bash" are one row, displayed under the spelling that carried
+// more calls (Postgres mode() is deterministic on a tie -- the sort-first
+// spelling wins). Rows sort by calls DESCENDING, then tool name; the
+// conversations column counts DISTINCT conversations over the whole merged
+// group, never a sum of per-spelling counts, or a conversation that used both
+// spellings would count twice. The merge deliberately retires the old
+// case-preserving contract, which kept Claude Code's tools (capitalised, seen
+// through the proxy) apart from fundi's (lowercase) -- see
+// tasks/conversation-queries.md §4.2; the dominant spelling still hints at
+// which framework dominated a row.
 func queryTools(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFilter) (QueryResult, error) {
 	if err := f.Path.validate(); err != nil {
 		return QueryResult{}, err
@@ -43,15 +49,21 @@ func queryTools(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFil
 	}
 
 	query := `
-SELECT b->>'name' AS tool, count(*) AS n, count(DISTINCT m.conversation_id) AS convs
-FROM conversations.conversation_message m
-JOIN conversations.conversation c ON c.id = m.conversation_id
-, LATERAL jsonb_array_elements(
-    CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
-  ) b
-WHERE b->>'type' = 'tool_use' AND ` + strings.Join(conds, " AND ") + `
-GROUP BY 1
-ORDER BY 3 DESC, 1`
+WITH usage AS (
+    SELECT lower(b->>'name') AS key, b->>'name' AS tool, m.conversation_id AS conv_id
+    FROM conversations.conversation_message m
+    JOIN conversations.conversation c ON c.id = m.conversation_id
+    , LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(m.content) = 'array' THEN m.content ELSE '[]'::jsonb END
+      ) b
+    WHERE b->>'type' = 'tool_use' AND ` + strings.Join(conds, " AND ") + `
+)
+SELECT mode() WITHIN GROUP (ORDER BY tool) AS tool,
+       count(*) AS calls,
+       count(DISTINCT conv_id) AS convs
+FROM usage
+GROUP BY key
+ORDER BY 2 DESC, 1`
 
 	rows, err := pool.Query(ctx, query, a.args...)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/profile"
 )
 
@@ -356,6 +357,46 @@ func TestEnumCompletions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The catalogue-query names complete from the static insightstypes list --
+// never a daemon round trip -- because TestCatalogueMatchesSharedQueryNames
+// holds that list in step with pkg/insights' registry. This test drives the
+// REAL ValidArgsFunction so a rename or a dropped registration fails here
+// instead of silently offering nothing (the failure class the __complete
+// probe in the original bug report showed).
+func TestCompleteQueryNames(t *testing.T) {
+	cmd := newConversationsQueryCmd()
+	if cmd.ValidArgsFunction == nil {
+		t.Fatal("ValidArgsFunction not set — `rafiki conversations query <TAB>` completes nothing")
+	}
+	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
+	}
+	if len(got) != len(insightstypes.QueryNames) {
+		t.Fatalf("got %v, want all %v", got, insightstypes.QueryNames)
+	}
+	for _, want := range insightstypes.QueryNames {
+		if !containsCandidate(got, want) {
+			t.Errorf("got %v, missing %q", got, want)
+		}
+	}
+	got, _ = cmd.ValidArgsFunction(cmd, nil, "co")
+	if len(got) != 1 || !containsCandidate(got, "coverage") {
+		t.Errorf("prefix 'co' got %v, want [coverage]", got)
+	}
+	got, _ = cmd.ValidArgsFunction(cmd, nil, "c")
+	if len(got) != 2 || !containsCandidate(got, "classes") || !containsCandidate(got, "coverage") {
+		t.Errorf("prefix 'c' got %v, want [classes coverage]", got)
+	}
+	if got, _ := cmd.ValidArgsFunction(cmd, nil, "z"); len(got) != 0 {
+		t.Errorf("prefix 'z' got %v, want none", got)
+	}
+	// The verb takes exactly one name; past it there is nothing to offer.
+	if got, _ := cmd.ValidArgsFunction(cmd, []string{"tools"}, ""); len(got) != 0 {
+		t.Errorf("past the single target got %v, want none", got)
 	}
 }
 

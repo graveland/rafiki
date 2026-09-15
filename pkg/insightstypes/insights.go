@@ -47,5 +47,15 @@ func (p Path) DrivenBy() string {
 	}
 }
 
+// QueryNames lists every named catalogue query pkg/insights registers, in
+// the order help text and tool descriptions present them. It is the single
+// completion source for `rafiki conversations query <TAB>` and `rafikid
+// agent query <TAB>`: the client binaries link this package (pgx-free) and
+// cannot reach the registry itself, so the list is static here and held in
+// step by TestCatalogueMatchesSharedQueryNames, which fails on any query
+// registered in pkg/insights without an entry here (or a list entry with no
+// query behind it).
+var QueryNames = []string{"tools", "skills", "classes", "models", "sizes", "coverage"}
+
 // argList accumulates positional query arguments and hands back the $N
 // placeholder for each, so a dynamic WHERE stays parameterized.

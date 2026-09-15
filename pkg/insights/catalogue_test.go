@@ -5,9 +5,12 @@ package insights
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 )
 
 func TestQueryUnknownNameReturnsNotFound(t *testing.T) {
@@ -15,6 +18,34 @@ func TestQueryUnknownNameReturnsNotFound(t *testing.T) {
 	_, err := ins.Query(context.Background(), ScopeAll(), "no-such-query", StatsFilter{})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+// The registry is the truth for what Query accepts; insightstypes.QueryNames
+// is what the client binaries complete against (they cannot link this
+// package). The two must describe the same set, so a query registered here
+// without a list entry -- or a list entry with no query behind it, which
+// would complete a name that always answers not-found -- fails here rather
+// than at a terminal. Names beginning with "__" are test registrations (see
+// the tests above) and are excluded.
+func TestCatalogueMatchesSharedQueryNames(t *testing.T) {
+	var got []string
+	for name := range catalogue {
+		if len(name) >= 2 && name[:2] == "__" {
+			continue
+		}
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	want := append([]string(nil), insightstypes.QueryNames...)
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("registered queries = %v, shared QueryNames = %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("registered queries = %v, shared QueryNames = %v", got, want)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -304,6 +305,21 @@ func newConversationsQueryCmd() *cobra.Command {
 		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage)",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runConversationsQuery,
+	}
+	// The query names are static and shared with the daemon's registry (the
+	// insightstypes list is held in step by TestCatalogueMatchesSharedQueryNames),
+	// so completion never dials the daemon and can never block or print.
+	cmd.ValidArgsFunction = func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) >= 1 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		var names []string
+		for _, n := range insightstypes.QueryNames {
+			if strings.HasPrefix(n, toComplete) {
+				names = append(names, n)
+			}
+		}
+		return names, cobra.ShellCompDirectiveNoFileComp
 	}
 	bindConversationFilterFlags(cmd)
 	return cmd

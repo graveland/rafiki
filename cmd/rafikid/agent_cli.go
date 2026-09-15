@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -216,6 +217,20 @@ func newAgentQueryCmd() *cobra.Command {
 		Short: "Run a named catalogue query (tools, skills, classes, models, sizes, coverage) over persisted history",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runAgentQuery,
+	}
+	// Same source as the client CLI's completion: the static insightstypes
+	// list, held in step with the registry by TestCatalogueMatchesSharedQueryNames.
+	cmd.ValidArgsFunction = func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) >= 1 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		var names []string
+		for _, n := range insightstypes.QueryNames {
+			if strings.HasPrefix(n, toComplete) {
+				names = append(names, n)
+			}
+		}
+		return names, cobra.ShellCompDirectiveNoFileComp
 	}
 	registerFilterFlags(cmd.Flags())
 	return cmd
