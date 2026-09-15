@@ -215,7 +215,7 @@ func (t *conversationExportTool) Execute(ctx context.Context, in ToolInput) (Too
 }
 
 const conversationQueryDescription = "Run a named catalogue query over your own conversation history: " +
-	"\"tools\" (tool_use counts by tool, case-insensitively merged under the " +
+	"\"tools\" (tool_use counts by tool with ok/error/unmatched splits, case-insensitively merged under the " +
 	"most common spelling, sorted by calls descending), \"skills\" (skill invocations, namespace-normalized), " +
 	"\"classes\" (behavioral breakdown: coordinator/brainstorming/planning/worker), " +
 	"\"models\" (served-model distribution), \"sizes\" (turn-count histogram per class), " +

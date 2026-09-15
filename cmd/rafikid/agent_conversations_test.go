@@ -132,7 +132,9 @@ func TestConversationReaderRunQueryMapsScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunQuery with an owner scope: %v", err)
 	}
-	if len(res.Columns) != 3 || res.Columns[0].Name != "tool" || res.Columns[1].Name != "calls" || res.Columns[2].Name != "conversations" {
+	if len(res.Columns) != 6 || res.Columns[0].Name != "tool" || res.Columns[1].Name != "calls" ||
+		res.Columns[2].Name != "ok" || res.Columns[3].Name != "errors" ||
+		res.Columns[4].Name != "unmatched" || res.Columns[5].Name != "conversations" {
 		t.Errorf("columns = %+v, want the tools query's declared schema", res.Columns)
 	}
 	if len(res.Rows) != 0 {

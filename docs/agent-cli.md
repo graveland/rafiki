@@ -136,8 +136,9 @@ rafikid agent query classes -j
 ```
 
 Requires exactly one positional query name, one of: `tools` (tool_use counts
-by tool, case-insensitively merged under the most common spelling and sorted
-by calls descending), `skills` (skill invocations, namespace-normalized),
+by tool with ok/error/unmatched splits, case-insensitively merged under the
+most common spelling and sorted by calls descending), `skills` (skill
+invocations, namespace-normalized),
 `classes` (behavioral breakdown: coordinator/brainstorming/planning/worker),
 `models` (served-model distribution), `sizes` (turn-count histogram per
 class), `coverage` (child-row instrumentation coverage by week, agent-kind

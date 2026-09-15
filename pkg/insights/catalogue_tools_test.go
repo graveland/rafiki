@@ -33,8 +33,8 @@ func TestQueryToolsMergesCasingUnderTheDominantSpelling(t *testing.T) {
 	if n, ok := row[1].(IntEntry); !ok || n != 3 {
 		t.Fatalf("calls = %v, want 3 (merged across spellings)", row[1])
 	}
-	if convs, ok := row[2].(IntEntry); !ok || convs != 1 {
-		t.Fatalf("convs = %v, want 1", row[2])
+	if convs, ok := row[5].(IntEntry); !ok || convs != 1 {
+		t.Fatalf("convs = %v, want 1", row[5])
 	}
 }
 
@@ -117,8 +117,8 @@ func TestQueryToolsMergesConversationCounts(t *testing.T) {
 	if n, ok := got.Rows[0][1].(IntEntry); !ok || n != 4 {
 		t.Fatalf("calls = %v, want 4", got.Rows[0][1])
 	}
-	if convs, ok := got.Rows[0][2].(IntEntry); !ok || convs != 3 {
-		t.Fatalf("convs = %v, want 3 (distinct conversations, never a per-spelling sum)", got.Rows[0][2])
+	if convs, ok := got.Rows[0][5].(IntEntry); !ok || convs != 3 {
+		t.Fatalf("convs = %v, want 3 (distinct conversations, never a per-spelling sum)", got.Rows[0][5])
 	}
 }
 
@@ -147,8 +147,55 @@ func TestQueryToolsScopeOwnerExcludesOtherOwners(t *testing.T) {
 	if n, ok := row[1].(IntEntry); !ok || n != 1 {
 		t.Fatalf("calls = %v, want 1", row[1])
 	}
-	if convs, ok := row[2].(IntEntry); !ok || convs != 1 {
-		t.Fatalf("convs = %v, want 1 (bob's conversation only)", row[2])
+	if convs, ok := row[5].(IntEntry); !ok || convs != 1 {
+		t.Fatalf("convs = %v, want 1 (bob's conversation only)", row[5])
+	}
+}
+
+// Outcomes split each call by the tool_result block that answers its id:
+// bash is called twice -- once answered ok, once answered is_error -- while
+// grep is never answered at all (the conversation died mid-call). calls must
+// stay the honest total: ok + errors + unmatched = calls, per row.
+func TestQueryToolsSplitsOutcomesOkErrorUnmatched(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := seedConversation(t, pool, "client", "bob")
+	insertMessage(t, pool, convID, 2, "assistant", `[{"type":"tool_use","id":"u-ok","name":"bash","input":{}}]`)
+	insertMessage(t, pool, convID, 3, "user", `[{"type":"tool_result","tool_use_id":"u-ok","content":"done"}]`)
+	insertMessage(t, pool, convID, 4, "assistant", `[{"type":"tool_use","id":"u-err","name":"bash","input":{}}]`)
+	insertMessage(t, pool, convID, 5, "user", `[{"type":"tool_result","tool_use_id":"u-err","is_error":true,"content":"boom"}]`)
+	insertMessage(t, pool, convID, 6, "assistant", `[{"type":"tool_use","id":"u-none","name":"grep","input":{}}]`)
+	ins := New(pool)
+
+	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
+	if err != nil {
+		t.Fatalf("query tools: %v", err)
+	}
+	if len(got.Rows) != 2 {
+		t.Fatalf("tools rows = %d (%v), want 2", len(got.Rows), got.Rows)
+	}
+	byTool := map[string][]IntEntry{}
+	for _, row := range got.Rows {
+		tool, ok := row[0].(StringEntry)
+		if !ok {
+			t.Fatalf("tool cell = %v, want a string", row[0])
+		}
+		cells := make([]IntEntry, 0, 5)
+		for _, cell := range row[1:6] {
+			n, ok := cell.(IntEntry)
+			if !ok {
+				t.Fatalf("%s numeric cell = %v, want an int", tool, cell)
+			}
+			cells = append(cells, n)
+		}
+		byTool[string(tool)] = cells
+	}
+	// Row layout: calls, ok, errors, unmatched, convs.
+	if bash := byTool["bash"]; len(bash) != 5 || bash[0] != 2 || bash[1] != 1 || bash[2] != 1 || bash[3] != 0 || bash[4] != 1 {
+		t.Fatalf("bash row = %v, want [2 1 1 0 1] (one ok, one error)", bash)
+	}
+	if grep := byTool["grep"]; len(grep) != 5 || grep[0] != 1 || grep[1] != 0 || grep[2] != 0 || grep[3] != 1 || grep[4] != 1 {
+		t.Fatalf("grep row = %v, want [1 0 0 1 1] (no result block: unmatched, not ok)", grep)
 	}
 }
 
