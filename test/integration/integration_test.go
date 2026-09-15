@@ -158,6 +158,14 @@ func bootDaemon(t *testing.T) *daemon {
 		// A developer's ambient RAFIKI_DB would otherwise point this throwaway
 		// daemon at their real conversations database.
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
+		// Executors must be off for the suite's plain spawns: a DB-backed daemon
+		// builds an executor pool by default (no RAFIKI_CONTROL_LISTEN, so
+		// executorsEnabled defaults on), and a top-level empty-selector spawn
+		// against a pool with zero live executors is now REFUSED
+		// ("no executor satisfies \"\"") instead of starting toolless. Tests
+		// that want the executor plane boot their own daemon with
+		// RAFIKI_EXECUTORS_ENABLED=1 (grant_test) or enroll an executor first.
+		"RAFIKI_EXECUTORS_ENABLED=0",
 		// Each daemon binds its OWN ephemeral proxy port. A fixed
 		// RAFIKI_PROXY_LISTEN (or the :8035 default) makes the suite's parallel
 		// daemons collide with each other — the first to bind wins, the rest

@@ -1871,3 +1871,12 @@
   live in cmd/rafikid/executor_select.go (promoteBareExecutorRef,
   persistRefAsSelector); the top-level + empty-selector + zero-live-executor
   spawn is now REFUSED with explainNoMatch instead of starting toolless.
+  **A DB-backed daemon with no `RAFIKI_CONTROL_LISTEN` defaults the pool ON**
+  (`executorsEnabled`, cmd/rafikid/main.go) — so every `test/integration`
+  boot helper that spawns plain children MUST set
+  `RAFIKI_EXECUTORS_ENABLED=0` or each spawn dies with
+  `no executor satisfies ""`. This silently broke 19 integration tests after
+  the refusal rule landed (found 2026-09-15); bootDaemon and bootDaemonDB
+  carry the default now, and any NEW boot helper needs it too. Tests that do
+  want the plane pass `RAFIKI_EXECUTORS_ENABLED=1` in extraEnv, which appends
+  last and overrides the default.
