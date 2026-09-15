@@ -333,6 +333,7 @@ var mcpBlueprints = []tools.Tool{
 	&tools.QuotaStatusBlueprint{},
 	&tools.ConversationSearchBlueprint{},
 	&tools.ConversationExportBlueprint{},
+	&tools.ConversationQueryBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint
@@ -423,12 +424,20 @@ var mcpToolDescriptions = func() map[string]string {
 	kill := &tools.AgentKillBlueprint{}
 	search := &tools.ConversationSearchBlueprint{}
 	export := &tools.ConversationExportBlueprint{}
+	query := &tools.ConversationQueryBlueprint{}
 	// Note and the remainder of the blueprint text stay verbatim; the
 	// fundi-only ownership sentence (from mcpSearchScopeStart to the end) is
 	// excised, the same composition the spawn override performs.
 	searchText := search.Description()
 	if start := strings.Index(searchText, mcpSearchScopeStart); start >= 0 {
 		searchText = strings.TrimRight(searchText[:start], " ")
+	}
+	// Same excision as search: conversation_query's blueprint text carries the
+	// same fundi-only ownership sentence at its end, false for an admin caller
+	// here for exactly the same reason.
+	queryText := query.Description()
+	if start := strings.Index(queryText, mcpSearchScopeStart); start >= 0 {
+		queryText = strings.TrimRight(queryText[:start], " ")
 	}
 	// Prefix and the remainder of the blueprint text stay verbatim; only the
 	// two-sentence notification promise between the markers goes.
@@ -458,6 +467,7 @@ var mcpToolDescriptions = func() map[string]string {
 		// mcpConversationScopeNote.
 		"conversation_search": mcpConversationScopeNote + "\n\n" + searchText,
 		"conversation_export": mcpConversationScopeNote + "\n\n" + export.Description(),
+		"conversation_query":  mcpConversationScopeNote + "\n\n" + queryText,
 		// agent_set_budget, agent_models and quota_status have no native-client
 		// equivalent to be confused with, so their blueprint texts stand as-is.
 		"task_add":    mcpLedgerPrefix + "\n\n" + taskAdd.Description(),

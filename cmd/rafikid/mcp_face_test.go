@@ -391,9 +391,10 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"agent_view",
 		// Deliberate on a DB-less face, unlike quota_status: Conversations is
 		// set unconditionally in getServer (newMCPConversationReader degrades
-		// to a deny-all Scope internally), so these two materialize and answer
-		// an ErrNoPool error at call time instead of declining.
+		// to a deny-all Scope internally), so these three materialize and
+		// answer an ErrNoPool error at call time instead of declining.
 		"conversation_export",
+		"conversation_query",
 		"conversation_search",
 		"task_add",
 		"task_drop",
@@ -438,6 +439,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"agent_spawn",
 		"agent_view",
 		"conversation_export",
+		"conversation_query",
 		"conversation_search",
 		"quota_status",
 		"task_add",
@@ -625,6 +627,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		"agent_spawn",
 		"agent_view",
 		"conversation_export",
+		"conversation_query",
 		"conversation_search",
 		"quota_status",
 		"task_add",

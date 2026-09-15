@@ -10,6 +10,7 @@ import (
 func init() {
 	DefaultBlueprint.Register(&ConversationSearchBlueprint{})
 	DefaultBlueprint.Register(&ConversationExportBlueprint{})
+	DefaultBlueprint.Register(&ConversationQueryBlueprint{})
 }
 
 // ConversationSummaryRow is one conversation, as the daemon's insights layer
@@ -57,6 +58,39 @@ type ConversationTranscript struct {
 type ConversationReader interface {
 	ConversationSearch(ctx context.Context, q ConversationQuery) ([]ConversationSummaryRow, error)
 	ConversationExport(ctx context.Context, conversationID string) (*ConversationTranscript, error)
+	RunQuery(ctx context.Context, name string, f CatalogueFilter) (CatalogueResult, error)
+}
+
+// CatalogueFilter mirrors insights.StatsFilter, for the conversation_query
+// tool. Distinct from ConversationQuery above (that type mirrors
+// insights.SearchFilter, for conversation_search) -- same package, two
+// different filter shapes for two different tools.
+type CatalogueFilter struct {
+	SinceUnix, UntilUnix                int64
+	Owner, Persona, Source, Model, Path string
+}
+
+// CatalogueColumn mirrors insights.Column.
+type CatalogueColumn struct {
+	Name, Kind, Format string
+}
+
+// CatalogueEntry mirrors insights.Entry as a plain union rather than an
+// interface -- this type crosses exactly one boundary (ConversationReader to
+// the tool's text rendering) and is never read by a query implementation
+// the way insights.Entry is.
+type CatalogueEntry struct {
+	Str     string
+	Int     int64
+	Float   float64
+	IsInt   bool
+	IsFloat bool
+}
+
+// CatalogueResult mirrors insights.QueryResult.
+type CatalogueResult struct {
+	Columns []CatalogueColumn
+	Rows    [][]CatalogueEntry
 }
 
 const conversationSearchDescription = "Search your own past conversations by time, model, " +
@@ -178,4 +212,97 @@ func (t *conversationExportTool) Execute(ctx context.Context, in ToolInput) (Too
 		return ToolResult{}, fmt.Errorf("conversation_export: marshal: %w", err)
 	}
 	return NewTextResult(string(b)), nil
+}
+
+const conversationQueryDescription = "Run a named catalogue query over your own conversation history: " +
+	"\"tools\" (tool_use counts by tool), \"skills\" (skill invocations, namespace-normalized), " +
+	"\"classes\" (behavioral breakdown: coordinator/brainstorming/planning/worker), " +
+	"\"models\" (served-model distribution), \"sizes\" (turn-count histogram per class), " +
+	"\"coverage\" (child-row instrumentation coverage by week, agent-kind conversations only). " +
+	"Results are scoped to conversations you own, same as conversation_search."
+
+type ConversationQueryBlueprint struct{}
+
+func (ConversationQueryBlueprint) Name() string        { return "conversation_query" }
+func (ConversationQueryBlueprint) Description() string { return conversationQueryDescription }
+func (ConversationQueryBlueprint) InputSchema() Schema {
+	return Schema{
+		Type: "object",
+		Properties: []SchemaProperty{
+			{Name: "name", Type: "string", Description: "One of: tools, skills, classes, models, sizes, coverage."},
+			{Name: "since_unix", Type: "integer", Description: "Unix seconds lower bound (meaning varies by query -- see its description)."},
+			{Name: "until_unix", Type: "integer", Description: "Unix seconds upper bound."},
+			{Name: "model", Type: "string", Description: "Filter by served model id (ignored by queries with no per-turn model)."},
+			{Name: "source", Type: "string", Description: "Filter by capture source."},
+			{Name: "path", Type: "string", Description: "\"proxy\" or \"direct\"; empty means either."},
+		},
+		Required: []string{"name"},
+	}
+}
+func (ConversationQueryBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
+	panic("blueprint: call Materialize first")
+}
+func (ConversationQueryBlueprint) Materialize(opts ToolOpts) (Tool, error) {
+	if opts.Conversations == nil {
+		return nil, nil
+	}
+	return &conversationQueryTool{reader: opts.Conversations}, nil
+}
+
+type conversationQueryTool struct {
+	ConversationQueryBlueprint
+	reader ConversationReader
+}
+
+func (t *conversationQueryTool) Execute(ctx context.Context, in ToolInput) (ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolResult{}, err
+	}
+	var req struct {
+		Name                string `json:"name"`
+		SinceUnix           int64  `json:"since_unix"`
+		UntilUnix           int64  `json:"until_unix"`
+		Model, Source, Path string
+	}
+	if err := in.Unmarshal(&req); err != nil {
+		return ToolResult{}, fmt.Errorf("conversation_query: %w", err)
+	}
+	if req.Name == "" {
+		return ToolResult{}, fmt.Errorf("conversation_query: name is required")
+	}
+	res, err := t.reader.RunQuery(ctx, req.Name, CatalogueFilter{
+		SinceUnix: req.SinceUnix, UntilUnix: req.UntilUnix,
+		Model: req.Model, Source: req.Source, Path: req.Path,
+	})
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("conversation_query: %w", err)
+	}
+	if len(res.Rows) == 0 {
+		return NewTextResult("no rows"), nil
+	}
+	var sb strings.Builder
+	for i, c := range res.Columns {
+		if i > 0 {
+			sb.WriteString("\t")
+		}
+		sb.WriteString(c.Name)
+	}
+	sb.WriteString("\n")
+	for _, row := range res.Rows {
+		for i, cell := range row {
+			if i > 0 {
+				sb.WriteString("\t")
+			}
+			switch {
+			case cell.IsInt:
+				fmt.Fprintf(&sb, "%d", cell.Int)
+			case cell.IsFloat:
+				fmt.Fprintf(&sb, "%g", cell.Float)
+			default:
+				sb.WriteString(cell.Str)
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return NewTextResult(sb.String()), nil
 }

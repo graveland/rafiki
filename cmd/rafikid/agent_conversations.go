@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -89,6 +90,56 @@ func (r *conversationReader) ConversationExport(ctx context.Context, conversatio
 		})
 	}
 	return out, nil
+}
+
+func (r *conversationReader) RunQuery(ctx context.Context, name string, f tools.CatalogueFilter) (tools.CatalogueResult, error) {
+	res, err := r.ctrl.ConversationQuery(ctx, r.scope, name, insights.StatsFilter{
+		Since: unixSecPtr(f.SinceUnix), Until: unixSecPtr(f.UntilUnix),
+		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
+		Path: insights.Path(f.Path),
+	})
+	if err != nil {
+		return tools.CatalogueResult{}, err
+	}
+	return catalogueResult(res)
+}
+
+// catalogueResult maps an insights.QueryResult onto the tool-side mirrors.
+// Column kinds collapse to the three the tool can render -- ColString is the
+// zero ColumnKind, so it is the default arm. An Entry outside the three
+// concrete types cannot occur for a result the admission-checked Query entry
+// point produced, so it is a mapping bug and fails loudly rather than
+// rendering as an empty cell.
+func catalogueResult(res insights.QueryResult) (tools.CatalogueResult, error) {
+	cols := make([]tools.CatalogueColumn, 0, len(res.Columns))
+	for _, c := range res.Columns {
+		kind := "string"
+		switch c.Kind {
+		case insights.ColInt:
+			kind = "int"
+		case insights.ColFloat:
+			kind = "float"
+		}
+		cols = append(cols, tools.CatalogueColumn{Name: c.Name, Kind: kind, Format: c.Format})
+	}
+	rows := make([][]tools.CatalogueEntry, 0, len(res.Rows))
+	for _, r := range res.Rows {
+		row := make([]tools.CatalogueEntry, 0, len(r))
+		for _, e := range r {
+			switch v := e.(type) {
+			case insights.IntEntry:
+				row = append(row, tools.CatalogueEntry{Int: int64(v), IsInt: true})
+			case insights.FloatEntry:
+				row = append(row, tools.CatalogueEntry{Float: float64(v), IsFloat: true})
+			case insights.StringEntry:
+				row = append(row, tools.CatalogueEntry{Str: string(v)})
+			default:
+				return tools.CatalogueResult{}, fmt.Errorf("agent_conversations: unhandled insights.Entry type %T", e)
+			}
+		}
+		rows = append(rows, row)
+	}
+	return tools.CatalogueResult{Columns: cols, Rows: rows}, nil
 }
 
 // unixSecPtr maps a 0 (unset) Unix-seconds filter onto a nil *time.Time; any

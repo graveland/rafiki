@@ -83,6 +83,7 @@ var tierByTool = map[string]Tier{
 	"quota_status":        TierDaemon,
 	"conversation_search": TierDaemon,
 	"conversation_export": TierDaemon,
+	"conversation_query":  TierDaemon,
 
 	// Daemon — `skill` loads from paths.SkillsDirs() as well as from the
 	// project, so it survives with no executor and only loses its

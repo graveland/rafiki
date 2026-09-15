@@ -53,6 +53,7 @@ var mcpToolNames = []string{
 	"quota_status",
 	"conversation_search",
 	"conversation_export",
+	"conversation_query",
 }
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
@@ -193,7 +194,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 	token := d.createMCPUser(t)
 	sess := mcpConnect(t, d.proxyURL, token)
 
-	// 3. ListTools must be the exact fourteen mcpToolNames pins.
+	// 3. ListTools must be the exact fifteen mcpToolNames pins.
 	list, err := sess.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
