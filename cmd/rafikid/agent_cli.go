@@ -1212,6 +1212,8 @@ func renderQueryResult(w io.Writer, m agentcli.Mode, res insights.QueryResult) e
 					jr = append(jr, float64(v))
 				case insights.StringEntry:
 					jr = append(jr, string(v))
+				default:
+					return fmt.Errorf("agent_cli: unhandled insights.Entry type %T", cell)
 				}
 			}
 			out.Rows = append(out.Rows, jr)
@@ -1243,6 +1245,8 @@ func renderQueryResult(w io.Writer, m agentcli.Mode, res insights.QueryResult) e
 				}
 			case insights.StringEntry:
 				cells[i] = string(v)
+			default:
+				return fmt.Errorf("agent_cli: unhandled insights.Entry type %T", cell)
 			}
 		}
 		tb.Row(cells...)

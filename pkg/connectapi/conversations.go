@@ -83,8 +83,8 @@ type CatalogueResult struct {
 }
 
 // ConversationInsights answers scoped conversation reads. The daemon derives
-// scope from the caller's own authenticated identity server-side -- neither
-// method takes one, matching QuotaReader's "no caller-supplied id" shape.
+// scope from the caller's own authenticated identity server-side -- no method
+// takes one, matching QuotaReader's "no caller-supplied id" shape.
 type ConversationInsights interface {
 	Search(ctx context.Context, f ConversationSearchFilter) ([]ConversationSummaryRow, error)
 	// Export returns ok=false when the conversation does not exist OR is

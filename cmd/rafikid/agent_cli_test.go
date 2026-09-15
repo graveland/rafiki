@@ -584,3 +584,31 @@ func TestRenderQueryResultJSONTypedValues(t *testing.T) {
 		}
 	}
 }
+
+// insights.Entry's own doc names the pkg/table formatting switch as one of the
+// sites every concrete type must be handled at; renderQueryResult holds BOTH
+// switches (JSON and table), so a cell that is none of the three types — or a
+// nil Entry, which no current producer can emit — must fail loud with the same
+// wording as the two adapters, never silently shorten a JSON row or render an
+// empty cell.
+func TestRenderQueryResultUnknownEntryFails(t *testing.T) {
+	res := sampleQueryResult()
+	res.Rows = [][]insights.Entry{{nil, insights.IntEntry(1)}}
+	for _, tc := range []struct {
+		mode agentcli.Mode
+		name string
+	}{
+		{agentcli.ModeJSON, "json"},
+		{agentcli.ModeJSONCompact, "json compact"},
+		{agentcli.ModeTable, "table"},
+	} {
+		var got bytes.Buffer
+		err := renderQueryResult(&got, tc.mode, res)
+		if err == nil {
+			t.Fatalf("%s: want an error for a nil Entry, got none (output:\n%s)", tc.name, got.String())
+		}
+		if !strings.Contains(err.Error(), "agent_cli: unhandled insights.Entry type") {
+			t.Fatalf("%s: error %q does not name the site and type", tc.name, err)
+		}
+	}
+}

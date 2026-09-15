@@ -128,6 +128,28 @@ rafikid agent export <conv-id> -j
 Requires exactly one positional conversation id. Renders the transcript as
 markdown by default, or JSON with `-j`/`-J`.
 
+## `query`
+
+```
+rafikid agent query tools --since 24h
+rafikid agent query classes -j
+```
+
+Requires exactly one positional query name, one of: `tools` (tool_use counts
+by tool), `skills` (skill invocations, namespace-normalized), `classes`
+(behavioral breakdown: coordinator/brainstorming/planning/worker), `models`
+(served-model distribution), `sizes` (turn-count histogram per class),
+`coverage` (child-row instrumentation coverage by week, agent-kind
+conversations only).
+
+All the `stats` filter flags: `--since`, `--until`, `--owner`, `--persona`,
+`--source`, `--model`, `--path`. Time filters are per query: tools and skills
+filter message time, models filters turn time, classes and sizes filter turn
+activity, coverage filters conversation creation week.
+
+Renders a table by default; `-j`/`-J` emit JSON with real typed values (ints
+and floats decode as numbers, never strings).
+
 ## `analyze`
 
 Runs the pipeline: resolve a population → skip already-analyzed

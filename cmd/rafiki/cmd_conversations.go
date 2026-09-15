@@ -23,14 +23,14 @@ func newConversationsCmd() *cobra.Command {
 		Use:     "conversations",
 		Aliases: []string{"c", "conv"},
 		Short:   "Query persisted conversation history from the daemon's agent database",
-		Long: `Global stats, search, and transcript export over the conversations schema
-the daemon persists to when RAFIKI_DB is set. Unlike "rafiki search" (live,
-in-memory, currently-running children only), these query history in Postgres
-regardless of whether anything is still running.
+		Long: `Global stats, search, transcript export, and named catalogue queries over
+the conversations schema the daemon persists to when RAFIKI_DB is set. Unlike
+"rafiki search" (live, in-memory, currently-running children only), these query
+history in Postgres regardless of whether anything is still running.
 
-Output matches "rafikid agent stats|search|export" exactly — same queries, same
-renderers, only the transport differs. --output controls the format: tables at a
-terminal, JSON when piped.`,
+Output matches "rafikid agent stats|search|export|query" exactly — same queries,
+same renderers, only the transport differs. --output controls the format: tables
+at a terminal, JSON when piped.`,
 	}
 	cmd.AddCommand(
 		newConversationsStatsCmd(),
@@ -340,8 +340,9 @@ func runConversationsQuery(cmd *cobra.Command, args []string) error {
 // with real typed values (ints and floats decode as numbers, never strings —
 // design doc §3). A bare marker interface (insights.Entry, mirrored on the
 // wire by QueryValue's oneof) does not marshal to clean JSON on its own, so
-// this is the one explicit type switch, kept beside the pkg/table formatting
-// switch immediately below so the two can't drift apart silently.
+// there are two explicit type switches, one per output mode — the JSON cell
+// switch above and the pkg/table formatting switch below — kept adjacent so
+// the two can't drift apart silently.
 func renderQueryResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.ConversationQueryResponse) error {
 	headers := make([]string, len(resp.GetColumns()))
 	for i, c := range resp.GetColumns() {

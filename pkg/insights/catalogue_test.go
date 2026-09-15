@@ -32,6 +32,25 @@ func TestQueryClassUnsetRefusesEvenIfRegistered(t *testing.T) {
 	}
 }
 
+// Class(99) is the admission switch's default arm -- the fail-closed property
+// that keeps a future Class constant added without an admission arm from
+// running ungated. Registering one under ScopeAll proves the arm fires: the
+// query is known by name, so the not-found must come from the class refusal,
+// never from run.
+func TestQueryUnknownClassRefuses(t *testing.T) {
+	catalogue["__test_unknown_class"] = catalogQuery{class: Class(99), run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
+		t.Fatal("run must never be called for an unrecognized class")
+		return QueryResult{}, nil
+	}}
+	defer delete(catalogue, "__test_unknown_class")
+
+	ins := &Insights{}
+	_, err := ins.Query(context.Background(), ScopeAll(), "__test_unknown_class", StatsFilter{})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
 func TestQueryOwnerScopedRefusesZeroValueScope(t *testing.T) {
 	called := false
 	catalogue["__test_owner_scoped"] = catalogQuery{class: ClassOwnerScoped, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {

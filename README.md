@@ -156,7 +156,7 @@ it takes raw ids and routes by configured prefix.
 
 ## `rafikid agent`
 
-`rafikid agent <stats|search|export|analyze|findings>` is a DSN-backed CLI
+`rafikid agent <stats|search|export|query|analyze|findings>` is a DSN-backed CLI
 over the captured `conversations` schema: read-only insights, the
 LLM-driven skill-gap detector, and finding triage. See
 [`docs/agent-cli.md`](docs/agent-cli.md) for every verb, flag, and the dev
@@ -950,10 +950,10 @@ the model cannot use.
 These must reach the **daemon's** environment, not your shell's — see
 `.env.example`, which documents why and how to verify it.
 
-Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export` queries
+Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export|query` queries
 that persisted history through the daemon socket — no separate DB credentials
 needed on the machine running `rafiki`. It renders the same tables as the
-DSN-direct `rafikid agent stats|search|export` (same queries, sibling
+DSN-direct `rafikid agent stats|search|export|query` (same queries, sibling
 renderers, only the transport differs). The output contract is table by
 default on a TTY and a pipe alike; `-o json`/`-j` for pretty JSON; `-J`/
 `-o jsonl` for one compact record per line (the `{"rows": …}` envelope
