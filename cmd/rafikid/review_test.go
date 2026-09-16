@@ -11,6 +11,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // fakeReviewReads stands in for *insights.Insights on the review verbs'
@@ -263,14 +264,26 @@ func TestConversationReviewUnknownModelFailsWholeRequest(t *testing.T) {
 	}
 }
 
-// The positive control for reviewModelResolves: a catalogued id passes and
-// reaches the queue, and a registry-declared alias passes even with an empty
-// catalog — the local fleet must not be hidden behind a catalog-only check.
+// The positive control for reviewModelResolves. Real catalog keys are bare
+// OpenRouter ids — "z-ai/glm-5.3-flash", "anthropic/claude-sonnet-5" — so
+// the seeds use that shape, never a qualified "openrouter/<id>" key (a shape
+// real catalogs never carry; seeding it once masked the resolver bug where
+// the qualified request string was resolved against the catalog and always
+// missed). Both spellings a caller can actually send are pinned: the
+// qualified spelling (what ListModelRows/agent_models/the picker offer) and
+// the bare Anthropic spelling (resolves against DefaultProvider inside
+// Split, then OpenRouterModel maps it onto its "anthropic/" entry).
 func TestConversationReviewKnownModelPassesValidation(t *testing.T) {
 	conv := "00000000-0000-0000-0000-0000000000cc"
-	t.Run("catalogued id", func(t *testing.T) {
+	catalog := func(t *testing.T) *routing.ModelCatalog {
+		return seedTestCatalog(t, map[string]int{
+			"z-ai/glm-5.3-flash":        200000,
+			"anthropic/claude-sonnet-5": 200000,
+		})
+	}
+	t.Run("catalogued id, qualified spelling", func(t *testing.T) {
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
-		c.SetCatalog(seedTestCatalog(t, map[string]int{"openrouter/z-ai/glm-5.3-flash": 200000}))
+		c.SetCatalog(catalog(t))
 		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			Model: "openrouter/z-ai/glm-5.3-flash",
@@ -280,6 +293,34 @@ func TestConversationReviewKnownModelPassesValidation(t *testing.T) {
 		}
 		if len(acc) != 1 || acc[0].Status != "enqueued" {
 			t.Fatalf("accepts = %+v, want one enqueued", acc)
+		}
+	})
+	t.Run("bare anthropic id", func(t *testing.T) {
+		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
+		c.SetCatalog(catalog(t))
+		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+			ConversationIDs: []string{conv}, Stage: "detect",
+			Model: "claude-sonnet-5",
+		})
+		if err != nil {
+			t.Fatalf("ConversationReview: %v", err)
+		}
+		if len(acc) != 1 || acc[0].Status != "enqueued" {
+			t.Fatalf("accepts = %+v, want one enqueued", acc)
+		}
+	})
+	t.Run("bare openrouter id is refused", func(t *testing.T) {
+		// The addressing rule: a first segment that names no configured
+		// provider is an error, never a fallthrough to DefaultProvider —
+		// so the catalog key's own spelling cannot ride in unqualified.
+		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
+		c.SetCatalog(catalog(t))
+		_, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+			ConversationIDs: []string{conv}, Stage: "detect",
+			Model: "z-ai/glm-5.3-flash",
+		})
+		if err == nil {
+			t.Fatal("an unqualified openrouter id must fail the whole request")
 		}
 	})
 	t.Run("registry alias without a catalog", func(t *testing.T) {

@@ -82,9 +82,12 @@ func newReviewQueue(pool *pgxpool.Pool, prov *providers.Set, catalog *routing.Mo
 
 // start launches the single worker goroutine. Call once, from Controller
 // construction, threaded off the same baseCtx every other daemon-lifetime
-// goroutine uses. A job pulled off the queue after ctx is cancelled still
-// runs its cleanup (the single-flight entry is removed either way), but the
-// select below makes no NEW pickup once the daemon is shutting down.
+// goroutine uses. Shutdown is a select between ctx.Done and the next job, so
+// a queued job CAN still be picked up after ctx is cancelled (Go selects
+// randomly among ready cases); its run then fails fast against the dead
+// context, and runJob's defer still clears the single-flight entry. The
+// daemon is going down either way — nothing here is worth a second
+// synchronization point on top of baseCtx.
 func (q *reviewQueue) start(ctx context.Context) {
 	go func() {
 		for {

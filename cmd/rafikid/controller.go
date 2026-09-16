@@ -1281,27 +1281,33 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 }
 
 // reviewModelResolves reports whether model names something the daemon can
-// actually serve a review job with. Two sources, mirroring ModelInfo's own
-// resolution: the provider registry's declared model alias (a custom or
-// locally-served provider's model is never in the OpenRouter catalog — the
-// alias table is how the operator declares it) and the OpenRouter catalog
-// itself. providers.Set.Split is the base gate either way: the worker's LLM
-// client routes through the same registry, so an unknown provider fails here
-// with an actionable message rather than mid-run as a per-conversation error.
-// A nil catalog only disqualifies a model the registry cannot answer for.
+// actually serve a review job with. providers.Set.Split is the base gate —
+// the worker's LLM client routes through the same registry, so an unknown
+// provider fails here with an actionable message rather than mid-run as a
+// per-conversation error. Beyond it, two sources, mirroring ModelInfo's own
+// resolution: the provider's declared model alias (a custom or locally-served
+// provider's model is never in the OpenRouter catalog — the alias table is
+// how the operator declares it) and the OpenRouter catalog. The catalog
+// resolves the id Split already SUBSTITUTED — the provider-local spelling,
+// which is what real catalog keys are ("z-ai/glm-5.3-flash",
+// "anthropic/claude-sonnet-5"), never the qualified request string: Split
+// only accepts "openrouter/<id>", which is the spelling the daemon's own
+// surfaces (ListModelRows, agent_models, the picker) offer, and no catalog
+// carries that prefix.
 func (c *Controller) reviewModelResolves(model string) bool {
 	set := c.providers
 	if set == nil {
 		set = providers.Default()
 	}
-	if _, _, err := set.Split(model); err != nil {
+	p, resolvedID, err := set.Split(model)
+	if err != nil {
 		return false
 	}
-	name, localID := providers.SplitRaw(model)
-	if name == "" {
-		name = set.DefaultProvider
-	}
-	if p, ok := set.Get(name); ok {
+	// The request-side local id is the alias KEY on the provider Split
+	// returned; a bare id resolved against DefaultProvider inside Split, so
+	// no provider-name handling is needed here. A declared alias means the
+	// operator registered the model with the daemon.
+	if _, localID := providers.SplitRaw(model); localID != "" {
 		if _, declared := p.Models[localID]; declared {
 			return true
 		}
@@ -1309,7 +1315,7 @@ func (c *Controller) reviewModelResolves(model string) bool {
 	if c.catalog == nil {
 		return false
 	}
-	_, ok := c.catalog.ResolveID(model)
+	_, ok := c.catalog.ResolveID(resolvedID)
 	return ok
 }
 
