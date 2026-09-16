@@ -1177,7 +1177,7 @@ func (c *Controller) ConversationQuery(ctx context.Context, scope insights.Scope
 // three is what lets ConversationReview/ConversationFindings stay testable
 // without a database while production wires the real *insights.Insights.
 type reviewReads interface {
-	FilterByScope(ctx context.Context, scope insights.Scope, ids []string) ([]string, error)
+	FilterByScope(ctx context.Context, scope insights.Scope, ids []string) (canonical, spellings []string, err error)
 	RecentAnalyses(ctx context.Context, scope insights.Scope, conversationIDs []string, limit int) ([]insights.AnalysisRow, error)
 	Findings(ctx context.Context, scope insights.Scope, f insights.FindingsFilter) ([]insights.Finding, error)
 }
@@ -1195,12 +1195,19 @@ var errReviewNoDB = connect.NewError(connect.CodeFailedPrecondition,
 // RAFIKI_REVIEW_* env > profile defaults — profile defaults are resolved
 // lazily inside the worker via resolveProfile, so this method only fills the
 // env tier), clamps budget_usd against RAFIKI_REVIEW_MAX_BUDGET_USD when set
-// (downward only), and calls c.reviewQ.tryAccept once per (scope-filtered)
-// conversation id. Returns one connectapi.ReviewAccept per surviving id, in
-// input order. An out-of-scope id is dropped silently — the same
-// not-found-shaped scope miss pkg/insights uses elsewhere; never a
-// permission error, which would leak the id's existence. Never blocks on an
-// LLM call: the worker owns the run.
+// (downward only; a negative ceiling is treated as 0 — no ceiling — before
+// the max-env logic), and calls c.reviewQ.tryAccept once per (scope-filtered)
+// conversation id. Requested ids may be conversation uuids or child ids (the
+// client's Resolve produces child ids); FilterByScope canonicalizes the
+// survivors to their conversation uuids index-aligned with the surviving
+// caller spellings, and this method queues on the CANONICAL value while the
+// response echoes the CALLER's spelling — so two spellings of one
+// conversation (its uuid and its child id) collide correctly in the
+// single-flight map. Returns one connectapi.ReviewAccept per surviving id, in
+// input order. An id matching neither arm — nonexistent or out of scope — is
+// dropped silently — the same not-found-shaped scope miss pkg/insights uses
+// elsewhere; never a permission error, which would leak the id's existence.
+// Never blocks on an LLM call: the worker owns the run.
 //
 // Model validation happens HERE, not inside the worker: a request naming an
 // unresolvable model must fail the whole request (design §6), not surface
@@ -1244,6 +1251,11 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 	// request's budget_usd is clamped DOWN to it — unset env means the
 	// request's own cap is the only cap, and a zero (unrequested) ceiling
 	// becomes the max rather than staying unlimited.
+	// A negative ceiling is malformed, not "spend nothing": 0 already means
+	// no ceiling here, so fold the negative to 0 BEFORE the max-env logic.
+	if budgetUSD < 0 {
+		budgetUSD = 0
+	}
 	if max, ok := envFloat("RAFIKI_REVIEW_MAX_BUDGET_USD"); ok && (budgetUSD == 0 || budgetUSD > max) {
 		budgetUSD = max
 	}
@@ -1254,20 +1266,17 @@ func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scop
 		minTurns = v
 	}
 
-	ids, err := c.reviewInsights.FilterByScope(ctx, scope, req.ConversationIDs)
+	canonical, admitted, err := c.reviewInsights.FilterByScope(ctx, scope, req.ConversationIDs)
 	if err != nil {
 		return nil, err
 	}
 
-	accepted := make([]connectapi.ReviewAccept, 0, len(req.ConversationIDs))
-	for _, id := range req.ConversationIDs {
-		if !slices.Contains(ids, id) {
-			continue // out of scope: dropped silently, never a status naming it
-		}
+	accepted := make([]connectapi.ReviewAccept, 0, len(admitted))
+	for k, spelling := range admitted {
 		accepted = append(accepted, connectapi.ReviewAccept{
-			ConversationID: id,
+			ConversationID: spelling,
 			Status: c.reviewQ.tryAccept(reviewJob{
-				conversationID: id,
+				conversationID: canonical[k],
 				stage:          stage,
 				model:          model,
 				profileName:    profileName,

@@ -17,15 +17,21 @@ import (
 // fakeReviewReads stands in for *insights.Insights on the review verbs'
 // accept path: FilterByScope answers with a fixed admitted set, so
 // ConversationReview's scope, clamp and model-validation behavior is
-// testable without a database.
+// testable without a database. canonical is the parallel canonical list the
+// real FilterByScope returns; when unset, the inputs are their own canonical
+// (the uuid inputs the older tests use).
 type fakeReviewReads struct {
-	ids      []string
-	findings []insights.Finding
-	analyses []insights.AnalysisRow
+	ids       []string
+	canonical []string
+	findings  []insights.Finding
+	analyses  []insights.AnalysisRow
 }
 
-func (f fakeReviewReads) FilterByScope(_ context.Context, _ insights.Scope, _ []string) ([]string, error) {
-	return f.ids, nil
+func (f fakeReviewReads) FilterByScope(_ context.Context, _ insights.Scope, _ []string) ([]string, []string, error) {
+	if f.canonical == nil {
+		return f.ids, f.ids, nil
+	}
+	return f.canonical, f.ids, nil
 }
 
 func (f fakeReviewReads) RecentAnalyses(_ context.Context, _ insights.Scope, _ []string, _ int) ([]insights.AnalysisRow, error) {
@@ -217,6 +223,100 @@ func TestConversationReviewClampsBudgetToMaxEnv(t *testing.T) {
 		job := <-c.reviewQ.jobs
 		if job.budgetUSD != 0.1 {
 			t.Fatalf("job.budgetUSD = %v, want the request's own 0.1", job.budgetUSD)
+		}
+	})
+}
+
+// The single-flight key and the queued job use the CANONICAL conversation
+// uuid FilterByScope returns, while the response echoes the CALLER's
+// spelling: the worker's turn count and analysis write run against the
+// conversation row (a child id would query nothing), and the caller sees its
+// own spelling back.
+func TestConversationReviewQueuesCanonicalEchoesCallerSpelling(t *testing.T) {
+	conv := "00000000-0000-0000-0000-0000000000dd"
+	child := "c_reviewchild"
+	c := reviewTestController(t, fakeReviewReads{ids: []string{child}, canonical: []string{conv}})
+	acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+		ConversationIDs: []string{child}, Stage: "detect",
+	})
+	if err != nil {
+		t.Fatalf("ConversationReview: %v", err)
+	}
+	if len(acc) != 1 || acc[0].Status != "enqueued" {
+		t.Fatalf("accepts = %+v, want one enqueued", acc)
+	}
+	if acc[0].ConversationID != child {
+		t.Fatalf("accept echoes %q, want the CALLER's spelling %q", acc[0].ConversationID, child)
+	}
+	job := <-c.reviewQ.jobs
+	if job.conversationID != conv {
+		t.Fatalf("job.conversationID = %q, want the canonical %q", job.conversationID, conv)
+	}
+}
+
+// Two spellings of one conversation -- its child id and its uuid --
+// canonicalize to the same value, so the second spelling collides in the
+// single-flight map: already_running, never a second job.
+func TestConversationReviewTwoSpellingsCollideInFlight(t *testing.T) {
+	conv := "00000000-0000-0000-0000-0000000000ee"
+	child := "c_reviewchild2"
+	c := reviewTestController(t, fakeReviewReads{
+		ids:       []string{child, conv},
+		canonical: []string{conv, conv},
+	})
+	acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+		ConversationIDs: []string{child, conv}, Stage: "detect",
+	})
+	if err != nil {
+		t.Fatalf("ConversationReview: %v", err)
+	}
+	if len(acc) != 2 {
+		t.Fatalf("accepts = %+v, want two", acc)
+	}
+	if acc[0].ConversationID != child || acc[0].Status != "enqueued" {
+		t.Fatalf("accept[0] = %+v, want %q enqueued", acc[0], child)
+	}
+	if acc[1].ConversationID != conv || acc[1].Status != "already_running" {
+		t.Fatalf("accept[1] = %+v, want %q already_running", acc[1], conv)
+	}
+	if len(c.reviewQ.jobs) != 1 {
+		t.Fatalf("queue holds %d jobs, want 1 (the canonical key collided)", len(c.reviewQ.jobs))
+	}
+}
+
+// A negative budget_usd is malformed, not "spend nothing": 0 is the
+// no-ceiling value, so the negative must fold to 0 at the clamp point
+// instead of landing on the job. The max-env logic then applies to the
+// folded value as for any unrequested ceiling.
+func TestConversationReviewNegativeBudgetIsNoCeiling(t *testing.T) {
+	conv := "00000000-0000-0000-0000-0000000000ff"
+	t.Run("without max env stays 0", func(t *testing.T) {
+		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
+		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+			ConversationIDs: []string{conv}, Stage: "detect",
+			BudgetUSD: -0.5, HasBudgetUSD: true,
+		})
+		if err != nil {
+			t.Fatalf("ConversationReview: %v", err)
+		}
+		if len(acc) != 1 || acc[0].Status != "enqueued" {
+			t.Fatalf("accepts = %+v, want one enqueued", acc)
+		}
+		if job := <-c.reviewQ.jobs; job.budgetUSD != 0 {
+			t.Fatalf("job.budgetUSD = %v, want 0 (negative folded to no ceiling)", job.budgetUSD)
+		}
+	})
+	t.Run("with max env takes the max", func(t *testing.T) {
+		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
+		t.Setenv("RAFIKI_REVIEW_MAX_BUDGET_USD", "0.25")
+		if _, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+			ConversationIDs: []string{conv}, Stage: "detect",
+			BudgetUSD: -0.5, HasBudgetUSD: true,
+		}); err != nil {
+			t.Fatalf("ConversationReview: %v", err)
+		}
+		if job := <-c.reviewQ.jobs; job.budgetUSD != 0.25 {
+			t.Fatalf("job.budgetUSD = %v, want 0.25 (folded to 0, then the max)", job.budgetUSD)
 		}
 	})
 }
