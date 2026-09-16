@@ -93,12 +93,6 @@ func reviewStageToString(stage rafikiv1.ReviewStage) string {
 	return "detect"
 }
 
-var reviewAcceptStatusToString = map[rafikiv1.ReviewAcceptStatus]string{
-	rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED:        "enqueued",
-	rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ALREADY_RUNNING: "already_running",
-	rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_QUEUE_FULL:      "queue_full",
-}
-
 var reviewAcceptStatusFromString = map[string]rafikiv1.ReviewAcceptStatus{
 	"enqueued":        rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
 	"already_running": rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ALREADY_RUNNING,
