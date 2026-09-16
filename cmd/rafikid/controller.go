@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 
@@ -156,6 +157,23 @@ type Controller struct {
 	// just means ContextWindow always returns ok=false, matching "the proxy
 	// face failed to start" or any other reason main.go has none to give.
 	catalog *routing.ModelCatalog
+
+	// reviewQ is the conversation-review worker's bounded queue. Non-nil
+	// only when pool is non-nil (main.go constructs and starts it there): a
+	// DSN-less daemon gets no reviewer, and ConversationReview answers
+	// FailedPrecondition rather than silently accepting jobs nothing will
+	// ever run.
+	reviewQ *reviewQueue
+
+	// reviewInsights answers the review verbs' scoped reads (FilterByScope,
+	// Findings, RecentAnalyses). An interface rather than *insights.Insights
+	// so the accept-path tests run without a database; production sets it to
+	// insights.New(pool) alongside coster. The methods live on
+	// *insights.Insights (pkg/insights owns scope-to-SQL translation), NOT
+	// on the agentcli.Backend interface c.insights carries — that seam has no
+	// review methods, so this field is the one place the Controller reaches
+	// them. Nil exactly when pool is nil, same condition as reviewQ.
+	reviewInsights reviewReads
 
 	// baseCtx is the daemon's own context, threaded into inproc.Options.Parent
 	// so cancelling it stops every in-process agent child at once. Distinct
@@ -443,6 +461,11 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		c.coster = insights.New(pool)
 		c.children = childstoredb.New(pool)
 		c.leases = store.NewLeases(pool)
+		// The review verbs' read surface. Pricer-less like coster's initial
+		// value: RecentAnalyses reads cost off the stored analysis row, it
+		// does not re-price anything, so the catalog's pricer is irrelevant
+		// here and this needs no SetCatalog rebuild.
+		c.reviewInsights = insights.New(pool)
 	}
 	return c
 }
@@ -1146,6 +1169,187 @@ func (c *Controller) ConversationQuery(ctx context.Context, scope insights.Scope
 		return insights.QueryResult{}, translateInsightsErr(err)
 	}
 	return res, nil
+}
+
+// reviewReads is the pkg/insights surface the two review verbs consume. The
+// methods live on *insights.Insights (pkg/insights alone owns scope-to-SQL
+// translation — see constraints.md), so an interface over exactly these
+// three is what lets ConversationReview/ConversationFindings stay testable
+// without a database while production wires the real *insights.Insights.
+type reviewReads interface {
+	FilterByScope(ctx context.Context, scope insights.Scope, ids []string) ([]string, error)
+	RecentAnalyses(ctx context.Context, scope insights.Scope, conversationIDs []string, limit int) ([]insights.AnalysisRow, error)
+	Findings(ctx context.Context, scope insights.Scope, f insights.FindingsFilter) ([]insights.Finding, error)
+}
+
+// errReviewNoDB is the review verbs' answer on a daemon with no agent
+// database: neither reviewQ nor reviewInsights exists. Shaped here (the
+// adapters return the Controller's error verbatim) with the same code
+// controllerConnectCode gives ErrNoAgentDB — a configuration gap, not a
+// transient failure.
+var errReviewNoDB = connect.NewError(connect.CodeFailedPrecondition,
+	errors.New("no agent database configured (RAFIKI_DB unset); conversation review is unavailable"))
+
+// ConversationReview validates req.Model (if set, or its env default)
+// against c.catalog, resolves every optional field per design §3 (request >
+// RAFIKI_REVIEW_* env > profile defaults — profile defaults are resolved
+// lazily inside the worker via resolveProfile, so this method only fills the
+// env tier), clamps budget_usd against RAFIKI_REVIEW_MAX_BUDGET_USD when set
+// (downward only), and calls c.reviewQ.tryAccept once per (scope-filtered)
+// conversation id. Returns one connectapi.ReviewAccept per surviving id, in
+// input order. An out-of-scope id is dropped silently — the same
+// not-found-shaped scope miss pkg/insights uses elsewhere; never a
+// permission error, which would leak the id's existence. Never blocks on an
+// LLM call: the worker owns the run.
+//
+// Model validation happens HERE, not inside the worker: a request naming an
+// unresolvable model must fail the whole request (design §6), not surface
+// as a per-id status. budget_usd and min_turns apply per conversation, never
+// divided or aggregated across a batch (design §4).
+func (c *Controller) ConversationReview(ctx context.Context, scope insights.Scope, req connectapi.ReviewRequest) ([]connectapi.ReviewAccept, error) {
+	if c.reviewQ == nil || c.reviewInsights == nil {
+		return nil, errReviewNoDB
+	}
+
+	// Stage: connectapi's proto mapping leaves only "detect"/"rank", but
+	// this method is also called directly (tests, future internal callers),
+	// so normalize defensively — StopAfter must never be "" (design §7,
+	// draft must never run from this verb).
+	stage := req.Stage
+	if stage != "rank" {
+		stage = "detect"
+	}
+
+	// Config resolution, design §3. The request tier wins; the env tier
+	// fills gaps; the profile tier is the worker's business.
+	model := req.Model
+	if model == "" {
+		model = os.Getenv("RAFIKI_REVIEW_MODEL")
+	}
+	if model != "" && !c.reviewModelResolves(model) {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("conversation review: model %q does not resolve in the daemon's model catalog or provider registry", model))
+	}
+	profileName := req.Profile
+	if profileName == "" {
+		profileName = os.Getenv("RAFIKI_REVIEW_PROFILE")
+	}
+	budgetUSD := 0.0
+	if req.HasBudgetUSD {
+		budgetUSD = req.BudgetUSD
+	} else if v, ok := envFloat("RAFIKI_REVIEW_BUDGET_USD"); ok {
+		budgetUSD = v
+	}
+	// The clamp is the one daemon-side cost knob (design §6): when set, a
+	// request's budget_usd is clamped DOWN to it — unset env means the
+	// request's own cap is the only cap, and a zero (unrequested) ceiling
+	// becomes the max rather than staying unlimited.
+	if max, ok := envFloat("RAFIKI_REVIEW_MAX_BUDGET_USD"); ok && (budgetUSD == 0 || budgetUSD > max) {
+		budgetUSD = max
+	}
+	minTurns := int32(0)
+	if req.HasMinTurns {
+		minTurns = req.MinTurns
+	} else if v, ok := envInt32("RAFIKI_REVIEW_MIN_TURNS"); ok {
+		minTurns = v
+	}
+
+	ids, err := c.reviewInsights.FilterByScope(ctx, scope, req.ConversationIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	accepted := make([]connectapi.ReviewAccept, 0, len(req.ConversationIDs))
+	for _, id := range req.ConversationIDs {
+		if !slices.Contains(ids, id) {
+			continue // out of scope: dropped silently, never a status naming it
+		}
+		accepted = append(accepted, connectapi.ReviewAccept{
+			ConversationID: id,
+			Status: c.reviewQ.tryAccept(reviewJob{
+				conversationID: id,
+				stage:          stage,
+				model:          model,
+				profileName:    profileName,
+				budgetUSD:      budgetUSD,
+				minTurns:       minTurns,
+				force:          req.Force,
+			}),
+		})
+	}
+	return accepted, nil
+}
+
+// reviewModelResolves reports whether model names something the daemon can
+// actually serve a review job with. Two sources, mirroring ModelInfo's own
+// resolution: the provider registry's declared model alias (a custom or
+// locally-served provider's model is never in the OpenRouter catalog — the
+// alias table is how the operator declares it) and the OpenRouter catalog
+// itself. providers.Set.Split is the base gate either way: the worker's LLM
+// client routes through the same registry, so an unknown provider fails here
+// with an actionable message rather than mid-run as a per-conversation error.
+// A nil catalog only disqualifies a model the registry cannot answer for.
+func (c *Controller) reviewModelResolves(model string) bool {
+	set := c.providers
+	if set == nil {
+		set = providers.Default()
+	}
+	if _, _, err := set.Split(model); err != nil {
+		return false
+	}
+	name, localID := providers.SplitRaw(model)
+	if name == "" {
+		name = set.DefaultProvider
+	}
+	if p, ok := set.Get(name); ok {
+		if _, declared := p.Models[localID]; declared {
+			return true
+		}
+	}
+	if c.catalog == nil {
+		return false
+	}
+	_, ok := c.catalog.ResolveID(model)
+	return ok
+}
+
+// ConversationFindings delegates to the review read surface (pkg/insights
+// owns the scoped SQL), scoped exactly like ConversationReview. Both halves
+// come back: findings for the filter, and the recent analysis rows that show
+// an enqueued review's outcome over the wire.
+func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Scope, f connectapi.ReviewFindingsFilter) ([]connectapi.ReviewFinding, []connectapi.ReviewAnalysis, error) {
+	if c.reviewInsights == nil {
+		return nil, nil, errReviewNoDB
+	}
+	rows, err := c.reviewInsights.Findings(ctx, scope, insights.FindingsFilter{
+		Axis: f.Axis, Skill: f.Skill, Status: f.Status,
+		ConversationIDs: f.ConversationIDs, Limit: f.Limit,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	analyses, err := c.reviewInsights.RecentAnalyses(ctx, scope, f.ConversationIDs, f.Limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	findings := make([]connectapi.ReviewFinding, 0, len(rows))
+	for _, r := range rows {
+		findings = append(findings, connectapi.ReviewFinding{
+			ID: r.ID, AnalysisID: r.AnalysisID, ConversationID: r.ConversationID,
+			Axis: r.Axis, TopicKey: r.TopicKey, SkillName: r.SkillName, Title: r.Title,
+			ExpectedSavingsTokens: r.ExpectedSavingsTokens, Status: r.Status,
+		})
+	}
+	analysisRows := make([]connectapi.ReviewAnalysis, 0, len(analyses))
+	for _, a := range analyses {
+		analysisRows = append(analysisRows, connectapi.ReviewAnalysis{
+			ID: a.ID, ConversationID: a.ConversationID, Model: a.Model, Profile: a.Profile,
+			Status: a.Status, Error: a.Error,
+			InputTokens: a.InputTokens, OutputTokens: a.OutputTokens,
+			CostUSD: a.CostUSD, CreatedAtUnix: a.CreatedAt.Unix(),
+		})
+	}
+	return findings, analysisRows, nil
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {

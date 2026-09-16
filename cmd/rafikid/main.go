@@ -474,6 +474,14 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
+	// The conversation-review worker: one bounded queue drained by a single
+	// goroutine, pool-gated like every other DB-backed component. A DSN-less
+	// daemon gets no reviewer at all — ConversationReview then answers
+	// FailedPrecondition instead of accepting jobs nothing will ever run.
+	if pool != nil {
+		ctrl.reviewQ = newReviewQueue(pool, prov, catalog)
+		ctrl.reviewQ.start(baseCtx)
+	}
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
 		if face.TokenAuth != nil {
@@ -493,6 +501,8 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
 			face.Control.SetModelLister(connectModels{c: ctrl})
 			face.Control.SetConversationInsights(connectConversations{c: ctrl})
+			face.Control.SetConversationReviewer(connectReview{c: ctrl})
+			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
 			if skillStore != nil {
 				face.Control.SetSkillManager(connectSkills{st: skillStore, version: version.String()})

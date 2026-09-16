@@ -627,6 +627,42 @@ func controllerConnectError(err error) error {
 	return connect.NewError(controllerConnectCode(ce.Code), errors.New(ce.Message))
 }
 
+// connectReview adapts *Controller to connectapi.ConversationReviewer. Scope
+// is derived HERE, from the caller's own credential — the wire carries no
+// scope, matching every conversation verb above.
+type connectReview struct{ c *Controller }
+
+func (a connectReview) Review(ctx context.Context, req connectapi.ReviewRequest) ([]connectapi.ReviewAccept, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return a.c.ConversationReview(ctx, scope, req)
+}
+
+// connectFindingsReader adapts *Controller to connectapi.
+// ConversationFindingsReader. Same scope rule: derived from the credential,
+// never carried on the wire.
+type connectFindingsReader struct{ c *Controller }
+
+func (a connectFindingsReader) Findings(ctx context.Context, f connectapi.ReviewFindingsFilter) ([]connectapi.ReviewFinding, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	findings, _, err := a.c.ConversationFindings(ctx, scope, f)
+	return findings, err
+}
+
+func (a connectFindingsReader) RecentAnalyses(ctx context.Context, conversationIDs []string, limit int) ([]connectapi.ReviewAnalysis, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, analyses, err := a.c.ConversationFindings(ctx, scope, connectapi.ReviewFindingsFilter{ConversationIDs: conversationIDs, Limit: limit})
+	return analyses, err
+}
+
 // controllerConnectCode translates the protocol codes a ControllerError can
 // carry onto connect codes. ErrNoAgentDB is a daemon configuration gap, not
 // a transient failure -- the request is fine and the operator must set
