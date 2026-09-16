@@ -434,6 +434,52 @@ func TestHopMarksTheOldChildRead(t *testing.T) {
 	}
 }
 
+// c.status is a single global field: nothing else resets it on a focus
+// change, so without this the footer keeps showing whatever the previously
+// focused child last reported -- including a status belonging to a different
+// conversation entirely.
+func TestHopUpdatesTheStatusLineToTheNewChild(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
+	c.rail.Apply(statusEventFor("c_2", "shutting_down", 1))
+	c.status = "agent: idle" // stale, left over from c_1
+
+	c.hop("c_2")
+
+	if want := "agent: shutting_down"; c.status != want {
+		t.Errorf("status = %q, want %q: the footer must describe the newly focused child", c.status, want)
+	}
+}
+
+// MarkRead is otherwise only called reactively, when a NEW event arrives for
+// the focused child. Hopping into a child that was already loaded and simply
+// re-reading its (already-fetched) transcript must clear its badge too,
+// rather than leaving it until the next live event -- which may never come
+// for a quiet conversation.
+func TestHopClearsAnExistingUnreadBadgeOnAnAlreadyLoadedChild(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
+
+	// c_2 was visited before (it has a cursor) and earned a badge while c_1
+	// was focused.
+	c.sessions["c_2"] = session.New("c_2")
+	ev := statusEventFor("c_2", "idle", 3)
+	c.sessions["c_2"].Apply(ev)
+	c.rail.Apply(ev)
+
+	if n, _ := c.rail.Get("c_2"); n.Attention == 0 {
+		t.Fatal("test setup: c_2 should carry a badge before the hop")
+	}
+
+	c.hop("c_2")
+
+	if n, _ := c.rail.Get("c_2"); n.Attention != 0 {
+		t.Errorf("Attention = %d, want 0: focusing and reading an already-loaded child must clear its badge immediately", n.Attention)
+	}
+}
+
 func TestLRUEvictsTheOldestButNeverTheFocused(t *testing.T) {
 	c := newTestCockpit("c_0")
 	defer c.shutdown()

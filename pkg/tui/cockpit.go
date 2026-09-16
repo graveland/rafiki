@@ -744,6 +744,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, ev := range msg.events {
 			s.ApplyHistory(ev)
 		}
+		// msg.after is the rail's watermark captured BEFORE the fetch -- what
+		// this focus is about to show, not the (possibly -1) resume point below.
+		// Delivering it into the transcript is reading it.
+		c.rail.MarkRead(msg.childID, msg.after)
 		after := msg.after
 		if len(msg.events) == 0 {
 			// Nothing persisted: the log is all there is, so replay it whole
@@ -1456,12 +1460,25 @@ func (c *Cockpit) openFocus(childID string) tea.Cmd {
 	}
 	c.touch(childID)
 
+	// The footer must describe the child now in focus, not whatever the
+	// previously focused child last reported -- c.status is a single global
+	// field and nothing else resets it on a focus change. The rail's Node is
+	// the source: it is kept current by Seed and by every status-bearing
+	// event, independent of whether this session's own stream has caught up.
+	c.status = ""
+	if n, ok := c.rail.Get(childID); ok && n.Status != "" {
+		c.status = "agent: " + n.Status
+	}
+
 	if len(s.Blocks) == 0 && !s.HasCursor {
 		return c.historyCmd(childID)
 	}
 	// Already read once: resume the log from where this session left off. Its
 	// history is in hand and re-fetching it would re-render the transcript on
-	// every hop.
+	// every hop. Focusing it is reading it -- clear whatever badge it carried
+	// from before this hop, rather than waiting on a live event that may never
+	// come if the child stays quiet.
+	c.rail.MarkRead(childID, s.Cursor)
 	c.startFocus(childID, s.Cursor)
 	return nil
 }
