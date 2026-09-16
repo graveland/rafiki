@@ -43,6 +43,31 @@ func TestLinesCacheIsTransparent(t *testing.T) {
 	}
 }
 
+// A user message's text is styled AFTER wrapping, one physical row at a time
+// -- not styled as one span before wrapping. ansi.Wordwrap does not reapply
+// an opening SGR code on a continuation row it creates by breaking a single
+// already-styled span, so styling first left every wrapped continuation row,
+// and every logical line but the message's first, with no colour at all.
+// This exercises both sources of a continuation row: an embedded newline in
+// the prompt, and a single logical line long enough to wrap on its own.
+func TestUserMessageEveryPhysicalRowIsStyled(t *testing.T) {
+	r := newRenderer()
+	r.width = 30
+	b := session.Block{Kind: session.KindUser, Text: "first line\n" +
+		"a second line long enough that it must wrap across more than one physical row at this width"}
+	out := r.renderBlock(b)
+
+	lines := strings.Split(strings.TrimPrefix(out, "\n"), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("test setup: expected at least 3 physical rows (1 short line + a wrapped long one), got %d: %q", len(lines), lines)
+	}
+	for i, l := range lines {
+		if !strings.Contains(l, "\x1b[1;36m") {
+			t.Errorf("row %d = %q, want it to carry its own opening style code -- a row with none renders unstyled", i, l)
+		}
+	}
+}
+
 // TestLinesRebuildsWhenFinalizedShrinks: Finalized moving backwards means the
 // transcript was replaced (a hop into a reused renderer, a reset). Appending
 // to a stale cache there would splice two children's transcripts together.

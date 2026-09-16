@@ -392,9 +392,22 @@ func (r *renderer) renderBlock(b session.Block) string {
 		return stylePending.Render("⏳ ") + stylePending.Render(b.Text)
 	case session.KindUser:
 		// A blank line ABOVE, so a prompt is separated from whatever the agent
-		// was doing before it. The prompt's own styling is untouched.
-		return "\n" + strings.Join(
-			wrapTo(styleUser.Render("▸ "), styleUser.Render(b.Text), r.width), "\n")
+		// was doing before it. A solid bar, matching the weight the assistant
+		// and error gutters use, rather than a repeated "▸ " per line.
+		//
+		// Wrapping happens on PLAIN text and styling is applied per finished
+		// row, not the other way around: ansi.Wordwrap does not reapply an
+		// opening SGR code on a continuation row it creates by breaking a
+		// single already-styled span, so styling the whole block first left
+		// every wrapped continuation row -- and every logical line but the
+		// message's first -- with no colour at all.
+		var rows []string
+		for _, line := range strings.Split(b.Text, "\n") {
+			for _, row := range wrapTo("▌ ", line, r.width) {
+				rows = append(rows, styleUser.Render(row))
+			}
+		}
+		return "\n" + strings.Join(rows, "\n")
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(b.Text)
 	case session.KindAssistant:
