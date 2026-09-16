@@ -273,7 +273,9 @@ status to `dismissed`/`actioned`.
 
 The read half has a socket twin: `rafiki conversations findings` (the
 Connect plane's `ConversationFindings`) lists the same findings — same
-filters, same open default, same limit convention — plus a recent-analyses
+filters, same open default, and the same limit convention except that the
+CLIENT rejects a negative `--limit` outright while the daemon maps a
+negative (or 0) to its default of 50 — plus a recent-analyses
 table (model, status, cost, tokens) where a review run's outcome becomes
 visible. It honors the shared `--output auto|json|jsonl` contract. Triage
 stays here: it is a direct-DB write, and the client never holds a DSN.
@@ -293,8 +295,12 @@ rafiki conversations review <id>... --stage rank            # rank persists find
 rafiki conversations review <id> --model openrouter/z-ai/glm-5.3-flash --budget-usd 0.05
 ```
 
-The request carries no scope — the daemon derives it from the credential,
-and an out-of-scope id is dropped silently. A batch is N independent
+The request carries no scope — the daemon derives it from the credential.
+Each `<id|name>` argument resolves client-side to a child id (`c_…`, the id
+`rafiki status` shows), and the daemon admits it through its
+`conversations.child` mapping; a conversation UUID is accepted too. An id
+matching neither spelling — one that names no conversation, or one out of
+scope — is dropped silently with no error. A batch is N independent
 per-conversation calls: the response carries one accept status per id
 (`enqueued`, `already running`, `queue full`), never an analysis id — read
 outcomes back through `rafiki conversations findings`, whose analyses rows
