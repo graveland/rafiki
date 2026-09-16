@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -367,5 +369,249 @@ func TestRenderQueryResponseJSONTypedValues(t *testing.T) {
 		if _, ok := row[i].(float64); !ok {
 			t.Errorf("cell %d (float): got %#v, want a number, not a string", i, row[i])
 		}
+	}
+}
+
+// ─── conversations review & findings ────────────────────────────────────────
+
+func TestConversationsReviewCmd_FlagsRegistered(t *testing.T) {
+	cmd := newConversationsReviewCmd()
+	for _, name := range []string{"stage", "model", "analyzer-profile", "budget-usd", "min-turns", "force"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("flag --%s not registered", name)
+		}
+	}
+	// The analyzer-profile flag must not be named "profile": profile
+	// resolution (profile_glue.go) reads a flag by that name off the
+	// command's own flag set as the DAEMON profile selection, so a local one
+	// would make `--profile sql` exit(2) on "unknown profile sql" instead of
+	// naming the analyzer profile the request field wants.
+	if cmd.Flags().Lookup("profile") != nil {
+		t.Error("a local --profile shadows the client's global -P/--profile; the analyzer-profile flag is --analyzer-profile")
+	}
+	if got := cmd.Flags().Lookup("stage").DefValue; got != "detect" {
+		t.Errorf("--stage default = %q, want detect", got)
+	}
+	if _, _, err := newRootCmd().Find([]string{"conversations", "review"}); err != nil {
+		t.Errorf("review not reachable from the command tree: %v", err)
+	}
+	if _, _, err := newRootCmd().Find([]string{"conversations", "findings"}); err != nil {
+		t.Errorf("findings not reachable from the command tree: %v", err)
+	}
+}
+
+func TestConversationsFindingsCmd_FlagsRegistered(t *testing.T) {
+	cmd := newConversationsFindingsCmd()
+	for _, name := range []string{"axis", "skill", "status", "limit"} {
+		if cmd.Flags().Lookup(name) == nil {
+			t.Errorf("flag --%s not registered", name)
+		}
+	}
+	if err := cmd.Args(cmd, []string{"extra"}); err == nil {
+		t.Error("expected error for a positional arg (findings takes none)")
+	}
+	if err := cmd.Args(cmd, nil); err != nil {
+		t.Errorf("no args should validate: %v", err)
+	}
+}
+
+// --stage is a closed set: anything else errors before any dial.
+func TestConversationsReviewStageValidated(t *testing.T) {
+	for _, tc := range []struct {
+		stage string
+		want  rafikiv1.ReviewStage
+		ok    bool
+	}{
+		{"detect", rafikiv1.ReviewStage_REVIEW_STAGE_DETECT, true},
+		{"rank", rafikiv1.ReviewStage_REVIEW_STAGE_RANK, true},
+		{"draft", rafikiv1.ReviewStage_REVIEW_STAGE_UNSPECIFIED, false},
+		{"", rafikiv1.ReviewStage_REVIEW_STAGE_UNSPECIFIED, false},
+		{"DETECT", rafikiv1.ReviewStage_REVIEW_STAGE_UNSPECIFIED, false},
+	} {
+		cmd := newConversationsReviewCmd()
+		if err := cmd.Flags().Set("stage", tc.stage); err != nil {
+			t.Fatalf("set stage %q: %v", tc.stage, err)
+		}
+		got, err := reviewStageFlag(cmd)
+		if tc.ok && err != nil {
+			t.Errorf("stage %q: unexpected error %v", tc.stage, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("stage %q: expected an error, got none", tc.stage)
+		}
+		if got != tc.want {
+			t.Errorf("stage %q: got %v, want %v", tc.stage, got, tc.want)
+		}
+	}
+}
+
+// The config file fills what the flags leave unset and never overwrites a
+// flag — design §3's resolution order, over the real wire. The target is
+// resolved by NAME through the framed fake's ctrl_list, so the test also
+// exercises the runClose-shared id-resolution path.
+func TestConversationsReviewMergesConfigFileButFlagsWin(t *testing.T) {
+	daemon, stub := newReviewHarness(t)
+	daemon.list = protocol.ListResponseData{Children: []protocol.ChildSummary{{
+		ChildID: "c_9", Name: "my-agent", Status: "exited",
+	}}}
+	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
+		ConversationId: "c_9", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
+	}}}
+
+	cfgPath := filepath.Join(t.TempDir(), "review.json")
+	if err := os.WriteFile(cfgPath, []byte(
+		`{"model":"file-model","profile":"file-profile","budget_usd":2.5,"min_turns":4}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RAFIKI_REVIEW_CONFIG", cfgPath)
+
+	cmd := newConversationsReviewCmd()
+	// --analyzer-profile is the review verb's own flag (the analyzer
+	// profile): it must reach the request, not the daemon-profile selection.
+	cmd.SetArgs([]string{"my-agent", "--model", "flag-model", "--min-turns", "8", "--analyzer-profile", "flag-profile"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("conversations review: %v", err)
+	}
+
+	calls := stub.reviews()
+	if len(calls) != 1 {
+		t.Fatalf("got %d ConversationReview calls, want 1", len(calls))
+	}
+	req := calls[0]
+	if ids := req.GetConversationIds(); len(ids) != 1 || ids[0] != "c_9" {
+		t.Errorf("ConversationIds = %v, want [c_9] (resolved from the name)", ids)
+	}
+	if req.Stage != rafikiv1.ReviewStage_REVIEW_STAGE_DETECT {
+		t.Errorf("Stage = %v, want DETECT (the flag default)", req.Stage)
+	}
+	if req.Model == nil || *req.Model != "flag-model" {
+		t.Errorf("Model = %v, want the flag's value, not the file's", req.Model)
+	}
+	if req.MinTurns == nil || *req.MinTurns != 8 {
+		t.Errorf("MinTurns = %v, want the flag's 8, not the file's 4", req.MinTurns)
+	}
+	if req.Profile == nil || *req.Profile != "flag-profile" {
+		t.Errorf("Profile = %v, want the flag's value (flags win over the file)", req.Profile)
+	}
+	if req.BudgetUsd == nil || *req.BudgetUsd != 2.5 {
+		t.Errorf("BudgetUsd = %v, want the file's 2.5 (no flag set)", req.BudgetUsd)
+	}
+	if req.Force != nil {
+		t.Errorf("Force = %v, want nil (neither flag nor file set it)", req.Force)
+	}
+}
+
+func TestConversationsReviewRendersPerIDStatus(t *testing.T) {
+	var buf bytes.Buffer
+	err := renderReviewAccepts(&buf, []*rafikiv1.ConversationReviewAccept{
+		{ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED},
+		{ConversationId: "c_2", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ALREADY_RUNNING},
+		{ConversationId: "c_3", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_QUEUE_FULL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "c_1: enqueued\nc_2: already running\nc_3: queue full\n"
+	if buf.String() != want {
+		t.Errorf("rendered %q, want %q", buf.String(), want)
+	}
+}
+
+// --force rides the request, and findings filters reach the wire verbatim:
+// status passes through (the daemon defaults "" to open), limit 0 means the
+// daemon's default.
+func TestConversationsFindingsSendsFilters(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.findingsResp = &rafikiv1.ConversationFindingsResponse{}
+
+	cmd := newConversationsFindingsCmd()
+	cmd.SetArgs([]string{"--axis", "prompt", "--skill", "sql", "--status", "dismissed", "--limit", "5"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("conversations findings: %v", err)
+	}
+
+	calls := stub.findings()
+	if len(calls) != 1 {
+		t.Fatalf("got %d ConversationFindings calls, want 1", len(calls))
+	}
+	req := calls[0]
+	if req.Axis != "prompt" || req.Skill != "sql" || req.Status != "dismissed" || req.Limit != 5 {
+		t.Errorf("filters did not reach the wire: %+v", req)
+	}
+}
+
+func TestConversationsFindingsRendersRows(t *testing.T) {
+	resp := &rafikiv1.ConversationFindingsResponse{
+		Findings: []*rafikiv1.ReviewFinding{
+			{Id: "f1", ConversationId: "conv-a", Axis: "prompt", SkillName: "sql",
+				Title: "N+1 queries", ExpectedSavingsTokens: 12000, Status: "open"},
+			{Id: "f2", ConversationId: "conv-b", Axis: "tools",
+				Title: "Redundant greps", ExpectedSavingsTokens: 300, Status: "open"},
+		},
+		Analyses: []*rafikiv1.ReviewAnalysis{{
+			Id: "a1", ConversationId: "conv-a", Model: "anthropic/claude-sonnet-5",
+			Status: "ok", CostUsd: 0.0123, CreatedAtUnix: 1716000000,
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := renderFindingsResponse(&buf, outputTable, resp); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"Axis", "Skill", "Title", "Savings", "Status", "ID",
+		"N+1 queries", "12,000", "open", "f1", "f2",
+		"Analysis", "Conversation", "Model", "Cost", "Created",
+		"a1", "conv-a", "anthropic/claude-sonnet-5", "$0.0123",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("findings table missing %q:\n%s", want, out)
+		}
+	}
+
+	// Neither collection present: the honest "no findings" line, matching
+	// rafikid agent findings' empty rendering.
+	var empty bytes.Buffer
+	if err := renderFindingsResponse(&empty, outputTable, &rafikiv1.ConversationFindingsResponse{}); err != nil {
+		t.Fatal(err)
+	}
+	if empty.String() != "no findings\n" {
+		t.Errorf("empty response rendered %q, want \"no findings\\n\"", empty.String())
+	}
+}
+
+// JSON mode carries the WHOLE response — findings and analyses — so jq sees
+// the same shape the daemon sent, and JSONL is one finding per line.
+func TestConversationsFindingsJSONModes(t *testing.T) {
+	resp := &rafikiv1.ConversationFindingsResponse{
+		Findings: []*rafikiv1.ReviewFinding{{
+			Id: "f1", ConversationId: "conv-a", Axis: "prompt", Title: "t",
+			ExpectedSavingsTokens: 10, Status: "open",
+		}},
+		Analyses: []*rafikiv1.ReviewAnalysis{{Id: "a1", ConversationId: "conv-a", Status: "ok"}},
+	}
+
+	var pretty bytes.Buffer
+	if err := renderFindingsResponse(&pretty, outputJSON, resp); err != nil {
+		t.Fatal(err)
+	}
+	var back struct {
+		Findings []map[string]any `json:"findings"`
+		Analyses []map[string]any `json:"analyses"`
+	}
+	if err := json.Unmarshal(pretty.Bytes(), &back); err != nil {
+		t.Fatalf("json output invalid: %v\n%s", err, pretty.String())
+	}
+	if len(back.Findings) != 1 || len(back.Analyses) != 1 {
+		t.Errorf("json output lost rows: %+v", back)
+	}
+
+	var lines bytes.Buffer
+	if err := renderFindingsResponse(&lines, outputJSONL, resp); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(strings.TrimSpace(lines.String()), "\n") + 1; n != 1 {
+		t.Errorf("jsonl rendered %d lines, want one finding per line:\n%s", n, lines.String())
 	}
 }

@@ -8,9 +8,11 @@ import (
 	"os"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -39,7 +41,14 @@ directory and, for fundi children, its clipped-output spill directory.
 
 With --all-exited, closes every already-exited child (optionally filtered by
 --older-than). --all-exited never stops a running child — only closing by
-id|name does that.`,
+id|name does that.
+
+With --review, each closed conversation is also handed to the daemon's
+conversation review (over Connect, after the close). The close has already
+succeeded at that point, so a review that fails — a whole-request error or a
+per-id ALREADY_RUNNING/QUEUE_FULL — only prints a note; it never fails the
+close. --no-review is the explicit no-op spelling of the default, for scripts
+that pass a fixed flag set.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			allExited, _ := cmd.Flags().GetBool("all-exited")
 			if allExited {
@@ -53,6 +62,11 @@ id|name does that.`,
 		RunE: runClose,
 	}
 	cmd.Flags().Bool("all-exited", false, "Close all exited children")
+	cmd.Flags().Bool("review", false, "After closing, ask the daemon to review each closed conversation (failure notes only — never fails the close)")
+	// Deliberately no mutual-exclusion validation: --no-review is the explicit
+	// no-op spelling of the default (design §5), so a script can pass a fixed
+	// flag set whether or not something else added --review.
+	cmd.Flags().Bool("no-review", false, "Explicitly skip the post-close review (the default)")
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout when a target must be stopped first (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (e.g. 30s)")
@@ -71,6 +85,9 @@ func runClose(cmd *cobra.Command, args []string) error {
 
 	ctx := cmdCtx(cmd)
 	allExited, _ := cmd.Flags().GetBool("all-exited")
+	// Only --review is read: --no-review is a no-op spelling of the default,
+	// so there is nothing to combine and no custom pair validation to add.
+	review, _ := cmd.Flags().GetBool("review")
 
 	if allExited {
 		// Resolve the mode before sending the request: -j and -J together is a
@@ -94,6 +111,15 @@ func runClose(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("ctrl_forget_all_exited: %s", client.FormatError(resp))
 		}
 		dropChildCompletionCache(cmd)
+		if review {
+			var data protocol.ForgetAllExitedResponseData
+			if err := json.Unmarshal(resp.Data, &data); err != nil {
+				// No ids to name without the decode; one unprefixed note.
+				fmt.Fprintf(os.Stderr, "review: decode close response: %v\n", err)
+			} else {
+				closeReview(cmd, data.Children)
+			}
+		}
 		return renderCloseAllExited(os.Stdout, json.RawMessage(resp.Data), mode)
 	}
 
@@ -114,12 +140,61 @@ func runClose(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		fmt.Printf("closed %s\n", childID)
+		if review {
+			closeReview(cmd, []string{childID})
+		}
 	}
 	dropChildCompletionCache(cmd)
 	if failures > 0 {
 		return fmt.Errorf("%d target(s) failed", failures)
 	}
 	return nil
+}
+
+// closeReview asks the daemon to review the conversations just closed, over
+// Connect — the close ran on the framed protocol and this is a new verb, so
+// it goes on Connect only. Best-effort by design (design §5): the close has
+// already succeeded, so a review that fails must never fail it — every
+// whole-request failure becomes one stderr note per closed id, and a per-id
+// ALREADY_RUNNING/QUEUE_FULL becomes the id's own note. Enqueued prints
+// nothing: silence is the success case here, the same way the close's own
+// `closed <id>` line is the only close output.
+func closeReview(cmd *cobra.Command, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	note := func(err error) {
+		for _, id := range ids {
+			fmt.Fprintf(os.Stderr, "review %s: %s\n", id, err)
+		}
+	}
+
+	cfg, err := loadReviewConfig()
+	if err != nil {
+		note(err)
+		return
+	}
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		note(err)
+		return
+	}
+	req := &rafikiv1.ConversationReviewRequest{ConversationIds: ids}
+	// Stage stays unspecified: the wire enum's zero value defaults to detect
+	// daemon-side, which is the stage close wants — rank persists findings
+	// and belongs to `rafiki conversations review --stage rank`.
+	cfg.mergeInto(req)
+
+	resp, err := ep.control().ConversationReview(cmdCtx(cmd), connect.NewRequest(req))
+	if err != nil {
+		note(diagnoseConnectError(err, ep.describe))
+		return
+	}
+	for _, acc := range resp.Msg.GetAccepted() {
+		if s := acc.GetStatus(); s != rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED {
+			fmt.Fprintf(os.Stderr, "review %s: %s\n", acc.GetConversationId(), reviewAcceptStatusText(s))
+		}
+	}
 }
 
 // renderCloseAllExited writes the ctrl_forget_all_exited result in the

@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strings"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/conversationview"
@@ -24,10 +27,11 @@ func newConversationsCmd() *cobra.Command {
 		Use:     "conversations",
 		Aliases: []string{"c", "conv"},
 		Short:   "Query persisted conversation history from the daemon's agent database",
-		Long: `Global stats, search, transcript export, and named catalogue queries over
-the conversations schema the daemon persists to when RAFIKI_DB is set. Unlike
-"rafiki search" (live, in-memory, currently-running children only), these query
-history in Postgres regardless of whether anything is still running.
+		Long: `Global stats, search, transcript export, named catalogue queries, and the
+conversation review verbs over the conversations schema the daemon persists
+to when RAFIKI_DB is set. Unlike "rafiki search" (live, in-memory,
+currently-running children only), these query history in Postgres regardless
+of whether anything is still running.
 
 Output matches "rafikid agent stats|search|export|query" exactly — same queries,
 same renderers, only the transport differs. --output controls the format: tables
@@ -38,6 +42,8 @@ at a terminal, JSON when piped.`,
 		newConversationsSearchCmd(),
 		newConversationsExportCmd(),
 		newConversationsQueryCmd(),
+		newConversationsReviewCmd(),
+		newConversationsFindingsCmd(),
 	)
 	return cmd
 }
@@ -350,6 +356,248 @@ func runConversationsQuery(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return renderQueryResponse(os.Stdout, mode, resp.Msg)
+}
+
+// ─── review ────────────────────────────────────────────────────────────────
+
+// newConversationsReviewCmd returns `rafiki conversations review <id|name>…`,
+// the general entry for the review verb (design §5) — `rafiki close --review`
+// is only the close-triggered convenience spelling of it. Like `query` it
+// goes over Connect: the framed protocol is frozen and takes no new verbs.
+func newConversationsReviewCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "review <id|name>...",
+		Short: "Ask the daemon to review one or more conversations (detect or rank)",
+		Long: `Ask the daemon's detector over one or more closed conversations. Each
+optional request field resolves per-value: an explicit flag, else
+~/.config/rafiki/review.json (RAFIKI_REVIEW_CONFIG overrides the path), else
+the daemon's own defaults — a missing file is a working configuration.
+
+A request naming N conversations is N independent per-conversation calls; the
+response carries one accept status per id, and out-of-scope ids are dropped
+silently (never a permission error). Detect does not persist findings; rank
+does.
+
+Note: --analyzer-profile names the analyzer profile. The global --profile/-P
+selects the DAEMON profile and keeps that meaning here; profile resolution
+(profile_glue.go) reads a flag named "profile" straight off the command's own
+flag set, so this verb's flag must not reuse the name.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: runConversationsReview,
+	}
+	cmd.Flags().String("stage", "detect", `analysis stage: "detect" or "rank" (rank persists findings)`)
+	_ = cmd.RegisterFlagCompletionFunc("stage", cobra.FixedCompletions(
+		[]string{"detect", "rank"}, cobra.ShellCompDirectiveNoFileComp))
+	cmd.Flags().String("model", "", "provider-qualified detector model")
+	// --analyzer-profile, not --profile: the client's global -P/--profile
+	// selects the daemon profile, and profile resolution (profile_glue.go)
+	// reads a flag named "profile" straight off the command's flag set — a
+	// local one under that name would make `--profile sql` resolve (and
+	// usually exit(2) on) an unknown DAEMON profile instead of naming the
+	// analyzer profile the request field wants.
+	cmd.Flags().String("analyzer-profile", "", "analyzer profile name (RAFIKI_ANALYZER_DIR)")
+	cmd.Flags().Float64("budget-usd", 0, "per-conversation spend ceiling in USD")
+	cmd.Flags().Int32("min-turns", 0, "skip conversations under this many turns")
+	cmd.Flags().Bool("force", false, "re-analyze conversations that already carry analysis")
+	return cmd
+}
+
+// reviewStageFlag maps --stage onto the wire enum. The accepted set is the
+// design's closed set — detect (the flag default) and rank — and anything
+// else, including an explicitly empty value, errors before any dial.
+func reviewStageFlag(cmd *cobra.Command) (rafikiv1.ReviewStage, error) {
+	s, _ := cmd.Flags().GetString("stage")
+	switch s {
+	case "detect":
+		return rafikiv1.ReviewStage_REVIEW_STAGE_DETECT, nil
+	case "rank":
+		return rafikiv1.ReviewStage_REVIEW_STAGE_RANK, nil
+	default:
+		return rafikiv1.ReviewStage_REVIEW_STAGE_UNSPECIFIED,
+			fmt.Errorf("--stage must be \"detect\" or \"rank\", got %q", s)
+	}
+}
+
+// applyReviewFlags copies every review flag the caller actually typed onto
+// req. Changed(), not a zero-value check, is the test: it keeps a typed
+// `--budget-usd 0` a real (explicit) request field instead of collapsing it
+// to "unset, daemon decides", and it leaves untyped flags for the config
+// file and the daemon's own defaults (design §3's resolution order).
+func applyReviewFlags(cmd *cobra.Command, req *rafikiv1.ConversationReviewRequest) {
+	fs := cmd.Flags()
+	if fs.Changed("model") {
+		v, _ := fs.GetString("model")
+		req.Model = &v
+	}
+	if fs.Changed("analyzer-profile") {
+		v, _ := fs.GetString("analyzer-profile")
+		req.Profile = &v
+	}
+	if fs.Changed("budget-usd") {
+		v, _ := fs.GetFloat64("budget-usd")
+		req.BudgetUsd = &v
+	}
+	if fs.Changed("min-turns") {
+		v, _ := fs.GetInt32("min-turns")
+		req.MinTurns = &v
+	}
+	if fs.Changed("force") {
+		v, _ := fs.GetBool("force")
+		req.Force = &v
+	}
+}
+
+// runConversationsReview resolves each target through the same framed-client
+// Resolve every other client verb uses, then sends ONE batched review
+// request over Connect. The batch is convenience only: the daemon treats it
+// as N independent per-conversation calls (design §4), each accepted or
+// rejected on its own.
+func runConversationsReview(cmd *cobra.Command, args []string) error {
+	// Resolve the stage before any dial: --stage garbage is a user-input
+	// error and must not spend a round trip.
+	stage, err := reviewStageFlag(cmd)
+	if err != nil {
+		return err
+	}
+
+	c := mustDial(cmd)
+	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctx := cmdCtx(cmd)
+
+	ids := make([]string, 0, len(args))
+	for _, arg := range args {
+		id, err := c.Resolve(ctx, arg)
+		if err != nil {
+			return fmt.Errorf("resolve %q: %w", arg, err)
+		}
+		ids = append(ids, id)
+	}
+
+	req := &rafikiv1.ConversationReviewRequest{ConversationIds: ids, Stage: stage}
+	applyReviewFlags(cmd, req)
+	// The config file fills only what the flags left unset — mergeInto never
+	// overwrites a set field, so flags win (design §3).
+	cfg, err := loadReviewConfig()
+	if err != nil {
+		return err
+	}
+	cfg.mergeInto(req)
+
+	resp, err := ep.control().ConversationReview(ctx, connect.NewRequest(req))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
+	}
+	return renderReviewAccepts(os.Stdout, resp.Msg.GetAccepted())
+}
+
+// ─── findings ───────────────────────────────────────────────────────────────
+
+// newConversationsFindingsCmd returns `rafiki conversations findings`, the
+// read-only findings list over Connect. No positional args: it lists across
+// the caller's whole scope, matching `rafikid agent findings`'s no-args
+// behavior. Triage (dismiss/action) deliberately stays rafikid-only (design
+// §2) — acting on findings is manual by owner decision.
+func newConversationsFindingsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "findings",
+		Short: "List review findings and recent analysis runs",
+		Args:  cobra.NoArgs,
+		RunE:  runConversationsFindings,
+	}
+	cmd.Flags().String("axis", "", "filter by axis")
+	cmd.Flags().String("skill", "", "filter by skill name")
+	cmd.Flags().String("status", "", `filter by status: "open" (the daemon's default), "dismissed" or "actioned"`)
+	cmd.Flags().Int("limit", 0, "max results (0 = daemon default)")
+	return cmd
+}
+
+func runConversationsFindings(cmd *cobra.Command, _ []string) error {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	axis, _ := cmd.Flags().GetString("axis")
+	skill, _ := cmd.Flags().GetString("skill")
+	status, _ := cmd.Flags().GetString("status")
+	limit, _ := cmd.Flags().GetInt("limit")
+	if limit < 0 || limit > math.MaxInt32 {
+		return fmt.Errorf("--limit must be between 0 and %d", int32(math.MaxInt32))
+	}
+
+	resp, err := ep.control().ConversationFindings(cmdCtx(cmd), connect.NewRequest(&rafikiv1.ConversationFindingsRequest{
+		Axis: axis, Skill: skill, Status: status, Limit: int32(limit),
+	}))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
+	}
+	return renderFindingsResponse(os.Stdout, mode, resp.Msg)
+}
+
+// renderFindingsResponse writes a ConversationFindingsResponse in the
+// requested mode. Table mode renders the findings table with the same
+// columns `rafikid agent findings` prints, followed by the recent-analyses
+// table — the analysis rows are where an enqueued review's outcome becomes
+// visible over the wire (design §2: rows are inserted at completion only,
+// so an in-flight review reads as empty until then).
+func renderFindingsResponse(w io.Writer, mode outputMode, resp *rafikiv1.ConversationFindingsResponse) error {
+	switch mode {
+	case outputJSON:
+		b, err := (protojson.MarshalOptions{Multiline: true, Indent: "  "}).Marshal(resp)
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(append(b, '\n'))
+		return err
+	case outputJSONL:
+		rows := make([]any, 0, len(resp.GetFindings()))
+		for _, f := range resp.GetFindings() {
+			rows = append(rows, f)
+		}
+		return writeJSONL(w, rows)
+	default:
+		return renderFindingsTable(w, resp)
+	}
+}
+
+// renderFindingsTable renders the table arms of the response.
+func renderFindingsTable(w io.Writer, resp *rafikiv1.ConversationFindingsResponse) error {
+	findings, analyses := resp.GetFindings(), resp.GetAnalyses()
+	if len(findings) == 0 && len(analyses) == 0 {
+		_, err := fmt.Fprintln(w, "no findings")
+		return err
+	}
+	if len(findings) > 0 {
+		tb := table.New(w, table.Options{})
+		tb.Header("Axis", "Skill", "Title", "Savings", "Status", "ID")
+		for _, r := range findings {
+			tb.Row(r.GetAxis(), r.GetSkillName(), r.GetTitle(),
+				humanize.Comma(r.GetExpectedSavingsTokens()), r.GetStatus(), r.GetId())
+		}
+		if err := tb.Render(); err != nil {
+			return err
+		}
+	}
+	if len(analyses) > 0 {
+		tb := table.New(w, table.Options{})
+		tb.Header("Analysis", "Conversation", "Model", "Status", "Cost", "Created")
+		for _, a := range analyses {
+			tb.Row(a.GetId(), a.GetConversationId(), a.GetModel(), a.GetStatus(),
+				fmt.Sprintf("$%.4f", a.GetCostUsd()),
+				time.Unix(a.GetCreatedAtUnix(), 0).Local().Format("2006-01-02 15:04"))
+		}
+		if err := tb.Render(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renderQueryResponse prints a ConversationQueryResponse as a table or as JSON
