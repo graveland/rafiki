@@ -32,9 +32,14 @@ jsonl` one compact record per line with any `{"rows": …}` envelope unwrapped
 the wire (control-protocol.md §6.18), and the client unwraps it before
 printing, so `rafiki conversations search -o json | jq '.[]'` and `rafikid
 agent search -J | jq '.[]'` iterate the same thing, as does `rafiki
-conversations search -J`. `analyze` and `findings` stay
-`rafikid`-only — they have no wire verbs, `analyze` needs an LLM client and
-writes to the DB, and `rafiki` never holds a DSN.
+conversations search -J`. `analyze` stays
+`rafikid`-only — there is no wire verb for it, it needs an LLM client and
+writes to the DB, and `rafiki` never holds a DSN. `findings` has a socket
+twin now: `rafiki conversations findings` (the Connect plane's
+`ConversationFindings`) serves the read half, while the `dismiss`/`action`
+triage subcommands stay `rafikid`-only. Review submission runs the other way
+— `rafiki conversations review` (its own section below) asks the daemon's
+review worker to run this pipeline, and has no `rafikid agent` counterpart.
 
 One thing the shared renderer cannot equalize: the two commands read whatever
 DSN each was handed. `rafikid agent --db` defaults to your shell's `RAFIKI_DB`
@@ -265,6 +270,56 @@ rafikid agent findings action <finding-id>
 `--axis`, `--skill`, `--status` (default: open) filter the list. The
 `dismiss`/`action` subcommands take exactly one finding id and set its
 status to `dismissed`/`actioned`.
+
+The read half has a socket twin: `rafiki conversations findings` (the
+Connect plane's `ConversationFindings`) lists the same findings — same
+filters, same open default, same limit convention — plus a recent-analyses
+table (model, status, cost, tokens) where a review run's outcome becomes
+visible. It honors the shared `--output auto|json|jsonl` contract. Triage
+stays here: it is a direct-DB write, and the client never holds a DSN.
+
+## Conversation review (`rafiki conversations review`)
+
+A client command documented here for the same reason `rafiki user` is: it is
+the remote entry to the same analyze pipeline `analyze` above runs directly.
+It asks the DAEMON's review worker to run the pipeline, over the Connect
+plane's `ConversationReview` — `rafiki` never holds a DSN and never makes an
+LLM call (the verb returns before anything runs). There is no `rafikid
+agent` counterpart: submission is Connect-only.
+
+```
+rafiki conversations review <id|name>...                    # detect (default stage)
+rafiki conversations review <id>... --stage rank            # rank persists findings
+rafiki conversations review <id> --model openrouter/z-ai/glm-5.3-flash --budget-usd 0.05
+```
+
+The request carries no scope — the daemon derives it from the credential,
+and an out-of-scope id is dropped silently. A batch is N independent
+per-conversation calls: the response carries one accept status per id
+(`enqueued`, `already running`, `queue full`), never an analysis id — read
+outcomes back through `rafiki conversations findings`, whose analyses rows
+are inserted at completion only, so an in-flight review reads as empty.
+
+Every optional field resolves flag > `~/.config/rafiki/review.json`
+(`RAFIKI_REVIEW_CONFIG` overrides the path) > the daemon's `RAFIKI_REVIEW_*`
+env > the analyzer profile's own defaults; a missing file is a working
+configuration. `--model` must be provider-qualified — `openrouter/<id>` for
+OpenRouter (a bare OpenRouter id reads as an unknown provider), a
+providers.toml alias as `<provider>/<alias>`, or an Anthropic id — and an id
+that resolves nowhere fails the whole request before anything is enqueued.
+The analyzer-profile flag is `--analyzer-profile`, not `--profile`: the
+global `-P/--profile` selects the DAEMON profile and keeps that meaning
+here. `min_turns` gates when a job DEQUEUES, not at accept, so a
+below-threshold job is skipped silently (no analysis row); `--force`
+re-analyzes conversations that already carry analysis.
+
+`rafiki close --review` is the same submission keyed off a close: after each
+close succeeds, that conversation is handed to the review worker with the
+stage left unspecified (the wire default, detect). It is best-effort by
+design — a review failure prints a stderr note and never fails the close,
+and only a non-`enqueued` status prints anything. `--no-review` is the
+explicit no-op spelling of the default, for scripts that pass a fixed flag
+set.
 
 ## Environment variables
 
