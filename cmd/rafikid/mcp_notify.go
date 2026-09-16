@@ -184,7 +184,16 @@ var mcpSettlements = newMCPSessions()
 // resume. A descendant's settlement reaches the MCP caller's own child — its
 // parent — through the parent-gated inbox push instead, and the caller sees
 // the whole subtree through agent_list.
-func (c *Controller) notifyMCPSettled(childID, reason string) {
+//
+// excludeUser removes that user's sessions from the fan-out, for a child the
+// user's own agent_kill just killed (the self-kill guard's MCP half, see
+// self_kill.go): the caller's tool result already said the agent stopped, and
+// this fragment would say the same thing again. The exclusion is per-USER,
+// not per-session, deliberately — the fan-out itself is a per-user blanket
+// (every session of the owner gets every settlement), so the user's own
+// action silencing its own blanket is the same granularity as everything
+// else on this surface. agent_list remains the reliable answer either way.
+func (c *Controller) notifyMCPSettled(childID, reason, excludeUser string) {
 	if mcpSettlements == nil {
 		return
 	}
@@ -193,6 +202,13 @@ func (c *Controller) notifyMCPSettled(childID, reason string) {
 		return
 	}
 	if snap.OwnerUserID == "" {
+		return
+	}
+	// The exclusion names the KILLER's user; it applies only when the settling
+	// child belongs to that same user. An MCP caller can kill another user's
+	// or another agent's child, and that child's owner still deserves the
+	// settlement its own spawn produced.
+	if excludeUser != "" && excludeUser == snap.OwnerUserID {
 		return
 	}
 	// Bounded like checkTaskResidue beside it: this rides the child's status

@@ -286,8 +286,11 @@ func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {
 	// Marked before Kill is called, not after: handleChildExit can run on
 	// monitorChild's goroutine at any point during Kill's blocking wait for
 	// cm.Remove, so the marker must already be visible before that race
-	// window opens. See suppressExitNotice (self_kill.go) for what reads it.
-	s.c.selfKilled.set(childID)
+	// window opens. The audience is the child's PARENT — this spawner speaks
+	// for a coordinator killing its own subagent, and the parent's settlement
+	// fragment is what the agent_kill result already answered. See
+	// self_kill.go for what reads it.
+	s.c.selfKilled.set(childID, killMark{parent: true})
 	if _, err := s.c.Kill(ctx, childID, 0, 0); err != nil {
 		// No shutdown completed (child not found/already exited, or Shutdown
 		// itself failed) — no exit is coming from this attempt, so the

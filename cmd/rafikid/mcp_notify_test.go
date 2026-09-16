@@ -448,7 +448,7 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 		},
 	})
 
-	c.notifySubagentSettled("c_mcp_desc", "exited")
+	c.notifySubagentSettled("c_mcp_desc", "exited", "")
 
 	if got := assertSilence(t, ss.got); got != "" {
 		t.Errorf("a descendant must not fan out to the caller's session; got %q", got)
@@ -535,7 +535,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 		Status:      protocol.StatusStreaming,
 		StartedAt:   time.Now(),
 	})
-	ctrl.notifySubagentSettled("c_mcp_wired", "exited")
+	ctrl.notifySubagentSettled("c_mcp_wired", "exited", "")
 
 	if gotMsg := waitFor(t, got); !strings.Contains(gotMsg, "c_mcp_wired") {
 		t.Errorf("the settled fragment must reach the initialized client: %q", gotMsg)
@@ -646,7 +646,7 @@ func TestMCPNotifyFiresForATopLevelChild(t *testing.T) {
 
 	// No evbuf at all: the fan-out must not depend on the event buffer being
 	// wired, only the parent push does.
-	c.notifySubagentSettled("c_mcp_top", "exited")
+	c.notifySubagentSettled("c_mcp_top", "exited", "")
 
 	got := waitFor(t, ss.got)
 	if !strings.Contains(got, "c_mcp_top") || !strings.Contains(got, "exited") {
@@ -654,5 +654,97 @@ func TestMCPNotifyFiresForATopLevelChild(t *testing.T) {
 	}
 	if !strings.Contains(got, "task_list") {
 		t.Errorf("fragment must point at the ledger like the inbox one: %q", got)
+	}
+}
+
+// spawnOwnedChild spawns a top-level fake-pi child attributed to owner, the
+// way userSpawner.Spawn produces one for an authenticated MCP caller.
+func spawnOwnedChild(t *testing.T, ctrl *Controller, owner users.Identity) string {
+	t.Helper()
+	req := protocol.SpawnRequest{
+		Kind:      protocol.KindClaude,
+		Cwd:       t.TempDir(),
+		PiBinary:  fakePiBin(t),
+		NoSession: true,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	res, err := ctrl.Spawn(ctx, req, owner)
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	return res.ChildID
+}
+
+// TestMCPSelfKillSuppressesTheKillerFanOut pins the MCP half of the self-kill
+// guard: an MCP caller's agent_kill on its OWN top-level agent already
+// answered "stopped" synchronously, so the settlement fan-out must not push
+// "agent X exited" back into the same caller's sessions. The human-kill
+// counterpart (Controller.Kill, no mark) still delivers.
+//
+// This uses the REAL package-level registry, not a swapped one: the swap
+// pattern the sequential tests above use races every lingering settle
+// goroutine a parallel test leaves behind, and this case must run in
+// parallel beside the other kill tests. A unique user id keeps the session
+// clear of every other test's fan-out.
+func TestMCPSelfKillSuppressesTheKillerFanOut(t *testing.T) {
+	t.Parallel()
+	ctrl, _, _ := killNoticeFixture(t)
+
+	ss := newSettleSession(t, "info")
+
+	owner := users.Identity{UserID: "u-selfkill-it", Username: "selfkill-it"}
+	mcpSettlements.Add(owner.UserID, ss.ss)
+	us := newUserSpawner(ctrl, owner)
+	ownID := spawnOwnedChild(t, ctrl, owner)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := us.Kill(ctx, ownID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	if got := assertSilence(t, ss.got); got != "" {
+		t.Errorf("the killer's own session must not hear about its own kill; got %q", got)
+	}
+	if _, ok := ctrl.selfKilled.take(ownID); ok {
+		t.Fatal("the kill mark must have been consumed by the exit handler, not left behind")
+	}
+
+	// The counterpart: a kill that did NOT come from the caller's surface —
+	// straight into Controller.Kill, as the CLI and Connect do — must still
+	// reach the sessions of the child's owner.
+	otherID := spawnOwnedChild(t, ctrl, owner)
+	if _, err := ctrl.Kill(ctx, otherID, 0, 0); err != nil {
+		t.Fatalf("human Kill: %v", err)
+	}
+	if got := waitFor(t, ss.got); !strings.Contains(got, otherID) {
+		t.Errorf("a human kill must still fan out to the owner's sessions; got %q", got)
+	}
+}
+
+// TestMCPKillStillNotifiesTheParent pins the half of the guard this surface
+// must NOT have: an MCP caller can kill somebody else's worker — a
+// coordinator that did not act — and that worker's parent must still receive
+// the settlement fragment. userSpawner.Kill's mark names only the MCP
+// audience; it must never set the parent-facing one.
+func TestMCPKillStillNotifiesTheParent(t *testing.T) {
+	t.Parallel()
+	ctrl, clk, cap := killNoticeFixture(t)
+
+	coordID := spawnTestChild(t, ctrl, nil)
+	workerID := spawnTestChildWithParent(t, ctrl, coordID)
+
+	us := newUserSpawner(ctrl, users.Identity{UserID: "u-op", Username: "op"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := us.Kill(ctx, workerID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+
+	clk.Advance(6 * time.Second)
+	batches := cap.batches()
+	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited") {
+		t.Fatalf("an MCP kill of a parented worker must still notify its parent: %+v", batches)
 	}
 }

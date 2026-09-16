@@ -3298,7 +3298,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
 		if c.evbuf != nil {
 			if isWorkingStatus(storePrev) {
-				c.notifySubagentSettled(childID, c.settleReason(childID))
+				c.notifySubagentSettled(childID, c.settleReason(childID), "")
 			}
 			c.evbuf.DrainIdle(childID)
 		}
@@ -3530,16 +3530,25 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// clears batches aimed AT this child, not at its parent) and before
 	// cm.Remove, which is the observable "teardown complete" signal.
 	//
-	// Suppressed for a clean kill the coordinator initiated itself via
-	// agent_kill: that call already blocks until cm.Remove, so its tool
-	// result already confirmed termination — this notification would tell it
-	// nothing new. checkTaskResidue still runs either way: killing a
-	// subagent with unresolved tasks is itself worth surfacing to the
-	// coordinator, self-initiated or not.
-	if c.suppressExitNotice(childID, res.ExitCode, res.Signal) {
+	// A kill the caller initiated itself via agent_kill suppresses the notice
+	// the audience that called it already has an answer for — that call blocks
+	// until cm.Remove, so its tool result already confirmed termination. But
+	// only when the death was the kill's own doing (exitCausedByShutdown): a
+	// daraja-hosted claude exits 143 from the SIGTERM the ladder sent, which
+	// is the kill's doing, while a fundi panic's ExitCode=2 or a foreign
+	// SIGKILL landing during the passive stdin-close wait is news even when a
+	// kill was in flight. And only for the audience that acted: a coordinator
+	// suppresses its parent fragment; an MCP caller's own user is excluded
+	// from the fan-out while the parent (a coordinator that did not act) is
+	// still told. checkTaskResidue runs either way: killing a subagent with
+	// unresolved tasks is itself worth surfacing, self-initiated or not.
+	mark, selfKilled := c.selfKilled.take(childID)
+	d := selfKillDispositionFor(mark, selfKilled && exitCausedByShutdown(res))
+	switch {
+	case d.suppressParent:
 		c.checkTaskResidue(childID)
-	} else {
-		c.notifySubagentSettled(childID, "exited")
+	default:
+		c.notifySubagentSettled(childID, "exited", d.excludeMCPUser)
 	}
 
 	// Drop any buffered events aimed at this child. It will never transition

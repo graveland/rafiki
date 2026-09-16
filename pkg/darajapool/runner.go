@@ -123,6 +123,15 @@ func (s *darajaStdin) Write(p []byte) (int, error) {
 
 func (s *darajaStdin) Close() error { return s.runner.Terminate() }
 
+// StopsOnClose declares what Close's doc comment already says: closing this
+// writer IS the stop request, not a passive EOF. pkg/child's Shutdown ladder
+// consults it to attribute the exit it observes during the stdin-close wait
+// to the shutdown itself (ShutdownResult.ByShutdown) rather than to the child
+// dying of something else while the ladder waited — which is what makes a
+// coordinator's agent_kill of a daraja-hosted claude child recognizable as
+// the daemon's own kill instead of a foreign crash.
+func (s *darajaStdin) StopsOnClose() bool { return true }
+
 func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	go r.pump()
 	return &darajaStdin{runner: r}, r.pr, io.NopCloser(bytes.NewReader(nil)), nil

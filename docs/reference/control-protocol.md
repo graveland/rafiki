@@ -540,6 +540,23 @@ runs before the parent gate in `notifySubagentSettled`, because every
 MCP-spawned child is top-level and the gate would otherwise return before
 anything reached the caller that spawned the agent.
 
+**The caller's own kill excludes itself.** An `agent_kill` issued from an MCP
+session marks the child with that caller's user (`userSpawner.Kill`,
+`killMark{mcpUser}`), and `notifyMCPSettled` drops the fan-out when the
+settling child's owner is that same user — the tool result already said the
+agent stopped, and the fragment would say it again. The exclusion is per-USER
+(the fan-out's own granularity, every session of the owner), applies only
+when killer and owner match (killing another user's agent silences nothing),
+and never touches the parent-facing half of the guard: an MCP caller can kill
+somebody else's worker, and that worker's coordinator — which did not act —
+still receives the fragment. The coordinator-facing half
+(`controllerSpawner.Kill`, `killMark{parent}`) suppresses the parent's
+event-buffer fragment instead, and only when the death was the kill's own
+doing (`exitCausedByShutdown`): a daraja-hosted claude child exits 143 from
+the SIGTERM the shutdown ladder sent — that is the kill — while a fundi
+panic's exit code 2 or a foreign signal landing during the passive stdin
+close wait is news even to the killer, and notifies.
+
 The push is **best-effort by construction**: the SDK's `Log` returns nil
 without writing anything when the client has never issued `logging/setLevel`
 (`mcp/server.go` reads `ss.state.LogLevel`, empty until then), and rafiki's

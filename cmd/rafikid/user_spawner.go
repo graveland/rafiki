@@ -139,11 +139,17 @@ func (s *userSpawner) Send(_ context.Context, childID, message string) error {
 	return s.c.Send(childID, frame)
 }
 
-// Kill shuts a child down and waits for the exit to be recorded. It
-// deliberately does NOT mark selfKilled: that marker suppresses the exit
-// notice to the child's own parent, which is right when a coordinator kills
-// its own worker and wrong here — an operator killing somebody's worker is
-// exactly the case where that worker's parent should be told.
+// Kill shuts a child down and waits for the exit to be recorded.
+//
+// The kill is marked with THIS caller's user as the excluded audience, so the
+// settlement fan-out does not push "agent X exited" back into the sessions of
+// the very caller whose agent_kill result just said the agent stopped — the
+// self-kill guard's MCP half (self_kill.go). It deliberately does NOT set the
+// parent-facing marker controllerSpawner.Kill sets: an MCP caller can kill
+// somebody else's worker — a coordinator that did not act — and that worker's
+// parent must still be told. The exclusion also applies only when the victim
+// is owned by the killer's own user (notifyMCPSettled compares), so a caller
+// killing another user's agent silences nothing.
 func (s *userSpawner) Kill(ctx context.Context, childID string) error {
 	if childID == "" {
 		return errors.New("agent id is required")
@@ -151,7 +157,15 @@ func (s *userSpawner) Kill(ctx context.Context, childID string) error {
 	if _, ok := s.c.st.Get(childID); !ok {
 		return fmt.Errorf("agent %s is not registered", childID)
 	}
+	// Marked before Kill, for the same race controllerSpawner.Kill documents:
+	// handleChildExit can consume the mark during Kill's blocking wait.
+	if s.owner.UserID != "" {
+		s.c.selfKilled.set(childID, killMark{mcpUser: s.owner.UserID})
+	}
 	if _, err := s.c.Kill(ctx, childID, 0, 0); err != nil {
+		// No shutdown completed — no exit is coming from this attempt, so the
+		// mark must not linger to exclude some later, unrelated fan-out.
+		s.c.selfKilled.take(childID)
 		return err
 	}
 	if !waitForChildRemoval(s.c.cm, childID, killWaitTimeout) {

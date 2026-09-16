@@ -151,7 +151,7 @@ func TestSettleFragmentNamesTheAgentAndPointsAtTheLedger(t *testing.T) {
 
 func TestExitNotifiesTheParent(t *testing.T) {
 	c, clk, cap := settleFixture(t)
-	c.notifySubagentSettled("c_w1", "exited")
+	c.notifySubagentSettled("c_w1", "exited", "")
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()

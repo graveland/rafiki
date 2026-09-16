@@ -98,7 +98,40 @@ type ShutdownResult struct {
 	// interchangeable outcomes — a caller, and an operator, must be able to
 	// tell them apart.
 	Abandoned bool
-	Duration  time.Duration
+	// ByShutdown is true when the death this result records was produced by
+	// the shutdown sequence itself, rather than by the child dying of
+	// something else while the sequence waited. It is set for every rung
+	// beyond the passive stdin close — the SIGTERM rung (including a runner
+	// whose own signal handler converts it to a nonzero exit code, the way
+	// claude exits 143 instead of dying by signal), the SIGKILL rung, and an
+	// abandoned wait — and for a passive stdin close whose writer implements
+	// StdinStopper (a Close that IS the stop request). A clean (ExitCode 0,
+	// no signal) exit on a genuinely passive stdin close is NOT flagged: it
+	// is indistinguishable from the child ending of its own accord, and its
+	// suppression needs no causality — the shape is unambiguous. Consumers
+	// use this to tell "the kill I drove did this" apart from "something else
+	// killed it while my kill was in flight", which the (code, signal) pair
+	// alone cannot answer: our SIGTERM and an external one are wire-identical.
+	ByShutdown bool
+	Duration   time.Duration
+}
+
+// StdinStopper is implemented by a Runner's stdin writer when closing it is
+// itself a request to stop the child, not a passive EOF handed to the child's
+// read loop.
+//
+// Child.Shutdown closes stdin first and waits out the full shutdown timeout on
+// the assumption that a well-behaved child exits on its own once it sees EOF.
+// A passive pipe meets that assumption or doesn't; either way the exit, when
+// it comes, is the child's own response. An active closer — darajapool's
+// relay, whose Close issues the executor-side shutdown RPC — has already
+// DRIVEN the death by the time the wait returns, so any exit observed during
+// that wait is the shutdown's own doing and ByShutdown must say so. Without
+// this distinction every daraja-hosted claude child (which exits 143 on the
+// SIGTERM that Close delivers) reads as a foreign crash and defeats any
+// consumer trying to recognize "my own kill".
+type StdinStopper interface {
+	StopsOnClose() bool
 }
 
 // abandonTimeout bounds the terminal `<-c.done` wait in Shutdown — how long we
@@ -960,6 +993,23 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 	// run — and FD exhaustion does not trigger a GC, so that is a real EMFILE
 	// path for a daemon churning children, not a tidiness point. Closing the
 	// write end of a pipe whose reader is gone is harmless.
+	//
+	// Before closing: is this closer passive or active? An active one (a
+	// StdinStopper) is itself the stop request, so the death the wait below
+	// observes is the shutdown's own doing — see ByShutdown. The flag goes on
+	// the record before the close, for the same reason as the rung write
+	// below: handleChildExit can read the record the moment the close ends
+	// the child. Skipped when the child already exited — that death was not
+	// this call's doing, and the early return below copies it untouched.
+	stdinStops := false
+	if s, ok := c.stdin.(StdinStopper); ok {
+		stdinStops = s.StopsOnClose()
+	}
+	if !alreadyClosed && stdinStops {
+		c.mu.Lock()
+		c.exit.ByShutdown = true
+		c.mu.Unlock()
+	}
 	closeStream(c.ID, "stdin", c.stdin)
 
 	if alreadyClosed {
@@ -971,15 +1021,22 @@ func (c *Child) Shutdown(shutdownTimeout, killTimeout time.Duration) (ShutdownRe
 		return res, nil
 	}
 
-	// escalated is local state; only readStdout writes to c.exit (under c.mu).
-	// We read c.exit once below under the lock, then set Escalated/Duration on
-	// the local copy — no concurrent writes to shared state.
+	// escalated is local state; only readStdout writes to c.exit (under c.mu)
+	// while the child is live, and this function writes ByShutdown once, BEFORE
+	// the rung whose deaths it attributes — handleChildExit reads ExitResult on
+	// a different goroutine the instant done closes, so a post-hoc write would
+	// race the read.
 	escalated := false
 	select {
 	case <-c.done:
 	case <-time.After(shutdownTimeout):
 		// stdin close didn't cause a timely exit; escalate to SIGTERM.
 		escalated = true
+		// Any death from here on is the ladder's doing. The flag goes on the
+		// record before Terminate, so a reap racing the signal still reads it.
+		c.mu.Lock()
+		c.exit.ByShutdown = true
+		c.mu.Unlock()
 		if terr := c.runner.Terminate(); terr != nil {
 			slog.Warn("terminate runner", "child", c.ID, "error", terr)
 		}

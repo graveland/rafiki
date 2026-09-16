@@ -40,16 +40,21 @@ func isWorkingStatus(s protocol.Status) bool {
 // child is top-level), then pushes one fragment into the child's PARENT's
 // event buffer, keyed on childID.
 //
+// excludeMCPUser omits that user's sessions from the fan-out: the settlement
+// path passes it when the child was killed by an MCP caller of that same
+// user, whose agent_kill result already answered what this fragment would
+// say. Empty means no exclusion — the ordinary settle path.
+//
 // Keying is what makes this cheap: last-write-wins per key means a worker that
 // settles three times contributes one fragment, and Push's per-(child, source)
 // debounce means five workers finishing together contribute one injected frame
 // rather than five turns.
-func (c *Controller) notifySubagentSettled(childID, reason string) {
+func (c *Controller) notifySubagentSettled(childID, reason, excludeMCPUser string) {
 	// The MCP fan-out runs first, independent of lineage AND of the event
 	// buffer: the caller that spawned a top-level MCP agent must hear about its
 	// settlement even though the parent gate below returns for it every time.
 	// With no session registered it is a no-op.
-	c.notifyMCPSettled(childID, reason)
+	c.notifyMCPSettled(childID, reason, excludeMCPUser)
 
 	if c.evbuf == nil {
 		return
