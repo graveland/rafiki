@@ -137,12 +137,6 @@ type fakeFramedDaemon struct {
 	forgets   []string
 }
 
-func (f *fakeFramedDaemon) killed() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.kills...)
-}
-
 func (f *fakeFramedDaemon) forgotten() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -335,7 +329,10 @@ func captureStderr(t *testing.T) func() string {
 		f.Close()
 	})
 	return func() string {
-		f.Sync()
+		// os.Stderr writes go straight through write(2), so the bytes are
+		// already visible to ReadFile via the page cache; Sync is only a
+		// durability flush and its failure cannot change what the test reads.
+		_ = f.Sync()
 		b, err := os.ReadFile(f.Name())
 		if err != nil {
 			t.Fatalf("read captured stderr: %v", err)
