@@ -89,6 +89,22 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 		Model:   parent.Model,
 		Labels:  labels,
 	})
+
+	// The native twin of a real Spawn's child_spawned (controller.go). Without
+	// it the row is silent from birth: the TUI rail only ever learns about a
+	// new child from the one-time Init seed or a reactive re-seed triggered by
+	// seeing an event for an unknown child id, and nothing else is ever
+	// published under this id until it exits. A subagent spawned mid-session
+	// was therefore invisible in the rail even though `rafiki list` (which
+	// queries fresh) already saw it.
+	c.publishEvent(id, &rafikiv1.Event{
+		ChildId: id,
+		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
+			ChildId:  id,
+			ParentId: parentChildID,
+			Name:     "task:" + threadID,
+		}},
+	})
 	return nil
 }
 

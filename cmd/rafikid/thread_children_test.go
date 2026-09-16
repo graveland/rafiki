@@ -4,11 +4,57 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
+
+// EnsureThreadChild must publish child_spawned exactly like a real Spawn does
+// (see TestSpawnPublishesNativeChildSpawned): the TUI rail only ever learns of
+// a new row from the one-time Init seed or a reactive reseed triggered by an
+// event for an unknown child id. A silent creation is invisible in the rail
+// for the rest of the session unless something else happens to force a
+// reseed -- `rafiki list`/`logs`/`tail` don't share the bug because they
+// query ListChildren fresh every time.
+func TestEnsureThreadChildPublishesNativeChildSpawned(t *testing.T) {
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
+	})
+
+	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
+		t.Fatalf("EnsureThreadChild: %v", err)
+	}
+	id := threadChildID("c_parent", "thread-a")
+
+	recs, err := c.evlog.Read(context.Background(), id, -1, 0)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	var found *rafikiv1.ChildSpawned
+	for _, r := range recs {
+		if r.Type == "child_spawned" {
+			var ev rafikiv1.Event
+			if err := protojson.Unmarshal(r.Payload, &ev); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			found = ev.GetChildSpawned()
+		}
+	}
+	if found == nil {
+		t.Fatal("no child_spawned event in the log")
+	}
+	if found.GetParentId() != "c_parent" {
+		t.Errorf("parent_id = %q, want %q", found.GetParentId(), "c_parent")
+	}
+	if found.GetChildId() != id {
+		t.Errorf("child_id = %q, want %q", found.GetChildId(), id)
+	}
+}
 
 func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
 	c := newTestController(t)
