@@ -270,22 +270,24 @@ func TestReviewFilterByScopeDropsIDsOutsideScope(t *testing.T) {
 	convB := insertConversation(t, pool, "client", "review-bob")
 	missing := "00000000-0000-0000-0000-00000000abcd"
 
-	got, err := New(pool).FilterByScope(ctx, ScopeOwner(alice), []string{convA, convB, missing})
+	// A UUID input is its own spelling and its own canonical.
+	canonical, spellings, err := New(pool).FilterByScope(ctx, ScopeOwner(alice), []string{convA, convB, missing})
 	if err != nil {
 		t.Fatalf("FilterByScope owner: %v", err)
 	}
-	if len(got) != 1 || got[0] != convA {
-		t.Fatalf("owner-scoped ids = %v, want exactly [%s] (out-of-scope and missing dropped)", got, convA)
+	if len(canonical) != 1 || canonical[0] != convA || len(spellings) != 1 || spellings[0] != convA {
+		t.Fatalf("owner-scoped ids = %v/%v, want exactly [%s] (out-of-scope and missing dropped)", canonical, spellings, convA)
 	}
 
 	// ScopeAll admits both owners' conversations; the nonexistent id still
 	// drops, and the caller's order is preserved.
-	got, err = New(pool).FilterByScope(ctx, ScopeAll(), []string{convB, missing, convA})
+	canonical, spellings, err = New(pool).FilterByScope(ctx, ScopeAll(), []string{convB, missing, convA})
 	if err != nil {
 		t.Fatalf("FilterByScope all: %v", err)
 	}
-	if len(got) != 2 || got[0] != convB || got[1] != convA {
-		t.Fatalf("all-scope ids = %v, want [%s, %s] in input order", got, convB, convA)
+	if len(canonical) != 2 || canonical[0] != convB || canonical[1] != convA ||
+		len(spellings) != 2 || spellings[0] != convB || spellings[1] != convA {
+		t.Fatalf("all-scope ids = %v/%v, want [%s, %s] in input order", canonical, spellings, convB, convA)
 	}
 }
 
@@ -295,12 +297,163 @@ func TestReviewFilterByScopeZeroScopeReturnsEmpty(t *testing.T) {
 
 	conv := insertConversation(t, pool, "client", "review-alice")
 
-	got, err := New(pool).FilterByScope(ctx, Scope{}, []string{conv})
+	canonical, spellings, err := New(pool).FilterByScope(ctx, Scope{}, []string{conv})
 	if err != nil {
 		t.Fatalf("zero scope must deny, not error: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("zero-scope ids = %v, want empty (the zero value denies)", got)
+	if len(canonical) != 0 || len(spellings) != 0 {
+		t.Fatalf("zero-scope ids = %v/%v, want empty (the zero value denies)", canonical, spellings)
+	}
+}
+
+// insertChildRow seeds a conversations.child row pointing at convID -- the
+// authoritative mapping the review reads match child ids through. Nothing in
+// pkg/insights needed one before the two-arm id match landed.
+func insertChildRow(t *testing.T, pool *pgxpool.Pool, childID, convID string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO conversations.child (child_id, kind, status, spawned_at, conversation_id)
+		VALUES ($1, 'fundi', 'exited', now(), $2::uuid)`,
+		childID, convID); err != nil {
+		t.Fatalf("insert child row %s: %v", childID, err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM conversations.child WHERE child_id = $1`, childID)
+	})
+}
+
+// The child-id arm in FilterByScope: the client's Resolve produces child ids,
+// so a conversation must be admitted through conversations.child and
+// canonicalized to its uuid, while another owner's child id and an id that
+// matches neither arm (garbage, a nonexistent uuid) drop silently. A real
+// UUID is unchanged: its own spelling, its own canonical.
+func TestReviewFilterByScopeAdmitsChildIDs(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	alice := ensureUser(t, pool, "review-alice")
+	convA := insertConversation(t, pool, "client", "review-alice")
+	convB := insertConversation(t, pool, "client", "review-bob")
+	childA, childB := "c_reviewchildA", "c_reviewchildB"
+	insertChildRow(t, pool, childA, convA)
+	insertChildRow(t, pool, childB, convB)
+	missing := "00000000-0000-0000-0000-00000000abcd"
+	garbage := "not-an-id-at-all"
+
+	canonical, spellings, err := New(pool).FilterByScope(ctx, ScopeOwner(alice),
+		[]string{childA, childB, garbage, missing, convA})
+	if err != nil {
+		t.Fatalf("FilterByScope: %v", err)
+	}
+	if len(canonical) != 2 || len(spellings) != 2 {
+		t.Fatalf("canonical=%v spellings=%v, want exactly two survivors", canonical, spellings)
+	}
+	if spellings[0] != childA || canonical[0] != convA {
+		t.Fatalf("first survivor = (%q, %q), want (%q, %q) -- the child id canonicalized to its conversation",
+			spellings[0], canonical[0], childA, convA)
+	}
+	if spellings[1] != convA || canonical[1] != convA {
+		t.Fatalf("second survivor = (%q, %q), want the uuid admitted as its own canonical", spellings[1], canonical[1])
+	}
+
+	// ScopeAll admits the other owner's child id too, still canonicalized,
+	// and the garbage id stays a silent drop.
+	canonical, spellings, err = New(pool).FilterByScope(ctx, ScopeAll(), []string{childB, garbage})
+	if err != nil {
+		t.Fatalf("FilterByScope all: %v", err)
+	}
+	if len(canonical) != 1 || canonical[0] != convB || len(spellings) != 1 || spellings[0] != childB {
+		t.Fatalf("all-scope = canonical %v spellings %v, want %q canonicalized to %q", canonical, spellings, childB, convB)
+	}
+}
+
+// The zero-value scope denies through the child arm too, without error --
+// and a garbage id is a silent drop there, not the loud failure the
+// pre-two-arm read gave for any non-UUID.
+func TestReviewFilterByScopeZeroScopeDeniesChildIDs(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	conv := insertConversation(t, pool, "client", "review-alice")
+	child := "c_reviewzerochild"
+	insertChildRow(t, pool, child, conv)
+
+	canonical, spellings, err := New(pool).FilterByScope(ctx, Scope{}, []string{child, "junk"})
+	if err != nil {
+		t.Fatalf("zero scope must deny, not error: %v", err)
+	}
+	if len(canonical) != 0 || len(spellings) != 0 {
+		t.Fatalf("zero-scope = %v/%v, want empty (the zero value denies)", canonical, spellings)
+	}
+}
+
+// The child-id arm through Findings: the filter matches through the child
+// mapping (the conversation join runs through conversation_analysis here),
+// another owner's child id contributes nothing, and a real uuid still works
+// in the same request.
+func TestReviewFindingsChildIDArm(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	alice := ensureUser(t, pool, "review-alice")
+	convA := insertConversation(t, pool, "client", "review-alice")
+	insertChildRow(t, pool, "c_findchildA", convA)
+	insertAnalysis(t, pool, convA, seedAnalysis{model: "detector-a", findings: []seedFinding{
+		{axis: "prompt", topicKey: "a-topic", title: "A", expectedSavings: 10},
+	}})
+	convB := insertConversation(t, pool, "client", "review-bob")
+	insertChildRow(t, pool, "c_findchildB", convB)
+	insertAnalysis(t, pool, convB, seedAnalysis{model: "detector-b", findings: []seedFinding{
+		{axis: "prompt", topicKey: "b-topic", title: "B", expectedSavings: 20},
+	}})
+
+	rows, err := New(pool).Findings(ctx, ScopeOwner(alice), FindingsFilter{ConversationIDs: []string{"c_findchildA"}})
+	if err != nil {
+		t.Fatalf("Findings child id: %v", err)
+	}
+	if len(rows) != 1 || rows[0].TopicKey != "a-topic" {
+		t.Fatalf("child-id findings = %+v, want exactly a-topic", rows)
+	}
+
+	// Mixed arms in one request: bob's child id and the junk id contribute
+	// nothing, alice's uuid still matches.
+	rows, err = New(pool).Findings(ctx, ScopeAll(), FindingsFilter{ConversationIDs: []string{"c_findchildB", convA, "junk"}})
+	if err != nil {
+		t.Fatalf("Findings mixed: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("mixed findings = %+v, want a-topic and b-topic", rows)
+	}
+}
+
+// The child-id arm through RecentAnalyses, where the row IS the analysis.
+func TestReviewRecentAnalysesChildIDArm(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	alice := ensureUser(t, pool, "review-alice")
+	convA := insertConversation(t, pool, "client", "review-alice")
+	insertChildRow(t, pool, "c_rachildA", convA)
+	insertAnalysis(t, pool, convA, seedAnalysis{model: "detector-a"})
+	convB := insertConversation(t, pool, "client", "review-bob")
+	insertChildRow(t, pool, "c_rachildB", convB)
+	insertAnalysis(t, pool, convB, seedAnalysis{model: "detector-b"})
+
+	rows, err := New(pool).RecentAnalyses(ctx, ScopeOwner(alice), []string{"c_rachildA"}, 0)
+	if err != nil {
+		t.Fatalf("RecentAnalyses child id: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ConversationID != convA {
+		t.Fatalf("child-id rows = %+v, want convA (%s) canonicalized", rows, convA)
+	}
+
+	// Zero scope + child id: denied, no error.
+	rows, err = New(pool).RecentAnalyses(ctx, Scope{}, []string{"c_rachildA"}, 0)
+	if err != nil {
+		t.Fatalf("zero scope must deny, not error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("zero-scope rows = %+v, want none", rows)
 	}
 }
 
