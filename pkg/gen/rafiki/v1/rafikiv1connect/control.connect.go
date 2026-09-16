@@ -79,6 +79,12 @@ const (
 	// ControlConversationQueryProcedure is the fully-qualified name of the Control's ConversationQuery
 	// RPC.
 	ControlConversationQueryProcedure = "/rafiki.v1.Control/ConversationQuery"
+	// ControlConversationReviewProcedure is the fully-qualified name of the Control's
+	// ConversationReview RPC.
+	ControlConversationReviewProcedure = "/rafiki.v1.Control/ConversationReview"
+	// ControlConversationFindingsProcedure is the fully-qualified name of the Control's
+	// ConversationFindings RPC.
+	ControlConversationFindingsProcedure = "/rafiki.v1.Control/ConversationFindings"
 	// ControlDarajaLaunchProcedure is the fully-qualified name of the Control's DarajaLaunch RPC.
 	ControlDarajaLaunchProcedure = "/rafiki.v1.Control/DarajaLaunch"
 	// ControlDarajaSendProcedure is the fully-qualified name of the Control's DarajaSend RPC.
@@ -110,6 +116,8 @@ type ControlClient interface {
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
+	ConversationReview(context.Context, *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error)
+	ConversationFindings(context.Context, *connect.Request[v1.ConversationFindingsRequest]) (*connect.Response[v1.ConversationFindingsResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
@@ -252,6 +260,18 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ConversationQuery")),
 			connect.WithClientOptions(opts...),
 		),
+		conversationReview: connect.NewClient[v1.ConversationReviewRequest, v1.ConversationReviewResponse](
+			httpClient,
+			baseURL+ControlConversationReviewProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationReview")),
+			connect.WithClientOptions(opts...),
+		),
+		conversationFindings: connect.NewClient[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse](
+			httpClient,
+			baseURL+ControlConversationFindingsProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationFindings")),
+			connect.WithClientOptions(opts...),
+		),
 		darajaLaunch: connect.NewClient[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse](
 			httpClient,
 			baseURL+ControlDarajaLaunchProcedure,
@@ -275,30 +295,32 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory         *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
-	streamEvents       *connect.Client[v1.StreamEventsRequest, v1.Event]
-	send               *connect.Client[v1.SendRequest, v1.SendResponse]
-	listChildren       *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
-	getChild           *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
-	spawn              *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
-	kill               *connect.Client[v1.KillRequest, v1.KillResponse]
-	close              *connect.Client[v1.CloseRequest, v1.CloseResponse]
-	setBudget          *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
-	listTasks          *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
-	listModels         *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
-	listExecutors      *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
-	getRateLimitStatus *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
-	listSkills         *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
-	getSkill           *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
-	upsertSkill        *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
-	deleteSkill        *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
-	setSkillEnabled    *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
-	conversationSearch *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
-	conversationExport *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
-	conversationQuery  *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
-	darajaLaunch       *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
-	darajaSend         *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
-	darajaWatch        *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
+	getHistory           *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents         *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send                 *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren         *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild             *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn                *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill                 *connect.Client[v1.KillRequest, v1.KillResponse]
+	close                *connect.Client[v1.CloseRequest, v1.CloseResponse]
+	setBudget            *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	listTasks            *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
+	listModels           *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	listExecutors        *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
+	getRateLimitStatus   *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	listSkills           *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
+	getSkill             *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
+	upsertSkill          *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
+	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
+	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	conversationSearch   *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	conversationExport   *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
+	conversationQuery    *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
+	conversationReview   *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
+	conversationFindings *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
+	darajaLaunch         *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
+	darajaSend           *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
+	darajaWatch          *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -406,6 +428,16 @@ func (c *controlClient) ConversationQuery(ctx context.Context, req *connect.Requ
 	return c.conversationQuery.CallUnary(ctx, req)
 }
 
+// ConversationReview calls rafiki.v1.Control.ConversationReview.
+func (c *controlClient) ConversationReview(ctx context.Context, req *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error) {
+	return c.conversationReview.CallUnary(ctx, req)
+}
+
+// ConversationFindings calls rafiki.v1.Control.ConversationFindings.
+func (c *controlClient) ConversationFindings(ctx context.Context, req *connect.Request[v1.ConversationFindingsRequest]) (*connect.Response[v1.ConversationFindingsResponse], error) {
+	return c.conversationFindings.CallUnary(ctx, req)
+}
+
 // DarajaLaunch calls rafiki.v1.Control.DarajaLaunch.
 func (c *controlClient) DarajaLaunch(ctx context.Context, req *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {
 	return c.darajaLaunch.CallUnary(ctx, req)
@@ -444,6 +476,8 @@ type ControlHandler interface {
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
+	ConversationReview(context.Context, *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error)
+	ConversationFindings(context.Context, *connect.Request[v1.ConversationFindingsRequest]) (*connect.Response[v1.ConversationFindingsResponse], error)
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
@@ -582,6 +616,18 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ConversationQuery")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlConversationReviewHandler := connect.NewUnaryHandler(
+		ControlConversationReviewProcedure,
+		svc.ConversationReview,
+		connect.WithSchema(controlMethods.ByName("ConversationReview")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlConversationFindingsHandler := connect.NewUnaryHandler(
+		ControlConversationFindingsProcedure,
+		svc.ConversationFindings,
+		connect.WithSchema(controlMethods.ByName("ConversationFindings")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlDarajaLaunchHandler := connect.NewUnaryHandler(
 		ControlDarajaLaunchProcedure,
 		svc.DarajaLaunch,
@@ -644,6 +690,10 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlConversationExportHandler.ServeHTTP(w, r)
 		case ControlConversationQueryProcedure:
 			controlConversationQueryHandler.ServeHTTP(w, r)
+		case ControlConversationReviewProcedure:
+			controlConversationReviewHandler.ServeHTTP(w, r)
+		case ControlConversationFindingsProcedure:
+			controlConversationFindingsHandler.ServeHTTP(w, r)
 		case ControlDarajaLaunchProcedure:
 			controlDarajaLaunchHandler.ServeHTTP(w, r)
 		case ControlDarajaSendProcedure:
@@ -741,6 +791,14 @@ func (UnimplementedControlHandler) ConversationExport(context.Context, *connect.
 
 func (UnimplementedControlHandler) ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationQuery is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationReview(context.Context, *connect.Request[v1.ConversationReviewRequest]) (*connect.Response[v1.ConversationReviewResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationReview is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationFindings(context.Context, *connect.Request[v1.ConversationFindingsRequest]) (*connect.Response[v1.ConversationFindingsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationFindings is not implemented"))
 }
 
 func (UnimplementedControlHandler) DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error) {

@@ -51,20 +51,22 @@ type ConversationResolver interface {
 type Server struct {
 	history HistoryLoader
 
-	events        atomic.Pointer[EventSource]
-	lineageLn     atomic.Pointer[eventlog.Lineage]
-	evlog         atomic.Pointer[eventlog.Store]
-	resolver      atomic.Pointer[ConversationResolver]
-	inbox         atomic.Pointer[inbox.Accepter]
-	children      atomic.Pointer[ChildLister]
-	lifecycle     atomic.Pointer[ChildLifecycle]
-	taskLister    atomic.Pointer[TaskLister]
-	modelLister   atomic.Pointer[ModelLister]
-	execLister    atomic.Pointer[ExecutorLister]
-	skills        atomic.Pointer[SkillManager]
-	quota         atomic.Pointer[QuotaReader]
-	conversations atomic.Pointer[ConversationInsights]
-	daraja        atomic.Pointer[*darajaHandlers]
+	events         atomic.Pointer[EventSource]
+	lineageLn      atomic.Pointer[eventlog.Lineage]
+	evlog          atomic.Pointer[eventlog.Store]
+	resolver       atomic.Pointer[ConversationResolver]
+	inbox          atomic.Pointer[inbox.Accepter]
+	children       atomic.Pointer[ChildLister]
+	lifecycle      atomic.Pointer[ChildLifecycle]
+	taskLister     atomic.Pointer[TaskLister]
+	modelLister    atomic.Pointer[ModelLister]
+	execLister     atomic.Pointer[ExecutorLister]
+	skills         atomic.Pointer[SkillManager]
+	quota          atomic.Pointer[QuotaReader]
+	conversations  atomic.Pointer[ConversationInsights]
+	reviewer       atomic.Pointer[ConversationReviewer]
+	findingsReader atomic.Pointer[ConversationFindingsReader]
+	daraja         atomic.Pointer[*darajaHandlers]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

@@ -450,6 +450,84 @@ message ConversationQueryResponse {
   repeated QueryRow rows = 2;
 }
 
+enum ReviewStage {
+  REVIEW_STAGE_UNSPECIFIED = 0; // defaults to detect
+  REVIEW_STAGE_DETECT = 1;
+  REVIEW_STAGE_RANK = 2; // persists findings
+}
+
+enum ReviewAcceptStatus {
+  REVIEW_ACCEPT_STATUS_UNSPECIFIED = 0;
+  REVIEW_ACCEPT_STATUS_ENQUEUED = 1;
+  REVIEW_ACCEPT_STATUS_ALREADY_RUNNING = 2;
+  REVIEW_ACCEPT_STATUS_QUEUE_FULL = 3;
+}
+
+// ConversationReviewRequest never carries a scope -- see ConversationQueryRequest's
+// comment above for why. An id outside the caller's scope is dropped from
+// ConversationReviewResponse.accepted silently, never reported as a distinct
+// status: surfacing it would confirm the id exists to a caller who cannot
+// read it.
+message ConversationReviewRequest {
+  repeated string conversation_ids = 1;
+  ReviewStage stage = 2;
+  optional string model = 3;
+  optional string profile = 4;
+  optional double budget_usd = 5;
+  optional int32 min_turns = 6;
+  optional bool force = 7;
+}
+
+message ConversationReviewAccept {
+  string conversation_id = 1;
+  ReviewAcceptStatus status = 2;
+}
+
+// ConversationReviewResponse is deliberately thin: one status per requested
+// conversation_id, nothing else. No analysis id, no run state -- read those
+// back through ConversationFindings. The verb never blocks on an LLM call.
+message ConversationReviewResponse {
+  repeated ConversationReviewAccept accepted = 1;
+}
+
+message ConversationFindingsRequest {
+  string axis = 1;
+  string skill = 2;
+  string status = 3; // "" means "open", matching store.ListFindings
+  repeated string conversation_ids = 4; // optional narrowing; scope still applies
+  int32 limit = 5;
+}
+
+message ReviewFinding {
+  string id = 1;
+  string analysis_id = 2;
+  string conversation_id = 3;
+  string axis = 4;
+  string topic_key = 5;
+  string skill_name = 6;
+  string title = 7;
+  int64 expected_savings_tokens = 8;
+  string status = 9;
+}
+
+message ReviewAnalysis {
+  string id = 1;
+  string conversation_id = 2;
+  string model = 3;
+  string profile = 4;
+  string status = 5; // ok | failed
+  string error = 6;
+  int64 input_tokens = 7;
+  int64 output_tokens = 8;
+  double cost_usd = 9;
+  int64 created_at_unix = 10;
+}
+
+message ConversationFindingsResponse {
+  repeated ReviewFinding findings = 1;
+  repeated ReviewAnalysis analyses = 2;
+}
+
 // ExecutorRow is one executor the daemon's pool currently knows about, plus
 // whether it could serve a spawn of a given kind right now.
 //
@@ -621,6 +699,8 @@ service Control {
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
+  rpc ConversationReview(ConversationReviewRequest) returns (ConversationReviewResponse);
+  rpc ConversationFindings(ConversationFindingsRequest) returns (ConversationFindingsResponse);
   rpc DarajaLaunch(DarajaLaunchRequest) returns (DarajaLaunchResponse);
   rpc DarajaSend(DarajaSendRequest) returns (DarajaSendResponse);
   rpc DarajaWatch(DarajaWatchRequest) returns (stream DarajaWatchResponse);
