@@ -71,6 +71,18 @@ type Node struct {
 	ExitCode *int32
 	Retrying bool
 
+	// StatusThrough is the highest ordinal already folded into Status/Exited/
+	// ExitCode/Retrying, a SEPARATE watermark for the same reason CostThrough
+	// and CtxThrough are: the rail and focus subscriptions overlap on the
+	// durable tier, so the same agent_status/child_exited/retry can arrive
+	// twice, out of order relative to each other's delivery. Without this gate
+	// an older delivery landing after a newer one flips the glyph backwards
+	// until the correct state re-arrives -- the rail's own spinner/checkmark
+	// visibly flickering out of sync with reality. HasStatusFloor admits the
+	// first status-bearing event even at ordinal 0.
+	StatusThrough  int32
+	HasStatusFloor bool
+
 	// SessionID is the child's session/conversation id from ListChildren, so
 	// the task box can address the ledger by conversation without another RPC.
 	SessionID string
@@ -274,6 +286,23 @@ func (r *Rail) Seed(summaries []*rafikiv1.ChildSummary) {
 	r.recomputeDepths()
 }
 
+// statusOrdinalAdmits reports whether ev is new enough to update n's
+// Status/Exited/ExitCode/Retrying fields, advancing StatusThrough when it is.
+// An ordinal-less event is ephemeral and always admitted, matching how the
+// rest of Apply treats a missing ordinal (see TurnEnd's Usage reading below).
+func statusOrdinalAdmits(n *Node, ev *rafikiv1.Event) bool {
+	if ev.Ordinal == nil {
+		return true
+	}
+	ord := ev.GetOrdinal()
+	if n.HasStatusFloor && ord <= n.StatusThrough {
+		return false
+	}
+	n.StatusThrough = ord
+	n.HasStatusFloor = true
+	return true
+}
+
 // Apply folds one rail-stream event into the tree.
 func (r *Rail) Apply(ev *rafikiv1.Event) {
 	r.mu.Lock()
@@ -325,16 +354,22 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 
 	switch p := ev.Payload.(type) {
 	case *rafikiv1.Event_AgentStatus:
-		n.Status = p.AgentStatus.GetState()
-		// Any status transition means the retry resolved one way or the other.
-		n.Retrying = false
+		if statusOrdinalAdmits(n, ev) {
+			n.Status = p.AgentStatus.GetState()
+			// Any status transition means the retry resolved one way or the other.
+			n.Retrying = false
+		}
 	case *rafikiv1.Event_Retry:
-		n.Retrying = true
+		if statusOrdinalAdmits(n, ev) {
+			n.Retrying = true
+		}
 	case *rafikiv1.Event_ChildExited:
-		n.Exited = true
-		n.Status = "exited"
-		n.ExitCode = p.ChildExited.ExitCode
-		n.Retrying = false
+		if statusOrdinalAdmits(n, ev) {
+			n.Exited = true
+			n.Status = "exited"
+			n.ExitCode = p.ChildExited.ExitCode
+			n.Retrying = false
+		}
 	case *rafikiv1.Event_AssistantMessage:
 		// The running total for the in-flight turn ONLY -- not accumulated,
 		// just the latest reading, matching how Engine.events() computes it

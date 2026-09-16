@@ -486,6 +486,49 @@ func TestSetCostNeverLowersAnAccumulatedTotal(t *testing.T) {
 	}
 }
 
+// statusEvt is an agent_status carrying a status at a given ordinal.
+func statusEvt(childID string, ordinal int32, state string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: state}},
+	}
+}
+
+// The rail and focus subscriptions overlap on the durable tier with no
+// ordering between the two goroutines that deliver them, so an older
+// agent_status can arrive after a newer one. Without an ordinal gate the
+// glyph/spinner would flip backwards until the newer state re-arrives --
+// visibly out of sync with reality.
+func TestApplyIgnoresAnOlderStatusArrivingAfterANewerOne(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(statusEvt("c1", 5, "idle"))
+	r.Apply(statusEvt("c1", 2, "streaming")) // stale, delivered late by the other feed
+
+	n, _ := r.Get("c1")
+	if n.Status != "idle" {
+		t.Errorf("Status = %q, want idle: a lower ordinal must not overwrite a higher one", n.Status)
+	}
+}
+
+// A ChildExited must not be undone by a stale AgentStatus that outraces it
+// through the other feed.
+func TestApplyIgnoresAStaleStatusArrivingAfterExit(t *testing.T) {
+	r := rail.New()
+	r.Apply(spawned("c1", "", "root", 0))
+	r.Apply(exited("c1", 0, 10))
+	r.Apply(statusEvt("c1", 3, "tool_running"))
+
+	n, _ := r.Get("c1")
+	if !n.Exited {
+		t.Error("Exited = false, want true: a stale status must not un-exit the row")
+	}
+	if n.Status != "exited" {
+		t.Errorf("Status = %q, want exited", n.Status)
+	}
+}
+
 func TestRemoveDropsTheNodeAndClearsFocus(t *testing.T) {
 	r := rail.New()
 	r.Seed([]*rafikiv1.ChildSummary{
