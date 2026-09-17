@@ -30,6 +30,16 @@ func TokenFile(name string) string { return filepath.Join(Dir(name), "token") }
 // plus labels, and two daemons' model universes need not overlap.
 func PresetsFile(name string) string { return filepath.Join(Dir(name), "presets.json") }
 
+// AppendSystemPromptFile is a profile's optional system-prompt appendix: a
+// plain text/markdown file `rafiki create` reads and prepends to
+// --append-system-prompt for every spawn under this profile, for any child
+// kind. A missing file means no addition, same as review.json — there is no
+// default content to seed, since that is CoordinationPrompt's job
+// (server-side, gated on the MCP surface, unrelated to this file).
+func AppendSystemPromptFile(name string) string {
+	return filepath.Join(Dir(name), "append-system-prompt.md")
+}
+
 // ActiveFile is a profile's active-child marker. RuntimeDir, beside the
 // sockets, because it is runtime state — matching where paths.ActiveFile put
 // the unscoped one.

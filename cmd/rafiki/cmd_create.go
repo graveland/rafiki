@@ -99,7 +99,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("cwd", "", "Working directory, must be absolute (defaults to current directory)")
 	cmd.Flags().String("kind", "", "Agent kind: fundi (default; native fundi runtime, needs a provider-qualified --model) or claude (Claude Code); also settable via a profile's `kind` field")
 	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi")
-	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt, e.g. \"$(cat ~/.claude-prompt.md)\" (applies to claude)")
+	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt (any kind); the profile's append-system-prompt.md, if present, is prepended to this")
 	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via a profile's `model` field")
 	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
@@ -292,7 +292,12 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	model, _ := cmd.Flags().GetString("model")
 
 	configDir, _ := cmd.Flags().GetString("config-dir")
-	appendSysPrompt, _ := cmd.Flags().GetString("append-system-prompt")
+	flagAppendSysPrompt, _ := cmd.Flags().GetString("append-system-prompt")
+	profileAppendSysPrompt, err := loadProfileAppendSystemPrompt(p.Name)
+	if err != nil {
+		return protocol.SpawnRequest{}, err
+	}
+	appendSysPrompt := mergeAppendSystemPrompt(profileAppendSysPrompt, flagAppendSysPrompt)
 
 	thinking, _ := cmd.Flags().GetString("thinking")
 	noSession, _ := cmd.Flags().GetBool("no-session")
