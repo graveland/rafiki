@@ -913,7 +913,7 @@ func (p *MessagesProxy) recordRawTrace(ctx context.Context, r *http.Request, res
 		Upstream:       upstream,
 		ReqMethod:      "POST",
 		ReqPath:        "/v1/messages",
-		ReqHeaders:     upstreamReqHeaders(r),
+		ReqHeaders:     upstreamReqHeaders(resp),
 		ReqBody:        cr.reqBody,
 		RespStatus:     &respStatus,
 		RespHeaders:    upstreamRespHeaders(resp),
@@ -1537,33 +1537,54 @@ func (p *MessagesProxy) beginCapture(r *http.Request, reqBody []byte, model stri
 	}
 }
 
-// upstreamReqHeaders builds a JSON object of headers the proxy forwarded to the
-// upstream. API key values are masked.
-func upstreamReqHeaders(r *http.Request) json.RawMessage {
-	h := map[string]string{
-		"Content-Type": "application/json",
+// upstreamReqHeaders builds a JSON object of the headers ACTUALLY placed on
+// the wire to upstream. resp.Request is what net/http.Client.Do sent (no
+// redirects occur on this path, so it is never a later hop) — reading it here
+// means this reflects reality rather than a hand-picked guess at which
+// headers matter, which used to silently drop everything but Content-Type,
+// anthropic-version and anthropic-beta. The credential is redacted, not
+// omitted, so a captured row still shows one was sent.
+func upstreamReqHeaders(resp *http.Response) json.RawMessage {
+	if resp.Request == nil {
+		return nil
 	}
-	if v := r.Header.Get("anthropic-version"); v != "" {
-		h["anthropic-version"] = v
-	}
-	if b := r.Header.Get("anthropic-beta"); b != "" {
-		h["anthropic-beta"] = b
-	}
-	out, _ := json.Marshal(h)
-	return out
+	return redactedHeaderJSON(resp.Request.Header, "Authorization", "X-Api-Key")
 }
 
-// upstreamRespHeaders builds a JSON object of headers the upstream returned.
+// upstreamRespHeaders builds a JSON object of every header the upstream
+// returned. Previously hand-picked to Content-Type and x-request-id only,
+// silently dropping everything else (rate-limit headers, retry-after,
+// OpenRouter's own routing metadata).
 func upstreamRespHeaders(resp *http.Response) json.RawMessage {
-	h := map[string]string{}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		h["Content-Type"] = ct
+	return redactedHeaderJSON(resp.Header)
+}
+
+// redactedHeaderJSON marshals h as a flat map, replacing the value of every
+// header named in redact (case-insensitively) with the literal string
+// "<redacted>" — the header stays visible (so a captured row shows a
+// credential was sent at all), just not its value. Nil/empty input maps to
+// SQL NULL, matching nilJSON's convention.
+func redactedHeaderJSON(h http.Header, redact ...string) json.RawMessage {
+	if len(h) == 0 {
+		return nil
 	}
-	if rid := resp.Header.Get("x-request-id"); rid != "" {
-		h["x-request-id"] = rid
+	strip := make(map[string]bool, len(redact))
+	for _, k := range redact {
+		strip[http.CanonicalHeaderKey(k)] = true
 	}
-	out, _ := json.Marshal(h)
-	return out
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		if strip[http.CanonicalHeaderKey(k)] {
+			out[k] = "<redacted>"
+			continue
+		}
+		out[k] = strings.Join(vs, ", ")
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // maxPassthroughBody caps how much of a small passthrough response is buffered
@@ -1673,7 +1694,7 @@ func (p *MessagesProxy) forwardPassthrough(w http.ResponseWriter, r *http.Reques
 		Upstream:    upstream,
 		ReqMethod:   r.Method,
 		ReqPath:     path,
-		ReqHeaders:  upstreamReqHeaders(r),
+		ReqHeaders:  upstreamReqHeaders(resp),
 		ReqBody:     reqBody,
 		RespStatus:  &respStatus,
 		RespHeaders: upstreamRespHeaders(resp),

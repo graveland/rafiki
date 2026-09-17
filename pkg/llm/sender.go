@@ -82,6 +82,55 @@ func (t sessionIDTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return base.RoundTrip(req)
 }
 
+// rawTraceHeaderKey is the context key rawTraceHeaders (in client.go) and
+// headerCaptureTransport share: withRawTraceHeaders attaches the pointer,
+// headerCaptureTransport fills it in from the real request actually placed on
+// the wire. Unexported: nothing outside this package may set or read it.
+type rawTraceHeaderKey struct{}
+
+// rawTraceHeaders holds the real request/response headers for one HTTP
+// attempt, captured below the SDK so recordRawTrace never has to guess at
+// what was actually sent. Both fields stay nil (not just empty) when no
+// attempt reached the transport, matching nilJSON's empty-input-is-NULL rule.
+type rawTraceHeaders struct {
+	req  http.Header
+	resp http.Header
+}
+
+// withRawTraceHeaders attaches a fresh capture point to ctx and returns it
+// alongside. Call once per logical Send/stream attempt, before the context
+// reaches any sender — every RoundTrip made with a descendant of the returned
+// ctx overwrites the pointed-to struct, so on a fallback chain the struct
+// ends up holding the LAST attempt's headers, which is exactly the attempt
+// whose (resp, err) the caller goes on to record.
+func withRawTraceHeaders(ctx context.Context) (context.Context, *rawTraceHeaders) {
+	h := &rawTraceHeaders{}
+	return context.WithValue(ctx, rawTraceHeaderKey{}, h), h
+}
+
+// headerCaptureTransport records the real outbound request headers and real
+// inbound response headers of every call, so raw-trace capture reflects what
+// actually went over the wire instead of a hand-maintained guess at which
+// headers matter. Wrapped around every sender's transport in SenderForKey,
+// unconditionally: recordRawTrace redacts credentials before persisting, so
+// capturing them here (to redact, not to store) is not itself a leak.
+type headerCaptureTransport struct{ base http.RoundTripper }
+
+func (t headerCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if h, ok := req.Context().Value(rawTraceHeaderKey{}).(*rawTraceHeaders); ok && h != nil {
+		h.req = req.Header.Clone()
+		if resp != nil {
+			h.resp = resp.Header.Clone()
+		}
+	}
+	return resp, err
+}
+
 type sdkSender struct{ client anthropic.Client }
 
 func (s sdkSender) New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
@@ -140,8 +189,9 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 	if key != "" {
 		opts = append(opts, option.WithAPIKey(key))
 	}
-	if rt != nil {
-		opts = append(opts, option.WithHTTPClient(&http.Client{Transport: rt}))
-	}
+	// Unconditional, and last: every sender's transport must be capturable
+	// regardless of whether a caller passed one, or fundi's raw-trace capture
+	// silently sees nothing for a provider that had no custom rt.
+	opts = append(opts, option.WithHTTPClient(&http.Client{Transport: headerCaptureTransport{base: rt}}))
 	return sdkSender{client: anthropic.NewClient(opts...)}, nil
 }

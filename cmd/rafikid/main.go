@@ -385,8 +385,11 @@ func runDaemon(opts runDaemonOpts) error {
 
 	// Raw request/response trace store. Created whenever the daemon has a
 	// database pool so per-session opt-in via --record-requests always works.
-	// RAFIKI_RECORD_REQUESTS=1 lifts the per-session gate: every session (and
-	// every proxied request, regardless of header) is recorded unconditionally.
+	// RAFIKI_RECORD_REQUESTS=1 lifts the per-request gate on BOTH faces: the
+	// Claude Code proxy (MessagesProxy.rawTraceAll) and every daemon-managed
+	// fundi child (Controller.rawTraceAll, consulted in agentRuntimeOptions) —
+	// every request is recorded unconditionally, regardless of header or
+	// --record-requests.
 	var rawTrace *rawtrace.RawTraceStore
 	rawTraceAll := false
 	if pool != nil {
@@ -471,7 +474,7 @@ func runDaemon(opts runDaemonOpts) error {
 		execStore = executorsdb.NewPostgresStore(pool)
 	}
 
-	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, baseCtx, execStore, userStore, skillStore, prov)
+	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	// The conversation-review worker: one bounded queue drained by a single

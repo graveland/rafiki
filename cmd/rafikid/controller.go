@@ -115,11 +115,19 @@ type Controller struct {
 	heldLeasesMu sync.Mutex
 	heldLeases   map[string]store.Lease
 
-	// rawTrace, when non-nil, enables raw LLM API request/response capture to
-	// the debug raw_http_request hypertable. Created at daemon startup when
-	// RAFIKI_RECORD_REQUESTS=1. Handed to agent children via
-	// fundi.RuntimeOptions.RawTrace.
+	// rawTrace, when non-nil, is the store raw LLM API request/response
+	// capture writes to (the debug raw_http_request hypertable). Created at
+	// daemon startup whenever a DB pool exists, independent of
+	// RAFIKI_RECORD_REQUESTS — whether a given spawn actually records is
+	// req.RecordRequests OR rawTraceAll, decided in agentRuntimeOptions.
+	// Handed to agent children via fundi.RuntimeOptions.RawTrace.
 	rawTrace *rawtrace.RawTraceStore
+
+	// rawTraceAll mirrors MessagesProxy.rawTraceAll for native fundi children:
+	// RAFIKI_RECORD_REQUESTS=1 must capture every spawn regardless of whether
+	// it passed --record-requests, the same "global switch beats per-request
+	// opt-in" rule the proxy face already applies.
+	rawTraceAll bool
 
 	// insights answers the ctrl_conversation_* RPCs. Always constructed —
 	// agentcli/local.New is nil-pool-safe, so a nil pool just means every
@@ -382,7 +390,7 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 	}
 }
 
-func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
+func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, rawTraceAll bool, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
 		if n, err := strconv.ParseFloat(h, 64); err == nil && n > 0 {
@@ -411,6 +419,7 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		heartbeatInterval: hb,
 		pool:              pool,
 		rawTrace:          rawTrace,
+		rawTraceAll:       rawTraceAll,
 		insights:          local.New(local.Options{Pool: pool}),
 		baseCtx:           baseCtx,
 		tasks:             taskStore(pool),

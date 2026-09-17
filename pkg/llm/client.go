@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -44,8 +45,16 @@ type Client struct {
 	defaultModel  string
 	modelGate     *ModelGate
 
-	rawTrace *rawtrace.RawTraceStore // nil when disabled
-	guard    *routing.ProviderGuard  // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
+	rawTrace rawTraceRecorder       // nil when disabled
+	guard    *routing.ProviderGuard // nil = disabled (RAFIKI_PROVIDER_GUARD=off)
+}
+
+// rawTraceRecorder is the one method Client needs from *rawtrace.RawTraceStore,
+// extracted so recordRawTrace's behavior (in particular, real vs. hardcoded
+// header capture) can be pinned by a test without a live database. Mirrors
+// pkg/server/proxy.go's identical seam over the same store.
+type rawTraceRecorder interface {
+	Insert(ctx context.Context, r rawtrace.RawHTTPRequest) error
 }
 
 type ClientOption func(*Client)
@@ -96,9 +105,18 @@ func WithDefaultModel(m string) ClientOption {
 }
 
 // WithRecordRequests enables raw HTTP request/response capture to the debug
-// raw_http_request hypertable. Pass nil to disable (the default).
+// raw_http_request hypertable. Pass nil to disable (the default). The nil
+// check happens here, not just at the call site: c.rawTrace is an interface
+// (rawTraceRecorder) so tests can fake it, and assigning a nil
+// *rawtrace.RawTraceStore straight into an interface field would produce a
+// non-nil interface wrapping a nil pointer — recordRawTrace's own `c.rawTrace
+// == nil` guard would then never fire.
 func WithRecordRequests(s *rawtrace.RawTraceStore) ClientOption {
-	return func(c *Client) { c.rawTrace = s }
+	return func(c *Client) {
+		if s != nil {
+			c.rawTrace = s
+		}
+	}
 }
 
 // WithTracerProvider injects OpenTelemetry tracing. The library never
@@ -336,6 +354,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 
 	ref := c.beginTurn(ctx, meta, params)
 	ctx = WithSessionID(ctx, ref.convID)
+	ctx, hdrs := withRawTraceHeaders(ctx)
 
 	start := time.Now()
 	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
@@ -346,7 +365,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		span.RecordError(err)
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
 		// Raw trace: non-streaming error path.
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
 		return nil, err
 	}
 
@@ -368,7 +387,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, servedBy, latency)
 	}
 	// Raw trace: non-streaming success path.
-	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, servedBy, latency, nil)
+	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, servedBy, latency, nil, hdrs)
 	return resp, nil
 }
 
@@ -533,6 +552,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 
 	ref := c.beginTurn(ctx, meta, params)
 	ctx = WithSessionID(ctx, ref.convID)
+	ctx, hdrs := withRawTraceHeaders(ctx)
 	start := time.Now()
 
 	stream, serr := streamer.NewStreaming(ctx, params)
@@ -568,7 +588,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// sendWithTrim's own retry loop (not SendParams) re-attempts via
 		// streaming again, instead of wastefully re-issuing to the same
 		// primary sender.
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
 		return nil, true, false, serr
 	}
 
@@ -590,7 +610,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 			span.RecordError(wrapped)
 			c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, wrapped)
 			recordPrimaryResult(breaker, now, wrapped)
-			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped)
+			c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), wrapped, hdrs)
 			return nil, true, delivered, wrapped
 		}
 		FixAccumulatedEmptyToolInput(&acc, ev)
@@ -611,7 +631,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// regardless of breaker state) or breaker is nil (bypass, no handoff
 		// exists to defer to): this IS the final result, so record it.
 		recordPrimaryResult(breaker, now, serr)
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
 		return nil, true, delivered, serr
 	}
 
@@ -638,7 +658,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 	if ref.capturing {
 		c.completeTurn(ctx, ref.turnID, ref.createdAt, &acc, primary, latency)
 	}
-	c.recordRawTrace(ctx, meta, ref.turnID, params, &acc, 200, primary, latency, nil)
+	c.recordRawTrace(ctx, meta, ref.turnID, params, &acc, 200, primary, latency, nil, hdrs)
 	return &acc, true, delivered, nil
 }
 
@@ -985,7 +1005,13 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 // cmd/rafikid/main.go) already drains any insert still in flight, bounded by
 // that same timeout. Errors are logged, never surfaced. No-op when c.rawTrace
 // is nil.
-func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream string, latency int, err error) {
+//
+// hdrs carries the real request/response headers captured off the wire by
+// headerCaptureTransport (see withRawTraceHeaders) — never nil in practice,
+// since every call site creates it before making the attempt, but its fields
+// stay nil when no attempt ever reached the transport (e.g. a resolution
+// error before any sender was called).
+func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID string, params anthropic.MessageNewParams, resp *anthropic.Message, status int, upstream string, latency int, err error, hdrs *rawTraceHeaders) {
 	if c.rawTrace == nil {
 		return
 	}
@@ -1014,10 +1040,10 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 		Upstream:    string(upstream),
 		ReqMethod:   "POST",
 		ReqPath:     "/v1/messages",
-		ReqHeaders:  json.RawMessage(`{"Content-Type":"application/json"}`),
+		ReqHeaders:  redactedHeaderJSON(hdrs.req, "Authorization", "X-Api-Key"),
 		ReqBody:     reqJSON,
 		RespStatus:  respStatus,
-		RespHeaders: json.RawMessage(`{}`),
+		RespHeaders: redactedHeaderJSON(hdrs.resp),
 		RespBody:    respJSON,
 		LatencyMS:   latency,
 		Error:       errStr,
@@ -1038,4 +1064,32 @@ func (c *Client) recordRawTrace(ctx context.Context, meta SendMeta, turnID strin
 		defer cancel()
 		_ = c.rawTrace.Insert(capCtx, r)
 	}()
+}
+
+// redactedHeaderJSON marshals h as a flat map, replacing the value of every
+// header named in redact (case-insensitively) with the literal string
+// "<redacted>" — the header is still visible (so a captured row shows a
+// credential was sent at all), just not its value. Nil input (no attempt
+// reached the transport) maps to SQL NULL, matching nilJSON's convention.
+func redactedHeaderJSON(h http.Header, redact ...string) json.RawMessage {
+	if len(h) == 0 {
+		return nil
+	}
+	strip := make(map[string]bool, len(redact))
+	for _, k := range redact {
+		strip[http.CanonicalHeaderKey(k)] = true
+	}
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		if strip[http.CanonicalHeaderKey(k)] {
+			out[k] = "<redacted>"
+			continue
+		}
+		out[k] = strings.Join(vs, ", ")
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
 }

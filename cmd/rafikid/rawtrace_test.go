@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/store"
 )
@@ -119,5 +120,49 @@ func TestRawTrace_InsertNilStore(t *testing.T) {
 
 	if err := nilStore.Insert(ctx, rawtrace.RawHTTPRequest{Source: "fundi"}); err != nil {
 		t.Fatalf("nil store Insert: %v", err)
+	}
+}
+
+// TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag pins the actual bug:
+// RAFIKI_RECORD_REQUESTS=1 (Controller.rawTraceAll) was documented as lifting
+// capture for "every session... regardless of header", but agentRuntimeOptions
+// only ever consulted req.RecordRequests — a native fundi child spawned
+// without --record-requests recorded nothing even with the daemon-wide switch
+// on. No DB is needed: rawTrace only needs to be a non-nil sentinel, since
+// this test asserts on ro.RawTrace's nil-ness, never calls Insert.
+func TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag(t *testing.T) {
+	c := newTestController(t)
+	c.rawTrace = &rawtrace.RawTraceStore{}
+	c.rawTraceAll = true
+
+	req := protocol.SpawnRequest{
+		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
+		// RecordRequests deliberately left false: rawTraceAll must still win.
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_rawtraceall", false, "", "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.RawTrace == nil {
+		t.Error("RawTrace = nil, want non-nil: RAFIKI_RECORD_REQUESTS=1 must capture every spawn, not just ones passing --record-requests")
+	}
+}
+
+// TestAgentRuntimeOptionsRawTraceOffByDefault guards the other side: with
+// rawTraceAll false and no per-spawn opt-in, capture must stay off.
+func TestAgentRuntimeOptionsRawTraceOffByDefault(t *testing.T) {
+	c := newTestController(t)
+	c.rawTrace = &rawtrace.RawTraceStore{}
+	c.rawTraceAll = false
+
+	req := protocol.SpawnRequest{
+		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_rawtraceoff", false, "", "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.RawTrace != nil {
+		t.Error("RawTrace != nil, want nil: neither --record-requests nor RAFIKI_RECORD_REQUESTS is set")
 	}
 }

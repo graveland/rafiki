@@ -406,7 +406,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 	ro.AutoResume = autoResume
 	ro.RawTrace = c.rawTrace
-	if !req.RecordRequests {
+	if !req.RecordRequests && !c.rawTraceAll {
 		ro.RawTrace = nil
 	}
 	// Bound to THIS child. Constructed here rather than stored on Controller

@@ -2185,3 +2185,56 @@ func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 		t.Errorf("RecordThread calls = %d, want 1: the thread stamp must precede the append-error return", fs.threads)
 	}
 }
+
+// TestRawTraceCapturesRealHeaders pins the actual bug: upstreamReqHeaders and
+// upstreamRespHeaders used to hand-pick a tiny allowlist (Content-Type,
+// anthropic-version, anthropic-beta for the request; Content-Type,
+// x-request-id for the response) and silently dropped everything else the
+// upstream actually sent or received. A raw_http_request row should instead
+// show the real credential REDACTED (present, not dropped) and any upstream
+// response header at all, neither of which the old allowlist could produce.
+func TestRawTraceCapturesRealHeaders(t *testing.T) {
+	rec := &fakeRawTrace{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "real-key" {
+			t.Errorf("upstream saw x-api-key = %q, want real-key (redaction must happen at capture, not on the wire)", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Anthropic-Ratelimit-Requests-Remaining", "42")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
+	p.store = &fakeProxyStore{}
+	p.SetRawTrace(rec, true)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-5","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if len(rec.inserted) != 1 {
+		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
+	}
+
+	var reqHeaders map[string]string
+	if err := json.Unmarshal(rec.inserted[0].ReqHeaders, &reqHeaders); err != nil {
+		t.Fatalf("ReqHeaders not valid JSON: %v (%s)", err, rec.inserted[0].ReqHeaders)
+	}
+	if reqHeaders["X-Api-Key"] != "<redacted>" {
+		t.Errorf("req X-Api-Key = %q, want <redacted> (present, not the real key, not dropped)", reqHeaders["X-Api-Key"])
+	}
+
+	var respHeaders map[string]string
+	if err := json.Unmarshal(rec.inserted[0].RespHeaders, &respHeaders); err != nil {
+		t.Fatalf("RespHeaders not valid JSON: %v (%s)", err, rec.inserted[0].RespHeaders)
+	}
+	if respHeaders["Anthropic-Ratelimit-Requests-Remaining"] != "42" {
+		t.Errorf("resp Anthropic-Ratelimit-Requests-Remaining = %q, want 42 (the old allowlist could never carry an arbitrary upstream header)", respHeaders["Anthropic-Ratelimit-Requests-Remaining"])
+	}
+}

@@ -105,7 +105,7 @@ func TestConversationReaderRunQueryMapsScope(t *testing.T) {
 			t.Fatalf("mkdirall %s: %v", d, err)
 		}
 	}
-	ctrl := NewController(childstore.New(), stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, pool, nil, t.Context(), nil, nil, nil, nil)
+	ctrl := NewController(childstore.New(), stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, pool, nil, false, t.Context(), nil, nil, nil, nil)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
