@@ -1,79 +1,111 @@
 # rafiki
 
 An LLM proxy and conversation-capture store, an agent library built on it, and
-a daemon that hosts coding-agent children. One module, two surfaces:
+a daemon (`rafikid`) that hosts coding-agent children — driven from a CLI/TUI
+client (`rafiki`).
 
-- **the proxy / library** — Anthropic- and OpenAI-protocol faces, routing with
-  failover, and a DB-backed conversation store that captures every turn.
-- **the daemon** — `rafikid` runs coding-agent children, multiplexes
-  their event streams to concurrent clients, and exposes a control plane over a
-  Unix socket. Its native `fundi` child kind drives the Anthropic API through
-  this repo's own library rather than shelling out to Claude Code.
+## Naming
 
-They were separate repos until they weren't: the daemon (then called fundi)
-consumed rafiki as a pinned module, and the pin drifted silently for a whole
-phase because a `go.work` file resolved it off disk instead. One module
-removes the failure mode entirely, and a later identity consolidation folded
-the daemon's own name into rafiki too — `fundi` now survives only as the
-native agent runtime's child kind (`--kind fundi`).
+Three Swahili words, three roles:
 
-## Layout
+- **rafiki** ("friend") — the project as a whole: the client/TUI binary
+  (`rafiki`), the daemon (`rafikid`), and the library underneath both.
+- **fundi** ("craftsman") — the native agent runtime, one of three child
+  kinds (`--kind fundi`, the default). It's the one that does the work
+  in-process, through this repo's own `pkg/llm`/`pkg/agentloop` rather than
+  shelling out to another agent binary.
+- **daraja** ("bridge") — the mechanism that lets a `claude`-kind child run
+  on a remote executor while still looking, to the daemon, like a normal
+  managed child: the executor launches Claude Code and reverse-dials back
+  into the daemon's pool, bridging capture, cost accounting, and routing
+  visibility onto a process the daemon didn't start directly. See
+  [Daraja](#daraja) below.
 
-```
-pkg/llm/        typed builder + Conversation — the library front door
-pkg/routing/    breaker, OpenRouter catalog, model resolution, ClassifyFailure,
-                prefix_hash, SSE capture parsing, turn store
-pkg/agentloop/  ToolSet, Run/Resume, Events — tool-use loop primitives
-pkg/store/      conversations schema migrations (source of truth), message
-                persistence, recovery queries
-pkg/server/     HTTP faces (/v1/messages, /v1/chat/completions), Authenticator
-                seam, static token auth, Prometheus metrics
-pkg/insights/   read-only queries over the captured corpus
-pkg/analyze/    LLM-driven skill-gap detection and finding triage
-pkg/agentcli/   the `rafikid agent` verb implementations
+## Highlights
 
-pkg/fundi/      the native agent runtime: turn engine, tools, context and skills
-pkg/child/      child process lifecycle and the per-backend providers
-pkg/inproc/     the child.Runner that runs a fundi child as a goroutine
-                over a pair of OS pipes
-pkg/control/    the daemon's control plane: dispatch and socket server
-pkg/childstore/ child session records and snapshots
-pkg/protocol/   typed wire shapes for every ctrl_* command, response and event
-pkg/client/     Go client for the daemon's socket
-pkg/bus/        event fan-out to concurrent subscribers
-pkg/ring/       bounded ring buffer for child output
-pkg/persist/    on-disk records and log dumps
-pkg/paths/      XDG path resolution and the RAFIKI_* environment inventory
-pkg/skills/     skill discovery and loading
-pkg/models/     LLM model catalog enumeration
-pkg/version/    build-derived version string
-
-cmd/rafikid/    the rafiki daemon: proxy face, standalone `rafikid fundi` stdio
-                mode, the DSN-backed `rafikid agent` insights CLI, and `migrate`
-cmd/rafiki/     the rafiki CLI client, plus `rafiki claude` (the launcher)
-pkg/tui/        the rafiki TUI (bubbletea, in-process — driven by
-                `rafiki create` and `rafiki attach`)
-```
-
-Everything importable lives under `pkg/`; `cmd/` is binaries. There is no
-`internal/` — if you want to use something, import it. Private helpers are
-unexported identifiers inside the package that uses them.
+- **Native agent runtime (`fundi`)** — drives the Anthropic, OpenRouter, or any
+  OpenAI-compatible provider directly through this repo's own library instead
+  of shelling out, with breaker-gated failover. In-band abort: the process
+  stays resident and abort arrives as a protocol frame.
+- **Subagent trees, either kind.** `fundi` and `--kind claude` agents get the
+  *same* rafiki agent-control surface — spawn, steer, budget, and watch real
+  subagents, not just Claude Code's own opaque `Task` tool. Kinds mix freely:
+  a `fundi` coordinator can spawn `claude` children and a `claude` session can
+  spawn `fundi` ones. Depth/cost/concurrency limits are enforced by the
+  daemon against stored state, never the caller's own claim, and settlement is
+  push-based — a coalesced digest lands in the parent's next turn instead of
+  it polling.
+- **Cost-tiered fleets** — because kinds and models mix freely under one
+  budgeted tree, a coordinator can plan with an expensive model, fan out
+  execution across a swarm of cheap OpenRouter subagents, and review with a
+  third — plan with Opus, execute with a fleet of $0.10/Mtok workers while
+  Sonnet coordinates, review with Fable — all watchable live in one cockpit.
+- **A searchable model catalog, not a static list.** `agent_models` queries
+  the live OpenRouter catalog (300+ entries) plus every locally-configured
+  provider — price, context window, tool/vision support, benchmark scores
+  where known — so a coordinator can find "cheapest tool-capable model under
+  $0.20/Mtok" itself instead of being handed a flat id list or guessing.
+- **Ships its own coordination skills, used like Superpowers.** A curated
+  skill set — brainstorming an idea into a design, writing a wave-based plan,
+  executing it by dispatching concurrent subagents, and the `agent_spawn`/
+  `task_*`/budget mechanics underneath — is synced both to a developer's
+  local Claude Code and into the daemon's own skill store, so any `fundi` or
+  `claude` agent rafiki spawns can pick up the same brainstorm → plan →
+  dispatch-a-fleet workflow using rafiki's own feature set, not just a human
+  working on this repo.
+- **Claude Code's own subagents are captured too.** Claude Code's native
+  `Task`-tool subagents get split into their own conversations (and their own
+  rail rows in the cockpit) rather than disappearing into one opaque parent
+  turn — so a `rafiki claude` session's built-in delegation is just as
+  inspectable as a rafiki-spawned one.
+- **Executor plane** — a subagent's filesystem/shell/LSP tools run on
+  whatever executor it's bound to, not the daemon's own process, and can
+  only touch what exists there: install one inside a VM or container and an
+  agent using it is confined to that VM/container's filesystem, nothing on
+  the host. `rafikid` itself can run in Kubernetes with no local filesystem
+  of interest at all — you connect from the cockpit on your laptop and start
+  agents against executors elsewhere, isolated per agent if you want it.
+  Background jobs survive a 600s `bash` ceiling and notify on completion;
+  workspaces can be pinned to a machine or rescheduled across an
+  interchangeable pool.
+- **Watch or drive the same conversation from anywhere.** A running agent
+  isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki watch`,
+  another agent's MCP tools (`agent_view`/`agent_send`), and a script hitting
+  the Connect API directly can all observe or steer the same conversation at
+  once — the event log fans out to every subscriber, and any number of them
+  can replay a child's history from an ordinal.
+- **Conversation review** — an LLM-driven pass over your own captured history
+  that detects skill gaps and triages findings, on demand
+  (`rafiki conversations review`) or automatically on close (`rafiki close
+  --review`) — no direct DB access needed on the client.
+- **Provider cache guard** — OpenRouter can silently move an unpinned model to
+  a colder, more expensive provider mid-conversation. `routing.ProviderGuard`
+  watches for the miss pattern and ejects the bad provider automatically.
+- **Model aliasing** — short names for long local/custom model ids, with a
+  declared context window so Claude Code doesn't assume 200K against a
+  16K-context local model and blow past it.
+- **Claude Code integration** — `rafiki claude` launches Claude Code through
+  the proxy with full capture, routing, and cost accounting, plus the injected
+  agent-control surface above — and can bill your own Claude subscription
+  instead of the daemon's API key.
+- **The `rafiki` cockpit** — a bubbletea TUI built into the client binary for
+  watching and driving a tree of agents live, no separate build step.
+- **Multi-daemon profiles** — one client resolves distinct daemons (local
+  socket or remote TLS) by name, each with its own token, model defaults, and
+  presets.
 
 ---
 
 # The proxy / library
 
-**Built (phases 1–4):** the routing core (per-upstream breaker, OpenRouter
-catalog, model resolution, prefix_hash, SSE capture parsing); the typed
-builder API + DB-backed `Conversation` (trim policy, cache breakpoints,
-write-ahead persistence); agent-loop primitives (`agentloop.Run`/`Resume`
-with fabricated-error crash recovery); both proxy faces — Anthropic
-`/v1/messages` and OpenAI `/v1/chat/completions` — behind an `Authenticator`
-seam; static bearer-token auth; Prometheus metrics; OTLP tracing; and `--dev`
-mode. The standalone `rafiki serve`/`rafiki migrate` binary is gone — the
-`rafikid` daemon now serves the proxy face itself, and `rafikid migrate` applies
-the schema. sc imports the module in-process and mounts the same faces; sc's
-diagnose loop, Slack agent and core-dump analyzer run on the library.
+Routing core (per-upstream breaker, OpenRouter catalog, model resolution,
+`prefix_hash`, SSE capture parsing); a typed builder API and DB-backed
+`Conversation` (trim policy, cache breakpoints, write-ahead persistence);
+agent-loop primitives (`agentloop.Run`/`Resume` with crash recovery); both
+proxy faces — Anthropic `/v1/messages` and OpenAI `/v1/chat/completions` —
+behind an `Authenticator` seam; static bearer-token auth; Prometheus metrics;
+OTLP tracing. `rafikid` serves the proxy face itself and applies the schema
+(`rafikid migrate`) — there is no separate `rafiki serve` binary.
 
 ## Model selection
 
@@ -83,70 +115,17 @@ Requests on the `/v1/messages` face (and `llm.Conversation`s) take:
   primary, with breaker-gated OpenRouter failover when configured;
 - a `<family>-latest` alias (`opus-latest`) — resolved live from the
   OpenRouter catalog to the family's newest Anthropic model;
-- a **short model alias** (`kimi-k3`, `deepseek-v4-pro`, `deepseek-v4-flash`,
-  `glm-5.2`) — resolved live from the catalog to the newest release of that
-  model line (the id itself or a stamped point release like `-0905`, never a
-  variant fork or a new line), yielding an OpenRouter slash id;
+- a **short model alias** (`kimi-k3`, `deepseek-v4-pro`, `glm-5.2`) —
+  resolved live from the catalog to the newest release of that model line,
+  yielding an OpenRouter slash id;
 - any OpenRouter slash id (`moonshotai/kimi-k3`) — routed directly to
-  OpenRouter with no failover: the caller asked for that specific model.
+  OpenRouter with no failover.
 
 Some model lines carry a **provider pin** (`routing.ProviderPrefsFor`):
 open-weight models are served by many OpenRouter providers of varying
 quantization and data-retention policy, so pinned lines get an OpenRouter
-`provider` routing object injected restricting them to vetted hosts
-(`glm-5.2` → Fireworks). A caller-supplied `provider` field always wins
-over the pin.
-
-### The provider cache guard
-
-OpenRouter picks which provider serves an unpinned model, and that choice can
-change without warning. On 2026-08-12 it moved `deepseek/deepseek-v4-pro` from
-Novita to CoreWeave; Novita had been serving 98–99% of input tokens from prompt
-cache, CoreWeave served 5.9%. Nothing errored — requests succeeded, quality was
-unaffected, and the cost per input token went up 15.6×. Sticky routing then kept
-every subsequent turn of the conversation on the bad provider.
-
-`routing.ProviderGuard` watches completed OpenRouter turns for exactly that. A
-turn counts as evidence against its provider only when it *should* have hit
-cache: same conversation, same `prefix_hash` as the previous turn, same provider
-as the previous turn, and a prompt over 4096 tokens. Five consecutive such
-misses eject the provider — its slug goes into the outbound request's
-`provider.ignore` for that model line, which is also what breaks OpenRouter's
-sticky routing and lets the next request land somewhere else.
-
-- **Threshold: 5.** Measured, not guessed. Across ~1200 turns of healthy Novita
-  traffic the worst consecutive miss streak was 1; the broken CoreWeave produced
-  streaks of 15–28. Both sequences are checked into
-  `pkg/routing/testdata/` and replayed as tests.
-- **TTL: 24 hours**, then the provider is eligible again — long enough that a
-  bad provider cannot re-burn the budget the same day, short enough that a
-  repaired endpoint returns unattended.
-- **Cap: 3 providers per model line**, oldest evicted first, so the guard can
-  never blacklist a model into unroutability.
-- The guard's ignore list is merged in **even when the caller supplied its own
-  `provider` object** — unlike the pin, which the caller overrides. A budget
-  guard any caller can switch off is not a guard.
-- It needs capture enabled: it judges misses using `prefix_hash` and the
-  conversation id, so with capture off nothing qualifies as evidence and the
-  guard is inert by design.
-
-Set `RAFIKI_PROVIDER_GUARD=off` to disable it entirely.
-
-Ejections are logged append-only, so the table is breakage history rather than
-just state, and unexpired rows reseed the in-memory list at startup:
-
-```sql
-SELECT created_at, provider, model_line, reason, expires_at, evidence
-  FROM openrouter.provider_ejection
- ORDER BY created_at DESC LIMIT 20;
-```
-
-Note that OpenRouter's endpoints API cannot answer this question for you: its
-`supports_implicit_caching` flag is `false` for Novita, which cached 99% of the
-time, and `true` only for the first-party DeepSeek endpoint. Every third-party
-endpoint also publishes an `input_cache_read` price whether or not it delivers
-one. Observed behaviour is the only signal, which is why the guard is
-observational rather than a catalog lookup.
+`provider` routing object restricting them to vetted hosts (`glm-5.2` →
+Fireworks). A caller-supplied `provider` field always wins over the pin.
 
 No concrete model ids are hardcoded: aliases name families/lines and the
 catalog is the source of truth, so an unresolvable alias errors instead of
@@ -154,10 +133,36 @@ falling back to a stale id. Slash ids and model aliases require
 `OPENROUTER_API_KEY`. The `/v1/chat/completions` face does no resolution —
 it takes raw ids and routes by configured prefix.
 
+### The provider cache guard
+
+OpenRouter picks which provider serves an unpinned model, and that choice can
+change without warning — silently, at up to 15× the input-token cost, because
+the new provider doesn't cache the way the old one did. `routing.ProviderGuard`
+watches completed OpenRouter turns for the tell (same conversation, same
+`prefix_hash` and provider as the previous turn, a prompt over 4096 tokens,
+and a cache miss). Five consecutive misses eject the provider for 24 hours,
+capped at 3 ejected providers per model line so the guard can never blacklist
+a line into unroutability. It needs capture enabled — it judges misses using
+`prefix_hash` and conversation id, both capture-only — so with capture off it
+is inert by design, and it applies **even when the caller supplied its own
+`provider` object**. Set `RAFIKI_PROVIDER_GUARD=off` to disable it.
+
+Ejections are logged append-only and reseed the in-memory list at startup:
+
+```sql
+SELECT created_at, provider, model_line, reason, expires_at, evidence
+  FROM openrouter.provider_ejection
+ ORDER BY created_at DESC LIMIT 20;
+```
+
+OpenRouter's catalog can't answer this for you — its `supports_implicit_caching`
+flag doesn't correlate with actual cache behavior — which is why the guard is
+observational rather than a lookup.
+
 ## `rafikid agent`
 
-`rafikid agent <stats|search|export|query|analyze|findings>` is a DSN-backed CLI
-over the captured `conversations` schema: read-only insights, the
+`rafikid agent <stats|search|export|query|analyze|findings>` is a DSN-backed
+CLI over the captured `conversations` schema: read-only insights, the
 LLM-driven skill-gap detector, and finding triage. See
 [`docs/agent-cli.md`](docs/agent-cli.md) for every verb, flag, and the dev
 loop.
@@ -182,24 +187,20 @@ an advisory lock so two servers booting together apply the chain exactly once.
 Some OpenRouter models reject an `output_config.effort` value Claude Code sends
 (e.g. `gpt-5-codex` accepts only `medium`). The proxy learns each model's
 allowed set at runtime: on a rejection that enumerates supported values, it
-records the constraint in an in-memory cache, clamps the effort, and retries the
-request once, so the client gets a working response instead of a dead turn.
-Subsequent requests to that model clamp proactively. The cache is per-process
-(never persisted) and starts empty, so it always reflects the current provider
-behavior. See `pkg/routing/effortmap.go` (`EffortCache`) and `pkg/server/proxy.go`
-(`effortRetry`).
+records the constraint in an in-memory (per-process, never persisted) cache,
+clamps the effort, and retries once. Subsequent requests to that model clamp
+proactively. See `pkg/routing/effortmap.go` (`EffortCache`) and
+`pkg/server/proxy.go` (`effortRetry`).
 
 ---
 
 # rafiki — the agent daemon
 
-rafiki began as a fork of pi-controller, which is why the control plane is
-newline-delimited JSON frames over a unix socket rather than something more
-modern. What it adds
-is a **native agent runtime**: the `fundi` child kind drives the Anthropic API
-through `pkg/llm` and `pkg/agentloop` directly rather than shelling out. That is
-what makes in-band abort possible — abort arrives as a protocol frame and the
-process stays resident.
+The control plane is newline-delimited JSON frames over a Unix socket (a
+legacy of rafiki's pi-controller fork), plus a Connect/protobuf plane for the
+TUI and remote access. What the daemon adds beyond hosting a process is a
+**native agent runtime**: the `fundi` child kind drives the Anthropic API
+through `pkg/llm`/`pkg/agentloop` directly.
 
 | Child kind | Backend |
 |---|---|
@@ -207,45 +208,27 @@ process stays resident.
 | `pi` | a pi process in `--mode rpc` |
 | `claude` | Claude Code |
 
-The kinds have **different model universes**, and `--model` completion is scoped
-to the one you picked. The scoping lives daemon-side now (`sourcesForKind` in
-`cmd/rafikid`), and completion asks the daemon named by the resolved profile,
-so against a remote daemon (a profile with a `url`) it offers that daemon's
-models, not the ones resolvable on your laptop. A `fundi` child routes
-through this module, so it takes
-concrete Anthropic ids, `<family>-latest` aliases and any OpenRouter slash id. A
-`pi` child resolves the id against pi's *own* providers in
-`~/.pi/agent/models.json`, so an OpenRouter slash id means nothing to it — pick
-one and the child spawns, attaches, and then never answers.
-
-Completion needs a reachable daemon. Candidates are cached per endpoint for a
-short window (children 15s, models 1h), every mutating verb (`create`, `kill`,
-`close`, `label`) drops its cache entry, and any failure — unreachable daemon,
-missing token — quietly yields no candidates rather than an error. `rafiki
-models` bypasses the model cache and rewrites it, which is the escape hatch
-after adding a provider or starting a new local model.
-
-`fundi` needs `ANTHROPIC_API_KEY` in the **daemon-visible** environment
-(unconditionally — the client always builds an Anthropic sender), plus
-`OPENROUTER_API_KEY` for any non-`anthropic/` model. Both reach a child from the
-caller's shell via `rafiki create --forward-env`, on by default. A missing key
-fails fast at spawn rather than on the first turn.
+The kinds have **different model universes**, and `--model` completion is
+scoped to the one you picked: `fundi` takes concrete Anthropic ids,
+`<family>-latest` aliases, and OpenRouter slash ids; `pi` resolves against
+its own `~/.pi/agent/models.json`, so an OpenRouter id means nothing to it —
+pick one and the child spawns, attaches, and never answers. `fundi` needs
+`ANTHROPIC_API_KEY` in the **daemon-visible** environment (unconditionally),
+plus `OPENROUTER_API_KEY` for any non-`anthropic/` model — both reach a
+spawned child from the caller's shell via `rafiki create --forward-env`, on
+by default.
 
 ## The agent inbox
 
-The daemon runs two durable stores for the same underlying traffic, and they
-give opposite guarantees on purpose. `conversations.event_log` is
-**at-least-once-to-a-cursor**, fanned out to every subscriber — any number of
-attached clients can replay a child's history from an ordinal. `conversations.agent_inbox`
-is **consume-once-into-a-turn** for exactly one consumer: the agent itself.
-Every message destined for an agent — a human's prompt, a coordinator's
-prompt, an abort, and the coalescing fragments the daemon generates from
-subagent lifecycle events — is persisted before it is acknowledged, and
-retired only when the agent confirms it entered a turn. A daemon that
-restarts between accepting a message and delivering it replays the message
-rather than losing it. One table serving both jobs would give neither
-guarantee: a fan-out log cannot be safely consumed-once, and a consume-once
-queue cannot be safely replayed by a second reader.
+The daemon runs two durable stores for the same traffic with opposite
+guarantees. `conversations.event_log` is **at-least-once-to-a-cursor**,
+fanned out to every subscriber — any attached client can replay a child's
+history from an ordinal. `conversations.agent_inbox` is
+**consume-once-into-a-turn** for exactly one consumer, the agent itself:
+every message destined for it — a prompt, an abort, a coalesced subagent
+digest — is persisted before it's acknowledged, and retired only once the
+agent confirms it entered a turn. A daemon restart between accepting and
+delivering a message replays it rather than losing it.
 
 ## Binaries
 
@@ -253,262 +236,121 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 
 | Binary | Role |
 |---|---|
-| `rafikid` | the daemon. It runs `fundi`-kind children as goroutines inside itself. `claude` children route through daraja on an executor when the daemon has an executor pool configured (see "Daraja" below); with no executor pool at all, they remain local subprocesses of the daemon. `rafikid fundi` still exists as a standalone one-child-on-stdio mode, but the daemon no longer re-execs itself to spawn one |
+| `rafikid` | the daemon. Runs `fundi`-kind children as goroutines inside itself; `claude` children route through daraja on an executor when one is configured for it, else run as local subprocesses. `rafikid fundi` is a standalone one-child-on-stdio mode |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 
 ## Daraja
 
 An ordinary `rafiki create --kind claude` routes through daraja automatically
 whenever the daemon has an executor pool configured and one of its executors
-declares `claude` in `--launch` — no operator action needed. `rafiki daraja
-launch`, below, is the manual entry point to the same machinery, useful for
-debugging the launch path directly without going through a full spawn.
+declares `claude` in `--launch` — no operator action needed. A daraja-routed
+claude child is proxied through the daemon (capture, cost accounting, routing
+visibility) while still billing the user's own Claude subscription by default
+(`--passthrough-auth auto|on|off`, mirroring `rafiki claude --passthrough-auth`).
 
-A daraja-routed claude child is proxied through the daemon (capture, cost
-accounting, routing visibility) while still billing the user's own Claude
-subscription by default — `--passthrough-auth auto|on|off` (default `auto`,
-or `$RAFIKI_CLAUDE_PASSTHROUGH`) controls who gets billed, mirroring `rafiki
-claude --passthrough-auth`.
-
-**`rafiki daraja launch`** launches a claude child via daraja on a remote executor.
-It resolves an executor that matches the selector AND supports launching claude,
-calls `AdminService.Launch` with a one-shot ticket, then waits for the daraja to
-reverse-dial back into the daemon's pool before returning the child id. A launch
-that matches no executor is refused with a per-candidate diagnostic naming which
-executor was excluded and why.
+`rafiki daraja launch` is the manual entry point — useful for debugging the
+launch path without a full spawn. It resolves an executor matching the
+selector and supporting claude, mints a one-shot ticket, and waits for the
+daraja to reverse-dial back before returning the child id:
 
 ```
 rafiki daraja launch --cwd <dir> --model <provider/model> [--executor <selector>] [--resume <session-id>]
 ```
 
-The command goes through `newConnectEndpoint`, so the resolved profile is
-honoured — it reaches a remote daemon the same way every other `rafiki` verb
-does (see [Profiles](#profiles)).
-The launched daraja dials back to either the TCP address (`$RAFIKI_CONTROL_LISTEN`)
-or the local Unix socket path, depending on whether the daemon has a TCP listener.
-
-### RPCs
-
-Three Connect RPCs on the Control service implement this flow:
-- **DarajaLaunch** (unary) — selects executor, mints ticket, calls AdminService.Launch, waits for reverse dial
-- **DarajaSend** (unary) — writes bytes to child stdin via the connected daraja  
-- **DarajaWatch** (server-streaming) — streams stdout + lifecycle markers (ProcessRestarted, ProcessExited)
-
-None may be bidi: the remote plane is HTTP/1.1 and connect-go refuses bidi below HTTP/2.
+See `docs/reference/control-protocol.md` for the three Connect RPCs behind
+this (`DarajaLaunch`, `DarajaSend`, `DarajaWatch`).
 
 ## Executor
 
-**`rafiki create` defaults to a workspace that can actually serve the kind you asked
-for.** For `fundi` (the default kind) that is your own machine: the client asks the
-daemon for an executor, starts one in-process, and points the spawn at it — so
-`read`, `write`, `bash` and the rest run where your files are, whether the daemon is on
-this machine or in a cluster. A kind that must be **launched** (currently `claude`) can
-never be served by that throwaway executor, so it is never pinned to it: with nothing
-explicit on the command line, the child is resolved across every live, admitted executor
-that declares the kind — asking you when the answer is ambiguous (the interactive form
-opens a picker; a flag-driven spawn lists the candidates and names `--executor`).
-`--no-local-executor` turns the local offer off; `--executor <machine-or-id>` targets one
-specific executor, and `--executor-selector` picks by labels instead.
+**`rafiki create` defaults to a workspace that can serve the kind you asked
+for.** For `fundi` that's your own machine: the client starts an in-process
+executor and points the spawn at it, so `read`/`write`/`bash` run where your
+files are. A kind that must be *launched* (`claude`) can't use that
+throwaway executor, so with nothing explicit on the command line it's
+resolved across every live, admitted executor that declares the kind —
+asking you when ambiguous. `--no-local-executor` turns the local offer off;
+`--executor <machine-or-id>` / `--executor-selector <labels>` target one.
 
 There are two kinds of executor:
 
-- **Durable** — enrolled with `rafiki executor enroll` or created outright with
-  `rafiki executor create`. Has a database row with operator-written labels, admission,
-  isolation and workspace mode. Lives until the operator deletes it.
-
-  Two labels on that row, `owner` and `machine`, are what let an interactive client on
-  the same box find it — and **the daemon writes both**, `owner` from the control
-  connection and `machine` from `--name`. Neither can be given with `--label`; a request
-  that tries is refused. So naming a durable executor is two steps, on two different
-  machines:
+- **Durable** — enrolled with `rafiki executor enroll` or created outright
+  with `rafiki executor create`. Has a database row with operator-written
+  labels, admission, isolation, and workspace mode; lives until deleted.
+  Naming one is two steps on two machines — name the machine where it will
+  run, then mint the enrollment token wherever the operator is:
 
   ```sh
-  # on the box the executor will run on:
-  rafiki executor name laptop
-  # wherever the operator happens to be — the token is carried to that box:
-  rafiki executor enroll --name laptop
+  rafiki executor name laptop                 # on the machine the executor runs on
+  rafiki executor enroll --name laptop         # wherever the operator is; carry the token over
   ```
+- **Transient** — started automatically by `rafiki create`/`rafiki attach`.
+  No database row, authenticated by a one-shot ticket over the already
+  authenticated control connection; dies when that connection closes.
 
-  `--name` names the machine the executor will RUN on, which is not necessarily the one
-  minting the token. `rafiki executor service install` consumes a token minted this way;
-  it stamps nothing of its own.
-- **Transient** — started automatically by `rafiki create` / `rafiki attach`. No
-  database row, no permanent credential. Authenticated by a one-shot ticket minted
-  over the already-authenticated control connection; dies when the connection closes.
-  Labeled `kind=session` with `owner` and `machine` written by the daemon from the
-  connection.
+If a durable executor already covers this machine and user, the client uses
+that instead of starting its own, so an agent keeps working after you detach.
 
-If a durable executor already covers this machine and user, the client uses that
-instead of starting its own. That one outlives your terminal, so an agent keeps
-working after you detach.
-`executor service install` accepts `--proxy name=base_url` (repeatable) and
-`--launch <kind>` (repeatable), the same flags as `executor serve` — see "The
-executor relay" below for `--proxy`. `--proxy` is usually the main reason to
-run one of these as a standing service in the first place: a laptop's local
-LLM endpoint (vmlx, Ollama, …) is only reachable while something on that
-laptop is up to relay it. `--launch claude` opts the machine into hosting
-`claude`-kind children for the daemon (see "Executor" above); install refuses
-up front if `claude` is not on this machine's `PATH`, rather than installing a
-unit that fails on every supervised start. Both, like every other flag, are
-baked into the unit at install time: to change them, re-run
-`executor service install` with the full set you want (the credential file is
-reused; no new token needed). Row-level facts — labels, enabled/disabled — are
-different: those live in the database and change live via `rafiki executor label`.
-
-**The executor's environment.** launchd and systemd --user do not inherit a
-login shell, so a supervised executor would otherwise run with nothing but
-HOME and PATH. Install therefore captures the installing shell's environment
-into `<config dir>/executor.env` (0600) — deliberately broad, because bash,
-git, ssh agent access and language servers on the executor inherit it — and
-`rafiki executor serve` applies it at startup. Precedence matches the daemon's
-`service.env`: what the unit bakes in wins; the file fills gaps. Three classes
-are skipped: rafiki's own variables (`RAFIKI_*`, provider API keys — otherwise
-every bash tool child on the executor would inherit a credentialed DSN), what
-the unit already owns (`PATH` travels verbatim in the unit; override with
-`--path-env`), and session/GUI residue that is stale on arrival (`PWD`,
-`SHLVL`, `GPG_TTY`, `DIRENV_*`, iTerm/starship/macOS login-session ids,
-`TERM*`, `DISPLAY`, `TMPDIR`). Re-running install merges new variables and
-reports conflicts; it never rewrites what the file already has.
-Point `RAFIKI_EXECUTOR_ENV_FILE` somewhere custom (or edit the file by hand) to
-manage it directly — see `.env.example`.
-
-Fill-gaps precedence cannot fix a variable the service manager seeds itself
-and gets wrong: launchd injects `SSH_AUTH_SOCK` (its own per-session agent
-socket) into every LaunchAgent, so a value captured into `executor.env` is
-inert — the unit always wins. For exactly those variables, serve applies a
-second file after the first: `<config dir>/executor-overrides.env` (0600,
-hand-maintained — install never writes it), where every variable you name is
-set **unconditionally**, beating the unit and `executor.env` alike.
-`SSH_AUTH_SOCK` and a corrected `PATH` are the canonical residents; to change
-either, edit the file and restart the service — no reinstall. Location:
-`RAFIKI_EXECUTOR_OVERRIDES_FILE`, and `executor.env` itself may name it (serve
-resolves the overrides path after loading that file, so an entry there is
-honoured).
-
-**Without an executor, an agent has no workspace tools at all.** `read`, `write`, `edit`,
-`glob`, `grep`, `ls`, `bash` and the `lsp_*` verbs are not registered — not registered and
-failing, and above all not silently running against the daemon's own filesystem. What
-remains is the daemon tier: MCP, web fetch and search, the task ledger, skills, and the
-agent verbs. That is a useful agent, and it is the right one for a caller that only wants
-reasoning over tools the daemon legitimately owns.
-
-**Project skills come from the workspace's machine.** A skill found in
-`<cwd>/.rafiki/skills` or `<cwd>/.claude/skills` is a workspace skill — and the
-workspace lives on the executor. The daemon fetches the project-tier inventory at
-spawn, merges it with the operator's skills (project shadows daemon-local dirs,
-which shadow the database tier on a qualified-name collision), and fetches bodies
-on the turn the model asks for one rather than eagerly at spawn. The database is
-the curated tier: it is served from the daemon's store, and the on-disk
-`<ConfigDir>/skills` default is opt-in via `RAFIKI_SKILLS_DIRS`.
-
-`rafiki create` gives you an executor automatically, so this is not something you normally
-arrange.
-
-`rafiki executor serve` moves the filesystem and shell tools (`read`, `write`,
-`edit`, `glob`, `grep`, `ls`, `bash`) and the language-server tools (`lsp_*`)
-behind a Connect RPC surface. The daemon becomes
-the RPC client: when an executor is configured, tool calls are dispatched to it;
-when absent, no workspace tool is registered at all.
-
-It is a subcommand of `rafiki` rather than its own binary, so there are two
-artifacts to build and ship — one client, one server — not three. The
-administrative verbs alongside it (`enroll`, `list`, `label`, `disable`,
-`enable`, `delete`) act on the daemon's control socket, which an executor host
-does not have, so their presence on such a host grants nothing. `disable`
-revokes a credential but keeps the row; `delete` removes it permanently —
-there is no tombstone for executors, unlike `users`.
-
-**Background execution** is the immediate win: `bash` is synchronous with a
-600s ceiling in-process, so dev servers, log tails, and any test suite slower
-than ten minutes are unavailable. The executor's `Attach` stream survives a
-dropped connection — a laptop sleeping mid-build does not lose the build.
+**Without an executor, an agent has no workspace tools at all** —
+`read`/`write`/`edit`/`glob`/`grep`/`ls`/`bash`/`lsp_*` simply aren't
+registered, never silently running against the daemon's own filesystem. What
+remains is the daemon tier: MCP, web fetch/search, the task ledger, skills,
+and the agent-control verbs.
 
 ```bash
 go build -o bin/rafiki ./cmd/rafiki
-
-# On the daemon's own machine, reverse-dial the executor socket:
 rafiki executor serve --connect-socket "$XDG_RUNTIME_DIR/rafiki/executor.sock" \
   --enroll-token <token> --root "$PWD"
 ```
 
-No certificate is involved: a single-machine install should not need one.
+**Flags:** `--connect host:port` (remote reverse-dial) / `--connect-socket`
+(local reverse-dial) — one is required; `--root` (working directory root,
+default cwd); `--concurrency` (default 6); `--proxy name=base_url`
+(repeatable — forward an LLM endpoint only this machine can reach, see "The
+executor relay" below); `--launch kind` (repeatable — opt this machine into
+hosting a launched child kind, e.g. `claude`); `--lsp-config` / `--no-lsp`
+(language servers auto-detect from `PATH` by default; a configured-but-absent
+server just drops its `lsp_*` tools rather than advertising broken ones).
 
-**Flags:**
-- `--connect` — reverse-dial a daemon at host:port (for remote executors); defaults to the host:port derived from `$RAFIKI_URL` when neither this nor `--connect-socket` is given
-- `--connect-socket` — reverse-dial a rafikid on this machine over its executor unix socket
-- `--root` — working directory root (defaults to current directory)
-- `--concurrency` — maximum concurrent tool calls (default 6)
-- `--proxy name=base_url` — declare an LLM endpoint this executor will forward
-  to (repeatable). See "The executor relay" below.
-- `--launch kind` — declare a child protocol this executor will host for the
-  daemon via AdminService.Launch (repeatable, e.g. `--launch claude`). Opt-in:
-  with no `--launch` this executor hosts nothing. Safe to self-report for the
-  same reason `--proxy` is — it only ever narrows what this machine will do.
+No certificate is involved for a local socket. **Socket permissions are the
+only access control**: the socket is `0600` from creation (`0177` umask), and
+the daemon refuses a second executor on a path already served by a live one.
+Anyone who can open the socket gets arbitrary `bash` and filesystem access
+inside `--root`.
 
-**Language servers run on the executor**, because that is where the files are. With no
-`--lsp-config`, the executor auto-detects what is installed on its own `PATH`; a config
-naming a server that is not installed leaves the `lsp_*` tools out of the agent's tool list
-rather than advertising eight tools that can only answer "executable file not found".
-`--no-lsp` disables them entirely.
+**The executor's environment.** launchd/systemd --user don't inherit a login
+shell, so `executor service install` captures the installing shell's
+environment into `<config dir>/executor.env` (0600) at install time — three
+classes are skipped (rafiki's own `RAFIKI_*`/provider keys, `PATH`, and
+stale session/GUI residue like `PWD`/`TERM*`/`DIRENV_*`). A second,
+hand-maintained file, `<config dir>/executor-overrides.env`, sets variables
+**unconditionally** — needed for anything the service manager itself seeds
+wrong, like launchd's per-session `SSH_AUTH_SOCK`. See `.env.example` and
+`RAFIKI_EXECUTOR_ENV_FILE`/`RAFIKI_EXECUTOR_OVERRIDES_FILE`.
 
-New flags: `--lsp-config` (path to an `lsp.json`), `--no-lsp`.
-
-**Socket permissions are the only access control in this phase.** The socket
-is created under a `0177` umask, so it is `0600` from the moment it exists —
-no window in which another local user can connect. The daemon refuses to
-accept a second executor on a path already served by a live one, rather than
-silently stealing its future connections. Anyone who *can* open the socket
-gets arbitrary `bash` and filesystem access inside `--root`; there is no
-authentication beyond the filesystem.
-
-**Background jobs.** With an executor configured, agents gain three tools
-that plain `bash` cannot offer, because plain `bash` is synchronous with a
-600s ceiling:
+**Background execution** is the immediate win over plain `bash`, which is
+synchronous with a 600s ceiling in-process:
 
 | Tool | Purpose |
 |---|---|
 | `bash_start` | start a command in the background, return a handle immediately |
-| `bash_output` | read everything the job has printed; reports running/exited and the exit code |
+| `bash_output` | read everything the job has printed; reports running/exited and exit code |
 | `bash_kill` | stop the job and its whole process group |
 
-**Completion is pushed, not polled.** The daemon watches every job a child
-starts: when the job exits (or its handle disappears from the executor), a
-fragment is injected into that child's next turn through the same coalescing
-event buffer subagent settlements ride (`cmd/rafikid/jobwatch.go`, source
-`jobs`, keyed per handle). An agent starts a job and settles; it reads output
-with `bash_output` when it wants it, and it is TOLD when the job finished.
-The watcher polls the child's CURRENT executor binding and deliberately skips
-the rebind machinery — a job lives on the workspace it started on, so a
-re-provisioned workspace can only ever answer "gone", and a background poll
-must not be able to trigger a migration behind the agent's back. Killing a
-job with `bash_kill` drops its watch silently: the agent resolved it on
-purpose, and a "finished" fragment would cost a turn to deliver news it
-already has. Watches live in the daemon's memory and are not re-armed on
-recovery, so a job still running when the daemon restarts notifies nothing —
-its workspace is re-provisioned and the job is gone with it, but the agent is
-not told, and `bash_output` is how it finds out.
-
-They are parent-side tools implemented as RPCs, and they **do not exist**
-when no executor is configured — a tool that can only answer "not configured"
-costs a turn to learn nothing. Output is written to a file on the executor,
-retained with drop-oldest at 8 MB, and a poll returns at most 100 KB of it from
-the end — when it clips, the reply names the file so the agent can `read` or
-`grep` the rest on the same machine.
-
-A finished job's output has **no expiry**. It lives until the agent's workspace
-is released, because a wall-clock window cannot know when an async agent will
-come back for it: a turn can end and resume hours later. What bounds it is a
-per-workspace byte budget (`--job-output-budget-mb`, 256 MB), which evicts the
-oldest finished job first and never evicts a running one.
-
-See `docs/reference/executor-protocol.md` for the full wire protocol.
+Completion is **pushed, not polled** — the daemon watches every job a child
+starts and injects a fragment into that child's next turn when it exits,
+through the same coalescing path subagent settlements use. Output is written
+to a file on the executor with a per-workspace byte budget
+(`--job-output-budget-mb`, default 256 MB, drop-oldest-finished-first) and
+**no time-based expiry** — a turn can end and resume hours later, so a job's
+output lives until its workspace is released, not until a wall-clock window
+elapses. Watches are in-memory and not re-armed across a daemon restart. See
+`docs/reference/executor-protocol.md` for the full wire protocol.
 
 ### The executor relay
 
 A provider in `providers.toml` can be reached through an executor's own
-localhost instead of the daemon dialing it directly — the case for a local
-inference server (vmlx, Ollama, …) that only listens on one machine's
-loopback, which the daemon usually is not on:
+localhost instead of the daemon dialing it directly — for a local inference
+server (vmlx, Ollama, …) the daemon usually can't reach:
 
 ```toml
 [providers.vmlx]
@@ -520,262 +362,144 @@ selector = "role=workstation"   # which executor(s)
 proxy = "vmlx"                  # matches a --proxy name on that executor
 ```
 
-The executor side is the allowlist: `rafiki executor serve --proxy
-vmlx=http://localhost:8005` declares the one name/base_url pair that machine
-is willing to forward to, and it is enforced there — a proxy request naming
-an undeclared name, or a path that would escape the declared base, never
-reaches the network. `base_url` still lives on the provider regardless of
-`via_executor`: it is the request's target URL either way, only the
-transport (direct dial vs. relayed through the executor's existing
-connection) changes.
-
-**No matching executor is a hard failure, on every spawn, for as long as the
-provider carries a `via_executor` table** — never a silent fall-through to a
-direct dial. A direct dial of a `via_executor` provider's `base_url` would
-have the daemon reach its OWN localhost, which either refuses outright or,
-worse, reaches something unrelated that happens to be listening on the same
-port — indistinguishable from success until the response comes back wrong.
-The relay is resolved once, when a child's `llm.Client` is built
-(`relayTransport`, `cmd/rafikid/provider_relay.go`); an executor that shows up
-afterward is not picked up until the next spawn.
-
-**A keyed provider's credential transits the executor process.** The relay
-carries the request (headers included) over the executor's own connection to
-rafikid, so an `api_key_env` credential attached to a `via_executor` provider
-is visible to whatever runs on that executor's machine for the length of the
-request. This is no different from any other tool call an executor already
-runs on the operator's behalf, but it is worth stating: `via_executor` is for
-endpoints the operator trusts with a credential, same as they already trust
-with `bash`.
-
-The relay is **not** subject to executor confinement — that machinery exists
-because tools run code on a machine, and the relay runs none. See the design
-doc's "Non-goals" section for the reasoning.
+The executor side is the allowlist (`rafiki executor serve --proxy
+vmlx=http://localhost:8005` declares exactly what it forwards to); a request
+naming an undeclared name never reaches the network. A `via_executor`
+provider with no matching executor is a hard failure on every spawn, never a
+silent direct dial (which would have the daemon reach its own localhost
+instead). The relay carries request headers over the executor's connection,
+so a keyed provider's credential transits whatever machine relays it — treat
+`via_executor` like any other tool call an executor already runs on your
+behalf.
 
 ### Model aliases and declared context windows
 
-A local model's real id is often long, and its context window is never in the
-OpenRouter catalog — that catalog only knows OpenRouter-hosted models, so a
-model like vmlx's has no source `CLAUDE_CODE_AUTO_COMPACT_WINDOW` can be
-computed from, and Claude Code falls back to assuming 200K for it. Left alone,
-a long session against a small-context local model keeps growing past what
-the model can actually accept and the request fails outside rafiki with an
-opaque `prompt_too_long` from the inference server itself.
-
-A provider can declare short aliases for its models, each optionally carrying
-its real context window:
-
-```toml
-[providers.vmlx]
-kind     = "anthropic"
-base_url = "http://localhost:8005"
-
-[providers.vmlx.models.qwen]
-id             = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
-context_window = 16384
-```
-
-`rafiki claude --model vmlx/qwen` now sends the real id upstream (the
-substitution happens once, in `providers.Set.Split`, so every caller that
-resolves a model id gets it for free) and pins
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW` to 16384 instead of leaving Claude Code's
-200K assumption in place. `context_window` is optional — an alias declared
-purely for the shorthand behaves exactly as before context-window-wise. The
-alias also shows up in `rafiki models` and `--model` tab completion
-(`source: alias`) — the daemon enumerates it from your provider config without
-a live probe of the local server, and the CLI learns it from the daemon, so a
-reachable daemon is all it takes to see it.
-
-Three more fields on the same `[providers.<name>.models.<alias>]` table tune
-what gets sent to a small-context model in the first place, since the
-biggest cost is usually fixed overhead — a large `CLAUDE.md`, a full tool
-inventory — not conversation growth:
+A local model's real id is often long, and its context window is never in
+the OpenRouter catalog, so Claude Code falls back to assuming 200K — which
+overflows a small local model with an opaque `prompt_too_long` from the
+inference server itself, outside rafiki's view. A provider can declare short
+aliases, each optionally carrying its real context window:
 
 ```toml
 [providers.vmlx.models.qwen]
 id                   = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
-context_window       = 61440
-context_files_tokens = 12288          # optional; overrides the auto formula (20% of context_window, clamped to [1024, 30000])
-skills               = ""             # "" = no skills; "*" or omitted = all; "a,b,c" = only those
-mcp_servers          = "codescan"     # same tri-state convention
+context_window       = 16384
+context_files_tokens = 12288      # optional; default 20% of context_window, clamped [1024, 30000]
+skills               = ""         # "" = none; "*"/omitted = all; "a,b,c" = only those
+mcp_servers          = "codescan" # same tri-state convention
 ```
 
-`context_files_tokens` bounds how much of `CLAUDE.md`/`AGENTS.md` gets
-embedded in the system prompt — when the combined content exceeds the
-budget, it's truncated at the last newline boundary with a marker naming how
-much was dropped, never silently. `skills`/`mcp_servers` control which
-skills and MCP servers this model's agent even sees declared as tools at
-all, since tool schemas are as much of a fixed cost as context files.
-
-These three apply to rafiki's own agent children (`rafikid fundi` /
-`--kind fundi`), which build their own system prompt and tool inventory — a
-`rafiki claude` child assembles its own context files, skills and MCP servers
-inside the Claude Code binary, and only `context_window` reaches it (as
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, above).
-
-All three are optional and only take effect for a model reached through its
-declared alias (e.g. `vmlx/qwen`, not the raw
-`vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit` id) — the alias is what
-carries the metadata. An explicit `--skills`/`--no-skills`/`--mcp-servers`/
-`--no-mcp` on the spawn always overrides the model's declared default; the
-default only fills in when the caller specified neither.
+`rafiki claude --model vmlx/qwen` sends the real id upstream and pins
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` accordingly; the alias shows up in `rafiki
+models` and `--model` completion (`source: alias`) once a reachable daemon
+knows about it. `context_files_tokens`/`skills`/`mcp_servers` bound what gets
+built into a **fundi** child's system prompt and tool inventory for that
+model — a `rafiki claude` child assembles those itself and only
+`context_window` reaches it. An explicit `--skills`/`--mcp-servers` flag on
+the spawn always overrides the model's declared default.
 
 ### Container executors
 
-An executor serves the filesystem it can see. Whether that view is a container
-is determined by how the operator starts it, not by a flag. To run a container
-executor, put `rafiki executor serve` inside a container the operator starts:
+An executor serves whatever filesystem it can see; whether that's a
+container is decided by how the operator starts it, not by a flag:
 
 ```
-docker run -d --name rafiki-executor \
-  -v /home/user/worktrees:/work \
+docker run -d --name rafiki-executor -v /home/user/worktrees:/work \
   rafiki-executor:latest \
   rafiki executor serve --connect daemon.example.com:443 --enroll-token <token>
 ```
 
-The `--root` flag sets the working directory; it is NOT a sandbox. The
-process's filesystem view — the container's mounts, chosen in `docker run`, or
-the host user's permissions — is the boundary. The executor declares nothing
-about itself: `isolation`, `workspace_mode`, `roots` and `labels` live only on
-the database row set at token-mint time.
-
-**Which means the row is where you say it is a container**, when you mint the
-credential:
+`--root` sets the working directory — it is **not** a sandbox; the
+container's mounts (or the host user's permissions, for a native executor)
+are the boundary. The executor asserts nothing about itself: `isolation`,
+`workspace_mode`, `roots`, `labels` all live on the database row set at
+token-mint time, so the row is where you declare a container:
 
 ```
 rafiki executor create --isolation container --workspace-mode ephemeral \
   --root /work --label env=ci
 ```
 
-Nothing detects this and nothing ever will — an executor sniffing
-`/proc/1/cgroup` would be asserting a fact that gates it. The row is what
-selects the machine (`--workspace-mode` narrows placement), what decides whether
-losing it fails a child or moves it, and what tells the child it is sandboxed at
-all. Leave `--isolation` at its `none` default on a machine that really is a
-container and the worker is never told, so its first denied path reads as a
-broken repository rather than as the sandbox working.
-
-**No path vocabulary.** There is no way to restrict a worker to a subtree of
-its worktree, by design. For container executors, `docker run -v` expresses the
-ro/rw model and the kernel enforces it. For native executors, path scoping would
-be fake in the only place it matters: the file tools could enforce structured
-path arguments in userspace, but `bash` could not. Native access is gated by
-**admission** (label-selection), not by paths.
-
-**The macOS caveat:** docker on macOS is a Linux VM, so a containerised
-executor means the agent works on Linux — different toolchain, different
-caches, bind-mount I/O that is not native-fast. Fine for rafiki (pure Go,
-cross-compiles); likely wrong for a Rust/Zig/ESP toolchain.
+There is deliberately no path vocabulary narrower than a whole executor:
+`docker run -v` expresses the ro/rw model for containers, and for native
+executors a userspace path check on the file tools would be fake since
+`bash` could still escape it. Native access is gated by **admission**
+(label-selection), not by paths.
 
 ### Workspace lifecycle
 
 Each child gets a workspace provisioned before it starts and released when it
-exits. The workspace's workdir is the child's cwd: the executor starts the
-child's tools there and refuses the provision if the path does not exist in its
-filesystem view.
+exits, at the child's cwd.
 
-- **ephemeral**: the operator declares these machines interchangeable and their
-  workspaces reconstructible — for containers, each child gets a fresh one. If
-  the executor is lost, the child can be rescheduled to another executor.
-- **pinned**: the executor exposes an existing tree. If the executor is lost,
-  the child is parked until it returns or the timeout expires.
+- **ephemeral** — the operator declares these machines interchangeable; if
+  the executor is lost, the child reschedules onto another one.
+- **pinned** — the executor exposes an existing tree; if it's lost, the child
+  parks until it returns or a timeout expires.
 
-This distinction is what the park-vs-fail decision consults when an executor
-goes away. It says nothing about filesystem isolation: on one executor every
-workspace serves the same root, and isolation comes from the operator's
-composition (containers) or from git worktrees passed as the child's cwd.
+This says nothing about filesystem isolation, which comes from the
+operator's composition (containers) or from git worktrees passed as cwd.
 
 ## Subagents
 
-A fundi agent can spawn and steer its own descendants through six tools:
+An agent can spawn and steer its own descendants, regardless of its own
+kind — `fundi` and `--kind claude` both get this surface (a `claude` agent
+reaches it through the injected MCP agent-control tools described under
+[Running locally](#running-locally) below), and `kind` on a spawn picks the
+child's runtime independently of the parent's, so the two mix freely in one
+tree:
 
 | Tool | Purpose |
 |---|---|
-| `agent_spawn` | start a subagent; returns a handle immediately, does not block |
+| `agent_spawn` | start a subagent (`kind: fundi\|claude`); returns a handle immediately, does not block |
 | `agent_list` | your subtree — id, name, model, status, assigned task |
 | `agent_view` | the tail of a descendant's transcript |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
 | `agent_kill` | stop a descendant and everything below it |
 | `agent_models` | the models you may spawn on |
 
-**Every verb that names another agent is checked against stored lineage.** An
-agent may only see, steer or kill its own descendants; a sibling's child, its
-own parent, and another conversation's agent are all refused with an error
-naming the id. The check reads the parent chain in `childstore`, never a tool
-argument — tool arguments are produced by a model that can be prompt-injected.
+Every verb naming another agent is checked against stored lineage (an agent
+may only see/steer/kill its own descendants) — read from `childstore`, never
+from a tool argument, since arguments come from a model that can be
+prompt-injected. Completion is a **signal**: `agent_spawn` returns as soon as
+the child is registered, and settlement lands as one coalesced digest per
+parent turn regardless of how many descendants finished together. Background
+jobs (`bash_start`) settle the same way.
 
-**Completion is a signal, not a return value.** `agent_spawn` returns as soon
-as the child is registered. When a descendant settles, one coalesced digest is
-injected into its parent's next turn: five workers finishing together cost one
-turn, not five. The digest names who finished; *what they did* is read from the
-task ledger with `task_list(assignee=…)`, which is one indexed query rather
-than a transcript replay. Background jobs (`bash_start`) ride the same
-machinery: a job's exit — or its handle vanishing — is injected into the
-starting child's next turn, keyed per handle and coalesced, so an agent that
-starts work in the background settles instead of polling.
+### Claude Code's own subagents
 
-**Unresolved work is caught, not prompted for.** An agent that settles holding
-non-terminal tasks is told once, naming the handles. A second settle with the
-same residue escalates to its coordinator instead of nudging again.
+A `--kind claude` agent still has its native `Task` tool available, and
+rafiki's tool descriptions and injected coordination prompt steer it toward
+`agent_spawn` instead — but when it uses `Task` anyway (or when a plain
+`rafiki claude` session does), rafiki still makes the result observable: each
+native subagent thread is detected from the underlying Claude Code protocol
+traffic and captured as its own conversation, with its own rail row in the
+cockpit and its own cost attribution, rather than disappearing into one
+opaque parent turn. A helper Claude Code spawns internally for a single
+tool call (its WebFetch/WebSearch summarizers) is captured too but not shown
+as an agent row — its cost still rolls up into its parent's total.
 
 ### Where a subagent runs
 
-`agent_spawn` takes two more parameters, and they are the entire grant:
+`agent_spawn` takes `executor` (a label selector, e.g. `env=work,os=linux`)
+and `workspace` (`ephemeral`/`pinned`, as above) — the entire placement
+grant. Neither creates an isolated checkout; every workspace on an executor
+shares its root, and isolation is `cwd` — a coordinator wanting an isolated
+worker creates a git worktree and passes it. **A selector can only narrow**:
+the daemon intersects the parent's effective executor set with the child's
+selector, so a child can never reach an executor its parent couldn't, by
+construction. The worker is told where it landed (machine, isolation,
+workspace mode, roots) in its own system prompt.
 
-| Parameter | Meaning |
-|---|---|
-| `executor` | a label selector over machines — `env=work,os=linux` |
-| `workspace` | `ephemeral` (may run only on executors declared reconstructible; rescheduled onto a matching executor if its machine is lost) or `pinned` (executors exposing an existing tree; fails where it stood) |
-
-Neither `workspace` mode creates an isolated checkout — every workspace on an
-executor shares that executor's single root, and the two modes differ only in
-which executor rows may serve the child and what happens when the executor is
-lost. Isolation is `cwd`: a coordinator that wants a worker in its own tree
-creates a git worktree and passes it, and the executor starts the worker's tools
-there (refusing the spawn if the path does not exist on the executor's
-filesystem).
-
-Nothing else path-shaped is model-facing. Mounts are derived by the daemon from
-the child's worktree; a coordinator choosing labels and a workspace mode cannot make
-the mistakes a coordinator composing path allowlists would, which is what makes
-these grants safe to author without human review.
-
-**A selector can only narrow.** The daemon computes the parent's effective
-executor set, evaluates the child's selector independently, and intersects. A
-child can never reach an executor its parent could not — by construction, not by
-a rule that has to be checked. A spawn matching nothing fails immediately and
-names the excluding predicate per candidate; it does not queue.
-
-**The worker is told where it landed** — machine, isolation, workspace mode,
-roots, and which of them are read-only — in its system prompt, at the moment the
-assignment is made. A sandboxed worker that does not know it is sandboxed
-misreads its first denial as a broken repository.
-
-#### What these grants do and do not defend against
-
-- **MCP bypasses the grant.** Any agent may use any MCP tool, so a worker
-  sandboxed to its worktree can still reach whatever the MCP surface reaches.
-  Correct today — an MCP server's containment is its operator's job — but adding
-  a filesystem- or kubectl-shaped MCP server silently widens every worker in the
-  fleet. Gating MCP at server granularity is a later change the vocabulary
-  leaves room for.
-- **A native executor grants everything its user can reach** — `~/.ssh`, every
-  repository on the machine. The mitigation is that admission is rare, not that
-  scope is narrow.
-- **Grants defend against the model, not against a compromised executor host.**
-  A remote executor self-applies the grant it is handed; a malicious one could
-  ignore it. Executors are infrastructure you deployed. mTLS would answer "is
-  this my executor", never "is my executor honest" — do not later mistake the
-  grant for a defence against a hostile host.
-- **Annotations are unverified claims across conversation boundaries.** Two
-  unrelated agents coordinate through shared mutable state; that is the value,
-  but a label write is a cross-conversation side effect rather than something
-  scoped to one child's lifetime. The same caveat applies to task metadata.
+Two things these grants don't defend against, worth knowing: **MCP bypasses
+them entirely** (any agent may use any MCP tool, regardless of executor
+confinement), and **a native executor grants everything its user can
+reach** — the mitigation is that admission is rare, not that scope is
+narrow. Grants defend against the model, not a compromised executor host.
 
 ### Limits
 
-Three independent ceilings, all enforced by the daemon against stored state —
-never against a value in the request that asks for them.
+Three independent ceilings, enforced by the daemon against stored state —
+never against a value in the request asking for them.
 
 | Limit | Set with | Default | Bounded by |
 |---|---|---|---|
@@ -783,26 +507,14 @@ never against a value in the request that asks for them.
 | **cost** | `--max-cost`, `agent_spawn(max_cost=…)` | unlimited | the parent's remaining budget |
 | **concurrency** | `--max-children`, `agent_spawn(max_children=…)` | `4` | — |
 
-**Depth is granted locally and bounded absolutely.** A parent grants what its
-child needs without reference to its own allowance: a coordinator making one
-hop grants each worker `1`, and those workers grant reviewers `0`. Nobody
-computes the tree's total depth — `RAFIKI_MAX_DEPTH` caps the child's absolute
-position, computed from stored lineage, and refuses regardless of what any
-parent granted.
-
-**Cost decrements across the subtree.** Spend is summed over every conversation
-in the tree, reached by conversation id (in-process agents) and by
-`external_ref` (proxied ones). A child may be granted at most its parent's
-remainder. Unset means unlimited — right for a top-level interactive agent,
-wrong for a coordinator, which should always set one.
-
-A budget hit **mid-flight is not a kill**: the subtree's unfinished tasks go
-`blocked` (not `orphaned` — the agents are alive), every live agent is steered
-once, and raising the budget resumes the work.
-
-Budget checks **fail closed**: if a budgeted agent's spend cannot be read, the
-spawn is refused. An agent with no budget is unaffected, so a daemon without a
-database keeps working.
+Depth is granted locally per hop (a coordinator granting `1` means its
+workers grant `0`) but bounded absolutely by `RAFIKI_MAX_DEPTH` regardless of
+what any parent granted. Cost decrements across the whole subtree; a child
+may be granted at most its parent's remainder, and unset means unlimited —
+fine for a top-level interactive agent, wrong for a coordinator. A budget hit
+mid-flight is not a kill: unfinished tasks go `blocked`, live agents are
+steered once, and raising the budget resumes the work. Budget checks fail
+closed — if a budgeted agent's spend can't be read, the spawn is refused.
 
 ## Paths
 
@@ -815,36 +527,27 @@ rafiki follows the XDG base directories:
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
 | config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`, `profiles.toml`) | `$XDG_CONFIG_HOME` |
 
-This is where the **daemon** binds and reads from. A client reaches a
-different daemon by naming it in a profile (`rafiki profile add <name>
---socket <path>` or `--url <https-url>`), not by overriding these paths —
-see [Profiles](#profiles).
+This is where the **daemon** binds and reads from — a client reaches a
+different daemon by naming it in a profile, not by overriding these paths
+(see [Profiles](#profiles)).
 
-**Instruction files come from two machines.** The user-global instructions file
-(`$RAFIKI_INSTRUCTIONS`, else `~/.config/rafiki/instructions.md`) belongs to
-whoever runs the agent loop, so the daemon reads it from its own disk. Project
-instructions — `CLAUDE.md` and `AGENTS.md` at the git root and at the working
-directory — belong to the *workspace*, so when the workspace lives on an
-executor the daemon asks that executor for them over the `ProjectContext` RPC
-rather than reading a path that does not exist there.
+Project instructions (`CLAUDE.md`/`AGENTS.md`) belong to the *workspace*, so
+when the workspace lives on an executor the daemon fetches them over the
+`ProjectContext` RPC rather than reading a local path. The user-global
+instructions file (`$RAFIKI_INSTRUCTIONS`) belongs to whoever runs the agent
+loop, so the daemon always reads that from its own disk.
 
-Its launchd/systemd service identity is `dev.graveland.rafiki` / `rafiki`.
+launchd/systemd service identity: `dev.graveland.rafiki` / `rafiki`.
 
 ## Profiles
 
 The `rafiki` client resolves exactly one **profile** per invocation — a name
-bound to the one daemon it should talk to and the credential that daemon
-needs. Before profiles, the endpoint (`--socket`/`RAFIKI_URL`) and the
-credential (`RAFIKI_TOKEN`/`~/.config/rafiki/token`) were independent
-globals, so aiming at a second daemon meant coordinating both by hand — and
-`rafiki user create` would clobber whichever token file the other daemon's
-client happened to be using. **`--socket` is gone**: there is no client-side
-flag or environment variable left that names a daemon, only profiles.
-
-A profile is a `[profile.<name>]` table in `~/.config/rafiki/profiles.toml`
-(hand-edited, or written by `rafiki profile add`):
+bound to the daemon it should talk to and the credential that daemon needs.
+There is no client-side `--socket`/`RAFIKI_URL` any more; only profiles name
+a daemon.
 
 ```toml
+# ~/.config/rafiki/profiles.toml
 [profile.work]
 socket = "/run/user/1000/rafiki/controller.sock"  # a local daemon...
 # url    = "https://rafiki.example.net"           # ...or a remote one (needs a token)
@@ -855,158 +558,92 @@ preset = "quick"
 labels = { team = "infra" }
 ```
 
-Exactly one of `socket`/`url` is required; everything else is optional. Each
-profile also owns its own token file
-(`~/.config/rafiki/profiles/<name>/token`, 0600) and its own presets
-(`~/.config/rafiki/profiles/<name>/presets.json`) — two daemons' model
-universes and credentials need not overlap.
+Exactly one of `socket`/`url` is required. Each profile owns its own token
+file (`~/.config/rafiki/profiles/<name>/token`, 0600) and its own presets, so
+two daemons' model universes and credentials need not overlap.
 
-**Resolution order**, first match wins:
-
-1. `-P`/`--profile <name>` — for one command.
-2. `$RAFIKI_PROFILE` — for one shell. This variable is still live (unlike the
-   retired ones below); it's the environment-variable spelling of `-P`.
-3. The `current-profile` pointer file, written by `rafiki profile use <name>`.
-4. **Bootstrap.** A machine with no `profiles.toml` at all gets one written
-   automatically on first use — a `default` profile pointing at the local XDG
-   socket (`http://localhost:8035` as its proxy) — with a one-line notice on
-   stderr. An explicit `-P`/`$RAFIKI_PROFILE` bypasses bootstrap: naming a
-   profile before any manifest exists is an error pointing at `rafiki profile
-   add`, not an autocreated `default` that might not be the daemon you meant.
+**Resolution order:** `-P`/`--profile` for one command → `$RAFIKI_PROFILE`
+for one shell → the `current-profile` pointer (`rafiki profile use <name>`)
+→ bootstrap (a machine with no `profiles.toml` gets a `default` profile
+pointing at the local XDG socket, written automatically on first use).
 
 ```bash
 rafiki profile add work --socket ~/.local/state/rafiki/controller.sock --proxy http://localhost:8035
 rafiki profile add prod --url https://rafiki.example.net --token "$TOKEN"
 rafiki profile use work
-rafiki profile list
-rafiki profile show prod
 rafiki -P prod status              # override for one command
-RAFIKI_PROFILE=prod rafiki status  # override for one shell
 ```
 
 `RAFIKI_URL`, `RAFIKI_TOKEN`, `RAFIKI_SOCKET`, `RAFIKI_DEFAULT_MODEL`,
-`RAFIKI_DEFAULT_PRESET` and `RAFIKI_DEFAULT_LABELS` no longer configure the
-**client** at all — each is a hard error naming the offending variable
-(`profile.CheckRetiredEnv`) if it's set while running `rafiki`, rather than
-being silently ignored or (worse) silently outranking the profile. They keep
-their old meaning for `rafikid` itself, which reads them from its own service
-environment, and for the two headless, profile-exempt commands `rafiki
-executor serve` / `rafiki executor service install` — see
-[Environment](#environment).
+`RAFIKI_DEFAULT_PRESET`, `RAFIKI_DEFAULT_LABELS` are hard client-side errors
+now (naming the offending variable) rather than silently-ignored or
+silently-outranking globals. They keep their old meaning for `rafikid`
+itself, and for the two headless, profile-exempt commands `rafiki executor
+serve` / `rafiki executor service install`.
 
 ## Environment
 
-rafiki's variables are `RAFIKI_`-prefixed. Older spellings (`FUNDI_*`, and
-before that `PIC_*`/`PI_CONTROLLER_*`) are retired: `pkg/paths.Get` reads
-exactly the current name and nothing else, so a shell still exporting an old
-name is silently ignored. `pkg/paths` is the single source of truth for what
-rafiki reads from the environment; `.env.example` documents each one in full.
+rafiki's variables are `RAFIKI_`-prefixed; `pkg/paths.Get` reads exactly the
+current name (older `FUNDI_*`/`PIC_*` spellings are retired and silently
+ignored). `.env.example` documents each one in full.
 
 | | |
 |---|---|
-| `RAFIKI_PROFILE` | client-side: selects a profile for one shell (see [Profiles](#profiles)); `-P`/`--profile` overrides it for one command |
-| — | `rafiki create`'s defaults for a bare invocation, in order: `--model`/`--preset`/`--label`, then the resolved profile's `model`/`preset`/`labels`, then (model only) the model you last spawned for that kind, remembered in the client state file, then the daemon's own default |
-| — | other display preferences (e.g. a currency `rafiki list`/the TUI convert cost figures into) live in that same client state file; view or change them with `rafiki config show` / `rafiki config set` |
+| `RAFIKI_PROFILE` | client-side: selects a profile for one shell (see [Profiles](#profiles)) |
 | `RAFIKI_INSTRUCTIONS` | user-global instruction file (default `~/.config/rafiki/instructions.md`) |
-| `RAFIKI_SKILLS_DIRS` | on-disk skill directories, path-list separated (OPT-IN — unset means no daemon-local dirs; skills come from the daemon's database store by default). Entries may be symlinks (e.g. into `~/.claude/skills` or a plugin cache); discovery follows them |
+| `RAFIKI_SKILLS_DIRS` | on-disk skill directories, path-list separated (opt-in — default is the daemon's database store). May be symlinks |
 | `RAFIKI_MCP_CONFIG` | global `.mcp.json` (default `~/.config/rafiki/mcp.json`) |
 | `RAFIKI_LSP_CONFIG` | global `lsp.json` for language server config (default `~/.config/rafiki/lsp.json`) |
 | `RAFIKI_PROXY_LISTEN` | bind address for the proxy face (default `:8035`) |
-| `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it. The documented local setup: `docker run -d -p 5433:5432 -e POSTGRES_PASSWORD=postgres timescale/timescaledb:2.28.2-pg18`. `rafiki service install` writes it to `~/.config/rafiki/service.env` (0600), never the unit file — it carries a password |
-| `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated to `$XDG_DATA_HOME/rafiki/daemon-id` on first run). **Required in Kubernetes**, where the pod filesystem is ephemeral. Two daemons sharing one value reproduce exactly the split-brain the lease exists to prevent. |
-| `RAFIKI_HEARTBEAT_INTERVAL` | daemon-side: how often a continuously-working child's parent gets a coalesced check-in push naming elapsed time and running cost (a Go duration string, e.g. `5m`). Defaults to 5 minutes; `0` disables the feature entirely. Only fires for children *with* a parent — a top-level agent has nobody to check in with |
-| `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane (e.g. `tcp:8036`). Unset = UDS only. **Requires `RAFIKI_DB`** — control-plane identity is row-backed, and a listener without a user table is fatal at startup |
-| `RAFIKI_CONTROL_TLS_CERT` | PEM cert for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_CONTROL_TLS_KEY` | PEM key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_URL` | **daemon-side.** Points an `rafikid`-spawned `claude`/`pi` child at an external rafiki instance instead of the embedded proxy face — useful for aiming a whole machine's children at a shared capture server. Read from the daemon's own service environment; its token comes from `RAFIKI_TOKEN` alongside it. Client-side this name is **retired**: setting it while running `rafiki` is a hard error (`profile.CheckRetiredEnv`) — a profile's `url` or `socket` names the daemon a client dials. Exempt: `rafiki executor serve`/`rafiki executor service install`, which still derive `--connect` from it (see [Executor](#executor)) |
-| `RAFIKI_TOKEN` | **daemon-side.** The bearer credential `rafikid` presents to the `RAFIKI_URL` proxy above. Client-side this name is **retired**: a profile's own token file (`~/.config/rafiki/profiles/<name>/token`) supplies the client's credential instead |
-| `RAFIKI_DEFAULT_MODEL` | **daemon-side.** The model `rafikid`'s own proxy face falls back to when a request names none. Client-side this name is **retired**: `rafiki create`'s default now comes from the resolved profile's `model` (see the defaults chain above), never from this variable |
-| `RAFIKI_TOOLS_WEB` | `1` enables the fundi webfetch and websearch tools. Default off |
-| `RAFIKI_BRAVE_API_KEY` | optional: use the [Brave Search API](https://api.search.brave.com/) for `websearch` instead of scraping DuckDuckGo Lite. Unset falls back to the keyless scraper, which needs no setup but can break on a markup change |
-| `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk) for compression: `auto` (default, use it when installed), `on`, `off`. Overridden by `--bash-rtk` |
-| `RAFIKI_EXECUTOR_SELECTOR` | client-side: default label selector for `rafiki create --executor-selector`, choosing an executor from the daemon's enrolled pool (e.g. `owner=brent`). Unset means `rafiki create` makes the client's own machine the workspace by default: it starts a session executor and points the spawn at it. Set it to send children somewhere else |
-| `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright, any other value forces them on (needs `RAFIKI_DB`). Unset defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (the only path in is the local unix socket, same trust boundary as the control socket) and OFF once it's set (that path becomes reachable over the TCP listener) |
+| `RAFIKI_DB` | postgres URL for conversation persistence; **required** — a DB-less daemon has no history, cost accounting, task ledger, user identity, executor plane or conversation leases, and `rafikid` refuses to start without it |
+| `RAFIKI_DAEMON_ID` | stable identity for this daemon — what a conversation lease records as its holder. Optional on a laptop (generated on first run); **required in Kubernetes**, where the pod filesystem is ephemeral |
+| `RAFIKI_HEARTBEAT_INTERVAL` | how often a continuously-working child's parent gets a coalesced check-in (Go duration, default 5m; `0` disables) |
+| `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane. Unset = UDS only. Requires `RAFIKI_DB` |
+| `RAFIKI_CONTROL_TLS_CERT` / `RAFIKI_CONTROL_TLS_KEY` | PEM cert/key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
+| `RAFIKI_URL` / `RAFIKI_TOKEN` | **daemon-side only.** Points a `rafikid`-spawned `claude`/`pi` child at an external rafiki instance instead of the embedded proxy face, plus its bearer token. Client-side both names are hard errors (a profile names the daemon instead) except for `rafiki executor serve`/`service install`, which still derive `--connect` from `RAFIKI_URL` |
+| `RAFIKI_DEFAULT_MODEL` | **daemon-side only** — the model the proxy face falls back to when a request names none |
+| `RAFIKI_TOOLS_WEB` | `1` enables the fundi `webfetch`/`websearch` tools (default off) |
+| `RAFIKI_BRAVE_API_KEY` | optional: use the Brave Search API for `websearch` instead of scraping DuckDuckGo Lite |
+| `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk): `auto` (default), `on`, `off` |
+| `RAFIKI_EXECUTOR_SELECTOR` | client-side default label selector for `rafiki create --executor-selector` |
+| `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright. Defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (UDS-only trust boundary), OFF once it's set |
 
-**Web access (webfetch / websearch).** The fundi runtime includes two opt-in web
-tools: `webfetch` fetches a URL and returns its text, and `websearch` queries
-DuckDuckGo and returns the top results. Both are **off by default** because a
-fundi child may run unattended without egress; set `RAFIKI_TOOLS_WEB=1` in the
-**daemon's** environment to enable them. When disabled the tools never appear in
-`tools[]` — they decline materialization rather than advertising an operation
-the model cannot use.
+**Web access (webfetch/websearch)** is opt-in (`RAFIKI_TOOLS_WEB=1`, daemon
+side) since a fundi child may run unattended without egress. When disabled
+the tools never appear in `tools[]`. `webfetch` resolves and checks the
+**resolved IP** (blocking loopback, link-local/metadata, RFC 1918, IPv6 ULA —
+a DNS name pointing at a private address is blocked too) and caps body reads
+at 100 KB while reading, not after. `websearch` uses DuckDuckGo Lite by
+default (no key) or Brave if `RAFIKI_BRAVE_API_KEY` is set.
 
-**Security posture:**
-- `webfetch` resolves the host and checks the **resolved IP**, not the hostname
-  string, before making a request. Blocked: loopback (`127.0.0.0/8`, `::1`),
-  link-local (`169.254.0.0/16`, notably the cloud metadata endpoint at
-  `169.254.169.254`), RFC 1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
-  `192.168.0.0/16`), and IPv6 unique local (`fc00::/7`). A DNS name pointing
-  at a private address is blocked.
-- Body reads are capped at 100 KB via `io.LimitReader` — the cap is enforced
-  **while reading**, not after, so a hostile server cannot exhaust memory.
-- `websearch` uses DuckDuckGo Lite, the anonymous HTML-only endpoint — no API
-  key, no credential plumbing. Results are limited to 20 (default 10).
+Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export|query`
+queries persisted history through the daemon socket (no separate DB
+credentials needed on the client machine) — the same queries as `rafikid
+agent stats|search|export|query`, sibling renderers, transport-only
+difference. Output is table on a TTY and a pipe alike by default; `-o
+json`/`-j` for pretty JSON, `-J`/`-o jsonl` for one record per line. See
+`docs/agent-cli.md` and `docs/reference/control-protocol.md` §6.17-6.19.
 
-These must reach the **daemon's** environment, not your shell's — see
-`.env.example`, which documents why and how to verify it.
-
-Once `RAFIKI_DB` is set, `rafiki conversations stats|search|export|query` queries
-that persisted history through the daemon socket — no separate DB credentials
-needed on the machine running `rafiki`. It renders the same tables as the
-DSN-direct `rafikid agent stats|search|export|query` (same queries, sibling
-renderers, only the transport differs). The output contract is table by
-default on a TTY and a pipe alike; `-o json`/`-j` for pretty JSON; `-J`/
-`-o jsonl` for one compact record per line (the `{"rows": …}` envelope
-unwrapped); `-j -J` together is an error (`cannot combine -j and -J`).
-Failures go to stderr, successes to stdout. See `docs/agent-cli.md` for the
-DSN-direct equivalent, or `docs/reference/control-protocol.md` §6.17-6.19 for
-the wire commands.
-
-Note that the two read whatever DSN each was given: `rafiki conversations` uses
-the **daemon's** `RAFIKI_DB` (written to `service.env` at `service install`
-time), while `rafikid agent --db` defaults to your shell's `RAFIKI_DB`, then
-`RAFIKI_TEST_DSN`. If their numbers disagree, check that first.
-
-`rafikid -h` and `rafikid fundi -h` document the two daemon process modes;
-`rafiki --help` covers the client. See `docs/reference/control-protocol.md` for the
-wire protocol spec and `docs/plans/2026-07-20-fundi-design.md` for the
-architecture.
+`rafiki conversations review <id|name>...` asks the daemon to run the same
+LLM-driven skill-gap detector `rafikid agent analyze` uses, but over Connect
+— no DSN needed on the client, and it works against a remote daemon.
+`--stage rank` also persists findings; `rafiki conversations findings` lists
+them. `rafiki close --review` runs it automatically on every conversation a
+close touches (best-effort — a failed review is reported but never fails the
+close itself).
 
 ### First user: claiming a fresh daemon
 
-Identity is row-backed (`conversations.users`), so a daemon that has never had
-`rafiki user create` run against it has no users at all — and **while that is
-true, both faces are wide open**: the proxy face accepts only its per-boot
-child secret (unknown outside the process tree, so effectively closed to
-anyone else), but every listener the control plane serves — UDS and, if
-configured, the TCP/TLS one — admits a connection with no `ctrl_auth` frame
-and lets it run exactly one command, `ctrl_user_create`. **Whoever's
-`ctrl_user_create` lands first becomes the daemon's first (and, until they add
-more, only) user.** This is deliberate — a freshly-started pod has no operator
-shell to hand it a token through — but it means the window between "the
-listener is reachable" and "the first user exists" is a real, if narrow,
-race, bounded only by how quickly the operator closes it. The daemon logs a
-WARN once a minute for as long as it stays open, and logs the peer address of
-whoever's `ctrl_user_create` claims it.
-
-Three sequences close the window before anything untrusted can reach the
-daemon:
-
-- **Local daemon, central database.** Run a `rafikid` on your own machine
-  pointed at the same `RAFIKI_DB` the real deployment will use, and
-  `rafiki user create` against that — the row lands in the shared database
-  before the real daemon ever serves a socket.
-- **Port-forward before ingress.** In Kubernetes, `kubectl port-forward` to
-  the pod and create the first user through the tunnel before any Service or
-  Ingress makes the control plane reachable from outside the cluster.
-- **Before upstream credentials exist.** Create the first user before
-  `ANTHROPIC_API_KEY`/`OPENROUTER_API_KEY` are configured, so a daemon claimed
-  during the window has nothing to spend even if someone else's
-  `ctrl_user_create` wins the race.
-
-Once a user exists, every other command — on any listener — requires a valid
-`ctrl_auth`/bearer token; deleting the last active user (`rafiki user rm`)
-returns the daemon to bootstrap mode, so the same window reopens.
+A daemon with no users at all starts in **bootstrap mode**: every listener
+(UDS, and TCP/TLS if configured) admits a connection with no `ctrl_auth`
+frame and lets it run exactly one command, `ctrl_user_create` — whoever's
+lands first becomes the only user. Deliberate (a freshly-started pod has no
+operator shell to hand a token to), but it's a real if narrow race, logged as
+a WARN once a minute while the window stays open. Close it before exposing
+the daemon: run a local `rafikid` against the same `RAFIKI_DB` and create the
+user before the real daemon's socket is reachable, or `kubectl port-forward`
+to the pod and create it before any Service/Ingress exposes the control
+plane. Deleting the last active user (`rafiki user rm`) reopens the window.
 
 ---
 
@@ -1014,31 +651,21 @@ returns the daemon to bootstrap mode, so the same window reopens.
 
 ## Prerequisites
 
-**[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) must be on `PATH`.** It
-is not optional and not a fallback: the fundi runtime's file-discovery tools are
-built directly on it, so `BuildRuntime` probes for it at startup and refuses to
-start without it. A daemon on a host with no `rg` fails every `fundi` child with
-`ripgrep (rg) is required but was not found on PATH` rather than degrading. The
-container image installs it (see `Dockerfile`); a local checkout needs
-`apt-get install ripgrep` or `brew install ripgrep`.
+**[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) must be on `PATH`.**
+Not optional: the fundi runtime's file-discovery tools are built directly on
+it, and `BuildRuntime` refuses to start without it (`apt-get install
+ripgrep` / `brew install ripgrep`).
 
-[rtk](https://github.com/rtk-ai/rtk) is genuinely optional — `RAFIKI_BASH_RTK`
-defaults to `auto`, which uses it when present and runs plain bash when it is
-not. Only `RAFIKI_BASH_RTK=on` promotes a missing `rtk` to a startup error, which
-is the entire difference between `on` and `auto`.
+[rtk](https://github.com/rtk-ai/rtk) is genuinely optional (`RAFIKI_BASH_RTK`
+defaults to `auto`).
 
 ```bash
-make check    # vet + golangci-lint + unit tests (-race) — the full local gate
+make check    # vet + golangci-lint + unit tests (-race) — the full local gate, no CI on this repo
 make test     # tests only
-make build    # all three Go binaries into bin/
+make build    # all Go binaries into bin/
 make install  # copy them to ~/.local/bin (override with DESTDIR=)
 make help     # every target
 ```
-
-There is **no CI on this repo**, so `make check` is the only gate. `make
-build-linux` cross-compiles for linux/amd64 — nothing else exercises `GOOS=linux`,
-and the daemon silently bitrotted there for an entire phase before that target
-existed.
 
 Integration tests (migrator, capture store) need TimescaleDB >= 2.22 on
 PostgreSQL 18:
@@ -1050,9 +677,9 @@ RAFIKI_TEST_DSN='postgres://postgres:postgres@localhost:5433/postgres?sslmode=di
   make test
 ```
 
-`make test` sources a gitignored `.env` and warns loudly when `RAFIKI_TEST_DSN`
-is unset — without it every DB-backed test *skips* while the run still reports
-success, which is indistinguishable from a clean pass.
+`make test` sources a gitignored `.env` and warns loudly when
+`RAFIKI_TEST_DSN` is unset — without it every DB-backed test *skips* while
+the run still reports success.
 
 ## Running locally
 
@@ -1063,195 +690,84 @@ go run ./cmd/rafikid migrate   # once, against a fresh database
 make run                       # rafikid in the foreground, proxy face on :8035
 ```
 
-**`rafikid` serves the proxy itself.** It mounts the same `/v1/messages` and
-`/v1/chat/completions` handlers the old standalone `rafiki serve` used to, on
-the same port, so anything already pointed at a local rafiki keeps working —
-and pi and claude children get capture, failover and model resolution without
-a second process anyone has to remember to start. It also proxies the two
-Anthropic-protocol endpoints Claude Code calls beyond `/v1/messages`:
-`POST /v1/messages/count_tokens` (token counting, with the same model
-resolution and upstream routing) and `HEAD /api/hello` (a connectivity
-preflight probe). Both are recorded in `conversations.raw_http_request` when
-`RAFIKI_RECORD_REQUESTS=1`, but neither opens a capture turn — a token count
-and a probe are metadata, not turns. The fundi kind never uses the face: it
-reaches the library in-process.
+`rafikid` serves the proxy itself — `/v1/messages`, `/v1/chat/completions`,
+`/v1/messages/count_tokens`, and `HEAD /api/hello` — so pi and claude
+children get capture, failover and model resolution with no second process.
+The fundi kind never uses the face; it reaches the library in-process.
 
-The face binds **all interfaces** by default (`RAFIKI_PROXY_LISTEN`, default
-`:8035`), so other hosts on your network can use one capture store and one set
-of breakers. Auth is always required: the daemon mints a per-boot token for its
-own spawned children, but that secret is unknown to any human or tool
-connecting from outside, so `make claude` needs a real user. A fresh daemon has
-none — it starts in bootstrap mode (see
-[First user](#first-user-claiming-a-fresh-daemon) below) — so create one once,
-in another shell, while `make run` is still up:
+The face binds all interfaces by default (`RAFIKI_PROXY_LISTEN`, default
+`:8035`). Auth is always required — a fresh daemon starts in bootstrap mode
+(above), so create a user once while `make run` is up:
 
 ```bash
 go run ./cmd/rafiki user create dev
 ```
 
-That mints a token and writes it to the resolved profile's token file
-(`rafiki profile show` names the path; a bare `go run ./cmd/rafiki` with no
-profiles yet bootstraps a `default` one first); `rafiki claude` (and so `make
-claude`) picks it up from there with nothing further to export. A busy port
-is a hard error rather than a fallback — the address is a contract, and
-silently landing elsewhere would mean talking to whatever *did* claim it.
-
-Because `make run` is now the daemon, it and the installed `rafiki service`
-cannot both hold the port. Use one or the other.
+That mints a token into the resolved profile's token file; `rafiki claude`
+picks it up with nothing further to export.
 
 ```bash
 make claude                                   # Claude Code through the local proxy
 make claude ARGS='--model glm-5.2'            # …on any model the proxy can route
 make claude ARGS='-- --permission-mode plan'  # …passing claude its own flags
-psql 'postgres://postgres:postgres@localhost:5433/rafiki_live' \
-  -c 'select model, status, upstream from conversations.conversation_turn'
 ```
 
-`make claude` is a thin wrapper over `rafiki claude`, which preflights
-`/healthz` and fails with a hint if the server isn't up. It targets the
-resolved profile's `proxy` and token by default; `--url`/`--token` override
-those for one invocation, and `RAFIKI_MODEL` still sets the default `--model`.
-Everything after `--` is passed to claude verbatim.
+`--model` accepts a concrete id, a `<family>-latest` alias, or an OpenRouter
+slash id — the launcher registers it as a *custom model option* rather than
+setting `ANTHROPIC_MODEL`, which Claude Code would otherwise validate against
+a client-side allowlist and reject. It also pins
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the model's real context window and
+strips inherited `ANTHROPIC_*` variables so a nested launch can't land on the
+outer session's captured conversation.
 
-`--model` accepts anything the proxy can resolve: a concrete id, a
-`<family>-latest` alias, or an OpenRouter slash id. That works because the
-launcher registers the id as a *custom model option* rather than setting
-`ANTHROPIC_MODEL` — Claude Code validates the latter against a client-side
-allowlist of Anthropic ids and rejects everything else before a request ever
-leaves, which would otherwise make the whole routing story above unreachable
-from this launcher. It also pins `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the
-model's real context window (Claude Code assumes 200K for a proxied model it
-cannot verify, so it compacts at the wrong point) and strips inherited
-`ANTHROPIC_*` variables, so launching a session from inside one does not land
-its turns on the outer session's captured conversation.
-
-Every proxied session also gets rafiki's MCP agent-control surface injected:
-the launcher appends an `--mcp-config=<json>` argument pointing a server
-named `rafiki` at the proxy's `/mcp` mount, and carries the credential as a
-`RAFIKI_MCP_TOKEN` environment variable that the config references as a
-`Bearer ${RAFIKI_MCP_TOKEN}` placeholder — Claude Code expands it at connect
-time, so the token never appears in argv (which is world-readable via `ps`).
-The injection is gated on the proxy URL being set, not on `--model`, so a
-bare `rafiki claude` gets it too. `RAFIKI_MCP_TOKEN` is stripped from the
-inherited environment before being set, so a session launched from inside
-another proxied session cannot adopt the outer session's MCP bearer. The
-token `rafiki claude` holds is a real user token, so the surface serves the
-full fourteen-tool agent-control set under the `mcp__rafiki__*` prefix;
-daemon-spawned `--kind claude` children carry the per-boot child secret
-instead, whose credential the same gate answers with a toolless server.
-
-Daemon-spawned `--kind claude` children are also told, in their own system
-prompt, to prefer this surface: rafiki merges a short coordination prompt
-(`claudeargv.CoordinationPrompt` — use `agent_spawn` rather than the built-in
-`Task` tool when delegating, track delegated work with the `task_*` ledger)
-into the child's `--append-system-prompt`, sharing that one element with any
-caller-supplied appendix (the flag is last-wins, so the merge must be one
-text). The injection is gated on the MCP config being present — the prompt
-names tools the config is what carries — and interactive `rafiki claude`
-sessions get none of it: a human drives those. The MCP face's own tool
-descriptions carry the same preference for any other MCP client, where a
-carve-out deferring "lightweight" delegation to the client's native tool read
-as the whole rule and the surface was never used.
-
-Any other Anthropic-protocol client works the same way via
-`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
+Every proxied session gets rafiki's MCP agent-control surface injected
+automatically (a `--mcp-config` pointing at the proxy's `/mcp` mount, with
+the credential carried as a `RAFIKI_MCP_TOKEN` env var Claude Code expands at
+connect time — never in argv, which is world-readable via `ps`). Daemon-
+spawned `--kind claude` children also get a short coordination prompt merged
+into `--append-system-prompt`, steering them toward `agent_spawn` over the
+built-in `Task` tool. Any other Anthropic-protocol client gets the same
+routing via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
 ### Billing your own subscription
 
 `--passthrough-auth` (or `RAFIKI_CLAUDE_PASSTHROUGH`) is a three-way switch —
-`auto` (the default), `on`, or `off` — for who gets billed. `on` (a bare
-`--passthrough-auth` also means `on`, for compatibility with its old boolean
-form) captures the conversation as usual but bills **your** Claude subscription
-rather than the daemon's `ANTHROPIC_API_KEY`; `off` always bills the daemon's
-key; `auto` picks between the two based on `--model` — `on` whenever it
-resolves to an Anthropic id, including a bare `rafiki claude` with no `--model`
-at all, since Claude Code then picks its own Anthropic id, and `off` otherwise.
-Passthrough works by *not* setting `ANTHROPIC_AUTH_TOKEN`: that variable is the
-only thing that makes Claude Code prefer API-key auth over its OAuth
-subscription, so omitting it lets the subscription credential through.
-rafiki's own token moves to an `X-Rafiki-Token` header, leaving `Authorization`
-free to carry yours, which the proxy forwards upstream untouched.
+`auto` (default), `on`, `off` — for who gets billed. `on` bills **your**
+Claude subscription instead of the daemon's `ANTHROPIC_API_KEY` (by omitting
+`ANTHROPIC_AUTH_TOKEN`, the only thing that makes Claude Code prefer
+API-key auth over OAuth); `off` always bills the daemon's key; `auto` picks
+`on` whenever `--model` resolves to an Anthropic id. It's Anthropic-only
+(rejected outright against a non-Anthropic model, with OpenRouter failover
+disabled for these requests too) and fails closed on every ambiguous case —
+no rafiki token, no forwardable credential, a typoed flag value — never
+silently falling back to the daemon's key. Only `rafiki claude` supports it;
+daemon-spawned `--kind claude` children can't unset the daemon's own key.
 
-Consequences worth knowing:
+Every passthrough response carries Anthropic's `anthropic-ratelimit-unified-*`
+headers (your subscription's 5h/7d utilization), captured best-effort into a
+latest-only per-user snapshot. `rafiki claude --limits` prints it; the
+cockpit's status line shows a live-polled summary; a `quota_status` tool lets
+a coordinator check its own headroom before deciding to fail over.
 
-- **`on` is Anthropic models only.** The launcher refuses `--passthrough-auth=on`
-  against a non-Anthropic `--model` up front, and the proxy rejects one with a
-  400 if it gets that far — a subscription credential cannot buy an OpenRouter
-  model, and failing over would bill the key you just opted out of. OpenRouter
-  failover is off for these requests for the same reason: an upstream error
-  reaches you verbatim. `auto` can't hit this: it derives its choice from the
-  same model check, so it never asks for passthrough against a model that
-  would reject it.
-- **It fails closed, never quietly.** Every way this can go wrong ends in an
-  error rather than a surprise bill: no rafiki token, no credential to forward
-  (you are logged out of Claude Code, or `CLAUDE_CODE_USE_BEDROCK`/`VERTEX` is
-  set), an `Authorization` that turns out to be rafiki's own token, the request
-  landing on the OpenAI-compatible face (which cannot honour passthrough), or
-  an unrecognised `--passthrough-auth`/`RAFIKI_CLAUDE_PASSTHROUGH` value (a typo
-  is rejected outright rather than silently falling back to `auto`). None of
-  these fall back to the daemon's key.
-- **`rafiki claude` only.** Daemon-spawned `--kind claude` children cannot use
-  it; they receive environment *additions* appended to the daemon's own
-  environment, which cannot un-set the daemon's `ANTHROPIC_API_KEY`.
-- **`RAFIKI_CLAUDE_PASSTHROUGH` accepts the same `auto`/`on`/`off`, plus `1` /
-  `true` as aliases for `on` and `0` / `false` / `no` as aliases for `off`,**
-  for compatibility with the old boolean-only env var.
-
-Every passthrough response carries Anthropic's own
-`anthropic-ratelimit-unified-*` headers — your subscription's 5h/7d rolling
-utilization, reset time, and status. The proxy captures these (best-effort,
-never at the cost of the response itself) into a latest-only per-user
-snapshot. `rafiki claude --limits` prints it and exits without launching a
-session; the cockpit's status line shows a live-polled summary once data has
-been captured, and a `quota_status` tool is available to any agent that can
-also spawn subagents, so a coordinator can check its own headroom before
-deciding whether to put more work on the subscription or fail over to
-another provider. This is scoped to passthrough traffic only — API-token
-usage is a separate billing relationship with its own usage endpoint.
-
-One client-side caveat when pointing Claude Code at any proxy by hand: it
-attaches its byte watchdog — the mechanism that lets SSE keep-alive pings feed
-the 300s stream idle watchdog — only when the base URL host is exactly
-`api.anthropic.com`. On a custom base URL, pings stop counting as activity and
-a thinking phase with more than 300s between content events dies with
-"Response stalled mid-stream" even though bytes flowed the whole time. Set
-`_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` to restore direct-connection
-behaviour (`rafiki claude` and fundi-spawned claude children get it
-automatically).
-
-That variable has a second, less obvious effect, because Claude Code gates two
-features on the same "is this a first-party host" predicate: it also re-enables
-*deferred tools* (tool search), which omit most tools from `tools[]` and send
-`tool_reference` blocks instead. Only Anthropic models can call a tool that
-was omitted, so a session on an OpenRouter-routed model dies on its first turn
-with `400 Deferred custom tools are only supported on Anthropic models`. The
-launcher and the daemon therefore set `ENABLE_TOOL_SEARCH=false` whenever
-`--model` is not an Anthropic id; hand-configured clients pointing at a
-non-Anthropic model need it in their own env. An explicit `ENABLE_TOOL_SEARCH`
-in the environment always wins, so `true` / `auto` / `auto:N` remain available
-if a future upstream does support them.
+One client-side gotcha when pointing Claude Code at any proxy by hand: its
+SSE-ping stream-idle watchdog only activates when the base URL host is
+exactly `api.anthropic.com`, so a thinking phase with >300s between content
+events on a custom host dies with "Response stalled mid-stream" even though
+bytes flowed the whole time. Set `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`
+to restore direct-connection behavior (`rafiki claude` and fundi-spawned
+claude children get it automatically) — but that variable also re-enables
+deferred tool search, which 400s on non-Anthropic models, so the launcher
+also sets `ENABLE_TOOL_SEARCH=false` whenever `--model` isn't an Anthropic id.
 
 ## The rafiki cockpit
 
-The cockpit is a bubbletea program living in `pkg/tui/`, built into the `rafiki`
-binary itself — there is no separate `rafiki-attach` artifact. It speaks Connect,
-so no bun, submodule, or separate build step is involved.
-
-It reaches the same daemon every other `rafiki` verb does: the resolved
-profile. A profile with a `url` attaches to that remote daemon over TLS
-(authenticated with the profile's token), and one with a `socket` uses the
-local unix socket at `<RuntimeDir>/connect.sock`, whose 0600 mode inside a
-0700 directory is its credential. A remote profile with no token is refused
-up front rather than after a round trip — the cockpit's plane has no
-bootstrap mode. To attach to a second, remote daemon:
+A bubbletea program built into the `rafiki` binary itself, speaking Connect —
+no separate build step. It reaches the same daemon every other `rafiki` verb
+does (the resolved profile):
 
 ```bash
 rafiki profile add prod --url https://rafiki.example.net --token "$TOKEN"
 rafiki -P prod attach
-```
-
-```bash
-make build          # builds rafikid + rafiki, including the in-process cockpit
 ```
 
 ### Entry points
@@ -1262,24 +778,16 @@ make build          # builds rafikid + rafiki, including the in-process cockpit
 | `rafiki attach <id\|name>` | that child, full width | its subtree, plus itself |
 | `rafiki attach` | the rail, nothing focused | everything you can see |
 
-A session follows its own delegation: start a conversation, let it spawn
-implementers, and they appear in the rail because they are in the subtree — not
-because anything resubscribed. The rail is absent until a second agent exists,
-so an ordinary single-agent session looks exactly as it did before — but `^R`
-still reveals the one-row rail as a peek, and that is also how you reach the
-spawn form (`n` is a rail key) to create the second agent from the cockpit.
-
-Attaching loads the agent's whole conversation from the database (`GetHistory`)
-and then follows the live event stream, so a child that last spoke months ago
-opens on its full transcript rather than on whatever the event log happens to
-still hold. The two are different stores with different, unrelated ordinal
-sequences; the cockpit keeps them apart deliberately.
+A session follows its own delegation — spawn implementers and they appear in
+the rail because they're in the subtree. The rail is hidden until a second
+agent exists; `^R`/`⇥` peek it, and `n` (a rail key) opens the spawn form.
+Attaching loads the full conversation from the database first
+(`GetHistory`), then follows the live event stream.
 
 ### Watching without the cockpit
 
 `rafiki watch [id|name]` subscribes to the same lifecycle events the rail is
-built from — spawns, status transitions, turns, errors, retries, exits — and
-prints them to stdout as they happen, one line per event:
+built from and prints them to stdout, one line per event:
 
 ```
 14:32:01  spawn   c_01ABC  impl-auth  parent=c_root
@@ -1289,121 +797,69 @@ prints them to stdout as they happen, one line per event:
 14:40:02  exit    c_01ABC  impl-auth  code=0 (lifetime 8m01s)
 ```
 
-The `status` lines carry how long the previous state lasted, so the transition
-out of a working state reads as the duration of the turn's work. It is not a
-TUI and replays nothing — it follows live events only, from every child you
-can see, or from one child's subtree when you name it. Notes about connecting
-and reconnecting go to stderr, so a piped stdout carries exactly the events;
-`-J` emits one raw event per line instead. It is also an honest window on what
-the rail should be showing: an event that appears here but never reaches the
-cockpit's rail is a cockpit bug, not a daemon one.
+Not a TUI, replays nothing — live events only, from everything you can see or
+one child's subtree when named. `-J` emits one raw event per line.
 
 ### Keys
 
-The cockpit has two focus targets — the input box and the agent rail — and
-**`⇥` toggles between them**. The focused one carries a reversed badge in the
-footer and an accent edge of its own.
+Two focus targets — the input box and the agent rail — toggled with `⇥`.
 
-There was a third, a separate transcript pane, and it is gone. It existed only
-to give a scrolling viewport its own keymap while a text editor held every
-plausible scroll key — the input box is a full emacs-keymapped editor and
-claims `⇧↑`/`⇧↓`, `^N`, `^P`, `^U`, `^K` and more. The input box scrolls the
-transcript directly now, so the extra stop bought nothing and cost a keypress
-on every agent switch, which is the move made most often. Hiding the rail with
-`^R` does not give up switching: `⇥` reveals it, and picking an agent with `⏎`
-puts it back. With exactly one agent the rail is hidden by default rather than
-by request, and the same keys peek it: `^R` or `⇥` reveals the single-row rail,
-and `⏎` or `esc` puts it back.
-
-**Global — work from any pane**
+**Global**
 
 | Key | Does |
 |---|---|
-| `⇥` / `⇧⇥` | Toggle between the input box and the agent rail; reveals it if hidden. |
-| `⌥N` / `^PgDn` | Hop to the next agent that needs you. |
-| `⌥P` / `^PgUp` | Hop to the previous agent that needs you. |
-| `^↑` / `^↓` | Hop straight up and down the rail, without changing pane. |
-| `esc` / `^X` | Abort the running turn. |
-| `^R` / `^B` | Collapse or restore the agent rail; with one agent, peek it. |
-| `^G` | Toggle the help overlay — every binding, grouped by pane. |
-| `^C/^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time. |
+| `⇥` / `⇧⇥` | Toggle between input box and agent rail; reveals it if hidden |
+| `⌥N` / `^PgDn` | Hop to the next agent that needs you |
+| `⌥P` / `^PgUp` | Hop to the previous agent that needs you |
+| `^↑` / `^↓` | Hop up/down the rail without changing pane |
+| `esc` / `^X` | Abort the running turn |
+| `^R` / `^B` | Collapse/restore the agent rail; with one agent, peek it |
+| `^G` | Toggle the help overlay |
+| `^C`/`^D` | Quit — press the same one twice within two seconds. Children keep running; reattach any time |
 
-**Input pane** (where a session starts)
+**Input pane**
 
 | Key | Does |
 |---|---|
-| `⏎` | Send a prompt — queues work for the agent. |
-| `⇧⏎` / `^J` | Insert a newline. Prompts can be as long as you like. |
-| paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert it in full. |
-| `^U` | Clear the whole input, and any folded pastes with it. |
-| `⌥⏎` / `^S` | Steer — inject into the turn already running. |
-| `PgUp` / `PgDn` | Scroll the transcript without leaving the input box. |
-| `home` / `end` | Jump to the top / bottom of the transcript. |
-| `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript. |
+| `⏎` | Send a prompt — queues work for the agent |
+| `⇧⏎` / `^J` | Insert a newline (`⇧⏎` needs a Kitty-keyboard-protocol terminal — Ghostty, Kitty, WezTerm, recent iTerm2/Alacritty; `^J` works everywhere) |
+| paste | Over six lines or 800 characters folds to `[pasted #1: 40 lines]`; paste again to insert in full |
+| `^U` | Clear the whole input, folded pastes included |
+| `⌥⏎` / `^S` | Steer — inject into the turn already running |
+| `PgUp`/`PgDn`, `home`/`end` | Scroll the transcript without leaving the input box |
+| `↑` / `↓` | Move the cursor; with nowhere to move, scroll the transcript |
 
-Everything else goes to the text editor.
-
-`⇧⏎` needs a terminal that speaks the Kitty keyboard protocol — Ghostty, Kitty,
-WezTerm, recent iTerm2 and Alacritty do. Anywhere else the key arrives
-indistinguishable from a bare `⏎` and sends, which is why `^J` exists: it is LF
-rather than CR and every terminal can send it.
+Prompt and steer are separate keys rather than one that guesses from agent
+state, since only you know whether you mean "queue this for later" or
+"interrupt now."
 
 **Rail pane**
 
 | Key | Does |
 |---|---|
-| `↑` / `↓` | Move the cursor. Browsing costs nothing — no agent is opened. |
-| `⏎` | Open the selected agent and return to the input box. |
-| `esc` | Back to the input box. |
+| `↑` / `↓` | Move the cursor — browsing opens no subscription |
+| `⏎` | Open the selected agent and return to the input box |
+| `esc` | Back to the input box |
 
-Moving the cursor is deliberately separate from opening: attaching to an agent
-opens a subscription, so a rail that hopped on every keypress opened one per
-keystroke.
+### Reading the transcript
 
-The box grows with the prompt, up to ten rows, and the transcript yields
-exactly the rows it takes.
-
-`PgUp`/`PgDn` are taken outright — a three-line box has no pages — while `↑`/`↓`
-are shared: the text editor gets them first and keeps them whenever the cursor
-actually moves, so a multi-line prompt is unaffected and a single-line one
-scrolls.
-
-**Reading the transcript**
-
-The transcript follows new output while you are at the bottom and holds its
-place while you are not, so reading back is never interrupted by an agent still
-working. Sending returns you to the bottom. The bottom-right readout says where
-you are — `↓ 1840/2272 81%` — and is right-aligned so it does not move when the
-key hints do.
-
-Three weights make the transcript scannable without colouring large areas of
-it: the agent's own prose carries a solid `▌` gutter, thinking a dotted `┊`,
-and tool calls none at all. Tool calls show their argument (`⚒ bash go test
-./...`) and their output truncated from the END, since a command's ending is
-where its error is.
-
-There is no mouse support, deliberately: capturing the mouse would take away
-your terminal's own select-and-copy, and copying a stack trace out of the pane
-is worth more than a scroll wheel.
-
-Prompt and steer are separate keys rather than one key that guesses from the
-agent's state. A prompt to a busy agent is durably queued rather than dropped,
-so "queue a follow-up for when it finishes" and "interrupt what it is doing now"
-are both useful and only you know which you mean.
+Follows new output at the bottom, holds position when scrolled back; sending
+returns you to the bottom. A bottom-right readout (`↓ 1840/2272 81%`) shows
+position. Three weights make it scannable: solid `▌` gutter for the agent's
+own prose, dotted `┊` for thinking, none for tool calls — which show their
+argument (`⚒ bash go test ./...`) and truncate output from the *end* (where
+the error usually is). No mouse support, deliberately — capturing it would
+take away your terminal's own select-and-copy.
 
 ### Activity and attention
-
-Each rail row carries a glyph for what the agent is doing and, when it needs
-you, a badge for how many things are waiting.
 
 ```
 ◌ spawning   ○ idle        ◐ streaming   ⚒ running a tool
 ⊛ compacting ‼ needs you   ◇ stopping    ⟳ retrying    ✓/✗ exited
 ```
 
-The badge counts only events worth a human: a finished turn, an agent going
-idle or blocking on you, an error, a child exiting. An agent that is merely
-working shows a glyph and no badge — activity is not attention. Retries are
-deliberately not badged, because automatic retry exists so a recoverable stream
-error is not your problem; the ⟳ glyph is there so an agent stuck retrying does
-not look identical to one making progress.
+The badge counts only events worth a human (a finished turn, going idle,
+blocking on you, an error, a child exiting) — an agent merely working shows a
+glyph and no badge. Retries aren't badged (automatic retry means a
+recoverable stream error isn't your problem), but the `⟳` glyph keeps one
+from looking identical to progress.

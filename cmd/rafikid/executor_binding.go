@@ -127,6 +127,13 @@ func (b *boundExecutor) stale() string {
 // with b.mu released -- which recover does, since both calls are RPCs to a
 // daemon-external process and every other caller on this child must not wait
 // on them.
+// chooseAndProvision must never substitute in-process execution for a
+// failure to bind. Every caller of boundExecutor assumes that opts.Executor
+// being non-nil (see blueprint.go's MaterializeAll) means workspace tools are
+// genuinely confined to a real executor — that's the security guard the
+// executor architecture rests on, not just a capability check. Returning an
+// error here is safe specifically because nothing downstream falls back to
+// running the tool locally on an error; see TestBoundExecutorNeverRunsInProcess.
 func (b *boundExecutor) chooseAndProvision(ctx context.Context) (execID, wsID string, cl tools.ExecutorClient, err error) {
 	execID, err = b.binder.ChooseFor(b.childID)
 	if err != nil {

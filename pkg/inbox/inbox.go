@@ -26,6 +26,15 @@ type Mode int
 
 const (
 	// ModePrompt queues work; the agent picks it up when it is next free.
+	//
+	// ModePrompt is the zero value, so a dropped, unset, or defaulted Mode
+	// silently becomes a prompt — never a steer or an abort. A zero-valued
+	// Inbound{} literal, a fixture forgetting the field, or a constructor
+	// that never sets it all land here without error. That's the deliberate
+	// fallback for ParseMode on an unrecognised spelling (queueing is a
+	// safer failure than injecting a steer into the wrong turn), but it's
+	// equally reachable by an ordinary mistake — check any new caller
+	// building an Inbound sets Mode explicitly.
 	ModePrompt Mode = iota
 	// ModeSteer injects into the turn already running, when one is.
 	ModeSteer
