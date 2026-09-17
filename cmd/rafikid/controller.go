@@ -2568,6 +2568,8 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 		id        string
 		err       error
 		abandoned bool
+		duration  time.Duration
+		escalated bool
 	}
 	done := make(chan result, len(ids))
 
@@ -2599,7 +2601,7 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			done <- result{id: id, err: err, abandoned: res.Abandoned}
+			done <- result{id: id, err: err, abandoned: res.Abandoned, duration: res.Duration, escalated: res.Escalated}
 		}()
 	}
 
@@ -2611,14 +2613,14 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 			remaining--
 			switch {
 			case r.err != nil:
-				slog.Warn("child shutdown error", "childId", r.id, "error", r.err)
+				slog.Warn("child shutdown error", "childId", r.id, "error", r.err, "duration", r.duration, "escalated", r.escalated)
 				errs = append(errs, fmt.Errorf("child %s: %w", r.id, r.err))
 			case r.abandoned:
 				// Not an error — Shutdown did everything it could — but "shut
 				// down" would be a lie: the goroutine is still in there.
-				slog.Error("child abandoned rather than reaped; its execution context is leaked", "childId", r.id)
+				slog.Error("child abandoned rather than reaped; its execution context is leaked", "childId", r.id, "duration", r.duration, "escalated", r.escalated)
 			default:
-				slog.Info("child shut down", "childId", r.id)
+				slog.Info("child shut down", "childId", r.id, "duration", r.duration, "escalated", r.escalated)
 			}
 		case <-ctx.Done():
 			slog.Warn("graceful shutdown deadline exceeded", "remaining", remaining)
