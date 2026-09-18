@@ -465,13 +465,14 @@ and renamed into place, and a file whose content is byte-identical to the
 synced corpus is left alone, so repeated syncs stay quiet.
 
 **The target is `<paths.CacheDir()>/pymodules`, marked with
-`.rafiki-managed`.** The cache directory is documented as disposable,
-regenerable data — unlike the skills directory there is no third-party contract
-pinning the location, so it lives under rafiki's own directory. The root is
 marked before first use and an existing unmarked directory is refused with
 `CodeFailedPrecondition` rather than adopted, so rafiki never writes into — and
 its prune never sweeps — a directory it did not create. Names are validated as
-path segments at both the write and the delete site, same rule as skills.
+path segments before anything is written. The prune sweep adds no per-entry
+re-validation, unlike the skills prune: it runs against a root already verified
+managed and only ever `os.Remove`s plain `ReadDir` entries (never recursing,
+never following a symlink out), while the skills prune re-validates because its
+root is the operator's own `~/.claude/skills` and a planted name matters there.
 
 **Opt-in per machine, and `pymodules_sync` on `DescribeResponse` is
 self-reported** exactly like `skills_sync`: it only ever narrows what the
