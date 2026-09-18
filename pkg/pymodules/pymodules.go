@@ -30,7 +30,7 @@ type Record struct {
 // pkg/pymodulesdb; this interface stays here so pkg/pymodules remains
 // pgx-free.
 type Store interface {
-	// Put always inserts a new row -- nothing is ever updated or deleted.
+	// Put always inserts a new row and never modifies an existing one.
 	// ownerUserID empty means unattributed. A delete stamps deleted_at on
 	// every version of the name; it never rewrites code.
 	Put(ctx context.Context, ownerUserID, name, code, description string) (Record, error)

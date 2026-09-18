@@ -213,10 +213,10 @@ func TestUnattributedRowsShareOneBucket(t *testing.T) {
 	}
 }
 
-// Delete appends a tombstone (an INSERT, deleted_at set): the name leaves
-// List, and a later Put appends a live row that resurrects the name with the
-// new code. History is kept the whole time.
-func TestDeleteTombstonesAndReputRestores(t *testing.T) {
+// Delete stamps deleted_at on every version of the name: the name leaves
+// List, and a later Put appends a live row that brings the name back with
+// the new code. History is kept the whole time.
+func TestDeleteHidesNameAndReputRestores(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
 	owner := newOwner(t, pool, "del-reput")
@@ -271,12 +271,12 @@ func TestDeleteDoesNotResurrectOlderVersions(t *testing.T) {
 		t.Fatalf("list after delete: %v", err)
 	}
 	if len(rows) != 0 {
-		t.Fatalf("List after delete returned %+v, want zero rows: the tombstone must hide older versions, not expose v1", rows)
+		t.Fatalf("List after delete returned %+v, want zero rows: the delete must hide older versions, not expose v2", rows)
 	}
 }
 
-// A delete of a name with zero rows reports ErrNotFound and inserts nothing:
-// no tombstone for a module that never existed.
+// A delete of a name with zero rows reports ErrNotFound and writes nothing:
+// no stamped row for a module that never existed.
 func TestDeleteNotFoundForUnknownName(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
@@ -370,8 +370,8 @@ func TestDeleteIsOwnerScoped(t *testing.T) {
 	}
 }
 
-// ownerUserID "" is the one shared unattributed bucket: Delete("") tombstones
-// only an unattributed row, and an attributed module is untouched.
+// ownerUserID "" is the one shared unattributed bucket: Delete("") stamps
+// only unattributed rows, and an attributed module is untouched.
 func TestDeleteUnattributedBucket(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
