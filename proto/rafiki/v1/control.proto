@@ -696,6 +696,10 @@ service Control {
   rpc UpsertSkill(UpsertSkillRequest) returns (UpsertSkillResponse);
   rpc DeleteSkill(DeleteSkillRequest) returns (DeleteSkillResponse);
   rpc SetSkillEnabled(SetSkillEnabledRequest) returns (SetSkillEnabledResponse);
+  rpc ListPymodules(ListPymodulesRequest) returns (ListPymodulesResponse);
+  rpc GetPymodule(GetPymoduleRequest) returns (GetPymoduleResponse);
+  rpc PutPymodule(PutPymoduleRequest) returns (PutPymoduleResponse);
+  rpc DeletePymodule(DeletePymoduleRequest) returns (DeletePymoduleResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
@@ -757,3 +761,33 @@ message SetSkillEnabledRequest {
   bool enabled = 3;
 }
 message SetSkillEnabledResponse {}
+
+// PymoduleRow is one row of conversations.pymodules in the caller's own
+// owner bucket. The owner is never a field: the daemon resolves it from the
+// request context, the same identity the caller's own children use.
+message PymoduleRow {
+  int64 version = 1;     // the row id: two saves under one name are two versions
+  string name = 2;
+  string description = 3;
+  string created_at = 4; // RFC3339
+  // code is populated only by GetPymodule and PutPymodule; list responses
+  // omit it -- an inventory is not a document.
+  string code = 5;
+}
+
+message ListPymodulesRequest {}
+message ListPymodulesResponse { repeated PymoduleRow rows = 1; }
+
+message GetPymoduleRequest { string name = 1; }
+message GetPymoduleResponse { PymoduleRow row = 1; }
+
+message PutPymoduleRequest {
+  string name = 1;
+  string code = 2;
+  // description defaults to "" when omitted.
+  string description = 3;
+}
+message PutPymoduleResponse { PymoduleRow row = 1; }
+
+message DeletePymoduleRequest { string name = 1; }
+message DeletePymoduleResponse {}

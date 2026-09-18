@@ -70,6 +70,14 @@ const (
 	ControlDeleteSkillProcedure = "/rafiki.v1.Control/DeleteSkill"
 	// ControlSetSkillEnabledProcedure is the fully-qualified name of the Control's SetSkillEnabled RPC.
 	ControlSetSkillEnabledProcedure = "/rafiki.v1.Control/SetSkillEnabled"
+	// ControlListPymodulesProcedure is the fully-qualified name of the Control's ListPymodules RPC.
+	ControlListPymodulesProcedure = "/rafiki.v1.Control/ListPymodules"
+	// ControlGetPymoduleProcedure is the fully-qualified name of the Control's GetPymodule RPC.
+	ControlGetPymoduleProcedure = "/rafiki.v1.Control/GetPymodule"
+	// ControlPutPymoduleProcedure is the fully-qualified name of the Control's PutPymodule RPC.
+	ControlPutPymoduleProcedure = "/rafiki.v1.Control/PutPymodule"
+	// ControlDeletePymoduleProcedure is the fully-qualified name of the Control's DeletePymodule RPC.
+	ControlDeletePymoduleProcedure = "/rafiki.v1.Control/DeletePymodule"
 	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
 	// ConversationSearch RPC.
 	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
@@ -113,6 +121,10 @@ type ControlClient interface {
 	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
+	ListPymodules(context.Context, *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error)
+	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
+	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
+	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -242,6 +254,30 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
 			connect.WithClientOptions(opts...),
 		),
+		listPymodules: connect.NewClient[v1.ListPymodulesRequest, v1.ListPymodulesResponse](
+			httpClient,
+			baseURL+ControlListPymodulesProcedure,
+			connect.WithSchema(controlMethods.ByName("ListPymodules")),
+			connect.WithClientOptions(opts...),
+		),
+		getPymodule: connect.NewClient[v1.GetPymoduleRequest, v1.GetPymoduleResponse](
+			httpClient,
+			baseURL+ControlGetPymoduleProcedure,
+			connect.WithSchema(controlMethods.ByName("GetPymodule")),
+			connect.WithClientOptions(opts...),
+		),
+		putPymodule: connect.NewClient[v1.PutPymoduleRequest, v1.PutPymoduleResponse](
+			httpClient,
+			baseURL+ControlPutPymoduleProcedure,
+			connect.WithSchema(controlMethods.ByName("PutPymodule")),
+			connect.WithClientOptions(opts...),
+		),
+		deletePymodule: connect.NewClient[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse](
+			httpClient,
+			baseURL+ControlDeletePymoduleProcedure,
+			connect.WithSchema(controlMethods.ByName("DeletePymodule")),
+			connect.WithClientOptions(opts...),
+		),
 		conversationSearch: connect.NewClient[v1.ConversationSearchRequest, v1.ConversationSearchResponse](
 			httpClient,
 			baseURL+ControlConversationSearchProcedure,
@@ -313,6 +349,10 @@ type controlClient struct {
 	upsertSkill          *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
 	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
 	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	listPymodules        *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
+	getPymodule          *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
+	putPymodule          *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
+	deletePymodule       *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
 	conversationSearch   *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
 	conversationExport   *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
 	conversationQuery    *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
@@ -413,6 +453,26 @@ func (c *controlClient) SetSkillEnabled(ctx context.Context, req *connect.Reques
 	return c.setSkillEnabled.CallUnary(ctx, req)
 }
 
+// ListPymodules calls rafiki.v1.Control.ListPymodules.
+func (c *controlClient) ListPymodules(ctx context.Context, req *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error) {
+	return c.listPymodules.CallUnary(ctx, req)
+}
+
+// GetPymodule calls rafiki.v1.Control.GetPymodule.
+func (c *controlClient) GetPymodule(ctx context.Context, req *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error) {
+	return c.getPymodule.CallUnary(ctx, req)
+}
+
+// PutPymodule calls rafiki.v1.Control.PutPymodule.
+func (c *controlClient) PutPymodule(ctx context.Context, req *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error) {
+	return c.putPymodule.CallUnary(ctx, req)
+}
+
+// DeletePymodule calls rafiki.v1.Control.DeletePymodule.
+func (c *controlClient) DeletePymodule(ctx context.Context, req *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error) {
+	return c.deletePymodule.CallUnary(ctx, req)
+}
+
 // ConversationSearch calls rafiki.v1.Control.ConversationSearch.
 func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return c.conversationSearch.CallUnary(ctx, req)
@@ -473,6 +533,10 @@ type ControlHandler interface {
 	UpsertSkill(context.Context, *connect.Request[v1.UpsertSkillRequest]) (*connect.Response[v1.UpsertSkillResponse], error)
 	DeleteSkill(context.Context, *connect.Request[v1.DeleteSkillRequest]) (*connect.Response[v1.DeleteSkillResponse], error)
 	SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error)
+	ListPymodules(context.Context, *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error)
+	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
+	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
+	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -598,6 +662,30 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("SetSkillEnabled")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListPymodulesHandler := connect.NewUnaryHandler(
+		ControlListPymodulesProcedure,
+		svc.ListPymodules,
+		connect.WithSchema(controlMethods.ByName("ListPymodules")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetPymoduleHandler := connect.NewUnaryHandler(
+		ControlGetPymoduleProcedure,
+		svc.GetPymodule,
+		connect.WithSchema(controlMethods.ByName("GetPymodule")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlPutPymoduleHandler := connect.NewUnaryHandler(
+		ControlPutPymoduleProcedure,
+		svc.PutPymodule,
+		connect.WithSchema(controlMethods.ByName("PutPymodule")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeletePymoduleHandler := connect.NewUnaryHandler(
+		ControlDeletePymoduleProcedure,
+		svc.DeletePymodule,
+		connect.WithSchema(controlMethods.ByName("DeletePymodule")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlConversationSearchHandler := connect.NewUnaryHandler(
 		ControlConversationSearchProcedure,
 		svc.ConversationSearch,
@@ -684,6 +772,14 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlDeleteSkillHandler.ServeHTTP(w, r)
 		case ControlSetSkillEnabledProcedure:
 			controlSetSkillEnabledHandler.ServeHTTP(w, r)
+		case ControlListPymodulesProcedure:
+			controlListPymodulesHandler.ServeHTTP(w, r)
+		case ControlGetPymoduleProcedure:
+			controlGetPymoduleHandler.ServeHTTP(w, r)
+		case ControlPutPymoduleProcedure:
+			controlPutPymoduleHandler.ServeHTTP(w, r)
+		case ControlDeletePymoduleProcedure:
+			controlDeletePymoduleHandler.ServeHTTP(w, r)
 		case ControlConversationSearchProcedure:
 			controlConversationSearchHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
@@ -779,6 +875,22 @@ func (UnimplementedControlHandler) DeleteSkill(context.Context, *connect.Request
 
 func (UnimplementedControlHandler) SetSkillEnabled(context.Context, *connect.Request[v1.SetSkillEnabledRequest]) (*connect.Response[v1.SetSkillEnabledResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetSkillEnabled is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListPymodules(context.Context, *connect.Request[v1.ListPymodulesRequest]) (*connect.Response[v1.ListPymodulesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListPymodules is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetPymodule is not implemented"))
+}
+
+func (UnimplementedControlHandler) PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.PutPymodule is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeletePymodule is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
