@@ -81,14 +81,18 @@ func TestPythonRoundTrip(t *testing.T) {
 	if !found {
 		t.Fatalf("py list -j has no row named roundtrip_mod: %s", listOut)
 	}
-	if bytes.Contains(listOut, []byte(roundtripModCode)) {
+	// The parse above is the real codeless guard; this substring check is the
+	// belt to those braces. The fragment is chosen escape-free on purpose —
+	// no quotes, no newlines — so it survives JSON escaping and the check can
+	// actually fire if the code ever leaks.
+	if bytes.Contains(listOut, []byte("hello from roundtrip_mod")) {
 		t.Fatalf("py list -j leaked the module body into the inventory: %s", listOut)
 	}
 
 	// ── 3. get: the code comes back byte-for-byte ────────────────────────
-	// Table mode prints the code raw via fmt.Println, so the output is the
-	// file's contents plus the one trailing newline Println adds on top of
-	// the one already in the body.
+	// Table mode prints the code raw to stdout (fmt.Fprintln on os.Stdout),
+	// so the output is the file's contents plus the one trailing newline
+	// the print adds on top of the one already in the body.
 	getOut, err := cliCmd(t, d, "py", "get", "roundtrip_mod").Output()
 	if err != nil {
 		t.Fatalf("py get failed: %v", err)
@@ -125,11 +129,18 @@ func TestPythonRoundTrip(t *testing.T) {
 		t.Fatalf("py get after delete: stderr %q does not mention not found", goneErrBuf.String())
 	}
 
-	// ── 6. put with a non-identifier name: refused before the wire ───────
-	// "9bad" cannot be a path segment or an import target; the client-side
-	// ValidName check rejects it without shipping the body to the daemon.
+	// ── 6. put with a non-identifier name: refused CLIENT-side ───────────
+	// "9bad" cannot be a path segment or an import target. Both the client
+	// and the daemon run the same ValidName check with the same message, so
+	// a put against the live daemon cannot tell which side fired. Run BOTH
+	// shapes with no daemon at all — cliCmd(t, nil, …) leaves the scratch
+	// profile dir empty, so any name that survives the client-side check
+	// dies later, in endpoint resolution, with a different error. The
+	// control below proves the two failures differ; "9bad" failing with the
+	// identifier message therefore proves the client-side check fired
+	// before any dial.
 	var badOut, badErrBuf bytes.Buffer
-	badCmd := cliCmd(t, d, "py", "put", "9bad", "--file", fixture)
+	badCmd := cliCmd(t, nil, "py", "put", "9bad", "--file", fixture)
 	badCmd.Stdout = &badOut
 	badCmd.Stderr = &badErrBuf
 	if err := badCmd.Run(); err == nil {
@@ -137,5 +148,21 @@ func TestPythonRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(badErrBuf.String(), "bare Python identifier") {
 		t.Fatalf("py put 9bad: stderr %q does not carry the identifier error", badErrBuf.String())
+	}
+
+	// Control: the same command with a VALID name and no daemon fails
+	// somewhere else — profile or endpoint resolution — and never with the
+	// identifier message. If this ever starts carrying "bare Python
+	// identifier", the client-side pre-check has been dropped or moved
+	// behind the dial and step 6's premise is gone.
+	var ctlOut, ctlErrBuf bytes.Buffer
+	ctlCmd := cliCmd(t, nil, "py", "put", "roundtrip_mod", "--file", fixture)
+	ctlCmd.Stdout = &ctlOut
+	ctlCmd.Stderr = &ctlErrBuf
+	if err := ctlCmd.Run(); err == nil {
+		t.Fatalf("py put with a valid name and no daemon must exit nonzero; stdout: %q", ctlOut.String())
+	}
+	if ctlErr := ctlErrBuf.String(); strings.Contains(ctlErr, "bare Python identifier") {
+		t.Fatalf("py put control: no daemon yet the error is the identifier message; the client-side ValidName pre-check did not fire first: %q", ctlErr)
 	}
 }

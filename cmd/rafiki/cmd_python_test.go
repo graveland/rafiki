@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -110,7 +111,11 @@ func TestPythonArgAndCompletionContracts(t *testing.T) {
 
 // The put contract: --file is required, and a name that can never be a path
 // segment is refused locally — before any code is shipped to the daemon.
+// isolateProfiles keeps the pinned message provably client-side: the ValidName
+// check runs before newConnectEndpoint, so the string can only come from it,
+// never from whatever profile an ambient environment points at.
 func TestPythonPutRequiresFileAndValidName(t *testing.T) {
+	isolateProfiles(t)
 	put := newPythonPutCmd()
 	put.SetOut(&bytes.Buffer{})
 	put.SetErr(&bytes.Buffer{})
@@ -182,5 +187,86 @@ func TestPythonListCells(t *testing.T) {
 	}
 	if strings.Contains(out, "CODE") {
 		t.Errorf("renderPymoduleList prints a CODE column:\n%s", out)
+	}
+}
+
+// The JSON shapes: list -j wraps the rows in the {"rows": …} envelope, list
+// -J emits one bare row per line, and get/put -j/-J emit the full row
+// including code with NO envelope. These are the shapes a script keys on —
+// the likeliest silent-drift point in the emit helpers — so they are pinned
+// here rather than only end-to-end.
+func TestPythonJSONShapes(t *testing.T) {
+	wireRow := func() *rafikiv1.PymoduleRow {
+		// Mirrors the wire: list rows arrive codeless, get/put rows arrive
+		// with the code. omitempty must keep the empty code out of list's
+		// objects entirely.
+		return &rafikiv1.PymoduleRow{
+			Name: "helper", Version: 7, Description: "d",
+			CreatedAt: "2026-09-18T12:34:56Z", Code: "x = 1",
+		}
+	}
+
+	// list -j: one envelope, and no code key on any row.
+	var listBuf bytes.Buffer
+	codeless := wireRow()
+	codeless.Code = ""
+	if err := emitPymoduleList(&listBuf, []*rafikiv1.PymoduleRow{codeless}, outputJSON, false); err != nil {
+		t.Fatal(err)
+	}
+	var listEnv struct {
+		Rows []*rafikiv1.PymoduleRow `json:"rows"`
+	}
+	if err := json.Unmarshal(listBuf.Bytes(), &listEnv); err != nil {
+		t.Fatalf("list -j: not a {\"rows\": …} envelope: %v\n%s", err, listBuf.String())
+	}
+	if len(listEnv.Rows) != 1 || listEnv.Rows[0].Name != "helper" {
+		t.Errorf("list -j rows = %+v, want [helper]", listEnv.Rows)
+	}
+	if bytes.Contains(listBuf.Bytes(), []byte(`"code"`)) {
+		t.Errorf("list -j carries a code key:\n%s", listBuf.String())
+	}
+
+	// list -J: one compact row per line, no envelope.
+	var jsonlBuf bytes.Buffer
+	if err := emitPymoduleList(&jsonlBuf, []*rafikiv1.PymoduleRow{codeless, codeless}, outputJSONL, false); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(jsonlBuf.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("list -J emitted %d lines, want 2:\n%s", len(lines), jsonlBuf.String())
+	}
+	for i, line := range lines {
+		var row rafikiv1.PymoduleRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Errorf("list -J line %d: not a bare row: %v\n%s", i, err, line)
+		}
+		if row.Name != "helper" {
+			t.Errorf("list -J line %d: name %q, want helper", i, row.Name)
+		}
+	}
+
+	// get/put -j: the full row including code, with no envelope around it.
+	for _, mode := range []outputMode{outputJSON, outputJSONL} {
+		var buf bytes.Buffer
+		if err := emitPymoduleCode(&buf, wireRow(), mode); err != nil {
+			t.Fatal(err)
+		}
+		var row rafikiv1.PymoduleRow
+		if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
+			t.Fatalf("emitPymoduleCode mode %v: not a bare row: %v\n%s", mode, err, buf.String())
+		}
+		if row.Code != "x = 1" || row.Version != 7 || row.Name != "helper" {
+			t.Errorf("emitPymoduleCode mode %v: got name=%q version=%d code=%q, want helper/7/\"x = 1\"", mode, row.Name, row.Version, row.Code)
+		}
+	}
+
+	// get in table mode writes the code raw to w — byte-for-byte, no
+	// decoration — so it can feed a file or an editor unchanged.
+	var rawBuf bytes.Buffer
+	if err := emitPymoduleCode(&rawBuf, wireRow(), outputAuto); err != nil {
+		t.Fatal(err)
+	}
+	if got := rawBuf.String(); got != "x = 1\n" {
+		t.Errorf("emitPymoduleCode table mode = %q, want %q", got, "x = 1\n")
 	}
 }

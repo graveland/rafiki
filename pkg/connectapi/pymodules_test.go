@@ -223,3 +223,40 @@ func TestPymodulesUnwired(t *testing.T) {
 		}
 	}
 }
+
+// SetPymoduleManager(nil) is refused, not stored: a stored pointer to a nil
+// interface would defeat the Unavailable path above and nil-panic the first
+// handler call instead.
+func TestSetPymoduleManagerNilIsRefused(t *testing.T) {
+	s := &Server{}
+	s.SetPymoduleManager(nil)
+	_, err := s.ListPymodules(context.Background(), connect.NewRequest(&rafikiv1.ListPymodulesRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("after SetPymoduleManager(nil): got code %v, want Unavailable", connect.CodeOf(err))
+	}
+}
+
+// pymoduleError maps ErrNotFound to CodeNotFound and everything else to
+// CodeInternal. NotFound is exercised by the tests above; this pins the
+// Internal branch — a store failure must not surface as a client-side
+// InvalidArgument-shaped answer.
+func TestPymoduleErrorMapsInternal(t *testing.T) {
+	boom := errors.New("connection refused")
+	s := &Server{}
+	s.SetPymoduleManager(&fakePymodules{listErr: boom})
+	if _, err := s.ListPymodules(context.Background(), connect.NewRequest(&rafikiv1.ListPymodulesRequest{})); connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("list failure: got code %v, want Internal", connect.CodeOf(err))
+	}
+	s.SetPymoduleManager(&fakePymodules{getErr: boom})
+	if _, err := s.GetPymodule(context.Background(), connect.NewRequest(&rafikiv1.GetPymoduleRequest{Name: "x"})); connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("get failure: got code %v, want Internal", connect.CodeOf(err))
+	}
+	s.SetPymoduleManager(&fakePymodules{putErr: boom})
+	if _, err := s.PutPymodule(context.Background(), connect.NewRequest(&rafikiv1.PutPymoduleRequest{Name: "x", Code: "y"})); connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("put failure: got code %v, want Internal", connect.CodeOf(err))
+	}
+	s.SetPymoduleManager(&fakePymodules{delErr: boom})
+	if _, err := s.DeletePymodule(context.Background(), connect.NewRequest(&rafikiv1.DeletePymoduleRequest{Name: "x"})); connect.CodeOf(err) != connect.CodeInternal {
+		t.Errorf("delete failure: got code %v, want Internal", connect.CodeOf(err))
+	}
+}

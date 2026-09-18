@@ -482,10 +482,9 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Twenty, materialized per caller: fifteen come from the same
-blueprints the fundi registry serves, three (`pymodule_put`, `pymodule_get`,
-`pymodule_delete`)
-from blueprints shared with it but never registered on fundi's tool set, and
+**Tools.** Twenty, materialized per caller: eighteen come from the same
+registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
+child gets the same eighteen, subject to the same per-caller declines), and
 two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
 never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
 this surface for a caller that is not a fundi child (`mcpToolDescriptions`).

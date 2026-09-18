@@ -151,7 +151,7 @@ func emitPymoduleCode(w io.Writer, row *rafikiv1.PymoduleRow, mode outputMode) e
 	case outputJSONL:
 		return writeJSONL(w, []any{row})
 	default:
-		fmt.Println(row.GetCode())
+		fmt.Fprintln(w, row.GetCode())
 		return nil
 	}
 }

@@ -218,3 +218,15 @@ func TestListSkillsUnwiredIsUnavailable(t *testing.T) {
 		t.Fatalf("want CodeUnavailable, got %v", err)
 	}
 }
+
+// SetSkillManager(nil) is refused, not stored — same rule as
+// SetPymoduleManager: a stored pointer to a nil interface would defeat the
+// Unavailable path above and nil-panic the first handler call instead.
+func TestSetSkillManagerNilIsRefused(t *testing.T) {
+	s := &Server{}
+	s.SetSkillManager(nil)
+	_, err := s.ListSkills(context.Background(), connect.NewRequest(&rafikiv1.ListSkillsRequest{}))
+	if connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("after SetSkillManager(nil): want CodeUnavailable, got %v", err)
+	}
+}

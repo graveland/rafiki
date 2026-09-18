@@ -37,7 +37,13 @@ func (m connectPyModules) ListPymodules(ctx context.Context) ([]connectapi.Pymod
 	}
 	out := make([]connectapi.PymoduleRow, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, connectPymoduleRow(r))
+		row := connectPymoduleRow(r)
+		// The manager contract: code is populated only by Get and Put — an
+		// inventory is not a document. The Connect handler blanks it again
+		// as defense in depth; this keeps the adapter honest about the
+		// contract it feeds.
+		row.Code = ""
+		out = append(out, row)
 	}
 	return out, nil
 }

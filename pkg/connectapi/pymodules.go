@@ -36,8 +36,15 @@ type PymoduleManager interface {
 
 // SetPymoduleManager attaches the pymodules backend. Post-construction
 // setter, same reason as SetSkillManager: the Controller is built after
-// this Server.
-func (s *Server) SetPymoduleManager(m PymoduleManager) { s.pymodules.Store(&m) }
+// this Server. A nil manager is refused rather than stored: storing &m for
+// a nil interface would defeat pymoduleManager's Unavailable path and nil-
+// panic the first handler call instead.
+func (s *Server) SetPymoduleManager(m PymoduleManager) {
+	if m == nil {
+		return
+	}
+	s.pymodules.Store(&m)
+}
 
 func (s *Server) pymoduleManager() (PymoduleManager, error) {
 	p := s.pymodules.Load()

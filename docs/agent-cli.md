@@ -583,9 +583,12 @@ rafiki python delete <name>                 # soft-delete every live version
 ```
 
 - **`list`** shows `NAME`, `VERSION`, `SAVED`, `DESCRIPTION` and never the
-  code — an inventory is a handful of lines and a body is a document. `get`
-  prints only the code by default, so it can feed a file or an editor
-  unchanged; `-o json` (on `get` or `put`) emits the full row including code.
+  code — an inventory is a handful of lines and a body is a document.
+  `-o json`/`-o jsonl` work on `list` too, and the rows stay codeless in
+  every mode (json wraps them in the shared `{"rows": …}` envelope, jsonl
+  prints one bare row per line). `get` prints only the code by default, so
+  it can feed a file or an editor unchanged; `-o json` (on `get` or `put`)
+  emits the full row including code, with no envelope around it.
 - **`put`** always inserts a NEW version — saving again under an existing
   name never modifies what is saved there, and the printed version id tells
   the two apart. The name must be a bare Python identifier (it becomes both

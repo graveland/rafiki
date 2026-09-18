@@ -54,7 +54,15 @@ type SkillManager interface {
 
 // SetSkillManager attaches the skills backend. Post-construction setter for the
 // same reason as SetExecutorLister: the Controller is built after this Server.
-func (s *Server) SetSkillManager(m SkillManager) { s.skills.Store(&m) }
+// A nil manager is refused rather than stored, the same rule as
+// SetPymoduleManager: storing &m for a nil interface would defeat
+// skillManager's Unavailable path and nil-panic the first handler call.
+func (s *Server) SetSkillManager(m SkillManager) {
+	if m == nil {
+		return
+	}
+	s.skills.Store(&m)
+}
 
 func (s *Server) skillManager() (SkillManager, error) {
 	p := s.skills.Load()
