@@ -58,9 +58,23 @@ You run **in the main repo**. You never `cd` into a worktree.
    anything runs. Then one read pass for what globs cannot see: does a later
    wave consume an interface no earlier wave produces? Write what you checked
    into the ledger; "the scan was clean" without the rows is not a scan.
-6. **Integration branch** off `main`, one per plan. Every wave lands on it
-   linearly — rebase plus `--ff-only`, never a merge commit (see *Merging a
-   wave*). `main` is never touched.
+6. **Integration branch, in its own worktree.** One integration branch off
+   `main` per plan, and it is checked out in a DEDICATED worktree created at
+   setup — never in the main checkout:
+
+   ```
+   git worktree add -b <plan>-integration .worktrees/integration-<plan> main
+   ```
+
+   The main checkout stays on whatever the operator left it on. Other sessions
+   work there: their commits, stashes and uncommitted files must never be
+   paved over, and a merge run against the main checkout's HEAD both blocks on
+   their dirty tree and exposes the branch to their commits. Every
+   integration command names the worktree explicitly (`git -C
+   <main-repo>/.worktrees/integration-<plan> …`), so no step depends on where
+   HEAD happens to sit. Coordinator-local commits (graduations, doc syncs)
+   also land in that worktree — `git -C <integration-wt> branch
+   --show-current` must name the integration branch before any commit.
 7. `task_add` every task with `metadata: {rung: "<n>", plan: "<basename>"}`.
    Metadata is write-once — it cannot be added later.
 
@@ -69,7 +83,8 @@ You run **in the main repo**. You never `cd` into a worktree.
 Per task, concurrently, in chunks of at most four:
 
 ```
-git worktree add -b <plan>-<task> .worktrees/<plan>-<task> <integration-head>
+git worktree add -b <plan>-<task> .worktrees/<plan>-<task> \
+  $(git -C <main-repo>/.worktrees/integration-<plan> rev-parse HEAD)
 <extract the task body> > <main-repo>/tasks/sdd/<plan-basename>/task-<n>-brief.md
 agent_spawn(cwd: "<abs worktree>", model: <seat for rung>, max_cost: <plan value>,
             task: "1.1", name: "1.1", prompt: <dispatch>)
@@ -185,12 +200,21 @@ Per task, before its branch lands:
 2. `git -C <wt> diff --name-only <BASE>..HEAD` against `touches:`. Anything
    outside the declaration is a plan defect: `PROCESS layer=plan`, a ruling,
    and the wave's remaining branches get read rather than trusted.
-3. Land it linearly. The worktree holds the task branch, so rebase there, then
-   fast-forward from the main repo:
+3. **Foreign-commit scan.** Before touching the branch:
+   `git -C <integration-wt> log <wave-base>..<integration-branch> --oneline`.
+   Every commit must be one this plan landed. A parallel session can leave
+   commits on the integration branch (this is exactly what happens when the
+   branch was ever checked out in the main checkout): keep them — they are
+   the operator's property, never silently rebased over, reset or dropped —
+   exclude them from the plan's diff scope and review, and record them in the
+   ledger before landing anything.
+4. Land it linearly. The worktree holds the task branch; the integration
+   worktree holds the integration branch. Rebase the task branch, then
+   fast-forward the integration branch to it:
 
    ```
    git -C <wt> rebase <integration-branch>
-   git merge --ff-only <task-branch>
+   git -C <integration-wt> merge --ff-only <task-branch>
    ```
 
    The rebase replays the task's commits onto the current integration head —
@@ -218,7 +242,8 @@ branch to the wave's start and re-land one branch at a time, re-running the
 gate; the first failure names the culprit. Slow in wall-clock, cheap in
 judgement, and impossible to get wrong.
 
-Only then: `git worktree remove` and `git branch -d`. A worktree outlives its
+Only then: `git worktree remove` and `git branch -d` for each task worktree.
+The integration worktree survives until Finishing. A worktree outlives its
 task by exactly one gate.
 
 ## Finishing
@@ -237,9 +262,13 @@ task by exactly one gate.
    them again.
 6. Remove every worktree and branch. Delete the plan file.
 7. **Stop.** The integration branch is not landed on `main` without your human
-   partner saying so. When it is, the same rule: fast-forward if `main` has
-   not moved; if it has, rebase the integration branch onto `main`, re-run
-   the gate, then fast-forward. A merge commit on `main` is a defect.
+   partner saying so. When it is: re-run the foreign-commit scan first and
+   name to the human anything on the branch this plan did not write — landing
+   fast-forwards `main` to the integration head, foreign commits included.
+   Then fast-forward if `main` has not moved; if it has, rebase the
+   integration branch onto `main`, re-run the gate, then fast-forward. A merge
+   commit on `main` is a defect. Finally remove the integration worktree
+   itself.
 
 ## The ledgers
 
