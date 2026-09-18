@@ -306,8 +306,9 @@ type ToolOpts struct {
 	// daemon), matching Quota's degrade rule.
 	Conversations ConversationReader
 
-	// PyModules, when non-nil, gives this agent the pymodule_put tool --
-	// saving a reusable Python snippet to its own owner-scoped store. nil
+	// PyModules, when non-nil, gives this agent the pymodule_put and
+	// pymodule_get tools -- saving a reusable Python snippet to, and
+	// fetching a saved one back from, its own owner-scoped store. nil
 	// means no pymodule store is configured (a DB-less daemon), same
 	// nil-means-decline rule as Quota/Conversations. Bound to ONE owner at
 	// construction, same reasoning as Agents/ConversationReader: no method

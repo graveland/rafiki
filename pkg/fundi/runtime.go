@@ -186,8 +186,9 @@ type RuntimeOptions struct {
 	// standalone `rafikid fundi` process.
 	Conversations tools.ConversationReader
 
-	// PyModules, when non-nil, gives this child the pymodule_put tool --
-	// saving a reusable Python snippet to its own owner-scoped store.
+	// PyModules, when non-nil, gives this child the pymodule_put and
+	// pymodule_get tools -- saving a reusable Python snippet to, and
+	// fetching a saved one back from, its own owner-scoped store.
 	// Supplied by the daemon as a per-owner adapter; nil when no pymodule
 	// store is configured (a DB-less daemon) or for the standalone
 	// `rafikid fundi` process.

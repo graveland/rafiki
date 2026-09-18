@@ -470,7 +470,7 @@ func TestMCPFaceDeclinesPymodulesWhenNoExecutorPool(t *testing.T) {
 	}
 	for provenance, req := range requests {
 		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
-		for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list", "pymodule_run"} {
+		for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list", "pymodule_run"} {
 			if slices.Contains(names, name) {
 				t.Errorf("%s request unexpectedly exposes %s: %v", provenance, name, names)
 			}
@@ -486,7 +486,7 @@ func TestMCPFacePymodulesAppearWhenExecutorRouted(t *testing.T) {
 	ctrl.darajaPool = &darajapool.Pool{}
 
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
-	for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list"} {
+	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list"} {
 		if !slices.Contains(names, name) {
 			t.Errorf("routed user request is missing %s: %v", name, names)
 		}
@@ -530,7 +530,7 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
 	})
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(r.WithContext(ctx))))
-	for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list"} {
+	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list"} {
 		if !slices.Contains(names, name) {
 			t.Errorf("unbound child request is missing %s: %v", name, names)
 		}
@@ -663,7 +663,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		t.Errorf("conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 	}
 
-	for _, name := range []string{"pymodule_put", "pymodule_delete"} {
+	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete"} {
 		if !strings.Contains(mcpToolDescriptions[name], "A claude-kind child you spawn") {
 			t.Errorf("%s: missing the pymodule_run delegation pointer", name)
 		}
@@ -674,6 +674,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		"agent_kill":          &tools.AgentKillBlueprint{},
 		"conversation_export": &tools.ConversationExportBlueprint{},
 		"pymodule_put":        &tools.PyModulePutBlueprint{},
+		"pymodule_get":        &tools.PyModuleGetBlueprint{},
 		"pymodule_delete":     &tools.PyModuleDeleteBlueprint{},
 		"task_add":            &tools.TaskAddBlueprint{},
 		"task_update":         &tools.TaskUpdateBlueprint{},

@@ -246,7 +246,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has
 	// no executor pool at all: no claude child can ever run one here, so
-	// put/delete/list would be a toolbox nobody can open. Unlike Quota
+	// put/get/delete/list would be a toolbox nobody can open. Unlike Quota
 	// (which degrades per-caller), this condition is the same for every
 	// caller of this daemon.
 	if ctrl.claudeExecutorRouted() {
@@ -354,6 +354,7 @@ var mcpBlueprints = []tools.Tool{
 	&tools.ConversationExportBlueprint{},
 	&tools.ConversationQueryBlueprint{},
 	&tools.PyModulePutBlueprint{},
+	&tools.PyModuleGetBlueprint{},
 	&tools.PyModuleDeleteBlueprint{},
 	&mcpPyModuleListBlueprint{},
 	&mcpPyModuleRunBlueprint{},
@@ -399,9 +400,10 @@ const mcpLedgerPrefix = "This is a shared, durable, cross-agent ledger. Rows per
 	"handle to agent_spawn — that is what makes the delegation visible to the operator " +
 	"and hands the agent its assignment."
 
-// mcpPymoduleRunPointer is appended to pymodule_put/pymodule_delete's text
-// on this surface: the blueprint text's "Only you can see or run what you
-// save here" is still true here, but "run" now also covers a claude child
+// mcpPymoduleRunPointer is appended to pymodule_put/pymodule_get/
+// pymodule_delete's text on this surface: the blueprint text's "Only you can
+// see or run what you save here" is still true here, but "run" now also
+// covers a claude child
 // you spawn calling pymodule_run on this same surface -- worth stating
 // explicitly, the same "prepare state, then delegate" framing
 // mcpLedgerPrefix gives task_add.
@@ -472,6 +474,7 @@ var mcpToolDescriptions = func() map[string]string {
 	export := &tools.ConversationExportBlueprint{}
 	query := &tools.ConversationQueryBlueprint{}
 	put := &tools.PyModulePutBlueprint{}
+	get := &tools.PyModuleGetBlueprint{}
 	del := &tools.PyModuleDeleteBlueprint{}
 	// Note and the remainder of the blueprint text stay verbatim; the
 	// fundi-only ownership sentence (from mcpSearchScopeStart to the end) is
@@ -523,6 +526,7 @@ var mcpToolDescriptions = func() map[string]string {
 		"task_drop":       mcpLedgerPrefix + "\n\n" + taskDrop.Description(),
 		"task_list":       mcpLedgerPrefix + "\n\n" + taskList.Description(),
 		"pymodule_put":    put.Description() + mcpPymoduleRunPointer,
+		"pymodule_get":    get.Description() + mcpPymoduleRunPointer,
 		"pymodule_delete": del.Description() + mcpPymoduleRunPointer,
 	}
 }()

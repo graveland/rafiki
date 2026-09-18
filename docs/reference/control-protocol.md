@@ -478,8 +478,9 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Nineteen, materialized per caller: fourteen come from the same
-blueprints the fundi registry serves, two (`pymodule_put`, `pymodule_delete`)
+**Tools.** Twenty, materialized per caller: fifteen come from the same
+blueprints the fundi registry serves, three (`pymodule_put`, `pymodule_get`,
+`pymodule_delete`)
 from blueprints shared with it but never registered on fundi's tool set, and
 two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
 never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
@@ -508,6 +509,7 @@ transport error, and never a successful result carrying the text.
 | `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error |
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 | `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store; saving again under an existing name is a new version, never an overwrite |
+| `pymodule_get` | Fetch one of the caller's saved pymodules by name — full source plus description, version and creation time; review before `pymodule_run`, or read-modify-write: fetch, edit, save as a new version with `pymodule_put` |
 | `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name |
 | `pymodule_list` | List the caller's saved pymodules (name + one-line description). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
 | `pymodule_run` | Run one of the caller's saved pymodules by name — executed out of the executor's synced pymodule cache, never out of a workspace file, with the child's workspace as the process cwd (or the call's own `cwd`) — and further saved modules importable; a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |

@@ -585,7 +585,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		ro.InlineSkills = append(ro.InlineSkills, skills.SkillMeta{
 			Namespace:   skills.DefaultNamespace,
 			Name:        "python-modules",
-			Description: "List your saved reusable Python modules (see pymodule_put, pymodule_run, pymodule_delete).",
+			Description: "List your saved reusable Python modules (see pymodule_put, pymodule_get, pymodule_run, pymodule_delete).",
 			Dynamic:     true,
 		})
 	}
