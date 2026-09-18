@@ -206,6 +206,21 @@ func skillsSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bo
 	return slices.Contains(launchKinds, "claude")
 }
 
+// pymodulesSyncEnabled resolves the effective --pymodules-sync value from the
+// flag and its environment form, with the same flag-vs-env precedence as
+// skillsSyncEnabled (see that function for why the environment is read here
+// rather than as the flag's default).
+//
+// Unlike skills sync there is NO launch-kind implication: there is no single
+// launch kind pymodules correlates with, so an operator opts in explicitly --
+// by flag or by environment -- and nothing implies it for them.
+func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+	if cmd.Flags().Changed("pymodules-sync") {
+		return flagOn
+	}
+	return os.Getenv("RAFIKI_EXECUTOR_PYMODULES_SYNC") != ""
+}
+
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
 func newExecutorServeCmd() *cobra.Command {
@@ -225,6 +240,7 @@ func newExecutorServeCmd() *cobra.Command {
 		lspConfig         string
 		noLSP             bool
 		skillsSync        bool
+		pymodulesSync     bool
 		proxyArgs         []string
 		launchKinds       []string
 	)
@@ -274,6 +290,7 @@ Two transports, exactly one of which is used:
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
 				SkillsSync:      skillsSyncEnabled(cmd, skillsSync, launchKinds),
+				PyModulesSync:   pymodulesSyncEnabled(cmd, pymodulesSync),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
 			})
@@ -345,6 +362,9 @@ Two transports, exactly one of which is used:
 		"accept the daemon's skill corpus into this machine's Claude skills directory "+
 			"(RAFIKI_EXECUTOR_SKILLS_SYNC enables it from a service unit). "+
 			"Implied by --launch claude; --skills-sync=false refuses it explicitly")
+	cmd.Flags().BoolVar(&pymodulesSync, "pymodules-sync", false,
+		"accept the daemon's owner-scoped pymodule corpus into this machine's disposable cache "+
+			"directory (RAFIKI_EXECUTOR_PYMODULES_SYNC enables it from a service unit)")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon, e.g. --launch claude "+
