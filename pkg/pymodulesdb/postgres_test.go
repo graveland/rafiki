@@ -402,3 +402,84 @@ func TestDeleteUnattributedBucket(t *testing.T) {
 		t.Fatalf("attributed list = %+v, want exactly theirs: the delete must not touch it", attrRows)
 	}
 }
+
+// Get is the single-name view of List's latest-per-name rule: two versions
+// under one name collapse to the higher-id row.
+func TestGetPymoduleLatestLiveRow(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "get-latest")
+
+	if _, err := st.Put(ctx, owner, "helpers", "code v1", "first version"); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	second, err := st.Put(ctx, owner, "helpers", "code v2", "second version")
+	if err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+
+	r, err := st.Get(ctx, owner, "helpers")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if r.ID != second.ID || r.Code != "code v2" || r.Name != "helpers" || r.OwnerUserID != owner {
+		t.Fatalf("get = %+v, want the higher-id row (id %d, code v2, owner %s)", r, second.ID, owner)
+	}
+}
+
+// A Get after a delete finds nothing -- the delete stamped every live
+// version -- and must not resurrect an older version.
+func TestGetPymoduleNotFoundAfterDelete(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "get-after-delete")
+
+	if _, err := st.Put(ctx, owner, "helpers", "A", "v1"); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	if _, err := st.Put(ctx, owner, "helpers", "B", "v2"); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	if err := st.Delete(ctx, owner, "helpers"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_, err := st.Get(ctx, owner, "helpers")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Fatalf("get after delete = %v, want ErrNotFound (no live row may remain)", err)
+	}
+}
+
+// Get is owner-scoped with the same IS NOT DISTINCT FROM rule as every other
+// operation: a name saved under one owner is invisible to the other owner.
+func TestGetPymoduleOwnerScoped(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	ownerA := newOwner(t, pool, "get-owner-a")
+	ownerB := newOwner(t, pool, "get-owner-b")
+
+	if _, err := st.Put(ctx, ownerA, "shared", "code a", "a's copy"); err != nil {
+		t.Fatalf("put a: %v", err)
+	}
+
+	_, err := st.Get(ctx, ownerB, "shared")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Fatalf("get by other owner = %v, want ErrNotFound: another owner's row must not leak", err)
+	}
+
+	// The unattributed bucket is likewise isolated: an attributed caller must
+	// not see unattributed rows, and vice versa.
+	if _, err := st.Put(ctx, "", "shared", "code unattr", "unattributed"); err != nil {
+		t.Fatalf("put unattributed: %v", err)
+	}
+	_, err = st.Get(ctx, ownerB, "shared")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Fatalf("get by attributed owner = %v, want ErrNotFound for the unattributed row", err)
+	}
+	r, err := st.Get(ctx, "", "shared")
+	if err != nil {
+		t.Fatalf("get unattributed: %v", err)
+	}
+	if r.Code != "code unattr" {
+		t.Fatalf("unattributed get = %+v, want code unattr", r)
+	}
+}

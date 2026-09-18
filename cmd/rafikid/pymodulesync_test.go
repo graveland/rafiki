@@ -42,6 +42,23 @@ func (s *fakePymoduleStore) List(_ context.Context, ownerUserID string) ([]pymod
 	return append([]pymodules.Record(nil), s.rows[ownerUserID]...), nil
 }
 
+// Get follows the real store's latest-live-row rule: the highest-ID row still
+// in the slice for (ownerUserID, name). A Delete removes the row from the
+// slice, so a Get after a delete reports ErrNotFound, and a later Put
+// restores it.
+func (s *fakePymoduleStore) Get(_ context.Context, ownerUserID, name string) (pymodules.Record, error) {
+	var best pymodules.Record
+	for _, r := range s.rows[ownerUserID] {
+		if r.Name == name && r.ID > best.ID {
+			best = r
+		}
+	}
+	if best.ID == 0 {
+		return pymodules.Record{}, pymodules.ErrNotFound
+	}
+	return best, nil
+}
+
 // fakePymodulePool stands in for *execpool.Pool — the same reason
 // executorPool (executor_select.go) is an interface: the pusher is testable
 // without a listener, a database, or a dialling executor.

@@ -96,10 +96,11 @@ var tierByTool = map[string]Tier{
 	// skill discovery in the project is.
 	"skill": TierDaemon,
 
-	// Daemon — pymodule_put and pymodule_delete write to the daemon's
-	// database, owner-scoped; nothing in the workspace is touched. Saved
-	// modules reach executors via the pusher, never via the tool.
+	// Daemon — pymodule_put, pymodule_get and pymodule_delete touch the
+	// daemon's database, owner-scoped; nothing in the workspace is touched.
+	// Saved modules reach executors via the pusher, never via the tool.
 	"pymodule_put":    TierDaemon,
+	"pymodule_get":    TierDaemon,
 	"pymodule_delete": TierDaemon,
 
 	// Daemon — annotates the executor's own database row.

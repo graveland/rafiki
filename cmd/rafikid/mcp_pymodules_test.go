@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -42,5 +43,26 @@ func TestMCPPyModuleStoreAdapter(t *testing.T) {
 		t.Errorf("fakePymoduleStore.deleted has %d entry/entries, want 1", len(store.deleted))
 	} else if store.deleted[0] != [2]string{"u-alice", "helper"} {
 		t.Errorf("deleted entry is %v, want [u-alice helper]", store.deleted[0])
+	}
+}
+
+// The MCP face's Get is bound to its constructed owner: it serves that
+// owner's latest live row and cannot see another owner's same-named module.
+func TestMCPPyModuleStoreGet(t *testing.T) {
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: nil}
+
+	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
+	r, err := mcp.Get(context.Background(), "alice_chart")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if r.ID != 1 || r.Name != "alice_chart" || r.Code != "def alice_chart(): pass" {
+		t.Errorf("Get = %+v, want alice's row (id 1)", r)
+	}
+
+	_, err = mcp.Get(context.Background(), "bob_util")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
 	}
 }

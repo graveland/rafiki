@@ -192,3 +192,30 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 		t.Errorf("inventory = %q, want the saved module's name and description", body)
 	}
 }
+
+// A bound writer's Get reads the latest live row under ITS owner: two
+// versions under one name collapse to the higher-id row, and another owner's
+// same-named module stays invisible.
+func TestControllerPyModuleWriterGet(t *testing.T) {
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	if _, err := w.Put(context.Background(), "alice_chart", "x = 1", "v2 of alice's chart"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	r, err := w.Get(context.Background(), "alice_chart")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if r.ID != 2 || r.Code != "x = 1" {
+		t.Errorf("Get = %+v, want the later version (id 2, code %q)", r, "x = 1")
+	}
+
+	// A name owned by bob is invisible to alice's writer: the wrong owner
+	// must not leak rows.
+	_, err = w.Get(context.Background(), "bob_util")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
+	}
+}

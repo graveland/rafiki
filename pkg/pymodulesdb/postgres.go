@@ -7,6 +7,7 @@ package pymodulesdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -79,6 +80,27 @@ func (s *pgStore) List(ctx context.Context, ownerUserID string) ([]pymodules.Rec
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Get mirrors List's per-name rule for one name: latest live row by id,
+// owner-scoped with the same IS NOT DISTINCT FROM semantics for the
+// unattributed bucket. pgx.ErrNoRows becomes pymodules.ErrNotFound -- an
+// ANSWER, not an error of the store.
+func (s *pgStore) Get(ctx context.Context, ownerUserID, name string) (pymodules.Record, error) {
+	r, err := scanRecord(s.pool.QueryRow(ctx,
+		`SELECT `+selectCols+`
+		 FROM conversations.pymodules
+		 WHERE owner_user_id IS NOT DISTINCT FROM $1 AND name = $2 AND deleted_at IS NULL
+		 ORDER BY id DESC
+		 LIMIT 1`,
+		ownerArg(ownerUserID), name))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pymodules.Record{}, pymodules.ErrNotFound
+	}
+	if err != nil {
+		return pymodules.Record{}, fmt.Errorf("get pymodule: %w", err)
+	}
+	return r, nil
 }
 
 // Delete soft-deletes every version of name by stamping deleted_at on all

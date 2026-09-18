@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 // pymoduleWriter adapts *Controller to tools.PyModuleStore, bound to one
@@ -45,6 +47,12 @@ func (w *pymoduleWriter) Delete(ctx context.Context, name string) error {
 		w.ctrl.pymodulePusher.pushAll(ctx)
 	}
 	return nil
+}
+
+// Get reads the latest live version of a module under this writer's bound
+// owner. Read-only: no push, nothing to fan out.
+func (w *pymoduleWriter) Get(ctx context.Context, name string) (pymodules.Record, error) {
+	return w.ctrl.pymoduleStore.Get(ctx, w.ownerUserID, name)
 }
 
 // pymoduleInventory renders ownerUserID's saved modules as "name —

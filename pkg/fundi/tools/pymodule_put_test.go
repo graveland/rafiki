@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 // fakePyModuleStore records every Put call so a test can assert the tool
@@ -14,6 +16,8 @@ import (
 type fakePyModuleStore struct {
 	puts    [][3]string // name, code, description, in call order
 	deletes []string    // names Delete was called with, in call order
+	getRec  pymodules.Record
+	getErr  error
 	nextID  int64
 	putErr  error
 	delErr  error

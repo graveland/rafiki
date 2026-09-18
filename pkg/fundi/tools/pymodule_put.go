@@ -14,6 +14,12 @@ import (
 type PyModuleStore interface {
 	Put(ctx context.Context, name, code, description string) (id int64, err error)
 
+	// Get returns one saved module's full record: code, description, version
+	// (the row id) and creation time. Returns an error wrapping
+	// pymodules.ErrNotFound when no live module has that name. Bound to the
+	// same single owner as Put/Delete -- no method takes an identity.
+	Get(ctx context.Context, name string) (pymodules.Record, error)
+
 	// Delete soft-deletes the named module: every version of it leaves the
 	// inventory and is pruned from executors on the next sync; a later Put
 	// under the same name restores it. Returns an error wrapping pymodules.ErrNotFound

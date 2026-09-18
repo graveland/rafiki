@@ -40,6 +40,12 @@ type Store interface {
 	// unattributed rows -- never another owner's, and never every owner's.
 	List(ctx context.Context, ownerUserID string) ([]Record, error)
 
+	// Get returns the latest live row for ownerUserID's name -- MAX(id) among
+	// that name's rows with deleted_at IS NULL. Returns ErrNotFound when no
+	// live row exists: unknown name, or every version deleted. A Get after a
+	// delete finds nothing; a later Put under the same name restores it.
+	Get(ctx context.Context, ownerUserID, name string) (Record, error)
+
 	// Delete soft-deletes every version of name by stamping deleted_at on all
 	// live rows. This is the ONLY mutation a pymodule row ever undergoes --
 	// Put is insert-only -- and it is why List's plain deleted_at IS NULL
