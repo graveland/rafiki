@@ -192,15 +192,16 @@ func (w *syncWriter) String() string {
 	return w.buf.String()
 }
 
-// run execs name(args...) under ctx with this tool's cwd, its process-group
-// kill-on-cancel, and its WaitDelay all wired up identically regardless of
-// whether the caller is running the rtk-rewritten argv or a plain
-// `bash -c`. It returns the merged stdout+stderr text (the model-facing
-// result) and stderr alone (so rtkRefused can inspect it without stdout
-// noise) — see syncWriter for why this isn't just CombinedOutput plus a tee.
-func (bt *bashTool) run(ctx context.Context, name string, args []string) (combined, stderrOnly string, err error) {
+// runSubprocess execs name(args...) under ctx with process-group
+// kill-on-cancel and the given WaitDelay, in cwd. Shared between bashTool
+// (which always passes bashWaitDelay) and pymodule_run (which does the
+// same, since both are "run one process to completion and collect its
+// output" with no other difference). Returns merged stdout+stderr and
+// stderr alone -- see syncWriter's doc comment for why this isn't just
+// CombinedOutput plus a tee.
+func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, name string, args []string) (combined, stderrOnly string, err error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = bt.cwd
+	cmd.Dir = cwd
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -214,7 +215,7 @@ func (bt *bashTool) run(ctx context.Context, name string, args []string) (combin
 		}
 		return nil
 	}
-	cmd.WaitDelay = bashWaitDelay
+	cmd.WaitDelay = waitDelay
 
 	combinedBuf := &syncWriter{}
 	var stderrBuf bytes.Buffer // written by stderr's copy goroutine only — no race
@@ -222,6 +223,13 @@ func (bt *bashTool) run(ctx context.Context, name string, args []string) (combin
 	cmd.Stderr = io.MultiWriter(combinedBuf, &stderrBuf)
 	err = cmd.Run()
 	return combinedBuf.String(), stderrBuf.String(), err
+}
+
+// run execs name(args...) under this tool's cwd and WaitDelay, identically
+// regardless of whether the caller is running the rtk-rewritten argv or a
+// plain `bash -c`.
+func (bt *bashTool) run(ctx context.Context, name string, args []string) (string, string, error) {
+	return runSubprocess(ctx, bt.cwd, bashWaitDelay, name, args)
 }
 
 // rtkRefused reports whether stderr looks like RTK ITSELF refusing to run
