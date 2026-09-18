@@ -28,9 +28,16 @@ type PyModuleLister interface {
 }
 
 // PyModuleExecutor runs a pymodule_run call on the calling child's own bound
-// executor. input is the same {script, modules, args} JSON
+// executor. input is the same {script, modules, cwd, args} JSON
 // PyModuleRunBlueprint's InputSchema describes. Bound to one child's
 // resolved executor binding at construction.
+//
+// The daemon-side implementation owns resolving the input's `cwd` against the
+// CALLING CHILD's own working directory before the bytes leave it — absent
+// and relative both resolve there, absolute and ~-prefixed pass through —
+// because the executor it lands on serves one root registry to every caller
+// without a workspace, and a relative path left to the executor's own
+// resolveToolPath would resolve against that root, not the caller's tree.
 //
 // Fundi never sets ToolOpts.PyModuleExecutor: its own pymodule_run
 // (pymodule_run.go) executes via fundi's tiered tool-routing, not through
