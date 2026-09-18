@@ -837,7 +837,7 @@ state, since only you know whether you mean "queue this for later" or
 
 | Key | Does |
 |---|---|
-| `↑` / `↓` | Move the cursor — the conversation pane previews the highlighted agent (a debounced read of its transcript; opens no subscription) |
+| `↑` / `↓` | Move the cursor — the conversation pane previews the highlighted agent, live: once the cursor rests, that agent's own event stream takes over (the previously open one resumes when you come back) |
 | `⏎` | Open the selected agent and return to the input box |
 | `esc` | Back to the input box, leaving focus where it was |
 

@@ -156,11 +156,12 @@ const (
 const maxSessions = 12
 
 // previewDebounce is how long the rail cursor must rest on a child before the
-// cockpit fetches that child's transcript to preview it. GetHistory is one
-// unpaginated query over the WHOLE conversation -- the most expensive RPC this
-// client issues -- so a held arrow key must not fire one per row it passes.
-// Ticks queue one per keystroke and each previews wherever the cursor is when
-// it fires, so a sweep collapses into the fetches the resting rows need.
+// cockpit acts on it: fetching the transcript it has no copy of, and moving
+// the focus subscription to it. GetHistory is one unpaginated query over the
+// WHOLE conversation -- the most expensive RPC this client issues -- and a
+// subscription move is churn, so a held arrow key must fire neither per row it
+// passes. Ticks queue one per keystroke and each carries the selection counter
+// it was armed under, so only the tick matching the final rest acts.
 const previewDebounce = 150 * time.Millisecond
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -202,11 +203,16 @@ type seedMsg struct {
 type seedRetryMsg struct{}
 type sendFailedMsg struct{ err error }
 
-// previewTickMsg fires previewDebounce after an arrow key moved the rail
-// cursor onto a child with no transcript in hand. Several can be pending at
-// once -- one per keystroke -- and that is fine: each previews wherever the
-// cursor rests when it fires, so a sweep costs one fetch, not one per row.
-type previewTickMsg struct{}
+// previewTickMsg fires previewDebounce after the rail cursor landed on a row
+// whose transcript the pane is not already live on. Several can be pending at
+// once -- one per keystroke -- and that is fine: each acts only if the cursor
+// is still where it was when the tick was armed (seq), so a sweep costs one
+// fetch-or-swap at the final rest, not one per row.
+type previewTickMsg struct {
+	// seq is the selection counter the tick was armed under. A newer arrow
+	// bumped it; a stale tick must do nothing.
+	seq int
+}
 
 type tasksLoadedMsg struct {
 	childID string
@@ -214,8 +220,8 @@ type tasksLoadedMsg struct {
 }
 
 // historyMsg carries one child's persisted conversation, plus the event-log
-// ordinal that was current when the fetch was ISSUED -- the focus stream
-// resumes from that, so anything logged during the fetch still arrives.
+// ordinal that was current when the fetch was ISSUED -- the stream that then
+// opens resumes from that, so anything logged during the fetch still arrives.
 type historyMsg struct {
 	childID string
 	events  []*rafikiv1.Event
@@ -355,24 +361,25 @@ type Cockpit struct {
 	// correct: a session starts ready to type.
 	focus focusPane
 	// selected is the rail CURSOR, distinct from the focused child. Browsing
-	// must be free: hop opens a focus subscription per call, so a cursor that
-	// hopped on every arrow churned one Connect stream per keystroke. Instead
-	// the cursor PREVIEWS: the pane shows the highlighted child's transcript,
-	// and commit is what opens the subscription.
+	// moves the pane, not the typed-to agent: the focus subscription follows
+	// the VIEWED child (see previewSettle), debounced, and hop on ⏎ is what
+	// hands the keys to the input.
 	selected string
+	// selectedSeq counts rail-cursor moves. previewTickMsg carries the value
+	// it was armed under; a tick whose seq is stale means the cursor moved on
+	// and a newer tick owns the action. A counter, not a timestamp: "the
+	// cursor rested" must not depend on the tick firing at 150.0ms exactly.
+	selectedSeq int
 	// historyInFlight marks a GetHistory already running, per child. History is
 	// not deduplicated -- ApplyHistory deliberately bypasses the ordinal cursor
 	// because the two ordinal spaces are unrelated -- so two responses for one
 	// child would append every block twice. The set lives where fetches are
 	// issued; historyMsg clears it on arrival.
 	historyInFlight map[string]bool
-	// historyFailed marks a child whose PREVIEW fetch failed, so its pane can
-	// say why rather than render "No messages yet" over a conversation the
-	// daemon could not read. Cleared on a later success or on commit.
-	historyFailed map[string]bool
 	// focusChild names the child that owns the focus subscription -- the fact
-	// c.stopFocus encodes, but readable, so preview delivery can be held to
-	// the invariant that it never changes.
+	// c.stopFocus encodes, but readable. It follows the VIEWED child: browsing
+	// moves it (debounced), ⏎ and esc move it back. ONE slot, owned by
+	// startFocus.
 	focusChild string
 	// reseeding is REQUESTED by applyEvent when it sees traffic from a child it
 	// does not know; reseedInFlight says one ListChildren is already running.
@@ -503,7 +510,6 @@ func NewCockpit(opts Options) *Cockpit {
 		profileName:              opts.ProfileName,
 		showProfileBadge:         opts.ShowProfileBadge,
 		historyInFlight:          make(map[string]bool),
-		historyFailed:            make(map[string]bool),
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -529,14 +535,14 @@ func NewCockpit(opts Options) *Cockpit {
 func (c *Cockpit) focused() string { return c.rail.Focus() }
 
 // viewing is the child whose transcript the conversation pane renders: the
-// rail cursor while the rail holds focus, the focused child otherwise.
+// rail cursor while the rail holds focus, the committed agent otherwise.
 //
-// Browsing is a PREVIEW, and it is deliberately read-only. hop is what opens
-// the focus subscription, and a cursor that hopped on every arrow churned one
-// Connect stream per keystroke -- the churn `selected` exists to avoid. The
-// session is never fed from the preview side (applyEvent's discipline holds:
-// the focus stream is the session's ONLY feed), so new messages keep badging
-// the row while you read the snapshot, and the commit replays them.
+// The subscription FOLLOWS this child: browsing moves it (rest-gated, see
+// previewSettle), ⏎ and esc move it back, and applyEvent feeds exactly the
+// owner. So the pane is never a stale snapshot -- a working agent's transcript
+// tracks it live -- while the typed-to agent stays a separate thing (the rail's
+// focus), which is the whole point of browsing without committing: reading one
+// agent and talking to another never collide.
 func (c *Cockpit) viewing() string {
 	if c.focus == focusRail && c.selected != "" {
 		return c.selected
@@ -603,7 +609,9 @@ func (c *Cockpit) landRailFirst() tea.Cmd {
 			c.selected = nodes[0].ChildID
 		}
 		// Preview the first row too: ↑/↓ and ⏎ work without a priming
-		// keystroke, and the pane already shows what ⏎ would open.
+		// keystroke, and the pane already shows what ⏎ would open -- live,
+		// since the subscription follows the viewed row once the cursor rests
+		// (and it has been resting since the seed).
 		return tea.Batch(c.setFocus(focusRail), c.previewCmd(c.selected))
 	}
 }
@@ -770,7 +778,10 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		if c.taskRefresh {
 			c.taskRefresh = false
-			cmd = c.fetchTasks(c.focused())
+			// The event that flipped this came from the child the pane is on:
+			// while browsing that is the previewed one, not the typed-to agent,
+			// and the task box shows viewing()'s ledger.
+			cmd = c.fetchTasks(c.viewing())
 		}
 		return c, tea.Batch(waitForEvent(c.focusCh), c.maybeReseed(cmd))
 
@@ -785,26 +796,22 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, nil
 		}
 		if msg.err != nil {
-			if msg.childID == c.focused() {
+			if msg.childID == c.viewing() {
 				// A conversation the daemon cannot resolve is normal, not fatal
 				// -- a child that has never taken a turn has no conversation row
 				// -- so fall back to replaying the whole log, which is exactly
-				// what the cockpit did before it asked for history at all.
+				// what the cockpit did before it asked for history at all. The
+				// status line says why the pane may be thinner than expected.
 				c.status = "history unavailable: " + connect.CodeOf(msg.err).String()
 				c.startFocus(msg.childID, -1)
 				return c, nil
 			}
-			// A PREVIEW fetch failed. There is no stream to fall back to --
-			// opening one would replace the focused child's subscription -- and
-			// keeping the empty session would render "No messages yet" over a
-			// conversation that could not be read. Drop the session so the next
-			// preview retries, and say why the pane is blank.
-			c.historyFailed[msg.childID] = true
+			// A late fetch: the cursor moved on while it ran, so nothing on
+			// screen explains -- and opening the stream here would yank the
+			// subscription to a child nobody is looking at. Drop the empty
+			// session; the next visit re-fetches.
 			delete(c.sessions, msg.childID)
 			c.evictPane(msg.childID)
-			if msg.childID == c.viewing() {
-				c.setNotice("history unavailable: " + connect.CodeOf(msg.err).String())
-			}
 			return c, nil
 		}
 		for _, ev := range msg.events {
@@ -812,10 +819,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The cursor takes the LOG watermark captured before the fetch -- never
 		// a conversation ordinal; ApplyHistory's doc has the full hazard. It is
-		// the resume point the focus stream -- or, for a previewed child, the
-		// commit hop -- picks up from. A session holding history but no cursor
-		// would otherwise resume from 0, and the log's Read is exclusive on
-		// afterOrdinal, so its first event would be skipped silently.
+		// the resume point the subscription opens from. A session holding history
+		// but no cursor would otherwise resume from 0, and the log's Read is
+		// exclusive on afterOrdinal, so its first event would be skipped silently.
 		resume := msg.after
 		if len(msg.events) == 0 {
 			// Nothing persisted: the log is all there is, so replay it whole
@@ -826,23 +832,22 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.Cursor = resume
 			s.HasCursor = true
 		}
-		if msg.childID == c.focused() {
-			// msg.after is the rail's watermark captured BEFORE the fetch -- what
-			// this focus is about to show. Delivering it into the transcript is
-			// reading it.
+		if msg.childID == c.viewing() {
+			// Displayed is read -- up to the watermark captured BEFORE the fetch:
+			// anything logged during it still arrives (and still badges until it
+			// is applied). And the subscription follows the view: the stream opens
+			// HERE, resuming from the watermark, whether this child is the
+			// committed agent or the row the cursor rests on. That is what makes
+			// a preview live -- the pane tracks a working agent at delta
+			// granularity instead of re-reading the whole conversation per rail
+			// event.
 			c.rail.MarkRead(msg.childID, msg.after)
 			c.startFocus(msg.childID, resume)
 			return c, nil
 		}
-		// A PREVIEWED child: the pane shows the snapshot and NOTHING opens a
-		// stream here -- hop on commit does, resuming from the watermark above,
-		// so the delta replays and nothing produced since the fetch is lost.
-		delete(c.historyFailed, msg.childID)
-		if msg.childID == c.viewing() {
-			// Displayed is read -- but only up to the watermark captured before
-			// the fetch: anything logged during it still badges.
-			c.rail.MarkRead(msg.childID, msg.after)
-		}
+		// A late fetch for a child the cursor moved past: warm the session for
+		// the next visit. Nothing is displayed, so nothing is read, and nothing
+		// opens a stream here.
 		return c, nil
 
 	case sendFailedMsg:
@@ -881,7 +886,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, tick()
 
 	case previewTickMsg:
-		return c, c.previewFetch()
+		return c, c.previewSettle(msg.seq)
 
 	case quotaTickMsg:
 		return c, tea.Batch(c.fetchQuotaCmd(), quotaTick())
@@ -1017,25 +1022,27 @@ func (c *Cockpit) retrySeed() tea.Cmd {
 }
 
 // applyEvent routes one event from the FOCUS stream to the rail and, when it
-// is the focused child's, to its session. The focus stream is the session's
-// ONLY feed; rail-stream events go to applyRailEvent and stop there.
+// is the subscription owner's, to that session. The focus stream is the
+// session's ONLY feed; rail-stream events go to applyRailEvent and stop there.
 func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	// The rail still folds focus-delivered events in: rail.Types deliberately
 	// excludes assistant_message, so CostLive and the ordinal head only advance
-	// for the focused child when this side folds into the rail too. The
+	// for the streamed child when this side folds into the rail too. The
 	// direction that is forbidden is rail → session; focus → rail is
 	// load-bearing.
 	c.applyRailEvent(ev)
 	id := ev.GetChildId()
 
-	// ONLY the focused child's session may be advanced. The rail subscription
-	// covers every child in the subject but carries none of their content, so
-	// applying it to a retained, non-focused session pushes that session's
-	// cursor far past what it has actually rendered -- and hop resumes from
-	// exactly that cursor. The effect was silent and total: hop away from a
-	// working agent, hop back, and every message it produced meanwhile is gone
-	// with no error and no gap marker.
-	if id != c.focused() {
+	// ONLY the session the subscription is on may be advanced. The rail
+	// subscription covers every child in the subject but carries none of their
+	// content, so applying an event to a retained session nothing is streaming
+	// pushes that session's cursor far past what it has actually rendered --
+	// and the next open resumes from exactly that cursor. The effect was
+	// silent and total: browse away from a working agent, come back, and every
+	// message it produced meanwhile is gone with no error and no gap marker.
+	// The owner is the VIEWED child (focusChild follows the view), so the pane
+	// and its feed can never describe different agents.
+	if id != c.focusChild {
 		return
 	}
 	s := c.sessions[id]
@@ -1045,7 +1052,7 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	before := len(s.Blocks)
 	s.Apply(ev)
 	if s.HasCursor {
-		// Delivery to the focused session IS reading.
+		// Delivery to the displayed session IS reading.
 		c.rail.MarkRead(id, s.Cursor)
 	}
 	if s.Status != "" {
@@ -1053,8 +1060,10 @@ func (c *Cockpit) applyEvent(ev *rafikiv1.Event) {
 	}
 	// Our own message coming back is the acknowledgement. Send means DURABLY
 	// QUEUED, not written to a pipe, so the RPC returning is not the agent
-	// having taken it into a turn.
-	if c.pending != "" && len(s.Blocks) > before &&
+	// having taken it into a turn. The echo belongs to the COMMITTED agent's
+	// conversation: while browsing, the streamed session is the viewed child's,
+	// and its user messages must not clear a send that went elsewhere.
+	if c.pending != "" && id == c.focused() && len(s.Blocks) > before &&
 		s.Blocks[len(s.Blocks)-1].Kind == session.KindUser {
 		c.pending = ""
 	}
@@ -1526,10 +1535,8 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 			c.rail.MarkRead(old, s.Cursor)
 		}
 	}
-	if c.stopFocus != nil {
-		c.stopFocus()
-		c.stopFocus = nil
-	}
+	// The old stream is stopped by startFocus, which owns the subscription
+	// slot; see its doc.
 
 	c.rail.SetFocus(childID)
 	// No renderer reset: each child owns its renderer (see pane.go), so there
@@ -1539,7 +1546,8 @@ func (c *Cockpit) hop(childID string) tea.Cmd {
 
 // openFocus starts the focus subscription for childID, creating its session if
 // needed. It has no identity guard, which is the whole reason it is separate
-// from hop: the seed path focuses a child and then needs its stream opened.
+// from hop: the seed path focuses a child and then needs its stream opened,
+// and previewSettle calls it for whatever row the cursor rests on.
 //
 // A session with nothing in it fetches the conversation from GetHistory FIRST
 // and opens its stream in the reply. The event log begins whenever the event
@@ -1556,6 +1564,16 @@ func (c *Cockpit) openFocus(childID string) tea.Cmd {
 	}
 	c.touch(childID)
 
+	if c.focusChild == childID {
+		// Already the subscription's owner and live-current: reopening would
+		// stop and restart the stream for nothing. This is what makes ⏎ on the
+		// previewed row free.
+		if s.HasCursor {
+			c.rail.MarkRead(childID, s.Cursor)
+		}
+		return nil
+	}
+
 	// The footer must describe the child now in focus, not whatever the
 	// previously focused child last reported -- c.status is a single global
 	// field and nothing else resets it on a focus change. The rail's Node is
@@ -1567,7 +1585,6 @@ func (c *Cockpit) openFocus(childID string) tea.Cmd {
 	}
 
 	if len(s.Blocks) == 0 && !s.HasCursor {
-		delete(c.historyFailed, childID)
 		return c.fetchHistoryOnce(childID)
 	}
 	// Already read once: resume the log from where this session left off. Its
@@ -1617,9 +1634,17 @@ func (c *Cockpit) historyCmd(childID string) tea.Cmd {
 //
 // -1 rather than 0 for a fresh session: ordinal 0 is a real event and the
 // log's Read is exclusive on afterOrdinal, so 0 would skip the first event.
-// focusChild records the same fact readably, so preview delivery can be held
-// to the invariant that it never changes.
+//
+// startFocus OWNS the one subscription slot: whatever stream is open is
+// stopped first. That is what lets the subscription follow the view (browsing
+// moves it, ⏎/esc move it back) without ever running two -- the per-keystroke
+// churn the rail cursor exists to avoid stays avoided by the rest-gating in
+// previewSettle, not by refusing to move.
 func (c *Cockpit) startFocus(childID string, after int32) {
+	if c.stopFocus != nil {
+		c.stopFocus()
+		c.stopFocus = nil
+	}
 	c.focusChild = childID
 	c.stopFocus = streams.StartFocus(context.Background(), c.cfg, childID,
 		&rafikiv1.EventCursor{Ordinals: map[string]int32{childID: after}}, c.focusCh)
@@ -1637,11 +1662,11 @@ func (c *Cockpit) touch(childID string) {
 	for len(c.lru) > maxSessions {
 		victim := c.lru[0]
 		c.lru = c.lru[1:]
-		if victim == c.focused() || victim == c.viewing() {
-			// Never evict what the user is looking at -- the focused child, or,
-			// while the rail holds focus, the row under the cursor: an eviction
-			// mid-preview would blank the pane the cursor stands on and start
-			// the same fetch again.
+		if victim == c.focused() || victim == c.viewing() || victim == c.focusChild {
+			// Never evict what the user is looking at -- the focused child, the
+			// row under the cursor while the rail holds focus, or the child the
+			// subscription is on (the same one a tick after a cursor move): an
+			// eviction under a live session would strand its stream.
 			c.lru = append([]string{victim}, c.lru...)
 			break
 		}
@@ -1720,19 +1745,33 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 		idx = 0
 	}
 	idx = (idx + delta + len(order)) % len(order)
+	if c.focus == focusRail && order[idx] == focusInput {
+		// Leaving the rail hands the keys back through leaveRail, which also
+		// returns the subscription to the committed agent -- the same round
+		// trip esc makes, so ⇥ out of a peeked rail closes the peek like its
+		// doc says rather than stranding the stream on the browsed row.
+		return c.leaveRail()
+	}
 	return c.setFocus(order[idx])
 }
 
 // leaveRail returns focus to the input, re-hiding the rail if a peek is what
-// revealed it. Both exits go through here: picking an agent and changing your
-// mind should leave the screen in the same shape you found it. The one-row
-// peek is the same round trip — ^R or ⇥ opened it, esc or ⏎ closes it.
+// revealed it, and returns the subscription to the committed agent. Every exit
+// from the rail goes through here -- esc, ⏎ (after hop has already made the
+// committed agent the viewed one), ⇥ out of the ring -- because whichever way
+// the user leaves, the pane they are about to look at is the committed agent's
+// and its stream must be the one running. A no-op when the subscription never
+// left.
 func (c *Cockpit) leaveRail() tea.Cmd {
 	if c.railPeek {
 		c.railHidden = true
 		c.railPeek = false
 	}
-	return c.setFocus(focusInput)
+	cmd := c.setFocus(focusInput)
+	if v := c.viewing(); v != "" && v != c.focusChild {
+		cmd = tea.Batch(cmd, c.openFocus(v))
+	}
+	return cmd
 }
 
 // moveSelection moves the rail cursor by delta without hopping, and readies
@@ -1765,6 +1804,7 @@ func (c *Cockpit) moveSelection(delta int) tea.Cmd {
 		idx = len(nodes) - 1
 	}
 	c.selected = nodes[idx].ChildID
+	c.selectedSeq++
 	return c.previewCmd(c.selected)
 }
 
@@ -1773,11 +1813,15 @@ func (c *Cockpit) moveSelection(delta int) tea.Cmd {
 //
 // A transcript already in hand -- focused earlier, or previewed before -- is
 // rendered straight from cache with no RPC, and DISPLAYING it is reading it:
-// the badge clears up to what the pane will actually show, while anything past
-// the session's cursor still badges, because the preview is a snapshot. A
-// child with nothing in hand gets a DEBOUNCED fetch (previewDebounce):
-// GetHistory over a whole conversation is not a query to fire per row of a
-// held-arrow sweep.
+// the badge clears up to what the pane will actually show. A child with
+// nothing in hand gets a DEBOUNCED fetch (previewDebounce): GetHistory over a
+// whole conversation is not a query to fire per row of a held-arrow sweep.
+//
+// Either way, if the subscription is not already on this child, the tick moves
+// it there once the cursor rests: the preview is LIVE, fed through the same
+// single subscription slot hop uses, so a working agent's pane tracks it at
+// delta granularity. What keeps that from being one stream move per keystroke
+// is the rest gate in previewSettle -- not a refusal to move.
 func (c *Cockpit) previewCmd(childID string) tea.Cmd {
 	if childID == "" {
 		return nil
@@ -1787,43 +1831,47 @@ func (c *Cockpit) previewCmd(childID string) tea.Cmd {
 		if s.HasCursor {
 			c.rail.MarkRead(childID, s.Cursor)
 		}
-		return nil
 	}
-	if c.historyInFlight[childID] {
-		return nil // its fetch is already running
+	if c.viewing() == c.focusChild {
+		return nil // the subscription is already on this child
 	}
-	return tea.Tick(previewDebounce, func(time.Time) tea.Msg { return previewTickMsg{} })
+	return tea.Tick(previewDebounce, func(time.Time) tea.Msg {
+		return previewTickMsg{seq: c.selectedSeq}
+	})
 }
 
-// previewFetch is the debounce firing: the cursor rested on a child, so fetch
-// the transcript it will preview. Everything re-checks the CURRENT state --
-// ticks queue per keystroke and the selection may have moved again -- so the
-// sweep costs one fetch for wherever the cursor ended up. It also creates the
-// session: historyMsg applies into it, and a response landing into nothing is
-// dropped.
-func (c *Cockpit) previewFetch() tea.Cmd {
+// previewSettle is the debounce firing: the cursor has rested on a row, so
+// make the pane's child the subscription's child.
+//
+// The seq check is the rest gate. Ticks queue one per keystroke; only the one
+// armed under the CURRENT selection acts, so a held arrow key sweeps the
+// cursor across the fleet without moving a single stream, and the row the
+// cursor finally rests on gets exactly one move. This -- not a refusal to
+// subscribe -- is what keeps browsing off the per-keystroke churn the rail
+// cursor was introduced to avoid: a subscription costs O(1) to move and
+// O(delta) to feed, where a re-read of the transcript would cost the whole
+// conversation per event.
+func (c *Cockpit) previewSettle(seq int) tea.Cmd {
+	if seq != c.selectedSeq {
+		return nil // the cursor moved again; a newer tick owns the rest
+	}
 	if c.focus != focusRail || c.selected == "" {
 		return nil
 	}
-	child := c.selected
-	if s := c.sessions[child]; s != nil && (len(s.Blocks) > 0 || s.HasCursor) {
-		return nil
+	if v := c.viewing(); v != "" && v != c.focusChild {
+		// fetchTasks for parity with hop: the task box follows viewing(), and a
+		// browsed agent with a ledger must show it, not an empty box until a
+		// task_* event happens to complete.
+		return tea.Batch(c.openFocus(v), c.fetchTasks(v))
 	}
-	// The session must exist before the response lands. It enters the LRU here
-	// too, so a sweep over a fleet stays bounded by maxSessions and evicts its
-	// own oldest previews.
-	if c.sessions[child] == nil {
-		c.sessions[child] = session.New(child)
-	}
-	c.touch(child)
-	return c.fetchHistoryOnce(child)
+	return nil
 }
 
 // fetchHistoryOnce issues GetHistory for childID unless one is already in
 // flight for it. History is not deduplicated -- ApplyHistory deliberately
 // bypasses the ordinal cursor because the two ordinal spaces are unrelated --
-// so two responses for one child would append every block twice. The guard
-// lives at the only place fetches are issued; historyMsg clears it on arrival.
+// so two responses for one child would append every block twice. openFocus is
+// the only fetch issuer; historyMsg clears the flag on arrival.
 func (c *Cockpit) fetchHistoryOnce(childID string) tea.Cmd {
 	if c.historyInFlight[childID] {
 		return nil
@@ -1929,9 +1977,9 @@ func (c *Cockpit) railCols() int {
 // agentIdentity renders the viewed agent's name and working directory for
 // the status line, styled to stand out from the plain status text beside it.
 // While browsing the rail that is the row under the cursor, marked "· preview"
-// -- the pane is a snapshot, not the live conversation. Empty whenever a modal
-// owns the screen (its own view, not a conversation, is what's on screen) or
-// nothing is focused.
+// -- live content, but the input still talks to the committed agent. Empty
+// whenever a modal owns the screen (its own view, not a conversation, is what's
+// on screen) or nothing is focused.
 //
 // This is the client's only on-screen confirmation of which agent and
 // directory it's talking to when there's just one child: the rail stays
@@ -1955,8 +2003,10 @@ func (c *Cockpit) agentIdentity() string {
 	}
 	id := styleAgentName.Render(name)
 	if v != c.focused() {
-		// A preview is not focus -- say so, or the pane reads as a live
-		// conversation and the reader waits for lines that will not come.
+		// Browsing is not focus -- say so, or the reader types a prompt that
+		// would land on a different agent than the pane they are reading. The
+		// pane IS live now (the subscription follows the view); what it is not
+		// is the agent the input talks to.
 		id += styleMeta.Render(" · preview")
 	}
 	if n.Cwd != "" {
@@ -2268,8 +2318,6 @@ func (c *Cockpit) View() tea.View {
 		conv = styleMeta.Render("No agents running. Start one with `rafiki create`.")
 	case f == "":
 		conv = styleMeta.Render("Pick an agent — ↑/↓ to browse, ⏎ to open.")
-	case c.focus == focusRail && c.historyFailed[f]:
-		conv = styleMeta.Render("history unavailable — ⏎ to open it.")
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)

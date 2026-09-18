@@ -598,28 +598,35 @@ func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
 }
 
 // FINDING 2. The rail subscription covers every child in the subject but
-// carries none of their content. Applying it to a retained, non-focused session
-// pushed that session's cursor past what it had rendered, and hop resumes from
-// exactly that cursor -- so everything the agent produced while you were away
-// was skipped, silently and permanently.
+// carries none of their content. Applying it to a retained session nothing is
+// streaming pushed that session's cursor past what it had rendered, and the
+// next open resumes from exactly that cursor -- so everything the agent
+// produced while you were away was skipped, silently and permanently.
 func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
 
-	// Focused on c_1, it reaches ordinal 10 through the focus stream.
+	// The subscription is on c_1, which reaches ordinal 10 through it. (The
+	// test drives applyEvent directly, so it names the owner the way an open
+	// stream would have.)
+	c.focusChild = "c_1"
 	c.applyEvent(&rafikiv1.Event{ChildId: "c_1", Ordinal: ptr32(10),
 		Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{}}})
 	if got := c.sessions["c_1"].Cursor; got != 10 {
 		t.Fatalf("focused cursor = %d, want 10", got)
 	}
 
-	// Hop away. c_1's session is retained; the rail keeps reporting its turns.
+	// Hop away. The subscription MOVES only when the target's history lands --
+	// which is the moment c_1's stream actually stops -- so deliver it, then
+	// send a focus-tier event for c_1: nobody is streaming c_1 any more, so it
+	// must not advance its session.
 	c.hop("c_2")
+	c.Update(historyMsg{childID: "c_2", after: 0, events: nil})
 	c.applyEvent(turnEndFor("c_1", 250))
 
 	if got := c.sessions["c_1"].Cursor; got != 10 {
-		t.Fatalf("non-focused cursor = %d, want 10 -- a rail event advanced it, so hopping "+
+		t.Fatalf("non-focused cursor = %d, want 10 -- a delivered event advanced it, so hopping "+
 			"back would resume from %d and skip ordinals 11..%d forever", got, got, got)
 	}
 }
@@ -955,14 +962,17 @@ func TestCommitSwitchesFocusAndEntersTheInput(t *testing.T) {
 	}
 }
 
-// Browsing must not open subscriptions: the rail cursor exists because hop
-// churned one Connect stream per keystroke. A preview that opened one per
-// arrow would recreate exactly that churn one layer down.
-func TestPreviewDoesNotOpenAFocusStream(t *testing.T) {
+// Browsing pages the pane through the highlighted agents' transcripts LIVE:
+// once the cursor rests, the single focus subscription moves to the viewed
+// child -- the same slot hop uses -- so a working agent's pane tracks it at
+// delta granularity instead of re-reading the whole conversation per event.
+// The rest gate that keeps this off one-stream-per-keystroke is pinned by
+// TestSweepDebouncesThePreviewFetch.
+func TestPreviewMovesTheSubscriptionToTheViewedChild(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
-		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 0),
+		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 9),
 	}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil}) // opens c_1's stream
 	if c.focusChild != "c_1" || c.stopFocus == nil {
@@ -971,27 +981,100 @@ func TestPreviewDoesNotOpenAFocusStream(t *testing.T) {
 
 	c.focus = focusRail
 	c.selected = "c_2"
-	c.Update(previewTickMsg{}) // the debounce fires; the cursor rested on c_2
+	c.Update(previewTickMsg{seq: c.selectedSeq}) // the cursor rested on c_2
 	c.Update(historyMsg{childID: "c_2", after: 9, events: []*rafikiv1.Event{
 		historyEvent("c_2", "preview line", 0, false),
 	}})
 
-	if c.focusChild != "c_1" {
-		t.Errorf("delivering a preview's history opened a focus subscription for %q; "+
-			"only hop may replace the focused child's stream", c.focusChild)
+	if c.focusChild != "c_2" || c.stopFocus == nil {
+		t.Errorf("resting on c_2 left the subscription on %q; the preview is live, not a snapshot", c.focusChild)
 	}
-	if c.stopFocus == nil {
-		t.Error("the preview replaced the focus subscription; c_1's stream is gone")
+	if s := c.sessions["c_2"]; s == nil || len(s.Blocks) != 1 {
+		t.Fatalf("the previewed transcript did not load; blocks = %d", len(s.Blocks))
 	}
-	if got := c.sessions["c_2"]; got == nil || len(got.Blocks) != 1 {
-		t.Errorf("the previewed transcript did not load: %d blocks", len(c.sessions["c_2"].Blocks))
+	// The moved subscription feeds the VIEWED session -- the ordinal is a log
+	// ordinal past the fetch's watermark, as the live stream would deliver it.
+	c.Update(eventMsg{evs: []*rafikiv1.Event{userMessageEventFor("c_2", "live line", 12)}})
+	if s := c.sessions["c_2"]; len(s.Blocks) != 2 {
+		t.Errorf("the live preview did not feed the viewed session; blocks = %d", len(s.Blocks))
+	}
+	if n, ok := c.rail.Get("c_2"); !ok || n.Attention != 0 {
+		t.Errorf("watching a live preview left attention at %d; delivery to the displayed session is reading", n.Attention)
 	}
 }
 
-// The commit after a preview must resume the live stream from the watermark
-// the preview fetched under, or the turn that ran between the snapshot and the
-// commit is either replayed from zero or silently missing.
-func TestCommitAfterPreviewResumesFromTheWatermark(t *testing.T) {
+// Leaving the rail -- any exit, not just ⏎ -- returns the subscription to the
+// committed agent: the pane about to be shown is its, and its stream is the
+// one that must be running. The browsed child's stream stops; on the next
+// visit it resumes from the cursor it kept, which is what makes the gap safe.
+func TestLeaveRailReturnsTheSubscriptionToTheCommittedAgent(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 9),
+	}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+	c.focus = focusRail
+	c.selected = "c_2"
+	c.Update(previewTickMsg{seq: c.selectedSeq})
+	c.Update(historyMsg{childID: "c_2", after: 9, events: []*rafikiv1.Event{
+		historyEvent("c_2", "preview line", 0, false),
+	}})
+	if c.focusChild != "c_2" {
+		t.Fatalf("setup: browsing did not move the subscription (owner %q)", c.focusChild)
+	}
+
+	c.Update(keyMsg("esc"))
+
+	if c.focus != focusInput {
+		t.Fatal("esc did not return to the input")
+	}
+	if c.focusChild != "c_1" {
+		t.Errorf("after esc the subscription sits on %q; the committed agent's pane is what is on screen", c.focusChild)
+	}
+}
+
+// The browsed child's session keeps the cursor its live feed advanced, so a
+// hop back resumes from THERE and replays nothing twice. This is the record
+// of why the subscription moves at all instead of the pane reading snapshots:
+// the state stays honest for the return trip.
+func TestHopBackToABrowsedChildResumesFromItsLiveCursor(t *testing.T) {
+	c := newTestCockpit("c_1")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 9),
+	}})
+	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
+	c.focus = focusRail
+	c.selected = "c_2"
+	c.Update(previewTickMsg{seq: c.selectedSeq})
+	c.Update(historyMsg{childID: "c_2", after: 9, events: []*rafikiv1.Event{
+		historyEvent("c_2", "preview line", 0, false),
+	}})
+	// Live delivery advances the browsed session past the watermark.
+	c.Update(eventMsg{evs: []*rafikiv1.Event{userMessageEventFor("c_2", "live line", 12)}})
+	if s := c.sessions["c_2"]; s.Cursor != 12 {
+		t.Fatalf("live delivery left c_2's cursor at %d, want 12", s.Cursor)
+	}
+
+	c.Update(keyMsg("esc")) // subscription returns to c_1
+	c.hop("c_2")
+
+	if c.focusChild != "c_2" {
+		t.Fatalf("hop to the browsed child left the subscription on %q", c.focusChild)
+	}
+	// Resuming re-opens from the session cursor (12); the already-applied
+	// ordinals are not replayed into duplicated blocks.
+	if s := c.sessions["c_2"]; len(s.Blocks) != 2 {
+		t.Errorf("blocks = %d, want 2; the resume must not duplicate applied content", len(s.Blocks))
+	}
+}
+
+// The watermark discipline survives the live preview: history delivery stamps
+// the session with the log ordinal captured BEFORE the fetch and the stream
+// opens resuming from exactly that -- so nothing logged while the fetch ran is
+// skipped, and the next open resumes from where the pane actually is.
+func TestPreviewDeliveryResumesFromTheWatermark(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1000,17 +1083,23 @@ func TestCommitAfterPreviewResumesFromTheWatermark(t *testing.T) {
 
 	c.focus = focusRail
 	c.selected = "c_2"
-	c.Update(previewTickMsg{})
+	c.Update(previewTickMsg{seq: c.selectedSeq})
 	c.Update(historyMsg{childID: "c_2", after: 9, events: []*rafikiv1.Event{
 		historyEvent("c_2", "old prompt", 0, false),
 	}})
-	if s := c.sessions["c_2"]; !s.HasCursor || s.Cursor != 9 {
-		t.Fatalf("preview left cursor at %d/%v, want the watermark 9; commit would resume from the wrong place", s.Cursor, s.Cursor)
+	s := c.sessions["c_2"]
+	if !s.HasCursor || s.Cursor != 9 {
+		t.Fatalf("preview left cursor at %d/%v, want the watermark 9; the next open would resume from the wrong place", s.Cursor, s.HasCursor)
+	}
+	if c.focusChild != "c_2" {
+		t.Errorf("delivering the preview did not open its subscription (owner %q)", c.focusChild)
 	}
 
+	// And committing to the row the subscription is already on must not churn
+	// it: openFocus's owner check makes ⏎ on the previewed row free.
 	c.hop("c_2")
 	if c.focusChild != "c_2" {
-		t.Errorf("committing to the previewed child did not open its subscription (owner %q)", c.focusChild)
+		t.Errorf("committing to the previewed child moved the subscription to %q", c.focusChild)
 	}
 }
 
@@ -1032,7 +1121,7 @@ func TestPreviewMarksReadOnlyWhenDisplayed(t *testing.T) {
 	// Browse onto c_2 and let its preview land while it is still displayed.
 	c.focus = focusRail
 	c.selected = "c_2"
-	c.Update(previewTickMsg{})
+	c.Update(previewTickMsg{seq: c.selectedSeq})
 	c.Update(historyMsg{childID: "c_2", after: 8, events: []*rafikiv1.Event{
 		historyEvent("c_2", "hi", 0, false),
 	}})
@@ -1041,8 +1130,10 @@ func TestPreviewMarksReadOnlyWhenDisplayed(t *testing.T) {
 	}
 
 	// And browse away before the fetch lands: nothing was displayed, so the
-	// badge must survive.
+	// badge must survive, the late delivery must warm the session without
+	// opening anything, and the subscription must stay exactly where it was.
 	c.moveSelection(-1) // back to c_1
+	before := c.focusChild
 	c.Update(railEventMsg{evs: []*rafikiv1.Event{turnEndFor("c_2", 9)}})
 	c.Update(historyMsg{childID: "c_2", after: 8, events: []*rafikiv1.Event{
 		historyEvent("c_2", "more", 1, true),
@@ -1053,12 +1144,16 @@ func TestPreviewMarksReadOnlyWhenDisplayed(t *testing.T) {
 	if s := c.sessions["c_2"]; len(s.Blocks) != 2 {
 		t.Errorf("the late fetch should still warm the session; blocks = %d", len(s.Blocks))
 	}
+	if c.focusChild != before {
+		t.Errorf("a late delivery moved the subscription to %q; only a rested cursor does that", c.focusChild)
+	}
 }
 
-// GetHistory is the most expensive RPC this client issues; a held arrow key
-// over a fleet must not fire one per row it passes. The arrow only arms a
-// debounce, and the firing debounce fetches wherever the cursor rests -- one
-// fetch, not one per row -- and never two for the same child at once.
+// GetHistory is the most expensive RPC this client issues and a stream move is
+// a subscription churn, so a held arrow key over a fleet must fire neither per
+// row it passes. The arrow only arms a debounce, and the tick armed under an
+// older cursor position is a no-op -- a sweep costs one action at the final
+// rest, and never two fetches for the same child at once.
 func TestSweepDebouncesThePreviewFetch(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
@@ -1075,24 +1170,31 @@ func TestSweepDebouncesThePreviewFetch(t *testing.T) {
 		t.Fatal("moving onto a row issued its fetch immediately; it must wait for the cursor to rest")
 	}
 
-	// The cursor has rested: exactly one fetch, and a queued tick from the
-	// sweep must not stack a second one while it is in flight.
-	c.Update(previewTickMsg{})
+	// The cursor has rested: exactly one fetch, and a STALE tick -- armed
+	// before the cursor moved on -- must not stack anything behind it.
+	c.Update(previewTickMsg{seq: c.selectedSeq})
 	if !c.historyInFlight["c_2"] {
 		t.Fatal("the cursor rested on c_2 but its transcript was never fetched")
 	}
 	if c.moveSelection(+1); c.historyInFlight["c_3"] {
-		t.Fatal("a queued tick fetched before the cursor rested on c_3")
+		t.Fatal("moving on issued its fetch before the cursor rested on c_3")
 	}
-	c.Update(previewTickMsg{})
+	c.Update(previewTickMsg{seq: c.selectedSeq - 1}) // the tick armed while on c_2
+	if c.historyInFlight["c_3"] {
+		t.Fatal("a stale tick acted after the cursor had moved on")
+	}
+	c.Update(previewTickMsg{seq: c.selectedSeq})
 	if !c.historyInFlight["c_3"] {
 		t.Fatal("the rested cursor on c_3 did not fetch its transcript")
 	}
 }
 
-// A preview fetch that failed must not leave the pane claiming "No messages
-// yet" over a conversation the daemon could not read.
-func TestFailedPreviewFetchSaysSo(t *testing.T) {
+// A history fetch that fails for the VIEWED child is not a blank pane: the
+// subscription opens on the durable log instead -- what the cockpit read before
+// GetHistory existed -- and the status line says why the pane may be thinner
+// than the conversation. A LATE failure (the cursor moved on while the fetch
+// ran) drops the empty session, since nothing on screen asked for it.
+func TestFailedHistoryForTheViewedChildFallsBackToTheLog(t *testing.T) {
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1100,19 +1202,22 @@ func TestFailedPreviewFetchSaysSo(t *testing.T) {
 	}})
 	c.focus = focusRail
 	c.selected = "c_2"
-	c.Update(previewTickMsg{})
+	c.Update(previewTickMsg{seq: c.selectedSeq})
 
 	c.Update(historyMsg{childID: "c_2", after: 6, err: errors.New("boom")})
 
-	if !c.historyFailed["c_2"] {
-		t.Error("a failed preview fetch was not recorded, so the pane cannot say why it is blank")
+	if c.focusChild != "c_2" || c.stopFocus == nil {
+		t.Errorf("a failed read left the subscription on %q; the log replay is the fallback, not a blank pane", c.focusChild)
 	}
+	if got := c.status; !strings.Contains(got, "history unavailable") {
+		t.Errorf("status = %q, want the reason the pane is thin", got)
+	}
+
+	// A late failure lands for a child nobody is looking at.
+	c.moveSelection(-1) // back to c_1
+	c.Update(historyMsg{childID: "c_2", after: 6, err: errors.New("boom again")})
 	if _, ok := c.sessions["c_2"]; ok {
-		t.Error("the failed preview kept an empty session, whose pane would lie about the conversation")
-	}
-	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	if !strings.Contains(ansi.Strip(c.View().Content), "history unavailable") {
-		t.Errorf("the pane must say the preview could not be read:\n%s", ansi.Strip(c.View().Content))
+		t.Error("a late failed fetch kept an empty session for a child nothing displays")
 	}
 }
 
