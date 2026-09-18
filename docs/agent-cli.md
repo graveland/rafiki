@@ -562,3 +562,41 @@ rafiki skills import <dir> [--namespace ns]
 Authenticated by the same per-user bearer credential as every other Connect
 verb: any valid user token may read and write the corpus, in any namespace,
 until multi-user scoping is built.
+
+## `rafiki python` (alias `py`)
+
+Manage your saved pymodules — reusable, owner-scoped Python snippets
+(`conversations.pymodules`). What you save here is exactly what children you
+spawn see: the store is scoped to the owner the daemon resolves from the
+connection itself (unattributed on the local unix socket), so there is no
+owner flag to pass and no way to see anyone else's corpus. It talks to the
+daemon over the Connect plane (`ListPymodules`/`GetPymodule`/`PutPymodule`/
+`DeletePymodule`), so it needs a reachable profile, never a DSN, and works
+against a remote daemon exactly as against a local one.
+
+```
+rafiki python list                          # the inventory; code is never printed here
+rafiki python get <name>                    # one module's code, raw
+rafiki python put <name> --file <path>      # save a new version (--file - reads stdin)
+rafiki python put <name> --file - --description "one line"
+rafiki python delete <name>                 # soft-delete every live version
+```
+
+- **`list`** shows `NAME`, `VERSION`, `SAVED`, `DESCRIPTION` and never the
+  code — an inventory is a handful of lines and a body is a document. `get`
+  prints only the code by default, so it can feed a file or an editor
+  unchanged; `-o json` (on `get` or `put`) emits the full row including code.
+- **`put`** always inserts a NEW version — saving again under an existing
+  name never modifies what is saved there, and the printed version id tells
+  the two apart. The name must be a bare Python identifier (it becomes both
+  `<name>.py` on every executor and the argument to `import <name>`), checked
+  locally before the code is sent and re-checked by the daemon.
+- **`delete`** removes every live version of the name at once — there is no
+  per-version delete. A later `put` under the same name restores it.
+- On a daemon with no agent database (a profile-scoped dev instance without
+  `RAFIKI_DB`), every verb reports `pymodules backend not yet wired` rather
+  than an empty answer.
+- Agents have the same corpus: the `pymodule_get`/`pymodule_put` tools a
+  child carries read and write exactly what this command does, so a module
+  saved here is importable by a child and vice versa.
+

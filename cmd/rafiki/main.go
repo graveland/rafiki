@@ -92,6 +92,7 @@ func newRootCmd() *cobra.Command {
 		newUserCmd(),
 		newConfigCmd(),
 		newSkillsCmd(),
+		newPythonCmd(),
 		newProfileCmd(),
 		newBudgetCmd(),
 	)
