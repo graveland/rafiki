@@ -244,6 +244,25 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		Quota:         quotaReader,
 		Conversations: newMCPConversationReader(ctrl, owner),
 	}
+	// The pymodule tools decline together, daemon-wide, when this daemon has
+	// no executor pool at all: no claude child can ever run one here, so
+	// put/delete/list would be a toolbox nobody can open. Unlike Quota
+	// (which degrades per-caller), this condition is the same for every
+	// caller of this daemon.
+	if ctrl.claudeExecutorRouted() {
+		opts.PyModules = newMCPPyModuleStore(ctrl, owner)
+		opts.PyModuleList = newMCPPyModuleLister(ctrl, owner)
+		// pymodule_run is scoped further: only a ProvenanceChildToken
+		// caller (a claude-kind child, never the interactive human) whose
+		// own childstore row carries a live executor binding gets it.
+		if id.Via == server.ProvenanceChildToken {
+			if snap, ok := ctrl.st.Get(id.ChildID); ok {
+				if exec, ok := newMCPPyModuleExecutor(ctrl.execPoolConn, snap); ok {
+					opts.PyModuleExecutor = exec
+				}
+			}
+		}
+	}
 
 	return mcpserver.New(mcpserver.Options{
 		Tools:        mcpToolset(opts, f.logger),
@@ -334,6 +353,10 @@ var mcpBlueprints = []tools.Tool{
 	&tools.ConversationSearchBlueprint{},
 	&tools.ConversationExportBlueprint{},
 	&tools.ConversationQueryBlueprint{},
+	&tools.PyModulePutBlueprint{},
+	&tools.PyModuleDeleteBlueprint{},
+	&mcpPyModuleListBlueprint{},
+	&mcpPyModuleRunBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint
@@ -375,6 +398,16 @@ const mcpLedgerPrefix = "This is a shared, durable, cross-agent ledger. Rows per
 	"When you delegate work to a rafiki agent, track it here: add the task, then pass its " +
 	"handle to agent_spawn — that is what makes the delegation visible to the operator " +
 	"and hands the agent its assignment."
+
+// mcpPymoduleRunPointer is appended to pymodule_put/pymodule_delete's text
+// on this surface: the blueprint text's "Only you can see or run what you
+// save here" is still true here, but "run" now also covers a claude child
+// you spawn calling pymodule_run on this same surface -- worth stating
+// explicitly, the same "prepare state, then delegate" framing
+// mcpLedgerPrefix gives task_add.
+const mcpPymoduleRunPointer = " A claude-kind child you spawn (with its own executor) " +
+	"can then pymodule_run whatever you save here -- it appears on its own tool list, not " +
+	"yours, exactly as pymodule_run does not appear on this session's."
 
 // mcpSurfacePrefix marks the agent-steering verbs as operating on daemon-managed
 // processes rather than the client's own subagents.
@@ -439,6 +472,8 @@ var mcpToolDescriptions = func() map[string]string {
 	search := &tools.ConversationSearchBlueprint{}
 	export := &tools.ConversationExportBlueprint{}
 	query := &tools.ConversationQueryBlueprint{}
+	put := &tools.PyModulePutBlueprint{}
+	del := &tools.PyModuleDeleteBlueprint{}
 	// Note and the remainder of the blueprint text stay verbatim; the
 	// fundi-only ownership sentence (from mcpSearchScopeStart to the end) is
 	// excised, the same composition the spawn override performs.
@@ -484,10 +519,12 @@ var mcpToolDescriptions = func() map[string]string {
 		"conversation_query":  mcpConversationScopeNote + "\n\n" + queryText,
 		// agent_set_budget, agent_models and quota_status have no native-client
 		// equivalent to be confused with, so their blueprint texts stand as-is.
-		"task_add":    mcpLedgerPrefix + "\n\n" + taskAdd.Description(),
-		"task_update": mcpLedgerPrefix + "\n\n" + taskUpdate.Description(),
-		"task_drop":   mcpLedgerPrefix + "\n\n" + taskDrop.Description(),
-		"task_list":   mcpLedgerPrefix + "\n\n" + taskList.Description(),
+		"task_add":        mcpLedgerPrefix + "\n\n" + taskAdd.Description(),
+		"task_update":     mcpLedgerPrefix + "\n\n" + taskUpdate.Description(),
+		"task_drop":       mcpLedgerPrefix + "\n\n" + taskDrop.Description(),
+		"task_list":       mcpLedgerPrefix + "\n\n" + taskList.Description(),
+		"pymodule_put":    put.Description() + mcpPymoduleRunPointer,
+		"pymodule_delete": del.Description() + mcpPymoduleRunPointer,
 	}
 }()
 

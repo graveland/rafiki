@@ -17,7 +17,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/darajapool"
+	"go.graveland.dev/rafiki/pkg/execpool"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -452,6 +456,90 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 	}
 }
 
+func TestMCPFaceDeclinesPymodulesWhenNoExecutorPool(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	requests := map[string]*http.Request{
+		"user": mcpRequestFor("u-alice"),
+		"child": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+			ctx := server.WithIdentity(r.Context(), &server.Identity{
+				UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
+			})
+			return r.WithContext(ctx)
+		}(),
+	}
+	for provenance, req := range requests {
+		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
+		for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list", "pymodule_run"} {
+			if slices.Contains(names, name) {
+				t.Errorf("%s request unexpectedly exposes %s: %v", provenance, name, names)
+			}
+		}
+	}
+}
+
+func TestMCPFacePymodulesAppearWhenExecutorRouted(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	ctrl := face.controller()
+	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
+	ctrl.execPoolConn = &execpool.Pool{}
+	ctrl.darajaPool = &darajapool.Pool{}
+
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list"} {
+		if !slices.Contains(names, name) {
+			t.Errorf("routed user request is missing %s: %v", name, names)
+		}
+	}
+	if slices.Contains(names, "pymodule_run") {
+		t.Errorf("user request unexpectedly exposes pymodule_run: %v", names)
+	}
+}
+
+func TestMCPFacePymoduleRunAppearsForBoundChild(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	ctrl := face.controller()
+	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
+	ctrl.execPoolConn = joinLiveRelayExecutor(t, executors.Executor{ID: "e-1"}, nil)
+	ctrl.darajaPool = &darajapool.Pool{}
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: "c-child",
+		Labels:  map[string]string{"rafiki/executor": "e-1"},
+	})
+
+	r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	ctx := server.WithIdentity(r.Context(), &server.Identity{
+		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	})
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(r.WithContext(ctx))))
+	if !slices.Contains(names, "pymodule_run") {
+		t.Errorf("bound child request is missing pymodule_run: %v", names)
+	}
+}
+
+func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	ctrl := face.controller()
+	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
+	ctrl.execPoolConn = &execpool.Pool{}
+	ctrl.darajaPool = &darajapool.Pool{}
+	ctrl.st.Insert(&childstore.Session{ChildID: "c-child"})
+
+	r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	ctx := server.WithIdentity(r.Context(), &server.Identity{
+		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	})
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(r.WithContext(ctx))))
+	for _, name := range []string{"pymodule_put", "pymodule_delete", "pymodule_list"} {
+		if !slices.Contains(names, name) {
+			t.Errorf("unbound child request is missing %s: %v", name, names)
+		}
+	}
+	if slices.Contains(names, "pymodule_run") {
+		t.Errorf("unbound child request unexpectedly exposes pymodule_run: %v", names)
+	}
+}
+
 // TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
 // identity binding. The SDK's own hijack guard never fires on this mount:
 // sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
@@ -575,10 +663,18 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		t.Errorf("conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 	}
 
+	for _, name := range []string{"pymodule_put", "pymodule_delete"} {
+		if !strings.Contains(mcpToolDescriptions[name], "A claude-kind child you spawn") {
+			t.Errorf("%s: missing the pymodule_run delegation pointer", name)
+		}
+	}
+
 	pairs := map[string]tools.Tool{
 		"agent_send":          &tools.AgentSendBlueprint{},
 		"agent_kill":          &tools.AgentKillBlueprint{},
 		"conversation_export": &tools.ConversationExportBlueprint{},
+		"pymodule_put":        &tools.PyModulePutBlueprint{},
+		"pymodule_delete":     &tools.PyModuleDeleteBlueprint{},
 		"task_add":            &tools.TaskAddBlueprint{},
 		"task_update":         &tools.TaskUpdateBlueprint{},
 		"task_drop":           &tools.TaskDropBlueprint{},
