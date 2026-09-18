@@ -13,6 +13,7 @@ import (
 // Delete is the delete half of fakePyModuleStore (the fake's struct and its
 // Put half live in pymodule_put_test.go; both tools share it). It records
 // every name Delete was called with and reports delErr when configured.
+// Records nothing when delErr is set -- an erroring fake models a failed call.
 func (s *fakePyModuleStore) Delete(_ context.Context, name string) error {
 	if s.delErr != nil {
 		return s.delErr

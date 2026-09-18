@@ -31,8 +31,8 @@ type Record struct {
 // pgx-free.
 type Store interface {
 	// Put always inserts a new row -- nothing is ever updated or deleted.
-	// ownerUserID empty means unattributed. A delete is a new tombstone row,
-	// never an update.
+	// ownerUserID empty means unattributed. A delete stamps deleted_at on
+	// every version of the name; it never rewrites code.
 	Put(ctx context.Context, ownerUserID, name, code, description string) (Record, error)
 
 	// List returns the latest row per name for ownerUserID (MAX(id) per
@@ -40,10 +40,13 @@ type Store interface {
 	// unattributed rows -- never another owner's, and never every owner's.
 	List(ctx context.Context, ownerUserID string) ([]Record, error)
 
-	// Delete appends a tombstone for the latest live row of name. Append-only:
-	// nothing is updated or deleted, so history is kept and a later Put under
-	// the same name resurrects it. Returns ErrNotFound when no live row exists
-	// (unknown name or already deleted) -- nothing is inserted in that case.
+	// Delete soft-deletes every version of name by stamping deleted_at on all
+	// live rows. This is the ONLY mutation a pymodule row ever undergoes --
+	// Put is insert-only -- and it is why List's plain deleted_at IS NULL
+	// filter cannot resurrect an older version: a delete leaves no live row
+	// behind. Returns ErrNotFound when no live row exists (unknown name or
+	// already deleted); nothing is written in that case. A later Put under
+	// the same name is a fresh live row and restores it.
 	Delete(ctx context.Context, ownerUserID string, name string) error
 }
 

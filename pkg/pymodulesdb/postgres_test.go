@@ -250,10 +250,8 @@ func TestDeleteTombstonesAndReputRestores(t *testing.T) {
 	}
 }
 
-// The tombstone must hide every version of a deleted name, not just the latest
-// one: with the tombstone filter inside the DISTINCT ON subquery, List would
-// resurface v1 (code "A") as the surviving latest-live row and this test would
-// see one row instead of zero.
+// A delete stamps every version of the name, so List returns zero rows no
+// matter how many live versions preceded it.
 func TestDeleteDoesNotResurrectOlderVersions(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
@@ -300,16 +298,20 @@ func TestDeleteNotFoundForUnknownName(t *testing.T) {
 	}
 }
 
-// Deleting an already-deleted name reports ErrNotFound rather than stacking a
-// second tombstone: the probe reads the latest row overall, tombstones
-// included, and the total row count stays at v1 + one tombstone.
+// Deleting an already-deleted name reports ErrNotFound rather than
+// restamping: Delete's UPDATE matches only live rows (deleted_at IS NULL),
+// so the second delete writes nothing and the total row count stays at
+// 2 -- both versions stamped in place, no third row.
 func TestDeleteNotFoundWhenAlreadyDeleted(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
 	owner := newOwner(t, pool, "del-twice")
 
 	if _, err := st.Put(ctx, owner, "helpers", "A", "v1"); err != nil {
-		t.Fatalf("put: %v", err)
+		t.Fatalf("put v1: %v", err)
+	}
+	if _, err := st.Put(ctx, owner, "helpers", "B", "v2"); err != nil {
+		t.Fatalf("put v2: %v", err)
 	}
 	if err := st.Delete(ctx, owner, "helpers"); err != nil {
 		t.Fatalf("first delete: %v", err)
@@ -326,7 +328,7 @@ func TestDeleteNotFoundWhenAlreadyDeleted(t *testing.T) {
 		t.Fatalf("count rows: %v", err)
 	}
 	if n != 2 {
-		t.Fatalf("row count = %d, want 2 (v1 + tombstone): the second delete must not stack another tombstone", n)
+		t.Fatalf("row count = %d, want 2 (both versions stamped in place, no third row): the second delete must write nothing", n)
 	}
 }
 
