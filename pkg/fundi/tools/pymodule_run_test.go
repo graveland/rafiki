@@ -26,13 +26,13 @@ func testPymoduleRunTool(t *testing.T, cwd string) Tool {
 	return tool
 }
 
-// seedPymoduleCache writes <cache>/pymodules/<name>.py directly, simulating a
-// module already synced to this executor by wave 2's sync RPC. Deliberately
+// seedPymoduleCache writes <cache>/pymodules/<name>/<name>.py directly, in
+// the layout the executor's SyncPyModules receiver produces. Deliberately
 // not going through the sync path: that is a different layer (the executor
-// receiver), and these tests exercise pymodule_run's own copy-and-run logic.
+// receiver), and these tests exercise pymodule_run's own PYTHONPATH logic.
 func seedPymoduleCache(t *testing.T, name, code string) {
 	t.Helper()
-	dir := filepath.Join(paths.CacheDir(), "pymodules")
+	dir := filepath.Join(paths.CacheDir(), "pymodules", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +92,14 @@ func TestPymoduleRunRejectsPathInModuleName(t *testing.T) {
 	if !strings.Contains(err.Error(), "../etc") {
 		t.Fatalf("error should name the offending module, got: %v", err)
 	}
-	// The module name is checked before any file copy: nothing may have been
-	// written into cwd for it ("../etc" would have landed as "etc.py").
+	// The module name is checked before any subprocess runs: nothing may have
+	// been written into cwd or the cache because of it.
 	if _, statErr := os.Stat(filepath.Join(cwd, "etc.py")); !os.IsNotExist(statErr) {
-		t.Fatal("a file was copied despite the invalid module name")
+		t.Fatal("something was written despite the invalid module name")
 	}
 }
 
-func TestPymoduleRunCopiesModuleAndRuns(t *testing.T) {
+func TestPymoduleRunMakesModuleImportable(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -115,6 +115,56 @@ func TestPymoduleRunCopiesModuleAndRuns(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, "42") {
 		t.Fatalf("result should contain the module's printed value 42, got: %q", res.Text)
+	}
+
+	// The workspace must be untouched: no copied module, no __pycache__.
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "script.py" {
+		t.Fatalf("cwd should contain only script.py, got %v", entries)
+	}
+
+	// ... and the rafiki-managed cache root must stay free of bytecode: the
+	// prune sweep owns every entry there, so PYTHONDONTWRITEBYTECODE is not
+	// optional.
+	stale, err := os.ReadDir(filepath.Join(paths.CacheDir(), "pymodules", "mymod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range stale {
+		if e.Name() == "__pycache__" {
+			t.Fatal("__pycache__ landed inside the managed module dir")
+		}
+	}
+}
+
+// A same-named file next to the script shadows the store (the script's own
+// directory is sys.path[0], ahead of PYTHONPATH) and must survive the run
+// untouched -- the store never writes over workspace files.
+func TestPymoduleRunLocalFileShadowsStore(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not found: %v", err)
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	seedPymoduleCache(t, "mymod", "VALUE = 42\n")
+	cwd := t.TempDir()
+	local := "VALUE = 7\n"
+	writeScript(t, cwd, "mymod.py", local)
+	writeScript(t, cwd, "script.py", "import mymod\nprint(mymod.VALUE)\n")
+
+	tool := testPymoduleRunTool(t, cwd)
+	res, err := tool.Execute(context.Background(), ToolInput(`{"script": "script.py", "modules": ["mymod"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, "7") {
+		t.Fatalf("the local mymod.py should shadow the stored one (7, not 42), got: %q", res.Text)
+	}
+	got, err := os.ReadFile(filepath.Join(cwd, "mymod.py"))
+	if err != nil || string(got) != local {
+		t.Fatalf("local mymod.py was modified: content=%q err=%v", got, err)
 	}
 }
 

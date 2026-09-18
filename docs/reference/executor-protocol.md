@@ -451,28 +451,38 @@ directory. Unlike SyncSkills this is owner-scoped at the source: the daemon
 resolves the executor's own `Labels["owner"]` username to a user id and sends
 only that owner's latest version of each saved module — an executor with no
 owner label, or one whose username does not resolve, receives nothing at all.
-Each module name is a bare Python identifier and becomes `<name>.py` — flat
-files, no per-namespace subtree, no plugin manifest, no frontmatter rendering;
-the payload has no namespace concept because a pymodule is a single file a
-script imports by name.
+Each module name is a bare Python identifier and lands at `<name>/<name>.py`
+inside the cache root — one directory per module, no per-namespace subtree, no
+plugin manifest, no frontmatter rendering; the payload has no namespace concept
+because a pymodule is a single file a script imports by name. The per-module
+directory exists so `pymodule_run` can put exactly the named modules'
+directories on `PYTHONPATH` for a run instead of copying files into the
+workspace — a run never writes into the working tree, and a same-named file
+next to the entry script shadows the stored module (the script's own directory
+is `sys.path[0]`, ahead of `PYTHONPATH`).
 
 **The whole owner's corpus, every time.** `modules` is the complete set for
-this owner, and a synced file absent from it is pruned — same wholesale
+this owner, and a synced entry absent from it is pruned — same wholesale
 replacement reasoning as SyncSkills. Zero modules is a legitimate sync (an
 owner who has saved nothing yet): it empties the owner's cache directory,
-which is correct, not data loss. Each file is written to a sibling temp file
-and renamed into place, and a file whose content is byte-identical to the
-synced corpus is left alone, so repeated syncs stay quiet.
+which is correct, not data loss. Each module is written to a sibling temp file
+inside its directory and renamed into place, and a module whose content is
+byte-identical to the synced corpus is left alone, so repeated syncs stay
+quiet.
 
-**The target is `<paths.CacheDir()>/pymodules`, marked with
-marked before first use and an existing unmarked directory is refused with
-`CodeFailedPrecondition` rather than adopted, so rafiki never writes into — and
-its prune never sweeps — a directory it did not create. Names are validated as
-path segments before anything is written. The prune sweep adds no per-entry
-re-validation, unlike the skills prune: it runs against a root already verified
-managed and only ever `os.Remove`s plain `ReadDir` entries (never recursing,
-never following a symlink out), while the skills prune re-validates because its
-root is the operator's own `~/.claude/skills` and a planted name matters there.
+**The target is `<paths.CacheDir()>/pymodules`, and the root is marked with a
+`.rafiki-managed` file before first use; an existing unmarked directory is
+refused with `CodeFailedPrecondition` rather than adopted, so rafiki never
+writes into — and its prune never sweeps — a directory it did not create.
+Names are validated as path segments before anything is written. The prune
+sweep adds no per-entry re-validation, unlike the skills prune: it runs
+against a root already verified managed and removes every entry absent from
+the corpus — a module directory via `os.RemoveAll` (which is also how a
+legacy flat `<name>.py` from the pre-directory layout migrates, and how a
+stray staging temp disappears), while a symlink entry is unlinked with
+`os.Remove`, never followed, so the sweep cannot reach outside the root. The
+skills prune re-validates per entry because its root is the operator's own
+`~/.claude/skills` and a planted name matters there.
 
 **Opt-in per machine, and `pymodules_sync` on `DescribeResponse` is
 self-reported** exactly like `skills_sync`: it only ever narrows what the

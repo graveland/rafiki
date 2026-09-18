@@ -23,9 +23,12 @@ func pymoduleCacheDir() string {
 	return filepath.Join(paths.CacheDir(), "pymodules")
 }
 
-// SyncPyModules replaces this executor's rafiki-managed pymodule files with
+// SyncPyModules replaces this executor's rafiki-managed pymodule tree with
 // req's corpus -- the whole corpus every time, same as SyncSkills, so a
-// child launching mid-sync never observes a half-written set.
+// child launching mid-sync never observes a half-written set. Each module
+// lives at <root>/<name>/<name>.py: a per-module directory, so pymodule_run
+// can put exactly the named modules' directories on PYTHONPATH instead of
+// copying files into the workspace.
 func (s *Server) SyncPyModules(
 	_ context.Context,
 	req *connect.Request[executorpb.SyncPyModulesRequest],
@@ -45,7 +48,7 @@ func (s *Server) SyncPyModules(
 			return nil, connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("module name: %w", err))
 		}
-		want[m.GetName()+".py"] = true
+		want[m.GetName()] = true
 	}
 
 	// Only ever write into a directory we marked, or one that does not
@@ -67,7 +70,7 @@ func (s *Server) SyncPyModules(
 
 	var written, pruned int32
 	for _, m := range req.Msg.GetModules() {
-		changed, err := writePyModuleFile(root, m.GetName(), m.GetCode())
+		changed, err := writePyModule(root, m.GetName(), m.GetCode())
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
@@ -76,7 +79,7 @@ func (s *Server) SyncPyModules(
 		}
 	}
 
-	n, err := prunePyModuleFiles(root, want)
+	n, err := prunePyModules(root, want)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -85,16 +88,20 @@ func (s *Server) SyncPyModules(
 	return connect.NewResponse(&executorpb.SyncPyModulesResponse{Written: written, Pruned: pruned}), nil
 }
 
-// writePyModuleFile writes name+".py" atomically (write to a sibling temp
-// file, then rename) and reports whether the content actually changed, so a
-// converged fleet stays quiet on repeated syncs.
-func writePyModuleFile(root, name, code string) (bool, error) {
-	final := filepath.Join(root, name+".py")
+// writePyModule writes name's code to root/name/name.py atomically (write
+// to a sibling temp file, then rename) and reports whether the content
+// actually changed, so a converged fleet stays quiet on repeated syncs.
+func writePyModule(root, name, code string) (bool, error) {
+	dir := filepath.Join(root, name)
+	final := filepath.Join(dir, name+".py")
 	existing, err := os.ReadFile(final)
 	if err == nil && string(existing) == code {
 		return false, nil
 	}
-	tmp, err := os.CreateTemp(root, ".rafiki-staging-*")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, fmt.Errorf("create %s dir: %w", name, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".rafiki-staging-*")
 	if err != nil {
 		return false, fmt.Errorf("stage %s: %w", name, err)
 	}
@@ -113,9 +120,13 @@ func writePyModuleFile(root, name, code string) (bool, error) {
 	return true, nil
 }
 
-// prunePyModuleFiles removes managed .py files absent from want, and
-// touches nothing else -- in particular never the managedMarker file itself.
-func prunePyModuleFiles(root string, want map[string]bool) (int32, error) {
+// prunePyModules removes every entry of root absent from want -- a module
+// directory, a legacy flat <name>.py from the pre-directory layout, a stray
+// staging temp, a symlink -- and touches nothing else, in particular never
+// the managedMarker file itself. Symlinks are UNLINKED, never followed:
+// os.Remove on a link removes the link itself, so the sweep can never reach
+// outside root, while a real directory goes via os.RemoveAll.
+func prunePyModules(root string, want map[string]bool) (int32, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return 0, fmt.Errorf("read pymodules dir: %w", err)
@@ -123,10 +134,15 @@ func prunePyModuleFiles(root string, want map[string]bool) (int32, error) {
 	var pruned int32
 	for _, e := range entries {
 		name := e.Name()
-		if name == managedMarker || want[name] || e.IsDir() {
+		if name == managedMarker || want[name] {
 			continue
 		}
-		if err := os.Remove(filepath.Join(root, name)); err != nil {
+		path := filepath.Join(root, name)
+		if e.Type()&os.ModeSymlink != 0 {
+			if err := os.Remove(path); err != nil {
+				return pruned, fmt.Errorf("prune %s: %w", name, err)
+			}
+		} else if err := os.RemoveAll(path); err != nil {
 			return pruned, fmt.Errorf("prune %s: %w", name, err)
 		}
 		pruned++

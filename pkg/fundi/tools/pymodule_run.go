@@ -18,9 +18,10 @@ const pymoduleRunDescription = "Run a Python script, with named modules " +
 	"from your pymodule store made importable first. `script` is the " +
 	"basename of a file you already wrote (with the write tool) in your " +
 	"working directory -- not a path, and not inline code. `modules` names " +
-	"the pymodules (saved with pymodule_put) your script imports; each is " +
-	"placed next to it before running. Returns combined stdout/stderr and " +
-	"the exit code."
+	"the pymodules (saved with pymodule_put) your script imports; their " +
+	"synced directories go on PYTHONPATH for this run -- nothing is written " +
+	"into your working directory, and a same-named file next to the script " +
+	"shadows the stored one. Returns combined stdout/stderr and the exit code."
 
 func init() { DefaultBlueprint.Register(&PyModuleRunBlueprint{}) }
 
@@ -115,21 +116,36 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		return ToolResult{}, fmt.Errorf("pymodule_run: script %q: %w", in.Script, err)
 	}
 
+	// Modules are consumed in place, never copied: each named module must be
+	// synced to this executor as <cache>/pymodules/<name>/<name>.py, and its
+	// directory goes on PYTHONPATH for this run only. The working directory
+	// is never written to, and a same-named file next to the script
+	// deliberately shadows the stored one (the script's own directory is
+	// sys.path[0], ahead of PYTHONPATH).
 	cacheDir := filepath.Join(paths.CacheDir(), "pymodules")
+	modDirs := make([]string, 0, len(in.Modules))
 	for _, m := range in.Modules {
-		src := filepath.Join(cacheDir, m+".py")
-		content, err := os.ReadFile(src)
-		if err != nil {
+		dir := filepath.Join(cacheDir, m)
+		if _, err := os.Stat(filepath.Join(dir, m+".py")); err != nil {
 			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor (has it been saved with pymodule_put yet?): %w", m, err)
 		}
-		dst := filepath.Join(rt.cwd, m+".py")
-		if err := os.WriteFile(dst, content, 0o644); err != nil {
-			return ToolResult{}, fmt.Errorf("pymodule_run: writing module %q: %w", m, err)
+		modDirs = append(modDirs, dir)
+	}
+
+	var env []string
+	if len(modDirs) > 0 {
+		pp := strings.Join(modDirs, string(os.PathListSeparator))
+		if existing := os.Getenv("PYTHONPATH"); existing != "" {
+			pp += string(os.PathListSeparator) + existing
 		}
+		// PYTHONDONTWRITEBYTECODE keeps __pycache__ out of the rafiki-managed
+		// cache root, where every entry belongs to the prune sweep; bytecode
+		// is worthless across runs at these sizes anyway.
+		env = append(os.Environ(), "PYTHONPATH="+pp, "PYTHONDONTWRITEBYTECODE=1")
 	}
 
 	args := append([]string{scriptPath}, in.Args...)
-	out, _, runErr := runSubprocess(ctx, rt.cwd, bashWaitDelay, rt.interpreter, args)
+	out, _, runErr := runSubprocess(ctx, rt.cwd, bashWaitDelay, rt.interpreter, args, env)
 	if runErr != nil {
 		out += fmt.Sprintf("\n[pymodule_run: %v]\n", runErr)
 	}

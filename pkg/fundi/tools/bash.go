@@ -194,14 +194,19 @@ func (w *syncWriter) String() string {
 
 // runSubprocess execs name(args...) under ctx with process-group
 // kill-on-cancel and the given WaitDelay, in cwd. Shared between bashTool
-// (which always passes bashWaitDelay) and pymodule_run (which does the
-// same, since both are "run one process to completion and collect its
-// output" with no other difference). Returns merged stdout+stderr and
+// (which always passes bashWaitDelay and a nil env) and pymodule_run (which
+// does the same, with an env carrying PYTHONPATH for its named modules),
+// since both are "run one process to completion and collect its output"
+// with no other difference. A nil env inherits the process environment,
+// the same as exec.Cmd's zero value. Returns merged stdout+stderr and
 // stderr alone -- see syncWriter's doc comment for why this isn't just
 // CombinedOutput plus a tee.
-func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, name string, args []string) (combined, stderrOnly string, err error) {
+func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, name string, args []string, env []string) (combined, stderrOnly string, err error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = cwd
+	if env != nil {
+		cmd.Env = env
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -229,7 +234,7 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 // regardless of whether the caller is running the rtk-rewritten argv or a
 // plain `bash -c`.
 func (bt *bashTool) run(ctx context.Context, name string, args []string) (string, string, error) {
-	return runSubprocess(ctx, bt.cwd, bashWaitDelay, name, args)
+	return runSubprocess(ctx, bt.cwd, bashWaitDelay, name, args, nil)
 }
 
 // rtkRefused reports whether stderr looks like RTK ITSELF refusing to run

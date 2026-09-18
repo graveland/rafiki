@@ -66,12 +66,12 @@ func TestSyncPyModulesWritesAndReadsBack(t *testing.T) {
 		t.Errorf("written=%d, want 2", resp.Msg.GetWritten())
 	}
 	for name, want := range map[string]string{"alpha": "X = 1\n", "beta": "Y = 2\n"} {
-		got, err := os.ReadFile(filepath.Join(pymoduleCacheDir(), name+".py"))
+		got, err := os.ReadFile(filepath.Join(pymoduleCacheDir(), name, name+".py"))
 		if err != nil {
-			t.Fatalf("%s.py missing: %v", name, err)
+			t.Fatalf("%s/%s.py missing: %v", name, name, err)
 		}
 		if string(got) != want {
-			t.Errorf("%s.py = %q, want %q", name, got, want)
+			t.Errorf("%s/%s.py = %q, want %q", name, name, got, want)
 		}
 	}
 }
@@ -95,10 +95,10 @@ func TestSyncPyModulesPrunesRemovedModule(t *testing.T) {
 	)
 	resp := syncOnce(&executorpb.SyncPyModule{Name: "alpha", Code: "X = 1\n"})
 
-	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "beta.py")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "beta")); !os.IsNotExist(err) {
 		t.Errorf("removed module survived a sync that omitted it (err=%v)", err)
 	}
-	got, err := os.ReadFile(filepath.Join(pymoduleCacheDir(), "alpha.py"))
+	got, err := os.ReadFile(filepath.Join(pymoduleCacheDir(), "alpha", "alpha.py"))
 	if err != nil || string(got) != "X = 1\n" {
 		t.Errorf("kept module was collaterally damaged: content=%q err=%v", got, err)
 	}
@@ -123,5 +123,67 @@ func TestSyncPyModulesIsIdempotentOnUnchangedContent(t *testing.T) {
 	}
 	if resp.Msg.GetWritten() != 0 {
 		t.Errorf("written=%d, want 0 for an unchanged corpus", resp.Msg.GetWritten())
+	}
+}
+
+// The pre-directory layout was a flat <name>.py per module; the first sync
+// from a newer binary must sweep those stale files as absent from the
+// corpus, because want is now keyed by bare module name. No manual migration
+// is needed anywhere in the fleet.
+func TestSyncPyModulesPrunesLegacyFlatLayout(t *testing.T) {
+	s := pymoduleServer(t, true)
+	req := &executorpb.SyncPyModulesRequest{
+		Modules: []*executorpb.SyncPyModule{{Name: "alpha", Code: "X = 1\n"}},
+	}
+	if _, err := s.SyncPyModules(context.Background(), connect.NewRequest(req)); err != nil {
+		t.Fatalf("SyncPyModules: %v", err)
+	}
+	legacy := filepath.Join(pymoduleCacheDir(), "alpha.py")
+	if err := os.WriteFile(legacy, []byte("X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := s.SyncPyModules(context.Background(), connect.NewRequest(req))
+	if err != nil {
+		t.Fatalf("second SyncPyModules: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Errorf("legacy flat file survived a sync (err=%v)", err)
+	}
+	if resp.Msg.GetPruned() != 1 {
+		t.Errorf("pruned=%d, want 1", resp.Msg.GetPruned())
+	}
+}
+
+// A symlink entry in the managed root is unlinked, never followed: the sweep
+// must not reach whatever the link points at.
+func TestSyncPyModulesPrunesSymlinkWithoutFollowing(t *testing.T) {
+	s := pymoduleServer(t, true)
+	req := &executorpb.SyncPyModulesRequest{
+		Modules: []*executorpb.SyncPyModule{{Name: "alpha", Code: "X = 1\n"}},
+	}
+	if _, err := s.SyncPyModules(context.Background(), connect.NewRequest(req)); err != nil {
+		t.Fatalf("SyncPyModules: %v", err)
+	}
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(pymoduleCacheDir(), "sneaky")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := s.SyncPyModules(context.Background(), connect.NewRequest(req))
+	if err != nil {
+		t.Fatalf("sync with a symlink entry: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("symlink survived a sync (err=%v)", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("the symlink's target was damaged: %v", err)
+	}
+	if resp.Msg.GetPruned() != 1 {
+		t.Errorf("pruned=%d, want 1", resp.Msg.GetPruned())
 	}
 }
