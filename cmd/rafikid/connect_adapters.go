@@ -302,6 +302,12 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 type connectSkills struct {
 	st      skills.Store
 	version string
+
+	// push refreshes the executor-facing skill corpus after a successful
+	// write (Upsert, SetEnabled): push-on-write rather than a timer. Nil is
+	// legal — tests and any wiring constructed before the pusher existed —
+	// and means writes still succeed, they just don't fan out.
+	push func(ctx context.Context)
 }
 
 func skillRowFrom(r skills.Record) connectapi.SkillRow {
@@ -376,6 +382,9 @@ func (c connectSkills) UpsertSkill(ctx context.Context, row connectapi.SkillRow)
 	if err != nil {
 		return connectapi.SkillRow{}, translateSkillErr(err)
 	}
+	if c.push != nil {
+		c.push(ctx)
+	}
 	return skillRowFrom(out), nil
 }
 
@@ -384,7 +393,13 @@ func (c connectSkills) DeleteSkill(ctx context.Context, ns, name string) error {
 }
 
 func (c connectSkills) SetSkillEnabled(ctx context.Context, ns, name string, enabled bool) error {
-	return translateSkillErr(c.st.SetEnabled(ctx, ns, name, enabled))
+	if err := c.st.SetEnabled(ctx, ns, name, enabled); err != nil {
+		return translateSkillErr(err)
+	}
+	if c.push != nil {
+		c.push(ctx)
+	}
+	return nil
 }
 
 func (l connectLifecycle) Close(_ context.Context, childID string) error {

@@ -15,11 +15,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/skills"
 )
 
-// skillSyncInterval is the slow tick. The push is idempotent and the executor
-// rewrites nothing when content is unchanged, so this only needs to be often
-// enough that an edit reaches a long-lived executor without a reconnect.
-const skillSyncInterval = 10 * time.Minute
-
 // skillPusher delivers the daemon's skill corpus to every executor that both
 // launches claude children and accepts a sync.
 //
@@ -81,22 +76,6 @@ func buildNamespaces(recs []skills.Record, version string) []*executorpb.SkillNa
 		})
 	}
 	return out
-}
-
-// Run pushes on a slow tick until ctx is done. Connect-triggered pushes arrive
-// separately through the pool's on-connect hook.
-func (sp *skillPusher) Run(ctx context.Context) {
-	t := time.NewTicker(skillSyncInterval)
-	defer t.Stop()
-	sp.pushAll(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			sp.pushAll(ctx)
-		}
-	}
 }
 
 func (sp *skillPusher) pushAll(ctx context.Context) {

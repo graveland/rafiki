@@ -288,6 +288,16 @@ type Controller struct {
 	// exactly the same condition as execPool.
 	execPoolConn *execpool.Pool
 
+	// skillPusher and pymodulePusher deliver the daemon's corpora to
+	// executors: skills whole-corpus, pymodules owner-scoped. Both are
+	// constructed at startup (main.go) before skill-manager registration —
+	// connectSkills holds a push callback into the skill pusher — and before
+	// the executor pool's on-connect wiring, which one callback serves for
+	// both. Nil when the daemon lacks the corresponding store or an executor
+	// pool: nothing to read, or nothing to push to.
+	skillPusher    *skillPusher
+	pymodulePusher *pymodulePusher
+
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).
 	execStore executors.Store
@@ -2165,6 +2175,26 @@ func (c *Controller) resumeOwnerUserID(ctx context.Context, childID string, snap
 		return ""
 	}
 	return id
+}
+
+// resolveUsernameToUserID resolves a username to a conversations.users id for
+// pymodulePusher's owner attribution, using the same users-store lookup
+// resumeOwnerUserID performs (active rows only — a tombstone must never
+// receive an attribution). It returns ("", false) on an empty name, a nil
+// store, any error or not-found: the pusher's rule is "unknown means push
+// nothing", because a wrong guess about ownership would hand one user's
+// private pymodule corpus to another user's executor.
+func (c *Controller) resolveUsernameToUserID(ctx context.Context, username string) (string, bool) {
+	if username == "" || c.users == nil {
+		return "", false
+	}
+	id, err := c.users.LookupUsername(ctx, username)
+	if err != nil {
+		slog.Warn("pymodule sync: owner label does not resolve to an active user; pushing nothing",
+			"owner", username, "error", err)
+		return "", false
+	}
+	return id, true
 }
 
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (control.SpawnResult, error) {

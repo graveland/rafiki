@@ -3,8 +3,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -74,5 +77,67 @@ func TestEligibleRequiresSkillsSyncAndClaude(t *testing.T) {
 	// fire against a pool entry before its Describe has landed.
 	if eligible(nil) {
 		t.Error("a nil Describe must not be eligible (and must not panic)")
+	}
+}
+
+// The ticker is gone: skillPusher has no Run, and the corpus is refreshed on
+// write instead (connectSkills.push below) and on executor connect (main.go's
+// SetOnConnect). These pin the adapter side of that contract — push fires
+// after a successful write, never after a failed one, and a nil push is
+// tolerated since existing wiring constructs connectSkills without one.
+func TestConnectSkillsPushesOnUpsert(t *testing.T) {
+	called := false
+	c := connectSkills{
+		st:      &fakeSkillStore{},
+		version: "v1",
+		push:    func(context.Context) { called = true },
+	}
+	if _, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
+		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if !called {
+		t.Fatal("UpsertSkill did not push after a successful write")
+	}
+
+	// A failed write pushes nothing: the store did not change, so the corpora
+	// the executors already hold still match it.
+	called = false
+	c.st = &fakeSkillStore{upsertErr: errors.New("db is gone")}
+	if _, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
+		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
+	}); err == nil {
+		t.Fatal("upsert unexpectedly succeeded")
+	}
+	if called {
+		t.Error("push fired on a failed upsert")
+	}
+}
+
+func TestConnectSkillsPushesOnSetEnabled(t *testing.T) {
+	called := false
+	c := connectSkills{
+		st:      &fakeSkillStore{},
+		version: "v1",
+		push:    func(context.Context) { called = true },
+	}
+	if err := c.SetSkillEnabled(context.Background(), "rafiki", "a", false); err != nil {
+		t.Fatalf("set enabled: %v", err)
+	}
+	if !called {
+		t.Fatal("SetSkillEnabled did not push after a successful write")
+	}
+}
+
+func TestConnectSkillsToleratesNilPush(t *testing.T) {
+	c := connectSkills{st: &fakeSkillStore{}, version: "v1"}
+	if _, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
+		Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := c.SetSkillEnabled(context.Background(), "rafiki", "a", true); err != nil {
+		t.Fatalf("set enabled: %v", err)
 	}
 }

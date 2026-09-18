@@ -35,6 +35,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/pymodules"
+	"go.graveland.dev/rafiki/pkg/pymodulesdb"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
@@ -485,6 +487,58 @@ func runDaemon(opts runDaemonOpts) error {
 		ctrl.reviewQ = newReviewQueue(pool, prov, catalog)
 		ctrl.reviewQ.start(baseCtx)
 	}
+
+	// The executor pool no longer owns a listener. It is reached at a PATH on
+	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control
+	// plane and the executor link share one port and one certificate — and the
+	// executor link inherits GetCertificate, which its own listener never had
+	// (a cert-manager rotation used to need a pod restart to reach it).
+	var execPool *execpool.Pool
+	if execStore != nil {
+		execPool = execpool.New(execStore)
+		execPool.SetOnLost(ctrl.HandleExecutorLost)
+		ctrl.execPool = execPool
+		ctrl.execPoolConn = execPool
+		// One sweeper for the pool, regardless of how many listeners feed it.
+		// It used to start inside the TLS branch, which was correct only while
+		// that was the sole way in; the unix listener below is the second.
+		execPool.StartSweeper(ctx)
+	}
+
+	// Both pushers are constructed before skill-manager registration so
+	// connectSkills can hold a push callback, and before the executor pool's
+	// on-connect wiring so one callback can serve both.
+	if skillStore != nil && execPool != nil {
+		ctrl.skillPusher = &skillPusher{pool: execPool, store: skillStore, version: version.String()}
+	}
+	var pymoduleStore pymodules.Store
+	if pool != nil {
+		pymoduleStore = pymodulesdb.NewPostgresStore(pool)
+	}
+	if pymoduleStore != nil && execPool != nil {
+		ctrl.pymodulePusher = &pymodulePusher{
+			pool: execPool, store: pymoduleStore, version: version.String(),
+			resolveOwnerID: ctrl.resolveUsernameToUserID,
+		}
+	}
+	if execPool != nil {
+		// An executor that has just connected has an empty or stale tree, so
+		// push immediately. This callback runs on its own goroutine, outside
+		// Pool.mu.
+		execPool.SetOnConnect(func(id string) {
+			if ctrl.skillPusher != nil {
+				if err := ctrl.skillPusher.pushIfEligible(baseCtx, id); err != nil {
+					slog.Warn("skill sync on connect failed", "executor", id, "error", err)
+				}
+			}
+			if ctrl.pymodulePusher != nil {
+				if err := ctrl.pymodulePusher.pushIfEligible(baseCtx, id); err != nil {
+					slog.Warn("pymodule sync on connect failed", "executor", id, "error", err)
+				}
+			}
+		})
+	}
+
 	if face != nil {
 		ctrl.SetProxy(face.URL, face.Token)
 		if face.TokenAuth != nil {
@@ -508,7 +562,16 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
 			if skillStore != nil {
-				face.Control.SetSkillManager(connectSkills{st: skillStore, version: version.String()})
+				// Push-on-write: a skill edit reaches every eligible executor on
+				// the write itself, not on a reconnect or a timer.
+				face.Control.SetSkillManager(connectSkills{
+					st: skillStore, version: version.String(),
+					push: func(ctx context.Context) {
+						if ctrl.skillPusher != nil {
+							ctrl.skillPusher.pushAll(ctx)
+						}
+					},
+				})
 			}
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
@@ -522,39 +585,6 @@ func runDaemon(opts runDaemonOpts) error {
 		// and the cost rollup all see the subagent.
 		face.SetController(ctrl)
 	}
-	// The executor pool no longer owns a listener. It is reached at a PATH on
-	// the shared TLS listener below, upgraded out of HTTP/1.1, so the control
-	// plane and the executor link share one port and one certificate — and the
-	// executor link inherits GetCertificate, which its own listener never had
-	// (a cert-manager rotation used to need a pod restart to reach it).
-	var execPool *execpool.Pool
-	if execStore != nil {
-		execPool = execpool.New(execStore)
-		execPool.SetOnLost(ctrl.HandleExecutorLost)
-		ctrl.execPool = execPool
-		ctrl.execPoolConn = execPool
-		// One sweeper for the pool, regardless of how many listeners feed it.
-		// It used to start inside the TLS branch, which was correct only while
-		// that was the sole way in; the unix listener below is the second.
-		execPool.StartSweeper(ctx)
-	}
-
-	// Push the skill corpus to every claude-capable executor. Only meaningful
-	// when both a database-backed skill store and an executor pool exist; a
-	// daemon without either has nothing to read and nothing to push to.
-	if skillStore != nil && execPool != nil {
-		pusher := &skillPusher{pool: execPool, store: skillStore, version: version.String()}
-		// An executor that has just connected has an empty or stale tree, so
-		// push immediately rather than waiting out the tick. This callback runs
-		// on its own goroutine, outside Pool.mu.
-		execPool.SetOnConnect(func(id string) {
-			if err := pusher.pushIfEligible(baseCtx, id); err != nil {
-				slog.Warn("skill sync on connect failed", "executor", id, "error", err)
-			}
-		})
-		go pusher.Run(baseCtx)
-	}
-
 	// Daraja pool: accepts per-child reverse-dialled connections.
 	var darajaPool *darajapool.Pool
 	if execStore != nil {
