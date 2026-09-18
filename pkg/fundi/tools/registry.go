@@ -322,6 +322,20 @@ type ToolOpts struct {
 	// pymodule record looks like, only that calling this produces text.
 	// nil means no pymodule store is configured.
 	PyModulesInventory func(ctx context.Context) (string, error)
+
+	// PyModuleList, when non-nil, gives this caller the pymodule_list tool on
+	// the MCP face -- fundi never sets this field; it renders the same
+	// inventory as a dynamic skill instead (PyModulesInventory above). nil
+	// means decline, same rule as PyModules.
+	PyModuleList PyModuleLister
+
+	// PyModuleExecutor, when non-nil, gives an MCP-connected claude child the
+	// pymodule_run tool, proxied to that child's own bound executor. nil
+	// means either this daemon has no executor pool at all, or this
+	// particular caller has no live executor binding -- see mcp_face.go's
+	// getServer for which. Never set by fundi: fundi's own pymodule_run
+	// executes via its own tiered tool-routing and does not use this field.
+	PyModuleExecutor PyModuleExecutor
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the
