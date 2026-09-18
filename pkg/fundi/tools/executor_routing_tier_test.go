@@ -40,7 +40,7 @@ func TestWorkspaceTierMembership(t *testing.T) {
 		"edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
-		"read", "write",
+		"pymodule_run", "read", "write",
 	}
 	got := WorkspaceTools()
 	if !slices.Equal(got, want) {
@@ -57,7 +57,7 @@ func TestRoutingLists(t *testing.T) {
 		"bash", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
-		"read", "write",
+		"pymodule_run", "read", "write",
 	}
 	if got := ExecutorLocalTools(); !slices.Equal(got, wantLocal) {
 		t.Errorf("ExecutorLocalTools() = %v, want %v", got, wantLocal)
@@ -68,7 +68,7 @@ func TestRoutingLists(t *testing.T) {
 		"edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
-		"read", "write",
+		"pymodule_run", "read", "write",
 	}
 	if got := RoutedToExecutor(); !slices.Equal(got, wantRouted) {
 		t.Errorf("RoutedToExecutor() = %v, want %v", got, wantRouted)

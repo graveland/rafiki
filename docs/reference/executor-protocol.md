@@ -188,7 +188,7 @@ connection — see [AdminService: Launch and Reap](#adminservice-launch-and-reap
 ```
 Describe() → { executorId, platform, roots[], concurrency, isolation,
                workspaceMode, tools[], version, selfReportedLabels,
-               proxies[], launchKinds[] }
+               proxies[], launchKinds[], skillsSync, pymodulesSync }
 ```
 
 Unary. Called at startup and periodically to discover the executor's
@@ -211,7 +211,9 @@ anyone. Both default to EMPTY: with no flag the executor forwards nothing and
 hosts nothing. A machine volunteering to host other people's children because
 someone forgot a flag is the self-report-gates-placement shape the isolation and
 workspace_mode rules exist to forbid — unlike those two fields, which the
-executor does not report at all.
+executor does not report at all. `skillsSync` and `pymodulesSync` self-report
+the same way (see their Sync sections): each only narrows whether the daemon
+may push that corpus here, and both default to off.
 
 ### Health
 
@@ -436,6 +438,52 @@ the implication; the enforcement on the RPC remains regardless, because a
 daemon that ignored a `false` here would cost an unexpected write to the
 operator's machine, which is a worse failure than the failed launch a wrong
 `launchKinds` entry buys.
+
+### SyncPyModules
+
+```
+SyncPyModules(version, modules[{name, code}])
+  → { written, pruned }
+```
+
+Unary. Delivers ONE owner's pymodule corpus to the executor's disposable cache
+directory. Unlike SyncSkills this is owner-scoped at the source: the daemon
+resolves the executor's own `Labels["owner"]` username to a user id and sends
+only that owner's latest version of each saved module — an executor with no
+owner label, or one whose username does not resolve, receives nothing at all.
+Each module name is a bare Python identifier and becomes `<name>.py` — flat
+files, no per-namespace subtree, no plugin manifest, no frontmatter rendering;
+the payload has no namespace concept because a pymodule is a single file a
+script imports by name.
+
+**The whole owner's corpus, every time.** `modules` is the complete set for
+this owner, and a synced file absent from it is pruned — same wholesale
+replacement reasoning as SyncSkills. Zero modules is a legitimate sync (an
+owner who has saved nothing yet): it empties the owner's cache directory,
+which is correct, not data loss. Each file is written to a sibling temp file
+and renamed into place, and a file whose content is byte-identical to the
+synced corpus is left alone, so repeated syncs stay quiet.
+
+**The target is `<paths.CacheDir()>/pymodules`, marked with
+`.rafiki-managed`.** The cache directory is documented as disposable,
+regenerable data — unlike the skills directory there is no third-party contract
+pinning the location, so it lives under rafiki's own directory. The root is
+marked before first use and an existing unmarked directory is refused with
+`CodeFailedPrecondition` rather than adopted, so rafiki never writes into — and
+its prune never sweeps — a directory it did not create. Names are validated as
+path segments at both the write and the delete site, same rule as skills.
+
+**Opt-in per machine, and `pymodules_sync` on `DescribeResponse` is
+self-reported** exactly like `skills_sync`: it only ever narrows what the
+executor will do, an executor answers `CodePermissionDenied` when the option is
+off, and a daemon reading `false` from `Describe` never sends a corpus. The
+option is on when the operator passed `--pymodules-sync` or set
+`RAFIKI_EXECUTOR_PYMODULES_SYNC`. There is NO launch-kind implication — unlike
+skills there is no single launch kind pymodules correlate with, so an operator
+opts in explicitly; `--pymodules-sync=false` still refuses explicitly. The
+enforcement on the RPC remains regardless, for the same reason as skills: a
+daemon that ignored a `false` here would cost an unexpected write to the
+operator's machine.
 
 ### Cancel
 
