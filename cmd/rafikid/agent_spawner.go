@@ -326,6 +326,16 @@ func (s *controllerSpawner) SetBudget(ctx context.Context, childID string, maxCo
 // from the binding — never from spec — so an agent cannot spawn into another
 // subtree.
 //
+// The owner identity rides from the caller's own stored row, not from an
+// empty identity: a user credential's spawn stamps owner_user_id directly,
+// while an agent's spawn would otherwise leave every descendant's row
+// unattributed — which is what made an agent-spawned child's own MCP secret
+// unresolvable (ChildForMCPToken refuses an unowned row) and its fundi
+// conversation unattributed. The subtree belongs to one user; each spawner
+// hands its row's id down, so the stamp recurses. An anonymous lineage (no
+// owner anywhere) stays empty, and attestOwner's display-only owner LABEL
+// still comes from the parent chain for parented spawns regardless.
+//
 // The task assignment rides along INSIDE SpawnRequest rather than being a
 // follow-up Assign call. Two reasons: a separate call leaves a window where a
 // row is assigned to a child that has not started, and a spawn refused by a
@@ -363,7 +373,11 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		ExecutorSelector:      spec.ExecutorSelector,
 		WorkspaceMode:         spec.WorkspaceMode,
 	}
-	res, err := s.c.Spawn(ctx, req, users.Identity{})
+	// The owner id is the caller's own row's, read from the same fetch that
+	// supplied Cwd: stored state, never a tool argument. An empty id is the
+	// anonymous-chain shape and stamps nothing, exactly as an empty identity
+	// used to.
+	res, err := s.c.Spawn(ctx, req, users.Identity{UserID: self.OwnerUserID})
 	if err != nil {
 		return tools.AgentInfo{}, err
 	}

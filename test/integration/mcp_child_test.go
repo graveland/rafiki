@@ -421,6 +421,63 @@ func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 	}
 }
 
+// TestMCPGrandchildTokenReachesTheAgentControlSurface is the second-hop twin
+// of TestMCPChildTokenReachesTheAgentControlSurface: the child spawned BY
+// another child holds a per-child MCP secret too, but its childstore row
+// carries no OwnerUserID — the controller spawner spawns with an empty
+// identity, and only the display-only owner LABEL propagates down the
+// lineage — so the secret's lookup must find the owner through the parent
+// chain. Before that walk, every agent-spawned descendant's MCP call answered
+// 401 ("unknown token") even though the daemon minted and delivered exactly
+// the credential its --mcp-config references: the top-most agent of a
+// coordinator tree worked, and everything beneath it could not reach the
+// surface at all.
+func TestMCPGrandchildTokenReachesTheAgentControlSurface(t *testing.T) {
+	t.Parallel()
+	d, dumps := bootMCPChildDaemon(t)
+	token := d.createMCPUser(t)
+	userSess := mcpConnect(t, d.proxyURL, token)
+
+	// The top-level child is spawned through the owner's user session, so its
+	// row records OwnerUserID and its own secret resolves (the first-hop case
+	// TestMCPChildTokenReachesTheAgentControlSurface pins). This test is about
+	// the second hop: A spawning its own claude child through its child-token
+	// session — the coordinator shape — and that child using ITS secret.
+	childA := mcpSpawnClaudeChild(t, userSess, "mcp-gc-top")
+	sessA := mcpConnect(t, d.proxyURL, waitClaudeDump(t, d, dumps, childA).envValue("RAFIKI_MCP_TOKEN"))
+	grandchild := mcpSpawnClaudeChild(t, sessA, "mcp-gc-under")
+
+	tokGC := waitClaudeDump(t, d, dumps, grandchild).envValue("RAFIKI_MCP_TOKEN")
+	if tokGC == "" {
+		t.Fatal("the agent-spawned grandchild's environment carries no RAFIKI_MCP_TOKEN; the spawn path delivered no per-child secret")
+	}
+	if tokGC == token {
+		t.Fatal("the grandchild's per-child secret must not be the owner's user token")
+	}
+
+	// Headline: the grandchild's own secret establishes a session and reaches
+	// the full agent-control tool set. The failure this guards used to be a
+	// 401 on the initialize itself.
+	sessGC := mcpConnect(t, d.proxyURL, tokGC)
+	tools, err := sessGC.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("grandchild-token ListTools: %v", err)
+	}
+	var got []string
+	for _, tl := range tools.Tools {
+		got = append(got, tl.Name)
+	}
+	mcpAssertExactToolSet(t, "grandchild-token session", got)
+
+	// The spawner bound to the grandchild's secret is scoped to ITS position:
+	// agent_list shows its own subtree — empty, it has spawned nothing — and
+	// must not leak its parent or anything above it.
+	listGC := mcpOK(t, sessGC, "agent_list", nil)
+	if strings.Contains(listGC, childA) {
+		t.Fatalf("grandchild-token agent_list leaked its own parent %s — the binding is not scoped to the grandchild's position; output:\n%s", childA, listGC)
+	}
+}
+
 // TestMCPChildKillNonDescendantRefused: two sibling children; A's secret
 // calling agent_kill on B is refused — the controller spawner authorizes by
 // position in the tree, and a sibling is not a descendant. The positive

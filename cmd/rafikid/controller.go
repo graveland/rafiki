@@ -717,17 +717,38 @@ func (c *Controller) Get(childID string) (childstore.Snapshot, bool) {
 }
 
 // OwnerUserIDForChild implements server.ChildOwnerLookup: it lets the proxy
-// face attribute a child-secret-authenticated request to the user who
-// actually spawned that child, via the request's X-Rafiki-Session header. See
-// docs/plans/2026-09-05-daraja-proxy-identity-design.md, Piece 2. ok is false
-// for an unknown childID or one with no recorded owner (an anonymous spawn) —
-// the caller then falls back to the anonymous identity.
+// face attribute a child-secret-authenticated request to the user whose
+// SUBTREE the child belongs to. Every child is stamped at spawn with its
+// subtree's owner — a user credential's spawn carries the id, and the
+// controller spawner hands its own row's id down (agent_spawner.go) — so the
+// common case resolves on the child's own row. The parent-chain walk exists
+// for rows written before that inheritance landed: resume preserves the
+// stored row without backfilling it, so a child spawned by an agent under an
+// older daemon keeps an empty id for its whole life. Only a lineage with NO
+// owner anywhere — the anonymous local-unix-socket spawn shape — refuses,
+// falling back to the anonymous identity as before. The walk is in-memory
+// childstore hops, never a database round trip: it runs per request on the
+// attribution face.
 func (c *Controller) OwnerUserIDForChild(childID string) (string, bool) {
-	snap, ok := c.st.Get(childID)
-	if !ok || snap.OwnerUserID == "" {
-		return "", false
+	cur := childID
+	// The bound is a cycle guard, not a depth limit: ParentOf links only point
+	// at earlier children, so the chain terminates. hopsTo bounds the same
+	// walk the same way.
+	for hops := 0; hops < 64; hops++ {
+		snap, ok := c.st.Get(cur)
+		if !ok {
+			return "", false
+		}
+		if snap.OwnerUserID != "" {
+			return snap.OwnerUserID, true
+		}
+		parent, ok := c.st.ParentOf(cur)
+		if !ok || parent == "" {
+			return "", false
+		}
+		cur = parent
 	}
-	return snap.OwnerUserID, true
+	return "", false
 }
 
 // mintMCPToken returns the per-child MCP secret for childID, minting one on
@@ -819,9 +840,11 @@ func (c *Controller) sweepMCPTokensIfDue() {
 }
 
 // ChildForMCPToken implements server.ChildTokenLookup: it resolves a per-child
-// MCP secret to the child that holds it and that child's owner. ok is false
-// for an unknown secret, a child that has exited, or a child with no recorded
-// owner (the anonymous-spawn case OwnerUserIDForChild also refuses).
+// MCP secret to the child that holds it and that child's owner — the row's
+// own id, or the nearest ancestor's when the row predates spawn-time
+// inheritance (see OwnerUserIDForChild). ok is false for an unknown secret, a
+// child that has exited, or a lineage with no recorded owner (the
+// anonymous-spawn case OwnerUserIDForChild also refuses).
 func (c *Controller) ChildForMCPToken(token string) (childID, ownerUserID string, ok bool) {
 	c.mcpTokensMu.RLock()
 	childID, known := c.mcpTokens[token]

@@ -36,9 +36,10 @@ func isWorkingStatus(s protocol.Status) bool {
 
 // notifySubagentSettled announces that childID settled. It fans out to every
 // live MCP session of the child's user (notifyMCPSettled, before the gate —
-// an MCP caller is not a rafiki child, has no inbox, and every MCP-spawned
-// child is top-level), then pushes one fragment into the child's PARENT's
-// event buffer, keyed on childID.
+// an MCP caller has no inbox, so the buffer push cannot reach it; the fan-out
+// is keyed to TOP-LEVEL rows, since a child-credential caller's spawns are
+// parented and reach it through the gate below), then pushes one fragment
+// into the child's PARENT's event buffer, keyed on childID.
 //
 // excludeMCPUser omits that user's sessions from the fan-out: the settlement
 // path passes it when the child was killed by an MCP caller of that same

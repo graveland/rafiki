@@ -416,13 +416,15 @@ func TestMCPNotifyReturnsWhileASendIsStuck(t *testing.T) {
 	release()
 }
 
-// TestMCPNotifySkipsADescendantOfAnMCPChild pins the owner-propagation truth:
-// OwnerUserID is stamped only from the identity argument at fresh spawn, and
-// the child-bound spawner passes an empty identity, so a descendant of an
-// MCP-spawned child carries an EMPTY id — only the display-only
-// Labels["owner"] username propagates, via attestOwner — and gets no MCP
-// fan-out. Its settlement reaches the MCP caller's own child (its parent)
-// through the parent-gated inbox push instead.
+// TestMCPNotifySkipsADescendantOfAnMCPChild pins the settlement routing:
+// a PARENTED child's settlement belongs to its spawner — the parent-gated
+// event-buffer push delivers it, and the MCP caller reads its subtree through
+// agent_list — so it never fans out to the owner's MCP sessions. The skip
+// keys on parented-ness, NOT on owner emptiness: descendants carry their
+// subtree's owner id since the controller spawner hands its own row's id
+// down, and an owner-keyed skip would fan a whole agent subtree out to the
+// owner's sessions on every worker settle. Both descendant shapes are
+// pinned: the unowned legacy row and the stamped current-row shape.
 func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 	prev := mcpSettlements
 	reg := newMCPSessions()
@@ -438,9 +440,20 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 		Status: protocol.StatusStreaming, StartedAt: time.Now(),
 	})
 	// The descendant exactly as controllerSpawner leaves it: parent labels
-	// set, OwnerUserID empty.
+	// set, OwnerUserID inherited from the spawner's own row.
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_mcp_desc", Name: "descendant",
+		OwnerUserID: "u-op",
+		Status:      protocol.StatusStreaming, StartedAt: time.Now(),
+		Labels: map[string]string{
+			childstore.LabelParent: "c_mcp_top",
+			childstore.LabelRoot:   "c_mcp_top",
+		},
+	})
+	// The legacy shape: a row written before the inheritance landed, carrying
+	// no owner id at all. The parented predicate must skip it identically.
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_mcp_desc_legacy", Name: "legacy descendant",
 		Status: protocol.StatusStreaming, StartedAt: time.Now(),
 		Labels: map[string]string{
 			childstore.LabelParent: "c_mcp_top",
@@ -449,9 +462,12 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 	})
 
 	c.notifySubagentSettled("c_mcp_desc", "exited", "")
-
 	if got := assertSilence(t, ss.got); got != "" {
-		t.Errorf("a descendant must not fan out to the caller's session; got %q", got)
+		t.Errorf("a stamped descendant must not fan out to the caller's session; got %q", got)
+	}
+	c.notifySubagentSettled("c_mcp_desc_legacy", "exited", "")
+	if got := assertSilence(t, ss.got); got != "" {
+		t.Errorf("an unowned descendant must not fan out to the caller's session; got %q", got)
 	}
 }
 

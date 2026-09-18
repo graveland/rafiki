@@ -414,7 +414,13 @@ provenances are entitled to the surface: `ProvenanceUser`, a real user token
 per-child secret minted at spawn by the Controller (`mintMCPToken`, delivered
 as the child's `RAFIKI_MCP_TOKEN`) and resolved through `UserTokenAuth`'s
 `ChildTokenLookup` to `Identity{UserID: owner, ChildID: child, Via:
-ProvenanceChildToken}` — never cached, dying with the child. Any other
+ProvenanceChildToken}` — never cached, dying with the child. The owner is
+the subtree's: every child is stamped at spawn with it (a user credential's
+spawn carries the id; the controller spawner hands its own row's id down),
+and `OwnerUserIDForChild` walks the parent chain only for rows written
+before that inheritance landed — resume preserves a stored row without
+backfilling it — while a lineage with no owner anywhere (an anonymous
+local-socket spawn) refuses. Any other
 provenance gets **403**: the credential authenticated and is not entitled to
 agent control — a status an MCP client can read, never a server that would
 render the refusal as an empty tool list.

@@ -158,32 +158,26 @@ var mcpSettlements = newMCPSessions()
 //
 // An MCP caller is not a rafiki child and has no inbox, so the existing
 // parent-gated push cannot reach it. The caller that spawned the child is
-// simply not in the lineage: a user credential spawns top-level children,
-// and since the child-token face landed, a CHILD credential spawns parented
-// children whose OwnerUserID is empty (the controller spawner passes an
-// empty identity) — both fan out to nobody here, and a child-caller's
-// descendants reach it through agent_list instead. This fan-out runs BEFORE
-// the parent gate, independently of lineage and of the event buffer.
+// simply not in the lineage: a user credential spawns top-level children and
+// its own MCP session is the audience, so a TOP-LEVEL child's settlement fans
+// out to every session of its owner. A PARENTED child's settlement belongs to
+// its spawner instead: the parent-gated push (notifySubagentSettled) delivers
+// the fragment into the parent's event buffer, and the caller reads its
+// subtree through agent_list. The routing is keyed on parented-ness, never on
+// owner emptiness — descendants carry their subtree's owner id since the
+// controller spawner hands its own row's id down (agent_spawner.go), and an
+// owner-keyed skip would fan a whole agent subtree out to the owner's
+// sessions on every worker settle.
 //
 // The owner comes from STORED STATE — childstore.Snapshot.OwnerUserID, the
 // conversations.child.owner_user_id column — never from an argument: this
 // runs on the child's own settle path, and a caller-supplied id would let one
 // child steer another user's notifications. OwnerUserID is the users.id (the
-// user-bound spawner passes the authenticated identity to Controller.Spawn),
-// so no username→id resolution happens here. Empty means an anonymous spawn
+// user-bound spawner passes the authenticated identity to Controller.Spawn;
+// an agent-bound spawner inherits its own row's), so no username→id
+// resolution happens here. Empty means an anonymous spawn
 // (e.g. the local unix socket), which owns no MCP session; that case is
 // skipped.
-//
-// A DESCENDANT of an MCP-spawned child is also skipped, and that is the
-// designed shape, not a gap: OwnerUserID is stamped only from the identity
-// argument at fresh spawn (userSpawner passes the authenticated user; the
-// child-bound controllerSpawner passes users.Identity{}), and nothing
-// inherits it down the lineage — only the display-only Labels["owner"]
-// username propagates, via attestOwner. The record round-trip
-// (childstoredb record ⇄ SessionFromRecord) preserves the empty id across
-// resume. A descendant's settlement reaches the MCP caller's own child — its
-// parent — through the parent-gated inbox push instead, and the caller sees
-// the whole subtree through agent_list.
 //
 // excludeUser removes that user's sessions from the fan-out, for a child the
 // user's own agent_kill just killed (the self-kill guard's MCP half, see
@@ -199,6 +193,11 @@ func (c *Controller) notifyMCPSettled(childID, reason, excludeUser string) {
 	}
 	snap, ok := c.st.Get(childID)
 	if !ok {
+		return
+	}
+	// Parented first: a descendant of an agent is its spawner's news, not the
+	// owner's sessions' — see the doc comment for the routing division.
+	if parent, hasParent := c.st.ParentOf(childID); hasParent && parent != "" {
 		return
 	}
 	if snap.OwnerUserID == "" {
