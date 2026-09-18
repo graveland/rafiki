@@ -574,6 +574,9 @@ func runDaemon(opts runDaemonOpts) error {
 					},
 				})
 			}
+			if ctrl.pymoduleStore != nil {
+				face.Control.SetPymoduleManager(connectPyModules{c: ctrl})
+			}
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})
 			}
