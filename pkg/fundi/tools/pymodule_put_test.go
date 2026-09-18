@@ -12,9 +12,11 @@ import (
 // fakePyModuleStore records every Put call so a test can assert the tool
 // called the store (or, for a rejected input, that it did not).
 type fakePyModuleStore struct {
-	puts   [][3]string // name, code, description, in call order
-	nextID int64
-	putErr error
+	puts    [][3]string // name, code, description, in call order
+	deletes []string    // names Delete was called with, in call order
+	nextID  int64
+	putErr  error
+	delErr  error
 }
 
 func (s *fakePyModuleStore) Put(_ context.Context, name, code, description string) (int64, error) {

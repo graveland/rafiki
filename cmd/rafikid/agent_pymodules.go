@@ -34,6 +34,19 @@ func (w *pymoduleWriter) Put(ctx context.Context, name, code, description string
 	return rec.ID, nil
 }
 
+// Delete soft-deletes the module under this writer's bound owner and pushes
+// the owner's corpus so executors prune it promptly. Nothing is pushed when
+// the delete reports not-found -- the corpus did not change.
+func (w *pymoduleWriter) Delete(ctx context.Context, name string) error {
+	if err := w.ctrl.pymoduleStore.Delete(ctx, w.ownerUserID, name); err != nil {
+		return err
+	}
+	if w.ctrl.pymodulePusher != nil {
+		w.ctrl.pymodulePusher.pushAll(ctx)
+	}
+	return nil
+}
+
 // pymoduleInventory renders ownerUserID's saved modules as "name —
 // description" lines, one per line, for the dynamic skill body. Returns a
 // clear "nothing saved yet" line rather than an empty string, since an empty

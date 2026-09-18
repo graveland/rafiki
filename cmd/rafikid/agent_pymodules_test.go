@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -87,6 +88,84 @@ func TestNewControllerPyModuleWriterPassesEmptyOwnerThrough(t *testing.T) {
 	}
 }
 
+// Delete makes the in-memory store behave like the real one: the latest live
+// row for (ownerUserID, name) disappears, an unknown or already-deleted name
+// reports pymodules.ErrNotFound, and every call is recorded so a test can
+// assert which owner a writer bound its delete to. It extends the fake defined
+// in pymodulesync_test.go; only the method lives here.
+func (s *fakePymoduleStore) Delete(_ context.Context, ownerUserID, name string) error {
+	s.deleted = append(s.deleted, [2]string{ownerUserID, name})
+	rows := s.rows[ownerUserID]
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Name == name {
+			s.rows[ownerUserID] = append(rows[:i:i], rows[i+1:]...)
+			return nil
+		}
+	}
+	return pymodules.ErrNotFound
+}
+
+// TestPymoduleDeleteTriggersOwnerScopedPush covers the delete write path: a
+// bound writer's Delete lands in the store under ITS owner, then pushAll fans
+// the pruned corpus out, so the next SyncPyModules for alice's executor no
+// longer carries the deleted module and bob's payload never did. Assertions
+// are on actual SyncPyModules RPC payloads, not on pusher mocks.
+func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	if _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// The put's fan-out reached both eligible executors.
+	if len(f.client.requests) != 2 {
+		t.Fatalf("after Put, SyncPyModules requests = %d, want 2", len(f.client.requests))
+	}
+
+	before := len(f.client.requests)
+	if err := w.Delete(context.Background(), "alice_plot"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// The delete reached the store under the writer's bound owner.
+	if len(f.store.deleted) != 1 || f.store.deleted[0] != [2]string{"u_alice", "alice_plot"} {
+		t.Fatalf("store Delete calls = %v, want exactly [{u_alice alice_plot}]", f.store.deleted)
+	}
+	// The delete pushed the pruned corpus: one request per eligible executor.
+	if len(f.client.requests) != before+2 {
+		t.Fatalf("after Delete, SyncPyModules requests = %d, want %d (exec-alice and exec-bob)", len(f.client.requests), before+2)
+	}
+	// alice's next payload has dropped the deleted module and keeps the rest.
+	if aliceNames := moduleNames(f.client.requests[before]); slices.Contains(aliceNames, "alice_plot") || !slices.Contains(aliceNames, "alice_chart") {
+		t.Errorf("alice's post-delete push = %v, want [alice_chart] without alice_plot", aliceNames)
+	}
+	// bob's payload (same fan-out) never contained alice's module.
+	if bobNames := moduleNames(f.client.requests[before+1]); slices.Contains(bobNames, "alice_plot") || !slices.Contains(bobNames, "bob_util") {
+		t.Errorf("bob's post-delete push = %v, want [bob_util] only", bobNames)
+	}
+}
+
+// A failed delete must not push: the corpus did not change, so the fake
+// client's request count is unchanged from before the delete.
+func TestPymoduleDeleteNotFoundSkipsPush(t *testing.T) {
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	before := len(f.client.requests)
+	err := w.Delete(context.Background(), "no_such_mod")
+	if err == nil {
+		t.Fatal("Delete of an unknown name = nil error, want not-found")
+	}
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Errorf("Delete error = %v, want it to wrap pymodules.ErrNotFound", err)
+	}
+	if len(f.client.requests) != before {
+		t.Errorf("SyncPyModules requests = %d, want unchanged (%d): a failed delete must not push", len(f.client.requests), before)
+	}
+}
+
+// TestPymoduleInventoryRendersSavedModules renders the dynamic skill body.
 func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 	// A fresh store, not the shared fixture: the fixture pre-seeds rows, and
 	// the empty-store case needs an owner with nothing saved.

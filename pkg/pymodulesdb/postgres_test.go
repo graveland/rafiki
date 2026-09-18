@@ -4,6 +4,7 @@ package pymodulesdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -209,5 +210,193 @@ func TestUnattributedRowsShareOneBucket(t *testing.T) {
 	}
 	if !codes["code one"] || !codes["code two"] || codes["code three"] {
 		t.Fatalf("got %+v, want code one and code two, never code three", rows)
+	}
+}
+
+// Delete appends a tombstone (an INSERT, deleted_at set): the name leaves
+// List, and a later Put appends a live row that resurrects the name with the
+// new code. History is kept the whole time.
+func TestDeleteTombstonesAndReputRestores(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "del-reput")
+
+	if _, err := st.Put(ctx, owner, "helpers", "A", "v1"); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	if _, err := st.Put(ctx, owner, "helpers", "B", "v2"); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	if err := st.Delete(ctx, owner, "helpers"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	rows, err := st.List(ctx, owner)
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("after delete got %d rows, want 0: %+v", len(rows), rows)
+	}
+
+	if _, err := st.Put(ctx, owner, "helpers", "C", "v3"); err != nil {
+		t.Fatalf("re-put: %v", err)
+	}
+	rows, err = st.List(ctx, owner)
+	if err != nil {
+		t.Fatalf("list after re-put: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Code != "C" {
+		t.Fatalf("after re-put got %+v, want exactly one row with code C", rows)
+	}
+}
+
+// The tombstone must hide every version of a deleted name, not just the latest
+// one: with the tombstone filter inside the DISTINCT ON subquery, List would
+// resurface v1 (code "A") as the surviving latest-live row and this test would
+// see one row instead of zero.
+func TestDeleteDoesNotResurrectOlderVersions(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "del-noresurrect")
+
+	if _, err := st.Put(ctx, owner, "helpers", "A", "v1"); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	if _, err := st.Put(ctx, owner, "helpers", "B", "v2"); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	if err := st.Delete(ctx, owner, "helpers"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	rows, err := st.List(ctx, owner)
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("List after delete returned %+v, want zero rows: the tombstone must hide older versions, not expose v1", rows)
+	}
+}
+
+// A delete of a name with zero rows reports ErrNotFound and inserts nothing:
+// no tombstone for a module that never existed.
+func TestDeleteNotFoundForUnknownName(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "del-unknown")
+
+	err := st.Delete(ctx, owner, "ghost_mod")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Fatalf("Delete on unknown name = %v, want ErrNotFound", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.pymodules
+		 WHERE owner_user_id IS NOT DISTINCT FROM $1 AND name = $2`,
+		ownerArg(owner), "ghost_mod").Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("row count after failed delete = %d, want 0: nothing may be inserted", n)
+	}
+}
+
+// Deleting an already-deleted name reports ErrNotFound rather than stacking a
+// second tombstone: the probe reads the latest row overall, tombstones
+// included, and the total row count stays at v1 + one tombstone.
+func TestDeleteNotFoundWhenAlreadyDeleted(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := newOwner(t, pool, "del-twice")
+
+	if _, err := st.Put(ctx, owner, "helpers", "A", "v1"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := st.Delete(ctx, owner, "helpers"); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	err := st.Delete(ctx, owner, "helpers")
+	if !errors.Is(err, pymodules.ErrNotFound) {
+		t.Fatalf("second delete = %v, want ErrNotFound", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.pymodules
+		 WHERE owner_user_id IS NOT DISTINCT FROM $1 AND name = $2`,
+		ownerArg(owner), "helpers").Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("row count = %d, want 2 (v1 + tombstone): the second delete must not stack another tombstone", n)
+	}
+}
+
+// Delete is owner-scoped like every other operation: A deleting "shared"
+// must not touch B's independent copy.
+func TestDeleteIsOwnerScoped(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	ownerA := newOwner(t, pool, "del-owner-a")
+	ownerB := newOwner(t, pool, "del-owner-b")
+
+	if _, err := st.Put(ctx, ownerA, "shared", "code a", "a's copy"); err != nil {
+		t.Fatalf("put a: %v", err)
+	}
+	if _, err := st.Put(ctx, ownerB, "shared", "code b", "b's copy"); err != nil {
+		t.Fatalf("put b: %v", err)
+	}
+
+	if err := st.Delete(ctx, ownerA, "shared"); err != nil {
+		t.Fatalf("delete a: %v", err)
+	}
+	aRows, err := st.List(ctx, ownerA)
+	if err != nil {
+		t.Fatalf("list a: %v", err)
+	}
+	if len(aRows) != 0 {
+		t.Fatalf("a's list = %+v, want 0 rows after a's delete", aRows)
+	}
+	bRows, err := st.List(ctx, ownerB)
+	if err != nil {
+		t.Fatalf("list b: %v", err)
+	}
+	if len(bRows) != 1 || bRows[0].Name != "shared" || bRows[0].Code != "code b" {
+		t.Fatalf("b's list = %+v, want exactly b's shared copy with code b", bRows)
+	}
+	// B's copy is independent: B's own delete succeeds too.
+	if err := st.Delete(ctx, ownerB, "shared"); err != nil {
+		t.Fatalf("delete b: %v", err)
+	}
+}
+
+// ownerUserID "" is the one shared unattributed bucket: Delete("") tombstones
+// only an unattributed row, and an attributed module is untouched.
+func TestDeleteUnattributedBucket(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	attributed := newOwner(t, pool, "del-unattr")
+
+	if _, err := st.Put(ctx, "", "mine", "code mine", "unattributed"); err != nil {
+		t.Fatalf("put unattributed: %v", err)
+	}
+	if _, err := st.Put(ctx, attributed, "theirs", "code theirs", "attributed"); err != nil {
+		t.Fatalf("put attributed: %v", err)
+	}
+
+	if err := st.Delete(ctx, "", "mine"); err != nil {
+		t.Fatalf("delete unattributed: %v", err)
+	}
+	rows, err := st.List(ctx, "")
+	if err != nil {
+		t.Fatalf("list unattributed: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("unattributed list = %+v, want 0 rows after the delete", rows)
+	}
+	attrRows, err := st.List(ctx, attributed)
+	if err != nil {
+		t.Fatalf("list attributed: %v", err)
+	}
+	if len(attrRows) != 1 || attrRows[0].Name != "theirs" {
+		t.Fatalf("attributed list = %+v, want exactly theirs: the delete must not touch it", attrRows)
 	}
 }

@@ -31,13 +31,20 @@ type Record struct {
 // pgx-free.
 type Store interface {
 	// Put always inserts a new row -- nothing is ever updated or deleted.
-	// ownerUserID empty means unattributed.
+	// ownerUserID empty means unattributed. A delete is a new tombstone row,
+	// never an update.
 	Put(ctx context.Context, ownerUserID, name, code, description string) (Record, error)
 
 	// List returns the latest row per name for ownerUserID (MAX(id) per
 	// name), ordered by name. ownerUserID empty returns only OTHER
 	// unattributed rows -- never another owner's, and never every owner's.
 	List(ctx context.Context, ownerUserID string) ([]Record, error)
+
+	// Delete appends a tombstone for the latest live row of name. Append-only:
+	// nothing is updated or deleted, so history is kept and a later Put under
+	// the same name resurrects it. Returns ErrNotFound when no live row exists
+	// (unknown name or already deleted) -- nothing is inserted in that case.
+	Delete(ctx context.Context, ownerUserID string, name string) error
 }
 
 // validNameRe is deliberately a bare Python identifier, not just a safe path

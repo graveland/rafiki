@@ -20,8 +20,9 @@ import (
 // of EVERY List call, in order, so a test can assert the pusher asked for one
 // owner's rows and nobody else's.
 type fakePymoduleStore struct {
-	rows   map[string][]pymodules.Record
-	listed []string
+	rows    map[string][]pymodules.Record
+	listed  []string
+	deleted [][2]string // Delete calls as {ownerUserID, name}, in call order
 }
 
 func (s *fakePymoduleStore) Put(_ context.Context, ownerUserID, name, code, description string) (pymodules.Record, error) {
