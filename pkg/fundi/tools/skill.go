@@ -58,15 +58,17 @@ func (SkillBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		names:          names,
 		remoteBody:     opts.RemoteSkillBody,
 		inlineBody:     opts.InlineSkillBody,
+		dynamicBody:    opts.PyModulesInventory,
 	}, nil
 }
 
 type skillTool struct {
 	SkillBlueprint
-	byName     map[string]skillspkg.SkillMeta
-	names      []string
-	remoteBody func(ctx context.Context, name string) (body, dir string, err error)
-	inlineBody func(ctx context.Context, namespace, name string) (string, error)
+	byName      map[string]skillspkg.SkillMeta
+	names       []string
+	remoteBody  func(ctx context.Context, name string) (body, dir string, err error)
+	inlineBody  func(ctx context.Context, namespace, name string) (string, error)
+	dynamicBody func(ctx context.Context) (string, error)
 }
 
 func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -81,6 +83,19 @@ func (st *skillTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 	s, ok := st.byName[in.Skill]
 	if !ok {
 		return ToolResult{}, fmt.Errorf("skill: unknown skill %q; available skills: %s", in.Skill, strings.Join(st.names, ", "))
+	}
+
+	// Dynamic takes priority over Inline/Remote: a dynamic skill is generated
+	// fresh on every call and has no Inline/Remote content to fall through to.
+	if s.Dynamic {
+		if st.dynamicBody == nil {
+			return ToolResult{}, fmt.Errorf("skill: %q is served from this daemon's store, which is unavailable", in.Skill)
+		}
+		body, err := st.dynamicBody(ctx)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("skill: %w", err)
+		}
+		return NewTextResult(body), nil
 	}
 
 	if s.Inline {

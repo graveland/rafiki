@@ -305,6 +305,23 @@ type ToolOpts struct {
 	// nil means no conversation-insights source is configured (a DB-less
 	// daemon), matching Quota's degrade rule.
 	Conversations ConversationReader
+
+	// PyModules, when non-nil, gives this agent the pymodule_put tool --
+	// saving a reusable Python snippet to its own owner-scoped store. nil
+	// means no pymodule store is configured (a DB-less daemon), same
+	// nil-means-decline rule as Quota/Conversations. Bound to ONE owner at
+	// construction, same reasoning as Agents/ConversationReader: no method
+	// takes a caller-supplied identity, so a tool argument can never name a
+	// different owner.
+	PyModules PyModuleStore
+
+	// PyModulesInventory, when non-nil, renders the calling child's saved
+	// pymodule names and descriptions as the body of the dynamic
+	// "rafiki:python-modules" skill. A function rather than exposing the
+	// store directly to skillTool: skill.go has no business knowing what a
+	// pymodule record looks like, only that calling this produces text.
+	// nil means no pymodule store is configured.
+	PyModulesInventory func(ctx context.Context) (string, error)
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the

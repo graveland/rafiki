@@ -50,6 +50,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -297,6 +298,14 @@ type Controller struct {
 	// pool: nothing to read, or nothing to push to.
 	skillPusher    *skillPusher
 	pymodulePusher *pymodulePusher
+
+	// pymoduleStore is the owner-scoped pymodule backend, read by the
+	// pymoduleWriter bound into each fundi child (agent_pymodules.go) and by
+	// pymodulePusher. Nil when the daemon has no database: pymodule_put
+	// declines to materialize and the dynamic python-modules skill is not
+	// advertised. Deliberately NOT conditioned on the executor pool -- a
+	// DB-but-no-executors daemon still lets a child save and list modules.
+	pymoduleStore pymodules.Store
 
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).

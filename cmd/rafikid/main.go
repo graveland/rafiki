@@ -515,6 +515,7 @@ func runDaemon(opts runDaemonOpts) error {
 	if pool != nil {
 		pymoduleStore = pymodulesdb.NewPostgresStore(pool)
 	}
+	ctrl.pymoduleStore = pymoduleStore
 	if pymoduleStore != nil && execPool != nil {
 		ctrl.pymodulePusher = &pymodulePusher{
 			pool: execPool, store: pymoduleStore, version: version.String(),

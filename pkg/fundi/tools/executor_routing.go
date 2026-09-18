@@ -49,6 +49,13 @@ var tierByTool = map[string]Tier{
 	"ls":    TierWorkspace,
 	"bash":  TierWorkspace,
 
+	// Workspace — pymodules. pymodule_run executes a Python script against the
+	// synced module files, which live in the workspace: a workspace
+	// capability through and through. (The blueprint itself arrives with
+	// Task 3.2; its tier is registered here so this shared map is edited by
+	// exactly one task per wave.)
+	"pymodule_run": TierWorkspace,
+
 	// Workspace — background jobs. Parent-side tools whose implementation is
 	// an RPC, so they are routed but never present in the executor's own
 	// registry.
@@ -90,6 +97,11 @@ var tierByTool = map[string]Tier{
 	// project-local entries. Skill loading is not a workspace capability;
 	// skill discovery in the project is.
 	"skill": TierDaemon,
+
+	// Daemon — pymodule_put writes to the daemon's database, owner-scoped;
+	// nothing in the workspace is touched. Saved modules reach executors via
+	// the pusher, never via the tool.
+	"pymodule_put": TierDaemon,
 
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,

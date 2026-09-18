@@ -33,6 +33,11 @@ type SkillMeta struct {
 	// this machine. Its Path is empty and meaningless here; its body is
 	// fetched over the executor link when the model asks for it.
 	Remote bool
+
+	// Dynamic marks a skill whose body is generated fresh on every call
+	// rather than read from a file or a stored row. Its Path, Dir are empty
+	// and meaningless, same as Inline.
+	Dynamic bool
 }
 
 // QualifiedName is the name a model sees and passes back to the skill tool:

@@ -444,6 +444,16 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	if c.pool != nil {
 		ro.Conversations = newControllerConversationReader(c, ownerUserID)
 	}
+	// Same nil-means-decline family, one more condition: the pymodule store
+	// exists independently of c.pool? No -- c.pymoduleStore is built from the
+	// same pool, so pool != nil implies store-or-not is decided in main.go;
+	// checking both keeps the guard honest on a controller whose fields are
+	// set independently in tests. The writer and the inventory are bound to
+	// the resolved owner, exactly like Conversations above.
+	if c.pool != nil && c.pymoduleStore != nil {
+		ro.PyModules = newControllerPyModuleWriter(c, ownerUserID)
+		ro.PyModulesInventory = pymoduleInventory(c, ownerUserID)
+	}
 	// A child on a daemon with an executor pool gets a boundExecutor, ALWAYS
 	// non-nil — selector or not. The selector (possibly empty) narrows where
 	// the child may bind, never WHETHER it binds: an empty selector is the
@@ -564,6 +574,20 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 			}
 			return rec.Body, nil
 		}
+	}
+
+	// The dynamic python-modules skill, OUTSIDE the skillStore block: it comes
+	// from the pymodule store, not the skills store, and must be advertised
+	// whenever a pymodule store exists regardless of what the skills tier did.
+	// The body is generated fresh on every skill call (Dynamic), rendered by
+	// the same owner-bound inventory wired above.
+	if c.pymoduleStore != nil {
+		ro.InlineSkills = append(ro.InlineSkills, skills.SkillMeta{
+			Namespace:   skills.DefaultNamespace,
+			Name:        "python-modules",
+			Description: "List your saved reusable Python modules (see pymodule_put, pymodule_run).",
+			Dynamic:     true,
+		})
 	}
 
 	ro.Executor = exec

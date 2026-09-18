@@ -186,6 +186,19 @@ type RuntimeOptions struct {
 	// standalone `rafikid fundi` process.
 	Conversations tools.ConversationReader
 
+	// PyModules, when non-nil, gives this child the pymodule_put tool --
+	// saving a reusable Python snippet to its own owner-scoped store.
+	// Supplied by the daemon as a per-owner adapter; nil when no pymodule
+	// store is configured (a DB-less daemon) or for the standalone
+	// `rafikid fundi` process.
+	PyModules tools.PyModuleStore
+
+	// PyModulesInventory, when non-nil, renders this child's saved pymodule
+	// names and descriptions as the body of the dynamic "rafiki:python-modules"
+	// skill. nil means no pymodule store is configured, and the dynamic skill
+	// is not advertised.
+	PyModulesInventory func(ctx context.Context) (string, error)
+
 	// Executor, when non-nil, runs the filesystem and shell tools in a
 	// separate process. nil means no workspace tier at all: the workspace
 	// tools are not registered, so the child reasons over the daemon tier
@@ -521,23 +534,25 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	toolOpts := tools.ToolOpts{
-		Cwd:             opts.Cwd,
-		FileTracker:     fileTracker,
-		OutputPolicy:    outputPolicy,
-		Skills:          discovered,
-		RTK:             tools.ParseRTKMode(opts.RTK),
-		Web:             opts.ToolsWeb,
-		LSP:             lspClient,
-		FileChanged:     lspNotifier,
-		Tasks:           taskStore,
-		ChildID:         opts.Ref,
-		Agents:          opts.Agents,
-		Quota:           opts.Quota,
-		Conversations:   opts.Conversations,
-		Executor:        opts.Executor,
-		ExecutorTools:   executorToolSet(opts.ExecutorTools),
-		RemoteSkillBody: opts.RemoteSkillBody,
-		InlineSkillBody: opts.InlineSkillBody,
+		Cwd:                opts.Cwd,
+		FileTracker:        fileTracker,
+		OutputPolicy:       outputPolicy,
+		Skills:             discovered,
+		RTK:                tools.ParseRTKMode(opts.RTK),
+		Web:                opts.ToolsWeb,
+		LSP:                lspClient,
+		FileChanged:        lspNotifier,
+		Tasks:              taskStore,
+		ChildID:            opts.Ref,
+		Agents:             opts.Agents,
+		Quota:              opts.Quota,
+		Conversations:      opts.Conversations,
+		PyModules:          opts.PyModules,
+		PyModulesInventory: opts.PyModulesInventory,
+		Executor:           opts.Executor,
+		ExecutorTools:      executorToolSet(opts.ExecutorTools),
+		RemoteSkillBody:    opts.RemoteSkillBody,
+		InlineSkillBody:    opts.InlineSkillBody,
 	}
 	// A process that is its own workspace satisfies the executor rule with a
 	// real in-process client rather than an exemption. Build it here, where the
