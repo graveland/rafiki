@@ -1173,8 +1173,10 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return c, c.cyclePane(0)
 		}
 		c.railHidden = !c.railHidden
-		// An explicit toggle is a decision: it outranks a peek, so ⏎ afterwards
-		// must not undo what the user just asked for.
+		// The peek flag goes with it either way: the rail a toggle reveals sits
+		// unfocused (the watch mode), and every exit from the rail hides it
+		// (leaveRail), so a pin is "the rail while I keep typing", not a sticky
+		// decision -- it ends the next time the rail is entered and left.
 		c.railPeek = false
 		// Never leave focus on a pane that just became invisible.
 		return c, c.cyclePane(0)
@@ -1755,18 +1757,22 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	return c.setFocus(order[idx])
 }
 
-// leaveRail returns focus to the input, re-hiding the rail if a peek is what
-// revealed it, and returns the subscription to the committed agent. Every exit
-// from the rail goes through here -- esc, ⏎ (after hop has already made the
-// committed agent the viewed one), ⇥ out of the ring -- because whichever way
-// the user leaves, the pane they are about to look at is the committed agent's
-// and its stream must be the one running. A no-op when the subscription never
-// left.
+// leaveRail returns focus to the input and HIDES the rail. Every exit from the
+// rail goes through here -- esc, ⏎ (after hop has already made the committed
+// agent the viewed one), ⇥ out of the ring -- because whichever way the user
+// leaves, the pane they are about to look at is the committed agent's and its
+// stream must be the one running. A no-op when the subscription never left.
+//
+// The hide is unconditional because the cockpit is meant to hold two modes and
+// nothing between them: BROWSE (rail on screen AND focused) and TALK
+// (full-width transcript, keys in the input). A rail left drawn beside an
+// unfocused input is the state that made focus ambiguous -- a cursor parked on
+// a row nobody is addressing -- so browsing is an overlay that any exit takes
+// down. ⇥ or ^R brings it back; ^R is the only way to hold it up unfocused,
+// and even that pin ends at the next visit to the rail.
 func (c *Cockpit) leaveRail() tea.Cmd {
-	if c.railPeek {
-		c.railHidden = true
-		c.railPeek = false
-	}
+	c.railHidden = true
+	c.railPeek = false
 	cmd := c.setFocus(focusInput)
 	if v := c.viewing(); v != "" && v != c.focusChild {
 		cmd = tea.Batch(cmd, c.openFocus(v))

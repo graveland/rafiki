@@ -960,6 +960,73 @@ func TestCommitSwitchesFocusAndEntersTheInput(t *testing.T) {
 	if !c.ta.Focused() {
 		t.Error("⏎ returned to the input pane with the textarea still blurred")
 	}
+	// The commit is also where the browse overlay comes down: the cockpit is
+	// either browsing (rail focused) or talking (full width), never a rail
+	// drawn beside an unfocused input. Pinned in full by
+	// TestEveryRailExitHidesTheRail.
+	if c.railCols() != 0 {
+		t.Error("⏎ left the rail drawn; committing must land full width")
+	}
+}
+
+// The cockpit holds two modes and nothing between them: BROWSE (rail on screen
+// and focused) and TALK (full-width transcript, keys in the input). Any exit
+// from the rail takes the overlay down -- ⏎ because talking to the chosen
+// agent is the point of the browse, esc because "done looking" ends it too,
+// ⇥ because cycling out of the ring is leaving it. A rail left drawn beside an
+// unfocused input is the state that made focus ambiguous.
+func TestEveryRailExitHidesTheRail(t *testing.T) {
+	for _, key := range []string{"enter", "esc", "tab"} {
+		t.Run(key, func(t *testing.T) {
+			c := railWith(t, "c_1", "c_2")
+			defer c.shutdown()
+
+			if c.focus != focusRail || c.railCols() == 0 {
+				t.Fatalf("setup: focus = %v, railCols = %d; the rail never took focus", c.focus, c.railCols())
+			}
+
+			c.Update(keyMsg(key))
+
+			if c.railCols() != 0 {
+				t.Errorf("%s from the rail left it drawn", key)
+			}
+			if c.focus != focusInput {
+				t.Errorf("%s left focus = %v, want input", key, c.focus)
+			}
+			if !c.ta.Focused() {
+				t.Errorf("%s left the textarea blurred", key)
+			}
+		})
+	}
+}
+
+// ^R is the one way to hold the rail up unfocused -- the watch mode, badges
+// and costs visible while the keys stay in the input -- and even that pin ends
+// at the next visit: every exit from the rail hides it, so the pin survives
+// only until the rail is entered and left again. The mode rule has exactly one
+// exception and this pins its boundary.
+func TestRailPinEndsAtTheNextVisit(t *testing.T) {
+	c := railWith(t, "c_1", "c_2")
+	defer c.shutdown()
+	ctrlR(c) // hide
+	ctrlR(c) // show again, unfocused: the watch-mode pin
+
+	if c.railCols() == 0 {
+		t.Fatal("the second ^R did not reveal the rail")
+	}
+	if c.focus != focusInput {
+		t.Fatalf("focus = %v after the ^R reveal, want input -- the pin is the UNFOCUSED rail", c.focus)
+	}
+
+	c.Update(keyMsg("tab")) // visit the rail
+	c.Update(keyMsg("esc")) // and leave it
+
+	if c.railCols() != 0 {
+		t.Error("the pin survived a visit to the rail")
+	}
+	if c.focus != focusInput {
+		t.Errorf("focus = %v after leaving, want input", c.focus)
+	}
 }
 
 // Browsing pages the pane through the highlighted agents' transcripts LIVE:
@@ -2214,7 +2281,7 @@ func TestTabRevealsTheHiddenRailWithTwoAgents(t *testing.T) {
 		t.Error("⇥ focused a rail that is still hidden")
 	}
 	if !c.railPeek {
-		t.Error("the ⇥ reveal was not recorded as a peek, so ⏎ cannot put it back")
+		t.Error("the ⇥ reveal was not recorded as a peek")
 	}
 }
 
@@ -2238,7 +2305,7 @@ func TestCtrlRTogglesWithTwoAgentsAsBefore(t *testing.T) {
 		t.Error("^R did not hide the rail with two agents")
 	}
 	if c.railPeek {
-		t.Error("hiding recorded a peek; an explicit toggle is a decision")
+		t.Error("hiding recorded a peek; the peek flag belongs to reveals, not to a collapse")
 	}
 
 	ctrlR(c)
