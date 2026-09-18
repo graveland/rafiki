@@ -68,6 +68,15 @@ Three Swahili words, three roles:
   Background jobs survive a 600s `bash` ceiling and notify on completion;
   workspaces can be pinned to a machine or rescheduled across an
   interchangeable pool.
+- **A Python library that follows the agent around.** `pymodule_put` saves a
+  reusable snippet — a class, a helper, or a runnable script — to the agent's
+  own store: versioned, soft-deletable, persisted in the daemon database,
+  visible only to its owner. The store syncs to the executors that owner's
+  agents land on, and `pymodule_run` executes a saved script straight out of
+  that synced cache by name — never a workspace copy, while the script runs
+  in the agent's working directory or a `cwd` the call names — with further
+  saved modules importable for the run. Code written once in one
+  conversation is still runnable in the next one, on another machine.
 - **Watch or drive the same conversation from anywhere.** A running agent
   isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki watch`,
   another agent's MCP tools (`agent_view`/`agent_send`), and a script hitting

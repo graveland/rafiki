@@ -98,14 +98,13 @@ func (e *mcpPyModuleRunExecutor) Run(ctx context.Context, input json.RawMessage)
 	return resultText, nil
 }
 
-const mcpPymoduleRunDescription = "Run a Python script in your own executor workspace, " +
-	"with named modules from your pymodule store made importable first. `script` is the " +
-	"basename of a file you already wrote (with your own file-writing tool) in your " +
-	"working directory -- not a path, and not inline code. `modules` names the pymodules " +
-	"(saved with pymodule_put) your script imports. Returns combined stdout/stderr and the " +
-	"exit code. This tool is present only when you are running as a rafiki-managed agent " +
-	"with a live executor binding -- it is absent otherwise, never merely erroring, so its " +
-	"absence from your tool list means there is no workspace for it to run in right now."
+const mcpPymoduleRunDescription = "Run a Python script you saved with pymodule_put, by its " +
+	"module name. `script` is the module name exactly as saved with pymodule_put -- not " +
+	"a path, and not inline code; if you have edited a module's code since saving it, " +
+	"pymodule_put it again before running. `modules` names further saved pymodules the " +
+	"script imports. `cwd` optionally sets the working directory -- absolute, or " +
+	"relative to your working directory; the default is your working directory. Returns " +
+	"combined stdout/stderr and the exit code."
 
 type mcpPyModuleRunBlueprint struct{}
 
@@ -115,8 +114,9 @@ func (mcpPyModuleRunBlueprint) InputSchema() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: []tools.SchemaProperty{
-			{Name: "script", Type: "string", Description: "Basename of the entry script, e.g. \"analyze.py\". No path components."},
-			{Name: "modules", Type: "array", Items: &tools.Schema{Type: "string"}, Description: "Names of pymodules to make importable, from pymodule_put."},
+			{Name: "script", Type: "string", Description: "Name of the pymodule to run, exactly as saved with pymodule_put (e.g. \"analyze\"). A bare Python identifier, not a path."},
+			{Name: "modules", Type: "array", Items: &tools.Schema{Type: "string"}, Description: "Names of further pymodules the script imports, from pymodule_put."},
+			{Name: "cwd", Type: "string", Description: "Optional working directory for the run -- absolute, ~-expanded, or relative to your working directory. Default: your working directory."},
 			{Name: "args", Type: "array", Items: &tools.Schema{Type: "string"}, Description: "Extra command-line arguments passed to the script."},
 		},
 		Required: []string{"script"},

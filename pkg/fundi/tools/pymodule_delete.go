@@ -12,10 +12,8 @@ import (
 
 const pymoduleDeleteDescription = "Soft-delete one of your saved pymodules by " +
 	"name. Deletion marks every saved version deleted: the module leaves your " +
-	"inventory and " +
-	"is pruned from your executors on the next sync, and history is kept -- " +
-	"saving a new version under the same name restores it. Errors if no live " +
-	"module has that name."
+	"inventory, and history is kept -- saving a new version under the same " +
+	"name restores it. Errors if no live module has that name."
 
 func init() { DefaultBlueprint.Register(&PyModuleDeleteBlueprint{}) }
 

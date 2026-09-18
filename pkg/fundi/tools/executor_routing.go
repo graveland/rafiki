@@ -49,11 +49,9 @@ var tierByTool = map[string]Tier{
 	"ls":    TierWorkspace,
 	"bash":  TierWorkspace,
 
-	// Workspace — pymodules. pymodule_run executes a Python script against the
-	// synced module files, which live in the workspace: a workspace
-	// capability through and through. (The blueprint itself arrives with
-	// Task 3.2; its tier is registered here so this shared map is edited by
-	// exactly one task per wave.)
+	// Workspace — pymodules. pymodule_run executes a saved pymodule out of
+	// the executor's synced cache: it needs the executor's interpreter and
+	// corpus, though the run itself never touches workspace files.
 	"pymodule_run": TierWorkspace,
 
 	// Workspace — background jobs. Parent-side tools whose implementation is

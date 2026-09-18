@@ -455,11 +455,17 @@ Each module name is a bare Python identifier and lands at `<name>/<name>.py`
 inside the cache root — one directory per module, no per-namespace subtree, no
 plugin manifest, no frontmatter rendering; the payload has no namespace concept
 because a pymodule is a single file a script imports by name. The per-module
-directory exists so `pymodule_run` can put exactly the named modules'
-directories on `PYTHONPATH` for a run instead of copying files into the
-workspace — a run never writes into the working tree, and a same-named file
-next to the entry script shadows the stored module (the script's own directory
-is `sys.path[0]`, ahead of `PYTHONPATH`).
+directory exists so `pymodule_run` can execute the entry script — itself a
+synced module, run as `<name>/<name>.py`, never a workspace copy — and put
+exactly the named modules' directories on `PYTHONPATH` for a run instead of
+copying files into the workspace. The process's working directory is the
+calling agent's own workspace — or the call's own `cwd`, resolved like the
+file tools' paths (`~`, relative, absolute) — so a script sees the same
+relative world a `bash` call would, while which copy of the script runs is
+decided solely by the synced cache. Bytecode from imports lands inside the modules' own cache
+directories (`__pycache__/`): the prune sweeps at root level only, so it
+survives between runs — part of why the cache is the right home for the
+scripts.
 
 **The whole owner's corpus, every time.** `modules` is the complete set for
 this owner, and a synced entry absent from it is pruned — same wholesale

@@ -24,8 +24,8 @@ type PyModuleStore interface {
 const pymodulePutDescription = "Save a reusable Python snippet (a class, a " +
 	"helper function) to your own pymodule store. Each save is a new " +
 	"version under `name`; nothing already saved is ever overwritten. " +
-	"Saved modules sync to your executors and become importable by name " +
-	"with pymodule_run. Only you can see or run what you save here."
+	"Anything you save becomes importable by name with pymodule_run. Only " +
+	"you can see or run what you save here."
 
 func init() { DefaultBlueprint.Register(&PyModulePutBlueprint{}) }
 

@@ -510,7 +510,7 @@ transport error, and never a successful result carrying the text.
 | `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store; saving again under an existing name is a new version, never an overwrite |
 | `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name |
 | `pymodule_list` | List the caller's saved pymodules (name + one-line description). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
-| `pymodule_run` | Run a Python script in the calling claude-kind child's own executor workspace, with its saved modules made importable first; a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
+| `pymodule_run` | Run one of the caller's saved pymodules by name — executed out of the executor's synced pymodule cache, never out of a workspace file, with the child's workspace as the process cwd (or the call's own `cwd`) — and further saved modules importable; a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist (the native
