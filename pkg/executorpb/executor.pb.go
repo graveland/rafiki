@@ -142,7 +142,12 @@ type DescribeResponse struct {
 	// NARROWS what this executor will do, and a wrong value costs a skipped sync
 	// rather than admitting anyone. It is NOT an access-gating fact, so it does
 	// not collide with the rule that the executor row is authoritative.
-	SkillsSync    bool `protobuf:"varint,12,opt,name=skills_sync,json=skillsSync,proto3" json:"skills_sync,omitempty"`
+	SkillsSync bool `protobuf:"varint,12,opt,name=skills_sync,json=skillsSync,proto3" json:"skills_sync,omitempty"`
+	// pymodules_sync reports that this executor accepts SyncPyModules. Safe to
+	// self-report for the same reason as skills_sync: it only ever NARROWS what
+	// this executor will do, and a wrong value costs a skipped sync rather than
+	// admitting anyone.
+	PymodulesSync bool `protobuf:"varint,13,opt,name=pymodules_sync,json=pymodulesSync,proto3" json:"pymodules_sync,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -257,6 +262,13 @@ func (x *DescribeResponse) GetLaunchKinds() []string {
 func (x *DescribeResponse) GetSkillsSync() bool {
 	if x != nil {
 		return x.SkillsSync
+	}
+	return false
+}
+
+func (x *DescribeResponse) GetPymodulesSync() bool {
+	if x != nil {
+		return x.PymodulesSync
 	}
 	return false
 }
@@ -2418,12 +2430,170 @@ func (x *SyncSkillsResponse) GetSkillsDir() string {
 	return ""
 }
 
+// SyncPyModule is one owner's pymodule, at its latest version. The name is
+// BARE and becomes "<name>.py" on the executor's synced cache directory.
+type SyncPyModule struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncPyModule) Reset() {
+	*x = SyncPyModule{}
+	mi := &file_executor_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncPyModule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncPyModule) ProtoMessage() {}
+
+func (x *SyncPyModule) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncPyModule.ProtoReflect.Descriptor instead.
+func (*SyncPyModule) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *SyncPyModule) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SyncPyModule) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+type SyncPyModulesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	Modules       []*SyncPyModule        `protobuf:"bytes,2,rep,name=modules,proto3" json:"modules,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncPyModulesRequest) Reset() {
+	*x = SyncPyModulesRequest{}
+	mi := &file_executor_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncPyModulesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncPyModulesRequest) ProtoMessage() {}
+
+func (x *SyncPyModulesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncPyModulesRequest.ProtoReflect.Descriptor instead.
+func (*SyncPyModulesRequest) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *SyncPyModulesRequest) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *SyncPyModulesRequest) GetModules() []*SyncPyModule {
+	if x != nil {
+		return x.Modules
+	}
+	return nil
+}
+
+type SyncPyModulesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Written       int32                  `protobuf:"varint,1,opt,name=written,proto3" json:"written,omitempty"`
+	Pruned        int32                  `protobuf:"varint,2,opt,name=pruned,proto3" json:"pruned,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncPyModulesResponse) Reset() {
+	*x = SyncPyModulesResponse{}
+	mi := &file_executor_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncPyModulesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncPyModulesResponse) ProtoMessage() {}
+
+func (x *SyncPyModulesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_executor_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncPyModulesResponse.ProtoReflect.Descriptor instead.
+func (*SyncPyModulesResponse) Descriptor() ([]byte, []int) {
+	return file_executor_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *SyncPyModulesResponse) GetWritten() int32 {
+	if x != nil {
+		return x.Written
+	}
+	return 0
+}
+
+func (x *SyncPyModulesResponse) GetPruned() int32 {
+	if x != nil {
+		return x.Pruned
+	}
+	return 0
+}
+
 var File_executor_proto protoreflect.FileDescriptor
 
 const file_executor_proto_rawDesc = "" +
 	"\n" +
 	"\x0eexecutor.proto\x12\x12rafiki.executor.v1\"\x11\n" +
-	"\x0fDescribeRequest\"\x91\x04\n" +
+	"\x0fDescribeRequest\"\xb8\x04\n" +
 	"\x10DescribeResponse\x12\x1f\n" +
 	"\vexecutor_id\x18\x01 \x01(\tR\n" +
 	"executorId\x12\x1a\n" +
@@ -2439,7 +2609,8 @@ const file_executor_proto_rawDesc = "" +
 	" \x03(\tR\aproxies\x12!\n" +
 	"\flaunch_kinds\x18\v \x03(\tR\vlaunchKinds\x12\x1f\n" +
 	"\vskills_sync\x18\f \x01(\bR\n" +
-	"skillsSync\x1aE\n" +
+	"skillsSync\x12%\n" +
+	"\x0epymodules_sync\x18\r \x01(\bR\rpymodulesSync\x1aE\n" +
 	"\x17SelfReportedLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x0f\n" +
@@ -2597,7 +2768,16 @@ const file_executor_proto_rawDesc = "" +
 	"\awritten\x18\x01 \x01(\x05R\awritten\x12\x16\n" +
 	"\x06pruned\x18\x02 \x01(\x05R\x06pruned\x12\x1d\n" +
 	"\n" +
-	"skills_dir\x18\x03 \x01(\tR\tskillsDir2\x93\t\n" +
+	"skills_dir\x18\x03 \x01(\tR\tskillsDir\"6\n" +
+	"\fSyncPyModule\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04code\x18\x02 \x01(\tR\x04code\"l\n" +
+	"\x14SyncPyModulesRequest\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\tR\aversion\x12:\n" +
+	"\amodules\x18\x02 \x03(\v2 .rafiki.executor.v1.SyncPyModuleR\amodules\"I\n" +
+	"\x15SyncPyModulesResponse\x12\x18\n" +
+	"\awritten\x18\x01 \x01(\x05R\awritten\x12\x16\n" +
+	"\x06pruned\x18\x02 \x01(\x05R\x06pruned2\xf9\t\n" +
 	"\x0fExecutorService\x12U\n" +
 	"\bDescribe\x12#.rafiki.executor.v1.DescribeRequest\x1a$.rafiki.executor.v1.DescribeResponse\x12O\n" +
 	"\x06Health\x12!.rafiki.executor.v1.HealthRequest\x1a\".rafiki.executor.v1.HealthResponse\x12T\n" +
@@ -2611,7 +2791,8 @@ const file_executor_proto_rawDesc = "" +
 	"\rProjectSkills\x12(.rafiki.executor.v1.ProjectSkillsRequest\x1a).rafiki.executor.v1.ProjectSkillsResponse\x12X\n" +
 	"\tSkillBody\x12$.rafiki.executor.v1.SkillBodyRequest\x1a%.rafiki.executor.v1.SkillBodyResponse\x12[\n" +
 	"\n" +
-	"SyncSkills\x12%.rafiki.executor.v1.SyncSkillsRequest\x1a&.rafiki.executor.v1.SyncSkillsResponse\x12P\n" +
+	"SyncSkills\x12%.rafiki.executor.v1.SyncSkillsRequest\x1a&.rafiki.executor.v1.SyncSkillsResponse\x12d\n" +
+	"\rSyncPyModules\x12(.rafiki.executor.v1.SyncPyModulesRequest\x1a).rafiki.executor.v1.SyncPyModulesResponse\x12P\n" +
 	"\x05Proxy\x12 .rafiki.executor.v1.ProxyRequest\x1a!.rafiki.executor.v1.ProxyResponse(\x010\x01B3Z1go.graveland.dev/rafiki/pkg/executorpb;executorpbb\x06proto3"
 
 var (
@@ -2627,7 +2808,7 @@ func file_executor_proto_rawDescGZIP() []byte {
 }
 
 var file_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
+var file_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_executor_proto_goTypes = []any{
 	(Failure_Code)(0),              // 0: rafiki.executor.v1.Failure.Code
 	(*DescribeRequest)(nil),        // 1: rafiki.executor.v1.DescribeRequest
@@ -2667,64 +2848,70 @@ var file_executor_proto_goTypes = []any{
 	(*SkillNamespace)(nil),         // 35: rafiki.executor.v1.SkillNamespace
 	(*SyncSkillsRequest)(nil),      // 36: rafiki.executor.v1.SyncSkillsRequest
 	(*SyncSkillsResponse)(nil),     // 37: rafiki.executor.v1.SyncSkillsResponse
-	nil,                            // 38: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
-	nil,                            // 39: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
-	nil,                            // 40: rafiki.executor.v1.Result.ObservedMtimeEntry
-	nil,                            // 41: rafiki.executor.v1.ProvisionRequest.EnvEntry
-	nil,                            // 42: rafiki.executor.v1.ProxyStart.HeadersEntry
-	nil,                            // 43: rafiki.executor.v1.ProxyHead.HeadersEntry
+	(*SyncPyModule)(nil),           // 38: rafiki.executor.v1.SyncPyModule
+	(*SyncPyModulesRequest)(nil),   // 39: rafiki.executor.v1.SyncPyModulesRequest
+	(*SyncPyModulesResponse)(nil),  // 40: rafiki.executor.v1.SyncPyModulesResponse
+	nil,                            // 41: rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	nil,                            // 42: rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	nil,                            // 43: rafiki.executor.v1.Result.ObservedMtimeEntry
+	nil,                            // 44: rafiki.executor.v1.ProvisionRequest.EnvEntry
+	nil,                            // 45: rafiki.executor.v1.ProxyStart.HeadersEntry
+	nil,                            // 46: rafiki.executor.v1.ProxyHead.HeadersEntry
 }
 var file_executor_proto_depIdxs = []int32{
-	38, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
+	41, // 0: rafiki.executor.v1.DescribeResponse.self_reported_labels:type_name -> rafiki.executor.v1.DescribeResponse.SelfReportedLabelsEntry
 	6,  // 1: rafiki.executor.v1.ContentBlock.image:type_name -> rafiki.executor.v1.ImageBlock
-	39, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
+	42, // 2: rafiki.executor.v1.ExecuteRequest.expect_mtime:type_name -> rafiki.executor.v1.ExecuteRequest.ExpectMtimeEntry
 	9,  // 3: rafiki.executor.v1.ExecuteResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	10, // 4: rafiki.executor.v1.ExecuteResponse.result:type_name -> rafiki.executor.v1.Result
 	11, // 5: rafiki.executor.v1.ExecuteResponse.failed:type_name -> rafiki.executor.v1.Failure
 	5,  // 6: rafiki.executor.v1.Result.content:type_name -> rafiki.executor.v1.ContentBlock
-	40, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
+	43, // 7: rafiki.executor.v1.Result.observed_mtime:type_name -> rafiki.executor.v1.Result.ObservedMtimeEntry
 	0,  // 8: rafiki.executor.v1.Failure.code:type_name -> rafiki.executor.v1.Failure.Code
 	9,  // 9: rafiki.executor.v1.AttachResponse.output:type_name -> rafiki.executor.v1.OutputChunk
 	16, // 10: rafiki.executor.v1.ProvisionRequest.mounts:type_name -> rafiki.executor.v1.Mount
-	41, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
+	44, // 11: rafiki.executor.v1.ProvisionRequest.env:type_name -> rafiki.executor.v1.ProvisionRequest.EnvEntry
 	24, // 12: rafiki.executor.v1.ProjectSkillsResponse.skills:type_name -> rafiki.executor.v1.ProjectSkill
-	42, // 13: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
+	45, // 13: rafiki.executor.v1.ProxyStart.headers:type_name -> rafiki.executor.v1.ProxyStart.HeadersEntry
 	30, // 14: rafiki.executor.v1.ProxyRequest.start:type_name -> rafiki.executor.v1.ProxyStart
-	43, // 15: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
+	46, // 15: rafiki.executor.v1.ProxyHead.headers:type_name -> rafiki.executor.v1.ProxyHead.HeadersEntry
 	32, // 16: rafiki.executor.v1.ProxyResponse.head:type_name -> rafiki.executor.v1.ProxyHead
 	34, // 17: rafiki.executor.v1.SkillNamespace.skills:type_name -> rafiki.executor.v1.SyncSkill
 	35, // 18: rafiki.executor.v1.SyncSkillsRequest.namespaces:type_name -> rafiki.executor.v1.SkillNamespace
-	1,  // 19: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
-	3,  // 20: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
-	7,  // 21: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
-	12, // 22: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
-	14, // 23: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
-	28, // 24: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
-	17, // 25: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
-	19, // 26: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
-	21, // 27: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
-	23, // 28: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
-	26, // 29: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
-	36, // 30: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
-	31, // 31: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
-	2,  // 32: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
-	4,  // 33: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
-	8,  // 34: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
-	13, // 35: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
-	15, // 36: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
-	29, // 37: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
-	18, // 38: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
-	20, // 39: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
-	22, // 40: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
-	25, // 41: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
-	27, // 42: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
-	37, // 43: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
-	33, // 44: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
-	32, // [32:45] is the sub-list for method output_type
-	19, // [19:32] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	38, // 19: rafiki.executor.v1.SyncPyModulesRequest.modules:type_name -> rafiki.executor.v1.SyncPyModule
+	1,  // 20: rafiki.executor.v1.ExecutorService.Describe:input_type -> rafiki.executor.v1.DescribeRequest
+	3,  // 21: rafiki.executor.v1.ExecutorService.Health:input_type -> rafiki.executor.v1.HealthRequest
+	7,  // 22: rafiki.executor.v1.ExecutorService.Execute:input_type -> rafiki.executor.v1.ExecuteRequest
+	12, // 23: rafiki.executor.v1.ExecutorService.Attach:input_type -> rafiki.executor.v1.AttachRequest
+	14, // 24: rafiki.executor.v1.ExecutorService.Cancel:input_type -> rafiki.executor.v1.CancelRequest
+	28, // 25: rafiki.executor.v1.ExecutorService.JobOutput:input_type -> rafiki.executor.v1.JobOutputRequest
+	17, // 26: rafiki.executor.v1.ExecutorService.Provision:input_type -> rafiki.executor.v1.ProvisionRequest
+	19, // 27: rafiki.executor.v1.ExecutorService.Release:input_type -> rafiki.executor.v1.ReleaseRequest
+	21, // 28: rafiki.executor.v1.ExecutorService.ProjectContext:input_type -> rafiki.executor.v1.ProjectContextRequest
+	23, // 29: rafiki.executor.v1.ExecutorService.ProjectSkills:input_type -> rafiki.executor.v1.ProjectSkillsRequest
+	26, // 30: rafiki.executor.v1.ExecutorService.SkillBody:input_type -> rafiki.executor.v1.SkillBodyRequest
+	36, // 31: rafiki.executor.v1.ExecutorService.SyncSkills:input_type -> rafiki.executor.v1.SyncSkillsRequest
+	39, // 32: rafiki.executor.v1.ExecutorService.SyncPyModules:input_type -> rafiki.executor.v1.SyncPyModulesRequest
+	31, // 33: rafiki.executor.v1.ExecutorService.Proxy:input_type -> rafiki.executor.v1.ProxyRequest
+	2,  // 34: rafiki.executor.v1.ExecutorService.Describe:output_type -> rafiki.executor.v1.DescribeResponse
+	4,  // 35: rafiki.executor.v1.ExecutorService.Health:output_type -> rafiki.executor.v1.HealthResponse
+	8,  // 36: rafiki.executor.v1.ExecutorService.Execute:output_type -> rafiki.executor.v1.ExecuteResponse
+	13, // 37: rafiki.executor.v1.ExecutorService.Attach:output_type -> rafiki.executor.v1.AttachResponse
+	15, // 38: rafiki.executor.v1.ExecutorService.Cancel:output_type -> rafiki.executor.v1.CancelResponse
+	29, // 39: rafiki.executor.v1.ExecutorService.JobOutput:output_type -> rafiki.executor.v1.JobOutputResponse
+	18, // 40: rafiki.executor.v1.ExecutorService.Provision:output_type -> rafiki.executor.v1.ProvisionResponse
+	20, // 41: rafiki.executor.v1.ExecutorService.Release:output_type -> rafiki.executor.v1.ReleaseResponse
+	22, // 42: rafiki.executor.v1.ExecutorService.ProjectContext:output_type -> rafiki.executor.v1.ProjectContextResponse
+	25, // 43: rafiki.executor.v1.ExecutorService.ProjectSkills:output_type -> rafiki.executor.v1.ProjectSkillsResponse
+	27, // 44: rafiki.executor.v1.ExecutorService.SkillBody:output_type -> rafiki.executor.v1.SkillBodyResponse
+	37, // 45: rafiki.executor.v1.ExecutorService.SyncSkills:output_type -> rafiki.executor.v1.SyncSkillsResponse
+	40, // 46: rafiki.executor.v1.ExecutorService.SyncPyModules:output_type -> rafiki.executor.v1.SyncPyModulesResponse
+	33, // 47: rafiki.executor.v1.ExecutorService.Proxy:output_type -> rafiki.executor.v1.ProxyResponse
+	34, // [34:48] is the sub-list for method output_type
+	20, // [20:34] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_executor_proto_init() }
@@ -2760,7 +2947,7 @@ func file_executor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_executor_proto_rawDesc), len(file_executor_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   43,
+			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -64,6 +64,9 @@ const (
 	// ExecutorServiceSyncSkillsProcedure is the fully-qualified name of the ExecutorService's
 	// SyncSkills RPC.
 	ExecutorServiceSyncSkillsProcedure = "/rafiki.executor.v1.ExecutorService/SyncSkills"
+	// ExecutorServiceSyncPyModulesProcedure is the fully-qualified name of the ExecutorService's
+	// SyncPyModules RPC.
+	ExecutorServiceSyncPyModulesProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModules"
 	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
 	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
 )
@@ -121,6 +124,12 @@ type ExecutorServiceClient interface {
 	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
 	// to drift and no partial state to reconcile after a crash.
 	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
+	// SyncPyModules replaces this executor's rafiki-managed pymodule cache with
+	// the corpus the daemon sends. Whole-corpus, not incremental, and
+	// downward-only like SyncSkills: the executor rewrites one cache directory
+	// wholesale, so there is no per-path bookkeeping to drift and no partial
+	// state to reconcile after a crash.
+	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
@@ -209,6 +218,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
 			connect.WithClientOptions(opts...),
 		),
+		syncPyModules: connect.NewClient[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse](
+			httpClient,
+			baseURL+ExecutorServiceSyncPyModulesProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
+			connect.WithClientOptions(opts...),
+		),
 		proxy: connect.NewClient[executorpb.ProxyRequest, executorpb.ProxyResponse](
 			httpClient,
 			baseURL+ExecutorServiceProxyProcedure,
@@ -232,6 +247,7 @@ type executorServiceClient struct {
 	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
 	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
 	syncSkills     *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
+	syncPyModules  *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
 	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
@@ -295,6 +311,11 @@ func (c *executorServiceClient) SyncSkills(ctx context.Context, req *connect.Req
 	return c.syncSkills.CallUnary(ctx, req)
 }
 
+// SyncPyModules calls rafiki.executor.v1.ExecutorService.SyncPyModules.
+func (c *executorServiceClient) SyncPyModules(ctx context.Context, req *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {
+	return c.syncPyModules.CallUnary(ctx, req)
+}
+
 // Proxy calls rafiki.executor.v1.ExecutorService.Proxy.
 func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse] {
 	return c.proxy.CallBidiStream(ctx)
@@ -353,6 +374,12 @@ type ExecutorServiceHandler interface {
 	// namespace and rewrites it wholesale, so there is no per-path bookkeeping
 	// to drift and no partial state to reconcile after a crash.
 	SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error)
+	// SyncPyModules replaces this executor's rafiki-managed pymodule cache with
+	// the corpus the daemon sends. Whole-corpus, not incremental, and
+	// downward-only like SyncSkills: the executor rewrites one cache directory
+	// wholesale, so there is no per-path bookkeeping to drift and no partial
+	// state to reconcile after a crash.
+	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
@@ -437,6 +464,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncSkills")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceSyncPyModulesHandler := connect.NewUnaryHandler(
+		ExecutorServiceSyncPyModulesProcedure,
+		svc.SyncPyModules,
+		connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceProxyHandler := connect.NewBidiStreamHandler(
 		ExecutorServiceProxyProcedure,
 		svc.Proxy,
@@ -469,6 +502,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceSkillBodyHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncSkillsProcedure:
 			executorServiceSyncSkillsHandler.ServeHTTP(w, r)
+		case ExecutorServiceSyncPyModulesProcedure:
+			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
 		case ExecutorServiceProxyProcedure:
 			executorServiceProxyHandler.ServeHTTP(w, r)
 		default:
@@ -526,6 +561,10 @@ func (UnimplementedExecutorServiceHandler) SkillBody(context.Context, *connect.R
 
 func (UnimplementedExecutorServiceHandler) SyncSkills(context.Context, *connect.Request[executorpb.SyncSkillsRequest]) (*connect.Response[executorpb.SyncSkillsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncSkills is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModules is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {

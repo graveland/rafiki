@@ -71,6 +71,11 @@ type Options struct {
 	// Claude config directory. Off by default: it writes into the operator's
 	// home directory, which is not something to enable by accident.
 	SkillsSync bool
+
+	// PyModulesSync lets the daemon push this executor's owner's pymodule
+	// corpus onto its disposable cache directory. Off by default, same
+	// reasoning as SkillsSync.
+	PyModulesSync bool
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -227,6 +232,7 @@ func (s *Server) Describe(
 		Proxies:            s.ProxyNames(),
 		LaunchKinds:        s.LaunchKinds(),
 		SkillsSync:         s.opts.SkillsSync,
+		PymodulesSync:      s.opts.PyModulesSync,
 	}), nil
 }
 

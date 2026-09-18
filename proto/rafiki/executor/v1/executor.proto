@@ -59,6 +59,13 @@ service ExecutorService {
   // to drift and no partial state to reconcile after a crash.
   rpc SyncSkills(SyncSkillsRequest) returns (SyncSkillsResponse);
 
+  // SyncPyModules replaces this executor's rafiki-managed pymodule cache with
+  // the corpus the daemon sends. Whole-corpus, not incremental, and
+  // downward-only like SyncSkills: the executor rewrites one cache directory
+  // wholesale, so there is no per-path bookkeeping to drift and no partial
+  // state to reconcile after a crash.
+  rpc SyncPyModules(SyncPyModulesRequest) returns (SyncPyModulesResponse);
+
   // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
   // the response back. One stream per request/response cycle.
   rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
@@ -95,6 +102,11 @@ message DescribeResponse {
   // rather than admitting anyone. It is NOT an access-gating fact, so it does
   // not collide with the rule that the executor row is authoritative.
   bool skills_sync = 12;
+  // pymodules_sync reports that this executor accepts SyncPyModules. Safe to
+  // self-report for the same reason as skills_sync: it only ever NARROWS what
+  // this executor will do, and a wrong value costs a skipped sync rather than
+  // admitting anyone.
+  bool pymodules_sync = 13;
 }
 
 message HealthRequest {}
@@ -347,4 +359,21 @@ message SyncSkillsResponse {
   // skills_dir is the directory the executor actually wrote into, so the
   // daemon can log where the corpus landed rather than guessing.
   string skills_dir = 3;
+}
+
+// SyncPyModule is one owner's pymodule, at its latest version. The name is
+// BARE and becomes "<name>.py" on the executor's synced cache directory.
+message SyncPyModule {
+  string name = 1;
+  string code = 2;
+}
+
+message SyncPyModulesRequest {
+  string version = 1;
+  repeated SyncPyModule modules = 2;
+}
+
+message SyncPyModulesResponse {
+  int32 written = 1;
+  int32 pruned = 2;
 }
