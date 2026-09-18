@@ -478,9 +478,15 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Fifteen, materialized per caller from the same blueprints the fundi
-registry serves (`mcpBlueprints`); descriptions are reworded on this surface
-for a caller that is not a fundi child (`mcpToolDescriptions`). A tool failure
+**Tools.** Nineteen, materialized per caller: fourteen come from the same
+blueprints the fundi registry serves, two (`pymodule_put`, `pymodule_delete`)
+from blueprints shared with it but never registered on fundi's tool set, and
+two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
+never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
+this surface for a caller that is not a fundi child (`mcpToolDescriptions`).
+The four pymodule tools decline together when the daemon has no executor
+pool (`claudeExecutorRouted`); `pymodule_run` declines further unless the
+caller is a claude-kind child with a live executor binding. A tool failure
 is `CallToolResult.IsError = true` carrying the diagnostic — never a JSON-RPC
 transport error, and never a successful result carrying the text.
 
@@ -501,6 +507,10 @@ transport error, and never a successful result carrying the text.
 | `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 | `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error |
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
+| `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store; saving again under an existing name is a new version, never an overwrite |
+| `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name |
+| `pymodule_list` | List the caller's saved pymodules (name + one-line description). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
+| `pymodule_run` | Run a Python script in the calling claude-kind child's own executor workspace, with its saved modules made importable first; a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist (the native

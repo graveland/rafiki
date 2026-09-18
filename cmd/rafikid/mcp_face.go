@@ -406,8 +406,8 @@ const mcpLedgerPrefix = "This is a shared, durable, cross-agent ledger. Rows per
 // explicitly, the same "prepare state, then delegate" framing
 // mcpLedgerPrefix gives task_add.
 const mcpPymoduleRunPointer = " A claude-kind child you spawn (with its own executor) " +
-	"can then pymodule_run whatever you save here -- it appears on its own tool list, not " +
-	"yours, exactly as pymodule_run does not appear on this session's."
+	"can then pymodule_run whatever you save here -- pymodule_run appears on a session's " +
+	"tool list only when that session carries its own live executor binding."
 
 // mcpSurfacePrefix marks the agent-steering verbs as operating on daemon-managed
 // processes rather than the client's own subagents.
