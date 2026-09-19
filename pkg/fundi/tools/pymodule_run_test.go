@@ -487,6 +487,29 @@ func TestPymoduleRunNotReadyRefusesWhenVenvMissing(t *testing.T) {
 	}
 }
 
+// The readiness refusal covers the entry script too: a script that itself
+// declares dependencies but has no venv refuses the run -- naming role
+// "script" -- and nothing executes, exactly as for a module.
+func TestPymoduleRunNotReadyRefusesWhenScriptVenvMissing(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// The entry script writes a marker only if executed, so the test proves
+	// the refusal happened before any process ran.
+	marker := filepath.Join(t.TempDir(), "marker.txt")
+	seedPymoduleCache(t, "runme", fmt.Sprintf("%s\n# requests>=2.31\n\nopen(%q, \"w\").write(\"ran\")\n", pymodules.RequirementsMarker, marker)) // no .venv, no staging dir
+
+	tool := testPymoduleRunTool(t, t.TempDir())
+	_, err := tool.Execute(context.Background(), ToolInput(`{"script": "runme"}`))
+	if err == nil {
+		t.Fatal("want an error for a script that declares dependencies with no venv, got nil")
+	}
+	if !strings.Contains(err.Error(), "dependencies not ready") || !strings.Contains(err.Error(), "script runme") {
+		t.Fatalf("error should name the script and say dependencies are not ready, got: %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("the entry script was executed despite the dependencies-not-ready refusal")
+	}
+}
+
 // A staging directory beside the code means a venv build is still in
 // flight: the refusal says so, so the caller can retry shortly rather than
 // conclude the build failed.

@@ -257,13 +257,19 @@ func pymoduleSitePackages(dir string) (sitePackages string, ok bool) {
 // has no usable venv, instead of running against missing or half-installed
 // packages. An entry with no requirements -- the common case -- or with a
 // venv already present always passes. The staging check distinguishes a
-// build still in flight (retryable) from one that failed or never synced.
+// build still in flight (retryable) from one that failed or never synced;
+// only a staging DIRECTORY counts as in flight -- a leftover file that
+// happens to carry the prefix is not a build, so it falls through to the
+// terminal refusal.
 func pymoduleVenvReadiness(role, name, dir string, reqs []string, hasVenv bool) error {
 	if hasVenv || len(reqs) == 0 {
 		return nil
 	}
-	if staging, _ := filepath.Glob(filepath.Join(dir, ".rafiki-venv-staging-*")); len(staging) > 0 {
-		return fmt.Errorf("pymodule_run: %s %s: dependency venv build is in progress; retry shortly", role, name)
+	staging, _ := filepath.Glob(filepath.Join(dir, ".rafiki-venv-staging-*"))
+	for _, entry := range staging {
+		if fi, err := os.Stat(entry); err == nil && fi.IsDir() {
+			return fmt.Errorf("pymodule_run: %s %s: dependency venv build is in progress; retry shortly", role, name)
+		}
 	}
 	return fmt.Errorf("pymodule_run: %s %s: dependencies not ready (venv missing — the build failed or has not synced; check the executor's sync or resave the module)", role, name)
 }
