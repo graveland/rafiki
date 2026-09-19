@@ -60,11 +60,16 @@ func (dt *pymoduleDeleteTool) Execute(ctx context.Context, input ToolInput) (Too
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
-	if err := dt.store.Delete(ctx, in.Name); err != nil {
+	notice, err := dt.store.Delete(ctx, in.Name)
+	if err != nil {
 		if errors.Is(err, pymodules.ErrNotFound) {
 			return ToolResult{}, fmt.Errorf("pymodule_delete: no module named %q in your store", in.Name)
 		}
 		return ToolResult{}, fmt.Errorf("pymodule_delete: %w", err)
 	}
-	return NewTextResult(fmt.Sprintf("deleted %q -- it leaves your inventory and is pruned from your executors on the next sync; save a new version under the same name to restore it", in.Name)), nil
+	msg := fmt.Sprintf("deleted %q -- it leaves your inventory and is pruned from your executors on the next sync; save a new version under the same name to restore it", in.Name)
+	if notice != "" {
+		msg += "\n\n" + notice
+	}
+	return NewTextResult(msg), nil
 }

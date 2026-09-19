@@ -14,12 +14,13 @@ import (
 // Put half live in pymodule_put_test.go; both tools share it). It records
 // every name Delete was called with and reports delErr when configured.
 // Records nothing when delErr is set -- an erroring fake models a failed call.
-func (s *fakePyModuleStore) Delete(_ context.Context, name string) error {
+// delNotice is the advisory notice the fake returns alongside success.
+func (s *fakePyModuleStore) Delete(_ context.Context, name string) (string, error) {
 	if s.delErr != nil {
-		return s.delErr
+		return "", s.delErr
 	}
 	s.deletes = append(s.deletes, name)
-	return nil
+	return s.delNotice, nil
 }
 
 // An invalid name must be rejected by the tool's own validation, before the
@@ -54,6 +55,27 @@ func TestPymoduleDeleteCallsStoreAndReports(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, "deleted") {
 		t.Errorf("result text = %q, want it to contain %q", res.Text, "deleted")
+	}
+}
+
+// A non-empty delete notice must ride the result text, after the deleted
+// confirmation -- same surfacing rule as pymodule_put's.
+func TestPymoduleDeleteIncludesNoticeInResult(t *testing.T) {
+	const notice = "dependency install failed on chart_helpers: boom"
+	store := &fakePyModuleStore{delNotice: notice}
+	tool, err := PyModuleDeleteBlueprint{}.Materialize(ToolOpts{PyModules: store})
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Text, "deleted") {
+		t.Errorf("result text = %q, want it to contain the deleted confirmation", res.Text)
+	}
+	if !strings.Contains(res.Text, notice) {
+		t.Errorf("result text = %q, want it to contain the store's notice %q", res.Text, notice)
 	}
 }
 

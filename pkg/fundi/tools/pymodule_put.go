@@ -12,7 +12,12 @@ import (
 // PyModuleStore lets an agent save a reusable Python snippet. Bound to one
 // owner at construction; no method takes a caller-supplied identity.
 type PyModuleStore interface {
-	Put(ctx context.Context, name, code, description string) (id int64, err error)
+	// Put returns the new row's id and an advisory notice string --
+	// possibly multi-line, possibly empty -- describing anything worth the
+	// calling agent's attention that did NOT block the save: a lint
+	// finding, or a dependency-install failure on one or more of the
+	// owner's executors. An empty notice means nothing to report.
+	Put(ctx context.Context, name, code, description string) (id int64, notice string, err error)
 
 	// Get returns one saved module's full record: code, description, version
 	// (the row id) and creation time. Returns an error wrapping
@@ -22,9 +27,11 @@ type PyModuleStore interface {
 
 	// Delete soft-deletes the named module: every version of it leaves the
 	// inventory and is pruned from executors on the next sync; a later Put
-	// under the same name restores it. Returns an error wrapping pymodules.ErrNotFound
-	// when no live module has that name.
-	Delete(ctx context.Context, name string) error
+	// under the same name restores it. Returns an error wrapping
+	// pymodules.ErrNotFound when no live module has that name. The returned
+	// notice is advisory, the same rule as Put's: anything the post-delete
+	// sync found worth reporting that did not block the delete.
+	Delete(ctx context.Context, name string) (notice string, err error)
 }
 
 const pymodulePutDescription = "Save a reusable Python snippet (a class, a " +
@@ -85,9 +92,13 @@ func (pt *pymodulePutTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
-	id, err := pt.store.Put(ctx, in.Name, in.Code, in.Description)
+	id, notice, err := pt.store.Put(ctx, in.Name, in.Code, in.Description)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_put: %w", err)
 	}
-	return NewTextResult(fmt.Sprintf("saved %q as version %d", in.Name, id)), nil
+	msg := fmt.Sprintf("saved %q as version %d", in.Name, id)
+	if notice != "" {
+		msg += "\n\n" + notice
+	}
+	return NewTextResult(msg), nil
 }

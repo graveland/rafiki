@@ -25,28 +25,51 @@ func newControllerPyModuleWriter(c *Controller, ownerUserID string) *pymoduleWri
 	return &pymoduleWriter{ctrl: c, ownerUserID: ownerUserID}
 }
 
-func (w *pymoduleWriter) Put(ctx context.Context, name, code, description string) (int64, error) {
+func (w *pymoduleWriter) Put(ctx context.Context, name, code, description string) (int64, string, error) {
+	// ORDER: block on a definite syntax error before anything else; then run
+	// the best-effort lint (its finding is about the code being saved, so it
+	// must see the exact text); then write the row; then push and collect
+	// venv results LAST, after the row exists. Lint and venv findings only
+	// ever land in the advisory notice -- they never block the save.
+	if syntaxErr := pymoduleSyntaxCheck(code); syntaxErr != "" {
+		return 0, "", fmt.Errorf("pymodule_put: %s does not parse as Python: %s", name, syntaxErr)
+	}
+	lint := pymoduleLintCheck(code)
+
 	rec, err := w.ctrl.pymoduleStore.Put(ctx, w.ownerUserID, name, code, description)
 	if err != nil {
-		return 0, err
+		return 0, "", err
+	}
+	var notice string
+	if lint != "" {
+		notice += "ruff found:\n" + lint
 	}
 	if w.ctrl.pymodulePusher != nil {
-		w.ctrl.pymodulePusher.pushAll(ctx)
+		results := w.ctrl.pymodulePusher.pushAll(ctx)
+		if failMsg := formatVenvFailures(results); failMsg != "" {
+			if notice != "" {
+				notice += "\n\n"
+			}
+			notice += failMsg
+		}
 	}
-	return rec.ID, nil
+	return rec.ID, notice, nil
 }
 
 // Delete soft-deletes the module under this writer's bound owner and pushes
-// the owner's corpus so executors prune it promptly. Nothing is pushed when
-// the delete reports not-found -- the corpus did not change.
-func (w *pymoduleWriter) Delete(ctx context.Context, name string) error {
+// the owner's corpus so executors prune it promptly, reporting any venv
+// build failures the sync surfaced as the advisory notice. Nothing is pushed
+// when the delete reports not-found -- the corpus did not change. There is
+// no syntax/lint check here: there is nothing left to check.
+func (w *pymoduleWriter) Delete(ctx context.Context, name string) (string, error) {
 	if err := w.ctrl.pymoduleStore.Delete(ctx, w.ownerUserID, name); err != nil {
-		return err
+		return "", err
 	}
+	var notice string
 	if w.ctrl.pymodulePusher != nil {
-		w.ctrl.pymodulePusher.pushAll(ctx)
+		notice = formatVenvFailures(w.ctrl.pymodulePusher.pushAll(ctx))
 	}
-	return nil
+	return notice, nil
 }
 
 // Get reads the latest live version of a module under this writer's bound

@@ -5,9 +5,13 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
@@ -19,6 +23,7 @@ import (
 // store fixture from pymodulesync_test.go, so the assertion is on actual
 // SyncPyModules RPCs, not on a mock of the push.
 func TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	// Per-executor clients attribute each payload to its executor: pushAll
 	// fans out concurrently, so the shared client's arrival order is not
@@ -31,7 +36,7 @@ func TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	id, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	id, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -61,11 +66,12 @@ func TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush(t *testing.T) {
 // A daemon with no executor pool constructs no pusher; a Put must still save
 // (the child can list its own modules even though nothing syncs anywhere).
 func TestNewControllerPyModuleWriterPutWithNilPusherStillSaves(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	ctrl := &Controller{pymoduleStore: f.store} // pymodulePusher deliberately nil
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	id, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	id, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -80,11 +86,12 @@ func TestNewControllerPyModuleWriterPutWithNilPusherStillSaves(t *testing.T) {
 // An anonymous spawn's empty owner is passed through to the store unchanged:
 // pymodules.Store treats it as the shared unattributed bucket, never global.
 func TestNewControllerPyModuleWriterPassesEmptyOwnerThrough(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	ctrl := &Controller{pymoduleStore: f.store}
 
 	w := newControllerPyModuleWriter(ctrl, "")
-	id, err := w.Put(context.Background(), "unattributed_util", "x = 1", "nobody's util")
+	id, _, err := w.Put(context.Background(), "unattributed_util", "x = 1", "nobody's util")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -120,6 +127,7 @@ func (s *fakePymoduleStore) Delete(_ context.Context, ownerUserID, name string) 
 // longer carries the deleted module and bob's payload never did. Assertions
 // are on actual SyncPyModules RPC payloads, not on pusher mocks.
 func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	// Per-executor clients attribute each payload to its executor: pushAll
 	// fans out concurrently, so the shared client's arrival order is not
@@ -132,7 +140,7 @@ func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	if _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things"); err != nil {
+	if _, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	// The put's fan-out reached both eligible executors.
@@ -140,7 +148,7 @@ func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
 		t.Fatalf("after Put, SyncPyModules requests = exec-alice %d, exec-bob %d; want 1 each", len(aliceC.requests), len(bobC.requests))
 	}
 
-	if err := w.Delete(context.Background(), "alice_plot"); err != nil {
+	if _, err := w.Delete(context.Background(), "alice_plot"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	// The delete reached the store under the writer's bound owner.
@@ -169,7 +177,7 @@ func TestPymoduleDeleteNotFoundSkipsPush(t *testing.T) {
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
 	before := len(f.client.requests)
-	err := w.Delete(context.Background(), "no_such_mod")
+	_, err := w.Delete(context.Background(), "no_such_mod")
 	if err == nil {
 		t.Fatal("Delete of an unknown name = nil error, want not-found")
 	}
@@ -183,6 +191,7 @@ func TestPymoduleDeleteNotFoundSkipsPush(t *testing.T) {
 
 // TestPymoduleInventoryRendersSavedModules renders the dynamic skill body.
 func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	// A fresh store, not the shared fixture: the fixture pre-seeds rows, and
 	// the empty-store case needs an owner with nothing saved.
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
@@ -197,7 +206,7 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 		t.Errorf("empty-store inventory = %q, want the nothing-saved hint", body)
 	}
 
-	if _, err := newControllerPyModuleWriter(ctrl, "u_alice").Put(context.Background(), "alice_chart", "x = 1", "charts things"); err != nil {
+	if _, _, err := newControllerPyModuleWriter(ctrl, "u_alice").Put(context.Background(), "alice_chart", "x = 1", "charts things"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	body, err = pymoduleInventory(ctrl, "u_alice")(context.Background())
@@ -213,11 +222,12 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 // versions under one name collapse to the higher-id row, and another owner's
 // same-named module stays invisible.
 func TestControllerPyModuleWriterGet(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	if _, err := w.Put(context.Background(), "alice_chart", "x = 1", "v2 of alice's chart"); err != nil {
+	if _, _, err := w.Put(context.Background(), "alice_chart", "x = 1", "v2 of alice's chart"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	r, err := w.Get(context.Background(), "alice_chart")
@@ -233,5 +243,89 @@ func TestControllerPyModuleWriterGet(t *testing.T) {
 	_, err = w.Get(context.Background(), "bob_util")
 	if !errors.Is(err, pymodules.ErrNotFound) {
 		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
+	}
+}
+
+// A definite syntax error must block the save BEFORE the DB write: Put
+// returns an error and the underlying pymodules.Store.Put is never reached
+// (the fixture's seeded alice row count is unchanged).
+func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not found: %v", err)
+	}
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	_, notice, err := w.Put(context.Background(), "alice_bad", "def f(:\n    pass\n", "broken")
+	if err == nil {
+		t.Fatal("Put of syntactically invalid code = nil error, want a syntax-error failure")
+	}
+	if !strings.Contains(err.Error(), "does not parse as Python") {
+		t.Errorf("Put error = %v, want it to name the parse failure", err)
+	}
+	if notice != "" {
+		t.Errorf("Put notice = %q on a blocked save, want empty", notice)
+	}
+	// The DB write never happened: alice still has exactly her seeded row.
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 1 || rows[0].Name != "alice_chart" {
+		t.Errorf("store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
+	}
+}
+
+// A failed dependency install on one of the owner's executors does NOT block
+// the save: the row is written and the failure rides back as the notice.
+func TestControllerPyModuleWriterPutSurfacesVenvFailure(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
+	f := newPymoduleFixture()
+	f.pool.clients = map[string]executorpbconnect.ExecutorServiceClient{
+		"exec-alice": &fakePymoduleClient{venvResults: []*executorpb.PyModuleVenvResult{{Name: "alice_plot", Ready: false, Error: "boom"}}},
+		"exec-bob":   &fakePymoduleClient{venvResults: []*executorpb.PyModuleVenvResult{{Name: "bob_util", Ready: true}}},
+	}
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	id, notice, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if id != 2 {
+		t.Errorf("Put id = %d, want 2: the row must be written despite the venv failure", id)
+	}
+	if !strings.Contains(notice, "boom") {
+		t.Errorf("Put notice = %q, want it to contain the venv failure %q", notice, "boom")
+	}
+	// The save really happened in the store under the writer's owner.
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 2 || rows[1].Name != "alice_plot" {
+		t.Errorf("store rows = %+v, want alice_plot saved after the seeded alice_chart", rows)
+	}
+}
+
+// A lint finding is advisory, never blocking: the save goes through and the
+// finding comes back in the notice. Hermetic -- RAFIKI_PYMODULE_UV points at
+// the fake-findings uv from pymodule_checks_test.go, never a real ruff.
+func TestControllerPyModuleWriterPutSucceedsDespiteLintFindings(t *testing.T) {
+	uvDir := writeFakeLintUV(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	w := newControllerPyModuleWriter(ctrl, "u_alice")
+	_, notice, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !strings.Contains(notice, fakeRuffFinding) {
+		t.Errorf("Put notice = %q, want it to contain the fake ruff finding %q", notice, fakeRuffFinding)
+	}
+	if !strings.Contains(notice, "ruff found:") {
+		t.Errorf("Put notice = %q, want it introduced by %q", notice, "ruff found:")
+	}
+	// The save went through despite the finding.
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 2 || rows[1].Name != "alice_plot" {
+		t.Errorf("store rows = %+v, want alice_plot saved: a lint finding must not block", rows)
 	}
 }

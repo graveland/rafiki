@@ -5,25 +5,34 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
 func TestMCPPyModuleStoreAdapter(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	ctx := context.Background()
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
 	ctrl := &Controller{pymoduleStore: store, pymodulePusher: nil}
 
 	// Test Put with nil pusher
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u-alice"})
-	id, err := mcp.Put(ctx, "helper", "def f(): pass", "a helper")
+	id, notice, err := mcp.Put(ctx, "helper", "def f(): pass", "a helper")
 	if err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
 	if id != 1 {
 		t.Errorf("Put returned id %d, want 1", id)
+	}
+	if notice != "" {
+		t.Errorf("Put notice = %q, want empty with nothing to report", notice)
 	}
 
 	// Verify record is stored
@@ -34,8 +43,8 @@ func TestMCPPyModuleStoreAdapter(t *testing.T) {
 	}
 
 	// Test Delete with nil pusher
-	if err := mcp.Delete(ctx, "helper"); err != nil {
-		t.Fatalf("Delete failed: %v", err)
+	if notice, err := mcp.Delete(ctx, "helper"); err != nil || notice != "" {
+		t.Fatalf("Delete = (%q, %v), want empty notice and nil error", notice, err)
 	}
 
 	// Verify deletion is tracked
@@ -64,5 +73,86 @@ func TestMCPPyModuleStoreGet(t *testing.T) {
 	_, err = mcp.Get(context.Background(), "bob_util")
 	if !errors.Is(err, pymodules.ErrNotFound) {
 		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
+	}
+}
+
+// The MCP face mirrors pymoduleWriter's ordering contract: a definite syntax
+// error blocks BEFORE the DB write -- Put errors and the store is untouched.
+func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not found: %v", err)
+	}
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
+	_, notice, err := mcp.Put(context.Background(), "alice_bad", "def f(:\n    pass\n", "broken")
+	if err == nil {
+		t.Fatal("Put of syntactically invalid code = nil error, want a syntax-error failure")
+	}
+	if !strings.Contains(err.Error(), "does not parse as Python") {
+		t.Errorf("Put error = %v, want it to name the parse failure", err)
+	}
+	if notice != "" {
+		t.Errorf("Put notice = %q on a blocked save, want empty", notice)
+	}
+	// The DB write never happened: alice still has exactly her seeded row.
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 1 || rows[0].Name != "alice_chart" {
+		t.Errorf("store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
+	}
+}
+
+// A failed dependency install on one of the owner's executors does NOT block
+// the MCP face's save either: the row is written and the failure rides back
+// as the notice.
+func TestMCPPyModuleStorePutSurfacesVenvFailure(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
+	f := newPymoduleFixture()
+	f.pool.clients = map[string]executorpbconnect.ExecutorServiceClient{
+		"exec-alice": &fakePymoduleClient{venvResults: []*executorpb.PyModuleVenvResult{{Name: "alice_plot", Ready: false, Error: "boom"}}},
+		"exec-bob":   &fakePymoduleClient{venvResults: []*executorpb.PyModuleVenvResult{{Name: "bob_util", Ready: true}}},
+	}
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
+	id, notice, err := mcp.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if id != 2 {
+		t.Errorf("Put id = %d, want 2: the row must be written despite the venv failure", id)
+	}
+	if !strings.Contains(notice, "boom") {
+		t.Errorf("Put notice = %q, want it to contain the venv failure %q", notice, "boom")
+	}
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 2 || rows[1].Name != "alice_plot" {
+		t.Errorf("store rows = %+v, want alice_plot saved after the seeded alice_chart", rows)
+	}
+}
+
+// A lint finding is advisory on the MCP face too: the save goes through and
+// the finding comes back in the notice (hermetic fake uv, no real ruff).
+func TestMCPPyModuleStorePutSucceedsDespiteLintFindings(t *testing.T) {
+	uvDir := writeFakeLintUV(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	f := newPymoduleFixture()
+	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
+
+	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
+	_, notice, err := mcp.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !strings.Contains(notice, fakeRuffFinding) {
+		t.Errorf("Put notice = %q, want it to contain the fake ruff finding %q", notice, fakeRuffFinding)
+	}
+	if !strings.Contains(notice, "ruff found:") {
+		t.Errorf("Put notice = %q, want it introduced by %q", notice, "ruff found:")
+	}
+	rows := f.store.rows["u_alice"]
+	if len(rows) != 2 || rows[1].Name != "alice_plot" {
+		t.Errorf("store rows = %+v, want alice_plot saved: a lint finding must not block", rows)
 	}
 }
