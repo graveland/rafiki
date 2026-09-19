@@ -177,6 +177,51 @@ func TestSyncPyModuleGitSourceRejectsInvalidName(t *testing.T) {
 	}
 }
 
+// A leading dash makes git parse the argument as an option rather than a
+// value: `git fetch origin --upload-pack=<cmd>` executes <cmd> locally on
+// this executor. The executor re-checks both wire values at its own boundary
+// before any subprocess runs -- the same shape validSegment applies to the
+// name. One test per field, so a pass line names exactly which gate held.
+func TestSyncPyModuleGitSourceRejectsLeadingDashRef(t *testing.T) {
+	s := gitSyncServer(t, true)
+	_, err := s.SyncPyModuleGitSource(context.Background(),
+		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{
+			Name: "ops-tools", Url: "/tmp/nowhere", Ref: "--upload-pack=touch /tmp/pwned",
+		}))
+	if err == nil {
+		t.Fatal("accepted a ref that begins with a dash")
+	}
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "ref") {
+		t.Errorf("error %q does not name the offending field", err.Error())
+	}
+	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
+		t.Errorf("a rejected sync wrote to disk (err=%v)", derr)
+	}
+}
+
+func TestSyncPyModuleGitSourceRejectsLeadingDashUrl(t *testing.T) {
+	s := gitSyncServer(t, true)
+	_, err := s.SyncPyModuleGitSource(context.Background(),
+		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{
+			Name: "ops-tools", Url: "--upload-pack=touch /tmp/pwned", Ref: "main",
+		}))
+	if err == nil {
+		t.Fatal("accepted a url that begins with a dash")
+	}
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "url") {
+		t.Errorf("error %q does not name the offending field", err.Error())
+	}
+	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
+		t.Errorf("a rejected sync wrote to disk (err=%v)", derr)
+	}
+}
+
 func TestSyncPyModuleGitSourceClonesAndDiscovers(t *testing.T) {
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{

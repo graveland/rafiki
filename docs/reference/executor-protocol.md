@@ -553,7 +553,12 @@ blob-sync's "whole corpus every time" built from git's own primitives, sweeping
 untracked and ignored leftovers (a stale `__pycache__`, a cruft `.py` that
 would otherwise become callable). Git runs as an ordinary subprocess and
 inherits whatever ambient credentials the executor's environment already has;
-rafiki configures none. A failed git operation is NOT an RPC error: the
+rafiki configures none. Because a leading dash would make git parse the
+argument as an option rather than a value — `git fetch origin
+--upload-pack=<cmd>` executes `<cmd>` locally — both `url` and `ref` beginning
+with a dash are refused with `CodeInvalidArgument` before any subprocess runs,
+re-checked at the executor's own boundary. A failed git operation is NOT an
+RPC error: the
 response carries `venvReady=false`, the capped combined output in `venvError`,
 and an empty inventory — no discovery or build is attempted against a checkout
 in an unknown state.

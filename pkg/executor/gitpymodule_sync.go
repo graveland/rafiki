@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"connectrpc.com/connect"
 
@@ -59,6 +60,22 @@ func (s *Server) SyncPyModuleGitSource(
 	if err := validSegment(req.Msg.GetName()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("source name: %w", err))
+	}
+
+	// A leading dash makes git parse the argument as an option instead of a
+	// value: `git fetch origin --upload-pack=<cmd>` executes <cmd> locally on
+	// this executor. Both values arrive from the daemon's store, but the
+	// executor re-checks at its own boundary, before any subprocess runs --
+	// the same shape validSegment applies to the name. Guarded on BOTH url
+	// and ref: the clone path is not exploitable in this shape today, but
+	// the guard is cheaper than trusting that accident to hold.
+	if url := req.Msg.GetUrl(); strings.HasPrefix(url, "-") {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("url %q begins with a dash and would parse as a git option, not a url", url))
+	}
+	if ref := req.Msg.GetRef(); strings.HasPrefix(ref, "-") {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("ref %q begins with a dash and would parse as a git option, not a ref", ref))
 	}
 
 	dir := gitPymoduleRepoDir(req.Msg.GetName())
