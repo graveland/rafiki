@@ -197,6 +197,17 @@ func (gp *gitPymodulePusher) pushTo(ctx context.Context, executorID, name, url, 
 	}, nil
 }
 
+// evict drops the cached inventory for (ownerUserID, name) — the pusher's
+// counterpart to a store Delete. Without it the removed source's rows keep
+// rendering on every span surface (allInventory for the skill body and MCP
+// pymodule_list, inventoryFor for `python list --repo <removed>`) until the
+// daemon restarts, because the cache readers never consult the store.
+func (gp *gitPymodulePusher) evict(ownerUserID, name string) {
+	gp.mu.Lock()
+	defer gp.mu.Unlock()
+	delete(gp.cache, gitSourceKey(ownerUserID, name))
+}
+
 func (gp *gitPymodulePusher) inventoryFor(ownerUserID, name string) (gitPymoduleInventory, bool) {
 	gp.mu.Lock()
 	defer gp.mu.Unlock()

@@ -18,12 +18,41 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 )
 
-// gitPymoduleRepoDir returns <cache>/pymodule-repos/<name> -- a sibling
-// cache root to pymoduleCacheDir(), not nested inside it, since a git
-// checkout's own layout (including .git/) must not be interleaved with the
-// flat per-module directories pymodule_sync.go manages and prunes by name.
+// gitPymoduleReposRoot is the parent cache root every git checkout lives
+// under: <cache>/pymodule-repos -- a sibling cache root to pymoduleCacheDir(),
+// not nested inside it, since a git checkout's own layout (including .git/)
+// must not be interleaved with the flat per-module directories
+// pymodule_sync.go manages and prunes by name.
+func gitPymoduleReposRoot() string {
+	return filepath.Join(paths.CacheDir(), "pymodule-repos")
+}
+
 func gitPymoduleRepoDir(name string) string {
-	return filepath.Join(paths.CacheDir(), "pymodule-repos", name)
+	return filepath.Join(gitPymoduleReposRoot(), name)
+}
+
+// ensureGitReposRoot establishes the pymodule-repos cache root exactly the
+// way SyncPyModules establishes pymoduleCacheDir(): only ever write into a
+// directory rafiki marked, or one that does not exist yet. Checked BEFORE
+// MkdirAll: creating the directory first would make the absent case
+// unrecognisable -- an empty dir is not a managed one. A root that exists
+// without the marker (or is not a directory at all) is refused, never
+// adopted: refreshGitCheckout would otherwise clone into, fetch, hard-reset
+// and clean -fdx inside whatever an operator or another program left there.
+func ensureGitReposRoot(root string) error {
+	if err := assertManagedOrAbsent(root); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(root, managedMarker)); !os.IsNotExist(err) {
+		return nil // exists and is already marked ours
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create pymodule-repos dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, managedMarker), []byte("pymodule-repos\n"), 0o644); err != nil {
+		return fmt.Errorf("mark pymodule-repos dir: %w", err)
+	}
+	return nil
 }
 
 // requirementsOnlyVenvError is the venvError for a checkout whose only
@@ -79,6 +108,13 @@ func (s *Server) SyncPyModuleGitSource(
 	}
 
 	dir := gitPymoduleRepoDir(req.Msg.GetName())
+
+	// Establish the checkout root the same way the blob path establishes its
+	// cache dir, BEFORE any clone/fetch/clean: refuse rather than adopt a root
+	// this executor never created.
+	if err := ensureGitReposRoot(gitPymoduleReposRoot()); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	if out, err := refreshGitCheckout(dir, req.Msg.GetUrl(), req.Msg.GetRef()); err != nil {
 		return connect.NewResponse(&executorpb.SyncPyModuleGitSourceResponse{
 			VenvReady: false,

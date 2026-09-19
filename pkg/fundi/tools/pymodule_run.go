@@ -42,8 +42,8 @@ func (PyModuleRunBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery."},
-			{Name: "script", Type: "string", Description: "Name of the pymodule to run, exactly as saved with pymodule_put (e.g. \"analyze\"). A bare Python identifier, not a path."},
-			{Name: "modules", Type: "array", Items: &Schema{Type: "string"}, Description: "Names of further pymodules the script imports, from pymodule_put."},
+			{Name: "script", Type: "string", Description: "Name of the pymodule to run (e.g. \"analyze\"): for repo \"local\", exactly as saved with pymodule_put; otherwise a discovered script name of the repo, as reported by discovery. A bare Python identifier, not a path."},
+			{Name: "modules", Type: "array", Items: &Schema{Type: "string"}, Description: "Names of further pymodules the script imports, resolved within the same repo: for repo \"local\", from pymodule_put; otherwise discovered packages of the repo, as reported by discovery."},
 			{Name: "cwd", Type: "string", Description: "Optional working directory for the run -- absolute, ~-expanded, or relative to your working directory. Default: your working directory."},
 			{Name: "args", Type: "array", Items: &Schema{Type: "string"}, Description: "Extra command-line arguments passed to the script."},
 		},

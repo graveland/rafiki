@@ -94,12 +94,21 @@ func toConnectGitPackages(pkgs []*executorpb.GitSourcePackage) []connectapi.GitS
 	return out
 }
 
-// RemoveGitSource deletes the registration outright. The pusher's cached
-// inventory for the name is simply never read again — no eviction step is
-// needed, and no executor is told (the cache directory's next refresh of
-// anything re-derives what exists; there is no prune model for git sources).
+// RemoveGitSource deletes the registration outright, then evicts the
+// pusher's cached inventory for the name — the cache readers never consult
+// the store, so a kept entry would keep rendering on every "everything"
+// surface (skill body, MCP pymodule_list, `python list`) until restart.
+// No executor is told: the cache directory's next refresh of anything
+// re-derives what exists; there is no prune model for git sources.
 func (m connectGitSources) RemoveGitSource(ctx context.Context, name string) error {
-	return m.c.gitpymoduleStore.Delete(ctx, spawnOwner(ctx).UserID, name)
+	owner := spawnOwner(ctx).UserID
+	if err := m.c.gitpymoduleStore.Delete(ctx, owner, name); err != nil {
+		return err
+	}
+	if m.c.gitpymodulePusher != nil {
+		m.c.gitpymodulePusher.evict(owner, name)
+	}
+	return nil
 }
 
 // compile-time pin: the adapter really satisfies the manager interface the

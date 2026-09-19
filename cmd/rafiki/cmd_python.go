@@ -259,7 +259,7 @@ func newPythonDeleteCmd() *cobra.Command {
 }
 
 // completePyModuleNames completes the <name> argument shared by python
-// get/delete. The verbs take exactly one name, so past it there is nothing to
+// get/put/delete. The verbs take exactly one name, so past it there is nothing to
 // offer. It never exits, never prints, and cannot block past
 // completionDeadline: every failure degrades to "no candidates" by design.
 func completePyModuleNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {

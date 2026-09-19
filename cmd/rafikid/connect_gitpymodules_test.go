@@ -181,3 +181,44 @@ func TestConnectGitSourcesNilPusherStillRegisters(t *testing.T) {
 		t.Fatalf("RemoveGitSource with nil pusher: %v", err)
 	}
 }
+
+// TestGitPymoduleRemoveEvictsCachedInventory pins the eviction on remove: the
+// pusher's cache is read without consulting the store (allInventory for the
+// skill body and MCP pymodule_list, inventoryFor for `python list --repo
+// <name>`), so a source removed without eviction keeps rendering its rows on
+// every span surface until the daemon restarts. After a remove, the removed
+// name is gone from both readers while an unrelated source's entry survives.
+func TestGitPymoduleRemoveEvictsCachedInventory(t *testing.T) {
+	f, m := newGitAdapterFixture()
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	// Populate the cache the way real traffic does: the adapter's synchronous
+	// first refresh on add, for two of alice's sources.
+	if _, err := m.AddGitSource(alice, "ops_tools", "https://example.net/ops.git", "main"); err != nil {
+		t.Fatalf("AddGitSource ops_tools: %v", err)
+	}
+	if _, err := m.AddGitSource(alice, "shared_lib", "https://example.net/lib.git", "v2"); err != nil {
+		t.Fatalf("AddGitSource shared_lib: %v", err)
+	}
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); !ok {
+		t.Fatal("precondition: ops_tools was never cached")
+	}
+
+	if err := m.RemoveGitSource(alice, "ops_tools"); err != nil {
+		t.Fatalf("RemoveGitSource: %v", err)
+	}
+
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
+		t.Error("inventoryFor still reports a removed source; its rows would keep rendering on `python list --repo ops_tools`")
+	}
+	all := f.gp.allInventory("u_alice")
+	if _, ok := all["ops_tools"]; ok {
+		t.Error("allInventory still reports the removed source; its rows would keep rendering on every span surface")
+	}
+	if _, ok := all["shared_lib"]; !ok {
+		t.Error("allInventory lost shared_lib, which was NOT removed")
+	}
+	if _, ok := f.gp.inventoryFor("u_alice", "shared_lib"); !ok {
+		t.Error("inventoryFor lost shared_lib, which was NOT removed")
+	}
+}

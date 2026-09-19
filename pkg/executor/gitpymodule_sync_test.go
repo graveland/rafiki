@@ -222,6 +222,45 @@ func TestSyncPyModuleGitSourceRejectsLeadingDashUrl(t *testing.T) {
 	}
 }
 
+// The pymodule-repos cache root is lazily created by the first sync, and a
+// root this executor never created must be REFUSED, not adopted: a pre-existing
+// non-rafiki directory would otherwise have clone, fetch, reset --hard and
+// clean -fdx run inside it. Same mechanism as the blob path's
+// assertManagedOrAbsent guard, one failure shape earlier in the handler.
+func TestSyncPyModuleGitSourceRefusesUnmanagedRoot(t *testing.T) {
+	s := gitSyncServer(t, true)
+	repo := gitFixture(t, map[string]string{
+		"scripts/rotate.py": "# rotate\n",
+	})
+
+	root := filepath.Dir(gitPymoduleRepoDir("ops-tools"))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(root, "operator-notes")
+	if err := os.WriteFile(stray, []byte("not rafiki's"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.SyncPyModuleGitSource(context.Background(),
+		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{Name: "ops-tools", Url: repo, Ref: "main"}))
+	if err == nil {
+		t.Fatal("synced into an unmanaged pymodule-repos root")
+	}
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("got %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	if _, serr := os.Stat(gitPymoduleRepoDir("ops-tools")); !os.IsNotExist(serr) {
+		t.Errorf("a refused sync wrote a checkout into the unmanaged root (err=%v)", serr)
+	}
+	if _, serr := os.Stat(filepath.Join(root, managedMarker)); !os.IsNotExist(serr) {
+		t.Errorf("a refused sync marked the unmanaged root as its own (err=%v)", serr)
+	}
+	if _, serr := os.Stat(stray); serr != nil {
+		t.Errorf("the refusal disturbed the root's own contents: %v", serr)
+	}
+}
+
 func TestSyncPyModuleGitSourceClonesAndDiscovers(t *testing.T) {
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{
@@ -245,6 +284,12 @@ func TestSyncPyModuleGitSourceClonesAndDiscovers(t *testing.T) {
 	checkout := gitPymoduleRepoDir("ops-tools")
 	if _, err := os.Stat(filepath.Join(checkout, ".git")); err != nil {
 		t.Errorf("the checkout does not exist at %s: %v", checkout, err)
+	}
+	// The lazily created cache root is marked, so a later sync recognises it
+	// as rafiki's — the same managedMarker mechanism the blob path's
+	// SyncPyModules applies to its own cache dir.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(checkout), managedMarker)); err != nil {
+		t.Errorf("the first sync did not drop the managed marker on the pymodule-repos root: %v", err)
 	}
 }
 
