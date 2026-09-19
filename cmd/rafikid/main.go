@@ -533,7 +533,7 @@ func runDaemon(opts runDaemonOpts) error {
 				}
 			}
 			if ctrl.pymodulePusher != nil {
-				if err := ctrl.pymodulePusher.pushIfEligible(baseCtx, id); err != nil {
+				if _, err := ctrl.pymodulePusher.pushIfEligible(baseCtx, id); err != nil {
 					slog.Warn("pymodule sync on connect failed", "executor", id, "error", err)
 				}
 			}

@@ -6,6 +6,8 @@ import (
 	"context"
 	"testing"
 
+	"go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/server"
 )
 
@@ -62,6 +64,14 @@ func TestConnectPyModulesOwnerFromContext(t *testing.T) {
 // assertion shape as TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush.
 func TestConnectPyModulesPushesAfterWrite(t *testing.T) {
 	f := newPymoduleFixture()
+	// Per-executor clients attribute each payload to its executor: pushAll
+	// fans out concurrently, so the shared client's arrival order is not
+	// deterministic.
+	aliceC, bobC := &fakePymoduleClient{}, &fakePymoduleClient{}
+	f.pool.clients = map[string]executorpbconnect.ExecutorServiceClient{
+		"exec-alice": aliceC,
+		"exec-bob":   bobC,
+	}
 	m := connectPyModules{c: &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}}
 	// u_alice (underscore) is the fixture's alice bucket: the pusher resolves
 	// exec-alice's owner label through the fixture's username map to exactly
@@ -73,22 +83,25 @@ func TestConnectPyModulesPushesAfterWrite(t *testing.T) {
 	}
 	// The put pushed: one SyncPyModules per eligible, resolvable executor
 	// (exec-alice and exec-bob; exec-ghost's owner does not resolve).
-	if len(f.client.requests) != 2 {
-		t.Fatalf("after Put: SyncPyModules requests = %d, want 2", len(f.client.requests))
+	if len(aliceC.requests) != 1 || len(bobC.requests) != 1 {
+		t.Fatalf("after Put: SyncPyModules requests = exec-alice %d, exec-bob %d; want 1 each", len(aliceC.requests), len(bobC.requests))
 	}
-	if got := moduleNames(f.client.requests[0]); !containsName(got, "alice_plot") {
+	if got := moduleNames(aliceC.requests[0]); !containsName(got, "alice_plot") {
 		t.Errorf("alice's push after Put = %v, want it to contain alice_plot", got)
 	}
 
 	if err := m.DeletePymodule(ctx, "alice_plot"); err != nil {
 		t.Fatalf("DeletePymodule: %v", err)
 	}
-	// The delete pushed the pruned corpus too: two more RPCs.
-	if len(f.client.requests) != 4 {
-		t.Fatalf("after Delete: SyncPyModules requests = %d, want 4", len(f.client.requests))
+	// The delete pushed the pruned corpus too: one more RPC per executor,
+	// and neither payload may still carry the deleted module.
+	if len(aliceC.requests) != 2 || len(bobC.requests) != 2 {
+		t.Fatalf("after Delete: SyncPyModules requests = exec-alice %d, exec-bob %d; want 2 each", len(aliceC.requests), len(bobC.requests))
 	}
-	if got := moduleNames(f.client.requests[2]); containsName(got, "alice_plot") {
-		t.Errorf("alice's push after Delete = %v, want the deleted module gone", got)
+	for _, req := range []*executorpb.SyncPyModulesRequest{aliceC.requests[1], bobC.requests[1]} {
+		if got := moduleNames(req); containsName(got, "alice_plot") {
+			t.Errorf("push after Delete = %v, want the deleted module gone", got)
+		}
 	}
 }
 

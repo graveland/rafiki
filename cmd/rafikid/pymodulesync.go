@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
 	"slices"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -70,32 +72,62 @@ func (pp *pymodulePusher) eligible(le execpool.LiveExecutor) bool {
 	return le.Executor.Labels["owner"] != ""
 }
 
-func (pp *pymodulePusher) pushAll(ctx context.Context) {
+// pymoduleSyncTimeout is how long one executor's SyncPyModules push may run
+// before its context expires. A venv build can legitimately take minutes, so
+// the default is generous; RAFIKI_PYMODULE_SYNC_TIMEOUT (a Go duration string,
+// e.g. "5m") overrides it when it parses, and anything unset or unparseable
+// falls back to the default.
+func pymoduleSyncTimeout() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("RAFIKI_PYMODULE_SYNC_TIMEOUT")); err == nil {
+		return d
+	}
+	return 5 * time.Minute
+}
+
+func (pp *pymodulePusher) pushAll(ctx context.Context) []*executorpb.PyModuleVenvResult {
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results []*executorpb.PyModuleVenvResult
+	)
 	for _, le := range pp.pool.Live() {
 		if !pp.eligible(le) {
 			continue
 		}
-		if err := pp.pushTo(ctx, le.Executor.ID); err != nil {
-			slog.Warn("pymodule sync failed", "executor", le.Executor.ID, "error", err)
-		}
+		wg.Add(1)
+		go func(executorID string) {
+			defer wg.Done()
+			res, err := pp.pushTo(ctx, executorID)
+			if err != nil {
+				slog.Warn("pymodule sync failed", "executor", executorID, "error", err)
+				return
+			}
+			mu.Lock()
+			results = append(results, res...)
+			mu.Unlock()
+		}(le.Executor.ID)
 	}
+	wg.Wait()
+	// Aggregated across executors, not deduplicated: the same module name can
+	// fail on two different executors, and the caller renders that.
+	return results
 }
 
-func (pp *pymodulePusher) pushIfEligible(ctx context.Context, executorID string) error {
+func (pp *pymodulePusher) pushIfEligible(ctx context.Context, executorID string) ([]*executorpb.PyModuleVenvResult, error) {
 	for _, le := range pp.pool.Live() {
 		if le.Executor.ID != executorID {
 			continue
 		}
 		if !pp.eligible(le) {
-			return nil
+			return nil, nil
 		}
 		return pp.pushTo(ctx, executorID)
 	}
-	return nil
+	return nil, nil
 }
 
-func (pp *pymodulePusher) pushTo(ctx context.Context, executorID string) error {
-	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func (pp *pymodulePusher) pushTo(ctx context.Context, executorID string) ([]*executorpb.PyModuleVenvResult, error) {
+	rctx, cancel := context.WithTimeout(ctx, pymoduleSyncTimeout())
 	defer cancel()
 
 	var target execpool.LiveExecutor
@@ -107,27 +139,27 @@ func (pp *pymodulePusher) pushTo(ctx context.Context, executorID string) error {
 		}
 	}
 	if !found {
-		return nil
+		return nil, nil
 	}
 	ownerID, ok := pp.resolveOwnerID(rctx, target.Executor.Labels["owner"])
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	recs, err := pp.store.List(rctx, ownerID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	client, err := pp.pool.ConnectClientFor(executorID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := client.SyncPyModules(rctx, connect.NewRequest(buildPyModules(recs, pp.version)))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	slog.Info("pymodules synced",
 		"executor", executorID, "written", resp.Msg.GetWritten(), "pruned", resp.Msg.GetPruned())
-	return nil
+	return resp.Msg.GetVenvResults(), nil
 }
