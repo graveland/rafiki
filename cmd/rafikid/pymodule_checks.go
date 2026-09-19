@@ -6,16 +6,17 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 // pymoduleSyntaxCheck runs `python3 -m py_compile` against code (written to
-// a temp file first, since py_compile takes a path) using the daemon's own
-// local python3. Returns "" whenever no definite syntax error was found --
-// this covers BOTH "python3 is not on PATH at all" (best-effort: no check
-// happened) AND "python3 ran and compiled it cleanly": callers cannot
-// distinguish the two, and must not need to -- both mean "nothing to
-// block". Returns the SyntaxError text (combined output, trimmed) only when
+// a file inside a throwaway temp directory first, since py_compile takes a
+// path) using the daemon's own local python3. Returns "" whenever no definite
+// syntax error was found -- this covers BOTH "python3 is not on PATH at all"
+// (best-effort: no check happened) AND "python3 ran and compiled it cleanly":
+// callers cannot distinguish the two, and must not need to -- both mean
+// "nothing to block". Returns the SyntaxError text (combined output, trimmed) only when
 // python3 was actually found and actually reported one. There is no error
 // return: an infrastructure hiccup (e.g. failing to write the temp file)
 // degrades to "" the same as "tool unavailable", never a blocking failure
@@ -25,11 +26,20 @@ func pymoduleSyntaxCheck(code string) string {
 	if err != nil {
 		return ""
 	}
-	src, err := writePymoduleCheckFile(code)
+	// Compile inside a throwaway DIRECTORY: py_compile on clean code writes
+	// __pycache__/<name>.cpython-*.pyc next to the source file, so a temp
+	// file dropped directly in the system temp root would leak one .pyc per
+	// successful pymodule_put on the daemon host. A per-check directory is
+	// removed whole, bytecode and all.
+	dir, err := os.MkdirTemp("", "rafiki-pymodule-syntax-*")
 	if err != nil {
 		return ""
 	}
-	defer os.Remove(src)
+	defer os.RemoveAll(dir)
+	src := filepath.Join(dir, "module.py")
+	if err := os.WriteFile(src, []byte(code), 0o600); err != nil {
+		return ""
+	}
 	out, err := exec.Command(py, "-m", "py_compile", src).CombinedOutput()
 	if err != nil {
 		// py_compile exits non-zero exactly when it reports a compile
@@ -74,8 +84,10 @@ func pymoduleLintCheck(code string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// writePymoduleCheckFile writes code to a temp file for a syntax/lint check
-// subprocess to read, since py_compile and ruff both take a path. The caller
+// writePymoduleCheckFile writes code to a temp file for a lint-check
+// subprocess to read, since ruff takes a path. (The syntax check no longer
+// shares this helper: py_compile also WRITES next to the path it is given,
+// so it needs a throwaway directory -- see pymoduleSyntaxCheck.) The caller
 // removes the file when done.
 func writePymoduleCheckFile(code string) (string, error) {
 	f, err := os.CreateTemp("", "rafiki-pymodule-check-*.py")

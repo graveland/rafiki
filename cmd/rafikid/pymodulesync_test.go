@@ -437,4 +437,17 @@ func TestPymoduleSyncTimeoutEnvOverride(t *testing.T) {
 	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
 		t.Errorf("garbage env: pymoduleSyncTimeout() = %v, want the 5m default", got)
 	}
+
+	// A parseable "0" or negative would otherwise become an already-expired
+	// push context -- every push failing loudly forever under a config that
+	// looks inert -- so both fall back to the default like garbage.
+	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "0")
+	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
+		t.Errorf("zero env: pymoduleSyncTimeout() = %v, want the 5m default", got)
+	}
+
+	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "-30s")
+	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
+		t.Errorf("negative env: pymoduleSyncTimeout() = %v, want the 5m default", got)
+	}
 }

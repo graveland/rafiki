@@ -75,10 +75,12 @@ func (pp *pymodulePusher) eligible(le execpool.LiveExecutor) bool {
 // pymoduleSyncTimeout is how long one executor's SyncPyModules push may run
 // before its context expires. A venv build can legitimately take minutes, so
 // the default is generous; RAFIKI_PYMODULE_SYNC_TIMEOUT (a Go duration string,
-// e.g. "5m") overrides it when it parses, and anything unset or unparseable
-// falls back to the default.
+// e.g. "5m") overrides it when it parses to a positive value, and anything
+// unset, unparseable or <= 0 falls back to the default -- a zero or negative
+// timeout would otherwise be an already-expired context that fails every push
+// forever under a config that looks inert.
 func pymoduleSyncTimeout() time.Duration {
-	if d, err := time.ParseDuration(os.Getenv("RAFIKI_PYMODULE_SYNC_TIMEOUT")); err == nil {
+	if d, err := time.ParseDuration(os.Getenv("RAFIKI_PYMODULE_SYNC_TIMEOUT")); err == nil && d > 0 {
 		return d
 	}
 	return 5 * time.Minute
