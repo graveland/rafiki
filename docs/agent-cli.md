@@ -575,20 +575,27 @@ daemon over the Connect plane (`ListPymodules`/`GetPymodule`/`PutPymodule`/
 against a remote daemon exactly as against a local one.
 
 ```
-rafiki python list                          # the inventory; code is never printed here
+rafiki python list [--repo <name>]          # the inventory; code is never printed here
 rafiki python get <name>                    # one module's code, raw
 rafiki python put <name> --file <path>      # save a new version (--file - reads stdin)
 rafiki python put <name> --file - --description "one line"
 rafiki python delete <name>                 # soft-delete every live version
 ```
 
-- **`list`** shows `NAME`, `VERSION`, `SAVED`, `DESCRIPTION` and never the
-  code — an inventory is a handful of lines and a body is a document.
-  `-o json`/`-o jsonl` work on `list` too, and the rows stay codeless in
-  every mode (json wraps them in the shared `{"rows": …}` envelope, jsonl
-  prints one bare row per line). `get` prints only the code by default, so
-  it can feed a file or an editor unchanged; `-o json` (on `get` or `put`)
-  emits the full row including code, with no envelope around it.
+- **`list`** shows `NAME`, `REPO`, `VERSION`, `SAVED`, `DESCRIPTION` and
+  never the code — an inventory is a handful of lines and a body is a
+  document. `--repo` narrows the inventory to one scope: `local` (the saved
+  blob store), a registered git source's name, or unset for everything —
+  the one place an empty value means "no filter", because it is a filter
+  flag, not an address. Git-sourced rows show the source's name in REPO and
+  `-` for VERSION and SAVED: they have neither, the repo's own history
+  being their versioning. `-o json`/`-o jsonl` work on `list` too, and the
+  rows stay codeless in every mode (json wraps them in the shared
+  `{"rows": …}` envelope, jsonl prints one bare row per line). `get` prints
+  only the code by default, so it can feed a file or an editor unchanged;
+  `-o json` (on `get` or `put`) emits the full row including code, with no
+  envelope around it. get/put/delete operate on the `local` scope only, so
+  their name completion narrows to it too.
 - **`put`** always inserts a NEW version — saving again under an existing
   name never modifies what is saved there, and the printed version id tells
   the two apart. The name must be a bare Python identifier (it becomes both
