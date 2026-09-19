@@ -443,7 +443,7 @@ operator's machine, which is a worse failure than the failed launch a wrong
 
 ```
 SyncPyModules(version, modules[{name, code}])
-  → { written, pruned }
+  → { written, pruned, venvResults[{name, ready, error}] }
 ```
 
 Unary. Delivers ONE owner's pymodule corpus to the executor's disposable cache
@@ -489,6 +489,27 @@ stray staging temp disappears), while a symlink entry is unlinked with
 `os.Remove`, never followed, so the sweep cannot reach outside the root. The
 skills prune re-validates per entry because its root is the operator's own
 `~/.claude/skills` and a planted name matters there.
+
+**Each module's dependencies install into a per-module venv, and the response
+reports how that went.** A module's requirements ride inside the code itself —
+a `# pymodule-requirements:` comment block parsed executor-side — so nothing
+about a module's dependencies travels outside its own source. The executor
+always builds and blocks on every sync; there is no wait flag. Each module
+directory's `.venv` is hash-gated with a `.rafiki-requirements-hash` file
+inside it: an unchanged hash skips the build entirely, and a changed one is
+rebuilt staged in a sibling temp directory and renamed into place only once it
+succeeded, so a failed rebuild leaves the previous working venv untouched. The
+response carries `venvResults` (repeated `PyModuleVenvResult{name, ready,
+error}`), one per module: `ready` is true when the module declares no
+requirements, built successfully, or was already up to date, and false only
+when requirements were declared and the build failed, with `error` naming why.
+
+Two properties of that reporting are inherent rather than configurable. A build
+continues to completion even if the daemon's client times out — the timeout
+bounds the daemon's wait, not the executor's build, so the venv still lands and
+the next sync reports it. And results are reported only when the RPC itself
+succeeds: a failed or timed-out call carries no per-module outcomes at all, the
+same way `written` and `pruned` are absent from it.
 
 **Opt-in per machine, and `pymodules_sync` on `DescribeResponse` is
 self-reported** exactly like `skills_sync`: it only ever narrows what the
