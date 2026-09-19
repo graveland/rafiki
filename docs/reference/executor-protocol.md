@@ -473,6 +473,22 @@ directories (`__pycache__/`): the prune sweeps at root level only, so it
 survives between runs — part of why the cache is the right home for the
 scripts.
 
+**`pymodule_run`'s `repo` argument selects the source, and only `local` means
+this corpus.** `repo` is required on the tool; `repo="local"` (the reserved
+sentinel for the blob store everywhere on the pymodule surface) runs a saved
+module exactly as described above. Any other value names a git source synced
+by `SyncPyModuleGitSource` (below): the script resolves to
+`scripts/<script>.py` in that source's checkout under
+`<paths.CacheDir()>/pymodule-repos/<repo>` — a `scripts/` layout, not the
+per-module directories above — while each `modules` entry resolves to a
+top-level package directory of the same checkout, and the checkout ROOT
+itself always joins `PYTHONPATH` first, so a script's own intra-repo imports
+resolve without naming its packages. The interpreter is the repo's shared
+`.venv/bin/python3` when that checkout has one, else the plain fallback — a
+repo whose venv build failed runs and fails visibly at import time rather
+than refusing. A git source's name never collides with `local`:
+registration refuses it.
+
 **The whole owner's corpus, every time.** `modules` is the complete set for
 this owner, and a synced entry absent from it is pruned — same wholesale
 replacement reasoning as SyncSkills. Zero modules is a legitimate sync (an

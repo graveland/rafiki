@@ -75,7 +75,11 @@ Three Swahili words, three roles:
   agents land on, and `pymodule_run` executes a saved script straight out of
   that synced cache by name — never a workspace copy, while the script runs
   in the agent's working directory or a `cwd` the call names — with further
-  saved modules importable for the run. Code written once in one
+  saved modules importable for the run. Pools beyond the personal store:
+  `rafiki python repo` registers a git-backed pymodule source that every
+  executor clones, discovers (`scripts/*.py` plus top-level packages) and
+  builds one shared venv for, so `pymodule_run` can run a repo's scripts
+  against its own dependencies. Code written once in one
   conversation is still runnable in the next one, on another machine.
 - **Watch or drive the same conversation from anywhere.** A running agent
   isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki watch`,
