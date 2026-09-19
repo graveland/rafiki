@@ -28,7 +28,7 @@ func TestMCPPyModuleListerAdapter(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store}
 	lister := newMCPPyModuleLister(ctrl, users.Identity{UserID: "u-alice"})
 
-	infos, err := lister.List(context.Background())
+	infos, err := lister.List(context.Background(), "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -53,12 +53,14 @@ func TestMCPPyModuleListBlueprintDeclines(t *testing.T) {
 	}
 }
 
-// stubLister is a minimal tools.PyModuleLister for testing.
+// stubLister is a minimal tools.PyModuleLister for testing. It ignores the
+// repo filter -- the filtering lives in the real adapter, and the render
+// tests below only need entries to come back.
 type stubLister struct {
 	infos []tools.PyModuleInfo
 }
 
-func (s *stubLister) List(context.Context) ([]tools.PyModuleInfo, error) {
+func (s *stubLister) List(context.Context, string) ([]tools.PyModuleInfo, error) {
 	return s.infos, nil
 }
 

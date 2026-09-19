@@ -16,8 +16,8 @@ import (
 // and delNotice are the advisory notices the fake returns, so a test can
 // drive the tool's notice-surfacing without a real store.
 type fakePyModuleStore struct {
-	puts      [][3]string // name, code, description, in call order
-	deletes   []string    // names Delete was called with, in call order
+	puts      [][4]string // repo, name, code, description, in call order
+	deletes   [][2]string // repo, name Delete was called with, in call order
 	getRec    pymodules.Record
 	getErr    error
 	nextID    int64
@@ -27,11 +27,11 @@ type fakePyModuleStore struct {
 	delNotice string
 }
 
-func (s *fakePyModuleStore) Put(_ context.Context, name, code, description string) (int64, string, error) {
+func (s *fakePyModuleStore) Put(_ context.Context, repo, name, code, description string) (int64, string, error) {
 	if s.putErr != nil {
 		return 0, "", s.putErr
 	}
-	s.puts = append(s.puts, [3]string{name, code, description})
+	s.puts = append(s.puts, [4]string{repo, name, code, description})
 	s.nextID++
 	return s.nextID, s.putNotice, nil
 }
@@ -45,15 +45,15 @@ func TestPymodulePutSavesValidInputToStore(t *testing.T) {
 	if tool == nil {
 		t.Fatal("Materialize returned nil tool with a non-nil store")
 	}
-	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers","code":"def chart(): pass","description":"chart helpers"}`))
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":"def chart(): pass","description":"chart helpers"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if len(store.puts) != 1 {
 		t.Fatalf("store Put calls = %d, want 1", len(store.puts))
 	}
-	if got := store.puts[0]; got[0] != "chart_helpers" || got[1] != "def chart(): pass" || got[2] != "chart helpers" {
-		t.Errorf("store got name/code/description = %q/%q/%q, want the tool input verbatim", got[0], got[1], got[2])
+	if got := store.puts[0]; got[0] != "local" || got[1] != "chart_helpers" || got[2] != "def chart(): pass" || got[3] != "chart helpers" {
+		t.Errorf("store got repo/name/code/description = %q/%q/%q/%q, want the tool input verbatim", got[0], got[1], got[2], got[3])
 	}
 	want := `saved "chart_helpers" as version 1`
 	if res.Text != want {
@@ -68,7 +68,7 @@ func TestPymodulePutRejectsInvalidNameWithoutCallingStore(t *testing.T) {
 		t.Fatalf("Materialize: %v", err)
 	}
 	for _, name := range []string{"foo/bar", "", "1foo", "my-module", strings.Repeat("_", 65)} {
-		input := `{"name":"` + name + `","code":"x = 1"}`
+		input := `{"repo":"local","name":"` + name + `","code":"x = 1"}`
 		res, err := tool.Execute(context.Background(), ToolInput(input))
 		if err == nil {
 			t.Errorf("Execute(name=%q) = nil error, want a validation error", name)
@@ -88,7 +88,7 @@ func TestPymodulePutRejectsEmptyCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	if _, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers","code":""}`)); err == nil {
+	if _, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":""}`)); err == nil {
 		t.Error("Execute with empty code = nil error, want an error")
 	}
 	if len(store.puts) != 0 {
@@ -102,8 +102,60 @@ func TestPymodulePutPropagatesStoreError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	if _, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers","code":"x = 1"}`)); err == nil || !strings.Contains(err.Error(), "db down") {
+	if _, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":"x = 1"}`)); err == nil || !strings.Contains(err.Error(), "db down") {
 		t.Errorf("Execute error = %v, want the store error wrapped through", err)
+	}
+}
+
+// A non-"local" repo names a git source, which this operation can never
+// target: a clear tool-level error, raised before the store is touched --
+// and an omitted repo is the same rejection, since "required" is enforced
+// here and not by the schema.
+func TestPymodulePutRejectsNonLocalRepo(t *testing.T) {
+	store := &fakePyModuleStore{}
+	tool, err := PyModulePutBlueprint{}.Materialize(ToolOpts{PyModules: store})
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	for _, input := range []string{
+		`{"repo":"ops-tools","name":"chart_helpers","code":"x = 1"}`,
+		`{"name":"chart_helpers","code":"x = 1"}`,
+	} {
+		res, err := tool.Execute(context.Background(), ToolInput(input))
+		if err == nil {
+			t.Errorf("Execute(%s) = nil error, want the repo rejection", input)
+			continue
+		}
+		if res.Text != "" {
+			t.Errorf("Execute(%s) result text = %q, want empty on error", input, res.Text)
+		}
+		if !strings.Contains(err.Error(), `repo must be "local"`) {
+			t.Errorf("Execute(%s) error = %v, want it to name the only legal repo value", input, err)
+		}
+	}
+	if len(store.puts) != 0 {
+		t.Errorf("store Put calls = %d, want 0: a non-local repo must be rejected before the store is touched", len(store.puts))
+	}
+}
+
+// {"repo":"local"} behaves exactly as it did before the repo parameter
+// existed: the regression guard for the required-field change.
+func TestPymodulePutAcceptsLocalRepo(t *testing.T) {
+	store := &fakePyModuleStore{}
+	tool, err := PyModulePutBlueprint{}.Materialize(ToolOpts{PyModules: store})
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":"x = 1"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(store.puts) != 1 || store.puts[0][0] != "local" || store.puts[0][1] != "chart_helpers" {
+		t.Errorf("store Put calls = %v, want exactly [local chart_helpers]", store.puts)
+	}
+	want := `saved "chart_helpers" as version 1`
+	if res.Text != want {
+		t.Errorf("result text = %q, want %q", res.Text, want)
 	}
 }
 
@@ -117,7 +169,7 @@ func TestPymodulePutIncludesNoticeInResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers","code":"import os\n"}`))
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":"import os\n"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -137,7 +189,7 @@ func TestPymodulePutOmitsNoticeWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"chart_helpers","code":"x = 1"}`))
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo":"local","name":"chart_helpers","code":"x = 1"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

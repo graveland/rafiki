@@ -38,7 +38,7 @@ func TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	id, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	id, _, err := w.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestNewControllerPyModuleWriterPutWithNilPusherStillSaves(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store} // pymodulePusher deliberately nil
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	id, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	id, _, err := w.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestNewControllerPyModuleWriterPassesEmptyOwnerThrough(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store}
 
 	w := newControllerPyModuleWriter(ctrl, "")
-	id, _, err := w.Put(context.Background(), "unattributed_util", "x = 1", "nobody's util")
+	id, _, err := w.Put(context.Background(), "local", "unattributed_util", "x = 1", "nobody's util")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	if _, _, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things"); err != nil {
+	if _, _, err := w.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	// The put's fan-out reached both eligible executors.
@@ -150,7 +150,7 @@ func TestPymoduleDeleteTriggersOwnerScopedPush(t *testing.T) {
 		t.Fatalf("after Put, SyncPyModules requests = exec-alice %d, exec-bob %d; want 1 each", len(aliceC.requests), len(bobC.requests))
 	}
 
-	if _, err := w.Delete(context.Background(), "alice_plot"); err != nil {
+	if _, err := w.Delete(context.Background(), "local", "alice_plot"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	// The delete reached the store under the writer's bound owner.
@@ -179,7 +179,7 @@ func TestPymoduleDeleteNotFoundSkipsPush(t *testing.T) {
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
 	before := len(f.client.requests)
-	_, err := w.Delete(context.Background(), "no_such_mod")
+	_, err := w.Delete(context.Background(), "local", "no_such_mod")
 	if err == nil {
 		t.Fatal("Delete of an unknown name = nil error, want not-found")
 	}
@@ -208,7 +208,7 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 		t.Errorf("empty-store inventory = %q, want the nothing-saved hint", body)
 	}
 
-	if _, _, err := newControllerPyModuleWriter(ctrl, "u_alice").Put(context.Background(), "alice_chart", "x = 1", "charts things"); err != nil {
+	if _, _, err := newControllerPyModuleWriter(ctrl, "u_alice").Put(context.Background(), "local", "alice_chart", "x = 1", "charts things"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	body, err = pymoduleInventory(ctrl, "u_alice")(context.Background())
@@ -217,6 +217,55 @@ func TestPymoduleInventoryRendersSavedModules(t *testing.T) {
 	}
 	if body != "alice_chart — charts things\n" {
 		t.Errorf("inventory = %q, want the saved module's name and description", body)
+	}
+}
+
+// TestPymoduleInventorySpansGitSources pins the skill body spanning both
+// scopes: the owner's local rows first, then every git source's cached
+// inventory, each git-sourced line labeled "reponame/name" so the agent can
+// tell which repo value to pass back. A nil gitpymodulePusher (no exec pool)
+// keeps the body to the local rows alone, never an error.
+func TestPymoduleInventorySpansGitSources(t *testing.T) {
+	disableLint(t) // hermetic: this test does not exercise the lint outcome
+	// A fresh store, not the shared fixture: the fixture pre-seeds rows, and
+	// the nil-pusher half below needs to see exactly the local rows.
+	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{
+		"u_alice": {{ID: 1, OwnerUserID: "u_alice", Name: "alice_chart", Description: "charts things"}},
+	}}
+	gp := &gitPymodulePusher{cache: map[string]gitPymoduleInventory{
+		gitSourceKey("u_alice", "ops-tools"): {
+			Scripts:  []*executorpb.GitSourceScript{{Name: "rotate_keys", Description: "rotates the API keys"}},
+			Packages: []*executorpb.GitSourcePackage{{Name: "opslib", Description: "ops helpers"}},
+		},
+	}}
+	ctrl := &Controller{pymoduleStore: store, gitpymodulePusher: gp}
+
+	body, err := pymoduleInventory(ctrl, "u_alice")(context.Background())
+	if err != nil {
+		t.Fatalf("inventory: %v", err)
+	}
+	for _, want := range []string{
+		"alice_chart — charts things",                  // local row, bare name
+		"ops-tools/rotate_keys — rotates the API keys", // discovered script, repo-labeled
+		"ops-tools/opslib — ops helpers",               // discovered package, repo-labeled
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("skill body = %q, want it to contain %q", body, want)
+		}
+	}
+
+	// No exec pool: no pusher, so no git section and no error -- the body is
+	// the local rows alone.
+	nilCtrl := &Controller{pymoduleStore: store}
+	body, err = pymoduleInventory(nilCtrl, "u_alice")(context.Background())
+	if err != nil {
+		t.Fatalf("inventory with nil pusher: %v", err)
+	}
+	if strings.Contains(body, "ops-tools/") {
+		t.Errorf("skill body with nil pusher = %q, want no git-sourced lines", body)
+	}
+	if !strings.Contains(body, "alice_chart — charts things") {
+		t.Errorf("skill body with nil pusher = %q, want the local row still rendered", body)
 	}
 }
 
@@ -229,10 +278,10 @@ func TestControllerPyModuleWriterGet(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	if _, _, err := w.Put(context.Background(), "alice_chart", "x = 1", "v2 of alice's chart"); err != nil {
+	if _, _, err := w.Put(context.Background(), "local", "alice_chart", "x = 1", "v2 of alice's chart"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	r, err := w.Get(context.Background(), "alice_chart")
+	r, err := w.Get(context.Background(), "local", "alice_chart")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -242,7 +291,7 @@ func TestControllerPyModuleWriterGet(t *testing.T) {
 
 	// A name owned by bob is invisible to alice's writer: the wrong owner
 	// must not leak rows.
-	_, err = w.Get(context.Background(), "bob_util")
+	_, err = w.Get(context.Background(), "local", "bob_util")
 	if !errors.Is(err, pymodules.ErrNotFound) {
 		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
 	}
@@ -263,7 +312,7 @@ func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	_, notice, err := w.Put(context.Background(), "alice_bad", "def f(:\n    pass\n", "broken")
+	_, notice, err := w.Put(context.Background(), "local", "alice_bad", "def f(:\n    pass\n", "broken")
 	if err == nil {
 		t.Fatal("Put of syntactically invalid code = nil error, want a syntax-error failure")
 	}
@@ -288,7 +337,7 @@ func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
-	input, err := json.Marshal(map[string]string{"name": "alice_bad", "code": "def f(:\n    pass\n"})
+	input, err := json.Marshal(map[string]string{"repo": "local", "name": "alice_bad", "code": "def f(:\n    pass\n"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +366,7 @@ func TestControllerPyModuleWriterPutSurfacesVenvFailure(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	id, notice, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	id, notice, err := w.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -344,7 +393,7 @@ func TestControllerPyModuleWriterPutSucceedsDespiteLintFindings(t *testing.T) {
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: f.pp}
 
 	w := newControllerPyModuleWriter(ctrl, "u_alice")
-	_, notice, err := w.Put(context.Background(), "alice_plot", "def alice_plot(): pass", "plots things")
+	_, notice, err := w.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}

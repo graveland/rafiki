@@ -16,6 +16,15 @@ import (
 // ErrNotFound means the module does not exist for the given owner.
 var ErrNotFound = errors.New("pymodule not found")
 
+// LocalRepo is the repo scope name of the owner's own blob store -- the only
+// scope pymodule_put/delete/get can address. Every other repo value names a
+// git source, whose content is read-only through pymodule_run (its own
+// history is the only mutation path) and which these tools must reject.
+// Defined here, next to the store it names a scope of, so the tool layer,
+// the daemon adapters and the CLI all quote one constant instead of three
+// copies of the literal "local".
+const LocalRepo = "local"
+
 // Record is one row of conversations.pymodules.
 type Record struct {
 	ID          int64

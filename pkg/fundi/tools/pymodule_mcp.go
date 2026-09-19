@@ -9,8 +9,11 @@ import (
 
 // PyModuleInfo is one row of an owner's pymodule inventory, rendered by the
 // pymodule_list MCP tool. Mirrors the fields pymoduleInventory's dynamic
-// skill body already renders for fundi.
+// skill body already renders for fundi. Repo names the scope the row came
+// from: "local" (the caller's own blob store) or a git source's name, so a
+// rendered result can show which repo value to pass back.
 type PyModuleInfo struct {
+	Repo        string
 	Name        string
 	Description string
 }
@@ -19,12 +22,18 @@ type PyModuleInfo struct {
 // one owner at construction, same rule as PyModuleStore -- no method takes a
 // caller-supplied identity.
 //
+// repo scopes the listing: empty means everything (the caller's own store
+// plus every git source's cached inventory), "local" narrows to the blob
+// store alone, and any other value names one git source. The filter has to
+// travel through this interface -- there is nowhere else for it to go -- and
+// an unknown git source name yields an empty result, not an error.
+//
 // Fundi never sets ToolOpts.PyModuleList: it renders the same inventory as
 // the dynamic "rafiki:python-modules" skill instead (see
 // ToolOpts.PyModulesInventory). This interface exists only for the MCP face,
 // which has no skill mechanism.
 type PyModuleLister interface {
-	List(ctx context.Context) ([]PyModuleInfo, error)
+	List(ctx context.Context, repo string) ([]PyModuleInfo, error)
 }
 
 // PyModuleExecutor runs a pymodule_run call on the calling child's own bound

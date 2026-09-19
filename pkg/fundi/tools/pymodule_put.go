@@ -11,19 +11,29 @@ import (
 
 // PyModuleStore lets an agent save a reusable Python snippet. Bound to one
 // owner at construction; no method takes a caller-supplied identity.
+//
+// Every method's repo parameter must be "local" -- the owner's own blob
+// store. That is the ONLY scope these three tools can address: a
+// git-sourced pymodule is read-only through pymodule_run and cannot be
+// created, fetched or removed here (its repo's own history is the only
+// mutation path). The tool layer rejects any other value before this
+// interface is reached, so implementations may assume repo == "local" --
+// but the parameter stays in the signature so the interface stays honest
+// about the addressing scheme and a future git-sourced Get has somewhere
+// to land.
 type PyModuleStore interface {
 	// Put returns the new row's id and an advisory notice string --
 	// possibly multi-line, possibly empty -- describing anything worth the
 	// calling agent's attention that did NOT block the save: a lint
 	// finding, or a dependency-install failure on one or more of the
 	// owner's executors. An empty notice means nothing to report.
-	Put(ctx context.Context, name, code, description string) (id int64, notice string, err error)
+	Put(ctx context.Context, repo, name, code, description string) (id int64, notice string, err error)
 
 	// Get returns one saved module's full record: code, description, version
 	// (the row id) and creation time. Returns an error wrapping
 	// pymodules.ErrNotFound when no live module has that name. Bound to the
 	// same single owner as Put/Delete -- no method takes an identity.
-	Get(ctx context.Context, name string) (pymodules.Record, error)
+	Get(ctx context.Context, repo, name string) (pymodules.Record, error)
 
 	// Delete soft-deletes the named module: every version of it leaves the
 	// inventory and is pruned from executors on the next sync; a later Put
@@ -31,7 +41,7 @@ type PyModuleStore interface {
 	// pymodules.ErrNotFound when no live module has that name. The returned
 	// notice is advisory, the same rule as Put's: anything the post-delete
 	// sync found worth reporting that did not block the delete.
-	Delete(ctx context.Context, name string) (notice string, err error)
+	Delete(ctx context.Context, repo, name string) (notice string, err error)
 }
 
 const pymodulePutDescription = "Save a reusable Python snippet (a class, a " +
@@ -55,11 +65,12 @@ func (PyModulePutBlueprint) InputSchema() Schema {
 	return Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
+			{Name: "repo", Type: "string", Description: "Must be \"local\" — you can only save to and read from your own pymodule store this way. A git-sourced pymodule is read-only through pymodule_run and pymodule_get; this operation cannot target one."},
 			{Name: "name", Type: "string", Description: "Module name, later importable as `import <name>`. Must be a bare Python identifier: letters, digits, underscore, not starting with a digit."},
 			{Name: "code", Type: "string", Description: "Full Python source of the module. A `# pymodule-requirements:` comment block declares dependencies installed into a per-module venv at sync time."},
 			{Name: "description", Type: "string", Description: "One-line description shown in your pymodule inventory."},
 		},
-		Required: []string{"name", "code"},
+		Required: []string{"repo", "name", "code"},
 	}
 }
 func (PyModulePutBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
@@ -78,6 +89,7 @@ type pymodulePutTool struct {
 }
 
 type pymodulePutInput struct {
+	Repo        string `json:"repo"`
 	Name        string `json:"name"`
 	Code        string `json:"code"`
 	Description string `json:"description"`
@@ -88,6 +100,12 @@ func (pt *pymodulePutTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	if err := input.Unmarshal(&in); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_put: invalid input: %w", err)
 	}
+	// The repo check comes first, before every other validation: a caller
+	// aiming at a git source must be told this operation cannot target one,
+	// whatever else is wrong with its input.
+	if in.Repo != pymodules.LocalRepo {
+		return ToolResult{}, fmt.Errorf("pymodule_put: repo must be %q — a git-sourced pymodule is managed through its own repo's pull requests, not through rafiki", pymodules.LocalRepo)
+	}
 	if err := pymodules.ValidName(in.Name); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_put: %w", err)
 	}
@@ -97,7 +115,7 @@ func (pt *pymodulePutTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	if err := ctx.Err(); err != nil {
 		return ToolResult{}, err
 	}
-	id, notice, err := pt.store.Put(ctx, in.Name, in.Code, in.Description)
+	id, notice, err := pt.store.Put(ctx, in.Repo, in.Name, in.Code, in.Description)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_put: %w", err)
 	}

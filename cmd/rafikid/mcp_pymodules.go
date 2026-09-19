@@ -28,7 +28,11 @@ func newMCPPyModuleStore(ctrl *Controller, owner users.Identity) *mcpPyModuleSto
 	return &mcpPyModuleStore{ctrl: ctrl, ownerUserID: owner.UserID}
 }
 
-func (w *mcpPyModuleStore) Put(ctx context.Context, name, code, description string) (int64, string, error) {
+// repo is always "local" by the time the tool layer calls in (it rejects
+// every other value), but the parameter stays: tools.PyModuleStore requires
+// it, and dropping it here would hide the addressing scheme the interface
+// speaks.
+func (w *mcpPyModuleStore) Put(ctx context.Context, repo, name, code, description string) (int64, string, error) {
 	// Same ordering contract as pymoduleWriter.Put: syntax blocks, lint is
 	// advisory and pre-write, the row is written next, and the push's venv
 	// results are collected LAST, after the row exists.
@@ -60,7 +64,10 @@ func (w *mcpPyModuleStore) Put(ctx context.Context, name, code, description stri
 	return rec.ID, notice, nil
 }
 
-func (w *mcpPyModuleStore) Delete(ctx context.Context, name string) (string, error) {
+// repo is always "local" by the time the tool layer calls in (it rejects
+// every other value), but the parameter stays: tools.PyModuleStore requires
+// it.
+func (w *mcpPyModuleStore) Delete(ctx context.Context, repo, name string) (string, error) {
 	if err := w.ctrl.pymoduleStore.Delete(ctx, w.ownerUserID, name); err != nil {
 		return "", err
 	}
@@ -73,6 +80,10 @@ func (w *mcpPyModuleStore) Delete(ctx context.Context, name string) (string, err
 
 // Get reads the latest live version of a module under this store's bound
 // owner. Read-only: no push, nothing to fan out.
-func (w *mcpPyModuleStore) Get(ctx context.Context, name string) (pymodules.Record, error) {
+// repo is always "local" by the time the tool layer calls in (it rejects
+// every other value; serving a git-sourced get is deferred -- the daemon
+// caches names and descriptions only, never file content), but the
+// parameter stays: tools.PyModuleStore requires it.
+func (w *mcpPyModuleStore) Get(ctx context.Context, repo, name string) (pymodules.Record, error) {
 	return w.ctrl.pymoduleStore.Get(ctx, w.ownerUserID, name)
 }
