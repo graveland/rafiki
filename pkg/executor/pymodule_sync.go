@@ -13,6 +13,7 @@ import (
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 // pymoduleCacheDir is where synced pymodules land: paths.CacheDir() is
@@ -79,13 +80,24 @@ func (s *Server) SyncPyModules(
 		}
 	}
 
+	// Every sync path always builds and waits for the venv result -- no
+	// wait/no-wait flag (design §3). A module with no requirements block
+	// still gets a result entry: it reports Ready, and clears any venv a
+	// previous corpus left behind.
+	venvResults := make([]*executorpb.PyModuleVenvResult, 0, len(req.Msg.GetModules()))
+	for _, m := range req.Msg.GetModules() {
+		res := buildModuleVenv(filepath.Join(root, m.GetName()), pymodules.ParseRequirements(m.GetCode()))
+		res.Name = m.GetName()
+		venvResults = append(venvResults, res)
+	}
+
 	n, err := prunePyModules(root, want)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	pruned = n
 
-	return connect.NewResponse(&executorpb.SyncPyModulesResponse{Written: written, Pruned: pruned}), nil
+	return connect.NewResponse(&executorpb.SyncPyModulesResponse{Written: written, Pruned: pruned, VenvResults: venvResults}), nil
 }
 
 // writePyModule writes name's code to root/name/name.py atomically (write

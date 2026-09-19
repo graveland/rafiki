@@ -187,3 +187,69 @@ func TestSyncPyModulesPrunesSymlinkWithoutFollowing(t *testing.T) {
 		t.Errorf("pruned=%d, want 1", resp.Msg.GetPruned())
 	}
 }
+
+// A module declaring a requirements block gets its venv built and reported
+// on every sync -- using the fake uv, never a real one (see writeFakeUV).
+func TestSyncPyModulesBuildsVenvAndReportsReady(t *testing.T) {
+	uvDir := writeFakeUV(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	s := pymoduleServer(t, true)
+	code := "# pymodule-requirements:\n# requests\n\nX = 1\n"
+
+	resp, err := s.SyncPyModules(context.Background(), connect.NewRequest(&executorpb.SyncPyModulesRequest{
+		Modules: []*executorpb.SyncPyModule{{Name: "alpha", Code: code}},
+	}))
+	if err != nil {
+		t.Fatalf("SyncPyModules: %v", err)
+	}
+	results := resp.Msg.GetVenvResults()
+	if len(results) != 1 {
+		t.Fatalf("venv results = %d entries, want 1", len(results))
+	}
+	if results[0].GetName() != "alpha" {
+		t.Errorf("venv result name = %q, want %q", results[0].GetName(), "alpha")
+	}
+	if !results[0].GetReady() {
+		t.Errorf("alpha's venv not ready: %q", results[0].GetError())
+	}
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "alpha", ".venv", "bin", "python3")); err != nil {
+		t.Errorf("venv was not built into alpha's module directory: %v", err)
+	}
+}
+
+// prunePyModules' whole-directory RemoveAll takes the .venv with the module:
+// a module absent from the corpus must leave neither its code file nor an
+// orphaned venv directory behind.
+func TestSyncPyModulesPrunesVenvWithFullModuleRemoval(t *testing.T) {
+	uvDir := writeFakeUV(t)
+	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
+	s := pymoduleServer(t, true)
+	alpha := &executorpb.SyncPyModule{Name: "alpha", Code: "# pymodule-requirements:\n# requests\n\nX = 1\n"}
+	beta := &executorpb.SyncPyModule{Name: "beta", Code: "Y = 2\n"}
+
+	if _, err := s.SyncPyModules(context.Background(),
+		connect.NewRequest(&executorpb.SyncPyModulesRequest{Modules: []*executorpb.SyncPyModule{alpha, beta}})); err != nil {
+		t.Fatalf("first SyncPyModules: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "alpha", ".venv", "bin", "python3")); err != nil {
+		t.Fatalf("alpha's venv was not built during the first sync: %v", err)
+	}
+
+	resp, err := s.SyncPyModules(context.Background(),
+		connect.NewRequest(&executorpb.SyncPyModulesRequest{Modules: []*executorpb.SyncPyModule{beta}}))
+	if err != nil {
+		t.Fatalf("second SyncPyModules: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "alpha", "alpha.py")); !os.IsNotExist(err) {
+		t.Errorf("removed module's code file survived a sync that omitted it (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "alpha", ".venv")); !os.IsNotExist(err) {
+		t.Errorf("removed module's .venv survived independently (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(pymoduleCacheDir(), "alpha")); !os.IsNotExist(err) {
+		t.Errorf("removed module's directory survived as an empty husk (err=%v)", err)
+	}
+	if resp.Msg.GetPruned() != 1 {
+		t.Errorf("pruned=%d, want 1", resp.Msg.GetPruned())
+	}
+}
