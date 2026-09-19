@@ -235,6 +235,31 @@ func wireCwd(t *testing.T, req *executorpb.ExecuteRequest) string {
 	return fields.Cwd
 }
 
+// TestMCPPyModuleRunRepoFieldSurvivesBindCwd: repo is required on the
+// executor's pymodule_run, and bindCwd rewrites the input through a
+// map[string]json.RawMessage round-trip -- exactly the shape that would
+// silently drop a field it does not know, if wrong. The repo value must
+// arrive on the wire byte-identical while cwd is still rewritten -- one
+// proves the other is no accident of a short-circuit.
+func TestMCPPyModuleRunRepoFieldSurvivesBindCwd(t *testing.T) {
+	caller := filepath.Join(t.TempDir(), "proj")
+	exec := &mcpPyModuleRunExecutor{callerCwd: caller}
+	req := wireInput(t, exec, `{"repo":"ops_tools","script":"rotate","modules":["ops_tools"],"cwd":"sub"}`)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(req.GetInputJson(), &fields); err != nil {
+		t.Fatalf("wire input %s does not unmarshal: %v", req.GetInputJson(), err)
+	}
+	if string(fields["repo"]) != `"ops_tools"` {
+		t.Errorf("repo on the wire = %s, want byte-identical \"ops_tools\"", fields["repo"])
+	}
+	if string(fields["modules"]) != `["ops_tools"]` {
+		t.Errorf("modules on the wire = %s, want byte-identical [\"ops_tools\"]", fields["modules"])
+	}
+	if got, want := wireCwd(t, req), filepath.Join(caller, "sub"); got != want {
+		t.Errorf("wire cwd = %q, want %q (bindCwd still rewrote cwd)", got, want)
+	}
+}
+
 // TestMCPPyModuleRunExecutorBindsCwdToTheCaller pins the MCP pymodule_run
 // cwd contract: `your working directory` in the tool description is the
 // CALLING CHILD's own cwd, not the executor's root. Before this, a relative

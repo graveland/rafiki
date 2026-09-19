@@ -184,11 +184,14 @@ func (e *mcpPyModuleRunExecutor) bindCwd(input json.RawMessage) json.RawMessage 
 	return out
 }
 
-const mcpPymoduleRunDescription = "Run a Python script you saved with pymodule_put, by its " +
-	"module name. `script` is the module name exactly as saved with pymodule_put -- not " +
+const mcpPymoduleRunDescription = "Run a Python script you saved with pymodule_put, or one from a " +
+	"registered git source, by its module name. `repo` picks the source: " +
+	"\"local\" for your own saved pymodules (pymodule_put), or a git " +
+	"source's name as reported by discovery. `script` is the module name exactly as saved with pymodule_put -- not " +
 	"a path, and not inline code; if you have edited a module's code since saving it, " +
 	"pymodule_put it again before running. `modules` names further saved pymodules the " +
-	"script imports. If the script or any named module declares a requirements block " +
+	"script imports, resolved within the same repo. If the script or any named module " +
+	"declares a requirements block " +
 	"(`# pymodule-requirements:`, see pymodule_put), its installed packages are on " +
 	"PYTHONPATH for the run and the script's own venv interpreter is used (script only). " +
 	"`cwd` optionally sets the working directory -- absolute, or " +
@@ -203,12 +206,13 @@ func (mcpPyModuleRunBlueprint) InputSchema() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: []tools.SchemaProperty{
+			{Name: "repo", Type: "string", Description: "Which pymodule source to use: \"local\" for your own saved pymodules (pymodule_put), or a git source's name as reported by discovery."},
 			{Name: "script", Type: "string", Description: "Name of the pymodule to run, exactly as saved with pymodule_put (e.g. \"analyze\"). A bare Python identifier, not a path."},
 			{Name: "modules", Type: "array", Items: &tools.Schema{Type: "string"}, Description: "Names of further pymodules the script imports, from pymodule_put."},
 			{Name: "cwd", Type: "string", Description: "Optional working directory for the run -- absolute, ~-expanded, or relative to your working directory. Default: your working directory."},
 			{Name: "args", Type: "array", Items: &tools.Schema{Type: "string"}, Description: "Extra command-line arguments passed to the script."},
 		},
-		Required: []string{"script"},
+		Required: []string{"script", "repo"},
 	}
 }
 func (mcpPyModuleRunBlueprint) Execute(context.Context, tools.ToolInput) (tools.ToolResult, error) {
