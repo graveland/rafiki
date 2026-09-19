@@ -566,9 +566,14 @@ names and descriptions only, never the executor's own filesystem paths.
 
 The repo gets exactly ONE shared venv, `<checkout>/.venv`, built with `uv sync`
 run with the checkout root as its working directory — rafiki parses no manifest
-and lets uv figure out its own input. A checkout with no `pyproject.toml`
-declares no dependencies at all: the build is skipped entirely and
-`venvReady=true` is reported with nothing invoked. Otherwise the build runs
+and lets uv figure out its own input. The manifest gate is file existence only,
+three-way: a checkout with neither `pyproject.toml` nor `requirements.txt`
+declares no dependencies at all, the build is skipped entirely and
+`venvReady=true` is reported with nothing invoked; a checkout carrying ONLY a
+bare `requirements.txt` — which `uv sync` cannot consume — reports
+`venvReady=false` with one clear sentence in `venvError` rather than promising
+a venv that was never built, its inventory still riding the same response as
+with any failed build. Otherwise the build runs
 staged in a sibling temp directory (via `UV_PROJECT_ENVIRONMENT`) using the
 same `RAFIKI_PYMODULE_UV` resolution and interpreter as blob-sourced venvs,
 and is renamed into place only once it succeeded; a failed build discards the

@@ -25,6 +25,12 @@ func gitPymoduleRepoDir(name string) string {
 	return filepath.Join(paths.CacheDir(), "pymodule-repos", name)
 }
 
+// requirementsOnlyVenvError is the venvError for a checkout whose only
+// dependency manifest is a bare requirements.txt: `uv sync` cannot consume
+// one, so the build is not attempted and venv_ready stays false rather than
+// promising a venv that was never built.
+const requirementsOnlyVenvError = "repo carries only requirements.txt; rafiki builds git-source venvs with `uv sync`, which needs a pyproject.toml — add one that declares the dependency"
+
 // SyncPyModuleGitSource refreshes ONE named git source in this executor's
 // rafiki-managed pymodule-repo cache: clone it fresh or fetch-and-reset an
 // existing checkout onto ref's current tip, discover the scripts and packages
@@ -144,15 +150,33 @@ func gitOutput(dir string, args ...string) ([]byte, error) {
 // own input. It returns "" when the venv is ready to use, or the capped
 // combined output of the failed build when not.
 //
-// A checkout with no pyproject.toml declares no dependencies at all: nothing
-// to build, so the venv is reported ready with no uv invocation -- the
-// response's venv_ready contract promises exactly this.
+// The manifest gate is file existence only, never parsing, and it is a
+// three-way check:
+//
+//   - pyproject.toml present: `uv sync` builds against it (the normal path).
+//   - only requirements.txt present: not ready, one clear sentence -- uv sync
+//     cannot consume a bare requirements file, and reporting venv_ready=true
+//     would promise a venv that was never built, its dependencies missing at
+//     run time. The discovered inventory still rides the same response, the
+//     same rule as any failed build.
+//   - neither file: no dependencies declared at all -- nothing to build, the
+//     venv is reported ready with no uv invocation, exactly as the response's
+//     venv_ready contract promises.
 func buildRepoVenv(dir string) string {
-	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Sprintf("stat pyproject.toml: %v", err)
+	_, err := os.Stat(filepath.Join(dir, "pyproject.toml"))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Sprintf("stat pyproject.toml: %v", err)
+	}
+	if os.IsNotExist(err) {
+		_, rerr := os.Stat(filepath.Join(dir, "requirements.txt"))
+		switch {
+		case rerr == nil:
+			return requirementsOnlyVenvError
+		case os.IsNotExist(rerr):
+			return ""
+		default:
+			return fmt.Sprintf("stat requirements.txt: %v", rerr)
 		}
-		return ""
 	}
 
 	// Same uv-required posture as buildModuleVenv: no pip fallback, and the

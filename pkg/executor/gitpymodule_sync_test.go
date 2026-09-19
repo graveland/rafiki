@@ -247,6 +247,32 @@ func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
 	}
 }
 
+// A repo whose only dependency manifest is a bare requirements.txt cannot be
+// served by `uv sync`: reporting venv_ready=true would promise a venv that
+// was never built, its dependencies missing at run time. The failure reports
+// exactly like a failed build -- VenvReady=false, one clear sentence naming
+// the gap -- while the discovered inventory still reports (design §5).
+func TestSyncPyModuleGitSourceRequirementsOnlyRepoReportsNotReady(t *testing.T) {
+	s := gitSyncServer(t, true)
+	repo := gitFixture(t, map[string]string{
+		"requirements.txt":  "requests\n",
+		"scripts/rotate.py": "# rotate\n",
+	})
+
+	resp := syncGitSource(t, s, "ops-tools", repo, "main")
+
+	if resp.GetVenvReady() {
+		t.Fatal("a requirements.txt-only repo reported VenvReady")
+	}
+	if !strings.Contains(resp.GetVenvError(), "requirements.txt") {
+		t.Errorf("venv error %q does not name requirements.txt", resp.GetVenvError())
+	}
+	assertScripts(t, resp.GetScripts(), map[string]string{"rotate": "rotate"})
+	if _, err := os.Stat(filepath.Join(gitPymoduleRepoDir("ops-tools"), ".venv")); !os.IsNotExist(err) {
+		t.Errorf("a skipped build published a .venv (err=%v)", err)
+	}
+}
+
 // The fake uv for the git-source sync tests: implements exactly the one
 // subcommand buildRepoVenv invokes, following writeFakeUV's technique from
 // pymodule_venv_test.go so no test here touches a real uv or the network.
