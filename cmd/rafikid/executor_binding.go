@@ -312,7 +312,8 @@ func isLivenessFailure(err error) bool {
 		errors.Is(err, execpool.ErrExecutorLost),
 		errors.Is(err, execpool.ErrParked),
 		errors.Is(err, execpool.ErrDraining),
-		errors.Is(err, execpool.ErrRedialed):
+		errors.Is(err, execpool.ErrRedialed),
+		errors.Is(err, execpool.ErrDialFailed):
 		return true
 	}
 	return false

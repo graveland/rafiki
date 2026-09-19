@@ -121,6 +121,42 @@ func TestExecuteRetriesAnyToolOnAPreDispatchFailure(t *testing.T) {
 	}
 }
 
+// This is the bug reported as "fundi agents can't reconnect after an executor
+// restart, only a rafikid restart fixes it": boundExecutor caches its client
+// and calls it directly, bypassing Pool.ClientFor (and its typed
+// ErrParked/ErrExecutorLost/ErrDraining answers) on every call after the
+// first bind. When the executor's TCP connection dies -- exactly what an
+// executor restart does to the connection a running child is bound to -- the
+// FIRST call against the dead cached client fails with a plain
+// broken-pipe-shaped error from the transport, wrapped by
+// workspaceClient.Execute as execpool.ErrDialFailed (see pool.go). Before that
+// sentinel existed this carried no sentinel execpool recognized, so retryable
+// refused a side-effecting tool like bash and the binding was never
+// invalidated -- every later call hit the identical dead client forever.
+func TestExecuteRecoversFromADeadConnectionOnASideEffectingTool(t *testing.T) {
+	f := newFakeBinder()
+	f.mode = "ephemeral"
+	f.live = true
+	f.failWith = fmt.Errorf("executor execute: write tcp: broken pipe: %w", execpool.ErrDialFailed)
+	f.failTimes = 1
+	b := newBoundExecutor("c1", f)
+
+	if _, err := b.Execute(context.Background(), "bash", nil); err != nil {
+		t.Fatalf("a pre-dispatch dead-connection failure never reached the executor "+
+			"and must retry even a side-effecting tool: %v", err)
+	}
+	if f.executeCalls != 2 {
+		t.Fatalf("executeCalls = %d, want 2 -- bash never got a second, working attempt",
+			f.executeCalls)
+	}
+
+	// The child must not be stuck on the same dead client for every call after
+	// this one either -- the whole point of the reported bug.
+	if _, err := b.Execute(context.Background(), "bash", nil); err != nil {
+		t.Fatalf("a later call still failed; the binding never recovered: %v", err)
+	}
+}
+
 func TestStartJobIsNeverRetriedAfterAStreamBreak(t *testing.T) {
 	f := newFakeBinder()
 	f.mode = "ephemeral"

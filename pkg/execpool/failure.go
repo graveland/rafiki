@@ -37,6 +37,24 @@ var (
 	// Callers must treat it as "maybe ran" and refuse to re-dispatch anything
 	// with side effects.
 	ErrStreamBroken = errors.New("execpool: the executor stream broke mid-call")
+
+	// ErrDialFailed means the call never reached the executor at all: the
+	// client-side Send failed before the stream was established. connect-go's
+	// CallServerStream only returns an error here for a failure on OUR side of
+	// the wire -- a response the server already sent, even an early one, comes
+	// back as io.EOF instead and is left for Receive/stream.Err to report as
+	// ErrStreamBroken. So an error surfacing at this point never reached the
+	// executor: every tool, including side-effecting ones, is safe to retry.
+	//
+	// This is the common shape of "the executor's TCP connection died" for a
+	// boundExecutor holding a CACHED client: the cached client bypasses
+	// Pool.ClientFor (and its typed ErrParked/ErrExecutorLost/ErrDraining
+	// answers) entirely, so a plain broken-pipe/connection-reset error from a
+	// dead connection would otherwise carry no sentinel at all and retryable
+	// would refuse it -- which is exactly what left a child's workspace tools
+	// permanently broken after its executor restarted, healed only by
+	// restarting rafikid and rebuilding every binding from scratch.
+	ErrDialFailed = errors.New("execpool: could not reach the executor")
 )
 
 // failureError converts an executor's Failure into an error carrying one of

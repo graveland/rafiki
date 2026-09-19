@@ -667,7 +667,7 @@ func (c *workspaceClient) Execute(ctx context.Context, tool string, input json.R
 		WorkspaceId: c.workspaceID,
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor execute: %w", err)
+		return "", fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 
@@ -699,7 +699,7 @@ func (c *workspaceClient) StartJob(ctx context.Context, command string) (string,
 		WorkspaceId: c.workspaceID,
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor start job: %w", err)
+		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 	var handle string
@@ -982,7 +982,7 @@ func (c *executorClient) Execute(ctx context.Context, tool string, input json.Ra
 		TimeoutMs: 600_000,
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor execute: %w", err)
+		return "", fmt.Errorf("executor execute: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 
@@ -1013,7 +1013,7 @@ func (c *executorClient) StartJob(ctx context.Context, command string) (string, 
 		Background: true,
 	}))
 	if err != nil {
-		return "", fmt.Errorf("executor start job: %w", err)
+		return "", fmt.Errorf("executor start job: %w: %w", err, ErrDialFailed)
 	}
 	defer stream.Close()
 	var handle string

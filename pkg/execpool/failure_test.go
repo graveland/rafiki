@@ -70,3 +70,27 @@ func TestErrStreamBrokenIsDistinctFromToolFailed(t *testing.T) {
 		t.Fatal("a broken stream must not look like a clean departure either")
 	}
 }
+
+// A failure to even open the stream is distinct from one that opened and then
+// broke: nothing was sent, so it must never look like "maybe ran".
+// workspaceClient.Execute and executorClient.Execute wrap exactly this shape
+// -- an error from c.inner.Execute() itself, before any Receive -- with both
+// the raw error and this sentinel via double %w, which is what the test
+// reproduces here.
+func TestErrDialFailedIsDistinctFromStreamBroken(t *testing.T) {
+	raw := errors.New("write tcp 127.0.0.1:9-> 10.0.0.1:41: write: broken pipe")
+	err := fmt.Errorf("executor execute: %w: %w", raw, ErrDialFailed)
+	if !errors.Is(err, ErrDialFailed) {
+		t.Fatalf("want errors.Is match on ErrDialFailed, got %v", err)
+	}
+	if errors.Is(err, ErrStreamBroken) {
+		t.Fatal("a pre-dispatch failure must not look like a mid-stream break -- " +
+			"that would refuse to retry side-effecting tools for no reason")
+	}
+	if errors.Is(err, ErrToolFailed) {
+		t.Fatal("a pre-dispatch failure must not look like a tool that ran and failed")
+	}
+	if !errors.Is(err, raw) {
+		t.Fatal("the underlying transport error must survive for logging")
+	}
+}
