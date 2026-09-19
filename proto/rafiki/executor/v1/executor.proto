@@ -376,4 +376,16 @@ message SyncPyModulesRequest {
 message SyncPyModulesResponse {
   int32 written = 1;
   int32 pruned = 2;
+  repeated PyModuleVenvResult venv_results = 3;
+}
+
+// PyModuleVenvResult reports one module's dependency-install outcome from a
+// single SyncPyModules call. ready is true both when the module declares no
+// requirements at all (nothing to build) and when a build just succeeded or
+// was already up to date; it is false only when requirements were declared
+// and the build failed, in which case error names why.
+message PyModuleVenvResult {
+  string name = 1;
+  bool ready = 2;
+  string error = 3;
 }
