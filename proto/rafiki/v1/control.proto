@@ -700,6 +700,10 @@ service Control {
   rpc GetPymodule(GetPymoduleRequest) returns (GetPymoduleResponse);
   rpc PutPymodule(PutPymoduleRequest) returns (PutPymoduleResponse);
   rpc DeletePymodule(DeletePymoduleRequest) returns (DeletePymoduleResponse);
+  rpc AddPymoduleGitSource(AddPymoduleGitSourceRequest) returns (AddPymoduleGitSourceResponse);
+  rpc ListPymoduleGitSources(ListPymoduleGitSourcesRequest) returns (ListPymoduleGitSourcesResponse);
+  rpc RefreshPymoduleGitSource(RefreshPymoduleGitSourceRequest) returns (RefreshPymoduleGitSourceResponse);
+  rpc RemovePymoduleGitSource(RemovePymoduleGitSourceRequest) returns (RemovePymoduleGitSourceResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
@@ -773,9 +777,18 @@ message PymoduleRow {
   // code is populated only by GetPymodule and PutPymodule; list responses
   // omit it -- an inventory is not a document.
   string code = 5;
+  // repo names the scope the row came from: "local" for the blob store
+  // (every row that predates git sources), otherwise the name of the git
+  // source the module was discovered in.
+  string repo = 6;
 }
 
-message ListPymodulesRequest {}
+message ListPymodulesRequest {
+  // repo is an optional scope filter: empty lists every pymodule the caller
+  // owns across all scopes, "local" the blob-store rows only, otherwise the
+  // named git source's discovered inventory.
+  string repo = 1;
+}
 message ListPymodulesResponse { repeated PymoduleRow rows = 1; }
 
 message GetPymoduleRequest { string name = 1; }
@@ -791,3 +804,49 @@ message PutPymoduleResponse { PymoduleRow row = 1; }
 
 message DeletePymoduleRequest { string name = 1; }
 message DeletePymoduleResponse {}
+
+// GitSourceRow is one registered git source: the human label used as the
+// `repo` argument everywhere, plus the url and ref it was registered with.
+message GitSourceRow {
+  string name = 1;
+  string url = 2;
+  string ref = 3;
+}
+
+message AddPymoduleGitSourceRequest {
+  // name is the human label, and must not be "local": that name is reserved
+  // for the blob store, and a git source registered under it would make
+  // repo="local" ambiguous.
+  string name = 1;
+  string url = 2;
+  string ref = 3;
+}
+message AddPymoduleGitSourceResponse { GitSourceRow row = 1; }
+
+message ListPymoduleGitSourcesRequest {}
+message ListPymoduleGitSourcesResponse { repeated GitSourceRow rows = 1; }
+
+message RefreshPymoduleGitSourceRequest { string name = 1; }
+
+// GitSourceScript and GitSourcePackage deliberately duplicate the executor
+// protocol's messages of the same names rather than importing across the two
+// proto packages: the daemon-client wire format and the daemon-executor wire
+// format stay dependency-free on each other.
+message GitSourceScript {
+  string name = 1;
+  string description = 2;
+}
+message GitSourcePackage {
+  string name = 1;
+  string description = 2;
+}
+
+message RefreshPymoduleGitSourceResponse {
+  repeated GitSourceScript scripts = 1;
+  repeated GitSourcePackage packages = 2;
+  bool venv_ready = 3;
+  string venv_error = 4;
+}
+
+message RemovePymoduleGitSourceRequest { string name = 1; }
+message RemovePymoduleGitSourceResponse {}

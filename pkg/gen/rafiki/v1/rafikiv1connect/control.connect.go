@@ -78,6 +78,18 @@ const (
 	ControlPutPymoduleProcedure = "/rafiki.v1.Control/PutPymodule"
 	// ControlDeletePymoduleProcedure is the fully-qualified name of the Control's DeletePymodule RPC.
 	ControlDeletePymoduleProcedure = "/rafiki.v1.Control/DeletePymodule"
+	// ControlAddPymoduleGitSourceProcedure is the fully-qualified name of the Control's
+	// AddPymoduleGitSource RPC.
+	ControlAddPymoduleGitSourceProcedure = "/rafiki.v1.Control/AddPymoduleGitSource"
+	// ControlListPymoduleGitSourcesProcedure is the fully-qualified name of the Control's
+	// ListPymoduleGitSources RPC.
+	ControlListPymoduleGitSourcesProcedure = "/rafiki.v1.Control/ListPymoduleGitSources"
+	// ControlRefreshPymoduleGitSourceProcedure is the fully-qualified name of the Control's
+	// RefreshPymoduleGitSource RPC.
+	ControlRefreshPymoduleGitSourceProcedure = "/rafiki.v1.Control/RefreshPymoduleGitSource"
+	// ControlRemovePymoduleGitSourceProcedure is the fully-qualified name of the Control's
+	// RemovePymoduleGitSource RPC.
+	ControlRemovePymoduleGitSourceProcedure = "/rafiki.v1.Control/RemovePymoduleGitSource"
 	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
 	// ConversationSearch RPC.
 	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
@@ -125,6 +137,10 @@ type ControlClient interface {
 	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
 	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
 	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
+	AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error)
+	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
+	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
+	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -278,6 +294,30 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DeletePymodule")),
 			connect.WithClientOptions(opts...),
 		),
+		addPymoduleGitSource: connect.NewClient[v1.AddPymoduleGitSourceRequest, v1.AddPymoduleGitSourceResponse](
+			httpClient,
+			baseURL+ControlAddPymoduleGitSourceProcedure,
+			connect.WithSchema(controlMethods.ByName("AddPymoduleGitSource")),
+			connect.WithClientOptions(opts...),
+		),
+		listPymoduleGitSources: connect.NewClient[v1.ListPymoduleGitSourcesRequest, v1.ListPymoduleGitSourcesResponse](
+			httpClient,
+			baseURL+ControlListPymoduleGitSourcesProcedure,
+			connect.WithSchema(controlMethods.ByName("ListPymoduleGitSources")),
+			connect.WithClientOptions(opts...),
+		),
+		refreshPymoduleGitSource: connect.NewClient[v1.RefreshPymoduleGitSourceRequest, v1.RefreshPymoduleGitSourceResponse](
+			httpClient,
+			baseURL+ControlRefreshPymoduleGitSourceProcedure,
+			connect.WithSchema(controlMethods.ByName("RefreshPymoduleGitSource")),
+			connect.WithClientOptions(opts...),
+		),
+		removePymoduleGitSource: connect.NewClient[v1.RemovePymoduleGitSourceRequest, v1.RemovePymoduleGitSourceResponse](
+			httpClient,
+			baseURL+ControlRemovePymoduleGitSourceProcedure,
+			connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
+			connect.WithClientOptions(opts...),
+		),
 		conversationSearch: connect.NewClient[v1.ConversationSearchRequest, v1.ConversationSearchResponse](
 			httpClient,
 			baseURL+ControlConversationSearchProcedure,
@@ -331,36 +371,40 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 
 // controlClient implements ControlClient.
 type controlClient struct {
-	getHistory           *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
-	streamEvents         *connect.Client[v1.StreamEventsRequest, v1.Event]
-	send                 *connect.Client[v1.SendRequest, v1.SendResponse]
-	listChildren         *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
-	getChild             *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
-	spawn                *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
-	kill                 *connect.Client[v1.KillRequest, v1.KillResponse]
-	close                *connect.Client[v1.CloseRequest, v1.CloseResponse]
-	setBudget            *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
-	listTasks            *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
-	listModels           *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
-	listExecutors        *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
-	getRateLimitStatus   *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
-	listSkills           *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
-	getSkill             *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
-	upsertSkill          *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
-	deleteSkill          *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
-	setSkillEnabled      *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
-	listPymodules        *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
-	getPymodule          *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
-	putPymodule          *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
-	deletePymodule       *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
-	conversationSearch   *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
-	conversationExport   *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
-	conversationQuery    *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
-	conversationReview   *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
-	conversationFindings *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
-	darajaLaunch         *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
-	darajaSend           *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
-	darajaWatch          *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
+	getHistory               *connect.Client[v1.GetHistoryRequest, v1.GetHistoryResponse]
+	streamEvents             *connect.Client[v1.StreamEventsRequest, v1.Event]
+	send                     *connect.Client[v1.SendRequest, v1.SendResponse]
+	listChildren             *connect.Client[v1.ListChildrenRequest, v1.ListChildrenResponse]
+	getChild                 *connect.Client[v1.GetChildRequest, v1.GetChildResponse]
+	spawn                    *connect.Client[v1.SpawnRequest, v1.SpawnResponse]
+	kill                     *connect.Client[v1.KillRequest, v1.KillResponse]
+	close                    *connect.Client[v1.CloseRequest, v1.CloseResponse]
+	setBudget                *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	listTasks                *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
+	listModels               *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
+	listExecutors            *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
+	getRateLimitStatus       *connect.Client[v1.GetRateLimitStatusRequest, v1.GetRateLimitStatusResponse]
+	listSkills               *connect.Client[v1.ListSkillsRequest, v1.ListSkillsResponse]
+	getSkill                 *connect.Client[v1.GetSkillRequest, v1.GetSkillResponse]
+	upsertSkill              *connect.Client[v1.UpsertSkillRequest, v1.UpsertSkillResponse]
+	deleteSkill              *connect.Client[v1.DeleteSkillRequest, v1.DeleteSkillResponse]
+	setSkillEnabled          *connect.Client[v1.SetSkillEnabledRequest, v1.SetSkillEnabledResponse]
+	listPymodules            *connect.Client[v1.ListPymodulesRequest, v1.ListPymodulesResponse]
+	getPymodule              *connect.Client[v1.GetPymoduleRequest, v1.GetPymoduleResponse]
+	putPymodule              *connect.Client[v1.PutPymoduleRequest, v1.PutPymoduleResponse]
+	deletePymodule           *connect.Client[v1.DeletePymoduleRequest, v1.DeletePymoduleResponse]
+	addPymoduleGitSource     *connect.Client[v1.AddPymoduleGitSourceRequest, v1.AddPymoduleGitSourceResponse]
+	listPymoduleGitSources   *connect.Client[v1.ListPymoduleGitSourcesRequest, v1.ListPymoduleGitSourcesResponse]
+	refreshPymoduleGitSource *connect.Client[v1.RefreshPymoduleGitSourceRequest, v1.RefreshPymoduleGitSourceResponse]
+	removePymoduleGitSource  *connect.Client[v1.RemovePymoduleGitSourceRequest, v1.RemovePymoduleGitSourceResponse]
+	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
+	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
+	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
+	conversationReview       *connect.Client[v1.ConversationReviewRequest, v1.ConversationReviewResponse]
+	conversationFindings     *connect.Client[v1.ConversationFindingsRequest, v1.ConversationFindingsResponse]
+	darajaLaunch             *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
+	darajaSend               *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
+	darajaWatch              *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -473,6 +517,26 @@ func (c *controlClient) DeletePymodule(ctx context.Context, req *connect.Request
 	return c.deletePymodule.CallUnary(ctx, req)
 }
 
+// AddPymoduleGitSource calls rafiki.v1.Control.AddPymoduleGitSource.
+func (c *controlClient) AddPymoduleGitSource(ctx context.Context, req *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error) {
+	return c.addPymoduleGitSource.CallUnary(ctx, req)
+}
+
+// ListPymoduleGitSources calls rafiki.v1.Control.ListPymoduleGitSources.
+func (c *controlClient) ListPymoduleGitSources(ctx context.Context, req *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error) {
+	return c.listPymoduleGitSources.CallUnary(ctx, req)
+}
+
+// RefreshPymoduleGitSource calls rafiki.v1.Control.RefreshPymoduleGitSource.
+func (c *controlClient) RefreshPymoduleGitSource(ctx context.Context, req *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error) {
+	return c.refreshPymoduleGitSource.CallUnary(ctx, req)
+}
+
+// RemovePymoduleGitSource calls rafiki.v1.Control.RemovePymoduleGitSource.
+func (c *controlClient) RemovePymoduleGitSource(ctx context.Context, req *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error) {
+	return c.removePymoduleGitSource.CallUnary(ctx, req)
+}
+
 // ConversationSearch calls rafiki.v1.Control.ConversationSearch.
 func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return c.conversationSearch.CallUnary(ctx, req)
@@ -537,6 +601,10 @@ type ControlHandler interface {
 	GetPymodule(context.Context, *connect.Request[v1.GetPymoduleRequest]) (*connect.Response[v1.GetPymoduleResponse], error)
 	PutPymodule(context.Context, *connect.Request[v1.PutPymoduleRequest]) (*connect.Response[v1.PutPymoduleResponse], error)
 	DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error)
+	AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error)
+	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
+	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
+	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -686,6 +754,30 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DeletePymodule")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlAddPymoduleGitSourceHandler := connect.NewUnaryHandler(
+		ControlAddPymoduleGitSourceProcedure,
+		svc.AddPymoduleGitSource,
+		connect.WithSchema(controlMethods.ByName("AddPymoduleGitSource")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListPymoduleGitSourcesHandler := connect.NewUnaryHandler(
+		ControlListPymoduleGitSourcesProcedure,
+		svc.ListPymoduleGitSources,
+		connect.WithSchema(controlMethods.ByName("ListPymoduleGitSources")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRefreshPymoduleGitSourceHandler := connect.NewUnaryHandler(
+		ControlRefreshPymoduleGitSourceProcedure,
+		svc.RefreshPymoduleGitSource,
+		connect.WithSchema(controlMethods.ByName("RefreshPymoduleGitSource")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRemovePymoduleGitSourceHandler := connect.NewUnaryHandler(
+		ControlRemovePymoduleGitSourceProcedure,
+		svc.RemovePymoduleGitSource,
+		connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlConversationSearchHandler := connect.NewUnaryHandler(
 		ControlConversationSearchProcedure,
 		svc.ConversationSearch,
@@ -780,6 +872,14 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlPutPymoduleHandler.ServeHTTP(w, r)
 		case ControlDeletePymoduleProcedure:
 			controlDeletePymoduleHandler.ServeHTTP(w, r)
+		case ControlAddPymoduleGitSourceProcedure:
+			controlAddPymoduleGitSourceHandler.ServeHTTP(w, r)
+		case ControlListPymoduleGitSourcesProcedure:
+			controlListPymoduleGitSourcesHandler.ServeHTTP(w, r)
+		case ControlRefreshPymoduleGitSourceProcedure:
+			controlRefreshPymoduleGitSourceHandler.ServeHTTP(w, r)
+		case ControlRemovePymoduleGitSourceProcedure:
+			controlRemovePymoduleGitSourceHandler.ServeHTTP(w, r)
 		case ControlConversationSearchProcedure:
 			controlConversationSearchHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
@@ -891,6 +991,22 @@ func (UnimplementedControlHandler) PutPymodule(context.Context, *connect.Request
 
 func (UnimplementedControlHandler) DeletePymodule(context.Context, *connect.Request[v1.DeletePymoduleRequest]) (*connect.Response[v1.DeletePymoduleResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeletePymodule is not implemented"))
+}
+
+func (UnimplementedControlHandler) AddPymoduleGitSource(context.Context, *connect.Request[v1.AddPymoduleGitSourceRequest]) (*connect.Response[v1.AddPymoduleGitSourceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.AddPymoduleGitSource is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListPymoduleGitSources is not implemented"))
+}
+
+func (UnimplementedControlHandler) RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RefreshPymoduleGitSource is not implemented"))
+}
+
+func (UnimplementedControlHandler) RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemovePymoduleGitSource is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {

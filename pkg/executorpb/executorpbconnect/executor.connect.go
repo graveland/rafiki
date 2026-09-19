@@ -67,6 +67,9 @@ const (
 	// ExecutorServiceSyncPyModulesProcedure is the fully-qualified name of the ExecutorService's
 	// SyncPyModules RPC.
 	ExecutorServiceSyncPyModulesProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModules"
+	// ExecutorServiceSyncPyModuleGitSourceProcedure is the fully-qualified name of the
+	// ExecutorService's SyncPyModuleGitSource RPC.
+	ExecutorServiceSyncPyModuleGitSourceProcedure = "/rafiki.executor.v1.ExecutorService/SyncPyModuleGitSource"
 	// ExecutorServiceProxyProcedure is the fully-qualified name of the ExecutorService's Proxy RPC.
 	ExecutorServiceProxyProcedure = "/rafiki.executor.v1.ExecutorService/Proxy"
 )
@@ -130,6 +133,15 @@ type ExecutorServiceClient interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
+	// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
+	// discover the scripts and packages the checkout contains, and build the
+	// repo's one shared venv.
+	//
+	// Per-source, not whole-corpus like SyncPyModules: a git source's own
+	// history is already the versioning and pruning mechanism, so there is no
+	// "prune what's absent" model to replicate here.
+	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse]
@@ -224,6 +236,12 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 			connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 			connect.WithClientOptions(opts...),
 		),
+		syncPyModuleGitSource: connect.NewClient[executorpb.SyncPyModuleGitSourceRequest, executorpb.SyncPyModuleGitSourceResponse](
+			httpClient,
+			baseURL+ExecutorServiceSyncPyModuleGitSourceProcedure,
+			connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
+			connect.WithClientOptions(opts...),
+		),
 		proxy: connect.NewClient[executorpb.ProxyRequest, executorpb.ProxyResponse](
 			httpClient,
 			baseURL+ExecutorServiceProxyProcedure,
@@ -235,20 +253,21 @@ func NewExecutorServiceClient(httpClient connect.HTTPClient, baseURL string, opt
 
 // executorServiceClient implements ExecutorServiceClient.
 type executorServiceClient struct {
-	describe       *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
-	health         *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
-	execute        *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
-	attach         *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
-	cancel         *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
-	jobOutput      *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
-	provision      *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
-	release        *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
-	projectContext *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
-	projectSkills  *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
-	skillBody      *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
-	syncSkills     *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
-	syncPyModules  *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
-	proxy          *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
+	describe              *connect.Client[executorpb.DescribeRequest, executorpb.DescribeResponse]
+	health                *connect.Client[executorpb.HealthRequest, executorpb.HealthResponse]
+	execute               *connect.Client[executorpb.ExecuteRequest, executorpb.ExecuteResponse]
+	attach                *connect.Client[executorpb.AttachRequest, executorpb.AttachResponse]
+	cancel                *connect.Client[executorpb.CancelRequest, executorpb.CancelResponse]
+	jobOutput             *connect.Client[executorpb.JobOutputRequest, executorpb.JobOutputResponse]
+	provision             *connect.Client[executorpb.ProvisionRequest, executorpb.ProvisionResponse]
+	release               *connect.Client[executorpb.ReleaseRequest, executorpb.ReleaseResponse]
+	projectContext        *connect.Client[executorpb.ProjectContextRequest, executorpb.ProjectContextResponse]
+	projectSkills         *connect.Client[executorpb.ProjectSkillsRequest, executorpb.ProjectSkillsResponse]
+	skillBody             *connect.Client[executorpb.SkillBodyRequest, executorpb.SkillBodyResponse]
+	syncSkills            *connect.Client[executorpb.SyncSkillsRequest, executorpb.SyncSkillsResponse]
+	syncPyModules         *connect.Client[executorpb.SyncPyModulesRequest, executorpb.SyncPyModulesResponse]
+	syncPyModuleGitSource *connect.Client[executorpb.SyncPyModuleGitSourceRequest, executorpb.SyncPyModuleGitSourceResponse]
+	proxy                 *connect.Client[executorpb.ProxyRequest, executorpb.ProxyResponse]
 }
 
 // Describe calls rafiki.executor.v1.ExecutorService.Describe.
@@ -316,6 +335,11 @@ func (c *executorServiceClient) SyncPyModules(ctx context.Context, req *connect.
 	return c.syncPyModules.CallUnary(ctx, req)
 }
 
+// SyncPyModuleGitSource calls rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource.
+func (c *executorServiceClient) SyncPyModuleGitSource(ctx context.Context, req *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
+	return c.syncPyModuleGitSource.CallUnary(ctx, req)
+}
+
 // Proxy calls rafiki.executor.v1.ExecutorService.Proxy.
 func (c *executorServiceClient) Proxy(ctx context.Context) *connect.BidiStreamForClient[executorpb.ProxyRequest, executorpb.ProxyResponse] {
 	return c.proxy.CallBidiStream(ctx)
@@ -380,6 +404,15 @@ type ExecutorServiceHandler interface {
 	// wholesale, so there is no per-path bookkeeping to drift and no partial
 	// state to reconcile after a crash.
 	SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error)
+	// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+	// rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
+	// discover the scripts and packages the checkout contains, and build the
+	// repo's one shared venv.
+	//
+	// Per-source, not whole-corpus like SyncPyModules: a git source's own
+	// history is already the versioning and pruning mechanism, so there is no
+	// "prune what's absent" model to replicate here.
+	SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error)
 	// Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
 	// the response back. One stream per request/response cycle.
 	Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error
@@ -470,6 +503,12 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 		connect.WithSchema(executorServiceMethods.ByName("SyncPyModules")),
 		connect.WithHandlerOptions(opts...),
 	)
+	executorServiceSyncPyModuleGitSourceHandler := connect.NewUnaryHandler(
+		ExecutorServiceSyncPyModuleGitSourceProcedure,
+		svc.SyncPyModuleGitSource,
+		connect.WithSchema(executorServiceMethods.ByName("SyncPyModuleGitSource")),
+		connect.WithHandlerOptions(opts...),
+	)
 	executorServiceProxyHandler := connect.NewBidiStreamHandler(
 		ExecutorServiceProxyProcedure,
 		svc.Proxy,
@@ -504,6 +543,8 @@ func NewExecutorServiceHandler(svc ExecutorServiceHandler, opts ...connect.Handl
 			executorServiceSyncSkillsHandler.ServeHTTP(w, r)
 		case ExecutorServiceSyncPyModulesProcedure:
 			executorServiceSyncPyModulesHandler.ServeHTTP(w, r)
+		case ExecutorServiceSyncPyModuleGitSourceProcedure:
+			executorServiceSyncPyModuleGitSourceHandler.ServeHTTP(w, r)
 		case ExecutorServiceProxyProcedure:
 			executorServiceProxyHandler.ServeHTTP(w, r)
 		default:
@@ -565,6 +606,10 @@ func (UnimplementedExecutorServiceHandler) SyncSkills(context.Context, *connect.
 
 func (UnimplementedExecutorServiceHandler) SyncPyModules(context.Context, *connect.Request[executorpb.SyncPyModulesRequest]) (*connect.Response[executorpb.SyncPyModulesResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModules is not implemented"))
+}
+
+func (UnimplementedExecutorServiceHandler) SyncPyModuleGitSource(context.Context, *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.executor.v1.ExecutorService.SyncPyModuleGitSource is not implemented"))
 }
 
 func (UnimplementedExecutorServiceHandler) Proxy(context.Context, *connect.BidiStream[executorpb.ProxyRequest, executorpb.ProxyResponse]) error {

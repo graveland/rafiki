@@ -66,6 +66,16 @@ service ExecutorService {
   // state to reconcile after a crash.
   rpc SyncPyModules(SyncPyModulesRequest) returns (SyncPyModulesResponse);
 
+  // SyncPyModuleGitSource refreshes ONE named git source in this executor's
+  // rafiki-managed pymodule-repo cache: clone or pull the source at its ref,
+  // discover the scripts and packages the checkout contains, and build the
+  // repo's one shared venv.
+  //
+  // Per-source, not whole-corpus like SyncPyModules: a git source's own
+  // history is already the versioning and pruning mechanism, so there is no
+  // "prune what's absent" model to replicate here.
+  rpc SyncPyModuleGitSource(SyncPyModuleGitSourceRequest) returns (SyncPyModuleGitSourceResponse);
+
   // Proxy relays one HTTP request to a pre-declared LLM endpoint and streams
   // the response back. One stream per request/response cycle.
   rpc Proxy(stream ProxyRequest) returns (stream ProxyResponse);
@@ -107,6 +117,11 @@ message DescribeResponse {
   // this executor will do, and a wrong value costs a skipped sync rather than
   // admitting anyone.
   bool pymodules_sync = 13;
+  // pymodule_git_sync reports that this executor accepts
+  // SyncPyModuleGitSource. Safe to self-report for the same reason as
+  // pymodules_sync: it only ever NARROWS what this executor will do, and a
+  // wrong value costs a skipped sync rather than admitting anyone.
+  bool pymodule_git_sync = 14;
 }
 
 message HealthRequest {}
@@ -388,4 +403,39 @@ message PyModuleVenvResult {
   string name = 1;
   bool ready = 2;
   string error = 3;
+}
+
+// GitSourceScript is one script discovered in a git-sourced repo's checkout.
+message GitSourceScript {
+  string name = 1;
+  string description = 2;
+}
+
+// GitSourcePackage is one importable package discovered in a git-sourced
+// repo's checkout.
+message GitSourcePackage {
+  string name = 1;
+  string description = 2;
+}
+
+message SyncPyModuleGitSourceRequest {
+  // name is the source's human label, which also names its cache directory.
+  string name = 1;
+  // url is where the executor clones/fetches the source from. The daemon
+  // sends it rather than the executor holding a registry: the executor has
+  // no store of its own.
+  string url = 2;
+  // ref is the git ref to check out (a branch, tag or commit).
+  string ref = 3;
+}
+
+message SyncPyModuleGitSourceResponse {
+  repeated GitSourceScript scripts = 1;
+  repeated GitSourcePackage packages = 2;
+  // venv_ready is true both when the repo declares no dependencies at all
+  // (nothing to build) and when the repo's one shared venv just built or was
+  // already up to date; false only when a build was needed and failed, in
+  // which case venv_error names why.
+  bool venv_ready = 3;
+  string venv_error = 4;
 }
