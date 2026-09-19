@@ -457,8 +457,14 @@ plugin manifest, no frontmatter rendering; the payload has no namespace concept
 because a pymodule is a single file a script imports by name. The per-module
 directory exists so `pymodule_run` can execute the entry script — itself a
 synced module, run as `<name>/<name>.py`, never a workspace copy — and put
-exactly the named modules' directories on `PYTHONPATH` for a run instead of
-copying files into the workspace. The process's working directory is the
+the named modules' directories on `PYTHONPATH` for a run instead of
+copying files into the workspace. A module that declares a
+`# pymodule-requirements:` block has its per-module `.venv`'s
+`site-packages` directory on `PYTHONPATH` too, and the entry script runs
+under its own `.venv/bin/python3` when it has one; a module whose
+dependencies are not ready (requirements declared, venv absent — build in
+progress or failed) refuses the run with a clear error rather than executing
+against missing imports. The process's working directory is the
 calling agent's own workspace — or the call's own `cwd`, resolved like the
 file tools' paths (`~`, relative, absolute) — so a script sees the same
 relative world a `bash` call would, while which copy of the script runs is
