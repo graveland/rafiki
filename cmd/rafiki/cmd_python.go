@@ -24,7 +24,7 @@ func newPythonCmd() *cobra.Command {
 		Aliases: []string{"py"},
 		Short:   "Manage your saved pymodules (reusable, owner-scoped Python snippets)",
 	}
-	cmd.AddCommand(newPythonListCmd(), newPythonGetCmd(), newPythonPutCmd(), newPythonDeleteCmd())
+	cmd.AddCommand(newPythonListCmd(), newPythonGetCmd(), newPythonPutCmd(), newPythonDeleteCmd(), newPythonRepoCmd())
 	return cmd
 }
 

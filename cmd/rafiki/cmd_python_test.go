@@ -15,9 +15,9 @@ import (
 )
 
 // The tree contract: `python` sits under the root with the alias `py`, and
-// carries exactly the four verbs. Aliases are guarded the same way
-// aliases_test.go guards the rest of the CLI — presence is a test failure
-// away from silent regression.
+// carries exactly the four blob verbs plus the `repo` group that manages git
+// sources. Aliases are guarded the same way aliases_test.go guards the rest
+// of the CLI — presence is a test failure away from silent regression.
 func TestPythonCommandTree(t *testing.T) {
 	cmd, _, err := newRootCmd().Find([]string{"python"})
 	if err != nil {
@@ -30,13 +30,13 @@ func TestPythonCommandTree(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		got[sub.Name()] = true
 	}
-	for _, want := range []string{"list", "get", "put", "delete"} {
+	for _, want := range []string{"list", "get", "put", "delete", "repo"} {
 		if !got[want] {
 			t.Errorf("python subcommands missing %q (have %v)", want, got)
 		}
 	}
-	if len(got) != 4 {
-		t.Errorf("python subcommands = %v, want exactly list/get/put/delete", got)
+	if len(got) != 5 {
+		t.Errorf("python subcommands = %v, want exactly list/get/put/delete/repo", got)
 	}
 
 	// The alias resolves to the same command: `rafiki py list` must be

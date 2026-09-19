@@ -31,6 +31,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/gitpymodulesdb"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -522,6 +524,14 @@ func runDaemon(opts runDaemonOpts) error {
 			resolveOwnerID: ctrl.resolveUsernameToUserID,
 		}
 	}
+	var gitpymoduleStore gitpymodules.Store
+	if pool != nil {
+		gitpymoduleStore = gitpymodulesdb.NewPostgresStore(pool)
+	}
+	ctrl.gitpymoduleStore = gitpymoduleStore
+	if gitpymoduleStore != nil && execPool != nil {
+		ctrl.gitpymodulePusher = newGitPymodulePusher(execPool, gitpymoduleStore, ctrl.resolveUsernameToUserID)
+	}
 	if execPool != nil {
 		// An executor that has just connected has an empty or stale tree, so
 		// push immediately. This callback runs on its own goroutine, outside
@@ -576,6 +586,9 @@ func runDaemon(opts runDaemonOpts) error {
 			}
 			if ctrl.pymoduleStore != nil {
 				face.Control.SetPymoduleManager(connectPyModules{c: ctrl})
+			}
+			if ctrl.gitpymoduleStore != nil {
+				face.Control.SetGitSourceManager(connectGitSources{c: ctrl})
 			}
 			if face.QuotaStore != nil {
 				face.Control.SetQuotaReader(connectQuota{store: face.QuotaStore})

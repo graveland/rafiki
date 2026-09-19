@@ -63,6 +63,7 @@ type Server struct {
 	execLister     atomic.Pointer[ExecutorLister]
 	skills         atomic.Pointer[SkillManager]
 	pymodules      atomic.Pointer[PymoduleManager]
+	gitSources     atomic.Pointer[GitSourceManager]
 	quota          atomic.Pointer[QuotaReader]
 	conversations  atomic.Pointer[ConversationInsights]
 	reviewer       atomic.Pointer[ConversationReviewer]

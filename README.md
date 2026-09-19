@@ -190,6 +190,11 @@ the head of the embedded chain, creating the tracking table
 (`public.rafiki_schema_migrations`) on first run and applying whatever it does
 not already record. It is idempotent, and concurrent callers are serialized by
 an advisory lock so two servers booting together apply the chain exactly once.
+One migration detail raises the supported floor to PostgreSQL >= 15: the
+unique index on `conversations.pymodule_git_sources (owner_user_id, name)` is
+declared `NULLS NOT DISTINCT`, so the unattributed bucket (a NULL owner) is
+one identity rather than NULLs-as-distinct rows — the dev container's pg18
+image already satisfies this.
 
 ## Model effort adaptation
 

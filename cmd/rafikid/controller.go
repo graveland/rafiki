@@ -42,6 +42,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
@@ -299,6 +300,11 @@ type Controller struct {
 	skillPusher    *skillPusher
 	pymodulePusher *pymodulePusher
 
+	// gitpymodulePusher fans a registered git source's refresh out to the
+	// owner's eligible executors and caches each latest reported inventory.
+	// Nil under the same condition as pymodulePusher.
+	gitpymodulePusher *gitPymodulePusher
+
 	// pymoduleStore is the owner-scoped pymodule backend, read by the
 	// pymoduleWriter bound into each fundi child (agent_pymodules.go) and by
 	// pymodulePusher. Nil when the daemon has no database: pymodule_put
@@ -306,6 +312,12 @@ type Controller struct {
 	// advertised. Deliberately NOT conditioned on the executor pool -- a
 	// DB-but-no-executors daemon still lets a child save and list modules.
 	pymoduleStore pymodules.Store
+
+	// gitpymoduleStore is the owner-scoped git-source backend (the `repo`
+	// scopes the pymodule tool surface addresses). Nil when the daemon has no
+	// database: `rafiki python repo` answers that the backend is not wired,
+	// the same DB-less posture the blob store has.
+	gitpymoduleStore gitpymodules.Store
 
 	// execStore is the durable executor registry. Nil when the executor
 	// listener is not configured (require the pool to mint tokens).

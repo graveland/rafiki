@@ -603,3 +603,33 @@ rafiki python delete <name>                 # soft-delete every live version
   child carries read and write exactly what this command does, so a module
   saved here is importable by a child and vice versa.
 
+### `rafiki python repo` (git-backed sources)
+
+Manage git-backed pymodule sources: owner-scoped `(name, url, ref)`
+registrations whose discovered scripts and packages children address as
+`repo=<name>` on the pymodule tools. The blob store above is itself one such
+scope under the reserved name `local`, which is why `repo add` refuses it.
+These are rare, setup-shaped operations, so they live here and on no agent
+tool surface — registration goes over Connect (`AddPymoduleGitSource`/
+`ListPymoduleGitSources`/`RefreshPymoduleGitSource`/`RemovePymoduleGitSource`)
+and works against a remote daemon exactly as against a local one.
+
+```
+rafiki python repo add <name> <url> [--ref <ref>]   # register + first refresh (--ref main)
+rafiki python repo list                             # NAME, URL, REF
+rafiki python repo refresh <name>                   # re-pull on every eligible executor
+rafiki python repo remove <name>
+```
+
+- **`add`** registers the source and the daemon fires the FIRST refresh
+  synchronously, so a bad clone (bad URL, unreachable host, failed auth)
+  fails the add outright. The printed summary is the discovered inventory:
+  script and package counts plus the venv state.
+- **`refresh`** re-pulls the source on every live executor of yours whose
+  `Describe` reports `pymodule_git_sync`, in parallel, and prints the same
+  summary. A failed venv build is printed as `venv build failed: …` and does
+  NOT fail the command — the refresh itself succeeded, and a broken build
+  only fails the runs that actually need the venv.
+- **`remove`** deletes the registration; executors are never told, and the
+  discovered inventory simply stops being reported.
+
