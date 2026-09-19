@@ -221,6 +221,22 @@ func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
 	return os.Getenv("RAFIKI_EXECUTOR_PYMODULES_SYNC") != ""
 }
 
+// pymoduleGitSyncEnabled resolves the effective --pymodule-git-sync value
+// from the flag and its environment form, with the same flag-vs-env precedence
+// as pymodulesSyncEnabled (see that function for why the environment is read
+// here rather than as the flag's default).
+//
+// Like pymodules sync there is NO launch-kind implication: git-sourced
+// pymodules correlate with no single launch kind either, so an operator opts
+// in explicitly -- by flag or by environment -- and nothing implies it for
+// them.
+func pymoduleGitSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+	if cmd.Flags().Changed("pymodule-git-sync") {
+		return flagOn
+	}
+	return os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != ""
+}
+
 // ─── serve ─────────────────────────────────────────────────────────────────────
 
 func newExecutorServeCmd() *cobra.Command {
@@ -241,6 +257,7 @@ func newExecutorServeCmd() *cobra.Command {
 		noLSP             bool
 		skillsSync        bool
 		pymodulesSync     bool
+		pymoduleGitSync   bool
 		proxyArgs         []string
 		launchKinds       []string
 	)
@@ -291,6 +308,7 @@ Two transports, exactly one of which is used:
 				NoLSP:           noLSP,
 				SkillsSync:      skillsSyncEnabled(cmd, skillsSync, launchKinds),
 				PyModulesSync:   pymodulesSyncEnabled(cmd, pymodulesSync),
+				PymoduleGitSync: pymoduleGitSyncEnabled(cmd, pymoduleGitSync),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
 			})
@@ -365,6 +383,10 @@ Two transports, exactly one of which is used:
 	cmd.Flags().BoolVar(&pymodulesSync, "pymodules-sync", false,
 		"accept the daemon's owner-scoped pymodule corpus into this machine's disposable cache "+
 			"directory (RAFIKI_EXECUTOR_PYMODULES_SYNC enables it from a service unit)")
+	cmd.Flags().BoolVar(&pymoduleGitSync, "pymodule-git-sync", false,
+		"accept refreshes of this executor's owner's registered git pymodule sources into this "+
+			"machine's disposable pymodule-repo cache, cloning or fetching them with this machine's "+
+			"own git (RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC enables it from a service unit)")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
 		"child protocol this executor will host for the daemon, e.g. --launch claude "+

@@ -153,3 +153,44 @@ func TestSkillsSyncNotImpliedByOtherLaunchKinds(t *testing.T) {
 		t.Error("only --launch claude implies skills sync")
 	}
 }
+
+// pymoduleGitSyncFromArgv drives the same path RunE uses for
+// --pymodule-git-sync: parse the flags, read them back, resolve them against
+// the environment (see skillsSyncFromArgv for the shape this mirrors).
+func pymoduleGitSyncFromArgv(t *testing.T, argv []string, env string) bool {
+	t.Helper()
+	t.Setenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC", env)
+	cmd := newExecutorServeCmd()
+	if err := cmd.Flags().Parse(argv); err != nil {
+		t.Fatal(err)
+	}
+	on, err := cmd.Flags().GetBool("pymodule-git-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pymoduleGitSyncEnabled(cmd, on)
+}
+
+func TestPymoduleGitSyncDefaultsOff(t *testing.T) {
+	if pymoduleGitSyncFromArgv(t, nil, "") {
+		t.Error("pymodule-git-sync defaulted on; it runs git clones against registered URLs")
+	}
+}
+
+func TestPymoduleGitSyncEnvTurnsItOn(t *testing.T) {
+	if !pymoduleGitSyncFromArgv(t, nil, "1") {
+		t.Error("a non-empty RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC must enable git-source sync — a service unit cannot edit argv")
+	}
+}
+
+func TestPymoduleGitSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
+	if pymoduleGitSyncFromArgv(t, []string{"--pymodule-git-sync=false"}, "1") {
+		t.Error("an explicit --pymodule-git-sync=false must stay able to switch the feature off on a machine whose environment enables it")
+	}
+}
+
+func TestPymoduleGitSyncFlagTurnsItOn(t *testing.T) {
+	if !pymoduleGitSyncFromArgv(t, []string{"--pymodule-git-sync"}, "") {
+		t.Error("--pymodule-git-sync must enable git-source sync")
+	}
+}

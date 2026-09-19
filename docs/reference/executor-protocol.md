@@ -529,6 +529,63 @@ enforcement on the RPC remains regardless, for the same reason as skills: a
 daemon that ignored a `false` here would cost an unexpected write to the
 operator's machine.
 
+### SyncPyModuleGitSource
+
+```
+SyncPyModuleGitSource(name, url, ref)
+  → { scripts[{name, description}], packages[{name, description}],
+      venvReady, venvError }
+```
+
+Unary. Refreshes ONE named git source into `<cache>/pymodule-repos/<name>/` —
+a sibling of the blob-sourced `pymodules/` cache root, never nested inside it,
+because a checkout's own layout (including its `.git/`) must not be interleaved
+with the flat per-module directories SyncPyModules manages and prunes by name.
+Per-source, not whole-corpus: a git source's own history is already the
+versioning and pruning mechanism, so there is no "prune what's absent" model to
+replicate.
+
+A checkout with no `.git` yet is `git clone`d fresh and checked out at `ref` (a
+branch, tag or SHA — git's own ref resolution handles each). An existing one is
+refreshed onto the tracked ref's current tip: `git fetch origin <ref>`, `git
+reset --hard FETCH_HEAD`, `git clean -fdx` — the closest equivalent to
+blob-sync's "whole corpus every time" built from git's own primitives, sweeping
+untracked and ignored leftovers (a stale `__pycache__`, a cruft `.py` that
+would otherwise become callable). Git runs as an ordinary subprocess and
+inherits whatever ambient credentials the executor's environment already has;
+rafiki configures none. A failed git operation is NOT an RPC error: the
+response carries `venvReady=false`, the capped combined output in `venvError`,
+and an empty inventory — no discovery or build is attempted against a checkout
+in an unknown state.
+
+On a successful refresh, discovery is a plain walk (no manifest parsing): each
+`scripts/*.py` is one callable script and each top-level directory containing
+`__init__.py` is one importable package, each described by its first
+`#`-prefixed comment line. The `scripts[]`/`packages[]` in the response carry
+names and descriptions only, never the executor's own filesystem paths.
+
+The repo gets exactly ONE shared venv, `<checkout>/.venv`, built with `uv sync`
+run with the checkout root as its working directory — rafiki parses no manifest
+and lets uv figure out its own input. A checkout with no `pyproject.toml`
+declares no dependencies at all: the build is skipped entirely and
+`venvReady=true` is reported with nothing invoked. Otherwise the build runs
+staged in a sibling temp directory (via `UV_PROJECT_ENVIRONMENT`) using the
+same `RAFIKI_PYMODULE_UV` resolution and interpreter as blob-sourced venvs,
+and is renamed into place only once it succeeded; a failed build discards the
+staging tree, leaves any previous venv untouched, and reports
+`venvReady=false` with the capped output — while STILL returning the discovered
+inventory, because a broken dependency must not hide what exists (a broken
+build only fails the runs that actually need it).
+
+**Opt-in per machine, and `pymodule_git_sync` on `DescribeResponse` is
+self-reported** exactly like `pymodules_sync`: it only ever narrows what the
+executor will do, an executor answers `CodePermissionDenied` when the option is
+off, and a daemon reading `false` from `Describe` never sends a refresh. The
+option is on when the operator passed `--pymodule-git-sync` or set
+`RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC`. There is NO launch-kind implication — an
+operator opts in explicitly; `--pymodule-git-sync=false` still refuses
+explicitly.
+
 ### Cancel
 
 ```

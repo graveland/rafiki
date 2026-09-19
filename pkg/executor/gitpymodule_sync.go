@@ -1,0 +1,199 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package executor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	"connectrpc.com/connect"
+
+	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
+	"go.graveland.dev/rafiki/pkg/paths"
+)
+
+// gitPymoduleRepoDir returns <cache>/pymodule-repos/<name> -- a sibling
+// cache root to pymoduleCacheDir(), not nested inside it, since a git
+// checkout's own layout (including .git/) must not be interleaved with the
+// flat per-module directories pymodule_sync.go manages and prunes by name.
+func gitPymoduleRepoDir(name string) string {
+	return filepath.Join(paths.CacheDir(), "pymodule-repos", name)
+}
+
+// SyncPyModuleGitSource refreshes ONE named git source in this executor's
+// rafiki-managed pymodule-repo cache: clone it fresh or fetch-and-reset an
+// existing checkout onto ref's current tip, discover the scripts and packages
+// the checkout contains, and build the repo's one shared venv.
+//
+// Per-source, not whole-corpus like SyncPyModules: a git source's own history
+// is already the versioning and pruning mechanism, so there is no "prune
+// what's absent" model to replicate here.
+//
+// A failed git operation does not error the RPC: it returns a response with
+// VenvReady=false and the git output in VenvError and empty inventory. A git
+// checkout left in an unknown state is not a state to discover or build
+// against, but the daemon still wants the failure REPORTED rather than
+// mistaking it for an unreachable executor.
+func (s *Server) SyncPyModuleGitSource(
+	_ context.Context,
+	req *connect.Request[executorpb.SyncPyModuleGitSourceRequest],
+) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
+	if !s.opts.PymoduleGitSync {
+		return nil, connect.NewError(connect.CodePermissionDenied,
+			errors.New("this executor does not accept pymodule git-source syncs"))
+	}
+
+	// The name becomes a path segment under the cache root: guard it before
+	// touching disk, the same way SyncPyModules guards its module names.
+	if err := validSegment(req.Msg.GetName()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("source name: %w", err))
+	}
+
+	dir := gitPymoduleRepoDir(req.Msg.GetName())
+	if out, err := refreshGitCheckout(dir, req.Msg.GetUrl(), req.Msg.GetRef()); err != nil {
+		return connect.NewResponse(&executorpb.SyncPyModuleGitSourceResponse{
+			VenvReady: false,
+			VenvError: uvError(out, err), // same 4096-byte cap as a failed uv build
+		}), nil
+	}
+
+	scripts, packages, err := gitpymodules.Discover(dir)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	resp := &executorpb.SyncPyModuleGitSourceResponse{}
+	for _, sc := range scripts {
+		resp.Scripts = append(resp.Scripts,
+			&executorpb.GitSourceScript{Name: sc.Name, Description: sc.Description})
+	}
+	for _, p := range packages {
+		resp.Packages = append(resp.Packages,
+			&executorpb.GitSourcePackage{Name: p.Name, Description: p.Description})
+	}
+
+	// A broken dependency build only fails the runs that need the venv: the
+	// inventory still reports (design §5), the same posture that keeps a
+	// failed blob-sourced rebuild from hiding the module itself.
+	venvErr := buildRepoVenv(dir)
+	resp.VenvReady = venvErr == ""
+	resp.VenvError = venvErr
+	return connect.NewResponse(resp), nil
+}
+
+// refreshGitCheckout establishes or updates dir's checkout of url at ref,
+// running git as subprocesses and returning the failed command's combined
+// output with its error so the caller can surface it verbatim. A checkout
+// with no .git yet is cloned fresh (then checked out at ref); an existing
+// one is fetched, hard-reset onto the fetched tip, and cleaned of everything
+// untracked or ignored -- the closest equivalent to blob-sync's "whole corpus
+// every time" built from git's own primitives.
+func refreshGitCheckout(dir, url, ref string) ([]byte, error) {
+	if _, err := os.Stat(filepath.Join(dir, ".git")); os.IsNotExist(err) {
+		// git clone takes the target directory as its own argument, so the
+		// subprocess's working directory is the clone's PARENT; create it
+		// first or exec fails before git ever runs.
+		parent := filepath.Dir(dir)
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return nil, fmt.Errorf("create %s: %w", parent, err)
+		}
+		out, err := gitOutput(parent, "clone", url, dir)
+		if err != nil {
+			return out, fmt.Errorf("git clone %s: %w", url, err)
+		}
+		out, err = gitOutput(dir, "checkout", ref)
+		if err != nil {
+			return out, fmt.Errorf("git checkout %s: %w", ref, err)
+		}
+		return nil, nil
+	}
+
+	out, err := gitOutput(dir, "fetch", "origin", ref)
+	if err != nil {
+		return out, fmt.Errorf("git fetch origin %s: %w", ref, err)
+	}
+	out, err = gitOutput(dir, "reset", "--hard", "FETCH_HEAD")
+	if err != nil {
+		return out, fmt.Errorf("git reset --hard: %w", err)
+	}
+	out, err = gitOutput(dir, "clean", "-fdx")
+	if err != nil {
+		return out, fmt.Errorf("git clean -fdx: %w", err)
+	}
+	return nil, nil
+}
+
+// gitOutput runs one git command in dir and returns its combined output. It is
+// deliberately NOT path-guarded: every caller passes a path built from a
+// validSegment-validated name, and git's own ref resolution handles the
+// arguments.
+func gitOutput(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
+// buildRepoVenv builds the checkout's ONE shared venv at dir/.venv by running
+// `uv sync` against the checkout's own manifest -- rafiki parses no manifest
+// itself, it only points uv at the checkout root and lets uv figure out its
+// own input. It returns "" when the venv is ready to use, or the capped
+// combined output of the failed build when not.
+//
+// A checkout with no pyproject.toml declares no dependencies at all: nothing
+// to build, so the venv is reported ready with no uv invocation -- the
+// response's venv_ready contract promises exactly this.
+func buildRepoVenv(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Sprintf("stat pyproject.toml: %v", err)
+		}
+		return ""
+	}
+
+	// Same uv-required posture as buildModuleVenv: no pip fallback, and the
+	// same resolution (RAFIKI_PYMODULE_UV, else PATH) -- do not reimplement.
+	uv, err := exec.LookPath(uvPath())
+	if err != nil {
+		return fmt.Sprintf("uv not found on this executor (required to install pymodule dependencies): %v", err)
+	}
+
+	// Stage in a sibling temp dir so pymodule_run never observes a half-built
+	// venv; the deferred RemoveAll is a no-op once the rename below has moved
+	// the tree out. Same idiom as buildModuleVenv.
+	staged, err := os.MkdirTemp(dir, ".rafiki-venv-staging-*")
+	if err != nil {
+		return fmt.Sprintf("stage venv: %v", err)
+	}
+	defer os.RemoveAll(staged)
+	stagedVenv := filepath.Join(staged, "venv")
+
+	// UV_PROJECT_ENVIRONMENT is how a single `uv sync` is pointed at a venv
+	// location of the caller's choosing; without it uv builds into the
+	// checkout's own .venv and the swap below would have nothing to move.
+	cmd := exec.Command(uv, "sync", "--python", pymodulePythonInterpreter())
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "UV_PROJECT_ENVIRONMENT="+stagedVenv)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// A failed build discards the staging tree and leaves any previous
+		// venv in place untouched, exactly like a failed blob-sourced rebuild.
+		return uvError(out, err)
+	}
+
+	// Swap into place. NOT a single atomic syscall -- there is a brief window
+	// where .venv does not exist, the same acknowledged non-atomicity
+	// buildModuleVenv carries; only ever replace a path rafiki itself staged.
+	venvDir := filepath.Join(dir, venvDirName)
+	if err := os.RemoveAll(venvDir); err != nil {
+		return fmt.Sprintf("remove old venv: %v", err)
+	}
+	if err := os.Rename(stagedVenv, venvDir); err != nil {
+		return fmt.Sprintf("publish venv: %v", err)
+	}
+	return ""
+}

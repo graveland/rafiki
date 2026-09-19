@@ -76,6 +76,13 @@ type Options struct {
 	// corpus onto its disposable cache directory. Off by default, same
 	// reasoning as SkillsSync.
 	PyModulesSync bool
+
+	// PymoduleGitSync lets the daemon refresh this executor's owner's
+	// registered git pymodule sources into its pymodule-repo cache: the
+	// executor clones or fetches a source its owner registered, which means
+	// running `git` as a subprocess against whatever URL was registered.
+	// Off by default, same reasoning as SkillsSync.
+	PymoduleGitSync bool
 }
 
 // Server implements executorpbconnect.ExecutorServiceHandler.
@@ -233,6 +240,7 @@ func (s *Server) Describe(
 		LaunchKinds:        s.LaunchKinds(),
 		SkillsSync:         s.opts.SkillsSync,
 		PymodulesSync:      s.opts.PyModulesSync,
+		PymoduleGitSync:    s.opts.PymoduleGitSync,
 	}), nil
 }
 
