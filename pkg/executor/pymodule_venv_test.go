@@ -3,10 +3,12 @@
 package executor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
@@ -93,7 +95,6 @@ func fakeUVInvocations(t *testing.T, log string) int {
 }
 
 func TestBuildVenvNoRequirementsIsReadyAndRemovesStaleVenv(t *testing.T) {
-	writeFakeUV(t)
 	moduleDir := t.TempDir()
 	venv := filepath.Join(moduleDir, ".venv")
 	if err := os.MkdirAll(filepath.Join(venv, "bin"), 0o755); err != nil {
@@ -109,6 +110,27 @@ func TestBuildVenvNoRequirementsIsReadyAndRemovesStaleVenv(t *testing.T) {
 	}
 	if _, err := os.Stat(venv); !os.IsNotExist(err) {
 		t.Errorf("stale .venv survived a no-requirements build (err=%v)", err)
+	}
+}
+
+// Truncation must be UTF-8-safe: protobuf-go rejects invalid UTF-8 in proto3
+// string fields at marshal time, so one garbled pip traceback sliced mid-rune
+// would fail the entire SyncPyModulesResponse and lose every module's result.
+// A bare repeat of the two-byte "é" would put the 4096-byte cut on a rune
+// boundary by even parity, so a leading ASCII byte shifts the cut into the
+// middle of a rune.
+func TestUvErrorTruncationIsUTF8Safe(t *testing.T) {
+	msg := "x" + strings.Repeat("é", 2500) // 5001 bytes; the cut straddles a rune
+	got := uvError([]byte(msg), errors.New("boom"))
+	if !utf8.ValidString(got) {
+		t.Errorf("uvError output is not valid UTF-8: %q", got)
+	}
+	const suffix = "... (truncated)"
+	if !strings.HasSuffix(got, suffix) {
+		t.Errorf("uvError output %q lacks the truncation suffix %q", got, suffix)
+	}
+	if max := maxVenvErrorBytes + len(suffix); len(got) > max {
+		t.Errorf("uvError output is %d bytes, want <= %d", len(got), max)
 	}
 }
 

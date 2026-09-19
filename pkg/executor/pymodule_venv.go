@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -162,5 +163,13 @@ func uvError(out []byte, err error) string {
 	if len(msg) <= maxVenvErrorBytes {
 		return msg
 	}
-	return msg[:maxVenvErrorBytes] + "... (truncated)"
+	// Back the cut off to the last rune boundary at or before the cap:
+	// protobuf-go rejects invalid UTF-8 in proto3 string fields at marshal
+	// time, so a mid-rune slice would fail the entire SyncPyModulesResponse
+	// and lose every module's result.
+	cut := maxVenvErrorBytes
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "... (truncated)"
 }
