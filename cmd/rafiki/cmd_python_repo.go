@@ -185,8 +185,12 @@ func gitSourceJSONLRows(rows []*rafikiv1.GitSourceRow) []any {
 // actually need the venv — so the failure is printed, visibly, on stdout.
 func emitGitSourceSummary(w io.Writer, header string, resp *rafikiv1.RefreshPymoduleGitSourceResponse, mode outputMode) error {
 	switch mode {
-	case outputJSON, outputJSONL:
+	case outputJSON:
 		return writeJSON(w, resp)
+	case outputJSONL:
+		// One compact record per line, the same -J contract every peer
+		// emitter follows — never the indented -j shape.
+		return writeJSONL(w, []any{resp})
 	default:
 		fmt.Fprintf(w, "%s: %d script(s), %d package(s)\n", header, len(resp.GetScripts()), len(resp.GetPackages()))
 		if !resp.GetVenvReady() && resp.GetVenvError() != "" {

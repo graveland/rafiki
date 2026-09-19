@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
@@ -124,6 +125,35 @@ func TestConnectGitSourcesAddRefreshesFirstAndRefreshReusesStored(t *testing.T) 
 	// An unknown name is the store's ErrNotFound, not a silent empty refresh.
 	if _, _, _, _, err := m.RefreshGitSource(alice, "no_such_source"); err != gitpymodules.ErrNotFound {
 		t.Fatalf("RefreshGitSource(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow pins what a failing
+// first refresh does to a registration: the add fails loudly with the refresh
+// error — the operator hears about the bad clone immediately — and the row
+// still survives in the store, so the retry is `python repo refresh`, not a
+// second add.
+func TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow(t *testing.T) {
+	f, m := newGitAdapterFixture()
+	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	if _, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/fresh.git", "develop"); err == nil {
+		t.Fatal("AddGitSource with a failing first refresh: succeeded, want the refresh error")
+	}
+
+	rows, err := m.ListGitSources(alice)
+	if err != nil {
+		t.Fatalf("ListGitSources after the failed add: %v", err)
+	}
+	survived := false
+	for _, r := range rows {
+		if r.Name == "fresh_tools" {
+			survived = r.URL == "https://example.net/fresh.git" && r.Ref == "develop"
+		}
+	}
+	if !survived {
+		t.Fatalf("rows after a failed first refresh = %+v, want fresh_tools to have survived the failed refresh", rows)
 	}
 }
 

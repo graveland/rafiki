@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -296,6 +299,75 @@ func TestPythonRepoCommandTree(t *testing.T) {
 	}
 	if len(stub.addCalls) != 0 {
 		t.Errorf("the daemon was called despite the local name refusals: %v", stub.addCalls)
+	}
+}
+
+// TestPythonRepoSummaryJSONLIsOneCompactLine pins the -J contract for the
+// add/refresh summary emitter: ONE compact record, no envelope, no
+// indentation — the shape `emitPymoduleCode` emits in the same mode, never
+// the indented -j form.
+func TestPythonRepoSummaryJSONLIsOneCompactLine(t *testing.T) {
+	summary := func() *rafikiv1.RefreshPymoduleGitSourceResponse {
+		return &rafikiv1.RefreshPymoduleGitSourceResponse{
+			Scripts: []*rafikiv1.GitSourceScript{
+				{Name: "rotate_keys"},
+				{Name: "deploy"},
+			},
+			Packages:  []*rafikiv1.GitSourcePackage{{Name: "opslib"}},
+			VenvReady: true,
+		}
+	}
+
+	// The emitter itself, both ways around: -j indents, -J stays one line.
+	var jBuf, jlBuf bytes.Buffer
+	if err := emitGitSourceSummary(&jBuf, "refreshed ops_tools", summary(), outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := emitGitSourceSummary(&jlBuf, "refreshed ops_tools", summary(), outputJSONL); err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimRight(jlBuf.String(), "\n"), "\n"); len(lines) != 1 {
+		t.Fatalf("emitGitSourceSummary -J printed %d line(s), want one compact record:\n%s", len(lines), jlBuf.String())
+	}
+	if !strings.Contains(jBuf.String(), "\n  ") {
+		t.Errorf("emitGitSourceSummary -j lost its indentation (the shape that distinguishes the two modes):\n%s", jBuf.String())
+	}
+
+	// End to end: `python repo add <name> <url> -J`. The -J flag lives on the
+	// root's persistent flag set, so the command runs under a root carrying
+	// the same persistent-flag registrations the real binary has (the same
+	// trick newTestRoot uses for the profile flag).
+	stub := &repoStubControl{
+		addResp: &rafikiv1.AddPymoduleGitSourceResponse{Row: &rafikiv1.GitSourceRow{
+			Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
+		}},
+		refreshResp: summary(),
+	}
+	newRepoHarness(t, stub)
+
+	root := &cobra.Command{Use: "rafiki"}
+	root.PersistentFlags().StringP("profile", "P", "", "")
+	root.PersistentFlags().StringP("output", "o", "auto", "")
+	root.PersistentFlags().BoolP("json", "j", false, "")
+	root.PersistentFlags().BoolP("jsonl", "J", false, "")
+	root.AddCommand(newPythonCmd()) // the real python group, which now carries repo
+	root.SetArgs([]string{"python", "repo", "add", "ops_tools", "https://example.net/ops.git", "-J"})
+
+	out := captureStdout(t, func() {
+		if err := root.Execute(); err != nil {
+			t.Fatalf("python repo add -J: %v", err)
+		}
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("add -J printed %d line(s), want exactly one compact record:\n%s", len(lines), out)
+	}
+	var resp rafikiv1.RefreshPymoduleGitSourceResponse
+	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
+		t.Fatalf("add -J line is not a bare record: %v\n%s", err, lines[0])
+	}
+	if len(resp.GetScripts()) != 2 || len(resp.GetPackages()) != 1 {
+		t.Errorf("add -J record carries scripts=%d packages=%d, want the discovered inventory", len(resp.GetScripts()), len(resp.GetPackages()))
 	}
 }
 

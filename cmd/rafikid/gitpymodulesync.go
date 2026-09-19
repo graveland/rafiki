@@ -111,6 +111,7 @@ func (gp *gitPymodulePusher) refresh(ctx context.Context, ownerUserID, name, url
 			defer mu.Unlock()
 			if err != nil {
 				failed++
+				slog.Warn("git pymodule source refresh failed", "executor", executorID, "source", name, "error", err)
 				return
 			}
 			if firstSet && gitInventoryDiffers(first, inv) {

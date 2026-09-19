@@ -190,11 +190,12 @@ the head of the embedded chain, creating the tracking table
 (`public.rafiki_schema_migrations`) on first run and applying whatever it does
 not already record. It is idempotent, and concurrent callers are serialized by
 an advisory lock so two servers booting together apply the chain exactly once.
-One migration detail raises the supported floor to PostgreSQL >= 15: the
-unique index on `conversations.pymodule_git_sources (owner_user_id, name)` is
-declared `NULLS NOT DISTINCT`, so the unattributed bucket (a NULL owner) is
-one identity rather than NULLs-as-distinct rows — the dev container's pg18
-image already satisfies this.
+One migration detail sets the supported floor at PostgreSQL >= 15: `NULLS
+NOT DISTINCT`, first used by migration 0014's tasks-ordinal index and again by
+0034's unique index on `conversations.pymodule_git_sources (owner_user_id,
+name)` — there it keeps the unattributed bucket (a NULL owner) one identity
+rather than NULLs-as-distinct rows. The dev container's pg18 image already
+satisfies this.
 
 ## Model effort adaptation
 

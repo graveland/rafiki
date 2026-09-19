@@ -624,7 +624,9 @@ rafiki python repo remove <name>
 - **`add`** registers the source and the daemon fires the FIRST refresh
   synchronously, so a bad clone (bad URL, unreachable host, failed auth)
   fails the add outright. The printed summary is the discovered inventory:
-  script and package counts plus the venv state.
+  script and package counts plus the venv state. Note the summary itself is
+  a SECOND refresh call the CLI makes after registering; if that call fails,
+  the source is still registered — rerun `python repo refresh`.
 - **`refresh`** re-pulls the source on every live executor of yours whose
   `Describe` reports `pymodule_git_sync`, in parallel, and prints the same
   summary. A failed venv build is printed as `venv build failed: …` and does

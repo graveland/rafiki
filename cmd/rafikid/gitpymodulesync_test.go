@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -369,6 +371,55 @@ func TestGitPymodulePusherAllInventorySpansMultipleSources(t *testing.T) {
 	}
 	if got := f.clients["exec-ghost"].callCount(); got != 0 {
 		t.Errorf("exec-ghost received %d refresh RPC(s), want 0", got)
+	}
+}
+
+// Both aggregation branches of a mixed fan-out: (a) every eligible executor
+// failed → the named error and an empty cache; (b) one fails, others succeed
+// → nil error and the successful snapshot cached, the failure contributing
+// nothing and overwriting nothing.
+func TestGitPymodulePusherRefreshEveryExecutorFailingIsAnError(t *testing.T) {
+	f := newGitSourceFixture()
+	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
+
+	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err == nil {
+		t.Fatal("refresh with every eligible executor failing: succeeded, want an error")
+	} else if !strings.Contains(err.Error(), "every eligible executor failed (1)") {
+		t.Errorf("refresh error = %v, want it to name the failed count", err)
+	}
+	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
+		t.Error("a fully-failed refresh left a cache entry behind")
+	}
+}
+
+func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
+	f := newGitSourceFixture()
+	// A second executor for the same owner: one fails, one answers.
+	second := execpool.LiveExecutor{
+		Executor: executors.Executor{ID: "exec-alice2", Labels: map[string]string{"owner": "alice"}},
+		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+	}
+	f.pool.live = append(f.pool.live, second)
+	ok := &fakeGitSourceClient{
+		resp: &executorpb.SyncPyModuleGitSourceResponse{
+			Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
+			VenvReady: true,
+		},
+	}
+	f.pool.clients["exec-alice2"] = ok
+	f.clients["exec-alice2"] = ok
+	f.clients["exec-alice"].err = errors.New("git fetch failed: network unreachable")
+
+	inv, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	if err != nil {
+		t.Fatalf("refresh with one responder = %v, want nil", err)
+	}
+	if len(inv.Scripts) != 1 || inv.Scripts[0].GetName() != "rotate_keys" || !inv.VenvReady {
+		t.Errorf("refresh returned %+v, want the successful executor's snapshot", inv)
+	}
+	cached, present := f.gp.inventoryFor("u_alice", "ops_tools")
+	if !present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys" {
+		t.Errorf("cached inventory = %+v (present %v), want the successful executor's snapshot", cached, present)
 	}
 }
 
