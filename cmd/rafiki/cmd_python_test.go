@@ -144,23 +144,24 @@ func writeFileForTest(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// The table cells: version as a plain number, SAVED as "2006-01-02 15:04",
-// and "-" for an absent description — the fallbacks an empty inventory row
-// must render rather than blanks.
+// The table cells: repo scope, version as a plain number, SAVED as
+// "2006-01-02 15:04", and "-" for an absent description — the fallbacks an
+// inventory row must render rather than blanks.
 func TestPythonListCells(t *testing.T) {
-	row := func(name string, version int64, createdAt, description string) *rafikiv1.PymoduleRow {
+	row := func(name, repo string, version int64, createdAt, description string) *rafikiv1.PymoduleRow {
 		return &rafikiv1.PymoduleRow{
 			Name:        name,
+			Repo:        repo,
 			Version:     version,
 			CreatedAt:   createdAt,
 			Description: description,
 		}
 	}
-	name, version, saved, description := pymoduleCells(
-		row("helper", 7, "2026-09-18T12:34:56Z", ""))
-	if name != "helper" || version != "7" || saved != "2026-09-18 12:34" || description != "-" {
-		t.Errorf("pymoduleCells = (%q,%q,%q,%q), want (helper,7,2026-09-18 12:34,-)",
-			name, version, saved, description)
+	name, repo, version, saved, description := pymoduleCells(
+		row("helper", "local", 7, "2026-09-18T12:34:56Z", ""))
+	if name != "helper" || repo != "local" || version != "7" || saved != "2026-09-18 12:34" || description != "-" {
+		t.Errorf("pymoduleCells = (%q,%q,%q,%q,%q), want (helper,local,7,2026-09-18 12:34,-)",
+			name, repo, version, saved, description)
 	}
 
 	if got := formatSavedAt(""); got != "-" {
@@ -172,21 +173,71 @@ func TestPythonListCells(t *testing.T) {
 		t.Errorf("formatSavedAt(unparseable) = %q, want the raw string", got)
 	}
 
-	// The rendered table names the four columns and never prints CODE.
+	// The version's absent marker mirrors the timestamp's: a git-sourced row
+	// has no version, and 0 is the wire's way of saying "none".
+	if got := formatVersion(0); got != "-" {
+		t.Errorf("formatVersion(0) = %q, want \"-\"", got)
+	}
+	if got := formatVersion(7); got != "7" {
+		t.Errorf("formatVersion(7) = %q, want \"7\"", got)
+	}
+
+	// The rendered table names the five columns and never prints CODE.
 	var buf bytes.Buffer
 	if err := renderPymoduleList(&buf, []*rafikiv1.PymoduleRow{
-		row("helper", 7, "2026-09-18T12:34:56Z", "reusable helpers"),
+		row("helper", "local", 7, "2026-09-18T12:34:56Z", "reusable helpers"),
 	}, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"NAME", "VERSION", "SAVED", "DESCRIPTION", "helper", "7", "2026-09-18 12:34", "reusable helpers"} {
+	for _, want := range []string{"NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION", "helper", "local", "7", "2026-09-18 12:34", "reusable helpers"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("renderPymoduleList output missing %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "CODE") {
 		t.Errorf("renderPymoduleList prints a CODE column:\n%s", out)
+	}
+}
+
+// TestPythonListRepoColumnRendersLocalAndGitRows pins the REPO column: a
+// local row and a git-sourced row render side by side, each carrying its own
+// repo cell, and a git-sourced row's VERSION/SAVED cells render "-" — it has
+// neither a version nor a save time, its source of truth being the repo's own
+// history.
+func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
+	rows := []*rafikiv1.PymoduleRow{
+		{Name: "helper", Repo: "local", Version: 7, CreatedAt: "2026-09-18T12:34:56Z", Description: "saved here"},
+		{Name: "rotate_keys", Repo: "ops_tools", Description: "rotates keys"},
+	}
+	var buf bytes.Buffer
+	if err := renderPymoduleList(&buf, rows, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION",
+		"helper", "local", "7", "2026-09-18 12:34", "saved here",
+		"rotate_keys", "ops_tools", "rotates keys"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderPymoduleList output missing %q:\n%s", want, out)
+		}
+	}
+
+	var gitLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "rotate_keys") {
+			gitLine = line
+			break
+		}
+	}
+	if gitLine == "" {
+		t.Fatalf("rotate_keys row not rendered:\n%s", out)
+	}
+	if n := strings.Count(gitLine, "-"); n < 2 {
+		t.Errorf("git-sourced row %q: only %d \"-\" cell(s), want the absent VERSION and SAVED both rendered \"-\"", gitLine, n)
+	}
+	if strings.Contains(gitLine, "0") {
+		t.Errorf("git-sourced row rendered a zero version: %q", gitLine)
 	}
 }
 

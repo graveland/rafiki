@@ -13,13 +13,16 @@ import (
 )
 
 // PymoduleRow is one saved pymodule as the manager returns it. Code is
-// populated only by Get and Put.
+// populated only by Get and Put. Repo names the scope the row came from:
+// "local" for the blob store, otherwise the git source it was discovered in
+// — the manager stamps it, the RPC handler passes it through.
 type PymoduleRow struct {
 	Version     int64
 	Name        string
 	Description string
 	CreatedAt   string
 	Code        string
+	Repo        string
 }
 
 // PymoduleManager is the narrow slice of the daemon needed to manage the
@@ -28,7 +31,13 @@ type PymoduleRow struct {
 // tools.PyModuleStore. A zero owner (unix socket) means the shared
 // unattributed bucket, which is what the caller's own children use.
 type PymoduleManager interface {
-	ListPymodules(ctx context.Context) ([]PymoduleRow, error)
+	// ListPymodules lists the caller's pymodules. repo is a scope filter:
+	// empty lists every scope, "local" the blob-store rows only, otherwise
+	// the named git source's discovered inventory. Empty meaning "no
+	// filter" is legitimate HERE alone — repo is a filter argument on this
+	// one method, never the "local" addressing sentinel used everywhere
+	// else (design §7).
+	ListPymodules(ctx context.Context, repo string) ([]PymoduleRow, error)
 	GetPymodule(ctx context.Context, name string) (PymoduleRow, error)
 	PutPymodule(ctx context.Context, name, code, description string) (PymoduleRow, error)
 	DeletePymodule(ctx context.Context, name string) error
@@ -69,6 +78,7 @@ func toProtoPymodule(r PymoduleRow) *rafikiv1.PymoduleRow {
 		Description: r.Description,
 		CreatedAt:   r.CreatedAt,
 		Code:        r.Code,
+		Repo:        r.Repo,
 	}
 }
 
@@ -79,7 +89,7 @@ func (s *Server) ListPymodules(
 	if err != nil {
 		return nil, err
 	}
-	rows, err := m.ListPymodules(ctx)
+	rows, err := m.ListPymodules(ctx, req.Msg.GetRepo())
 	if err != nil {
 		return nil, pymoduleError(err)
 	}

@@ -20,6 +20,10 @@ type fakePymodules struct {
 	putErr  error
 	delErr  error
 
+	// listRepo records the repo filter the last ListPymodules call carried,
+	// so a test can pin the handler's pass-through of req.Msg.GetRepo().
+	listRepo string
+
 	puts []recordedPut
 	dels []string
 }
@@ -28,7 +32,8 @@ type fakePymodules struct {
 // arguments the handler must pass through unchanged.
 type recordedPut struct{ name, code, description string }
 
-func (f *fakePymodules) ListPymodules(_ context.Context) ([]PymoduleRow, error) {
+func (f *fakePymodules) ListPymodules(_ context.Context, repo string) ([]PymoduleRow, error) {
+	f.listRepo = repo
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -84,6 +89,37 @@ func TestListPymodulesOmitsCode(t *testing.T) {
 		if got.Code != "" {
 			t.Errorf("row %d (%q): list leaked code %q", i, got.Name, got.Code)
 		}
+	}
+}
+
+// TestListPymodulesPassesRepoFilterThrough pins the handler's role: it
+// forwards req.Msg.GetRepo() to the manager UNCHANGED — scoping is entirely
+// the manager's job (the daemon-side adapter decides what "local" and a git
+// source's name mean) — and every manager-supplied field, Repo included,
+// reaches the wire unmangled while code stays blanked.
+func TestListPymodulesPassesRepoFilterThrough(t *testing.T) {
+	s := &Server{}
+	f := &fakePymodules{rows: []PymoduleRow{
+		{Version: 1, Name: "gitonly", Repo: "ops_tools", Code: "leaked if not blanked"},
+	}}
+	s.SetPymoduleManager(f)
+
+	for _, want := range []string{"", "local", "ops_tools"} {
+		if _, err := s.ListPymodules(context.Background(), connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: want})); err != nil {
+			t.Fatalf("list with repo %q: %v", want, err)
+		}
+		if f.listRepo != want {
+			t.Errorf("manager got repo %q, want %q (forwarded unchanged)", f.listRepo, want)
+		}
+	}
+
+	resp, err := s.ListPymodules(context.Background(), connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: "ops_tools"}))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := resp.Msg.GetRows()
+	if len(got) != 1 || got[0].GetRepo() != "ops_tools" || got[0].GetCode() != "" {
+		t.Errorf("rows = %+v, want the git-sourced row with Repo ops_tools and no code", got)
 	}
 }
 

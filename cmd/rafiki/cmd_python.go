@@ -29,7 +29,8 @@ func newPythonCmd() *cobra.Command {
 }
 
 func newPythonListCmd() *cobra.Command {
-	return &cobra.Command{
+	var repo string
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your saved pymodules (code is never printed here)",
 		Args:  cobra.NoArgs,
@@ -39,7 +40,7 @@ func newPythonListCmd() *cobra.Command {
 				return err
 			}
 			resp, err := ep.control().ListPymodules(cmdCtx(cmd),
-				connect.NewRequest(&rafikiv1.ListPymodulesRequest{}))
+				connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: repo}))
 			if err != nil {
 				return err
 			}
@@ -50,6 +51,12 @@ func newPythonListCmd() *cobra.Command {
 			return emitPymoduleList(os.Stdout, resp.Msg.GetRows(), mode, useColor)
 		},
 	}
+	// --repo defaults to empty, meaning everything — a filter, not an address,
+	// so unlike the tool surface there is no "local"-only default to state
+	// (design §7's CLI split): "local" narrows to saved pymodules, a git
+	// source's name to its discovered inventory.
+	cmd.Flags().StringVar(&repo, "repo", "", `scope to one source: "local" for saved pymodules, otherwise a git source's name (default: everything)`)
+	return cmd
 }
 
 // emitPymoduleList writes list's output in the resolved mode. The wire rows
@@ -67,27 +74,38 @@ func emitPymoduleList(w io.Writer, rows []*rafikiv1.PymoduleRow, mode outputMode
 	}
 }
 
-// renderPymoduleList renders the inventory table: NAME, VERSION, SAVED,
-// DESCRIPTION — never CODE.
+// renderPymoduleList renders the inventory table: NAME, REPO, VERSION,
+// SAVED, DESCRIPTION — never CODE.
 func renderPymoduleList(w io.Writer, rows []*rafikiv1.PymoduleRow, useColor bool) error {
 	tb := table.New(w, table.Options{Color: useColor})
-	tb.Header(dimHeader(useColor, "NAME", "VERSION", "SAVED", "DESCRIPTION")...)
+	tb.Header(dimHeader(useColor, "NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION")...)
 	for _, r := range rows {
-		name, version, saved, description := pymoduleCells(r)
-		tb.Row(name, version, saved, description)
+		name, repo, version, saved, description := pymoduleCells(r)
+		tb.Row(name, repo, version, saved, description)
 	}
 	return tb.Render()
 }
 
-// pymoduleCells renders one row's table cells: the name verbatim, the version
-// as a plain number, SAVED as "2006-01-02 15:04", and a description that
-// falls back to "-" when absent. Extracted so the unit tests pin the
-// rendering without a daemon.
-func pymoduleCells(r *rafikiv1.PymoduleRow) (name, version, saved, description string) {
+// pymoduleCells renders one row's table cells: the name verbatim, the repo
+// scope the row came from, the version as a plain number, SAVED as
+// "2006-01-02 15:04", and a description that falls back to "-" when absent.
+// Extracted so the unit tests pin the rendering without a daemon.
+func pymoduleCells(r *rafikiv1.PymoduleRow) (name, repo, version, saved, description string) {
 	return r.GetName(),
-		strconv.FormatInt(r.GetVersion(), 10),
+		defaultDash(r.GetRepo()),
+		formatVersion(r.GetVersion()),
 		formatSavedAt(r.GetCreatedAt()),
 		defaultDash(r.GetDescription())
+}
+
+// formatVersion renders a row's version the way formatSavedAt renders its
+// timestamp: "-" when absent — a git-sourced row carries no version, and 0 is
+// the wire's way of saying "none" — the number otherwise.
+func formatVersion(v int64) string {
+	if v == 0 {
+		return "-"
+	}
+	return strconv.FormatInt(v, 10)
 }
 
 // formatSavedAt renders a row's RFC3339 createdAt the way the other list
@@ -254,7 +272,10 @@ func completePyModuleNames(cmd *cobra.Command, args []string, toComplete string)
 	}
 	ctx, cancel := context.WithTimeout(cmdCtx(cmd), completionDeadline)
 	defer cancel()
-	resp, err := ep.control().ListPymodules(ctx, connect.NewRequest(&rafikiv1.ListPymodulesRequest{}))
+	// get/put/delete only ever operate on the local scope (design §7), so the
+	// completion narrows to it: a git-sourced name would be suggested and
+	// then refused.
+	resp, err := ep.control().ListPymodules(ctx, connect.NewRequest(&rafikiv1.ListPymodulesRequest{Repo: "local"}))
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
