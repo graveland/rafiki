@@ -195,7 +195,8 @@ func (w *syncWriter) String() string {
 // runSubprocess execs name(args...) under ctx with process-group
 // kill-on-cancel and the given WaitDelay, in cwd. Shared between bashTool
 // (which always passes bashWaitDelay and a nil env) and pymodule_run (which
-// does the same, with an env carrying PYTHONPATH for its named modules),
+// does the same, with an env carrying PYTHONPATH for the run -- named
+// modules' code dirs plus the site-packages of any entry with a venv),
 // since both are "run one process to completion and collect its output"
 // with no other difference. A nil env inherits the process environment,
 // the same as exec.Cmd's zero value. Returns merged stdout+stderr and

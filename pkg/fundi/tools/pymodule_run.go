@@ -19,9 +19,13 @@ const pymoduleRunDescription = "Run a Python script you saved with pymodule_put,
 	"pymodule_put -- not a path, and not inline code; if you have edited a " +
 	"module's code since saving it, pymodule_put it again before running. " +
 	"`modules` names further saved pymodules the script imports; they go on " +
-	"PYTHONPATH for the run. `cwd` optionally sets the working directory -- " +
-	"absolute, or relative to your working directory; the default is your " +
-	"working directory. Returns combined stdout/stderr and the exit code."
+	"PYTHONPATH for the run. If the script or any named module declares a " +
+	"requirements block (`# pymodule-requirements:`, see pymodule_put), its " +
+	"installed packages are on PYTHONPATH for the run and the script's own " +
+	"venv interpreter is used (script only). `cwd` optionally sets the " +
+	"working directory -- absolute, or relative to your working directory; " +
+	"the default is your working directory. Returns combined stdout/stderr " +
+	"and the exit code."
 
 func init() { DefaultBlueprint.Register(&PyModuleRunBlueprint{}) }
 
@@ -110,18 +114,72 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	if _, err := os.Stat(scriptPath); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: script %q is not synced to this executor (has it been saved with pymodule_put yet?): %w", in.Script, err)
 	}
-	modDirs := make([]string, 0, len(in.Modules))
-	for _, m := range in.Modules {
-		dir := filepath.Join(cacheDir, m)
-		if _, err := os.Stat(filepath.Join(dir, m+".py")); err != nil {
-			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor (has it been saved with pymodule_put yet?): %w", m, err)
-		}
-		modDirs = append(modDirs, dir)
+
+	// The script's venv interpreter and site-packages are resolved per call,
+	// not at Materialize time: the script's requirements can change between
+	// materialization and this call, so whether it has a venv is only known
+	// here. A venv always runs its OWN .venv/bin/python3, so a run stays
+	// self-consistent with the venv that was built -- a changed
+	// RAFIKI_PYMODULE_PYTHON never re-points or rebuilds an existing venv;
+	// only future venv builds use the new interpreter.
+	scriptVenvPython := pymoduleVenvPython(scriptDir)
+	_, scriptVenvErr := os.Stat(scriptVenvPython)
+	scriptHasVenv := scriptVenvErr == nil
+	scriptCode, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return ToolResult{}, fmt.Errorf("pymodule_run: script %q: %w", in.Script, err)
+	}
+	if err := pymoduleVenvReadiness("script", in.Script, scriptDir, pymodules.ParseRequirements(string(scriptCode)), scriptHasVenv); err != nil {
+		return ToolResult{}, err
 	}
 
+	type pymoduleEntry struct {
+		dir     string
+		hasVenv bool
+	}
+	entries := make([]pymoduleEntry, 0, len(in.Modules))
+	for _, m := range in.Modules {
+		dir := filepath.Join(cacheDir, m)
+		path := filepath.Join(dir, m+".py")
+		if _, err := os.Stat(path); err != nil {
+			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor (has it been saved with pymodule_put yet?): %w", m, err)
+		}
+		_, venvErr := os.Stat(pymoduleVenvPython(dir))
+		hasVenv := venvErr == nil
+		code, err := os.ReadFile(path)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("pymodule_run: module %q: %w", m, err)
+		}
+		if err := pymoduleVenvReadiness("module", m, dir, pymodules.ParseRequirements(string(code)), hasVenv); err != nil {
+			return ToolResult{}, err
+		}
+		entries = append(entries, pymoduleEntry{dir: dir, hasVenv: hasVenv})
+	}
+
+	// PYTHONPATH is a union, not dependency resolution: every entry with a
+	// venv contributes its site-packages alongside its code directory, and
+	// conflicts resolve by PYTHONPATH order like any other collision. The
+	// script's own directory stays off PYTHONPATH (it is sys.path[0], which
+	// brings no site-packages with it -- hence its site-packages here),
+	// followed by the modules in call order, each emitting its code dir then
+	// its site-packages; the pre-existing PYTHONPATH value trails last.
+	var ppEntries []string
+	if scriptHasVenv {
+		if sp, ok := pymoduleSitePackages(scriptDir); ok {
+			ppEntries = append(ppEntries, sp)
+		}
+	}
+	for _, e := range entries {
+		ppEntries = append(ppEntries, e.dir)
+		if e.hasVenv {
+			if sp, ok := pymoduleSitePackages(e.dir); ok {
+				ppEntries = append(ppEntries, sp)
+			}
+		}
+	}
 	var env []string
-	if len(modDirs) > 0 {
-		pp := strings.Join(modDirs, string(os.PathListSeparator))
+	if len(ppEntries) > 0 {
+		pp := strings.Join(ppEntries, string(os.PathListSeparator))
 		if existing := os.Getenv("PYTHONPATH"); existing != "" {
 			pp += string(os.PathListSeparator) + existing
 		}
@@ -152,8 +210,14 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		runCwd = p
 	}
 
+	// The venv interpreter wins over the fallback only for the script: a
+	// module's venv never runs the process, its packages ride PYTHONPATH.
+	interpreter := rt.interpreter
+	if scriptHasVenv {
+		interpreter = scriptVenvPython
+	}
 	args := append([]string{scriptPath}, in.Args...)
-	out, _, runErr := runSubprocess(ctx, runCwd, bashWaitDelay, rt.interpreter, args, env)
+	out, _, runErr := runSubprocess(ctx, runCwd, bashWaitDelay, interpreter, args, env)
 	if runErr != nil {
 		out += fmt.Sprintf("\n[pymodule_run: %v]\n", runErr)
 	}
@@ -163,4 +227,43 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		spillName = "pymodule_run"
 	}
 	return NewTextResult(rt.p.Clip(out, spillName)), nil
+}
+
+// pymoduleVenvPython is the interpreter path of a pymodule's per-module
+// dependency venv, a sibling of the module's own .py inside its synced cache
+// directory. Venvs are consumed in place, never copied.
+func pymoduleVenvPython(dir string) string {
+	return filepath.Join(dir, ".venv", "bin", "python3")
+}
+
+// pymoduleSitePackages resolves a pymodule's venv site-packages directory by
+// globbing <dir>/.venv/lib/python3.*/site-packages and taking the first
+// match. ok is false when the glob finds nothing (a malformed or partially
+// built venv): the caller then proceeds with the code directory alone,
+// silently.
+func pymoduleSitePackages(dir string) (sitePackages string, ok bool) {
+	matches, err := filepath.Glob(filepath.Join(dir, ".venv", "lib", "python3.*", "site-packages"))
+	if err != nil || len(matches) == 0 {
+		return "", false
+	}
+	fi, err := os.Stat(matches[0])
+	if err != nil || !fi.IsDir() {
+		return "", false
+	}
+	return matches[0], true
+}
+
+// pymoduleVenvReadiness refuses a run whose entry declares dependencies but
+// has no usable venv, instead of running against missing or half-installed
+// packages. An entry with no requirements -- the common case -- or with a
+// venv already present always passes. The staging check distinguishes a
+// build still in flight (retryable) from one that failed or never synced.
+func pymoduleVenvReadiness(role, name, dir string, reqs []string, hasVenv bool) error {
+	if hasVenv || len(reqs) == 0 {
+		return nil
+	}
+	if staging, _ := filepath.Glob(filepath.Join(dir, ".rafiki-venv-staging-*")); len(staging) > 0 {
+		return fmt.Errorf("pymodule_run: %s %s: dependency venv build is in progress; retry shortly", role, name)
+	}
+	return fmt.Errorf("pymodule_run: %s %s: dependencies not ready (venv missing — the build failed or has not synced; check the executor's sync or resave the module)", role, name)
 }

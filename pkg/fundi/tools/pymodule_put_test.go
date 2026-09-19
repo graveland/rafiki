@@ -153,3 +153,13 @@ func TestPymodulePutMaterializeDeclinesWithoutStore(t *testing.T) {
 		t.Errorf("Materialize with nil PyModules = (%v, %v), want (nil, nil)", tool, err)
 	}
 }
+
+// The put description is the only place an agent learns the marker syntax,
+// on every face the tool is served from, so it must name it.
+func TestPymodulePutDescriptionMentionsRequirementsMarker(t *testing.T) {
+	for _, want := range []string{pymodules.RequirementsMarker, "per-module venv", "pymodule_run"} {
+		if !strings.Contains(pymodulePutDescription, want) {
+			t.Errorf("pymodule_put description should mention %q, got: %q", want, pymodulePutDescription)
+		}
+	}
+}

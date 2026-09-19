@@ -188,7 +188,10 @@ const mcpPymoduleRunDescription = "Run a Python script you saved with pymodule_p
 	"module name. `script` is the module name exactly as saved with pymodule_put -- not " +
 	"a path, and not inline code; if you have edited a module's code since saving it, " +
 	"pymodule_put it again before running. `modules` names further saved pymodules the " +
-	"script imports. `cwd` optionally sets the working directory -- absolute, or " +
+	"script imports. If the script or any named module declares a requirements block " +
+	"(`# pymodule-requirements:`, see pymodule_put), its installed packages are on " +
+	"PYTHONPATH for the run and the script's own venv interpreter is used (script only). " +
+	"`cwd` optionally sets the working directory -- absolute, or " +
 	"relative to your working directory; the default is your working directory. Returns " +
 	"combined stdout/stderr and the exit code."
 

@@ -37,8 +37,13 @@ type PyModuleStore interface {
 const pymodulePutDescription = "Save a reusable Python snippet (a class, a " +
 	"helper function) to your own pymodule store. Each save is a new " +
 	"version under `name`; nothing already saved is ever overwritten. " +
-	"Anything you save becomes importable by name with pymodule_run. Only " +
-	"you can see or run what you save here."
+	"Anything you save becomes importable by name with pymodule_run. A " +
+	"module can declare dependencies by placing a line whose entire content " +
+	"is `# pymodule-requirements:` in the code, followed by contiguous " +
+	"comment lines each holding one requirements.txt-style pin (e.g. " +
+	"`# requests>=2.31`); dependencies are installed into a per-module venv " +
+	"on the executor at sync time and are available to pymodule_run " +
+	"automatically. Only you can see or run what you save here."
 
 func init() { DefaultBlueprint.Register(&PyModulePutBlueprint{}) }
 
@@ -51,7 +56,7 @@ func (PyModulePutBlueprint) InputSchema() Schema {
 		Type: "object",
 		Properties: []SchemaProperty{
 			{Name: "name", Type: "string", Description: "Module name, later importable as `import <name>`. Must be a bare Python identifier: letters, digits, underscore, not starting with a digit."},
-			{Name: "code", Type: "string", Description: "Full Python source of the module."},
+			{Name: "code", Type: "string", Description: "Full Python source of the module. A `# pymodule-requirements:` comment block declares dependencies installed into a per-module venv at sync time."},
 			{Name: "description", Type: "string", Description: "One-line description shown in your pymodule inventory."},
 		},
 		Required: []string{"name", "code"},
