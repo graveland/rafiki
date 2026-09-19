@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -78,6 +80,10 @@ func TestMCPPyModuleStoreGet(t *testing.T) {
 
 // The MCP face mirrors pymoduleWriter's ordering contract: a definite syntax
 // error blocks BEFORE the DB write -- Put errors and the store is untouched.
+// The error's OBSERVABLE shape is pinned at the tool layer (pymodulePutTool
+// wraps store errors once with "pymodule_put: "), so the adapter adds none
+// of its own and the end-to-end text is exactly
+// "pymodule_put: <name> does not parse as Python: <syntax text>".
 func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
@@ -93,6 +99,9 @@ func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not parse as Python") {
 		t.Errorf("Put error = %v, want it to name the parse failure", err)
 	}
+	if strings.HasPrefix(err.Error(), "pymodule_put:") {
+		t.Errorf("Put error = %v, want no %q prefix at the adapter layer: the tool wraps store errors with it exactly once", err, "pymodule_put:")
+	}
 	if notice != "" {
 		t.Errorf("Put notice = %q on a blocked save, want empty", notice)
 	}
@@ -100,6 +109,28 @@ func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
 	rows := f.store.rows["u_alice"]
 	if len(rows) != 1 || rows[0].Name != "alice_chart" {
 		t.Errorf("store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
+	}
+
+	// The full text an MCP caller sees: the same save through the real
+	// pymodule_put tool, over this store as its backend.
+	tool, err := tools.PyModulePutBlueprint{}.Materialize(tools.ToolOpts{PyModules: mcp})
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	input, err := json.Marshal(map[string]string{"name": "alice_bad", "code": "def f(:\n    pass\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), tools.ToolInput(input))
+	if err == nil {
+		t.Fatal("tool Execute of syntactically invalid code = nil error, want the syntax failure")
+	}
+	const wantPrefix = "pymodule_put: alice_bad does not parse as Python: "
+	if !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("tool error = %q, want the end-to-end prefix %q exactly once", err.Error(), wantPrefix)
+	}
+	if suffix := strings.TrimPrefix(err.Error(), wantPrefix); suffix == "" {
+		t.Errorf("tool error = %q, want the syntax text after %q to be non-empty", err.Error(), wantPrefix)
 	}
 }
 

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
@@ -248,7 +250,11 @@ func TestControllerPyModuleWriterGet(t *testing.T) {
 
 // A definite syntax error must block the save BEFORE the DB write: Put
 // returns an error and the underlying pymodules.Store.Put is never reached
-// (the fixture's seeded alice row count is unchanged).
+// (the fixture's seeded alice row count is unchanged). The error's
+// OBSERVABLE shape is pinned at the tool layer: pymodulePutTool wraps every
+// store error once with "pymodule_put: ", so the adapter must add none of
+// its own and the end-to-end text is exactly
+// "pymodule_put: <name> does not parse as Python: <syntax text>".
 func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
@@ -264,6 +270,9 @@ func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not parse as Python") {
 		t.Errorf("Put error = %v, want it to name the parse failure", err)
 	}
+	if strings.HasPrefix(err.Error(), "pymodule_put:") {
+		t.Errorf("Put error = %v, want no %q prefix at the adapter layer: the tool wraps store errors with it exactly once", err, "pymodule_put:")
+	}
 	if notice != "" {
 		t.Errorf("Put notice = %q on a blocked save, want empty", notice)
 	}
@@ -271,6 +280,28 @@ func TestControllerPyModuleWriterPutBlocksOnSyntaxError(t *testing.T) {
 	rows := f.store.rows["u_alice"]
 	if len(rows) != 1 || rows[0].Name != "alice_chart" {
 		t.Errorf("store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
+	}
+
+	// The full text the calling agent sees: the same save through the real
+	// pymodule_put tool, over this writer as its store.
+	tool, err := tools.PyModulePutBlueprint{}.Materialize(tools.ToolOpts{PyModules: w})
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	input, err := json.Marshal(map[string]string{"name": "alice_bad", "code": "def f(:\n    pass\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Execute(context.Background(), tools.ToolInput(input))
+	if err == nil {
+		t.Fatal("tool Execute of syntactically invalid code = nil error, want the syntax failure")
+	}
+	const wantPrefix = "pymodule_put: alice_bad does not parse as Python: "
+	if !strings.HasPrefix(err.Error(), wantPrefix) {
+		t.Errorf("tool error = %q, want the end-to-end prefix %q exactly once", err.Error(), wantPrefix)
+	}
+	if suffix := strings.TrimPrefix(err.Error(), wantPrefix); suffix == "" {
+		t.Errorf("tool error = %q, want the syntax text after %q to be non-empty", err.Error(), wantPrefix)
 	}
 }
 

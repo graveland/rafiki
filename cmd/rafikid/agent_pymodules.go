@@ -32,7 +32,10 @@ func (w *pymoduleWriter) Put(ctx context.Context, name, code, description string
 	// venv results LAST, after the row exists. Lint and venv findings only
 	// ever land in the advisory notice -- they never block the save.
 	if syntaxErr := pymoduleSyntaxCheck(code); syntaxErr != "" {
-		return 0, "", fmt.Errorf("pymodule_put: %s does not parse as Python: %s", name, syntaxErr)
+		// No "pymodule_put: " prefix here: the tool layer wraps every store
+		// error with that prefix, so adding it twice doubles it in the text
+		// the calling agent actually sees.
+		return 0, "", fmt.Errorf("%s does not parse as Python: %s", name, syntaxErr)
 	}
 	lint := pymoduleLintCheck(code)
 

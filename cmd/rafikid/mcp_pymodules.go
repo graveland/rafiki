@@ -33,7 +33,10 @@ func (w *mcpPyModuleStore) Put(ctx context.Context, name, code, description stri
 	// advisory and pre-write, the row is written next, and the push's venv
 	// results are collected LAST, after the row exists.
 	if syntaxErr := pymoduleSyntaxCheck(code); syntaxErr != "" {
-		return 0, "", fmt.Errorf("pymodule_put: %s does not parse as Python: %s", name, syntaxErr)
+		// No "pymodule_put: " prefix here: the tool layer wraps every store
+		// error with that prefix, so adding it twice doubles it in the text
+		// an MCP caller actually sees.
+		return 0, "", fmt.Errorf("%s does not parse as Python: %s", name, syntaxErr)
 	}
 	lint := pymoduleLintCheck(code)
 
