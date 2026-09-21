@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -431,4 +433,338 @@ func jsonEqual(a, b string) bool {
 		return false
 	}
 	return mustJSON(va) == mustJSON(vb)
+}
+
+// ---- streaming (NewStreaming + the SSE translation) ----
+
+// openAIStreamBody joins SSE data lines into one text/event-stream body: each
+// element becomes `data: <line>\n\n`. "[DONE]" is just another line.
+func openAIStreamBody(lines ...string) string {
+	var sb strings.Builder
+	for _, line := range lines {
+		sb.WriteString("data: " + line + "\n\n")
+	}
+	return sb.String()
+}
+
+// openAIStreamHandler serves a pre-built SSE body with the content type real
+// OpenAI-compatible endpoints answer streams with.
+func openAIStreamHandler(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// openAIToolOpenChunk is the FIRST chunk for a tool call: it carries the id,
+// the function name, and an empty arguments string (OpenAI does not repeat
+// any of these on later chunks).
+func openAIToolOpenChunk(id, name string) string {
+	return `{"id":"chatcmpl-s2","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"` + id + `","type":"function","function":{"name":"` + name + `","arguments":""}}]},"finish_reason":null}]}`
+}
+
+// openAIToolArgsChunk builds a tool-call continuation chunk carrying the next
+// raw arguments fragment, with the fragment JSON-escaped exactly as OpenAI
+// escapes it inside the chunk's string field.
+func openAIToolArgsChunk(args string) string {
+	return `{"id":"chatcmpl-s2","model":"gpt-4o","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":` + mustJSONString(args) + `}}]},"finish_reason":null}]}`
+}
+
+// mustJSONString JSON-encodes s as a wire string value (the arguments field is
+// a JSON-encoded string, not an object).
+func mustJSONString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
+
+// collectStream drains a stream via Next()/Current(), accumulating the message
+// the way pkg/llm/client.go's sendStreaming does (Accumulate plus
+// backfillDeltaUsage), so the assertions cover the real consumer path.
+func collectStream(t *testing.T, stream interface {
+	Next() bool
+	Current() anthropic.MessageStreamEventUnion
+	Err() error
+	Close() error
+}) (events []anthropic.MessageStreamEventUnion, types []string, acc anthropic.Message) {
+	t.Helper()
+	for stream.Next() {
+		ev := stream.Current()
+		events = append(events, ev)
+		types = append(types, ev.Type)
+		if err := acc.Accumulate(ev); err != nil {
+			t.Fatalf("Accumulate(%s): %v", ev.Type, err)
+		}
+		backfillDeltaUsage(&acc, ev)
+	}
+	return events, types, acc
+}
+
+func TestOpenAISenderNewStreamingTextOnly(t *testing.T) {
+	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(
+		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"lo "},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"world"},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}`,
+		`[DONE]`,
+	)))
+
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	if err != nil {
+		t.Fatalf("NewStreaming: %v", err)
+	}
+	defer stream.Close()
+	events, types, acc := collectStream(t, stream)
+
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err() after a healthy stream: %v", err)
+	}
+	// Cases 1-3-3-3-6-7: message_start, one content_block_start, one delta per
+	// content chunk, one stop, message_delta, message_stop — exactly, nothing
+	// extra.
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	if !slices.Equal(types, wantTypes) {
+		t.Fatalf("event types = %v, want %v", types, wantTypes)
+	}
+
+	start := events[0]
+	if start.Message.ID != "chatcmpl-s1" || start.Message.Model != "gpt-4o" {
+		t.Errorf("message_start message = %s, want id chatcmpl-s1 model gpt-4o", mustJSON(start.Message))
+	}
+	if start.Message.Role != "assistant" || start.Message.Type != "message" {
+		t.Errorf("message_start role/type = %q/%q, want assistant/message", start.Message.Role, start.Message.Type)
+	}
+	if len(start.Message.Content) != 0 {
+		t.Errorf("message_start content = %s, want empty", mustJSON(start.Message.Content))
+	}
+	if start.Message.Usage.InputTokens != 0 || start.Message.Usage.OutputTokens != 0 {
+		t.Errorf("message_start usage = %s, want zeroed (real numbers are not known yet)", mustJSON(start.Message.Usage))
+	}
+
+	blockStart := events[1]
+	if blockStart.Index != 0 {
+		t.Errorf("content_block_start index = %d, want 0", blockStart.Index)
+	}
+	if blockStart.ContentBlock.Type != "text" || blockStart.ContentBlock.Text != "" {
+		t.Errorf("content_block_start content_block = %s, want {type:text,text:\"\"}", mustJSON(blockStart.ContentBlock))
+	}
+
+	wantTexts := []string{"Hel", "lo ", "world"}
+	for i, want := range wantTexts {
+		ev := events[2+i]
+		if ev.Index != 0 {
+			t.Errorf("content_block_delta[%d] index = %d, want 0", i, ev.Index)
+		}
+		if ev.Delta.Text != want {
+			t.Errorf("content_block_delta[%d] text = %q, want %q", i, ev.Delta.Text, want)
+		}
+	}
+	if events[5].Type != "content_block_stop" || events[5].Index != 0 {
+		t.Errorf("content_block_stop = %s index %d, want index 0", events[5].Type, events[5].Index)
+	}
+
+	delta := events[6]
+	if delta.Delta.StopReason != anthropic.StopReasonEndTurn {
+		t.Errorf("message_delta stop_reason = %q, want end_turn", delta.Delta.StopReason)
+	}
+	if delta.Usage.InputTokens != 11 || delta.Usage.OutputTokens != 7 {
+		t.Errorf("message_delta usage = %d/%d, want 11/7", delta.Usage.InputTokens, delta.Usage.OutputTokens)
+	}
+
+	// The accumulated message is what the caller actually keeps: text
+	// reassembled across deltas, the mapped stop reason, and usage backfilled
+	// from message_delta (input arrives only there — message_start is zeroed).
+	if acc.ID != "chatcmpl-s1" || acc.Model != "gpt-4o" {
+		t.Errorf("accumulated id/model = %q/%q, want chatcmpl-s1/gpt-4o", acc.ID, acc.Model)
+	}
+	if acc.StopReason != anthropic.StopReasonEndTurn {
+		t.Errorf("accumulated stop_reason = %q, want end_turn", acc.StopReason)
+	}
+	if len(acc.Content) != 1 || acc.Content[0].Text != "Hello world" {
+		t.Errorf("accumulated content = %s, want one text block \"Hello world\"", mustJSON(acc.Content))
+	}
+	if acc.Usage.InputTokens != 11 || acc.Usage.OutputTokens != 7 {
+		t.Errorf("accumulated usage = %d/%d, want 11/7", acc.Usage.InputTokens, acc.Usage.OutputTokens)
+	}
+}
+
+func TestOpenAISenderNewStreamingToolCall(t *testing.T) {
+	// The arguments JSON, split across four fragments exactly as OpenAI streams
+	// them: the first chunk carries id+name with empty arguments, then the raw
+	// fragments follow one per chunk. This is the test that dies if the
+	// translation accumulates and re-emits: a snapshotting implementation
+	// produces garbage when the fragments are concatenated.
+	fragments := []string{
+		`{"city"`,
+		`:"Paris",`,
+		`"unit":"cel`,
+		`sius"}`,
+	}
+	lines := []string{
+		openAIToolOpenChunk("call_7", "get_weather"),
+		openAIToolArgsChunk(fragments[0]),
+		openAIToolArgsChunk(fragments[1]),
+		openAIToolArgsChunk(fragments[2]),
+		openAIToolArgsChunk(fragments[3]),
+		`{"id":"chatcmpl-s2","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":9}}`,
+		`[DONE]`,
+	}
+	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(lines...)))
+
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	if err != nil {
+		t.Fatalf("NewStreaming: %v", err)
+	}
+	defer stream.Close()
+	events, types, acc := collectStream(t, stream)
+
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err() after a healthy stream: %v", err)
+	}
+	wantTypes := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	if !slices.Equal(types, wantTypes) {
+		t.Fatalf("event types = %v, want %v", types, wantTypes)
+	}
+
+	blockStart := events[1]
+	if blockStart.ContentBlock.Type != "tool_use" {
+		t.Errorf("content_block_start type = %q, want tool_use", blockStart.ContentBlock.Type)
+	}
+	if blockStart.ContentBlock.ID != "call_7" || blockStart.ContentBlock.Name != "get_weather" {
+		t.Errorf("content_block_start id/name = %q/%q, want call_7/get_weather (id and name arrive once, on the first chunk)", blockStart.ContentBlock.ID, blockStart.ContentBlock.Name)
+	}
+	if input := mustJSON(blockStart.ContentBlock.Input); input != `{}` {
+		t.Errorf("content_block_start input = %s, want {}", input)
+	}
+
+	// Each partial_json must be the EXACT raw fragment OpenAI sent, in order,
+	// unmodified — not a re-serialized snapshot.
+	var gotFragments []string
+	for _, ev := range events {
+		if ev.Type != "content_block_delta" {
+			continue
+		}
+		if ev.Delta.Type != "input_json_delta" {
+			t.Fatalf("delta type = %q, want input_json_delta", ev.Delta.Type)
+		}
+		gotFragments = append(gotFragments, ev.Delta.PartialJSON)
+	}
+	if !slices.Equal(gotFragments, fragments) {
+		t.Fatalf("partial_json fragments = %q, want the raw fragments %q (forwarded as-is, not accumulated)",
+			gotFragments, fragments)
+	}
+	joined := strings.Join(gotFragments, "")
+	if !json.Valid([]byte(joined)) {
+		t.Fatalf("concatenated fragments = %q, which is not valid JSON", joined)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(joined), &parsed); err != nil {
+		t.Fatalf("concatenated fragments %q do not unmarshal: %v", joined, err)
+	}
+	if parsed["city"] != "Paris" || parsed["unit"] != "celsius" {
+		t.Errorf("parsed fragments = %s, want the arguments the fixture sent", mustJSON(parsed))
+	}
+
+	if acc.StopReason != anthropic.StopReasonToolUse {
+		t.Errorf("accumulated stop_reason = %q, want tool_use", acc.StopReason)
+	}
+	if len(acc.Content) != 1 {
+		t.Fatalf("accumulated content = %d blocks, want 1 tool_use", len(acc.Content))
+	}
+	if string(acc.Content[0].Input) != `{"city":"Paris","unit":"celsius"}` {
+		t.Errorf("accumulated input = %s, want the fragments concatenated into the original JSON", acc.Content[0].Input)
+	}
+	if acc.Usage.InputTokens != 20 || acc.Usage.OutputTokens != 9 {
+		t.Errorf("accumulated usage = %d/%d, want 20/9", acc.Usage.InputTokens, acc.Usage.OutputTokens)
+	}
+}
+
+func TestOpenAISenderNewStreamingErrorMidStream(t *testing.T) {
+	// Two healthy chunks, then a line that is not a chunk (case 8's
+	// "non-[DONE] line that fails to parse as a chunk").
+	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(
+		`{"id":"chatcmpl-s3","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"partial "},"finish_reason":null}]}`,
+		`{"id":"chatcmpl-s3","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"text"},"finish_reason":null}]}`,
+		`{oops-not-json`,
+		`[DONE]`,
+	)))
+
+	stream, err := s.NewStreaming(context.Background(), minimalParams())
+	if err != nil {
+		t.Fatalf("NewStreaming: %v", err)
+	}
+	defer stream.Close()
+	events, types, _ := collectStream(t, stream)
+
+	// The healthy prefix is delivered before the failure surfaces.
+	wantPrefix := []string{"message_start", "content_block_start", "content_block_delta", "content_block_delta"}
+	if len(types) < len(wantPrefix) || !slices.Equal(types[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("events before the failure = %v, want the healthy prefix %v first", types, wantPrefix)
+	}
+
+	serr := stream.Err()
+	if serr == nil {
+		t.Fatal("stream.Err() = nil after an unparseable chunk, want the in-band error")
+	}
+	// Case 8's contract: the error event must be shaped for ParseStreamError —
+	// the exact string sseStreamErrPrefix expects, carrying a type from
+	// streamerr.go's vocabulary.
+	if se, ok := ParseStreamError(serr); !ok {
+		t.Fatalf("ParseStreamError(%v) = ok:false — the error event is not shaped for recovery", serr)
+	} else if se.ErrType != "api_error" {
+		t.Errorf("error.type = %q, want api_error (the safe default for an unparseable chunk)", se.ErrType)
+	}
+	if !IsTransientStreamError(serr) {
+		t.Errorf("IsTransientStreamError = false, want true — a mid-stream failure must classify as transient")
+	}
+	if len(events) < len(wantPrefix) {
+		t.Fatalf("only %d events delivered, want at least the healthy prefix", len(events))
+	}
+}
+
+func TestSenderForKeyBuildsOpenAISender(t *testing.T) {
+	p := providers.Provider{Name: "oai", Kind: providers.KindOpenAI, BaseURL: "http://example.invalid", APIKeyEnv: "OPENAI_API_KEY"}
+	s, err := SenderForKey(p, "resolved-key", nil)
+	if err != nil {
+		t.Fatalf("SenderForKey with a base_url: %v", err)
+	}
+	if s == nil {
+		t.Fatal("SenderForKey returned nil Sender with no error")
+	}
+	// The wiring must go through newOpenAISender (not an SDK client), and the
+	// result must carry the streaming capability agentloop type-asserts for.
+	if _, ok := s.(*openAISender); !ok {
+		t.Fatalf("SenderForKey(KindOpenAI) returned %T, want *openAISender", s)
+	}
+	if _, ok := s.(StreamingSender); !ok {
+		t.Fatalf("SenderForKey(KindOpenAI) returned %T, which does not implement StreamingSender — streaming would silently fall back to non-streamed sends", s)
+	}
+
+	// No canonical default base URL exists for a generic OpenAI-compatible
+	// endpoint: an empty base_url is a config error, not a silent default.
+	p.BaseURL = ""
+	if s2, err := SenderForKey(p, "resolved-key", nil); err == nil {
+		t.Fatalf("SenderForKey with empty BaseURL = %v, want a config error", s2)
+	}
 }

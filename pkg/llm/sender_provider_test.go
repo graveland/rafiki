@@ -201,12 +201,18 @@ func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
 	}
 }
 
-// The kind is reserved, not implemented. Constructing it must fail with a
-// message that says so, not produce a sender that 400s at call time.
-func TestSenderForOpenAIKindRefused(t *testing.T) {
-	_, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: "http://x"}, nil)
-	if err == nil {
-		t.Fatal("SenderFor(openai) succeeded; the kind is reserved and unimplemented")
+// The kind is implemented (Task 2.1): SenderForKey routes it through
+// newOpenAISender and must hand back a StreamingSender, like the other kinds.
+// The constructor's empty-BaseURL-is-a-config-error contract is pinned in
+// openai_sender_test.go (TestOpenAISenderNewRequiresBaseURL,
+// TestSenderForKeyBuildsOpenAISender).
+func TestSenderForKeyOpenAIKindBuildsSender(t *testing.T) {
+	s, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: "http://x"}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor(openai): %v", err)
+	}
+	if _, ok := s.(llm.StreamingSender); !ok {
+		t.Error("SenderFor(openai) must return a StreamingSender; streaming would silently degrade to non-streaming")
 	}
 }
 

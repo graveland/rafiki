@@ -180,7 +180,7 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 		)
 		rt = sessionIDTransport{base: rt}
 	case providers.KindOpenAI:
-		return nil, fmt.Errorf("llm: provider %q: kind %q is reserved and not implemented", p.Name, p.Kind)
+		return newOpenAISender(p, key, rt)
 	default:
 		return nil, fmt.Errorf("llm: provider %q: unknown kind %q", p.Name, p.Kind)
 	}
