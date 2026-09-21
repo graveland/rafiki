@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,61 @@ func TestUserSpawnerSetBudgetRefusesEveryParentedChild(t *testing.T) {
 			t.Errorf("SetBudget(%s) refusal must name the parent %s; got %v", tc.target, tc.parent, err)
 		}
 	}
+}
+
+// A listing must survive an indeterminate depth: AbsoluteDepth's refuse
+// sentinel (a parent chain past the walk bound) must not crash the tool-facing
+// render — RenderAgents indents by Depth and panics on a negative count — nor
+// show a fabricated number. The display clamps it to the root level; the
+// legitimate nodes around it keep their real depths.
+func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	prev := ""
+	for i := 0; i < 66; i++ {
+		id := fmt.Sprintf("x_%02d", i)
+		if prev == "" {
+			c.st.Insert(&childstore.Session{
+				ChildID: id, Status: protocol.StatusIdle,
+				StartedAt: time.Now(), Kind: protocol.KindFundi,
+			})
+		} else {
+			c.st.Insert(&childstore.Session{
+				ChildID: id, Status: protocol.StatusIdle,
+				StartedAt: time.Now(), Kind: protocol.KindFundi,
+				Labels: map[string]string{
+					childstore.LabelParent: prev,
+					childstore.LabelRoot:   "x_00",
+				},
+			})
+		}
+		prev = id
+	}
+
+	sp := newUserSpawner(c, users.Identity{UserID: "u_1", Username: "op"})
+	kids, err := sp.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deep, shallow *tools.AgentInfo
+	for i := range kids {
+		switch kids[i].ChildID {
+		case "x_65":
+			deep = &kids[i]
+		case "x_01":
+			shallow = &kids[i]
+		}
+	}
+	if deep == nil || shallow == nil {
+		t.Fatalf("listing must contain the deep and shallow children, got %+v", kids)
+	}
+	if deep.Depth != 0 {
+		t.Errorf("an indeterminate depth must display as 0 (root level), got %d", deep.Depth)
+	}
+	if shallow.Depth != 1 {
+		t.Errorf("the clamp must not touch a resolvable chain: x_01.Depth = %d, want 1", shallow.Depth)
+	}
+	// RenderAgents indents by Depth; this must not panic on the clamped row.
+	_ = tools.RenderAgents(kids)
 }
 
 func TestUserSpawnerListReportsAbsoluteDepth(t *testing.T) {

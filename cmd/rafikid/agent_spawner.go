@@ -85,6 +85,15 @@ func (s *controllerSpawner) infoFor(snap childstore.Snapshot) tools.AgentInfo {
 // binding, userSpawner passes the child's absolute depth in the daemon's
 // forest.
 func snapshotInfo(snap childstore.Snapshot, depth int) tools.AgentInfo {
+	// An indeterminate depth (AbsoluteDepth's refuse sentinel for a parent
+	// chain that cannot be walked to a root) is a display-only problem here:
+	// RenderAgents indents by Depth and panics on a negative count, and
+	// sortAgents would file the child above top-level agents. Clamp it to the
+	// root level rather than crash or render a fabricated number; admission
+	// paths refuse instead (see checkDepth).
+	if depth < 0 {
+		depth = 0
+	}
 	return tools.AgentInfo{
 		ChildID: snap.ChildID,
 		Name:    snap.Name,

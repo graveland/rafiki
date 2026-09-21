@@ -100,7 +100,13 @@ func (c *Controller) checkDepth(req protocol.SpawnRequest) error {
 		}
 		abs := c.st.AbsoluteDepth(req.ParentChildID)
 		if abs < 0 {
-			return limitError("parentChildId: no such child: %s", req.ParentChildID)
+			// The Get above proved the child exists, so this is the
+			// truncated-chain sentinel, not "no such child": the stored parent
+			// chain does not reach a root within the walk bound. The child's
+			// true position — and so the new child's landing depth — is
+			// unknown, and unknown here must refuse, not guess (see
+			// checkBudget's fails-closed note for the same reasoning).
+			return limitError("parentChildId: cannot determine the depth of %s: its parent chain does not reach a root within the walk limit", req.ParentChildID)
 		}
 		childDepth = abs + 1
 	}
@@ -119,6 +125,15 @@ func (c *Controller) checkDepth(req protocol.SpawnRequest) error {
 // too, so a stored grant can never describe a subtree the ceiling forbids —
 // otherwise the refusal would arrive one generation late and be confusing.
 func grantedDepth(req protocol.SpawnRequest, childDepth, ceiling int) int {
+	// An indeterminate landing depth (childDepthFor's -1) grants nothing. The
+	// child may sit anywhere, including past the ceiling, so the only safe
+	// grant is "may not spawn" — the same 0-means-cannot convention
+	// grantedChildren uses. Letting the negative ride through the room
+	// arithmetic below would fail OPEN: it reads as extra room, and a spawn
+	// off a corrupt record mints a child with depth it was never entitled to.
+	if childDepth < 0 {
+		return 0
+	}
 	want := defaultSpawnDepth
 	if req.MaxDepth != nil {
 		want = *req.MaxDepth
@@ -282,13 +297,19 @@ func (c *Controller) subtreeSpend(ctx context.Context, rootChildID string) (floa
 // childDepthFor is where a child of parentID would land. Kept separate from
 // checkDepth so the stored grant and the admission check cannot disagree
 // about the arithmetic.
+//
+// It returns -1 when the landing depth cannot be determined: parentID is
+// unknown, or its parent chain cannot be walked to a root within the walk
+// bound. Callers must never feed that -1 into grant arithmetic as a real
+// depth — grantedDepth turns it into a grant of 0 ("cannot spawn"), never
+// "assume top level".
 func childDepthFor(st *childstore.Store, parentID string) int {
 	if parentID == "" {
 		return 0
 	}
 	abs := st.AbsoluteDepth(parentID)
 	if abs < 0 {
-		return 0
+		return -1
 	}
 	return abs + 1
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,75 @@ func TestAbsoluteDepthCountsStoredParentLinks(t *testing.T) {
 	}
 	if got := c.st.AbsoluteDepth("c_unknown"); got != -1 {
 		t.Errorf("an unknown child must report -1, got %d", got)
+	}
+}
+
+// deepChainFixture builds a controller whose childstore holds a parent chain
+// one hop deeper than childstore's walk bound (maxChainDepth is 64; the
+// literal is mirrored here because the constant is unexported):
+//
+//	c_x0 (top) -> c_x1 -> ... -> c_x65
+//
+// AbsoluteDepth(c_x65) therefore cannot resolve and must report the refuse
+// sentinel, never the bound itself.
+func deepChainFixture(t *testing.T) *Controller {
+	t.Helper()
+	c := &Controller{st: childstore.New(), cm: newChildManager()}
+	prev := ""
+	for i := 0; i < 66; i++ {
+		id := fmt.Sprintf("c_x%d", i)
+		labels := map[string]string{}
+		if i > 0 {
+			labels[childstore.LabelParent] = prev
+			labels[childstore.LabelRoot] = "c_x0"
+		}
+		c.st.Insert(&childstore.Session{
+			ChildID: id, Status: protocol.StatusIdle, Labels: labels,
+			StartedAt: time.Now(), Kind: protocol.KindFundi,
+			MaxDepth: 3, MaxChildren: 4,
+		})
+		prev = id
+	}
+	return c
+}
+
+// A parent chain deeper than the walk bound must fail closed, not report the
+// bound as a real depth: before AbsoluteDepth grew its sentinel, a 65+-hop
+// chain surfaced as a perfectly actionable depth 64 and sailed through every
+// depth check below the ceiling.
+func TestTruncatedParentChainRefusesSpawn(t *testing.T) {
+	c := deepChainFixture(t)
+
+	if got := c.st.AbsoluteDepth("c_x65"); got != -1 {
+		t.Fatalf("AbsoluteDepth(c_x65) = %d, want -1: a chain past the walk bound is indeterminate, not a real 64", got)
+	}
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_x65"})
+	if err == nil {
+		t.Fatal("a parent whose depth cannot be determined must be refused, not treated as top level")
+	}
+	if strings.Contains(err.Error(), "no such child") {
+		t.Errorf("the child exists; the refusal must name the undeterminable depth: %v", err)
+	}
+	if !strings.Contains(err.Error(), "depth") {
+		t.Errorf("refusal must name the limit: %v", err)
+	}
+}
+
+// The grant arithmetic must fail closed on an indeterminate landing depth
+// too: childDepthFor reports -1 rather than assuming top level, and
+// grantedDepth turns that into a grant of 0 — the same "0 means cannot
+// spawn" convention grantedChildren uses. Without the clamp the room
+// arithmetic reads the -1 as bonus room and mints the requested grant.
+func TestIndeterminateLandingDepthGrantsNothing(t *testing.T) {
+	c := deepChainFixture(t)
+
+	depth := childDepthFor(c.st, "c_x65")
+	if depth != -1 {
+		t.Fatalf("childDepthFor(c_x65) = %d, want -1", depth)
+	}
+	ask := 2
+	if got := grantedDepth(protocol.SpawnRequest{MaxDepth: &ask}, depth, resolveAbsoluteDepthCeiling()); got != 0 {
+		t.Errorf("a child of an indeterminate-depth parent must be granted depth 0 (cannot spawn), got %d", got)
 	}
 }
 

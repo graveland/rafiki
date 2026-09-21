@@ -1,6 +1,7 @@
 package childstore_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -169,6 +170,20 @@ func TestCycleTerminates(t *testing.T) {
 	}
 }
 
+// absoluteChain builds a linear parent chain of n nodes (c_00 at the top,
+// each subsequent node parented on the last) and returns the deepest id. The
+// root label is left unset: AbsoluteDepth walks rafiki/parent links only.
+func absoluteChain(t *testing.T, s *childstore.Store, n int) string {
+	t.Helper()
+	prev := ""
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("c_%02d", i)
+		insert(t, s, id, prev, "")
+		prev = id
+	}
+	return prev
+}
+
 func TestAbsoluteDepth(t *testing.T) {
 	s := tree(t)
 	cases := map[string]int{
@@ -184,6 +199,29 @@ func TestAbsoluteDepth(t *testing.T) {
 	}
 	if got := s.AbsoluteDepth(""); got != -1 {
 		t.Errorf("AbsoluteDepth(empty) = %d, want -1", got)
+	}
+}
+
+// A chain exactly as long as the walk bound still resolves, so 64 is a REAL
+// depth and the sentinel must not swallow it. (65 nodes = depth 64; the
+// literal mirrors childstore's unexported maxChainDepth.)
+func TestAbsoluteDepthResolvesChainAtWalkBound(t *testing.T) {
+	s := childstore.New()
+	deepest := absoluteChain(t, s, 65)
+	if got := s.AbsoluteDepth(deepest); got != 64 {
+		t.Errorf("AbsoluteDepth(64-deep chain) = %d, want 64", got)
+	}
+}
+
+// One hop past the walk bound the walk can no longer confirm a root, and the
+// true depth is unknown. It must come back as the refuse sentinel -1 —
+// indistinguishable-from-nothing — never as 64, which a legitimate chain can
+// also produce. Before the sentinel this fell through as a real depth 64.
+func TestAbsoluteDepthRefusesChainPastWalkBound(t *testing.T) {
+	s := childstore.New()
+	deepest := absoluteChain(t, s, 66) // nodes c_00..c_65, depth 65
+	if got := s.AbsoluteDepth(deepest); got != -1 {
+		t.Errorf("AbsoluteDepth(65-deep chain) = %d, want -1 (indeterminate), got a real-looking number", got)
 	}
 }
 

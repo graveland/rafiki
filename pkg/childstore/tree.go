@@ -112,8 +112,14 @@ func (s *Store) DescendantDepth(ancestorID, candidateID string) int {
 }
 
 // AbsoluteDepth returns how many parent links separate childID from its
-// top-level ancestor. A top-level child is 0. An unknown child is -1, which
-// callers must treat as "refuse", never as "top level".
+// top-level ancestor. A top-level child is 0. It returns -1 — the refuse
+// sentinel, the same convention DescendantDepth uses — when the depth cannot
+// be determined: childID is unknown, or its stored parent chain cannot be
+// walked to a root within maxChainDepth hops (corrupt state, a hand-edited
+// record, a cycle). Callers must treat -1 as "refuse", never as "top level"
+// and never as the real depth 64: a chain that resolves on its final
+// permitted hop legitimately IS 64 deep, so only -1 keeps "exactly 64" and
+// "unknown, at least 64" distinguishable.
 //
 // This is the number RAFIKI_MAX_DEPTH bounds. It is computed from the stored
 // parent chain rather than from any grant arithmetic, because a chain of
@@ -135,6 +141,15 @@ func (s *Store) AbsoluteDepth(childID string) int {
 		}
 		depth++
 		cur = parent
+	}
+	// The walk exhausted maxChainDepth hops without hitting a root, so depth
+	// is exactly 64 — but that number is only real if cur is the root. One
+	// more hop decides: a parent still being present means the chain
+	// continues past the bound and the true depth is unknown, so report the
+	// refuse sentinel rather than a number that a legitimate 64-deep chain
+	// would also produce.
+	if _, ok := s.ParentOf(cur); ok {
+		return -1
 	}
 	return depth
 }
