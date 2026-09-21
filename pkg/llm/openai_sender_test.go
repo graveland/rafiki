@@ -190,6 +190,74 @@ func TestOpenAISenderNewBuildsRequest(t *testing.T) {
 	}
 }
 
+// TestOpenAISenderNewUserMessageContentBlocks pins how user messages whose
+// content blocks do not fully translate behave. An image-only message (the
+// shape llm.UserContent documents, reachable from pkg/fundi's send path) must
+// fail the turn with the limitation named — a silent whole-message drop would
+// lose all of the user's content — while a text+image message still
+// translates: text kept on the wire, image dropped with the existing Warn.
+func TestOpenAISenderNewUserMessageContentBlocks(t *testing.T) {
+	imageBlock := anthropic.NewImageBlockBase64("image/png", "aGVsbG8=")
+
+	t.Run("image_only_is_an_error", func(t *testing.T) {
+		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(openAIOK))
+		})
+		params := minimalParams()
+		params.Messages = []anthropic.MessageParam{{
+			Role:    "user",
+			Content: []anthropic.ContentBlockParamUnion{imageBlock},
+		}}
+		_, err := s.New(context.Background(), params)
+		if err == nil {
+			t.Fatal("New: want an error for an image-only user message, got nil — the message silently vanished from the request")
+		}
+		if !strings.Contains(err.Error(), "images") || !strings.Contains(err.Error(), "do not support") {
+			t.Errorf("error = %v, want it to name the limitation (image blocks unsupported by kind=openai providers)", err)
+		}
+	})
+
+	t.Run("text_plus_image_keeps_text", func(t *testing.T) {
+		var (
+			mu      sync.Mutex
+			gotBody map[string]any
+		)
+		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
+			raw, err := io.ReadAll(r.Body)
+			r.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				_ = json.Unmarshal(raw, &gotBody)
+			}
+			_, _ = w.Write([]byte(openAIOK))
+		})
+		params := minimalParams()
+		params.Messages = []anthropic.MessageParam{{
+			Role: "user",
+			Content: []anthropic.ContentBlockParamUnion{
+				imageBlock,
+				{OfText: &anthropic.TextBlockParam{Text: "What is in this picture?"}},
+			},
+		}}
+		if _, err := s.New(context.Background(), params); err != nil {
+			t.Fatalf("New: %v — a partially translatable user message must still send (text kept, image dropped with the Warn)", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		var msgs []map[string]any
+		if err := json.Unmarshal([]byte(mustJSON(gotBody["messages"])), &msgs); err != nil {
+			t.Fatalf("messages not an array: %v (%s)", err, mustJSON(gotBody["messages"]))
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("messages = %d entries, want exactly the one user message: %s", len(msgs), mustJSON(msgs))
+		}
+		if !jsonEqual(mustJSON(msgs[0]), `{"role":"user","content":"What is in this picture?"}`) {
+			t.Errorf("messages[0] = %s, want the text kept and nothing else on the wire", mustJSON(msgs[0]))
+		}
+	})
+}
+
 // TestOpenAISenderNewParsesResponse drives three fixture responses through the
 // sender: plain text, tool_calls, and an unrecognized finish_reason.
 func TestOpenAISenderNewParsesResponse(t *testing.T) {
@@ -759,6 +827,36 @@ func TestSenderForKeyBuildsOpenAISender(t *testing.T) {
 	}
 	if _, ok := s.(StreamingSender); !ok {
 		t.Fatalf("SenderForKey(KindOpenAI) returned %T, which does not implement StreamingSender — streaming would silently fall back to non-streamed sends", s)
+	}
+
+	// The key threaded through SenderForKey must reach the wire as
+	// "Authorization: Bearer <key>". The assertions above are type/capability
+	// only, so a regression to newOpenAISender(p, "", rt) — silently unkeying
+	// every keyed OpenAI provider — would pass them; only a fixture round
+	// trip catches it.
+	var (
+		mu      sync.Mutex
+		gotAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		_, _ = w.Write([]byte(openAIOK))
+	}))
+	t.Cleanup(srv.Close)
+	p.BaseURL = srv.URL
+	sw, err := SenderForKey(p, "resolved-key", nil)
+	if err != nil {
+		t.Fatalf("SenderForKey against a fixture: %v", err)
+	}
+	if _, err := sw.New(context.Background(), minimalParams()); err != nil {
+		t.Fatalf("New through SenderForKey: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != "Bearer resolved-key" {
+		t.Errorf("Authorization = %q, want Bearer resolved-key — the key did not survive the SenderForKey → newOpenAISender threading", gotAuth)
 	}
 
 	// No canonical default base URL exists for a generic OpenAI-compatible

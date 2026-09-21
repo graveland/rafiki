@@ -291,6 +291,10 @@ func translateOpenAIAssistantMessage(mp *anthropic.MessageParam) ([]openAIMessag
 // ("An assistant message with 'tool_calls' must be followed by tool messages
 // responding to each 'tool_call_id'"). The common rafiki shapes — a
 // tool_result-only user message, a text-only user message — are unaffected.
+// A message that carried blocks but had every one of them dropped (the
+// image-only shape llm.UserContent documents) errors instead of dropping the
+// whole message — silently losing all of a user message's content is a
+// limitation to fail on, not to hide.
 func translateOpenAIUserMessage(mp *anthropic.MessageParam) ([]openAIMessage, error) {
 	var text strings.Builder
 	var toolMsgs []openAIMessage
@@ -317,7 +321,16 @@ func translateOpenAIUserMessage(mp *anthropic.MessageParam) ([]openAIMessage, er
 		}
 	}
 	if text.Len() == 0 && len(toolMsgs) == 0 {
-		return nil, nil
+		// Nothing survived translation. A message with no blocks at all has no
+		// meaning on the wire — dropped, like the assistant side above. But a
+		// message that CARRIED blocks whose every one dropped (an image-only
+		// message, reachable from llm.UserContent) would silently vanish from
+		// the request: that is total user-content loss, so fail the turn with
+		// the limitation named instead of hiding it.
+		if len(mp.Content) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("llm: openai: user message contains only content blocks with no Chat Completions equivalent (e.g. images), which kind=\"openai\" providers do not support")
 	}
 	out := toolMsgs
 	if text.Len() > 0 {
