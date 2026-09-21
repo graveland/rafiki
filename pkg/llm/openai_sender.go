@@ -295,6 +295,8 @@ func translateOpenAIAssistantMessage(mp *anthropic.MessageParam) ([]openAIMessag
 // image-only shape llm.UserContent documents) errors instead of dropping the
 // whole message — silently losing all of a user message's content is a
 // limitation to fail on, not to hide.
+// ToolResultBlockParam.IsError has no OpenAI equivalent and is dropped; the
+// failure text itself still reaches the model.
 func translateOpenAIUserMessage(mp *anthropic.MessageParam) ([]openAIMessage, error) {
 	var text strings.Builder
 	var toolMsgs []openAIMessage

@@ -551,6 +551,9 @@ func mustJSONString(s string) string {
 // collectStream drains a stream via Next()/Current(), accumulating the message
 // the way pkg/llm/client.go's sendStreaming does (Accumulate plus
 // backfillDeltaUsage), so the assertions cover the real consumer path.
+// Deliberately omits the Fix/Sanitize helpers the real loop also applies
+// (client.go); they are no-ops for the shapes this decoder emits (tool blocks
+// always carry input:{}), so the binding holds without them.
 func collectStream(t *testing.T, stream interface {
 	Next() bool
 	Current() anthropic.MessageStreamEventUnion
