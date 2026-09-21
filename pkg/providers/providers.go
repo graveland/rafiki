@@ -31,8 +31,10 @@ type Kind string
 const (
 	KindAnthropic           Kind = "anthropic"
 	KindAnthropicOpenRouter Kind = "anthropic-openrouter"
-	// KindOpenAI is reserved and NOT implemented. It is accepted by the parser
-	// so a config naming it loads, and rejected at sender construction.
+	// KindOpenAI is a generic OpenAI-compatible Chat Completions provider,
+	// translated to/from the Anthropic shape at the sender boundary
+	// (pkg/llm/openai_sender.go). base_url is required — there is no
+	// canonical default, so SenderForKey rejects an empty one.
 	KindOpenAI Kind = "openai"
 )
 
