@@ -37,21 +37,24 @@ type StreamingSender interface {
 }
 
 // sessionIDContextKey is the context key WithSessionID writes and
-// sessionIDTransport reads. Unexported: nothing outside this file may set or
-// read it directly, so the only way a request carries a session id is
+// sessionIDFromContext reads. Unexported: nothing outside this file may set
+// or read it directly, so the only way a request carries a session id is
 // through WithSessionID.
 type sessionIDContextKey struct{}
 
-// WithSessionID attaches a stable per-conversation identifier to ctx, sent as
-// OpenRouter's "x-session-id" header on every request issued with it (via
-// sessionIDTransport, wired onto anthropic-openrouter senders in
-// SenderForKey). This is the same sticky-routing header the reverse-proxy
+// WithSessionID attaches a stable per-conversation identifier to ctx, sent on
+// whatever header a provider declares via providers.toml's session_header
+// (SenderForKey wires sessionIDTransport, or for the openai kind, the
+// sender's own request builders — see sessionIDFromContext) — OpenRouter's is
+// "x-session-id". This is the same sticky-routing header the reverse-proxy
 // face already sends for passthrough clients (pkg/server/proxy.go,
-// pkg/server/openai.go); without it, OpenRouter falls back to hashing the
-// first system+user message pair for routing, which pins only a
-// conversation's static prefix and leaves every later turn's growing tail
-// unrouted — see the ProviderGuard notes on cache locality. An empty id is a
-// no-op: ctx is returned unchanged and no header is ever sent.
+// pkg/server/openai.go); without it, a provider with no other signal falls
+// back to hashing the first system+user message pair for routing, which pins
+// only a conversation's static prefix and leaves every later turn's growing
+// tail unrouted — see the ProviderGuard notes on cache locality. An empty id
+// is a no-op: ctx is returned unchanged and no header is ever sent. A
+// provider with no session_header configured also never sends one,
+// regardless of what ctx carries.
 func WithSessionID(ctx context.Context, id string) context.Context {
 	if id == "" {
 		return ctx
@@ -59,13 +62,16 @@ func WithSessionID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, sessionIDContextKey{}, id)
 }
 
-// sessionIDTransport sets x-session-id from ctx (via WithSessionID) on every
-// outbound request, so OpenRouter can pin a whole conversation's requests to
-// one backend for prompt-cache locality. Only ever wrapped around an
-// anthropic-openrouter sender's transport in SenderForKey — the
-// Anthropic-native path must never see this header.
+// sessionIDTransport sets header from ctx (via WithSessionID) on every
+// outbound request, so a provider that supports sticky routing can pin a
+// whole conversation's requests to one backend for prompt-cache locality.
+// header is provider-specific — OpenRouter's is "x-session-id" — and is
+// wired only when the provider declares a non-empty SessionHeader in
+// providers.toml (SenderForKey). The Anthropic-native path must never see
+// this unless it opts in.
 type sessionIDTransport struct {
-	base http.RoundTripper
+	base   http.RoundTripper
+	header string
 }
 
 func (t sessionIDTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -73,13 +79,22 @@ func (t sessionIDTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if id, ok := req.Context().Value(sessionIDContextKey{}).(string); ok && id != "" {
+	if id, ok := sessionIDFromContext(req.Context()); ok && t.header != "" {
 		// Clone rather than mutate: RoundTrip must not modify the original
 		// request (net/http.RoundTripper's contract).
 		req = req.Clone(req.Context())
-		req.Header.Set("x-session-id", id)
+		req.Header.Set(t.header, id)
 	}
 	return base.RoundTrip(req)
+}
+
+// sessionIDFromContext reads the identifier WithSessionID attached, if any.
+// Shared by sessionIDTransport and the openai kind's own request builders
+// (which set headers directly rather than through a RoundTripper), so both
+// paths read the identical ctx value the same way.
+func sessionIDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(sessionIDContextKey{}).(string)
+	return id, ok && id != ""
 }
 
 // rawTraceHeaderKey is the context key rawTraceHeaders (in client.go) and
@@ -164,6 +179,7 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 	opts := []option.RequestOption{}
 
 	base := p.BaseURL
+	sessionHeader := p.SessionHeader
 	switch p.Kind {
 	case providers.KindAnthropic:
 		if base == "" {
@@ -178,13 +194,31 @@ func SenderForKey(p providers.Provider, key string, rt http.RoundTripper) (Sende
 			option.WithHeader("X-OpenRouter-Title", "rafiki"),
 			option.WithHeader("X-OpenRouter-Categories", "cli-agent"),
 		)
-		rt = sessionIDTransport{base: rt}
+		// "x-session-id" is OpenRouter's implicit default, unconditional
+		// before session_header was configurable — preserved here so an
+		// ad-hoc Provider{Kind: KindAnthropicOpenRouter} literal (any code
+		// that doesn't go through providers.Default() or a providers.toml
+		// entry naming session_header explicitly) keeps working exactly as
+		// before. An explicit session_header always wins over this default.
+		if sessionHeader == "" {
+			sessionHeader = "x-session-id"
+		}
 	case providers.KindOpenAI:
 		return newOpenAISender(p, key, rt)
 	default:
 		return nil, fmt.Errorf("llm: provider %q: unknown kind %q", p.Name, p.Kind)
 	}
 	opts = append(opts, option.WithBaseURL(base))
+
+	// Opt-in per provider, not tied to Kind: a plain KindAnthropic entry
+	// (e.g. Fireworks' Anthropic-compatible endpoint) wants this exactly as
+	// much as KindAnthropicOpenRouter does when it declares session_header —
+	// the header NAME is provider-specific, the need for sticky routing is
+	// not. KindAnthropic has no implicit default (unlike OpenRouter above),
+	// so it stays silent unless session_header is set.
+	if sessionHeader != "" {
+		rt = sessionIDTransport{base: rt, header: sessionHeader}
+	}
 
 	if key != "" {
 		opts = append(opts, option.WithAPIKey(key))

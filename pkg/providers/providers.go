@@ -62,6 +62,18 @@ type Provider struct {
 	Extras      map[string]any        `toml:"extras"`
 	ViaExecutor *ViaExecutor          `toml:"via_executor"`
 	Models      map[string]ModelAlias `toml:"models"`
+	// SessionHeader, when non-empty, is the HTTP header name a stable
+	// per-conversation identifier is sent on for backend-sticky routing (see
+	// llm.WithSessionID) — the header name is provider-specific (OpenRouter's
+	// is "x-session-id"; Fireworks' Anthropic-compatible endpoint wants
+	// "x-session-affinity"). Empty defers to Kind's own default where one
+	// exists: KindAnthropicOpenRouter always sends "x-session-id" even when
+	// this is empty, preserving pre-session_header behavior for any Provider
+	// value that doesn't set it — including one built as a struct literal
+	// rather than through Default() or providers.toml. KindAnthropic and
+	// KindOpenAI have no implicit default and stay silent unless this is set.
+	// "x-session-affinity"), so this is opt-in per entry, not tied to Kind.
+	SessionHeader string `toml:"session_header"`
 }
 
 // ModelAlias names a short local id for a provider's real model id, and

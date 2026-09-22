@@ -26,16 +26,17 @@ import (
 // nothing above pkg/llm learns a new wire format. Streaming shares the
 // request-body builder (buildOpenAIChatRequest) with the non-streaming path.
 type openAISender struct {
-	baseURL string // scheme+host+path prefix, trailing "/" trimmed; never empty
-	apiKey  string // empty means keyless: no Authorization header at all
-	client  *http.Client
+	baseURL       string // scheme+host+path prefix, trailing "/" trimmed; never empty
+	apiKey        string // empty means keyless: no Authorization header at all
+	sessionHeader string // empty means no session-pinning header is ever sent
+	client        *http.Client
 }
 
 // newOpenAISender builds the KindOpenAI sender. The shape mirrors SenderForKey
 // (provider table entry + resolved key + optional RoundTripper) so the
 // SenderForKey wiring is the same one-liner the other kinds get.
 //
-// Two behaviors are carried over from SenderForKey exactly, not reinvented:
+// Three behaviors are carried over from SenderForKey exactly, not reinvented:
 //
 //   - Keyless convention (sender.go:189-191): an empty key sends NO
 //     Authorization header at all — never "Bearer " with an empty value.
@@ -45,6 +46,12 @@ type openAISender struct {
 //     whatever rt was passed in with headerCaptureTransport{base: rt},
 //     applied unconditionally regardless of whether rt was nil, or fundi's
 //     raw-trace capture silently sees nothing for this provider.
+//   - Session pinning (p.SessionHeader): unlike the SDK-based kinds, this
+//     sender builds *http.Request values itself rather than going through a
+//     RoundTripper, so sessionIDTransport can't wrap it — New/NewStreaming
+//     each set the header directly from sessionIDFromContext when
+//     p.SessionHeader is non-empty. Same ctx value, same opt-in-per-provider
+//     rule, different mechanism because this kind owns its own transport.
 //
 // Unlike Anthropic/OpenRouter there is no canonical default base URL for a
 // generic OpenAI-compatible endpoint, so an empty BaseURL is a config error
@@ -54,9 +61,10 @@ func newOpenAISender(p providers.Provider, key string, rt http.RoundTripper) (*o
 		return nil, fmt.Errorf("llm: provider %q: kind %q requires a base_url in providers.toml (no canonical default for OpenAI-compatible endpoints)", p.Name, p.Kind)
 	}
 	return &openAISender{
-		baseURL: strings.TrimRight(p.BaseURL, "/"),
-		apiKey:  key,
-		client:  &http.Client{Transport: headerCaptureTransport{base: rt}},
+		baseURL:       strings.TrimRight(p.BaseURL, "/"),
+		apiKey:        key,
+		sessionHeader: p.SessionHeader,
+		client:        &http.Client{Transport: headerCaptureTransport{base: rt}},
 	}, nil
 }
 
@@ -78,6 +86,9 @@ func (s *openAISender) New(ctx context.Context, params anthropic.MessageNewParam
 	// Keyless convention: an empty key sends no Authorization header at all.
 	if s.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	}
+	if id, ok := sessionIDFromContext(ctx); ok && s.sessionHeader != "" {
+		req.Header.Set(s.sessionHeader, id)
 	}
 
 	resp, err := s.client.Do(req)
@@ -553,6 +564,9 @@ func (s *openAISender) NewStreaming(ctx context.Context, params anthropic.Messag
 	// Keyless convention: an empty key sends no Authorization header at all.
 	if s.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	}
+	if id, ok := sessionIDFromContext(ctx); ok && s.sessionHeader != "" {
+		req.Header.Set(s.sessionHeader, id)
 	}
 
 	resp, err := s.client.Do(req)

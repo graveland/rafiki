@@ -451,6 +451,67 @@ func TestOpenAISenderNewWrapsRoundTripperForCapture(t *testing.T) {
 	}
 }
 
+// The openai kind builds its own *http.Request rather than going through
+// sessionIDTransport (which wraps an SDK client's RoundTripper), so session
+// pinning needs its own assertion here — sender_provider_test.go covers the
+// SDK-based kinds. Unset SessionHeader must stay silent (no implicit
+// default, unlike KindAnthropicOpenRouter): confirmed by the second case
+// below sending no header at all despite a session id being on ctx.
+func TestOpenAISenderNewHonorsConfiguredSessionHeader(t *testing.T) {
+	var mu sync.Mutex
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = r.Header.Get("x-session-affinity")
+		mu.Unlock()
+		_, _ = w.Write([]byte(openAIOK))
+	}))
+	defer srv.Close()
+
+	s, err := newOpenAISender(providers.Provider{
+		Name: "fireworks-openai", Kind: providers.KindOpenAI,
+		BaseURL: srv.URL, SessionHeader: "x-session-affinity",
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("newOpenAISender: %v", err)
+	}
+	ctx := WithSessionID(context.Background(), "conv-shard-2")
+	if _, err := s.New(ctx, minimalParams()); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got != "conv-shard-2" {
+		t.Errorf("x-session-affinity = %q, want conv-shard-2", got)
+	}
+}
+
+func TestOpenAISenderNewNoSessionHeaderWhenUnconfigured(t *testing.T) {
+	var mu sync.Mutex
+	var sawAny bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		_, sawAny = r.Header["X-Session-Affinity"]
+		mu.Unlock()
+		_, _ = w.Write([]byte(openAIOK))
+	}))
+	defer srv.Close()
+
+	s, err := newOpenAISender(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: srv.URL}, "", nil)
+	if err != nil {
+		t.Fatalf("newOpenAISender: %v", err)
+	}
+	ctx := WithSessionID(context.Background(), "conv-shard-2")
+	if _, err := s.New(ctx, minimalParams()); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sawAny {
+		t.Error("session header present with no session_header configured — the openai kind must stay silent, it has no implicit default")
+	}
+}
+
 // TestOpenAISenderNewRequiresBaseURL pins the constructor contract Task 2.1's
 // SenderForKey wiring depends on: unlike Anthropic/OpenRouter there is no
 // canonical default base URL for a generic OpenAI-compatible endpoint, so an

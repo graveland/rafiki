@@ -225,3 +225,69 @@ func TestSenderForStreams(t *testing.T) {
 		t.Error("SenderFor must return a StreamingSender; the streaming path silently degrades to non-streaming otherwise")
 	}
 }
+
+// A KindAnthropic provider (e.g. Fireworks' Anthropic-compatible endpoint)
+// has no implicit session header — TestSenderForAnthropicNeverSeesSessionID
+// pins that — but must send whatever session_header it declares, on the name
+// it declares, not OpenRouter's "x-session-id". This is the actual new
+// capability: pinning conversations to a backend on a provider whose sticky
+// routing header isn't OpenRouter's.
+func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
+	var gotAffinity string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAffinity = r.Header.Get("x-session-affinity")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	sender, err := llm.SenderFor(providers.Provider{
+		Name: "fireworks", Kind: providers.KindAnthropic,
+		BaseURL: srv.URL, SessionHeader: "x-session-affinity",
+	}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor: %v", err)
+	}
+	ctx := llm.WithSessionID(context.Background(), "conv-xyz-789")
+	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+		Model: anthropic.Model("m"), MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if gotAffinity != "conv-xyz-789" {
+		t.Errorf("x-session-affinity = %q, want conv-xyz-789", gotAffinity)
+	}
+}
+
+// An explicit session_header on a KindAnthropicOpenRouter provider overrides
+// the "x-session-id" implicit default rather than sending both or being
+// ignored — the override, not the default, must win.
+func TestSenderForOpenRouterExplicitSessionHeaderOverridesDefault(t *testing.T) {
+	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	var gotCustom, gotDefault string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCustom = r.Header.Get("x-custom-session")
+		gotDefault = r.Header.Get("x-session-id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	sender, err := llm.SenderFor(providers.Provider{
+		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
+		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY", SessionHeader: "x-custom-session",
+	}, nil)
+	if err != nil {
+		t.Fatalf("SenderFor: %v", err)
+	}
+	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
+	_, _ = sender.New(ctx, anthropic.MessageNewParams{
+		Model: anthropic.Model("m"), MaxTokens: 16,
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
+	})
+	if gotCustom != "conv-abc-123" {
+		t.Errorf("x-custom-session = %q, want conv-abc-123", gotCustom)
+	}
+	if gotDefault != "" {
+		t.Errorf("x-session-id = %q, want empty — the explicit override must replace the default, not add to it", gotDefault)
+	}
+}
