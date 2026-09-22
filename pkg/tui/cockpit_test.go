@@ -2238,23 +2238,20 @@ func TestPeekEndsWithTheLastRow(t *testing.T) {
 	}
 }
 
-// Zero agents: ^R stays harmless. There is nothing to peek and the empty state
-// already says to use `rafiki create`, so the key reveals nothing and never
-// parks focus on a rail with no rows.
-func TestCtrlRWithNoAgentsIsHarmless(t *testing.T) {
+// Zero agents: ^R goes straight to the create form. There is nothing to peek
+// at, and a rail with no rows is not a state worth entering -- it is the
+// thing the form exists to fix.
+func TestCtrlRWithNoAgentsOpensCreateForm(t *testing.T) {
 	c := bareCockpit(t)
 	defer c.shutdown()
 
 	ctrlR(c)
 
+	if c.form == nil {
+		t.Error("^R with no agents did not open the create form")
+	}
 	if c.railCols() != 0 {
 		t.Error("^R revealed a rail with no agents in it")
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v after ^R, want input", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("^R with no agents left the textarea blurred")
 	}
 }
 
@@ -2366,24 +2363,18 @@ func TestBareAttachWithOneChildOpensIt(t *testing.T) {
 	}
 }
 
-// No children is not a choice either, and the rail cannot be entered — focus
-// must not be trapped on a pane with nothing in it.
-func TestBareAttachWithNoChildrenFallsBackToInput(t *testing.T) {
+// No children is not a choice either, and there is nothing to view — land
+// straight in the create form instead of stranding focus on an empty pane.
+func TestBareAttachWithNoChildrenOpensCreateForm(t *testing.T) {
 	c := bareCockpit(t)
 	c.Update(seedMsg{children: nil})
 	defer c.shutdown()
 
-	if c.focus != focusRail {
-		// fine either way at this point; what matters is it is not stuck
-		if c.focus != focusInput {
-			t.Fatalf("focus = %v, want input", c.focus)
-		}
+	if c.form == nil {
+		t.Fatal("no children seeded, want the create form open")
 	}
-	if c.focus == focusRail {
-		t.Error("focus is trapped on an empty rail")
-	}
-	if !strings.Contains(ansi.Strip(c.View().Content), "No agents running") {
-		t.Error("the empty state must say there is nothing to attach to")
+	if c.railCols() != 0 {
+		t.Error("an empty rail should not be drawn behind the create form")
 	}
 }
 

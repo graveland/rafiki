@@ -585,20 +585,32 @@ func (c *Cockpit) seedCmd() tea.Cmd {
 	}
 }
 
+// openSpawnForm opens the create form fresh, fetching the model catalog NOW
+// rather than when the model row is reached: the typeahead has to be instant
+// when it gets there, and a round trip started on first keystroke is not.
+// Shared by the `n` key, a bare attach with no children to land on, and ^R
+// pressed against an empty rail -- all three are "nothing to view", and the
+// form is the one thing there is to do about that.
+func (c *Cockpit) openSpawnForm() tea.Cmd {
+	c.form = newSpawnForm()
+	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
+	return tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+}
+
 // landRailFirst decides where a bare `rafiki attach` should start, once the
 // children are known.
 //
 // One child is not a choice: open it, because making someone pick from a list
 // of one is a keystroke that carries no information. No children is not a
-// choice either, and the rail cannot be entered — fall back to the input so
-// the empty state reads normally rather than trapping focus on a pane with
-// nothing in it. Only a real choice lands on the rail, with the first row
+// choice either, and there is nothing to view -- go straight to the create
+// form rather than stranding focus on an empty conversation pane with no way
+// back to it. Only a real choice lands on the rail, with the first row
 // already under the cursor so ↑/↓ and ⏎ work without a priming keystroke.
 func (c *Cockpit) landRailFirst() tea.Cmd {
 	nodes := c.rail.Nodes()
 	switch len(nodes) {
 	case 0:
-		return c.setFocus(focusInput)
+		return c.openSpawnForm()
 	case 1:
 		c.rail.SetFocus(nodes[0].ChildID)
 		c.selected = nodes[0].ChildID
@@ -1160,10 +1172,10 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				c.railHidden = true
 				c.railPeek = false
 			case c.rail.Len() == 0:
-				// Nothing to reveal; the empty state already says to use
-				// `rafiki create`. Fall through to cyclePane(0) anyway — a bare
-				// attach starts with focus on the rail, and this key must not
-				// leave it there on a pane that cannot render.
+				// Nothing to peek at all — go straight to the thing an empty
+				// rail exists to lead to, same call landRailFirst makes on
+				// arrival.
+				return c, c.openSpawnForm()
 			default:
 				c.railHidden = false
 				c.railPeek = true
@@ -1216,12 +1228,7 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			commit := c.hop(c.selected)
 			return c, tea.Batch(commit, c.leaveRail())
 		case key.Matches(msg, k.NewAgent):
-			c.form = newSpawnForm()
-			// Fetch the catalog NOW rather than when the model row is
-			// reached: the typeahead has to be instant when it gets there,
-			// and a round trip started on first keystroke is not.
-			c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
-			return c, tea.Batch(c.fetchModelsCmd(c.form.kind()), textinput.Blink)
+			return c, c.openSpawnForm()
 		case key.Matches(msg, k.EndAgent):
 			return c, c.endSelected()
 		case key.Matches(msg, k.EditBudget):
