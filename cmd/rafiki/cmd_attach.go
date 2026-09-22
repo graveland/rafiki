@@ -31,6 +31,8 @@ func newAttachCmd() *cobra.Command {
 		Short:   "Attach the rafiki cockpit to running children",
 		Long: `Attach the cockpit — a tree rail beside a conversation.
 
+A bare ` + "`rafiki`" + ` (no subcommand) is shorthand for this with no argument.
+
 With no argument it opens over every child you can see, with nothing focused:
 pick one from the rail. With an id or name it opens focused on that child and
 follows its delegation, so agents it spawns appear in the rail without

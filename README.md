@@ -795,13 +795,15 @@ rafiki -P prod attach
 |---|---|---|
 | `rafiki create …` | the new child, full width | its subtree, plus itself |
 | `rafiki attach <id\|name>` | that child, full width | its subtree, plus itself |
-| `rafiki attach` | the rail, nothing focused | everything you can see |
+| `rafiki attach`, or bare `rafiki` | the rail, nothing focused | everything you can see |
 
 A session follows its own delegation — spawn implementers and they appear in
 the rail because they're in the subtree. The rail is hidden until a second
 agent exists; `^R`/`⇥` peek it, and `n` (a rail key) opens the spawn form.
-Attaching loads the full conversation from the database first
-(`GetHistory`), then follows the live event stream.
+With no children at all there is nothing to peek, so a bare attach, and `^R`
+against an empty rail, open the spawn form directly instead. Attaching loads
+the full conversation from the database first (`GetHistory`), then follows
+the live event stream.
 
 ### Watching without the cockpit
 

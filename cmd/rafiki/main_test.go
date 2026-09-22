@@ -4,6 +4,8 @@ package main
 
 import (
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -47,4 +49,45 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// A bare `rafiki` (no subcommand) is `rafiki attach` with nothing to focus.
+func TestRootRunEIsAttach(t *testing.T) {
+	root := newRootCmd()
+	got := reflect.ValueOf(root.RunE).Pointer()
+	want := reflect.ValueOf(runAttach).Pointer()
+	if got != want {
+		t.Fatal("root's RunE is not runAttach; a bare `rafiki` would no longer behave like `rafiki attach`")
+	}
+	if err := root.Args(root, nil); err != nil {
+		t.Fatalf("bare `rafiki` must be accepted: %v", err)
+	}
+}
+
+// Args has to be set for RunE to ever see zero args (cobra defaults to
+// ArbitraryArgs there), which means root's own custom Args func is now the
+// only thing standing between a mistyped subcommand and silently trying to
+// attach to a child literally named after the typo. It must still read as a
+// typo, exactly as it did when cobra's own unmatched-subcommand check ran.
+func TestRootArgsRejectsUnknownCommand(t *testing.T) {
+	root := newRootCmd()
+	err := root.Args(root, []string{"bogus"})
+	if err == nil {
+		t.Fatal("want an error for an unrecognised subcommand")
+	}
+	if !strings.Contains(err.Error(), `unknown command "bogus"`) {
+		t.Fatalf("error = %q, want it to name the bad command", err.Error())
+	}
+}
+
+// A near-miss should still get the "Did you mean" nudge cobra's own
+// legacyArgs gives -- rootArgs reproduces it by hand, so it is the one thing
+// most likely to bitrot silently if a future cobra upgrade changes the
+// wording this depends on.
+func TestRootArgsSuggestsCloseMatches(t *testing.T) {
+	root := newRootCmd()
+	err := root.Args(root, []string{"lsit"})
+	if err == nil || !strings.Contains(err.Error(), "list") {
+		t.Fatalf("error = %v, want a suggestion naming `list`", err)
+	}
 }

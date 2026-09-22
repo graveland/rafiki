@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -32,14 +33,51 @@ func main() {
 	}
 }
 
+// rootArgs accepts zero arguments, for RunE to run as a bare `rafiki attach`,
+// and otherwise reproduces cobra's own "unknown command" error (normally
+// produced by Find(), but only when Args is nil) so a mistyped subcommand
+// still reads as a typo rather than an attempt to attach to a child literally
+// named "lsit".
+func rootArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	// SuggestionsFor reads this directly rather than defaulting it the way
+	// cobra's own (unexported) findSuggestions does -- skip the assignment and
+	// every near-miss silently gets zero suggestions instead of the "Did you
+	// mean" list `rafiki lsit` used to produce.
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		cmd.SuggestionsMinimumDistance = 2
+	}
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n"
+		for _, s := range suggestions {
+			msg += "\t" + s + "\n"
+		}
+	}
+	return errors.New(msg)
+}
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "rafiki",
-		Short:         "Control the rafiki daemon",
-		Long:          "rafiki is the command-line client for the rafikid daemon.\nIt speaks the JSONL protocol over the daemon's UDS socket.",
+		Use:   "rafiki",
+		Short: "Control the rafiki daemon",
+		Long: "rafiki is the command-line client for the rafikid daemon.\n" +
+			"It speaks the JSONL protocol over the daemon's UDS socket.\n\n" +
+			"With no subcommand it behaves like `rafiki attach`: the cockpit, rail-first.",
 		Version:       version.String(),
 		SilenceUsage:  true, // don't print usage on RunE errors
 		SilenceErrors: true, // main() prints errors itself
+		// A bare `rafiki` is `rafiki attach` with nothing to focus -- the same
+		// rail-first cockpit `rafiki attach` opens with no argument. Args has to
+		// be set explicitly for RunE to ever see zero args: Find()'s own
+		// "unknown command" check (legacyArgs) only fires when Args is nil, so
+		// leaving it nil to also cover the zero-arg case would swallow that
+		// check along with it. rootArgs keeps the check for everything but the
+		// zero-arg case, so `rafiki bogus` still fails exactly as it did before.
+		Args: rootArgs,
+		RunE: runAttach,
 	}
 
 	// Persistent, so every subcommand inherits them; the shorthands ride along
