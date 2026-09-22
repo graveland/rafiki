@@ -266,13 +266,14 @@ func (c *Cockpit) applyKilled(m killedMsg) {
 // Unlike a kill there is no event to wait for: closing removes the child from
 // the daemon's store, so nothing will ever publish about it again. The rail row
 // has to go here or it stays until the next reseed.
-func (c *Cockpit) applyClosed(m closedMsg) {
+func (c *Cockpit) applyClosed(m closedMsg) tea.Cmd {
 	if m.err != nil {
 		c.setNotice("could not close " + m.name + ": " + trimRPCError(m.err))
-		return
+		return nil
 	}
-	c.forgetChild(m.childID)
+	cmd := c.forgetChild(m.childID)
 	c.setNotice("closed " + m.name)
+	return cmd
 }
 
 // trimRPCError strips connect-go's transport prefix so the daemon's own
@@ -294,7 +295,7 @@ func trimRPCError(err error) string {
 // until eviction, and the lru entry would keep a dead id in the rotation. The
 // selection is moved off it because a cursor parked on a row that no longer
 // exists makes the next `x` a no-op with no explanation.
-func (c *Cockpit) forgetChild(childID string) {
+func (c *Cockpit) forgetChild(childID string) tea.Cmd {
 	if c.selected == childID {
 		c.selected = c.neighbour(+1)
 		if c.selected == childID {
@@ -324,16 +325,20 @@ func (c *Cockpit) forgetChild(childID string) {
 		c.rail.SetFocus("")
 	}
 
-	// Closing the last row out of the rail must not strand pane focus on a
-	// list nothing draws (railVisible needs a row). The peek goes with it: a
-	// peek that outlived its row would resurrect the rail for the NEXT single
-	// agent, one nobody asked to see. The blink command is dropped, the same
-	// precedent NewCockpit set for its own focus call — and applyClosed's
-	// caller drops every cmd anyway.
+	// Closing the last row out of the rail leaves nothing to view, the same
+	// state a bare attach with no children lands in, so it gets the same
+	// answer: the create form. Focus still moves off the rail first (the form
+	// is modal, and esc out of it must not land on a list nothing draws), and
+	// the peek goes with the row: a peek that outlived it would resurrect the
+	// rail for the NEXT single agent, one nobody asked to see.
 	if c.rail.Len() == 0 {
 		c.railPeek = false
 		if c.focus == focusRail {
 			_ = c.setFocus(focusInput)
 		}
+		if c.form == nil {
+			return c.openSpawnForm()
+		}
 	}
+	return nil
 }

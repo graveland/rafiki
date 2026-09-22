@@ -2238,6 +2238,53 @@ func TestPeekEndsWithTheLastRow(t *testing.T) {
 	}
 }
 
+// Closing the last agent leaves nothing to view -- the same state a bare
+// attach with no children lands in, and it gets the same answer. Driven
+// through Update so the form's catalog fetch is not dropped on the floor.
+func TestClosingTheLastAgentOpensCreateForm(t *testing.T) {
+	c := oneAgentCockpit(t)
+	defer c.shutdown()
+
+	c.Update(closedMsg{childID: "c_1", name: "c_1"})
+
+	if c.form == nil {
+		t.Fatal("closing the last agent did not open the create form")
+	}
+	if c.railCols() != 0 {
+		t.Error("an empty rail should not be drawn behind the create form")
+	}
+}
+
+// Closing one of several is not that state: the rail still has something on it.
+func TestClosingOneOfSeveralAgentsLeavesTheFormShut(t *testing.T) {
+	c := railWith(t, "c_1", "c_2")
+	exitChild(c, "c_1")
+	c.Update(closedMsg{childID: "c_1", name: "c_1"})
+
+	if c.form != nil {
+		t.Error("the create form opened with an agent still on the rail")
+	}
+}
+
+// esc out of the form on an empty rail must not strand you: ⇥ is how you get
+// to the rail everywhere else, and with no rows the rail's only job is the
+// form, so ⇥ goes there rather than being a dead key.
+func TestTabOnAnEmptyRailReopensCreateForm(t *testing.T) {
+	c := bareCockpit(t)
+	c.Update(seedMsg{children: nil})
+	defer c.shutdown()
+	c.Update(keyMsg("esc"))
+	if c.form != nil {
+		t.Fatal("esc did not close the create form")
+	}
+
+	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if c.form == nil {
+		t.Error("⇥ on an empty rail did not reopen the create form")
+	}
+}
+
 // Zero agents: ^R goes straight to the create form. There is nothing to peek
 // at, and a rail with no rows is not a state worth entering -- it is the
 // thing the form exists to fix.

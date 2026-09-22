@@ -883,8 +883,7 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, nil
 
 	case closedMsg:
-		c.applyClosed(msg)
-		return c, nil
+		return c, c.applyClosed(msg)
 
 	case budgetSetMsg:
 		c.applyBudgetSet(msg)
@@ -1727,7 +1726,12 @@ func (c *Cockpit) cyclePane(delta int) tea.Cmd {
 	// dead ⇥ reads as a broken key. "Hidden" is railVisible's question, not
 	// just the flag: below two rows the rail is hidden by DEFAULT, and the
 	// peek is what makes a one-row rail renderable at all. A reveal always
-	// lands focus ON the rail, never on a pane still invisible.
+	// lands focus ON the rail, never on a pane still invisible. An EMPTY rail
+	// has nothing to reveal, and a dead ⇥ there is a trap -- esc out of the
+	// create form would otherwise leave no key but ^R that leads anywhere.
+	if delta != 0 && c.rail.Len() == 0 {
+		return c.openSpawnForm()
+	}
 	if delta != 0 && c.rail.Len() >= 1 && !c.railVisible() {
 		c.railHidden = false
 		c.railPeek = true
