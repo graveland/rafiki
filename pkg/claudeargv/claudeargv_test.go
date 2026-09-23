@@ -187,6 +187,19 @@ func TestParamsFromSpawnRequestInjectsTheCoordinationPrompt(t *testing.T) {
 	}
 }
 
+// TestCoordinationPromptMentionsPresets pins the preset sentence: the prompt
+// names the preset_* tools in its tool list and points the child at spawning
+// by preset rather than choosing models — the same preference the MCP face's
+// agent_spawn description carries (its blueprint text ends with the preset
+// paragraph), per CoordinationPrompt's doc comment.
+func TestCoordinationPromptMentionsPresets(t *testing.T) {
+	for _, want := range []string{"preset_list", "agent_spawn's preset", "preset_*"} {
+		if !strings.Contains(CoordinationPrompt, want) {
+			t.Errorf("CoordinationPrompt %q missing %q; the preset preference no longer reaches claude children", CoordinationPrompt, want)
+		}
+	}
+}
+
 // The flag is last-wins, so the merge must land as ONE --append-system-prompt
 // element carrying both texts — a second element would silently drop whichever
 // text came first.

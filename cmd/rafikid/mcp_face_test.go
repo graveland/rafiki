@@ -540,6 +540,54 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 	}
 }
 
+// TestMCPFacePresetToolsForBothProvenances pins where the preset block sits in
+// getServer: OUTSIDE the claudeExecutorRouted pymodule block. Presets need
+// only the database, so both a user-token and a child-token caller list all
+// four on a daemon with NO executor pool at all — nesting the block inside the
+// executor-routed condition strips them from both.
+func TestMCPFacePresetToolsForBothProvenances(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	ctrl := face.controller()
+	if ctrl.claudeExecutorRouted() {
+		t.Fatal("fixture: the controller already routes through an executor pool; this test pins the pool-less state")
+	}
+	ctrl.presetStore = newFakePresetStore("u-alice", presetFixture("default:implementer"))
+
+	requests := map[string]*http.Request{
+		"user": mcpRequestFor("u-alice"),
+		"child": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+			ctx := server.WithIdentity(r.Context(), &server.Identity{
+				UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
+			})
+			return r.WithContext(ctx)
+		}(),
+	}
+	for provenance, req := range requests {
+		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
+		for _, name := range []string{"preset_list", "preset_get", "preset_put", "preset_delete"} {
+			if !slices.Contains(names, name) {
+				t.Errorf("%s request is missing %s: %v", provenance, name, names)
+			}
+		}
+	}
+}
+
+// TestMCPFacePresetToolsAbsentWithoutStore pins the decline: a nil preset
+// store (a DB-less daemon) materializes none of the four, the same
+// nil-means-decline rule the pymodule and quota blueprints follow.
+func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	face.controller().presetStore = nil
+
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	for _, name := range []string{"preset_list", "preset_get", "preset_put", "preset_delete"} {
+		if slices.Contains(names, name) {
+			t.Errorf("nil preset store unexpectedly exposes %s: %v", name, names)
+		}
+	}
+}
+
 // TestMCPFaceRejectsASessionIDPresentedByAnotherCaller pins the per-session
 // identity binding. The SDK's own hijack guard never fires on this mount:
 // sessInfo.userID is captured only from auth.TokenInfoFromContext, which only
@@ -667,6 +715,16 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		if !strings.Contains(mcpToolDescriptions[name], "A claude-kind child you spawn") {
 			t.Errorf("%s: missing the pymodule_run delegation pointer", name)
 		}
+	}
+
+	// agent_spawn's blueprint text ends with the preset paragraph (added after
+	// the excision span, so it composes through untouched): the excision above
+	// must have left it standing, or the face tells the model nothing about
+	// presets while preset_list sits beside it. The preset_ tools carry no
+	// overrides — their blueprint descriptions hold no fundi-only claim — so
+	// this paragraph is the face's only preset wording.
+	if !strings.Contains(spawnDesc, "preset") {
+		t.Errorf("agent_spawn: the preset paragraph is gone; the excision must cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
 	}
 
 	pairs := map[string]tools.Tool{

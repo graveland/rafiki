@@ -244,6 +244,16 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		Quota:         quotaReader,
 		Conversations: newMCPConversationReader(ctrl, owner),
 	}
+	// Presets need only the database: unlike the pymodule tools they are the
+	// same for every caller and every executor state. A child-token caller is
+	// attributed as the writer.
+	if ctrl.presetStore != nil {
+		writer := ""
+		if id.Via == server.ProvenanceChildToken {
+			writer = id.ChildID
+		}
+		opts.Presets = newPresetBinding(ctrl, owner.UserID, writer)
+	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has
 	// no executor pool at all: no claude child can ever run one here, so
 	// put/get/delete/list would be a toolbox nobody can open. Unlike Quota
@@ -358,6 +368,10 @@ var mcpBlueprints = []tools.Tool{
 	&tools.PyModuleDeleteBlueprint{},
 	&mcpPyModuleListBlueprint{},
 	&mcpPyModuleRunBlueprint{},
+	&tools.PresetListBlueprint{},
+	&tools.PresetGetBlueprint{},
+	&tools.PresetPutBlueprint{},
+	&tools.PresetDeleteBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint

@@ -40,11 +40,13 @@ const PermissionModeBypass = "bypassPermissions"
 // `rafiki claude` sessions: a human drives those and builds Params by hand.
 const CoordinationPrompt = "You are running under rafiki, which exposes its agent-control " +
 	"surface as MCP tools (agent_spawn, agent_send, agent_list, agent_view, agent_kill, " +
-	"agent_models, task_*). When you delegate work to a subagent, use rafiki's agent_spawn " +
+	"agent_models, preset_*, task_*). When you delegate work to a subagent, use rafiki's agent_spawn " +
 	"rather than your built-in Task tool: a rafiki agent is a separate daemon-managed " +
 	"process, visible in the operator's cockpit, budgetable in dollars, steerable and " +
-	"stoppable mid-flight, and it outlives this conversation. Track delegated work with " +
-	"rafiki's task_* ledger and pass the handle to agent_spawn."
+	"stoppable mid-flight, and it outlives this conversation. Spawn workers by preset " +
+	"(agent_spawn's preset, e.g. default:implementer; see preset_list) rather than choosing " +
+	"models yourself. Track delegated work with rafiki's task_* ledger and pass the " +
+	"handle to agent_spawn."
 
 // WithCoordinationPrompt prepends CoordinationPrompt to s when the child
 // carries the MCP agent-control surface (mcpAgentControl), else returns s
