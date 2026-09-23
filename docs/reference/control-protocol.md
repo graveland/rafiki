@@ -252,6 +252,10 @@ watch that row freeze.
 | `ListPymoduleGitSources` | unary | The caller's own registered git sources (name, url, ref), owner-scoped exactly as `ListPymodules`. Rows are the registrations only — the discovered inventory is served by `RefreshPymoduleGitSource` and by the pymodule discovery surfaces, never by this |
 | `RefreshPymoduleGitSource` | unary | Fan a re-pull of ONE named source out to every LIVE executor the caller owns whose `Describe` reports `pymodule_git_sync`, in parallel. Each executor fetches/hard-resets its checkout at the source's stored ref, re-runs discovery and rebuilds the repo's one shared venv; the daemon caches the LAST response as the source's inventory snapshot (an executor that fails contributes nothing and leaves any prior snapshot in place; only when every responder fails — or none is eligible — does the call error). Executors disagreeing on the discovered names are logged, not reconciled. The response carries the discovered `scripts`/`packages` (name + description) and the venv's `venv_ready`/`venv_error`; a failed venv build is reported, not an error — the refresh itself succeeded |
 | `RemovePymoduleGitSource` | unary | Delete one of the caller's git source registrations outright (`CodeNotFound` when none is registered). Executors are never told — there is no prune model for git sources; a source's own history is its versioning, and the cached inventory for the name is simply never read again |
+| `ListPresets` | unary | The caller's own agent presets — the latest live row per name, names optionally narrowed to a `prefix` (e.g. `"default:"` for one group). Owner-scoped like `ListPymodules` (§2.3 Presets) |
+| `GetPreset` | unary | One preset: the latest live version's row by default, every version live and deleted with `history`; `CodeNotFound` when no version exists |
+| `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level, budgets >= 0, known tool names, no `rafiki/` label keys); a child-token caller is recorded as the writer |
+| `DeletePreset` | unary | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows |
 | `ConversationSearch` | unary | Query the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, status, path, min_tokens, text, limit) — never a scope: the daemon derives scope server-side from the authenticated credential (`IsUserCredential` → the user's own rows, `IsAdmin` → all, anything else `CodePermissionDenied`) and ANDs it on top, so an `owner` filter can only ever narrow, never widen. `limit` 0 means the default (50) and is clamped to 500. Each row carries id/name/owner/persona/source/model/status/driven_by, created-at, turn and token aggregates, cache-hit ratio, total USD and the first user message snippet |
 | `ConversationExport` | unary | One conversation's decomposed transcript: header identity plus ordered turns (role, verbatim content-block JSON, skills invoked, per-turn tokens/latency/model/prefix hash) and the recovered available-skills catalog. Scope is derived exactly as `ConversationSearch`. A conversation that does not exist OR is outside the caller's scope returns `CodeNotFound` — the two are deliberately indistinguishable, because "you may not read X" would confirm X exists |
 | `ConversationQuery` | unary | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, path) — never a scope: the daemon derives scope server-side from the authenticated credential exactly as `ConversationSearch`, so an `owner` filter can only ever narrow, never widen. Time filters are per query: tools and skills filter message time, models filters turn time, classes and sizes filter turn activity, coverage filters conversation creation week. The `tools` rows group tool names CASE-INSENSITIVELY — each row is displayed under the spelling that carried the most calls (ties: the sort-first spelling) — sort by calls descending, and count `conversations` as DISTINCT conversations over the whole merged group, never a sum of per-spelling counts. The response carries the query's declared schema — typed `QueryColumn`s (name/kind/format, where `format` is a display-only hint) and rows of oneof-typed `QueryValue` cells (`str_value`/`int_value`/`float_value`), so ints and floats decode as numbers, never strings. An unknown query name OR a query whose admission class refuses the caller's derived scope returns `CodeNotFound` — the same fold as `ConversationExport` |
@@ -297,6 +301,41 @@ multi-user scoping is built. The verbs are mounted inside the proxy face via
 `server.Handler.Mount`; there is deliberately no second mount in `main.go` —
 a `mux.Handle` for `/rafiki.v1.Control/` there would shadow the face's auth
 middleware, because ServeMux prefers the longer pattern.
+
+### Presets (`ListPresets`, `GetPreset`, `PutPreset`, `DeletePreset`)
+
+The four preset verbs manage the daemon's agent presets in
+`conversations.presets` — named seats fixing model, tools, prompt and budget —
+backing `rafiki preset` and the `preset_*` tools (§2.4). A preset is
+**owner-scoped**: the owner is resolved from the authenticated credential,
+never a request field — a user token reaches its own bucket, and the anonymous
+unix-socket caller shares the daemon's single unattributed bucket, exactly as
+`ListPymodules`.
+
+The store is **append-only**: `PutPreset` inserts a new row and never
+modifies an existing one; `DeletePreset` stamps `deleted_at` on every live
+version (the only UPDATE a preset row undergoes) and errors when none is
+live; `GetPreset{history: true}` returns every version, deleted included,
+newest first. A deleted name later re-put starts a new version line.
+
+`PresetRow`'s allowlists (`tools`, `skills`, `mcp_servers`) are tri-state
+through the `StringList` wrapper — proto3 cannot mark a repeated field
+optional, so an ABSENT message means unset (the kind's default: everything),
+PRESENT-AND-EMPTY means none, and a list means exactly those. Collapsing the
+first two turns "all tools" into "no tools", so the daemon's conversions
+(`pkg/presets/proto.go`) keep nil and empty distinct end to end, pinned by
+`TestPresetProtoRoundTripTriState`. The other optionals (`context_files`,
+`max_cost`, `max_depth`, `max_children`) are proto3 `optional` for the same
+unset-vs-zero reason.
+
+Spawn resolution happens ONCE, in `Controller.Spawn`: `applyPreset`
+(`cmd/rafikid/presets.go`) resolves the request's `preset` name against the
+owner's rows and merges it into the spawn fields before anything else reads
+them — kind (confirmed, never contradicted), model/provider/thinking,
+executor, labels, system prompt (fixed; the request may only append),
+budgets, and allowlists a request may only NARROW. Resume rebuilds from the
+persisted session, which already holds the RESOLVED fields, and never
+re-resolves — so editing a preset never reaches a running or resumed child.
 
 ### `Send` and the durable inbox
 
@@ -486,15 +525,17 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Twenty, materialized per caller: eighteen come from the same
+**Tools.** Twenty-four, materialized per caller: twenty-two come from the same
 registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
-child gets the same eighteen, subject to the same per-caller declines), and
+child gets the same twenty-two, subject to the same per-caller declines), and
 two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
 never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
 this surface for a caller that is not a fundi child (`mcpToolDescriptions`).
 The four pymodule tools decline together when the daemon has no executor
 pool (`claudeExecutorRouted`); `pymodule_run` declines further unless the
-caller is a claude-kind child with a live executor binding. A tool failure
+caller is a claude-kind child with a live executor binding. The four preset
+tools decline together when the daemon has no database — no preset store, so
+nothing to read or write. A tool failure
 is `CallToolResult.IsError = true` carrying the diagnostic — never a JSON-RPC
 transport error, and never a successful result carrying the text.
 
@@ -520,6 +561,10 @@ transport error, and never a successful result carrying the text.
 | `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name; the required `repo` argument must be `"local"` (git sources are read-only through this tool); failed dependency-venv cleanups on the owner's executors ride the result text as a notice |
 | `pymodule_list` | List the caller's pymodules (name + one-line description) across all scopes — the blob store plus every registered git source's discovered scripts and packages, git rows labeled `reponame/name`; an optional `repo` argument narrows to one scope (`"local"` or a git source's name — the one place an empty value legitimately means "everything"). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
 | `pymodule_run` | Run one of the caller's pymodules by name — the required `repo` argument selects the source: `"local"` runs a saved module out of the executor's synced pymodule cache, a git source's name runs its discovered script out of that source's synced checkout (`scripts/<script>.py`, the checkout root on `PYTHONPATH` so intra-repo imports resolve, the repo's shared `.venv` interpreter when present) — never a workspace file, with the child's workspace as the process cwd (or the call's own `cwd`); a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
+| `preset_list` | List the presets the caller can spawn agents with — one row per preset with name, kind, model and description; an optional `prefix` narrows to one group (e.g. `default:`). Declined, with the other three, when the daemon has no database |
+| `preset_get` | Read one preset — version stamp and full spec (kind, model, tools, prompts, budget) as JSON; `history` returns every past version, deleted ones included. What a spawn with that preset will get |
+| `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker; a child-token caller is recorded as the writer |
+| `preset_delete` | Delete one preset by name — every live version is stamped deleted and the history is kept; a later `preset_put` under the same name starts a new version line |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist (the native
@@ -879,6 +924,16 @@ the client sees the response, the child is fully ready for `ctrl_send`.
 {
   "type":                "ctrl_spawn",
 
+  // Kind (all optional)
+  "kind":                "fundi",         // "fundi" (default, when empty —
+                                            // the daemon's own agent runtime)
+                                            // or "claude" (Claude Code); picks
+                                            // the child's runtime independently
+                                            // of the parent's
+  "preset":              null,             // daemon-side preset resolved first
+                                            // (kind, model, tools, prompt,
+                                            // budgets); see §2.3 Presets
+
   // Identity
   "name":                "afk-impl",       // optional; if set, controller
                                             // sends set_session_name after spawn
@@ -920,9 +975,9 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "forkSession":         null,             // --fork <path>
 
   // Tool / extension / skill scoping (all optional)
-  "tools":               null,             // --tools <comma-joined>
+  "tools":               null,             // comma-joined; reaches fundi as --tools
   "noTools":             false,
-  "noBuiltinTools":      false,
+  "noBuiltinTools":      false,            // reaches fundi as --no-builtin-tools
   "extensions":          [],               // -e <src> per entry
   "noExtensions":        false,
   "skills":              [],               // --skill <path> per entry

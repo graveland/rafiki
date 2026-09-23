@@ -104,8 +104,9 @@ Three Swahili words, three roles:
 - **The `rafiki` cockpit** — a bubbletea TUI built into the client binary for
   watching and driving a tree of agents live, no separate build step.
 - **Multi-daemon profiles** — one client resolves distinct daemons (local
-  socket or remote TLS) by name, each with its own token, model defaults, and
-  presets.
+  socket or remote TLS) by name, each with its own token and model defaults;
+  agent presets (named seats: model, tools, prompt, budget) live in each
+  daemon's database.
 
 ---
 
@@ -535,6 +536,27 @@ mid-flight is not a kill: unfinished tasks go `blocked`, live agents are
 steered once, and raising the budget resumes the work. Budget checks fail
 closed — if a budgeted agent's spend can't be read, the spawn is refused.
 
+### Presets
+
+A preset is a named seat — model, tools, system prompt and budget — that an
+agent spawn starts from. By convention a preset is named `<group>:<role>`
+(`default:implementer`, `default:reviewer`); every preset in one group is a
+seat in the same fleet. `rafiki preset list|get|put|delete` manages them;
+`rafiki preset put NAME -f spec.json` saves the spec (append-only — each save
+is a new version, a delete stamps every live version, `get NAME --history`
+reads them back). The JSON fields: `description, kind, provider, model,
+thinking, executor, labels, tools, skills, mcp_servers, context_files,
+system_prompt, append_system_prompt, max_cost, max_depth, max_children`.
+`tools`/`skills`/`mcp_servers` are tri-state: omitted = the kind's default
+(everything), `[]` = none, a list = exactly those.
+
+Agents spawn by `agent_spawn`'s `preset` argument. Spawn-time fields may
+override `model`/`thinking`/budgets, append to the system prompt, and only
+narrow `tools`/`skills`/`mcp_servers`/`context_files` — a preset's allowlist
+never widens, and its system prompt is never replaced. A claude-kind preset
+accepts only `model`, `append_system_prompt`, `executor`, `labels` and
+budgets.
+
 ## Paths
 
 rafiki follows the XDG base directories:
@@ -544,7 +566,7 @@ rafiki follows the XDG base directories:
 | socket | `~/.local/state/rafiki/controller.sock` | `$XDG_RUNTIME_DIR` |
 | records | `~/.local/share/rafiki/state` | `$XDG_DATA_HOME` |
 | logs | `~/.local/state/rafiki/logs` | `$XDG_STATE_HOME` |
-| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `presets.json`, `profiles.toml`) | `$XDG_CONFIG_HOME` |
+| config | `~/.config/rafiki` (instructions, skills, `mcp.json`, `lsp.json`, `profiles.toml`) | `$XDG_CONFIG_HOME` |
 
 This is where the **daemon** binds and reads from — a client reaches a
 different daemon by naming it in a profile, not by overriding these paths
@@ -578,8 +600,9 @@ labels = { team = "infra" }
 ```
 
 Exactly one of `socket`/`url` is required. Each profile owns its own token
-file (`~/.config/rafiki/profiles/<name>/token`, 0600) and its own presets, so
-two daemons' model universes and credentials need not overlap.
+file (`~/.config/rafiki/profiles/<name>/token`, 0600), and each daemon its own
+presets, so two daemons' model universes and credentials need not overlap. A
+profile's `preset` names one of that daemon's presets (`rafiki preset list`).
 
 **Resolution order:** `-P`/`--profile` for one command → `$RAFIKI_PROFILE`
 for one shell → the `current-profile` pointer (`rafiki profile use <name>`)

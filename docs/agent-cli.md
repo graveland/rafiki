@@ -435,6 +435,8 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--no-skills` | — | disable skill discovery |
 | `--skills-dir` | *(repeatable)* | additional skills directories |
 | `--skills` | — | comma-separated skill allowlist |
+| `--tools` | — | comma-separated allowlist of built-in tools (empty = all); MCP tools are governed by `--mcp-servers`/`--no-mcp` |
+| `--no-builtin-tools` | — | disable every built-in tool; wins over `--tools` |
 | `--mcp-config` | `$RAFIKI_MCP_CONFIG` | path to .mcp.json |
 | `--mcp-servers` | — | comma-separated allowlist of .mcp.json server names to connect |
 | `--no-mcp` | — | disable MCP entirely, even when --mcp-config is set |
