@@ -48,6 +48,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
+	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
@@ -312,6 +313,10 @@ type Controller struct {
 	// advertised. Deliberately NOT conditioned on the executor pool -- a
 	// DB-but-no-executors daemon still lets a child save and list modules.
 	pymoduleStore pymodules.Store
+
+	// presetStore is the owner-scoped preset backend; nil on a DB-less
+	// daemon, which refuses any spawn naming a preset.
+	presetStore presets.Store
 
 	// gitpymoduleStore is the owner-scoped git-source backend (the `repo`
 	// scopes the pymodule tool surface addresses). Nil when the daemon has no
@@ -1431,6 +1436,15 @@ func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Sc
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
+	// Preset resolution runs FIRST, before anything reads req — notably
+	// checksCwdLocally below, which reads req.Kind, and every later step that
+	// overrides or narrows a preset-supplied field. The error is already a
+	// *control.ControllerError.
+	req, presetRec, err := c.applyPreset(ctx, req, owner.UserID)
+	if err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// Validate cwd exists on THIS machine (dispatch already checks it's
 	// absolute) — but only for kinds the daemon itself forks a subprocess
 	// for. A fundi child never touches the daemon's own filesystem: its
@@ -1608,6 +1622,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	initLabels["rafiki/cwd"] = req.Cwd
 	initLabels["rafiki/pid"] = strconv.Itoa(ch.PID())
 	initLabels["rafiki/kind"] = spawnKindLabel(req.Kind)
+	stampPresetLabels(initLabels, presetRec)
 	if req.ConfigDir != "" {
 		initLabels["rafiki/config_dir"] = req.ConfigDir
 	}

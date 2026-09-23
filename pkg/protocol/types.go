@@ -167,6 +167,12 @@ type SpawnRequest struct {
 	// was retired, with no alias.
 	Kind string `json:"kind,omitempty"`
 
+	// Preset names a daemon-side preset (conversations.presets) that
+	// Controller.Spawn resolves FIRST, before any other field is read: it
+	// supplies kind, model, tools, prompt and budgets, which the remaining
+	// fields then override or narrow. Empty means no preset.
+	Preset string `json:"preset,omitempty"`
+
 	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
 	// — it selects the claude config dir (plugins, hooks, MCP, settings). It is
 	// persisted so a resumed claude child re-uses the same profile.
