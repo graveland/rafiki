@@ -175,7 +175,7 @@ func TestNoClaudeOrPiPathsLeak(t *testing.T) {
 		t.Setenv(env, "")
 	}
 	all := append(SkillsDirs(),
-		InstructionsFile(), PresetsFile(), GlobalMCPConfig())
+		InstructionsFile(), GlobalMCPConfig())
 	for _, p := range all {
 		if strings.Contains(p, "/.claude") || strings.Contains(p, "/.pi/") {
 			t.Errorf("fundi config path leaks into a foreign tool's directory: %s", p)

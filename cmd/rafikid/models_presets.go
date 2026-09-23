@@ -2,14 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
 	"sort"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/models"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -320,78 +316,4 @@ func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) (
 	rows := filterRowsForKind(filterByProvider(decorateRows(spine, facts), provider), kind)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return rows, nil
-}
-
-// presetEntry is the JSON shape of one entry in the presets file.
-// The full Preset struct lives in cmd/rafiki/presets.go; this is a minimal copy
-// to avoid cross-package coupling in v1.
-type presetEntry struct {
-	Model  string            `json:"model,omitempty"`
-	Labels map[string]string `json:"labels,omitempty"`
-}
-
-// presetsFile is the JSON shape of the top-level presets object.
-type presetsFile struct {
-	Presets map[string]presetEntry `json:"presets"`
-}
-
-// ListPresets reads the presets file at paths.PresetsFile() and returns
-// presets that satisfy the label filter. labels and hasLabel use the same
-// AND-match semantics as ctrl_list: every k=v in labels must match the
-// preset's labels map, and every key in hasLabel must be present.
-//
-// An absent or empty presets file returns an empty slice (not an error) so
-// callers always get a well-formed response.
-func (c *Controller) ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error) {
-	path := paths.PresetsFile()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []protocol.PresetInfo{}, nil
-		}
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	var pf presetsFile
-	if err := json.Unmarshal(b, &pf); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-
-	// Sort preset names for deterministic output.
-	names := make([]string, 0, len(pf.Presets))
-	for name := range pf.Presets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	out := make([]protocol.PresetInfo, 0, len(names))
-	for _, name := range names {
-		p := pf.Presets[name]
-		if !matchesPresetLabelFilter(p.Labels, labels, hasLabel) {
-			continue
-		}
-		out = append(out, protocol.PresetInfo{
-			Name:   name,
-			Model:  p.Model,
-			Labels: p.Labels,
-		})
-	}
-	return out, nil
-}
-
-// matchesPresetLabelFilter returns true when the preset's labels satisfy both
-// the AND-match required map and the key-presence hasLabels list.  Unlike the
-// child matchesLabelFilter, nil preset labels are handled gracefully so presets
-// without any labels can still be returned when the filter is empty.
-func matchesPresetLabelFilter(presetLabels, required map[string]string, hasLabels []string) bool {
-	for k, v := range required {
-		if presetLabels[k] != v {
-			return false
-		}
-	}
-	for _, k := range hasLabels {
-		if _, ok := presetLabels[k]; !ok {
-			return false
-		}
-	}
-	return true
 }

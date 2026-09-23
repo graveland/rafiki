@@ -62,7 +62,6 @@ type fakeController struct {
 	executorDeleteFn        func(protocol.ExecutorDeleteRequest) error
 	executorSessionFn       func(control.Connection, users.Identity, protocol.ExecutorSessionRequest) (protocol.ExecutorSessionResponseData, error)
 	listModelsFn            func(context.Context, string) ([]protocol.ModelInfo, error)
-	listPresetsFn           func(map[string]string, []string) ([]protocol.PresetInfo, error)
 	contextWindowFn         func(string) (int, int, bool)
 	costsFn                 func([]childstore.Snapshot) map[string]float64
 	modelInfoFn             func(string) protocol.ModelInfoResponseData
@@ -338,13 +337,6 @@ func (f *fakeController) SetLabels(childID string, set map[string]string, remove
 func (f *fakeController) ListModels(ctx context.Context, provider string) ([]protocol.ModelInfo, error) {
 	if f.listModelsFn != nil {
 		return f.listModelsFn(ctx, provider)
-	}
-	return nil, nil
-}
-
-func (f *fakeController) ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error) {
-	if f.listPresetsFn != nil {
-		return f.listPresetsFn(labels, hasLabel)
 	}
 	return nil, nil
 }
@@ -1857,94 +1849,6 @@ func TestDispatch_ListModels_MalformedRequest(t *testing.T) {
 	d := control.NewDispatch(&fakeController{})
 	resp := d.HandleFrame(discardConn{}, []byte(`{not valid json`))
 	mustError(t, resp, protocol.ErrInvalidArgs)
-}
-
-// ─── ctrl_list_presets ────────────────────────────────────────────────────────
-
-func TestDispatch_ListPresets_Success(t *testing.T) {
-	c := &fakeController{
-		listPresetsFn: func(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error) {
-			all := []protocol.PresetInfo{
-				{Name: "work", Model: "anthropic/claude-sonnet-4-5", Labels: map[string]string{"context": "work"}},
-				{Name: "cheap", Model: "ollama/llama3.1:8b", Labels: map[string]string{"context": "cheap"}},
-			}
-			// Apply label filter.
-			if len(labels) == 0 && len(hasLabel) == 0 {
-				return all, nil
-			}
-			var out []protocol.PresetInfo
-			for _, p := range all {
-				ok := true
-				for k, v := range labels {
-					if p.Labels[k] != v {
-						ok = false
-						break
-					}
-				}
-				if ok {
-					out = append(out, p)
-				}
-			}
-			return out, nil
-		},
-	}
-	d := control.NewDispatch(c)
-
-	// No filter — all presets.
-	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_list_presets","id":"p1"}`)))
-	if r.Command != protocol.TypeCtrlListPresets || r.ID != "p1" {
-		t.Fatalf("command=%s id=%s", r.Command, r.ID)
-	}
-	var data protocol.ListPresetsResponseData
-	if err := json.Unmarshal(r.Data, &data); err != nil {
-		t.Fatal(err)
-	}
-	if len(data.Presets) != 2 {
-		t.Fatalf("expected 2 presets, got %d", len(data.Presets))
-	}
-
-	// Label filter — only "work" context.
-	frame := `{"type":"ctrl_list_presets","id":"p2","labels":{"context":"work"}}`
-	r = mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
-	if err := json.Unmarshal(r.Data, &data); err != nil {
-		t.Fatal(err)
-	}
-	if len(data.Presets) != 1 || data.Presets[0].Name != "work" {
-		t.Errorf("label filter: got %+v", data.Presets)
-	}
-}
-
-func TestDispatch_ListPresets_EmptyIsArray(t *testing.T) {
-	c := &fakeController{
-		listPresetsFn: func(map[string]string, []string) ([]protocol.PresetInfo, error) {
-			return nil, nil
-		},
-	}
-	d := control.NewDispatch(c)
-	r := mustSuccess(t, d.HandleFrame(discardConn{}, []byte(`{"type":"ctrl_list_presets","id":"p3"}`)))
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(r.Data, &raw); err != nil {
-		t.Fatal(err)
-	}
-	if string(raw["presets"]) == "null" {
-		t.Error("presets should be [] not null")
-	}
-}
-
-func TestDispatch_ListPresets_HasLabelFilter(t *testing.T) {
-	var capturedHasLabel []string
-	c := &fakeController{
-		listPresetsFn: func(_ map[string]string, hasLabel []string) ([]protocol.PresetInfo, error) {
-			capturedHasLabel = hasLabel
-			return []protocol.PresetInfo{{Name: "work"}}, nil
-		},
-	}
-	d := control.NewDispatch(c)
-	frame := `{"type":"ctrl_list_presets","id":"p4","hasLabel":["team"]}`
-	mustSuccess(t, d.HandleFrame(discardConn{}, []byte(frame)))
-	if len(capturedHasLabel) != 1 || capturedHasLabel[0] != "team" {
-		t.Errorf("hasLabel not passed through: %v", capturedHasLabel)
-	}
 }
 
 // ─── ctrl_model_info ──────────────────────────────────────────────────────

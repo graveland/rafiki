@@ -26,10 +26,6 @@ func Dir(name string) string { return filepath.Join(paths.ConfigDir(), "profiles
 // TokenFile is a profile's control-plane credential.
 func TokenFile(name string) string { return filepath.Join(Dir(name), "token") }
 
-// PresetsFile is a profile's presets. Per-profile because a preset is a model
-// plus labels, and two daemons' model universes need not overlap.
-func PresetsFile(name string) string { return filepath.Join(Dir(name), "presets.json") }
-
 // AppendSystemPromptFile is a profile's optional system-prompt appendix: a
 // plain text/markdown file `rafiki create` reads and prepends to
 // --append-system-prompt for every spawn under this profile, for any child

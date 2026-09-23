@@ -159,10 +159,6 @@ type Controller interface {
 	// the formula does not live in two binaries.
 	ModelInfo(model string) protocol.ModelInfoResponseData
 
-	// ListPresets enumerates presets from <config dir>/presets.json (paths.PresetsFile()).
-	// labels and hasLabel apply the same AND-match filter semantics as ctrl_list.
-	ListPresets(labels map[string]string, hasLabel []string) ([]protocol.PresetInfo, error)
-
 	// Per-connection subscriptions. conn is the Connection passed to
 	// FrameHandler; it serves as both the event-delivery target and the
 	// identity key for subsequent Unsubscribe calls.
@@ -306,8 +302,6 @@ func (d *dispatcher) handle(conn Connection, frame []byte) []byte {
 		return d.setLabels(frame, hdr.ID)
 	case protocol.TypeCtrlListModels:
 		return d.listModels(frame, hdr.ID)
-	case protocol.TypeCtrlListPresets:
-		return d.listPresets(frame, hdr.ID)
 	case protocol.TypeCtrlModelInfo:
 		return d.modelInfo(frame, hdr.ID)
 	case protocol.TypeCtrlSubscribe:
@@ -818,21 +812,6 @@ func (d *dispatcher) listModels(frame []byte, id string) []byte {
 		infos = []protocol.ModelInfo{}
 	}
 	return okResponse(protocol.TypeCtrlListModels, id, protocol.ListModelsResponseData{Models: infos})
-}
-
-func (d *dispatcher) listPresets(frame []byte, id string) []byte {
-	var req protocol.ListPresetsRequest
-	if err := json.Unmarshal(frame, &req); err != nil {
-		return errResponse(protocol.TypeCtrlListPresets, id, protocol.ErrInvalidArgs, "malformed request")
-	}
-	presets, err := d.c.ListPresets(req.Labels, req.HasLabel)
-	if err != nil {
-		return mapErr(protocol.TypeCtrlListPresets, id, err, protocol.ErrInternal)
-	}
-	if presets == nil {
-		presets = []protocol.PresetInfo{}
-	}
-	return okResponse(protocol.TypeCtrlListPresets, id, protocol.ListPresetsResponseData{Presets: presets})
 }
 
 func (d *dispatcher) modelInfo(frame []byte, id string) []byte {

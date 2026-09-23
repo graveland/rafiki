@@ -205,10 +205,6 @@ func SkillsDirs() []string {
 	return out
 }
 
-// PresetsFile is the presets file: <ConfigDir>/presets.json. It used to live at
-// ~/.pi/agent/rafiki-presets.json — rafiki's own file inside pi's directory.
-func PresetsFile() string { return filepath.Join(ConfigDir(), "presets.json") }
-
 // GlobalMCPConfig is the machine-wide .mcp.json: $RAFIKI_MCP_CONFIG, else
 // <ConfigDir>/mcp.json. The per-cwd .mcp.json remains the primary source and
 // takes precedence; this is the fallback for servers you want everywhere.
