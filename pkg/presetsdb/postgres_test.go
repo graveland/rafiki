@@ -185,6 +185,89 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 	}
 }
 
+// The nullable-by-absence text columns (provider, model, thinking, executor,
+// system_prompt, append_system_prompt, written_by_child) encode "unset" as
+// SQL NULL, never the empty string: Put maps Go "" through NULLIF and the
+// read path COALESCEs NULL back to "". Get alone cannot prove the NULL half
+// -- COALESCE hides a dropped NULLIF behind a read-back "" -- so the unset
+// case also asserts the RAW columns are NULL through the pool.
+func TestPresetStoreTextColumnsRoundTrip(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+
+	cols := []struct {
+		column string                        // conversations.presets column
+		value  string                        // non-empty value that must round-trip exactly
+		set    func(*presets.Record, string) // the Record field the column is written from
+		get    func(presets.Record) string   // the Record field the column scans into
+	}{
+		{"provider", "openrouter",
+			func(r *presets.Record, v string) { r.Provider = v },
+			func(r presets.Record) string { return r.Provider }},
+		{"model", "z-ai/glm-4.6",
+			func(r *presets.Record, v string) { r.Model = v },
+			func(r presets.Record) string { return r.Model }},
+		{"thinking", "high",
+			func(r *presets.Record, v string) { r.Thinking = v },
+			func(r presets.Record) string { return r.Thinking }},
+		{"executor", "env=work,os=linux",
+			func(r *presets.Record, v string) { r.Executor = v },
+			func(r presets.Record) string { return r.Executor }},
+		{"system_prompt", "You are a reviewer.",
+			func(r *presets.Record, v string) { r.SystemPrompt = v },
+			func(r presets.Record) string { return r.SystemPrompt }},
+		{"append_system_prompt", "Be terse.",
+			func(r *presets.Record, v string) { r.AppendSystemPrompt = v },
+			func(r presets.Record) string { return r.AppendSystemPrompt }},
+		{"written_by_child", "spawn-1",
+			func(r *presets.Record, v string) { r.WrittenByChild = v },
+			func(r presets.Record) string { return r.WrittenByChild }},
+	}
+
+	// Unset: every field is the zero "" -- stored as SQL NULL, read back "".
+	if _, err := st.Put(ctx, "", presets.Record{Name: "text-unset", Kind: presets.KindFundi}); err != nil {
+		t.Fatalf("put text-unset: %v", err)
+	}
+	got, err := st.Get(ctx, "", "text-unset")
+	if err != nil {
+		t.Fatalf("get text-unset: %v", err)
+	}
+	for _, c := range cols {
+		if v := c.get(got); v != "" {
+			t.Errorf("text-unset.%s = %q, want \"\" (unset round-trips)", c.column, v)
+		}
+	}
+	var unsetIsNull bool
+	if err := pool.QueryRow(ctx, `SELECT
+			provider IS NULL AND model IS NULL AND thinking IS NULL AND executor IS NULL
+			AND system_prompt IS NULL AND append_system_prompt IS NULL AND written_by_child IS NULL
+			FROM conversations.presets WHERE name = 'text-unset'`).Scan(&unsetIsNull); err != nil {
+		t.Fatalf("read raw unset row: %v", err)
+	}
+	if !unsetIsNull {
+		t.Error("unset text columns must be stored as SQL NULL, not '' -- a NULLIF is missing from Put")
+	}
+
+	// Non-empty: every column set at once (distinct values would also expose
+	// a swapped NULLIF placeholder); each must come back exactly.
+	full := presets.Record{Name: "text-full", Kind: presets.KindFundi}
+	for _, c := range cols {
+		c.set(&full, c.value)
+	}
+	if _, err := st.Put(ctx, "", full); err != nil {
+		t.Fatalf("put text-full: %v", err)
+	}
+	got, err = st.Get(ctx, "", "text-full")
+	if err != nil {
+		t.Fatalf("get text-full: %v", err)
+	}
+	for _, c := range cols {
+		if v := c.get(got); v != c.value {
+			t.Errorf("text-full.%s = %q, want exactly %q", c.column, v, c.value)
+		}
+	}
+}
+
 // Put is append-only: two Puts under one name leave two rows, Get serves the
 // second (higher id), and History returns both, newest first.
 func TestPresetStoreAppendOnlyLatest(t *testing.T) {

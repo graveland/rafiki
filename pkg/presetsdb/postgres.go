@@ -94,7 +94,7 @@ func (s *pgStore) Put(ctx context.Context, ownerUserID string, r presets.Record)
 			system_prompt, append_system_prompt, max_cost, max_depth, max_children,
 			written_by_child)
 		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''),
-			$8, $9, $10, $11, $12, $13,
+			NULLIF($8, ''), $9, $10, $11, $12, $13,
 			NULLIF($14, ''), NULLIF($15, ''), $16, $17, $18,
 			NULLIF($19, ''))
 		 RETURNING `+selectCols,
