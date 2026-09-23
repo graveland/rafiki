@@ -46,16 +46,21 @@ shapes the child -- a name, --model, --kind, --cwd, --preset, -d -- and create
 spawns directly instead; -i opens the form anyway, prefilled.
 
 Kind precedence, strongest first:
-  --kind
+  --kind (refused if it conflicts with the preset's kind)
+  the named preset's kind (the preset resolves in the daemon)
   the resolved profile's kind
   fundi (default)
 
-Model precedence, strongest first:
+With --preset, the preset resolves IN THE DAEMON: it supplies the kind, model,
+tools, prompt and budgets, and the client sends only the preset name and the
+preset's kind. --model still overrides the preset's model; a profile or
+remembered model is deliberately NOT sent -- a preset is a request, a profile
+default is ambient, and sending one would make the preset's model permanently
+unreachable.
+
+Without a preset, model precedence, strongest first:
   --model
-  the named preset's model (an explicitly named preset is a request)
-  the resolved profile's model (a profile default is ambient, so it sits
-    below a named preset -- otherwise a profile default would make every
-    preset's model permanently unreachable)
+  the resolved profile's model
   the model last spawned for this kind (remembered per profile and kind)
   the daemon's default
 
@@ -487,7 +492,11 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			}
 			return err
 		}
-		rec := presets.FromProto(resp.Msg.GetRows()[0])
+		rows := resp.Msg.GetRows()
+		if len(rows) == 0 {
+			return fmt.Errorf("--preset: no preset %q (see `rafiki preset list`)", presetName)
+		}
+		rec := presets.FromProto(rows[0])
 		modelFlag, _ := cmd.Flags().GetString("model")
 		kindFlag, _ := cmd.Flags().GetString("kind")
 		if err := applyCreatePreset(&req, presetName, rec, kindFlag, cmd.Flags().Changed("kind"), modelFlag); err != nil {

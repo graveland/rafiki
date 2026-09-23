@@ -134,6 +134,7 @@ func newPresetGetCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&history, "history", false, "Print every version of the preset, live and deleted")
+	cmd.ValidArgsFunction = completePresetNames
 	return cmd
 }
 
@@ -176,17 +177,15 @@ func presetSpecCells(view presetView) [][2]string {
 	if s.Description != "" {
 		cells = append(cells, [2]string{"description", s.Description})
 	}
-	for _, pair := range [][2]string{
-		{"tools", formatSpecList(s.Tools)},
-		{"skills", formatSpecList(s.Skills)},
-		{"mcp_servers", formatSpecList(s.MCPServers)},
-		{"context_files", formatSpecBool(s.ContextFiles)},
-		{"max_cost", formatSpecFloat(s.MaxCost)},
-		{"max_depth", formatSpecInt(s.MaxDepth)},
-		{"max_children", formatSpecInt(s.MaxChildren)},
-	} {
-		cells = append(cells, pair)
-	}
+	cells = append(cells,
+		[2]string{"tools", formatSpecList(s.Tools)},
+		[2]string{"skills", formatSpecList(s.Skills)},
+		[2]string{"mcp_servers", formatSpecList(s.MCPServers)},
+		[2]string{"context_files", formatSpecBool(s.ContextFiles)},
+		[2]string{"max_cost", formatSpecFloat(s.MaxCost)},
+		[2]string{"max_depth", formatSpecInt(s.MaxDepth)},
+		[2]string{"max_children", formatSpecInt(s.MaxChildren)},
+	)
 	for _, k := range sortedKeys(s.Labels) {
 		cells = append(cells, [2]string{"labels." + k, s.Labels[k]})
 	}
@@ -273,6 +272,7 @@ func newPresetPutCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "path to the preset JSON (-f - reads stdin)")
+	cmd.ValidArgsFunction = completePresetNames
 	return cmd
 }
 
@@ -288,15 +288,18 @@ func presetPutRequest(name string, data []byte) (*rafikiv1.PutPresetRequest, err
 	}
 	spec.Name = name
 	rec := spec.Record()
-	rec.CreatedAt = time.Now().UTC()
 	return &rafikiv1.PutPresetRequest{Preset: presets.ToProto(rec)}, nil
 }
 
-// formatSpecList renders an optional string list: nil = unset (""), a list
-// joined with commas — including the empty one, which is news ("none").
+// formatSpecList renders an optional string list: nil = unset (""), a
+// set-but-empty list = "(none)" — news worth printing, not blankness — and
+// any other list joined with commas.
 func formatSpecList(xs *[]string) string {
 	if xs == nil {
 		return ""
+	}
+	if len(*xs) == 0 {
+		return "(none)"
 	}
 	return strings.Join(*xs, ",")
 }
@@ -345,6 +348,7 @@ func newPresetDeleteCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.ValidArgsFunction = completePresetNames
 	return cmd
 }
 

@@ -836,6 +836,43 @@ func TestCreatePresetDropsAmbientModel(t *testing.T) {
 	}
 }
 
+// ─── resolvePresetName ───────────────────────────────────────────────────────
+//
+// The preset NAME is resolved client-side (the --preset flag, else the
+// resolved profile's `preset` field); the preset's CONTENT now resolves in
+// the daemon. These tests pin only that name resolution — no presets.json
+// fixtures, which stopped existing with the client-side loader.
+
+// TestProfilePresetName_AppliedWhenFlagUnset checks that the resolved
+// profile's `preset` field is read (via resolvePresetName) when --preset is
+// not passed.
+func TestProfilePresetName_AppliedWhenFlagUnset(t *testing.T) {
+	localProfileForTest(t, profile.Profile{Preset: "mypreset"})
+
+	cmd := newCreateCmd()
+	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	// The same resolution runCreate does, not a copy of it.
+	if name := resolvePresetName(cmd); name != "mypreset" {
+		t.Errorf("presetName = %q, want mypreset (the profile's preset field)", name)
+	}
+}
+
+// TestProfilePresetName_FlagWinsOverProfile checks that an explicit --preset
+// wins over the profile's `preset` field.
+func TestProfilePresetName_FlagWinsOverProfile(t *testing.T) {
+	localProfileForTest(t, profile.Profile{Preset: "profpreset"})
+
+	cmd := newCreateCmd()
+	if err := cmd.Flags().Set("preset", "flagpreset"); err != nil {
+		t.Fatal(err)
+	}
+	if name := resolvePresetName(cmd); name != "flagpreset" {
+		t.Errorf("presetName = %q, want flagpreset (the flag wins over the profile default)", name)
+	}
+}
+
 // TestResolveModelChainWithoutPreset pins the 3-argument model chain: the
 // named preset no longer takes part client-side — it resolves in the daemon
 // — so the chain is flag > profile > remembered.
