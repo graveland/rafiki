@@ -36,6 +36,8 @@ type agentFlags struct {
 	skillsDir          []string
 	skills             string
 	noSkills           bool
+	tools              string
+	noBuiltinTools     bool
 	mcpConfig          string
 	mcpServers         string
 	noMCP              bool
@@ -269,6 +271,8 @@ func runAgentWithFlags(f agentFlags) int {
 		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, false),
 		Skills:               skillsVal,
 		NoSkills:             noSkills,
+		Tools:                f.tools,
+		NoBuiltinTools:       f.noBuiltinTools,
 		NoContextFiles:       f.noContextFiles,
 		ContextFilesBudget:   defaults.ContextFilesTokens,
 		MCPConfig:            mcpPath,

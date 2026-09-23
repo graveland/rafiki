@@ -197,6 +197,8 @@ Claude Code. Normally spawned by the rafiki daemon rather than invoked directly.
 	cmd.Flags().StringArrayVar(&f.skillsDir, "skills-dir", nil, "additional skills directory (repeatable)")
 	cmd.Flags().StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	cmd.Flags().BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
+	cmd.Flags().StringVar(&f.tools, "tools", "", "comma-separated allowlist of built-in tools (empty means all); MCP tools are governed by --mcp-servers/--no-mcp")
+	cmd.Flags().BoolVar(&f.noBuiltinTools, "no-builtin-tools", false, "disable every built-in tool; wins over --tools")
 	cmd.Flags().StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
 	cmd.Flags().StringVar(&f.lspConfig, "lsp-config", "", "path to lsp.json (default: <cwd>/.lsp.json if present, else $RAFIKI_LSP_CONFIG or <ConfigDir>/lsp.json)")
 	cmd.Flags().StringVar(&f.ref, "ref", paths.Get(paths.ChildID), "external ref correlating the conversation across restarts")

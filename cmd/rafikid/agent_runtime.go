@@ -670,6 +670,8 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		SkillsDirs:           assembleSkillDirs(cwd, f.skillsDir, hasExecutor),
 		Skills:               skillsVal,
 		NoSkills:             noSkills,
+		Tools:                f.tools,
+		NoBuiltinTools:       f.noBuiltinTools,
 		NoContextFiles:       f.noContextFiles,
 		ContextFilesBudget:   defaults.ContextFilesTokens,
 		MCPConfig:            mcpPath,

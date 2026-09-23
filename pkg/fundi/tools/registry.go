@@ -424,6 +424,36 @@ func (r *Registry) Definitions() []anthropic.ToolUnionParam {
 	return out
 }
 
+// Retain drops every registered tool whose name is not in keep. A nil or
+// empty keep drops everything. It returns the names in keep that were not
+// registered, sorted, so a caller can report an allowlist naming a tool
+// this agent does not have.
+func (r *Registry) Retain(keep []string) (missing []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	wanted := make(map[string]bool, len(keep))
+	for _, name := range keep {
+		wanted[name] = true
+	}
+	for name := range r.defs {
+		if !wanted[name] {
+			delete(r.defs, name)
+			delete(r.fns, name)
+		}
+	}
+
+	seen := make(map[string]bool, len(keep))
+	for _, name := range keep {
+		if _, ok := r.defs[name]; !ok && !seen[name] {
+			seen[name] = true
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
 // Execute runs the named tool. An unknown name is a returned error, not a
 // panic — agentloop converts it to an is_error tool result the model can see.
 //

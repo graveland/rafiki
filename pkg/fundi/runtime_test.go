@@ -329,6 +329,62 @@ func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
 	}
 }
 
+// TestRuntimeToolAllowlistFiltersBuiltinsOnly drives the built-in tool
+// allowlist through the real BuildRuntime path: Tools filters the materialized
+// registry to exactly the named built-ins, NoBuiltinTools wins by leaving
+// none, and an empty Tools is today's behaviour — the full default set.
+// InProcessWorkspace is set so the workspace tier (read/bash/…) actually
+// materializes; without it those tools decline and an allowlist naming them
+// could not be distinguished from a typo. The registry is read through
+// eng.tools.Definitions(), the same list the model sees on every turn.
+func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
+	build := func(mutate func(*RuntimeOptions)) *Engine {
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.InProcessWorkspace = true
+		if mutate != nil {
+			mutate(&opts)
+		}
+		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+		if err != nil {
+			t.Fatalf("BuildRuntime: %v", err)
+		}
+		t.Cleanup(shutdown)
+		return eng
+	}
+	toolNames := func(eng *Engine) []string {
+		var names []string
+		for _, def := range eng.tools.Definitions() {
+			if def.OfTool != nil {
+				names = append(names, def.OfTool.Name)
+			}
+		}
+		return names
+	}
+
+	allowed := build(func(o *RuntimeOptions) { o.Tools = "read,bash" })
+	got := toolNames(allowed)
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"bash", "read"}) {
+		t.Errorf("Tools=\"read,bash\" left %v, want exactly [bash read]", got)
+	}
+
+	none := build(func(o *RuntimeOptions) { o.NoBuiltinTools = true })
+	if names := toolNames(none); len(names) != 0 {
+		t.Errorf("NoBuiltinTools left %d tools registered, want 0: %v", len(names), names)
+	}
+
+	// Empty means all: the same workspace tools the unfiltered standalone mode
+	// guarantees must still be present.
+	full := build(nil)
+	names := toolNames(full)
+	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
+		if !slices.Contains(names, name) {
+			t.Errorf("Tools=\"\" is missing %q; an empty allowlist must keep the full default set", name)
+		}
+	}
+}
+
 // wantsLSP reports whether BuildRuntime should construct a language-server
 // manager. Only a process that is its own workspace can reach the lsp_* tools
 // through opts.LSP; everywhere else they are proxied to the executor or not

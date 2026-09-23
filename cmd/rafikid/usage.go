@@ -60,6 +60,8 @@ func newAgentFlagSet(f *agentFlags) *pflag.FlagSet {
 	fs.StringArrayVar(&f.skillsDir, "skills-dir", nil, "additional skills directory (repeatable)")
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")
 	fs.BoolVar(&f.noSkills, "no-skills", false, "disable skill discovery and the skill tool entirely")
+	fs.StringVar(&f.tools, "tools", "", "comma-separated allowlist of built-in tools (empty means all); MCP tools are governed by --mcp-servers/--no-mcp")
+	fs.BoolVar(&f.noBuiltinTools, "no-builtin-tools", false, "disable every built-in tool; wins over --tools")
 	fs.StringVar(&f.mcpConfig, "mcp-config", "", "path to .mcp.json (default: <cwd>/.mcp.json if present, else $RAFIKI_MCP_CONFIG or <ConfigDir>/mcp.json)")
 	fs.StringVar(&f.mcpServers, "mcp-servers", "", "comma-separated allowlist of .mcp.json server names to connect (empty or \"*\" means all)")
 	fs.BoolVar(&f.noMCP, "no-mcp", false, "disable MCP entirely, even when --mcp-config is set")

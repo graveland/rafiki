@@ -44,11 +44,16 @@ type RuntimeOptions struct {
 	// (see cmd/rafikid's resumeOwnerUserID). Empty means unattributed, which
 	// is legitimate — the standalone `rafikid fundi` process runs as the
 	// daemon, not as a person.
-	OwnerUserID    string
-	SpillDir       string   // defaults to paths.SpillDir(Ref) when empty
-	SkillsDirs     []string // already assembled; see assembleSkillDirs in cmd/rafikid
-	Skills         string   // comma-separated allowlist; empty means all
-	NoSkills       bool
+	OwnerUserID string
+	SpillDir    string   // defaults to paths.SpillDir(Ref) when empty
+	SkillsDirs  []string // already assembled; see assembleSkillDirs in cmd/rafikid
+	Skills      string   // comma-separated allowlist; empty means all
+	NoSkills    bool
+	// Tools is a comma-separated allowlist of BUILT-IN tools; empty means all.
+	// MCP tools are not affected (see MCPServers/NoMCP).
+	Tools string
+	// NoBuiltinTools drops every built-in tool. It wins over Tools.
+	NoBuiltinTools bool
 	NoContextFiles bool
 	// ContextFilesBudget is the approximate token budget context files may
 	// occupy; 0 means no cap. Set from a model's declared alias — see
@@ -430,6 +435,21 @@ func filterMCPServers(cfg map[string]tools.MCPServerConfig, allowlist string) ma
 	return out
 }
 
+// splitToolList splits a comma-separated tool list into names, trimming
+// spaces and dropping empties, so "read, bash," behaves the same as the tight
+// form. A list naming only separators yields nil — the same "everything"
+// treatment an empty string gets, since a filter that selected nothing
+// silently was never what the caller meant.
+func splitToolList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -565,6 +585,21 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		toolOpts.ExecutorTools = served
 	}
 	registry := tools.DefaultBlueprint.MaterializeAll(toolOpts)
+
+	// Built-in tool allowlist, applied BEFORE the MCP block below so MCP tools
+	// registered afterwards are never filtered: MCP stays governed by
+	// --mcp-servers/--no-mcp. Warn rather than fail on unknown names: a tool
+	// can legitimately decline for these opts (e.g. skill with zero skills),
+	// so a missing name is not proof of a typo.
+	switch {
+	case opts.NoBuiltinTools:
+		registry.Retain(nil)
+	case opts.Tools != "":
+		if missing := registry.Retain(splitToolList(opts.Tools)); len(missing) > 0 {
+			slog.Warn("runtime: tool allowlist names tools this agent does not have",
+				"missing", missing)
+		}
+	}
 
 	mcpShutdown := func() {}
 	if opts.MCPConfig != "" && !opts.NoMCP {

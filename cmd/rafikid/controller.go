@@ -4242,6 +4242,12 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 	if req.NoSkills {
 		argv = append(argv, "--no-skills")
 	}
+	if req.Tools != "" {
+		argv = append(argv, "--tools", req.Tools)
+	}
+	if req.NoBuiltinTools {
+		argv = append(argv, "--no-builtin-tools")
+	}
 	if req.NoContextFiles {
 		argv = append(argv, "--no-context-files")
 	}
