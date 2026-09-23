@@ -62,6 +62,20 @@ type SpawnSpec struct {
 	// can be rescheduled when its machine goes away, which is the only reason
 	// the model is asked about it at all.
 	WorkspaceMode string
+
+	// Preset names a preset the controller resolves before admission; the
+	// fields below and Model/MaxCost/... then override or narrow it.
+	Preset   string
+	Thinking string
+	// AppendSystemPrompt is appended AFTER the preset's own append.
+	AppendSystemPrompt string
+	// Tools/Skills/MCPServers are TRI-STATE requests: nil = no request,
+	// non-nil empty = none, a list = exactly those (a subset of the preset's).
+	Tools      *[]string
+	Skills     *[]string
+	MCPServers *[]string
+	// ContextFiles: nil = no request; false = skip context files.
+	ContextFiles *bool
 }
 
 // AgentSpawner is the daemon-side capability behind the agent_* tools.

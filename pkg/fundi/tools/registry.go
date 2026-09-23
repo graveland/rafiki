@@ -337,6 +337,14 @@ type ToolOpts struct {
 	// getServer for which. Never set by fundi: fundi's own pymodule_run
 	// executes via its own tiered tool-routing and does not use this field.
 	PyModuleExecutor PyModuleExecutor
+
+	// Presets, when non-nil, gives this agent the preset_list/get/put/delete
+	// tools over its owner's preset store -- reading, and (only on request)
+	// writing, the operator's seat policy. nil declines the preset_* tools,
+	// same nil-means-decline rule as PyModules. Bound to ONE owner at
+	// construction (and to the agent's child id as write attribution), so no
+	// tool argument can ever name a different owner.
+	Presets PresetStore
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the

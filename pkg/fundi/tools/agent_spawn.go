@@ -25,7 +25,10 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"work — the task is assigned to it atomically, so agent_list and task_list agree.\n\n" +
 	"Use a subagent when the work is genuinely separable — a review, an independent " +
 	"implementation, an investigation you do not want in your own context. Do not " +
-	"spawn one for a step you could just do."
+	"spawn one for a step you could just do.\n\n" +
+	"Prefer `preset` to choosing a model yourself: a preset (see preset_list) " +
+	"fixes the operator's seat policy for a role, and your other fields narrow " +
+	"what it grants."
 
 type AgentSpawnBlueprint struct{}
 
@@ -40,7 +43,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "name", Type: "string",
 				Description: "Short human-readable name (\"reviewer\", \"impl-auth\"). Optional but makes agent_list readable."},
 			{Name: "model", Type: "string",
-				Description: "Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options."},
+				Description: "Overrides the preset's model; only set this when the human named a model. " +
+					"Model id to run it on. Omit to inherit the daemon default. Use agent_models to see the options."},
 			{Name: "cwd", Type: "string",
 				Description: "Absolute working directory for the agent: where its tools start and " +
 					"relative paths resolve. For an executor-bound agent the executor must be " +
@@ -78,6 +82,20 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"creates a fresh or isolated checkout — every workspace on an executor " +
 					"serves that executor's single root. For an isolated tree, create a git " +
 					"worktree yourself and pass it as cwd. Omit to inherit yours."},
+			{Name: "preset", Type: "string",
+				Description: "Name of a preset (`<group>:<role>`, e.g. default:implementer) fixing this agent's kind, model, tools, system prompt and budget. Prefer this to choosing a model. See preset_list."},
+			{Name: "thinking", Type: "string",
+				Description: "off|minimal|low|medium|high|xhigh; overrides the preset's."},
+			{Name: "append_system_prompt", Type: "string",
+				Description: "Extra system-prompt text appended after the preset's. Keep it identical across a wave of workers so they share the prompt cache; put per-worker instructions in `prompt`."},
+			{Name: "tools", Type: "array", Items: &Schema{Type: "string"},
+				Description: "Narrow the preset: a subset of what it allows, or [] for none. Cannot widen it."},
+			{Name: "skills", Type: "array", Items: &Schema{Type: "string"},
+				Description: "Narrow the preset: a subset of what it allows, or [] for none. Cannot widen it."},
+			{Name: "mcp_servers", Type: "array", Items: &Schema{Type: "string"},
+				Description: "Narrow the preset: a subset of what it allows, or [] for none. Cannot widen it."},
+			{Name: "context_files", Type: "boolean",
+				Description: "false to skip CLAUDE.md/AGENTS.md context files. Cannot re-enable them if the preset disables them."},
 		},
 		Required: []string{"prompt"},
 	}
@@ -102,17 +120,24 @@ type agentSpawnTool struct {
 
 func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
-		Prompt      string   `json:"prompt"`
-		Name        string   `json:"name,omitempty"`
-		Model       string   `json:"model,omitempty"`
-		Cwd         string   `json:"cwd,omitempty"`
-		Task        string   `json:"task,omitempty"`
-		Kind        string   `json:"kind,omitempty"`
-		MaxDepth    *int     `json:"max_depth,omitempty"`
-		MaxCost     *float64 `json:"max_cost,omitempty"`
-		MaxChildren *int     `json:"max_children,omitempty"`
-		Executor    string   `json:"executor,omitempty"`
-		Workspace   string   `json:"workspace,omitempty"`
+		Prompt             string    `json:"prompt"`
+		Name               string    `json:"name,omitempty"`
+		Model              string    `json:"model,omitempty"`
+		Cwd                string    `json:"cwd,omitempty"`
+		Task               string    `json:"task,omitempty"`
+		Kind               string    `json:"kind,omitempty"`
+		MaxDepth           *int      `json:"max_depth,omitempty"`
+		MaxCost            *float64  `json:"max_cost,omitempty"`
+		MaxChildren        *int      `json:"max_children,omitempty"`
+		Executor           string    `json:"executor,omitempty"`
+		Workspace          string    `json:"workspace,omitempty"`
+		Preset             string    `json:"preset,omitempty"`
+		Thinking           string    `json:"thinking,omitempty"`
+		AppendSystemPrompt string    `json:"append_system_prompt,omitempty"`
+		Tools              *[]string `json:"tools,omitempty"`
+		Skills             *[]string `json:"skills,omitempty"`
+		MCPServers         *[]string `json:"mcp_servers,omitempty"`
+		ContextFiles       *bool     `json:"context_files,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -138,17 +163,24 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	// SpawnSpec carries no parent. The implementation supplies the caller's
 	// own id, which it closed over at construction.
 	info, err := t.agents.Spawn(ctx, SpawnSpec{
-		Name:             params.Name,
-		Model:            params.Model,
-		Cwd:              cwd,
-		Prompt:           params.Prompt,
-		Task:             params.Task,
-		Kind:             params.Kind,
-		MaxDepth:         params.MaxDepth,
-		MaxCost:          params.MaxCost,
-		MaxChildren:      params.MaxChildren,
-		ExecutorSelector: params.Executor,
-		WorkspaceMode:    params.Workspace,
+		Name:               params.Name,
+		Model:              params.Model,
+		Cwd:                cwd,
+		Prompt:             params.Prompt,
+		Task:               params.Task,
+		Kind:               params.Kind,
+		MaxDepth:           params.MaxDepth,
+		MaxCost:            params.MaxCost,
+		MaxChildren:        params.MaxChildren,
+		ExecutorSelector:   params.Executor,
+		WorkspaceMode:      params.Workspace,
+		Preset:             params.Preset,
+		Thinking:           params.Thinking,
+		AppendSystemPrompt: params.AppendSystemPrompt,
+		Tools:              params.Tools,
+		Skills:             params.Skills,
+		MCPServers:         params.MCPServers,
+		ContextFiles:       params.ContextFiles,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)

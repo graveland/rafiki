@@ -103,6 +103,13 @@ var tierByTool = map[string]Tier{
 	"pymodule_get":    TierDaemon,
 	"pymodule_delete": TierDaemon,
 
+	// Daemon — presets live in the daemon's database; nothing in the
+	// workspace is touched.
+	"preset_list":   TierDaemon,
+	"preset_get":    TierDaemon,
+	"preset_put":    TierDaemon,
+	"preset_delete": TierDaemon,
+
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,
 }
