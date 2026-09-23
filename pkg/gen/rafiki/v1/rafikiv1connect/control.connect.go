@@ -90,6 +90,14 @@ const (
 	// ControlRemovePymoduleGitSourceProcedure is the fully-qualified name of the Control's
 	// RemovePymoduleGitSource RPC.
 	ControlRemovePymoduleGitSourceProcedure = "/rafiki.v1.Control/RemovePymoduleGitSource"
+	// ControlListPresetsProcedure is the fully-qualified name of the Control's ListPresets RPC.
+	ControlListPresetsProcedure = "/rafiki.v1.Control/ListPresets"
+	// ControlGetPresetProcedure is the fully-qualified name of the Control's GetPreset RPC.
+	ControlGetPresetProcedure = "/rafiki.v1.Control/GetPreset"
+	// ControlPutPresetProcedure is the fully-qualified name of the Control's PutPreset RPC.
+	ControlPutPresetProcedure = "/rafiki.v1.Control/PutPreset"
+	// ControlDeletePresetProcedure is the fully-qualified name of the Control's DeletePreset RPC.
+	ControlDeletePresetProcedure = "/rafiki.v1.Control/DeletePreset"
 	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
 	// ConversationSearch RPC.
 	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
@@ -141,6 +149,10 @@ type ControlClient interface {
 	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
 	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
 	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
+	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
+	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
+	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
+	DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -318,6 +330,30 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
 			connect.WithClientOptions(opts...),
 		),
+		listPresets: connect.NewClient[v1.ListPresetsRequest, v1.ListPresetsResponse](
+			httpClient,
+			baseURL+ControlListPresetsProcedure,
+			connect.WithSchema(controlMethods.ByName("ListPresets")),
+			connect.WithClientOptions(opts...),
+		),
+		getPreset: connect.NewClient[v1.GetPresetRequest, v1.GetPresetResponse](
+			httpClient,
+			baseURL+ControlGetPresetProcedure,
+			connect.WithSchema(controlMethods.ByName("GetPreset")),
+			connect.WithClientOptions(opts...),
+		),
+		putPreset: connect.NewClient[v1.PutPresetRequest, v1.PutPresetResponse](
+			httpClient,
+			baseURL+ControlPutPresetProcedure,
+			connect.WithSchema(controlMethods.ByName("PutPreset")),
+			connect.WithClientOptions(opts...),
+		),
+		deletePreset: connect.NewClient[v1.DeletePresetRequest, v1.DeletePresetResponse](
+			httpClient,
+			baseURL+ControlDeletePresetProcedure,
+			connect.WithSchema(controlMethods.ByName("DeletePreset")),
+			connect.WithClientOptions(opts...),
+		),
 		conversationSearch: connect.NewClient[v1.ConversationSearchRequest, v1.ConversationSearchResponse](
 			httpClient,
 			baseURL+ControlConversationSearchProcedure,
@@ -397,6 +433,10 @@ type controlClient struct {
 	listPymoduleGitSources   *connect.Client[v1.ListPymoduleGitSourcesRequest, v1.ListPymoduleGitSourcesResponse]
 	refreshPymoduleGitSource *connect.Client[v1.RefreshPymoduleGitSourceRequest, v1.RefreshPymoduleGitSourceResponse]
 	removePymoduleGitSource  *connect.Client[v1.RemovePymoduleGitSourceRequest, v1.RemovePymoduleGitSourceResponse]
+	listPresets              *connect.Client[v1.ListPresetsRequest, v1.ListPresetsResponse]
+	getPreset                *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
+	putPreset                *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
+	deletePreset             *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
 	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
 	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
 	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
@@ -537,6 +577,26 @@ func (c *controlClient) RemovePymoduleGitSource(ctx context.Context, req *connec
 	return c.removePymoduleGitSource.CallUnary(ctx, req)
 }
 
+// ListPresets calls rafiki.v1.Control.ListPresets.
+func (c *controlClient) ListPresets(ctx context.Context, req *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error) {
+	return c.listPresets.CallUnary(ctx, req)
+}
+
+// GetPreset calls rafiki.v1.Control.GetPreset.
+func (c *controlClient) GetPreset(ctx context.Context, req *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error) {
+	return c.getPreset.CallUnary(ctx, req)
+}
+
+// PutPreset calls rafiki.v1.Control.PutPreset.
+func (c *controlClient) PutPreset(ctx context.Context, req *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error) {
+	return c.putPreset.CallUnary(ctx, req)
+}
+
+// DeletePreset calls rafiki.v1.Control.DeletePreset.
+func (c *controlClient) DeletePreset(ctx context.Context, req *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error) {
+	return c.deletePreset.CallUnary(ctx, req)
+}
+
 // ConversationSearch calls rafiki.v1.Control.ConversationSearch.
 func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return c.conversationSearch.CallUnary(ctx, req)
@@ -605,6 +665,10 @@ type ControlHandler interface {
 	ListPymoduleGitSources(context.Context, *connect.Request[v1.ListPymoduleGitSourcesRequest]) (*connect.Response[v1.ListPymoduleGitSourcesResponse], error)
 	RefreshPymoduleGitSource(context.Context, *connect.Request[v1.RefreshPymoduleGitSourceRequest]) (*connect.Response[v1.RefreshPymoduleGitSourceResponse], error)
 	RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error)
+	ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error)
+	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
+	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
+	DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -778,6 +842,30 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("RemovePymoduleGitSource")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListPresetsHandler := connect.NewUnaryHandler(
+		ControlListPresetsProcedure,
+		svc.ListPresets,
+		connect.WithSchema(controlMethods.ByName("ListPresets")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetPresetHandler := connect.NewUnaryHandler(
+		ControlGetPresetProcedure,
+		svc.GetPreset,
+		connect.WithSchema(controlMethods.ByName("GetPreset")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlPutPresetHandler := connect.NewUnaryHandler(
+		ControlPutPresetProcedure,
+		svc.PutPreset,
+		connect.WithSchema(controlMethods.ByName("PutPreset")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeletePresetHandler := connect.NewUnaryHandler(
+		ControlDeletePresetProcedure,
+		svc.DeletePreset,
+		connect.WithSchema(controlMethods.ByName("DeletePreset")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlConversationSearchHandler := connect.NewUnaryHandler(
 		ControlConversationSearchProcedure,
 		svc.ConversationSearch,
@@ -880,6 +968,14 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlRefreshPymoduleGitSourceHandler.ServeHTTP(w, r)
 		case ControlRemovePymoduleGitSourceProcedure:
 			controlRemovePymoduleGitSourceHandler.ServeHTTP(w, r)
+		case ControlListPresetsProcedure:
+			controlListPresetsHandler.ServeHTTP(w, r)
+		case ControlGetPresetProcedure:
+			controlGetPresetHandler.ServeHTTP(w, r)
+		case ControlPutPresetProcedure:
+			controlPutPresetHandler.ServeHTTP(w, r)
+		case ControlDeletePresetProcedure:
+			controlDeletePresetHandler.ServeHTTP(w, r)
 		case ControlConversationSearchProcedure:
 			controlConversationSearchHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
@@ -1007,6 +1103,22 @@ func (UnimplementedControlHandler) RefreshPymoduleGitSource(context.Context, *co
 
 func (UnimplementedControlHandler) RemovePymoduleGitSource(context.Context, *connect.Request[v1.RemovePymoduleGitSourceRequest]) (*connect.Response[v1.RemovePymoduleGitSourceResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemovePymoduleGitSource is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListPresets(context.Context, *connect.Request[v1.ListPresetsRequest]) (*connect.Response[v1.ListPresetsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListPresets is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetPreset is not implemented"))
+}
+
+func (UnimplementedControlHandler) PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.PutPreset is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeletePreset is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {

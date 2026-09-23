@@ -704,6 +704,10 @@ service Control {
   rpc ListPymoduleGitSources(ListPymoduleGitSourcesRequest) returns (ListPymoduleGitSourcesResponse);
   rpc RefreshPymoduleGitSource(RefreshPymoduleGitSourceRequest) returns (RefreshPymoduleGitSourceResponse);
   rpc RemovePymoduleGitSource(RemovePymoduleGitSourceRequest) returns (RemovePymoduleGitSourceResponse);
+  rpc ListPresets(ListPresetsRequest) returns (ListPresetsResponse);
+  rpc GetPreset(GetPresetRequest) returns (GetPresetResponse);
+  rpc PutPreset(PutPresetRequest) returns (PutPresetResponse);
+  rpc DeletePreset(DeletePresetRequest) returns (DeletePresetResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
@@ -850,3 +854,42 @@ message RefreshPymoduleGitSourceResponse {
 
 message RemovePymoduleGitSourceRequest { string name = 1; }
 message RemovePymoduleGitSourceResponse {}
+
+// StringList wraps a repeated string so a preset allowlist can be ABSENT
+// (unset: the kind's default), PRESENT-AND-EMPTY (none), or a list --
+// proto3 cannot mark a repeated field optional, and collapsing the first two
+// turns "all tools" into "no tools".
+message StringList { repeated string items = 1; }
+
+message PresetRow {
+  int64 version = 1;
+  string name = 2;
+  string description = 3;
+  string kind = 4;
+  string provider = 5;
+  string model = 6;
+  string thinking = 7;
+  string executor = 8;
+  map<string, string> labels = 9;
+  StringList tools = 10;
+  StringList skills = 11;
+  StringList mcp_servers = 12;
+  optional bool context_files = 13;
+  string system_prompt = 14;
+  string append_system_prompt = 15;
+  optional double max_cost = 16;
+  optional int32 max_depth = 17;
+  optional int32 max_children = 18;
+  string written_by_child = 19;
+  string created_at = 20; // RFC3339
+  string deleted_at = 21; // RFC3339; empty when live
+}
+
+message ListPresetsRequest { string prefix = 1; }
+message ListPresetsResponse { repeated PresetRow rows = 1; }
+message GetPresetRequest { string name = 1; bool history = 2; }
+message GetPresetResponse { repeated PresetRow rows = 1; }
+message PutPresetRequest { PresetRow preset = 1; }
+message PutPresetResponse { PresetRow preset = 1; }
+message DeletePresetRequest { string name = 1; }
+message DeletePresetResponse {}

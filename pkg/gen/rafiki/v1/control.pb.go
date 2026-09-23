@@ -6123,6 +6123,610 @@ func (*RemovePymoduleGitSourceResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{88}
 }
 
+// StringList wraps a repeated string so a preset allowlist can be ABSENT
+// (unset: the kind's default), PRESENT-AND-EMPTY (none), or a list --
+// proto3 cannot mark a repeated field optional, and collapsing the first two
+// turns "all tools" into "no tools".
+type StringList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []string               `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StringList) Reset() {
+	*x = StringList{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StringList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StringList) ProtoMessage() {}
+
+func (x *StringList) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StringList.ProtoReflect.Descriptor instead.
+func (*StringList) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *StringList) GetItems() []string {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+type PresetRow struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Version            int64                  `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
+	Name               string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Description        string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	Kind               string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
+	Provider           string                 `protobuf:"bytes,5,opt,name=provider,proto3" json:"provider,omitempty"`
+	Model              string                 `protobuf:"bytes,6,opt,name=model,proto3" json:"model,omitempty"`
+	Thinking           string                 `protobuf:"bytes,7,opt,name=thinking,proto3" json:"thinking,omitempty"`
+	Executor           string                 `protobuf:"bytes,8,opt,name=executor,proto3" json:"executor,omitempty"`
+	Labels             map[string]string      `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Tools              *StringList            `protobuf:"bytes,10,opt,name=tools,proto3" json:"tools,omitempty"`
+	Skills             *StringList            `protobuf:"bytes,11,opt,name=skills,proto3" json:"skills,omitempty"`
+	McpServers         *StringList            `protobuf:"bytes,12,opt,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
+	ContextFiles       *bool                  `protobuf:"varint,13,opt,name=context_files,json=contextFiles,proto3,oneof" json:"context_files,omitempty"`
+	SystemPrompt       string                 `protobuf:"bytes,14,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	AppendSystemPrompt string                 `protobuf:"bytes,15,opt,name=append_system_prompt,json=appendSystemPrompt,proto3" json:"append_system_prompt,omitempty"`
+	MaxCost            *float64               `protobuf:"fixed64,16,opt,name=max_cost,json=maxCost,proto3,oneof" json:"max_cost,omitempty"`
+	MaxDepth           *int32                 `protobuf:"varint,17,opt,name=max_depth,json=maxDepth,proto3,oneof" json:"max_depth,omitempty"`
+	MaxChildren        *int32                 `protobuf:"varint,18,opt,name=max_children,json=maxChildren,proto3,oneof" json:"max_children,omitempty"`
+	WrittenByChild     string                 `protobuf:"bytes,19,opt,name=written_by_child,json=writtenByChild,proto3" json:"written_by_child,omitempty"`
+	CreatedAt          string                 `protobuf:"bytes,20,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339
+	DeletedAt          string                 `protobuf:"bytes,21,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"` // RFC3339; empty when live
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *PresetRow) Reset() {
+	*x = PresetRow{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PresetRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PresetRow) ProtoMessage() {}
+
+func (x *PresetRow) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PresetRow.ProtoReflect.Descriptor instead.
+func (*PresetRow) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *PresetRow) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *PresetRow) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PresetRow) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *PresetRow) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *PresetRow) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *PresetRow) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *PresetRow) GetThinking() string {
+	if x != nil {
+		return x.Thinking
+	}
+	return ""
+}
+
+func (x *PresetRow) GetExecutor() string {
+	if x != nil {
+		return x.Executor
+	}
+	return ""
+}
+
+func (x *PresetRow) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *PresetRow) GetTools() *StringList {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
+}
+
+func (x *PresetRow) GetSkills() *StringList {
+	if x != nil {
+		return x.Skills
+	}
+	return nil
+}
+
+func (x *PresetRow) GetMcpServers() *StringList {
+	if x != nil {
+		return x.McpServers
+	}
+	return nil
+}
+
+func (x *PresetRow) GetContextFiles() bool {
+	if x != nil && x.ContextFiles != nil {
+		return *x.ContextFiles
+	}
+	return false
+}
+
+func (x *PresetRow) GetSystemPrompt() string {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return ""
+}
+
+func (x *PresetRow) GetAppendSystemPrompt() string {
+	if x != nil {
+		return x.AppendSystemPrompt
+	}
+	return ""
+}
+
+func (x *PresetRow) GetMaxCost() float64 {
+	if x != nil && x.MaxCost != nil {
+		return *x.MaxCost
+	}
+	return 0
+}
+
+func (x *PresetRow) GetMaxDepth() int32 {
+	if x != nil && x.MaxDepth != nil {
+		return *x.MaxDepth
+	}
+	return 0
+}
+
+func (x *PresetRow) GetMaxChildren() int32 {
+	if x != nil && x.MaxChildren != nil {
+		return *x.MaxChildren
+	}
+	return 0
+}
+
+func (x *PresetRow) GetWrittenByChild() string {
+	if x != nil {
+		return x.WrittenByChild
+	}
+	return ""
+}
+
+func (x *PresetRow) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *PresetRow) GetDeletedAt() string {
+	if x != nil {
+		return x.DeletedAt
+	}
+	return ""
+}
+
+type ListPresetsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Prefix        string                 `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPresetsRequest) Reset() {
+	*x = ListPresetsRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPresetsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPresetsRequest) ProtoMessage() {}
+
+func (x *ListPresetsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPresetsRequest.ProtoReflect.Descriptor instead.
+func (*ListPresetsRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *ListPresetsRequest) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+type ListPresetsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rows          []*PresetRow           `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPresetsResponse) Reset() {
+	*x = ListPresetsResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[92]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPresetsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPresetsResponse) ProtoMessage() {}
+
+func (x *ListPresetsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[92]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPresetsResponse.ProtoReflect.Descriptor instead.
+func (*ListPresetsResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{92}
+}
+
+func (x *ListPresetsResponse) GetRows() []*PresetRow {
+	if x != nil {
+		return x.Rows
+	}
+	return nil
+}
+
+type GetPresetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	History       bool                   `protobuf:"varint,2,opt,name=history,proto3" json:"history,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPresetRequest) Reset() {
+	*x = GetPresetRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[93]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPresetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPresetRequest) ProtoMessage() {}
+
+func (x *GetPresetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[93]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPresetRequest.ProtoReflect.Descriptor instead.
+func (*GetPresetRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{93}
+}
+
+func (x *GetPresetRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GetPresetRequest) GetHistory() bool {
+	if x != nil {
+		return x.History
+	}
+	return false
+}
+
+type GetPresetResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rows          []*PresetRow           `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetPresetResponse) Reset() {
+	*x = GetPresetResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[94]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetPresetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetPresetResponse) ProtoMessage() {}
+
+func (x *GetPresetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[94]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetPresetResponse.ProtoReflect.Descriptor instead.
+func (*GetPresetResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{94}
+}
+
+func (x *GetPresetResponse) GetRows() []*PresetRow {
+	if x != nil {
+		return x.Rows
+	}
+	return nil
+}
+
+type PutPresetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Preset        *PresetRow             `protobuf:"bytes,1,opt,name=preset,proto3" json:"preset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutPresetRequest) Reset() {
+	*x = PutPresetRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[95]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutPresetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutPresetRequest) ProtoMessage() {}
+
+func (x *PutPresetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[95]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutPresetRequest.ProtoReflect.Descriptor instead.
+func (*PutPresetRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{95}
+}
+
+func (x *PutPresetRequest) GetPreset() *PresetRow {
+	if x != nil {
+		return x.Preset
+	}
+	return nil
+}
+
+type PutPresetResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Preset        *PresetRow             `protobuf:"bytes,1,opt,name=preset,proto3" json:"preset,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutPresetResponse) Reset() {
+	*x = PutPresetResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[96]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutPresetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutPresetResponse) ProtoMessage() {}
+
+func (x *PutPresetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[96]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutPresetResponse.ProtoReflect.Descriptor instead.
+func (*PutPresetResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{96}
+}
+
+func (x *PutPresetResponse) GetPreset() *PresetRow {
+	if x != nil {
+		return x.Preset
+	}
+	return nil
+}
+
+type DeletePresetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeletePresetRequest) Reset() {
+	*x = DeletePresetRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[97]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeletePresetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeletePresetRequest) ProtoMessage() {}
+
+func (x *DeletePresetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[97]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeletePresetRequest.ProtoReflect.Descriptor instead.
+func (*DeletePresetRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{97}
+}
+
+func (x *DeletePresetRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type DeletePresetResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeletePresetResponse) Reset() {
+	*x = DeletePresetResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[98]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeletePresetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeletePresetResponse) ProtoMessage() {}
+
+func (x *DeletePresetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[98]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeletePresetResponse.ProtoReflect.Descriptor instead.
+func (*DeletePresetResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{98}
+}
+
 var File_rafiki_v1_control_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_control_proto_rawDesc = "" +
@@ -6596,7 +7200,60 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"venv_error\x18\x04 \x01(\tR\tvenvError\"4\n" +
 	"\x1eRemovePymoduleGitSourceRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"!\n" +
-	"\x1fRemovePymoduleGitSourceResponse*S\n" +
+	"\x1fRemovePymoduleGitSourceResponse\"\"\n" +
+	"\n" +
+	"StringList\x12\x14\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\xf3\x06\n" +
+	"\tPresetRow\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\x03R\aversion\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x1a\n" +
+	"\bprovider\x18\x05 \x01(\tR\bprovider\x12\x14\n" +
+	"\x05model\x18\x06 \x01(\tR\x05model\x12\x1a\n" +
+	"\bthinking\x18\a \x01(\tR\bthinking\x12\x1a\n" +
+	"\bexecutor\x18\b \x01(\tR\bexecutor\x128\n" +
+	"\x06labels\x18\t \x03(\v2 .rafiki.v1.PresetRow.LabelsEntryR\x06labels\x12+\n" +
+	"\x05tools\x18\n" +
+	" \x01(\v2\x15.rafiki.v1.StringListR\x05tools\x12-\n" +
+	"\x06skills\x18\v \x01(\v2\x15.rafiki.v1.StringListR\x06skills\x126\n" +
+	"\vmcp_servers\x18\f \x01(\v2\x15.rafiki.v1.StringListR\n" +
+	"mcpServers\x12(\n" +
+	"\rcontext_files\x18\r \x01(\bH\x00R\fcontextFiles\x88\x01\x01\x12#\n" +
+	"\rsystem_prompt\x18\x0e \x01(\tR\fsystemPrompt\x120\n" +
+	"\x14append_system_prompt\x18\x0f \x01(\tR\x12appendSystemPrompt\x12\x1e\n" +
+	"\bmax_cost\x18\x10 \x01(\x01H\x01R\amaxCost\x88\x01\x01\x12 \n" +
+	"\tmax_depth\x18\x11 \x01(\x05H\x02R\bmaxDepth\x88\x01\x01\x12&\n" +
+	"\fmax_children\x18\x12 \x01(\x05H\x03R\vmaxChildren\x88\x01\x01\x12(\n" +
+	"\x10written_by_child\x18\x13 \x01(\tR\x0ewrittenByChild\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x14 \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"deleted_at\x18\x15 \x01(\tR\tdeletedAt\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x10\n" +
+	"\x0e_context_filesB\v\n" +
+	"\t_max_costB\f\n" +
+	"\n" +
+	"_max_depthB\x0f\n" +
+	"\r_max_children\",\n" +
+	"\x12ListPresetsRequest\x12\x16\n" +
+	"\x06prefix\x18\x01 \x01(\tR\x06prefix\"?\n" +
+	"\x13ListPresetsResponse\x12(\n" +
+	"\x04rows\x18\x01 \x03(\v2\x14.rafiki.v1.PresetRowR\x04rows\"@\n" +
+	"\x10GetPresetRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\ahistory\x18\x02 \x01(\bR\ahistory\"=\n" +
+	"\x11GetPresetResponse\x12(\n" +
+	"\x04rows\x18\x01 \x03(\v2\x14.rafiki.v1.PresetRowR\x04rows\"@\n" +
+	"\x10PutPresetRequest\x12,\n" +
+	"\x06preset\x18\x01 \x01(\v2\x14.rafiki.v1.PresetRowR\x06preset\"A\n" +
+	"\x11PutPresetResponse\x12,\n" +
+	"\x06preset\x18\x01 \x01(\v2\x14.rafiki.v1.PresetRowR\x06preset\")\n" +
+	"\x13DeletePresetRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"\x16\n" +
+	"\x14DeletePresetResponse*S\n" +
 	"\tEventTier\x12\x1a\n" +
 	"\x16EVENT_TIER_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EVENT_TIER_DURABLE\x10\x01\x12\x12\n" +
@@ -6614,7 +7271,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	" REVIEW_ACCEPT_STATUS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dREVIEW_ACCEPT_STATUS_ENQUEUED\x10\x01\x12(\n" +
 	"$REVIEW_ACCEPT_STATUS_ALREADY_RUNNING\x10\x02\x12#\n" +
-	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\x94\x16\n" +
+	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xc3\x18\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -6644,7 +7301,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x14AddPymoduleGitSource\x12&.rafiki.v1.AddPymoduleGitSourceRequest\x1a'.rafiki.v1.AddPymoduleGitSourceResponse\x12m\n" +
 	"\x16ListPymoduleGitSources\x12(.rafiki.v1.ListPymoduleGitSourcesRequest\x1a).rafiki.v1.ListPymoduleGitSourcesResponse\x12s\n" +
 	"\x18RefreshPymoduleGitSource\x12*.rafiki.v1.RefreshPymoduleGitSourceRequest\x1a+.rafiki.v1.RefreshPymoduleGitSourceResponse\x12p\n" +
-	"\x17RemovePymoduleGitSource\x12).rafiki.v1.RemovePymoduleGitSourceRequest\x1a*.rafiki.v1.RemovePymoduleGitSourceResponse\x12a\n" +
+	"\x17RemovePymoduleGitSource\x12).rafiki.v1.RemovePymoduleGitSourceRequest\x1a*.rafiki.v1.RemovePymoduleGitSourceResponse\x12L\n" +
+	"\vListPresets\x12\x1d.rafiki.v1.ListPresetsRequest\x1a\x1e.rafiki.v1.ListPresetsResponse\x12F\n" +
+	"\tGetPreset\x12\x1b.rafiki.v1.GetPresetRequest\x1a\x1c.rafiki.v1.GetPresetResponse\x12F\n" +
+	"\tPutPreset\x12\x1b.rafiki.v1.PutPresetRequest\x1a\x1c.rafiki.v1.PutPresetResponse\x12O\n" +
+	"\fDeletePreset\x12\x1e.rafiki.v1.DeletePresetRequest\x1a\x1f.rafiki.v1.DeletePresetResponse\x12a\n" +
 	"\x12ConversationSearch\x12$.rafiki.v1.ConversationSearchRequest\x1a%.rafiki.v1.ConversationSearchResponse\x12a\n" +
 	"\x12ConversationExport\x12$.rafiki.v1.ConversationExportRequest\x1a%.rafiki.v1.ConversationExportResponse\x12^\n" +
 	"\x11ConversationQuery\x12#.rafiki.v1.ConversationQueryRequest\x1a$.rafiki.v1.ConversationQueryResponse\x12a\n" +
@@ -6668,7 +7329,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 93)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 104)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),                           // 0: rafiki.v1.EventTier
 	(SendMode)(0),                            // 1: rafiki.v1.SendMode
@@ -6763,128 +7424,155 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*RefreshPymoduleGitSourceResponse)(nil), // 90: rafiki.v1.RefreshPymoduleGitSourceResponse
 	(*RemovePymoduleGitSourceRequest)(nil),   // 91: rafiki.v1.RemovePymoduleGitSourceRequest
 	(*RemovePymoduleGitSourceResponse)(nil),  // 92: rafiki.v1.RemovePymoduleGitSourceResponse
-	nil,                                      // 93: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                                      // 94: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                                      // 95: rafiki.v1.SpawnRequest.LabelsEntry
-	nil,                                      // 96: rafiki.v1.ExecutorRow.LabelsEntry
-	(*Event)(nil),                            // 97: rafiki.v1.Event
-	(*ContentBlock)(nil),                     // 98: rafiki.v1.ContentBlock
-	(*darajapb.ChildSpec)(nil),               // 99: rafiki.daraja.v1.ChildSpec
+	(*StringList)(nil),                       // 93: rafiki.v1.StringList
+	(*PresetRow)(nil),                        // 94: rafiki.v1.PresetRow
+	(*ListPresetsRequest)(nil),               // 95: rafiki.v1.ListPresetsRequest
+	(*ListPresetsResponse)(nil),              // 96: rafiki.v1.ListPresetsResponse
+	(*GetPresetRequest)(nil),                 // 97: rafiki.v1.GetPresetRequest
+	(*GetPresetResponse)(nil),                // 98: rafiki.v1.GetPresetResponse
+	(*PutPresetRequest)(nil),                 // 99: rafiki.v1.PutPresetRequest
+	(*PutPresetResponse)(nil),                // 100: rafiki.v1.PutPresetResponse
+	(*DeletePresetRequest)(nil),              // 101: rafiki.v1.DeletePresetRequest
+	(*DeletePresetResponse)(nil),             // 102: rafiki.v1.DeletePresetResponse
+	nil,                                      // 103: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                                      // 104: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                      // 105: rafiki.v1.SpawnRequest.LabelsEntry
+	nil,                                      // 106: rafiki.v1.ExecutorRow.LabelsEntry
+	nil,                                      // 107: rafiki.v1.PresetRow.LabelsEntry
+	(*Event)(nil),                            // 108: rafiki.v1.Event
+	(*ContentBlock)(nil),                     // 109: rafiki.v1.ContentBlock
+	(*darajapb.ChildSpec)(nil),               // 110: rafiki.daraja.v1.ChildSpec
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	97, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	93, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
-	6,  // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
-	0,  // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
-	7,  // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
-	1,  // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	98, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	94, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
-	11, // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
-	11, // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	95, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
-	24, // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
-	27, // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
-	31, // 13: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
-	34, // 14: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
-	38, // 15: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
-	37, // 16: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
-	39, // 17: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
-	2,  // 18: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
-	3,  // 19: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
-	42, // 20: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
-	45, // 21: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
-	46, // 22: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
-	96, // 23: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
-	48, // 24: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
-	99, // 25: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	57, // 26: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
-	58, // 27: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
-	59, // 28: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
-	59, // 29: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
-	62, // 30: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
-	62, // 31: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
-	62, // 32: rafiki.v1.UpsertSkillResponse.row:type_name -> rafiki.v1.SkillRow
-	73, // 33: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
-	73, // 34: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	73, // 35: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	82, // 36: rafiki.v1.AddPymoduleGitSourceResponse.row:type_name -> rafiki.v1.GitSourceRow
-	82, // 37: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
-	88, // 38: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
-	89, // 39: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
-	4,  // 40: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	8,  // 41: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	9,  // 42: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	12, // 43: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	14, // 44: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	16, // 45: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	18, // 46: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	20, // 47: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	22, // 48: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
-	25, // 49: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	28, // 50: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	49, // 51: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
-	60, // 52: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	63, // 53: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
-	65, // 54: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
-	67, // 55: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
-	69, // 56: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
-	71, // 57: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
-	74, // 58: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
-	76, // 59: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
-	78, // 60: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
-	80, // 61: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	83, // 62: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
-	85, // 63: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
-	87, // 64: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
-	91, // 65: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
-	30, // 66: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
-	33, // 67: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
-	36, // 68: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
-	41, // 69: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
-	44, // 70: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
-	51, // 71: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
-	53, // 72: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
-	55, // 73: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
-	5,  // 74: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	97, // 75: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	10, // 76: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	13, // 77: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	15, // 78: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	17, // 79: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	19, // 80: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	21, // 81: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	23, // 82: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
-	26, // 83: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	29, // 84: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	50, // 85: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
-	61, // 86: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	64, // 87: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
-	66, // 88: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
-	68, // 89: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
-	70, // 90: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
-	72, // 91: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
-	75, // 92: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
-	77, // 93: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
-	79, // 94: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
-	81, // 95: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	84, // 96: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
-	86, // 97: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
-	90, // 98: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
-	92, // 99: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
-	32, // 100: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
-	35, // 101: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
-	40, // 102: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
-	43, // 103: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
-	47, // 104: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
-	52, // 105: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
-	54, // 106: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
-	56, // 107: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
-	74, // [74:108] is the sub-list for method output_type
-	40, // [40:74] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	108, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	103, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	6,   // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
+	0,   // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
+	7,   // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
+	1,   // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
+	109, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	104, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	11,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
+	11,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
+	105, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	24,  // 11: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
+	27,  // 12: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
+	31,  // 13: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
+	34,  // 14: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
+	38,  // 15: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
+	37,  // 16: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
+	39,  // 17: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
+	2,   // 18: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
+	3,   // 19: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
+	42,  // 20: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
+	45,  // 21: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
+	46,  // 22: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
+	106, // 23: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
+	48,  // 24: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
+	110, // 25: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	57,  // 26: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
+	58,  // 27: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
+	59,  // 28: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
+	59,  // 29: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
+	62,  // 30: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
+	62,  // 31: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
+	62,  // 32: rafiki.v1.UpsertSkillResponse.row:type_name -> rafiki.v1.SkillRow
+	73,  // 33: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
+	73,  // 34: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	73,  // 35: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	82,  // 36: rafiki.v1.AddPymoduleGitSourceResponse.row:type_name -> rafiki.v1.GitSourceRow
+	82,  // 37: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
+	88,  // 38: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
+	89,  // 39: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
+	107, // 40: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
+	93,  // 41: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
+	93,  // 42: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
+	93,  // 43: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
+	94,  // 44: rafiki.v1.ListPresetsResponse.rows:type_name -> rafiki.v1.PresetRow
+	94,  // 45: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
+	94,  // 46: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
+	94,  // 47: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
+	4,   // 48: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	8,   // 49: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	9,   // 50: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	12,  // 51: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	14,  // 52: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	16,  // 53: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	18,  // 54: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	20,  // 55: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	22,  // 56: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
+	25,  // 57: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	28,  // 58: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	49,  // 59: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
+	60,  // 60: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	63,  // 61: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
+	65,  // 62: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
+	67,  // 63: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
+	69,  // 64: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
+	71,  // 65: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
+	74,  // 66: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
+	76,  // 67: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
+	78,  // 68: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
+	80,  // 69: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
+	83,  // 70: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
+	85,  // 71: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
+	87,  // 72: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
+	91,  // 73: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
+	95,  // 74: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
+	97,  // 75: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
+	99,  // 76: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
+	101, // 77: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
+	30,  // 78: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
+	33,  // 79: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
+	36,  // 80: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
+	41,  // 81: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
+	44,  // 82: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
+	51,  // 83: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	53,  // 84: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	55,  // 85: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	5,   // 86: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	108, // 87: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	10,  // 88: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	13,  // 89: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	15,  // 90: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	17,  // 91: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	19,  // 92: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	21,  // 93: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	23,  // 94: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
+	26,  // 95: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	29,  // 96: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	50,  // 97: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
+	61,  // 98: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	64,  // 99: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
+	66,  // 100: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
+	68,  // 101: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
+	70,  // 102: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
+	72,  // 103: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
+	75,  // 104: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
+	77,  // 105: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
+	79,  // 106: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
+	81,  // 107: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
+	84,  // 108: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
+	86,  // 109: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
+	90,  // 110: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
+	92,  // 111: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
+	96,  // 112: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
+	98,  // 113: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
+	100, // 114: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
+	102, // 115: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
+	32,  // 116: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
+	35,  // 117: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
+	40,  // 118: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
+	43,  // 119: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
+	47,  // 120: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
+	52,  // 121: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	54,  // 122: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	56,  // 123: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	86,  // [86:124] is the sub-list for method output_type
+	48,  // [48:86] is the sub-list for method input_type
+	48,  // [48:48] is the sub-list for extension type_name
+	48,  // [48:48] is the sub-list for extension extendee
+	0,   // [0:48] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -6919,13 +7607,14 @@ func file_rafiki_v1_control_proto_init() {
 		(*DarajaWatchResponse_Exited)(nil),
 	}
 	file_rafiki_v1_control_proto_msgTypes[55].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[90].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   93,
+			NumMessages:   104,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
