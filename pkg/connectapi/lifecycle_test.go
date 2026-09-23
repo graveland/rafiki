@@ -65,6 +65,7 @@ func TestSpawnPassesFieldsThrough(t *testing.T) {
 
 	resp, err := s.Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
 		Cwd: "/work", Name: "scout", Model: "claude-opus-5", Kind: "fundi",
+		Preset:        "reviewer",
 		ParentChildId: "c_0", ExecutorSelector: "kind=native",
 		Labels: map[string]string{"team": "a"},
 	}))
@@ -76,6 +77,9 @@ func TestSpawnPassesFieldsThrough(t *testing.T) {
 	}
 	if f.got.Cwd != "/work" || f.got.Name != "scout" || f.got.Kind != "fundi" {
 		t.Errorf("params wrong: %+v", f.got)
+	}
+	if f.got.Preset != "reviewer" {
+		t.Errorf("Preset = %q, want reviewer", f.got.Preset)
 	}
 	if f.got.ParentChildID != "c_0" || f.got.ExecutorSelector != "kind=native" {
 		t.Errorf("lineage/selector wrong: %+v", f.got)

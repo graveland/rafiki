@@ -127,18 +127,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 		ExecutorSelector:         executorSelector,
 		ExecutorSelectorFromFlag: req.ExecutorSelector != "",
 		ShowProfileBadge:         multipleProfilesConfigured(),
-		CreateDefaults: tui.SpawnDefaults{
-			Name: req.Name,
-			Kind: req.Kind,
-			// req.Model already carries the whole precedence chain, including
-			// the remembered model -- see buildSpawnRequest.
-			Model: req.Model,
-			// An explicit --executor (only reachable here with -i, since the
-			// flag suppresses the form on its own) is what the form shows and
-			// what it sends, not something the spawn quietly does differently.
-			Executor: req.ExecutorRef,
-			Cwd:      req.Cwd,
-		},
+		CreateDefaults:           createFormDefaults(req),
 	})
 	if _, runErr := tea.NewProgram(m).Run(); runErr != nil {
 		ring.Dump()
@@ -148,4 +137,24 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 	// stale either way.
 	dropChildCompletionCache(cmd)
 	return nil
+}
+
+// createFormDefaults prefills the form with exactly what a bare create would
+// have spawned: the request `create` already assembled. req.Model already
+// carries the whole precedence chain, including the remembered model -- see
+// buildSpawnRequest. An explicit --executor (only reachable here with -i,
+// since the flag suppresses the form on its own) is what the form shows and
+// what it sends, not something the spawn quietly does differently. The preset
+// resolves in the daemon (Controller.Spawn applies it first), so the form
+// sends the NAME and the model prefill stays empty under one -- the daemon
+// resolves the preset's model.
+func createFormDefaults(req protocol.SpawnRequest) tui.SpawnDefaults {
+	return tui.SpawnDefaults{
+		Name:     req.Name,
+		Kind:     req.Kind,
+		Model:    req.Model,
+		Executor: req.ExecutorRef,
+		Cwd:      req.Cwd,
+		Preset:   req.Preset,
+	}
 }

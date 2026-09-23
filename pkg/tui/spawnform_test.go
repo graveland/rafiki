@@ -91,6 +91,35 @@ func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
 	}
 }
 
+// A preset named by the caller rides every spawn the form issues — it is not
+// an editable field, so nothing is shown and nothing the user types can drop
+// it; buildSpawnRequest is what puts it on the wire.
+func TestPresetDefaultsRideTheFormWithoutBeingAField(t *testing.T) {
+	c := NewCockpit(Options{
+		BaseURL:    "http://127.0.0.1:1",
+		OpenCreate: true,
+		CreateDefaults: SpawnDefaults{
+			Name: "reviewer", Kind: "claude", Preset: "reviewer", Cwd: "/tmp/x",
+		},
+	})
+	if c.form == nil {
+		t.Fatal("OpenCreate did not open the form")
+	}
+	sp, errMsg := c.form.params(nil)
+	if errMsg != "" {
+		t.Fatalf("form params: %s", errMsg)
+	}
+	req := c.buildSpawnRequest(sp)
+	if got := req.GetPreset(); got != "reviewer" {
+		t.Errorf("Preset = %q, want reviewer on the wire request", got)
+	}
+	// The established contract: with a preset the model prefill stays empty —
+	// the daemon resolves the preset's model.
+	if got := c.form.inputs[fieldModel].Value(); got != "" {
+		t.Errorf("model prefill = %q, want empty under a preset", got)
+	}
+}
+
 func TestNOpensTheCreateForm(t *testing.T) {
 	formCockpit(t)
 }

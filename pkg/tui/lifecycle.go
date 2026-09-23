@@ -121,6 +121,7 @@ func (c *Cockpit) buildSpawnRequest(p spawnParams) *rafikiv1.SpawnRequest {
 		Kind:    p.kind,
 		Model:   p.model,
 		MaxCost: p.maxCost,
+		Preset:  p.preset,
 	}
 	switch {
 	case p.executor != "":

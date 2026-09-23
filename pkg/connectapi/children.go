@@ -82,6 +82,7 @@ type SpawnParams struct {
 	Name             string
 	Model            string
 	Kind             string
+	Preset           string
 	ParentChildID    string
 	ExecutorSelector string
 	ExecutorRef      string

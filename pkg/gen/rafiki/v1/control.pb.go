@@ -1070,6 +1070,10 @@ type SpawnRequest struct {
 	// ExecutorRef pins this spawn to one specific executor by its human-readable
 	// machine label or raw id. See protocol.SpawnRequest.ExecutorRef.
 	ExecutorRef string `protobuf:"bytes,11,opt,name=executor_ref,json=executorRef,proto3" json:"executor_ref,omitempty"`
+	// Preset names a daemon-side preset (conversations.presets) that
+	// Controller.Spawn resolves FIRST — it supplies kind, model, tools, prompt
+	// and budgets. Empty = none.
+	Preset string `protobuf:"bytes,12,opt,name=preset,proto3" json:"preset,omitempty"`
 	// The three budgets are optional because zero and unset differ, in OPPOSITE
 	// directions per field: unset max_depth means 1 and zero means "may not
 	// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
@@ -1164,6 +1168,13 @@ func (x *SpawnRequest) GetExecutorSelector() string {
 func (x *SpawnRequest) GetExecutorRef() string {
 	if x != nil {
 		return x.ExecutorRef
+	}
+	return ""
+}
+
+func (x *SpawnRequest) GetPreset() string {
+	if x != nil {
+		return x.Preset
 	}
 	return ""
 }
@@ -6801,7 +6812,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0fGetChildRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\"A\n" +
 	"\x10GetChildResponse\x12-\n" +
-	"\x05child\x18\x01 \x01(\v2\x17.rafiki.v1.ChildSummaryR\x05child\"\xe4\x03\n" +
+	"\x05child\x18\x01 \x01(\v2\x17.rafiki.v1.ChildSummaryR\x05child\"\xfc\x03\n" +
 	"\fSpawnRequest\x12\x10\n" +
 	"\x03cwd\x18\x01 \x01(\tR\x03cwd\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -6810,7 +6821,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06labels\x18\x05 \x03(\v2#.rafiki.v1.SpawnRequest.LabelsEntryR\x06labels\x12&\n" +
 	"\x0fparent_child_id\x18\x06 \x01(\tR\rparentChildId\x12+\n" +
 	"\x11executor_selector\x18\a \x01(\tR\x10executorSelector\x12!\n" +
-	"\fexecutor_ref\x18\v \x01(\tR\vexecutorRef\x12 \n" +
+	"\fexecutor_ref\x18\v \x01(\tR\vexecutorRef\x12\x16\n" +
+	"\x06preset\x18\f \x01(\tR\x06preset\x12 \n" +
 	"\tmax_depth\x18\b \x01(\x05H\x00R\bmaxDepth\x88\x01\x01\x12\x1e\n" +
 	"\bmax_cost\x18\t \x01(\x01H\x01R\amaxCost\x88\x01\x01\x12&\n" +
 	"\fmax_children\x18\n" +

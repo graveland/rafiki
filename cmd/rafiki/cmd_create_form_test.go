@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func createCmdFor(t *testing.T, argv ...string) (*cobra.Command, []string) {
@@ -114,5 +116,24 @@ func TestWantsSessionExecutor(t *testing.T) {
 			t.Errorf("%s: wantsSessionExecutor(%q, %q, %v) = %v, want %v",
 				tc.name, tc.selector, tc.kind, tc.noLocalExecutor, got, tc.want)
 		}
+	}
+}
+
+// The form must be prefilled with exactly what a bare create would have
+// spawned -- the preset name included, so accepting the form spawns with it
+// (create's own Long help). The model prefill stays empty under a preset:
+// the daemon resolves the preset's model.
+func TestCreateFormDefaultsCarryThePreset(t *testing.T) {
+	got := createFormDefaults(protocol.SpawnRequest{
+		Name: "scout", Kind: "fundi", Preset: "reviewer", ExecutorRef: "greyshift", Cwd: "/tmp/x",
+	})
+	if got.Preset != "reviewer" {
+		t.Errorf("Preset = %q, want reviewer", got.Preset)
+	}
+	if got.Name != "scout" || got.Kind != "fundi" || got.Executor != "greyshift" || got.Cwd != "/tmp/x" {
+		t.Errorf("defaults wrong: %+v", got)
+	}
+	if got.Model != "" {
+		t.Errorf("Model = %q, want empty under a preset (the daemon resolves it)", got.Model)
 	}
 }

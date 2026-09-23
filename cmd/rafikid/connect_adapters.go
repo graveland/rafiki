@@ -222,11 +222,23 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 	if err := requireUserCredential(ctx); err != nil {
 		return "", err
 	}
-	req := protocol.SpawnRequest{
+	res, err := l.c.Spawn(ctx, buildProtocolSpawnRequest(p), spawnOwner(ctx))
+	if err != nil {
+		return "", err
+	}
+	return res.ChildID, nil
+}
+
+// buildProtocolSpawnRequest maps the Connect-plane params onto the framed
+// protocol request Controller.Spawn applies. Extracted so the field mapping is
+// testable without a Controller behind it.
+func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
+	return protocol.SpawnRequest{
 		Cwd:              p.Cwd,
 		Name:             p.Name,
 		Model:            p.Model,
 		Kind:             p.Kind,
+		Preset:           p.Preset,
 		Labels:           p.Labels,
 		ParentChildID:    p.ParentChildID,
 		ExecutorSelector: p.ExecutorSelector,
@@ -235,24 +247,6 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 		MaxCost:          p.MaxCost,
 		MaxChildren:      p.MaxChildren,
 	}
-	// The owner is read from the CONTEXT, never the request: it is matched by
-	// executor admission selectors, so a client that could name it could claim
-	// to be any owner. This mirrors dispatcher.spawn reading conn.Identity().
-	//
-	// server.UserTokenAuth.Middleware is what put it there — the Connect
-	// routes mount inside the proxy face's middleware stack
-	// (server.Handler.Mount, wired in proxy.go), so a remote caller's
-	// credential has already been resolved to a user by the time a handler
-	// runs. The zero value is correct and expected on the unix socket, which
-	// authenticates nobody because the socket itself is the credential.
-	//
-	// This was hardcoded to users.Identity{}, which was invisible while the
-	// only reachable mount was that socket.
-	res, err := l.c.Spawn(ctx, req, spawnOwner(ctx))
-	if err != nil {
-		return "", err
-	}
-	return res.ChildID, nil
 }
 
 func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, killMs int64) (connectapi.KillOutcome, error) {

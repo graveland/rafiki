@@ -72,6 +72,9 @@ type spawnParams struct {
 	executor string
 	cwd      string
 	maxCost  *float64
+	// preset is not a form field: it arrives via SpawnDefaults and rides every
+	// spawn this form issues, resolved daemon-side via Controller.Spawn.
+	preset string
 }
 
 // spawnForm is the modal shown by `n` on the agents pane.
@@ -88,6 +91,9 @@ type spawnForm struct {
 	kindIx int
 	focus  spawnField
 
+	// preset is the caller's SpawnDefaults.Preset, echoed into every spawn —
+	// not an editable field.
+	preset string
 	// err is the daemon's refusal, kept so the form can stay open with the
 	// values still in it. Dismissing a form on failure throws away exactly the
 	// input the user needs to correct.
@@ -219,6 +225,7 @@ func (f *spawnForm) kind() string { return spawnKinds[f.kindIx] }
 // prefill seeds the form from the caller's defaults, leaving anything empty at
 // the form's own default.
 func (f *spawnForm) prefill(d SpawnDefaults) {
+	f.preset = d.Preset
 	if d.Name != "" {
 		f.inputs[fieldName].SetValue(d.Name)
 	}
@@ -251,6 +258,7 @@ func (f *spawnForm) params(cur *clientstate.Currency) (spawnParams, string) {
 		model:    strings.TrimSpace(f.inputs[fieldModel].Value()),
 		executor: strings.TrimSpace(f.inputs[fieldExecutor].Value()),
 		cwd:      cwd,
+		preset:   f.preset,
 	}
 	if raw := strings.TrimSpace(f.inputs[fieldMaxCost].Value()); raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)

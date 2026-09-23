@@ -281,11 +281,16 @@ type Options struct {
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
 // defaults; cwd falls back to the client's working directory.
 type SpawnDefaults struct {
-	Name     string
-	Kind     string
+	Name string
+	Kind string
+	// Model is a plain prefill; leave it EMPTY when Preset is set — the
+	// daemon resolves the preset's model.
 	Model    string
 	Executor string
 	Cwd      string
+	// Preset is sent with every spawn issued from the form and resolved
+	// daemon-side via Controller.Spawn.
+	Preset string
 }
 
 // ── Model ───────────────────────────────────────────────────────────────────

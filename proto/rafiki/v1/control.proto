@@ -167,6 +167,11 @@ message SpawnRequest {
   // machine label or raw id. See protocol.SpawnRequest.ExecutorRef.
   string executor_ref = 11;
 
+  // Preset names a daemon-side preset (conversations.presets) that
+  // Controller.Spawn resolves FIRST — it supplies kind, model, tools, prompt
+  // and budgets. Empty = none.
+  string preset = 12;
+
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
