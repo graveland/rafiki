@@ -205,6 +205,13 @@ type RuntimeOptions struct {
 	// is not advertised.
 	PyModulesInventory func(ctx context.Context) (string, error)
 
+	// Presets, when non-nil, gives this child the preset_list, preset_get,
+	// preset_put and preset_delete tools over its own owner's presets.
+	// Supplied by the daemon as a per-owner adapter; nil when no preset store
+	// is configured (a DB-less daemon) or for the standalone `rafikid fundi`
+	// process.
+	Presets tools.PresetStore
+
 	// Executor, when non-nil, runs the filesystem and shell tools in a
 	// separate process. nil means no workspace tier at all: the workspace
 	// tools are not registered, so the child reasons over the daemon tier
@@ -570,6 +577,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Conversations:      opts.Conversations,
 		PyModules:          opts.PyModules,
 		PyModulesInventory: opts.PyModulesInventory,
+		Presets:            opts.Presets,
 		Executor:           opts.Executor,
 		ExecutorTools:      executorToolSet(opts.ExecutorTools),
 		RemoteSkillBody:    opts.RemoteSkillBody,

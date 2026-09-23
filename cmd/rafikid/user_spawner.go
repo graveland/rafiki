@@ -61,10 +61,7 @@ func (s *userSpawner) Models(ctx context.Context, q tools.ModelQuery) ([]tools.M
 // caller's own ledger — an MCP caller's ledger is resolved per request by the
 // bridge, not by the controller.
 func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.AgentInfo, error) {
-	kind := spec.Kind
-	if kind == "" {
-		kind = protocol.KindFundi
-	}
+	kind := spawnKind(spec)
 	if spec.Cwd == "" || !filepath.IsAbs(spec.Cwd) {
 		return tools.AgentInfo{}, errors.New("cwd is required and must be an absolute path")
 	}
@@ -88,6 +85,7 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 		ExecutorSelector: spec.ExecutorSelector,
 		WorkspaceMode:    spec.WorkspaceMode,
 	}
+	applySpawnSpecShaping(&req, spec)
 	res, err := s.c.Spawn(ctx, req, s.owner)
 	if err != nil {
 		return tools.AgentInfo{}, err

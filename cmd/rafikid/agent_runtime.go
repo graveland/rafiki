@@ -454,6 +454,15 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		ro.PyModules = newControllerPyModuleWriter(c, ownerUserID)
 		ro.PyModulesInventory = pymoduleInventory(c, ownerUserID)
 	}
+	// Presets: same nil-means-decline family, in its own `if` block (NOT
+	// nested in the pymodule condition) so either store can be removed without
+	// touching the other. The binding is per-owner like the adapters above,
+	// with the daemon-stamped child id as write attribution: a child that
+	// saves a preset stamps written_by_child with its own id, the operator's
+	// empty.
+	if c.pool != nil && c.presetStore != nil {
+		ro.Presets = newPresetBinding(c, ownerUserID, childID)
+	}
 	// A child on a daemon with an executor pool gets a boundExecutor, ALWAYS
 	// non-nil — selector or not. The selector (possibly empty) narrows where
 	// the child may bind, never WHETHER it binds: an empty selector is the

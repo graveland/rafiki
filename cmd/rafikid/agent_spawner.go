@@ -331,6 +331,54 @@ func (s *controllerSpawner) SetBudget(ctx context.Context, childID string, maxCo
 	return s.c.SetChildBudget(ctx, s.selfID, childID, maxCost)
 }
 
+// spawnKind resolves a spec's child kind: the caller's choice, else the fundi
+// default. The default applies ONLY when no preset is named — with a preset
+// an empty kind stays empty so the controller's applyPreset takes the kind
+// from the preset (and still refuses a request kind that contradicts it);
+// defaulting it here first would turn every preset spawn into a fundi spawn.
+func spawnKind(spec tools.SpawnSpec) string {
+	if spec.Preset != "" {
+		return spec.Kind
+	}
+	if spec.Kind == "" {
+		return protocol.KindFundi
+	}
+	return spec.Kind
+}
+
+// applySpawnSpecShaping copies the preset name and the tri-state shaping
+// requests from spec onto req. nil means "no request"; a non-nil empty
+// list means "none".
+func applySpawnSpecShaping(req *protocol.SpawnRequest, spec tools.SpawnSpec) {
+	req.Preset = spec.Preset
+	req.Thinking = spec.Thinking
+	req.AppendSystemPrompt = spec.AppendSystemPrompt
+	if spec.Tools != nil {
+		if len(*spec.Tools) == 0 {
+			req.NoBuiltinTools = true
+		} else {
+			req.Tools = strings.Join(*spec.Tools, ",")
+		}
+	}
+	if spec.Skills != nil {
+		if len(*spec.Skills) == 0 {
+			req.NoSkills = true
+		} else {
+			req.Skills = *spec.Skills
+		}
+	}
+	if spec.MCPServers != nil {
+		if len(*spec.MCPServers) == 0 {
+			req.NoMCP = true
+		} else {
+			req.MCPServers = *spec.MCPServers
+		}
+	}
+	if spec.ContextFiles != nil && !*spec.ContextFiles {
+		req.NoContextFiles = true
+	}
+}
+
 // Spawn creates a descendant. ParentChildID is the caller's own id, taken
 // from the binding — never from spec — so an agent cannot spawn into another
 // subtree.
@@ -351,10 +399,7 @@ func (s *controllerSpawner) SetBudget(ctx context.Context, childID string, maxCo
 // limit (phase 05) would need a compensating write to undo it. Controller.Spawn
 // assigns only after the child is registered, so a refusal writes nothing.
 func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.AgentInfo, error) {
-	kind := spec.Kind
-	if kind == "" {
-		kind = protocol.KindFundi
-	}
+	kind := spawnKind(spec)
 	self, ok := s.c.st.Get(s.selfID)
 	if !ok {
 		return tools.AgentInfo{}, fmt.Errorf("spawning agent %s is not registered", s.selfID)
@@ -382,6 +427,7 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 		ExecutorSelector:      spec.ExecutorSelector,
 		WorkspaceMode:         spec.WorkspaceMode,
 	}
+	applySpawnSpecShaping(&req, spec)
 	// The owner id is the caller's own row's, read from the same fetch that
 	// supplied Cwd: stored state, never a tool argument. An empty id is the
 	// anonymous-chain shape and stamps nothing, exactly as an empty identity

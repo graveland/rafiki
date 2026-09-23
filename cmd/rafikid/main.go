@@ -35,6 +35,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gitpymodulesdb"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
+	"go.graveland.dev/rafiki/pkg/presetsdb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -114,7 +115,6 @@ variables disagree with the daemon's:`)
 		}
 		fmt.Fprintf(&b, "  %-12s %s\n", label, d)
 	}
-	fmt.Fprintf(&b, "  %-12s %s\n", "presets", paths.PresetsFile())
 	fmt.Fprintf(&b, "  %-12s %s\n", "mcp", paths.GlobalMCPConfig())
 	fmt.Fprint(&b, `
 $RAFIKI_SOCKET overrides the socket path for both the daemon's clients
@@ -520,6 +520,12 @@ func runDaemon(opts runDaemonOpts) error {
 		pymoduleStore = pymodulesdb.NewPostgresStore(pool)
 	}
 	ctrl.pymoduleStore = pymoduleStore
+	// Presets are database-backed only: a pool is the only backing a preset
+	// store has, so a DB-less daemon leaves ctrl.presetStore nil and the
+	// Connect manager is never registered.
+	if pool != nil {
+		ctrl.presetStore = presetsdb.NewPostgresStore(pool)
+	}
 	if pymoduleStore != nil && execPool != nil {
 		ctrl.pymodulePusher = &pymodulePusher{
 			pool: execPool, store: pymoduleStore, version: version.String(),
@@ -588,6 +594,9 @@ func runDaemon(opts runDaemonOpts) error {
 			}
 			if ctrl.pymoduleStore != nil {
 				face.Control.SetPymoduleManager(connectPyModules{c: ctrl})
+			}
+			if ctrl.presetStore != nil {
+				face.Control.SetPresetManager(connectPresets{c: ctrl})
 			}
 			if ctrl.gitpymoduleStore != nil {
 				face.Control.SetGitSourceManager(connectGitSources{c: ctrl})
