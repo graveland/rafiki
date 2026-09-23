@@ -17,6 +17,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -784,5 +785,80 @@ func TestCreateJSONLOneCompactLine(t *testing.T) {
 	// carries "stalled":false — JSONL is the record as-is.
 	if buf.String() != `{"childId":"c_123","model":"m","stalled":false}`+"\n" {
 		t.Errorf("jsonl output = %q, want one compact line", buf.String())
+	}
+}
+
+// TestCreatePresetDropsAmbientModel pins the preset branch of create's request shaping:
+// the request carries the preset name and the preset's kind, its model is
+// ONLY the --model flag value (empty when the flag is unset, even though a
+// profile model exists), and an explicit --kind that contradicts the preset
+// fails.
+func TestCreatePresetDropsAmbientModel(t *testing.T) {
+	rec := presets.Record{Name: "reviewer", Kind: presets.KindClaude, Model: "claude-x"}
+
+	// No --model flag: Model stays empty even with a profile model in play.
+	req2 := &protocol.SpawnRequest{}
+	if err := applyCreatePreset(req2, "reviewer", rec, "", false, ""); err != nil {
+		t.Fatalf("applyCreatePreset: %v", err)
+	}
+	if req2.Preset != "reviewer" {
+		t.Errorf("Preset = %q, want reviewer", req2.Preset)
+	}
+	if req2.Kind != presets.KindClaude {
+		t.Errorf("Kind = %q, want the preset's kind claude", req2.Kind)
+	}
+	if req2.Model != "" {
+		t.Errorf("Model = %q, want empty (no --model flag; a profile model must not ride along)", req2.Model)
+	}
+
+	// An explicit --model flag is kept.
+	req3 := &protocol.SpawnRequest{}
+	if err := applyCreatePreset(req3, "reviewer", rec, "", false, "flag-model"); err != nil {
+		t.Fatalf("applyCreatePreset: %v", err)
+	}
+	if req3.Model != "flag-model" {
+		t.Errorf("Model = %q, want flag-model (an explicit flag outranks the preset)", req3.Model)
+	}
+
+	// A matching explicit --kind is fine.
+	req4 := &protocol.SpawnRequest{}
+	if err := applyCreatePreset(req4, "reviewer", rec, presets.KindClaude, true, ""); err != nil {
+		t.Errorf("applyCreatePreset with a matching --kind: %v", err)
+	}
+
+	// A conflicting --kind fails.
+	err := applyCreatePreset(&protocol.SpawnRequest{}, "reviewer", rec, "fundi", true, "")
+	if err == nil {
+		t.Fatal("applyCreatePreset with a conflicting --kind = nil error, want a failure")
+	}
+	if !strings.Contains(err.Error(), `--kind "fundi" conflicts with preset "reviewer" (kind "claude")`) {
+		t.Errorf("error = %v, want the conflict named", err)
+	}
+}
+
+// TestResolveModelChainWithoutPreset pins the 3-argument model chain: the
+// named preset no longer takes part client-side — it resolves in the daemon
+// — so the chain is flag > profile > remembered.
+func TestResolveModelChainWithoutPreset(t *testing.T) {
+	cases := []struct {
+		name       string
+		flagModel  string
+		profModel  string
+		remembered string
+		want       string
+	}{
+		{"flag wins over everything", "flag-m", "prof-m", "remembered-m", "flag-m"},
+		{"profile default beats the remembered model", "", "prof-m", "remembered-m", "prof-m"},
+		{"remembered is the last resort", "", "", "remembered-m", "remembered-m"},
+		{"nothing set leaves it to the daemon", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveModel(tc.flagModel, tc.profModel, tc.remembered)
+			if got != tc.want {
+				t.Fatalf("resolveModel(%q,%q,%q) = %q, want %q",
+					tc.flagModel, tc.profModel, tc.remembered, got, tc.want)
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,12 +9,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
@@ -71,23 +75,24 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from <config dir>/presets.json (also settable via a profile's `preset` field)")
-	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		// Best-effort: silently empty list when the profile fails to resolve or
-		// its presets file is missing or malformed. A completion handler must
-		// never exit or print, so this deliberately uses resolveProfile rather
-		// than mustProfile — a misconfigured profile must not break tab-completion.
-		p, err := resolveProfile(cmd)
+	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
+	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		// Best-effort over Connect: a completion handler must never exit or
+		// print, so every failure — endpoint, network, daemon — degrades to
+		// "no candidates" by design.
+		ep, err := newConnectEndpoint(cmd)
 		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		pf, err := loadPresets(p.Name)
-		if err != nil || pf == nil {
+		ctx, cancel := context.WithTimeout(cmdCtx(cmd), completionDeadline)
+		defer cancel()
+		resp, err := ep.control().ListPresets(ctx, connect.NewRequest(&rafikiv1.ListPresetsRequest{}))
+		if err != nil {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		names := make([]string, 0, len(pf.Presets))
-		for name := range pf.Presets {
-			names = append(names, name)
+		names := make([]string, 0, len(resp.Msg.GetRows()))
+		for _, r := range resp.Msg.GetRows() {
+			names = append(names, r.GetName())
 		}
 		return names, cobra.ShellCompDirectiveNoFileComp
 	})
@@ -204,18 +209,15 @@ func resolveKind(flagKind, profileKind string) string {
 }
 
 // resolveModel picks the model. See docs/plans/2026-09-04-client-profiles-plan.md
-// Task 10 before reordering anything here.
+// Task 10 before reordering anything here. The named preset no longer takes
+// part in this chain: it now resolves in the daemon, which applies the
+// preset's model before any field the client sends.
 //
-// The named preset sits ABOVE the profile default deliberately, which is NOT
-// where RAFIKI_DEFAULT_MODEL used to sit: an explicitly named preset is a
-// request, while a profile default is ambient and will be set on every profile.
-// Leaving the profile default on top would make every preset's model
-// unreachable.
-//
-// The remembered model stays last, below both, because it is an inference from
-// what happened last time and must never override a declaration.
-func resolveModel(flagModel, presetModel, profileModel, remembered string) string {
-	for _, candidate := range []string{flagModel, presetModel, profileModel, remembered} {
+// The profile default sits above the remembered model deliberately: a profile
+// default is a declaration, the remembered model an inference from what
+// happened last time and must never override a declaration.
+func resolveModel(flagModel, profileModel, remembered string) string {
+	for _, candidate := range []string{flagModel, profileModel, remembered} {
 		if candidate != "" {
 			return candidate
 		}
@@ -397,6 +399,26 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	return req, nil
 }
 
+// applyCreatePreset shapes a spawn request to carry a named preset. The
+// daemon resolves the preset's model, tools, prompt and budgets itself, so
+// this only pins what the client must decide: the preset's kind (the executor
+// logic below branches on req.Kind, so it overrides a profile kind or the
+// fundi default), the preset name, and a model of ONLY the --model flag —
+// an explicit flag outranks the preset on the daemon, but a profile or
+// remembered model must never travel with a preset, or the preset's model
+// would be permanently unreachable. An explicit --kind that contradicts the
+// preset is refused rather than silently resolved one way or the other.
+// Extracted so the shaping is testable without a daemon.
+func applyCreatePreset(req *protocol.SpawnRequest, name string, rec presets.Record, kindFlag string, kindChanged bool, modelFlag string) error {
+	if kindChanged && kindFlag != "" && kindFlag != rec.Kind {
+		return fmt.Errorf("--kind %q conflicts with preset %q (kind %q)", kindFlag, name, rec.Kind)
+	}
+	req.Preset = name
+	req.Kind = rec.Kind
+	req.Model = modelFlag
+	return nil
+}
+
 // collectCallerEnv snapshots the calling process's environment for inclusion
 // in a SpawnRequest. Reserved keys are stripped so they can't override what the
 // daemon injects per-child — notably the socket and child id, which the child
@@ -445,31 +467,35 @@ func runCreate(cmd *cobra.Command, args []string) error {
 
 	p := mustProfile(cmd)
 
-	// Apply the named preset, then resolve the model through the full chain.
-	// buildSpawnRequest has already merged the profile's labels under --label
-	// flags; the preset's labels merge in beneath that (existing labels win).
-	//
-	// The model chain here is --model > preset's model > profile's model >
-	// remembered model, in that order — see resolveModel. Reordering it is a
-	// documented, deliberate departure from the old RAFIKI_DEFAULT_MODEL
-	// precedence; read Task 10 of the plan before changing it.
+	// Resolve the named preset, if any, against the daemon: the daemon applies
+	// the preset's model, tools, prompt and budgets itself, so the request only
+	// carries the name, the preset's kind, and the --model flag value — a
+	// profile or remembered model must NOT be sent, or it would outrank the
+	// preset's model on the daemon side. This happens before the form branch so
+	// the form is prefilled with the request that will actually spawn.
 	presetName := resolvePresetName(cmd)
-	presetModel := ""
 	if presetName != "" {
-		pf, err := loadPresets(p.Name)
+		ep, err := newConnectEndpoint(cmd)
 		if err != nil {
-			return fmt.Errorf("--preset: %w", err)
+			return err
 		}
-		preset, ok := pf.Presets[presetName]
-		if !ok {
-			return fmt.Errorf("--preset: unknown preset %q (available: %s)", presetName, availablePresets(pf))
+		resp, err := ep.control().GetPreset(cmdCtx(cmd),
+			connect.NewRequest(&rafikiv1.GetPresetRequest{Name: presetName}))
+		if err != nil {
+			if connect.CodeOf(err) == connect.CodeNotFound {
+				return fmt.Errorf("--preset: no preset %q (see `rafiki preset list`)", presetName)
+			}
+			return err
 		}
-		presetModel = preset.Model
-		if len(preset.Labels) > 0 {
-			req.Labels = mergeLabels(preset.Labels, req.Labels)
+		rec := presets.FromProto(resp.Msg.GetRows()[0])
+		modelFlag, _ := cmd.Flags().GetString("model")
+		kindFlag, _ := cmd.Flags().GetString("kind")
+		if err := applyCreatePreset(&req, presetName, rec, kindFlag, cmd.Flags().Changed("kind"), modelFlag); err != nil {
+			return err
 		}
+	} else {
+		req.Model = resolveModel(req.Model, p.Model, clientstate.LastModelFor(p.Name, req.Kind))
 	}
-	req.Model = resolveModel(req.Model, presetModel, p.Model, clientstate.LastModelFor(p.Name, req.Kind))
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
 	detached, _ := cmd.Flags().GetBool("detached")

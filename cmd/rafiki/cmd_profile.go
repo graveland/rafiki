@@ -141,7 +141,6 @@ func newProfileShowCmd() *cobra.Command {
 			fmt.Fprintf(w, "model:    %s\n", defaultDash(p.Model))
 			fmt.Fprintf(w, "preset:   %s\n", defaultDash(p.Preset))
 			fmt.Fprintf(w, "labels:   %s\n", defaultDash(formatProfileLabels(p.Labels)))
-			fmt.Fprintf(w, "presets:  %s\n", profile.PresetsFile(name))
 			return nil
 		},
 	}
@@ -207,7 +206,7 @@ func newProfileAddCmd() *cobra.Command {
 	cmd.Flags().String("token", "", "control-plane token; required with --url")
 	cmd.Flags().String("kind", "", "default agent kind for `rafiki create`")
 	cmd.Flags().String("model", "", "default model for `rafiki create`")
-	cmd.Flags().String("preset", "", "default preset for `rafiki create`")
+	cmd.Flags().String("preset", "", "default preset for `rafiki create` (a name from `rafiki preset list`)")
 	cmd.Flags().StringArray("label", nil, "default label k=v (repeatable)")
 	cmd.ValidArgsFunction = func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return nil, cobra.ShellCompDirectiveNoFileComp

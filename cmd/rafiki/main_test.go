@@ -16,7 +16,7 @@ import (
 // buildSpawnRequest consults the remembered model, so without this the tests
 // read the developer's real ~/.local/state/rafiki/client-state.json -- and a
 // model remembered from ordinary use then leaks into a test's expected
-// precedence. That is not hypothetical: it made TestPreset_MergeOrder fail
+// precedence. That is not hypothetical: it made the old model-precedence tests fail
 // with a model no fixture mentions.
 //
 // Package-wide, because the coupling is inside the request builder rather than

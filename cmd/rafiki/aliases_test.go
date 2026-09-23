@@ -81,7 +81,6 @@ func TestCommandAliases(t *testing.T) {
 		{[]string{"logs"}, []string{"log"}},
 		{[]string{"label"}, []string{"lab"}},
 		{[]string{"models"}, []string{"model"}},
-		{[]string{"presets"}, []string{"preset"}},
 		{[]string{"service"}, []string{"svc"}},
 		{[]string{"completion"}, []string{"comp"}},
 		{[]string{"claude"}, []string{"cl"}},
