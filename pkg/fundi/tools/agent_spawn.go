@@ -85,7 +85,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "preset", Type: "string",
 				Description: "Name of a preset (`<group>:<role>`, e.g. default:implementer) fixing this agent's kind, model, tools, system prompt and budget. Prefer this to choosing a model. See preset_list."},
 			{Name: "thinking", Type: "string",
-				Description: "off|minimal|low|medium|high|xhigh; overrides the preset's."},
+				Description: "off|low|medium|high|xhigh; overrides the preset's."},
 			{Name: "append_system_prompt", Type: "string",
 				Description: "Extra system-prompt text appended after the preset's. Keep it identical across a wave of workers so they share the prompt cache; put per-worker instructions in `prompt`."},
 			{Name: "tools", Type: "array", Items: &Schema{Type: "string"},

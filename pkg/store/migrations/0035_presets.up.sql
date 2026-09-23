@@ -28,11 +28,18 @@ CREATE TABLE conversations.presets (
     deleted_at           timestamptz NULL,
     created_at           timestamptz NOT NULL DEFAULT now(),
     CHECK (kind IN ('fundi', 'claude')),
-    -- a claude child honours only model, append_system_prompt and extra args
-    -- (pkg/claudeargv), so every fundi-only knob must be unset on a claude preset
+    -- a claude child honours only model, provider, append_system_prompt,
+    -- executor, labels and the budgets (pkg/claudeargv); this CHECK pins the
+    -- six fundi-only knobs it must NOT carry -- thinking, tools, skills,
+    -- mcp_servers, context_files, system_prompt -- and leaves the honoured
+    -- fields unconstrained. pkg/presets.Validate is the enforcement gate:
+    -- a database that already ran an older, more permissive 0035 keeps its
+    -- CHECK, and Validate still rejects what it must.
     CHECK (kind <> 'claude' OR (thinking IS NULL AND tools IS NULL AND skills IS NULL
            AND mcp_servers IS NULL AND context_files IS NULL AND system_prompt IS NULL)),
-    CHECK (thinking IS NULL OR thinking IN ('off','minimal','low','medium','high','xhigh')),
+    -- mirrors pkg/presets.thinkingLevels (the levels pkg/fundi's
+    -- thinkingBudgets can actually honour)
+    CHECK (thinking IS NULL OR thinking IN ('off','low','medium','high','xhigh')),
     CHECK (max_cost IS NULL OR max_cost >= 0),
     CHECK (max_depth IS NULL OR max_depth >= 0),
     CHECK (max_children IS NULL OR max_children >= 0)

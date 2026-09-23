@@ -444,9 +444,12 @@ func filterMCPServers(cfg map[string]tools.MCPServerConfig, allowlist string) ma
 
 // splitToolList splits a comma-separated tool list into names, trimming
 // spaces and dropping empties, so "read, bash," behaves the same as the tight
-// form. A list naming only separators yields nil — the same "everything"
-// treatment an empty string gets, since a filter that selected nothing
-// silently was never what the caller meant.
+// form. Any input that names no tools returns nil, and at the BuildRuntime
+// call site the two empty cases are NOT the same: an empty --tools string
+// short-circuits the allowlist switch entirely (no filtering, every tool
+// kept), while a non-empty string whose split is empty — e.g. ", " — flows
+// into Retain(nil), whose empty keep-set drops every built-in tool, silently
+// (nothing is "missing", so nothing is warned about).
 func splitToolList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

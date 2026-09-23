@@ -37,7 +37,7 @@ func (PresetPutBlueprint) InputSchema() Schema {
 			{Name: "model", Type: "string",
 				Description: "Model id children spawned with this preset run on."},
 			{Name: "thinking", Type: "string",
-				Description: "off|minimal|low|medium|high|xhigh."},
+				Description: "off|low|medium|high|xhigh."},
 			{Name: "executor", Type: "string",
 				Description: "Executor label selector children spawned with this preset are confined to."},
 			{Name: "labels", Type: "object",

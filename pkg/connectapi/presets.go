@@ -31,6 +31,8 @@ type PresetManager interface {
 	// every row newest first, deleted ones included.
 	GetPreset(ctx context.Context, name string, history bool) ([]presets.Record, error)
 	// PutPreset validates and stores spec as a new version.
+	// Validation failures must be wrapped with ErrInvalidPreset (mapped to
+	// CodeInvalidArgument); store errors must not be.
 	PutPreset(ctx context.Context, spec presets.Spec) (presets.Record, error)
 	// DeletePreset stamps deleted_at on every live row for name.
 	DeletePreset(ctx context.Context, name string) error

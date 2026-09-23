@@ -206,21 +206,25 @@ func Group(name string) string {
 }
 
 // thinkingLevels are the values conversations.presets' CHECK accepts and
-// the routing layer understands, in ascending intensity.
+// the routing layer understands, in ascending intensity. They are exactly
+// pkg/fundi's thinkingBudgets keys: a level the runtime cannot honour must
+// not be saveable.
 var thinkingLevels = map[string]bool{
-	"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true,
+	"off": true, "low": true, "medium": true, "high": true, "xhigh": true,
 }
 
 // Validate checks everything the database's CHECKs check, plus what they
 // cannot, so a bad preset fails with a readable message before the INSERT:
 //   - ValidName(r.Name)
 //   - r.Kind is KindFundi or KindClaude
-//   - r.Thinking is "" or one of off|minimal|low|medium|high|xhigh
+//   - r.Thinking is "" or one of off|low|medium|high|xhigh
 //   - when r.Kind == KindClaude: Thinking == "", Tools == nil, Skills == nil,
 //     MCPServers == nil, ContextFiles == nil, SystemPrompt == "" -- the error
 //     names the first offending field: `field "tools" does not apply to kind "claude"`
 //   - MaxCost/MaxDepth/MaxChildren, when non-nil, are >= 0
-//   - every Labels key is non-empty and does not start with "rafiki/"
+//   - every Labels key mirrors validateUserLabelKeys (cmd/rafikid/labels.go,
+//     the source of truth): non-empty, [A-Za-z0-9_./-] only, not "owner",
+//     and no "rafiki/" or "fundi/" prefix
 func Validate(r Record) error {
 	if err := ValidName(r.Name); err != nil {
 		return err
@@ -229,7 +233,7 @@ func Validate(r Record) error {
 		return fmt.Errorf("field %q must be %q or %q, got %q", "kind", KindFundi, KindClaude, r.Kind)
 	}
 	if r.Thinking != "" && !thinkingLevels[r.Thinking] {
-		return fmt.Errorf("field %q must be one of off|minimal|low|medium|high|xhigh, got %q", "thinking", r.Thinking)
+		return fmt.Errorf("field %q must be one of off|low|medium|high|xhigh, got %q", "thinking", r.Thinking)
 	}
 	if r.Kind == KindClaude {
 		for _, bad := range []struct {
@@ -261,12 +265,28 @@ func Validate(r Record) error {
 		if key == "" {
 			return fmt.Errorf("field %q keys must be non-empty", "labels")
 		}
-		if strings.HasPrefix(key, "rafiki/") {
-			return fmt.Errorf("field %q keys must not start with %q, got %q", "labels", "rafiki/", key)
+		if !labelKeyRe.MatchString(key) {
+			return fmt.Errorf("field %q key %q contains characters outside [A-Za-z0-9_./-]; such keys are reserved for the spawn path", "labels", key)
+		}
+		if strings.HasPrefix(key, "rafiki/") || strings.HasPrefix(key, "fundi/") {
+			return fmt.Errorf("field %q key %q uses a reserved prefix (rafiki/ and fundi/ are written by the daemon)", "labels", key)
+		}
+		if key == "owner" {
+			return fmt.Errorf("field %q key %q is reserved and written by the daemon", "labels", key)
 		}
 	}
 	return nil
 }
+
+// labelKeyRe mirrors labelKeyRE in cmd/rafikid/labels.go: the only characters
+// a label key the spawn path accepts may contain (letters, digits, underscore,
+// dot, forward-slash, hyphen). pkg/presets cannot import cmd/rafikid, so the
+// rules are hardcoded here; labels.go's validateUserLabelKeys is the source of
+// truth (reservedLabelKeys, reservedLabelPrefixes, labelKeyRE) and the two
+// must be kept in sync -- applyPreset merges a preset's labels into the
+// caller's, which validateUserLabelKeys then rejects, so a preset saved with
+// a key Validate admits would be unspawnable.
+var labelKeyRe = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 
 // Store: owner-scoped, append-only. No method takes a caller-supplied
 // identity other than ownerUserID, which the daemon supplies.

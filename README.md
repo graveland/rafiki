@@ -554,8 +554,8 @@ Agents spawn by `agent_spawn`'s `preset` argument. Spawn-time fields may
 override `model`/`thinking`/budgets, append to the system prompt, and only
 narrow `tools`/`skills`/`mcp_servers`/`context_files` — a preset's allowlist
 never widens, and its system prompt is never replaced. A claude-kind preset
-accepts only `model`, `append_system_prompt`, `executor`, `labels` and
-budgets.
+accepts only `model`, `provider`, `append_system_prompt`, `executor`,
+`labels` and budgets.
 
 ## Paths
 

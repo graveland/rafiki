@@ -254,7 +254,7 @@ watch that row freeze.
 | `RemovePymoduleGitSource` | unary | Delete one of the caller's git source registrations outright (`CodeNotFound` when none is registered). Executors are never told — there is no prune model for git sources; a source's own history is its versioning, and the cached inventory for the name is simply never read again |
 | `ListPresets` | unary | The caller's own agent presets — the latest live row per name, names optionally narrowed to a `prefix` (e.g. `"default:"` for one group). Owner-scoped like `ListPymodules` (§2.3 Presets) |
 | `GetPreset` | unary | One preset: the latest live version's row by default, every version live and deleted with `history`; `CodeNotFound` when no version exists |
-| `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level, budgets >= 0, known tool names, no `rafiki/` label keys); a child-token caller is recorded as the writer |
+| `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); a child-token caller is recorded as the writer |
 | `DeletePreset` | unary | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows |
 | `ConversationSearch` | unary | Query the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, status, path, min_tokens, text, limit) — never a scope: the daemon derives scope server-side from the authenticated credential (`IsUserCredential` → the user's own rows, `IsAdmin` → all, anything else `CodePermissionDenied`) and ANDs it on top, so an `owner` filter can only ever narrow, never widen. `limit` 0 means the default (50) and is clamped to 500. Each row carries id/name/owner/persona/source/model/status/driven_by, created-at, turn and token aggregates, cache-hit ratio, total USD and the first user message snippet |
 | `ConversationExport` | unary | One conversation's decomposed transcript: header identity plus ordered turns (role, verbatim content-block JSON, skills invoked, per-turn tokens/latency/model/prefix hash) and the recovered available-skills catalog. Scope is derived exactly as `ConversationSearch`. A conversation that does not exist OR is outside the caller's scope returns `CodeNotFound` — the two are deliberately indistinguishable, because "you may not read X" would confirm X exists |
@@ -925,11 +925,12 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "type":                "ctrl_spawn",
 
   // Kind (all optional)
-  "kind":                "fundi",         // "fundi" (default, when empty —
-                                            // the daemon's own agent runtime)
-                                            // or "claude" (Claude Code); picks
-                                            // the child's runtime independently
-                                            // of the parent's
+  "kind":                "fundi",         // "fundi" (the default when empty
+                                            // and no preset; with preset set, an
+                                            // empty kind takes the PRESET's kind) or
+                                            // "claude" (Claude Code); picks the
+                                            // child's runtime independently of
+                                            // the parent's
   "preset":              null,             // daemon-side preset resolved first
                                             // (kind, model, tools, prompt,
                                             // budgets); see §2.3 Presets
@@ -959,7 +960,7 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   // Model + auth (all optional; pi resolves from its own config if omitted)
   "provider":            "anthropic",
   "model":               "claude-sonnet-4",
-  "thinking":            "medium",         // off|minimal|low|medium|high|xhigh
+  "thinking":            "medium",         // off|low|medium|high|xhigh
   "apiKey":              "sk-...",         // not persisted in state record
   "passthroughAuth":     null,             // kind=claude, daraja-routed only: ""/"auto"
                                             // (default) bills the user's own Claude

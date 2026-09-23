@@ -111,7 +111,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	cmd.Flags().String("config-dir", "", "CLAUDE_CONFIG_DIR for --kind claude ONLY; ignored by --kind fundi")
 	cmd.Flags().String("append-system-prompt", "", "Append text to the agent's system prompt (any kind); the profile's append-system-prompt.md, if present, is prepended to this")
 	cmd.Flags().StringP("model", "m", "", "Model (e.g. anthropic/claude-sonnet-4); also settable via a profile's `model` field")
-	cmd.Flags().String("thinking", "", "Thinking level: off|minimal|low|medium|high|xhigh")
+	cmd.Flags().String("thinking", "", "Thinking level: off|low|medium|high|xhigh")
 	cmd.Flags().Bool("no-session", false, "Run in ephemeral mode (no session file)")
 	cmd.Flags().String("session", "", "Resume an existing session.jsonl by path")
 	cmd.Flags().String("fork", "", "Fork from an existing session.jsonl by path")
@@ -155,7 +155,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc("fork", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 		return []string{"jsonl"}, cobra.ShellCompDirectiveFilterFileExt
 	})
-	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "minimal", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
+	_ = cmd.RegisterFlagCompletionFunc("thinking", cobra.FixedCompletions([]string{"off", "low", "medium", "high", "xhigh"}, cobra.ShellCompDirectiveNoFileComp))
 	// Scoped to --kind: a claude child cannot resolve an OpenRouter slash id, and
 	// the fundi child cannot resolve one of claude's provider-local ids. Offering
 	// the union produces a child that spawns and attaches and then never

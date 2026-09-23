@@ -83,6 +83,14 @@ func TestPresetValidate(t *testing.T) {
 		{"negative max_children", func() Record { r := fundi(); r.MaxChildren = intPtr(-1); return r }(), "max_children"},
 		{"empty labels key", func() Record { r := fundi(); r.Labels = map[string]string{"": "v"}; return r }(), "labels"},
 		{"labels key in reserved rafiki/ namespace", func() Record { r := fundi(); r.Labels = map[string]string{"rafiki/x": "v"}; return r }(), "labels"},
+		// The spawn path reserves these too (validateUserLabelKeys,
+		// cmd/rafikid/labels.go); a preset saved with one would be unspawnable.
+		{"labels key reserved: owner", func() Record { r := fundi(); r.Labels = map[string]string{"owner": "x"}; return r }(), "labels"},
+		{"labels key in reserved fundi/ namespace", func() Record { r := fundi(); r.Labels = map[string]string{"fundi/x": "v"}; return r }(), "labels"},
+		{"labels key with a space", func() Record { r := fundi(); r.Labels = map[string]string{"has space": "v"}; return r }(), "labels"},
+		// thinking must be one of the levels pkg/fundi's thinkingBudgets can
+		// actually honour; "minimal" is not one of them.
+		{"minimal thinking", func() Record { r := fundi(); r.Thinking = "minimal"; return r }(), "thinking"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.subtest, func(t *testing.T) {
@@ -109,6 +117,22 @@ func TestPresetValidate(t *testing.T) {
 	ok.MaxCost = floatPtr(0)
 	if err := Validate(ok); err != nil {
 		t.Errorf("Validate(claude with model/append_system_prompt/max_cost=0) = %v, want nil", err)
+	}
+
+	// The five thinking levels Validate accepts are exactly the runtime's
+	// (pkg/fundi's thinkingBudgets); a label key may use the full allowed
+	// charset. Both are the saveable-but-unspawnable guards.
+	for _, level := range []string{"off", "low", "medium", "high", "xhigh"} {
+		r := fundi()
+		r.Thinking = level
+		if err := Validate(r); err != nil {
+			t.Errorf("Validate(thinking=%q) = %v, want nil", level, err)
+		}
+	}
+	good := fundi()
+	good.Labels = map[string]string{"env.prod/x_1-y": "v"}
+	if err := Validate(good); err != nil {
+		t.Errorf("Validate(labels with full allowed charset) = %v, want nil", err)
 	}
 }
 

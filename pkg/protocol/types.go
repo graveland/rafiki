@@ -215,7 +215,7 @@ type SpawnRequest struct {
 	// Model + auth (pi resolves from its own config when omitted).
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
-	Thinking string `json:"thinking,omitempty"` // off|minimal|low|medium|high|xhigh
+	Thinking string `json:"thinking,omitempty"` // off|low|medium|high|xhigh
 	APIKey   string `json:"apiKey,omitempty"`
 
 	// Session flags.
