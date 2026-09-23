@@ -1,6 +1,6 @@
 ---
 name: coordinating-agents
-description: Use when spawning, steering, budgeting or waiting on subagents - covers agent_spawn/send/view/kill/set_budget, choosing a model from the live catalog, the async settle model, worktree isolation, task_* as a ledger, and cost budgets as an instrument.
+description: Use when spawning, steering, budgeting or waiting on subagents - covers agent_spawn/send/view/kill/set_budget, dispatching by preset, the async settle model, worktree isolation, task_* as a ledger, and cost budgets as an instrument.
 ---
 
 # Coordinating agents
@@ -39,17 +39,44 @@ wait — do not manufacture tool calls to fill the time.
 Use `agent_list`/`agent_view` when you need to *look something up* — which
 agent is which, what one has said — never as a waiting loop.
 
-## Three settle reasons, three different responses
+## Dispatching by preset
 
-The notification names one:
+A dispatch carries `preset: "<group>:<role>"` — a named seat that fixes kind,
+model, tools, system prompt and budget. You never choose a model yourself; the
+seats live in the daemon's database and are the `managing-presets` skill's
+business.
 
-- **`settled (idle)`** — the turn ended. **This is not a claim of
-  completion.** The agent may have finished, or stopped, or asked you
-  something. Read its report file before deciding anything.
-- **`settled — <limit reason>`** — it hit its cost budget. See *Budgets* below;
-  the right response depends on how expensive the work should have been.
-- **`settled after a turn error: <err>`** — resume once on the same model. A
-  second identical error is not transient: change something.
+- **Always set the preset explicitly.** An omitted preset inherits the daemon
+  default, which silently defeats the seat policy. Record which preset (or its
+  absence) every child ran on.
+- If no preset fits the work, do not improvise a model: tune or create a seat
+  per `managing-presets` — and only when the human asked. Otherwise ask.
+- Override `model`/`thinking`/budgets on a dispatch only when the human named
+  one; tools/skills/mcp_servers may only narrow what the preset allows.
+- Pools are not interchangeable, and only the environment knows which is
+  scarce — a rolling-window subscription costs opportunity, prepaid credits go
+  unspent, metered spend is money. `quota_status` reports a subscription's
+  captured 5h and 7d utilization; consult it **once per plan**, not per
+  dispatch. "No data captured yet" is normal and means *no signal*, not
+  headroom.
+
+## On ANY failure: record the evidence, then STOP and ask
+
+A failure is any of: a settle error, a cost-cap hit, a turn error, or a
+dispatch naming a missing preset. The response is always the same:
+
+1. Write the evidence with `task_update` (or the plan ledger): the settle
+   reason or last error, the preset and model the child ran on, what it had
+   done so far.
+2. STOP and ask the human. **No retry, no model switch, no budget raise, no
+   escalation** — a second attempt is the human's call, made with the evidence
+   in front of them.
+
+Model health degrades along two axes — quality (rounds-to-accept, blocked
+work, review catches it) and economics (the same work suddenly costing several
+times more; a provider-side regression review catches **never**). You cannot
+diagnose the second from inside a session, which is exactly why the failure
+goes to the human with the numbers instead of being retried.
 
 ## Concurrency and seat hygiene
 
@@ -57,72 +84,16 @@ The notification names one:
 your own value. Dispatch wider work in chunks of four; a refusal past the limit
 is a wasted turn.
 
-**A settled child still holds its seat.** Settled-but-unreaped children count
+**A settled child still holds its slot.** Settled-but-unreaped children count
 against the cap, so a refusal naming the limit while everything looks finished
-is not a reason to wait — it is a reaping problem. `agent_kill` finished workers
-as part of handling a settle, not only for runaways. Their branches survive;
-only the conversation goes.
+is not a reason to wait — it is a reaping problem. `agent_kill` finished
+workers as part of handling a settle, not only for runaways. Their branches
+survive; only the conversation goes. (Reap after the task's review is
+adjudicated — an implementer you may need to resume warm for a fix round is
+not reapable until then; if seats are starved, seats go to pending reviews
+first.)
 
 Never run two agents concurrently against the same working tree.
-
-## Choosing the model
-
-**Never carry a model id in memory or in a habit.** Prices, availability and
-provider health move week to week, and an id you remember is stale on a schedule
-you do not control. Resolve a query at dispatch time instead:
-
-- `agent_models` with **no arguments** returns a distribution — how many models,
-  price range and median, context range, tool and vision counts, how many carry
-  benchmark scores. Use it to aim the second call. It does not return every row
-  and you should not want it to.
-- Then narrow, and ask for a handful rather than a page. The response always
-  states how many matched before the cap.
-- A model the catalog cannot answer for — no price, no context, no score — is
-  **kept**, not excluded. Locally-served models look exactly like that.
-
-**If the project declares seats, use them.** A repo's CLAUDE.md or AGENTS.md is
-where provider availability, bans and concrete model choices belong: they are
-facts about one environment, and this skill is not. Absent a declaration,
-resolve a query yourself and record what you chose in the ledger, so the next
-session inherits evidence rather than a guess.
-
-### Qualities, and when each is load-bearing
-
-- **Tool calling** is non-negotiable for any agent that must act, and the
-  catalog reports it as a **tri-state**: "unknown" is not "no". A model that
-  cannot call tools spawns, attaches, and does nothing.
-- **Context** measured against the brief plus everything it will read, not
-  against the brief alone.
-- **Benchmark scores** are weak third-party evidence. Absent means *unscored*,
-  never zero — an unbenchmarked model is not a bad one, and every locally-served
-  model is unbenchmarked.
-- **Turn count beats token price.** The cheapest tier routinely takes two or
-  three times the turns on multi-step work and costs more overall. It is right
-  when the brief contains the code to write — transcription plus tests. For
-  anything that must be inferred from prose, start mid.
-- **Kind scoping is a mechanism, not a policy.** A `claude` child can only
-  resolve Anthropic ids; a `fundi` child needs a provider-qualified one. Hand
-  either the wrong shape and it spawns, attaches, and never answers.
-
-**Always set the model explicitly.** An omitted model inherits the daemon
-default, which silently defeats every choice above.
-
-### Pools are not interchangeable, and only the project knows which is scarce
-
-Where the money comes from changes what "expensive" means:
-
-- A **rolling-window subscription** costs opportunity rather than dollars.
-  Trivial work that eats the window costs you the real work that cannot run at
-  hour four.
-- **Prepaid credits** cost you by going unspent.
-- **Metered spend** is money.
-
-Find out which pools this environment has and which one is constrained — that is
-a CLAUDE.md/AGENTS.md fact, not something to infer. `quota_status` reports a
-subscription's captured 5h and 7d utilization; consult it **once per plan**, not
-per dispatch, because it is a rolling window that does not move between two
-spawns and a call per dispatch is a turn per dispatch. "No data captured yet" is
-normal and means *no signal*, not headroom.
 
 ## The dispatch prompt
 
@@ -201,7 +172,8 @@ worktree remove` refuses outright while untracked files are present.
 `max_cost` is a hard fence on a child **and everything it spawns**, in USD.
 `0` means unlimited — it is not "spend nothing". Always set one when
 coordinating: an unbudgeted subagent is the failure that spends your whole
-grant on one confused loop.
+grant on one confused loop. Size it to what the work *should* cost — a tight
+cap on cheap work is how a degraded seat gets caught.
 
 - You may raise or lower a **direct** child's cap with `agent_set_budget`
   (absolute value, not a delta). Not a grandchild's; ask the intermediate
@@ -210,34 +182,8 @@ grant on one confused loop.
 - If your own grant cannot cover the work ahead, say so now and proceed. You
   will be refused at some spawn; discovering that at the start is strictly
   better than at the end.
-
-### The budget is an instrument, not just a fence
-
-A cap sized to what the work *should* cost turns a breach into a signal. When a
-child breaches:
-
-- **Cheap, mechanical work** → suspect the model, not the estimate. The same
-  work used to fit. Switch models and re-dispatch; do not raise the cap.
-- **Hard, judgement-heavy work** → suspect the estimate. `agent_set_budget` and
-  resume.
-- **In between** → one `agent_view`, then decide.
-
-Record the breach either way. It is evidence about the model regardless of how
-you rule.
-
-### Model health degrades along two axes. Review sees one.
-
-- **Quality** — rounds-to-accept, blocked work, specs missed. Review catches
-  this.
-- **Economics** — the same work suddenly costing several times more. Review
-  catches this **never**, and it is usually a *provider-side* regression rather
-  than anything about the model: a cache layer stops hitting, and output quality
-  is unchanged while cost multiplies.
-
-The second is the one that actually happens, and nothing but the budget will
-tell you. **On an economic anomaly, switch models. Do not diagnose.** Switching
-costs one spawn; debugging someone else's cache layer costs an afternoon and you
-do not own the fix.
+- **A cap hit is a failure** — see *On ANY failure* above: evidence, then STOP
+  and ask. A cap is an instrument, not a licence to retry.
 
 ## `task_*` is a durable ledger, not a scratchpad
 
@@ -260,4 +206,5 @@ Tasks live in the database, survive restarts, and are queryable.
   review findings, extra context, or a correction.
 - `agent_kill` shuts one down. Use it for a child that is looping, working from
   a premise you have since ruled against, duplicating another's work, or simply
-  finished and holding a seat. A killed child's work is lost; its branch is not.
+  finished and holding a slot. A killed child's work is lost; its branch is not.
+  Its task row orphans — reclaim it with `task_update` after the kill.

@@ -1,14 +1,28 @@
 ---
 name: writing-plans
-description: Use when turning an agreed design into an implementation plan for subagents to execute - defines the wave/worktree/rung plan format, how to batch work at authoring time, and how to write task bodies a cheap model can execute.
+description: Use when turning an agreed design into an implementation plan for subagents to execute - defines the wave/worktree plan format, how to batch work at authoring time, where reviews go, and how to write task bodies an implementer seat can execute.
 ---
 
 # Writing an implementation plan
 
 The plan is the only thing the coordinator reads, and one task body is the only
-thing its implementer reads. Its job is to be executable by the **cheapest
-model that can do the work**, which is a property you can check rather than
-hope for.
+thing its implementer reads. Its job is to be executable by the seat it will be
+dispatched to, which is a property you can check rather than hope for.
+
+**Ask for the preset group up front.** Every dispatch names a preset
+(`<group>:<role>`), so a plan needs one. If the design (or the human) did not
+name a group, ask before writing — and record the answer in the header:
+
+```markdown
+# <topic> — implementation plan
+Spec: docs/plans/2026-09-07-<topic>-design.md
+Preset group: default
+Budget: $2.40 across 9 tasks in 3 waves
+```
+
+**Name the group, never models.** Which model fills each seat is decided by the
+`managing-presets` skill against the live catalog — a delisting, a price move
+or a provider going bad does not invalidate a single plan.
 
 ## Document shape
 
@@ -16,6 +30,7 @@ hope for.
 # <topic> — implementation plan
 
 Spec: docs/plans/2026-09-07-<topic>-design.md
+Preset group: default
 Budget: $2.40 across 9 tasks in 3 waves
 
 ## Coverage
@@ -30,7 +45,6 @@ invariants this plan touches — quoted, not summarised.>
 gate: make check
 
 ### Task 1.1 — Add cost_usd to AgentInfo
-rung: 1
 touches: pkg/fundi/tools/agent.go, pkg/fundi/tools/agent_steer.go
 worktree: .worktrees/<plan>-1.1
 max_cost: 0.15
@@ -52,39 +66,45 @@ improvises. Older plans under `docs/plans/complete/` carry exactly that header
 alongside checkbox task lists this format does not use — do not copy one as a
 template.
 
-## The six task fields
+## The five task fields
 
-- **`rung`** — how much ceremony this earns. See below.
 - **`touches`** — the files this task may modify. Checked for disjointness
   within a wave when the plan is written, and against the real diff before the
   branch merges.
 - **`worktree`** — `.worktrees/<plan>-<task>`. Stated, not derived, so a
-  coordinator that lost its context finds the same path. Omit at rung 0.
+  coordinator that lost its context finds the same path. Omit for an inline
+  task.
 - **`max_cost`** — USD, passed straight to `agent_spawn`. **Size it to what the
   work should cost**, not generously: a tight cap on cheap work is how a
-  degraded model gets caught.
+  degraded seat gets caught.
 - **`verify`** — the exact command that proves this task. Not "run the tests".
-  Required at every rung, including 0, because rung 0 is the rung most often
-  tagged wrong.
+  Required for every task, including inline ones, because inline is the mode
+  most often tagged wrong.
 - **body** — the work.
 
-**Name rungs, never models.** The rung-to-seat mapping lives in
-`subagent-driven-development`, and which model fills a seat is a fact about the
-environment that belongs in the project's CLAUDE.md/AGENTS.md — so a delisting,
-a price move or a provider going bad does not invalidate a single plan.
+**Inline tasks exist.** A one-line change whose body contains the exact text
+gains nothing from a spawn — mark it for the coordinator to edit itself, run
+its `verify`, and commit. Tag honestly: an inflated dispatch costs a spawn and
+a review cycle on a one-line change; a deflated one costs a bug.
 
-## The rungs
+## Where reviews go
 
-| Rung | Work | What it costs to run |
-|---|---|---|
-| **0** | one line, one constant; the body contains the exact text | coordinator edits inline. No subagent, no review |
-| **1** | several same-shape mechanical edits | one subagent; the coordinator reads the diff itself |
-| **2** | an ordinary task with its own tests | implementer plus a reviewer |
-| **3** | a CLAUDE.md invariant, concurrency, a security boundary, a wire format | implementer plus a reviewer on the strongest seat |
+Review placement is yours to decide, and the plan states it — the coordinator
+does not infer ceremony. The rules:
 
-Tag honestly. A rung inflated "to be safe" costs two spawns and a review cycle
-on a one-line change; a rung deflated costs a bug. The coordinator may raise a
-rung on evidence and may never lower one.
+- **A task that touches a CLAUDE.md invariant, concurrency, a wire format, or
+  a security boundary gets its own reviewer checkpoint** (a `<group>:reviewer`
+  dispatch after it lands). This is the one hard rule — these are the tasks a
+  cheap first pass quietly gets wrong.
+- Everything else: batch reviews at **wave boundaries** by default. One review
+  over a wave's whole diff is cheaper than one per task and still catches
+  cross-task drift; split a wave's review into per-task reviews only when a
+  task carries a plan invariant or lands in a request path.
+- **Reviewers are always a fresh spawn** — a different agent, never the
+  implementer's conversation.
+- **The whole-change `:final-reviewer` review is mandatory and budgeted
+  first** — it is the seat that catches what every per-task review missed, and
+  it is the one a budget shortfall silently deletes.
 
 ## Waves
 
@@ -102,14 +122,16 @@ its `gate:`.
   give that task its own wave. Never two tasks in one wave editing one file.
 - Order waves by dependency. Do not build a general graph; a barrier is enough
   and is impossible to get wrong.
+- Prefer a review checkpoint on a wave boundary: it sees the wave's whole diff
+  after the gate, where per-task context is fresh in the reviewer's brief.
 
-## Writing a body a cheap model can execute
+## Writing a body a seat can execute
 
 Three rules, each of which a reviewer can fail a plan on:
 
-1. **A rung-0 or rung-1 body must be transcribable.** Could a model with zero
-   knowledge of this repo produce the diff from this body alone? If not, it is
-   not rung 1 — either write the body properly or raise the rung.
+1. **An inline or mechanical body must be transcribable.** Could a model with
+   zero knowledge of this repo produce the diff from this body alone? If not,
+   either write the body properly or mark it for a review checkpoint.
 2. **Every exact value appears in the body** — constants, strings, signatures,
    test names, error text. Never "as described in the design doc". The
    implementer receives the brief and nothing else.
@@ -125,12 +147,12 @@ because every task carries a spawn and possibly a review.
 ## Budget
 
 Every task carries `max_cost`; the header states the total. **That total is not
-the sum of the implementer caps** — it is the implementers, plus a reviewer seat
-for every rung-2 and rung-3 task, plus the fix rounds those rungs allow, plus a
-named reserve for the whole-branch final review. Stating only the implementer
-caps understates a plan by roughly half, and the seat a shortfall silently
-deletes is the final review: it runs last, and it is the one that catches what
-every per-task review missed.
+the sum of the implementer caps** — it is the implementers, plus the review
+checkpoints the plan places, plus the fix rounds they allow, plus the
+whole-branch `:final-reviewer` review, named and budgeted first. Stating only
+the implementer caps understates a plan by roughly half, and the review a
+shortfall silently deletes runs last, after everything else has consumed the
+margin.
 
 A coordinator cannot spend more than its own grant, so stating the number
 honestly makes a shortfall visible before anything runs instead of at task
@@ -183,11 +205,11 @@ questions, roughly in order of what they cost when missed:
    catches its mirror image: a file specified in two bodies and declared in
    neither, where both implementers must report BLOCKED to obey their own
    isolation rules. Walk the bodies, not the `touches:` lines.
-7. **Is every `max_cost` priced for the seat that fills it, and everything that
-   seat reads?** A cap is a number about a model, and the plan does not name
-   models. When a review seat is described as an expensive model in one
-   paragraph and priced at a flat rung rate in another, the coordinator
-   discovers it mid-flight and raises budgets under time pressure.
+7. **Is every `max_cost` priced for what the task actually reads?** A cap is a
+   number about a seat and everything it will read — the brief plus the files.
+   When a review checkpoint is described as reading a whole wave's diff but
+   priced at a per-task rate, the coordinator discovers it mid-flight and raises
+   budgets under time pressure.
 
 This pass is cheap and it is not optional. It is the only place these defects
 are visible at all, and each one that survives it costs a dispatch, a review
