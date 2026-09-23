@@ -478,10 +478,7 @@ func (c *ModelCatalog) ResolveLatest(family string) (string, string, bool) {
 	prefix := "anthropic/claude-" + family
 	var best orModel
 	for _, m := range c.models {
-		if strings.HasPrefix(m.ID, "~") || strings.HasSuffix(m.ID, "-fast") {
-			continue
-		}
-		if !strings.HasPrefix(m.ID, prefix) {
+		if _, ok := nativeAnthropicID(m.ID); !ok || !strings.HasPrefix(m.ID, prefix) {
 			continue
 		}
 		if best.ID == "" || m.Created > best.Created {
@@ -530,6 +527,17 @@ func inModelLine(id, prefix string) bool {
 
 // anthropicIDFromOR derives the Anthropic API id from an OR id:
 // "anthropic/claude-opus-4.8" -> "claude-opus-4-8".
+// nativeAnthropicID returns the native-sender id for a catalog entry the
+// native Anthropic sender can run: an "anthropic/claude-*" id that is not a
+// ~alias, a ":<suffix>" pricing twin (":batch" carries its base model's
+// created stamp, so it would otherwise tie with it), or a "-fast" variant.
+func nativeAnthropicID(orID string) (string, bool) {
+	if !strings.HasPrefix(orID, "anthropic/claude-") || strings.Contains(orID, ":") || strings.HasSuffix(orID, "-fast") {
+		return "", false
+	}
+	return anthropicIDFromOR(orID), true
+}
+
 func anthropicIDFromOR(orID string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(orID, "anthropic/"), ".", "-")
 }
@@ -867,6 +875,9 @@ type CatalogRow struct {
 	IntelligenceIndex *float64
 	CodingIndex       *float64
 	AgenticIndex      *float64
+	// AnthropicID is the native-sender spelling ("claude-opus-5-5") of an
+	// entry the native Anthropic sender can run, empty for everything else.
+	AnthropicID string
 }
 
 // SeedForTest injects catalog entries without a network fetch (tests only).
@@ -952,6 +963,7 @@ func (c *ModelCatalog) Rows() []CatalogRow {
 			CacheWriteUSD:       optionalPrice(m.Pricing.InputCacheWrite),
 			InputModalities:     m.Architecture.InputModalities,
 		}
+		row.AnthropicID, _ = nativeAnthropicID(m.ID)
 		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

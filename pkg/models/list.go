@@ -54,11 +54,10 @@ type Model struct {
 // knownModels is a curated list of commonly-used "provider/model" identifiers.
 // Keep additions alphabetically grouped by provider for readability.
 //
-// Only the Anthropic entries here are load-bearing: every other provider's ids
-// also arrive from the live OpenRouter catalog, so these are a warm-start for a
-// cold cache rather than the only way to reach them. Anthropic ids cannot come
-// from that catalog (see the package doc), so this list plus the "<family>-latest"
-// aliases is the whole of what completion offers for the native path.
+// Every entry is a warm-start for a cold catalog, not the only way to reach a
+// model: the daemon extends builtin with the live catalog's native-runnable
+// Anthropic ids (cmd/rafikid ListModelRows), and every other provider's ids
+// arrive from the catalog directly.
 var knownModels = []string{
 	// Anthropic. Concrete ids date quickly — prefer the "<family>-latest"
 	// aliases loadBuiltins appends, which resolve live against the catalog.
@@ -68,8 +67,6 @@ var knownModels = []string{
 	"anthropic/claude-opus-4-7",
 	"anthropic/claude-sonnet-4-5",
 	"anthropic/claude-haiku-4-5",
-	"anthropic/claude-3-5-sonnet-latest",
-	"anthropic/claude-3-5-haiku-latest",
 
 	// OpenAI
 	"openrouter/openai/gpt-4o",

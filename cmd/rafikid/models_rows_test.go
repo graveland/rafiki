@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,50 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 	} {
 		if got != nil {
 			t.Errorf("bare %s = %v, want ABSENT (field not in snapshot)", name, *got)
+		}
+	}
+}
+
+// The claude kind's rows come from the catalog, not only the curated list: a
+// model released after the list was written must appear under its native
+// (dashed) id, priced. A curated dashed id must pick up its dotted entry's
+// price, a <family>-latest alias its resolved entry's, and no ":batch" twin
+// may surface as a row.
+func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
+	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	price := func(p float64) *routing.ModelPricing {
+		return &routing.ModelPricing{PromptUSD: p, CompletionUSD: 5 * p}
+	}
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "anthropic/claude-opus-5.5", Created: 9, Pricing: price(5e-6)},
+		{ID: "anthropic/claude-opus-5.5:batch", Created: 9, Pricing: price(2.5e-6)},
+		{ID: "anthropic/claude-haiku-4.5", Created: 3, Pricing: price(1e-6)},
+		{ID: "openai/gpt-4o", Created: 1, Pricing: price(2.5e-6)},
+	})
+	c := &Controller{catalog: cat}
+	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]connectapi.ModelRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+		if r.Provider != "anthropic" || strings.Contains(r.ID, ":") {
+			t.Errorf("claude-kind row %q (provider %q) must not be offered", r.ID, r.Provider)
+		}
+	}
+	for id, want := range map[string]float64{
+		"anthropic/claude-opus-5-5":  5e-6, // catalog-only: not in the curated list
+		"anthropic/claude-haiku-4-5": 1e-6, // curated dashed id, dotted catalog entry
+		"anthropic/opus-latest":      5e-6, // alias priced as what it resolves to
+	} {
+		r, ok := byID[id]
+		if !ok {
+			t.Errorf("row %q missing", id)
+			continue
+		}
+		if r.PromptUSD == nil || *r.PromptUSD != want {
+			t.Errorf("%s: PromptUSD = %v, want %v", id, r.PromptUSD, want)
 		}
 	}
 }

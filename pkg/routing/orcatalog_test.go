@@ -975,3 +975,45 @@ func TestCatalogDecodesAllThreeBenchmarkScores(t *testing.T) {
 		t.Errorf("AgenticIndex = %v, want 59.2", r.AgenticIndex)
 	}
 }
+
+// OpenRouter lists a ":batch" twin beside each Anthropic model with the SAME
+// created stamp, so a tie-broken-by-order pick could land on the twin and
+// hand the native sender "claude-opus-5-5:batch". Seed the twin FIRST.
+func TestResolveLatestSkipsVariantTwins(t *testing.T) {
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	c.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-opus-5.5:batch", Created: 9},
+		{ID: "anthropic/claude-opus-5.5", Created: 9},
+		{ID: "anthropic/claude-opus-5", Created: 5},
+	})
+	ant, or, ok := c.ResolveLatest("opus")
+	if !ok || ant != "claude-opus-5-5" || or != "anthropic/claude-opus-5.5" {
+		t.Fatalf("opus: got (%q,%q,%v)", ant, or, ok)
+	}
+}
+
+// AnthropicID is the native-sender spelling of a catalog row, and empty for
+// anything the native sender cannot run: other vendors, and the ~alias,
+// ":batch" and "-fast" variants.
+func TestRowsCarryAnthropicID(t *testing.T) {
+	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
+	c.SeedForTest([]CatalogEntry{
+		{ID: "anthropic/claude-opus-5.5", Created: 1},
+		{ID: "anthropic/claude-opus-5.5:batch", Created: 1},
+		{ID: "anthropic/claude-opus-4.8-fast", Created: 1},
+		{ID: "anthropic/claude-sonnet-5", Created: 1},
+		{ID: "openai/gpt-4o", Created: 1},
+	})
+	want := map[string]string{
+		"anthropic/claude-opus-5.5":       "claude-opus-5-5",
+		"anthropic/claude-opus-5.5:batch": "",
+		"anthropic/claude-opus-4.8-fast":  "",
+		"anthropic/claude-sonnet-5":       "claude-sonnet-5",
+		"openai/gpt-4o":                   "",
+	}
+	for _, r := range c.Rows() {
+		if got := r.AnthropicID; got != want[r.ID] {
+			t.Errorf("%s: AnthropicID = %q, want %q", r.ID, got, want[r.ID])
+		}
+	}
+}

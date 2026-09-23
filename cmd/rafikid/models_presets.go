@@ -244,14 +244,10 @@ func filterRowsForKind(rows []connectapi.ModelRow, kind string) []connectapi.Mod
 	return out
 }
 
-// catalogFactsByID flattens the daemon's already-warm catalog into a join
-// table. One Rows() call rather than per-id lookups: each of those resolves
-// and locks, so a ~300-model catalog would cost 300 of each.
-func (c *Controller) catalogFactsByID() map[string]catalogFacts {
-	if c.catalog == nil {
-		return nil
-	}
-	rows := c.catalog.Rows()
+// catalogFactsByID flattens the catalog's rows into a join table. It takes
+// rows from one Rows() call rather than doing per-id lookups: each of those
+// resolves and locks, so a ~300-model catalog would cost 300 of each.
+func (c *Controller) catalogFactsByID(rows []routing.CatalogRow) map[string]catalogFacts {
 	out := make(map[string]catalogFacts, len(rows))
 	for _, r := range rows {
 		f := catalogFacts{
@@ -273,6 +269,18 @@ func (c *Controller) catalogFactsByID() map[string]catalogFacts {
 		}
 		out["openrouter/"+r.ID] = f
 		out[r.ID] = f // the spine spells OpenRouter ids both ways
+		if r.AnthropicID != "" {
+			out["anthropic/"+r.AnthropicID] = f // native spelling: dashes, not dots
+		}
+	}
+	// A <family>-latest alias carries the facts of the entry it resolves to.
+	for _, alias := range routing.LatestFamilies() {
+		fam, _ := routing.LatestAlias(alias)
+		if _, orID, ok := c.catalog.ResolveLatest(fam); ok {
+			if f, found := out[orID]; found {
+				out["anthropic/"+alias] = f
+			}
+		}
 	}
 	return out
 }
@@ -294,22 +302,36 @@ func (c *Controller) ListModelRows(ctx context.Context, provider, kind string) (
 	}
 	spine := models.ListSources(ctx, providersOrDefault(c.providers), spineWant)
 
-	facts := c.catalogFactsByID()
-	if want[models.SourceOpenRouter] && c.catalog != nil {
+	var facts map[string]catalogFacts
+	if c.catalog != nil {
+		catRows := c.catalog.Rows()
+		facts = c.catalogFactsByID(catRows)
 		seen := make(map[string]bool, len(spine))
 		for _, m := range spine {
 			seen[m.ID] = true
 		}
-		for _, r := range c.catalog.Rows() {
-			id := "openrouter/" + r.ID
-			if seen[id] {
-				continue
+		add := func(m models.Model) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				spine = append(spine, m)
 			}
-			seen[id] = true
-			spine = append(spine, models.Model{
-				ID: id, Provider: "openrouter", Model: r.ID,
-				Name: r.Name, Source: models.SourceOpenRouter,
-			})
+		}
+		for _, r := range catRows {
+			// The curated list can't keep up with Anthropic releases; the
+			// catalog's native-runnable entries extend it under builtin, the
+			// source that serves the native Anthropic path.
+			if want[models.SourceBuiltin] && r.AnthropicID != "" {
+				add(models.Model{
+					ID: "anthropic/" + r.AnthropicID, Provider: "anthropic", Model: r.AnthropicID,
+					Name: r.Name, Source: models.SourceBuiltin,
+				})
+			}
+			if want[models.SourceOpenRouter] {
+				add(models.Model{
+					ID: "openrouter/" + r.ID, Provider: "openrouter", Model: r.ID,
+					Name: r.Name, Source: models.SourceOpenRouter,
+				})
+			}
 		}
 	}
 
