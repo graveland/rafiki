@@ -674,11 +674,15 @@ func TestStoreStoppedRule(t *testing.T) {
 	owner := insertUser(t, pool, "stopped-owner")
 
 	cases := []struct {
-		name   string
-		conv   convFixture
-		child  *childFixture
-		msgAge time.Duration
-		want   bool
+		name  string
+		conv  convFixture
+		child *childFixture
+		// unlinkedChild inserts the child row with conversation_id NULL, so the
+		// conversation links — or fails to link — through external_ref alone:
+		// the claude shape, where the thread ref is the only tie.
+		unlinkedChild bool
+		msgAge        time.Duration
+		want          bool
 	}{
 		{
 			name:   "closed_at set",
@@ -723,22 +727,44 @@ func TestStoreStoppedRule(t *testing.T) {
 			// The child row exists but links to nothing: conversation_id NULL
 			// and child_id matching neither the external_ref equality nor the
 			// LIKE arm. Unlinked, so the old messages alone decide.
-			name:   "different child id does not link",
-			conv:   convFixture{Owner: owner, Name: "unlinked", ExternalRef: "c_unlinked:thread-1"},
-			child:  &childFixture{ID: "c_other", Status: "running"},
-			msgAge: 3 * time.Hour,
-			want:   true,
+			name:          "different child id does not link",
+			conv:          convFixture{Owner: owner, Name: "unlinked", ExternalRef: "c_unlinked:thread-1"},
+			child:         &childFixture{ID: "c_other", Status: "running"},
+			unlinkedChild: true,
+			msgAge:        3 * time.Hour,
+			want:          true,
+		},
+		{
+			// The LIKE arm must read the child id's underscore as a literal.
+			// Child c_1 ties to its claude-style thread through external_ref
+			// alone (conversation_id NULL — the claude shape), and the fresh
+			// messages leave the exited-child arm the only thing that can make
+			// the conversation stopped: the linkage itself must work.
+			name:          "underscore child id links its own thread",
+			conv:          convFixture{Owner: owner, Name: "uscore-own", ExternalRef: "c_1:t9"},
+			child:         &childFixture{ID: "c_1", Status: "exited"},
+			unlinkedChild: true,
+			msgAge:        time.Minute,
+			want:          true,
+		},
+		{
+			// ...and an external_ref differing ONLY at the underscore position
+			// must not link. Unescaped, LIKE 'c_1:%' reads '_' as a wildcard and
+			// would stop ca1:t9 through a child it does not belong to; the fresh
+			// messages keep every other arm quiet, so the linkage alone decides.
+			name:   "same-shaped external_ref without the underscore does not link",
+			conv:   convFixture{Owner: owner, Name: "uscore-decoy", ExternalRef: "ca1:t9"},
+			msgAge: time.Minute,
+			want:   false,
 		},
 	}
 	for _, tc := range cases {
 		conv := insertConversation(t, pool, tc.conv)
 		if tc.child != nil {
-			// Only the "different child id" case leaves the child unlinked: it
-			// carries no conversation_id and an unrelated child_id.
-			if tc.child.ID != "c_other" {
-				insertChild(t, pool, *tc.child, conv)
-			} else {
+			if tc.unlinkedChild {
 				insertChild(t, pool, *tc.child, "")
+			} else {
+				insertChild(t, pool, *tc.child, conv)
 			}
 		}
 		insertMessage(t, pool, conv, 0, "user", "stopped rule fixture", ago(tc.msgAge))
