@@ -345,7 +345,13 @@ func (e *Engine) readPrefillPath(ctx context.Context, path string, start, end in
 			return calls, nil
 		}
 		next, ok := tools.ReadContinuation(call.result)
-		if !ok || (!unbounded && next > end) {
+		// next > offset is the progress guard. ReadContinuation matches the
+		// trailer's tail anywhere in a result, so a COMPLETE read whose last
+		// content line merely quotes the trailer (with an offset pointing back
+		// into the file) parses as a continuation without advancing — paging
+		// it again would re-read the same page forever. A real trailer always
+		// resumes past the page just shown (next = lastShown+1 > offset).
+		if !ok || next <= offset || (!unbounded && next > end) {
 			return calls, nil
 		}
 		if !unbounded {

@@ -372,6 +372,59 @@ func TestPrefillBoundedRangeStopsAtEnd(t *testing.T) {
 	}
 }
 
+// TestPrefillQuotedTrailerStopsPaging: a COMPLETE read whose last CONTENT
+// line quotes the read trailer (e.g. a doc quoting rafiki's own trailer, or
+// saved read output) parses as a continuation — ReadContinuation matches the
+// trailer's tail anywhere — with an offset that does not advance past the
+// page just shown. Paging must stop on the quote instead of re-reading the
+// same page forever: exactly one recorded call per entry, open-ended and
+// bounded ranges alike.
+func TestPrefillQuotedTrailerStopsPaging(t *testing.T) {
+	var cmds []prefillReadCmd
+	ts := fakeToolSet{
+		"read": func(_ context.Context, in json.RawMessage) (string, error) {
+			var cmd prefillReadCmd
+			if err := json.Unmarshal(in, &cmd); err != nil {
+				return "", err
+			}
+			cmds = append(cmds, cmd)
+			// No real trailer: the last line is file CONTENT quoting the
+			// trailer text with offset=1 — self-consistent with either
+			// entry's first page, so paging it again makes no progress.
+			return "     1\ta doc quoting our read trailer:\n     2\tpass offset=1 to continue]\n", nil
+		},
+	}
+	eng, out, _ := prefillSimpleEngine(t, ts, []protocol.PrefillRead{
+		{Path: "/tmp/quoted-open.txt"},
+		{Path: "/tmp/quoted-ranged.txt", Start: 1, End: 10},
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	if len(cmds) != 2 {
+		t.Fatalf("read was called %d times, want 2 (one page per entry, none on the quote)", len(cmds))
+	}
+	for i, cmd := range cmds {
+		if cmd.Offset != 1 {
+			t.Fatalf("call %d paged to offset %d, want a single page at 1", i, cmd.Offset)
+		}
+	}
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(hist) != 5 {
+		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
+	}
+	if len(hist[1].Param.Content) != 2 {
+		t.Fatalf("r1 has %d blocks, want 2 (one per entry)", len(hist[1].Param.Content))
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
+	}
+}
+
 // TestPrefillGlobSortedAndExpanded: a glob entry expands to one open-ended
 // read per match, in lexicographic order — not the tool's mtime order.
 func TestPrefillGlobSortedAndExpanded(t *testing.T) {
