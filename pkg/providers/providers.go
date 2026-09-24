@@ -13,6 +13,7 @@ package providers
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -113,11 +114,65 @@ func (p Provider) APIKey() string {
 	return os.Getenv(p.APIKeyEnv)
 }
 
+// EmbeddingsConfig is the [embeddings] table: a self-contained,
+// OpenAI-shaped /embeddings endpoint. Absent = BM25-only recall.
+type EmbeddingsConfig struct {
+	URL        string `toml:"url"`
+	APIKeyEnv  string `toml:"api_key_env"`
+	Model      string `toml:"model"`
+	Dimensions int    `toml:"dimensions"`
+}
+
+// APIKey resolves the embeddings credential from the environment, mirroring
+// Provider.APIKey: empty for a keyless endpoint, and empty (not an error) when
+// the named variable is unset — an unset key surfaces as an upstream 401.
+func (e EmbeddingsConfig) APIKey() string {
+	if e.APIKeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(e.APIKeyEnv)
+}
+
+func (e EmbeddingsConfig) validate() error {
+	u, err := url.Parse(e.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("providers: [embeddings] url must be an absolute http(s) URL, got %q", e.URL)
+	}
+	if e.Model == "" {
+		return errors.New("providers: [embeddings] model is required")
+	}
+	if e.Dimensions < 1 || e.Dimensions > 16000 {
+		return fmt.Errorf("providers: [embeddings] dimensions must be 1..16000, got %d", e.Dimensions)
+	}
+	return nil
+}
+
+// SummariesConfig is the [summaries] table. Model uses the same
+// provider/model addressing as everything else. Absent = no summaries.
+type SummariesConfig struct {
+	Model            string `toml:"model"`
+	MaxSegmentTokens int    `toml:"max_segment_tokens"`
+}
+
+func (s SummariesConfig) validate() error {
+	if s.Model == "" {
+		return errors.New("providers: [summaries] model is required")
+	}
+	if s.MaxSegmentTokens < 0 {
+		return fmt.Errorf("providers: [summaries] max_segment_tokens must be >= 0, got %d", s.MaxSegmentTokens)
+	}
+	return nil
+}
+
 // Set is the whole registry: the contents of providers.toml, which is by
 // definition the contents of the future rafikid.toml [llm] section.
 type Set struct {
 	DefaultProvider string              `toml:"default_provider"`
 	Providers       map[string]Provider `toml:"providers"`
+	// Embeddings is the [embeddings] table; nil means BM25-only recall.
+	Embeddings *EmbeddingsConfig `toml:"embeddings"`
+	// Summaries is the [summaries] table; nil means no summaries.
+	Summaries *SummariesConfig `toml:"summaries"`
 }
 
 // Get returns a provider by name.
@@ -267,6 +322,16 @@ func (s *Set) Validate() error {
 	}
 	if _, ok := s.Providers[s.DefaultProvider]; !ok {
 		return fmt.Errorf("providers: default_provider %q is not a defined provider (have: %s)", s.DefaultProvider, strings.Join(s.Names(), ", "))
+	}
+	if s.Embeddings != nil {
+		if err := s.Embeddings.validate(); err != nil {
+			return err
+		}
+	}
+	if s.Summaries != nil {
+		if err := s.Summaries.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

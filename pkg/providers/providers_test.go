@@ -212,3 +212,158 @@ skills = "*"
 		t.Errorf("star: Skills = %v, want pointer to \"*\"", got)
 	}
 }
+
+func TestProvidersLoadsEmbeddingsAndSummaries(t *testing.T) {
+	t.Setenv("EMBED_TEST_API_KEY", "vk")
+	const toml = `
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[embeddings]
+url = "https://embed.internal:8443/v1/embeddings"
+api_key_env = "EMBED_TEST_API_KEY"
+model = "bge-large"
+dimensions = 1536
+
+[summaries]
+model = "anthropic/claude-haiku-4-5"
+max_segment_tokens = 6000
+`
+	set, err := providers.Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse with [embeddings] and [summaries]: %v", err)
+	}
+	e := set.Embeddings
+	if e == nil {
+		t.Fatal("Embeddings = nil, want the decoded table")
+	}
+	if e.URL != "https://embed.internal:8443/v1/embeddings" {
+		t.Errorf("Embeddings.URL = %q", e.URL)
+	}
+	if e.APIKeyEnv != "EMBED_TEST_API_KEY" {
+		t.Errorf("Embeddings.APIKeyEnv = %q", e.APIKeyEnv)
+	}
+	if e.Model != "bge-large" || e.Dimensions != 1536 {
+		t.Errorf("Embeddings.Model = %q, Dimensions = %d, want bge-large, 1536", e.Model, e.Dimensions)
+	}
+	if got := e.APIKey(); got != "vk" {
+		t.Errorf("Embeddings.APIKey() = %q, want the env value", got)
+	}
+	s := set.Summaries
+	if s == nil {
+		t.Fatal("Summaries = nil, want the decoded table")
+	}
+	if s.Model != "anthropic/claude-haiku-4-5" || s.MaxSegmentTokens != 6000 {
+		t.Errorf("Summaries = %+v, want model anthropic/claude-haiku-4-5, 6000", s)
+	}
+
+	// A config without the tables must leave them nil (absent = BM25-only
+	// recall, no summaries), and Undecoded must not reject the tables when
+	// they ARE present — Parse above would have failed otherwise.
+	plain, err := providers.Parse([]byte(goodTOML))
+	if err != nil {
+		t.Fatalf("Parse without the new tables: %v", err)
+	}
+	if plain.Embeddings != nil || plain.Summaries != nil {
+		t.Errorf("tables must be nil when absent: Embeddings = %v, Summaries = %v", plain.Embeddings, plain.Summaries)
+	}
+}
+
+func TestProvidersRejectsBadEmbeddings(t *testing.T) {
+	const base = `
+default_provider = "x"
+[providers.x]
+kind = "anthropic"
+`
+	const embeddings = `
+[embeddings]
+url = "https://e.internal/v1"
+model = "m"
+dimensions = 1536
+`
+	cases := []struct {
+		name string
+		toml string
+		want string // substring the error must contain
+	}{
+		{
+			name: "dimensions zero",
+			toml: strings.ReplaceAll(embeddings, "dimensions = 1536", ""),
+			want: "[embeddings] dimensions must be 1..16000, got 0",
+		},
+		{
+			name: "dimensions too large",
+			toml: strings.ReplaceAll(embeddings, "dimensions = 1536", "dimensions = 16001"),
+			want: "[embeddings] dimensions must be 1..16000, got 16001",
+		},
+		{
+			name: "relative url",
+			toml: strings.ReplaceAll(embeddings, "https://e.internal/v1", "embed.internal/v1"),
+			want: "[embeddings] url must be an absolute http(s) URL",
+		},
+		{
+			name: "url without a host",
+			toml: strings.ReplaceAll(embeddings, "https://e.internal/v1", "http://"),
+			want: "[embeddings] url must be an absolute http(s) URL",
+		},
+		{
+			name: "wrong scheme",
+			toml: strings.ReplaceAll(embeddings, "https://e.internal/v1", "ftp://e.internal/v1"),
+			want: "[embeddings] url must be an absolute http(s) URL",
+		},
+		{
+			name: "missing model",
+			toml: strings.ReplaceAll(embeddings, "model = \"m\"\n", ""),
+			want: "[embeddings] model is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := providers.Parse([]byte(base + tc.toml))
+			if err == nil {
+				t.Fatalf("Parse succeeded, want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestProvidersRejectsBadSummaries(t *testing.T) {
+	const base = `
+default_provider = "x"
+[providers.x]
+kind = "anthropic"
+`
+	cases := []struct {
+		name string
+		toml string
+		want string
+	}{
+		{
+			name: "missing model",
+			toml: "[summaries]\nmax_segment_tokens = 6000\n",
+			want: "[summaries] model is required",
+		},
+		{
+			name: "negative max_segment_tokens",
+			toml: "[summaries]\nmodel = 'anthropic/claude-haiku-4-5'\nmax_segment_tokens = -1\n",
+			want: "[summaries] max_segment_tokens must be >= 0, got -1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := providers.Parse([]byte(base + tc.toml))
+			if err == nil {
+				t.Fatalf("Parse succeeded, want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
