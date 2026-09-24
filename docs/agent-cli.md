@@ -445,7 +445,7 @@ Example (`plan-files.txt`):
 # context every worker needs
 CLAUDE.md
 docs/plans/2026-09-24-prefilled-spawn-plan/task-2.1-brief.md:1-80
-pkg/**/*.go:-30
+pkg/**/*.go
 ```
 
 `--prefill-files -` reads the list from stdin and is only allowed with
