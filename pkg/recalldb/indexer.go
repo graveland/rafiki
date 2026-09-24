@@ -215,7 +215,7 @@ func (s *Store) pendingMemoryEmbeds(ctx context.Context, model string, per int) 
 }
 
 func (s *Store) pendingSummaryEmbeds(ctx context.Context, model string, per int) ([]recall.EmbedItem, error) {
-	rows, err := s.pool.Query(ctx, `SELECT s.id::text, s.title, s.summary, c.name, `+repoBaseSQL+`, c.origin_entrypoint, c.created_at
+	rows, err := s.pool.Query(ctx, `SELECT s.id::text, s.title, s.summary, coalesce(c.name, ''), `+repoBaseSQL+`, c.origin_entrypoint, c.created_at
 		FROM conversations.conversation_summary s
 		JOIN conversations.conversation c ON c.id = s.conversation_id
 		WHERE (s.embedding IS NULL OR s.embedding_model IS DISTINCT FROM $1)
@@ -244,7 +244,7 @@ func (s *Store) pendingSummaryEmbeds(ctx context.Context, model string, per int)
 }
 
 func (s *Store) pendingWindowEmbeds(ctx context.Context, model string, per int) ([]recall.EmbedItem, error) {
-	rows, err := s.pool.Query(ctx, `SELECT w.id::text, w.text, c.name, `+repoBaseSQL+`, c.origin_entrypoint, c.created_at
+	rows, err := s.pool.Query(ctx, `SELECT w.id::text, w.text, coalesce(c.name, ''), `+repoBaseSQL+`, c.origin_entrypoint, c.created_at
 		FROM conversations.conversation_window w
 		JOIN conversations.conversation c ON c.id = w.conversation_id
 		WHERE (w.embedding IS NULL OR w.embedding_model IS DISTINCT FROM $1)

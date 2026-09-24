@@ -832,6 +832,43 @@ func TestStorePendingEmbedsSkipsLiveTail(t *testing.T) {
 	}
 }
 
+func TestStorePendingEmbedsNullNameConversation(t *testing.T) {
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "pending-null-name")
+	// Prod shape the wave-2 fixtures never had: a conversation with a NULL
+	// name (and NULL repo_root). PendingEmbeds' summary/window queries join
+	// the conversation for the EmbedHeader meta — an uncoalesced c.name scan
+	// fails the whole embed pass with "cannot scan NULL into *string" the
+	// first time one of these rows is pending (observed live on prod).
+	conv := insertConversation(t, pool, convFixture{Owner: owner, RepoRoot: ""})
+	if _, err := pool.Exec(ctx, `UPDATE conversations.conversation SET name = NULL, repo_root = NULL WHERE id = $1::uuid`, conv); err != nil {
+		t.Fatalf("null out name/repo: %v", err)
+	}
+	insertMessage(t, pool, conv, 0, "user", "sealed content", ago(3*time.Hour))
+	sealedID := insertWindow(t, pool, conv, owner, 0, 0, 0, "sealed window text", true)
+
+	items, err := st.PendingEmbeds(ctx, "pn", 10)
+	if err != nil {
+		t.Fatalf("pending embeds with a NULL-name conversation: %v", err)
+	}
+	var found *recall.EmbedItem
+	for i := range items {
+		if items[i].ID == sealedID {
+			found = &items[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("sealed window %s missing from pending embeds: %v", sealedID, items)
+	}
+	// EmbedHeader renders the empty name as an empty quoted string and the
+	// missing repo as "-"; either way the header, not a scan error.
+	wantPrefix := "repo: - · conversation: \"\" · "
+	if !strings.HasPrefix(found.Text, wantPrefix) {
+		t.Errorf("embed text %q, want prefix %q", found.Text, wantPrefix)
+	}
+}
+
 func TestStoreWriteWindowsClearsEmbeddingOnTextChange(t *testing.T) {
 	st, pool := testStore(t)
 	ctx := context.Background()
