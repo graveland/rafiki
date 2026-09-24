@@ -444,11 +444,45 @@ func (e *Engine) Wait() { e.wg.Wait() }
 func (e *Engine) Close() { close(e.wake) }
 
 // worker drains the prompt queue serially for the engine's lifetime, and
-// stops for good the first time a turn panics. When AutoResume is set, it
-// calls agentloop.Resume on startup to finalise any incomplete previous turn
-// (dangling tool_use, truncated max_tokens) before accepting inbound prompts.
+// stops for good the first time a turn panics.
+//
+// Startup order: the pre-fill classification runs BEFORE any resume, on a
+// history loaded whenever the spawn configured a pre-fill or auto-recovery
+// is enabled. A pre-fill-shaped tail is never handed to agentloop.Resume —
+// its tail is user tool_results, and Resume would Continue, calling the
+// model with the files and no task. startupResume therefore only runs when
+// the history is genuinely resumable (prefillNone).
 func (e *Engine) worker() {
-	if e.autoResume {
+	resume := e.autoResume
+	if len(e.prefill) > 0 || e.autoResume {
+		history, err := e.conv.History(e.baseCtx)
+		if err != nil {
+			slog.Error("agent: load history before startup failed; ending this child",
+				"conversation", e.conv.ID, "error", err)
+			e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+			e.fatal(err)
+			return
+		}
+		st := classifyPrefill(history, len(e.prefill) > 0)
+		switch st {
+		case prefillEmpty, prefillHasR0, prefillHasR1:
+			if err := e.runPrefill(e.baseCtx, history, st); err != nil {
+				slog.Error("agent: prefill failed; ending this child",
+					"conversation", e.conv.ID, "error", err)
+				e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+				e.fatal(err)
+				return
+			}
+			resume = false
+		case prefillComplete:
+			// Skip startupResume whether or not the pre-fill field survived
+			// the restart: a pre-fill-shaped tail must never Continue.
+			resume = false
+		case prefillNone:
+			// No pre-fill shape in sight: keep today's startupResume behaviour.
+		}
+	}
+	if resume {
 		e.startupResume()
 	}
 	for range e.wake {
@@ -501,7 +535,8 @@ func (e *Engine) worker() {
 }
 
 // startupResume calls agentloop.Resume on the conversation once, before any
-// inbound prompt arrives. Called by worker when EngineConfig.AutoResume is set.
+// inbound prompt arrives. Called by worker when the history is resumable
+// (prefillNone) and EngineConfig.AutoResume is set.
 //
 // agentloop.Resume handles every recoverable state: a clean end_turn returns
 // immediately; a dangling tool_use fabricates synthetic is_error results and

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/toolmeta"
@@ -32,6 +34,12 @@ const (
 	// binaryCheckBytes is how many bytes at the head of the file are
 	// scanned for a NUL byte to detect binary content.
 	binaryCheckBytes = 8192
+
+	// readContinueFmt is the trailer appended when a result was cut short:
+	// it names the lines shown and the 1-based offset to resume from.
+	// tools.ReadContinuation parses it back out; the two must stay in
+	// agreement, which TestReadContinuationRoundTrip pins.
+	readContinueFmt = "\n[showing lines %d-%d; more lines remain — pass offset=%d to continue]\n"
 
 	readDescription = "Read a file from the local filesystem. " +
 		"Use `path` (or `file_path`, an alias) — absolute or relative to the " +
@@ -184,9 +192,29 @@ func (rt *readTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 		return NewTextResult(fmt.Sprintf("(no lines at or after offset %d; file has %d lines)\n", offset, lineNo)), nil
 	}
 	if truncated {
-		fmt.Fprintf(&out, "\n[showing lines %d-%d; more lines remain — pass offset=%d to continue]\n", offset, lastShown, lastShown+1)
+		fmt.Fprintf(&out, readContinueFmt, offset, lastShown, lastShown+1)
 	}
 	return NewTextResult(out.String()), nil
+}
+
+// readContinueRe matches the continuation trailer read appends to a truncated
+// result; the captured group is the 1-based offset to resume from. Anchored
+// at the trailer's end so a path that happens to contain similar text can't
+// fool it.
+var readContinueRe = regexp.MustCompile(`pass offset=(\d+) to continue\]\s*$`)
+
+// ReadContinuation reports the offset a truncated read result asks the
+// caller to continue from. ok is false when the result is complete.
+func ReadContinuation(result string) (next int, ok bool) {
+	m := readContinueRe.FindStringSubmatch(result)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 type readInput struct {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -515,5 +516,60 @@ func TestReadTruncatesLongLineOnRuneBoundary(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, lineTruncSuffix) {
 		t.Fatal("an over-long line must be marked as truncated")
+	}
+}
+
+// TestReadContinuationRoundTrip pins ReadContinuation against the trailer
+// Execute actually emits: a file larger than the byte budget truncates with
+// a trailer whose resume offset is lastShown+1, and a complete result parses
+// as done. The pre-fill (pkg/fundi) relies on both directions.
+func TestReadContinuationRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	var lines []string
+	for i := 1; i <= 2000; i++ {
+		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
+	}
+	big := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(big, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, big)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, ok := ReadContinuation(res.Text)
+	if !ok {
+		t.Fatal("a byte-capped read must report a continuation offset")
+	}
+	// lastShown is the end of the range the trailer itself names; the resume
+	// offset must be exactly one past it.
+	m := regexp.MustCompile(`\[showing lines (\d+)-(\d+); more lines remain`).FindStringSubmatch(res.Text)
+	if m == nil {
+		t.Fatalf("expected a showing-lines trailer in %q", res.Text[max(0, len(res.Text)-200):])
+	}
+	lastShown, convErr := strconv.Atoi(m[2])
+	if convErr != nil {
+		t.Fatalf("parse trailer end %q: %v", m[2], convErr)
+	}
+	if next != lastShown+1 {
+		t.Fatalf("ReadContinuation = %d, want lastShown+1 = %d", next, lastShown+1)
+	}
+
+	small := filepath.Join(dir, "small.txt")
+	if err := os.WriteFile(small, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, small)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next2, ok2 := ReadContinuation(res2.Text); ok2 {
+		t.Fatalf("a complete result must not report a continuation, got %d", next2)
 	}
 }
