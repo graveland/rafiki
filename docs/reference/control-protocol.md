@@ -1129,7 +1129,11 @@ pi --mode rpc
    [...extraArgs]
 ```
 
-Fields are added only if non-zero/non-empty. `extraArgs` are appended last
+Fields are added only if non-zero/non-empty. For `fundi`, a non-empty
+`prefill` reaches the child as a JSON `--prefill` flag
+(`[{"path":…,"start":…,"end":…}]`, one object per entry — the list syntax
+`rafiki create --prefill-files` accepts maps onto these objects); other kinds
+carry no prefill. `extraArgs` are appended last
 and always win pi's flag parsing (last-wins). The controller logs the full
 assembled argv (with `--api-key` redacted) at spawn time.
 
@@ -1161,6 +1165,66 @@ assembled argv (with `--api-key` redacted) at spawn time.
 | Pi exits before first response | `spawn_failed` | reap; capture last stderr into error message; no state record persists |
 | Initial `get_state` 5s timeout | success with `stalled: true` | child alive, status stays `spawning` |
 | `set_session_name` round-trip fails | success | name stays as pi's default; emit warning event |
+
+#### 6.3.5 Pre-fill
+
+The SpawnRequest `prefill` field — framed JSON `"prefill": [{"path":…,
+"start":…,"end":…}]`, Connect `repeated PrefillRead prefill = 13`
+(`proto/rafiki/v1/control.proto`; `PrefillRead` carries 1-based inclusive
+`start`/`end`, 0 = open) — names the files (or globs) the child reads
+through its own Read tool **before its first turn**, recorded as real
+tool_use/tool_result history. It is validated in `Controller.Spawn` by
+`validatePrefill` (`cmd/rafikid/prefill_spawn.go`), after the preset
+resolves, and refused with `invalid_args` when it could never run:
+
+- `prefill: only kind fundi supports a pre-fill` — any non-fundi kind
+  (an empty kind is accepted and resolved as fundi).
+- `prefill: the child needs the read tool, but this spawn disables every
+  built-in tool` — with `noBuiltinTools`.
+- `prefill: the child needs the read tool, but its tool allowlist omits it`
+  — with a non-empty `tools` allowlist lacking `read`.
+- `prefill: a glob entry needs the glob tool, but the tool allowlist omits
+  it` — a glob entry (path containing any of `*?[{`) under an allowlist
+  lacking `glob`.
+- Per-entry shape errors from `pkg/prefill`: `no entries`, `too many
+  entries: N (max 500)`, `empty path`, negative bounds, `start N is after
+  end M`, `glob "…" cannot carry a line range`, and the parse-side range
+  errors (`empty range`, zero is not a valid line number). The engine
+  re-checks the tool set at worker start (`prefillToolsAvailable`).
+
+At engine worker start — before any queued prompt is consumed (prompts stay
+unacked and are redelivered if the daemon dies mid-pre-fill) — the entries
+are executed through the child's `read` (and `glob`) tools and persisted via
+`SeedHistory` as three rows with `meta == nil` (usage SQL NULL = "not
+reported", never zero):
+
+- **r0** — user, one text block, exactly:
+  `[rafiki prefill] The files for this task were read for you before this
+  conversation started; their contents follow.`
+- **r1** — assistant, only `tool_use` blocks, tool name `read`, ids
+  `prefill_0001`, `prefill_0002`, … in call order. A glob contributes the
+  reads its matches expand to, never a glob call itself.
+- **r2** — user, one `tool_result` per r1 id, same order; `is_error` for a
+  failed read.
+
+The task prompt, when it arrives, is appended by the normal
+`agentloop.Run` → `AppendUser` as the next user row, and `mergeForRequest`
+(`pkg/llm/conversation.go`) merges r2 with it into one wire message. Nothing
+else writes between r2 and the task.
+
+A pre-fill-shaped history is never handed to `startupResume`/`Resume`: the
+tail is user tool_results, and Resume would Continue and call the model with
+the files and no task. A partial pre-fill (r0, or r0+r1, left by a dead
+process) is finished on restart: r1 is replayed verbatim so its ids and
+inputs match, and only the missing rows are persisted.
+
+The estimated token footprint (total bytes of all read inputs and results ÷
+4) may not exceed **60% of the model's context window** (from the catalog;
+128k when the catalog doesn't know the model). Over the cap, nothing is
+persisted and the child ends with an `agent_error` naming the estimate, the
+cap, and the five largest reads. The `prefill_` id prefix on r1/r2 plus NULL
+usage on r1 is the provenance marker distinguishing a pre-fill from a real
+turn.
 
 ### 6.4 `ctrl_resume`
 

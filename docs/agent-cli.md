@@ -416,6 +416,49 @@ Passing any of these (or any other shaping flag) spawns directly; `-i` opens
 the interactive form anyway, prefilled — where the executor field, `^E`'s
 picker, and the same kind-aware default apply.
 
+### Pre-filled spawns
+
+`--prefill-files <list>` makes the child read files **before its first
+turn**: the engine reads them through the child's own Read tool and persists
+the tool_use/tool_result pairs as real conversation history, so the model
+starts its task already holding the files. The daemon carries the same
+pre-fill on `agent_spawn`'s `prefill` param and on the SpawnRequest `prefill`
+field (`docs/reference/control-protocol.md` §6.3).
+
+The list is a file, one entry per line:
+
+- `#` starts a comment (to end of line); blank lines are ignored;
+  leading/trailing whitespace is trimmed.
+- Paths are relative to the child's cwd (absolute also accepted).
+- An optional range suffix is recognised only when the entry ends in `:` +
+  optional digits + `-` + optional digits, so a path containing `:` still
+  works. Ranges are **1-based and inclusive**, matching Read's printed line
+  numbers: `:N-M`, `:N-` (to EOF), `:-M` (from the start). `:-` alone (both
+  sides empty), `N > M`, and `0` in either position are errors.
+- A **glob** is an entry whose path contains any of `*?[{`. A glob may not
+  carry a range.
+- An empty list (after comments/blank lines) is an error.
+
+Example (`plan-files.txt`):
+
+```
+# context every worker needs
+CLAUDE.md
+docs/plans/2026-09-24-prefilled-spawn-plan/task-2.1-brief.md:1-80
+pkg/**/*.go:-30
+```
+
+`--prefill-files -` reads the list from stdin and is only allowed with
+`--detached` (stdin is not available once create attaches).
+
+Pre-fills are **fundi only** — the daemon refuses the spawn for any other
+kind. The child needs the `read` tool in its tool set (`glob` too when any
+entry is a glob); a spawn whose allowlist omits them is refused. The total
+read volume is estimated and capped at **60% of the model's context window**
+(128k assumed when the catalog doesn't know the model); over the cap,
+nothing is persisted and the child ends with an error naming the estimate,
+the cap, and the five largest reads.
+
 ## `rafikid fundi` flags
 
 `rafikid fundi` runs a single agent child on stdio. Its flags configure the
@@ -446,7 +489,7 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--max-output-tokens` | `0` (default 16384) | per-turn output token cap |
 | `--system-prompt` | — | override the base system prompt |
 | `--append-system-prompt` | — | append to the system prompt |
-| `--prefill` | — | JSON list of files/globs the engine reads before turn 1 (`[{"path":…,"start":…,"end":…}]`, see `protocol.PrefillRead`); normally set by the daemon |
+| `--prefill` | — | JSON list of files/globs the engine reads before turn 1 (`[{"path":…,"start":…,"end":…}]`); normally set from the client's `--prefill-files` list (see "Pre-filled spawns" under `rafiki create`) |
 | `--fake-turns` | — | replay a recorded turn file for testing |
 
 ## `rafiki daraja`
