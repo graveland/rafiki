@@ -110,6 +110,15 @@ var tierByTool = map[string]Tier{
 	"preset_put":    TierDaemon,
 	"preset_delete": TierDaemon,
 
+	// Daemon — recall reads the daemon's captured conversations and the
+	// caller's own memories; nothing in the workspace is touched.
+	"recall":         TierDaemon,
+	"recall_context": TierDaemon,
+	"memory_put":     TierDaemon,
+	"memory_get":     TierDaemon,
+	"memory_tree":    TierDaemon,
+	"memory_delete":  TierDaemon,
+
 	// Daemon — annotates the executor's own database row.
 	"executor_annotate": TierDaemon,
 }

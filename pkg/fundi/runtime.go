@@ -216,6 +216,13 @@ type RuntimeOptions struct {
 	// process.
 	Presets tools.PresetStore
 
+	// Recall, when non-nil, gives this child the recall, recall_context and
+	// memory_* tools -- search over the conversation history its credential
+	// can see and over its own saved memories. Supplied by the daemon as a
+	// per-caller adapter; nil when no recall store is configured (a DB-less
+	// daemon) or for the standalone `rafikid fundi` process.
+	Recall tools.RecallBinding
+
 	// Executor, when non-nil, runs the filesystem and shell tools in a
 	// separate process. nil means no workspace tier at all: the workspace
 	// tools are not registered, so the child reasons over the daemon tier
@@ -585,6 +592,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		PyModules:          opts.PyModules,
 		PyModulesInventory: opts.PyModulesInventory,
 		Presets:            opts.Presets,
+		Recall:             opts.Recall,
 		Executor:           opts.Executor,
 		ExecutorTools:      executorToolSet(opts.ExecutorTools),
 		RemoteSkillBody:    opts.RemoteSkillBody,

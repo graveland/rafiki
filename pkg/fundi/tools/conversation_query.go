@@ -96,6 +96,7 @@ type CatalogueResult struct {
 const conversationSearchDescription = "Search your own past conversations by time, model, " +
 	"source, status, or a substring of the first message. Returns summaries (turn counts, " +
 	"tokens, cost) -- use conversation_export to read a specific conversation's full transcript. " +
+	"For searching what was said inside conversations, use recall. " +
 	"Results are scoped to conversations you own; there is no way to search another user's " +
 	"conversations with this tool."
 

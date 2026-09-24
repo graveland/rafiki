@@ -345,6 +345,14 @@ type ToolOpts struct {
 	// construction (and to the agent's child id as write attribution), so no
 	// tool argument can ever name a different owner.
 	Presets PresetStore
+
+	// Recall, when non-nil, gives this agent the recall, recall_context and
+	// memory_* tools -- search over the conversation history its credential
+	// can see and over its own saved memories, plus putting, fetching and
+	// deleting those memories. nil declines all six, same nil-means-decline
+	// rule as Presets. Bound to ONE caller at construction (conversation scope
+	// plus memory owner), so no tool argument can ever name a different owner.
+	Recall RecallBinding
 }
 
 // ConversationIDKey is the context key for the conversation ID injected by the
