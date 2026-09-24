@@ -156,10 +156,11 @@ func (s *Summarizer) summarizeConversation(ctx context.Context, enabledAt time.T
 			return nil
 		}
 		// No new segments: re-reducing an unchanged chain costs one reduce call
-		// plus an embedding clear/re-embed every pass. Skip when a
-		// current-version conversation-level row already covers the chain; a
-		// missing or stale row (crash recovery) still reduces.
-		if hasCurrentConversationRow(existing) {
+		// plus an embedding clear/re-embed every pass. Skip only when a
+		// current-version conversation-level row already COVERS the chain; a
+		// missing, stale, or short row (a pass that upserted segments but
+		// crashed before the row upsert) still reduces.
+		if hasCurrentConversationRow(existing, kept[len(kept)-1].OrdinalTo) {
 			return nil
 		}
 	}
@@ -245,10 +246,13 @@ func (s *Summarizer) summarizeConversation(ctx context.Context, enabledAt time.T
 }
 
 // hasCurrentConversationRow reports whether existing already holds a
-// conversation-level row at the current prompt version.
-func hasCurrentConversationRow(existing []Summary) bool {
+// conversation-level row at the current prompt version whose OrdinalTo
+// covers the kept chain (>= coveredTo). A current-version row that stops
+// short means a previous pass upserted segments but crashed before the row
+// upsert; treating it as current would skip the healing reduce forever.
+func hasCurrentConversationRow(existing []Summary, coveredTo int) bool {
 	for _, sum := range existing {
-		if sum.Level == "conversation" && sum.PromptVersion == SummaryPromptVersion {
+		if sum.Level == "conversation" && sum.PromptVersion == SummaryPromptVersion && sum.OrdinalTo >= coveredTo {
 			return true
 		}
 	}

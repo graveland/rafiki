@@ -1,6 +1,7 @@
 package recall
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -544,6 +545,117 @@ func TestSummarizerReducesWhenConversationRowMissing(t *testing.T) {
 	conv := store.upserts[0]
 	if conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90 {
 		t.Fatalf("conversation row = %+v", conv)
+	}
+}
+
+func TestSummarizerReducesWhenConversationRowStaleVersion(t *testing.T) {
+	store := summarizerStore()
+	store.eligible = []ConversationMeta{summarizerConv("c1")}
+	// Segments are current but the conversation-level row was written by an
+	// older prompt version: the version check in hasCurrentConversationRow
+	// must fall through and re-reduce the chain.
+	store.summaries = map[string][]Summary{"c1": {
+		{ID: "s0", ConversationID: "c1", Level: "segment", Seq: 0, OrdinalFrom: 0, OrdinalTo: 50,
+			Title: "one", Summary: "one body", PromptVersion: SummaryPromptVersion},
+		{ID: "s1", ConversationID: "c1", Level: "segment", Seq: 1, OrdinalFrom: 51, OrdinalTo: 90,
+			Title: "two", Summary: "two body", PromptVersion: SummaryPromptVersion},
+		{ID: "c-row", ConversationID: "c1", Level: "conversation", Seq: 0, OrdinalFrom: 0, OrdinalTo: 90,
+			Title: "stale", Summary: "stale version", PromptVersion: SummaryPromptVersion - 1},
+	}}
+	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
+	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
+	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(comp.calls) != 1 {
+		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	}
+	if comp.calls[0].system != summaryReducePrompt {
+		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(store.upserts))
+	}
+	conv := store.upserts[0]
+	if conv.Level != "conversation" || conv.PromptVersion != SummaryPromptVersion || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90 {
+		t.Fatalf("conversation row = %+v", conv)
+	}
+}
+
+func TestSummarizerReducesWhenConversationRowShort(t *testing.T) {
+	store := summarizerStore()
+	store.eligible = []ConversationMeta{summarizerConv("c1")}
+	// Crash between the two upserts: the conversation-level row is
+	// current-version but stops at ordinal 50 while the kept chain runs to
+	// 90. Coverage, not just version, must gate the skip.
+	store.summaries = map[string][]Summary{"c1": {
+		{ID: "s0", ConversationID: "c1", Level: "segment", Seq: 0, OrdinalFrom: 0, OrdinalTo: 50,
+			Title: "one", Summary: "one body", PromptVersion: SummaryPromptVersion},
+		{ID: "s1", ConversationID: "c1", Level: "segment", Seq: 1, OrdinalFrom: 51, OrdinalTo: 90,
+			Title: "two", Summary: "two body", PromptVersion: SummaryPromptVersion},
+		{ID: "c-row", ConversationID: "c1", Level: "conversation", Seq: 0, OrdinalFrom: 0, OrdinalTo: 50,
+			Title: "partial", Summary: "partial story", PromptVersion: SummaryPromptVersion},
+	}}
+	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
+	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
+	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(comp.calls) != 1 {
+		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	}
+	if comp.calls[0].system != summaryReducePrompt {
+		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(store.upserts))
+	}
+	conv := store.upserts[0]
+	if conv.Level != "conversation" || conv.OrdinalTo != 90 {
+		t.Fatalf("conversation row = %+v", conv)
+	}
+}
+
+func TestSummarizerBackfillBudgetMissingWarns(t *testing.T) {
+	// backfill_since armed with no budget key: the Warn must fire and
+	// backfill_since must be cleared (budget reads as 0, spend 0 >= 0).
+	for _, budget := range []struct{ name, value string }{{"missing", ""}, {"unparseable", "not-a-float"}} {
+		store := summarizerStore()
+		store.state["backfill_since"] = summarizerEnabledAt.Format(time.RFC3339)
+		if budget.value != "" || budget.name == "unparseable" {
+			store.state["backfill_budget_usd"] = budget.value
+		}
+		var buf bytes.Buffer
+		s := summarizerWith(SummarizerOptions{Store: store, Completer: summarizerCompleter("m")})
+		s.logger = slog.New(slog.NewTextHandler(&buf, nil))
+		if err := s.Pass(context.Background()); err != nil {
+			t.Fatalf("%s: Pass: %v", budget.name, err)
+		}
+		if got := store.state["backfill_since"]; got != "" {
+			t.Fatalf("%s: backfill_since = %q, want cleared", budget.name, got)
+		}
+		if !strings.Contains(buf.String(), "backfill active without backfill_budget_usd") {
+			t.Fatalf("%s: warn not logged: %q", budget.name, buf.String())
+		}
+	}
+
+	// A set, parseable budget with spend under it: no warning, and
+	// backfill_since stays armed.
+	store := summarizerStore()
+	store.state["backfill_since"] = summarizerEnabledAt.Format(time.RFC3339)
+	store.state["backfill_budget_usd"] = "5"
+	store.state["backfill_spent_usd"] = "1"
+	var buf bytes.Buffer
+	s := summarizerWith(SummarizerOptions{Store: store, Completer: summarizerCompleter("m")})
+	s.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	if err := s.Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if got := store.state["backfill_since"]; got != summarizerEnabledAt.Format(time.RFC3339) {
+		t.Fatalf("backfill_since = %q, want unchanged", got)
+	}
+	if buf.String() != "" {
+		t.Fatalf("unexpected log output: %q", buf.String())
 	}
 }
 
