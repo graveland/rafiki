@@ -446,6 +446,7 @@ corresponding `RAFIKI_*` env var default; an explicit flag always wins.
 | `--max-output-tokens` | `0` (default 16384) | per-turn output token cap |
 | `--system-prompt` | — | override the base system prompt |
 | `--append-system-prompt` | — | append to the system prompt |
+| `--prefill` | — | JSON list of files/globs the engine reads before turn 1 (`[{"path":…,"start":…,"end":…}]`, see `protocol.PrefillRead`); normally set by the daemon |
 | `--fake-turns` | — | replay a recorded turn file for testing |
 
 ## `rafiki daraja`

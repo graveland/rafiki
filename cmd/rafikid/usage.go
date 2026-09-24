@@ -56,6 +56,7 @@ func newAgentFlagSet(f *agentFlags) *pflag.FlagSet {
 	fs.StringVar(&f.thinking, "thinking", "off", "extended-thinking level: off|low|medium|high|xhigh")
 	fs.StringVar(&f.systemPrompt, "system-prompt", "", "override the base system prompt")
 	fs.StringVar(&f.appendSystemPrompt, "append-system-prompt", "", "append to the system prompt")
+	fs.StringVar(&f.prefill, "prefill", "", "JSON list of files/globs the engine reads before turn 1 (see protocol.PrefillRead; normally set by the daemon)")
 	fs.BoolVar(&f.noContextFiles, "no-context-files", false, "skip loading CLAUDE.md/AGENTS.md context files")
 	fs.StringArrayVar(&f.skillsDir, "skills-dir", nil, "additional skills directory (repeatable)")
 	fs.StringVar(&f.skills, "skills", "", "comma-separated list restricting discovered skills to these names")

@@ -99,9 +99,15 @@ type Session struct {
 	NoContextFiles     bool
 	SystemPrompt       string
 	AppendSystemPrompt string
-	Verbose            bool
-	PiBinary           string
-	ExtraArgs          []string
+	// Prefill is the spawn's pre-fill (see protocol.PrefillRead): the files
+	// (or globs) the child reads through its own Read tool before turn 1,
+	// recorded as real tool_use/tool_result history. Persisted and carried
+	// across resume like the other argv-shaped spawn config, so a daemon
+	// restart or a respawn replays the same pre-fill the child started with.
+	Prefill   []protocol.PrefillRead
+	Verbose   bool
+	PiBinary  string
+	ExtraArgs []string
 
 	// RecordRequests, when true, enables raw LLM API request/response capture
 	// for this child (see protocol.SpawnRequest.RecordRequests). Persisted and
@@ -209,6 +215,7 @@ type Snapshot struct {
 	NoContextFiles     bool
 	SystemPrompt       string
 	AppendSystemPrompt string
+	Prefill            []protocol.PrefillRead
 	Verbose            bool
 	PiBinary           string
 	ExtraArgs          []string
@@ -289,6 +296,7 @@ func (s *Session) Snapshot() Snapshot {
 		NoThemes:          s.NoThemes,
 		NoContextFiles:    s.NoContextFiles,
 		SystemPrompt:      s.SystemPrompt, AppendSystemPrompt: s.AppendSystemPrompt,
+		Prefill: copyPrefill(s.Prefill),
 		Verbose: s.Verbose, PiBinary: s.PiBinary,
 		ExtraArgs: copyStrings(s.ExtraArgs),
 
@@ -334,6 +342,17 @@ func copyLabels(m map[string]string) map[string]string {
 	for k, v := range m {
 		out[k] = v
 	}
+	return out
+}
+
+// copyPrefill returns a deep copy of a pre-fill list. Both nil and empty
+// inputs return nil, matching copyStrings.
+func copyPrefill(entries []protocol.PrefillRead) []protocol.PrefillRead {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]protocol.PrefillRead, len(entries))
+	copy(out, entries)
 	return out
 }
 

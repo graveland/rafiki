@@ -92,10 +92,13 @@ type ChildConfig struct {
 	NoContextFiles     bool     `json:"noContextFiles,omitempty"`
 	SystemPrompt       string   `json:"systemPrompt,omitempty"`
 	AppendSystemPrompt string   `json:"appendSystemPrompt,omitempty"`
-	Verbose            bool     `json:"verbose,omitempty"`
-	PiBinary           string   `json:"piBinary,omitempty"`
-	ExtraArgs          []string `json:"extraArgs,omitempty"`
-	RecordRequests     bool     `json:"recordRequests,omitempty"`
+	// Prefill is the spawn's pre-fill (see protocol.PrefillRead). It rides the
+	// config JSONB, so adding it costs no migration.
+	Prefill        []protocol.PrefillRead `json:"prefill,omitempty"`
+	Verbose        bool                   `json:"verbose,omitempty"`
+	PiBinary       string                 `json:"piBinary,omitempty"`
+	ExtraArgs      []string               `json:"extraArgs,omitempty"`
+	RecordRequests bool                   `json:"recordRequests,omitempty"`
 }
 
 // ChildStore persists child state records.
@@ -174,6 +177,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 			NoContextFiles:     snap.NoContextFiles,
 			SystemPrompt:       snap.SystemPrompt,
 			AppendSystemPrompt: snap.AppendSystemPrompt,
+			Prefill:            snap.Prefill,
 			Verbose:            snap.Verbose,
 			PiBinary:           snap.PiBinary,
 			ExtraArgs:          snap.ExtraArgs,
@@ -241,6 +245,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		NoContextFiles:     rec.Config.NoContextFiles,
 		SystemPrompt:       rec.Config.SystemPrompt,
 		AppendSystemPrompt: rec.Config.AppendSystemPrompt,
+		Prefill:            rec.Config.Prefill,
 		Verbose:            rec.Config.Verbose,
 		PiBinary:           rec.Config.PiBinary,
 		ExtraArgs:          rec.Config.ExtraArgs,

@@ -665,6 +665,10 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 	defaults, _ := resolveModelDefaults(effectiveProv, f.model)
 	skillsVal, noSkills := resolveAllowlistOption(f.skills, f.noSkills, defaults.Skills)
 	mcpServersVal, noMCP := resolveAllowlistOption(f.mcpServers, f.noMCP, defaults.MCPServers)
+	prefillEntries, err := prefillFromFlag(f.prefill)
+	if err != nil {
+		return fundi.RuntimeOptions{}, err
+	}
 
 	return fundi.RuntimeOptions{
 		Model:                f.model,
@@ -672,6 +676,7 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		MaxOutputTokens:      f.maxOutputTokens,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
+		Prefill:              prefillEntries,
 		Cwd:                  cwd,
 		Ref:                  f.ref,
 		Name:                 f.name,

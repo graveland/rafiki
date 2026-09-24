@@ -997,6 +997,13 @@ the client sees the response, the child is fully ready for `ctrl_send`.
   "systemPrompt":        null,             // --system-prompt
   "appendSystemPrompt":  null,             // --append-system-prompt
 
+  // Pre-fill (optional; kind=fundi only — refused otherwise): files/globs the
+  // child reads through its own Read tool before turn 1, recorded as real
+  // tool_use/tool_result history. Requires the read tool (and glob for any
+  // glob entry) in the child's tool set. Persisted on the child record.
+  "prefill":             [],               // [{"path":"docs/plan.md","start":10,"end":40},
+                                            //  {"path":"notes/*"}]
+
   // Verbosity
   "verbose":             false,
 
@@ -2090,6 +2097,9 @@ For each known child, the controller maintains a JSON record at
   // System prompt
   "systemPrompt":      null,
   "appendSystemPrompt":null,
+
+  // Pre-fill (see the SpawnRequest notes above; survives resume/recovery)
+  "prefill":           [],
 
   // Process control (env is NOT persisted; controller re-inherits at resume)
   "piBinary":          null,

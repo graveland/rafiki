@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 )
@@ -32,6 +34,7 @@ type agentFlags struct {
 	maxOutputTokens    int
 	systemPrompt       string
 	appendSystemPrompt string
+	prefill            string
 	noContextFiles     bool
 	skillsDir          []string
 	skills             string
@@ -187,6 +190,20 @@ func standaloneFatal(stdin io.Closer) (func(error), <-chan error) {
 	}, fired
 }
 
+// prefillFromFlag decodes the --prefill JSON value (buildAgentArgv marshals
+// []protocol.PrefillRead for it) into the engine's entries. An empty flag is a
+// nil list, not an error — the no-prefill default.
+func prefillFromFlag(s string) ([]protocol.PrefillRead, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var entries []protocol.PrefillRead
+	if err := json.Unmarshal([]byte(s), &entries); err != nil {
+		return nil, fmt.Errorf("agent flags: --prefill: %w", err)
+	}
+	return entries, nil
+}
+
 // runAgentWithFlags is the post-flag-parsing body, shared by both the
 // cobra path (newFundiCmd.RunE) and the in-process daemon path
 // (agentRuntimeOptions → parseAgentFlags → toRuntimeOptions).
@@ -257,6 +274,11 @@ func runAgentWithFlags(f agentFlags) int {
 	defaults, _ := resolveModelDefaults(prov, f.model)
 	skillsVal, noSkills := resolveAllowlistOption(f.skills, f.noSkills, defaults.Skills)
 	mcpServersVal, noMCP := resolveAllowlistOption(f.mcpServers, f.noMCP, defaults.MCPServers)
+	prefillEntries, err := prefillFromFlag(f.prefill)
+	if err != nil {
+		slog.Error("agent: invalid --prefill", "error", err)
+		return 1
+	}
 
 	opts := fundi.RuntimeOptions{
 		Model:                f.model,
@@ -264,6 +286,7 @@ func runAgentWithFlags(f agentFlags) int {
 		MaxOutputTokens:      f.maxOutputTokens,
 		SystemPromptOverride: f.systemPrompt,
 		AppendSystemPrompt:   f.appendSystemPrompt,
+		Prefill:              prefillEntries,
 		Cwd:                  cwd,
 		Ref:                  f.ref,
 		Name:                 f.name,

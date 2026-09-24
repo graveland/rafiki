@@ -1445,6 +1445,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		return control.SpawnResult{}, err
 	}
 
+	// A pre-fill the child could not run is refused here, before anything
+	// else reads req — same ordering argument as applyPreset above: the
+	// preset's kind and tool shaping are already resolved, so the check sees
+	// the request the child would actually receive.
+	if err := validatePrefill(req); err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// Validate cwd exists on THIS machine (dispatch already checks it's
 	// absolute) — but only for kinds the daemon itself forks a subprocess
 	// for. A fundi child never touches the daemon's own filesystem: its
@@ -1701,6 +1709,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		NoContextFiles:     req.NoContextFiles,
 		SystemPrompt:       req.SystemPrompt,
 		AppendSystemPrompt: req.AppendSystemPrompt,
+		Prefill:            req.Prefill,
 		Verbose:            req.Verbose,
 		PiBinary:           bin,
 		ExtraArgs:          req.ExtraArgs,
@@ -1996,6 +2005,7 @@ func (c *Controller) activateLiveChild(
 		NoContextFiles:     snap.NoContextFiles,
 		SystemPrompt:       snap.SystemPrompt,
 		AppendSystemPrompt: snap.AppendSystemPrompt,
+		Prefill:            snap.Prefill,
 		Verbose:            snap.Verbose,
 		PiBinary:           piBin,
 		ExtraArgs:          snap.ExtraArgs,
@@ -2106,6 +2116,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		NoContextFiles:     snap.NoContextFiles,
 		SystemPrompt:       snap.SystemPrompt,
 		AppendSystemPrompt: snap.AppendSystemPrompt,
+		Prefill:            snap.Prefill,
 		Verbose:            snap.Verbose,
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
@@ -4250,6 +4261,18 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 	}
 	if req.AppendSystemPrompt != "" {
 		argv = append(argv, "--append-system-prompt", req.AppendSystemPrompt)
+	}
+	if len(req.Prefill) > 0 {
+		// JSON.Marshal of []PrefillRead (plain string/int fields) cannot fail;
+		// the branch exists so a future field that could fail degrades to a
+		// child with no pre-fill instead of one that dies on the flag parse.
+		b, err := json.Marshal(req.Prefill)
+		if err != nil {
+			slog.Error("agent spawn: marshal prefill; omitting --prefill",
+				"childId", childID, "error", err)
+		} else {
+			argv = append(argv, "--prefill", string(b))
+		}
 	}
 	if len(req.Skills) > 0 {
 		argv = append(argv, "--skills", strings.Join(req.Skills, ","))
