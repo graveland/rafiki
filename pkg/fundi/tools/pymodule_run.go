@@ -200,7 +200,7 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		if existing := os.Getenv("PYTHONPATH"); existing != "" {
 			pp += string(os.PathListSeparator) + existing
 		}
-		env = append(env, "PYTHONPATH="+pp)
+		env = envWithPythonPath(pp)
 	}
 
 	// Default cwd is the calling agent's workspace. An explicit cwd stands
@@ -325,7 +325,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	if existing := os.Getenv("PYTHONPATH"); existing != "" {
 		pp += string(os.PathListSeparator) + existing
 	}
-	env := []string{"PYTHONPATH=" + pp}
+	env := envWithPythonPath(pp)
 
 	// cwd resolution and the run itself are the blob path's mechanics
 	// unchanged: the repo argument decides WHAT runs, never WHERE.
@@ -356,6 +356,26 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 		spillName = "pymodule_run"
 	}
 	return NewTextResult(rt.p.Clip(out, spillName)), nil
+}
+
+// envWithPythonPath builds a subprocess environment from the FULL process
+// environment with PYTHONPATH set to pp. runSubprocess replaces the child's
+// env with whatever it is handed, so pymodule_run -- the one caller that
+// passes a non-nil env -- must carry the whole environment: an env of only
+// PYTHONPATH would strip PATH, HOME and everything else and break any script
+// that shells out or reads the caller's environment. pp is the fully
+// computed value (the callers fold any pre-existing PYTHONPATH into it); any
+// PYTHONPATH entry already present is dropped here so the key appears
+// exactly once.
+func envWithPythonPath(pp string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "PYTHONPATH=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, "PYTHONPATH="+pp)
 }
 
 // pymoduleVenvPython is the interpreter path of a pymodule's per-module

@@ -451,8 +451,8 @@ func TestPymoduleRunModuleVenvSitePackagesOnPath(t *testing.T) {
 	fakeVenv(t, modDir, "pass\n", true)
 	// The fallback interpreter echoes its own path (so the fallback
 	// selection is assertable) and then execs real python3 by ABSOLUTE path
-	// -- the subprocess env carries only PYTHONPATH, so a bare `python3`
-	// would not resolve -- so the entry script can print its PYTHONPATH.
+	// -- independent of PATH resolution -- so the entry script can print its
+	// PYTHONPATH.
 	fallback := filepath.Join(t.TempDir(), "fake-python")
 	fallbackBody := "#!/bin/sh\necho \"interp:$0\"\nexec " + python3 + " \"$@\"\n"
 	if err := os.WriteFile(fallback, []byte(fallbackBody), 0o755); err != nil {
@@ -626,6 +626,107 @@ func TestPymoduleRunVenvSitePackagesGlobMissStillRuns(t *testing.T) {
 	}
 	if got := pythonPathLine(t, res.Text); got != modDir {
 		t.Fatalf("PYTHONPATH = %q, want exactly the module's code dir %q (glob miss: no site-packages entry, no error)", got, modDir)
+	}
+}
+
+// lineAfter extracts the text between the first marker occurrence and the
+// end of its line, so a test can assert one printed value in isolation.
+func lineAfter(t *testing.T, out, marker string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(out, marker)
+	if !ok {
+		t.Fatalf("output has no %q line, got: %q", marker, out)
+	}
+	line, _, _ := strings.Cut(rest, "\n")
+	return line
+}
+
+// A run that names modules sets PYTHONPATH -- and must keep the REST of the
+// process environment too: the subprocess env is the caller's environment
+// with PYTHONPATH swapped for the computed value, so PATH, HOME and anything
+// the caller set reach the script. (It previously got an environment
+// containing ONLY PYTHONPATH, which broke shelling out and any library
+// reading HOME.)
+func TestPymoduleRunKeepsProcessEnvWithModules(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not found: %v", err)
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("RAFIKI_TEST_PYMODULE_MARKER", "present")
+	seedPymoduleCache(t, "mymod", "VALUE = 42\n")
+	seedPymoduleCache(t, "runme", "import os\nimport mymod\n"+
+		"print(mymod.VALUE)\n"+
+		"print(\"path:\" + (os.environ.get(\"PATH\") or \"\"))\n"+
+		"print(\"marker:\" + (os.environ.get(\"RAFIKI_TEST_PYMODULE_MARKER\") or \"\"))\n")
+
+	tool := testPymoduleRunTool(t, t.TempDir())
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Text, "42") {
+		t.Fatalf("the module should still be importable, got: %q", res.Text)
+	}
+	if lineAfter(t, res.Text, "path:") == "" {
+		t.Fatalf("the script should see PATH, got: %q", res.Text)
+	}
+	if got := lineAfter(t, res.Text, "marker:"); got != "present" {
+		t.Fatalf("the script should see the caller's marker, got marker %q in: %q", got, res.Text)
+	}
+}
+
+// The same environment guarantee on the git-repo path: a checkout run also
+// keeps the full process environment alongside its computed PYTHONPATH.
+func TestPymoduleRunRepoKeepsProcessEnvWithModules(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 not found: %v", err)
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("RAFIKI_TEST_PYMODULE_MARKER", "present")
+	seedGitPymoduleRepo(t, "ops_tools",
+		map[string]string{"main": "import os\n" +
+			"print(\"path:\" + (os.environ.get(\"PATH\") or \"\"))\n" +
+			"print(\"marker:\" + (os.environ.get(\"RAFIKI_TEST_PYMODULE_MARKER\") or \"\"))\n"},
+		nil)
+
+	tool := testPymoduleRunTool(t, t.TempDir())
+	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lineAfter(t, res.Text, "path:") == "" {
+		t.Fatalf("the script should see PATH, got: %q", res.Text)
+	}
+	if got := lineAfter(t, res.Text, "marker:"); got != "present" {
+		t.Fatalf("the script should see the caller's marker, got marker %q in: %q", got, res.Text)
+	}
+}
+
+// envWithPythonPath must hand back the full process environment with
+// PYTHONPATH replaced: a pre-existing PYTHONPATH entry ends up exactly once,
+// with the computed value, and every other entry is kept.
+func TestEnvWithPythonPath(t *testing.T) {
+	t.Setenv("PYTHONPATH", "stale/entry")
+	t.Setenv("RAFIKI_TEST_PYMODULE_KEPT", "preserved")
+	env := envWithPythonPath("computed/dir")
+
+	var pp []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "PYTHONPATH=") {
+			pp = append(pp, e)
+		}
+	}
+	if len(pp) != 1 || pp[0] != "PYTHONPATH=computed/dir" {
+		t.Fatalf("PYTHONPATH should appear exactly once as the computed value, got %v in: %v", pp, env)
+	}
+	kept := false
+	for _, e := range env {
+		if e == "RAFIKI_TEST_PYMODULE_KEPT=preserved" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("the rest of the process environment must be kept, got: %v", env)
 	}
 }
 
