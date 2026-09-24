@@ -151,3 +151,24 @@ func TestCreatePrefillFlag(t *testing.T) {
 		}
 	})
 }
+
+// -i opens the create form, and the form cannot carry a pre-fill (pkg/tui's
+// SpawnRequest has no such field) — so the combination used to parse the list
+// and then silently drop it. The flags are mutually exclusive at parse time.
+func TestPrefillFilesInteractiveExclusive(t *testing.T) {
+	cmd := newCreateCmd()
+	if err := cmd.Flags().Set("interactive", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("prefill-files", "list.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := cmd.ValidateFlagGroups()
+	if err == nil {
+		t.Fatal("want -i and --prefill-files to be rejected together, got none")
+	}
+	if !strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "prefill-files") {
+		t.Errorf("error = %q, want it to name both flags", err)
+	}
+}

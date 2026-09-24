@@ -85,6 +85,10 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
 	cmd.Flags().String("prefill-files", "",
 		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi only.")
+	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
+	// such field), so accepting both would parse the list and then silently
+	// drop it on the form path. Refuse at parse time instead.
+	cmd.MarkFlagsMutuallyExclusive("interactive", "prefill-files")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort over Connect: a completion handler must never exit or
 		// print, so every failure — endpoint, network, daemon — degrades to

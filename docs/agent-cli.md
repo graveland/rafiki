@@ -449,7 +449,9 @@ pkg/**/*.go
 ```
 
 `--prefill-files -` reads the list from stdin and is only allowed with
-`--detached` (stdin is not available once create attaches).
+`--detached` (stdin is not available once create attaches). It is mutually
+exclusive with `-i`: the interactive form cannot carry a pre-fill, so the
+combination is refused at parse time rather than silently dropping the list.
 
 Pre-fills are **fundi only** — the daemon refuses the spawn for any other
 kind. The child needs the `read` tool in its tool set (`glob` too when any
