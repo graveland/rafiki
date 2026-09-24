@@ -256,6 +256,14 @@ watch that row freeze.
 | `GetPreset` | unary | One preset: the latest live version's row by default, every version live and deleted with `history`; `CodeNotFound` when no version exists |
 | `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); a child-token caller is recorded as the writer |
 | `DeletePreset` | unary | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows |
+| `Recall` | unary | Hybrid search (BM25 + vector, RRF-fused) over memories, conversation summaries and windows. `query` is required (`CodeInvalidArgument` otherwise); `sources` filters to some of `memory`/`summary`/`window` (empty = all three, an unknown name `CodeInvalidArgument`); `under` is an ltree path prefix for memories, `repo` a basename filter for conversation sources; `since_unix`/`until_unix` are unix seconds, **0 = unbounded**; `limit` 0 means the default (10), clamped to 50. Hits carry `id` (`m:`/`s:`/`w:`-prefixed — the key `RecallContext` expands), `source`, `snippet`, `when` (RFC3339 UTC), conversation identity/repo/kind, ordinal span, memory path/name, summary title and the fused `score` |
+| `RecallContext` | unary | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (defaults 3 each); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text (default 8000). An empty `id` is `CodeInvalidArgument`; an unknown or malformed id `CodeNotFound` |
+| `GetMemory` | unary | One of the CALLER'S own memories by `(path, name)`, body and meta included. Memories are always owner-scoped to the caller's own user id — an admin gets no one else's |
+| `MemoryTree` | unary | The caller's memories under `path`, to `depth` (0 = unlimited), ordered by path; the rendered tree is byte-budgeted (`recall.TreeMaxChars`) on the tool surface |
+| `PutMemory` | unary | Save or replace a memory at `(path, name)` under the CALLER'S OWN user id — even for an admin. `path` must be dot-separated labels matching `[A-Za-z0-9_-]{1,256}` (`CodeInvalidArgument` otherwise), `meta_json` must parse as JSON (empty means `{}`) and an empty owner is `CodeInvalidArgument` (`recall.ErrNoOwner`). Replace is a new row; the old one is tombstoned, never deleted |
+| `DeleteMemory` | unary | Tombstone (`deleted_at`) one of the caller's memories at `(path, name)`; an unknown name is `CodeNotFound`. Never a hard delete |
+| `RecallBackfill` | unary | Arm summarization of conversations whose last activity predates `summaries_enabled_at`: `since_unix` sets the cut-over (**0 = from the beginning**, unlike `Recall`'s 0 = unbounded), `max_cost_usd` is the spend ceiling after which backfill auto-disarms. A non-admin caller is refused with `CodePermissionDenied` |
+| `RecallStatus` | unary | The recall index's state: conversation/window/summary/memory counts, unembedded windows and pending summaries, cumulative summary cost, `backfill_since` (RFC3339, empty when backfill is off), its budget and spend, and the configured embedding and summary models |
 | `ConversationSearch` | unary | Query the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, status, path, min_tokens, text, limit) — never a scope: the daemon derives scope server-side from the authenticated credential (`IsUserCredential` → the user's own rows, `IsAdmin` → all, anything else `CodePermissionDenied`) and ANDs it on top, so an `owner` filter can only ever narrow, never widen. `limit` 0 means the default (50) and is clamped to 500. Each row carries id/name/owner/persona/source/model/status/driven_by, created-at, turn and token aggregates, cache-hit ratio, total USD and the first user message snippet |
 | `ConversationExport` | unary | One conversation's decomposed transcript: header identity plus ordered turns (role, verbatim content-block JSON, skills invoked, per-turn tokens/latency/model/prefix hash) and the recovered available-skills catalog. Scope is derived exactly as `ConversationSearch`. A conversation that does not exist OR is outside the caller's scope returns `CodeNotFound` — the two are deliberately indistinguishable, because "you may not read X" would confirm X exists |
 | `ConversationQuery` | unary | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, path) — never a scope: the daemon derives scope server-side from the authenticated credential exactly as `ConversationSearch`, so an `owner` filter can only ever narrow, never widen. Time filters are per query: tools and skills filter message time, models filters turn time, classes and sizes filter turn activity, coverage filters conversation creation week. The `tools` rows group tool names CASE-INSENSITIVELY — each row is displayed under the spelling that carried the most calls (ties: the sort-first spelling) — sort by calls descending, and count `conversations` as DISTINCT conversations over the whole merged group, never a sum of per-spelling counts. The response carries the query's declared schema — typed `QueryColumn`s (name/kind/format, where `format` is a display-only hint) and rows of oneof-typed `QueryValue` cells (`str_value`/`int_value`/`float_value`), so ints and floats decode as numbers, never strings. An unknown query name OR a query whose admission class refuses the caller's derived scope returns `CodeNotFound` — the same fold as `ConversationExport` |
@@ -336,6 +344,44 @@ executor, labels, system prompt (fixed; the request may only append),
 budgets, and allowlists a request may only NARROW. Resume rebuilds from the
 persisted session, which already holds the RESOLVED fields, and never
 re-resolves — so editing a preset never reaches a running or resumed child.
+
+### Recall and memories (`Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`)
+
+The eight recall verbs serve the recall index: `conversations.memory` (the
+saved memory tree), plus two DERIVED index tables over captured
+conversations — `conversation_window` (extracted ~3200-char windows of
+dialogue and compacted tool-call arguments) and `conversation_summary`
+(rolling LLM summaries). Search fuses one BM25 list and one vector list per
+source with RRF (`recall.Search`); tool results are never indexed (they
+appear in context expansion as size markers only).
+
+Scoping is asymmetric BY DESIGN, and the request carries no scope field —
+the daemon resolves it from the authenticated credential exactly as
+`ConversationSearch` does: conversation-derived sources (summaries, windows)
+read under the credential's scope, so an **admin's hits cover the whole
+daemon's users** and a named user's cover only their own rows (an identity
+that is neither admits nothing, `CodePermissionDenied` via
+`recall.ErrInvalidScope`). **Memories are always the caller's own** — every
+memory method takes the caller's user id, never a scope, admin included: a
+saved memory is private to whoever saved it. An empty owner is
+`CodeInvalidArgument` (`recall.ErrNoOwner`).
+
+Error mapping (`recallError`, `pkg/connectapi/recall.go`) over the store's
+sentinels: `recall.ErrNotFound` → `CodeNotFound` (an unknown hit id, memory
+or tombstoned memory name); `recall.ErrInvalidPath` (a bad memory path
+label) and `recall.ErrNoOwner` (no owner) → `CodeInvalidArgument`;
+`recall.ErrInvalidScope` (a scope admitting nothing) → `CodePermissionDenied`;
+anything else is a store failure → `CodeInternal`. A handler-level refusal —
+an empty `query`, an empty `id`, an unknown source name, non-JSON
+`meta_json` — is `CodeInvalidArgument` before the manager is ever called.
+When the daemon has recall unwired (no database), all eight answer
+`CodeUnavailable`.
+
+Zero asymmetry between the two time-bearing requests: `Recall`'s
+`since_unix`/`until_unix` treat **0 as unbounded** (a filter that is simply
+absent), while `RecallBackfill`'s `since_unix` treats **0 as "from the
+beginning"** — a real cut-over instant. `Recall`'s `limit` 0 means the
+default (10); `RecallBackfill` has no default instant.
 
 ### `Send` and the durable inbox
 
@@ -525,9 +571,9 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Twenty-four, materialized per caller: twenty-two come from the same
+**Tools.** Thirty, materialized per caller: twenty-eight come from the same
 registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
-child gets the same twenty-two, subject to the same per-caller declines), and
+child gets the same twenty-eight, subject to the same per-caller declines), and
 two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
 never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
 this surface for a caller that is not a fundi child (`mcpToolDescriptions`).
