@@ -205,6 +205,9 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 				LatencyMS: ptrInt(1500), Model: "openrouter/x/glm", PrefixHash: "abc123",
 			}, {
 				Ordinal: 4, Role: "user", Content: []byte(`[{"type":"text"}]`),
+			}, {
+				Ordinal: 5, Role: "assistant", Content: []byte(`[{"type":"text"}]`),
+				InputTokens: ptrInt64(0), LatencyMS: ptrInt(0),
 			}},
 			AvailableSkills: []string{"brainstorming", "writing-plans"},
 		},
@@ -224,8 +227,8 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 		t.Errorf("header = (%q,%q,%q), want (conv-1,brent,claude)",
 			msg.GetConversationId(), msg.GetOwner(), msg.GetDrivenBy())
 	}
-	if len(msg.GetTurns()) != 2 {
-		t.Fatalf("turns = %d, want 2", len(msg.GetTurns()))
+	if len(msg.GetTurns()) != 3 {
+		t.Fatalf("turns = %d, want 3", len(msg.GetTurns()))
 	}
 	turn := msg.GetTurns()[0]
 	if turn.GetOrdinal() != 3 || turn.GetRole() != "assistant" || string(turn.GetContent()) != `[{"type":"text"}]` {
@@ -247,6 +250,11 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 		unmetered.CacheReadTokens != nil || unmetered.LatencyMs != nil {
 		t.Errorf("unreported metrics must be unset, got in=%v out=%v cache=%v latency=%v",
 			unmetered.InputTokens, unmetered.OutputTokens, unmetered.CacheReadTokens, unmetered.LatencyMs)
+	}
+	// A measured zero stays SET on the wire: zero is not "not reported".
+	zeroed := msg.GetTurns()[2]
+	if zeroed.InputTokens == nil || zeroed.LatencyMs == nil {
+		t.Errorf("measured zeros must stay set, got in=%v latency=%v", zeroed.InputTokens, zeroed.LatencyMs)
 	}
 	if len(msg.GetAvailableSkills()) != 2 || msg.GetAvailableSkills()[0] != "brainstorming" {
 		t.Errorf("available_skills = %v, want [brainstorming writing-plans]", msg.GetAvailableSkills())
