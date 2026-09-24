@@ -724,6 +724,17 @@ service Control {
   rpc GetPreset(GetPresetRequest) returns (GetPresetResponse);
   rpc PutPreset(PutPresetRequest) returns (PutPresetResponse);
   rpc DeletePreset(DeletePresetRequest) returns (DeletePresetResponse);
+  // Recall serves conversation-derived hits and curated memories for the
+  // calling identity: the manager implementation resolves Scope/owner from
+  // the request context, so no request field carries them.
+  rpc Recall(RecallRequest) returns (RecallResponse);
+  rpc RecallContext(RecallContextRequest) returns (RecallContextResponse);
+  rpc GetMemory(GetMemoryRequest) returns (GetMemoryResponse);
+  rpc MemoryTree(MemoryTreeRequest) returns (MemoryTreeResponse);
+  rpc PutMemory(PutMemoryRequest) returns (PutMemoryResponse);
+  rpc DeleteMemory(DeleteMemoryRequest) returns (DeleteMemoryResponse);
+  rpc RecallBackfill(RecallBackfillRequest) returns (RecallBackfillResponse);
+  rpc RecallStatus(RecallStatusRequest) returns (RecallStatusResponse);
   rpc ConversationSearch(ConversationSearchRequest) returns (ConversationSearchResponse);
   rpc ConversationExport(ConversationExportRequest) returns (ConversationExportResponse);
   rpc ConversationQuery(ConversationQueryRequest) returns (ConversationQueryResponse);
@@ -909,3 +920,89 @@ message PutPresetRequest { PresetRow preset = 1; }
 message PutPresetResponse { PresetRow preset = 1; }
 message DeletePresetRequest { string name = 1; }
 message DeletePresetResponse {}
+
+message RecallHit {
+  string id = 1; string source = 2; string snippet = 3;
+  // when is RFC3339 (UTC).
+  string when = 4;
+  string conversation_id = 5; string conversation_name = 6;
+  string repo = 7; string kind = 8;
+  int32 ordinal_from = 9; int32 ordinal_to = 10;
+  string path = 11; string name = 12;
+  string title = 13; double score = 14;
+}
+
+message RecallRequest {
+  string query = 1;
+  // sources filters the indexes searched: "memory", "summary", "window";
+  // empty means all three.
+  repeated string sources = 2;
+  string under = 3;   // ltree path prefix for memories; "" = all
+  string repo = 4;    // basename match for conversation sources; "" = all
+  int64 since_unix = 5;  // unix seconds; 0 = unbounded
+  int64 until_unix = 6;  // unix seconds; 0 = unbounded
+  int32 limit = 7;    // 0 = default (10), clamped to 50
+}
+message RecallResponse { repeated RecallHit hits = 1; }
+
+message RecallContextRequest {
+  string id = 1;      // hit id ("m:", "s:" or "w:" prefixed)
+  int32 before = 2;
+  int32 after = 3;
+  int32 max_chars = 4;
+}
+message RecallContextResponse { string text = 1; }
+
+message MemoryRow {
+  string id = 1;
+  string path = 2;
+  string name = 3;
+  string body = 4;
+  string meta_json = 5;
+  string created_at = 6; // RFC3339 (UTC)
+  string updated_at = 7; // RFC3339 (UTC)
+}
+message GetMemoryRequest {
+  string path = 1;
+  string name = 2;
+}
+message GetMemoryResponse { MemoryRow memory = 1; }
+message MemoryTreeRequest {
+  string path = 1;
+  int32 depth = 2;
+}
+message MemoryTreeResponse { repeated MemoryRow memories = 1; }
+message PutMemoryRequest {
+  string path = 1;
+  string name = 2;
+  string body = 3;
+  string meta_json = 4; // must be valid JSON; empty means "{}"
+}
+message PutMemoryResponse { MemoryRow memory = 1; }
+message DeleteMemoryRequest {
+  string path = 1;
+  string name = 2;
+}
+message DeleteMemoryResponse {}
+
+message RecallBackfillRequest {
+  int64 since_unix = 1; // unix seconds
+  double max_cost_usd = 2;
+}
+message RecallBackfillResponse {}
+
+message RecallStatusRequest {}
+message RecallStatusResponse {
+  int64 conversations = 1;
+  int64 windows = 2;
+  int64 windows_unembedded = 3;
+  int64 summaries = 4;
+  int64 summaries_pending = 5;
+  int64 memories = 6;
+  double summary_cost_usd = 7;
+  string backfill_since = 8; // RFC3339 (UTC); empty when backfill is off
+  double backfill_budget_usd = 9;
+  double backfill_spent_usd = 10;
+  string embedding_model = 11;
+  string summary_model = 12;
+}

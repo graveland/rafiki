@@ -6809,6 +6809,1145 @@ func (*DeletePresetResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{99}
 }
 
+type RecallHit struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Id      string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Source  string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	Snippet string                 `protobuf:"bytes,3,opt,name=snippet,proto3" json:"snippet,omitempty"`
+	// when is RFC3339 (UTC).
+	When             string  `protobuf:"bytes,4,opt,name=when,proto3" json:"when,omitempty"`
+	ConversationId   string  `protobuf:"bytes,5,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	ConversationName string  `protobuf:"bytes,6,opt,name=conversation_name,json=conversationName,proto3" json:"conversation_name,omitempty"`
+	Repo             string  `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`
+	Kind             string  `protobuf:"bytes,8,opt,name=kind,proto3" json:"kind,omitempty"`
+	OrdinalFrom      int32   `protobuf:"varint,9,opt,name=ordinal_from,json=ordinalFrom,proto3" json:"ordinal_from,omitempty"`
+	OrdinalTo        int32   `protobuf:"varint,10,opt,name=ordinal_to,json=ordinalTo,proto3" json:"ordinal_to,omitempty"`
+	Path             string  `protobuf:"bytes,11,opt,name=path,proto3" json:"path,omitempty"`
+	Name             string  `protobuf:"bytes,12,opt,name=name,proto3" json:"name,omitempty"`
+	Title            string  `protobuf:"bytes,13,opt,name=title,proto3" json:"title,omitempty"`
+	Score            float64 `protobuf:"fixed64,14,opt,name=score,proto3" json:"score,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *RecallHit) Reset() {
+	*x = RecallHit{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[100]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallHit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallHit) ProtoMessage() {}
+
+func (x *RecallHit) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[100]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallHit.ProtoReflect.Descriptor instead.
+func (*RecallHit) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{100}
+}
+
+func (x *RecallHit) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RecallHit) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *RecallHit) GetSnippet() string {
+	if x != nil {
+		return x.Snippet
+	}
+	return ""
+}
+
+func (x *RecallHit) GetWhen() string {
+	if x != nil {
+		return x.When
+	}
+	return ""
+}
+
+func (x *RecallHit) GetConversationId() string {
+	if x != nil {
+		return x.ConversationId
+	}
+	return ""
+}
+
+func (x *RecallHit) GetConversationName() string {
+	if x != nil {
+		return x.ConversationName
+	}
+	return ""
+}
+
+func (x *RecallHit) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *RecallHit) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *RecallHit) GetOrdinalFrom() int32 {
+	if x != nil {
+		return x.OrdinalFrom
+	}
+	return 0
+}
+
+func (x *RecallHit) GetOrdinalTo() int32 {
+	if x != nil {
+		return x.OrdinalTo
+	}
+	return 0
+}
+
+func (x *RecallHit) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *RecallHit) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RecallHit) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *RecallHit) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+type RecallRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Query string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	// sources filters the indexes searched: "memory", "summary", "window";
+	// empty means all three.
+	Sources       []string `protobuf:"bytes,2,rep,name=sources,proto3" json:"sources,omitempty"`
+	Under         string   `protobuf:"bytes,3,opt,name=under,proto3" json:"under,omitempty"`                           // ltree path prefix for memories; "" = all
+	Repo          string   `protobuf:"bytes,4,opt,name=repo,proto3" json:"repo,omitempty"`                             // basename match for conversation sources; "" = all
+	SinceUnix     int64    `protobuf:"varint,5,opt,name=since_unix,json=sinceUnix,proto3" json:"since_unix,omitempty"` // unix seconds; 0 = unbounded
+	UntilUnix     int64    `protobuf:"varint,6,opt,name=until_unix,json=untilUnix,proto3" json:"until_unix,omitempty"` // unix seconds; 0 = unbounded
+	Limit         int32    `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"`                          // 0 = default (10), clamped to 50
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallRequest) Reset() {
+	*x = RecallRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[101]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallRequest) ProtoMessage() {}
+
+func (x *RecallRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[101]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallRequest.ProtoReflect.Descriptor instead.
+func (*RecallRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{101}
+}
+
+func (x *RecallRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *RecallRequest) GetSources() []string {
+	if x != nil {
+		return x.Sources
+	}
+	return nil
+}
+
+func (x *RecallRequest) GetUnder() string {
+	if x != nil {
+		return x.Under
+	}
+	return ""
+}
+
+func (x *RecallRequest) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *RecallRequest) GetSinceUnix() int64 {
+	if x != nil {
+		return x.SinceUnix
+	}
+	return 0
+}
+
+func (x *RecallRequest) GetUntilUnix() int64 {
+	if x != nil {
+		return x.UntilUnix
+	}
+	return 0
+}
+
+func (x *RecallRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type RecallResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Hits          []*RecallHit           `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallResponse) Reset() {
+	*x = RecallResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[102]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallResponse) ProtoMessage() {}
+
+func (x *RecallResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[102]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallResponse.ProtoReflect.Descriptor instead.
+func (*RecallResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{102}
+}
+
+func (x *RecallResponse) GetHits() []*RecallHit {
+	if x != nil {
+		return x.Hits
+	}
+	return nil
+}
+
+type RecallContextRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"` // hit id ("m:", "s:" or "w:" prefixed)
+	Before        int32                  `protobuf:"varint,2,opt,name=before,proto3" json:"before,omitempty"`
+	After         int32                  `protobuf:"varint,3,opt,name=after,proto3" json:"after,omitempty"`
+	MaxChars      int32                  `protobuf:"varint,4,opt,name=max_chars,json=maxChars,proto3" json:"max_chars,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallContextRequest) Reset() {
+	*x = RecallContextRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[103]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallContextRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallContextRequest) ProtoMessage() {}
+
+func (x *RecallContextRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[103]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallContextRequest.ProtoReflect.Descriptor instead.
+func (*RecallContextRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{103}
+}
+
+func (x *RecallContextRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RecallContextRequest) GetBefore() int32 {
+	if x != nil {
+		return x.Before
+	}
+	return 0
+}
+
+func (x *RecallContextRequest) GetAfter() int32 {
+	if x != nil {
+		return x.After
+	}
+	return 0
+}
+
+func (x *RecallContextRequest) GetMaxChars() int32 {
+	if x != nil {
+		return x.MaxChars
+	}
+	return 0
+}
+
+type RecallContextResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallContextResponse) Reset() {
+	*x = RecallContextResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[104]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallContextResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallContextResponse) ProtoMessage() {}
+
+func (x *RecallContextResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[104]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallContextResponse.ProtoReflect.Descriptor instead.
+func (*RecallContextResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{104}
+}
+
+func (x *RecallContextResponse) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type MemoryRow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Path          string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	MetaJson      string                 `protobuf:"bytes,5,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339 (UTC)
+	UpdatedAt     string                 `protobuf:"bytes,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // RFC3339 (UTC)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryRow) Reset() {
+	*x = MemoryRow{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[105]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryRow) ProtoMessage() {}
+
+func (x *MemoryRow) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[105]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryRow.ProtoReflect.Descriptor instead.
+func (*MemoryRow) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{105}
+}
+
+func (x *MemoryRow) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetMetaJson() string {
+	if x != nil {
+		return x.MetaJson
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *MemoryRow) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
+type GetMemoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMemoryRequest) Reset() {
+	*x = GetMemoryRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[106]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMemoryRequest) ProtoMessage() {}
+
+func (x *GetMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[106]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMemoryRequest.ProtoReflect.Descriptor instead.
+func (*GetMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{106}
+}
+
+func (x *GetMemoryRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *GetMemoryRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type GetMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Memory        *MemoryRow             `protobuf:"bytes,1,opt,name=memory,proto3" json:"memory,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMemoryResponse) Reset() {
+	*x = GetMemoryResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[107]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMemoryResponse) ProtoMessage() {}
+
+func (x *GetMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[107]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMemoryResponse.ProtoReflect.Descriptor instead.
+func (*GetMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{107}
+}
+
+func (x *GetMemoryResponse) GetMemory() *MemoryRow {
+	if x != nil {
+		return x.Memory
+	}
+	return nil
+}
+
+type MemoryTreeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Depth         int32                  `protobuf:"varint,2,opt,name=depth,proto3" json:"depth,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryTreeRequest) Reset() {
+	*x = MemoryTreeRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[108]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryTreeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryTreeRequest) ProtoMessage() {}
+
+func (x *MemoryTreeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[108]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryTreeRequest.ProtoReflect.Descriptor instead.
+func (*MemoryTreeRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{108}
+}
+
+func (x *MemoryTreeRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *MemoryTreeRequest) GetDepth() int32 {
+	if x != nil {
+		return x.Depth
+	}
+	return 0
+}
+
+type MemoryTreeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Memories      []*MemoryRow           `protobuf:"bytes,1,rep,name=memories,proto3" json:"memories,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryTreeResponse) Reset() {
+	*x = MemoryTreeResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[109]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryTreeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryTreeResponse) ProtoMessage() {}
+
+func (x *MemoryTreeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[109]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryTreeResponse.ProtoReflect.Descriptor instead.
+func (*MemoryTreeResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{109}
+}
+
+func (x *MemoryTreeResponse) GetMemories() []*MemoryRow {
+	if x != nil {
+		return x.Memories
+	}
+	return nil
+}
+
+type PutMemoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Body          string                 `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	MetaJson      string                 `protobuf:"bytes,4,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"` // must be valid JSON; empty means "{}"
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutMemoryRequest) Reset() {
+	*x = PutMemoryRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[110]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutMemoryRequest) ProtoMessage() {}
+
+func (x *PutMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[110]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutMemoryRequest.ProtoReflect.Descriptor instead.
+func (*PutMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{110}
+}
+
+func (x *PutMemoryRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *PutMemoryRequest) GetMetaJson() string {
+	if x != nil {
+		return x.MetaJson
+	}
+	return ""
+}
+
+type PutMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Memory        *MemoryRow             `protobuf:"bytes,1,opt,name=memory,proto3" json:"memory,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PutMemoryResponse) Reset() {
+	*x = PutMemoryResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[111]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PutMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PutMemoryResponse) ProtoMessage() {}
+
+func (x *PutMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[111]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PutMemoryResponse.ProtoReflect.Descriptor instead.
+func (*PutMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{111}
+}
+
+func (x *PutMemoryResponse) GetMemory() *MemoryRow {
+	if x != nil {
+		return x.Memory
+	}
+	return nil
+}
+
+type DeleteMemoryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteMemoryRequest) Reset() {
+	*x = DeleteMemoryRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[112]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteMemoryRequest) ProtoMessage() {}
+
+func (x *DeleteMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[112]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteMemoryRequest.ProtoReflect.Descriptor instead.
+func (*DeleteMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{112}
+}
+
+func (x *DeleteMemoryRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DeleteMemoryRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type DeleteMemoryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteMemoryResponse) Reset() {
+	*x = DeleteMemoryResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[113]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteMemoryResponse) ProtoMessage() {}
+
+func (x *DeleteMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[113]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteMemoryResponse.ProtoReflect.Descriptor instead.
+func (*DeleteMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{113}
+}
+
+type RecallBackfillRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SinceUnix     int64                  `protobuf:"varint,1,opt,name=since_unix,json=sinceUnix,proto3" json:"since_unix,omitempty"` // unix seconds
+	MaxCostUsd    float64                `protobuf:"fixed64,2,opt,name=max_cost_usd,json=maxCostUsd,proto3" json:"max_cost_usd,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallBackfillRequest) Reset() {
+	*x = RecallBackfillRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[114]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallBackfillRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallBackfillRequest) ProtoMessage() {}
+
+func (x *RecallBackfillRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[114]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallBackfillRequest.ProtoReflect.Descriptor instead.
+func (*RecallBackfillRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{114}
+}
+
+func (x *RecallBackfillRequest) GetSinceUnix() int64 {
+	if x != nil {
+		return x.SinceUnix
+	}
+	return 0
+}
+
+func (x *RecallBackfillRequest) GetMaxCostUsd() float64 {
+	if x != nil {
+		return x.MaxCostUsd
+	}
+	return 0
+}
+
+type RecallBackfillResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallBackfillResponse) Reset() {
+	*x = RecallBackfillResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[115]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallBackfillResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallBackfillResponse) ProtoMessage() {}
+
+func (x *RecallBackfillResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[115]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallBackfillResponse.ProtoReflect.Descriptor instead.
+func (*RecallBackfillResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{115}
+}
+
+type RecallStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecallStatusRequest) Reset() {
+	*x = RecallStatusRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[116]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallStatusRequest) ProtoMessage() {}
+
+func (x *RecallStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[116]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallStatusRequest.ProtoReflect.Descriptor instead.
+func (*RecallStatusRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{116}
+}
+
+type RecallStatusResponse struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Conversations     int64                  `protobuf:"varint,1,opt,name=conversations,proto3" json:"conversations,omitempty"`
+	Windows           int64                  `protobuf:"varint,2,opt,name=windows,proto3" json:"windows,omitempty"`
+	WindowsUnembedded int64                  `protobuf:"varint,3,opt,name=windows_unembedded,json=windowsUnembedded,proto3" json:"windows_unembedded,omitempty"`
+	Summaries         int64                  `protobuf:"varint,4,opt,name=summaries,proto3" json:"summaries,omitempty"`
+	SummariesPending  int64                  `protobuf:"varint,5,opt,name=summaries_pending,json=summariesPending,proto3" json:"summaries_pending,omitempty"`
+	Memories          int64                  `protobuf:"varint,6,opt,name=memories,proto3" json:"memories,omitempty"`
+	SummaryCostUsd    float64                `protobuf:"fixed64,7,opt,name=summary_cost_usd,json=summaryCostUsd,proto3" json:"summary_cost_usd,omitempty"`
+	BackfillSince     string                 `protobuf:"bytes,8,opt,name=backfill_since,json=backfillSince,proto3" json:"backfill_since,omitempty"` // RFC3339 (UTC); empty when backfill is off
+	BackfillBudgetUsd float64                `protobuf:"fixed64,9,opt,name=backfill_budget_usd,json=backfillBudgetUsd,proto3" json:"backfill_budget_usd,omitempty"`
+	BackfillSpentUsd  float64                `protobuf:"fixed64,10,opt,name=backfill_spent_usd,json=backfillSpentUsd,proto3" json:"backfill_spent_usd,omitempty"`
+	EmbeddingModel    string                 `protobuf:"bytes,11,opt,name=embedding_model,json=embeddingModel,proto3" json:"embedding_model,omitempty"`
+	SummaryModel      string                 `protobuf:"bytes,12,opt,name=summary_model,json=summaryModel,proto3" json:"summary_model,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *RecallStatusResponse) Reset() {
+	*x = RecallStatusResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[117]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecallStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecallStatusResponse) ProtoMessage() {}
+
+func (x *RecallStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[117]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecallStatusResponse.ProtoReflect.Descriptor instead.
+func (*RecallStatusResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{117}
+}
+
+func (x *RecallStatusResponse) GetConversations() int64 {
+	if x != nil {
+		return x.Conversations
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetWindows() int64 {
+	if x != nil {
+		return x.Windows
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetWindowsUnembedded() int64 {
+	if x != nil {
+		return x.WindowsUnembedded
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetSummaries() int64 {
+	if x != nil {
+		return x.Summaries
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetSummariesPending() int64 {
+	if x != nil {
+		return x.SummariesPending
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetMemories() int64 {
+	if x != nil {
+		return x.Memories
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetSummaryCostUsd() float64 {
+	if x != nil {
+		return x.SummaryCostUsd
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetBackfillSince() string {
+	if x != nil {
+		return x.BackfillSince
+	}
+	return ""
+}
+
+func (x *RecallStatusResponse) GetBackfillBudgetUsd() float64 {
+	if x != nil {
+		return x.BackfillBudgetUsd
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetBackfillSpentUsd() float64 {
+	if x != nil {
+		return x.BackfillSpentUsd
+	}
+	return 0
+}
+
+func (x *RecallStatusResponse) GetEmbeddingModel() string {
+	if x != nil {
+		return x.EmbeddingModel
+	}
+	return ""
+}
+
+func (x *RecallStatusResponse) GetSummaryModel() string {
+	if x != nil {
+		return x.SummaryModel
+	}
+	return ""
+}
+
 var File_rafiki_v1_control_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_control_proto_rawDesc = "" +
@@ -7341,7 +8480,95 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06preset\x18\x01 \x01(\v2\x14.rafiki.v1.PresetRowR\x06preset\")\n" +
 	"\x13DeletePresetRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x16\n" +
-	"\x14DeletePresetResponse*S\n" +
+	"\x14DeletePresetResponse\"\xf5\x02\n" +
+	"\tRecallHit\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06source\x18\x02 \x01(\tR\x06source\x12\x18\n" +
+	"\asnippet\x18\x03 \x01(\tR\asnippet\x12\x12\n" +
+	"\x04when\x18\x04 \x01(\tR\x04when\x12'\n" +
+	"\x0fconversation_id\x18\x05 \x01(\tR\x0econversationId\x12+\n" +
+	"\x11conversation_name\x18\x06 \x01(\tR\x10conversationName\x12\x12\n" +
+	"\x04repo\x18\a \x01(\tR\x04repo\x12\x12\n" +
+	"\x04kind\x18\b \x01(\tR\x04kind\x12!\n" +
+	"\fordinal_from\x18\t \x01(\x05R\vordinalFrom\x12\x1d\n" +
+	"\n" +
+	"ordinal_to\x18\n" +
+	" \x01(\x05R\tordinalTo\x12\x12\n" +
+	"\x04path\x18\v \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\f \x01(\tR\x04name\x12\x14\n" +
+	"\x05title\x18\r \x01(\tR\x05title\x12\x14\n" +
+	"\x05score\x18\x0e \x01(\x01R\x05score\"\xbd\x01\n" +
+	"\rRecallRequest\x12\x14\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\x12\x18\n" +
+	"\asources\x18\x02 \x03(\tR\asources\x12\x14\n" +
+	"\x05under\x18\x03 \x01(\tR\x05under\x12\x12\n" +
+	"\x04repo\x18\x04 \x01(\tR\x04repo\x12\x1d\n" +
+	"\n" +
+	"since_unix\x18\x05 \x01(\x03R\tsinceUnix\x12\x1d\n" +
+	"\n" +
+	"until_unix\x18\x06 \x01(\x03R\tuntilUnix\x12\x14\n" +
+	"\x05limit\x18\a \x01(\x05R\x05limit\":\n" +
+	"\x0eRecallResponse\x12(\n" +
+	"\x04hits\x18\x01 \x03(\v2\x14.rafiki.v1.RecallHitR\x04hits\"q\n" +
+	"\x14RecallContextRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06before\x18\x02 \x01(\x05R\x06before\x12\x14\n" +
+	"\x05after\x18\x03 \x01(\x05R\x05after\x12\x1b\n" +
+	"\tmax_chars\x18\x04 \x01(\x05R\bmaxChars\"+\n" +
+	"\x15RecallContextResponse\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\xb2\x01\n" +
+	"\tMemoryRow\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body\x12\x1b\n" +
+	"\tmeta_json\x18\x05 \x01(\tR\bmetaJson\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\a \x01(\tR\tupdatedAt\":\n" +
+	"\x10GetMemoryRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"A\n" +
+	"\x11GetMemoryResponse\x12,\n" +
+	"\x06memory\x18\x01 \x01(\v2\x14.rafiki.v1.MemoryRowR\x06memory\"=\n" +
+	"\x11MemoryTreeRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
+	"\x05depth\x18\x02 \x01(\x05R\x05depth\"F\n" +
+	"\x12MemoryTreeResponse\x120\n" +
+	"\bmemories\x18\x01 \x03(\v2\x14.rafiki.v1.MemoryRowR\bmemories\"k\n" +
+	"\x10PutMemoryRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body\x12\x1b\n" +
+	"\tmeta_json\x18\x04 \x01(\tR\bmetaJson\"A\n" +
+	"\x11PutMemoryResponse\x12,\n" +
+	"\x06memory\x18\x01 \x01(\v2\x14.rafiki.v1.MemoryRowR\x06memory\"=\n" +
+	"\x13DeleteMemoryRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"\x16\n" +
+	"\x14DeleteMemoryResponse\"X\n" +
+	"\x15RecallBackfillRequest\x12\x1d\n" +
+	"\n" +
+	"since_unix\x18\x01 \x01(\x03R\tsinceUnix\x12 \n" +
+	"\fmax_cost_usd\x18\x02 \x01(\x01R\n" +
+	"maxCostUsd\"\x18\n" +
+	"\x16RecallBackfillResponse\"\x15\n" +
+	"\x13RecallStatusRequest\"\xe9\x03\n" +
+	"\x14RecallStatusResponse\x12$\n" +
+	"\rconversations\x18\x01 \x01(\x03R\rconversations\x12\x18\n" +
+	"\awindows\x18\x02 \x01(\x03R\awindows\x12-\n" +
+	"\x12windows_unembedded\x18\x03 \x01(\x03R\x11windowsUnembedded\x12\x1c\n" +
+	"\tsummaries\x18\x04 \x01(\x03R\tsummaries\x12+\n" +
+	"\x11summaries_pending\x18\x05 \x01(\x03R\x10summariesPending\x12\x1a\n" +
+	"\bmemories\x18\x06 \x01(\x03R\bmemories\x12(\n" +
+	"\x10summary_cost_usd\x18\a \x01(\x01R\x0esummaryCostUsd\x12%\n" +
+	"\x0ebackfill_since\x18\b \x01(\tR\rbackfillSince\x12.\n" +
+	"\x13backfill_budget_usd\x18\t \x01(\x01R\x11backfillBudgetUsd\x12,\n" +
+	"\x12backfill_spent_usd\x18\n" +
+	" \x01(\x01R\x10backfillSpentUsd\x12'\n" +
+	"\x0fembedding_model\x18\v \x01(\tR\x0eembeddingModel\x12#\n" +
+	"\rsummary_model\x18\f \x01(\tR\fsummaryModel*S\n" +
 	"\tEventTier\x12\x1a\n" +
 	"\x16EVENT_TIER_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12EVENT_TIER_DURABLE\x10\x01\x12\x12\n" +
@@ -7359,7 +8586,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	" REVIEW_ACCEPT_STATUS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dREVIEW_ACCEPT_STATUS_ENQUEUED\x10\x01\x12(\n" +
 	"$REVIEW_ACCEPT_STATUS_ALREADY_RUNNING\x10\x02\x12#\n" +
-	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xc3\x18\n" +
+	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xaa\x1d\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -7393,7 +8620,16 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\vListPresets\x12\x1d.rafiki.v1.ListPresetsRequest\x1a\x1e.rafiki.v1.ListPresetsResponse\x12F\n" +
 	"\tGetPreset\x12\x1b.rafiki.v1.GetPresetRequest\x1a\x1c.rafiki.v1.GetPresetResponse\x12F\n" +
 	"\tPutPreset\x12\x1b.rafiki.v1.PutPresetRequest\x1a\x1c.rafiki.v1.PutPresetResponse\x12O\n" +
-	"\fDeletePreset\x12\x1e.rafiki.v1.DeletePresetRequest\x1a\x1f.rafiki.v1.DeletePresetResponse\x12a\n" +
+	"\fDeletePreset\x12\x1e.rafiki.v1.DeletePresetRequest\x1a\x1f.rafiki.v1.DeletePresetResponse\x12=\n" +
+	"\x06Recall\x12\x18.rafiki.v1.RecallRequest\x1a\x19.rafiki.v1.RecallResponse\x12R\n" +
+	"\rRecallContext\x12\x1f.rafiki.v1.RecallContextRequest\x1a .rafiki.v1.RecallContextResponse\x12F\n" +
+	"\tGetMemory\x12\x1b.rafiki.v1.GetMemoryRequest\x1a\x1c.rafiki.v1.GetMemoryResponse\x12I\n" +
+	"\n" +
+	"MemoryTree\x12\x1c.rafiki.v1.MemoryTreeRequest\x1a\x1d.rafiki.v1.MemoryTreeResponse\x12F\n" +
+	"\tPutMemory\x12\x1b.rafiki.v1.PutMemoryRequest\x1a\x1c.rafiki.v1.PutMemoryResponse\x12O\n" +
+	"\fDeleteMemory\x12\x1e.rafiki.v1.DeleteMemoryRequest\x1a\x1f.rafiki.v1.DeleteMemoryResponse\x12U\n" +
+	"\x0eRecallBackfill\x12 .rafiki.v1.RecallBackfillRequest\x1a!.rafiki.v1.RecallBackfillResponse\x12O\n" +
+	"\fRecallStatus\x12\x1e.rafiki.v1.RecallStatusRequest\x1a\x1f.rafiki.v1.RecallStatusResponse\x12a\n" +
 	"\x12ConversationSearch\x12$.rafiki.v1.ConversationSearchRequest\x1a%.rafiki.v1.ConversationSearchResponse\x12a\n" +
 	"\x12ConversationExport\x12$.rafiki.v1.ConversationExportRequest\x1a%.rafiki.v1.ConversationExportResponse\x12^\n" +
 	"\x11ConversationQuery\x12#.rafiki.v1.ConversationQueryRequest\x1a$.rafiki.v1.ConversationQueryResponse\x12a\n" +
@@ -7417,7 +8653,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 105)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 123)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),                           // 0: rafiki.v1.EventTier
 	(SendMode)(0),                            // 1: rafiki.v1.SendMode
@@ -7523,27 +8759,45 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*PutPresetResponse)(nil),                // 101: rafiki.v1.PutPresetResponse
 	(*DeletePresetRequest)(nil),              // 102: rafiki.v1.DeletePresetRequest
 	(*DeletePresetResponse)(nil),             // 103: rafiki.v1.DeletePresetResponse
-	nil,                                      // 104: rafiki.v1.EventCursor.OrdinalsEntry
-	nil,                                      // 105: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                                      // 106: rafiki.v1.SpawnRequest.LabelsEntry
-	nil,                                      // 107: rafiki.v1.ExecutorRow.LabelsEntry
-	nil,                                      // 108: rafiki.v1.PresetRow.LabelsEntry
-	(*Event)(nil),                            // 109: rafiki.v1.Event
-	(*ContentBlock)(nil),                     // 110: rafiki.v1.ContentBlock
-	(*darajapb.ChildSpec)(nil),               // 111: rafiki.daraja.v1.ChildSpec
+	(*RecallHit)(nil),                        // 104: rafiki.v1.RecallHit
+	(*RecallRequest)(nil),                    // 105: rafiki.v1.RecallRequest
+	(*RecallResponse)(nil),                   // 106: rafiki.v1.RecallResponse
+	(*RecallContextRequest)(nil),             // 107: rafiki.v1.RecallContextRequest
+	(*RecallContextResponse)(nil),            // 108: rafiki.v1.RecallContextResponse
+	(*MemoryRow)(nil),                        // 109: rafiki.v1.MemoryRow
+	(*GetMemoryRequest)(nil),                 // 110: rafiki.v1.GetMemoryRequest
+	(*GetMemoryResponse)(nil),                // 111: rafiki.v1.GetMemoryResponse
+	(*MemoryTreeRequest)(nil),                // 112: rafiki.v1.MemoryTreeRequest
+	(*MemoryTreeResponse)(nil),               // 113: rafiki.v1.MemoryTreeResponse
+	(*PutMemoryRequest)(nil),                 // 114: rafiki.v1.PutMemoryRequest
+	(*PutMemoryResponse)(nil),                // 115: rafiki.v1.PutMemoryResponse
+	(*DeleteMemoryRequest)(nil),              // 116: rafiki.v1.DeleteMemoryRequest
+	(*DeleteMemoryResponse)(nil),             // 117: rafiki.v1.DeleteMemoryResponse
+	(*RecallBackfillRequest)(nil),            // 118: rafiki.v1.RecallBackfillRequest
+	(*RecallBackfillResponse)(nil),           // 119: rafiki.v1.RecallBackfillResponse
+	(*RecallStatusRequest)(nil),              // 120: rafiki.v1.RecallStatusRequest
+	(*RecallStatusResponse)(nil),             // 121: rafiki.v1.RecallStatusResponse
+	nil,                                      // 122: rafiki.v1.EventCursor.OrdinalsEntry
+	nil,                                      // 123: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                      // 124: rafiki.v1.SpawnRequest.LabelsEntry
+	nil,                                      // 125: rafiki.v1.ExecutorRow.LabelsEntry
+	nil,                                      // 126: rafiki.v1.PresetRow.LabelsEntry
+	(*Event)(nil),                            // 127: rafiki.v1.Event
+	(*ContentBlock)(nil),                     // 128: rafiki.v1.ContentBlock
+	(*darajapb.ChildSpec)(nil),               // 129: rafiki.daraja.v1.ChildSpec
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	109, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	104, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	127, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	122, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	6,   // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,   // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	7,   // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,   // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	110, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	105, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	128, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	123, // 7: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
 	11,  // 8: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	11,  // 9: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	106, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	124, // 10: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
 	16,  // 11: rafiki.v1.SpawnRequest.prefill:type_name -> rafiki.v1.PrefillRead
 	25,  // 12: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
 	28,  // 13: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
@@ -7557,9 +8811,9 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	43,  // 21: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
 	46,  // 22: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
 	47,  // 23: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
-	107, // 24: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
+	125, // 24: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
 	49,  // 25: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
-	111, // 26: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	129, // 26: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
 	58,  // 27: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
 	59,  // 28: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
 	60,  // 29: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
@@ -7574,7 +8828,7 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	83,  // 38: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
 	89,  // 39: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
 	90,  // 40: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
-	108, // 41: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
+	126, // 41: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
 	94,  // 42: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
 	94,  // 43: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
 	94,  // 44: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
@@ -7582,87 +8836,107 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	95,  // 46: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
 	95,  // 47: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
 	95,  // 48: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
-	4,   // 49: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	8,   // 50: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	9,   // 51: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	12,  // 52: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	14,  // 53: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	17,  // 54: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	19,  // 55: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	21,  // 56: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	23,  // 57: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
-	26,  // 58: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	29,  // 59: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	50,  // 60: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
-	61,  // 61: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	64,  // 62: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
-	66,  // 63: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
-	68,  // 64: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
-	70,  // 65: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
-	72,  // 66: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
-	75,  // 67: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
-	77,  // 68: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
-	79,  // 69: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
-	81,  // 70: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	84,  // 71: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
-	86,  // 72: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
-	88,  // 73: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
-	92,  // 74: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
-	96,  // 75: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
-	98,  // 76: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
-	100, // 77: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
-	102, // 78: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
-	31,  // 79: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
-	34,  // 80: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
-	37,  // 81: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
-	42,  // 82: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
-	45,  // 83: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
-	52,  // 84: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
-	54,  // 85: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
-	56,  // 86: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
-	5,   // 87: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	109, // 88: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	10,  // 89: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	13,  // 90: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	15,  // 91: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	18,  // 92: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	20,  // 93: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	22,  // 94: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	24,  // 95: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
-	27,  // 96: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	30,  // 97: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	51,  // 98: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
-	62,  // 99: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	65,  // 100: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
-	67,  // 101: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
-	69,  // 102: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
-	71,  // 103: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
-	73,  // 104: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
-	76,  // 105: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
-	78,  // 106: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
-	80,  // 107: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
-	82,  // 108: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	85,  // 109: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
-	87,  // 110: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
-	91,  // 111: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
-	93,  // 112: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
-	97,  // 113: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
-	99,  // 114: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
-	101, // 115: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
-	103, // 116: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
-	33,  // 117: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
-	36,  // 118: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
-	41,  // 119: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
-	44,  // 120: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
-	48,  // 121: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
-	53,  // 122: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
-	55,  // 123: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
-	57,  // 124: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
-	87,  // [87:125] is the sub-list for method output_type
-	49,  // [49:87] is the sub-list for method input_type
-	49,  // [49:49] is the sub-list for extension type_name
-	49,  // [49:49] is the sub-list for extension extendee
-	0,   // [0:49] is the sub-list for field type_name
+	104, // 49: rafiki.v1.RecallResponse.hits:type_name -> rafiki.v1.RecallHit
+	109, // 50: rafiki.v1.GetMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	109, // 51: rafiki.v1.MemoryTreeResponse.memories:type_name -> rafiki.v1.MemoryRow
+	109, // 52: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	4,   // 53: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	8,   // 54: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	9,   // 55: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	12,  // 56: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	14,  // 57: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	17,  // 58: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	19,  // 59: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	21,  // 60: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	23,  // 61: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
+	26,  // 62: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	29,  // 63: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	50,  // 64: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
+	61,  // 65: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	64,  // 66: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
+	66,  // 67: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
+	68,  // 68: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
+	70,  // 69: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
+	72,  // 70: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
+	75,  // 71: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
+	77,  // 72: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
+	79,  // 73: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
+	81,  // 74: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
+	84,  // 75: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
+	86,  // 76: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
+	88,  // 77: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
+	92,  // 78: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
+	96,  // 79: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
+	98,  // 80: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
+	100, // 81: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
+	102, // 82: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
+	105, // 83: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
+	107, // 84: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
+	110, // 85: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
+	112, // 86: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
+	114, // 87: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
+	116, // 88: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
+	118, // 89: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
+	120, // 90: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
+	31,  // 91: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
+	34,  // 92: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
+	37,  // 93: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
+	42,  // 94: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
+	45,  // 95: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
+	52,  // 96: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	54,  // 97: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	56,  // 98: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	5,   // 99: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	127, // 100: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	10,  // 101: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	13,  // 102: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	15,  // 103: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	18,  // 104: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	20,  // 105: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	22,  // 106: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	24,  // 107: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
+	27,  // 108: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	30,  // 109: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	51,  // 110: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
+	62,  // 111: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	65,  // 112: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
+	67,  // 113: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
+	69,  // 114: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
+	71,  // 115: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
+	73,  // 116: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
+	76,  // 117: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
+	78,  // 118: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
+	80,  // 119: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
+	82,  // 120: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
+	85,  // 121: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
+	87,  // 122: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
+	91,  // 123: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
+	93,  // 124: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
+	97,  // 125: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
+	99,  // 126: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
+	101, // 127: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
+	103, // 128: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
+	106, // 129: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
+	108, // 130: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
+	111, // 131: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
+	113, // 132: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
+	115, // 133: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
+	117, // 134: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
+	119, // 135: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
+	121, // 136: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
+	33,  // 137: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
+	36,  // 138: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
+	41,  // 139: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
+	44,  // 140: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
+	48,  // 141: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
+	53,  // 142: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	55,  // 143: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	57,  // 144: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	99,  // [99:145] is the sub-list for method output_type
+	53,  // [53:99] is the sub-list for method input_type
+	53,  // [53:53] is the sub-list for extension type_name
+	53,  // [53:53] is the sub-list for extension extendee
+	0,   // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -7704,7 +8978,7 @@ func file_rafiki_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   105,
+			NumMessages:   123,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

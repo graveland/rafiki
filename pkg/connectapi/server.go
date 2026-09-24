@@ -64,6 +64,7 @@ type Server struct {
 	skills         atomic.Pointer[SkillManager]
 	pymodules      atomic.Pointer[PymoduleManager]
 	presets        atomic.Pointer[PresetManager]
+	recall         atomic.Pointer[RecallManager]
 	gitSources     atomic.Pointer[GitSourceManager]
 	quota          atomic.Pointer[QuotaReader]
 	conversations  atomic.Pointer[ConversationInsights]

@@ -98,6 +98,22 @@ const (
 	ControlPutPresetProcedure = "/rafiki.v1.Control/PutPreset"
 	// ControlDeletePresetProcedure is the fully-qualified name of the Control's DeletePreset RPC.
 	ControlDeletePresetProcedure = "/rafiki.v1.Control/DeletePreset"
+	// ControlRecallProcedure is the fully-qualified name of the Control's Recall RPC.
+	ControlRecallProcedure = "/rafiki.v1.Control/Recall"
+	// ControlRecallContextProcedure is the fully-qualified name of the Control's RecallContext RPC.
+	ControlRecallContextProcedure = "/rafiki.v1.Control/RecallContext"
+	// ControlGetMemoryProcedure is the fully-qualified name of the Control's GetMemory RPC.
+	ControlGetMemoryProcedure = "/rafiki.v1.Control/GetMemory"
+	// ControlMemoryTreeProcedure is the fully-qualified name of the Control's MemoryTree RPC.
+	ControlMemoryTreeProcedure = "/rafiki.v1.Control/MemoryTree"
+	// ControlPutMemoryProcedure is the fully-qualified name of the Control's PutMemory RPC.
+	ControlPutMemoryProcedure = "/rafiki.v1.Control/PutMemory"
+	// ControlDeleteMemoryProcedure is the fully-qualified name of the Control's DeleteMemory RPC.
+	ControlDeleteMemoryProcedure = "/rafiki.v1.Control/DeleteMemory"
+	// ControlRecallBackfillProcedure is the fully-qualified name of the Control's RecallBackfill RPC.
+	ControlRecallBackfillProcedure = "/rafiki.v1.Control/RecallBackfill"
+	// ControlRecallStatusProcedure is the fully-qualified name of the Control's RecallStatus RPC.
+	ControlRecallStatusProcedure = "/rafiki.v1.Control/RecallStatus"
 	// ControlConversationSearchProcedure is the fully-qualified name of the Control's
 	// ConversationSearch RPC.
 	ControlConversationSearchProcedure = "/rafiki.v1.Control/ConversationSearch"
@@ -153,6 +169,17 @@ type ControlClient interface {
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
 	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
 	DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error)
+	// Recall serves conversation-derived hits and curated memories for the
+	// calling identity: the manager implementation resolves Scope/owner from
+	// the request context, so no request field carries them.
+	Recall(context.Context, *connect.Request[v1.RecallRequest]) (*connect.Response[v1.RecallResponse], error)
+	RecallContext(context.Context, *connect.Request[v1.RecallContextRequest]) (*connect.Response[v1.RecallContextResponse], error)
+	GetMemory(context.Context, *connect.Request[v1.GetMemoryRequest]) (*connect.Response[v1.GetMemoryResponse], error)
+	MemoryTree(context.Context, *connect.Request[v1.MemoryTreeRequest]) (*connect.Response[v1.MemoryTreeResponse], error)
+	PutMemory(context.Context, *connect.Request[v1.PutMemoryRequest]) (*connect.Response[v1.PutMemoryResponse], error)
+	DeleteMemory(context.Context, *connect.Request[v1.DeleteMemoryRequest]) (*connect.Response[v1.DeleteMemoryResponse], error)
+	RecallBackfill(context.Context, *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error)
+	RecallStatus(context.Context, *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -354,6 +381,54 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DeletePreset")),
 			connect.WithClientOptions(opts...),
 		),
+		recall: connect.NewClient[v1.RecallRequest, v1.RecallResponse](
+			httpClient,
+			baseURL+ControlRecallProcedure,
+			connect.WithSchema(controlMethods.ByName("Recall")),
+			connect.WithClientOptions(opts...),
+		),
+		recallContext: connect.NewClient[v1.RecallContextRequest, v1.RecallContextResponse](
+			httpClient,
+			baseURL+ControlRecallContextProcedure,
+			connect.WithSchema(controlMethods.ByName("RecallContext")),
+			connect.WithClientOptions(opts...),
+		),
+		getMemory: connect.NewClient[v1.GetMemoryRequest, v1.GetMemoryResponse](
+			httpClient,
+			baseURL+ControlGetMemoryProcedure,
+			connect.WithSchema(controlMethods.ByName("GetMemory")),
+			connect.WithClientOptions(opts...),
+		),
+		memoryTree: connect.NewClient[v1.MemoryTreeRequest, v1.MemoryTreeResponse](
+			httpClient,
+			baseURL+ControlMemoryTreeProcedure,
+			connect.WithSchema(controlMethods.ByName("MemoryTree")),
+			connect.WithClientOptions(opts...),
+		),
+		putMemory: connect.NewClient[v1.PutMemoryRequest, v1.PutMemoryResponse](
+			httpClient,
+			baseURL+ControlPutMemoryProcedure,
+			connect.WithSchema(controlMethods.ByName("PutMemory")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteMemory: connect.NewClient[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse](
+			httpClient,
+			baseURL+ControlDeleteMemoryProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteMemory")),
+			connect.WithClientOptions(opts...),
+		),
+		recallBackfill: connect.NewClient[v1.RecallBackfillRequest, v1.RecallBackfillResponse](
+			httpClient,
+			baseURL+ControlRecallBackfillProcedure,
+			connect.WithSchema(controlMethods.ByName("RecallBackfill")),
+			connect.WithClientOptions(opts...),
+		),
+		recallStatus: connect.NewClient[v1.RecallStatusRequest, v1.RecallStatusResponse](
+			httpClient,
+			baseURL+ControlRecallStatusProcedure,
+			connect.WithSchema(controlMethods.ByName("RecallStatus")),
+			connect.WithClientOptions(opts...),
+		),
 		conversationSearch: connect.NewClient[v1.ConversationSearchRequest, v1.ConversationSearchResponse](
 			httpClient,
 			baseURL+ControlConversationSearchProcedure,
@@ -437,6 +512,14 @@ type controlClient struct {
 	getPreset                *connect.Client[v1.GetPresetRequest, v1.GetPresetResponse]
 	putPreset                *connect.Client[v1.PutPresetRequest, v1.PutPresetResponse]
 	deletePreset             *connect.Client[v1.DeletePresetRequest, v1.DeletePresetResponse]
+	recall                   *connect.Client[v1.RecallRequest, v1.RecallResponse]
+	recallContext            *connect.Client[v1.RecallContextRequest, v1.RecallContextResponse]
+	getMemory                *connect.Client[v1.GetMemoryRequest, v1.GetMemoryResponse]
+	memoryTree               *connect.Client[v1.MemoryTreeRequest, v1.MemoryTreeResponse]
+	putMemory                *connect.Client[v1.PutMemoryRequest, v1.PutMemoryResponse]
+	deleteMemory             *connect.Client[v1.DeleteMemoryRequest, v1.DeleteMemoryResponse]
+	recallBackfill           *connect.Client[v1.RecallBackfillRequest, v1.RecallBackfillResponse]
+	recallStatus             *connect.Client[v1.RecallStatusRequest, v1.RecallStatusResponse]
 	conversationSearch       *connect.Client[v1.ConversationSearchRequest, v1.ConversationSearchResponse]
 	conversationExport       *connect.Client[v1.ConversationExportRequest, v1.ConversationExportResponse]
 	conversationQuery        *connect.Client[v1.ConversationQueryRequest, v1.ConversationQueryResponse]
@@ -597,6 +680,46 @@ func (c *controlClient) DeletePreset(ctx context.Context, req *connect.Request[v
 	return c.deletePreset.CallUnary(ctx, req)
 }
 
+// Recall calls rafiki.v1.Control.Recall.
+func (c *controlClient) Recall(ctx context.Context, req *connect.Request[v1.RecallRequest]) (*connect.Response[v1.RecallResponse], error) {
+	return c.recall.CallUnary(ctx, req)
+}
+
+// RecallContext calls rafiki.v1.Control.RecallContext.
+func (c *controlClient) RecallContext(ctx context.Context, req *connect.Request[v1.RecallContextRequest]) (*connect.Response[v1.RecallContextResponse], error) {
+	return c.recallContext.CallUnary(ctx, req)
+}
+
+// GetMemory calls rafiki.v1.Control.GetMemory.
+func (c *controlClient) GetMemory(ctx context.Context, req *connect.Request[v1.GetMemoryRequest]) (*connect.Response[v1.GetMemoryResponse], error) {
+	return c.getMemory.CallUnary(ctx, req)
+}
+
+// MemoryTree calls rafiki.v1.Control.MemoryTree.
+func (c *controlClient) MemoryTree(ctx context.Context, req *connect.Request[v1.MemoryTreeRequest]) (*connect.Response[v1.MemoryTreeResponse], error) {
+	return c.memoryTree.CallUnary(ctx, req)
+}
+
+// PutMemory calls rafiki.v1.Control.PutMemory.
+func (c *controlClient) PutMemory(ctx context.Context, req *connect.Request[v1.PutMemoryRequest]) (*connect.Response[v1.PutMemoryResponse], error) {
+	return c.putMemory.CallUnary(ctx, req)
+}
+
+// DeleteMemory calls rafiki.v1.Control.DeleteMemory.
+func (c *controlClient) DeleteMemory(ctx context.Context, req *connect.Request[v1.DeleteMemoryRequest]) (*connect.Response[v1.DeleteMemoryResponse], error) {
+	return c.deleteMemory.CallUnary(ctx, req)
+}
+
+// RecallBackfill calls rafiki.v1.Control.RecallBackfill.
+func (c *controlClient) RecallBackfill(ctx context.Context, req *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error) {
+	return c.recallBackfill.CallUnary(ctx, req)
+}
+
+// RecallStatus calls rafiki.v1.Control.RecallStatus.
+func (c *controlClient) RecallStatus(ctx context.Context, req *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error) {
+	return c.recallStatus.CallUnary(ctx, req)
+}
+
 // ConversationSearch calls rafiki.v1.Control.ConversationSearch.
 func (c *controlClient) ConversationSearch(ctx context.Context, req *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
 	return c.conversationSearch.CallUnary(ctx, req)
@@ -669,6 +792,17 @@ type ControlHandler interface {
 	GetPreset(context.Context, *connect.Request[v1.GetPresetRequest]) (*connect.Response[v1.GetPresetResponse], error)
 	PutPreset(context.Context, *connect.Request[v1.PutPresetRequest]) (*connect.Response[v1.PutPresetResponse], error)
 	DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error)
+	// Recall serves conversation-derived hits and curated memories for the
+	// calling identity: the manager implementation resolves Scope/owner from
+	// the request context, so no request field carries them.
+	Recall(context.Context, *connect.Request[v1.RecallRequest]) (*connect.Response[v1.RecallResponse], error)
+	RecallContext(context.Context, *connect.Request[v1.RecallContextRequest]) (*connect.Response[v1.RecallContextResponse], error)
+	GetMemory(context.Context, *connect.Request[v1.GetMemoryRequest]) (*connect.Response[v1.GetMemoryResponse], error)
+	MemoryTree(context.Context, *connect.Request[v1.MemoryTreeRequest]) (*connect.Response[v1.MemoryTreeResponse], error)
+	PutMemory(context.Context, *connect.Request[v1.PutMemoryRequest]) (*connect.Response[v1.PutMemoryResponse], error)
+	DeleteMemory(context.Context, *connect.Request[v1.DeleteMemoryRequest]) (*connect.Response[v1.DeleteMemoryResponse], error)
+	RecallBackfill(context.Context, *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error)
+	RecallStatus(context.Context, *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error)
 	ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error)
 	ConversationExport(context.Context, *connect.Request[v1.ConversationExportRequest]) (*connect.Response[v1.ConversationExportResponse], error)
 	ConversationQuery(context.Context, *connect.Request[v1.ConversationQueryRequest]) (*connect.Response[v1.ConversationQueryResponse], error)
@@ -866,6 +1000,54 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DeletePreset")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlRecallHandler := connect.NewUnaryHandler(
+		ControlRecallProcedure,
+		svc.Recall,
+		connect.WithSchema(controlMethods.ByName("Recall")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRecallContextHandler := connect.NewUnaryHandler(
+		ControlRecallContextProcedure,
+		svc.RecallContext,
+		connect.WithSchema(controlMethods.ByName("RecallContext")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetMemoryHandler := connect.NewUnaryHandler(
+		ControlGetMemoryProcedure,
+		svc.GetMemory,
+		connect.WithSchema(controlMethods.ByName("GetMemory")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlMemoryTreeHandler := connect.NewUnaryHandler(
+		ControlMemoryTreeProcedure,
+		svc.MemoryTree,
+		connect.WithSchema(controlMethods.ByName("MemoryTree")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlPutMemoryHandler := connect.NewUnaryHandler(
+		ControlPutMemoryProcedure,
+		svc.PutMemory,
+		connect.WithSchema(controlMethods.ByName("PutMemory")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteMemoryHandler := connect.NewUnaryHandler(
+		ControlDeleteMemoryProcedure,
+		svc.DeleteMemory,
+		connect.WithSchema(controlMethods.ByName("DeleteMemory")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRecallBackfillHandler := connect.NewUnaryHandler(
+		ControlRecallBackfillProcedure,
+		svc.RecallBackfill,
+		connect.WithSchema(controlMethods.ByName("RecallBackfill")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRecallStatusHandler := connect.NewUnaryHandler(
+		ControlRecallStatusProcedure,
+		svc.RecallStatus,
+		connect.WithSchema(controlMethods.ByName("RecallStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlConversationSearchHandler := connect.NewUnaryHandler(
 		ControlConversationSearchProcedure,
 		svc.ConversationSearch,
@@ -976,6 +1158,22 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlPutPresetHandler.ServeHTTP(w, r)
 		case ControlDeletePresetProcedure:
 			controlDeletePresetHandler.ServeHTTP(w, r)
+		case ControlRecallProcedure:
+			controlRecallHandler.ServeHTTP(w, r)
+		case ControlRecallContextProcedure:
+			controlRecallContextHandler.ServeHTTP(w, r)
+		case ControlGetMemoryProcedure:
+			controlGetMemoryHandler.ServeHTTP(w, r)
+		case ControlMemoryTreeProcedure:
+			controlMemoryTreeHandler.ServeHTTP(w, r)
+		case ControlPutMemoryProcedure:
+			controlPutMemoryHandler.ServeHTTP(w, r)
+		case ControlDeleteMemoryProcedure:
+			controlDeleteMemoryHandler.ServeHTTP(w, r)
+		case ControlRecallBackfillProcedure:
+			controlRecallBackfillHandler.ServeHTTP(w, r)
+		case ControlRecallStatusProcedure:
+			controlRecallStatusHandler.ServeHTTP(w, r)
 		case ControlConversationSearchProcedure:
 			controlConversationSearchHandler.ServeHTTP(w, r)
 		case ControlConversationExportProcedure:
@@ -1119,6 +1317,38 @@ func (UnimplementedControlHandler) PutPreset(context.Context, *connect.Request[v
 
 func (UnimplementedControlHandler) DeletePreset(context.Context, *connect.Request[v1.DeletePresetRequest]) (*connect.Response[v1.DeletePresetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeletePreset is not implemented"))
+}
+
+func (UnimplementedControlHandler) Recall(context.Context, *connect.Request[v1.RecallRequest]) (*connect.Response[v1.RecallResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Recall is not implemented"))
+}
+
+func (UnimplementedControlHandler) RecallContext(context.Context, *connect.Request[v1.RecallContextRequest]) (*connect.Response[v1.RecallContextResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RecallContext is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetMemory(context.Context, *connect.Request[v1.GetMemoryRequest]) (*connect.Response[v1.GetMemoryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetMemory is not implemented"))
+}
+
+func (UnimplementedControlHandler) MemoryTree(context.Context, *connect.Request[v1.MemoryTreeRequest]) (*connect.Response[v1.MemoryTreeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.MemoryTree is not implemented"))
+}
+
+func (UnimplementedControlHandler) PutMemory(context.Context, *connect.Request[v1.PutMemoryRequest]) (*connect.Response[v1.PutMemoryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.PutMemory is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteMemory(context.Context, *connect.Request[v1.DeleteMemoryRequest]) (*connect.Response[v1.DeleteMemoryResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteMemory is not implemented"))
+}
+
+func (UnimplementedControlHandler) RecallBackfill(context.Context, *connect.Request[v1.RecallBackfillRequest]) (*connect.Response[v1.RecallBackfillResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RecallBackfill is not implemented"))
+}
+
+func (UnimplementedControlHandler) RecallStatus(context.Context, *connect.Request[v1.RecallStatusRequest]) (*connect.Response[v1.RecallStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RecallStatus is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationSearch(context.Context, *connect.Request[v1.ConversationSearchRequest]) (*connect.Response[v1.ConversationSearchResponse], error) {
