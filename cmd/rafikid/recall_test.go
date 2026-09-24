@@ -156,15 +156,17 @@ func TestRecallBindingNilWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestRecallWiring runs the three wiring tests whose pinned names do not
-// contain the verify pattern ('TestRecall|TestMCPFace' — an UNANCHORED
-// substring match): TestStartRecall* and TestLLMCompleter* would otherwise
-// silently skip inside the gate. Same shim rule as the other pinned-name
-// suites; the subtests call the bodies directly.
+// TestRecallWiring runs the wiring tests whose pinned names do not contain
+// the verify pattern ('TestRecall|TestMCPFace' — an UNANCHORED substring
+// match): TestStartRecall* and TestLLMCompleter* would otherwise silently
+// skip inside the gate. Same shim rule as the other pinned-name suites; the
+// subtests call the bodies directly.
 func TestRecallWiring(t *testing.T) {
 	t.Run("start-recall-no-config-leaves-interfaces-nil", TestStartRecallNoConfigLeavesInterfacesNil)
 	t.Run("start-recall-no-pool-disables", TestStartRecallNoPoolDisables)
 	t.Run("llm-completer-uses-summary-entrypoint", TestLLMCompleterUsesSummaryEntrypoint)
+	t.Run("llm-completer-resolves-catalog-model", TestLLMCompleterResolvesCatalogModel)
+	t.Run("llm-completer-completion-cost-fallback", TestLLMCompleterCompletionCostFallback)
 }
 
 func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
@@ -413,5 +415,100 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 	}
 	if entrypoint != recall.SummaryEntrypoint {
 		t.Fatalf("entrypoint = %q", entrypoint)
+	}
+}
+
+// TestLLMCompleterResolvesCatalogModel pins the catalog-model resolution the
+// completer performs once at construction: the shared catalog indexes
+// OpenRouter-NATIVE ids (z-ai/glm-5.3-flash), so a provider-qualified
+// [summaries] model (the documented providers.toml shape) must be split
+// before any ContextWindow/pricing query — the raw string never matches and
+// would silently degrade the segment budget to the unknown-context fallback.
+// Rides the TestRecallWiring shim (the pinned name lacks the -run pattern).
+func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
+	prov := func(models map[string]providers.ModelAlias) *providers.Set {
+		return &providers.Set{
+			DefaultProvider: "anthropic",
+			Providers: map[string]providers.Provider{
+				"anthropic":  {Kind: "anthropic", APIKeyEnv: "ANTHROPIC_API_KEY"},
+				"openrouter": {Kind: "anthropic-openrouter", APIKeyEnv: "OPENROUTER_API_KEY", Models: models},
+			},
+		}
+	}
+
+	t.Run("provider-qualified id splits to the catalog-native id", func(t *testing.T) {
+		c := newLLMCompleter(nil, prov(nil), "openrouter/z-ai/glm-5.3-flash", nil)
+		if c.model != "openrouter/z-ai/glm-5.3-flash" {
+			t.Fatalf("model = %q, want the configured string (the stable identity)", c.model)
+		}
+		if c.catalogModel != "z-ai/glm-5.3-flash" {
+			t.Fatalf("catalogModel = %q, want the provider-local id", c.catalogModel)
+		}
+	})
+	t.Run("alias resolves to the real id", func(t *testing.T) {
+		p := prov(map[string]providers.ModelAlias{"glm": {ID: "z-ai/glm-5.3-flash", ContextWindow: 1310720}})
+		c := newLLMCompleter(nil, p, "openrouter/glm", nil)
+		if c.catalogModel != "z-ai/glm-5.3-flash" {
+			t.Fatalf("catalogModel = %q, want the alias's real id", c.catalogModel)
+		}
+	})
+	t.Run("bare id resolves against the default provider unchanged", func(t *testing.T) {
+		c := newLLMCompleter(nil, prov(nil), "claude-haiku-4-5", nil)
+		if c.catalogModel != "claude-haiku-4-5" {
+			t.Fatalf("catalogModel = %q, want the id unchanged", c.catalogModel)
+		}
+	})
+	t.Run("unknown provider falls back to the raw string", func(t *testing.T) {
+		c := newLLMCompleter(nil, prov(nil), "weird/x", nil)
+		if c.catalogModel != "weird/x" {
+			t.Fatalf("catalogModel = %q, want the raw fallback", c.catalogModel)
+		}
+	})
+	t.Run("nil provider set falls back to the raw string", func(t *testing.T) {
+		c := newLLMCompleter(nil, nil, "openrouter/z-ai/glm-5.3-flash", nil)
+		if c.catalogModel != "openrouter/z-ai/glm-5.3-flash" {
+			t.Fatalf("catalogModel = %q, want the raw fallback", c.catalogModel)
+		}
+	})
+}
+
+// TestLLMCompleterCompletionCostFallback pins completionCost's fallback: the
+// response echoes the serving provider's id, but when that spelling misses the
+// catalog the configured model's provider-local id is tried before giving up —
+// a summary's cost is never silently zero because the responder spelled the id
+// differently than the catalog does. Rides the TestRecallWiring shim.
+func TestLLMCompleterCompletionCostFallback(t *testing.T) {
+	usage := anthropic.Usage{InputTokens: 1000, OutputTokens: 100}
+	known := func(ids ...string) insights.Pricer {
+		set := map[string]struct{}{}
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		return func(model string) (routing.ModelPricing, bool) {
+			if _, ok := set[model]; !ok {
+				return routing.ModelPricing{}, false
+			}
+			return routing.ModelPricing{}, true // zero prices; ok is what the test pins
+		}
+	}
+	// Zero prices make Cost 0 — indistinguishable from a miss. Assert "found"
+	// instead: track which id the pricer saw.
+	var saw []string
+	recorder := func(model string) (routing.ModelPricing, bool) {
+		saw = append(saw, model)
+		return routing.ModelPricing{}, false
+	}
+	completionCost(recorder, "echoed-id", "z-ai/glm-5.3-flash", usage)
+	if len(saw) != 2 || saw[0] != "echoed-id" || saw[1] != "z-ai/glm-5.3-flash" {
+		t.Fatalf("pricer saw %v, want [echoed-id z-ai/glm-5.3-flash]", saw)
+	}
+	saw = nil
+	completionCost(recorder, "echoed-id", "echoed-id", usage)
+	if len(saw) != 1 {
+		t.Fatalf("pricer saw %v, want a single probe when the fallback equals the first", saw)
+	}
+	saw = nil
+	if got := completionCost(known("echoed-id"), "echoed-id", "z-ai/glm-5.3-flash", usage); got != 0 {
+		t.Fatalf("cost = %v, want 0 (zero-priced entry is a hit, not a miss)", got)
 	}
 }

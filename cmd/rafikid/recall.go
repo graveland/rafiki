@@ -30,6 +30,14 @@ import (
 type llmCompleter struct {
 	client *llm.Client
 	model  string
+	// catalogModel is the model id the shared catalog indexes — the provider-
+	// local half of model ("z-ai/glm-5.3-flash" for "openrouter/z-ai/glm-5.3-flash").
+	// ContextWindow and the pricing fallback query the catalog with it: the
+	// snapshot holds OpenRouter-native ids, so a provider-qualified string never
+	// matches and would silently degrade every lookup to the fallback. Falls
+	// back to model itself when model names no provider (a bare id is already
+	// catalog-shaped) or names an unknown one.
+	catalogModel string
 	// pricer prices the call exactly like pkg/analyze's detector does; nil (a
 	// client with no catalog pricing) leaves CostUSD 0.
 	pricer insights.Pricer
@@ -37,13 +45,27 @@ type llmCompleter struct {
 
 var _ recall.Completer = (*llmCompleter)(nil)
 
+// newLLMCompleter resolves the configured model against the provider set once,
+// at construction: model stays the configured string (the stable identity the
+// summarizer records and keys eligibility on), catalogModel is what the shared
+// catalog indexes.
+func newLLMCompleter(client *llm.Client, prov *providers.Set, model string, pricer insights.Pricer) *llmCompleter {
+	c := &llmCompleter{client: client, model: model, catalogModel: model, pricer: pricer}
+	if prov != nil {
+		if _, id, err := prov.Split(model); err == nil {
+			c.catalogModel = id
+		}
+	}
+	return c
+}
+
 func (c *llmCompleter) Model() string { return c.model }
 
-// ContextWindow resolves the model's context length from the shared catalog.
-// ok=false (unknown model, cold cache) is the Summarizer's fallback signal,
-// not an error.
+// ContextWindow resolves the model's context length from the shared catalog,
+// queried with the provider-local id (see catalogModel). ok=false (unknown
+// model, cold cache) is the Summarizer's fallback signal, not an error.
 func (c *llmCompleter) ContextWindow() (int, bool) {
-	tokens, _, ok := c.client.Catalog().ContextWindow(c.model)
+	tokens, _, ok := c.client.Catalog().ContextWindow(c.catalogModel)
 	return tokens, ok
 }
 
@@ -71,19 +93,26 @@ func (c *llmCompleter) Complete(ctx context.Context, ownerUserID, system, user s
 		Model:        model,
 		InputTokens:  resp.Usage.InputTokens,
 		OutputTokens: resp.Usage.OutputTokens,
-		CostUSD:      completionCost(c.pricer, model, resp.Usage),
+		CostUSD:      completionCost(c.pricer, model, c.catalogModel, resp.Usage),
 	}, nil
 }
 
 // completionCost prices one response's usage via pricer, returning 0 when the
 // pricer is nil or has no entry for the model — the same arithmetic as
 // pkg/analyze/detect.go's detectCost, which routes through
-// routing.ModelPricing.Cost so every cost consumer shares one formula.
-func completionCost(pricer insights.Pricer, model string, usage anthropic.Usage) float64 {
+// routing.ModelPricing.Cost so every cost consumer shares one formula. The
+// response echoes the serving provider's id, but an echo that misses the
+// catalog falls back to the configured model's provider-local id before
+// giving up, so a summary's cost is never silently zero just because the
+// responder spelled the id differently than the catalog does.
+func completionCost(pricer insights.Pricer, model, catalogModel string, usage anthropic.Usage) float64 {
 	if pricer == nil {
 		return 0
 	}
 	price, ok := pricer(model)
+	if !ok && catalogModel != "" && catalogModel != model {
+		price, ok = pricer(catalogModel)
+	}
 	if !ok {
 		return 0
 	}
@@ -307,12 +336,8 @@ func buildRecallRuntime(pool *pgxpool.Pool, prov *providers.Set, client *llm.Cli
 			summaryModel = prov.Summaries.Model
 			if client != nil {
 				sums = recall.NewSummarizer(recall.SummarizerOptions{
-					Store: st,
-					Completer: &llmCompleter{
-						client: client,
-						model:  prov.Summaries.Model,
-						pricer: client.Catalog().Pricing,
-					},
+					Store:            st,
+					Completer:        newLLMCompleter(client, prov, prov.Summaries.Model, client.Catalog().Pricing),
 					MaxSegmentTokens: prov.Summaries.MaxSegmentTokens,
 					Logger:           logger,
 				})
