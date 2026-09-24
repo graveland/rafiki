@@ -565,6 +565,12 @@ transport error, and never a successful result carrying the text.
 | `preset_get` | Read one preset — version stamp and full spec (kind, model, tools, prompts, budget) as JSON; `history` returns every past version, deleted ones included. What a spawn with that preset will get |
 | `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker; a child-token caller is recorded as the writer |
 | `preset_delete` | Delete one preset by name — every live version is stamped deleted and the history is kept; a later `preset_put` under the same name starts a new version line |
+| `recall` | Search your past conversations AND your saved memories by keyword and meaning — one line per hit (`m:` memory, `s:` summary, `w:` window), never full text. Conversation results cover what your credential can see (an admin reads the whole daemon); memories are always your own. Declined, with the five below, when the daemon has no recall store |
+| `recall_context` | Expand one recall hit: a window returns the surrounding messages (tool results collapsed to size markers), a summary its full text and conversation id, a memory its full body |
+| `memory_put` | Save or replace one of YOUR memories at `path/name` — tombstone-replace, one live version |
+| `memory_get` | Fetch one of your saved memories — full body, metadata, timestamps; a missing path/name is a tool error |
+| `memory_tree` | Fetch every memory under a path, full bodies; when the subtree exceeds the output budget it degrades to paths plus first lines and asks you to narrow |
+| `memory_delete` | Remove one of your memories from recall results — tombstoned, not destroyed |
 
 The `task_*` descriptions are likewise reworded: the ledger is shared, durable
 and cross-agent — not the client's private per-session checklist (the native

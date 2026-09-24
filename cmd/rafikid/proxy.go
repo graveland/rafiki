@@ -130,6 +130,13 @@ type proxyFace struct {
 	// Controller into it after construction. The face is built before the
 	// Controller exists, for the same reason as Control and MCP above.
 	messages *server.MessagesProxy
+
+	// LLM is the client the face builds for its own routing — exposed so the
+	// daemon's recall summarizer can issue completions through the same
+	// provider set, catalog and capture path instead of building a second
+	// client. Nil when the face failed to start (main.go logs and continues);
+	// startRecall treats a nil client as "no summaries".
+	LLM *llm.Client
 }
 
 // defaultProxyListen is where the face binds unless RAFIKI_PROXY_LISTEN says
@@ -407,6 +414,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 		QuotaStore: quotaStore,
 		TokenAuth:  tokenAuth,
 		messages:   messages,
+		LLM:        client,
 	}
 	logger.Info("proxy face listening",
 		"addr", ln.Addr().String(), "children_use", f.URL, "captured", pool != nil)

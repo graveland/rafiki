@@ -318,6 +318,16 @@ type Controller struct {
 	// daemon, which refuses any spawn naming a preset.
 	presetStore presets.Store
 
+	// recall is the wired recall subsystem (store, optional embedder, the
+	// background indexer and summarizer). Nil on a DB-less daemon: the
+	// recall/recall_context/memory_* tools decline and conversation close
+	// stamping has no indexer to nudge.
+	recall *recallRuntime
+
+	// recallWg tracks the recall indexer goroutine; waited on by Stop, the
+	// same contract as sweeperWg.
+	recallWg sync.WaitGroup
+
 	// gitpymoduleStore is the owner-scoped git-source backend (the `repo`
 	// scopes the pymodule tool surface addresses). Nil when the daemon has no
 	// database: `rafiki python repo` answers that the backend is not wired,
@@ -588,11 +598,12 @@ func (c *Controller) sweepTick(ctx context.Context) {
 	c.sweepInbox()
 }
 
-// Stop waits for background goroutines (currently the sweeper) to exit.
-// The caller is responsible for cancelling the context passed to startSweeper
-// before calling Stop.
+// Stop waits for background goroutines (the sweeper and the recall indexer)
+// to exit. The caller is responsible for cancelling the context passed to
+// startSweeper AND to startRecall before calling Stop.
 func (c *Controller) Stop() {
 	c.sweeperWg.Wait()
+	c.recallWg.Wait()
 }
 
 // sweepExpired closes all exited children whose ExitedAt is older than
@@ -2850,6 +2861,15 @@ func (c *Controller) Close(childID string) error {
 		}
 		if err := c.stampConversationsClosed(ctx, childID); err != nil {
 			slog.Warn("stamp conversation closed", "childId", childID, "error", err)
+		}
+		// A conversation just became stopped: its tail windows may now be
+		// sealed and embedded and its summary chain advanced. Nudge the indexer
+		// so that happens now rather than on the next tick. recall and the
+		// durable child store share the same nil condition (both need the
+		// pool), but the guard stays independent so a future wiring change
+		// cannot silently drop the nudge.
+		if c.recall != nil {
+			c.recall.indexer.Nudge()
 		}
 		cancel()
 	}

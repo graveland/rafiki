@@ -37,7 +37,11 @@ import (
 
 // mcpToolNames is the exact surface the MCP face must expose: the
 // agent-control blueprints (cmd/rafikid/mcp_face.go's mcpBlueprints), no more
-// and no fewer. ListTools must agree with this list exactly.
+// and no fewer. ListTools must agree with this list exactly. The daemon under
+// test is DB-backed, so recall is wired (startRecall runs unconditionally on
+// a pool) and the six recall/memory tools materialize — with no
+// [embeddings]/[summaries] config they answer BM25-only, which still makes
+// them real tools.
 var mcpToolNames = []string{
 	"agent_spawn",
 	"agent_list",
@@ -58,6 +62,12 @@ var mcpToolNames = []string{
 	"preset_get",
 	"preset_put",
 	"preset_delete",
+	"recall",
+	"recall_context",
+	"memory_put",
+	"memory_get",
+	"memory_tree",
+	"memory_delete",
 }
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────

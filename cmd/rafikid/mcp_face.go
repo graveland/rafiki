@@ -254,6 +254,15 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		}
 		opts.Presets = newPresetBinding(ctrl, owner.UserID, writer)
 	}
+	// Recall + memory tools, bound to the caller the same way the conversation
+	// reader is: an admin's conversation-derived hits cover the whole daemon,
+	// everyone else's are scoped to their own rows, and memories are ALWAYS
+	// the caller's own. Declines daemon-wide when recall is not wired; the
+	// guard lives here because newRecallBinding's decline is a nil INTERFACE
+	// (a typed-nil assignment would defeat the blueprints' decline).
+	if rb := newRecallBinding(ctrl, owner); rb != nil {
+		opts.Recall = rb
+	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has
 	// no executor pool at all: no claude child can ever run one here, so
 	// put/get/delete/list would be a toolbox nobody can open. Unlike Quota
@@ -344,7 +353,8 @@ func (f *mcpFace) taskStoreFor(ctrl *Controller) tasks.Store {
 }
 
 // mcpBlueprints is the agent-control surface's tool set: the spawner verbs,
-// the shared task ledger, and the caller's own quota view. Each blueprint is a
+// the shared task ledger, the caller's own quota view, the caller's preset
+// store, and its recall + memory surfaces. Each blueprint is a
 // Tool that implements Materializer; the nil-check in getServer covers the
 // decline.
 var mcpBlueprints = []tools.Tool{
@@ -372,6 +382,12 @@ var mcpBlueprints = []tools.Tool{
 	&tools.PresetGetBlueprint{},
 	&tools.PresetPutBlueprint{},
 	&tools.PresetDeleteBlueprint{},
+	&tools.RecallBlueprint{},
+	&tools.RecallContextBlueprint{},
+	&tools.MemoryPutBlueprint{},
+	&tools.MemoryGetBlueprint{},
+	&tools.MemoryTreeBlueprint{},
+	&tools.MemoryDeleteBlueprint{},
 }
 
 // mcpNotificationNote replaces the settlement promise the fundi blueprint

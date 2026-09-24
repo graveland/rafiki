@@ -28,6 +28,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/users"
 )
 
 // projectContextFetcher is the one method the daemon needs from an executor
@@ -462,6 +463,17 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// empty.
 	if c.pool != nil && c.presetStore != nil {
 		ro.Presets = newPresetBinding(c, ownerUserID, childID)
+	}
+	// Recall: same nil-means-decline family. The decline is daemon-wide
+	// (c.recall == nil), but newRecallBinding itself returns a nil INTERFACE on
+	// it, so the guard lives HERE: assigning that typed-nil to ro.Recall would
+	// make the interface non-nil and defeat the blueprints' nil-decline — the
+	// exact trap the Quota block above documents. The identity is owner-only:
+	// a fundi child reads conversations under its owner's scope (agentRuntime
+	// has no admin bit to grant more), and memories are always its owner's
+	// own.
+	if rb := newRecallBinding(c, users.Identity{UserID: ownerUserID}); rb != nil {
+		ro.Recall = rb
 	}
 	// A child on a daemon with an executor pool gets a boundExecutor, ALWAYS
 	// non-nil — selector or not. The selector (possibly empty) narrows where

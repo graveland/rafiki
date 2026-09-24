@@ -423,11 +423,15 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 // blueprint that stopped materializing for some other reason.
 func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 	face, ledger := mcpFaceFixture(t)
+	face.controller().recall = &recallRuntime{st: &fakeRecallStore{}}
 	opts := tools.ToolOpts{
 		Agents:        newUserSpawner(face.controller(), users.Identity{UserID: "u-alice", Username: "alice"}),
 		Tasks:         ledger,
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-alice"}),
+	}
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}); rb != nil {
+		opts.Recall = rb
 	}
 	var names []string
 	for _, tool := range mcpToolset(opts, discardLogger()) {
@@ -445,7 +449,13 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"conversation_export",
 		"conversation_query",
 		"conversation_search",
+		"memory_delete",
+		"memory_get",
+		"memory_put",
+		"memory_tree",
 		"quota_status",
+		"recall",
+		"recall_context",
 		"task_add",
 		"task_drop",
 		"task_list",
@@ -584,6 +594,43 @@ func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
 	for _, name := range []string{"preset_list", "preset_get", "preset_put", "preset_delete"} {
 		if slices.Contains(names, name) {
 			t.Errorf("nil preset store unexpectedly exposes %s: %v", name, names)
+		}
+	}
+}
+
+// TestMCPFaceRecallToolsFollowRecallRuntime pins the recall block's gate: the
+// six decline on a daemon whose recall subsystem is not wired (nil
+// ctrl.recall — the DB-less posture) and materialize for BOTH provenances
+// once it is, exactly like the preset block outside the executor-routed
+// pymodule condition.
+func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+	recallTools := []string{"recall", "recall_context", "memory_put", "memory_get", "memory_tree", "memory_delete"}
+
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	for _, name := range recallTools {
+		if slices.Contains(names, name) {
+			t.Errorf("nil recall runtime unexpectedly exposes %s: %v", name, names)
+		}
+	}
+
+	face.controller().recall = &recallRuntime{st: &fakeRecallStore{}}
+	requests := map[string]*http.Request{
+		"user": mcpRequestFor("u-alice"),
+		"child": func() *http.Request {
+			r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+			ctx := server.WithIdentity(r.Context(), &server.Identity{
+				UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
+			})
+			return r.WithContext(ctx)
+		}(),
+	}
+	for provenance, req := range requests {
+		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
+		for _, name := range recallTools {
+			if !slices.Contains(names, name) {
+				t.Errorf("%s request is missing %s: %v", provenance, name, names)
+			}
 		}
 	}
 }
@@ -822,11 +869,15 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 	// conversation reader is set unconditionally, exactly as getServer does:
 	// a child-attributed identity carries the OWNER's user id, so the reader
 	// binds that owner's scope.
+	face.controller().recall = &recallRuntime{st: &fakeRecallStore{}}
 	opts := tools.ToolOpts{
 		Agents:        newControllerSpawner(face.controller(), "c-child"),
 		Tasks:         face.taskStoreFor(face.controller()),
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-owner"}),
+	}
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}); rb != nil {
+		opts.Recall = rb
 	}
 	var names []string
 	for _, tool := range mcpToolset(opts, discardLogger()) {
@@ -844,7 +895,13 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		"conversation_export",
 		"conversation_query",
 		"conversation_search",
+		"memory_delete",
+		"memory_get",
+		"memory_put",
+		"memory_tree",
 		"quota_status",
+		"recall",
+		"recall_context",
 		"task_add",
 		"task_drop",
 		"task_list",

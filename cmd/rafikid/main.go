@@ -33,6 +33,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorsdb"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/gitpymodulesdb"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/presetsdb"
@@ -526,6 +527,19 @@ func runDaemon(opts runDaemonOpts) error {
 	if pool != nil {
 		ctrl.presetStore = presetsdb.NewPostgresStore(pool)
 	}
+	// Recall: the store behind the recall/recall_context/memory_* tools, plus
+	// the background indexer (windows, embeddings, rolling summaries) started
+	// on ctx — the same lifetime the sweeper runs on, so Stop() at shutdown
+	// waits on it after cancel() has already told it to stop. The llm client
+	// is the proxy face's: the summarizer's completions ride the same
+	// provider set, catalog and capture path as everything else the daemon
+	// sends. A face that failed to start leaves the daemon without summaries
+	// (windowing and memories are client-free and still run).
+	var recallLLM *llm.Client
+	if face != nil {
+		recallLLM = face.LLM
+	}
+	startRecall(ctx, ctrl, pool, prov, recallLLM, slog.Default())
 	if pymoduleStore != nil && execPool != nil {
 		ctrl.pymodulePusher = &pymodulePusher{
 			pool: execPool, store: pymoduleStore, version: version.String(),
