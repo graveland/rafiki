@@ -38,8 +38,8 @@ type TranscriptTurnRow struct {
 	Role                                       string
 	Content                                    []byte
 	Skills                                     []string
-	InputTokens, OutputTokens, CacheReadTokens int64
-	LatencyMS                                  int
+	InputTokens, OutputTokens, CacheReadTokens *int64 // nil = not reported
+	LatencyMS                                  *int
 	Model, PrefixHash                          string
 }
 
@@ -159,7 +159,7 @@ func (s *Server) ConversationExport(
 		turns = append(turns, &rafikiv1.TranscriptTurn{
 			Ordinal: int32(t.Ordinal), Role: t.Role, Content: t.Content, Skills: t.Skills,
 			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
-			LatencyMs: int32(t.LatencyMS), Model: t.Model, PrefixHash: t.PrefixHash,
+			LatencyMs: latencyMS32(t.LatencyMS), Model: t.Model, PrefixHash: t.PrefixHash,
 		})
 	}
 	return connect.NewResponse(&rafikiv1.ConversationExportResponse{
@@ -235,4 +235,14 @@ func queryError(err error) error {
 	}
 	slog.Error("connect: conversation query failed", "error", err)
 	return connect.NewError(connect.CodeInternal, errors.New(internalRedactedText))
+}
+
+// latencyMS32 narrows an optional latency to the proto's optional int32,
+// keeping nil (not reported) distinct from a measured zero.
+func latencyMS32(ms *int) *int32 {
+	if ms == nil {
+		return nil
+	}
+	v := int32(*ms)
+	return &v
 }

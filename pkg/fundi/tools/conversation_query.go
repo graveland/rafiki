@@ -40,8 +40,8 @@ type ConversationTranscriptTurn struct {
 	Role                                       string
 	Content                                    json.RawMessage
 	Skills                                     []string
-	InputTokens, OutputTokens, CacheReadTokens int64
-	LatencyMS                                  int
+	InputTokens, OutputTokens, CacheReadTokens *int64 // nil = not reported
+	LatencyMS                                  *int
 	Model, PrefixHash                          string
 }
 

@@ -51,6 +51,7 @@ func newConversationsServer(f *fakeConversationInsights) *connectapi.Server {
 
 // ptrInt64 builds the *int64 a proto `optional int64` field decodes to.
 func ptrInt64(v int64) *int64 { return &v }
+func ptrInt(v int) *int       { return &v }
 
 func TestConversationSearchNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
@@ -200,8 +201,10 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 			Turns: []connectapi.TranscriptTurnRow{{
 				Ordinal: 3, Role: "assistant", Content: []byte(`[{"type":"text"}]`),
 				Skills:      []string{"brainstorming"},
-				InputTokens: 100, OutputTokens: 20, CacheReadTokens: 80,
-				LatencyMS: 1500, Model: "openrouter/x/glm", PrefixHash: "abc123",
+				InputTokens: ptrInt64(100), OutputTokens: ptrInt64(20), CacheReadTokens: ptrInt64(80),
+				LatencyMS: ptrInt(1500), Model: "openrouter/x/glm", PrefixHash: "abc123",
+			}, {
+				Ordinal: 4, Role: "user", Content: []byte(`[{"type":"text"}]`),
 			}},
 			AvailableSkills: []string{"brainstorming", "writing-plans"},
 		},
@@ -221,8 +224,8 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 		t.Errorf("header = (%q,%q,%q), want (conv-1,brent,claude)",
 			msg.GetConversationId(), msg.GetOwner(), msg.GetDrivenBy())
 	}
-	if len(msg.GetTurns()) != 1 {
-		t.Fatalf("turns = %d, want 1", len(msg.GetTurns()))
+	if len(msg.GetTurns()) != 2 {
+		t.Fatalf("turns = %d, want 2", len(msg.GetTurns()))
 	}
 	turn := msg.GetTurns()[0]
 	if turn.GetOrdinal() != 3 || turn.GetRole() != "assistant" || string(turn.GetContent()) != `[{"type":"text"}]` {
@@ -234,6 +237,16 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 	}
 	if turn.GetLatencyMs() != 1500 || turn.GetPrefixHash() != "abc123" {
 		t.Errorf("turn metrics = (%d,%q), want (1500,abc123)", turn.GetLatencyMs(), turn.GetPrefixHash())
+	}
+	if turn.InputTokens == nil || turn.GetInputTokens() != 100 || turn.CacheReadTokens == nil {
+		t.Errorf("reported metrics must be set on the wire: in=%v cache=%v", turn.InputTokens, turn.CacheReadTokens)
+	}
+	// Unreported metrics stay UNSET on the wire, not zero.
+	unmetered := msg.GetTurns()[1]
+	if unmetered.InputTokens != nil || unmetered.OutputTokens != nil ||
+		unmetered.CacheReadTokens != nil || unmetered.LatencyMs != nil {
+		t.Errorf("unreported metrics must be unset, got in=%v out=%v cache=%v latency=%v",
+			unmetered.InputTokens, unmetered.OutputTokens, unmetered.CacheReadTokens, unmetered.LatencyMs)
 	}
 	if len(msg.GetAvailableSkills()) != 2 || msg.GetAvailableSkills()[0] != "brainstorming" {
 		t.Errorf("available_skills = %v, want [brainstorming writing-plans]", msg.GetAvailableSkills())

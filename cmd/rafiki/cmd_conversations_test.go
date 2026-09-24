@@ -174,7 +174,7 @@ func TestConversationsExportRendersLikeAgentCLI(t *testing.T) {
 		AvailableSkills: []string{"td-go", "td-sql"},
 		Turns: []insightstypes.TranscriptTurn{
 			{Ordinal: 1, Role: "user", Content: json.RawMessage(`[{"type":"text","text":"hello"}]`)},
-			{Ordinal: 2, Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"hi"}]`), OutputTokens: 12, Model: "claude-sonnet-5"},
+			{Ordinal: 2, Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"hi"}]`), OutputTokens: int64Ptr(12), Model: "claude-sonnet-5"},
 		},
 	}
 
@@ -615,3 +615,5 @@ func TestConversationsFindingsJSONModes(t *testing.T) {
 		t.Errorf("jsonl rendered %d lines, want one finding per line:\n%s", n, lines.String())
 	}
 }
+
+func int64Ptr(v int64) *int64 { return &v }

@@ -2556,17 +2556,19 @@ func (x *ConversationExportRequest) GetConversationId() string {
 }
 
 type TranscriptTurn struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Ordinal         int32                  `protobuf:"varint,1,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
-	Role            string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
-	Content         []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"` // verbatim JSON content-block array
-	Skills          []string               `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
-	InputTokens     int64                  `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens    int64                  `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	CacheReadTokens int64                  `protobuf:"varint,7,opt,name=cache_read_tokens,json=cacheReadTokens,proto3" json:"cache_read_tokens,omitempty"`
-	LatencyMs       int32                  `protobuf:"varint,8,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
-	Model           string                 `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`
-	PrefixHash      string                 `protobuf:"bytes,10,opt,name=prefix_hash,json=prefixHash,proto3" json:"prefix_hash,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Ordinal int32                  `protobuf:"varint,1,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
+	Role    string                 `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	Content []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"` // verbatim JSON content-block array
+	Skills  []string               `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
+	// Metrics are unset when not reported (a message with no turn row, e.g. a
+	// user or pre-fill row, or a NULL column); zero is a measured zero.
+	InputTokens     *int64 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3,oneof" json:"input_tokens,omitempty"`
+	OutputTokens    *int64 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3,oneof" json:"output_tokens,omitempty"`
+	CacheReadTokens *int64 `protobuf:"varint,7,opt,name=cache_read_tokens,json=cacheReadTokens,proto3,oneof" json:"cache_read_tokens,omitempty"`
+	LatencyMs       *int32 `protobuf:"varint,8,opt,name=latency_ms,json=latencyMs,proto3,oneof" json:"latency_ms,omitempty"`
+	Model           string `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`
+	PrefixHash      string `protobuf:"bytes,10,opt,name=prefix_hash,json=prefixHash,proto3" json:"prefix_hash,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2630,29 +2632,29 @@ func (x *TranscriptTurn) GetSkills() []string {
 }
 
 func (x *TranscriptTurn) GetInputTokens() int64 {
-	if x != nil {
-		return x.InputTokens
+	if x != nil && x.InputTokens != nil {
+		return *x.InputTokens
 	}
 	return 0
 }
 
 func (x *TranscriptTurn) GetOutputTokens() int64 {
-	if x != nil {
-		return x.OutputTokens
+	if x != nil && x.OutputTokens != nil {
+		return *x.OutputTokens
 	}
 	return 0
 }
 
 func (x *TranscriptTurn) GetCacheReadTokens() int64 {
-	if x != nil {
-		return x.CacheReadTokens
+	if x != nil && x.CacheReadTokens != nil {
+		return *x.CacheReadTokens
 	}
 	return 0
 }
 
 func (x *TranscriptTurn) GetLatencyMs() int32 {
-	if x != nil {
-		return x.LatencyMs
+	if x != nil && x.LatencyMs != nil {
+		return *x.LatencyMs
 	}
 	return 0
 }
@@ -8166,21 +8168,25 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x1aConversationSearchResponse\x122\n" +
 	"\x04rows\x18\x01 \x03(\v2\x1e.rafiki.v1.ConversationSummaryR\x04rows\"D\n" +
 	"\x19ConversationExportRequest\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"\xba\x02\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"\x96\x03\n" +
 	"\x0eTranscriptTurn\x12\x18\n" +
 	"\aordinal\x18\x01 \x01(\x05R\aordinal\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\fR\acontent\x12\x16\n" +
-	"\x06skills\x18\x04 \x03(\tR\x06skills\x12!\n" +
-	"\finput_tokens\x18\x05 \x01(\x03R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x03R\foutputTokens\x12*\n" +
-	"\x11cache_read_tokens\x18\a \x01(\x03R\x0fcacheReadTokens\x12\x1d\n" +
+	"\x06skills\x18\x04 \x03(\tR\x06skills\x12&\n" +
+	"\finput_tokens\x18\x05 \x01(\x03H\x00R\vinputTokens\x88\x01\x01\x12(\n" +
+	"\routput_tokens\x18\x06 \x01(\x03H\x01R\foutputTokens\x88\x01\x01\x12/\n" +
+	"\x11cache_read_tokens\x18\a \x01(\x03H\x02R\x0fcacheReadTokens\x88\x01\x01\x12\"\n" +
 	"\n" +
-	"latency_ms\x18\b \x01(\x05R\tlatencyMs\x12\x14\n" +
+	"latency_ms\x18\b \x01(\x05H\x03R\tlatencyMs\x88\x01\x01\x12\x14\n" +
 	"\x05model\x18\t \x01(\tR\x05model\x12\x1f\n" +
 	"\vprefix_hash\x18\n" +
 	" \x01(\tR\n" +
-	"prefixHash\"\x86\x02\n" +
+	"prefixHashB\x0f\n" +
+	"\r_input_tokensB\x10\n" +
+	"\x0e_output_tokensB\x14\n" +
+	"\x12_cache_read_tokensB\r\n" +
+	"\v_latency_ms\"\x86\x02\n" +
 	"\x1aConversationExportResponse\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x18\n" +
@@ -8957,6 +8963,7 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[16].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[24].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[27].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[31].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[33].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[35].OneofWrappers = []any{
 		(*QueryValue_StrValue)(nil),

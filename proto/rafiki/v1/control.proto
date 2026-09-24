@@ -404,10 +404,12 @@ message TranscriptTurn {
   string role = 2;
   bytes  content = 3; // verbatim JSON content-block array
   repeated string skills = 4;
-  int64  input_tokens = 5;
-  int64  output_tokens = 6;
-  int64  cache_read_tokens = 7;
-  int32  latency_ms = 8;
+  // Metrics are unset when not reported (a message with no turn row, e.g. a
+  // user or pre-fill row, or a NULL column); zero is a measured zero.
+  optional int64 input_tokens = 5;
+  optional int64 output_tokens = 6;
+  optional int64 cache_read_tokens = 7;
+  optional int32 latency_ms = 8;
   string model = 9;
   string prefix_hash = 10;
 }

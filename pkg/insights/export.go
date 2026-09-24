@@ -25,10 +25,14 @@ type TranscriptTurn struct {
 
 	Skills []string `json:"skills"` // skills invoked in this message (Skill tool_use / user /slash markers)
 
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	CacheReadTokens int64  `json:"cache_read_tokens"`
-	LatencyMS       int    `json:"latency_ms"`
+	// The metrics are nil — JSON null — when the message has no turn row (a
+	// user message, or a synthetic one such as a spawn's pre-fill) or the
+	// turn row left that column NULL. Zero is a measured zero, never "not
+	// reported"; collapsing the two misreports synthetic rows as free turns.
+	InputTokens     *int64 `json:"input_tokens"`
+	OutputTokens    *int64 `json:"output_tokens"`
+	CacheReadTokens *int64 `json:"cache_read_tokens"`
+	LatencyMS       *int   `json:"latency_ms"`
 	Model           string `json:"model"`
 	PrefixHash      string `json:"prefix_hash"`
 }
@@ -48,8 +52,8 @@ type Transcript struct {
 
 // turnMetrics holds the per-turn figures attached to an assistant message.
 type turnMetrics struct {
-	inTok, outTok, cacheRead int64
-	latencyMS                int
+	inTok, outTok, cacheRead *int64
+	latencyMS                *int
 	model, prefixHash        string
 }
 
@@ -134,8 +138,8 @@ func (i *Insights) Export(ctx context.Context, scope Scope, conversationID strin
 // re-run at the same ordinal) the newest turn's metrics win, stably across runs.
 func (i *Insights) turnMetricsByOrdinal(ctx context.Context, conversationID string) (map[int]turnMetrics, error) {
 	rows, err := i.pool.Query(ctx, `
-		SELECT coalesce(response_ordinal, ordinal), coalesce(input_tokens,0), coalesce(output_tokens,0),
-		       coalesce(cache_read_tokens,0), coalesce(latency_ms,0),
+		SELECT coalesce(response_ordinal, ordinal), input_tokens, output_tokens,
+		       cache_read_tokens, latency_ms,
 		       coalesce(model,''), coalesce(prefix_hash,'')
 		  FROM conversations.conversation_turn
 		 WHERE conversation_id = $1::uuid

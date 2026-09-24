@@ -90,7 +90,7 @@ func fixtureTranscript() *insights.Transcript {
 		AvailableSkills: []string{"sc-diagnose-replication-lag"},
 		Turns: []insights.TranscriptTurn{
 			{Ordinal: 0, Role: "user", Content: textContent("why is replica X lagging?")},
-			{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: 10, OutputTokens: 5},
+			{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: i64(10), OutputTokens: i64(5)},
 		},
 	}
 }
@@ -377,3 +377,23 @@ func TestDetectFailsAfterTwoMalformedResponses(t *testing.T) {
 		t.Fatalf("requests sent = %d, want 2 (initial + one retry, no third attempt)", len(sender.lastReq))
 	}
 }
+
+// TestRenderTranscriptMarkdownMetricsOnlyWhenReported pins the renderer's nil
+// guard: a turn with unreported metrics (a user or pre-fill row) prints no
+// token line, while a measured zero still prints as zero.
+func TestRenderTranscriptMarkdownMetricsOnlyWhenReported(t *testing.T) {
+	zero, forty := int64(0), int64(40)
+	md := renderTranscriptMarkdown(&insights.Transcript{Turns: []insights.TranscriptTurn{
+		{Ordinal: 0, Role: "user", Content: json.RawMessage(`[{"type":"text","text":"hi"}]`)},
+		{Ordinal: 1, Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"ok"}]`),
+			InputTokens: &forty, OutputTokens: &zero},
+	}})
+	if strings.Count(md, "in=") != 1 {
+		t.Errorf("want exactly one token line (the reported turn), got:\n%s", md)
+	}
+	if !strings.Contains(md, "in=40 out=0") {
+		t.Errorf("a measured zero must still render, got:\n%s", md)
+	}
+}
+
+func i64(v int64) *int64 { return &v }

@@ -66,7 +66,7 @@ func TestRenderTranscriptMD(t *testing.T) {
 			Ordinal: 0, Role: "user",
 			Content: json.RawMessage(`[{"type":"text","text":"check the replica"}]`),
 		}, {
-			Ordinal: 1, Role: "assistant", Model: "claude-haiku-4-5", OutputTokens: 12,
+			Ordinal: 1, Role: "assistant", Model: "claude-haiku-4-5", OutputTokens: i64(12),
 			Content: json.RawMessage(`[{"type":"tool_use","id":"tu_1","name":"service_status","input":{"id":"x"}}]`),
 			Skills:  []string{"sc-diagnose-service"},
 		}},
@@ -133,3 +133,5 @@ func TestRenderJSONIndent(t *testing.T) {
 		t.Errorf("indent mode should pretty-print, got %q", b.String())
 	}
 }
+
+func i64(v int64) *int64 { return &v }

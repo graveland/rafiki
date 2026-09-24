@@ -1769,7 +1769,10 @@ same answer a bad id gets.
 
 Response `data` is `insights.Transcript` (same shape `rafikid agent export -j` prints):
 ordered turns with role, content, per-turn token/latency/model metrics, and the recovered
-skill catalog.
+skill catalog. A turn's `input_tokens`, `output_tokens`, `cache_read_tokens` and `latency_ms`
+are `null` when not reported: the message has no turn row (a user message, or a synthetic
+row such as a spawn's pre-fill) or the turn row left that column NULL. `0` is a measured zero.
+Connect's `TranscriptTurn` carries the same fields as `optional`, unset when not reported.
 
 Errors: `invalid_args` when `conversationId` is missing; `not_found` when no such conversation
 exists, including an id that is not a UUID (a child id such as `c_…` is named as one in the

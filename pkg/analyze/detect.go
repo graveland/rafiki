@@ -272,8 +272,8 @@ func renderTranscriptMarkdown(t *insights.Transcript) string {
 		if turn.Model != "" {
 			meta = append(meta, turn.Model)
 		}
-		if turn.InputTokens != 0 || turn.OutputTokens != 0 {
-			meta = append(meta, fmt.Sprintf("in=%d out=%d", turn.InputTokens, turn.OutputTokens))
+		if turn.InputTokens != nil && turn.OutputTokens != nil {
+			meta = append(meta, fmt.Sprintf("in=%d out=%d", *turn.InputTokens, *turn.OutputTokens))
 		}
 		if len(turn.Skills) > 0 {
 			meta = append(meta, "skills="+strings.Join(turn.Skills, ","))

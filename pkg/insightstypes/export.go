@@ -16,10 +16,12 @@ type TranscriptTurn struct {
 
 	Skills []string `json:"skills"` // skills invoked in this message (Skill tool_use / user /slash markers)
 
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	CacheReadTokens int64  `json:"cache_read_tokens"`
-	LatencyMS       int    `json:"latency_ms"`
+	// nil (JSON null) = not reported: no turn row, or a NULL column. See
+	// insights.TranscriptTurn; a zero here is a measured zero.
+	InputTokens     *int64 `json:"input_tokens"`
+	OutputTokens    *int64 `json:"output_tokens"`
+	CacheReadTokens *int64 `json:"cache_read_tokens"`
+	LatencyMS       *int   `json:"latency_ms"`
 	Model           string `json:"model"`
 	PrefixHash      string `json:"prefix_hash"`
 }

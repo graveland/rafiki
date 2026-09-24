@@ -581,7 +581,7 @@ func TestAnalyzeCorpusDir(t *testing.T) {
 			Source:         "corpus",
 			Turns: []insights.TranscriptTurn{
 				{Ordinal: 0, Role: "user", Content: textContent("why is replica X lagging?")},
-				{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: 10, OutputTokens: 5},
+				{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: i64(10), OutputTokens: i64(5)},
 			},
 		}
 		raw, err := json.Marshal(tr)
@@ -667,7 +667,7 @@ func TestAnalyzeCorpusDirSkipsArtifactsAndEmptyTranscripts(t *testing.T) {
 	}
 	realTurns := []insights.TranscriptTurn{
 		{Ordinal: 0, Role: "user", Content: textContent("why is replica X lagging?")},
-		{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: 10, OutputTokens: 5},
+		{Ordinal: 1, Role: "assistant", Content: textContent("investigating..."), Model: "claude-haiku-4-5", InputTokens: i64(10), OutputTokens: i64(5)},
 	}
 	writeTranscript("conv-a.json", "corpus-conv-a", realTurns)
 	writeTranscript("conv-a.compact.json", "corpus-conv-a", realTurns)
@@ -1014,3 +1014,5 @@ func TestAnalyzeFindingScoreIsRankedNotRaw(t *testing.T) {
 		}
 	}
 }
+
+func i64(v int64) *int64 { return &v }

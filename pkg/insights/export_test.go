@@ -4,7 +4,9 @@ package insights
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -107,12 +109,8 @@ func TestExport_AttachesTurnMetrics(t *testing.T) {
 	if assistant == nil {
 		t.Fatal("no assistant message at ordinal 1")
 	}
-	if assistant.InputTokens != 200 || assistant.OutputTokens != 90 || assistant.CacheReadTokens != 150 {
-		t.Errorf("assistant metrics = in %d/out %d/cache %d, want 200/90/150",
-			assistant.InputTokens, assistant.OutputTokens, assistant.CacheReadTokens)
-	}
-	if assistant.LatencyMS != 1500 || assistant.PrefixHash != "prefix-1" {
-		t.Errorf("assistant latency=%d prefix=%q, want 1500/prefix-1", assistant.LatencyMS, assistant.PrefixHash)
+	if got := metricsOf(assistant); got != "in 200/out 90/cache 150/latency 1500" || assistant.PrefixHash != "prefix-1" {
+		t.Errorf("assistant metrics = %s prefix=%q, want in 200/out 90/cache 150/latency 1500, prefix-1", got, assistant.PrefixHash)
 	}
 }
 
@@ -144,6 +142,66 @@ func TestExport_MalformedIDIsNotFound(t *testing.T) {
 	_, err := New(pool).Export(ctx, ScopeAll(), "c_01M3AC3TYYJAW3RX40DQ9GNYYN")
 	if err == nil || !strings.Contains(err.Error(), "child id") {
 		t.Errorf("a c_ id should be named as a child id, got %v", err)
+	}
+}
+
+// metricsOf renders a turn's metrics with nil shown as "null", so one string
+// comparison checks both the values and that nothing is missing.
+func metricsOf(turn *TranscriptTurn) string {
+	i64 := func(p *int64) string {
+		if p == nil {
+			return "null"
+		}
+		return fmt.Sprint(*p)
+	}
+	lat := "null"
+	if turn.LatencyMS != nil {
+		lat = fmt.Sprint(*turn.LatencyMS)
+	}
+	return fmt.Sprintf("in %s/out %s/cache %s/latency %s",
+		i64(turn.InputTokens), i64(turn.OutputTokens), i64(turn.CacheReadTokens), lat)
+}
+
+// TestExport_UnreportedMetricsAreNull pins the nil-vs-zero distinction: a
+// message with no turn row (a user message, or a synthetic pre-fill row)
+// exports null metrics, a turn row's NULL column exports null for that field
+// alone, and a measured zero stays zero.
+func TestExport_UnreportedMetricsAreNull(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "server", "erin")
+	insertMessage(t, pool, convID, 0, "user", `[{"type":"text","text":"hi"}]`)
+	insertMessage(t, pool, convID, 1, "assistant", `[{"type":"tool_use","id":"prefill_0001","name":"read","input":{}}]`)
+	insertMessage(t, pool, convID, 2, "user", `[{"type":"tool_result","tool_use_id":"prefill_0001","content":"x"}]`)
+	insertMessage(t, pool, convID, 3, "assistant", `[{"type":"text","text":"done"}]`)
+	turnID := insertTurn(t, pool, convID, seedTurn{ordinal: 3, model: "m", inTok: 40, outTok: 0, latencyMS: 900})
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation_turn SET cache_read_tokens = NULL WHERE id = $1`, turnID); err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := New(pool).Export(ctx, ScopeAll(), convID)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	want := map[int]string{
+		0: "in null/out null/cache null/latency null",
+		1: "in null/out null/cache null/latency null", // synthetic pre-fill row: no turn
+		2: "in null/out null/cache null/latency null",
+		3: "in 40/out 0/cache null/latency 900", // measured zero output, NULL cache column
+	}
+	for idx := range tr.Turns {
+		turn := &tr.Turns[idx]
+		if got := metricsOf(turn); got != want[turn.Ordinal] {
+			t.Errorf("ordinal %d metrics = %s, want %s", turn.Ordinal, got, want[turn.Ordinal])
+		}
+	}
+	b, err := json.Marshal(tr.Turns[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"input_tokens":null`) {
+		t.Errorf("unreported metrics must marshal as null, got %s", b)
 	}
 }
 
@@ -185,12 +243,8 @@ func TestExport_DirectPathMetrics(t *testing.T) {
 	if assistant == nil {
 		t.Fatal("no assistant turn at ordinal 1")
 	}
-	if assistant.InputTokens != 321 || assistant.OutputTokens != 88 || assistant.CacheReadTokens != 200 {
-		t.Errorf("direct-path metrics = in %d/out %d/cache %d, want 321/88/200",
-			assistant.InputTokens, assistant.OutputTokens, assistant.CacheReadTokens)
-	}
-	if assistant.LatencyMS != 1717 || assistant.Model != "claude-fable-5" {
-		t.Errorf("direct-path latency=%d model=%q, want 1717/claude-fable-5", assistant.LatencyMS, assistant.Model)
+	if got := metricsOf(assistant); got != "in 321/out 88/cache 200/latency 1717" || assistant.Model != "claude-fable-5" {
+		t.Errorf("direct-path metrics = %s model=%q, want in 321/out 88/cache 200/latency 1717, claude-fable-5", got, assistant.Model)
 	}
 }
 
@@ -218,7 +272,7 @@ func TestExport_DuplicateOrdinalNewestWins(t *testing.T) {
 				assistant = &tr.Turns[idx]
 			}
 		}
-		if assistant == nil || assistant.Model != "new" || assistant.InputTokens != 999 {
+		if assistant == nil || assistant.Model != "new" || assistant.InputTokens == nil || *assistant.InputTokens != 999 {
 			t.Fatalf("assistant = %+v, want newest turn (model new, in 999)", assistant)
 		}
 	}
