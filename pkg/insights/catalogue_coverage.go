@@ -19,7 +19,7 @@ func init() {
 // child row versus how many didn't -- an instrumentation-completeness check,
 // not a content question. See tasks/conversation-queries.md §5.2: child rows
 // start 2026-09-03, so anything before that reads as 0% by design, not data
-// loss. LEFT JOIN c.child is read WITHOUT a deleted_at filter deliberately
+// loss. LEFT JOIN c.child is read WITHOUT a closed_at filter deliberately
 // (§5.3: Close soft-deletes child rows, and an analysis query must see
 // tombstones to get true historical coverage -- going through the child
 // store's own List method here would hide 315 of 317 rows).

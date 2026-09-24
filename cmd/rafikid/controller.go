@@ -2848,6 +2848,9 @@ func (c *Controller) Close(childID string) error {
 		if err := c.children.Delete(ctx, childID); err != nil {
 			slog.Warn("delete child row", "childId", childID, "error", err)
 		}
+		if err := c.stampConversationsClosed(ctx, childID); err != nil {
+			slog.Warn("stamp conversation closed", "childId", childID, "error", err)
+		}
 		cancel()
 	}
 	if err := c.deleteLogDump(childID); err != nil {
@@ -2872,6 +2875,33 @@ func (c *Controller) deleteLogDump(childID string) error {
 	path := filepath.Join(c.logsDir, childID)
 	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	return nil
+}
+
+// stampConversationsClosed stamps closed_at on every conversation linked to a
+// closed child. A conversation is linked when it is the child's own
+// conversation (fundi children set child.conversation_id), or when its
+// external_ref is the child id (claude root threads) or child_id + ":" +
+// thread (claude subagent threads). _ and % are escaped in the LIKE because
+// child ids are c_<ulid> and _ is a single-character wildcard — an unescaped
+// pattern for c_1 would also stamp cX1:t1.
+//
+// Only conversations whose closed_at is still NULL are stamped, so a re-close
+// or a Close racing another closer cannot overwrite an existing close time.
+// Kill paths must not call this: a killed child is not a closed conversation.
+func (c *Controller) stampConversationsClosed(ctx context.Context, childID string) error {
+	if c.pool == nil {
+		return nil
+	}
+	const q = `
+UPDATE conversations.conversation c SET closed_at = now()
+ WHERE c.closed_at IS NULL
+   AND (c.id = (SELECT conversation_id FROM conversations.child WHERE child_id = $1)
+        OR c.external_ref = $1
+        OR c.external_ref LIKE replace(replace($1,'_','\_'),'%','\%') || ':%' ESCAPE '\')`
+	if _, err := c.pool.Exec(ctx, q, childID); err != nil {
+		return fmt.Errorf("stamp conversations closed %s: %w", childID, err)
 	}
 	return nil
 }

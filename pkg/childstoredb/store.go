@@ -67,12 +67,12 @@ ON CONFLICT (child_id) DO UPDATE SET
     max_children      = EXCLUDED.max_children,
     config            = EXCLUDED.config,
     labels            = EXCLUDED.labels,
-    deleted_at        = NULL,
+    closed_at         = NULL,
     updated_at        = now()`
 
 // Upsert writes rec, creating the row or updating it in place.
 //
-// deleted_at is cleared unconditionally: an upsert is the daemon asserting this
+// closed_at is cleared unconditionally: an upsert is the daemon asserting this
 // child is live, and writing into a tombstoned row without clearing it would
 // leave a row that exists, updates, and is never returned by List — invisible
 // to recovery and to rafiki list, with nothing to observe. Child ids are ULIDs
@@ -114,8 +114,8 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 	return nil
 }
 
-// Delete tombstones a child row. Idempotent: a missing or already-tombstoned
-// row is not an error.
+// Delete stamps closed_at on a child row — the close tombstone. Idempotent: a
+// missing or already-closed row is not an error.
 //
 // The row is kept rather than removed so history stays explainable. Lineage
 // lives in labels ("rafiki/parent"), and conversation_turn outlives the child,
@@ -124,12 +124,12 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 // table by foreign key, so the old DELETE cascaded nothing and cost only that
 // context. Same rule as users.
 //
-// Every reader must filter tombstones out; List (below) is the one that
+// Every reader must filter closed rows out; List (below) is the one that
 // matters, because it drives recovery.
 func (s *Store) Delete(ctx context.Context, childID string) error {
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE conversations.child SET deleted_at = now()
-		  WHERE child_id = $1 AND deleted_at IS NULL`, childID); err != nil {
+		`UPDATE conversations.child SET closed_at = now()
+		  WHERE child_id = $1 AND closed_at IS NULL`, childID); err != nil {
 		return fmt.Errorf("childstoredb: delete %s: %w", childID, err)
 	}
 	return nil
@@ -157,15 +157,15 @@ func (s *Store) Delete(ctx context.Context, childID string) error {
 // because the conversation lease, not the stamp, decides who actually runs
 // the child.
 //
-// The deleted_at guard keeps the stamp a no-op on a row closed in the race
-// between List and this write; it must never un-tombstone (only Upsert
+// The closed_at guard keeps the stamp a no-op on a row closed in the race
+// between List and this write; it must never re-open a closed row (only Upsert
 // asserts liveness — see its doc comment).
 const adoptSQL = `
 UPDATE conversations.child SET
     daemon_id  = $2,
     labels     = labels || jsonb_build_object('rafiki/daemon', $2::text),
     updated_at = now()
-WHERE child_id = $1 AND deleted_at IS NULL`
+WHERE child_id = $1 AND closed_at IS NULL`
 
 func (s *Store) AdoptOwnership(ctx context.Context, childID, daemonID string) error {
 	if _, err := s.pool.Exec(ctx, adoptSQL, childID, daemonID); err != nil {
@@ -185,7 +185,7 @@ SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::te
        COALESCE(executor_selector,''), COALESCE(workspace_mode,''),
        max_depth, max_cost, max_children, config, labels, updated_at
   FROM conversations.child
- WHERE deleted_at IS NULL`
+ WHERE closed_at IS NULL`
 
 // List returns every live child row.
 //

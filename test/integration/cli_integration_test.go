@@ -476,7 +476,7 @@ func TestCLI_BudgetSet(t *testing.T) {
 // jsonlTestLabel is the label every child this test creates carries, so the
 // list assertions below are immune to children OTHER tests' daemons create
 // concurrently: the test daemons share one database and ctrl_list is not
-// daemon-scoped (childstoredb's listSQL has no WHERE beyond deleted_at), so
+// daemon-scoped (childstoredb's listSQL has no WHERE beyond closed_at), so
 // an unfiltered `rafiki list` sees the whole shared set and can change between
 // two invocations as parallel tests spawn and exit their own children.
 const jsonlTestLabel = "cli-tables=jsonl"

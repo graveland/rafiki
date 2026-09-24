@@ -2,6 +2,7 @@ package childstoredb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -27,6 +28,49 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("migrate: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	return pool
+}
+
+// scratchPool gives the test its own database, migrated fresh from the
+// embedded chain — the scratch-database pattern from
+// pkg/presetsdb/postgres_test.go's testStore, so the test never touches a
+// shared database.
+func scratchPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+	ctx := context.Background()
+
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect admin: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	name := fmt.Sprintf("rafiki_childstoredb_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("create scratch db: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)")
+	})
+
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.ConnConfig.Database = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect scratch db: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 	return pool
 }
 
@@ -164,6 +208,40 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// TestStoreDeleteStampsClosedAt pins the close tombstone: after Delete the
+// row's closed_at is stamped and List omits it. Fails if the SQL still names
+// the pre-0036 column — that UPDATE errors against the renamed column, it
+// cannot silently match nothing.
+func TestStoreDeleteStampsClosedAt(t *testing.T) {
+	pool := scratchPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	id := "c_closedat_" + time.Now().Format("150405.000000")
+	rec := childstore.ChildRecord{
+		ChildID: id, Kind: protocol.KindFundi,
+		Status: string(protocol.StatusExited), SpawnedAt: time.Now(),
+	}
+	if err := s.Upsert(ctx, rec); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var closedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT closed_at FROM conversations.child WHERE child_id = $1`, id).Scan(&closedAt); err != nil {
+		t.Fatalf("read closed_at: %v", err)
+	}
+	if closedAt == nil {
+		t.Fatal("closed_at is NULL after Delete — the close stamp is missing")
+	}
+	if _, ok := lookup(t, s, id); ok {
+		t.Error("List returned a closed row — the closed_at filter is missing")
+	}
+}
+
 func findRecord(t *testing.T, s *Store, id string) childstore.ChildRecord {
 	t.Helper()
 	rec, ok := lookup(t, s, id)
@@ -201,7 +279,7 @@ func insertConversation(t *testing.T, pool *pgxpool.Pool) string {
 
 // TestAdoptOwnership pins the ownership stamp's column contract: daemon_id and
 // the rafiki/daemon label move together, existing labels survive the merge,
-// status is untouched, and the row stays visible to List (deleted_at is not
+// status is untouched, and the row stays visible to List (closed_at is not
 // the stamp's business).
 func TestAdoptOwnership(t *testing.T) {
 	pool := testPool(t)
