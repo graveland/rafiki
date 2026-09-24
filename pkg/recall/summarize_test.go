@@ -236,6 +236,14 @@ func summarizerCompaction(conv string, ordinal int) Message {
 		Content: json.RawMessage(strconv.Quote("earlier conversation collapsed here"))}
 }
 
+// summarizerToolResult is a message whose only content is a tool_result
+// block; Extract drops those, so a post-summary tail of only these builds no
+// segments.
+func summarizerToolResult(conv string, ordinal int) Message {
+	return Message{ConversationID: conv, Ordinal: ordinal, Role: "tool", Kind: "tool_result",
+		Content: json.RawMessage(`[{"type":"tool_result","content":"done"}]`)}
+}
+
 func summarizerConv(id string) ConversationMeta {
 	return summarizerConvAt(id, utcDate(2026, 1, 2))
 }
@@ -478,6 +486,64 @@ func TestSummarizerIncrementalOnlyNewTail(t *testing.T) {
 	}
 	if !strings.Contains(comp.calls[1].user, "Part 1: old tail body") || !strings.Contains(comp.calls[1].user, "Part 2: new tail body") {
 		t.Fatalf("reduce prompt missing parts: %q", comp.calls[1].user)
+	}
+}
+
+func TestSummarizerSkipsReduceWhenConversationRowCurrent(t *testing.T) {
+	store := summarizerStore()
+	store.eligible = []ConversationMeta{summarizerConv("c1")}
+	store.summaries = map[string][]Summary{"c1": {
+		{ID: "s0", ConversationID: "c1", Level: "segment", Seq: 0, OrdinalFrom: 0, OrdinalTo: 50,
+			Title: "one", Summary: "one body", PromptVersion: SummaryPromptVersion},
+		{ID: "s1", ConversationID: "c1", Level: "segment", Seq: 1, OrdinalFrom: 51, OrdinalTo: 90,
+			Title: "two", Summary: "two body", PromptVersion: SummaryPromptVersion},
+		{ID: "c-row", ConversationID: "c1", Level: "conversation", Seq: 0, OrdinalFrom: 0, OrdinalTo: 90,
+			Title: "all", Summary: "whole story", PromptVersion: SummaryPromptVersion},
+	}}
+	// Post-summary tail extracts to nothing (tool_result-only): no new
+	// segments, and a current-version conversation row already covers the
+	// chain, so this pass must cost nothing.
+	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
+	comp := summarizerCompleter("m")
+	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(comp.calls) != 0 {
+		t.Fatalf("Complete calls = %d, want 0", len(comp.calls))
+	}
+	if len(store.upserts) != 0 {
+		t.Fatalf("upserts = %d, want 0", len(store.upserts))
+	}
+}
+
+func TestSummarizerReducesWhenConversationRowMissing(t *testing.T) {
+	store := summarizerStore()
+	store.eligible = []ConversationMeta{summarizerConv("c1")}
+	// Same shape as the skip case, but no conversation-level row: crash
+	// recovery must still reduce the kept chain.
+	store.summaries = map[string][]Summary{"c1": {
+		{ID: "s0", ConversationID: "c1", Level: "segment", Seq: 0, OrdinalFrom: 0, OrdinalTo: 50,
+			Title: "one", Summary: "one body", PromptVersion: SummaryPromptVersion},
+		{ID: "s1", ConversationID: "c1", Level: "segment", Seq: 1, OrdinalFrom: 51, OrdinalTo: 90,
+			Title: "two", Summary: "two body", PromptVersion: SummaryPromptVersion},
+	}}
+	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
+	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
+	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	if len(comp.calls) != 1 {
+		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	}
+	if comp.calls[0].system != summaryReducePrompt {
+		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
+	}
+	if len(store.upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(store.upserts))
+	}
+	conv := store.upserts[0]
+	if conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90 {
+		t.Fatalf("conversation row = %+v", conv)
 	}
 }
 

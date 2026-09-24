@@ -151,8 +151,17 @@ func (s *Summarizer) summarizeConversation(ctx context.Context, enabledAt time.T
 		return err
 	}
 	segs := s.buildSegments(msgs)
-	if len(kept) == 0 && len(segs) == 0 {
-		return nil
+	if len(segs) == 0 {
+		if len(kept) == 0 {
+			return nil
+		}
+		// No new segments: re-reducing an unchanged chain costs one reduce call
+		// plus an embedding clear/re-embed every pass. Skip when a
+		// current-version conversation-level row already covers the chain; a
+		// missing or stale row (crash recovery) still reduces.
+		if hasCurrentConversationRow(existing) {
+			return nil
+		}
 	}
 
 	spent := 0.0
@@ -235,6 +244,17 @@ func (s *Summarizer) summarizeConversation(ctx context.Context, enabledAt time.T
 	return nil
 }
 
+// hasCurrentConversationRow reports whether existing already holds a
+// conversation-level row at the current prompt version.
+func hasCurrentConversationRow(existing []Summary) bool {
+	for _, sum := range existing {
+		if sum.Level == "conversation" && sum.PromptVersion == SummaryPromptVersion {
+			return true
+		}
+	}
+	return false
+}
+
 // clearSpentBackfill resets backfill once its budget is spent; "" reads as
 // unset everywhere.
 func (s *Summarizer) clearSpentBackfill(ctx context.Context) error {
@@ -243,7 +263,18 @@ func (s *Summarizer) clearSpentBackfill(ctx context.Context) error {
 		return err
 	}
 	spent := stateDecimal(ctx, s.store, "backfill_spent_usd")
-	budget := stateDecimal(ctx, s.store, "backfill_budget_usd")
+	budgetRaw, ok, err := stateValue(ctx, s.store, "backfill_budget_usd")
+	if err != nil {
+		return err
+	}
+	budget, parseErr := strconv.ParseFloat(budgetRaw, 64)
+	if !ok || parseErr != nil {
+		// backfill_since is armed but the budget is missing or unparseable, so
+		// it reads as 0 and this branch disables backfill; surface the
+		// operator's mistake instead of failing silently.
+		s.logger.Warn("recall summaries: backfill active without backfill_budget_usd; disabling backfill")
+		budget = 0
+	}
 	if spent >= budget {
 		return s.store.SetState(ctx, "backfill_since", "")
 	}
@@ -281,6 +312,7 @@ func conversationRow(seg Summary) Summary {
 	seg.Level = "conversation"
 	seg.Seq = 0
 	seg.CostUSD = 0
+	seg.ID = "" // the INSERT assigns its own uuid; honoring Summary.ID on upsert is a latent trap
 	return seg
 }
 
