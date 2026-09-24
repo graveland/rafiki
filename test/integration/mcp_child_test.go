@@ -139,13 +139,16 @@ func (c claudeDump) sessionHeader() string {
 
 // parseClaudeDump splits one dump file into its argv and env halves, decoding
 // each argv line from base64. The fixture opens its dump file (truncating)
-// before it writes argv, and the env half comes from a forked env(1), so a
-// dump caught mid-write carries argv without the marker: ok is false and the
-// caller must keep polling — a marker-less file is a child that started but
-// has not finished recording, never a fixture change (the marker is printf'd
-// before the fork, so a real fixture change cannot produce an argv-carrying
-// file without one). An undecodable argv line gets the same treatment: the
-// file predates the fixture change, not evidence of a real launch.
+// before it writes argv, and the env half comes from a forked env(1) that
+// appends only after the marker flushes, so a dump caught mid-write carries
+// argv without the marker — or with the marker and no env at all: ok is false
+// and the caller must keep polling (the second shape is caught by the
+// RAFIKI_MCP_TOKEN requirement in waitClaudeDump, not here). A marker-less
+// file is a child that started but has not finished recording, never a
+// fixture change (the marker is printf'd before the fork, so a real fixture
+// change cannot produce an argv-carrying file without one). An undecodable
+// argv line gets the same treatment: the file predates the fixture change,
+// not evidence of a real launch.
 func parseClaudeDump(_ *testing.T, path string) (claudeDump, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -171,9 +174,18 @@ func parseClaudeDump(_ *testing.T, path string) (claudeDump, bool) {
 
 // waitClaudeDump polls the dump directory until a fake-claude child whose
 // RAFIKI_CHILD_ID (buildEnv sets it on every child) names childID has recorded
-// its launch. A child that died at startup — a broken fixture, a spawn plan
-// that refused it — never writes one, so the failure carries the daemon's
-// stderr: the only place the real cause is written.
+// its launch — env half INCLUDED: a dump is accepted only once it carries
+// RAFIKI_MCP_TOKEN. The marker flushes before the forked env(1) appends the
+// env half, so a dump that names the child but carries no token is still
+// mid-write; accepting it read as "the child carries no per-child secret" and
+// failed the token assertions below intermittently (observed once as
+// TestMCPChildKillNonDescendantRefused). Every dump-writing child on these
+// daemons mints the secret — bootDaemonDB always serves the proxy face and
+// proxyChildEnv mints unconditionally for kind=claude when a proxy URL is set
+// — and every caller of this waiter reads the token, so the requirement here
+// cannot mask a legitimate absence. A child that died at startup — a broken
+// fixture, a spawn plan that refused it — never writes one, so the failure
+// carries the daemon's stderr: the only place the real cause is written.
 func waitClaudeDump(t *testing.T, d *daemon, dumpDir, childID string) claudeDump {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second) // full-suite parallel load slows spawns well past 20s
@@ -184,9 +196,13 @@ func waitClaudeDump(t *testing.T, d *daemon, dumpDir, childID string) claudeDump
 			if !ok {
 				continue // caught mid-write; the child is still recording
 			}
-			if dump.envValue(paths.ChildID) == childID {
-				return dump
+			if dump.envValue(paths.ChildID) != childID {
+				continue
 			}
+			if dump.envValue("RAFIKI_MCP_TOKEN") == "" {
+				continue // env half not flushed yet; the child is still recording
+			}
+			return dump
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
