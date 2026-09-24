@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -735,5 +736,35 @@ func TestPrefillAssistantRowHasNoUsage(t *testing.T) {
 	}
 	if hist[1].Param.Role != anthropic.MessageParamRoleAssistant {
 		t.Fatalf("r1 role = %v", hist[1].Param.Role)
+	}
+}
+
+// TestPrefillContextWindowUsesProviderLocalID pins the id the cap asks the
+// catalog about. The engine carries the provider-local id ("z-ai/glm-5.3-flash"
+// for "openrouter/z-ai/glm-5.3-flash"); the catalog is keyed by OpenRouter-
+// native ids, so querying with the provider prefix re-attached misses and the
+// cap silently falls back to 60% of 128K, refusing a whole-repo pre-fill a 1M
+// model could hold.
+func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{
+		{ID: "z-ai/glm-5.3-flash", Created: 1, ContextLength: 1048576},
+		{ID: "anthropic/claude-haiku-4.5", Created: 2, ContextLength: 200000},
+	})
+	client, err := llm.NewClient(llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		modelID string
+		want    int
+	}{
+		{"z-ai/glm-5.3-flash", 1048576},
+		{"claude-haiku-4-5", 200000}, // anthropic provider: bare id mapped by the catalog
+		{"unknown/model", prefillFallbackContext},
+	} {
+		if got := prefillContextWindow(client, tc.modelID); got != tc.want {
+			t.Errorf("prefillContextWindow(%q) = %d, want %d", tc.modelID, got, tc.want)
+		}
 	}
 }

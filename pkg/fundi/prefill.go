@@ -238,7 +238,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 		total += len(c.input) + len(c.result)
 	}
 	est := (total + 3) / 4
-	ctxLen := prefillContextWindow(e.client, e.state.Provider, e.state.ModelID)
+	ctxLen := prefillContextWindow(e.client, e.state.ModelID)
 	tokenCap := ctxLen * prefillCapPercent / 100
 	if est > tokenCap {
 		return fmt.Errorf("prefill: estimated %d tokens exceeds the %d-token cap (%d%% of the model's context window); largest reads: %s",
@@ -446,9 +446,14 @@ func (e *Engine) prefillToolsAvailable() error {
 // prefillContextWindow returns the context window the token cap is computed
 // against: the catalog's figure for the child's model when it knows it, else
 // prefillFallbackContext.
-func prefillContextWindow(client *llm.Client, provider, modelID string) int {
+//
+// modelID must be the provider-local id (EngineConfig.ModelID, already split
+// and alias-resolved by Providers.Split). The catalog indexes OpenRouter-native
+// ids, so a provider-qualified "openrouter/z-ai/…" never matches and would
+// silently cap every pre-fill at the fallback's 60%.
+func prefillContextWindow(client *llm.Client, modelID string) int {
 	if cat := catalogOf(client); cat != nil {
-		if ctxLen, _, ok := cat.ContextWindow(fullModel(provider, modelID)); ok {
+		if ctxLen, _, ok := cat.ContextWindow(modelID); ok {
 			return ctxLen
 		}
 	}
