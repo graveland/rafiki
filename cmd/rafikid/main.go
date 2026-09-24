@@ -612,6 +612,9 @@ func runDaemon(opts runDaemonOpts) error {
 			if ctrl.presetStore != nil {
 				face.Control.SetPresetManager(connectPresets{c: ctrl})
 			}
+			if ctrl.recall != nil {
+				face.Control.SetRecallManager(connectRecall{c: ctrl})
+			}
 			if ctrl.gitpymoduleStore != nil {
 				face.Control.SetGitSourceManager(connectGitSources{c: ctrl})
 			}

@@ -690,3 +690,68 @@ rafiki python repo remove <name>
 - **`remove`** deletes the registration; executors are never told, and the
   discovered inventory simply stops being reported.
 
+
+## `rafiki recall` and `rafiki memory`
+
+Search the recall index and manage your saved memories. Recall is what a
+fundi child's `recall` tool serves, exposed to the operator: conversation
+summaries (`s:` ids), verbatim conversation windows (`w:` ids) and memories
+saved with `memory put` (`m:` ids), ranked by keyword AND meaning. It talks to
+the daemon over the Connect plane (`Recall`/`RecallContext`/`GetMemory`/
+`MemoryTree`/`PutMemory`/`DeleteMemory`/`RecallBackfill`/`RecallStatus`), so
+it needs a reachable profile, never a DSN. Conversation results cover what
+your credential can see — an admin reads the whole daemon, a user only their
+own rows; memories are ALWAYS your own, admin included. On a daemon with no
+agent database every verb reports `recall backend not yet wired`.
+
+```
+rafiki recall <query...> [--source memory|summary|window]... [--under PATH]
+                         [--repo NAME] [--since 7d|36h|RFC3339] [--limit N]
+rafiki recall context <hit-id> [--before N] [--after N] [--max-chars N]
+rafiki memory tree <path> [--depth N]
+rafiki memory get <path> <name>
+rafiki memory put <path> <name> [--body TEXT | --file PATH | stdin] [--meta JSON]
+rafiki memory delete <path> <name>
+rafiki memory backfill --since DURATION|RFC3339 --max-cost USD   # admin credential
+rafiki memory status
+```
+
+- **`recall`** prints `ID`, `SOURCE`, `WHEN`, `WHERE`, `SNIPPET` — one line
+  per hit, never full text. WHERE is a memory's `path/name`, else a
+  conversation's `repo·name`. `-o json` prints the hit array as-is and
+  `-o jsonl` one hit per line. `--source` is repeatable and accepts
+  `memory`, `summary` and `window`; anything else the daemon refuses.
+- **`recall context <id>`** expands a hit into its full text — a window into
+  its surrounding messages (`--before`/`--after` ordinals, `--max-chars`
+  cap), a summary into its title and full text, a memory into its body. It
+  prints plain text in every output mode; cobra resolves the literal word
+  `context` as the subcommand, so it is never read as a query.
+- **`memory put`** resolves the body from `--body`, else `--file` (`-` reads
+  stdin), else piped stdin; `--meta` must be a JSON object. A path is 1+
+  dot-separated labels (`[A-Za-z0-9_-]`); the daemon tombstones deletes.
+- **`memory status`** reads the index: conversation/window/summary/memory
+  counts, unembedded windows, pending summaries, the running total of
+  summary spend, and the embedding and summarizer models (empty when
+  keyword-only search or summaries are off).
+
+### The zero asymmetry (`--since` on recall vs backfill)
+
+The wire's zero means different things on the two verbs, deliberately:
+
+- **`Recall`'s `since_unix`/`until_unix` 0 = unbounded.** A search without
+  `--since` covers all time; the CLI sends 0 only when you did not pass the
+  flag.
+- **`RecallBackfill`'s `since_unix` 0 = "from the beginning", and
+  `max_cost_usd <= 0` is REFUSED (`CodeInvalidArgument`).** A wire
+  `RecallBackfillRequest{}` — both fields zero — can never start an
+  all-history, budgetless backfill: the summarizer would otherwise read a
+  missing budget as unlimited spend. The CLI makes both flags required, so
+  "all history" only ever happens because an operator typed a timestamp
+  (e.g. `--since 1970-01-01T00:00:00Z`), never because a field defaulted.
+
+`backfill` is admin-credential only — the daemon refuses anyone else with
+`PermissionDenied` — and arms three state keys (`backfill_since` as RFC3339,
+`backfill_budget_usd`, `backfill_spent_usd` reset to `"0"`), then nudges the
+indexer. A backfill that has spent its budget disables itself
+(`backfill_since` cleared; visible as an empty `backfill_since` in `memory
+status`).

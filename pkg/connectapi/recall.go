@@ -58,6 +58,14 @@ func (s *Server) recallManager() (RecallManager, error) {
 	return *r, nil
 }
 
+// ErrNoBackfillBudget is a Backfill refused because max_cost_usd is not
+// positive. The wire field's zero default must never read as "unlimited" — a
+// wire RecallBackfillRequest{} carries BOTH fields zero, and a budgetless
+// all-history backfill is exactly the spend footgun this refusal prevents —
+// so only an explicitly positive budget arms a backfill. recallError maps it
+// to CodeInvalidArgument.
+var ErrNoBackfillBudget = errors.New("recall backfill: a positive max_cost_usd is required")
+
 // recallError maps a manager failure onto a Connect code: an unknown row is
 // CodeNotFound, a bad memory path or a missing owner is the caller's fault
 // (CodeInvalidArgument), a scope that admits nothing is CodePermissionDenied,
@@ -71,6 +79,8 @@ func recallError(err error) error {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	case errors.Is(err, recall.ErrInvalidScope):
 		return connect.NewError(connect.CodePermissionDenied, err)
+	case errors.Is(err, ErrNoBackfillBudget):
+		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)
 }
