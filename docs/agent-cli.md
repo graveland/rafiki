@@ -727,7 +727,8 @@ rafiki memory status
   prints plain text in every output mode; cobra resolves the literal word
   `context` as the subcommand, so it is never read as a query.
 - **`memory put`** resolves the body from `--body`, else `--file` (`-` reads
-  stdin), else piped stdin; `--meta` must be a JSON object. A path is 1+
+  stdin), else piped stdin; `--meta` must be valid JSON (an object is
+  conventional, but any valid JSON is accepted). A path is 1+
   dot-separated labels (`[A-Za-z0-9_-]`); the daemon tombstones deletes.
 - **`memory status`** reads the index: conversation/window/summary/memory
   counts, unembedded windows, pending summaries, the running total of

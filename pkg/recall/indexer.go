@@ -112,6 +112,11 @@ func (ix *Indexer) tickOnce(ctx context.Context) {
 // per-conversation extract error is logged and the pass continues; an embed
 // or summary error ends that pass for this tick without touching the others.
 // The returned error joins the pass-level failures, for callers that log it.
+//
+// Tick does not take the advisory lock itself — Run holds it for each pass
+// (tickOnce) — so Tick is not safe to call concurrently with Run. The
+// daemon's caller is that Run loop, started once at startup and held for the
+// daemon's life; the tests call Tick directly, single-threaded.
 func (ix *Indexer) Tick(ctx context.Context) error {
 	var err error
 	if e := ix.extractPass(ctx); e != nil {

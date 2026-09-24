@@ -277,7 +277,7 @@ same surface is on the CLI:
 
 ```bash
 rafiki recall "payment retry logic" --repo rafiki --limit 20
-rafiki recall context w_01ABC... --before 5
+rafiki recall context w:9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d --before 5
 rafiki memory tree projects
 rafiki memory put projects.rafiki auth "tokens ride the transport"
 rafiki memory get projects.rafiki auth

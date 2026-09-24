@@ -47,8 +47,10 @@ func (e *memoryNotFoundError) Error() string {
 }
 func (e *memoryNotFoundError) Unwrap() error { return recall.ErrNotFound }
 
-// memoryJSON is one memory as memory_get returns it. meta is omitted when
-// absent; timestamps are RFC3339 UTC, as preset_get renders its own.
+// memoryJSON is one memory as memory_get returns it. meta is always present
+// JSON — the store normalizes an absent meta to "{}" (omitempty only guards
+// a zero value no store path produces); timestamps are RFC3339 UTC, as
+// preset_get renders its own.
 type memoryJSON struct {
 	ID        string          `json:"id"`
 	Path      string          `json:"path"`
