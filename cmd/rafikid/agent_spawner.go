@@ -377,6 +377,7 @@ func applySpawnSpecShaping(req *protocol.SpawnRequest, spec tools.SpawnSpec) {
 	if spec.ContextFiles != nil && !*spec.ContextFiles {
 		req.NoContextFiles = true
 	}
+	req.Prefill = spec.Prefill
 }
 
 // Spawn creates a descendant. ParentChildID is the caller's own id, taken

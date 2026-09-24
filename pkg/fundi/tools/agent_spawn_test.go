@@ -77,3 +77,52 @@ func TestAgentSpawnDescriptionKeepsExcisionMarkers(t *testing.T) {
 		t.Errorf("excision markers out of order: \"You will be notified\" at %d, \"Keep doing your own work\" at %d", notif, keep)
 	}
 }
+
+// TestAgentSpawnPrefillParsed pins that agent_spawn parses its prefill list
+// at the tool (a malformed entry fails the call instead of failing inside
+// the child) and that the parsed entries reach SpawnSpec.Prefill verbatim.
+func TestAgentSpawnPrefillParsed(t *testing.T) {
+	t.Run("entries reach SpawnSpec", func(t *testing.T) {
+		sp := &fakeSpawner{}
+		reg, ctx := newAgentTools(t, sp)
+		in := `{"prompt":"do it","prefill":["CLAUDE.md","pkg/prefill/prefill.go:10-40","src/**/*.rs"]}`
+		if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in)); err != nil {
+			t.Fatalf("agent_spawn: %v", err)
+		}
+		if len(sp.spawned) != 1 {
+			t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
+		}
+		spec := sp.spawned[0]
+		want := []struct {
+			path       string
+			start, end int
+		}{
+			{"CLAUDE.md", 0, 0},
+			{"pkg/prefill/prefill.go", 10, 40},
+			{"src/**/*.rs", 0, 0},
+		}
+		if len(spec.Prefill) != len(want) {
+			t.Fatalf("Prefill = %#v, want %d entries", spec.Prefill, len(want))
+		}
+		for i, w := range want {
+			if spec.Prefill[i].Path != w.path || spec.Prefill[i].Start != w.start || spec.Prefill[i].End != w.end {
+				t.Errorf("Prefill[%d] = %+v, want %s:%d-%d", i, spec.Prefill[i], w.path, w.start, w.end)
+			}
+		}
+	})
+
+	t.Run("bad range errors without spawning", func(t *testing.T) {
+		sp := &fakeSpawner{}
+		reg, ctx := newAgentTools(t, sp)
+		_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x","prefill":["f.go:40-10"]}`))
+		if err == nil {
+			t.Fatal("want an error for a bad range, got nil")
+		}
+		if !strings.HasPrefix(err.Error(), "agent_spawn: prefill: ") {
+			t.Errorf("error = %q, want it wrapped as agent_spawn: prefill: …", err)
+		}
+		if len(sp.spawned) != 0 {
+			t.Errorf("a failed parse must not spawn, got %d spawns", len(sp.spawned))
+		}
+	})
+}

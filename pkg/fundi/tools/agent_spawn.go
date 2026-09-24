@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"go.graveland.dev/rafiki/pkg/prefill"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func init() {
@@ -96,6 +99,12 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 				Description: "Narrow the preset: a subset of what it allows, or [] for none. Cannot widen it."},
 			{Name: "context_files", Type: "boolean",
 				Description: "false to skip CLAUDE.md/AGENTS.md context files. Cannot re-enable them if the preset disables them."},
+			{Name: "prefill", Type: "array", Items: &Schema{Type: "string"},
+				Description: "Files the agent starts having already read, one entry each: a path relative to its cwd, " +
+					"optionally with a 1-based inclusive line range (path:10-40, path:200-, path:-80), or a glob " +
+					"(src/**/*.rs, no range). The reads run on the agent's own machine before its first turn and " +
+					"cost you almost nothing to send; use this instead of pasting file contents into prompt. " +
+					"Put CLAUDE.md or skill files here too, with ranges. Needs the read tool (and glob for globs)."},
 		},
 		Required: []string{"prompt"},
 	}
@@ -138,6 +147,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		Skills             *[]string `json:"skills,omitempty"`
 		MCPServers         *[]string `json:"mcp_servers,omitempty"`
 		ContextFiles       *bool     `json:"context_files,omitempty"`
+		Prefill            []string  `json:"prefill,omitempty"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: invalid input: %w", err)
@@ -158,6 +168,19 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 	// the worker's uncommitted work can survive a machine going away.
 	if params.Workspace != "" && params.Workspace != "ephemeral" && params.Workspace != "pinned" {
 		return ToolResult{}, fmt.Errorf("agent_spawn: unknown workspace mode %q — must be \"ephemeral\" or \"pinned\"", params.Workspace)
+	}
+
+	// A pre-fill list is parsed at the tool, so a malformed entry fails the
+	// call instead of failing inside the child's engine worker; an absent
+	// field (nil) means no pre-fill, while an explicit empty list is a parse
+	// error like any other.
+	var prefillReads []protocol.PrefillRead
+	if params.Prefill != nil {
+		parsed, err := prefill.ParseEntries(params.Prefill)
+		if err != nil {
+			return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)
+		}
+		prefillReads = parsed
 	}
 
 	// SpawnSpec carries no parent. The implementation supplies the caller's
@@ -181,6 +204,7 @@ func (t *agentSpawnTool) Execute(ctx context.Context, input ToolInput) (ToolResu
 		Skills:             params.Skills,
 		MCPServers:         params.MCPServers,
 		ContextFiles:       params.ContextFiles,
+		Prefill:            prefillReads,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_spawn: %w", err)

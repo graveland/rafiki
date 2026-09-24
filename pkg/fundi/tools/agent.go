@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func init() {
@@ -76,6 +78,11 @@ type SpawnSpec struct {
 	MCPServers *[]string
 	// ContextFiles: nil = no request; false = skip context files.
 	ContextFiles *bool
+
+	// Prefill lists files (or globs) the child reads through its own Read
+	// tool before its first turn, recorded as real tool_use/tool_result
+	// history. Nil means no pre-fill; an empty non-nil list is refused.
+	Prefill []protocol.PrefillRead
 }
 
 // AgentSpawner is the daemon-side capability behind the agent_* tools.
