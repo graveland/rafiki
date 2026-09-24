@@ -349,6 +349,66 @@ func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
 	}
 }
 
+// TestPrefillEmptyHistorySkipsResume pins the crash-recovery fix: a fundi
+// child recovered with AutoResume whose conversation carries NO persisted
+// messages has nothing to resume — agentloop.Resume errors on empty by
+// design, and fataling there killed the child before the recovery replay
+// could deliver its queued rows (TestDBChildState_InboxReplaysUnconfirmed-
+// MessageAfterCrash). The engine must stay alive, call the model zero times,
+// and consume a prompt normally afterwards.
+func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+	ref := "prefill-empty-skips-resume"
+
+	// A conversation that exists but holds no messages — the state a
+	// SIGKILL'd child that only ever answered get_state frames is left in.
+	seedClient := prefillDBSeedClient(t, pool)
+	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if hist, err := conv.History(ctx); err != nil || len(hist) != 0 {
+		t.Fatalf("seed history = %d rows (%v), want 0", len(hist), err)
+	}
+
+	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
+	fatalCalled := make(chan error, 1)
+	eng, out := prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+		cfg.AutoResume = true
+		cfg.OnFatal = func(err error) { fatalCalled <- err }
+	})
+	defer eng.Close()
+
+	// The startup classify runs against the empty history and must skip
+	// Resume entirely: no LLM call (the gate fails the test the moment one
+	// happens) and no fatal (the channel). The settle only gates when the
+	// prompt below arrives, not whether a violation is detected.
+	select {
+	case err := <-fatalCalled:
+		t.Fatalf("engine fataled on an empty-history startup: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if gate.callCount() != 0 {
+		t.Fatalf("LLM was called %d times before any prompt", gate.callCount())
+	}
+	if hist, err := eng.conv.History(ctx); err != nil || len(hist) != 0 {
+		t.Fatalf("history after settle = %d rows (%v), want 0", len(hist), err)
+	}
+
+	// The engine is alive: the prompt is consumed and turns normally.
+	gate.openGate()
+	eng.HandlePrompt("go")
+	eng.Wait()
+	if gate.callCount() != 1 {
+		t.Fatalf("sender served %d calls, want exactly 1 (the prompt turn)", gate.callCount())
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
+	}
+}
+
 // failIfCalledToolSet is a ToolSet whose definitions look complete (read and
 // glob) but whose Execute fails the test if ever invoked.
 func failIfCalledToolSet(t *testing.T, msg string) fakeToolSet {

@@ -450,8 +450,9 @@ func (e *Engine) Close() { close(e.wake) }
 // history loaded whenever the spawn configured a pre-fill or auto-recovery
 // is enabled. A pre-fill-shaped tail is never handed to agentloop.Resume —
 // its tail is user tool_results, and Resume would Continue, calling the
-// model with the files and no task. startupResume therefore only runs when
-// the history is genuinely resumable (prefillNone).
+// model with the files and no task. startupResume therefore only runs on a
+// non-empty, non-prefill-shaped history — an empty one has nothing to
+// resume and skips it (see the prefillNone case below).
 func (e *Engine) worker() {
 	resume := e.autoResume
 	if len(e.prefill) > 0 || e.autoResume {
@@ -479,7 +480,18 @@ func (e *Engine) worker() {
 			// the restart: a pre-fill-shaped tail must never Continue.
 			resume = false
 		case prefillNone:
-			// No pre-fill shape in sight: keep today's startupResume behaviour.
+			// No pre-fill shape in sight. An EMPTY history, though, has nothing
+			// to resume: agentloop.Resume errors on it by design
+			// (EngineConfig.AutoResume's doc names "empty history" as a
+			// resume-impossible case), and fataling there killed the
+			// crash-recovered child before the recovery replay could deliver
+			// its queued rows. Non-empty, non-prefill histories keep
+			// startupResume.
+			if len(history) == 0 {
+				slog.Info("agent: skipping startup resume; no persisted messages",
+					"conversation", e.conv.ID)
+				resume = false
+			}
 		}
 	}
 	if resume {
