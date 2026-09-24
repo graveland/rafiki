@@ -752,6 +752,9 @@ func TestStoreStoppedRule(t *testing.T) {
 			// must not link. Unescaped, LIKE 'c_1:%' reads '_' as a wildcard and
 			// would stop ca1:t9 through a child it does not belong to; the fresh
 			// messages keep every other arm quiet, so the linkage alone decides.
+			// This case only falsifies because the cases above share this scratch
+			// database: the exited child c_1 they insert must still be present
+			// when this conversation is evaluated.
 			name:   "same-shaped external_ref without the underscore does not link",
 			conv:   convFixture{Owner: owner, Name: "uscore-decoy", ExternalRef: "ca1:t9"},
 			msgAge: time.Minute,
