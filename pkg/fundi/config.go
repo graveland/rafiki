@@ -10,6 +10,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -171,6 +172,11 @@ type Config struct {
 	// any inbound prompts — see EngineConfig.AutoResume.
 	AutoResume bool
 
+	// Prefill is handed straight to EngineConfig.Prefill: the spawn's
+	// pre-fill (see protocol.PrefillRead), run by the engine at worker start
+	// on a fresh conversation. Empty means none.
+	Prefill []protocol.PrefillRead
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture.
 	// Nil disables capture; passed directly to llm.WithRecordRequests.
 	RawTrace *rawtrace.RawTraceStore
@@ -264,6 +270,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		Name:           c.Name,
 		BaseCtx:        ctx,
 		AutoResume:     c.AutoResume,
+		Prefill:        c.Prefill,
 		OnFatal:        c.OnFatal,
 		NativeSink:     c.NativeSink,
 		OnConsumed:     c.OnConsumed,

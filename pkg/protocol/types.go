@@ -153,6 +153,15 @@ type GetRequest struct {
 	ChildID string `json:"childId"`
 }
 
+// PrefillRead is one entry of a spawn's pre-fill: a file (or glob) the
+// child reads through its own Read tool before turn 1. Start/End are
+// 1-based inclusive line numbers; 0 means open (from the start / to EOF).
+type PrefillRead struct {
+	Path  string `json:"path"`
+	Start int    `json:"start,omitempty"`
+	End   int    `json:"end,omitempty"`
+}
+
 // SpawnRequest starts a new pi child (§6.3).
 // cwd is required; all other fields are optional and forwarded to pi as flags.
 // apiKey is used at spawn time only and is never written to the state record.
@@ -171,6 +180,11 @@ type SpawnRequest struct {
 	// supplies kind, model, tools, prompt and budgets, which the remaining
 	// fields then override or narrow. Empty means no preset.
 	Preset string `json:"preset,omitempty"`
+
+	// Prefill lists files the child reads through its own Read tool, on its
+	// own executor, before its first turn; they're recorded as real
+	// tool_use/tool_result history. fundi only. Empty means none.
+	Prefill []PrefillRead `json:"prefill,omitempty"`
 
 	// ConfigDir, for kind=claude, is exported to the child as CLAUDE_CONFIG_DIR
 	// — it selects the claude config dir (plugins, hooks, MCP, settings). It is

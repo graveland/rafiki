@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -82,6 +83,10 @@ type EngineConfig struct {
 	// dangling tool_use, truncated max_tokens) and reports failure only
 	// when resume is impossible (cap exceeded, empty history).
 	AutoResume bool
+
+	// Prefill is the spawn's pre-fill (see protocol.PrefillRead), run by the
+	// engine at worker start on a fresh conversation. Empty means none.
+	Prefill []protocol.PrefillRead
 
 	// OnFatal is called at most once, from the turn worker, when the engine
 	// has hit something it cannot continue past — today that means a panic
@@ -152,6 +157,9 @@ type Engine struct {
 	em         *Emitter
 	state      StateData
 	autoResume bool
+	// prefill is the spawn's pre-fill (see EngineConfig.Prefill); run by the
+	// engine at worker start on a fresh conversation. Empty means none.
+	prefill []protocol.PrefillRead
 	// baseCtx is the engine-lifetime root every turn's cancellable context
 	// derives from — the single seam for wiring process shutdown (a
 	// signal.NotifyContext parent) into in-flight turns.
@@ -253,6 +261,8 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		fe:             fe,
 		em:             NewEmitter(fe, cfg.Provider, pricerFor(cfg.Client)),
 		baseCtx:        baseCtx,
+		autoResume:     cfg.AutoResume,
+		prefill:        cfg.Prefill,
 		onFatal:        cfg.OnFatal,
 		onConsumed:     cfg.OnConsumed,
 		onTurnEnded:    cfg.OnTurnEnded,

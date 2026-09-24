@@ -17,6 +17,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/skills"
@@ -35,9 +36,12 @@ type RuntimeOptions struct {
 	MaxOutputTokens      int // 0 = default (4096); per-turn output cap sent to upstream
 	SystemPromptOverride string
 	AppendSystemPrompt   string
-	Cwd                  string // must be absolute
-	Ref                  string
-	Name                 string
+	// Prefill is the spawn's pre-fill (see protocol.PrefillRead), run by the
+	// engine at worker start on a fresh conversation. Empty means none.
+	Prefill []protocol.PrefillRead
+	Cwd     string // must be absolute
+	Ref     string
+	Name    string
 	// OwnerUserID is the conversations.users id of the person this child runs
 	// for (an id, never a username). The daemon sets it from the
 	// authenticated caller's identity at spawn, and re-resolves it on resume
@@ -636,6 +640,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		MaxOutputTokens:        opts.MaxOutputTokens,
 		SystemPromptOverride:   opts.SystemPromptOverride,
 		AppendSystemPrompt:     opts.AppendSystemPrompt,
+		Prefill:                opts.Prefill,
 		ContextFiles:           contextFiles,
 		SkillsInventory:        skills.SkillsInventory(discovered),
 		Cwd:                    opts.Cwd,
