@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
@@ -81,6 +83,8 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
+	cmd.Flags().String("prefill-files", "",
+		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi only.")
 	_ = cmd.RegisterFlagCompletionFunc("preset", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		// Best-effort over Connect: a completion handler must never exit or
 		// print, so every failure — endpoint, network, daemon — degrades to
@@ -424,6 +428,35 @@ func applyCreatePreset(req *protocol.SpawnRequest, name string, rec presets.Reco
 	return nil
 }
 
+// resolvePrefillFiles reads and parses the --prefill-files flag, if set, into
+// SpawnRequest entries. Extracted so the flag's failure modes are testable
+// without a daemon, and so runCreate can refuse a bad list BEFORE mustDial —
+// it dials nothing, and a parse error is a user-input error that must not
+// open a connection first.
+func resolvePrefillFiles(cmd *cobra.Command) ([]protocol.PrefillRead, error) {
+	list, _ := cmd.Flags().GetString("prefill-files")
+	if list == "" {
+		return nil, nil
+	}
+	var (
+		text []byte
+		err  error
+	)
+	if list == "-" {
+		detached, _ := cmd.Flags().GetBool("detached")
+		if !detached {
+			return nil, errors.New("--prefill-files -: stdin is only available with --detached")
+		}
+		text, err = io.ReadAll(os.Stdin)
+	} else {
+		text, err = os.ReadFile(list)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("--prefill-files %s: %w", list, err)
+	}
+	return prefill.Parse(string(text))
+}
+
 // collectCallerEnv snapshots the calling process's environment for inclusion
 // in a SpawnRequest. Reserved keys are stripped so they can't override what the
 // daemon injects per-child — notably the socket and child id, which the child
@@ -462,6 +495,13 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Read and parse --prefill-files BEFORE any dial: a bad list is a
+	// user-input error and must not open a connection first.
+	prefillEntries, err := resolvePrefillFiles(cmd)
+	if err != nil {
+		return err
+	}
+
 	c := mustDial(cmd)
 	defer c.Close()
 
@@ -469,6 +509,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	req.Prefill = prefillEntries
 
 	p := mustProfile(cmd)
 

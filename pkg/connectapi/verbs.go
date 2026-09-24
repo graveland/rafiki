@@ -12,6 +12,7 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // Send submits one message to a child. It routes through the Inbox seam rather
@@ -174,6 +175,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Model:            m.GetModel(),
 		Kind:             m.GetKind(),
 		Preset:           m.GetPreset(),
+		Prefill:          prefillFromProto(m.GetPrefill()),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
 		ExecutorRef:      m.GetExecutorRef(),
@@ -192,6 +194,24 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		p.MaxChildren = &v
 	}
 	return p
+}
+
+// prefillFromProto maps the wire pre-fill onto protocol.PrefillRead entries,
+// nil when the request carries none. Validation happens in the controller;
+// this layer only carries the list, so it duplicates no prefill.Validate rule.
+func prefillFromProto(rows []*rafikiv1.PrefillRead) []protocol.PrefillRead {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]protocol.PrefillRead, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, protocol.PrefillRead{
+			Path:  r.GetPath(),
+			Start: int(r.GetStart()),
+			End:   int(r.GetEnd()),
+		})
+	}
+	return out
 }
 
 // Kill ends a child and reports the status it settled on.

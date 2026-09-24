@@ -87,9 +87,15 @@ type SpawnParams struct {
 	ExecutorSelector string
 	ExecutorRef      string
 	Labels           map[string]string
-	MaxDepth         *int
-	MaxCost          *float64
-	MaxChildren      *int
+
+	// Prefill is the pre-fill list: files (or globs) the child reads through
+	// its own Read tool before its first turn. Nil = none. Validated by the
+	// controller, never here.
+	Prefill []protocol.PrefillRead
+
+	MaxDepth    *int
+	MaxCost     *float64
+	MaxChildren *int
 }
 
 // ChildLifecycle is the narrow slice of the daemon's Controller needed to

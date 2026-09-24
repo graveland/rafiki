@@ -151,6 +151,14 @@ message GetChildResponse {
   ChildSummary child = 1;
 }
 
+// PrefillRead is one pre-fill entry; start/end are 1-based inclusive
+// line numbers, 0 = open. See protocol.PrefillRead.
+message PrefillRead {
+  string path = 1;
+  int32 start = 2;
+  int32 end = 3;
+}
+
 // SpawnRequest is a deliberately NARROW slice of protocol.SpawnRequest — the
 // fields a TUI sets. Everything else keeps its daemon-side default. Do not
 // grow this into a full mirror without a consumer for each field.
@@ -171,6 +179,9 @@ message SpawnRequest {
   // Controller.Spawn resolves FIRST — it supplies kind, model, tools, prompt
   // and budgets. Empty = none.
   string preset = 12;
+
+  // Files the child reads before its first turn (fundi only).
+  repeated PrefillRead prefill = 13;
 
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
