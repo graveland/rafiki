@@ -57,6 +57,9 @@ type turnMetrics struct {
 // Works for both paths: the proxy path decomposes requests into
 // conversation_message rows just as the in-process path does.
 func (i *Insights) Export(ctx context.Context, scope Scope, conversationID string) (*Transcript, error) {
+	if err := checkConversationID(conversationID); err != nil {
+		return nil, fmt.Errorf("export: %w", err)
+	}
 	tr := &Transcript{ConversationID: conversationID}
 
 	var a argList

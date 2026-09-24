@@ -5,6 +5,7 @@ package insights
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +125,25 @@ func TestExport_NotFound(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("export missing conversation err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestExport_MalformedIDIsNotFound pins checkConversationID's call site: a
+// child id (the usual mistake) and any other non-UUID must come back as
+// ErrNotFound, not as a Postgres uuid syntax error that the control plane
+// reports as internal.
+func TestExport_MalformedIDIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	for _, id := range []string{"c_01M3AC3TYYJAW3RX40DQ9GNYYN", "not-a-uuid", ""} {
+		_, err := New(pool).Export(ctx, ScopeAll(), id)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("Export(%q) err = %v, want ErrNotFound", id, err)
+		}
+	}
+	_, err := New(pool).Export(ctx, ScopeAll(), "c_01M3AC3TYYJAW3RX40DQ9GNYYN")
+	if err == nil || !strings.Contains(err.Error(), "child id") {
+		t.Errorf("a c_ id should be named as a child id, got %v", err)
 	}
 }
 

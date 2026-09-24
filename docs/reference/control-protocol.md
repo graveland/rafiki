@@ -1722,8 +1722,9 @@ volume, adoption, token, cost, failure, latency, cache-waste, and prefix-reuse f
 same struct.
 
 Errors: `no_agent_db` (§8) means the daemon has no database configured; `not_found` (§8) means
-`conversationId` was given but no such conversation exists, or it lies outside the connection's
-scope (the Scope fold above — a scope miss answers not-found, never a permission error).
+`conversationId` was given but no such conversation exists (including an id that is not a UUID,
+such as a child id), or it lies outside the connection's scope (the Scope fold above — a scope
+miss answers not-found, never a permission error).
 
 ### 6.18 `ctrl_conversation_search`
 
@@ -1771,7 +1772,8 @@ ordered turns with role, content, per-turn token/latency/model metrics, and the 
 skill catalog.
 
 Errors: `invalid_args` when `conversationId` is missing; `not_found` when no such conversation
-exists; `payload_too_large` (§8) when the transcript exceeds the maximum response size — export
+exists, including an id that is not a UUID (a child id such as `c_…` is named as one in the
+message; pass the child's `sessionId`); `payload_too_large` (§8) when the transcript exceeds the maximum response size — export
 it via `rafikid agent export` instead; `no_agent_db` (§8) when the daemon has no database
 configured.
 

@@ -177,6 +177,9 @@ func (i *Insights) GlobalStats(ctx context.Context, scope Scope, f StatsFilter) 
 // conversation does not exist (rather than a zeroed bundle indistinguishable
 // from a real conversation with no turns).
 func (i *Insights) ConversationStats(ctx context.Context, scope Scope, conversationID string) (*Stats, error) {
+	if err := checkConversationID(conversationID); err != nil {
+		return nil, err
+	}
 	var pa argList
 	probeWhere := "id = " + pa.next(conversationID) + "::uuid AND " + scope.cond(&pa, "owner_user_id")
 	var exists bool

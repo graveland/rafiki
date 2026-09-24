@@ -227,6 +227,17 @@ func TestConversationStats_NotFound(t *testing.T) {
 	}
 }
 
+func TestConversationStats_MalformedIDIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	for _, id := range []string{"c_01M3AC3TYYJAW3RX40DQ9GNYYN", "not-a-uuid"} {
+		_, err := New(pool).ConversationStats(ctx, ScopeAll(), id)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("ConversationStats(%q) err = %v, want ErrNotFound", id, err)
+		}
+	}
+}
+
 func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
