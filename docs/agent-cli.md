@@ -456,9 +456,14 @@ exclusive with `-i`: the interactive form cannot carry a pre-fill, so the
 combination is refused at parse time rather than silently dropping the list.
 
 Pre-fills are **fundi only** — the daemon refuses the spawn for any other
-kind. The child needs the `read` tool in its tool set (`glob` too when any
-entry is a glob); a spawn whose allowlist omits them is refused. The total
-read volume is estimated and capped at **60% of the model's context window**
+kind. The reads run through an internal read/glob reader wired to the same
+executor as the child's own tools, so the child's tool set does not need
+`read`: a tool-less child (a preset with `tools: []`, or an allowlist without
+`read`) gets its files persisted as one text row — each under an
+`=== <path> ===` header (`=== <path> (lines a-b) ===` for a bounded range or
+a paged read), the read output verbatim in its `cat -n` numbering — while a
+child that keeps `read` gets ordinary recorded tool calls. The total read
+volume is estimated and capped at **60% of the model's context window**
 (128k assumed when the catalog doesn't know the model); over the cap,
 nothing is persisted and the child ends with an error naming the estimate,
 the cap, and the five largest reads.

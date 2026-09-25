@@ -236,6 +236,101 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	}
 }
 
+// TestPrefillResumeDoesNotContinueTextPrefill pins the same defensive rule
+// for the TEXT shape: a history that is exactly ONE user row starting with
+// PrefillTextPreamble — the complete pre-fill a tool-less child persists —
+// must never reach agentloop.Resume (which would Continue, calling the model
+// with the files and no task) and must never re-run the pre-fill. When the
+// task arrives, the request carries the files and the task in ONE user
+// message, task text last.
+func TestPrefillResumeDoesNotContinueTextPrefill(t *testing.T) {
+	t.Run("unconfigured", func(t *testing.T) { testPrefillTextTailSkipsResume(t, false) })
+	t.Run("configured", func(t *testing.T) { testPrefillTextTailSkipsResume(t, true) })
+}
+
+func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
+	t.Helper()
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+	ref := "prefill-text-" + t.Name()
+
+	// Seed exactly the text row a tool-less child's pre-fill leaves behind.
+	seedClient := prefillDBSeedClient(t, pool)
+	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	textRow := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			anthropic.NewTextBlock(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"),
+		},
+	}
+	if err := conv.SeedHistory(ctx, []llm.Message{textRow}); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+	if hist, err := conv.History(ctx); err != nil || len(hist) != 1 {
+		t.Fatalf("seeded history = %d rows (%v), want 1", len(hist), err)
+	}
+
+	gate := &prefillGateSender{t: t, inner: newCapturingSender(t, sampleEndTurn)}
+	var eng *Engine
+	var out *syncBuffer
+	eng, out = prefillDBEngine(t, pool, gate, ref, func(cfg *EngineConfig) {
+		cfg.AutoResume = true
+		if configured {
+			// runPrefill must NOT run either: the shape is already complete.
+			cfg.Prefill = []protocol.PrefillRead{{Path: "/tmp/a.txt"}}
+			cfg.Tools = failIfCalledToolSet(t, "prefill re-ran on a complete text history")
+		}
+	})
+	defer eng.Close()
+
+	// Settle: the startup classify runs against the 1-row text history and
+	// must do nothing — no Resume, no pre-fill, no LLM call.
+	time.Sleep(300 * time.Millisecond)
+	if gate.callCount() != 0 {
+		t.Fatalf("LLM was called %d times before any prompt", gate.callCount())
+	}
+	if hist, err := eng.conv.History(ctx); err != nil || len(hist) != 1 {
+		t.Fatalf("history after settle = %d rows (%v), want 1 unchanged", len(hist), err)
+	}
+
+	// Now the prompt: exactly one LLM call, and the request carries the files
+	// and the task in ONE user message, task text last.
+	gate.openGate()
+	eng.HandlePrompt("do the task")
+	eng.Wait()
+
+	if gate.callCount() != 1 {
+		t.Fatalf("sender served %d calls, want exactly 1 (the prompt turn)", gate.callCount())
+	}
+	params := gate.inner.lastParams(t)
+	msgs := params.Messages
+	if len(msgs) != 1 {
+		t.Fatalf("request has %d messages, want 1 (the merged user message)", len(msgs))
+	}
+	merged := msgs[0]
+	if merged.Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("request message 0 role = %v, want user", merged.Role)
+	}
+	if len(merged.Content) != 2 {
+		t.Fatalf("merged user message has %d blocks, want prefill text + task", len(merged.Content))
+	}
+	first := merged.Content[0]
+	if first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble) {
+		t.Fatalf("merged block 0 = %+v, want the pre-fill text", first)
+	}
+	last := merged.Content[1]
+	if last.OfText == nil || last.OfText.Text != "do the task" {
+		t.Fatalf("merged block 1 = %+v, want the task text last", last)
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
+	}
+}
+
 // TestPrefillCompletesPartialR1: a process died after persisting r0+r1. The
 // restarted engine (pre-fill configured + AutoResume) re-executes r1's
 // inputs verbatim and writes r2 — with NO LLM call.

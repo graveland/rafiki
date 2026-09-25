@@ -88,6 +88,15 @@ type EngineConfig struct {
 	// engine at worker start on a fresh conversation. Empty means none.
 	Prefill []protocol.PrefillRead
 
+	// PrefillTools is the INTERNAL reader the pre-fill executes its reads
+	// through — the read/glob-only registry BuildRuntime materializes from
+	// the same executor routing and confinement as the model's tools. It is
+	// never offered to the model: a tool-less child's pre-fill renders as one
+	// text row (see runPrefill) instead of tool_use/tool_result rows. nil
+	// means the pre-fill reads through Tools (engines built outside
+	// BuildRuntime), where the model's tool set gates the pre-fill as before.
+	PrefillTools agentloop.ToolSet
+
 	// OnFatal is called at most once, from the turn worker, when the engine
 	// has hit something it cannot continue past — today that means a panic
 	// escaped a turn. The engine has already stopped accepting work and
@@ -160,6 +169,9 @@ type Engine struct {
 	// prefill is the spawn's pre-fill (see EngineConfig.Prefill); run by the
 	// engine at worker start on a fresh conversation. Empty means none.
 	prefill []protocol.PrefillRead
+	// prefillTools is the internal reader the pre-fill executes through (see
+	// EngineConfig.PrefillTools); nil means the reads go through tools.
+	prefillTools agentloop.ToolSet
 	// baseCtx is the engine-lifetime root every turn's cancellable context
 	// derives from — the single seam for wiring process shutdown (a
 	// signal.NotifyContext parent) into in-flight turns.
@@ -279,6 +291,7 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 		baseCtx:        baseCtx,
 		autoResume:     cfg.AutoResume,
 		prefill:        cfg.Prefill,
+		prefillTools:   cfg.PrefillTools,
 		onFatal:        cfg.OnFatal,
 		onConsumed:     cfg.OnConsumed,
 		onTurnEnded:    cfg.OnTurnEnded,
@@ -495,9 +508,10 @@ func (e *Engine) Close() {
 // turn from racing the constructor caller's boot-time work (BuildEngine's
 // lease acquisition and RepairOrphans). Then the pre-fill classification runs
 // BEFORE any resume, on a history loaded whenever the spawn configured a
-// pre-fill or auto-recovery is enabled. A pre-fill-shaped tail is never handed
-// to agentloop.Resume — its tail is user tool_results, and Resume would
-// Continue, calling the model with the files and no task. startupResume
+// pre-fill or auto-recovery is enabled. A pre-fill-shaped tail (either shape)
+// is never handed to agentloop.Resume — the 3-row shape's tail is user
+// tool_results, the text shape's a user text row; Resume would Continue and
+// call the model with the files and no task in both cases. startupResume
 // therefore only runs on a non-empty, non-prefill-shaped history — an empty
 // one has nothing to resume and skips it (see the prefillNone case below).
 func (e *Engine) worker() {
@@ -529,9 +543,12 @@ func (e *Engine) worker() {
 				return
 			}
 			resume = false
-		case prefillComplete:
+		case prefillComplete, prefillTextComplete:
 			// Skip startupResume whether or not the pre-fill field survived
-			// the restart: a pre-fill-shaped tail must never Continue.
+			// the restart: a pre-fill-shaped tail must never Continue — the
+			// 3-row shape's tail is user tool_results, the text shape's a
+			// user text row; Resume would call the model with the files and
+			// no task either way.
 			resume = false
 		case prefillNone:
 			// No pre-fill shape in sight. An EMPTY history, though, has nothing

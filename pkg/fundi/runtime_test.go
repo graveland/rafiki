@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/skills"
 )
@@ -246,6 +249,71 @@ func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
 	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
 		if !names[name] {
 			t.Errorf("%q is missing; the standalone mode must keep its workspace tools", name)
+		}
+	}
+}
+
+// TestBuildRuntimeNoBuiltinToolsPrefillRuns pins the tool-less pre-fill
+// wiring end to end: with NoBuiltinTools the MODEL's tool definitions are
+// empty, yet a configured pre-fill still runs — through the internal reader
+// BuildRuntime materializes (real read via the in-process executor) — and
+// persists the ONE user text row, so a tool-less batch seat gets its files.
+func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("alpha line\nbeta line\n"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	opts := fakeRuntimeOptions(t, cwd)
+	opts.InProcessWorkspace = true
+	opts.NoBuiltinTools = true
+	opts.Prefill = []protocol.PrefillRead{{Path: "a.txt"}}
+
+	out := &syncBuffer{}
+	fe := NewFrontend(strings.NewReader(""), out, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	if err != nil {
+		t.Fatalf("BuildRuntime: %v", err)
+	}
+	defer shutdown()
+
+	// The model sees no tools at all.
+	if defs := eng.tools.Definitions(); len(defs) != 0 {
+		names := make([]string, 0, len(defs))
+		for _, d := range defs {
+			if d.OfTool != nil {
+				names = append(names, d.OfTool.Name)
+			}
+		}
+		t.Fatalf("model tool definitions = %v, want none under NoBuiltinTools", names)
+	}
+
+	// The pre-fill ran anyway, through the internal reader. A prompt turn
+	// serializes behind it on the same worker goroutine — and the in-memory
+	// store must not be polled concurrently — so queue one and wait; the
+	// scripted fake turns answer it.
+	eng.HandlePrompt("go")
+	eng.Wait()
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply)", len(hist))
+	}
+	row := hist[0].Param
+	if row.Role != anthropic.MessageParamRoleUser || len(row.Content) != 1 || row.Content[0].OfText == nil {
+		t.Fatalf("prefill row = %+v, want one user text block", row.Content)
+	}
+	text := row.Content[0].OfText.Text
+	if !strings.HasPrefix(text, PrefillTextPreamble) {
+		t.Fatalf("prefill row does not start with the text marker: %q", text)
+	}
+	if !strings.Contains(text, "=== a.txt ===\n     1\talpha line\n     2\tbeta line\n") {
+		t.Fatalf("prefill row missing a.txt's header + numbered contents; got:\n%s", text)
+	}
+	for _, b := range row.Content {
+		if b.OfToolUse != nil || b.OfToolResult != nil {
+			t.Fatal("tool-less pre-fill row carries a tool block")
 		}
 	}
 }

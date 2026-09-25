@@ -105,7 +105,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 					"optionally with a 1-based inclusive line range (path:10-40, path:200-, path:-80), or a glob " +
 					"(src/**/*.rs, no range). The reads run on the agent's own machine before its first turn and " +
 					"cost you almost nothing to send; use this instead of pasting file contents into prompt. " +
-					"Put CLAUDE.md or skill files here too, with ranges. Needs the read tool (and glob for globs)."},
+					"Put CLAUDE.md or skill files here too, with ranges. The agent does not need the read tool " +
+					"for this: a tool-less agent gets the files as text under `=== <path> ===` headers."},
 		},
 		Required: []string{"prompt"},
 	}

@@ -65,14 +65,17 @@ business.
 When a dispatch needs files read before the first turn, pass them as the
 `prefill` param of `agent_spawn` — a list of `{path, start, end}` entries
 (1-based inclusive line ranges, 0 = open) — instead of pasting the contents
-into `prompt`: the worker reads them through its own Read tool and the reads
-are persisted as real history, so the files sit in the conversation before
-turn 1 at a fraction of the prompt's token cost. Ranges work for skill or
-CLAUDE.md excerpts too (`{"path": "CLAUDE.md", "start": 1, "end": 60}`).
-The worker's kind must be fundi and its tool set must keep `read` (`glob` too
-when any entry is a glob); the total read volume is capped at 60% of the
-model's context window. Keep the list **identical across a wave** so every
-worker shares the same cached prefix.
+into `prompt`: rafiki reads them through an internal reader before the
+worker's first turn and persists them as real history, so the files sit in
+the conversation before turn 1 at a fraction of the prompt's token cost.
+Ranges work for skill or CLAUDE.md excerpts too (`{"path": "CLAUDE.md",
+"start": 1, "end": 60}`). The worker's kind must be fundi; its own tool set
+need NOT include `read` — a tool-less seat (`tools: []`, the review
+pipeline's batch reviewer) gets its files rendered as one text row under
+`=== <path> ===` headers, while a seat that keeps `read` gets ordinary
+recorded tool calls. The total read volume is capped at 60% of the model's
+context window. Keep the list **identical across a wave** so every worker
+shares the same cached prefix.
 ## On ANY failure: record the evidence, then STOP and ask
 
 A failure is any of: a settle error, a cost-cap hit, a turn error, or a

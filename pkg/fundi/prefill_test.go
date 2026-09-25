@@ -670,6 +670,251 @@ func runPrefillInMemory(t *testing.T, entries []protocol.PrefillRead) []store.Me
 	return hist
 }
 
+// prefillNumberedRead is a fake read tool whose output is numbered like the
+// real one (`cat -n` style), so the text shape's verbatim contents are
+// assertable. files maps absolute path to its lines; failPaths errors a read
+// the way a missing file does.
+func prefillNumberedRead(files map[string][]string, failPaths map[string]bool) fakeToolSet {
+	return fakeToolSet{
+		"read": func(_ context.Context, in json.RawMessage) (string, error) {
+			var cmd prefillReadCmd
+			if err := json.Unmarshal(in, &cmd); err != nil {
+				return "", fmt.Errorf("read: invalid input: %w", err)
+			}
+			if failPaths[cmd.Path] {
+				return "", fmt.Errorf("read: open %s: no such file or directory", cmd.Path)
+			}
+			var sb strings.Builder
+			for i, line := range files[cmd.Path] {
+				n := i + 1
+				if n < cmd.Offset || n >= cmd.Offset+cmd.Limit {
+					continue
+				}
+				fmt.Fprintf(&sb, "%6d\t%s\n", n, line)
+			}
+			return sb.String(), nil
+		},
+	}
+}
+
+// prefillToollessEngine is prefillSimpleEngine for the TEXT shape: the
+// model's tool set has no read (the tool-less child) and the internal
+// pre-fill reader is injected as EngineConfig.PrefillTools.
+func prefillToollessEngine(t *testing.T, reader fakeToolSet, entries []protocol.PrefillRead, extra ...func(*EngineConfig)) (*Engine, *syncBuffer, *capturingSender) {
+	t.Helper()
+	modelTools := fakeToolSet{ // no read: the model cannot call it
+		"bash": func(context.Context, json.RawMessage) (string, error) { return "", nil },
+	}
+	return prefillSimpleEngine(t, modelTools, entries, append([]func(*EngineConfig){
+		func(cfg *EngineConfig) { cfg.PrefillTools = reader },
+	}, extra...)...)
+}
+
+// TestPrefillToollessRendersTextRow is the core TEXT-shape contract: a child
+// whose MODEL tool set lacks read (preset tools: []) carries a pre-fill — the
+// reads run through the internal reader and persist as exactly ONE user text
+// row (marker, then `=== <path> ===` sections with the numbered contents in
+// call order), never as tool_use/tool_result rows; the task prompt lands as
+// the next user row and merges with the text row into ONE wire user message,
+// task text last.
+func TestPrefillToollessRendersTextRow(t *testing.T) {
+	reader := prefillNumberedRead(map[string][]string{
+		"/tmp/a.txt": {"alpha", "beta"},
+		"/tmp/b.txt": {"gamma"},
+	}, nil)
+	eng, out, sender := prefillToollessEngine(t, reader,
+		[]protocol.PrefillRead{{Path: "/tmp/a.txt"}, {Path: "/tmp/b.txt"}})
+
+	eng.HandlePrompt("do the task")
+	eng.Wait()
+
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply)", len(hist))
+	}
+
+	// r0: user, exactly ONE text block starting with the text marker.
+	if hist[0].Ordinal != 0 || hist[0].Param.Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("row 0 = ordinal %d role %v, want user at 0", hist[0].Ordinal, hist[0].Param.Role)
+	}
+	if len(hist[0].Param.Content) != 1 || hist[0].Param.Content[0].OfText == nil {
+		t.Fatalf("row 0 must be a single text block, got %d blocks", len(hist[0].Param.Content))
+	}
+	text := hist[0].Param.Content[0].OfText.Text
+	if !strings.HasPrefix(text, PrefillTextPreamble) {
+		t.Fatalf("row 0 text does not start with the text pre-fill marker: %q", text)
+	}
+	// Sections in call order, each header followed by the numbered contents.
+	wantA := "=== /tmp/a.txt ===\n     1\talpha\n     2\tbeta\n"
+	wantB := "=== /tmp/b.txt ===\n     1\tgamma\n"
+	if !strings.Contains(text, wantA) {
+		t.Fatalf("text row missing a.txt's header + numbered contents; got:\n%s", text)
+	}
+	if !strings.Contains(text, wantB) {
+		t.Fatalf("text row missing b.txt's header + numbered contents; got:\n%s", text)
+	}
+	if ia, ib := strings.Index(text, "=== /tmp/a.txt ==="), strings.Index(text, "=== /tmp/b.txt ==="); ia < 0 || ia >= ib {
+		t.Fatalf("sections out of order (a at %d, b at %d)", ia, ib)
+	}
+
+	// No tool_use or tool_result block anywhere in the history.
+	for i, m := range hist {
+		for j, b := range m.Param.Content {
+			if b.OfToolUse != nil || b.OfToolResult != nil {
+				t.Fatalf("row %d block %d is a tool block; a tool-less pre-fill must be text only", i, j)
+			}
+		}
+	}
+
+	// r1: the task prompt; r2: the turn's reply.
+	if hist[1].Param.Content[0].OfText == nil || hist[1].Param.Content[0].OfText.Text != "do the task" {
+		t.Fatalf("row 1 = %+v, want the task prompt", hist[1].Param.Content)
+	}
+	if hist[2].Param.Role != anthropic.MessageParamRoleAssistant {
+		t.Fatalf("row 2 role = %v, want the assistant reply", hist[2].Param.Role)
+	}
+
+	// The request: the text row and the task merged into ONE user message,
+	// task text last.
+	params := sender.lastParams(t)
+	if len(params.Messages) != 1 {
+		t.Fatalf("request has %d messages, want 1 (the merged user message)", len(params.Messages))
+	}
+	merged := params.Messages[0]
+	if merged.Role != anthropic.MessageParamRoleUser {
+		t.Fatalf("request message 0 role = %v, want user", merged.Role)
+	}
+	if len(merged.Content) != 2 {
+		t.Fatalf("merged user message has %d blocks, want prefill text + task", len(merged.Content))
+	}
+	first := merged.Content[0]
+	if first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble) {
+		t.Fatalf("merged block 0 = %+v, want the pre-fill text", first)
+	}
+	last := merged.Content[1]
+	if last.OfText == nil || last.OfText.Text != "do the task" {
+		t.Fatalf("merged block 1 = %+v, want the task text last", last)
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
+	}
+}
+
+// TestPrefillTextShapeGlobRangeAndError covers the text shape's trickier
+// renders: a glob entry expands to sorted per-match sections; a bounded range
+// names its span in the header; a missing file renders as an (error: …)
+// section without taking the child down; and a paged open entry shows the
+// span the trailer proved (lines 1-2) with the tail page unheadered.
+func TestPrefillTextShapeGlobRangeAndError(t *testing.T) {
+	reader := prefillNumberedRead(map[string][]string{
+		"/b/aaa.txt":      {"aaa body"},
+		"/b/zzz.txt":      {"zzz body"},
+		"/tmp/ranged.txt": {"l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12", "l13"},
+		"/tmp/paged.txt":  {"p1", "p2", "p3"},
+	}, map[string]bool{"/tmp/missing.txt": true})
+	reader["glob"] = func(_ context.Context, in json.RawMessage) (string, error) {
+		var gi struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if err := json.Unmarshal(in, &gi); err != nil {
+			return "", err
+		}
+		if gi.Pattern != "*.txt" || gi.Path != "/b" {
+			return "", fmt.Errorf("glob input = %s, want pattern *.txt path /b", in)
+		}
+		return "/b/zzz.txt\n/b/aaa.txt\n", nil // unsorted: the walk must sort
+	}
+	// The paged entry: the first page ends at line 2 with a real trailer.
+	innerRead := reader["read"]
+	reader["read"] = func(ctx context.Context, in json.RawMessage) (string, error) {
+		var cmd prefillReadCmd
+		if err := json.Unmarshal(in, &cmd); err != nil {
+			return "", err
+		}
+		if cmd.Path == "/tmp/paged.txt" && cmd.Offset == 1 {
+			return "     1\tp1\n     2\tp2\n[showing lines 1-2; more lines remain — pass offset=3 to continue]\n", nil
+		}
+		return innerRead(ctx, in)
+	}
+
+	eng, out, _ := prefillToollessEngine(t, reader, []protocol.PrefillRead{
+		{Path: "/b/*.txt"},
+		{Path: "/tmp/ranged.txt", Start: 10, End: 12},
+		{Path: "/tmp/paged.txt"},
+		{Path: "/tmp/missing.txt"},
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(hist) != 3 {
+		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply) — a failed read must not be fatal", len(hist))
+	}
+	text := hist[0].Param.Content[0].OfText.Text
+	for _, want := range []string{
+		"=== /b/aaa.txt ===\n     1\taaa body\n",
+		"=== /b/zzz.txt ===\n     1\tzzz body\n",
+		"=== /tmp/ranged.txt (lines 10-12) ===\n    10\tl10\n    11\tl11\n    12\tl12\n",
+		"=== /tmp/paged.txt (lines 1-2) ===\n     1\tp1\n     2\tp2\n",
+		"=== /tmp/paged.txt ===\n     3\tp3\n",
+		"=== /tmp/missing.txt ===\n(error: read: open /tmp/missing.txt: no such file or directory)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text row missing section %q; got:\n%s", want, text)
+		}
+	}
+	// Glob matches in lexicographic order, not the fake's output order.
+	if ia, iz := strings.Index(text, "=== /b/aaa.txt ==="), strings.Index(text, "=== /b/zzz.txt ==="); ia < 0 || ia >= iz {
+		t.Fatalf("glob matches not sorted (aaa at %d, zzz at %d)", ia, iz)
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("a failed read must not be fatal: %s", msg)
+	}
+}
+
+// TestPrefillTextOverCapPersistsNothing: the token cap counts the RENDERED
+// text (marker, headers and all). Over the cap nothing is persisted and the
+// child ends with the estimate and the largest reads named.
+func TestPrefillTextOverCapPersistsNothing(t *testing.T) {
+	huge := strings.Repeat("x", 76800*4+4000) // > 76800 tokens' worth of bytes
+	reader := fakeToolSet{
+		"read": func(context.Context, json.RawMessage) (string, error) { return huge, nil },
+	}
+	fatalCalled := make(chan error, 1)
+	eng, out, _ := prefillToollessEngine(t, reader, []protocol.PrefillRead{{Path: "/tmp/huge.txt"}}, func(cfg *EngineConfig) {
+		cfg.OnFatal = func(err error) { fatalCalled <- err }
+	})
+
+	select {
+	case err := <-fatalCalled:
+		for _, part := range []string{"estimated", "exceeds", "/tmp/huge.txt"} {
+			if !strings.Contains(err.Error(), part) {
+				t.Fatalf("over-cap error %q does not name %q", err.Error(), part)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("OnFatal was never called for an over-cap text pre-fill")
+	}
+	if msg := out.String(); !strings.Contains(msg, "agent_error") {
+		t.Fatalf("expected an agent_error frame, got %q", msg)
+	}
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(hist) != 0 {
+		t.Fatalf("history has %d rows, want NOTHING persisted before the cap check", len(hist))
+	}
+}
+
 // prefillTestRow builds one store.Message for classifyPrefill's table.
 func prefillTestRow(param llm.Message) store.Message {
 	return store.Message{Param: param, ToolUseIDs: store.ToolUseIDsOf(param)}
@@ -702,6 +947,18 @@ func TestPrefillClassify(t *testing.T) {
 		Role:    anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("please read these files first.")},
 	}
+	textPrefill := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			anthropic.NewTextBlock(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"),
+		},
+	}
+	nearMarkerText := anthropic.MessageParam{
+		Role: anthropic.MessageParamRoleUser,
+		Content: []anthropic.ContentBlockParamUnion{
+			anthropic.NewTextBlock("[rafiki prefill] some other preamble a user could have typed."),
+		},
+	}
 	realID := anthropic.MessageParam{
 		Role: anthropic.MessageParamRoleAssistant,
 		Content: []anthropic.ContentBlockParamUnion{
@@ -723,6 +980,14 @@ func TestPrefillClassify(t *testing.T) {
 		// A pre-fill-SHAPED history is recognised even without the field, so
 		// the shaped tail can never reach Resume.
 		{"complete unconfigured", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2)}, false, prefillComplete},
+		// The text shape a tool-less child persists: exactly ONE user row
+		// starting with PrefillTextPreamble. Complete — with or without the
+		// field — and it must never be confused with an r0 prefix of the
+		// tool-call shape.
+		{"text complete", []store.Message{prefillTestRow(textPrefill)}, true, prefillTextComplete},
+		{"text complete unconfigured", []store.Message{prefillTestRow(textPrefill)}, false, prefillTextComplete},
+		{"text complete plus task row", []store.Message{prefillTestRow(textPrefill), prefillTestRow(task)}, true, prefillNone},
+		{"near-marker text row", []store.Message{prefillTestRow(nearMarkerText)}, true, prefillNone},
 		{"complete plus task row", []store.Message{prefillTestRow(r0), prefillTestRow(r1), prefillTestRow(r2), prefillTestRow(task)}, true, prefillNone},
 		{"wrong preamble", []store.Message{prefillTestRow(wrongPreamble)}, true, prefillNone},
 		{"non-prefill id", []store.Message{prefillTestRow(r0), prefillTestRow(realID)}, true, prefillNone},

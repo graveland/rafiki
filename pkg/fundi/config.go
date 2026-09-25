@@ -185,6 +185,12 @@ type Config struct {
 	// on a fresh conversation. Empty means none.
 	Prefill []protocol.PrefillRead
 
+	// PrefillTools is handed straight to EngineConfig.PrefillTools: the
+	// INTERNAL read/glob reader the pre-fill executes through, never offered
+	// to the model. BuildRuntime materializes it (RuntimeOptions.PrefillTools
+	// carries the override); nil means the reads go through Tools.
+	PrefillTools agentloop.ToolSet
+
 	// RawTrace, when non-nil, enables raw LLM API request/response capture.
 	// Nil disables capture; passed directly to llm.WithRecordRequests.
 	RawTrace *rawtrace.RawTraceStore
@@ -279,6 +285,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 		BaseCtx:        ctx,
 		AutoResume:     c.AutoResume,
 		Prefill:        c.Prefill,
+		PrefillTools:   c.PrefillTools,
 		OnFatal:        c.OnFatal,
 		NativeSink:     c.NativeSink,
 		OnConsumed:     c.OnConsumed,

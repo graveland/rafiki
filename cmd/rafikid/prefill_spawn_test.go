@@ -13,8 +13,9 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
-// TestPrefillValidateRefusals covers validatePrefill's table: every refusal
-// message is verbatim from the plan, and the accepting cases return nil.
+// TestPrefillValidateRefusals covers validatePrefill's table: the refusals
+// that remain (kind, entry shape) are verbatim, and the accepting cases —
+// now including tool-less children — return nil.
 func TestPrefillValidateRefusals(t *testing.T) {
 	badRange := []protocol.PrefillRead{{Path: "a.md", Start: 9, End: 3}}
 	globEntry := []protocol.PrefillRead{{Path: "notes/*.md"}}
@@ -28,10 +29,14 @@ func TestPrefillValidateRefusals(t *testing.T) {
 		{"empty prefill with kind claude", protocol.SpawnRequest{Kind: protocol.KindClaude}, ""},
 		{"no tools restrict nothing", protocol.SpawnRequest{Prefill: plain}, ""},
 		{"tools include read and glob with a glob entry", protocol.SpawnRequest{Prefill: globEntry, Tools: "read,glob"}, ""},
+		// Tool-less children carry pre-fills: the reads run through the
+		// engine's internal reader, so neither NoBuiltinTools nor an allowlist
+		// without read/glob is a refusal any more.
+		{"no builtin tools accepted", protocol.SpawnRequest{Prefill: plain, NoBuiltinTools: true}, ""},
+		{"no builtin tools with a glob entry accepted", protocol.SpawnRequest{Prefill: globEntry, NoBuiltinTools: true}, ""},
+		{"tools omit read accepted", protocol.SpawnRequest{Prefill: plain, Tools: "bash,edit"}, ""},
+		{"glob entry, tools omit glob accepted", protocol.SpawnRequest{Prefill: globEntry, Tools: "read"}, ""},
 		{"claude kind", protocol.SpawnRequest{Kind: protocol.KindClaude, Prefill: plain}, "prefill: only kind fundi supports a pre-fill"},
-		{"no builtin tools", protocol.SpawnRequest{Prefill: plain, NoBuiltinTools: true}, "prefill: the child needs the read tool, but this spawn disables every built-in tool"},
-		{"tools omit read", protocol.SpawnRequest{Prefill: plain, Tools: "bash,edit"}, "prefill: the child needs the read tool, but its tool allowlist omits it"},
-		{"glob entry, tools omit glob", protocol.SpawnRequest{Prefill: globEntry, Tools: "read"}, "prefill: a glob entry needs the glob tool, but the tool allowlist omits it"},
 		{"bad range", protocol.SpawnRequest{Prefill: badRange, Tools: "read"}, "prefill: entry 1: start 9 is after end 3"},
 	}
 

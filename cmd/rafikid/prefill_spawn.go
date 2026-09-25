@@ -9,15 +9,17 @@ import (
 )
 
 // validatePrefill refuses a pre-fill the child could not run. Called in
-// Controller.Spawn right after applyPreset, so the preset's kind and tool
-// shaping are already resolved.
+// Controller.Spawn right after applyPreset, so the preset's kind shaping is
+// already resolved.
 //
 // The entries themselves are checked by prefill.Validate (shape: non-empty
-// paths, sane 1-based ranges, no range on a glob, entry count). The remaining
-// checks are about the CHILD the pre-fill is headed for: a pre-fill is history
-// the engine fabricates from the child's own Read (and, for globs, Glob) tool
-// results, so a child whose tool set excludes those tools could never produce
-// it — and a non-fundi kind has no engine that runs a pre-fill at all.
+// paths, sane 1-based ranges, no range on a glob, entry count). The child's
+// TOOL SET is deliberately not checked here: the reads run through the
+// engine's internal read/glob reader (materialized from the same executor
+// routing as the child's tools, never offered to the model), so a tool-less
+// child carries a pre-fill as one text row — the engine refuses a spawn
+// whose executor cannot serve reads, at worker start. Only the kind is
+// checked here: a non-fundi kind has no engine that runs a pre-fill at all.
 func validatePrefill(req protocol.SpawnRequest) error {
 	// prefill.Validate errors with "prefill: no entries" on an empty slice,
 	// which is the normal no-prefill case, not a refusal.
@@ -41,43 +43,6 @@ func validatePrefill(req protocol.SpawnRequest) error {
 		return &control.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: msg,
-		}
-	}
-
-	if req.NoBuiltinTools {
-		return &control.ControllerError{
-			Code:    protocol.ErrInvalidArgs,
-			Message: "prefill: the child needs the read tool, but this spawn disables every built-in tool",
-		}
-	}
-
-	// An empty req.Tools means "all built-in tools", so read and glob are both
-	// available; only a non-empty allowlist can omit them.
-	hasGlob := false
-	for _, e := range req.Prefill {
-		if prefill.IsGlob(e.Path) {
-			hasGlob = true
-			break
-		}
-	}
-	if req.Tools != "" {
-		tools := map[string]bool{}
-		for _, t := range strings.Split(req.Tools, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				tools[t] = true
-			}
-		}
-		if !tools["read"] {
-			return &control.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: "prefill: the child needs the read tool, but its tool allowlist omits it",
-			}
-		}
-		if hasGlob && !tools["glob"] {
-			return &control.ControllerError{
-				Code:    protocol.ErrInvalidArgs,
-				Message: "prefill: a glob entry needs the glob tool, but the tool allowlist omits it",
-			}
 		}
 	}
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/prefill"
@@ -21,9 +22,17 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
-// PrefillPreamble is the first row (r0) of a persisted pre-fill: one user
-// text block telling the model why files appear before its first turn.
+// PrefillPreamble is the first row (r0) of a TOOL-shape persisted pre-fill:
+// one user text block telling the model why files appear before its first
+// turn, followed (r1/r2) by its own recorded read tool calls.
 const PrefillPreamble = "[rafiki prefill] The files for this task were read for you before this conversation started; their contents follow."
+
+// PrefillTextPreamble is the marker line of a TEXT-shape pre-fill row: the
+// single user row a tool-less child's pre-fill persists, whose body is this
+// line followed by one `=== <path> ===` section per read (the read tool's
+// numbered output verbatim). A child whose model tool set offers no read
+// cannot carry tool_use history for it, so its reads render as text instead.
+const PrefillTextPreamble = "[rafiki prefill] The files for this task were read for you before this conversation started; their contents follow, each after an `=== <path> ===` header, numbered <line><TAB><text>."
 
 const (
 	// prefillIDPrefix marks the synthetic tool_use/tool_result rows the
@@ -46,9 +55,10 @@ const (
 )
 
 // prefillState classifies a conversation's history against the pre-fill row
-// shape (r0 preamble, r1 tool_use, r2 tool_result) so a restart can finish a
-// pre-fill a dead process left partial — and so a pre-fill-shaped tail can
-// never be handed to agentloop.Resume.
+// shapes — the tool-call shape (r0 preamble, r1 tool_use, r2 tool_result) and
+// the text shape (one user row starting with PrefillTextPreamble) — so a
+// restart can finish a pre-fill a dead process left partial, and so a
+// pre-fill-shaped tail can never be handed to agentloop.Resume.
 type prefillState int
 
 const (
@@ -69,18 +79,31 @@ const (
 	// must also skip: the tail is user tool_results, and Resume would
 	// Continue, calling the model with the files and no task.
 	prefillComplete
+	// prefillTextComplete: exactly ONE user row starting with
+	// PrefillTextPreamble — a complete TEXT-shape pre-fill (a tool-less
+	// child's). Same rule as prefillComplete: nothing to run, no Resume. The
+	// text shape is written as one row in one atomic write, so it has no
+	// partial prefixes to complete.
+	prefillTextComplete
 )
 
 // classifyPrefill maps a conversation's history to a prefillState. configured
-// only separates the empty-history cases: a pre-fill-SHAPED history is
-// recognised even when the engine was rebuilt without the field, so the
-// shaped tail is never misread as resumable work.
+// only separates the empty-history cases: a pre-fill-SHAPED history (either
+// shape) is recognised even when the engine was rebuilt without the field, so
+// the shaped tail is never misread as resumable work.
 func classifyPrefill(history []store.Message, configured bool) prefillState {
 	if len(history) == 0 {
 		if configured {
 			return prefillEmpty
 		}
 		return prefillNone
+	}
+	// The text shape is one row, complete: check it before the tool-call
+	// shape's prefix states, which a text row can never match (different
+	// marker text) but which would otherwise fall through to prefillNone and
+	// send the row to startupResume.
+	if len(history) == 1 && prefillRowIsTextPrefill(history[0]) {
+		return prefillTextComplete
 	}
 	if len(history) > 3 {
 		return prefillNone
@@ -146,6 +169,20 @@ func prefillRowIsR2(m store.Message) bool {
 	return true
 }
 
+// prefillRowIsTextPrefill: a user row whose first block is text starting with
+// PrefillTextPreamble — the complete TEXT-shape pre-fill a tool-less child
+// persists. Exactly one row, written in one atomic write: the text shape has
+// no partial prefixes to recognise.
+func prefillRowIsTextPrefill(m store.Message) bool {
+	if m.Param.Role != anthropic.MessageParamRoleUser {
+		return false
+	}
+	if len(m.Param.Content) == 0 || m.Param.Content[0].OfText == nil {
+		return false
+	}
+	return strings.HasPrefix(m.Param.Content[0].OfText.Text, PrefillTextPreamble)
+}
+
 // prefillReadInput marshals a read call's input. Field order is the byte
 // stability contract: two runs over the same entries must produce identical
 // r1 content, which SeedHistory's divergence check (and
@@ -164,20 +201,33 @@ type prefillGlobInput struct {
 }
 
 // prefillCall is one read the pre-fill executed (or attempted), in call
-// order: one tool_use block in r1 and one tool_result block in r2. Glob
-// executions are never recorded — only the reads their matches expand to.
+// order: one tool_use block in r1 and one tool_result block in r2, or one
+// `=== <path> ===` section in the text shape. Glob executions are never
+// recorded — only the reads their matches expand to.
 type prefillCall struct {
-	id      string          // prefill_0001-style; assigned in call order
-	input   json.RawMessage // the marshalled tool_use input, byte-stable
-	path    string          // for the over-cap listing
-	result  string          // the tool result, or the Go error's text
-	isError bool
+	id    string          // prefill_0001-style; assigned in call order
+	input json.RawMessage // the marshalled tool_use input, byte-stable
+	path  string          // for the over-cap listing and the text header
+	// lineStart/lineEnd name the 1-based line span the call covered, for the
+	// text shape's header: offset..(next-1) for a page a trailer proved the
+	// end of, offset..end for a bounded range. lineEnd == 0 (and the error
+	// case) renders the header without a range.
+	lineStart int
+	lineEnd   int
+	result    string // the tool result, or the Go error's text
+	isError   bool
 }
 
-// runPrefill executes the spawn's pre-fill and persists the synthetic
-// tool_use/tool_result rows. Called by worker() at engine start, before any
-// queued prompt is consumed, on a history that is empty (prefillEmpty) or a
-// partial pre-fill (prefillHasR0/prefillHasR1).
+// runPrefill executes the spawn's pre-fill and persists the synthetic rows.
+// Called by worker() at engine start, before any queued prompt is consumed,
+// on a history that is empty (prefillEmpty) or a partial pre-fill
+// (prefillHasR0/prefillHasR1).
+//
+// Two persisted shapes. A child whose MODEL tool set offers read records the
+// reads as its own tool calls (r0 preamble, r1 tool_use, r2 tool_result); a
+// tool-less child renders them as ONE user text row (renderPrefillText). A
+// PARTIAL pre-fill is always completed in the tool-call shape: its r0/r1 ids
+// and inputs are already persisted, and only that shape can finish them.
 //
 // It emits NO frontend frames: an AgentStart/AgentEnd pair outside a turn
 // would drive the settle path, and a child quietly reading its files before
@@ -186,6 +236,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 	if err := e.prefillToolsAvailable(); err != nil {
 		return err
 	}
+	textShape := st == prefillEmpty && !e.modelHasReadTool()
 
 	// Build the call list. A persisted r1 is replayed verbatim — ids and
 	// inputs come from history, so r2 matches what those ids promise.
@@ -200,7 +251,7 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 			if err != nil {
 				return fmt.Errorf("prefill: re-marshal tool_use %s input: %w", tu.ID, err)
 			}
-			result, execErr := e.tools.Execute(ctx, "read", input)
+			result, execErr := e.prefillReader().Execute(ctx, "read", input)
 			call := prefillCall{id: tu.ID, input: input, path: prefillInputPath(input), result: result}
 			if execErr != nil {
 				call.isError = true
@@ -236,10 +287,18 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 
 	// Token cap, checked BEFORE any persistence: a pre-fill that overflows
 	// the model's window must not poison the conversation with half of
-	// itself.
+	// itself. The text shape is capped on its RENDERED row — marker, headers
+	// and (error: …) lines included, since those are exactly what the model
+	// will read.
 	total := 0
-	for _, c := range calls {
-		total += len(c.input) + len(c.result)
+	var rendered string
+	if textShape {
+		rendered = renderPrefillText(calls)
+		total = len(rendered)
+	} else {
+		for _, c := range calls {
+			total += len(c.input) + len(c.result)
+		}
 	}
 	est := (total + 3) / 4
 	ctxLen := prefillContextWindow(e.client, e.state.ModelID)
@@ -247,6 +306,22 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 	if est > tokenCap {
 		return fmt.Errorf("prefill: estimated %d tokens exceeds the %d-token cap (%d%% of the model's context window); largest reads: %s",
 			est, tokenCap, prefillCapPercent, prefillLargestCalls(calls, 5))
+	}
+
+	if textShape {
+		// ONE user row = one atomic write: SeedHistory writes rows one at a
+		// time, so a single-row shape has no partial prefix for a crash to
+		// leave behind — a restart either re-runs the whole pre-fill (empty
+		// history) or finds it complete (prefillTextComplete).
+		r0 := anthropic.MessageParam{
+			Role:    anthropic.MessageParamRoleUser,
+			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(rendered)},
+		}
+		if err := e.conv.SeedHistory(ctx, []llm.Message{r0}); err != nil {
+			return fmt.Errorf("prefill: seed history: %w", err)
+		}
+		slog.Info("agent: prefill complete", "conversation", e.conv.ID, "reads", len(calls), "est_tokens", est, "shape", "text")
+		return nil
 	}
 
 	// Persist r0/r1/r2. In the resumed-partial cases the existing rows are
@@ -331,23 +406,25 @@ func (e *Engine) readPrefillPath(ctx context.Context, path string, start, end in
 	if !unbounded {
 		limit = end - offset + 1
 	}
+	reader := e.prefillReader()
 	var calls []prefillCall
 	for {
 		input, err := json.Marshal(prefillReadInput{Path: path, Offset: offset, Limit: limit})
 		if err != nil {
 			return nil, fmt.Errorf("prefill: marshal read input for %q: %w", path, err)
 		}
-		call := prefillCall{input: input, path: path}
-		result, execErr := e.tools.Execute(ctx, "read", input)
+		call := prefillCall{input: input, path: path, lineStart: offset}
+		result, execErr := reader.Execute(ctx, "read", input)
 		call.result = result
 		if execErr != nil {
 			call.isError = true
 			call.result = execErr.Error()
-		}
-		calls = append(calls, call)
-		if execErr != nil {
+			calls = append(calls, call)
+			// No range in an error section's header: it names a span that
+			// was never read.
 			return calls, nil
 		}
+		calls = append(calls, call)
 		next, ok := tools.ReadContinuation(call.result)
 		// next > offset is the progress guard. ReadContinuation matches the
 		// trailer's tail anywhere in a result, so a COMPLETE read whose last
@@ -356,8 +433,15 @@ func (e *Engine) readPrefillPath(ctx context.Context, path string, start, end in
 		// it again would re-read the same page forever. A real trailer always
 		// resumes past the page just shown (next = lastShown+1 > offset).
 		if !ok || next <= offset || (!unbounded && next > end) {
+			if !unbounded {
+				// A bounded range's requested span is known from the input.
+				calls[len(calls)-1].lineEnd = end
+			}
 			return calls, nil
 		}
+		// The page just shown ends where the trailer resumes, so the text
+		// shape can name its span.
+		calls[len(calls)-1].lineEnd = next - 1
 		if !unbounded {
 			limit = end - next + 1
 		}
@@ -373,7 +457,7 @@ func (e *Engine) executePrefillGlob(ctx context.Context, entry string) ([]string
 	if err != nil {
 		return nil, fmt.Errorf("prefill: marshal glob input for %q: %w", entry, err)
 	}
-	result, err := e.tools.Execute(ctx, "glob", input)
+	result, err := e.prefillReader().Execute(ctx, "glob", input)
 	if err != nil {
 		return nil, fmt.Errorf("prefill: glob %q: %w", entry, err)
 	}
@@ -425,26 +509,89 @@ func splitGlobEntry(path string) (base, pattern string) {
 	}
 }
 
-// prefillToolsAvailable re-checks, at worker start, that the child's built-in
-// tool set can actually carry out the pre-fill: read always, glob when any
-// entry is a glob. The controller refuses a spawn whose tool set lacks
-// these; this is the same defence on the executor side.
+// prefillReader returns the tool set the pre-fill executes its reads
+// through: the internal reader BuildRuntime materializes
+// (EngineConfig.PrefillTools) when one was provided, else the model's own
+// tool set. The fallback keeps engines built outside BuildRuntime (tests, a
+// bare EngineConfig) working: their reads were always meant to run through
+// Tools, and there the model's tool set gates the pre-fill exactly as before.
+func (e *Engine) prefillReader() agentloop.ToolSet {
+	if e.prefillTools != nil {
+		return e.prefillTools
+	}
+	return e.tools
+}
+
+// modelHasReadTool reports whether the MODEL's tool set exposes read — the
+// discriminator between the pre-fill's two persisted shapes. With read
+// offered, the reads are recorded as tool_use/tool_result rows (the model
+// could have made those calls); without it, they render as one text row,
+// because a history full of tool_use for a tool the request never offered is
+// rejected by some providers.
+func (e *Engine) modelHasReadTool() bool {
+	for _, d := range e.tools.Definitions() {
+		if d.OfTool != nil && d.OfTool.Name == "read" {
+			return true
+		}
+	}
+	return false
+}
+
+// prefillToolsAvailable re-checks, at worker start, that the INTERNAL
+// pre-fill reader can actually carry out the reads: read always, glob when
+// any entry is a glob. The reader is materialized from the same executor
+// routing as the model's tools, so it coming up empty means the executor
+// cannot serve reads (no workspace tier, or a served set without read) —
+// there is no filesystem the reads could run against. The MODEL's tool set
+// is deliberately NOT checked here: a tool-less child's reads render as text
+// (runPrefill's text shape) instead of tool calls.
 func (e *Engine) prefillToolsAvailable() error {
 	names := make(map[string]bool)
-	for _, d := range e.tools.Definitions() {
+	for _, d := range e.prefillReader().Definitions() {
 		if d.OfTool != nil {
 			names[d.OfTool.Name] = true
 		}
 	}
 	if !names["read"] {
-		return errors.New("prefill: the read tool is not available to this child")
+		return errors.New("prefill: the internal read tool is unavailable to this child")
 	}
 	for _, entry := range e.prefill {
 		if prefill.IsGlob(entry.Path) && !names["glob"] {
-			return errors.New("prefill: the glob tool is not available to this child")
+			return errors.New("prefill: the internal glob tool is unavailable to this child")
 		}
 	}
 	return nil
+}
+
+// prefillCallHeader is the text shape's section header for one call: plain
+// for an open-ended (or failed) read, spanned for a bounded range or a page
+// whose end a trailer proved.
+func prefillCallHeader(c prefillCall) string {
+	if c.lineStart > 0 && c.lineEnd >= c.lineStart {
+		return fmt.Sprintf("=== %s (lines %d-%d) ===", c.path, c.lineStart, c.lineEnd)
+	}
+	return "=== " + c.path + " ==="
+}
+
+// renderPrefillText renders the calls as ONE text row body: the marker line,
+// then one section per call in call order — `=== <path> ===` (spanned for a
+// bounded range or a proven page) and the read tool's numbered output
+// verbatim; a failed read renders as `(error: <message>)`. Byte-stable by
+// construction: the sections follow the calls' deterministic order.
+func renderPrefillText(calls []prefillCall) string {
+	var sb strings.Builder
+	sb.WriteString(PrefillTextPreamble)
+	for _, c := range calls {
+		sb.WriteString("\n\n")
+		sb.WriteString(prefillCallHeader(c))
+		sb.WriteString("\n")
+		if c.isError {
+			fmt.Fprintf(&sb, "(error: %s)", c.result)
+			continue
+		}
+		sb.WriteString(c.result)
+	}
+	return sb.String()
 }
 
 // prefillContextWindow returns the context window the token cap is computed

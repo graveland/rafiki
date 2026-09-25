@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -40,9 +41,19 @@ type RuntimeOptions struct {
 	// Prefill is the spawn's pre-fill (see protocol.PrefillRead), run by the
 	// engine at worker start on a fresh conversation. Empty means none.
 	Prefill []protocol.PrefillRead
-	Cwd     string // must be absolute
-	Ref     string
-	Name    string
+
+	// PrefillTools, when set, overrides the internal reader BuildRuntime
+	// materializes for a configured Prefill (the injection seam tests use).
+	// nil with a non-empty Prefill means BuildRuntime builds it: a second
+	// registry over the SAME ToolOpts — the model's registry may have been
+	// retained down (a tool-less child), but its reads still have to run,
+	// through the same executor routing and confinement this process's tools
+	// use. The reader is never offered to the model (see EngineConfig.
+	// PrefillTools).
+	PrefillTools agentloop.ToolSet
+	Cwd          string // must be absolute
+	Ref          string
+	Name         string
 	// OwnerUserID is the conversations.users id of the person this child runs
 	// for (an id, never a username). The daemon sets it from the
 	// authenticated caller's identity at spawn, and re-resolves it on resume
@@ -636,6 +647,32 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		}
 	}
 
+	// The pre-fill's INTERNAL reader: a second registry over the same
+	// toolOpts, retained to read+glob, materialized BEFORE the model's
+	// allowlist above could strip it — the allowlist filters `registry` only,
+	// so a tool-less child keeps a working reader while offering the model
+	// nothing. Same MaterializeAll rules as the model's tools: no executor
+	// means no workspace tools (the engine refuses the pre-fill at worker
+	// start), and a served set without read drops the routed read. Warn on a
+	// missing name here rather than fail: runPrefill's
+	// prefillToolsAvailable names the missing internal tool at worker start,
+	// and the common cause (a spawn that asked for a pre-fill with no
+	// workspace to read from) is a shaping mistake the error there explains.
+	var prefillTools agentloop.ToolSet
+	if len(opts.Prefill) > 0 {
+		switch {
+		case opts.PrefillTools != nil:
+			prefillTools = opts.PrefillTools
+		default:
+			reader := tools.DefaultBlueprint.MaterializeAll(toolOpts)
+			if missing := reader.Retain([]string{"read", "glob"}); len(missing) > 0 {
+				slog.Warn("runtime: pre-fill reader is missing tools; reads cannot run",
+					"missing", missing)
+			}
+			prefillTools = reader
+		}
+	}
+
 	mcpShutdown := func() {}
 	if opts.MCPConfig != "" && !opts.NoMCP {
 		if _, err := os.Stat(opts.MCPConfig); err != nil {
@@ -661,6 +698,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		SystemPromptOverride:   opts.SystemPromptOverride,
 		AppendSystemPrompt:     opts.AppendSystemPrompt,
 		Prefill:                opts.Prefill,
+		PrefillTools:           prefillTools,
 		ContextFiles:           contextFiles,
 		SkillsInventory:        skills.SkillsInventory(discovered),
 		Cwd:                    opts.Cwd,

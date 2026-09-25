@@ -1,6 +1,7 @@
 // Package prefill parses and validates a spawn's pre-fill list: the files (or
-// globs) a fundi child reads through its own Read tool before its first turn,
-// recorded as real tool_use/tool_result history. It is deliberately pgx-free
+// globs) a fundi child's engine reads before its first turn, recorded as real
+// history — tool_use/tool_result rows on a child whose tool set includes
+// read, one text row on a tool-less child. It is deliberately pgx-free
 // (imports only pkg/protocol) so the client binary can link it too.
 package prefill
 
