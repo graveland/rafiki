@@ -190,6 +190,18 @@ type Engine struct {
 	// worker is guaranteed at least one more pass over the queue.
 	wake chan struct{}
 	wg   sync.WaitGroup // one count per queued-but-unfinished turn
+
+	// started gates the worker's first pass. NewEngine starts the goroutine,
+	// but worker() blocks on this channel until Start() closes it, so the
+	// constructor's caller can finish its own boot-time work — BuildEngine's
+	// lease acquisition and RepairOrphans — before the worker runs the
+	// pre-fill, startupResume, or any turn. Idempotent via startOnce.
+	started   chan struct{}
+	startOnce sync.Once
+	// stopped is closed by Close() so a worker still parked on the gate — a
+	// never-started engine, e.g. one BuildEngine discarded after a lease
+	// failure — exits instead of leaking its goroutine.
+	stopped chan struct{}
 }
 
 // queued is one entry in the turn queue: the text, and the inbox frame ids it
@@ -229,7 +241,11 @@ func (t toolSetWithConvID) Execute(ctx context.Context, name string, input json.
 	return t.ToolSet.Execute(ctx, name, input)
 }
 
-// NewEngine creates the engine's conversation and starts its turn worker.
+// NewEngine creates the engine's conversation and starts its turn worker
+// goroutine. The worker blocks on the start gate until Start() closes it —
+// every constructor path that relies on the worker running (BuildEngine,
+// BuildRuntime via it, and each test harness) must call Start() once its own
+// boot-time work is done.
 func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 	if cfg.Client == nil {
 		return nil, errors.New("agent: EngineConfig.Client is required")
@@ -274,7 +290,9 @@ func NewEngine(cfg EngineConfig, fe *Frontend) (*Engine, error) {
 			ModelID:     cfg.ModelID,
 			Provider:    cfg.Provider,
 		},
-		wake: make(chan struct{}, 1),
+		wake:    make(chan struct{}, 1),
+		started: make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 	if cfg.NativeSink != nil {
 		e.em.SetNativeSink(cfg.NativeSink)
@@ -432,8 +450,26 @@ func (e *Engine) HandleAbort() {
 func (e *Engine) State() StateData { return e.state }
 
 // Wait blocks until every queued turn has finished. Intended for tests and
-// shutdown; it does not stop new work from being queued.
+// shutdown; it does not stop new work from being queued. A never-started
+// engine with queued work would block here forever — a constructor path that
+// queues before calling Start() is a bug the test suite pins (see Start).
 func (e *Engine) Wait() { e.wg.Wait() }
+
+// Start releases the engine's worker goroutine. NewEngine starts the worker
+// but gates it: the pre-fill, startupResume, and every turn wait until the
+// constructor's caller has finished its own boot-time work — for BuildEngine
+// that is lease acquisition plus boot-time RepairOrphans, both of which must
+// strictly precede the pre-fill's own writes (a pre-fill racing boot repair
+// writes r1/r2 into exactly the history the repair scans, and runs unfenced,
+// before the write lease exists).
+//
+// Every constructor path that relies on the worker running must call Start()
+// once its boot work is done; NewEngine deliberately does not. Idempotent via
+// sync.Once, so a wrapper may call it without knowing whether an inner
+// builder already did.
+func (e *Engine) Start() {
+	e.startOnce.Do(func() { close(e.started) })
+}
 
 // Close stops the engine's worker goroutine. Call it only after Wait() has
 // returned and after nothing can call HandlePrompt/HandleSteer/HandleAbort
@@ -441,19 +477,37 @@ func (e *Engine) Wait() { e.wg.Wait() }
 // (Frontend.Run has already returned), then Wait(), then Close(). Sending on
 // wake after Close (i.e. a HandlePrompt racing a Close) would panic on a
 // closed channel; the ordering above is what rules that race out.
-func (e *Engine) Close() { close(e.wake) }
+//
+// Close also opens the start gate's abort side (stopped), so a worker still
+// parked on it — a never-started engine, e.g. one BuildEngine discarded after
+// a lease failure — exits instead of leaking. On a started engine nothing
+// selects on stopped anymore, so this is inert there.
+func (e *Engine) Close() {
+	close(e.stopped)
+	close(e.wake)
+}
 
 // worker drains the prompt queue serially for the engine's lifetime, and
 // stops for good the first time a turn panics.
 //
-// Startup order: the pre-fill classification runs BEFORE any resume, on a
-// history loaded whenever the spawn configured a pre-fill or auto-recovery
-// is enabled. A pre-fill-shaped tail is never handed to agentloop.Resume —
-// its tail is user tool_results, and Resume would Continue, calling the
-// model with the files and no task. startupResume therefore only runs on a
-// non-empty, non-prefill-shaped history — an empty one has nothing to
-// resume and skips it (see the prefillNone case below).
+// Startup order: the START GATE first — nothing below runs until Start()
+// closes e.started, which is what keeps the pre-fill, startupResume, and every
+// turn from racing the constructor caller's boot-time work (BuildEngine's
+// lease acquisition and RepairOrphans). Then the pre-fill classification runs
+// BEFORE any resume, on a history loaded whenever the spawn configured a
+// pre-fill or auto-recovery is enabled. A pre-fill-shaped tail is never handed
+// to agentloop.Resume — its tail is user tool_results, and Resume would
+// Continue, calling the model with the files and no task. startupResume
+// therefore only runs on a non-empty, non-prefill-shaped history — an empty
+// one has nothing to resume and skips it (see the prefillNone case below).
 func (e *Engine) worker() {
+	// The start gate. stopped is the abort side: Close() on a never-started
+	// engine must end this goroutine, not park it forever.
+	select {
+	case <-e.started:
+	case <-e.stopped:
+		return
+	}
 	resume := e.autoResume
 	if len(e.prefill) > 0 || e.autoResume {
 		history, err := e.conv.History(e.baseCtx)

@@ -3,6 +3,7 @@ package fundi
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
@@ -24,6 +25,14 @@ import (
 // results; 0 (with a nil error) when there is nothing to repair — including
 // an empty conversation or one whose trailing assistant message already has
 // every tool_use resolved.
+//
+// Orphaned tool_use blocks whose ids carry the prefill_ prefix are NOT
+// repaired: they belong to the spawn pre-fill's r1, and completing an
+// interrupted pre-fill (r0+r1 persisted, r2 missing) is runPrefill's
+// prefillHasR1 job — it re-executes r1's inputs and seeds the real results.
+// Fabricating "aborted" results beside them would corrupt the model context
+// and diverge the row runPrefill's SeedHistory expects to find. Repair is for
+// every other orphan exactly as before.
 func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 	history, err := conv.History(ctx)
 	if err != nil {
@@ -55,6 +64,11 @@ func RepairOrphans(ctx context.Context, conv *llm.Conversation) (int, error) {
 	for _, block := range history[lastAssistant].Param.Content {
 		tu := block.OfToolUse
 		if tu == nil || resolved[tu.ID] {
+			continue
+		}
+		// A pre-fill's synthetic tool_use ids are never orphans to repair —
+		// see this function's doc comment.
+		if strings.HasPrefix(tu.ID, prefillIDPrefix) {
 			continue
 		}
 		blocks = append(blocks, anthropic.NewToolResultBlock(tu.ID,

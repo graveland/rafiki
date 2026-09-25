@@ -17,6 +17,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -82,6 +83,7 @@ func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref st
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	return eng, out
 }
 
@@ -423,5 +425,99 @@ func failIfCalledToolSet(t *testing.T, msg string) fakeToolSet {
 			t.Error(msg)
 			return "", fmt.Errorf("%s", msg)
 		},
+	}
+}
+
+// TestBuildEngineRepairsBeforePrefill is the end-to-end ordering test for the
+// boot race: a conversation left mid-prefill (r0+r1 persisted, no r2) reaches
+// Config.BuildEngine, which resolves the conversation, acquires the lease,
+// and runs boot-time RepairOrphans — all while the worker is still gated —
+// and only then releases the worker via its final Start(). The repair must
+// skip the prefill_ ids, the worker must then complete the pre-fill
+// (prefillHasR1: re-execute r1's read, seed r2), and the final history must be
+// exactly r0/r1/r2 with the REAL read results — no synthetic "Tool execution
+// aborted by user." row beside them, and no SeedHistory divergence fatal from
+// a repair that won a different interleaving.
+func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+	ref := "buildengine-repairs-before-prefill"
+
+	// The interrupted-prefill shape a dead process leaves behind.
+	seedClient := prefillDBSeedClient(t, pool)
+	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]); err != nil {
+		t.Fatalf("seed history: %v", err)
+	}
+
+	var mu sync.Mutex
+	var reads int
+	ts := fakeToolSet{
+		"read": func(_ context.Context, in json.RawMessage) (string, error) {
+			var cmd prefillReadCmd
+			if err := json.Unmarshal(in, &cmd); err != nil {
+				return "", err
+			}
+			mu.Lock()
+			reads++
+			mu.Unlock()
+			return cmd.Path + " body", nil
+		},
+	}
+
+	cfg := Config{
+		Model:     "anthropic/claude-x",
+		Name:      "w1",
+		Cwd:       t.TempDir(),
+		FakeTurns: writeFakeTurns(t, sampleEndTurn),
+		Tools:     ts,
+		Providers: providers.Default(),
+		Pool:      pool,
+		Ref:       ref,
+		Prefill:   []protocol.PrefillRead{{Path: "/tmp/a.txt"}},
+	}
+	out := &syncBuffer{}
+	fe := NewFrontend(strings.NewReader(""), out, nil)
+	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
+	if err != nil {
+		t.Fatalf("BuildEngine: %v", err)
+	}
+	t.Cleanup(eng.Close)
+	defer shutdown()
+
+	// BuildEngine's final Start() released the worker; the pre-fill has now
+	// completed the interrupted shape.
+	hist := waitForPrefillDBRows(t, eng, out, 3)
+	if len(hist) != 3 {
+		t.Fatalf("history has %d rows, want exactly 3 — a 4th row would be boot repair's "+
+			"synthetic results landing beside the real r2", len(hist))
+	}
+	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
+		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
+	}
+	r1 := hist[1].Param.Content[0].OfToolUse
+	if r1 == nil || r1.ID != "prefill_0001" {
+		t.Fatalf("r1 block = %+v, want the seeded tool_use prefill_0001", hist[1].Param.Content[0])
+	}
+	tr := hist[2].Param.Content[0].OfToolResult
+	if tr == nil || tr.ToolUseID != "prefill_0001" {
+		t.Fatalf("r2 block = %+v, want the pre-fill's tool_result for prefill_0001", hist[2].Param.Content[0])
+	}
+	if got := tr.Content[0].OfText.Text; got != "/tmp/a.txt body" {
+		t.Fatalf("r2 result = %q, want the re-executed read output — a %q row here means "+
+			"boot repair fabricated results for a prefill_ id", got, "Tool execution aborted by user.")
+	}
+	mu.Lock()
+	if reads != 1 {
+		mu.Unlock()
+		t.Fatalf("read ran %d times, want 1 (r1's single input re-executed)", reads)
+	}
+	mu.Unlock()
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
 	}
 }

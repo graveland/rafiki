@@ -430,6 +430,7 @@ func blockingBuildFunc(started chan struct{}, fakeTurnsPath string) BuildFunc {
 		if err != nil {
 			return nil, nil, err
 		}
+		eng.Start() // open the worker gate; the builder has no boot-time work
 		return eng, func() {}, nil
 	}
 }
@@ -802,6 +803,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 		if err != nil {
 			return nil, nil, err
 		}
+		eng.Start() // open the worker gate; the builder has no boot-time work
 		return eng, func() {}, nil
 	}
 }
@@ -894,6 +896,7 @@ func panickingTurnBuildFunc() BuildFunc {
 		if err != nil {
 			return nil, nil, err
 		}
+		eng.Start() // open the worker gate; the builder has no boot-time work
 		return eng, func() {}, nil
 	}
 }

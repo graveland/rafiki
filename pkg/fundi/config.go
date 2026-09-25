@@ -307,10 +307,14 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	// process. A DB-backed conversation reattached via ByExternalRef (see
 	// convOpts above) can carry a dangling tool_use left by a PREVIOUS
 	// process that crashed or was killed mid-turn — before that process's
-	// own abort handling ever ran. Repair here, once, before the engine's
-	// worker can execute any turn (NewEngine has already started it, but
-	// nothing wakes it until cmd/rafikid's Frontend.Run reads its first
-	// inbound frame, which happens strictly after BuildEngine returns).
+	// own abort handling ever ran. Repair here, once, while the engine's
+	// worker is still gated (see Engine.Start): NewEngine started the worker
+	// goroutine, but nothing it does — pre-fill, startupResume, any turn —
+	// can run until the eng.Start() below, so this write cannot race the
+	// pre-fill persisting r1/r2 into the very history being scanned.
+	// RepairOrphans also leaves prefill_-prefixed ids alone (completing an
+	// interrupted pre-fill is runPrefill's prefillHasR1 job), so the two
+	// passes cannot fabricate results for each other's rows.
 	// In-memory mode (c.Pool == nil) has nothing to reattach — Conversation
 	// always mints a fresh "mem-..." id — so this is a clean no-op there,
 	// not an error.
@@ -324,6 +328,11 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 			slog.Info("agent: boot-time orphan repair", "conversation", eng.conv.ID, "repaired", repaired)
 		}
 	}
+
+	// Release the worker — LAST, after the lease above and the repair above:
+	// the invariant the worker's startup paths rely on is that when the gate
+	// opens, the conversation is fenced and repair is done.
+	eng.Start()
 
 	return eng, shutdown, nil
 }

@@ -94,6 +94,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	t.Cleanup(w.release)
 
 	eng.HandlePrompt("go")
@@ -163,6 +164,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 
 	eng.HandlePrompt("go")
 	var snapshot string

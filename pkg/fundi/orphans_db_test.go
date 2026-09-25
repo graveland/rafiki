@@ -231,3 +231,94 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 	// what the real Anthropic API rejects. With repair applied, it does.
 	assertToolResultFollowsToolUse(t, sender.lastParams(t).Messages, "tu_1")
 }
+
+// TestRepairOrphansSkipsPrefillIDs pins the boot-repair half of the
+// pre-fill/boot-repair race fix: an interrupted pre-fill persists r0+r1 and
+// dies before r2, and the restarted process's BuildEngine runs RepairOrphans
+// against exactly that history. The unresolved tool_use ids are prefill_
+// prefixed — completing them is runPrefill's prefillHasR1 job (re-execute
+// r1's inputs, seed r2) — so repair must return 0 and append nothing. A
+// non-prefill orphan in the same shape is still repaired, unchanged.
+func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
+	pool, _ := dbTestPool(t)
+	ctx := context.Background()
+
+	t.Run("prefill ids left untouched", func(t *testing.T) {
+		ref := "repair-skips-prefill-ids"
+		seedClient := prefillDBSeedClient(t, pool)
+		conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+		if err != nil {
+			t.Fatalf("seed conversation: %v", err)
+		}
+		// r0+r1 with no r2: the state a dead process leaves mid-prefill,
+		// and what boot-time RepairOrphans sees in BuildEngine.
+		if err := conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]); err != nil {
+			t.Fatalf("seed history: %v", err)
+		}
+
+		n, err := RepairOrphans(ctx, conv)
+		if err != nil {
+			t.Fatalf("RepairOrphans: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("RepairOrphans synthesized %d results for prefill_ ids, want 0 — "+
+				"completing an interrupted pre-fill is runPrefill's job, not the repair's", n)
+		}
+		hist, err := conv.History(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hist) != 2 {
+			t.Fatalf("history has %d rows, want 2 — repair must not append for a prefill_ id", len(hist))
+		}
+	})
+
+	t.Run("non-prefill orphan still repaired", func(t *testing.T) {
+		ref := "repair-still-fixes-real-orphan"
+		seedClient := prefillDBSeedClient(t, pool)
+		conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
+		if err != nil {
+			t.Fatalf("seed conversation: %v", err)
+		}
+		// The same r0+r1-no-r2 shape, but the tool_use id is a real model id
+		// — an ordinary orphan, which repair must still fabricate a result for.
+		r0 := prefillSeedRows("/tmp/a.txt")[0]
+		r1 := anthropic.MessageParam{
+			Role: anthropic.MessageParamRoleAssistant,
+			Content: []anthropic.ContentBlockParamUnion{
+				anthropic.NewToolUseBlock("toolu_01ABC",
+					json.RawMessage(`{"path":"/tmp/a.txt","offset":1,"limit":1000000}`), "read"),
+			},
+		}
+		if err := conv.SeedHistory(ctx, []llm.Message{r0, r1}); err != nil {
+			t.Fatalf("seed history: %v", err)
+		}
+
+		n, err := RepairOrphans(ctx, conv)
+		if err != nil {
+			t.Fatalf("RepairOrphans: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("RepairOrphans synthesized %d results, want 1 (the non-prefill orphan)", n)
+		}
+		hist, err := conv.History(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hist) != 3 {
+			t.Fatalf("history has %d rows, want 3 (one synthetic row appended)", len(hist))
+		}
+		last := hist[2]
+		if last.Param.Role != anthropic.MessageParamRoleUser {
+			t.Fatalf("trailing row role = %v, want user", last.Param.Role)
+		}
+		tr := last.Param.Content[0].OfToolResult
+		if tr == nil || tr.ToolUseID != "toolu_01ABC" {
+			t.Fatalf("trailing block = %+v, want a tool_result for toolu_01ABC", last.Param.Content[0])
+		}
+		if !tr.IsError.Value || len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
+			tr.Content[0].OfText.Text != "Tool execution aborted by user." {
+			t.Fatalf("synthesized result = %+v, want the standard abort text marked IsError", tr)
+		}
+	})
+}

@@ -66,6 +66,7 @@ func newConsumingEngine(t *testing.T, ts fakeToolSet, sender llm.Sender,
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
 }

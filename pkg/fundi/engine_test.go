@@ -18,6 +18,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // sampleEndTurn is the plain end_turn companion to emit_test.go's sampleResp:
@@ -159,6 +160,7 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
 }
@@ -193,6 +195,7 @@ func newTestEngineWithConfig(t *testing.T, ts fakeToolSet, sender llm.Sender, ex
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
 }
@@ -798,6 +801,7 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 
 	runDone := make(chan error, 1)
@@ -881,5 +885,108 @@ func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
 	// No OnTurn has fired yet, so the running total is 0 — under any positive budget.
 	if stop, reason := ev.ShouldStop(); stop {
 		t.Errorf("ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
+	}
+}
+
+// TestWorkerWaitsForStart pins the start gate. Between NewEngine and Start()
+// the worker must run nothing — not the pre-fill, not startupResume, not a
+// turn — because BuildEngine does its boot-time work in exactly that window:
+// it acquires the conversation write lease and runs RepairOrphans, and a
+// pre-fill writing r1/r2 there would (a) race the repair, which scans that
+// same history and fabricates "aborted" results for r1's unresolved prefill_
+// ids, and (b) run unfenced, before any write lease exists.
+//
+// Built directly on NewEngine — deliberately NOT through the test harnesses,
+// which call Start() themselves — with a pre-fill configured so an ungated
+// worker has immediate, observable work to do.
+func TestWorkerWaitsForStart(t *testing.T) {
+	silenceSlog(t)
+	sender := newCapturingSender(t, sampleEndTurn)
+	client, err := llm.NewClient(
+		llm.WithProviderSender("anthropic", sender),
+		llm.WithDefaultModel("claude-x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &syncBuffer{}
+	fe := NewFrontend(strings.NewReader(""), out, nil)
+
+	var mu sync.Mutex
+	var reads int
+	ts := fakeToolSet{
+		"read": func(context.Context, json.RawMessage) (string, error) {
+			mu.Lock()
+			reads++
+			mu.Unlock()
+			return "/tmp/a.txt body", nil
+		},
+	}
+	eng, err := NewEngine(EngineConfig{
+		Client:   client,
+		Tools:    ts,
+		Provider: "anthropic",
+		ModelID:  "claude-x",
+		Name:     "w1",
+		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
+		Prefill:  []protocol.PrefillRead{{Path: "/tmp/a.txt"}},
+	}, fe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(eng.Close)
+
+	// No Start() yet: the worker is parked on the gate. The pre-fill must not
+	// have executed its read or persisted a row. (Parked long enough that an
+	// ungated worker — which runs the pre-fill the moment NewEngine starts it
+	// — reliably trips this.)
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	if reads != 0 {
+		mu.Unlock()
+		t.Fatalf("the read tool ran %d times before Start(); the worker is not gated", reads)
+	}
+	mu.Unlock()
+	if hist, err := eng.conv.History(context.Background()); err != nil || len(hist) != 0 {
+		t.Fatalf("history before Start() = %d rows (%v), want 0 — the pre-fill wrote rows unfenced", len(hist), err)
+	}
+
+	// Start() releases the worker: the empty history classifies as
+	// prefillEmpty and the pre-fill runs. A prompt queued right after Start()
+	// serializes BEHIND it, so eng.Wait() proves both finished — and only
+	// then does the test goroutine read the in-memory history, which the
+	// conversation does not synchronize for concurrent readers/writers.
+	eng.Start()
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	mu.Lock()
+	if reads != 1 {
+		mu.Unlock()
+		t.Fatalf("read ran %d times after Start(), want 1 (the pre-fill's single entry)", reads)
+	}
+	mu.Unlock()
+	// Exactly one LLM call: the prompt turn. The pre-fill executes tools only.
+	if got := sender.callCount(); got != 1 {
+		t.Fatalf("the LLM was called %d times, want 1 (the prompt turn only)", got)
+	}
+	hist, err := eng.conv.History(context.Background())
+	if err != nil {
+		t.Fatalf("history after Start(): %v", err)
+	}
+	if len(hist) != 5 {
+		t.Fatalf("history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
+	}
+	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
+		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
+	}
+	if tu := hist[1].Param.Content[0].OfToolUse; tu == nil || tu.ID != "prefill_0001" {
+		t.Fatalf("r1 block = %+v, want the pre-fill's tool_use prefill_0001", hist[1].Param.Content[0])
+	}
+	if tr := hist[2].Param.Content[0].OfToolResult; tr == nil || tr.ToolUseID != "prefill_0001" ||
+		tr.Content[0].OfText == nil || tr.Content[0].OfText.Text != "/tmp/a.txt body" {
+		t.Fatalf("r2 block = %+v, want the pre-fill's real tool_result", hist[2].Param.Content[0])
+	}
+	if msg := out.String(); strings.Contains(msg, "agent_error") {
+		t.Fatalf("unexpected agent_error frames: %s", msg)
 	}
 }
