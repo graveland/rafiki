@@ -1187,7 +1187,10 @@ func (x *ToolExecutionEnd) GetIsError() bool {
 }
 
 // Retry reports a turn-level retry attempt, so a supervisor can see an agent
-// looping rather than silently stalling.
+// looping rather than silently stalling. The daemon's rate-limit auto-resume
+// (cmd/rafikid's ratelimit_resume.go) is today's only producer: will_retry
+// true announces a scheduled resume (reason carries when), false resolves the
+// earlier announcement (fired, cleared by a success, or attempts exhausted).
 type Retry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Attempt       int32                  `protobuf:"varint,1,opt,name=attempt,proto3" json:"attempt,omitempty"`

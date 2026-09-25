@@ -255,6 +255,12 @@ type Controller struct {
 	// breaches bounds the budget sweep to one steer per breach.
 	breaches budgetBreaches
 
+	// rateWatch is the claude rate-limit auto-resume watch: per-child 429
+	// marks, reset times and at most one pending resume timer. In-memory on
+	// purpose (a restart loses the pending resume, the same stall there was
+	// before the feature). See ratelimit_resume.go.
+	rateWatch rateLimitWatch
+
 	// heartbeats tracks long-running children's working spells for
 	// sweepHeartbeats. See heartbeat_sweep.go.
 	heartbeats heartbeatState
@@ -479,6 +485,12 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 		evlog:             eventLogStore(pool),
 		inboxBatch:        inboxBatchConfig(),
 		sentFrames:        make(map[string]sentFrame),
+		rateWatch: rateLimitWatch{
+			m:          make(map[string]*rateLimitState),
+			buffer:     rateLimitResumeBuffer,
+			minBackoff: rateLimitMinBackoff,
+			maxBackoff: rateLimitMaxBackoff,
+		},
 	}
 	// After the literal: the queue's Validate and Deliver are methods on c.
 	c.inbox = c.newInboxQueue(inboxStore(pool))
@@ -2580,6 +2592,13 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		c.darajaReg.Forget(childID)
 	}
 
+	// An operator's kill must not be undone by a pending rate-limit resume:
+	// drop the watch here, where the intent is known, not in handleChildExit
+	// (a passive stdin close makes the same death read as the child's own —
+	// fake-pi and claude alike exit 0 on EOF). Also covers the native-child
+	// early return below, which never reaches the shutdown sequence.
+	c.rateWatch.drop(childID)
+
 	// A synthetic thread child has no process, so every lookup below misses and
 	// this used to answer "child not found" for a child the operator could see
 	// in the rail. Ending one is a store write; exitNativeChild does it and
@@ -2676,6 +2695,12 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 	if c.stopping.CompareAndSwap(false, true) {
 		slog.Info("daemon stopping; child exits will no longer be persisted — rows keep their live statuses for restart recovery")
 	}
+
+	// The daemon is dying: pending rate-limit resumes go with it (the watch is
+	// in-memory by design — see ratelimit_resume.go). Killing every timer here
+	// also means a child killed by the shutdown cannot be prompted by a timer
+	// that outlived the decision to stop it.
+	c.rateWatch.dropAll()
 
 	ids := c.cm.LiveIDs()
 	if len(ids) == 0 {
@@ -2828,6 +2853,10 @@ func (c *Controller) Close(childID string) error {
 	}
 
 	c.st.Delete(childID)
+	// A forgotten child is never coming back: nothing must resurrect it, so
+	// its rate-limit watch goes with the row. CloseAllExited, the other
+	// forget site, drops the same way.
+	c.rateWatch.drop(childID)
 	// Its synthetic thread children go with it: they carry a parent label, so
 	// leaving them would strand them at the top of the rail pointing at a
 	// session that no longer exists. Their transcripts survive, exactly as this
@@ -2979,6 +3008,7 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 		owns := c.ownsChildRow(s)
 		if owns {
 			c.dropInboxForForgotten(s.ChildID, "child forgotten")
+			c.rateWatch.drop(s.ChildID)
 		}
 		if c.children != nil && owns {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3689,6 +3719,11 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 		// round trip.
 		go c.drainInbox(c.inbox, childID)
 		c.heartbeats.stopWorking(childID)
+		// The turn just settled: if the upstream's latest verdict for this
+		// child was a 429, that verdict is what killed it — schedule the
+		// auto-resume (claude children only; the gate is inside). In-memory
+		// work only, so it stays on the status path.
+		c.maybeRateLimitResume(childID)
 	}
 	if ok && isWorkingStatus(newStatus) {
 		c.heartbeats.startWorking(childID)
@@ -3787,6 +3822,14 @@ func (c *Controller) handleChildRenamed(childID, newName, previous string) {
 func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	res := ch.ExitResult()
 	now := time.Now()
+
+	// A spontaneous exit KEEPS its rate-limit watch: the fire path relaunches
+	// an exited child via Resume, which is the whole point of keeping it. The
+	// exits that must NOT be undone — an operator's Kill, the daemon's own
+	// shutdown — drop the watch at their own call sites (Kill,
+	// ShutdownAllChildren), where the intent is known, rather than here,
+	// where a passive stdin close makes an operator's kill read as the
+	// child's own death (fake-pi and claude alike exit 0 on EOF).
 
 	// Determine last known status before marking exited. Recorded in the
 	// row's last_status column and the log dump's ExitInfo as observability —

@@ -522,3 +522,75 @@ func TestCompactionBoundaryDoesNotSettleRunningToolCalls(t *testing.T) {
 		t.Errorf("Finalized = %d = len(blocks): settleAll ran and would mark every in-flight call resolved", s.Finalized)
 	}
 }
+
+func retryEvent(childID string, willRetry bool, attempt int32, reason string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
+			Attempt:   attempt,
+			WillRetry: willRetry,
+			Reason:    reason,
+		}},
+	}
+}
+
+// The daemon's rate-limit auto-resume is Event_Retry's only producer: a
+// scheduled resume must appear in the transcript as a system block naming
+// when it fires, exactly as the rail's ⟳ names it in the tree.
+func TestRetryNoticeAppendsSystemBlock(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+
+	if len(s.Blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1", len(s.Blocks))
+	}
+	b := s.Blocks[0]
+	if b.Kind != session.KindSystem || !b.Final {
+		t.Errorf("block = kind %v final %v, want KindSystem final=true", b.Kind, b.Final)
+	}
+	if !strings.Contains(b.Text, "auto-resume scheduled for 15:04:05") {
+		t.Errorf("text = %q, want the schedule announcement", b.Text)
+	}
+}
+
+// The resolution half (fired, cleared by a success, abandoned) clears the
+// rail's glyph and must NOT append a transcript block: the turn that follows
+// appends its own, and a "firing" divider between them would be noise.
+func TestRetryResolutionAppendsNoBlock(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+	s.Apply(retryEvent("c_test", false, 1, "auto-resume 1 firing"))
+
+	if len(s.Blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1: the will_retry=false half appends nothing", len(s.Blocks))
+	}
+}
+
+// A retry notice is mid-conversation, not turn-ending: like the compaction
+// boundary it must not settleAll, or a future mid-turn producer would freeze
+// its in-flight tool calls without their results.
+func TestRetryNoticeDoesNotSettleRunningToolCalls(t *testing.T) {
+	s := session.New("c_test")
+	s.Apply(&rafikiv1.Event{
+		ChildId: "c_test",
+		Payload: &rafikiv1.Event_AssistantMessage{
+			AssistantMessage: &rafikiv1.AssistantMessage{
+				Content: []*rafikiv1.ContentBlock{{
+					Index: 0,
+					Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+						Id: "tu_1", Name: "bash", InputJson: `{"command":"sleep 60"}`,
+					}},
+				}},
+			},
+		},
+	})
+	s.Apply(&rafikiv1.Event{ChildId: "c_test", Payload: &rafikiv1.Event_ToolExecutionStart{
+		ToolExecutionStart: &rafikiv1.ToolExecutionStart{ToolUseId: "tu_1", Name: "bash"},
+	}})
+
+	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+
+	if s.Finalized == len(s.Blocks) {
+		t.Errorf("Finalized = %d = len(blocks): settleAll ran on a retry notice", s.Finalized)
+	}
+}

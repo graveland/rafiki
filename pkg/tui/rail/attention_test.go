@@ -27,7 +27,14 @@ func toolStart(id string, ord int32) *rafikiv1.Event {
 
 func retryEv(id string, ord int32) *rafikiv1.Event {
 	return &rafikiv1.Event{ChildId: id, Ordinal: &ord,
-		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{}}}
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{WillRetry: true}}}
+}
+
+// retryResolved is the will_retry=false half: a retry that resolved (fired,
+// cleared by a success, abandoned) without any status transition to do it.
+func retryResolved(id string, ord int32) *rafikiv1.Event {
+	return &rafikiv1.Event{ChildId: id, Ordinal: &ord,
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{WillRetry: false}}}
 }
 
 func seeded(t *testing.T) *rail.Rail {
@@ -83,6 +90,19 @@ func TestRetryIsNotNotable(t *testing.T) {
 	}
 	if n, _ := r.Get("c_1"); !n.Retrying {
 		t.Error("retry must still set the Retrying flag for the glyph")
+	}
+}
+
+// A retry's resolution half (will_retry=false — the daemon's auto-resume
+// fired, a success cleared it, or the attempts ran out) must CLEAR the flag:
+// a retry that ends without a status transition would otherwise spin its ⟳
+// forever.
+func TestRetryResolutionClearsTheGlyph(t *testing.T) {
+	r := seeded(t)
+	r.Apply(retryEv("c_1", 1))
+	r.Apply(retryResolved("c_1", 2))
+	if n, _ := r.Get("c_1"); n.Retrying {
+		t.Error("will_retry=false left the Retrying flag set")
 	}
 }
 

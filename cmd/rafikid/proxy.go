@@ -446,6 +446,10 @@ func (f *proxyFace) SetController(c *Controller) {
 		return
 	}
 	f.messages.SetThreadObserver(c)
+	// Same nil-guarded seam, for the rate-limit auto-resume watch: the proxy
+	// reports main-thread 429s and clean completions, and the controller
+	// schedules a claude child's resume against the reset time.
+	f.messages.SetRateLimitObserver(c)
 }
 
 // startBroadcastListener binds a dedicated HTTP listener for OpenRouter's OTLP

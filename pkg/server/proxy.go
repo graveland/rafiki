@@ -89,6 +89,13 @@ type MessagesProxy struct {
 	// child record for it. Optional: nil in a proxy with no daemon behind it,
 	// which is the client-driven path.
 	threadObserver ThreadObserver
+
+	// rateLimitObserver is told when a captured main-thread request is rejected
+	// with 429 and when one completes cleanly, so the daemon can auto-resume a
+	// claude child whose turn a rate limit killed (see the Controller side,
+	// cmd/rafikid's ratelimit_resume.go). Optional; nil on the client-driven
+	// path. Calls are gated on cr.on, so a proxy without capture never notifies.
+	rateLimitObserver RateLimitObserver
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -111,6 +118,26 @@ type ThreadObserver interface {
 // Written once during daemon startup before any child can exist, the same
 // ordering guarantee SetMetrics and SetRawTrace rely on; not synchronized.
 func (p *MessagesProxy) SetThreadObserver(o ThreadObserver) { p.threadObserver = o }
+
+// RateLimitObserver is notified of the two upstream verdicts a rate-limit
+// auto-resume policy needs: a 429 rejection of a main-thread request, and a
+// clean completion of one. session is the X-Rafiki-Session value, which for a
+// daemon-spawned child is that child's id (see proxyChildEnv) and for an
+// interactive or hand-configured client is an id that resolves to no child —
+// implementations must ignore what they cannot resolve. resetAt is the
+// best-known time the rejecting limit clears, from the response's reset
+// headers; the zero time means unknown.
+//
+// Implemented by the daemon's Controller.
+type RateLimitObserver interface {
+	RateLimited(session string, resetAt time.Time)
+	TurnSucceeded(session string)
+}
+
+// SetRateLimitObserver attaches the daemon's rate-limit auto-resume watch
+// (optional). Same startup-once ordering guarantee as SetThreadObserver; not
+// synchronized.
+func (p *MessagesProxy) SetRateLimitObserver(o RateLimitObserver) { p.rateLimitObserver = o }
 
 // SetQuotaStore enables capture of Anthropic's per-account subscription
 // rate-limit headers off OAuth-passthrough responses. Pass nil to disable
@@ -1063,6 +1090,12 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 	p.logger.Info("llm turn", append(turnFields, p.costFields(r, cr.convID, model, usage)...)...)
 	p.metrics.ObserveTurn(upstream, "complete", "anthropic", elapsed, usage)
+	// A clean completion is the upstream verdict that clears the rate-limit
+	// watch: the model answered, so nothing is waiting on a reset (see the
+	// Controller side, ratelimit_resume.go).
+	if s := rateLimitWatchable(cr); s != "" && p.rateLimitObserver != nil {
+		p.rateLimitObserver.TurnSucceeded(s)
+	}
 	if upstream == "openrouter" {
 		p.guard.Observe(time.Now(), routing.Observation{
 			Provider: usage.Provider, Model: model, Conversation: cr.convID,
@@ -1249,6 +1282,11 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 	}
 	p.logger.Warn("llm turn failed", "conversation", cr.convID, "user", user, "upstream", upstream, "model", model, "status", resp.StatusCode, "body", errBody, "latency", latency(elapsed))
 	p.metrics.ObserveTurn(upstream, "error", "anthropic", elapsed, routing.CapturedUsage{})
+	// A 429 is the one upstream rejection the daemon acts on itself: the
+	// auto-resume watch marks the child rate-limited (with the reset time when
+	// the response names one) so the child's idle transition can schedule a
+	// resume instead of leaving the task stalled until a human notices.
+	p.notifyRateLimited(cr, resp)
 	// Detached: r.Context() may already be canceled (client hung up) by the time
 	// these capture writes — including the raw trace below — run. Same budget as
 	// the success-path capCtx above: this does the same raw-trace-insert +
@@ -1266,6 +1304,92 @@ func (p *MessagesProxy) handleUpstreamError(w http.ResponseWriter, r *http.Reque
 		p.failTurnCtx(capCtx, cr, reason)
 		p.decomposeRequestCtx(capCtx, cr)
 	}
+}
+
+// notifyRateLimited tells the daemon's auto-resume watch that a main-thread
+// request was rejected with 429, carrying the best-known reset time from the
+// response's reset headers. Called from handleUpstreamError, which owns every
+// upstream 4xx/5xx; a 429 retried away against a fallback never reaches here,
+// and a 429 Claude Code later recovers from is cleared by the success path's
+// TurnSucceeded before the child's next idle transition can schedule on it.
+func (p *MessagesProxy) notifyRateLimited(cr captureRef, resp *http.Response) {
+	if resp.StatusCode != http.StatusTooManyRequests || p.rateLimitObserver == nil {
+		return
+	}
+	s := rateLimitWatchable(cr)
+	if s == "" {
+		return
+	}
+	p.rateLimitObserver.RateLimited(s, rateLimitResetAt(resp.Header))
+}
+
+// rateLimitWatchable returns the session id to report to the rate-limit
+// observer, or "" when this response must not drive it: capture is off (the
+// request is not attributable to a child), the request belongs to a Task
+// subagent's thread (its 429 must not schedule a resume for the parent — the
+// parent sees the failed tool call itself and decides), or the request carried
+// no X-Rafiki-Session at all (a hand-configured client). For a daemon-spawned
+// child the session header IS the child id (see proxyChildEnv / cmd_daraja.go).
+func rateLimitWatchable(cr captureRef) string {
+	if !cr.on || cr.isSubagent || cr.session == "" {
+		return ""
+	}
+	return cr.session
+}
+
+// rateLimitResetAt extracts the best-known time a rejecting rate limit clears
+// from an upstream 429's headers, for the auto-resume scheduler. Priority:
+// the Anthropic unified-limit reset headers (OAuth passthrough — the window
+// whose status is not "allowed" is the one doing the limiting; when none is
+// identifiable, the earliest reset of any window, since firing early only
+// re-arms), then the generic Retry-After header, then zero (unknown — the
+// scheduler falls back to its own backoff ladder).
+func rateLimitResetAt(h http.Header) time.Time {
+	if st, ok := quota.ParseHeaders(h); ok {
+		var limiting, anyReset []time.Time
+		for _, w := range []quota.Window{st.FiveH, st.SevenD} {
+			if w.ResetAt == nil {
+				continue
+			}
+			anyReset = append(anyReset, *w.ResetAt)
+			if w.Status != "" && w.Status != "allowed" {
+				limiting = append(limiting, *w.ResetAt)
+			}
+		}
+		if len(limiting) > 0 {
+			return earliestTime(limiting)
+		}
+		if len(anyReset) > 0 {
+			return earliestTime(anyReset)
+		}
+	}
+	return parseRetryAfterHeader(h.Get("Retry-After"))
+}
+
+func earliestTime(ts []time.Time) time.Time {
+	out := ts[0]
+	for _, t := range ts[1:] {
+		if t.Before(out) {
+			out = t
+		}
+	}
+	return out
+}
+
+// parseRetryAfterHeader parses an RFC 7231 §7.1.1.1 Retry-After value: either
+// a delay-seconds integer or an HTTP-date. Zero on absence or an unparseable
+// value — the caller treats that as unknown, never as "already reset".
+func parseRetryAfterHeader(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && secs >= 0 {
+		return time.Now().Add(time.Duration(secs) * time.Second)
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // requestUser resolves the caller's username for turn logs, or "<unknown>".

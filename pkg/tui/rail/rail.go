@@ -361,7 +361,11 @@ func (r *Rail) Apply(ev *rafikiv1.Event) {
 		}
 	case *rafikiv1.Event_Retry:
 		if statusOrdinalAdmits(n, ev) {
-			n.Retrying = true
+			// will_retry=false is the resolution half (fired, cleared by a
+			// success, or abandoned): it must CLEAR the flag, not hold it — a
+			// retry that ends without a status transition would otherwise spin
+			// its ⟳ forever.
+			n.Retrying = p.Retry.GetWillRetry()
 		}
 	case *rafikiv1.Event_ChildExited:
 		if statusOrdinalAdmits(n, ev) {

@@ -411,7 +411,7 @@ Every event payload is classified into a tier:
 | `TurnEnd` | durable | End of an agent turn |
 | `ToolExecutionStart` | durable | Tool began executing (name, tool_use_id) |
 | `ToolExecutionEnd` | durable | Tool completed (duration_ms, is_error) |
-| `Retry` | durable | Turn-level retry with attempt count and reason |
+| `Retry` | durable | Turn-level retry with attempt count and reason. Today's only producer is the daemon's rate-limit auto-resume (`cmd/rafikid/ratelimit_resume.go`): `will_retry: true` announces a scheduled resume of a claude child whose turn a 429 killed (`reason` names the reset time and attempt, e.g. "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"); `will_retry: false` resolves it (fired, cleared by a clean completion, or the attempt cap reached). The cockpit renders the scheduling half as a system block in the transcript and shows ⟳ on the rail row until the resolution half arrives |
 | `ChildSpawned` | durable | A sub-agent was created (child_id, parent_id, name) |
 | `ChildExited` | durable | A sub-agent exited (optional exit_code, signal) |
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |

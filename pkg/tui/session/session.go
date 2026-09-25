@@ -273,6 +273,26 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 			Text:  formatCompactionBoundary(p.CompactionBoundary),
 			Final: true,
 		})
+	case *rafikiv1.Event_Retry:
+		// The daemon's rate-limit auto-resume is the event's only producer
+		// today. will_retry=true means the agent is parked waiting for a
+		// scheduled retry (the rail shows ⟳): append the reason as a system
+		// block so the transcript names when the resume fires. will_retry=false
+		// is the resolution half (fired, cleared by a success, abandoned): it
+		// only un-sticks the rail's glyph, and the turn that follows appends
+		// its own blocks. Like CompactionBoundary this is mid-conversation, not
+		// turn-ending — do NOT settleAll: a future mid-turn producer would
+		// otherwise freeze its in-flight tool calls without their results, and
+		// today's producer fires after the turn's own result already settled
+		// everything settleable.
+		if p.Retry.GetWillRetry() {
+			s.Blocks = append(s.Blocks, Block{
+				Kind:  KindSystem,
+				At:    time.Now(),
+				Text:  p.Retry.GetReason(),
+				Final: true,
+			})
+		}
 	case *rafikiv1.Event_ChildExited:
 		// A dead child answers no more tool calls.
 		s.settleAll()
