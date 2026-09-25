@@ -168,9 +168,16 @@ machine:
   the Connect handlers. `Spawn` reads it there — never from the request
   message, since the owner is matched by executor admission selectors and a
   client that could name it could claim to be any owner. On the local unix
-  socket the bearer token is resolved the same optional way
-  (`optionalIdentity`), and a request without one runs as the zero identity —
-  matching a token-less framed UDS connection.
+  socket the credential is resolved by the optionalIdentityInterceptor with
+  the SAME rule the framed socket gives its optional `ctrl_auth` (§6.6): no
+  credential → anonymous (the zero identity, matching a token-less framed UDS
+  connection); a credential that resolves → that user; a credential that is
+  PRESENT but does not resolve → `Unauthenticated` ("invalid auth token",
+  never a silent downgrade to anonymous); a store that cannot be checked →
+  `Unavailable` ("identity store unavailable", never the store's error text).
+  The two planes must agree, because one that swallowed an invalid credential
+  and one that refused it would answer the same operator differently
+  depending on which plane the request took.
 - **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
 
 ```bash
@@ -2429,7 +2436,10 @@ overwritten, so a caller learns their selector will not mean what they wrote.
   daemon's own OS user on a token-less local UDS connection. Both halves of
   executor selection match on it — an executor's `admits` selector and a
   client's own binding — so a caller able to state it could claim another
-  operator's machines.
+  operator's machines. Because the owner is whatever the ENROLLING connection
+  was, a machine enrolled before its profile carried a token is labelled with
+  the daemon's OS user and will not match spawns from the authenticated
+  profile — see §15.6's consequence note.
 - `machine` comes from `name`, validated daemon-side (letters, digits, `-`, `_`,
   `.`, at most 63 characters). A comma or an equals sign would silently reparse
   the `owner=…,machine=…` selector into a different one, which for a value
@@ -2605,6 +2615,15 @@ token-less local UDS connection the owner is the daemon's own OS user
 umask and owned by that user, so anyone who can open it already IS that user.
 The request has no username field and must never grow one.
 
+**Consequence worth knowing.** An executor enrolled over a token-less UDS
+connection is labelled `owner=<daemon OS user>`. Once the profile carries a
+token, its framed and Connect verbs authenticate as the token's username, and
+a spawn whose selector wants `owner=<that username>` will NOT match the
+machine enrolled under the OS-user label — admission refuses the spawn. The
+fix is to re-enroll the machine from the authenticated profile, or relabel it
+(`rafiki executor label`), so its `owner=` matches the username the profile
+authenticates as.
+
 **Request**
 ```jsonc
 {
@@ -2687,9 +2706,18 @@ commands, subject to the same connection auth as everything else (§2.2): UDS
 is anonymous unless its optional `ctrl_auth` resolved (§6.6), a TCP/TLS
 connection needs a valid `ctrl_auth` identity —
 **except** `ctrl_user_create`, which is also the one command a *bootstrap*
-connection may send with no identity at all, per §2.2's bootstrap rule. All
+connection may send with no identity at all, per §2.2's bootstrap rule. On
+the UDS — which has no bootstrap window — `ctrl_user_create` follows the same
+FIRST-USER rule as the bootstrap path: when zero active users exist (re-read
+from the store per request, not per connection) the user it mints is an
+**admin**, because granting the bit later needs an admin caller and none
+would otherwise exist; once users exist it mints an ordinary non-admin user.
+All
 three verbs return `no_agent_db` when the daemon has no database pool
-(`RAFIKI_DB` unset) — there is no in-memory fallback for identity.
+(`RAFIKI_DB` unset) — there is no in-memory fallback for identity. And
+`user create` is the recovery path for a stale profile token: the CLI dials
+it token-less deliberately, so a credential that no longer resolves cannot
+refuse the one verb that mints its replacement.
 
 ### 16.1 `ctrl_user_create`
 

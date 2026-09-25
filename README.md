@@ -222,8 +222,12 @@ TUI and remote access. The two planes share one identity: a profile with a
 token presents it to both — `ctrl_auth` as the framed socket's optional first
 frame, the bearer token on connect.sock — so owner-scoped state, presets
 above all, written through one plane is visible to the other. A token-less
-profile stays anonymous (local trust) on both. What the daemon adds beyond
-hosting a process is a
+profile stays anonymous (local trust) on both, and a token that no longer
+resolves is refused on both (`auth_invalid` framed / Connect `unauthenticated`)
+with the same recovery: delete the profile's token file, or run
+`rafiki user create` — which dials token-less precisely so it still works
+when the stored token is stale. What the daemon adds beyond hosting a process
+is a
 **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm`/`pkg/agentloop` directly.
 
@@ -394,6 +398,13 @@ only access control**: the socket is `0600` from creation (`0177` umask), and
 the daemon refuses a second executor on a path already served by a live one.
 Anyone who can open the socket gets arbitrary `bash` and filesystem access
 inside `--root`.
+
+**Executor owner labels follow the enrolling connection.** A machine enrolled
+while its profile carries no token is labelled `owner=<the daemon's OS user>`.
+Once the profile has a token, its verbs authenticate as that token's username,
+and a spawn selecting `owner=<username>` will not match the machine enrolled
+under the OS-user label — admission refuses the spawn. Re-enroll from the
+authenticated profile (or relabel `owner=`) so the two agree.
 
 **The executor's environment.** launchd/systemd --user don't inherit a login
 shell, so `executor service install` captures the installing shell's

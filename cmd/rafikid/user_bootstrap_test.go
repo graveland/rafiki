@@ -112,6 +112,74 @@ func TestUserCreateBootstrapRefusesWhenTheCountCannotBeRead(t *testing.T) {
 	}
 }
 
+// ─── UserCreateLocal: the framed UDS's user_create ────────────────────────────
+
+// The framed UDS never takes the bootstrap path, but it must reach the same
+// first-user OUTCOME: with zero active users the minted user is an admin —
+// there is no other way to make one reachable once the bootstrap window has
+// closed without this — and once users exist, an ordinary non-admin one.
+func TestUserCreateLocalMintsTheFirstUserAdmin(t *testing.T) {
+	st := &bootstrapStore{}
+	c := &Controller{users: st}
+
+	if _, err := c.UserCreateLocal(context.Background(), "first"); err != nil {
+		t.Fatalf("the first local create failed: %v", err)
+	}
+	if len(st.created) != 1 || st.created[0] != "first" {
+		t.Fatalf("created = %v", st.created)
+	}
+	if !st.adminBits[0] {
+		t.Fatalf("the first user on the UDS was minted with admin bits %v, want admin", st.adminBits)
+	}
+
+	// Users exist now: an ordinary non-admin create, as this socket always did.
+	if _, err := c.UserCreateLocal(context.Background(), "second"); err != nil {
+		t.Fatalf("the second local create failed: %v", err)
+	}
+	if st.adminBits[1] {
+		t.Fatalf("the second user was minted admin: %v", st.adminBits)
+	}
+}
+
+// Like UserCreateBootstrap, the decision reads the store per call — a rule
+// baked into the connection would go stale the moment a parallel client
+// minted the first user.
+func TestUserCreateLocalChecksTheStoreOnEveryCall(t *testing.T) {
+	st := &bootstrapStore{}
+	c := &Controller{users: st}
+	for i := 0; i < 3; i++ {
+		_, _ = c.UserCreateLocal(context.Background(), "u")
+	}
+	if st.countCalls != 3 {
+		t.Fatalf("CountActive called %d times, want 3 (one per request)", st.countCalls)
+	}
+}
+
+// "I could not check" creates nothing and propagates: the dispatcher maps it
+// for the caller, and a local caller may see the text (the UDS is locally
+// trusted — same treatment the ordinary UserCreate errors get).
+func TestUserCreateLocalRefusesWhenTheCountCannotBeRead(t *testing.T) {
+	st := &bootstrapStore{countErr: errors.New("failed to connect to host=db.internal")}
+	c := &Controller{users: st}
+
+	if _, err := c.UserCreateLocal(context.Background(), "brent"); err == nil {
+		t.Fatal("local create succeeded with an unreadable user count")
+	}
+	if len(st.created) != 0 {
+		t.Fatalf("created = %v, want none", st.created)
+	}
+}
+
+// A daemon with no database cannot serve identity at all.
+func TestUserCreateLocalNeedsAStore(t *testing.T) {
+	c := &Controller{}
+	_, err := c.UserCreateLocal(context.Background(), "brent")
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) || ce.Code != protocol.ErrNoAgentDB {
+		t.Fatalf("err = %v, want a ControllerError with code %q", err, protocol.ErrNoAgentDB)
+	}
+}
+
 // A daemon with no database cannot serve identity at all.
 func TestUserCreateBootstrapNeedsAStore(t *testing.T) {
 	c := &Controller{}

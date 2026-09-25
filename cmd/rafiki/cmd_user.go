@@ -52,7 +52,13 @@ unless --no-write is given, so creating a user also logs this machine in.`,
 
 func runUserCreate(cmd *cobra.Command, args []string) error {
 	defer dropUserCompletionCache(cmd)
-	c := mustDial(cmd)
+	// Token-less, deliberately: user create is the recovery path for a stale
+	// token, and mustDial would put that stale token on the wire — a refused
+	// ctrl_auth dead-ends the verb that mints its replacement. On the UDS the
+	// socket is the trust mechanism (and a first user minted here is an
+	// admin, same rule as bootstrap); over TLS the empty token makes the first
+	// request the bootstrap ctrl_user_create (see DialURL).
+	c := mustDialWithoutToken(cmd)
 	defer c.Close()
 
 	resp, err := c.Request(cmdCtx(cmd), protocol.UserCreateRequest{

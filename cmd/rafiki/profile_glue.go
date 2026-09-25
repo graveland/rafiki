@@ -17,9 +17,10 @@ import (
 // more than once — and re-reading the manifest per call would let the answer
 // change mid-command, which is exactly the class of bug this feature removes.
 var (
-	profileOnce sync.Once
-	profileVal  profile.Resolved
-	profileErr  error
+	profileOnce     sync.Once
+	profileVal      profile.Resolved
+	profileErr      error
+	profileResolved bool
 )
 
 // resolveProfile resolves the process's profile, once.
@@ -37,6 +38,7 @@ func resolveProfile(cmd *cobra.Command) (profile.Resolved, error) {
 		profileVal, profileErr = profile.Resolve(profile.Selection{
 			Flag: flag, Env: env, EnvSet: envSet,
 		})
+		profileResolved = true
 		if profileErr == nil && profileVal.Bootstrapped {
 			fmt.Fprintf(os.Stderr,
 				"created %s with a %q profile for the local daemon (%s)\n",
@@ -91,4 +93,17 @@ func resetProfileCache() {
 	profileOnce = sync.Once{}
 	profileVal = profile.Resolved{}
 	profileErr = nil
+	profileResolved = false
+}
+
+// resolvedProfile returns the process's already-resolved profile, if one was
+// resolved, without triggering resolution. Deliberately lazy-proof: it backs
+// error formatting (withTokenAdvice), and formatting an error must never
+// create a profiles.toml as a side effect for a command that never resolved a
+// profile in the first place.
+func resolvedProfile() (profile.Resolved, bool) {
+	if !profileResolved || profileErr != nil {
+		return profile.Resolved{}, false
+	}
+	return profileVal, true
 }

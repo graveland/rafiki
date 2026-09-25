@@ -120,10 +120,12 @@ type proxyFace struct {
 
 	// TokenAuth is the same identity resolver the TCP/TLS face requires a
 	// credential through, exposed so the UDS Connect listener can OPTIONALLY
-	// resolve identity too (see UserTokenAuth.IdentifyOptional) — the socket
-	// remains the trust boundary for admission; this only enriches a request
-	// with identity when a credential happens to be attached, which is what
-	// lets a per-user read like GetRateLimitStatus work locally.
+	// resolve identity too (see UserTokenAuth.IdentifyStrict, used by the
+	// optionalIdentityInterceptor) — the socket remains the trust boundary for
+	// admission; this enriches a request with identity when a credential is
+	// attached and REFUSES one that does not resolve, which is what lets a
+	// per-user read like GetRateLimitStatus work locally and keeps the two
+	// control planes agreeing on a bad credential.
 	TokenAuth *server.UserTokenAuth
 
 	// messages is the /v1/messages proxy, retained so main.go can wire the

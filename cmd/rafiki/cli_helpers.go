@@ -48,6 +48,30 @@ func mustDial(cmd *cobra.Command) *client.Client {
 	return c
 }
 
+// mustDialWithoutToken is mustDial with the profile's credential deliberately
+// left off the wire: the UDS is locally trusted, and the credential's ABSENCE
+// is what makes bootstrap reachable (DialURL's no-token path) and keeps a
+// STALE token from dead-ending the one verb that mints its replacement. There
+// is exactly one caller, `rafiki user create` — anything else that dials wants
+// the profile's identity, not anonymity.
+func mustDialWithoutToken(cmd *cobra.Command) *client.Client {
+	p := mustProfile(cmd)
+	if p.URL != "" {
+		c, err := client.DialURL(cmdCtx(cmd), p.URL, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
+			os.Exit(2)
+		}
+		return c
+	}
+	c, err := client.Dial(p.Socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
+		os.Exit(2)
+	}
+	return c
+}
+
 // cmdCtx returns the cobra command's context — canceled on SIGINT/SIGTERM,
 // via the one signal.NotifyContext main() wraps around ExecuteContext. Falls
 // back to context.Background() only for a command driven directly in a test,

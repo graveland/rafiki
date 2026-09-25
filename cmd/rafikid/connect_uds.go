@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/server"
@@ -29,12 +32,16 @@ import (
 // the 0700 directory, matching the framed-JSON control socket — auth is who
 // may connect, never gated by a credential over UDS.
 //
-// auth, when non-nil, still OPTIONALLY resolves identity for a request that
-// happens to carry a credential (see UserTokenAuth.IdentifyOptional) — a
-// caller presenting no token is unaffected, and one presenting an
-// unrecognized token is treated exactly the same as one presenting none
-// (never rejected, since the socket already decided admission). This is what
-// lets a per-user Connect read like GetRateLimitStatus resolve "who is
+// auth, when non-nil, still OPTIONALLY resolves identity — but now it must
+// AGREE with the framed socket's optional ctrl_auth: a request with NO
+// credential proceeds anonymously, one whose credential RESOLVES runs as that
+// user, and one presenting a credential that does not resolve is refused —
+// Unauthenticated for an unknown token, Unavailable for a store that could not
+// be checked (never the store's error text) — exactly as the framed handshake
+// refuses the same credential. A mount that silently downgraded a bad
+// credential to anonymous while its framed sibling refused it would answer the
+// same operator differently depending on which plane the request took. This
+// is what lets a per-user Connect read like GetRateLimitStatus resolve "who is
 // asking" over the local socket the cockpit and CLI dial by default, without
 // weakening the socket's own trust-by-filesystem-permissions model for every
 // other verb that never looks at identity at all.
@@ -66,9 +73,10 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	}
 
 	mux := http.NewServeMux()
-	// Empty token: the socket IS the credential for ADMISSION.
-	routePath, handler := srv.Routes(connectapi.NewAuthInterceptor(""))
-	mux.Handle(routePath, optionalIdentity(auth, handler))
+	// Empty token: the socket IS the credential for ADMISSION. The optional
+	// identity interceptor rides behind it in the same chain.
+	routePath, handler := srv.Routes(connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
+	mux.Handle(routePath, handler)
 
 	// Unencrypted HTTP/2 (h2c) via the standard library's Protocols field,
 	// rather than the deprecated x/net/http2/h2c wrapper. Connect's
@@ -95,22 +103,73 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	return ln, nil
 }
 
-// optionalIdentity sets caller identity on the request context when auth is
-// configured AND the request carries a credential that resolves — otherwise
-// it changes nothing and the request proceeds exactly as it always has
-// (anonymous, admitted by the socket alone). It never rejects a request:
-// IdentifyOptional already swallows "no credential", "unrecognized
-// credential" and "store unavailable" into the same nil, so this stays a
-// pure enrichment step, never a second admission gate layered on top of the
-// one the socket already is.
-func optionalIdentity(auth *server.UserTokenAuth, next http.Handler) http.Handler {
-	if auth == nil {
-		return next
+// optionalIdentityInterceptor resolves caller identity for a request that
+// carries a credential, with the same three-way rule the framed unix socket
+// gives its optional ctrl_auth (pkg/control's ListenWithAuth):
+//
+//   - no credential → proceed anonymous, untouched. The socket decided
+//     admission; a credential was never the price of entry.
+//   - credential resolves → the request runs as that user, which is what lets
+//     a per-user Connect read like GetRateLimitStatus resolve "who is asking"
+//     over the local socket the cockpit and CLI dial by default.
+//   - credential present but unknown → Unauthenticated ("invalid auth token",
+//     the framed handshake's wording), never a silent downgrade to anonymous:
+//     the caller presented a credential expecting it to mean something, and
+//     running the request under another user's (or the daemon bucket's)
+//     identity would misattribute its work.
+//   - identity store unavailable → Unavailable with the fixed message, never
+//     the store's error text — an outage is not a bad credential, and a pgx
+//     error carries the DSN.
+//
+// auth == nil (no identity store wired) passes everything through untouched:
+// there is nothing to resolve and nothing to refuse.
+func optionalIdentityInterceptor(auth *server.UserTokenAuth) connect.Interceptor {
+	return optionalIdentity{auth: auth}
+}
+
+type optionalIdentity struct{ auth *server.UserTokenAuth }
+
+// ctxFor resolves the credential carried in h and returns the context the
+// handler should run with, or a Connect error to refuse the request with.
+func (o optionalIdentity) ctxFor(ctx context.Context, h http.Header) (context.Context, error) {
+	if o.auth == nil {
+		return ctx, nil
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if id := auth.IdentifyOptional(r.Context(), r); id != nil {
-			r = r.WithContext(server.WithIdentity(r.Context(), id))
+	id, err := o.auth.IdentifyStrict(ctx, h)
+	if err != nil {
+		if errors.Is(err, server.ErrAuthUnavailable) {
+			return nil, connect.NewError(connect.CodeUnavailable,
+				errors.New("identity store unavailable"))
 		}
-		next.ServeHTTP(w, r)
+		return nil, connect.NewError(connect.CodeUnauthenticated,
+			errors.New("invalid auth token"))
+	}
+	if id == nil {
+		return ctx, nil
+	}
+	return server.WithIdentity(ctx, id), nil
+}
+
+func (o optionalIdentity) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return connect.UnaryFunc(func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		ctx, err := o.ctxFor(ctx, req.Header())
+		if err != nil {
+			return nil, err
+		}
+		return next(ctx, req)
+	})
+}
+
+func (o optionalIdentity) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+func (o optionalIdentity) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return connect.StreamingHandlerFunc(func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		ctx, err := o.ctxFor(ctx, conn.RequestHeader())
+		if err != nil {
+			return err
+		}
+		return next(ctx, conn)
 	})
 }

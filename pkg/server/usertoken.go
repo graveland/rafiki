@@ -93,8 +93,11 @@ func (a *UserTokenAuth) SetChildTokenLookup(lookup ChildTokenLookup) {
 	a.childTokenLookup = lookup
 }
 
-// errAuthUnavailable distinguishes "I could not check" from "invalid".
-var errAuthUnavailable = errors.New("identity store unavailable")
+// ErrAuthUnavailable distinguishes "I could not check" from "invalid". It is
+// exported because mounts that must ANSWER a credential rather than merely
+// enrich a request with it (the Connect UDS interceptor) need to tell the two
+// apart: an outage is Unavailable, never a rejection of the caller's token.
+var ErrAuthUnavailable = errors.New("identity store unavailable")
 
 func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +107,7 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		id, err := a.resolve(r.Context(), token, r.Header.Get("X-Rafiki-Session"))
-		if errors.Is(err, errAuthUnavailable) {
+		if errors.Is(err, ErrAuthUnavailable) {
 			// 503, never 401: a 401 tells the client its credential is bad
 			// and clients respond by discarding it. A database blip must
 			// not log out the whole fleet. The store's error text stays
@@ -135,7 +138,7 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 			case err == nil:
 				http.Error(w, "Authorization carries a rafiki token, not an upstream credential; passthrough auth needs your provider credential there", http.StatusUnauthorized)
 				return
-			case errors.Is(err, errAuthUnavailable):
+			case errors.Is(err, ErrAuthUnavailable):
 				// Could not check — which is not the same as "checked, and it
 				// is not ours". This guard exists to stop rafiki's own
 				// credential being shipped to a third party, so an
@@ -151,27 +154,33 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// IdentifyOptional resolves the caller's identity when a credential is
-// presented, and returns nil — never an error — otherwise: no credential, an
-// unrecognized one, or a store that could not be checked. This is for a mount
-// whose trust model is NOT the credential (a unix socket's filesystem
-// permissions, for the Connect UDS listener) but that can still enrich a
-// request with identity when one happens to be attached, e.g. so a per-user
-// read like GetRateLimitStatus resolves locally too. Unlike Middleware, this
-// must never reject the request — swallowing every failure into "proceed
-// anonymously" is what keeps it safe to call on a mount other verbs still
-// reach with no credential at all, and keeps a stale/rotated token from
-// silently locking someone out of a socket that used to admit them.
-func (a *UserTokenAuth) IdentifyOptional(ctx context.Context, r *http.Request) *Identity {
-	token, _ := credential(r)
+// IdentifyStrict resolves the credential carried in header values, for a
+// mount that must REFUSE a bad credential the same way the framed unix socket
+// refuses a bad ctrl_auth: the two planes must agree, because one that
+// swallows an invalid credential and one that refuses it answer the same
+// operator differently. The outcomes are distinct on purpose:
+//
+//   - no credential at all → (nil, nil): proceed anonymous. The mount's own
+//     trust mechanism (the socket) decided admission; a credential was never
+//     the price of entry.
+//   - credential resolves → (id, nil).
+//   - credential unknown → (nil, users.ErrNotFound): a REFUSAL, never a
+//     downgrade to anonymous — a client that presented a token expected it to
+//     mean something, and running it anonymously would attribute another
+//     user's (or the daemon bucket's) work to the wrong owner.
+//   - store could not be checked → (nil, ErrAuthUnavailable): also a refusal,
+//     but as an outage — never worded as an invalid credential, and never
+//     with the store's own error text.
+func (a *UserTokenAuth) IdentifyStrict(ctx context.Context, h http.Header) (*Identity, error) {
+	token, _ := CredentialFromHeader(h)
 	if token == "" {
-		return nil
+		return nil, nil
 	}
-	id, err := a.resolve(ctx, token, r.Header.Get("X-Rafiki-Session"))
+	id, err := a.resolve(ctx, token, h.Get("X-Rafiki-Session"))
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return &id
+	return &id, nil
 }
 
 // resolve returns the identity for token; the per-child and per-boot child
@@ -228,7 +237,7 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		return Identity{}, users.ErrNotFound
 	}
 	if err != nil {
-		return Identity{}, errAuthUnavailable
+		return Identity{}, ErrAuthUnavailable
 	}
 
 	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser, IsAdmin: uid.IsAdmin}

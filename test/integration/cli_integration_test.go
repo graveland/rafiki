@@ -697,10 +697,11 @@ func operatorName() string {
 
 // The framed socket now accepts an optional ctrl_auth as its first frame and
 // the CLI sends the profile's token, so both verbs run as one identity. The
-// user is minted through the CLI itself: on a fresh daemon (no users) the
-// token-less profile reaches bootstrap mode over the framed socket, and
-// `user create` writes the token into the profile's token file, which every
-// later invocation in this test then authenticates with.
+// user is minted through the CLI itself: `rafiki user create` dials TOKEN-LESS
+// (it is the recovery path for a stale token, and must never present one), the
+// UDS admits it anonymously because the socket is the trust mechanism, and it
+// writes the minted token into the profile's token file, which every later
+// invocation in this test then authenticates with.
 func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -710,9 +711,13 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	configDir := t.TempDir()
 
 	// 1. Mint the daemon's first user; the CLI writes its token into profile
-	// "it"'s token file (renderUserCreate) and prints it once on stderr. This
-	// is the bootstrap path: no users exist, the token-less profile reaches
-	// the framed socket anonymously, and ctrl_user_create claims the daemon.
+	// "it"'s token file (renderUserCreate) and prints it once on stderr. The
+	// dial is token-less (mustDialWithoutToken) and the UDS admits it
+	// anonymously — the socket is the trust mechanism, there is no bootstrap
+	// window on the framed UDS. When this daemon genuinely has no users yet,
+	// the user minted here becomes its admin (UserCreateLocal's zero-users
+	// rule); on the suite's shared database other users already exist, so the
+	// minted user is an ordinary one — this test does not depend on which.
 	userCmd := cliCmdIn(t, d, configDir, "--output", "json", "user", "create", operatorName())
 	var userStderr bytes.Buffer
 	userCmd.Stderr = &userStderr

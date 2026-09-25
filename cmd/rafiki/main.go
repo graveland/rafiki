@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -28,9 +30,32 @@ func main() {
 	if err := root.ExecuteContext(ctx); err != nil {
 		// Cobra's RunE error path: print to stderr, exit 1.
 		// Connection errors get exit 2 via direct os.Exit in subcommands.
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "error:", withTokenAdvice(err))
 		os.Exit(1)
 	}
+}
+
+// withTokenAdvice appends the recovery path to a framed connection that was
+// refused with auth_invalid — a profile token that no longer resolves. The
+// error surfaces on the verb's first Request (the auth frame is fire-and-
+// forget; the refusal closes the connection and readLoop stashes the reason),
+// and without advice it reads as an opaque "client connection closed". The
+// advice is exactly what unsticks the operator: delete the token file (the
+// profile then dials anonymous again, local trust as always) or run
+// `rafiki user create` — which dials token-less precisely so it still works
+// here — to mint a new one. Only an already-resolved profile is consulted:
+// formatting an error must never bootstrap a profiles.toml as a side effect.
+func withTokenAdvice(err error) error {
+	msg := err.Error()
+	if !strings.Contains(msg, "auth: auth_invalid") && !strings.Contains(msg, "auth: rejected") {
+		return err
+	}
+	p, ok := resolvedProfile()
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%w\n\nthe token in %s did not authenticate: delete it, or run `rafiki user create` to mint a new one",
+		err, profile.TokenFile(p.Name))
 }
 
 // rootArgs accepts zero arguments, for RunE to run as a bare `rafiki attach`,

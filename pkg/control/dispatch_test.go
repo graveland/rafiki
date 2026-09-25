@@ -31,6 +31,14 @@ func (c identityConn) Deliver(_ []byte)         {}
 func (c identityConn) Identity() users.Identity { return c.id }
 func (c identityConn) Restricted() bool         { return false }
 
+// restrictedConn is a bootstrap-admitted Connection stub: no identity, and
+// only ctrl_user_create accepted (the dispatcher enforces that).
+type restrictedConn struct{}
+
+func (restrictedConn) Deliver(_ []byte)         {}
+func (restrictedConn) Identity() users.Identity { return users.Identity{} }
+func (restrictedConn) Restricted() bool         { return true }
+
 // ─── fakeController ───────────────────────────────────────────────────────────
 
 type fakeController struct {
@@ -46,6 +54,7 @@ type fakeController struct {
 	forgetAllExitedFn       func(int64) ([]string, error)
 	sendFn                  func(string, json.RawMessage) error
 	userCreateFn            func(context.Context, string) (protocol.UserCreateResponseData, error)
+	userCreateLocalFn       func(context.Context, string) (protocol.UserCreateResponseData, error)
 	countActiveFn           func(context.Context) (int, error)
 	subscribeFn             func(string, control.Connection, protocol.SubscribeFilter) error
 	unsubscribeFn           func(string, control.Connection) error
@@ -72,6 +81,10 @@ type fakeController struct {
 	conversationSearchFn    func(context.Context, insights.Scope, insights.SearchFilter) ([]insights.ConversationSummary, error)
 	conversationExportFn    func(context.Context, insights.Scope, string) (*insights.Transcript, error)
 	lastUserListLimit       int
+	// userCreateLocalCalls counts UserCreateLocal invocations: the dispatcher
+	// routing test asserts an anonymous unrestricted user_create reaches THIS
+	// method rather than UserCreate or UserCreateBootstrap.
+	userCreateLocalCalls int
 }
 
 func (f *fakeController) List(filter protocol.ListFilter) []childstore.Snapshot {
@@ -314,6 +327,16 @@ func (f *fakeController) UserCreateBootstrap(ctx context.Context, username strin
 				Message: "a user already exists; authenticate with ctrl_auth to create more users",
 			}
 		}
+	}
+	return f.UserCreate(ctx, username)
+}
+
+// UserCreateLocal records that it was CHOSEN — which is what the dispatcher
+// routing test asserts — and delegates like UserCreate does.
+func (f *fakeController) UserCreateLocal(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	f.userCreateLocalCalls++
+	if f.userCreateLocalFn != nil {
+		return f.userCreateLocalFn(ctx, username)
 	}
 	return f.UserCreate(ctx, username)
 }
@@ -1967,6 +1990,46 @@ func TestUserCreateMapsDuplicateNameToAnInvalidArgsError(t *testing.T) {
 	d := control.NewDispatch(&fakeController{})
 	req := []byte(`{"type":"ctrl_user_create","id":"1","username":"taken"}`)
 	mustError(t, d.HandleFrame(nil, req), protocol.ErrInvalidArgs)
+}
+
+// ctrl_user_create routes by connection kind: restricted → UserCreateBootstrap
+// (the TCP bootstrap window, which re-checks the store); authenticated →
+// UserCreate; anonymous UNRESTRICTED — the locally trusted UDS — →
+// UserCreateLocal, whose first-user rule is what makes the UDS's first user
+// an admin. Note a nil connection counts as anonymous: several dispatch tests
+// pass nil, and the controller resolves it the same way it resolves the UDS
+// path (the daemon's own OS user).
+func TestUserCreateRoutesByConnectionKind(t *testing.T) {
+	mkReq := []byte(`{"type":"ctrl_user_create","id":"1","username":"newoperator"}`)
+
+	// Anonymous unrestricted (the UDS, and every nil-conn dispatch test).
+	fLocal := &fakeController{}
+	if r := mustSuccess(t, control.NewDispatch(fLocal).HandleFrame(discardConn{}, mkReq)); r.ID != "1" {
+		t.Fatalf("response = %+v", r)
+	}
+	if fLocal.userCreateLocalCalls != 1 {
+		t.Fatalf("UserCreateLocal calls = %d, want 1 (the anonymous UDS path)", fLocal.userCreateLocalCalls)
+	}
+
+	// Authenticated: the caller already has an identity, so an ordinary
+	// non-admin create — never the local first-user rule.
+	fAuthed := &fakeController{}
+	if r := mustSuccess(t, control.NewDispatch(fAuthed).HandleFrame(
+		identityConn{id: users.Identity{UserID: "u1", Username: "brent"}}, mkReq)); r.ID != "1" {
+		t.Fatalf("response = %+v", r)
+	}
+	if fAuthed.userCreateLocalCalls != 0 {
+		t.Fatalf("an authenticated user_create must not take the local path (calls = %d)", fAuthed.userCreateLocalCalls)
+	}
+
+	// Restricted (TCP bootstrap): the window re-check, not the local rule.
+	fRestricted := &fakeController{countActiveFn: func(context.Context) (int, error) { return 0, nil }}
+	if r := mustSuccess(t, control.NewDispatch(fRestricted).HandleFrame(restrictedConn{}, mkReq)); r.ID != "1" {
+		t.Fatalf("response = %+v", r)
+	}
+	if fRestricted.userCreateLocalCalls != 0 {
+		t.Fatalf("a restricted bootstrap user_create must not take the local path (calls = %d)", fRestricted.userCreateLocalCalls)
+	}
 }
 
 // The response is capped at MaxFrameBytes, so an unbounded limit is a

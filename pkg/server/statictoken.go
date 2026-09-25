@@ -60,17 +60,22 @@ func (ContextAuthenticator) Identify(r *http.Request) *Identity {
 // a caller which puts rafiki's token there is stating that Authorization
 // carries its own upstream credential instead, so the two never collide.
 func credential(r *http.Request) (token string, passthrough bool) {
-	if h := r.Header.Get("X-Rafiki-Token"); h != "" {
-		return h, true
-	}
-	return bearerOrAPIKey(r), false
+	return CredentialFromHeader(r.Header)
 }
 
-func bearerOrAPIKey(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); h != "" {
-		if token, ok := strings.CutPrefix(h, "Bearer "); ok {
-			return token
+// CredentialFromHeader is credential's header-only form, for callers that
+// hold header values without an *http.Request — a connect.Interceptor sees
+// req.Header(), never the request. One extraction, two callers: a second
+// spelling of "which header carries the credential" is the kind of duplicate
+// that drifts into accepting different credentials per mount.
+func CredentialFromHeader(h http.Header) (token string, passthrough bool) {
+	if v := h.Get("X-Rafiki-Token"); v != "" {
+		return v, true
+	}
+	if a := h.Get("Authorization"); a != "" {
+		if t, ok := strings.CutPrefix(a, "Bearer "); ok {
+			return t, false
 		}
 	}
-	return r.Header.Get("x-api-key")
+	return h.Get("x-api-key"), false
 }

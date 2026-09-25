@@ -5167,6 +5167,28 @@ func (c *Controller) UserCreateBootstrap(ctx context.Context, username string) (
 	return c.createUser(ctx, username, true)
 }
 
+// UserCreateLocal serves ctrl_user_create on a locally trusted connection —
+// the plain UDS, whose connections are anonymous unless they presented
+// ctrl_auth, and never bootstrap-restricted. The framed UDS never takes the
+// bootstrap PATH, but it must reach the same first-user OUTCOME: with zero
+// active users there is no admin and none is otherwise reachable (granting
+// the bit later needs an admin caller), so the user minted here is one. With
+// users already present this mints an ordinary non-admin user, exactly as
+// this socket has always done — local trust, no re-check window to close.
+// The count is read from the store per request, like UserCreateBootstrap: a
+// decision baked into the connection would go stale the moment a parallel
+// client minted the first user.
+func (c *Controller) UserCreateLocal(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
+	if c.users == nil {
+		return protocol.UserCreateResponseData{}, errNoUserStore
+	}
+	n, err := c.users.CountActive(ctx)
+	if err != nil {
+		return protocol.UserCreateResponseData{}, err
+	}
+	return c.createUser(ctx, username, n == 0)
+}
+
 func (c *Controller) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {
 	if c.users == nil {
 		return nil, errNoUserStore

@@ -313,3 +313,140 @@ func TestUDSAuth_PipelinedRequestBehindANonAuthFirstFrame(t *testing.T) {
 		t.Fatalf("second response = %q, want %q (the pending frame's follower was dropped)", resp, echoOf("2"))
 	}
 }
+
+// ─── the cheap invariants ─────────────────────────────────────────────────────
+
+// A ctrl_auth frame AFTER the handshake is an ordinary request to the
+// dispatcher, and the dispatcher has no auth verb: it is refused as an
+// unknown command type, and the connection's identity is untouched — a
+// mid-stream ctrl_auth can never re-authenticate (or re-anonymize) a
+// connection whose admission was decided once.
+func TestUDSAuth_ALaterCtrlAuthFrameIsInert(t *testing.T) {
+	seen := make(chan control.Connection, 4)
+	ctrl := &fakeController{}
+	sock, done := udsServer(t, oneUser("rfk_good", "brent"), captureDispatchHandler(seen, ctrl))
+	defer done()
+
+	conn := udsDial(t, sock)
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	// First: the handshake auth, then an ordinary request.
+	var buf bytes.Buffer
+	writeFrameTo(t, &buf, protocol.AuthRequest{Type: protocol.TypeCtrlAuth, ID: "0", Token: "rfk_good"})
+	writeFrameTo(t, &buf, map[string]string{"type": protocol.TypeCtrlStatus, "id": "1"})
+	if _, err := conn.Write(buf.Bytes()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if resp := readResponse(t, conn); !resp.Success {
+		t.Fatalf("first request failed: %+v", resp.Error)
+	}
+	c := <-seen
+	if c.Identity().UserID != "u1" {
+		t.Fatalf("identity after the handshake = %+v, want u1", c.Identity())
+	}
+
+	// Then: another ctrl_auth frame, mid-stream.
+	writeJSONFrame(t, conn, protocol.AuthRequest{Type: protocol.TypeCtrlAuth, ID: "2", Token: "rfk_good"})
+	resp := readResponse(t, conn)
+	if resp.Success || resp.Error.Code != protocol.ErrInvalidArgs {
+		t.Fatalf("a mid-stream ctrl_auth = %+v, want an invalid_args refusal", resp)
+	}
+
+	// And the identity is exactly what it was.
+	writeJSONFrame(t, conn, map[string]string{"type": protocol.TypeCtrlStatus, "id": "3"})
+	if resp := readResponse(t, conn); !resp.Success {
+		t.Fatalf("request after the refused ctrl_auth failed: %+v", resp.Error)
+	}
+	c = <-seen
+	if c.Identity().UserID != "u1" || c.Identity().Username != "brent" {
+		t.Fatalf("identity after the refused ctrl_auth = %+v, want {u1 brent}", c.Identity())
+	}
+}
+
+// A client that opens the socket and says NOTHING is already in the broadcast
+// registry — the optional-auth peek runs after registration and blocks until
+// the client speaks, so it cannot delay delivery. This is the attach/subscriber
+// pattern: dial, wait for events.
+func TestUDSAuth_SilentClientReceivesBroadcasts(t *testing.T) {
+	noop := control.FuncHandler(func(control.Connection, []byte) []byte { return nil })
+	dir, err := os.MkdirTemp("", "fundi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	srv, err := control.ListenWithAuth(filepath.Join(dir, "test.sock"), noop, oneUser("secret", "brent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	conn := udsDial(t, filepath.Join(dir, "test.sock"))
+	defer conn.Close()
+
+	// No first frame at all — the handshake peek is parked on the read.
+	time.Sleep(150 * time.Millisecond)
+	sentinel := []byte(`{"type":"ctrl_daemon_shutdown","reason":"test"}`)
+	if n := srv.Broadcast(sentinel); n != 1 {
+		t.Fatalf("Broadcast reached %d connections, want 1 (the silent client was never registered)", n)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := readerFor(conn).ReadFrame()
+	if err != nil {
+		t.Fatalf("read broadcast: %v", err)
+	}
+	if string(frame) != string(sentinel) {
+		t.Fatalf("broadcast frame = %q", frame)
+	}
+}
+
+// EOF before any frame — a dial that changed its mind — closes quietly: no
+// response, no wedged slot, and the server keeps serving the next client.
+func TestUDSAuth_EOFBeforeAnyFrameClosesQuietly(t *testing.T) {
+	echo := control.FuncHandler(func(_ control.Connection, frame []byte) []byte {
+		return append([]byte("echo:"), frame...)
+	})
+	sock, done := udsServer(t, oneUser("secret", "brent"), echo)
+	defer done()
+
+	gone := udsDial(t, sock)
+	gone.Close() // EOF on the server's first read
+
+	// The next client still gets served.
+	conn := udsDial(t, sock)
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeFrame(t, conn, `{"type":"ping"}`)
+	if resp := readFrameString(t, conn); resp != `echo:{"type":"ping"}` {
+		t.Fatalf("server stopped serving after a silent client vanished: %q", resp)
+	}
+}
+
+// captureDispatchHandler is a dispatcher-backed handler that also hands the
+// connection to seen on every frame, so a test can watch the identity the
+// dispatcher actually ran with.
+func captureDispatchHandler(seen chan<- control.Connection, ctrl control.Controller) control.ConnectionLifecycleHandler {
+	inner := control.NewDispatch(ctrl)
+	return captureHandler{seen: seen, inner: inner}
+}
+
+type captureHandler struct {
+	seen  chan<- control.Connection
+	inner control.ConnectionLifecycleHandler
+}
+
+func (h captureHandler) HandleFrame(c control.Connection, frame []byte) []byte {
+	select {
+	case h.seen <- c:
+	default:
+	}
+	return h.inner.HandleFrame(c, frame)
+}
+
+func (h captureHandler) HandleClose(c control.Connection) { h.inner.HandleClose(c) }

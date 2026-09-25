@@ -223,6 +223,14 @@ type Controller interface {
 	// window. A race between two simultaneous first arrivals is accepted
 	// (first writer wins); persistence past the window is not.
 	UserCreateBootstrap(ctx context.Context, username string) (protocol.UserCreateResponseData, error)
+	// UserCreateLocal is UserCreate on a locally trusted, UNRESTRICTED and
+	// anonymous connection — the plain UDS, which has no bootstrap window to
+	// re-check but must reach the same first-user OUTCOME: when zero active
+	// users exist the minted user is an admin (there is no other way to make
+	// one reachable once the window that could mint one has closed), and with
+	// users present an ordinary non-admin one. The count is read from the
+	// store per request, like UserCreateBootstrap.
+	UserCreateLocal(ctx context.Context, username string) (protocol.UserCreateResponseData, error)
 	UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error)
 	UserRm(ctx context.Context, username string) error
 }
@@ -1156,8 +1164,19 @@ func (d *dispatcher) userCreate(conn Connection, frame []byte, id string) []byte
 	}
 
 	create := d.c.UserCreate
-	if restricted {
+	switch {
+	case restricted:
 		create = d.c.UserCreateBootstrap
+	case !connIdentity(conn).IsUser():
+		// An anonymous, UNRESTRICTED connection is the locally trusted UDS —
+		// on TCP a non-restricted connection is always authenticated, since a
+		// TCP connection with no valid ctrl_auth is either refused or
+		// bootstrap-restricted. Its user_create follows the same first-user
+		// rule as bootstrap (the count is re-read per request, not per
+		// connection): zero users → admin, because none is otherwise
+		// reachable once this first one exists. Users existing → an ordinary
+		// non-admin create, as this socket has always done.
+		create = d.c.UserCreateLocal
 	}
 	data, err := create(context.Background(), req.Username)
 	if errors.Is(err, users.ErrUsernameTaken) {
