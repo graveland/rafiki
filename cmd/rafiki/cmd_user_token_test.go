@@ -4,7 +4,8 @@ package main
 // longer resolves would refuse every framed verb that presents it — including
 // `rafiki user create`, the one verb that mints its replacement — so:
 //
-//   - `user create` dials token-less (mustDialWithoutToken): the UDS is local
+//   - `user create` dials the LOCAL socket token-less (mustDialWithoutToken;
+//     a remote profile keeps its token, since TCP requires it): the UDS is local
 //     trust, and the credential's absence is what keeps the recovery verb
 //     working.
 //   - every other framed verb's refusal names the token file and the recovery,
