@@ -697,7 +697,12 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	handler := control.NewDispatch(ctrl)
-	srv, err := control.Listen(socketPath, handler)
+	// The same identity store the TCP listener and the upgrade path use. On
+	// the UDS a ctrl_auth first frame is OPTIONAL (ListenWithAuth): a profile
+	// that carries a token runs framed verbs as that user, so owner-scoped
+	// state (presets above all) agrees between this socket and connect.sock.
+	// A token-less client stays anonymous — local trust, as always.
+	srv, err := control.ListenWithAuth(socketPath, handler, userStore)
 	if err != nil {
 		slog.Error("listen", "socket", socketPath, "error", err)
 		os.Exit(1)

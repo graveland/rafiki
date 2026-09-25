@@ -71,7 +71,19 @@ func writeCliProfile(t *testing.T, configDir, socketPath string) {
 // os.Environ() overrides whatever the shell exported.
 func cliCmd(t *testing.T, d *daemon, args ...string) *exec.Cmd {
 	t.Helper()
-	configDir := t.TempDir()
+	return cliCmdIn(t, d, "", args...)
+}
+
+// cliCmdIn is cliCmd with a caller-supplied config dir: for the tests that
+// need SEVERAL invocations to share one profile directory — a token file
+// written by `rafiki user create` has to survive to the preset/create
+// invocations that must run as that user. An empty dir gets a fresh temp dir,
+// exactly like cliCmd.
+func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.Cmd {
+	t.Helper()
+	if configDir == "" {
+		configDir = t.TempDir()
+	}
 	if d != nil {
 		writeCliProfile(t, configDir, d.socketPath)
 	}
@@ -665,5 +677,97 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	}
 	if !strings.Contains(bothErrBuf.String(), "cannot combine -j and -J") {
 		t.Fatalf("-j -J error text changed; got: %s", bothErrBuf.String())
+	}
+}
+
+// TestCLI_PresetPutThenCreateOnTheSameProfile is the regression for the
+// two-identities bug on a socket profile. `rafiki preset put` sends the
+// profile's bearer token over connect.sock (Connect), so the preset is owned
+// by that user; `rafiki create --preset` sends ctrl_spawn over the framed
+// control socket, which used to authenticate nobody — the spawn resolved the
+// preset against owner "" and failed with `no preset "review:fixer"; presets
+// in "review:": (none)` even though the SAME profile had just written it.
+//
+// operatorName mints a unique username per run: the suite shares one
+// disposable database across runs and daemons, so a fixed name would collide
+// with the user a previous run created ("username ... is already taken").
+func operatorName() string {
+	return fmt.Sprintf("operator-%d", time.Now().UnixNano())
+}
+
+// The framed socket now accepts an optional ctrl_auth as its first frame and
+// the CLI sends the profile's token, so both verbs run as one identity. The
+// user is minted through the CLI itself: on a fresh daemon (no users) the
+// token-less profile reaches bootstrap mode over the framed socket, and
+// `user create` writes the token into the profile's token file, which every
+// later invocation in this test then authenticates with.
+func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
+	t.Parallel()
+	d := bootDaemon(t)
+
+	// One config dir for the whole flow: the token `user create` writes must
+	// still be there when preset put and create resolve the profile.
+	configDir := t.TempDir()
+
+	// 1. Mint the daemon's first user; the CLI writes its token into profile
+	// "it"'s token file (renderUserCreate) and prints it once on stderr. This
+	// is the bootstrap path: no users exist, the token-less profile reaches
+	// the framed socket anonymously, and ctrl_user_create claims the daemon.
+	userCmd := cliCmdIn(t, d, configDir, "--output", "json", "user", "create", operatorName())
+	var userStderr bytes.Buffer
+	userCmd.Stderr = &userStderr
+	userOut, err := userCmd.Output()
+	if err != nil {
+		t.Fatalf("user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
+	}
+	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
+	if b, err := os.ReadFile(tokenPath); err != nil || len(bytes.TrimSpace(b)) == 0 {
+		t.Fatalf("user create did not leave a token at %s: %v", tokenPath, err)
+	}
+
+	// 2. Write a preset over Connect: the profile's bearer token rides
+	// connect.sock, so the preset is owned by the user minted in step 1.
+	presetFile := filepath.Join(t.TempDir(), "review-fixer.json")
+	presetJSON := `{"description":"uds-auth regression fixture","kind":"fundi","model":"anthropic/claude-sonnet-4-5"}`
+	if err := os.WriteFile(presetFile, []byte(presetJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	putOut, err := cliCmdIn(t, d, configDir, "preset", "put", "review:fixer", "-f", presetFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("preset put failed: %v\noutput: %s", err, putOut)
+	}
+	if !strings.Contains(string(putOut), "saved review:fixer") {
+		t.Fatalf("preset put output missing confirmation: %s", putOut)
+	}
+
+	// 3. The regression: the framed socket must run as the SAME identity now,
+	// so the spawn resolves the preset instead of answering
+	// `no preset "review:fixer"; presets in "review:": (none)`. The preset
+	// supplies the model (no --model flag here on purpose: a preset that did
+	// not apply would fail the spawn, not silently pass).
+	var createStderr bytes.Buffer
+	createCmd := cliCmdIn(t, d, configDir,
+		"--output", "json",
+		"create", "preset-bug",
+		"--preset", "review:fixer",
+		"--cwd", "/tmp",
+		"--no-session",
+		"--no-extensions",
+		"--no-local-executor",
+		"--detached",
+	)
+	createCmd.Stderr = &createStderr
+	createOut, err := createCmd.Output()
+	if err != nil {
+		t.Fatalf("create --preset failed: %v\nstderr: %s", err, createStderr.String())
+	}
+	var spawnResp struct {
+		ChildID string `json:"childId"`
+	}
+	if err := json.Unmarshal(createOut, &spawnResp); err != nil {
+		t.Fatalf("decode create response: %v\n%s", err, createOut)
+	}
+	if spawnResp.ChildID == "" {
+		t.Fatalf("create --preset returned empty childId; output: %s", createOut)
 	}
 }

@@ -43,8 +43,26 @@ type Client struct {
 
 // Dial opens a connection to the UDS at path. If path is empty,
 // resolves to $RAFIKI_SOCKET or the XDG default (see
-// DefaultSocketPath).
+// DefaultSocketPath). No ctrl_auth frame is sent — the connection is
+// anonymous, which is what a token-less profile and every bootstrap-mode
+// caller want.
 func Dial(path string) (*Client, error) {
+	return DialWithToken(path, "")
+}
+
+// DialWithToken is Dial with a control-plane credential: when token is
+// non-empty, a ctrl_auth frame is written as the connection's first frame
+// (fire-and-forget, exactly as DialURL does — see sendAuthFrame).
+//
+// This exists because one profile used to run as two identities: Connect
+// verbs carried the profile's bearer token over connect.sock and ran as that
+// user, while framed verbs over the plain control socket ran anonymous — so a
+// preset written with `rafiki preset put` was invisible to `rafiki create
+// --preset` on the same profile, because presets resolve against the
+// connection's owner. Sending the token on the framed socket too makes both
+// surfaces the same identity. The server treats ctrl_auth as optional on the
+// UDS (pkg/control.ListenWithAuth), so a token-less dial is unchanged.
+func DialWithToken(path, token string) (*Client, error) {
 	if path == "" {
 		path = DefaultSocketPath()
 	}
@@ -52,13 +70,7 @@ func Dial(path string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", path, err)
 	}
-	c := &Client{
-		conn:    conn,
-		closeCh: make(chan struct{}),
-		subs:    make(map[uint64]chan []byte),
-	}
-	go c.readLoop()
-	return c, nil
+	return serveConn(conn, token)
 }
 
 // DefaultSocketPath returns the controller socket location: an explicit

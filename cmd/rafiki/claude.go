@@ -148,7 +148,9 @@ func dialDaemon(ctx context.Context, cmd *cobra.Command) (*client.Client, error)
 	if p.URL != "" {
 		return client.DialURL(ctx, p.URL, p.Token)
 	}
-	return client.Dial(p.Socket)
+	// Same token-carrying dial as mustDial: a degraded lookup must still be
+	// THE PROFILE'S identity, not an anonymous one.
+	return client.DialWithToken(p.Socket, p.Token)
 }
 
 // runClaude runs `rafiki claude [flags] [-- claude flags...]`.

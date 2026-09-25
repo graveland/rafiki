@@ -35,7 +35,12 @@ func mustDial(cmd *cobra.Command) *client.Client {
 		}
 		return c
 	}
-	c, err := client.Dial(p.Socket)
+	// The profile's token rides the framed socket too: without it, framed
+	// verbs ran anonymous while Connect verbs ran as the profile's user, so a
+	// preset written over Connect was invisible to `rafiki create --preset` on
+	// the same profile (presets resolve against the connection's owner).
+	// sendAuthFrame skips an empty token, so a token-less profile is unchanged.
+	c, err := client.DialWithToken(p.Socket, p.Token)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
 		os.Exit(2)

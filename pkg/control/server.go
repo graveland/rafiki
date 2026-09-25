@@ -35,8 +35,9 @@ type Connection interface {
 	Deliver(frame []byte)
 
 	// Identity is the authenticated caller. The zero value means "not a
-	// user": a UDS connection (locally trusted, no handshake) or a
-	// bootstrap connection (no users exist yet).
+	// user": a token-less UDS connection (locally trusted, no handshake),
+	// a TCP connection admitted in bootstrap mode, or — on the UDS — one
+	// that never sent ctrl_auth (see ListenWithAuth).
 	Identity() users.Identity
 
 	// Restricted reports a bootstrap-admitted connection, which may send
@@ -89,6 +90,12 @@ type Server struct {
 	ctx     context.Context
 	conns   map[Connection]struct{}
 	connsMu sync.Mutex
+
+	// auth, when non-nil, lets the plain UDS listener admit an authenticated
+	// identity: a connection whose first frame is ctrl_auth runs as that user
+	// (see ListenWithAuth). Nil keeps the UDS path anonymous-only, and makes
+	// a ctrl_auth first frame a refusal rather than a downgrade to anonymous.
+	auth Authenticator
 }
 
 // Addr returns the listener's network address. For a UDS server this is
@@ -107,6 +114,25 @@ func (s *Server) Addr() net.Addr {
 //
 // The socket is chmod'd to 0600 after binding.
 func Listen(path string, handler ConnectionLifecycleHandler) (*Server, error) {
+	return ListenWithAuth(path, handler, nil)
+}
+
+// ListenWithAuth is Listen with an Authenticator: a connection to this UDS
+// whose FIRST frame is ctrl_auth is admitted as that user instead of
+// anonymously, which is what makes owner-scoped state (presets, conversation
+// scopes) agree between this socket and the Connect socket — both now run as
+// the profile's identity.
+//
+// The handshake is otherwise UDS-shaped, not TCP-shaped (see udsHandshake):
+// the first frame is not a gate — it IS the client's first request, dispatched
+// exactly as today — so a client may still open the socket and wait
+// indefinitely before sending; nothing is ever refused for silence. ctrl_auth
+// is optional, not mandatory: the socket remains the local trust boundary,
+// and a token-less client is admitted anonymously exactly as before. A nil
+// auth stays allowed (a daemon without RAFIKI_DB has no identity store):
+// ctrl_auth is then refused with `internal` rather than silently downgraded
+// to anonymous.
+func ListenWithAuth(path string, handler ConnectionLifecycleHandler, auth Authenticator) (*Server, error) {
 	// Stale-socket probe: if the path exists, try to dial. If dial fails the
 	// old listener is gone — safe to unlink. If dial succeeds, a live process
 	// owns the socket and we must not clobber it.
@@ -134,6 +160,7 @@ func Listen(path string, handler ConnectionLifecycleHandler) (*Server, error) {
 		ctx:     ctx,
 		cancel:  cancel,
 		conns:   make(map[Connection]struct{}),
+		auth:    auth,
 	}
 	go s.acceptLoop()
 	return s, nil
@@ -183,8 +210,8 @@ type netConn struct {
 
 	// identity and restricted are decided once, by the auth handshake,
 	// before any frame is dispatched, and never change afterwards — so
-	// they need no lock. The zero values are the UDS path's: locally
-	// trusted, not a user, not restricted.
+	// they need no lock. The zero values are a token-less connection's:
+	// locally trusted (UDS), not a user, not restricted.
 	identity   users.Identity
 	restricted bool
 }
@@ -283,9 +310,9 @@ func (c *netConn) Deliver(frame []byte) {
 	}
 }
 
-// admission is what the auth handshake decided about one connection. Its
-// zero value is the plain UDS path: no handshake ran, so there is no reader
-// to inherit, no user, and no restriction.
+// admission is what a handshake decided about one connection. Its zero value
+// is a token-less UDS connection: no handshake ran (or the handshake saw a
+// non-ctrl_auth first frame), so there is no user and no restriction.
 type admission struct {
 	// reader read the handshake frame and may already hold bytes the client
 	// pipelined behind it — handleConn must reuse it, never rebuild it. Nil
@@ -306,8 +333,13 @@ type admission struct {
 	pending []byte
 }
 
-// handleConn drives the frame-read loop for one connection. Pass the zero
-// admission for connections with no handshake (the plain UDS listener).
+// handleConn drives the frame-read loop for one connection. The TCP/TLS and
+// upgrade paths arrive with their admission handshake already run (a.reader
+// non-nil). The UDS listener passes the zero admission: its handshake is
+// optional (ctrl_auth may or may not be the first frame — see ListenWithAuth)
+// and runs HERE, after the connection is registered, because the peek blocks
+// until the client speaks and a client that opened the socket and waits must
+// already be in the broadcast registry.
 func (s *Server) handleConn(conn net.Conn, a admission) {
 	defer conn.Close()
 
@@ -336,16 +368,31 @@ func (s *Server) handleConn(conn net.Conn, a admission) {
 
 	defer s.handler.HandleClose(nc)
 
+	// The UDS handshake (see udsHandshake): a.reader == nil means no admission
+	// handshake has run — the UDS listener's handshake is optional and deferred
+	// to here, so it cannot delay broadcast registration. On refusal it has
+	// already written the error frame; closing the conn is this defer's job.
+	if a.reader == nil {
+		uds, ok := s.udsHandshake(conn)
+		if !ok {
+			return
+		}
+		a = uds
+		nc.identity, nc.restricted = a.identity, a.restricted
+	}
+
 	// a.pending is a request frame the handshake already consumed from
-	// a.reader (the bootstrap ctrl_user_create). Those bytes are gone from
+	// a.reader (the bootstrap ctrl_user_create on TCP, or — on the UDS — the
+	// non-ctrl_auth first frame). Those bytes are gone from
 	// the socket: re-reading conn would block forever, so it is dispatched
 	// here, before the loop, or it is lost.
 	if len(a.pending) > 0 && !s.serveFrame(nc, a.pending) {
 		return
 	}
 
-	// a.reader is non-nil when a preceding auth handshake (TCP/TLS path)
-	// already constructed a FrameReader and read the first frame off conn:
+	// a.reader is non-nil when a preceding auth handshake (TCP/TLS path, or
+	// the UDS listener's optional ctrl_auth — see ListenWithAuth) already
+	// constructed a FrameReader and read the first frame off conn:
 	// that bufio.Reader may have buffered bytes past the frame's trailing
 	// newline (a client's first real request landing in the same TCP
 	// segment as ctrl_auth is common — client.DialURL writes auth and
@@ -462,6 +509,83 @@ func (s *Server) ServeUpgraded(conn net.Conn, auth Authenticator) {
 		return
 	}
 	s.handleConn(conn, a)
+}
+
+// ─── UDS admission: ctrl_auth is optional, not mandatory ──────────────────────
+
+// udsHandshake reads the unix-socket connection's first frame and decides its
+// admission. It is the UDS counterpart of authHandshake, with two deliberate
+// differences:
+//
+//   - ctrl_auth is OPTIONAL. The socket is the local trust boundary and always
+//     has been, so a connection that does not authenticate is admitted
+//     anonymously exactly as before — the frame it read is not a handshake
+//     frame but the client's first REQUEST, and it comes back as admission
+//     pending (the same mechanism the TCP bootstrap uses), because the bytes
+//     are already consumed from the socket. An authenticated connection is
+//     never restricted: UDS has no bootstrap window, only full local trust.
+//
+//   - No read deadline. TCP bounds how long it will wait for ctrl_auth because
+//     it is mandatory there; here the first frame is only the first frame, and
+//     a UDS client may legitimately open the socket and wait (an attach that
+//     dials before it speaks, a long-lived subscriber). Refusing silence would
+//     break them; nothing here ever times out a connection for not speaking.
+//     Only the Authenticate call itself is bounded, by the same
+//     authHandshakeTimeout the TCP handshake gives its store round-trip.
+//
+// It runs inside handleConn, after the connection is registered in the
+// broadcast registry, so the peek (which blocks until the client speaks)
+// cannot delay a silent client's registration.
+func (s *Server) udsHandshake(conn net.Conn) (admission, bool) {
+	r := protocol.NewFrameReader(conn, protocol.MaxFrameBytes)
+	frame, err := r.ReadFrame()
+	if err != nil {
+		// Same shape as a first-request read failing in handleConn: EOF is a
+		// client that changed its mind, anything else is worth a warning.
+		if err != io.EOF {
+			slog.Warn("server: read first frame", "remote", conn.RemoteAddr(), "error", err)
+		}
+		return admission{}, false
+	}
+
+	var req protocol.AuthRequest
+	if err := json.Unmarshal(frame, &req); err != nil || req.Type != protocol.TypeCtrlAuth {
+		// Not a ctrl_auth frame: exactly today's behaviour — anonymous, and
+		// this frame is the first request. It has been consumed from the
+		// socket and cannot be re-read, so handleConn must dispatch it from
+		// admission.pending.
+		return admission{reader: r, pending: frame}, true
+	}
+
+	remote := conn.RemoteAddr()
+	refuse := func(code, msg string) (admission, bool) {
+		s.writeAuthError(conn, code, msg)
+		return admission{}, false
+	}
+
+	if s.auth == nil {
+		// No identity store (daemon without RAFIKI_DB): a token cannot be
+		// checked. Refuse rather than silently downgrade to anonymous — the
+		// client sent a credential expecting it to mean something.
+		slog.Error("server: auth: no authenticator configured", "remote", remote)
+		return refuse(protocol.ErrInternal, "identity store unavailable")
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, authHandshakeTimeout)
+	defer cancel()
+
+	id, err := s.auth.Authenticate(ctx, req.Token)
+	if errors.Is(err, users.ErrNotFound) {
+		slog.Warn("server: auth: invalid token", "remote", remote)
+		return refuse(protocol.ErrAuthInvalid, "invalid auth token")
+	}
+	if err != nil {
+		// "I could not check" — never reported as an invalid credential, and
+		// never with the store's error text (a pgx error carries the DSN).
+		slog.Error("server: auth: identity store unavailable", "remote", remote, "error", err)
+		return refuse(protocol.ErrInternal, "identity store unavailable")
+	}
+	return admission{reader: r, identity: id}, true
 }
 
 // ─── TCP/TLS listener ──────────────────────────────────────────────────────────

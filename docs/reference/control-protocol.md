@@ -31,7 +31,9 @@ Two transports, identical framing and protocol.
 
 - Path: the daemon always binds `<RuntimeDir>/controller.sock` — `$XDG_RUNTIME_DIR/rafiki/` if that's set to an absolute path, else `$XDG_STATE_HOME/rafiki/` (default `~/.local/state/rafiki/`); see `pkg/paths.SocketPath`. `$RAFIKI_SOCKET` does **not** change where the daemon binds — it is a client-side override (`pkg/client.DefaultSocketPath`, what a spawned child is handed to find its own daemon) that must agree with the daemon's own path or a client dials a socket nobody is listening on. (`$PI_CONTROLLER_SOCKET` / `~/.pi/run/controller.sock` were the pre-rename names; nothing reads them any more.)
 - Mode: socket `0600`, parent directory `0700`. Filesystem permissions are
-  the only authentication.
+  the trust boundary; a connection is anonymous ("the daemon's own OS user")
+  unless it presents `ctrl_auth` as its first frame — see §6.6 for the
+  optional-credential rule and §2.2 for the failure modes it shares with TCP.
 - Stream-oriented (`SOCK_STREAM`). Multiple concurrent client connections.
 
 ### 2.2 Remote TCP/TLS (optional)
@@ -77,9 +79,17 @@ Two transports, identical framing and protocol.
   ("identity store unavailable") and the real error goes to the daemon log.
   This mirrors the handshake rule above and exists for the same reason: a pgx
   connection error names the host, the user and the database.
-- UDS connections skip auth entirely — local filesystem permissions
-  (0600 socket, 0700 directory) are the only trust mechanism. They are never
-  bootstrap-restricted and carry no user identity.
+- UDS connections are anonymous by default — local filesystem permissions
+  (0600 socket, 0700 directory) are the trust mechanism — but a client MAY
+  present `ctrl_auth` as its first frame (see §6.6). When it does and the
+  token resolves, the connection runs as that user instead of anonymously,
+  which is what makes owner-scoped state (presets, conversation scopes,
+  executor owner) agree between the framed socket and the Connect socket for
+  one profile. UDS connections are never bootstrap-restricted. The daemon
+  wires the same identity store the TCP listener uses
+  (`control.ListenWithAuth`); with none configured (no `RAFIKI_DB`) a UDS
+  `ctrl_auth` is refused with `internal`, never silently downgraded to
+  anonymous.
 
 ## 2.3 Connect control plane (HTTP)
 
@@ -157,9 +167,10 @@ machine:
   identity on the request context (`server.WithIdentity`), and it survives into
   the Connect handlers. `Spawn` reads it there — never from the request
   message, since the owner is matched by executor admission selectors and a
-  client that could name it could claim to be any owner. On the unix socket the
-  context carries nothing and the owner is the zero identity, matching a framed
-  UDS connection.
+  client that could name it could claim to be any owner. On the local unix
+  socket the bearer token is resolved the same optional way
+  (`optionalIdentity`), and a request without one runs as the zero identity —
+  matching a token-less framed UDS connection.
 - **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
 
 ```bash
@@ -316,7 +327,9 @@ The four preset verbs manage the daemon's agent presets in
 `conversations.presets` — named seats fixing model, tools, prompt and budget —
 backing `rafiki preset` and the `preset_*` tools (§2.4). A preset is
 **owner-scoped**: the owner is resolved from the authenticated credential,
-never a request field — a user token reaches its own bucket, and the anonymous
+never a request field — a user token reaches its own bucket (either plane:
+Connect's bearer, or the framed socket's optional `ctrl_auth`), and the
+anonymous
 unix-socket caller shares the daemon's single unattributed bucket, exactly as
 `ListPymodules`.
 
@@ -1385,26 +1398,38 @@ kept as aliases — muscle memory and scripts); the framed wire spelling
 it stays in `rafiki list` with `status=exited`. That composition (stop, then
 finalize) lives in `close` now — see §6.13.
 
-### 6.6 `ctrl_auth` (TCP/TLS only)
+### 6.6 `ctrl_auth` (mandatory on TCP/TLS; optional on the UDS)
 
 ```jsonc
 { "type": "ctrl_auth", "id": "0", "token": "..." }
 ```
 
-Must be the first frame on a TCP connection, except in bootstrap mode
+On a TCP connection it must be the first frame, except in bootstrap mode
 (§2.2), where the first frame may instead be a `ctrl_user_create`. TCP
 connections run over mandatory TLS (see §2.2); there is no plaintext TCP
 control plane.
+
+On the local unix socket `ctrl_auth` is OPTIONAL as the first frame, and the
+first frame is always dispatched: with it and a token that resolves, the
+connection runs as that user for its lifetime; without it the connection is
+anonymous — full local trust, exactly as before — and the first frame is an
+ordinary request, so a client may also open the socket and wait before
+sending anything (there is no handshake deadline on the UDS); with a token
+that names no active user the controller answers `auth_invalid` with the TCP
+wording ("invalid auth token") and closes — an invalid credential is never
+silently downgraded to anonymous. A `ctrl_auth` frame is never dispatched as
+a request: the handshake consumes it on either transport.
 
 The token is a per-user token minted by `ctrl_user_create`. On success, the
 connection proceeds normally — no explicit success response is written, and
 the resolved identity is attached to the connection for its lifetime. On
 failure the controller sends an error response and closes the connection:
 `auth_invalid` for a token that names no active user, `auth_required` for a
-non-`ctrl_auth` first frame once a user exists, and `internal` ("identity
-store unavailable") when the store could not be consulted at all — a
+non-`ctrl_auth` first frame once a user exists (TCP only — the UDS admits an
+anonymous connection instead), and `internal` ("identity store unavailable")
+when the store could not be consulted at all or none is configured — a
 distinction clients depend on, since `auth_invalid` means "discard this
-credential". UDS connections skip auth entirely.
+credential".
 
 ### 6.7 `ctrl_subscribe`
 
@@ -1723,8 +1748,8 @@ seconds (0/absent = unbounded). `owner` is a **username** from `conversations.us
 daemon resolves it to a user id server-side; rows store the id, never the name.
 
 **Scope.** What these three verbs can see is bounded server-side by the connection's own
-identity, never by a request field: an empty identity (the daemon's own UDS/local-trust path)
-and an admin connection sees every owner's conversations; a non-admin user connection is scoped
+identity, never by a request field: an empty identity (a token-less UDS connection — the
+local-trust path) and an admin connection sees every owner's conversations; a non-admin user connection is scoped
 to its own. `owner`/`persona`/… above are caller-supplied *filters* ANDed on top of that bound.
 The derivation (`scopeForConnection` in `pkg/control/dispatch.go`) never appears on the wire
 and is pinned by pkg/control's scope tests.
@@ -1999,7 +2024,7 @@ Defined error codes:
 | `invalid_args`          | Request fields failed validation.                                  |
 | `spawn_failed`          | `pi` subprocess failed to start or exited immediately.             |
 | `auth_required`         | TCP connection sent a non-`ctrl_auth` frame first, or sent a command other than `ctrl_user_create` on a bootstrap connection. |
-| `auth_invalid`          | TCP auth token names no active user.                               |
+| `auth_invalid`          | TCP or UDS `ctrl_auth` token names no active user.                 |
 | `not_found`             | Generic; e.g., `ctrl_resume` against unknown id.                   |
 | `internal`              | Unexpected controller-side error. The message carries details **only for an authenticated connection**; on an unauthenticated (bootstrap) one it is a fixed string and the real error is logged server-side only — a pgx failure names the host, user and database. |
 | `no_agent_db`           | `ctrl_conversation_*`: no agent database configured (`RAFIKI_DB` unset). |
@@ -2400,8 +2425,8 @@ either as a label is REFUSED** with `ERR_INVALID_ARGS` — not silently
 overwritten, so a caller learns their selector will not mean what they wrote.
 
 - `owner` comes from the connection, by the same rule as `ctrl_executor_session`
-  (§15.6): `conn.Identity().Username` on an authenticated TCP/TLS connection,
-  and the daemon's own OS user on a local UDS connection. Both halves of
+  (§15.6): `conn.Identity().Username` on an authenticated connection, and the
+  daemon's own OS user on a token-less local UDS connection. Both halves of
   executor selection match on it — an executor's `admits` selector and a
   client's own binding — so a caller able to state it could claim another
   operator's machines.
@@ -2573,9 +2598,9 @@ selector is `owner=<user>,machine=<name>` in both cases, so a child can move
 between a durable executor and a transient one without its stored selector
 ever changing.
 
-**Owner resolution.** On an authenticated TCP/TLS connection the owner is
-`conn.Identity().Username`. On a local UDS connection — which carries no
-authenticated identity — the owner is the daemon's own OS user
+**Owner resolution.** On an authenticated connection — TCP/TLS, or a UDS one
+that presented `ctrl_auth` — the owner is `conn.Identity().Username`. On a
+token-less local UDS connection the owner is the daemon's own OS user
 (`os/user.Current().Username`). The control socket is created under a `0177`
 umask and owned by that user, so anyone who can open it already IS that user.
 The request has no username field and must never grow one.
@@ -2659,7 +2684,8 @@ collides with an existing executor of the same owner.
 
 Commands for managing rafiki user identities. These are ordinary `ctrl_*`
 commands, subject to the same connection auth as everything else (§2.2): UDS
-is always trusted, a TCP/TLS connection needs a valid `ctrl_auth` identity —
+is anonymous unless its optional `ctrl_auth` resolved (§6.6), a TCP/TLS
+connection needs a valid `ctrl_auth` identity —
 **except** `ctrl_user_create`, which is also the one command a *bootstrap*
 connection may send with no identity at all, per §2.2's bootstrap rule. All
 three verbs return `no_agent_db` when the daemon has no database pool

@@ -218,7 +218,12 @@ proactively. See `pkg/routing/effortmap.go` (`EffortCache`) and
 
 The control plane is newline-delimited JSON frames over a Unix socket (a
 legacy of rafiki's pi-controller fork), plus a Connect/protobuf plane for the
-TUI and remote access. What the daemon adds beyond hosting a process is a
+TUI and remote access. The two planes share one identity: a profile with a
+token presents it to both — `ctrl_auth` as the framed socket's optional first
+frame, the bearer token on connect.sock — so owner-scoped state, presets
+above all, written through one plane is visible to the other. A token-less
+profile stays anonymous (local trust) on both. What the daemon adds beyond
+hosting a process is a
 **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm`/`pkg/agentloop` directly.
 
@@ -670,6 +675,10 @@ Exactly one of `socket`/`url` is required. Each profile owns its own token
 file (`~/.config/rafiki/profiles/<name>/token`, 0600), and each daemon its own
 presets, so two daemons' model universes and credentials need not overlap. A
 profile's `preset` names one of that daemon's presets (`rafiki preset list`).
+On a local profile the token is optional but not decorative: it authenticates
+framed verbs too (the daemon's optional `ctrl_auth` on the socket), so a
+preset saved with `rafiki preset put` is visible to `rafiki create --preset`
+on the same profile.
 
 **Resolution order:** `-P`/`--profile` for one command → `$RAFIKI_PROFILE`
 for one shell → the `current-profile` pointer (`rafiki profile use <name>`)
