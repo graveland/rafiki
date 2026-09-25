@@ -159,12 +159,13 @@ capped at 3 ejected providers per model line so the guard can never blacklist
 a line into unroutability. It needs capture enabled — it judges misses using
 `prefix_hash` and conversation id, both capture-only — so with capture off it
 is inert by design, and it applies **even when the caller supplied its own
-`provider` object**. Set `RAFIKI_PROVIDER_GUARD=off` to disable it.
+`provider` object**. Set `RAFIKI_PROVIDER_GUARD=off` to disable automatic
+ejection; operator bans (below) still apply.
 
 Ejections are logged append-only and reseed the in-memory list at startup:
 
 ```sql
-SELECT created_at, provider, model_line, reason, expires_at, evidence
+SELECT created_at, provider, model_line, reason, expires_at, note, evidence
   FROM openrouter.provider_ejection
  ORDER BY created_at DESC LIMIT 20;
 ```
@@ -172,6 +173,26 @@ SELECT created_at, provider, model_line, reason, expires_at, evidence
 OpenRouter's catalog can't answer this for you — its `supports_implicit_caching`
 flag doesn't correlate with actual cache behavior — which is why the guard is
 observational rather than a lookup.
+
+### Operator provider bans
+
+The guard only notices cache misses. For anything else (a provider that is
+slow, looping, or you simply don't trust), ban it by hand at runtime:
+
+```
+rafiki providers ban open-inference --note "spinning"   # every model, until lifted
+rafiki providers ban some-host --for 6h
+rafiki providers bans                                    # operator bans + guard ejections
+rafiki providers unban open-inference
+```
+
+A ban applies to every model line on the next OpenRouter request, including
+for children already running, and is written to the ejection log above
+(reason `operator`; a lift is a superseding `lift` row, never a delete), so it
+survives restarts. Bans are exempt from the guard's per-line cap. Banning and
+unbanning require an admin user credential or the local socket. The provider
+is OpenRouter's slug; a display name is lowercased with spaces turned into
+dashes. See `docs/reference/control-protocol.md` §"Provider bans".
 
 ## `rafikid agent`
 

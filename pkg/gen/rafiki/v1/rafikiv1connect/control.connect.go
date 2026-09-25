@@ -135,6 +135,13 @@ const (
 	ControlDarajaSendProcedure = "/rafiki.v1.Control/DarajaSend"
 	// ControlDarajaWatchProcedure is the fully-qualified name of the Control's DarajaWatch RPC.
 	ControlDarajaWatchProcedure = "/rafiki.v1.Control/DarajaWatch"
+	// ControlListProviderBansProcedure is the fully-qualified name of the Control's ListProviderBans
+	// RPC.
+	ControlListProviderBansProcedure = "/rafiki.v1.Control/ListProviderBans"
+	// ControlBanProviderProcedure is the fully-qualified name of the Control's BanProvider RPC.
+	ControlBanProviderProcedure = "/rafiki.v1.Control/BanProvider"
+	// ControlUnbanProviderProcedure is the fully-qualified name of the Control's UnbanProvider RPC.
+	ControlUnbanProviderProcedure = "/rafiki.v1.Control/UnbanProvider"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -188,6 +195,13 @@ type ControlClient interface {
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest]) (*connect.ServerStreamForClient[v1.DarajaWatchResponse], error)
+	// Provider bans exclude OpenRouter providers from routing. List shows the
+	// cache guard's automatic ejections alongside operator bans; Ban and Unban
+	// manage operator bans only and require an admin user credential (or the
+	// anonymous local socket).
+	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
+	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
+	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -477,6 +491,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("DarajaWatch")),
 			connect.WithClientOptions(opts...),
 		),
+		listProviderBans: connect.NewClient[v1.ListProviderBansRequest, v1.ListProviderBansResponse](
+			httpClient,
+			baseURL+ControlListProviderBansProcedure,
+			connect.WithSchema(controlMethods.ByName("ListProviderBans")),
+			connect.WithClientOptions(opts...),
+		),
+		banProvider: connect.NewClient[v1.BanProviderRequest, v1.BanProviderResponse](
+			httpClient,
+			baseURL+ControlBanProviderProcedure,
+			connect.WithSchema(controlMethods.ByName("BanProvider")),
+			connect.WithClientOptions(opts...),
+		),
+		unbanProvider: connect.NewClient[v1.UnbanProviderRequest, v1.UnbanProviderResponse](
+			httpClient,
+			baseURL+ControlUnbanProviderProcedure,
+			connect.WithSchema(controlMethods.ByName("UnbanProvider")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -528,6 +560,9 @@ type controlClient struct {
 	darajaLaunch             *connect.Client[v1.DarajaLaunchRequest, v1.DarajaLaunchResponse]
 	darajaSend               *connect.Client[v1.DarajaSendRequest, v1.DarajaSendResponse]
 	darajaWatch              *connect.Client[v1.DarajaWatchRequest, v1.DarajaWatchResponse]
+	listProviderBans         *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
+	banProvider              *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
+	unbanProvider            *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -760,6 +795,21 @@ func (c *controlClient) DarajaWatch(ctx context.Context, req *connect.Request[v1
 	return c.darajaWatch.CallServerStream(ctx, req)
 }
 
+// ListProviderBans calls rafiki.v1.Control.ListProviderBans.
+func (c *controlClient) ListProviderBans(ctx context.Context, req *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error) {
+	return c.listProviderBans.CallUnary(ctx, req)
+}
+
+// BanProvider calls rafiki.v1.Control.BanProvider.
+func (c *controlClient) BanProvider(ctx context.Context, req *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error) {
+	return c.banProvider.CallUnary(ctx, req)
+}
+
+// UnbanProvider calls rafiki.v1.Control.UnbanProvider.
+func (c *controlClient) UnbanProvider(ctx context.Context, req *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error) {
+	return c.unbanProvider.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -811,6 +861,13 @@ type ControlHandler interface {
 	DarajaLaunch(context.Context, *connect.Request[v1.DarajaLaunchRequest]) (*connect.Response[v1.DarajaLaunchResponse], error)
 	DarajaSend(context.Context, *connect.Request[v1.DarajaSendRequest]) (*connect.Response[v1.DarajaSendResponse], error)
 	DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error
+	// Provider bans exclude OpenRouter providers from routing. List shows the
+	// cache guard's automatic ejections alongside operator bans; Ban and Unban
+	// manage operator bans only and require an admin user credential (or the
+	// anonymous local socket).
+	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
+	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
+	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -1096,6 +1153,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("DarajaWatch")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListProviderBansHandler := connect.NewUnaryHandler(
+		ControlListProviderBansProcedure,
+		svc.ListProviderBans,
+		connect.WithSchema(controlMethods.ByName("ListProviderBans")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlBanProviderHandler := connect.NewUnaryHandler(
+		ControlBanProviderProcedure,
+		svc.BanProvider,
+		connect.WithSchema(controlMethods.ByName("BanProvider")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlUnbanProviderHandler := connect.NewUnaryHandler(
+		ControlUnbanProviderProcedure,
+		svc.UnbanProvider,
+		connect.WithSchema(controlMethods.ByName("UnbanProvider")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -1190,6 +1265,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlDarajaSendHandler.ServeHTTP(w, r)
 		case ControlDarajaWatchProcedure:
 			controlDarajaWatchHandler.ServeHTTP(w, r)
+		case ControlListProviderBansProcedure:
+			controlListProviderBansHandler.ServeHTTP(w, r)
+		case ControlBanProviderProcedure:
+			controlBanProviderHandler.ServeHTTP(w, r)
+		case ControlUnbanProviderProcedure:
+			controlUnbanProviderHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1381,4 +1462,16 @@ func (UnimplementedControlHandler) DarajaSend(context.Context, *connect.Request[
 
 func (UnimplementedControlHandler) DarajaWatch(context.Context, *connect.Request[v1.DarajaWatchRequest], *connect.ServerStream[v1.DarajaWatchResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DarajaWatch is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListProviderBans is not implemented"))
+}
+
+func (UnimplementedControlHandler) BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.BanProvider is not implemented"))
+}
+
+func (UnimplementedControlHandler) UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UnbanProvider is not implemented"))
 }

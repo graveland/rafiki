@@ -290,6 +290,9 @@ watch that row freeze.
 | `DarajaLaunch` | unary | Launches a claude child via daraja on a matching executor. Selects an executor that admits the request's label selector AND declares "claude" in its `LaunchKinds`, calls `AdminService.Launch` on that executor with a one-shot ticket, then waits for the daraja's reverse dial into the pool. A match yielding zero candidates returns `explanation` with per-candidate refusal reasons. Response carries `child_id`, `pid`, `pgid`, and `connected_unix_ms`. Requires a configured executor pool and daraja connect address (**`RAFIKI_CONTROL_LISTEN` must be set**; Unix socket paths are refused because remote executors cannot reach daemon-local sockets). |
 | `DarajaSend` | unary | Writes bytes to a live child's stdin via the connected daraja. Unary rather than bidi because the HTTP/1.1 remote plane cannot carry the bidirectional Relay stream. Returns `acknowledged=true` on success; the child id must name a currently-connected daraja. |
 | `DarajaWatch` | server-streaming | Streams stdout and lifecycle markers (ProcessRestarted, ProcessExited) from a connected daraja. Server-streaming only — client sends no messages during the watch. The stream follows the child until disconnect or context cancellation. Lifecycle events let callers distinguish process-boundary resets from ordinary output. |
+| `ListProviderBans` | unary | Every live exclusion of an OpenRouter provider from routing: operator bans (`reason` `operator`, `model_line` `*` = every model line) and the provider cache guard's own ejections (`reason` `no_cache`, one model line). `expires_at` (unix seconds) is ABSENT for a ban that lasts until lifted; `persistent` is false when the daemon has no ejection log, meaning bans are lost on restart. Open to any caller (§"Provider bans") |
+| `BanProvider` | unary | Ban one provider slug from every model line, effective on the next OpenRouter request on both the proxy face and fundi children. `duration_seconds` is optional: absent = until lifted, present must be > 0 (`CodeInvalidArgument` otherwise). Re-banning replaces expiry and note. Admin user credential or the anonymous unix socket only; anything else `CodePermissionDenied` |
+| `UnbanProvider` | unary | Lift an operator ban (`CodeNotFound` when none is live). Does not clear the cache guard's own ejections of that provider. Same authority rule as `BanProvider` |
 
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 
@@ -327,6 +330,24 @@ multi-user scoping is built. The verbs are mounted inside the proxy face via
 `server.Handler.Mount`; there is deliberately no second mount in `main.go` —
 a `mux.Handle` for `/rafiki.v1.Control/` there would shadow the face's auth
 middleware, because ServeMux prefers the longer pattern.
+
+### Provider bans (`ListProviderBans`, `BanProvider`, `UnbanProvider`)
+
+Operator bans ride the provider cache guard (`routing.ProviderGuard`): a ban is
+an ejection with reason `operator` recorded under model line `*`, merged into
+every outgoing OpenRouter request's `provider.ignore` alongside the guard's
+own ejections. Operator bans are exempt from the guard's per-model-line cap of
+three. Every ban and lift is appended to `openrouter.provider_ejection` (a lift
+is a superseding `reason = 'lift'` row, never a delete) BEFORE it takes effect,
+and a failed write fails the call; the daemon rehydrates the latest row per
+`(provider, model_line)` at startup. Another daemon on the same database sees a
+ban only when it restarts. `RAFIKI_PROVIDER_GUARD=off` disables automatic
+ejection only; operator bans still apply. Backs `rafiki providers`.
+
+A ban reroutes every user's children, so mutations require an admin user
+credential or the anonymous unix socket (the socket is the credential); a
+non-admin user, a child-attributed identity and a per-child token are all
+refused `CodePermissionDenied`.
 
 ### Presets (`ListPresets`, `GetPreset`, `PutPreset`, `DeletePreset`)
 

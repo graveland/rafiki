@@ -748,6 +748,13 @@ service Control {
   rpc DarajaLaunch(DarajaLaunchRequest) returns (DarajaLaunchResponse);
   rpc DarajaSend(DarajaSendRequest) returns (DarajaSendResponse);
   rpc DarajaWatch(DarajaWatchRequest) returns (stream DarajaWatchResponse);
+  // Provider bans exclude OpenRouter providers from routing. List shows the
+  // cache guard's automatic ejections alongside operator bans; Ban and Unban
+  // manage operator bans only and require an admin user credential (or the
+  // anonymous local socket).
+  rpc ListProviderBans(ListProviderBansRequest) returns (ListProviderBansResponse);
+  rpc BanProvider(BanProviderRequest) returns (BanProviderResponse);
+  rpc UnbanProvider(UnbanProviderRequest) returns (UnbanProviderResponse);
 }
 
 // SkillRow is one row of conversations.skills. body is omitted from list
@@ -1011,3 +1018,43 @@ message RecallStatusResponse {
   string embedding_model = 11;
   string summary_model = 12;
 }
+
+// ProviderBan is one live exclusion of an OpenRouter provider from routing:
+// an operator ban (reason "operator", model_line "*" = every model line) or a
+// cache-guard ejection (reason "no_cache", scoped to one model line).
+message ProviderBan {
+  string provider = 1;           // OpenRouter slug ("openinference"); a guard ejection may carry the display name
+  string model_line = 2;
+  string reason = 3;
+  int64 created_at = 4;          // unix seconds
+  optional int64 expires_at = 5; // unix seconds; absent = until lifted
+  string note = 6;
+}
+
+message ListProviderBansRequest {}
+message ListProviderBansResponse {
+  repeated ProviderBan bans = 1;
+  // persistent is false when the daemon has no ejection log: bans then last
+  // only until it restarts.
+  bool persistent = 2;
+}
+
+// BanProviderRequest bans provider from every model line. Banning an
+// already-banned provider replaces its expiry and note.
+message BanProviderRequest {
+  string provider = 1;
+  // Absent = until lifted. Present must be > 0: a zero-length ban is a
+  // mistake, not a request.
+  optional int64 duration_seconds = 2;
+  string note = 3;
+}
+message BanProviderResponse {
+  ProviderBan ban = 1;
+  bool persistent = 2;
+}
+
+// UnbanProviderRequest lifts an operator ban. It does not clear the cache
+// guard's own ejections of the same provider. NotFound when no operator ban is
+// live.
+message UnbanProviderRequest { string provider = 1; }
+message UnbanProviderResponse {}

@@ -47,19 +47,20 @@ func providerGuardEnabled(v string) bool {
 }
 
 // buildProviderGuard constructs the guard and seeds it from the durable
-// ejection log. Returns nil when disabled — a nil *ProviderGuard is inert at
-// every call site, so callers need no branch.
+// ejection log. It is ALWAYS built: disabling the guard turns off automatic
+// ejection only, because the guard also carries operator bans, and a nil
+// guard would silently drop them.
 //
 // With no pool the guard still runs, memory-only: it protects the budget for
 // this process's lifetime and simply forgets across restarts, which is strictly
 // better than not guarding at all.
 func buildProviderGuard(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) *routing.ProviderGuard {
-	if !providerGuardEnabled(paths.Get(paths.ProviderGuard)) {
-		logger.Warn("provider cache guard disabled; a provider that stops serving cache hits will not be ejected",
-			"env", paths.ProviderGuard)
-		return nil
-	}
 	guard := routing.NewProviderGuard(routing.DefaultEjectTTL, logger)
+	if !providerGuardEnabled(paths.Get(paths.ProviderGuard)) {
+		logger.Warn("provider cache guard disabled; a provider that stops serving cache hits will not be ejected (operator bans still apply)",
+			"env", paths.ProviderGuard)
+		guard.SetObserve(false)
+	}
 	if pool == nil {
 		return guard
 	}
@@ -343,6 +344,7 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// Connect reports as CodeUnimplemented.
 	connectServer := connectapi.NewServer(store.NewMessages(pool))
 	h.ControlPath, h.Control = connectServer.Routes()
+	connectServer.SetProviderBanManager(connectProviderBans{g: guard})
 	mcpFace := newMCPFace(logger, captureStore, quotaStore, version.String())
 	h.MCPPath, h.MCP = mcpFace.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler {

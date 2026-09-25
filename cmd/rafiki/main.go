@@ -147,6 +147,7 @@ func newRootCmd() *cobra.Command {
 		newLabelCmd(),
 		newModelsCmd(),
 		newPresetCmd(),
+		newProvidersCmd(),
 		newRecallCmd(),
 		newMemoryCmd(),
 		newServiceCmd(),

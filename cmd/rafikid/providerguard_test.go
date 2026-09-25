@@ -65,12 +65,25 @@ func TestBuildProviderGuardRehydrates(t *testing.T) {
 }
 
 // TestBuildProviderGuardDisabled proves the off-switch reaches all the way
-// through the constructor, and that a nil pool still yields a working
-// memory-only guard rather than nothing.
+// through the constructor as "no automatic ejection" — NOT a nil guard, which
+// would silently drop operator bans — and that a nil pool still yields a
+// working memory-only guard rather than nothing.
 func TestBuildProviderGuardDisabled(t *testing.T) {
 	t.Setenv(paths.ProviderGuard, "off")
-	if g := buildProviderGuard(context.Background(), nil, slog.New(slog.DiscardHandler)); g != nil {
-		t.Errorf("guard = %v with RAFIKI_PROVIDER_GUARD=off, want nil", g)
+	g := buildProviderGuard(context.Background(), nil, slog.New(slog.DiscardHandler))
+	if g == nil {
+		t.Fatal("guard = nil with RAFIKI_PROVIDER_GUARD=off; operator bans need it")
+	}
+	now := time.Now()
+	for range 20 {
+		g.Observe(now, routing.Observation{Provider: "CoreWeave", Model: "vendor/m", Conversation: "c",
+			PrefixHash: "h", InputTokens: 50000})
+	}
+	if _, err := g.Ban(context.Background(), now, "banned", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.IgnoredFor(now, "vendor/m"); len(got) != 1 || got[0] != "banned" {
+		t.Errorf("IgnoredFor = %v with the guard off, want the ban only", got)
 	}
 	t.Setenv(paths.ProviderGuard, "")
 	if g := buildProviderGuard(context.Background(), nil, slog.New(slog.DiscardHandler)); g == nil {

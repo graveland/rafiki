@@ -213,3 +213,34 @@ func TestSendParamsAliasOnlyMergesGuardIgnore(t *testing.T) {
 		t.Errorf("alias pin + guard ignore not merged as expected, wire body = %s", body)
 	}
 }
+
+// TestSendParamsOperatorBanReachesTheWire proves an operator ban — recorded
+// against every model line, not the model being sent — lands in the outgoing
+// provider.ignore alongside an alias pin, on a model the guard never observed.
+func TestSendParamsOperatorBanReachesTheWire(t *testing.T) {
+	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("ok"),
+	}}
+	c, err := NewClient(
+		WithProviders(aliasPinSet(t)),
+		WithProviderSender("anthropic", &scriptedSender{}),
+		WithProviderSender("openrouter", openrouter),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
+	if _, err := g.Ban(context.Background(), time.Now(), "open-inference", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	c.SetProviderGuard(g)
+
+	sendAliasParams(t, c, "openrouter/glm-flash@fireworks")
+
+	body := wireBody(t, openrouter.lastReq, 0)
+	if !strings.Contains(body, `"provider":{"only":["fireworks"],"ignore":["open-inference"]}`) {
+		t.Errorf("operator ban not merged into the wire body: %s", body)
+	}
+}

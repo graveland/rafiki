@@ -164,8 +164,8 @@ func TestModelLine(t *testing.T) {
 	}
 }
 
-// TestGuardNilSafe proves a nil guard is inert rather than a panic, which is
-// what RAFIKI_PROVIDER_GUARD=off leaves behind at every call site.
+// TestGuardNilSafe proves a nil guard is inert rather than a panic, so library
+// callers that never attach one need no branch.
 func TestGuardNilSafe(t *testing.T) {
 	var g *ProviderGuard
 	g.Observe(time.Now(), miss("c1", "CoreWeave"))
