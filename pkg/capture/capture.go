@@ -356,6 +356,7 @@ type TurnResult struct {
 	Response            []byte
 	StopReason          string
 	Upstream            string
+	ServedProvider      string // OpenRouter provider that served the response; empty = not reported (stored NULL)
 	InputTokens         int64
 	OutputTokens        int64
 	CacheReadTokens     int64
@@ -369,10 +370,11 @@ func (s *CaptureStore) CompleteTurn(ctx context.Context, r TurnResult) error {
 			`UPDATE conversations.conversation_turn
 			    SET status='complete', response=$3, stop_reason=$4, upstream=$5,
 			        input_tokens=$6, output_tokens=$7, cache_read_tokens=$8, cache_creation_tokens=$9, latency_ms=$10,
-			        model=COALESCE(NULLIF($11,''), model)
+			        model=COALESCE(NULLIF($11,''), model), served_provider=$12
 			  WHERE id=$1::uuid AND created_at=$2`,
 			r.TurnID, r.CreatedAt, nullifyBytes(jsonbSafe(r.Response)), nullify(r.StopReason), nullify(r.Upstream),
-			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model)
+			r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens, r.LatencyMS, r.Model,
+			nullify(r.ServedProvider))
 		if err != nil {
 			return err
 		}

@@ -536,6 +536,7 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 			Ordinal: t.Ordinal, Role: t.Role, Content: t.Content, Skills: t.Skills,
 			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
 			LatencyMS: t.LatencyMS, Model: t.Model, PrefixHash: t.PrefixHash,
+			ServedProvider: t.ServedProvider,
 		})
 	}
 	return connectapi.TranscriptRow{

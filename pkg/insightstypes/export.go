@@ -24,6 +24,9 @@ type TranscriptTurn struct {
 	LatencyMS       *int   `json:"latency_ms"`
 	Model           string `json:"model"`
 	PrefixHash      string `json:"prefix_hash"`
+
+	// The OpenRouter provider that served the turn; empty when not reported.
+	ServedProvider string `json:"served_provider"`
 }
 
 // Transcript is a decomposed conversation: header identity, the ordered message

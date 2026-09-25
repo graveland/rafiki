@@ -61,6 +61,9 @@ func TestCaptureStore(t *testing.T) {
 	t.Run("conversation model backfill", func(t *testing.T) {
 		testConversationModelBackfill(t, ctx, pool, cs)
 	})
+	t.Run("CompleteTurn served_provider", func(t *testing.T) {
+		testCompleteTurnServedProvider(t, ctx, pool, cs)
+	})
 }
 
 // newTestStore connects a CaptureStore to the RAFIKI_TEST_DSN database,
@@ -205,6 +208,61 @@ func testInsertTurnIntentAndCompleteTurn(t *testing.T, ctx context.Context, pool
 	}
 	if gotLatencyMS != want.LatencyMS {
 		t.Errorf("latency_ms = %d, want %d", gotLatencyMS, want.LatencyMS)
+	}
+}
+
+// testCompleteTurnServedProvider pins the served-provider write: a non-empty
+// ServedProvider is stored verbatim, an empty one is stored as SQL NULL (the
+// "not reported" sentinel — never an empty string), so export's coalesce and
+// any NULL-means-unknown reader both see the same thing.
+func testCompleteTurnServedProvider(t *testing.T, ctx context.Context, pool *pgxpool.Pool, cs *CaptureStore) {
+	convID, err := cs.EnsureConversation(ctx, ConversationRef{
+		OriginEntrypoint: "diagnose", DrivenBy: "server",
+	})
+	if err != nil {
+		t.Fatalf("EnsureConversation: %v", err)
+	}
+	newTurn := func() (string, time.Time) {
+		t.Helper()
+		id, createdAt, err := cs.InsertTurnIntent(ctx, TurnIntent{
+			ConversationID: convID, Ordinal: 1, Model: "claude-test", Request: []byte(`{"messages":[]}`),
+		})
+		if err != nil {
+			t.Fatalf("InsertTurnIntent: %v", err)
+		}
+		return id, createdAt
+	}
+	readServedProvider := func(turnID string, createdAt time.Time) any {
+		t.Helper()
+		var served any
+		if err := pool.QueryRow(ctx, `SELECT served_provider FROM conversations.conversation_turn
+			 WHERE id=$1::uuid AND created_at=$2`, turnID, createdAt).Scan(&served); err != nil {
+			t.Fatalf("read back served_provider: %v", err)
+		}
+		return served
+	}
+
+	turnID, createdAt := newTurn()
+	if err := cs.CompleteTurn(ctx, TurnResult{
+		TurnID: turnID, CreatedAt: createdAt, Model: "claude-test-served",
+		Response: []byte(`{"content":[]}`), StopReason: "end_turn",
+		Upstream: "openrouter", ServedProvider: "Together",
+	}); err != nil {
+		t.Fatalf("CompleteTurn (with provider): %v", err)
+	}
+	if got := readServedProvider(turnID, createdAt); got != "Together" {
+		t.Errorf("served_provider = %v, want Together", got)
+	}
+
+	turnID, createdAt = newTurn()
+	if err := cs.CompleteTurn(ctx, TurnResult{
+		TurnID: turnID, CreatedAt: createdAt, Model: "claude-test-served",
+		Response: []byte(`{"content":[]}`), StopReason: "end_turn", Upstream: "anthropic",
+	}); err != nil {
+		t.Fatalf("CompleteTurn (no provider): %v", err)
+	}
+	if got := readServedProvider(turnID, createdAt); got != nil {
+		t.Errorf("served_provider = %v, want SQL NULL for an unreported provider", got)
 	}
 }
 

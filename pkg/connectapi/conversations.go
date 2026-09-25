@@ -41,6 +41,7 @@ type TranscriptTurnRow struct {
 	InputTokens, OutputTokens, CacheReadTokens *int64 // nil = not reported
 	LatencyMS                                  *int
 	Model, PrefixHash                          string
+	ServedProvider                             string // OpenRouter provider that served the turn; empty = not reported
 }
 
 // TranscriptRow mirrors insights.Transcript.
@@ -160,6 +161,7 @@ func (s *Server) ConversationExport(
 			Ordinal: int32(t.Ordinal), Role: t.Role, Content: t.Content, Skills: t.Skills,
 			InputTokens: t.InputTokens, OutputTokens: t.OutputTokens, CacheReadTokens: t.CacheReadTokens,
 			LatencyMs: latencyMS32(t.LatencyMS), Model: t.Model, PrefixHash: t.PrefixHash,
+			ServedProvider: t.ServedProvider,
 		})
 	}
 	return connect.NewResponse(&rafikiv1.ConversationExportResponse{

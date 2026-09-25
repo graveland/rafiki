@@ -365,3 +365,48 @@ func TestMigrate0019UserAttribution(t *testing.T) {
 		t.Fatal("conversation_turn lost its columnstore hypertable status")
 	}
 }
+
+// TestMigrate0037ServedProvider pins 0037: the chain produces a nullable,
+// default-less served_provider on conversation_turn — the OpenRouter provider
+// that served each turn, NULL meaning not reported — and its down migration
+// actually drops it.
+func TestMigrate0037ServedProvider(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var typ, nullable, hasDefault string
+	if err := pool.QueryRow(ctx, `
+		SELECT data_type, is_nullable, coalesce(column_default,'')
+		  FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='conversation_turn'
+		   AND column_name='served_provider'`).Scan(&typ, &nullable, &hasDefault); err != nil {
+		t.Fatalf("probe served_provider: %v", err)
+	}
+	if typ != "text" || nullable != "YES" || hasDefault != "" {
+		t.Fatalf("served_provider = (%s, nullable=%s, default=%q), want (text, YES, no default)", typ, nullable, hasDefault)
+	}
+
+	// There is no MigrateTo API, so exercise the down migration directly:
+	// read the file (its absence or a no-op body must fail this test, not
+	// silently restore to 0036 with the column still there) and run it.
+	down, err := os.ReadFile("migrations/0037_turn_served_provider.down.sql")
+	if err != nil {
+		t.Fatalf("read down migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	var exists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		 WHERE table_schema='conversations' AND table_name='conversation_turn'
+		   AND column_name='served_provider')`).Scan(&exists); err != nil {
+		t.Fatalf("probe served_provider after down: %v", err)
+	}
+	if exists {
+		t.Fatal("served_provider survived the down migration")
+	}
+}

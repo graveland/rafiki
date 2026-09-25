@@ -124,6 +124,7 @@ type seedTurn struct {
 	cacheRead       int64
 	cacheCreate     int64
 	latencyMS       int
+	servedProvider  string
 	prefixHash      string
 	prefixContent   string // JSON; stored NULL when empty
 	responseOrdinal *int
@@ -157,15 +158,16 @@ func insertTurn(t *testing.T, pool *pgxpool.Pool, convID string, st seedTurn) st
 		`INSERT INTO conversations.conversation_turn
 		   (conversation_id, ordinal, status, model, request, response, stop_reason,
 		    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-		    upstream, latency_ms, source, prefix_hash, response_ordinal, prefix_content, created_at)
+		    upstream, latency_ms, source, prefix_hash, response_ordinal, prefix_content, created_at,
+		    served_provider)
 		 VALUES ($1, $2, $3, $4, '{}'::jsonb, NULL, 'end_turn',
 		         $5, $6, $7, $8,
-		         $9, $10, $11, $12, $13, $14, $15)
+		         $9, $10, $11, $12, $13, $14, $15, $16)
 		 RETURNING id::text`,
 		convID, st.ordinal, status, nullStr(st.model),
 		st.inTok, st.outTok, st.cacheRead, st.cacheCreate,
 		nullStr(st.upstream), st.latencyMS, nullStr(st.source), nullStr(st.prefixHash),
-		st.responseOrdinal, nullJSON(st.prefixContent), createdAt).Scan(&id)
+		st.responseOrdinal, nullJSON(st.prefixContent), createdAt, nullStr(st.servedProvider)).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert turn: %v", err)
 	}

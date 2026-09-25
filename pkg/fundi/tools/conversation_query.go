@@ -43,6 +43,7 @@ type ConversationTranscriptTurn struct {
 	InputTokens, OutputTokens, CacheReadTokens *int64 // nil = not reported
 	LatencyMS                                  *int
 	Model, PrefixHash                          string
+	ServedProvider                             string // OpenRouter provider that served the turn; empty = not reported
 }
 
 // ConversationTranscript mirrors insights.Transcript.

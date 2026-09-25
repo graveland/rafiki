@@ -2569,8 +2569,11 @@ type TranscriptTurn struct {
 	LatencyMs       *int32 `protobuf:"varint,8,opt,name=latency_ms,json=latencyMs,proto3,oneof" json:"latency_ms,omitempty"`
 	Model           string `protobuf:"bytes,9,opt,name=model,proto3" json:"model,omitempty"`
 	PrefixHash      string `protobuf:"bytes,10,opt,name=prefix_hash,json=prefixHash,proto3" json:"prefix_hash,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The OpenRouter provider that served the turn (e.g. "Together"); empty
+	// when not reported (native Anthropic, no turn row, or pre-column turns).
+	ServedProvider string `protobuf:"bytes,11,opt,name=served_provider,json=servedProvider,proto3" json:"served_provider,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *TranscriptTurn) Reset() {
@@ -2669,6 +2672,13 @@ func (x *TranscriptTurn) GetModel() string {
 func (x *TranscriptTurn) GetPrefixHash() string {
 	if x != nil {
 		return x.PrefixHash
+	}
+	return ""
+}
+
+func (x *TranscriptTurn) GetServedProvider() string {
+	if x != nil {
+		return x.ServedProvider
 	}
 	return ""
 }
@@ -8168,7 +8178,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x1aConversationSearchResponse\x122\n" +
 	"\x04rows\x18\x01 \x03(\v2\x1e.rafiki.v1.ConversationSummaryR\x04rows\"D\n" +
 	"\x19ConversationExportRequest\x12'\n" +
-	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"\x96\x03\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"\xbf\x03\n" +
 	"\x0eTranscriptTurn\x12\x18\n" +
 	"\aordinal\x18\x01 \x01(\x05R\aordinal\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -8182,7 +8192,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05model\x18\t \x01(\tR\x05model\x12\x1f\n" +
 	"\vprefix_hash\x18\n" +
 	" \x01(\tR\n" +
-	"prefixHashB\x0f\n" +
+	"prefixHash\x12'\n" +
+	"\x0fserved_provider\x18\v \x01(\tR\x0eservedProviderB\x0f\n" +
 	"\r_input_tokensB\x10\n" +
 	"\x0e_output_tokensB\x14\n" +
 	"\x12_cache_read_tokensB\r\n" +

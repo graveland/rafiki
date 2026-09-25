@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/capture"
@@ -690,5 +691,82 @@ func TestUserContentOrdersImagesFirst(t *testing.T) {
 	// An image carrying no bytes is skipped rather than sent as an empty block.
 	if n := len(UserContent("hi", []UserImage{{MediaType: "image/png"}})); n != 1 {
 		t.Errorf("empty image data must be skipped, got %d blocks", n)
+	}
+}
+
+// respondWithProvider returns a canned response carrying OpenRouter's
+// non-standard top-level "provider" field — the shape a real OpenRouter body
+// has, and the only place the serving provider's name arrives.
+func respondWithProvider(provider string) func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+	return func(anthropic.MessageNewParams) (*anthropic.Message, error) {
+		return cannedMessage(`{"id":"msg_or","type":"message","role":"assistant","model":"deepseek/deepseek-v4-pro",` +
+			`"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",` +
+			`"usage":{"input_tokens":10,"output_tokens":5},"provider":"` + provider + `"}`), nil
+	}
+}
+
+// servedProviderOfLastTurn reads the captured turn's served_provider straight
+// out of the database — the value completeTurn wrote. A NULL column reads as
+// "" (not reported).
+func servedProviderOfLastTurn(t *testing.T, pool *pgxpool.Pool, convID string) string {
+	t.Helper()
+	var served *string
+	if err := pool.QueryRow(context.Background(), `SELECT served_provider
+		 FROM conversations.conversation_turn
+		 WHERE conversation_id=$1::uuid
+		 ORDER BY created_at DESC LIMIT 1`, convID).Scan(&served); err != nil {
+		t.Fatalf("read served_provider: %v", err)
+	}
+	if served == nil {
+		return ""
+	}
+	return *served
+}
+
+// TestCaptureRecordsServedProvider proves the non-streaming completion path
+// records which OpenRouter provider served the turn: a response body with a
+// top-level "provider" field must land in conversation_turn.served_provider.
+func TestCaptureRecordsServedProvider(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondWithProvider("Together"),
+	}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Send(ctx, UserText("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if got := servedProviderOfLastTurn(t, pool, conv.ID); got != "Together" {
+		t.Errorf("captured served_provider = %q, want Together", got)
+	}
+}
+
+// TestCaptureRecordsServedProviderStreaming proves the same for the streaming
+// path, where the provider name arrives inside message_start's message and
+// must survive Accumulate into the final message (the ProviderGuard's
+// streaming Observe already relies on this).
+func TestCaptureRecordsServedProviderStreaming(t *testing.T) {
+	pool := convTestPool(t)
+	ctx := context.Background()
+	start := sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_or","type":"message",`+
+		`"role":"assistant","model":"deepseek/deepseek-v4-pro","content":[],`+
+		`"usage":{"input_tokens":10,"output_tokens":0},"provider":"Together"}}`)
+	events := append([]ssestream.Event{start, contentBlockStartEvent()},
+		textDeltaEvent("hi"), contentBlockStopEvent(), messageDeltaEvent(), messageStopEvent())
+	sender := &fakeStreamingSender{scripts: []streamScript{{events: events}}}
+	c := testClient(t, pool, sender)
+	conv, err := c.Conversation(ctx, NewConversation("", "test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Send(ctx, UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {})); err != nil {
+		t.Fatal(err)
+	}
+	if got := servedProviderOfLastTurn(t, pool, conv.ID); got != "Together" {
+		t.Errorf("captured served_provider = %q, want Together (streaming)", got)
 	}
 }

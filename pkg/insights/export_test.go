@@ -114,6 +114,50 @@ func TestExport_AttachesTurnMetrics(t *testing.T) {
 	}
 }
 
+// TestExport_ServedProvider pins the per-turn serving-provider export: a turn
+// row that recorded which OpenRouter provider served it exports that name, a
+// row with no record (native Anthropic, or a turn captured before the column
+// existed) exports "" — not a bogus provider, not a JSON null.
+func TestExport_ServedProvider(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	convID := insertConversation(t, pool, "client", "dana")
+	one := 1
+	two := 2
+	three := 3
+	insertTurn(t, pool, convID, seedTurn{
+		ordinal: 0, model: "deepseek/deepseek-v4-pro", upstream: "openrouter",
+		inTok: 10, outTok: 5, latencyMS: 100, servedProvider: "Together",
+		responseOrdinal: &one, createdAt: time.Now().Add(-2 * time.Minute),
+	})
+	insertTurn(t, pool, convID, seedTurn{
+		ordinal: 1, model: "claude-fable-5", upstream: "anthropic",
+		inTok: 11, outTok: 6, latencyMS: 110,
+		responseOrdinal: &two, createdAt: time.Now().Add(-time.Minute),
+	})
+	insertTurn(t, pool, convID, seedTurn{
+		ordinal: 2, model: "deepseek/deepseek-v4-pro", upstream: "openrouter",
+		inTok: 12, outTok: 7, latencyMS: 120, servedProvider: "Parasail",
+		responseOrdinal: &three, createdAt: time.Now(),
+	})
+	insertMessage(t, pool, convID, 0, "user", `[{"type":"text","text":"hi"}]`)
+	insertMessage(t, pool, convID, 1, "assistant", `[{"type":"text","text":"a"}]`)
+	insertMessage(t, pool, convID, 2, "assistant", `[{"type":"text","text":"b"}]`)
+	insertMessage(t, pool, convID, 3, "assistant", `[{"type":"text","text":"c"}]`)
+
+	tr, err := New(pool).Export(ctx, ScopeAll(), convID)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	want := map[int]string{0: "", 1: "Together", 2: "", 3: "Parasail"}
+	for idx := range tr.Turns {
+		turn := &tr.Turns[idx]
+		if got := turn.ServedProvider; got != want[turn.Ordinal] {
+			t.Errorf("ordinal %d served_provider = %q, want %q", turn.Ordinal, got, want[turn.Ordinal])
+		}
+	}
+}
+
 func TestExport_NotFound(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)

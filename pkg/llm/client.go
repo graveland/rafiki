@@ -1001,7 +1001,11 @@ func (c *Client) completeTurn(ctx context.Context, turnID string, createdAt time
 	} else if cErr = c.capture.CompleteTurn(ctx, capture.TurnResult{
 		TurnID: turnID, CreatedAt: createdAt, Model: string(resp.Model), Response: respJSON,
 		StopReason: string(resp.StopReason), Upstream: string(upstream),
-		InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
+		// OpenRouter's non-standard top-level "provider" field names the actual
+		// backend that served the turn ("Together", "Parasail", …); "" for a
+		// native Anthropic response, which has no such field.
+		ServedProvider: ProviderOf(resp),
+		InputTokens:    resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens,
 		CacheReadTokens: resp.Usage.CacheReadInputTokens, CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
 		LatencyMS: latencyMS,
 	}); cErr != nil {

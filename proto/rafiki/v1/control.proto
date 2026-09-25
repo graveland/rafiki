@@ -412,6 +412,9 @@ message TranscriptTurn {
   optional int32 latency_ms = 8;
   string model = 9;
   string prefix_hash = 10;
+  // The OpenRouter provider that served the turn (e.g. "Together"); empty
+  // when not reported (native Anthropic, no turn row, or pre-column turns).
+  string served_provider = 11;
 }
 
 message ConversationExportResponse {

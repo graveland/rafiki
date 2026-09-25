@@ -35,6 +35,14 @@ type TranscriptTurn struct {
 	LatencyMS       *int   `json:"latency_ms"`
 	Model           string `json:"model"`
 	PrefixHash      string `json:"prefix_hash"`
+
+	// The OpenRouter provider that actually served the producing turn (e.g.
+	// "Together", "Parasail"), empty when not reported: a native Anthropic
+	// response, a message with no turn row, or a turn captured before the
+	// column existed. OpenRouter load-balances each call across backends with
+	// different quantizations, so upstream's "openrouter" alone cannot
+	// separate model effects from provider effects.
+	ServedProvider string `json:"served_provider"`
 }
 
 // Transcript is a decomposed conversation: header identity, the ordered message
@@ -55,6 +63,7 @@ type turnMetrics struct {
 	inTok, outTok, cacheRead *int64
 	latencyMS                *int
 	model, prefixHash        string
+	servedProvider           string
 }
 
 // Export reconstructs a conversation as an ordered, decomposed transcript.
@@ -114,6 +123,7 @@ func (i *Insights) Export(ctx context.Context, scope Scope, conversationID strin
 		if m, ok := metrics[ordinal]; ok {
 			turn.InputTokens, turn.OutputTokens, turn.CacheReadTokens = m.inTok, m.outTok, m.cacheRead
 			turn.LatencyMS, turn.Model, turn.PrefixHash = m.latencyMS, m.model, m.prefixHash
+			turn.ServedProvider = m.servedProvider
 		}
 		tr.Turns = append(tr.Turns, turn)
 	}
@@ -140,7 +150,7 @@ func (i *Insights) turnMetricsByOrdinal(ctx context.Context, conversationID stri
 	rows, err := i.pool.Query(ctx, `
 		SELECT coalesce(response_ordinal, ordinal), input_tokens, output_tokens,
 		       cache_read_tokens, latency_ms,
-		       coalesce(model,''), coalesce(prefix_hash,'')
+		       coalesce(model,''), coalesce(prefix_hash,''), coalesce(served_provider,'')
 		  FROM conversations.conversation_turn
 		 WHERE conversation_id = $1::uuid
 		 ORDER BY created_at`, conversationID)
@@ -154,7 +164,7 @@ func (i *Insights) turnMetricsByOrdinal(ctx context.Context, conversationID stri
 			ord int
 			m   turnMetrics
 		)
-		if err := rows.Scan(&ord, &m.inTok, &m.outTok, &m.cacheRead, &m.latencyMS, &m.model, &m.prefixHash); err != nil {
+		if err := rows.Scan(&ord, &m.inTok, &m.outTok, &m.cacheRead, &m.latencyMS, &m.model, &m.prefixHash, &m.servedProvider); err != nil {
 			return nil, fmt.Errorf("export: scan turn metrics: %w", err)
 		}
 		out[ord] = m // ORDER BY created_at → newest wins on duplicate keys
