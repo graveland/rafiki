@@ -343,8 +343,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// control plane" produce the same bodiless 404, which net/http answers and
 	// Connect reports as CodeUnimplemented.
 	connectServer := connectapi.NewServer(store.NewMessages(pool))
-	h.ControlPath, h.Control = connectServer.Routes()
 	connectServer.SetProviderBanManager(connectProviderBans{g: guard})
+	// connectControlRoute adds the policy interceptor: the proxy face's
+	// Connect route accepts child credentials (the per-boot secret every
+	// child holds, the per-child MCP secrets), and the policy table is what
+	// stops them at operator verbs.
+	h.ControlPath, h.Control = connectControlRoute(connectServer)
 	mcpFace := newMCPFace(logger, captureStore, quotaStore, version.String())
 	h.MCPPath, h.MCP = mcpFace.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler {

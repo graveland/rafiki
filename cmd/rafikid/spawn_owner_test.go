@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/connectapi"
+	"connectrpc.com/connect"
+
 	"go.graveland.dev/rafiki/pkg/server"
 )
 
@@ -36,39 +37,51 @@ func TestSpawnOwnerIsZeroOnTheUnixSocket(t *testing.T) {
 }
 
 // S1: Connect's agent-control verbs refuse a credential that is not a user
-// credential. The child-attributed identity carries the owner's UserID — the
-// attribution path that bills the child's LLM turns — so a non-empty-UserID
-// check cannot stand in for provenance here either. Both adapters hold a nil
-// Controller: reaching it at all means the refusal failed.
-func TestConnectAgentControlRefusesANonUserCredential(t *testing.T) {
+// credential. The gate is the policy interceptor on the route
+// (cmd/rafikid/connect_policy.go); these pin its decisions at the procedure
+// level: Spawn and ListExecutors are userOnly, and both refusals name the
+// procedure so an operator can tell what was refused.
+func TestControlPolicyRefusesANonUserCredentialOnAgentControl(t *testing.T) {
 	childAttributed := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
 	unknown := server.WithIdentity(context.Background(), &server.Identity{})
-	const refusal = "agent-control verbs require a user credential"
 
-	_, err := (connectLifecycle{}).Spawn(childAttributed, connectapi.SpawnParams{})
-	if err == nil || !strings.Contains(err.Error(), refusal+"; this identity is child-attributed") {
-		t.Fatalf("child-attributed spawn = %v, want the named refusal", err)
-	}
-	_, err = (connectLifecycle{}).Spawn(unknown, connectapi.SpawnParams{})
-	if err == nil || !strings.Contains(err.Error(), refusal) {
-		t.Fatalf("unknown-credential spawn = %v, want the named refusal", err)
-	}
-	_, err = (connectExecutors{}).ListExecutors(childAttributed, "")
-	if err == nil || !strings.Contains(err.Error(), refusal+"; this identity is child-attributed") {
-		t.Fatalf("child-attributed ListExecutors = %v, want the named refusal", err)
+	for _, procedure := range []string{
+		controlProcedurePrefix + "Spawn",
+		controlProcedurePrefix + "ListExecutors",
+	} {
+		for name, ctx := range map[string]context.Context{
+			"child-attributed": childAttributed,
+			"zero identity":    unknown,
+		} {
+			err := authorizeControlProcedure(ctx, procedure)
+			if connect.CodeOf(err) != connect.CodePermissionDenied {
+				t.Errorf("%s with a %s credential = %v, want %v",
+					procedure, name, err, connect.CodePermissionDenied)
+			}
+			if !strings.Contains(err.Error(), procedure) {
+				t.Errorf("refusal %q does not name the procedure", err)
+			}
+		}
 	}
 }
 
 // The gate itself: nil identity (the UDS path, where the socket is the
-// credential and spawns land unowned) and a real user credential both pass.
-func TestRequireUserCredentialAdmitsAnonymousAndUser(t *testing.T) {
-	if err := requireUserCredential(context.Background()); err != nil {
-		t.Fatalf("anonymous UDS caller refused: %v", err)
-	}
+// credential and spawns land unowned) and a real user credential both pass —
+// for every policy, including the anyCaller verbs a child credential may
+// reach.
+func TestControlPolicyAdmitsAnonymousAndUser(t *testing.T) {
 	user := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
-	if err := requireUserCredential(user); err != nil {
-		t.Fatalf("user credential refused: %v", err)
+	for _, ctx := range []context.Context{context.Background(), user} {
+		for _, procedure := range []string{
+			controlProcedurePrefix + "Spawn",
+			controlProcedurePrefix + "ListExecutors",
+			controlProcedurePrefix + "ListModels",
+		} {
+			if err := authorizeControlProcedure(ctx, procedure); err != nil {
+				t.Errorf("%s refused: %v", procedure, err)
+			}
+		}
 	}
 }

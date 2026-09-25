@@ -178,6 +178,11 @@ machine:
   The two planes must agree, because one that swallowed an invalid credential
   and one that refused it would answer the same operator differently
   depending on which plane the request took.
+- **Authorization (both mounts):** the policy interceptor
+  (`cmd/rafikid/connect_policy.go`) classifies every procedure through a
+  `procedure → policy` table and refuses whatever the caller's credential may
+  not reach — the same table on the proxy face and on `connect.sock`, since
+  both mount through `connectControlRoute`. See "Who may call what" below.
 - **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
 
 ```bash
@@ -272,7 +277,7 @@ watch that row freeze.
 | `RemovePymoduleGitSource` | unary | Delete one of the caller's git source registrations outright (`CodeNotFound` when none is registered). Executors are never told — there is no prune model for git sources; a source's own history is its versioning, and the cached inventory for the name is simply never read again |
 | `ListPresets` | unary | The caller's own agent presets — the latest live row per name, names optionally narrowed to a `prefix` (e.g. `"default:"` for one group). Owner-scoped like `ListPymodules` (§2.3 Presets) |
 | `GetPreset` | unary | One preset: the latest live version's row by default, every version live and deleted with `history`; `CodeNotFound` when no version exists |
-| `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); a child-token caller is recorded as the writer |
+| `PutPreset` | unary | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); user credentials only — a child credential is refused by the provenance gate ("Who may call what") |
 | `DeletePreset` | unary | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows |
 | `Recall` | unary | Hybrid search (BM25 + vector, RRF-fused) over memories, conversation summaries and windows. `query` is required (`CodeInvalidArgument` otherwise); `sources` filters to some of `memory`/`summary`/`window` (empty = all three, an unknown name `CodeInvalidArgument`); `under` is an ltree path prefix for memories, `repo` a basename filter for conversation sources; `since_unix`/`until_unix` are unix seconds, **0 = unbounded**; `limit` 0 means the default (10), clamped to 50. Hits carry `id` (`m:`/`s:`/`w:`-prefixed — the key `RecallContext` expands), `source`, `snippet`, `when` (RFC3339 UTC), conversation identity/repo/kind, ordinal span, memory path/name, summary title and the fused `score` |
 | `RecallContext` | unary | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (the wire takes 0 as "the window's own span" — the 3-each default is the fundi `recall_context` tool's substitution, not this verb's); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text with **0 = uncapped** (the 8000 default is likewise the tool's substitution). An empty `id` is `CodeInvalidArgument`; a well-formed but unknown id is `CodeNotFound`; a malformed one (no `m:`/`s:`/`w:` prefix) falls through to `CodeInternal` |
@@ -293,6 +298,50 @@ watch that row freeze.
 | `ListProviderBans` | unary | Every live exclusion of an OpenRouter provider from routing: operator bans (`reason` `operator`, `model_line` `*` = every model line) and the provider cache guard's own ejections (`reason` `no_cache`, one model line). `expires_at` (unix seconds) is ABSENT for a ban that lasts until lifted; `persistent` is false when the daemon has no ejection log, meaning bans are lost on restart. Open to any caller (§"Provider bans") |
 | `BanProvider` | unary | Ban one provider slug from every model line, effective on the next OpenRouter request on both the proxy face and fundi children. `duration_seconds` is optional: absent = until lifted, present must be > 0 (`CodeInvalidArgument` otherwise). Re-banning replaces expiry and note. Admin user credential or the anonymous unix socket only; anything else `CodePermissionDenied` |
 | `UnbanProvider` | unary | Lift an operator ban (`CodeNotFound` when none is live). Does not clear the cache guard's own ejections of that provider. Same authority rule as `BanProvider` |
+
+#### Who may call what (the provenance gate)
+
+Every Connect mount of the Control service — the proxy face's route and the
+local `connect.sock` — composes its interceptors through
+`connectControlRoute` (`cmd/rafikid/connect_policy.go`), which appends ONE
+policy interceptor, `connectPolicyInterceptor`. It resolves each procedure's
+policy from a `procedure → policy` table (`controlPolicyTable`) whose
+coverage over the generated Control service descriptor is pinned by
+`TestControlPolicyTableCoversEveryProcedure` (`cmd/rafikid`): a new RPC
+cannot land unclassified, because the test fails until the table gains an
+entry, and a name the table holds that the descriptor does not fails too.
+The table's miss-default is `userOnly`, so a gap can only over-refuse, never
+admit.
+
+| Policy | Meaning | Procedures |
+|---|---|---|
+| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `SetBudget`, `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `PutPreset`, `DeletePreset`, `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch` |
+| `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus` |
+| `childScoped` | Reserved for script children (wave 1 of the script-children plan): a child credential will act on its own subtree. Enforced exactly as `userOnly` until then | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `ListTasks` |
+
+The gate distinguishes three credential shapes:
+
+- **No identity** (nil) — the unix socket's anonymous caller. The socket
+  itself is the credential (admission happened by filesystem permission), so
+  the gate passes it, as before the gate existed.
+- **A user credential** (`ProvenanceUser`) — passes every procedure.
+- **A child credential** — everything else an identity can resolve to:
+  `ProvenanceChildToken` (a per-child secret), `ProvenanceChildAttributed`
+  (the per-boot token plus `X-Rafiki-Session`), and the empty `Identity{}` a
+  bare per-boot token resolves to. Refused with `CodePermissionDenied` on
+  every `userOnly` and `childScoped` procedure — the refusal names the
+  procedure and the credential kind, never the secret — and admitted only on
+  the `anyCaller` reads.
+
+This gate exists because every claude child holds a child credential in its
+environment (`ANTHROPIC_AUTH_TOKEN`, `RAFIKI_MCP_TOKEN`) — as does every bash
+command the model runs — and before the gate only `Spawn`, `ListExecutors`
+and the conversation verbs checked provenance: one curl from inside any
+child could kill any sibling tree, lift any budget, or rewrite the presets,
+skills and pymodules every future agent loads. `scopeFor` (the conversation
+verbs' scope derivation) is unchanged and still refuses a child credential
+itself; the MCP agent-control surface (§2.4) has its own entitlement gate
+and is not affected.
 
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 
@@ -560,9 +609,9 @@ local-socket spawn) refuses. Any other
 provenance gets **403**: the credential authenticated and is not entitled to
 agent control — a status an MCP client can read, never a server that would
 render the refusal as an empty tool list.
-and the Connect plane's `Spawn` and `ListExecutors` answer a named permission
-error ("agent-control verbs require a user credential; this identity is
-child-attributed"). Attribution and authority are separate: `/v1/messages`
+and every non-`anyCaller` Connect verb refuses it the same way through the
+policy interceptor's table (see the Control plane's "Who may call what").
+Attribution and authority are separate: `/v1/messages`
 billing, raw-trace capture and quota attribution consume the UserID and are
 deliberately unchanged, and a user token that also carries `X-Rafiki-Session`
 stays `ProvenanceUser` — provenance is a property of the credential, not the

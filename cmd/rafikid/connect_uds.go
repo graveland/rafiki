@@ -74,8 +74,11 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 
 	mux := http.NewServeMux()
 	// Empty token: the socket IS the credential for ADMISSION. The optional
-	// identity interceptor rides behind it in the same chain.
-	routePath, handler := srv.Routes(connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
+	// identity interceptor rides behind it, and connectControlRoute puts the
+	// policy gate innermost, behind identity resolution — the same table the
+	// proxy face serves, so a child credential presented to the local socket
+	// is refused on operator verbs exactly as it is remotely.
+	routePath, handler := connectControlRoute(srv, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
 	mux.Handle(routePath, handler)
 
 	// Unencrypted HTTP/2 (h2c) via the standard library's Protocols field,

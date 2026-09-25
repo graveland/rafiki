@@ -219,9 +219,9 @@ func containsString(haystack []string, needle string) bool {
 type connectLifecycle struct{ c *Controller }
 
 func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (string, error) {
-	if err := requireUserCredential(ctx); err != nil {
-		return "", err
-	}
+	// Provenance is enforced by the policy interceptor on the route
+	// (connect_policy.go): Spawn is childScoped, so a child credential is
+	// refused there before this adapter runs.
 	res, err := l.c.Spawn(ctx, buildProtocolSpawnRequest(p), spawnOwner(ctx))
 	if err != nil {
 		return "", err
@@ -283,10 +283,9 @@ type connectExecutors struct{ c *Controller }
 func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]connectapi.ExecutorRow, error) {
 	// The row set is scoped BY the caller's identity — "the executors this
 	// owner could spawn onto" — so a child-attributed caller would be reading
-	// its owner's fleet, the same borrowed identity Spawn refuses.
-	if err := requireUserCredential(ctx); err != nil {
-		return nil, err
-	}
+	// its owner's fleet, the same borrowed identity Spawn refuses. The
+	// refusal itself lives on the route's policy interceptor (userOnly), not
+	// here.
 	return e.c.ListExecutorRows(ctx, kind, spawnOwner(ctx).Username)
 }
 
@@ -413,31 +412,6 @@ func spawnOwner(ctx context.Context) users.Identity {
 	return users.Identity{UserID: id.UserID, Username: id.Username}
 }
 
-// requireUserCredential is S1's Connect-plane gate: a verb that acts or
-// answers AS the caller's identity requires that identity to come from a real
-// user credential. A child-attributed identity carries the owner's UserID —
-// that is the attribution path /v1/messages bills turns through — so a
-// non-empty-UserID check cannot stand in for provenance here either.
-//
-// IdentityFromContext returning nil is NOT refused: on the unix socket the
-// socket itself is the credential and the caller is anonymous (spawns land
-// unowned, executor rows list unscoped), exactly as before provenance
-// existed. Every presented credential that is not a user credential —
-// child-attributed, or one resolving to the zero identity — is refused with a
-// named permission error, because an RPC caller should see why.
-func requireUserCredential(ctx context.Context) error {
-	id := server.IdentityFromContext(ctx)
-	if id == nil || id.IsUserCredential() {
-		return nil
-	}
-	if id.Via == server.ProvenanceChildAttributed {
-		return connect.NewError(connect.CodePermissionDenied,
-			errors.New("agent-control verbs require a user credential; this identity is child-attributed"))
-	}
-	return connect.NewError(connect.CodePermissionDenied,
-		errors.New("agent-control verbs require a user credential; the presented credential does not resolve to one"))
-}
-
 // connectQuota adapts *quota.Store to connectapi.QuotaReader, resolving the
 // caller's own user id from ctx rather than taking one as an argument — the
 // same reasoning as spawnOwner: a caller-supplied id would let anyone read
@@ -468,8 +442,9 @@ func (q connectQuota) RateLimitStatus(ctx context.Context) (connectapi.RateLimit
 
 // errNotAUserCredential is scopeFor's refusal for any identity that is not a
 // real user credential -- the only provenance the design's Scope mechanism
-// accepts. See requireUserCredential for the identical reasoning applied to
-// the agent-control verbs.
+// accepts. The agent-control verbs get the identical reasoning from the
+// route's policy interceptor (cmd/rafikid/connect_policy.go), which refuses
+// them before these handlers run.
 var errNotAUserCredential = errors.New("conversation queries require a user credential")
 
 // scopeFor is the ONE place the Connect plane turns an authenticated
