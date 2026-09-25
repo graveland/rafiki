@@ -6,14 +6,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -121,11 +127,11 @@ func TestChildPyModuleStoreRefusesAuthoring(t *testing.T) {
 // gets nil — the blueprints' decline — never an owner-scoped binding.
 func TestRecallBindingRefusesChildCaller(t *testing.T) {
 	c := &Controller{recall: &recallRuntime{st: &fakeRecallStore{}}}
-	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, "c-child"); rb != nil {
+	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, true); rb != nil {
 		t.Fatal("child caller bound a recall binding, want nil")
 	}
 	// The user caller keeps its binding (owner == the caller).
-	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, ""); rb == nil {
+	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, false); rb == nil {
 		t.Fatal("user caller lost its recall binding")
 	}
 }
@@ -217,5 +223,86 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	}
 	if convs != 2 {
 		t.Fatalf("models conversations = %d, want 2 (the subtree, never the sibling)", convs)
+	}
+}
+
+// TestMCPFaceChildConversationsBindingIsSubtree pins the getServer DECISION,
+// not just the reader: a per-child caller's conversation_search runs through
+// newMCPChildConversationReader. Reverting the `if isChild` branch to the
+// owner reader (newMCPConversationReader, ScopeOwner) makes the sibling row
+// reappear here, because this drives the tool through the SDK session
+// getServer builds — the same path a real child's RAFIKI_MCP_TOKEN drives.
+func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
+	pool := openTestPool(t)
+	ctx := context.Background()
+	uniq := fmt.Sprintf("c_%d", time.Now().UnixNano())
+
+	own := insertConvForCost(t, pool, "")             // fundi caller: session-id route
+	desc := insertConvForCost(t, pool, uniq+"kid")    // claude descendant: ref route
+	sibling := insertConvForCost(t, pool, uniq+"sib") // the owner's OTHER child
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`,
+			[]string{own, desc, sibling})
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.users WHERE username = 'mcp-child-scope-owner' AND deleted_at IS NULL`)
+	})
+	// Own all three rows by the owner user, so this test is a true leak
+	// oracle: reverting the binding to the owner reader (ScopeOwner) surfaces
+	// the sibling here, it does not merely return nothing.
+	var ownerID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, token_sha256)
+		 VALUES ('mcp-child-scope-owner', 'mcp-child-scope-owner:' || gen_random_uuid()::text)
+		 RETURNING id::text`).Scan(&ownerID); err != nil {
+		t.Fatalf("insert owner user: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET owner_user_id = $1::uuid
+		  WHERE id = ANY($2::uuid[])`, ownerID, []string{own, desc, sibling}); err != nil {
+		t.Fatalf("own conversations: %v", err)
+	}
+	st := childstore.New()
+	dir := t.TempDir()
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
+		filepath.Join(dir, "c.sock"), nil, pool, nil, false, ctx, nil, nil, nil, nil)
+	caller := uniq + "caller"
+	st.Insert(&childstore.Session{
+		ChildID: caller, SessionID: own, Status: protocol.StatusIdle,
+		Kind: protocol.KindFundi, StartedAt: time.Now(),
+	})
+	st.Insert(&childstore.Session{
+		ChildID: uniq + "kid", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: caller, childstore.LabelRoot: caller},
+	})
+	st.Insert(&childstore.Session{
+		ChildID: uniq + "sib", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: uniq + "root", childstore.LabelRoot: uniq + "root"},
+	})
+
+	face := newMCPFace(discardLogger(), nil, nil, "test")
+	face.SetController(ctrl)
+	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	child = child.WithContext(server.WithIdentity(child.Context(), &server.Identity{
+		UserID: "u-owner", ChildID: caller, Via: server.ProvenanceChildToken,
+	}))
+	cs := mcpConnect(t, face.getServer(child))
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conversation_search"})
+	if err != nil {
+		t.Fatalf("conversation_search: %v", err)
+	}
+	// The tool renders rows by conversation id, so the ids are the oracle:
+	// both in-subtree rows surface, the sibling's never does.
+	text := mcpCallText(t, res)
+	if !strings.Contains(text, desc) {
+		t.Fatalf("conversation_search did not surface the in-subtree descendant %s:\n%s", desc, text)
+	}
+	if !strings.Contains(text, own) {
+		t.Fatalf("conversation_search did not surface the caller's own conversation %s:\n%s", own, text)
+	}
+	if strings.Contains(text, sibling) {
+		t.Fatalf("conversation_search leaked the owner's other child's conversation %s:\n%s", sibling, text)
 	}
 }

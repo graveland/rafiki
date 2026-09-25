@@ -94,7 +94,7 @@ func (f *fakeRecallStore) MemoryTree(ctx context.Context, ownerUserID, path stri
 // shape startRecall leaves behind on a daemon with a database.
 func bindingWith(st recall.Store, owner users.Identity) *recallBinding {
 	c := &Controller{recall: &recallRuntime{st: st}}
-	return newRecallBinding(c, owner, "").(*recallBinding)
+	return newRecallBinding(c, owner, false).(*recallBinding)
 }
 
 func TestRecallBindingScopeFromIdentity(t *testing.T) {
@@ -148,7 +148,7 @@ func TestRecallBindingMemoryOwnerAlwaysCaller(t *testing.T) {
 
 func TestRecallBindingNilWhenDisabled(t *testing.T) {
 	c := &Controller{} // a DB-less daemon: startRecall never ran
-	rb := newRecallBinding(c, users.Identity{UserID: "u-alice"}, "")
+	rb := newRecallBinding(c, users.Identity{UserID: "u-alice"}, false)
 	// The interface itself must be nil — a typed-nil *recallBinding here would
 	// defeat every recall blueprint's decline.
 	if rb != nil {

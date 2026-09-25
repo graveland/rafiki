@@ -110,13 +110,15 @@ func (s childScope) ConversationInScope(conversationID string) bool {
 //   - A nil identity (unix-socket local trust) and a real user credential
 //     resolve NO child scope: every childScoped handler takes the operator
 //     path, exactly as before this source existed.
-//   - A ProvenanceChildToken identity resolves a scope EVEN WHEN the child's
-//     row has since left the childstore. Returning nil there would upgrade a
-//     dead child to operator authority — the one fail-open shape this file
-//     refuses to build. The scope itself refuses every target (IsDescendant
-//     demands the ancestor row exist), answers an empty subtree, and admits
-//     no conversation, so a vanished child reads as "nothing visible", never
-//     as "the fleet".
+//   - EVERY ProvenanceChildToken identity resolves a scope — the resolved
+//     shape, the empty-ChildID resolve that names the provenance but no
+//     child, and the child whose row has left the childstore. Returning nil
+//     for any of the three would upgrade the caller to operator authority —
+//     the one fail-open shape this file refuses to build. The scope itself
+//     refuses every target (IsDescendant demands a non-empty ancestor with a
+//     stored row), answers an empty subtree, and admits no conversation, so
+//     a dead, unnamed or vanished child reads as "nothing visible", never as
+//     "the fleet".
 //   - Every other presented credential — per-boot + session attribution, the
 //     bare per-boot secret, anything else — is refused by the policy gate
 //     before a handler runs, so this source never sees it; if it somehow
@@ -124,7 +126,7 @@ func (s childScope) ConversationInScope(conversationID string) bool {
 //     anonymous local caller only.
 func (c *Controller) childScopeFor(ctx context.Context) connectapi.ChildScope {
 	id := server.IdentityFromContext(ctx)
-	if id == nil || id.Via != server.ProvenanceChildToken || id.ChildID == "" {
+	if id == nil || id.Via != server.ProvenanceChildToken {
 		return nil
 	}
 	return childScope{c: c, childID: id.ChildID}

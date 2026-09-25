@@ -53,9 +53,12 @@ const (
 	// connectapi's ChildScopeSource (cmd/rafikid connect_childscope.go),
 	// which reads the stored parent chain via childstore.IsDescendant and
 	// refuses the caller's own id — a child is not a descendant of itself.
-	// An unwired source fails closed: the handler answers Unavailable, never
-	// the operator path. ProvenanceChildAttributed and the bare per-boot
-	// secret name no child with authority and stay refused here.
+	// The source never resolves nil — the operator path — for a child-shaped
+	// credential: the empty-ChildID and vanished-row shapes resolve an
+	// always-refusing scope, and the daemon wiring itself is pinned end to
+	// end by TestConnectChildScopedOnTheConnectPlane (test/integration).
+	// ProvenanceChildAttributed and the bare per-boot secret name no child
+	// with authority and stay refused here.
 	policyChildScoped
 )
 

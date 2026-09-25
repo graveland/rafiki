@@ -685,6 +685,25 @@ func TestChildScopeFor(t *testing.T) {
 		t.Fatalf("Authorize(descendant) = %v, want nil", err)
 	}
 
+	// The EMPTY-ChildID resolve — the credential names the provenance but no
+	// child: non-nil scope, everything refused. Never the operator path
+	// (review-1 F2).
+	sc = ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
+		UserID: "u1", Via: server.ProvenanceChildToken,
+	}))
+	if sc == nil {
+		t.Fatal("empty-ChildID child resolved nil, want an always-refusing scope")
+	}
+	if err := sc.Authorize("c_kid"); connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("empty-ChildID Authorize = %v, want %v", err, connect.CodePermissionDenied)
+	}
+	if got := sc.Subtree(nil); len(got) != 0 {
+		t.Fatalf("empty-ChildID Subtree = %v, want empty", got)
+	}
+	if sc.ConversationInScope("conv-c_mine") {
+		t.Fatal("empty-ChildID admitted a conversation")
+	}
+
 	// The vanished row: non-nil scope, everything refused.
 	sc = ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", ChildID: "c_gone", Via: server.ProvenanceChildToken,

@@ -430,7 +430,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-alice"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}, ""); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}, false); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string
@@ -632,6 +632,20 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	for _, name := range recallTools {
 		if slices.Contains(names, name) {
 			t.Errorf("child request unexpectedly exposes %s: %v", name, names)
+		}
+	}
+
+	// The EMPTY-ChildID child shape (provenance named, no child): the
+	// caller-shape flag declines too — it must never fall through to the
+	// owner binding (review-1 F2).
+	anonymous := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	anonymous = anonymous.WithContext(server.WithIdentity(anonymous.Context(), &server.Identity{
+		UserID: "u-alice", Via: server.ProvenanceChildToken,
+	}))
+	names = mcpToolNames(t, mcpConnect(t, face.getServer(anonymous)))
+	for _, name := range recallTools {
+		if slices.Contains(names, name) {
+			t.Errorf("empty-ChildID child request unexpectedly exposes %s: %v", name, names)
 		}
 	}
 }
@@ -877,7 +891,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-owner"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}, ""); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}, false); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string

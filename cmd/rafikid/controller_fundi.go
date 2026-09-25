@@ -19,7 +19,9 @@ import (
 // conversationIDForChild resolves the conversation holding a child's persisted
 // message history. A fundi child's SessionID IS the conversation UUID
 // (pkg/fundi/engine.go sets SessionID: conv.ID). A claude child's SessionID is
-// a session file path, so its row is found by external_ref, which is the
+// its backend's own session id (the stream-json session_id the child reports,
+// synced into the row by monitorChild) — not a conversation UUID and never
+// resolvable as one — so its row is found by external_ref, which is the
 // child id the proxy stamped into X-Rafiki-Session
 // (cmd/rafikid/controller.go proxyChildEnv). Same route pkg/insights/subtree.go
 // uses to correlate claude children for cost rollup.

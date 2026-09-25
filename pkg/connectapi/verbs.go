@@ -194,6 +194,15 @@ func (s *Server) Spawn(
 
 	sp := connectapiSpawnParams(req.Msg)
 	if sc := s.childScope(ctx); sc != nil {
+		if sc.ChildID() == "" {
+			// A per-child credential that names no child must not spawn — and
+			// MUST NOT fall through to the forced-empty-parent path below:
+			// ParentChildID "" is the top-level spawn shape, so an empty forced
+			// parent would grant an operator power to the one caller least
+			// entitled to it.
+			return nil, refuseChildScope(errors.New(
+				"spawn requires a child id your credential does not name"))
+		}
 		sp.ParentChildID = sc.ChildID()
 	}
 	id, err := (*p).Spawn(ctx, sp)

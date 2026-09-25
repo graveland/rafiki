@@ -70,7 +70,7 @@ func (s Scope) cond(a *argList, ownerCol, idCol, refCol string) string {
 		// escaping bug that would silently over-match a sibling. The same
 		// WHERE clause SubtreeCost rolls spend up with, so scope and cost
 		// agree on what "one subtree" is.
-		return `(` + idCol + ` = ANY(` + a.next(nonNilUUIDs(s.subtree.ConversationIDs)) + `::uuid[])
+		return `(` + idCol + ` = ANY(` + a.next(uuidsOnly(s.subtree.ConversationIDs)) + `::uuid[])
 		 OR ` + refCol + ` = ANY(` + a.next(nonNilStrings(s.subtree.ExternalRefs)) + `::text[])
 		 OR EXISTS (SELECT 1 FROM unnest(` + a.next(nonNilStrings(s.subtree.ExternalRefPrefixes)) + `::text[]) p WHERE starts_with(` + refCol + `, p)))`
 	case !s.valid():

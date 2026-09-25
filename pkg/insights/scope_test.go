@@ -86,7 +86,9 @@ func TestScopeOwnerIsValid(t *testing.T) {
 func TestScopeSubtreeCond(t *testing.T) {
 	a := &argList{}
 	sel := SubtreeSelector{
-		ConversationIDs:     []string{"uuid-1"},
+		// A well-formed UUID: the conversation arm routes through uuidsOnly,
+		// which drops anything else rather than poisoning the array cast.
+		ConversationIDs:     []string{"00000000-0000-0000-0000-000000000001"},
 		ExternalRefs:        []string{"c_01"},
 		ExternalRefPrefixes: []string{"c_01:"},
 	}
@@ -103,7 +105,7 @@ func TestScopeSubtreeCond(t *testing.T) {
 	if len(a.args) != 3 {
 		t.Fatalf("cond() appended %d args, want 3", len(a.args))
 	}
-	for i, want := range [][]string{{"uuid-1"}, {"c_01"}, {"c_01:"}} {
+	for i, want := range [][]string{{"00000000-0000-0000-0000-000000000001"}, {"c_01"}, {"c_01:"}} {
 		gotArg, ok := a.args[i].([]string)
 		if !ok || len(gotArg) != len(want) || gotArg[0] != want[0] {
 			t.Fatalf("cond() arg %d = %#v, want %v", i, a.args[i], want)
@@ -255,5 +257,53 @@ func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("empty-selector search returned %d rows, want 0", len(rows))
+	}
+}
+
+// TestScopeSubtreeSurvivesANonUUIDSessionID mirrors
+// TestCostsByConversationSurvivesANonUUIDSessionID for the scope queries:
+// $1::uuid[] rejects the whole ARRAY on one malformed element, so a selector
+// whose ConversationIDs carry a non-UUID session id (a pi child's) alongside a
+// real conversation must degrade to "that row is unreachable", never fail the
+// query — the same batching risk the cost path already guards.
+func TestScopeSubtreeSurvivesANonUUIDSessionID(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ins := New(pool)
+
+	convA := insertConversation(t, pool, "server", "")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx,
+			`DELETE FROM conversations.conversation WHERE id = $1::uuid`, convA)
+	})
+
+	rows, err := ins.Search(ctx, ScopeSubtree(SubtreeSelector{
+		ConversationIDs: []string{convA, "sess_not_a_uuid"},
+	}), SearchFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("one malformed id must not fail the query: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != convA {
+		t.Fatalf("rows = %v, want exactly the one well-formed conversation", rows)
+	}
+
+	// All-non-UUID ConversationIDs with no refs: the array filters to empty,
+	// which must match nothing — not NULL-match, not error.
+	rows, err = ins.Search(ctx, ScopeSubtree(SubtreeSelector{
+		ConversationIDs: []string{"sess_not_a_uuid"},
+	}), SearchFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("all-malformed ids must not fail the query: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %v, want none", rows)
+	}
+
+	// The one-conversation probe renders the same arms over the bare table;
+	// the malformed element must survive there too.
+	if _, err := ins.ConversationStats(ctx, ScopeSubtree(SubtreeSelector{
+		ConversationIDs: []string{"sess_not_a_uuid"},
+	}), convA); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stats probe = %v, want ErrNotFound", err)
 	}
 }

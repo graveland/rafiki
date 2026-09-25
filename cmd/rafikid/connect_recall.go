@@ -89,7 +89,7 @@ func (m connectRecall) RecallContext(ctx context.Context, id string, before, aft
 	if _, err := m.runtime(); err != nil {
 		return "", err
 	}
-	b := newRecallBinding(m.c, recallIdentity(ctx), "")
+	b := newRecallBinding(m.c, recallIdentity(ctx), false)
 	if b == nil {
 		return "", errRecallUnwired
 	}

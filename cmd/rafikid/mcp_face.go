@@ -224,10 +224,6 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// always subtree-scoped (newControllerSpawner); the rest now are too, or
 	// refuse.
 	isChild := id.Via == server.ProvenanceChildToken
-	childID := ""
-	if isChild {
-		childID = id.ChildID
-	}
 	var spawner tools.AgentSpawner
 	switch {
 	case id.IsUserCredential():
@@ -283,7 +279,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// recall is not wired; the guard lives here because newRecallBinding's
 	// decline is a nil INTERFACE (a typed-nil assignment would defeat the
 	// blueprints' decline).
-	if rb := newRecallBinding(ctrl, owner, childID); rb != nil {
+	if rb := newRecallBinding(ctrl, owner, isChild); rb != nil {
 		opts.Recall = rb
 	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has

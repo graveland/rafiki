@@ -69,11 +69,15 @@ func (i *Insights) SubtreeCostDetailed(ctx context.Context, sel SubtreeSelector)
 		return 0, nil, nil
 	}
 
+	// uuidsOnly, same as CostsByConversation: $1::uuid[] rejects the whole
+	// ARRAY on one malformed element, so a single non-UUID session id in the
+	// batched selector must degrade to "row unreachable", never fail the
+	// rollup.
 	rows, err := i.pool.Query(ctx,
 		`SELECT coalesce(t.model,''), `+tokenSums+` `+statsFrom+`
 		 WHERE `+refMatch+`
 		 GROUP BY t.model`,
-		nonNilUUIDs(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs),
+		uuidsOnly(sel.ConversationIDs), nonNilStrings(sel.ExternalRefs),
 		nonNilStrings(sel.ExternalRefPrefixes))
 	if err != nil {
 		return 0, nil, fmt.Errorf("subtree cost: %w", err)
@@ -121,17 +125,12 @@ func (i *Insights) SubtreeCostDetailed(ctx context.Context, sel SubtreeSelector)
 	return total, unpriced, nil
 }
 
-// nonNilUUIDs / nonNilStrings keep `= ANY($1)` well-typed for an empty list.
+// nonNilStrings keeps `= ANY($1)` well-typed for an empty list.
 // A nil slice binds as SQL NULL, and `x = ANY(NULL)` is NULL rather than
 // false — which makes the whole WHERE clause match nothing in a way that looks
-// like "the subtree has spent nothing" instead of like a bug.
-func nonNilUUIDs(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
-}
-
+// like "the subtree has spent nothing" instead of like a bug. (The UUID arm
+// needs the same nil-safety; uuidsOnly provides it — its output is always
+// non-nil — and drops malformed elements at the same time.)
 func nonNilStrings(s []string) []string {
 	if s == nil {
 		return []string{}

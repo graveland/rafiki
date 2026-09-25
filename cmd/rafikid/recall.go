@@ -140,21 +140,24 @@ var _ tools.RecallBinding = (*recallBinding)(nil)
 // interface-typed option only when non-nil (a typed-nil in the interface
 // would defeat the blueprints' nil-decline).
 //
-// A per-child MCP caller binds NOTHING (nil): review-0's F1 row. Both sides
-// of this binding are owner-dimensioned — recall.Scope admits an owner's
-// rows, MemoryOwner is a user id — and there is no per-child memory
-// namespace, so a child caller previously read AND WROTE its owner's memory
-// namespace and searched its owner's conversation-derived indexes. Scoping
-// recall to a subtree the way the conversation reader now is would mean a
-// second Scope type and new SQL in pkg/recall; until that exists the
+// A per-child MCP caller binds NOTHING (nil, via childCredential): review-0's
+// F1 row. Both sides of this binding are owner-dimensioned — recall.Scope
+// admits an owner's rows, MemoryOwner is a user id — and there is no
+// per-child memory namespace, so a child caller previously read AND WROTE its
+// owner's memory namespace and searched its owner's conversation-derived
+// indexes. The flag is the CALLER SHAPE (Via == ProvenanceChildToken), not a
+// resolved child id: the empty-ChildID resolve that names the provenance but
+// no child must decline too, never fall through to the owner binding.
+// Scoping recall to a subtree the way the conversation reader now is would
+// mean a second Scope type and new SQL in pkg/recall; until that exists the
 // conservative default stands — the child gets no recall or memory tools at
 // all, and its designed memory surface (if any) is its own runtime, not its
 // owner's namespace.
-func newRecallBinding(c *Controller, owner users.Identity, childID string) tools.RecallBinding {
+func newRecallBinding(c *Controller, owner users.Identity, childCredential bool) tools.RecallBinding {
 	if c.recall == nil {
 		return nil
 	}
-	if childID != "" {
+	if childCredential {
 		return nil
 	}
 	var scope recall.Scope

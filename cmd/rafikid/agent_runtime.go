@@ -479,7 +479,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// a fundi child reads conversations under its owner's scope (agentRuntime
 	// has no admin bit to grant more), and memories are always its owner's
 	// own.
-	if rb := newRecallBinding(c, users.Identity{UserID: ownerUserID}, ""); rb != nil {
+	if rb := newRecallBinding(c, users.Identity{UserID: ownerUserID}, false); rb != nil {
 		ro.Recall = rb
 	}
 	// A child on a daemon with an executor pool gets a boundExecutor, ALWAYS
