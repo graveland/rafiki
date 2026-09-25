@@ -287,7 +287,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if requested == "" {
 		requested = c.defaultModel
 	}
-	p, modelID, err := c.set.Split(requested)
+	p, modelID, alias, err := c.set.Resolve(requested)
 	if err != nil {
 		return ctx, nil, "", nil, params, err
 	}
@@ -301,7 +301,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if meta.Primary != "" {
 		primary = meta.Primary
 	}
-	c.mutateParams(p, &params)
+	c.mutateParams(p, alias, &params)
 
 	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(
 		attribute.String("rafiki.model", string(params.Model)),
@@ -315,14 +315,20 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 
 // mutateParams applies a kind's request-body mutation. Only
 // anthropic-openrouter has one: OpenRouter's non-standard top-level "provider"
-// field, carrying the pinned routing preferences plus whatever the cache guard
-// has ejected. providers.Validate refuses extras.provider, so the user cannot
-// clobber it.
-func (c *Client) mutateParams(p providers.Provider, params *anthropic.MessageNewParams) {
+// field, carrying the pinned routing preferences (an alias's own only pin
+// replacing the static pin when the request was made through an alias), plus
+// whatever the cache guard has ejected. providers.Validate refuses
+// extras.provider, so the user cannot clobber it.
+//
+// alias is the ModelAlias the requested model id matched, from
+// providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
+// model against the FALLBACK provider via the catalog, which knows nothing
+// about the primary's aliases) and for non-alias requests.
+func (c *Client) mutateParams(p providers.Provider, alias *providers.ModelAlias, params *anthropic.MessageNewParams) {
 	if p.Kind != providers.KindAnthropicOpenRouter {
 		return
 	}
-	applyProviderPrefs(params, c.guard, p.Extras)
+	applyProviderPrefs(params, alias, c.guard, p.Extras)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -839,7 +845,11 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		if fbProvider.Kind == providers.KindAnthropicOpenRouter {
 			fbParams.Model = anthropic.Model(c.catalog.OpenRouterModel(string(params.Model)))
 		}
-		c.mutateParams(fbProvider, &fbParams)
+		// The fallback path has no alias: the model was re-resolved against
+		// the FALLBACK provider via the catalog, which knows nothing about the
+		// primary's aliases, so nil means the fallback's own static pins and
+		// guard ejections apply, never a stale alias pin.
+		c.mutateParams(fbProvider, nil, &fbParams)
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
 			c.modelGate.recordSuccess(string(params.Model))
@@ -855,12 +865,24 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 // ejected, as the request body's "provider" field, and merges the provider's
 // configured extras alongside.
 //
+// An alias's Only pin, when non-empty, REPLACES the static pin's Only for this
+// request: the alias is the explicit, more specific declaration (two aliases
+// may share one id and route it to different providers, which a static
+// per-line pin could never express). The guard's Ignore list still merges in
+// either way — an alias pin declares who MAY serve; the guard vetoes who
+// must not. With an alias pin the body carries "provider" even when there is
+// no static pin and nothing to ignore.
+//
 // SetExtraFields REPLACES the whole map, so everything that belongs in it must
 // be assembled here in one call. "provider" is a reserved extras key
 // (providers.Validate refuses it) precisely because a user-supplied one would
 // otherwise delete the guard's ejections with no error and no log line.
-func applyProviderPrefs(params *anthropic.MessageNewParams, g *routing.ProviderGuard, extras map[string]any) {
+func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any) {
 	prefs, pinned := routing.ProviderPrefsFor(string(params.Model))
+	if alias != nil && len(alias.Only) > 0 {
+		prefs.Only = alias.Only
+		pinned = true
+	}
 	ignore := g.IgnoredFor(time.Now(), string(params.Model))
 	if !pinned && len(ignore) == 0 && len(extras) == 0 {
 		return

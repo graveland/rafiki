@@ -98,6 +98,18 @@ type ModelAlias struct {
 	ContextFilesTokens  int     `toml:"context_files_tokens"`
 	Skills              *string `toml:"skills"`
 	MCPServers          *string `toml:"mcp_servers"`
+	// Only lists the OpenRouter provider slugs allowed to serve requests made
+	// through this alias, sent as the request body's "provider".only. It is
+	// what lets two aliases name the SAME real id while routing it to
+	// DIFFERENT providers (an A/B eval: "glm-flash@together" vs
+	// "glm-flash@fireworks"), so the pin is per-alias and travels with the
+	// alias through Set.Resolve — never looked up by id. A non-empty value
+	// REPLACES the static pin's only for that request (the alias is the
+	// explicit, more specific declaration); the ProviderGuard's ignore list
+	// still merges in. nil/empty = no alias pin: static pins and the guard
+	// still apply as before. Only meaningful for kind "anthropic-openrouter";
+	// Validate refuses it on any other kind.
+	Only []string `toml:"only"`
 }
 
 // Keyless reports whether this provider sends no credential at all.
@@ -315,8 +327,21 @@ func (s *Set) Validate() error {
 		}
 		sort.Strings(aliases)
 		for _, alias := range aliases {
-			if p.Models[alias].ID == "" {
+			m := p.Models[alias]
+			if m.ID == "" {
 				return fmt.Errorf("providers: provider %q: models.%s: id is required", name, alias)
+			}
+			// A provider pin is an OpenRouter routing instruction (the request
+			// body's "provider".only); on any other kind it would be silently
+			// meaningless, so refuse it rather than let a config look like it
+			// constrains routing when nothing reads it.
+			if len(m.Only) > 0 && p.Kind != KindAnthropicOpenRouter {
+				return fmt.Errorf("providers: provider %q: models.%s: only requires kind %q, not %q", name, alias, KindAnthropicOpenRouter, p.Kind)
+			}
+			for _, slug := range m.Only {
+				if strings.TrimSpace(slug) == "" {
+					return fmt.Errorf("providers: provider %q: models.%s: only must not contain an empty provider slug", name, alias)
+				}
 			}
 		}
 	}

@@ -460,6 +460,10 @@ context_window       = 16384
 context_files_tokens = 12288      # optional; default 20% of context_window, clamped [1024, 30000]
 skills               = ""         # "" = none; "*"/omitted = all; "a,b,c" = only those
 mcp_servers          = "codescan" # same tri-state convention
+
+[providers.openrouter.models."glm-flash@together"]
+id   = "z-ai/glm-5.3-flash"
+only = ["together"]              # openrouter only: provider slugs allowed to serve this alias
 ```
 
 `rafiki claude --model vmlx/qwen` sends the real id upstream and pins
@@ -470,6 +474,16 @@ built into a **fundi** child's system prompt and tool inventory for that
 model — a `rafiki claude` child assembles those itself and only
 `context_window` reaches it. An explicit `--skills`/`--mcp-servers` flag on
 the spawn always overrides the model's declared default.
+
+`only` is an OpenRouter-only pin on an `anthropic-openrouter` provider's
+alias: requests made through the alias are sent with
+`"provider": {"only": [...]}` so only those OpenRouter provider slugs may
+serve them, and it replaces any built-in routing pin for that model line for
+that request (the cache guard's ignore list still merges in). Because the
+pin lives on the alias, two aliases can route the SAME model id to different
+providers — an eval compares `openrouter/glm-flash@together` against
+`openrouter/glm-flash@fireworks`, both sending `z-ai/glm-5.3-flash` with
+different `only` lists. On any other provider kind, `only` is a config error.
 
 ### Container executors
 

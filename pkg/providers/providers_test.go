@@ -140,6 +140,21 @@ func TestParseRejects(t *testing.T) {
 			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"anthropic\"\n[providers.x.models.qwen]\ncontext_window = 16384\n",
 			want: "models.qwen: id is required",
 		},
+		{
+			name: "only on a non-openrouter provider",
+			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"anthropic\"\n[providers.x.models.qwen]\nid = \"m\"\nonly = [\"fireworks\"]\n",
+			want: "models.qwen: only requires kind \"anthropic-openrouter\", not \"anthropic\"",
+		},
+		{
+			name: "only on an openai provider",
+			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"openai\"\nbase_url = \"http://localhost:8000\"\n[providers.x.models.g]\nid = \"m\"\nonly = [\"fireworks\"]\n",
+			want: "models.g: only requires kind \"anthropic-openrouter\", not \"openai\"",
+		},
+		{
+			name: "empty only slug",
+			toml: "default_provider = \"x\"\n[providers.x]\nkind = \"anthropic-openrouter\"\n[providers.x.models.g]\nid = \"z-ai/glm-5.3-flash\"\nonly = [\"together\", \"\"]\n",
+			want: "models.g: only must not contain an empty provider slug",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,6 +225,52 @@ skills = "*"
 	}
 	if got := p.Models["star"].Skills; got == nil || *got != "*" {
 		t.Errorf("star: Skills = %v, want pointer to \"*\"", got)
+	}
+}
+
+// only is the alias-level OpenRouter provider pin: two aliases may name the
+// SAME real id while pinning DIFFERENT provider slugs, which is what makes an
+// A/B eval on one model possible. Absent = nil (no pin).
+func TestParseModelAliasOnly(t *testing.T) {
+	const toml = `
+default_provider = "openrouter"
+
+[providers.openrouter]
+kind = "anthropic-openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+
+[providers.openrouter.models."glm-flash@together"]
+id   = "z-ai/glm-5.3-flash"
+only = ["together"]
+
+[providers.openrouter.models."glm-flash@fireworks"]
+id   = "z-ai/glm-5.3-flash"
+only = ["fireworks"]
+
+[providers.openrouter.models.unpinned]
+id = "z-ai/glm-5.2"
+`
+	set, err := providers.Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	p, ok := set.Get("openrouter")
+	if !ok {
+		t.Fatal("Get(openrouter) not found")
+	}
+	if got := p.Models["glm-flash@together"].Only; len(got) != 1 || got[0] != "together" {
+		t.Errorf("glm-flash@together.Only = %v, want [together]", got)
+	}
+	if got := p.Models["glm-flash@fireworks"].Only; len(got) != 1 || got[0] != "fireworks" {
+		t.Errorf("glm-flash@fireworks.Only = %v, want [fireworks]", got)
+	}
+	if got := p.Models["unpinned"].Only; got != nil {
+		t.Errorf("unpinned.Only = %v, want nil (key absent = no pin)", got)
+	}
+	// The two aliases above must still resolve to the same real id.
+	if p.Models["glm-flash@together"].ID != p.Models["glm-flash@fireworks"].ID {
+		t.Errorf("two-aliases-one-id setup lost: %q vs %q",
+			p.Models["glm-flash@together"].ID, p.Models["glm-flash@fireworks"].ID)
 	}
 }
 
