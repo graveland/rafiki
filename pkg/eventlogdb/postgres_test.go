@@ -5,6 +5,7 @@ package eventlogdb_test
 import (
 	"context"
 	"os"
+	"sort"
 	"sync"
 	"testing"
 
@@ -52,6 +53,73 @@ func TestPostgresConformance(t *testing.T) {
 		})
 		return eventlogdb.New(pool), child
 	})
+}
+
+// TestAppendManyConcurrentPublishersOneChild is the scale the two tests above
+// structurally cannot reach: the memory store is atomic under its own mutex,
+// and TestConcurrentAppendDoesNotDuplicateAnOrdinal fires one burst, not a
+// sustained storm. Burst after burst of publishers for ONE child is what the
+// daemon actually does (controller publishes for every child event), and
+// before per-child serialization the losers retried immediately against the
+// rest of the storm, exhausted maxAppendAttempts, and DROPPED the event.
+func TestAppendManyConcurrentPublishersOneChild(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	child := "c_" + ulid.Make().String()
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM conversations.event_log WHERE child_id = $1`, child) })
+
+	const publishers = 64
+	const perPublisher = 8
+	const total = publishers * perPublisher
+
+	s := eventlogdb.New(pool)
+	ords := make([][]int32, publishers)
+	errs := make([]error, publishers)
+	var wg sync.WaitGroup
+	for i := range publishers {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for range perPublisher {
+				ord, err := s.Append(ctx, child, statusEvent(child, "streaming"))
+				if err != nil {
+					errs[idx] = err
+					return
+				}
+				ords[idx] = append(ords[idx], ord)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("publisher %d: %v", i, err)
+		}
+	}
+
+	got := make([]int32, 0, total)
+	for _, o := range ords {
+		got = append(got, o...)
+	}
+	if len(got) != total {
+		t.Fatalf("collected %d ordinals, want %d", len(got), total)
+	}
+	sort.Slice(got, func(a, b int) bool { return got[a] < got[b] })
+	for want := range int32(total) {
+		if got[want] != want {
+			t.Fatalf("sorted ordinal[%d] = %d — the sequence has a gap or a duplicate", want, got[want])
+		}
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != total {
+		t.Fatalf("row count = %d, want %d — %d events were dropped", count, total, total-count)
+	}
 }
 
 // TestConcurrentAppendDoesNotDuplicateAnOrdinal is the test the shared
