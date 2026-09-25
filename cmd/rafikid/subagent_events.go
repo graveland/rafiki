@@ -149,7 +149,14 @@ func (c *Controller) checkTaskResidue(childID string) {
 	if !ok || parent == "" {
 		// A top-level agent escalates to the human, via the log and
 		// `rafiki tasks`. There is nobody above it to inject into.
-		slog.Warn("agent settled again with unresolved tasks",
+		//
+		// Info, not Warn: non-terminal is not the same as neglected. Pending
+		// rows are a backlog's normal steady state, and rows assigned to
+		// still-running children are work in flight — both settle with
+		// "unresolved" residue routinely. This line records that the agent
+		// was nudged once and settled anyway; the ledger (`rafiki tasks`) is
+		// the authoritative view of what is actually left.
+		slog.Info("agent settled again with unresolved tasks",
 			"childId", childID, "unresolved", len(unresolved))
 		return
 	}

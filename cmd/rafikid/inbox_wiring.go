@@ -572,6 +572,6 @@ func (c *Controller) sweepInbox() {
 		return
 	}
 	if n > 0 {
-		slog.Info("inbox: swept terminal rows", "count", n)
+		slog.Debug("inbox: swept terminal rows", "count", n)
 	}
 }

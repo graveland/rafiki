@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -77,6 +78,8 @@ func parseNanos(s string) (t time.Time, ok bool) {
 // but not surfaced, to avoid OpenRouter disabling the webhook on transient
 // errors (the payload is fire-and-forget from OR's perspective).
 func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
+	stored := &spanLogCounter{}
+
 	insertSQL := `INSERT INTO openrouter.broadcast
 			(session_id, generation_id, trace_id, span_id, model,
 			 input_tokens, output_tokens, cache_read_tokens, cost_usd,
@@ -125,12 +128,60 @@ func HandleOTLP(pool *pgxpool.Pool, logger *slog.Logger) http.HandlerFunc {
 				}
 			}
 		}
-		if count > 0 {
-			logger.Info("or_broadcast: stored spans", "count", count)
-		} else {
+		// Success is the one case coalesced: OR fires this per generation
+		// batch, so a per-request line scales with traffic. The failure
+		// paths above, and a valid body with no spans in it, log per request.
+		if count == 0 {
 			logger.Warn("or_broadcast: valid body but zero spans", "body_len", len(body))
 		}
+		stored.record(count, time.Now(), logger)
 	}
+}
+
+// broadcastLogWindow is the coalescing window for HandleOTLP's success line.
+const broadcastLogWindow = time.Minute
+
+// spanLogCounter coalesces the "or_broadcast: stored spans" line into one per
+// window instead of one per webhook request. OpenRouter broadcasts every
+// generation it serves, so the per-request line was the daemon's log volume
+// growing with traffic — pure success confirmation with nothing to act on.
+// The parse/insert/zero-span failure paths log immediately and are unaffected.
+//
+// The flush is lazy: the first record that arrives after the window has
+// expired flushes the accumulated count, then opens the next window at its
+// own arrival time — so every line counts exactly the spans recorded inside
+// its window, and the triggering record belongs to the window it opens.
+// Steady traffic therefore produces one line per minute; a burst followed by
+// silence flushes only when traffic resumes (or never, if it stopped —
+// openrouter.broadcast holds the truth). That trades exactness nobody checks
+// for a counter with no timer and no goroutine: an http.Handler has no
+// lifecycle of its own, and a background flusher would need one to be shut
+// down with.
+type spanLogCounter struct {
+	mu          sync.Mutex
+	windowStart time.Time
+	count       int
+}
+
+// record adds n spans to the current window, flushing and reopening the
+// window first when it has expired by the time this request arrived. The
+// expiry check runs before the n<=0 return so even a span-less request can
+// flush a window that traffic has moved past.
+func (c *spanLogCounter) record(n int, now time.Time, logger *slog.Logger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.windowStart.IsZero() && now.Sub(c.windowStart) >= broadcastLogWindow {
+		logger.Info("or_broadcast: stored spans", "count", c.count)
+		c.count = 0
+		c.windowStart = time.Time{}
+	}
+	if n <= 0 {
+		return
+	}
+	if c.windowStart.IsZero() {
+		c.windowStart = now
+	}
+	c.count += n
 }
 
 func insertSpan(ctx context.Context, pool *pgxpool.Pool, sql string, sp otlpSpan, logger *slog.Logger) error {

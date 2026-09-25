@@ -3,6 +3,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"testing"
 
@@ -100,5 +101,62 @@ func TestExecutorsEnabled(t *testing.T) {
 				t.Errorf("executorsEnabled(%q, %v) = %v, want %v", tt.controlAddr, tt.dbConfigured, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseLogLevel covers the four level names the --log-level help
+// advertises, case-insensitivity, and the refusal of everything else —
+// including slog's own offset forms ("INFO+2"), which are more power than
+// selecting a daemon's verbosity needs.
+func TestParseLogLevel(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    slog.Level
+		wantErr bool
+	}{
+		{"debug", slog.LevelDebug, false},
+		{"INFO", slog.LevelInfo, false},
+		{" Warn ", slog.LevelWarn, false},
+		{"error", slog.LevelError, false},
+		{"", slog.LevelInfo, true},
+		{"verbose", slog.LevelInfo, true},
+		{"INFO+2", slog.LevelInfo, true},
+	}
+	for _, tt := range tests {
+		got, err := parseLogLevel(tt.in)
+		if got != tt.want || (err != nil) != tt.wantErr {
+			t.Errorf("parseLogLevel(%q) = %v, %v; want %v, err=%v", tt.in, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
+
+// TestResolveLogLevel pins the precedence chain (flag > RAFIKI_LOG_LEVEL >
+// info) and the asymmetry between the two sources: an invalid flag fails the
+// run, an invalid env value warns and falls back to info.
+func TestResolveLogLevel(t *testing.T) {
+	if level, err := resolveLogLevel("debug"); err != nil || level != slog.LevelDebug {
+		t.Errorf("flag debug = %v, %v; want debug, nil", level, err)
+	}
+	if _, err := resolveLogLevel("louder"); err == nil {
+		t.Error("invalid flag must fail the run, got nil error")
+	}
+
+	t.Setenv(paths.LogLevel, "warn")
+	if level, err := resolveLogLevel(""); err != nil || level != slog.LevelWarn {
+		t.Errorf("env warn = %v, %v; want warn, nil", level, err)
+	}
+	if level, err := resolveLogLevel("error"); err != nil || level != slog.LevelError {
+		t.Errorf("flag must beat env = %v, %v; want error, nil", level, err)
+	}
+
+	t.Setenv(paths.LogLevel, "nonsense")
+	level, err := resolveLogLevel("")
+	if err != nil || level != slog.LevelInfo {
+		t.Errorf("invalid env = %v, %v; want info fallback, nil error", level, err)
+	}
+
+	t.Setenv(paths.LogLevel, "")
+	if level, err := resolveLogLevel(""); err != nil || level != slog.LevelInfo {
+		t.Errorf("unset everywhere = %v, %v; want info, nil", level, err)
 	}
 }

@@ -142,6 +142,11 @@ const (
 	// the conversations.raw_http_request hypertable. Debug-only; off by default.
 	RecordRequests = "RAFIKI_RECORD_REQUESTS"
 
+	// LogLevel selects the daemon's log verbosity: "debug", "info" (default),
+	// "warn" or "error", case-insensitive. --log-level overrides it on the
+	// command line.
+	LogLevel = "RAFIKI_LOG_LEVEL"
+
 	// BashRTK controls whether the fundi bash tool routes commands through
 	// rtk for output compression: "auto" (default, use it when installed),
 	// "on" (require it), or "off".

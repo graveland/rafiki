@@ -490,3 +490,54 @@ func testBroadcastPool(t *testing.T) *pgxpool.Pool {
 func testBroadcastLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+// TestSpanLogCounterCoalescesPerWindow pins the coalescing contract: spans
+// recorded inside one window emit nothing; the first record past the window
+// flushes exactly the count stored INSIDE that window, and belongs to the
+// window it opens; a zero-count record never opens a window but still
+// flushes an expired one. No database — the counter is pure, and its clock
+// is caller-supplied so the test never sleeps.
+func TestSpanLogCounterCoalescesPerWindow(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	base := time.Unix(1_700_000_000, 0)
+	c := &spanLogCounter{}
+
+	c.record(3, base, logger)
+	c.record(4, base.Add(30*time.Second), logger)
+	if buf.Len() != 0 {
+		t.Fatalf("records inside one window logged %q; want silence", buf.String())
+	}
+
+	c.record(5, base.Add(broadcastLogWindow+time.Second), logger)
+	if out := buf.String(); !strings.Contains(out, "or_broadcast: stored spans") || !strings.Contains(out, "count=7") {
+		t.Fatalf("flush line = %q; want stored spans with count=7 (3+4, not the triggering 5)", out)
+	}
+
+	// The triggering record opened a fresh window carrying its own 5; the
+	// next record joins it, and both flush together when that window closes.
+	buf.Reset()
+	c.record(1, base.Add(broadcastLogWindow+2*time.Second), logger)
+	if buf.Len() != 0 {
+		t.Fatalf("record into the reopened window logged %q; want silence", buf.String())
+	}
+	c.record(1, base.Add(2*broadcastLogWindow+2*time.Second), logger)
+	if out := buf.String(); !strings.Contains(out, "count=6") {
+		t.Fatalf("second flush = %q; want count=6 (the reopened window's 5+1)", out)
+	}
+
+	// A zero-count record must not open a window (a no-op request would
+	// otherwise start the clock for spans it never stored), but must still
+	// flush an expired one.
+	buf.Reset()
+	c2 := &spanLogCounter{}
+	c2.record(0, base, logger)
+	c2.record(2, base.Add(90*time.Second), logger)
+	if buf.Len() != 0 {
+		t.Fatalf("records after a zero-count opener logged %q; want silence", buf.String())
+	}
+	c2.record(0, base.Add(150*time.Second), logger)
+	if out := buf.String(); !strings.Contains(out, "count=2") {
+		t.Fatalf("zero-record flush = %q; want stored spans with count=2", out)
+	}
+}

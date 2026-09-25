@@ -734,6 +734,7 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi `webfetch`/`websearch` tools (default off) |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the Brave Search API for `websearch` instead of scraping DuckDuckGo Lite |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk): `auto` (default), `on`, `off` |
+| `RAFIKI_LOG_LEVEL` | daemon log verbosity: `debug`, `info` (default), `warn`, `error`. The daemon's `--log-level` flag overrides it. `debug` exposes per-request housekeeping lines; at `info` the OpenRouter broadcast webhook coalesces its success line to one per minute |
 | `RAFIKI_EXECUTOR_SELECTOR` | client-side default label selector for `rafiki create --executor-selector` |
 | `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright. Defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (UDS-only trust boundary), OFF once it's set |
 

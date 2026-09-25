@@ -130,6 +130,7 @@ func newRootCmd() *cobra.Command {
 	var listenAddr string
 	var dbDSN string
 	var dev bool
+	var logLevel string
 
 	root := &cobra.Command{
 		Use:           "rafikid",
@@ -143,10 +144,11 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			return runDaemon(runDaemonOpts{
-				Config: cfg,
-				Listen: listenAddr,
-				DB:     dbDSN,
-				Dev:    dev,
+				Config:   cfg,
+				Listen:   listenAddr,
+				DB:       dbDSN,
+				Dev:      dev,
+				LogLevel: logLevel,
 			})
 		},
 	}
@@ -155,6 +157,7 @@ func newRootCmd() *cobra.Command {
 	root.Flags().StringVar(&listenAddr, "listen", "", "proxy face listen address (overrides RAFIKI_PROXY_LISTEN)")
 	root.Flags().StringVar(&dbDSN, "db", "", "postgres DSN (overrides RAFIKI_DB)")
 	root.Flags().BoolVar(&dev, "dev", false, "dev mode: auto-migrate the schema")
+	root.Flags().StringVar(&logLevel, "log-level", "", "log level: debug|info|warn|error (overrides RAFIKI_LOG_LEVEL; default info)")
 
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
@@ -278,18 +281,23 @@ func newMigrateCmd() *cobra.Command {
 
 // runDaemonOpts is the cobra-parsed daemon configuration.
 type runDaemonOpts struct {
-	Config Config
-	Listen string
-	DB     string
-	Dev    bool
+	Config   Config
+	Listen   string
+	DB       string
+	Dev      bool
+	LogLevel string
 }
 
 // runDaemon is the daemon's main loop, extracted from the old main() body.
 // It owns everything from flag parsing onward and never returns on success
 // (it blocks until signalled).
 func runDaemon(opts runDaemonOpts) error {
+	level, err := resolveLogLevel(opts.LogLevel)
+	if err != nil {
+		return err
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: level,
 	})))
 
 	// XDG locations, NOT ~/.pi — that is pi's own directory, and a daemon must
@@ -1013,6 +1021,52 @@ func parseControlListenAddr() string {
 		return ""
 	}
 	return addr
+}
+
+// resolveLogLevel picks the daemon's log level: the --log-level flag first,
+// then RAFIKI_LOG_LEVEL, then info. The two sources get different treatment
+// on an invalid value: the flag is the caller typing at a prompt this very
+// second, so it fails the run loudly; the env var is a line in a unit or .env
+// file that may have been sitting there for months, so it warns and falls
+// back to info — matching how parseControlListenAddr treats a bad
+// RAFIKI_CONTROL_LISTEN. A silent downgrade would be the expensive failure:
+// "why can't I see debug lines" is unanswerable from the log alone, so the
+// warning names the value that was ignored.
+func resolveLogLevel(flagValue string) (slog.Level, error) {
+	v := flagValue
+	if v == "" {
+		v = paths.Get(paths.LogLevel)
+	}
+	if v == "" {
+		return slog.LevelInfo, nil
+	}
+	level, err := parseLogLevel(v)
+	if err != nil {
+		if flagValue != "" {
+			return slog.LevelInfo, fmt.Errorf("--log-level: %w", err)
+		}
+		slog.Warn("RAFIKI_LOG_LEVEL is not a valid level; using info", "value", v)
+		return slog.LevelInfo, nil
+	}
+	return level, nil
+}
+
+// parseLogLevel maps a level name to slog's level. Names only, matching the
+// --log-level help: slog's own UnmarshalText would also accept offset forms
+// ("INFO+2"), which are more power than selecting a daemon's verbosity needs
+// and one more syntax to get wrong in a unit file.
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return slog.LevelInfo, fmt.Errorf("unknown log level %q (want debug, info, warn or error)", s)
 }
 
 // loadServiceEnv applies the daemon's environment file (see
