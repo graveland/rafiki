@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 // TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty proves the
@@ -349,6 +350,31 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 		if _, err := c.agentRuntimeOptions(req, "c_explicit_db", false, "", ""); err == nil {
 			t.Errorf("agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
 		}
+	}
+}
+
+// TestAgentRuntimeOptionsSharesControllerCatalog proves every in-process
+// agent child gets the controller's ONE shared model catalog in its runtime
+// options: without this wiring each child's llm.Client builds its own catalog
+// and fetches OpenRouter's whole model list itself, so 200 children meant 200
+// fetches and hundreds of MB. agentRuntimeOptions covers spawn, resume and
+// startup recovery, so one assertion here pins all three paths.
+func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
+	c := newTestController(t)
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	c.SetCatalog(cat)
+
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_shared_catalog", false, "", "")
+	if err != nil {
+		t.Fatalf("agentRuntimeOptions: %v", err)
+	}
+	if ro.Catalog != cat {
+		t.Errorf("ro.Catalog = %p, want the controller's shared catalog instance %p", ro.Catalog, cat)
 	}
 }
 

@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/routing"
 )
 
 func TestThinkingBudgetFor(t *testing.T) {
@@ -209,5 +211,69 @@ func TestValidateRejectsMissingRegistry(t *testing.T) {
 	c := Config{Model: "anthropic/claude-sonnet-5"}
 	if err := c.Validate(); err == nil {
 		t.Fatal("Validate accepted a Config with no provider registry")
+	}
+}
+
+// buildCatalogEngine is the shared construction helper for the catalog tests:
+// it builds one engine through Config.BuildEngine exactly as the daemon's
+// in-process runner does (fake turns, no network), so the test observes what
+// client — and therefore which model catalog — the engine really ended up
+// with. The caller owns closing the engine.
+func buildCatalogEngine(t *testing.T, cat *routing.ModelCatalog) *Engine {
+	t.Helper()
+	silenceSlog(t)
+	cfg := Config{
+		Model:     "anthropic/claude-x",
+		Cwd:       t.TempDir(),
+		Name:      "catalog-under-test",
+		FakeTurns: writeFakeTurns(t, sampleEndTurn),
+		Tools:     fakeToolSet{},
+		Providers: providers.Default(),
+		Catalog:   cat,
+	}
+	eng, shutdown, err := cfg.BuildEngine(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil))
+	if err != nil {
+		t.Fatalf("BuildEngine: %v", err)
+	}
+	t.Cleanup(shutdown)
+	return eng
+}
+
+// TestBuildEngineUsesSharedCatalog proves Config.Catalog reaches the engine's
+// llm.Client as THE instance, not a copy or a re-defaulted one. Every
+// in-process fundi child used to build its own catalog, fetching OpenRouter's
+// whole model list per child; threading the daemon's shared instance through
+// Config.Catalog is what makes that one fetch and one copy daemon-wide. The
+// seeded entry also pins that pricing lookups answer from the shared data.
+func TestBuildEngineUsesSharedCatalog(t *testing.T) {
+	cat := routing.NewModelCatalog(nil, time.Hour, nil)
+	cat.SeedForTest([]routing.CatalogEntry{{ID: "claude-x", Name: "shared catalog model"}})
+
+	eng := buildCatalogEngine(t, cat)
+	defer eng.Close()
+
+	got := catalogOf(eng.client)
+	if got != cat {
+		t.Fatalf("engine's client uses catalog %p, want the shared instance %p passed via Config.Catalog", got, cat)
+	}
+}
+
+// TestBuildEngineWithoutSharedCatalogBuildsOwn pins the standalone `rafikid
+// fundi` contract behind the shared-catalog change: with no Catalog handed in,
+// each engine's client still defaults its own (non-nil) catalog, and two
+// engines never share one instance — nil must mean "build your own", not
+// "reuse something process-global".
+func TestBuildEngineWithoutSharedCatalogBuildsOwn(t *testing.T) {
+	a := buildCatalogEngine(t, nil)
+	b := buildCatalogEngine(t, nil)
+	defer a.Close()
+	defer b.Close()
+
+	catA, catB := catalogOf(a.client), catalogOf(b.client)
+	if catA == nil || catB == nil {
+		t.Fatalf("standalone engines' catalogs = %p, %p; llm.NewClient was expected to default one in for each", catA, catB)
+	}
+	if catA == catB {
+		t.Fatalf("two standalone engines share one catalog instance (%p); nil Catalog must mean the client builds its own", catA)
 	}
 }

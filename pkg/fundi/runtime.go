@@ -20,6 +20,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
@@ -99,6 +100,17 @@ type RuntimeOptions struct {
 	FakeTurns      string
 	Providers      *providers.Set
 	APIKeyOverride string
+
+	// Catalog is the daemon's shared model catalog, passed to the child's
+	// llm.Client via llm.WithCatalog. nil = the client builds its own
+	// (standalone `rafikid fundi`, which has no daemon catalog to share).
+	//
+	// Without it every in-process child fetches OpenRouter's whole model list
+	// itself and holds its own copy for the client's TTL — N children, N
+	// fetches and N copies of the same data. The daemon owns ONE instance
+	// (Controller.catalog); handing the same pointer to every child makes the
+	// fetch and the memory daemon-wide, not per-child.
+	Catalog *routing.ModelCatalog
 
 	// ProviderSenders overrides the sender for specific providers, keyed by
 	// provider name. The daemon populates this for every provider with a
@@ -660,6 +672,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Providers:              opts.Providers,
 		APIKeyOverride:         opts.APIKeyOverride,
 		ProviderSenders:        opts.ProviderSenders,
+		Catalog:                opts.Catalog,
 		Pool:                   opts.Pool,
 		Tools:                  registry,
 		AutoResume:             opts.AutoResume,

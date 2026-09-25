@@ -336,6 +336,13 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	}
 	ro.ProviderSenders = senders
 
+	// The daemon's ONE shared model catalog, so this child's llm.Client never
+	// builds (and OpenRouter-fetches) its own — N in-process children used to
+	// mean N model-list fetches and N copies of the same ~MB of models. This
+	// is the same instance the proxy face passes via llm.WithCatalog; nil
+	// (catalog-less daemon) keeps the client building its own.
+	ro.Catalog = c.catalog
+
 	// The single lease-acquisition site. Every agent path — spawn, resume,
 	// startup recovery — reaches BuildEngine, so hooking here is what makes the
 	// guard cover all of them. Acquiring in loadChildren alone left every

@@ -13,6 +13,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -132,6 +133,13 @@ type Config struct {
 	// does not have. The provider is identified by Model, so a forwarded key
 	// can never land on a provider the caller did not address.
 	APIKeyOverride string
+
+	// Catalog is the shared model catalog handed to the engine's llm.Client
+	// via llm.WithCatalog — see RuntimeOptions.Catalog, whose doc comment
+	// carries the reasoning. nil means the client builds its own, which is
+	// what the standalone `rafikid fundi` process (no daemon catalog) keeps
+	// doing.
+	Catalog *routing.ModelCatalog
 
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/rafikid before calling BuildEngine.
@@ -340,6 +348,14 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 		return nil, err
 	}
 	opts := []llm.ClientOption{llm.WithProviders(c.Providers)}
+
+	// The shared catalog is appended before the FakeTurns early-return below:
+	// a --fake-turns child must end up with the caller's catalog just as a
+	// real one does. nil (standalone `rafikid fundi`) keeps the client
+	// defaulting its own, exactly as before — see llm.NewClient.
+	if c.Catalog != nil {
+		opts = append(opts, llm.WithCatalog(c.Catalog))
+	}
 
 	if c.FakeTurns != "" {
 		fake, err := LoadFakeSender(c.FakeTurns)
