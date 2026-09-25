@@ -98,6 +98,91 @@ message SendResponse {
   string message_id = 1;
 }
 
+// ─── Script children (Report / Receive / SetResult) ─────────────────────────
+// The three verbs a script child (a process, not an LLM) talks to the daemon
+// with. All three are childScoped, and all three act on the CALLER'S OWN
+// position in the tree, resolved from the credential — never from a request
+// field. Report pushes upward to the caller's own parent; Receive and
+// SetResult are strictly self-only.
+
+// Report publishes progress from a script child to its parent's event buffer,
+// where it coalesces and defers exactly like a subagent settle
+// (notifySubagentSettled): five reports between the parent's turns cost one
+// injected frame, not five.
+message ReportRequest {
+  // kind is the report's discriminator ("progress", "log", "error", ...).
+  // Required, at most 64 bytes, and no control characters — it is rendered
+  // verbatim inside the fragment the parent's frame carries.
+  string kind = 1;
+  // data_json is the report payload as a JSON object (or any valid JSON
+  // value). Required to PARSE as JSON and capped at MaxReportDataBytes (4
+  // KiB); oversized or malformed data is refused with CodeInvalidArgument
+  // rather than truncated — a silently truncated JSON payload is worse than
+  // an explicit error, and the cap keeps a report fragment well inside the
+  // event buffer's own per-fragment truncation.
+  string data_json = 2;
+}
+
+message ReportResponse {}
+
+// ReceiveRequest has one field, and it is a self-check, not an address: a
+// caller may only receive its own inbox.
+message ReceiveRequest {
+  // When set, must equal the caller's own child id (CodePermissionDenied
+  // otherwise — this is the one childScoped verb whose check is identity, not
+  // subtree, so it cannot go through ChildScope.Authorize, which refuses the
+  // caller's own id). Empty means the caller's own id.
+  string child_id = 1;
+}
+
+// ScriptMessage is one message streamed to a script child over Receive.
+message ScriptMessage {
+  // Text is work delivered to the child's inbox: an agent_send (prompt or
+  // steer) aimed at this child. The modes mirror SendMode minus ABORT — an
+  // abort arrives as the stop variant below, because to a script both mean
+  // "stop what you are doing".
+  message Text {
+    string text = 1;
+    SendMode mode = 2;  // PROMPT or STEER; never ABORT here
+    // The durable row id this message was assembled from — exactly one
+    // today, because a message carries one inbox row (the Receive stream
+    // delivers a pulled batch row by row rather than coalescing it).
+    // Repeated so a future batching change needs no wire change. This is
+    // what a caller quotes when asking what a script received.
+    repeated string message_ids = 3;
+    // Non-text payloads attached by Send (an image pasted beside a question).
+    repeated ImageBlock attachments = 4;
+  }
+  // Stop tells the script to shut down gracefully. It is delivered by the
+  // Receive stream's lifecycle poll — within roughly one poll interval of
+  // the child entering shutting_down, which still precedes the SIGTERM and
+  // SIGKILL rungs because those wait out the shutdown timeout — not by a
+  // synchronous pre-signal push. The kill escalation that already exists is
+  // the backstop either way, and an inbox abort is delivered as one too.
+  message Stop {
+    // why the daemon is stopping the script ("stopped by operator",
+    // "abort requested"). Informational only.
+    string reason = 1;
+  }
+  oneof body {
+    Text text = 1;
+    Stop stop = 2;
+  }
+}
+
+// SetResultRequest is a plain unary call, not streamed — the script calls it
+// once at the end of its work. See ReceiveRequest for the self-only rule.
+message SetResultRequest {
+  // result_json is the script's structured final result as JSON. Required to
+  // PARSE as JSON and capped at MaxResultBytes (4 KiB); oversized or
+  // malformed data is refused with CodeInvalidArgument. Last write wins:
+  // every call replaces the stored result, and the value present when the
+  // child settles rides the settle fragment and GetChild.
+  string result_json = 1;
+}
+
+message SetResultResponse {}
+
 // ChildSummary mirrors protocol.ChildSummary. Only the fields a client renders
 // are carried; this is deliberately not a field-for-field mirror, because a
 // mirrored type nobody enforces drifts.
@@ -131,6 +216,11 @@ message ChildSummary {
   // SpawnRequest.max_cost is -- unset here means unlimited, matching
   // childstore.Session.MaxCost's zero-value convention, NOT "cap of zero".
   optional double max_cost = 16;
+  // result is the script child's final result (SetResult), verbatim JSON.
+  // Empty when the child has not set one — there is no separate presence bit
+  // because a stored result is always non-empty (a JSON value has at least
+  // one byte).
+  string result = 17;
 }
 
 message ListChildrenRequest {
@@ -755,6 +845,13 @@ service Control {
   rpc ListProviderBans(ListProviderBansRequest) returns (ListProviderBansResponse);
   rpc BanProvider(BanProviderRequest) returns (BanProviderResponse);
   rpc UnbanProvider(UnbanProviderRequest) returns (UnbanProviderResponse);
+  // The script-child verbs. All three are childScoped; Report is the one that
+  // acts OUTWARD (on the caller's own parent), Receive and SetResult act only
+  // on the caller itself. See the "Script children" block above for the
+  // authorization and size-cap rules.
+  rpc Report(ReportRequest) returns (ReportResponse);
+  rpc Receive(ReceiveRequest) returns (stream ScriptMessage);
+  rpc SetResult(SetResultRequest) returns (SetResultResponse);
 }
 
 // SkillRow is one row of conversations.skills. body is omitted from list

@@ -142,6 +142,12 @@ const (
 	ControlBanProviderProcedure = "/rafiki.v1.Control/BanProvider"
 	// ControlUnbanProviderProcedure is the fully-qualified name of the Control's UnbanProvider RPC.
 	ControlUnbanProviderProcedure = "/rafiki.v1.Control/UnbanProvider"
+	// ControlReportProcedure is the fully-qualified name of the Control's Report RPC.
+	ControlReportProcedure = "/rafiki.v1.Control/Report"
+	// ControlReceiveProcedure is the fully-qualified name of the Control's Receive RPC.
+	ControlReceiveProcedure = "/rafiki.v1.Control/Receive"
+	// ControlSetResultProcedure is the fully-qualified name of the Control's SetResult RPC.
+	ControlSetResultProcedure = "/rafiki.v1.Control/SetResult"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -202,6 +208,13 @@ type ControlClient interface {
 	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
 	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
 	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
+	// The script-child verbs. All three are childScoped; Report is the one that
+	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
+	// on the caller itself. See the "Script children" block above for the
+	// authorization and size-cap rules.
+	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
+	Receive(context.Context, *connect.Request[v1.ReceiveRequest]) (*connect.ServerStreamForClient[v1.ScriptMessage], error)
+	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -509,6 +522,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("UnbanProvider")),
 			connect.WithClientOptions(opts...),
 		),
+		report: connect.NewClient[v1.ReportRequest, v1.ReportResponse](
+			httpClient,
+			baseURL+ControlReportProcedure,
+			connect.WithSchema(controlMethods.ByName("Report")),
+			connect.WithClientOptions(opts...),
+		),
+		receive: connect.NewClient[v1.ReceiveRequest, v1.ScriptMessage](
+			httpClient,
+			baseURL+ControlReceiveProcedure,
+			connect.WithSchema(controlMethods.ByName("Receive")),
+			connect.WithClientOptions(opts...),
+		),
+		setResult: connect.NewClient[v1.SetResultRequest, v1.SetResultResponse](
+			httpClient,
+			baseURL+ControlSetResultProcedure,
+			connect.WithSchema(controlMethods.ByName("SetResult")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -563,6 +594,9 @@ type controlClient struct {
 	listProviderBans         *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
 	banProvider              *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
 	unbanProvider            *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
+	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
+	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
+	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -810,6 +844,21 @@ func (c *controlClient) UnbanProvider(ctx context.Context, req *connect.Request[
 	return c.unbanProvider.CallUnary(ctx, req)
 }
 
+// Report calls rafiki.v1.Control.Report.
+func (c *controlClient) Report(ctx context.Context, req *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {
+	return c.report.CallUnary(ctx, req)
+}
+
+// Receive calls rafiki.v1.Control.Receive.
+func (c *controlClient) Receive(ctx context.Context, req *connect.Request[v1.ReceiveRequest]) (*connect.ServerStreamForClient[v1.ScriptMessage], error) {
+	return c.receive.CallServerStream(ctx, req)
+}
+
+// SetResult calls rafiki.v1.Control.SetResult.
+func (c *controlClient) SetResult(ctx context.Context, req *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error) {
+	return c.setResult.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -868,6 +917,13 @@ type ControlHandler interface {
 	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
 	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
 	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
+	// The script-child verbs. All three are childScoped; Report is the one that
+	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
+	// on the caller itself. See the "Script children" block above for the
+	// authorization and size-cap rules.
+	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
+	Receive(context.Context, *connect.Request[v1.ReceiveRequest], *connect.ServerStream[v1.ScriptMessage]) error
+	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -1171,6 +1227,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("UnbanProvider")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlReportHandler := connect.NewUnaryHandler(
+		ControlReportProcedure,
+		svc.Report,
+		connect.WithSchema(controlMethods.ByName("Report")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlReceiveHandler := connect.NewServerStreamHandler(
+		ControlReceiveProcedure,
+		svc.Receive,
+		connect.WithSchema(controlMethods.ByName("Receive")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetResultHandler := connect.NewUnaryHandler(
+		ControlSetResultProcedure,
+		svc.SetResult,
+		connect.WithSchema(controlMethods.ByName("SetResult")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -1271,6 +1345,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlBanProviderHandler.ServeHTTP(w, r)
 		case ControlUnbanProviderProcedure:
 			controlUnbanProviderHandler.ServeHTTP(w, r)
+		case ControlReportProcedure:
+			controlReportHandler.ServeHTTP(w, r)
+		case ControlReceiveProcedure:
+			controlReceiveHandler.ServeHTTP(w, r)
+		case ControlSetResultProcedure:
+			controlSetResultHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1474,4 +1554,16 @@ func (UnimplementedControlHandler) BanProvider(context.Context, *connect.Request
 
 func (UnimplementedControlHandler) UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UnbanProvider is not implemented"))
+}
+
+func (UnimplementedControlHandler) Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Report is not implemented"))
+}
+
+func (UnimplementedControlHandler) Receive(context.Context, *connect.Request[v1.ReceiveRequest], *connect.ServerStream[v1.ScriptMessage]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Receive is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetResult is not implemented"))
 }

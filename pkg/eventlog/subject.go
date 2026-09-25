@@ -181,6 +181,8 @@ func TypeName(ev *rafikiv1.Event) string {
 		return "child_exited"
 	case *rafikiv1.Event_CompactionBoundary:
 		return "compaction_boundary"
+	case *rafikiv1.Event_ScriptReport:
+		return "script_report"
 	case *rafikiv1.Event_Error:
 		return "error"
 	case *rafikiv1.Event_Retry:

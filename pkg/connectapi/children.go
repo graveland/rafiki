@@ -63,6 +63,7 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 		maxCost := *c.MaxCost
 		out.MaxCost = &maxCost
 	}
+	out.Result = c.Result
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
 			out.LatestOrdinal = &latest

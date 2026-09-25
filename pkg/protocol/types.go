@@ -582,6 +582,9 @@ type ChildSummary struct {
 	// treats its own zero value as unlimited -- see grantedCost), so this is
 	// only ever set when the underlying cap is a real positive number.
 	MaxCost *float64 `json:"max_cost,omitempty"`
+	// Result is the script child's final result (Connect SetResult): verbatim
+	// JSON, omitted when the child has not set one. See childstore.Session.Result.
+	Result string `json:"result,omitempty"`
 }
 
 // ListResponseData is the data payload for ctrl_list responses.

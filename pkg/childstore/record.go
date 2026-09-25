@@ -67,6 +67,10 @@ type ChildRecord struct {
 
 	Config ChildConfig
 	Labels map[string]string
+
+	// Result is the script child's final result (Connect SetResult): verbatim
+	// JSON, empty when unset. See childstore.Session.Result.
+	Result string
 }
 
 // ChildConfig is the spawn configuration that only matters on resume. It is
@@ -184,6 +188,8 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 			RecordRequests:     snap.RecordRequests,
 		},
 		Labels: snap.Labels,
+
+		Result: snap.Result,
 	}
 }
 
@@ -252,5 +258,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		RecordRequests:     rec.Config.RecordRequests,
 
 		Labels: rec.Labels,
+
+		Result: rec.Result,
 	}
 }

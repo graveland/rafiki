@@ -161,6 +161,12 @@ type Session struct {
 	// SlashCommands is the claude child's advertised slash-command list (names),
 	// captured from its init frame. Empty for pi children.
 	SlashCommands []string
+
+	// Result is the script child's final result (Connect SetResult): verbatim
+	// JSON, last write wins. Empty when the child has not set one — a stored
+	// result is always non-empty, because SetResult validates that it parses
+	// as a complete JSON value. Carried in the settle fragment and GetChild.
+	Result string
 }
 
 // Snapshot is a defensive copy used at every boundary.
@@ -255,6 +261,9 @@ type Snapshot struct {
 	// SlashCommands is the claude child's advertised slash-command list (names),
 	// captured from its init frame. Empty for pi children.
 	SlashCommands []string
+
+	// Result mirrors Session.Result — see its doc comment.
+	Result string
 }
 
 // Snapshot returns a deep copy of the session's fields. The caller may freely
@@ -315,6 +324,7 @@ func (s *Session) Snapshot() Snapshot {
 		ExitedRenderRing: copyRingEvents(s.ExitedRenderRing),
 		Labels:           copyLabels(s.Labels),
 		SlashCommands:    copyStrings(s.SlashCommands),
+		Result:           s.Result,
 	}
 }
 

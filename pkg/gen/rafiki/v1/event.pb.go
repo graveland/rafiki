@@ -1443,10 +1443,69 @@ func (x *CompactionBoundary) GetPostTokens() int32 {
 	return 0
 }
 
+// ScriptReport is one progress report a script child published with the
+// Connect Report verb. It appears in the child's own durable event log only
+// when the script is top-level (no parent to push to); a parented script's
+// reports ride its parent's event buffer instead. kind is the caller's
+// discriminator, data_json the payload verbatim (already validated and
+// size-capped by the handler).
+type ScriptReport struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	DataJson      string                 `protobuf:"bytes,2,opt,name=data_json,json=dataJson,proto3" json:"data_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScriptReport) Reset() {
+	*x = ScriptReport{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScriptReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScriptReport) ProtoMessage() {}
+
+func (x *ScriptReport) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScriptReport.ProtoReflect.Descriptor instead.
+func (*ScriptReport) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ScriptReport) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ScriptReport) GetDataJson() string {
+	if x != nil {
+		return x.DataJson
+	}
+	return ""
+}
+
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — twelve durable types as of the claude-compaction work, not the two
-// this comment used to name. pkg/eventlog/tier.go is the authority.
+// ordinal is set on DURABLE-tier events — thirteen durable types as of the
+// script-children work, not the twelve this comment named before it and not
+// the two this comment originally named. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
 // 0023): zero-based and gap-free per child. It is NOT conversation_message.
@@ -1482,6 +1541,7 @@ type Event struct {
 	//	*Event_ChildSpawned
 	//	*Event_ChildExited
 	//	*Event_CompactionBoundary
+	//	*Event_ScriptReport
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1489,7 +1549,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[20]
+	mi := &file_rafiki_v1_event_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1561,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[20]
+	mi := &file_rafiki_v1_event_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1574,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{20}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Event) GetChildId() string {
@@ -1662,6 +1722,15 @@ func (x *Event) GetCompactionBoundary() *CompactionBoundary {
 	return nil
 }
 
+func (x *Event) GetScriptReport() *ScriptReport {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ScriptReport); ok {
+			return x.ScriptReport
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -1718,6 +1787,10 @@ type Event_CompactionBoundary struct {
 	CompactionBoundary *CompactionBoundary `protobuf:"bytes,22,opt,name=compaction_boundary,json=compactionBoundary,proto3,oneof"`
 }
 
+type Event_ScriptReport struct {
+	ScriptReport *ScriptReport `protobuf:"bytes,23,opt,name=script_report,json=scriptReport,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -1743,6 +1816,8 @@ func (*Event_ChildSpawned) isEvent_Payload() {}
 func (*Event_ChildExited) isEvent_Payload() {}
 
 func (*Event_CompactionBoundary) isEvent_Payload() {}
+
+func (*Event_ScriptReport) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -1852,7 +1927,10 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\vpost_tokens\x18\x03 \x01(\x05H\x01R\n" +
 	"postTokens\x88\x01\x01B\r\n" +
 	"\v_pre_tokensB\x0e\n" +
-	"\f_post_tokens\"\xbc\a\n" +
+	"\f_post_tokens\"?\n" +
+	"\fScriptReport\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1b\n" +
+	"\tdata_json\x18\x02 \x01(\tR\bdataJson\"\xfc\a\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
 	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
@@ -1872,7 +1950,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\x05retry\x18\x13 \x01(\v2\x10.rafiki.v1.RetryH\x00R\x05retry\x12>\n" +
 	"\rchild_spawned\x18\x14 \x01(\v2\x17.rafiki.v1.ChildSpawnedH\x00R\fchildSpawned\x12;\n" +
 	"\fchild_exited\x18\x15 \x01(\v2\x16.rafiki.v1.ChildExitedH\x00R\vchildExited\x12P\n" +
-	"\x13compaction_boundary\x18\x16 \x01(\v2\x1d.rafiki.v1.CompactionBoundaryH\x00R\x12compactionBoundaryB\t\n" +
+	"\x13compaction_boundary\x18\x16 \x01(\v2\x1d.rafiki.v1.CompactionBoundaryH\x00R\x12compactionBoundary\x12>\n" +
+	"\rscript_report\x18\x17 \x01(\v2\x17.rafiki.v1.ScriptReportH\x00R\fscriptReportB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinal*\xc8\x01\n" +
@@ -1899,7 +1978,7 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_rafiki_v1_event_proto_goTypes = []any{
 	(StopReason)(0),            // 0: rafiki.v1.StopReason
 	(*Usage)(nil),              // 1: rafiki.v1.Usage
@@ -1922,7 +2001,8 @@ var file_rafiki_v1_event_proto_goTypes = []any{
 	(*ChildSpawned)(nil),       // 18: rafiki.v1.ChildSpawned
 	(*ChildExited)(nil),        // 19: rafiki.v1.ChildExited
 	(*CompactionBoundary)(nil), // 20: rafiki.v1.CompactionBoundary
-	(*Event)(nil),              // 21: rafiki.v1.Event
+	(*ScriptReport)(nil),       // 21: rafiki.v1.ScriptReport
+	(*Event)(nil),              // 22: rafiki.v1.Event
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -1949,11 +2029,12 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	18, // 21: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
 	19, // 22: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
 	20, // 23: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	21, // 24: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -1978,7 +2059,7 @@ func file_rafiki_v1_event_proto_init() {
 	}
 	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[20].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[21].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -1992,6 +2073,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_ChildSpawned)(nil),
 		(*Event_ChildExited)(nil),
 		(*Event_CompactionBoundary)(nil),
+		(*Event_ScriptReport)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1999,7 +2081,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

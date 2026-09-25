@@ -479,6 +479,9 @@ func SnapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		maxCost := snap.MaxCost
 		cs.MaxCost = &maxCost
 	}
+	if snap.Result != "" {
+		cs.Result = snap.Result
+	}
 	return cs
 }
 

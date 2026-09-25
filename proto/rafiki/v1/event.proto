@@ -214,10 +214,22 @@ message CompactionBoundary {
   optional int32 post_tokens = 3;
 }
 
+// ScriptReport is one progress report a script child published with the
+// Connect Report verb. It appears in the child's own durable event log only
+// when the script is top-level (no parent to push to); a parented script's
+// reports ride its parent's event buffer instead. kind is the caller's
+// discriminator, data_json the payload verbatim (already validated and
+// size-capped by the handler).
+message ScriptReport {
+  string kind = 1;
+  string data_json = 2;
+}
+
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — twelve durable types as of the claude-compaction work, not the two
-// this comment used to name. pkg/eventlog/tier.go is the authority.
+// ordinal is set on DURABLE-tier events — thirteen durable types as of the
+// script-children work, not the twelve this comment named before it and not
+// the two this comment originally named. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
 // 0023): zero-based and gap-free per child. It is NOT conversation_message.
@@ -252,5 +264,6 @@ message Event {
     ChildSpawned child_spawned = 20;
     ChildExited child_exited = 21;
     CompactionBoundary compaction_boundary = 22;
+    ScriptReport script_report = 23;
   }
 }

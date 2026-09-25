@@ -73,6 +73,7 @@ type Server struct {
 	findingsReader atomic.Pointer[ConversationFindingsReader]
 	daraja         atomic.Pointer[*darajaHandlers]
 	scopes         atomic.Pointer[ChildScopeSource]
+	scripts        atomic.Pointer[ScriptHub]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

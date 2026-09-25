@@ -44,15 +44,18 @@ const (
 	// never be listed here.
 	policyAnyCaller
 
-	// policyChildScoped marks the nine agent-control verbs a child credential
+	// policyChildScoped marks the twelve agent-control verbs a child credential
 	// with subtree authority may call — Spawn, Kill, Close, Send, GetHistory,
-	// StreamEvents, ListChildren, GetChild, ListTasks. The gate admits a
+	// StreamEvents, ListChildren, GetChild, ListTasks, and the three
+	// script-child verbs Report, Receive, SetResult. The gate admits a
 	// ProvenanceChildToken caller on them, but a procedure name carries no
 	// target child id, so the gate cannot check the subtree itself: it admits
 	// and the HANDLER resolves the caller's subtree authority through
 	// connectapi's ChildScopeSource (cmd/rafikid connect_childscope.go),
 	// which reads the stored parent chain via childstore.IsDescendant and
 	// refuses the caller's own id — a child is not a descendant of itself.
+	// (Receive and SetResult never consult Authorize at all: they are
+	// self-only verbs, checked by identity, not by subtree.)
 	// The source never resolves nil — the operator path — for a child-shaped
 	// credential: the empty-ChildID and vanished-row shapes resolve an
 	// always-refusing scope, and the daemon wiring itself is pinned end to
@@ -96,6 +99,13 @@ var controlPolicyTable = map[string]controlPolicy{
 	"Kill":         policyChildScoped,
 	"Close":        policyChildScoped,
 	"ListTasks":    policyChildScoped,
+	// Script children (Report / Receive / SetResult). Report acts OUTWARD on
+	// the caller's own parent; Receive and SetResult are self-only. All three
+	// resolve the caller's position from the credential — the request carries
+	// no address to authorize against.
+	"Report":    policyChildScoped,
+	"Receive":   policyChildScoped,
+	"SetResult": policyChildScoped,
 
 	// anyCaller: the four read-only, non-scoped verbs.
 	"ListModels":         policyAnyCaller,

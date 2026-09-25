@@ -80,6 +80,39 @@ func (q *Queue) DeliverAll(ctx context.Context, childID string) error {
 	return q.deliver(ctx, childID, nil)
 }
 
+// Pull atomically retires and returns childID's pending rows: the read-side
+// primitive for a consumer that delivers rows ITSELF rather than through the
+// queue's Deliver function — today, the Connect Receive stream for script
+// children (cmd/rafikid connect_script.go).
+//
+// It takes the same per-child lock deliver takes, so an immediate delivery
+// racing this pull can never hand the same row to two consumers, and it marks
+// the rows consumed BEFORE returning them: the same at-most-once contract the
+// claude children already have (deliverInbox's doc — consumed on the write,
+// because a runtime with no ack seam cannot confirm). Rows returned but never
+// delivered over the wire are lost, exactly as they would be on a failed
+// claude frame write.
+func (q *Queue) Pull(ctx context.Context, childID string) ([]Inbound, error) {
+	if q.cfg.Store == nil {
+		return nil, nil
+	}
+	unlock := q.locks.lock(childID)
+	defer unlock()
+
+	rows, err := q.cfg.Store.Pending(ctx, childID)
+	if err != nil || len(rows) == 0 {
+		return rows, err
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	if err := q.cfg.Store.MarkConsumed(ctx, ids); err != nil {
+		return nil, fmt.Errorf("inbox: pull %s: %w", childID, err)
+	}
+	return rows, nil
+}
+
 func (q *Queue) deliver(ctx context.Context, childID string, source *string) error {
 	if q.cfg.Store == nil || q.cfg.Deliver == nil {
 		return nil

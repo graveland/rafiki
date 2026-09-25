@@ -72,7 +72,16 @@ func (c *Controller) notifySubagentSettled(childID, reason, excludeMCPUser strin
 	if !ok {
 		return
 	}
-	c.evbuf.Push(parent, subagentEventSource, childID, settleFragment(childID, snap.Name, reason))
+	// The settle fragment carries the child's final result (Connect SetResult)
+	// verbatim when it has one: for a script child the result IS the work
+	// product, and the parent reading the injected frame should not need a
+	// second verb call to learn what the script concluded. Last write wins —
+	// this is whatever was stored at settle time.
+	fragment := settleFragment(childID, snap.Name, reason)
+	if res := snap.Result; res != "" {
+		fragment += "\nfinal result of " + childID + ": " + res
+	}
+	c.evbuf.Push(parent, subagentEventSource, childID, fragment)
 }
 
 // settleFragment is the one wording both settlement consumers render — the
