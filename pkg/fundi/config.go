@@ -297,6 +297,9 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 	if c.OnConversationResolved != nil && pool != nil {
 		lease, lerr := c.OnConversationResolved(ctx, eng.conv.ID)
 		if lerr != nil {
+			// The engine is discarded unstarted: Close releases its gated
+			// worker, which would otherwise park on the start gate forever.
+			eng.Close()
 			return nil, nil, fmt.Errorf("agent: conversation lease: %w", lerr)
 		}
 		client.SetLease(lease)

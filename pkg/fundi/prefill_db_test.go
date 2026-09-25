@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -519,5 +520,45 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	mu.Unlock()
 	if msg := out.String(); strings.Contains(msg, "agent_error") {
 		t.Fatalf("unexpected agent_error frames: %s", msg)
+	}
+}
+
+// TestBuildEngineLeaseFailureReleasesWorker pins that a BuildEngine which
+// fails to take the conversation lease closes the engine it discards:
+// NewEngine already started the worker, gated on Start(), and nothing else
+// holds a handle that could release it — without the Close it parks forever,
+// one leaked engine per lost lease race.
+func TestBuildEngineLeaseFailureReleasesWorker(t *testing.T) {
+	silenceSlog(t)
+	pool, _ := dbTestPool(t)
+	workers := func() int {
+		buf := make([]byte, 1<<20)
+		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "fundi.(*Engine).worker")
+	}
+	before := workers()
+
+	cfg := Config{
+		Model:     "anthropic/claude-x",
+		Name:      "w1",
+		Cwd:       t.TempDir(),
+		FakeTurns: writeFakeTurns(t, sampleEndTurn),
+		Tools:     fakeToolSet{},
+		Providers: providers.Default(),
+		Pool:      pool,
+		Ref:       "buildengine-lease-failure",
+		OnConversationResolved: func(context.Context, string) (store.Lease, error) {
+			return store.Lease{}, errors.New("conversation is driven by another daemon")
+		},
+	}
+	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
+	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
+		t.Fatal("BuildEngine succeeded, want the lease error")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for workers() > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := workers(); n > before {
+		t.Fatalf("%d engine worker goroutine(s) still parked after a failed BuildEngine (baseline %d)", n, before)
 	}
 }
