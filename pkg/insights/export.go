@@ -76,7 +76,7 @@ func (i *Insights) Export(ctx context.Context, scope Scope, conversationID strin
 	tr := &Transcript{ConversationID: conversationID}
 
 	var a argList
-	where := "c.id = " + a.next(conversationID) + "::uuid AND " + scope.cond(&a, "c.owner_user_id")
+	where := "c.id = " + a.next(conversationID) + "::uuid AND " + scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")
 	err := i.pool.QueryRow(ctx, `
 		SELECT coalesce(u.username,''), coalesce(c.persona,''), c.driven_by,
 		       coalesce((SELECT min(source) FROM conversations.conversation_turn

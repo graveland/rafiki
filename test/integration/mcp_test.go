@@ -70,6 +70,27 @@ var mcpToolNames = []string{
 	"memory_delete",
 }
 
+// mcpChildToolNames is what a per-child credential's session lists: the same
+// surface MINUS the recall and memory tools. Wave 1 of the script-children
+// plan declined those six for a child caller — both sides of that binding are
+// owner-dimensioned and there is no per-child memory namespace, so binding it
+// would hand the child read AND write on its owner's memories (see
+// newRecallBinding). The preset and pymodule authoring tools stay listed: they
+// refuse at call time now, and a listed refusal is one the model reads.
+var mcpChildToolNames = func() []string {
+	dropped := map[string]bool{
+		"recall": true, "recall_context": true,
+		"memory_put": true, "memory_get": true, "memory_tree": true, "memory_delete": true,
+	}
+	out := make([]string, 0, len(mcpToolNames))
+	for _, name := range mcpToolNames {
+		if !dropped[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}()
+
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
 
 // bootMCPDaemon boots the DB-backed daemon the MCP tests drive, over the

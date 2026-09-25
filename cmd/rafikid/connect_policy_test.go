@@ -13,9 +13,11 @@ import (
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -31,8 +33,10 @@ const (
 
 // proxyFaceConnectRoute mounts the Control service the way proxy.go mounts it
 // on the proxy face — connectControlRoute behind tokenAuth.Middleware — with
-// a REAL UserTokenAuth wired for all three child credentials. It returns a
-// Connect client pointed at the mounted stack.
+// a REAL UserTokenAuth wired for all three child credentials, and the real
+// child-subtree source wired with a childstore that knows c_child as a
+// childless tree (so every target the matrix names is a non-descendant). It
+// returns a Connect client pointed at the mounted stack.
 //
 // The route composition here goes through connectControlRoute, the same
 // composer proxy.go and connect_uds.go mount through, so this test cannot
@@ -59,9 +63,19 @@ func proxyFaceConnectRoute(t *testing.T) rafikiv1connect.ControlClient {
 	})
 
 	// The same construction proxy.go uses — through connectControlRoute, the
-	// one composer both mounts share. HistoryLoader tolerates a nil pool
-	// because no admitted request below reaches GetHistory.
+	// one composer both mounts share, plus the subtree source the childScoped
+	// handlers consult. Kill is childScoped: its per-child refusal must come
+	// from the REAL source (c_victim is not a descendant of c_child), or the
+	// assertion would be proving that an unwired handler answers Unavailable.
+	// HistoryLoader tolerates a nil pool because no admitted request below
+	// reaches GetHistory.
+	ctrl := &Controller{st: childstore.New(), cm: newChildManager()}
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_child", Status: protocol.StatusIdle, Kind: protocol.KindFundi,
+		StartedAt: time.Now(),
+	})
 	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv.SetChildScopeSource(ctrl.childScopeFor)
 	h := &server.Handler{}
 	h.ControlPath, h.Control = connectControlRoute(srv)
 
@@ -105,9 +119,14 @@ func childCredentials() []struct {
 }
 
 // childUsableVerbs are the verbs the 0.1 brief names: each acts (or answers)
-// with operator authority — kill another tree, lift a budget, rewrite what
-// every future agent loads or runs — so a child credential must be refused
-// on every one of them.
+// with operator authority — lift a budget, rewrite what every future agent
+// loads or runs — so a child credential must be refused on every one of them.
+// Kill is childScoped and appears here anyway: with the subtree source wired,
+// its per-child refusal comes from the handler layer (c_victim is not a
+// descendant), with the identical code the gate gives the other two child
+// credentials — so the test pins the CODE across all three shapes, and the
+// per-verb matrix (TestConnectChildScopedVerbs) pins where each refusal
+// originates.
 func childUsableVerbs(client rafikiv1connect.ControlClient) []struct {
 	name   string
 	invoke func(ctx context.Context, set func(h http.Header)) error
@@ -268,6 +287,16 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 // resolves to — is a child credential, not a user: it carries no provenance
 // and must not inherit operator authority because its UserID is empty rather
 // than borrowed.
+//
+// childScoped admits ONE child credential at the gate: a per-child secret
+// names a child with subtree authority, so it passes and the HANDLER layer
+// resolves its subtree (connectapi.ChildScopeSource — the per-verb matrix is
+// TestConnectChildScopedVerbs). The other two child shapes name no child with
+// authority — an attributed identity's ChildID is empty by construction, and
+// the bare per-boot secret names nothing at all — so both stay refused here,
+// exactly as in wave 0. Gate admission is not operator authority: a handler
+// without the wired source must never serve a child caller the operator path,
+// which the wiring test and the per-verb matrix both pin.
 func TestAuthorizeControlProcedure(t *testing.T) {
 	const (
 		userOnly   = controlProcedurePrefix + "SetBudget"
@@ -291,18 +320,20 @@ func TestAuthorizeControlProcedure(t *testing.T) {
 		if id.id != nil {
 			ctx = server.WithIdentity(ctx, id.id)
 		}
-		// A nil identity and a real user credential pass every policy. A child
-		// credential passes only the anyCaller verb; userOnly and childScoped
-		// (enforced as userOnly in wave 0 — wave 1 changes this expectation for
-		// ProvenanceChildToken identities alone) refuse it.
+		// A nil identity and a real user credential pass every policy. A
+		// per-child secret passes only the anyCaller and childScoped verbs —
+		// on childScoped it has yet to name a legal target, which the handler
+		// layer enforces. The two unattributed child shapes pass only
+		// anyCaller.
 		trusted := id.id == nil || id.id.IsUserCredential()
+		childToken := id.id != nil && id.id.Via == server.ProvenanceChildToken
 		for _, tc := range []struct {
 			procedure string
 			wantAdmit bool
 		}{
 			{anyCaller, true},
 			{userOnly, trusted},
-			{childScope, trusted},
+			{childScope, trusted || childToken},
 		} {
 			err := authorizeControlProcedure(ctx, tc.procedure)
 			if tc.wantAdmit {
@@ -323,12 +354,15 @@ func TestAuthorizeControlProcedure(t *testing.T) {
 
 // TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs pins the OTHER
 // mount of the Control service: the local socket composes the same policy
-// gate behind its optional identity interceptor, so a child credential
-// presented to connect.sock is refused on operator verbs exactly as it is on
-// the proxy face — while a credential-LESS caller, the socket's own trust
-// model, still reaches the handlers. The two planes must agree: one that
-// refuses a child credential and one that serves it would answer the same
-// operator differently depending on which route the request took.
+// gate behind its optional identity interceptor, and the same child-subtree
+// source behind the gate. Kill is childScoped, so the three child credentials
+// are refused from two different layers with one identical code — the
+// per-boot shapes by the gate (they name no child with authority), the
+// per-child secret by the handler's subtree check (c_victim is not a
+// descendant of c_child) — while a credential-LESS caller, the socket's own
+// trust model, still reaches the handlers. The two planes must agree: one
+// that refuses a child credential and one that serves it would answer the
+// same operator differently depending on which route the request took.
 func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -347,7 +381,13 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 		return "", false
 	})
 
+	ctrl := &Controller{st: childstore.New(), cm: newChildManager()}
+	ctrl.st.Insert(&childstore.Session{
+		ChildID: "c_child", Status: protocol.StatusIdle, Kind: protocol.KindFundi,
+		StartedAt: time.Now(),
+	})
 	srv := connectapi.NewServer(nil)
+	srv.SetChildScopeSource(ctrl.childScopeFor)
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
 	if err != nil {

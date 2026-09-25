@@ -312,10 +312,13 @@ func mcpDrain(t *testing.T, resp *http.Response) string {
 }
 
 // mcpAssertExactToolSet fails the test unless got is exactly the assertion of
-// record. Both credential kinds assert against the one list.
+// record. A child credential asserts against the CHILD list — the user list
+// minus the six recall/memory tools wave 1 declined for children — so a
+// regression that rebinds the owner-dimensioned recall surface onto a child
+// caller fails here on the real daemon, not just in the unit fixture.
 func mcpAssertExactToolSet(t *testing.T, where string, got []string) {
 	t.Helper()
-	want := slices.Clone(mcpToolNames)
+	want := slices.Clone(mcpChildToolNames)
 	slices.Sort(want)
 	slices.Sort(got)
 	if !slices.Equal(got, want) {

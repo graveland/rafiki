@@ -68,6 +68,12 @@ func filterFromRequest(req *rafikiv1.StreamEventsRequest) (eventlog.Filter, erro
 
 // StreamEvents replays the durable tier if a cursor was supplied, then follows
 // live events matching the subject predicate.
+//
+// childScoped: a per-child credential may stream only a filter inside its own
+// subtree, resolved with the same descendant predicate every childScoped verb
+// uses — a child or subtree subject rooted at the caller itself is refused
+// too (a child is not a descendant of its own id), and the daemon-wide All
+// subject is refused outright: it is the operator's view.
 func (s *Server) StreamEvents(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.StreamEventsRequest],
@@ -76,6 +82,18 @@ func (s *Server) StreamEvents(
 	filter, err := filterFromRequest(req.Msg)
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if sc := s.childScope(ctx); sc != nil {
+		switch filter.Subject.Scope {
+		case eventlog.ScopeAll:
+			return refuseChildScope(errors.New("the all-subject stream is operator-only; stream your own subtree instead"))
+		case eventlog.ScopeChild, eventlog.ScopeSubtree:
+			if err := sc.Authorize(filter.Subject.ChildID); err != nil {
+				return err
+			}
+		default:
+			return connect.NewError(connect.CodeInvalidArgument, errors.New("unknown subject scope"))
+		}
 	}
 	ln := s.lineage()
 	if ln == nil {

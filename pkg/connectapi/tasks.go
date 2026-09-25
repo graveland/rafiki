@@ -4,6 +4,7 @@ package connectapi
 
 import (
 	"context"
+	"errors"
 
 	"connectrpc.com/connect"
 
@@ -35,6 +36,13 @@ const taskListMaxRows = 2000
 
 // ListTasks answers the task ledger for one conversation.
 //
+// childScoped: a per-child credential must NAME a conversation inside its own
+// subtree (its own ledger or a descendant's — ConversationInScope resolves
+// both from the childstore), because an empty conversation_id means "every
+// conversation", which is the operator's cross-fleet view. The refusal is
+// PermissionDenied, not a scoped empty list: a silently empty ledger reads
+// exactly like "you have no tasks".
+//
 // A Server with no lister attached answers an EMPTY list: that is a wiring
 // state, not a runtime one, and it keeps the zero value usable in tests.
 // A STORE error is returned AS an error -- rafiki requires a database, so a
@@ -45,6 +53,13 @@ func (s *Server) ListTasks(
 	ctx context.Context, req *connect.Request[rafikiv1.ListTasksRequest],
 ) (*connect.Response[rafikiv1.ListTasksResponse], error) {
 	out := &rafikiv1.ListTasksResponse{}
+	if sc := s.childScope(ctx); sc != nil {
+		convID := req.Msg.GetConversationId()
+		if convID == "" || !sc.ConversationInScope(convID) {
+			return nil, refuseChildScope(errors.New(
+				"list the task ledger of one conversation inside your own subtree; every conversation is the operator's view"))
+		}
+	}
 	lp := s.taskLister.Load()
 	if lp == nil || *lp == nil {
 		return connect.NewResponse(out), nil

@@ -216,11 +216,23 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		return nil
 	}
 	owner := users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
+	// A per-child caller's authoring surfaces narrow here, once, and every
+	// binding below keys off it. This is review-0's F1 fix: the MCP face
+	// admitted a per-child credential and then bound every owner-scoped tool
+	// to owner.UserID — the owner's conversation corpus, memory namespace,
+	// preset namespace and pymodule bucket. The agent-control tools were
+	// always subtree-scoped (newControllerSpawner); the rest now are too, or
+	// refuse.
+	isChild := id.Via == server.ProvenanceChildToken
+	childID := ""
+	if isChild {
+		childID = id.ChildID
+	}
 	var spawner tools.AgentSpawner
 	switch {
 	case id.IsUserCredential():
 		spawner = newUserSpawner(ctrl, owner)
-	case id.Via == server.ProvenanceChildToken:
+	case isChild:
 		spawner = newControllerSpawner(ctrl, id.ChildID)
 	default:
 		return nil
@@ -237,30 +249,41 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// degrades to a deny-all Scope{} internally rather than needing a nil check
 	// at the call site, matching how Tasks and Agents are always set in this
 	// same literal. The reader takes no caller id in any method, so this
-	// construction is the binding -- see its doc comment.
+	// construction is the binding -- see its doc comment. A per-child caller
+	// reads its own SUBTREE, never its owner's corpus (see
+	// newMCPChildConversationReader).
+	conversations := newMCPConversationReader(ctrl, owner)
+	if isChild {
+		conversations = newMCPChildConversationReader(ctrl, id.ChildID)
+	}
 	opts := tools.ToolOpts{
 		Agents:        spawner,
 		Tasks:         f.taskStoreFor(ctrl),
 		Quota:         quotaReader,
-		Conversations: newMCPConversationReader(ctrl, owner),
+		Conversations: conversations,
 	}
 	// Presets need only the database: unlike the pymodule tools they are the
-	// same for every caller and every executor state. A child-token caller is
-	// attributed as the writer.
+	// same for every caller and every executor state. A child-token caller
+	// gets the READ-only binding: put/delete refuse, because a child writing
+	// the owner's preset namespace shadows — latest-live-wins — whatever the
+	// operator's next spawn resolves.
 	if ctrl.presetStore != nil {
-		writer := ""
-		if id.Via == server.ProvenanceChildToken {
-			writer = id.ChildID
+		if isChild {
+			opts.Presets = childPresetBinding{newPresetBinding(ctrl, owner.UserID, "")}
+		} else {
+			opts.Presets = newPresetBinding(ctrl, owner.UserID, "")
 		}
-		opts.Presets = newPresetBinding(ctrl, owner.UserID, writer)
 	}
 	// Recall + memory tools, bound to the caller the same way the conversation
 	// reader is: an admin's conversation-derived hits cover the whole daemon,
 	// everyone else's are scoped to their own rows, and memories are ALWAYS
-	// the caller's own. Declines daemon-wide when recall is not wired; the
-	// guard lives here because newRecallBinding's decline is a nil INTERFACE
-	// (a typed-nil assignment would defeat the blueprints' decline).
-	if rb := newRecallBinding(ctrl, owner); rb != nil {
+	// the caller's own. A per-child caller gets NOTHING here — there is no
+	// per-child memory namespace, so the owner-dimensioned binding would read
+	// and write the owner's — see newRecallBinding. Declines daemon-wide when
+	// recall is not wired; the guard lives here because newRecallBinding's
+	// decline is a nil INTERFACE (a typed-nil assignment would defeat the
+	// blueprints' decline).
+	if rb := newRecallBinding(ctrl, owner, childID); rb != nil {
 		opts.Recall = rb
 	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has
@@ -269,12 +292,16 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// (which degrades per-caller), this condition is the same for every
 	// caller of this daemon.
 	if ctrl.claudeExecutorRouted() {
-		opts.PyModules = newMCPPyModuleStore(ctrl, owner)
+		store := tools.PyModuleStore(newMCPPyModuleStore(ctrl, owner))
+		if isChild {
+			store = &childPyModuleStore{newMCPPyModuleStore(ctrl, owner)}
+		}
+		opts.PyModules = store
 		opts.PyModuleList = newMCPPyModuleLister(ctrl, owner)
 		// pymodule_run is scoped further: only a ProvenanceChildToken
 		// caller (a claude-kind child, never the interactive human) whose
 		// own childstore row carries a live executor binding gets it.
-		if id.Via == server.ProvenanceChildToken {
+		if isChild {
 			if snap, ok := ctrl.st.Get(id.ChildID); ok {
 				if exec, ok := newMCPPyModuleExecutor(ctrl.execPoolConn, snap); ok {
 					opts.PyModuleExecutor = exec
@@ -463,17 +490,18 @@ const mcpSpawnKeepDoing = "Keep doing your own work"
 // conversation tools' blueprint descriptions. Those claims ("Results are
 // scoped to conversations you own; there is no way to search another
 // user's") are written for a fundi child, whose scope is always its owner's
-// -- but newMCPConversationReader grants ScopeAll to an admin caller, so on
-// this surface the truthful scope story is the CALLING credential's: a user
-// token reads its own conversations, an admin token reads the whole daemon's.
-// The not-found-not-permission framing of the export description stays
-// verbatim (a conversation outside the caller's scope answers not-found),
-// which is correct for both provenances -- for an admin nothing is ever out
-// of scope, so the sentence never bites.
+// -- but this surface's scope story is the CALLING credential's: a user token
+// reads its own conversations, a per-child token reads its own subtree's
+// (wave 1 — never the owner's corpus), and an admin token reads the whole
+// daemon's. The not-found-not-permission framing of the export description
+// stays verbatim (a conversation outside the caller's scope answers
+// not-found), which is correct for every provenance -- for an admin nothing
+// is ever out of scope, so the sentence never bites.
 const mcpConversationScopeNote = "Scope: results cover the conversations the " +
-	"credential you are calling with can see -- your own conversations, or, when " +
-	"you hold an admin credential, the whole daemon's. A conversation outside " +
-	"that scope answers not-found, never a permission error."
+	"credential you are calling with can see -- your own conversations, your own " +
+	"subtree's when you call as a spawned agent, or, when you hold an admin " +
+	"credential, the whole daemon's. A conversation outside that scope answers " +
+	"not-found, never a permission error."
 
 // mcpSearchScopeStart begins the fundi-only ownership claim inside the
 // conversation_search blueprint text. Note and the remainder of the blueprint

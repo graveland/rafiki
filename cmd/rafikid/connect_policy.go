@@ -44,13 +44,18 @@ const (
 	// never be listed here.
 	policyAnyCaller
 
-	// policyChildScoped is reserved for wave 1 of the script-children plan:
-	// verbs a child credential may call on its own subtree (Spawn, Kill,
-	// Close, Send, GetHistory, StreamEvents, ListChildren, GetChild,
-	// ListTasks). In wave 0 the gate enforces it exactly as userOnly — a
-	// child credential is refused — because the subtree authorization path
-	// does not exist yet. Wave 1 changes only authorizeControlProcedure's
-	// childScoped branch, never the table.
+	// policyChildScoped marks the nine agent-control verbs a child credential
+	// with subtree authority may call — Spawn, Kill, Close, Send, GetHistory,
+	// StreamEvents, ListChildren, GetChild, ListTasks. The gate admits a
+	// ProvenanceChildToken caller on them, but a procedure name carries no
+	// target child id, so the gate cannot check the subtree itself: it admits
+	// and the HANDLER resolves the caller's subtree authority through
+	// connectapi's ChildScopeSource (cmd/rafikid connect_childscope.go),
+	// which reads the stored parent chain via childstore.IsDescendant and
+	// refuses the caller's own id — a child is not a descendant of itself.
+	// An unwired source fails closed: the handler answers Unavailable, never
+	// the operator path. ProvenanceChildAttributed and the bare per-boot
+	// secret name no child with authority and stay refused here.
 	policyChildScoped
 )
 
@@ -76,8 +81,9 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 //	GetRateLimitStatus the rate-limit windows already attributed to the
 //	                  caller's own (or its owner's) account
 var controlPolicyTable = map[string]controlPolicy{
-	// Child-scoped in wave 1; enforced as userOnly until then. See
-	// policyChildScoped.
+	// childScoped: a per-child credential may call these on its own subtree;
+	// the per-verb subtree check lives in the handler behind
+	// connectapi.Server.SetChildScopeSource. See policyChildScoped.
 	"GetHistory":   policyChildScoped,
 	"StreamEvents": policyChildScoped,
 	"Send":         policyChildScoped,
@@ -193,19 +199,24 @@ func (controlPolicyGate) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 // filesystem permission), exactly as before provenance existed. Every
 // presented credential that is not a user credential — a per-child secret,
 // the per-boot secret with or without its session header, or anything else
-// that resolves to the zero identity — is a child credential: userOnly and
-// childScoped procedures refuse it, anyCaller procedures admit it.
+// that resolves to the zero identity — is a child credential: userOnly
+// procedures refuse it, anyCaller procedures admit it, and a childScoped
+// procedure admits ONLY the per-child secret, because only that credential
+// names a child with subtree authority. The admitted child caller is still
+// not an operator: each childScoped handler resolves the caller's subtree
+// through the wired ChildScopeSource and refuses every target outside it.
 func authorizeControlProcedure(ctx context.Context, procedure string) error {
 	id := server.IdentityFromContext(ctx)
 	if id == nil || id.IsUserCredential() {
 		return nil
 	}
-	if policyFor(procedure) == policyAnyCaller {
+	policy := policyFor(procedure)
+	if policy == policyAnyCaller {
 		return nil
 	}
-	// childScoped is enforced as userOnly in wave 0 (see policyChildScoped),
-	// so it falls into the same refusal — deliberately not a separate branch
-	// until wave 1 adds the subtree authorization it needs.
+	if policy == policyChildScoped && id.Via == server.ProvenanceChildToken {
+		return nil
+	}
 	return connect.NewError(connect.CodePermissionDenied,
 		errors.New("procedure "+procedure+" requires a user credential; the presented credential is "+childCredentialKind(id)))
 }

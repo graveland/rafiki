@@ -354,3 +354,33 @@ func (b presetBinding) Delete(ctx context.Context, name string) error {
 	}
 	return b.c.presetStore.Delete(ctx, b.owner, name)
 }
+
+// childPresetBinding is what a per-child MCP caller gets instead of the
+// owner's binding: the read verbs pass through — preset names and metadata
+// are the same read-only, non-scoped facts Connect's anyCaller grants a child
+// credential on ListPresets/GetPreset — but AUTHORING refuses. Review-0's F1:
+// the owner-scoped put/delete let a child shadow, latest-live-wins, whatever
+// preset the operator's next spawn would resolve. Attribution is not
+// authorization, so wave 1 removes the write rather than stamping it more
+// honestly.
+//
+// The refusal is an ERROR, not a declined tool: the tool stays listed so the
+// model reads the rule it violated, and every surface wrapping this binding
+// sees one sentence naming who may author presets.
+type childPresetBinding struct {
+	presetBinding
+}
+
+var _ tools.PresetStore = childPresetBinding{}
+
+// errPresetChildAuthoring is the child-caller refusal for preset
+// put/delete. It names the rule, never the caller's credential value.
+var errPresetChildAuthoring = errors.New("presets are operator-authored: a per-child credential may read presets but never put or delete them")
+
+func (b childPresetBinding) Put(ctx context.Context, spec presets.Spec) (presets.Record, error) {
+	return presets.Record{}, errPresetChildAuthoring
+}
+
+func (b childPresetBinding) Delete(ctx context.Context, name string) error {
+	return errPresetChildAuthoring
+}

@@ -20,11 +20,12 @@ var _ tools.PresetStore = presetBinding{}
 
 // connectPresets adapts *Controller to connectapi.PresetManager, modelled on
 // connectPyModules: the owner comes from the request CONTEXT via spawnOwner —
-// never a request field. No credential gate is applied, deliberately, for the
-// same reason connectPyModules gives: an anonymous unix-socket caller writes
-// the shared unattributed bucket, which is the same owner its own children
-// resolve to, and a child-attributed caller is a legitimate preset writer
-// through its owner.
+// never a request field. No per-request gate is applied here because the
+// route's policy interceptor (connect_policy.go) already applies one: these
+// verbs are userOnly, so a child credential is refused before this manager
+// runs, and what reaches it is a real user credential — or the anonymous
+// unix-socket caller, who writes the shared unattributed bucket, the same
+// owner its own children resolve to.
 //
 // The manager never mutates a Spec handed to it: presets.ToProto aliases the
 // record's value-shaped data (Labels and the tri-state slices) into the proto

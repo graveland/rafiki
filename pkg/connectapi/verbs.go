@@ -28,6 +28,13 @@ func (s *Server) Send(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
+	// childScoped: a per-child credential may steer only its own subtree, and
+	// the check runs before the message is accepted anywhere.
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	inboxP := s.inbox.Load()
 	if inboxP == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
@@ -100,6 +107,10 @@ func contentFromBlocks(blocks []*rafikiv1.ContentBlock) (string, []inbox.Attachm
 }
 
 // ListChildren returns the daemon's children, optionally filtered by status.
+//
+// childScoped: a per-child credential gets ONLY its own subtree, resolved by
+// the wired ChildScope (the same descendants controllerSpawner.List answers),
+// never the operator's fleet view.
 func (s *Server) ListChildren(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
@@ -110,6 +121,14 @@ func (s *Server) ListChildren(
 			errors.New("child lister not yet wired"))
 	}
 	elog := s.eventLog()
+	if sc := s.childScope(ctx); sc != nil {
+		summaries := sc.Subtree(req.Msg.GetStatuses())
+		out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
+		for _, c := range summaries {
+			out = append(out, toProtoChild(c, elog, ctx))
+		}
+		return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: out}), nil
+	}
 	summaries := (*p).ListChildren(req.Msg.GetStatuses())
 	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 	for _, c := range summaries {
@@ -128,6 +147,13 @@ func (s *Server) GetChild(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
+	// childScoped: the subtree boundary runs before the lookup, so a caller
+	// cannot even confirm a sibling exists.
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	p := s.children.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,
@@ -144,6 +170,14 @@ func (s *Server) GetChild(
 
 // Spawn creates a child. The budget pointers are copied as pointers, never
 // dereferenced into values, so "unset" survives the trip to the daemon.
+//
+// childScoped: a per-child credential spawns into its OWN position —
+// ParentChildID is forced to the caller's child id, overwriting whatever the
+// wire carried, which is the existing child-spawn admission (depth, budget
+// and children checks read the PARENT's grant through that field, the same
+// admission fundi's agent_spawn gets). The owner stamp then comes from the
+// same source fundi's spawner uses — the caller's own stored row — resolved
+// in cmd/rafikid's lifecycle adapter from the credential.
 func (s *Server) Spawn(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SpawnRequest],
@@ -159,6 +193,9 @@ func (s *Server) Spawn(
 	}
 
 	sp := connectapiSpawnParams(req.Msg)
+	if sc := s.childScope(ctx); sc != nil {
+		sp.ParentChildID = sc.ChildID()
+	}
 	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -223,6 +260,12 @@ func (s *Server) Kill(
 	if childID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
+	}
+	// childScoped: the subtree boundary runs before the kill is attempted.
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
 	}
 	p := s.lifecycle.Load()
 	if p == nil {

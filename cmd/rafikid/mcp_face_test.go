@@ -430,7 +430,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-alice"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}, ""); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string
@@ -600,9 +600,11 @@ func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
 
 // TestMCPFaceRecallToolsFollowRecallRuntime pins the recall block's gate: the
 // six decline on a daemon whose recall subsystem is not wired (nil
-// ctrl.recall — the DB-less posture) and materialize for BOTH provenances
-// once it is, exactly like the preset block outside the executor-routed
-// pymodule condition.
+// ctrl.recall — the DB-less posture), materialize for a user caller once it
+// is, and stay declined for a per-child caller — wave 1's F1 fix: the
+// owner-dimensioned binding would hand a child read AND write on its owner's
+// memory namespace, and there is no per-child namespace to bind instead, so
+// the child gets none of the six (see newRecallBinding).
 func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	face, _ := mcpFaceFixture(t)
 	recallTools := []string{"recall", "recall_context", "memory_put", "memory_get", "memory_tree", "memory_delete"}
@@ -615,22 +617,21 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	}
 
 	face.controller().recall = &recallRuntime{st: &fakeRecallStore{}}
-	requests := map[string]*http.Request{
-		"user": mcpRequestFor("u-alice"),
-		"child": func() *http.Request {
-			r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
-			ctx := server.WithIdentity(r.Context(), &server.Identity{
-				UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
-			})
-			return r.WithContext(ctx)
-		}(),
+	names = mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	for _, name := range recallTools {
+		if !slices.Contains(names, name) {
+			t.Errorf("user request is missing %s: %v", name, names)
+		}
 	}
-	for provenance, req := range requests {
-		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
-		for _, name := range recallTools {
-			if !slices.Contains(names, name) {
-				t.Errorf("%s request is missing %s: %v", provenance, name, names)
-			}
+
+	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	child = child.WithContext(server.WithIdentity(child.Context(), &server.Identity{
+		UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	}))
+	names = mcpToolNames(t, mcpConnect(t, face.getServer(child)))
+	for _, name := range recallTools {
+		if slices.Contains(names, name) {
+			t.Errorf("child request unexpectedly exposes %s: %v", name, names)
 		}
 	}
 }
@@ -876,7 +877,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-owner"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}, ""); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string

@@ -94,7 +94,7 @@ func (i *Insights) RecentAnalyses(ctx context.Context, scope Scope, conversation
 	limit = clampReviewLimit(limit)
 
 	var a argList
-	conds := []string{scope.cond(&a, "c.owner_user_id")}
+	conds := []string{scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")}
 	if len(conversationIDs) > 0 {
 		uuids, childIDs := splitIDArm(conversationIDs)
 		conds = append(conds, idArms(&a, uuids, childIDs, "ca.conversation_id"))
@@ -163,7 +163,7 @@ func (i *Insights) Findings(ctx context.Context, scope Scope, f FindingsFilter) 
 	}
 
 	var a argList
-	conds := []string{scope.cond(&a, "c.owner_user_id"), "af.status = " + a.next(status)}
+	conds := []string{scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref"), "af.status = " + a.next(status)}
 	if f.Axis != "" {
 		conds = append(conds, "af.axis = "+a.next(f.Axis))
 	}
@@ -246,7 +246,7 @@ func (i *Insights) FilterByScope(ctx context.Context, scope Scope, ids []string)
 SELECT c.id::text, c.id::text
   FROM conversations.conversation c
  WHERE c.id = ANY(`+a.next(uuids)+`::uuid[])
-   AND `+scope.cond(&a, "c.owner_user_id"))
+   AND `+scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref"))
 	}
 	if len(childIDs) > 0 {
 		arms = append(arms, `
@@ -254,7 +254,7 @@ SELECT c.id::text, ch.child_id
   FROM conversations.conversation c
   JOIN conversations.child ch ON ch.conversation_id = c.id
  WHERE ch.child_id = ANY(`+a.next(childIDs)+`::text[])
-   AND `+scope.cond(&a, "c.owner_user_id"))
+   AND `+scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref"))
 	}
 	rows, err := i.pool.Query(ctx, strings.Join(arms, "\nUNION ALL\n"), a.args...)
 	if err != nil {

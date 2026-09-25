@@ -597,6 +597,12 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetChildLister(ctrl)
 			face.Control.SetTaskLister(ctrl)
 			face.Control.SetChildLifecycle(connectLifecycle{c: ctrl})
+			// The child credential's subtree authority for the nine childScoped
+			// verbs. The policy gate admits a ProvenanceChildToken caller on
+			// them; without this wiring the gate's admission would have no
+			// subtree boundary to enforce at the handler layer, so it is wired
+			// alongside the gate it completes (pinned by the wiring test).
+			face.Control.SetChildScopeSource(ctrl.childScopeFor)
 			face.Control.SetModelLister(connectModels{c: ctrl})
 			face.Control.SetConversationInsights(connectConversations{c: ctrl})
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})

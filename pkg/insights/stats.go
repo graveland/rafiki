@@ -147,7 +147,7 @@ func (i *Insights) GlobalStats(ctx context.Context, scope Scope, f StatsFilter) 
 		return nil, err
 	}
 	var a argList
-	conds := []string{"1=1", scope.cond(&a, "c.owner_user_id")}
+	conds := []string{"1=1", scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")}
 	if db := f.Path.drivenBy(); db != "" {
 		conds = append(conds, "c.driven_by = "+a.next(db))
 	}
@@ -181,7 +181,7 @@ func (i *Insights) ConversationStats(ctx context.Context, scope Scope, conversat
 		return nil, err
 	}
 	var pa argList
-	probeWhere := "id = " + pa.next(conversationID) + "::uuid AND " + scope.cond(&pa, "owner_user_id")
+	probeWhere := "id = " + pa.next(conversationID) + "::uuid AND " + scope.cond(&pa, "owner_user_id", "id", "external_ref")
 	var exists bool
 	if err := i.pool.QueryRow(ctx,
 		`SELECT true FROM conversations.conversation WHERE `+probeWhere, pa.args...).Scan(&exists); err != nil {

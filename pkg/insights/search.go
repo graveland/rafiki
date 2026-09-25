@@ -74,7 +74,7 @@ func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]C
 	// turn-level EXISTS folded in), and conds that reference the LATERAL
 	// aggregates and so can only apply outside the conversation scan.
 	var a argList
-	convConds := []string{"1=1", scope.cond(&a, "c.owner_user_id")}
+	convConds := []string{"1=1", scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")}
 	if db := f.Path.drivenBy(); db != "" {
 		convConds = append(convConds, "c.driven_by = "+a.next(db))
 	}

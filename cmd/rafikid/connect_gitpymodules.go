@@ -15,11 +15,11 @@ import (
 // field — the same rule connectPyModules follows, so registration is
 // owner-scoped with no way to see or write another owner's sources.
 //
-// No credential gate is applied, deliberately, for the same reason
-// connectPyModules carries none: an anonymous unix-socket caller writes the
-// shared unattributed bucket, which is the same owner its own children
-// resolve to, and a child-attributed caller is a legitimate pymodule-surface
-// writer through its owner.
+// No per-request credential check appears here for the same reason
+// connectPyModules carries none: the route's policy interceptor
+// (connect_policy.go) already refuses child credentials on these userOnly
+// verbs, and the anonymous unix-socket caller writes the shared unattributed
+// bucket, the same owner its own children resolve to.
 type connectGitSources struct{ c *Controller }
 
 // AddGitSource registers (or repoints) the source, then fires the FIRST

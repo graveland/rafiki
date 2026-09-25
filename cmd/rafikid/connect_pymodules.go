@@ -14,12 +14,14 @@ import (
 
 // connectPyModules adapts *Controller to connectapi.PymoduleManager. The
 // owner comes from the request CONTEXT via spawnOwner -- never a request
-// field -- exactly as connectLifecycle.Spawn resolves it. No credential
-// gate is applied, deliberately (design doc §3): an anonymous unix-socket
-// caller writes the shared unattributed bucket, which is the same owner its
-// own children resolve to, and a child-attributed caller is a legitimate
-// pymodule writer through its owner -- the authority the MCP face already
-// grants.
+// field -- exactly as connectLifecycle.Spawn resolves it. No per-request
+// credential check appears here because the route's policy interceptor
+// (connect_policy.go) already applies one: these verbs are userOnly, so a
+// child credential is refused before this manager runs. (The MCP face's
+// pymodule authoring for a child caller is refused separately, by the
+// childPyModuleStore binding — never mapped through to the owner.) An
+// anonymous unix-socket caller writes the shared unattributed bucket, the
+// same owner its own children resolve to.
 type connectPyModules struct{ c *Controller }
 
 func connectPymoduleRow(rec pymodules.Record) connectapi.PymoduleRow {

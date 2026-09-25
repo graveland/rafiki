@@ -21,7 +21,7 @@ func queryModels(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFi
 		return QueryResult{}, err
 	}
 	var a argList
-	conds := []string{"t.model IS NOT NULL", scope.cond(&a, "c.owner_user_id")}
+	conds := []string{"t.model IS NOT NULL", scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")}
 	if db := f.Path.drivenBy(); db != "" {
 		conds = append(conds, "c.driven_by = "+a.next(db))
 	}

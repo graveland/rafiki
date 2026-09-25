@@ -139,8 +139,22 @@ var _ tools.RecallBinding = (*recallBinding)(nil)
 // subsystem is not wired: the caller must assign the result to the
 // interface-typed option only when non-nil (a typed-nil in the interface
 // would defeat the blueprints' nil-decline).
-func newRecallBinding(c *Controller, owner users.Identity) tools.RecallBinding {
+//
+// A per-child MCP caller binds NOTHING (nil): review-0's F1 row. Both sides
+// of this binding are owner-dimensioned — recall.Scope admits an owner's
+// rows, MemoryOwner is a user id — and there is no per-child memory
+// namespace, so a child caller previously read AND WROTE its owner's memory
+// namespace and searched its owner's conversation-derived indexes. Scoping
+// recall to a subtree the way the conversation reader now is would mean a
+// second Scope type and new SQL in pkg/recall; until that exists the
+// conservative default stands — the child gets no recall or memory tools at
+// all, and its designed memory surface (if any) is its own runtime, not its
+// owner's namespace.
+func newRecallBinding(c *Controller, owner users.Identity, childID string) tools.RecallBinding {
 	if c.recall == nil {
+		return nil
+	}
+	if childID != "" {
 		return nil
 	}
 	var scope recall.Scope

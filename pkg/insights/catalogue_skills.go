@@ -25,7 +25,7 @@ func querySkills(ctx context.Context, pool *pgxpool.Pool, scope Scope, f StatsFi
 		return QueryResult{}, err
 	}
 	var a argList
-	conds := []string{"1=1", scope.cond(&a, "c.owner_user_id")}
+	conds := []string{"1=1", scope.cond(&a, "c.owner_user_id", "c.id", "c.external_ref")}
 	if db := f.Path.drivenBy(); db != "" {
 		conds = append(conds, "c.driven_by = "+a.next(db))
 	}

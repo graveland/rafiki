@@ -72,6 +72,7 @@ type Server struct {
 	reviewer       atomic.Pointer[ConversationReviewer]
 	findingsReader atomic.Pointer[ConversationFindingsReader]
 	daraja         atomic.Pointer[*darajaHandlers]
+	scopes         atomic.Pointer[ChildScopeSource]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
@@ -162,6 +163,15 @@ func (s *Server) GetHistory(
 	if childID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
+	}
+	// childScoped: the subtree boundary runs BEFORE the conversation
+	// resolves, so a caller learns nothing about a child it may not read —
+	// not even whether one exists (Authorize refuses unknown ids with the
+	// same not-a-descendant answer).
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
 	}
 
 	conversationID, err := s.resolveConversation(childID)

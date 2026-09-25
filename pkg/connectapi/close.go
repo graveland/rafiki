@@ -46,6 +46,12 @@ func (s *Server) Close(
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("child_id is required"))
 	}
+	// childScoped: the subtree boundary runs before the close is attempted.
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
+	}
 	p := s.lifecycle.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,

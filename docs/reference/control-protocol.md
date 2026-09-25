@@ -317,7 +317,7 @@ admit.
 |---|---|---|
 | `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `SetBudget`, `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `PutPreset`, `DeletePreset`, `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch` |
 | `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus` |
-| `childScoped` | Reserved for script children (wave 1 of the script-children plan): a child credential will act on its own subtree. Enforced exactly as `userOnly` until then | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `ListTasks` |
+| `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused; an unwired source fails closed (`Unavailable`), never the operator path | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `ListTasks` |
 
 The gate distinguishes three credential shapes:
 
@@ -329,9 +329,11 @@ The gate distinguishes three credential shapes:
   `ProvenanceChildToken` (a per-child secret), `ProvenanceChildAttributed`
   (the per-boot token plus `X-Rafiki-Session`), and the empty `Identity{}` a
   bare per-boot token resolves to. Refused with `CodePermissionDenied` on
-  every `userOnly` and `childScoped` procedure — the refusal names the
-  procedure and the credential kind, never the secret — and admitted only on
-  the `anyCaller` reads.
+  every `userOnly` procedure, and on `childScoped` procedures for every shape
+  EXCEPT `ProvenanceChildToken` — whose subtree reach the handler layer then
+  bounds, per the table above. The refusal names the procedure and the
+  credential kind, never the secret; without bounds, only the `anyCaller`
+  reads admit a child credential.
 
 This gate exists because every claude child holds a child credential in its
 environment (`ANTHROPIC_AUTH_TOKEN`, `RAFIKI_MCP_TOKEN`) — as does every bash
@@ -339,9 +341,11 @@ command the model runs — and before the gate only `Spawn`, `ListExecutors`
 and the conversation verbs checked provenance: one curl from inside any
 child could kill any sibling tree, lift any budget, or rewrite the presets,
 skills and pymodules every future agent loads. `scopeFor` (the conversation
-verbs' scope derivation) is unchanged and still refuses a child credential
-itself; the MCP agent-control surface (§2.4) has its own entitlement gate
-and is not affected.
+verbs' scope derivation) still refuses a child credential itself. The MCP
+agent-control surface (§2.4) has its own entitlement gate, and wave 1 of the
+script-children plan scoped its per-child bindings too: conversation reads
+to the child's own subtree, and the recall/memory, preset and pymodule
+authoring surfaces refused outright — see `mcp_face.go`'s `getServer`.
 
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 
@@ -608,10 +612,12 @@ backfilling it — while a lineage with no owner anywhere (an anonymous
 local-socket spawn) refuses. Any other
 provenance gets **403**: the credential authenticated and is not entitled to
 agent control — a status an MCP client can read, never a server that would
-render the refusal as an empty tool list.
-and every non-`anyCaller` Connect verb refuses it the same way through the
-policy interceptor's table (see the Control plane's "Who may call what").
-Attribution and authority are separate: `/v1/messages`
+render the refusal as an empty tool list. Every non-`anyCaller` Connect verb
+refuses a child credential the same way through the policy interceptor's
+table (see the Control plane's "Who may call what"), and on the `childScoped`
+verbs a per-child credential is bounded to its subtree instead of refused —
+never given the operator path. Attribution and authority are separate:
+`/v1/messages`
 billing, raw-trace capture and quota attribution consume the UserID and are
 deliberately unchanged, and a user token that also carries `X-Rafiki-Session`
 stays `ProvenanceUser` — provenance is a property of the credential, not the
@@ -652,7 +658,17 @@ onto another caller's bound tools.
   prompt is injected into asking for. The task ledger is keyed by the caller's
   OWNER (the conversation the `/v1/messages` attribution path already
   resolves), so a child shares its owner's ledger, exactly as a fundi child
-  does.
+  does. Wave 1 of the script-children plan narrowed the rest of the child's
+  tool set to the same boundary (review-0's F1 finding): `conversation_*` read
+  the child's own SUBTREE — its conversation plus its descendants' — through
+  `insights.ScopeSubtree`, never its owner's corpus; the recall and memory
+  tools are declined outright (both sides of that binding are owner-dimensioned
+  and there is no per-child memory namespace to bind instead); and the
+  authoring halves of the preset and pymodule tools refuse at call time
+  (`childPresetBinding`, `childPyModuleStore`) — the read halves still work, so
+  a child can read the presets it may spawn with and the modules it may run,
+  but it can never shadow what its owner's next spawn resolves or inject
+  Python into what the owner's fundi children run.
 
 `agent_set_budget` remains an exception for the user caller: **top-level
 children only**. Any parented child is refused — a parented child's budget
@@ -691,19 +707,19 @@ transport error, and never a successful result carrying the text.
 | `task_drop` | Abandon a task with a required `reason`; drops its subtasks |
 | `task_list` | Read the ledger; filter by status, metadata or assignee; dropped rows hidden unless `include_dropped` |
 | `quota_status` | The caller's own captured Anthropic subscription rate-limit snapshot; omitted when the daemon has no quota capture (a Materializer decline) |
-| `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
+| `conversation_search` | Search the CALLER's own past conversations by time, model, source, status or first-message substring; summaries with turn/token/cost figures. An admin caller reads the whole daemon's; a child caller reads its own subtree's; otherwise scoped to the caller's owner. Errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
 | `conversation_export` | Read one conversation's full transcript (per-turn metrics, skills invoked), found by `conversation_search`; a conversation outside the caller's scope answers not-found, never a permission error |
 | `conversation_query` | Run one named catalogue query (`tools`, `skills`, `classes`, `models`, `sizes`, `coverage`) over the caller's conversation history: typed columns rendered as tab-separated text. `tools` groups tool names case-insensitively and sorts by calls descending. Scoped like `conversation_search`; errors (`ErrNoPool`) at call time rather than declining when the daemon has no database |
-| `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store — the required `repo` argument must be `"local"` (the blob store's sentinel; git sources are read-only through this tool, `CodeInvalidArgument` otherwise); saving again under an existing name is a new version, never an overwrite. A module that does not parse as Python is refused outright; advisory findings — `ruff` lint output, failed dependency-venv installs on the owner's executors — ride the result text as a notice and never block the save |
+| `pymodule_put` | Save a reusable Python module (name, source, one-line description) to the caller's own pymodule store — the required `repo` argument must be `"local"` (the blob store's sentinel; git sources are read-only through this tool, `CodeInvalidArgument` otherwise); saving again under an existing name is a new version, never an overwrite. A module that does not parse as Python is refused outright; advisory findings — `ruff` lint output, failed dependency-venv installs on the owner's executors — ride the result text as a notice and never block the save. A child caller is REFUSED by rule: pymodules are operator-authored, and a child writing the owner's bucket would put arbitrary Python into the corpus the owner's fundi children run |
 | `pymodule_get` | Fetch one of the caller's saved pymodules by name — full source plus description, version and creation time; the required `repo` argument must be `"local"` (git sources are read-only through this tool); review before `pymodule_run`, or read-modify-write: fetch, edit, save as a new version with `pymodule_put` |
-| `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name; the required `repo` argument must be `"local"` (git sources are read-only through this tool); failed dependency-venv cleanups on the owner's executors ride the result text as a notice |
+| `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name; the required `repo` argument must be `"local"` (git sources are read-only through this tool); failed dependency-venv cleanups on the owner's executors ride the result text as a notice. A child caller is REFUSED by rule, like `pymodule_put` |
 | `pymodule_list` | List the caller's pymodules (name + one-line description) across all scopes — the blob store plus every registered git source's discovered scripts and packages, git rows labeled `reponame/name`; an optional `repo` argument narrows to one scope (`"local"` or a git source's name — the one place an empty value legitimately means "everything"). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
 | `pymodule_run` | Run one of the caller's pymodules by name — the required `repo` argument selects the source: `"local"` runs a saved module out of the executor's synced pymodule cache, a git source's name runs its discovered script out of that source's synced checkout (`scripts/<script>.py`, the checkout root on `PYTHONPATH` so intra-repo imports resolve, the repo's shared `.venv` interpreter when present) — never a workspace file, with the child's workspace as the process cwd (or the call's own `cwd`); a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
 | `preset_list` | List the presets the caller can spawn agents with — one row per preset with name, kind, model and description; an optional `prefix` narrows to one group (e.g. `default:`). Declined, with the other three, when the daemon has no database |
 | `preset_get` | Read one preset — version stamp and full spec (kind, model, tools, prompts, budget) as JSON; `history` returns every past version, deleted ones included. What a spawn with that preset will get |
-| `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker; a child-token caller is recorded as the writer |
+| `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker. A child caller is REFUSED by rule: presets are operator-authored, and a child writing the owner's namespace would shadow — latest-live-wins — what the operator's next spawn resolves |
 | `preset_delete` | Delete one preset by name — every live version is stamped deleted and the history is kept; a later `preset_put` under the same name starts a new version line |
-| `recall` | Search your past conversations AND your saved memories by keyword and meaning — one line per hit (`m:` memory, `s:` summary, `w:` window), never full text. Conversation results cover what your credential can see (an admin reads the whole daemon); memories are always your own. Declined, with the five below, when the daemon has no recall store |
+| `recall` | Search your past conversations AND your saved memories by keyword and meaning — one line per hit (`m:` memory, `s:` summary, `w:` window), never full text. Conversation results cover what your credential can see (an admin reads the whole daemon); memories are always your own. Declined, with the five below, when the daemon has no recall store — and declined for a child caller in every case: both sides of the binding are owner-dimensioned and there is no per-child memory namespace, so the tools never reach a child (wave 1) |
 | `recall_context` | Expand one recall hit: a window returns the surrounding messages (tool results collapsed to size markers), a summary its full text and conversation id, a memory its full body |
 | `memory_put` | Save or replace one of YOUR memories at `path/name` — tombstone-replace, one live version |
 | `memory_get` | Fetch one of your saved memories — full body, metadata, timestamps; a missing path/name is a tool error |

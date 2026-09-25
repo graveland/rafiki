@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -86,4 +88,31 @@ func (w *mcpPyModuleStore) Delete(ctx context.Context, repo, name string) (strin
 // parameter stays: tools.PyModuleStore requires it.
 func (w *mcpPyModuleStore) Get(ctx context.Context, repo, name string) (pymodules.Record, error) {
 	return w.ctrl.pymoduleStore.Get(ctx, w.ownerUserID, name)
+}
+
+// childPyModuleStore is what a per-child MCP caller gets instead of the
+// owner's store: get passes through — the corpus it reads is exactly the one
+// the child's own executor binding can pymodule_run, so reading what it can
+// run adds no reach — but AUTHORING refuses. Review-0's F1: the owner-scoped
+// put/delete let a child write arbitrary Python into the corpus the owner's
+// fundi children run, then pushAll it to their live executors.
+//
+// The refusal is an ERROR, not a declined tool: the tool stays listed so the
+// model reads the rule it violated.
+type childPyModuleStore struct {
+	*mcpPyModuleStore
+}
+
+var _ tools.PyModuleStore = (*childPyModuleStore)(nil)
+
+// errPyModuleChildAuthoring is the child-caller refusal for pymodule
+// put/delete. It names the rule, never the caller's credential value.
+var errPyModuleChildAuthoring = errors.New("pymodules are operator-authored: a per-child credential may read and run modules but never put or delete them")
+
+func (w *childPyModuleStore) Put(ctx context.Context, repo, name, code, description string) (int64, string, error) {
+	return 0, "", errPyModuleChildAuthoring
+}
+
+func (w *childPyModuleStore) Delete(ctx context.Context, repo, name string) (string, error) {
+	return "", errPyModuleChildAuthoring
 }

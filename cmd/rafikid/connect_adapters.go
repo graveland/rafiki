@@ -48,12 +48,6 @@ func (c *Controller) nativeEventSource() *nativeEventSource {
 
 // ListChildren satisfies connectapi.ChildLister. An empty statuses means no
 // filter.
-//
-// The Snapshot -> ChildSummary mapping is control.SnapshotToSummary, not a
-// local reimplementation: it joins provider and model, nils the PID for an
-// exited child, converts time.Time to Unix millis, and sources the context
-// window through the catalog func. Every one of those is easy to get subtly
-// wrong by hand.
 func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 	snaps := c.List(protocol.ListFilter{})
 	kept := make([]childstore.Snapshot, 0, len(snaps))
@@ -63,6 +57,18 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 		}
 		kept = append(kept, s)
 	}
+	return c.summariesFor(kept)
+}
+
+// summariesFor maps snapshots onto the protocol summaries every list-shaped
+// verb serves: ONE batched cost rollup (see costsFor — N serial round trips
+// was the cockpit's seed-path stall), and the SnapshotToSummary field mapping
+// (provider+model join, nil PID for an exited child, Unix-millis stamps,
+// catalog-sourced context window) that is easy to get subtly wrong by hand.
+// Both the operator list and the child-scoped subtree list go through it, so
+// a child caller's ListChildren answers with the same per-row facts an
+// operator's does, minus the rows outside its subtree.
+func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSummary {
 	// ONE rollup for the whole list. Pricing each child with its own
 	// SubtreeCost call meant N serial round trips, each with its own timeout,
 	// on the cockpit's seed path -- and the seed is re-run whenever an unknown
@@ -219,9 +225,15 @@ func containsString(haystack []string, needle string) bool {
 type connectLifecycle struct{ c *Controller }
 
 func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (string, error) {
-	// Provenance is enforced by the policy interceptor on the route
-	// (connect_policy.go): Spawn is childScoped, so a child credential is
-	// refused there before this adapter runs.
+	// The policy interceptor (connect_policy.go) admits a per-child credential
+	// here since wave 1 — Spawn is childScoped — and the handler has already
+	// forced p.ParentChildID to the caller's own child id (see
+	// connectapi.Spawn). That forced parent IS the child-spawn admission: the
+	// depth, children and budget checks read the PARENT's grant through it,
+	// and spawnOwner stamps the owner from the credential, which for a child
+	// credential is its owner — the same owner fundi's controllerSpawner
+	// stamps from the stored row, resolved here from the same credential the
+	// mount authenticated.
 	res, err := l.c.Spawn(ctx, buildProtocolSpawnRequest(p), spawnOwner(ctx))
 	if err != nil {
 		return "", err

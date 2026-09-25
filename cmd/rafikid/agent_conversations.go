@@ -49,6 +49,21 @@ func newMCPConversationReader(ctrl *Controller, owner users.Identity) *conversat
 	}
 }
 
+// newMCPChildConversationReader binds a per-child MCP caller to its own
+// SUBTREE: the caller's own conversation plus every descendant's, through the
+// same three correlation routes SubtreeCost prices (fundi session ids, claude
+// external_refs, branch prefixes) — insights.ScopeSubtree, never
+// ScopeOwner. This is the closing of review-0's F1 first row: the previous
+// binding mapped a child credential to its OWNER's user id and handed it the
+// owner's whole conversation corpus, full transcripts included.
+//
+// The selector is built from childstore state only. A child whose row has
+// gone yields an (empty) selector that denies every row — a vanished child
+// reads as nothing visible, never as the owner's corpus.
+func newMCPChildConversationReader(ctrl *Controller, childID string) *conversationReader {
+	return &conversationReader{ctrl: ctrl, scope: insights.ScopeSubtree(ctrl.subtreeSelector(childID))}
+}
+
 func (r *conversationReader) ConversationSearch(ctx context.Context, q tools.ConversationQuery) ([]tools.ConversationSummaryRow, error) {
 	f := insights.SearchFilter{
 		Since: unixSecPtr(q.SinceUnix), Until: unixSecPtr(q.UntilUnix),
