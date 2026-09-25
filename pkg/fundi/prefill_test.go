@@ -259,18 +259,29 @@ func blockText(t *testing.T, tr *anthropic.ToolResultBlockParam) string {
 }
 
 // TestPrefillAllReadsFailIsFatal: when every read failed the child gained
-// nothing, so the pre-fill fails and the engine ends the child.
+// nothing, so the pre-fill fails and the engine ends the child. The error
+// carries the reads' own errors (which name the resolved path), capped, so a
+// caller who got a relative path wrong can see where it actually pointed.
 func TestPrefillAllReadsFailIsFatal(t *testing.T) {
+	paths := []string{"/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt", "/tmp/d.txt", "/tmp/e.txt"}
+	fail := map[string]bool{}
+	var entries []protocol.PrefillRead
+	for _, p := range paths {
+		fail[p] = true
+		entries = append(entries, protocol.PrefillRead{Path: p})
+	}
 	fatalCalled := make(chan error, 1)
-	eng, out, _ := prefillSimpleEngine(t, prefillFakeRead(map[string]bool{"/tmp/a.txt": true}),
-		[]protocol.PrefillRead{{Path: "/tmp/a.txt"}}, func(cfg *EngineConfig) {
-			cfg.OnFatal = func(err error) { fatalCalled <- err }
-		})
+	eng, out, _ := prefillSimpleEngine(t, prefillFakeRead(fail), entries, func(cfg *EngineConfig) {
+		cfg.OnFatal = func(err error) { fatalCalled <- err }
+	})
 
 	select {
 	case err := <-fatalCalled:
-		if err == nil || !strings.Contains(err.Error(), "prefill: every read failed") {
-			t.Fatalf("fatal error = %v, want it to name every read failed", err)
+		want := "prefill: every read failed: read: open /tmp/a.txt: no such file or directory; " +
+			"read: open /tmp/b.txt: no such file or directory; " +
+			"read: open /tmp/c.txt: no such file or directory (+2 more)"
+		if err == nil || err.Error() != want {
+			t.Fatalf("fatal error = %v, want %q", err, want)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for an all-failing pre-fill")

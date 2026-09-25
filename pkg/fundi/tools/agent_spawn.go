@@ -100,7 +100,8 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "context_files", Type: "boolean",
 				Description: "false to skip CLAUDE.md/AGENTS.md context files. Cannot re-enable them if the preset disables them."},
 			{Name: "prefill", Type: "array", Items: &Schema{Type: "string"},
-				Description: "Files the agent starts having already read, one entry each: a path relative to its cwd, " +
+				Description: "Files the agent starts having already read, one entry each: a path resolved against " +
+					"the SPAWNED agent's cwd (not yours; use an absolute path for files outside that cwd), " +
 					"optionally with a 1-based inclusive line range (path:10-40, path:200-, path:-80), or a glob " +
 					"(src/**/*.rs, no range). The reads run on the agent's own machine before its first turn and " +
 					"cost you almost nothing to send; use this instead of pasting file contents into prompt. " +

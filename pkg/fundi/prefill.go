@@ -40,6 +40,9 @@ const (
 	// End (an open-ended read). Larger than any real file: the tool's own
 	// byte budget is what actually caps the result.
 	prefillOpenLimit = 1_000_000
+	// prefillFailuresShown caps how many read errors an all-failed pre-fill
+	// quotes in its fatal error.
+	prefillFailuresShown = 3
 )
 
 // prefillState classifies a conversation's history against the pre-fill row
@@ -215,19 +218,20 @@ func (e *Engine) runPrefill(ctx context.Context, history []store.Message, st pre
 		}
 	}
 
-	// A child that gained nothing cannot start its task.
+	// A child that gained nothing cannot start its task. The reads' own
+	// errors name the resolved path, which is what a caller who mis-aimed a
+	// relative path needs to see.
 	if len(calls) == 0 {
-		return errors.New("prefill: every read failed")
+		return errors.New("prefill: no reads to run")
 	}
-	allFailed := true
+	var failures []string
 	for _, c := range calls {
-		if !c.isError {
-			allFailed = false
-			break
+		if c.isError {
+			failures = append(failures, c.result)
 		}
 	}
-	if allFailed {
-		return errors.New("prefill: every read failed")
+	if len(failures) == len(calls) {
+		return fmt.Errorf("prefill: every read failed: %s", prefillFailureList(failures, prefillFailuresShown))
 	}
 
 	// Token cap, checked BEFORE any persistence: a pre-fill that overflows
@@ -469,6 +473,15 @@ func prefillInputPath(input json.RawMessage) string {
 		return string(input)
 	}
 	return in.Path
+}
+
+// prefillFailureList joins the first n read errors, noting how many more
+// were dropped.
+func prefillFailureList(failures []string, n int) string {
+	if len(failures) <= n {
+		return strings.Join(failures, "; ")
+	}
+	return fmt.Sprintf("%s (+%d more)", strings.Join(failures[:n], "; "), len(failures)-n)
 }
 
 // prefillLargestCalls names the n biggest calls by estimated tokens, for the

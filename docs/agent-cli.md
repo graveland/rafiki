@@ -429,7 +429,9 @@ The list is a file, one entry per line:
 
 - `#` starts a comment (to end of line); blank lines are ignored;
   leading/trailing whitespace is trimmed.
-- Paths are relative to the child's cwd (absolute also accepted).
+- Paths are relative to the **child's** cwd, not the spawner's (absolute also
+  accepted — use one for files outside the child's cwd, e.g. a plan brief
+  living in the main checkout while the child works in a worktree).
 - An optional range suffix is recognised only when the entry ends in `:` +
   optional digits + `-` + optional digits, so a path containing `:` still
   works. Ranges are **1-based and inclusive**, matching Read's printed line
