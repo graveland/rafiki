@@ -85,19 +85,6 @@ func outputOpts(cmd *cobra.Command) (outputMode, bool, error) {
 	return mode, colorEnabled(colorFlag, tty), nil
 }
 
-// resolveTarget returns the resolved childID for a subcommand argument.
-// If input is empty it falls back to the profile's active marker file; if
-// that is also absent it returns a clear error.
-func resolveTarget(ctx context.Context, c *client.Client, profileName, input string) (string, error) {
-	if input == "" {
-		input = getActive(profileName)
-		if input == "" {
-			return "", fmt.Errorf("no child specified and no active marker; run `rafiki list` to see options")
-		}
-	}
-	return c.Resolve(ctx, input)
-}
-
 // completeChildren returns child IDs and names that start with toComplete.
 func completeChildren(cmd *cobra.Command, toComplete string) []string {
 	return completeChildrenByState(cmd, toComplete, func(completionChild) bool {

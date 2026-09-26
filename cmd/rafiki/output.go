@@ -15,7 +15,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/table"
 )
 
@@ -169,25 +168,6 @@ func dimHeader(useColor bool, names ...string) []string {
 	return out
 }
 
-// childRows adapts the wire summaries to writeJSONL's []any as canonical
-// protojson bytes per row. The one remaining consumer is cmd_recent.go's
-// legacy children-payload path, which pipes rows through writeJSONL; handing
-// it the proto messages directly would marshal them with encoding/json
-// (int64 as numbers) instead of the canonical protojson encoding.
-func childRows(children []*rafikiv1.ChildSummary) []any {
-	rows := make([]any, len(children))
-	for i, ch := range children {
-		b, err := marshalProtoJSON(ch)
-		if err != nil {
-			// Unreachable for daemon-built proto3 messages; keep the row rather
-			// than dropping it silently, accepting encoding/json's shape.
-			b, _ = json.Marshal(ch)
-		}
-		rows[i] = json.RawMessage(b)
-	}
-	return rows
-}
-
 // writeProtoChildren writes list's -o json shape — the {"children":[...]}
 // envelope the framed plane shipped — with each row the canonical protojson
 // of its ChildSummary. Same construction as emitProtoRows, with the
@@ -203,82 +183,6 @@ func writeProtoChildren(w io.Writer, children []*rafikiv1.ChildSummary) error {
 	}
 	env := []byte(`{"children":[` + strings.Join(parts, ",") + "]}")
 	return writeIndentedJSON(w, env)
-}
-
-// protoChildSummaries converts framed-plane summaries onto the wire type —
-// the one direction the CLI still needs, for a children-shaped payload
-// arriving as raw JSON (cmd_recent.go's legacy path). The optional fields
-// stay nil when the source is nil, the same rule connectapi.toProtoChild
-// applies.
-func protoChildSummaries(children []protocol.ChildSummary) []*rafikiv1.ChildSummary {
-	out := make([]*rafikiv1.ChildSummary, 0, len(children))
-	for _, c := range children {
-		ch := &rafikiv1.ChildSummary{
-			ChildId:             c.ChildID,
-			Name:                c.Name,
-			Kind:                c.Kind,
-			Status:              c.Status,
-			Model:               c.Model,
-			Cwd:                 c.Cwd,
-			SessionId:           c.SessionID,
-			SessionFile:         c.SessionFile,
-			StartedAt:           c.StartedAt,
-			LastActivity:        c.LastActivity,
-			Labels:              c.Labels,
-			SlashCommands:       c.SlashCommands,
-			ContextWindow:       int32(c.ContextWindow),
-			MaxCompletionTokens: int32(c.MaxCompletionTokens),
-			Result:              c.Result,
-			ExitSignal:          c.ExitSignal,
-		}
-		if c.PID != nil {
-			pid := int32(*c.PID)
-			ch.Pid = &pid
-		}
-		if c.ExitCode != nil {
-			code := int32(*c.ExitCode)
-			ch.ExitCode = &code
-		}
-		if c.CostUSD != nil {
-			cost := *c.CostUSD
-			ch.CostUsd = &cost
-		}
-		if c.MaxCost != nil {
-			maxCost := *c.MaxCost
-			ch.MaxCost = &maxCost
-		}
-		out = append(out, ch)
-	}
-	return out
-}
-
-// rawRows adapts already-encoded JSON objects to writeJSONL's []any, so a
-// payload's exact field names survive the round trip untouched.
-func rawRows(rows []json.RawMessage) []any {
-	out := make([]any, len(rows))
-	for i, r := range rows {
-		out[i] = r
-	}
-	return out
-}
-
-// decodeChildrenPayload reports whether data carries a children list — the
-// framed ctrl_list envelope {"children":[...]} or a bare array — and returns
-// the children as wire summaries. A pointer is used for the envelope so an
-// object with no children key (any other verb's payload) reads as absent
-// rather than as an empty list.
-func decodeChildrenPayload(data []byte) ([]*rafikiv1.ChildSummary, bool) {
-	var env struct {
-		Children *[]protocol.ChildSummary `json:"children"`
-	}
-	if err := json.Unmarshal(data, &env); err == nil && env.Children != nil {
-		return protoChildSummaries(*env.Children), true
-	}
-	var arr []protocol.ChildSummary
-	if err := json.Unmarshal(data, &arr); err == nil && arr != nil {
-		return protoChildSummaries(arr), true
-	}
-	return nil, false
 }
 
 // formatUnixMilli renders a wire millisecond timestamp the way the list

@@ -59,19 +59,6 @@ func TestConversationsExportCmd_RequiresExactlyOneArg(t *testing.T) {
 	}
 }
 
-// wireResponse marshals v the way the framed daemon does, so tests exercising
-// framed-client render paths (see cmd_user_test.go) drive the real round trip
-// rather than a hand-written payload. The conversation verbs are on Connect
-// now, but their old helpers served other files too.
-func wireResponse(t *testing.T, command string, v any) *protocol.Response {
-	t.Helper()
-	data, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal %s payload: %v", command, err)
-	}
-	return &protocol.Response{Type: protocol.TypeCtrlResponse, Command: command, Success: true, Data: data}
-}
-
 // ─── the Connect stub ───────────────────────────────────────────────────────
 
 // conversationStub serves the conversation Control RPCs and records every
