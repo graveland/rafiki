@@ -308,6 +308,21 @@ message SpawnRequest {
   ScriptSpec script = 14;
 
   // Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
+  // This is enforced as a child-ALLOWED set (fields 1-14, see verbs.go's
+  // childAllowedSpawnFields), not a literal list of these 15 -- so a NEW
+  // SpawnRequest field is OPERATOR-ONLY by default. Adding one requires an
+  // explicit decision: either add its number to childAllowedSpawnFields (and
+  // to this comment's child-allowed range) if a child should be able to set
+  // it, or leave it unclassified and let TestSpawnRequestFieldsAreClassified
+  // (pkg/connectapi/verbs_test.go) fail until it's placed in one bucket or
+  // the other on purpose.
+  //
+  // thinking (17) and append_system_prompt (16) are labelled OPERATOR-ONLY
+  // here as a Connect-WIRE policy, not a capability boundary: a child can
+  // already set both through the tool plane (fundi/MCP agent_spawn, and any
+  // preset it can name, including one it wrote itself) before this guard ever
+  // runs. The wire guard exists to keep Connect at least as strict as the
+  // framed plane, not to claim these two fields are otherwise unreachable.
   //
   // Types are mirrors of protocol.SpawnRequest (pkg/protocol/types.go); where
   // the plan sketch said bool but the Go field is a string (fork_session,

@@ -230,45 +230,61 @@ func (s *Server) GetChild(
 	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary, elog, ctx)}), nil
 }
 
-// operatorOnlyFieldMin and operatorOnlyFieldMax bound SpawnRequest's
-// OPERATOR-ONLY range (control.proto fields 15-29: config_dir through
-// passthrough_auth). firstOperatorOnlySet walks the descriptor by number
-// rather than a literal field list, so a field added later inside the range
-// is refused to a child credential with no second edit here.
-const (
-	operatorOnlyFieldMin protoreflect.FieldNumber = 15
-	operatorOnlyFieldMax protoreflect.FieldNumber = 29
-)
+// childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
+// with child provenance may set (fields 1-14, the child-reachable shape of
+// SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any other set
+// field — including one added in the future — is refused to a child
+// credential by default: firstOperatorOnlySet fails CLOSED on everything not
+// in this set, rather than open on a literal operator-only list that a new
+// field could silently miss. See control.proto:310 and
+// TestSpawnRequestFieldsAreClassified, which fails the build the day a new
+// SpawnRequest field lands unclassified.
+var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
+	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
+	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
+}
 
-// firstOperatorOnlySet returns the wire name of the lowest-numbered
-// OPERATOR-ONLY field req has set, or "" if none are set. Has() supplies the
-// "non-zero" test directly: none of fields 15-29 declare explicit presence
-// (no "optional" keyword), so for a proto3 scalar it reports true only for a
-// non-default value and for a repeated/map field only when non-empty —
-// exactly the non-empty-string/slice/map, true-bool rule Spawn's child
-// refusal applies.
+// firstOperatorOnlySet returns the wire name of the lowest-numbered field req
+// has set that is NOT in childAllowedSpawnFields, or "" if every set field is
+// child-allowed. Has() supplies the "non-zero" test directly: proto3 fields
+// without the "optional" keyword report true only for a non-default scalar
+// value and for a repeated/map field only when non-empty — exactly the
+// non-empty-string/slice/map, true-bool rule Spawn's child refusal applies.
+// The scan walks every field the descriptor knows about (not a numeric
+// range), so it also catches a field number the current build doesn't
+// recognize as operator-only but that the caller still managed to set.
 func firstOperatorOnlySet(req *rafikiv1.SpawnRequest) string {
 	m := req.ProtoReflect()
 	fields := m.Descriptor().Fields()
-	for n := operatorOnlyFieldMin; n <= operatorOnlyFieldMax; n++ {
-		fd := fields.ByNumber(n)
-		if fd != nil && m.Has(fd) {
-			return string(fd.Name())
+	var lowest protoreflect.FieldDescriptor
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if childAllowedSpawnFields[fd.Number()] {
+			continue
+		}
+		if !m.Has(fd) {
+			continue
+		}
+		if lowest == nil || fd.Number() < lowest.Number() {
+			lowest = fd
 		}
 	}
-	return ""
+	if lowest == nil {
+		return ""
+	}
+	return string(lowest.Name())
 }
 
 // Spawn creates a child. The budget pointers are copied as pointers, never
 // dereferenced into values, so "unset" survives the trip to the daemon.
 //
 // Security boundary, checked before anything else runs: a caller with child
-// provenance may not set any OPERATOR-ONLY field (fields 15-29 — see
-// firstOperatorOnlySet). This is a privilege-escalation guard, not a
-// convenience default, so it runs ahead of the cwd check, the lifecycle-wired
-// check, and every other validation — a child credential must never learn
-// anything about the daemon's state from a request the security boundary
-// alone should have refused.
+// provenance may not set any field outside childAllowedSpawnFields (today
+// that's fields 15-29 — see firstOperatorOnlySet). This is a
+// privilege-escalation guard, not a convenience default, so it runs ahead of
+// the cwd check, the lifecycle-wired check, and every other validation — a
+// child credential must never learn anything about the daemon's state from a
+// request the security boundary alone should have refused.
 //
 // childScoped: a per-child credential spawns into its OWN position —
 // ParentChildID is forced to the caller's child id, overwriting whatever the

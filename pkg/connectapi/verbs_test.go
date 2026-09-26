@@ -54,6 +54,30 @@ func setOperatorOnlyField(t *testing.T, req *rafikiv1.SpawnRequest, fd protorefl
 	}
 }
 
+// operatorOnlyFieldMin and operatorOnlyFieldMax record today's OPERATOR-ONLY
+// SpawnRequest range (control.proto fields 15-29: config_dir through
+// passthrough_auth). Production (verbs.go's firstOperatorOnlySet) no longer
+// consults a range -- it fails closed on anything outside
+// childAllowedSpawnFields -- so these constants live here, not in verbs.go,
+// purely to give TestSpawnRequestFieldsAreClassified something explicit to
+// check every field number against.
+const (
+	operatorOnlyFieldMin protoreflect.FieldNumber = 15
+	operatorOnlyFieldMax protoreflect.FieldNumber = 29
+)
+
+// childAllowedFieldNumbers mirrors verbs.go's childAllowedSpawnFields (fields
+// 1-14: cwd through script, including the three budget fields). It is kept
+// as its own copy, not an import of the unexported production set, because
+// this file is package connectapi_test -- and duplicating it here is the
+// point: TestSpawnRequestFieldsAreClassified fails the moment a field number
+// exists that this list and operatorOnlyFieldMin/Max don't between them
+// cover, forcing a conscious classification decision on both sides.
+var childAllowedFieldNumbers = map[protoreflect.FieldNumber]bool{
+	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
+	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
+}
+
 // TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller walks SpawnRequest's
 // OPERATOR-ONLY range (control.proto fields 15-29: config_dir through
 // passthrough_auth) by descriptor NUMBER rather than a literal field list, so
@@ -62,14 +86,18 @@ func setOperatorOnlyField(t *testing.T, req *rafikiv1.SpawnRequest, fd protorefl
 // itself. Each subtest sets exactly ONE field on an otherwise-empty request
 // and drives it through a childScoped Spawn call: the security boundary must
 // refuse every one of them with PermissionDenied, naming the field, and the
-// lifecycle must never be reached.
+// lifecycle must never be reached. exercised is counted and must be nonzero,
+// so a renumbered or moved range can't make this test pass having tested
+// nothing (W2a).
 func TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller(t *testing.T) {
 	fields := (&rafikiv1.SpawnRequest{}).ProtoReflect().Descriptor().Fields()
-	for n := protoreflect.FieldNumber(15); n <= 29; n++ {
+	exercised := 0
+	for n := operatorOnlyFieldMin; n <= operatorOnlyFieldMax; n++ {
 		fd := fields.ByNumber(n)
 		if fd == nil {
 			continue
 		}
+		exercised++
 		t.Run(string(fd.Name()), func(t *testing.T) {
 			f := &fakeLifecycle{}
 			s := childScopedServer(f)
@@ -87,6 +115,43 @@ func TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller(t *testing.T) {
 				t.Errorf("Spawn reached the lifecycle despite the refusal: %+v", f.got)
 			}
 		})
+	}
+	if exercised == 0 {
+		t.Fatal("exercised zero operator-only fields -- the range or the descriptor moved, and this test now proves nothing")
+	}
+}
+
+// TestSpawnRequestFieldsAreClassified walks every field number SpawnRequest's
+// descriptor actually declares and fails unless each one is classified --
+// either in childAllowedFieldNumbers or in [operatorOnlyFieldMin,
+// operatorOnlyFieldMax]. A field landing outside both (field 30 and up,
+// today) is still refused to a child caller by firstOperatorOnlySet's
+// fail-closed default, but that's an accident of the guard's design, not a
+// decision anyone made -- this test turns a new field into a build failure
+// until someone puts it in one of the two buckets on purpose, on both sides
+// (this file's classification and verbs.go's childAllowedSpawnFields).
+func TestSpawnRequestFieldsAreClassified(t *testing.T) {
+	fields := (&rafikiv1.SpawnRequest{}).ProtoReflect().Descriptor().Fields()
+	if fields.Len() == 0 {
+		t.Fatal("SpawnRequest descriptor reports zero fields -- nothing was classified")
+	}
+	classified := 0
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		n := fd.Number()
+		switch {
+		case childAllowedFieldNumbers[n]:
+			classified++
+		case n >= operatorOnlyFieldMin && n <= operatorOnlyFieldMax:
+			classified++
+		default:
+			t.Errorf("SpawnRequest field %d (%s) is not classified as child-allowed or operator-only: "+
+				"add it to childAllowedFieldNumbers or the operator-only range in this file, and to "+
+				"childAllowedSpawnFields in verbs.go if it should be child-reachable", n, fd.Name())
+		}
+	}
+	if classified != fields.Len() {
+		t.Fatalf("classified %d of %d SpawnRequest fields", classified, fields.Len())
 	}
 }
 

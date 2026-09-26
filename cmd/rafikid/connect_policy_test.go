@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -229,6 +231,67 @@ func TestProxyFaceConnectAdmitsUserAndAnyCaller(t *testing.T) {
 	}
 }
 
+// TestProxyFaceConnectSpawnRefusesOperatorOnlyFieldToAChildToken and
+// TestProxyFaceConnectSpawnAdmitsAUserTokenWithEveryOperatorOnlyFieldSet drive
+// connectapi.Server.Spawn's operator-only-field guard (verbs.go's
+// firstOperatorOnlySet) through the REAL identity chain this face serves: a
+// bearer token resolves through UserTokenAuth to a server.Identity, the
+// policy gate (childScoped) admits it, childScopeFor resolves a per-child
+// token to a non-nil subtree scope, and only then does the handler run the
+// field guard. Each link is pinned separately elsewhere (TestAuthorizeControlProcedure,
+// connect_childscope_test.go, verbs_test.go's per-field matrix); these two
+// are the proof the chain agrees end to end (W2A MINOR 3).
+func TestProxyFaceConnectSpawnRefusesOperatorOnlyFieldToAChildToken(t *testing.T) {
+	client := proxyFaceConnectRoute(t)
+	req := connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd: "/tmp",
+		Env: map[string]string{"K": "V"},
+	})
+	req.Header().Set("Authorization", "Bearer "+proxyChildToken)
+
+	_, err := client.Spawn(context.Background(), req)
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("Spawn with env set (per-child token) = %v, want %v", err, connect.CodePermissionDenied)
+	}
+	if !strings.Contains(err.Error(), "env") {
+		t.Errorf("refusal %q does not name env", err.Error())
+	}
+}
+
+func TestProxyFaceConnectSpawnAdmitsAUserTokenWithEveryOperatorOnlyFieldSet(t *testing.T) {
+	client := proxyFaceConnectRoute(t)
+	req := connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:                "/tmp",
+		ConfigDir:          "/cfg",
+		AppendSystemPrompt: "be nice",
+		Thinking:           "high",
+		NoSession:          true,
+		ResumeSession:      "sess-1",
+		ForkSession:        "sess-0",
+		Extensions:         []string{"ext"},
+		NoExtensions:       true,
+		Verbose:            true,
+		ExtraArgs:          []string{"--flag"},
+		SkillsDirs:         []string{"/skills"},
+		McpConfig:          "/mcp.json",
+		Env:                map[string]string{"K": "V"},
+		RecordRequests:     true,
+		PassthroughAuth:    "on",
+	})
+	req.Header().Set("Authorization", "Bearer "+proxyUserToken)
+
+	// The child lifecycle is unwired in this fixture, so a user credential
+	// that clears the guard reaches CodeUnavailable, not success -- that's
+	// "the handler ran", the same acceptable outcome
+	// TestProxyFaceConnectAdmitsUserAndAnyCaller uses for the other operator
+	// verbs. What this test refuses to accept is PermissionDenied.
+	_, err := client.Spawn(context.Background(), req)
+	if connect.CodeOf(err) == connect.CodePermissionDenied {
+		t.Fatalf("Spawn with every operator-only field set (user token) = %v, want anything but %v",
+			err, connect.CodePermissionDenied)
+	}
+}
+
 // TestControlPolicyTableCoversEveryProcedure is the completeness gate: every
 // procedure of the generated Control service descriptor must have a table
 // entry, and the table must hold no stale names. A new RPC therefore cannot
@@ -422,5 +485,53 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 	// A user credential resolves and passes the gate the same way.
 	if err := kill(func(h http.Header) { h.Set("Authorization", "Bearer "+proxyUserToken) }); connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Errorf("Kill over UDS with a user credential = %v, want %v (handler reached)", err, connect.CodeUnavailable)
+	}
+}
+
+// TestScopeForNilIsUnreachableOnTheRealProxyFace is the load-bearing half of
+// scopeFor's nil-is-local-trust proof (connect_adapters_test.go's
+// TestScopeForNilIsUnreachableOffTheUDS is the other half, and stays --
+// there is compositional value in pinning the auth wrapper alone). That test
+// REBUILDS the stack: it calls h.Mount with its own wrap closure, which
+// proves UserTokenAuth.Middleware itself refuses an unauthenticated caller,
+// but not that proxy.go still WIRES that middleware onto the Control mount it
+// actually serves. server.Handler.Mount treats a nil wrap as pass-through
+// (pkg/server/handler.go), so if proxy.go ever dropped or reordered its wrap
+// argument, the real proxy face would admit an anonymous Control call --
+// scopeFor(nil) would then read that as local trust and grant ScopeAll over
+// every user's conversations from the network face, and the rebuilt-stack
+// test would still pass, none the wiser.
+//
+// This test instead calls startProxyFace -- the same constructor
+// cmd/rafikid's main() calls to build the face it actually serves -- and
+// drives ConversationSearch, a userOnly scopeFor-backed verb, through it with
+// no credential at all. It fails the moment that composition stops
+// authenticating.
+func TestScopeForNilIsUnreachableOnTheRealProxyFace(t *testing.T) {
+	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	face, err := startProxyFace(ctx, faceOptions{
+		Logger:   slog.New(slog.DiscardHandler),
+		Registry: prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("startProxyFace: %v", err)
+	}
+	defer face.Close(ctx)
+
+	client := rafikiv1connect.NewControlClient(http.DefaultClient, face.URL)
+	_, err = client.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
+	if err == nil {
+		t.Fatal("ConversationSearch with no credential on the real proxy face succeeded, want a refusal")
+	}
+	switch code := connect.CodeOf(err); code {
+	case connect.CodeUnauthenticated, connect.CodePermissionDenied:
+	default:
+		t.Fatalf("ConversationSearch with no credential err = %v (code %v), want Unauthenticated or PermissionDenied", err, code)
 	}
 }
