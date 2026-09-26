@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ type userAdminFakeStore struct {
 	createErr error
 	removeErr error
 	removed   []string
+	listLimit int // the limit the store actually received
 }
 
 func (f *userAdminFakeStore) Create(_ context.Context, username string, isAdmin bool) (users.User, string, error) {
@@ -34,7 +37,8 @@ func (f *userAdminFakeStore) Create(_ context.Context, username string, isAdmin 
 	return u, "rfk_tok", nil
 }
 
-func (f *userAdminFakeStore) List(context.Context, bool, int) ([]users.User, error) {
+func (f *userAdminFakeStore) List(_ context.Context, _ bool, limit int) ([]users.User, error) {
+	f.listLimit = limit
 	return f.rows, nil
 }
 
@@ -143,6 +147,139 @@ func TestCreateUserNeverMintsAdmin(t *testing.T) {
 	}
 	if st.rows[0].IsAdmin {
 		t.Errorf("Create minted an admin: %+v", st.rows[0])
+	}
+}
+
+// connectErrMsg returns the wire message of an error the adapter coded, or
+// fails the test when the error is not a coded *connect.Error.
+func connectErrMsg(t *testing.T, err error) string {
+	t.Helper()
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		t.Fatalf("not a coded connect error: %v", err)
+	}
+	return ce.Message()
+}
+
+// TestCreateUserMapsSentinels pins the adapter's mapping of the user store's
+// caller-error sentinels onto the framed texts (pkg/control/dispatch.go
+// userCreate): a taken name and a malformed name are answers on the wire, not
+// redacted internal errors. Each mapped error is already coded, so
+// userAdminErr (pkg/connectapi/users.go) passes it through untouched — no
+// slog, no redaction. An unmapped store error keeps the raw pass-through that
+// userAdminErr logs and redacts.
+func TestCreateUserMapsSentinels(t *testing.T) {
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
+	for _, tc := range []struct {
+		name      string
+		createErr error
+		wantCode  connect.Code
+		wantMsg   string
+	}{
+		{
+			name:      "taken name",
+			createErr: fmt.Errorf("usersdb: %w", users.ErrUsernameTaken),
+			wantCode:  connect.CodeInvalidArgument,
+			wantMsg:   "username alice is already taken",
+		},
+		{
+			name:      "invalid username",
+			createErr: fmt.Errorf("%w: must not be empty or whitespace", users.ErrInvalidUsername),
+			wantCode:  connect.CodeInvalidArgument,
+			wantMsg:   "invalid username: must not be empty or whitespace",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &userAdminFakeStore{createErr: tc.createErr}
+			a := connectUserAdmin{c: &Controller{users: st}}
+			_, err := a.Create(ctx, "alice")
+			if connect.CodeOf(err) != tc.wantCode {
+				t.Fatalf("code %v, want %v", connect.CodeOf(err), tc.wantCode)
+			}
+			if got := connectErrMsg(t, err); got != tc.wantMsg {
+				t.Errorf("message %q, want %q", got, tc.wantMsg)
+			}
+		})
+	}
+	// Everything else keeps the current path: the error passes through UNCoded
+	// (CodeOf reports Unknown) so userAdminErr is the one that logs the cause
+	// and redacts the wire text.
+	st := &userAdminFakeStore{createErr: errors.New("pgx: dial tcp db.internal:5432")}
+	a := connectUserAdmin{c: &Controller{users: st}}
+	if _, err := a.Create(ctx, "alice"); err == nil || connect.CodeOf(err) != connect.CodeUnknown {
+		t.Errorf("unmapped store error = %v, want it to pass through uncoded", err)
+	}
+}
+
+// TestUserListClampsLimit pins the framed clamp (dispatch.go userList): a
+// limit ≤0 or above maxUserListLimit is clamped to the cap before the store
+// sees it — never rejected, never passed through raw.
+func TestUserListClampsLimit(t *testing.T) {
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
+	for _, tc := range []struct {
+		name  string
+		limit int32
+		want  int
+	}{
+		{"zero becomes the framed cap", 0, maxUserListLimit},
+		{"negative becomes the framed cap", -5, maxUserListLimit},
+		{"huge request clamped", 1 << 30, maxUserListLimit},
+		{"just over the cap clamped", maxUserListLimit + 1, maxUserListLimit},
+		{"exact cap passes through", maxUserListLimit, maxUserListLimit},
+		{"ordinary value passes through", 25, 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &userAdminFakeStore{}
+			a := connectUserAdmin{c: &Controller{users: st}}
+			if _, err := a.List(ctx, false, tc.limit); err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if st.listLimit != tc.want {
+				t.Errorf("store saw limit %d, want %d", st.listLimit, tc.want)
+			}
+		})
+	}
+}
+
+// TestUserRemoveRefusesEmptyUsername pins framed userRm's pre-store check
+// (dispatch.go): an empty username is an invalid argument with framed's text,
+// and the store is never asked.
+func TestUserRemoveRefusesEmptyUsername(t *testing.T) {
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
+	st := &userAdminFakeStore{}
+	a := connectUserAdmin{c: &Controller{users: st}}
+	err := a.Remove(ctx, "")
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("code %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if got := connectErrMsg(t, err); got != "username is required" {
+		t.Errorf("message %q, want %q", got, "username is required")
+	}
+	if len(st.removed) != 0 {
+		t.Errorf("empty username reached the store: removed=%v", st.removed)
+	}
+}
+
+// TestUserRemoveMapsNotFound pins the framed not-found text (dispatch.go
+// userRm): a miss is an answer naming the requested user, not a redacted
+// internal error, and composed from the requested name like framed does.
+func TestUserRemoveMapsNotFound(t *testing.T) {
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
+	st := &userAdminFakeStore{removeErr: fmt.Errorf("usersdb: %w", users.ErrNotFound)}
+	a := connectUserAdmin{c: &Controller{users: st}}
+	err := a.Remove(ctx, "alice")
+	if connect.CodeOf(err) != connect.CodeNotFound {
+		t.Fatalf("code %v, want NotFound", connect.CodeOf(err))
+	}
+	if got := connectErrMsg(t, err); got != "no active user named alice" {
+		t.Errorf("message %q, want %q", got, "no active user named alice")
+	}
+	if len(st.removed) != 0 {
+		t.Errorf("failed removal recorded: removed=%v", st.removed)
 	}
 }
 

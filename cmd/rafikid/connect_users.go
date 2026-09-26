@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -12,7 +14,16 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/users"
 )
+
+// maxUserListLimit bounds List exactly as pkg/control's same-named constant
+// bounds ctrl_user_list (dispatch.go userList): a limit ≤0 or above the cap
+// is CLAMPED to the cap, never rejected and never passed through raw — so a
+// 0 (which the store would otherwise default to 100) and a 2^30 get the same
+// 500-row window on both planes. Mirrored rather than imported: the framed
+// constant is unexported and pkg/control goes away with the framed verbs.
+const maxUserListLimit = 500
 
 var _ connectapi.UserAdmin = connectUserAdmin{}
 
@@ -47,6 +58,26 @@ func (a connectUserAdmin) Create(ctx context.Context, username string) (*rafikiv
 	}
 	data, err := a.c.UserCreate(ctx, username)
 	if err != nil {
+		// The store's caller-error sentinels are answers, not infrastructure
+		// failures: they map onto the framed texts (dispatch.go userCreate) and
+		// return already-coded, so userAdminErr (pkg/connectapi/users.go) passes
+		// them through untouched — no slog, no redaction. Everything else keeps
+		// the raw pass-through that userAdminErr logs and redacts.
+		switch {
+		case errors.Is(err, users.ErrUsernameTaken):
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("username %s is already taken", username))
+		case errors.Is(err, users.ErrInvalidUsername):
+			// Framed has no dedicated text for a malformed-but-nonempty name —
+			// userCreate pre-validates only the empty case and lets the rest fall
+			// to mapErr's redacted internal. pkg/users composes the reason after
+			// the sentinel text ("must not be empty or whitespace", "longer than
+			// 64 bytes"); forward that detail, which is authored text and leaks
+			// nothing.
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("invalid username: %s",
+					strings.TrimPrefix(err.Error(), users.ErrInvalidUsername.Error()+": ")))
+		}
 		return nil, err
 	}
 	createdAt, err := time.Parse(time.RFC3339, data.CreatedAt)
@@ -65,6 +96,11 @@ func (a connectUserAdmin) Create(ctx context.Context, username string) (*rafikiv
 func (a connectUserAdmin) List(ctx context.Context, includeDeleted bool, limit int32) ([]*rafikiv1.UserRow, error) {
 	if err := requireUserAdmin(ctx); err != nil {
 		return nil, err
+	}
+	// Framed parity: dispatch.go's userList clamps ≤0 and above the cap to
+	// maxUserListLimit before the store sees the request.
+	if limit <= 0 || limit > maxUserListLimit {
+		limit = maxUserListLimit
 	}
 	rows, err := a.c.UserList(ctx, includeDeleted, int(limit))
 	if err != nil {
@@ -92,5 +128,19 @@ func (a connectUserAdmin) Remove(ctx context.Context, username string) error {
 	if err := requireUserAdmin(ctx); err != nil {
 		return err
 	}
-	return a.c.UserRm(ctx, username)
+	// Framed userRm refuses an empty name before the store, with the same
+	// text userCreate uses for it (dispatch.go).
+	if username == "" {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("username is required"))
+	}
+	if err := a.c.UserRm(ctx, username); err != nil {
+		// A miss is an answer: the framed text composes from the REQUESTED
+		// name, matching dispatch.go userRm.
+		if errors.Is(err, users.ErrNotFound) {
+			return connect.NewError(connect.CodeNotFound,
+				fmt.Errorf("no active user named %s", username))
+		}
+		return err
+	}
+	return nil
 }
