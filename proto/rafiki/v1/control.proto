@@ -414,11 +414,13 @@ message ListTasksRequest {
   // hidden by default.
   bool include_dropped = 2;
   // The framed verb's remaining filter fields: tasks assigned to one child,
-  // one status value, a row cap, and all (include dropped — the framed
-  // spelling of include_dropped).
+  // one status value, a row cap, and all (include dropped).
   string child_id = 3;
   string status = 4;
   int32 limit = 5;
+  // all is the framed verb's include-dropped flag. Both spellings stay on
+  // the wire; the handler treats include_dropped OR all set as
+  // include-dropped.
   bool all = 6;
 }
 
@@ -738,8 +740,8 @@ message ExecutorRow {
 }
 
 message ListExecutorsRequest {
-  // kind scopes eligibility: "claude" checks launch-kind support, "fundi" (or
-  // empty) checks only admission/workspace-mode, matching chooseExecutor vs
+  // kind scopes eligibility: "claude" checks launch-kind support, "fundi"
+  // checks only admission/workspace-mode, matching chooseExecutor vs
   // chooseLaunchExecutor.
   //
   // kind empty = plain listing, eligibility unevaluated (eligible/reason unset).
@@ -1304,6 +1306,8 @@ message StatusRequest {}
 // StatusResponse mirrors protocol.StatusResponseData.
 message StatusResponse {
   string version = 1;
+  // started_at is unix ms, the daemon process's start time
+  // (Controller.startedAt.UnixMilli).
   int64 started_at = 2;
   ChildCounts children = 3;
   int64 memory_bytes = 4;
@@ -1334,6 +1338,8 @@ message SearchRequest {
   message SearchSessionFilter {
     string cwd_contains = 1;
     string name_contains = 2;
+    // since is unix ms, compared against each child's StartedAt.UnixMilli
+    // (matchesSessionFilter); 0 means unbounded.
     int64 since = 3;
     map<string, string> labels = 4;
     repeated string has_label = 5;
@@ -1345,6 +1351,7 @@ message SearchResponse {
   repeated SearchHit hits = 1;
   int32 total_hits = 2;
   int32 scanned = 3;
+  // elapsed is ms (time.Since(start).Milliseconds() in Controller.Search).
   int64 elapsed = 4;
 
   // SearchHit mirrors protocol.SearchHit: one content match.
@@ -1354,6 +1361,7 @@ message SearchResponse {
     string session_id = 3;
     string session_name = 4;
     string entry_id = 5;
+    // timestamp is unix ms, the ring event's own Timestamp (pkg/ring).
     int64 timestamp = 6;
     string role = 7;
     string snippet = 8;
@@ -1533,13 +1541,15 @@ message CreateUserRequest {
 
 // CreateUserResponse mirrors protocol.UserCreateResponseData: the plaintext
 // token, the only time it is ever transmitted — the daemon stores a digest
-// and cannot reproduce it.
+// and cannot reproduce it. created_at deviates from the mirror: the Go field
+// is an RFC3339 string, but unix seconds win, matching
+// UserRow.created_at_unix.
 // Never mints an admin. Admins come only from rafikid user create --admin.
 message CreateUserResponse {
   string id = 1;
   string username = 2;
   string token = 3;
-  string created_at = 4;
+  int64 created_at_unix = 4;
 }
 
 // ListUsersRequest mirrors protocol.UserListRequest. Tokens are never

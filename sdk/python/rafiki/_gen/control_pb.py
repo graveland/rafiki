@@ -5179,7 +5179,7 @@ class CreateUserResponse:
     id: str = ""
     username: str = ""
     token: str = ""
-    created_at: str = ""
+    created_at_unix: int = 0
 
     def to_dict(self) -> dict:
         out = {}
@@ -5189,8 +5189,8 @@ class CreateUserResponse:
             out["username"] = self.username
         if self.token != "":
             out["token"] = self.token
-        if self.created_at != "":
-            out["createdAt"] = self.created_at
+        if self.created_at_unix != 0:
+            out["createdAtUnix"] = str(self.created_at_unix)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CreateUserResponse":
@@ -5204,9 +5204,9 @@ class CreateUserResponse:
         _v = _d.get("token")
         if _v is not None:
             obj.token = _v
-        _v = _d.get("createdAt")
+        _v = _d.get("createdAtUnix")
         if _v is not None:
-            obj.created_at = _v
+            obj.created_at_unix = _int_in(_v)
         return obj
 
 @dataclasses.dataclass

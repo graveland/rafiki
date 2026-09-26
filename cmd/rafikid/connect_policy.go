@@ -40,8 +40,8 @@ const (
 	// policyAnyCaller admits any caller, child credentials included, because
 	// the procedure is read-only and answers nothing scoped to a user beyond
 	// what the caller's own credential already names: ListModels,
-	// ListPresets, GetPreset, GetRateLimitStatus. Anything writable must
-	// never be listed here.
+	// ListPresets, GetPreset, GetRateLimitStatus, ListProviderBans,
+	// ModelInfo. Anything writable must never be listed here.
 	policyAnyCaller
 
 	// policyChildScoped marks the twelve agent-control verbs a child credential
@@ -79,13 +79,15 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 // budget, write) or ANSWER AS the caller (conversations, recall, executors)?
 // Then it is userOnly unless wave 1 will scope it to the caller's subtree
 // (childScoped). Does it only READ daemon-wide, non-owned facts? anyCaller —
-// and only these four, all read-only:
+// and only these six, all read-only:
 //
-//	ListModels        the model catalog, no owner dimension
-//	ListPresets       preset names/metadata; a child may read, not write
-//	GetPreset         same
+//	ListModels         the model catalog, no owner dimension
+//	ListPresets        preset names/metadata; a child may read, not write
+//	GetPreset          same
 //	GetRateLimitStatus the rate-limit windows already attributed to the
-//	                  caller's own (or its owner's) account
+//	                   caller's own (or its owner's) account
+//	ListProviderBans   the ban list names providers, not users
+//	ModelInfo          per-model catalog lookup, the twin of ListModels
 var controlPolicyTable = map[string]controlPolicy{
 	// childScoped: a per-child credential may call these on its own subtree;
 	// the per-verb subtree check lives in the handler behind
@@ -107,7 +109,8 @@ var controlPolicyTable = map[string]controlPolicy{
 	"Receive":   policyChildScoped,
 	"SetResult": policyChildScoped,
 
-	// anyCaller: the four read-only, non-scoped verbs.
+	// anyCaller: the read-only, non-scoped verbs — see the classification
+	// rule above for all six.
 	"ListModels":         policyAnyCaller,
 	"ListPresets":        policyAnyCaller,
 	"GetPreset":          policyAnyCaller,

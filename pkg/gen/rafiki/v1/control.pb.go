@@ -2317,12 +2317,14 @@ type ListTasksRequest struct {
 	// hidden by default.
 	IncludeDropped bool `protobuf:"varint,2,opt,name=include_dropped,json=includeDropped,proto3" json:"include_dropped,omitempty"`
 	// The framed verb's remaining filter fields: tasks assigned to one child,
-	// one status value, a row cap, and all (include dropped — the framed
-	// spelling of include_dropped).
-	ChildId       string `protobuf:"bytes,3,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	Status        string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	Limit         int32  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
-	All           bool   `protobuf:"varint,6,opt,name=all,proto3" json:"all,omitempty"`
+	// one status value, a row cap, and all (include dropped).
+	ChildId string `protobuf:"bytes,3,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	Status  string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Limit   int32  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	// all is the framed verb's include-dropped flag. Both spellings stay on
+	// the wire; the handler treats include_dropped OR all set as
+	// include-dropped.
+	All           bool `protobuf:"varint,6,opt,name=all,proto3" json:"all,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4435,8 +4437,8 @@ func (x *ExecutorRow) GetReason() string {
 
 type ListExecutorsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// kind scopes eligibility: "claude" checks launch-kind support, "fundi" (or
-	// empty) checks only admission/workspace-mode, matching chooseExecutor vs
+	// kind scopes eligibility: "claude" checks launch-kind support, "fundi"
+	// checks only admission/workspace-mode, matching chooseExecutor vs
 	// chooseLaunchExecutor.
 	//
 	// kind empty = plain listing, eligibility unevaluated (eligible/reason unset).
@@ -9288,8 +9290,10 @@ func (*StatusRequest) Descriptor() ([]byte, []int) {
 
 // StatusResponse mirrors protocol.StatusResponseData.
 type StatusResponse struct {
-	state         protoimpl.MessageState      `protogen:"open.v1"`
-	Version       string                      `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Version string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	// started_at is unix ms, the daemon process's start time
+	// (Controller.startedAt.UnixMilli).
 	StartedAt     int64                       `protobuf:"varint,2,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	Children      *StatusResponse_ChildCounts `protobuf:"bytes,3,opt,name=children,proto3" json:"children,omitempty"`
 	MemoryBytes   int64                       `protobuf:"varint,4,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
@@ -9453,11 +9457,12 @@ func (x *SearchRequest) GetSessionFilter() *SearchRequest_SearchSessionFilter {
 
 // SearchResponse mirrors protocol.SearchResponseData.
 type SearchResponse struct {
-	state         protoimpl.MessageState      `protogen:"open.v1"`
-	Hits          []*SearchResponse_SearchHit `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"`
-	TotalHits     int32                       `protobuf:"varint,2,opt,name=total_hits,json=totalHits,proto3" json:"total_hits,omitempty"`
-	Scanned       int32                       `protobuf:"varint,3,opt,name=scanned,proto3" json:"scanned,omitempty"`
-	Elapsed       int64                       `protobuf:"varint,4,opt,name=elapsed,proto3" json:"elapsed,omitempty"`
+	state     protoimpl.MessageState      `protogen:"open.v1"`
+	Hits      []*SearchResponse_SearchHit `protobuf:"bytes,1,rep,name=hits,proto3" json:"hits,omitempty"`
+	TotalHits int32                       `protobuf:"varint,2,opt,name=total_hits,json=totalHits,proto3" json:"total_hits,omitempty"`
+	Scanned   int32                       `protobuf:"varint,3,opt,name=scanned,proto3" json:"scanned,omitempty"`
+	// elapsed is ms (time.Since(start).Milliseconds() in Controller.Search).
+	Elapsed       int64 `protobuf:"varint,4,opt,name=elapsed,proto3" json:"elapsed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -10777,14 +10782,16 @@ func (x *CreateUserRequest) GetUsername() string {
 
 // CreateUserResponse mirrors protocol.UserCreateResponseData: the plaintext
 // token, the only time it is ever transmitted — the daemon stores a digest
-// and cannot reproduce it.
+// and cannot reproduce it. created_at deviates from the mirror: the Go field
+// is an RFC3339 string, but unix seconds win, matching
+// UserRow.created_at_unix.
 // Never mints an admin. Admins come only from rafikid user create --admin.
 type CreateUserResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
 	Token         string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CreatedAtUnix int64                  `protobuf:"varint,4,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -10840,11 +10847,11 @@ func (x *CreateUserResponse) GetToken() string {
 	return ""
 }
 
-func (x *CreateUserResponse) GetCreatedAt() string {
+func (x *CreateUserResponse) GetCreatedAtUnix() int64 {
 	if x != nil {
-		return x.CreatedAt
+		return x.CreatedAtUnix
 	}
-	return ""
+	return 0
 }
 
 // ListUsersRequest mirrors protocol.UserListRequest. Tokens are never
@@ -11580,12 +11587,14 @@ func (x *StatusResponse_ChildCounts) GetExited() int32 {
 // SearchSessionFilter mirrors protocol.SearchSessionFilter. Labels is an
 // AND-match (every k=v present); HasLabel tests key presence only.
 type SearchRequest_SearchSessionFilter struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CwdContains   string                 `protobuf:"bytes,1,opt,name=cwd_contains,json=cwdContains,proto3" json:"cwd_contains,omitempty"`
-	NameContains  string                 `protobuf:"bytes,2,opt,name=name_contains,json=nameContains,proto3" json:"name_contains,omitempty"`
-	Since         int64                  `protobuf:"varint,3,opt,name=since,proto3" json:"since,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	HasLabel      []string               `protobuf:"bytes,5,rep,name=has_label,json=hasLabel,proto3" json:"has_label,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	CwdContains  string                 `protobuf:"bytes,1,opt,name=cwd_contains,json=cwdContains,proto3" json:"cwd_contains,omitempty"`
+	NameContains string                 `protobuf:"bytes,2,opt,name=name_contains,json=nameContains,proto3" json:"name_contains,omitempty"`
+	// since is unix ms, compared against each child's StartedAt.UnixMilli
+	// (matchesSessionFilter); 0 means unbounded.
+	Since         int64             `protobuf:"varint,3,opt,name=since,proto3" json:"since,omitempty"`
+	Labels        map[string]string `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	HasLabel      []string          `protobuf:"bytes,5,rep,name=has_label,json=hasLabel,proto3" json:"has_label,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11657,17 +11666,18 @@ func (x *SearchRequest_SearchSessionFilter) GetHasLabel() []string {
 
 // SearchHit mirrors protocol.SearchHit: one content match.
 type SearchResponse_SearchHit struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	SessionFile   string                 `protobuf:"bytes,2,opt,name=session_file,json=sessionFile,proto3" json:"session_file,omitempty"`
-	SessionId     string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	SessionName   string                 `protobuf:"bytes,4,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
-	EntryId       string                 `protobuf:"bytes,5,opt,name=entry_id,json=entryId,proto3" json:"entry_id,omitempty"`
-	Timestamp     int64                  `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Role          string                 `protobuf:"bytes,7,opt,name=role,proto3" json:"role,omitempty"`
-	Snippet       string                 `protobuf:"bytes,8,opt,name=snippet,proto3" json:"snippet,omitempty"`
-	MatchStart    int32                  `protobuf:"varint,9,opt,name=match_start,json=matchStart,proto3" json:"match_start,omitempty"`
-	MatchEnd      int32                  `protobuf:"varint,10,opt,name=match_end,json=matchEnd,proto3" json:"match_end,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ChildId     string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	SessionFile string                 `protobuf:"bytes,2,opt,name=session_file,json=sessionFile,proto3" json:"session_file,omitempty"`
+	SessionId   string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	SessionName string                 `protobuf:"bytes,4,opt,name=session_name,json=sessionName,proto3" json:"session_name,omitempty"`
+	EntryId     string                 `protobuf:"bytes,5,opt,name=entry_id,json=entryId,proto3" json:"entry_id,omitempty"`
+	// timestamp is unix ms, the ring event's own Timestamp (pkg/ring).
+	Timestamp     int64  `protobuf:"varint,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Role          string `protobuf:"bytes,7,opt,name=role,proto3" json:"role,omitempty"`
+	Snippet       string `protobuf:"bytes,8,opt,name=snippet,proto3" json:"snippet,omitempty"`
+	MatchStart    int32  `protobuf:"varint,9,opt,name=match_start,json=matchStart,proto3" json:"match_start,omitempty"`
+	MatchEnd      int32  `protobuf:"varint,10,opt,name=match_end,json=matchEnd,proto3" json:"match_end,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12663,13 +12673,12 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06ticket\x18\x03 \x01(\tR\x06ticket\x12\x1a\n" +
 	"\bselector\x18\x04 \x01(\tR\bselector\"/\n" +
 	"\x11CreateUserRequest\x12\x1a\n" +
-	"\busername\x18\x01 \x01(\tR\busername\"u\n" +
+	"\busername\x18\x01 \x01(\tR\busername\"~\n" +
 	"\x12CreateUserResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x14\n" +
-	"\x05token\x18\x03 \x01(\tR\x05token\x12\x1d\n" +
-	"\n" +
-	"created_at\x18\x04 \x01(\tR\tcreatedAt\"Q\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\x12&\n" +
+	"\x0fcreated_at_unix\x18\x04 \x01(\x03R\rcreatedAtUnix\"Q\n" +
 	"\x10ListUsersRequest\x12'\n" +
 	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\"=\n" +
