@@ -8,7 +8,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tui"
 )
@@ -59,7 +58,7 @@ func wantsCreateForm(cmd *cobra.Command, args []string, isTTY bool) bool {
 
 // wantsSessionExecutor reports whether the FORM path should stand up this
 // machine as a workspace before opening the cockpit. Extracted so the rule is
-// testable without a terminal, a client, or a real session executor.
+// testable without a terminal or a real session executor.
 //
 // The kind gate is the point: a launch-required kind (anything but fundi) can
 // never be served by the local session executor -- it never advertises any
@@ -90,7 +89,7 @@ func wantsSessionExecutor(reqSelector, executorRef, kind string, noLocalExecutor
 // (below), matching runCreate's undetached case -- the TUI only returns when
 // the user quits, so a deferred stop here never outlives the children it was
 // serving.
-func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnRequest, noLocalExecutor bool) error {
+func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest, noLocalExecutor bool) error {
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
@@ -104,7 +103,7 @@ func runCreateForm(cmd *cobra.Command, c *client.Client, req protocol.SpawnReque
 	p := mustProfile(cmd)
 	executorSelector := req.ExecutorSelector
 	if wantsSessionExecutor(req.ExecutorSelector, req.ExecutorRef, req.Kind, noLocalExecutor) {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}

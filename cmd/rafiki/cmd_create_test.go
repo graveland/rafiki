@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -708,83 +707,130 @@ func TestResolveExecutor(t *testing.T) {
 }
 
 func TestCreateTextFields(t *testing.T) {
-	data := protocol.SpawnResponseData{
-		ChildID:     "c_123",
-		SessionID:   "s_456",
-		SessionFile: "/sessions/c_123.jsonl",
-		Model:       "anthropic/claude-sonnet-4-5",
-	}
+	// The Connect SpawnResponse carries the child id only (the framed payload's
+	// session/model fields were dropped on the wire); the text view renders
+	// exactly what the record carries.
 	var buf bytes.Buffer
-	if err := renderCreateSummary(&buf, data, outputTable); err != nil {
+	if err := renderCreateSummary(&buf, &rafikiv1.SpawnResponse{ChildId: "c_123"}, outputTable); err != nil {
 		t.Fatalf("renderCreateSummary: %v", err)
 	}
-	out := buf.String()
-	for _, want := range []string{
-		"childId: c_123\n",
-		"sessionId: s_456\n",
-		"sessionFile: /sessions/c_123.jsonl\n",
-		"model: anthropic/claude-sonnet-4-5\n",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("text output missing %q; got:\n%s", want, out)
-		}
+	if buf.String() != "childId: c_123\n" {
+		t.Errorf("text output = %q, want only the childId line", buf.String())
 	}
 
-	// Empty fields are skipped, and the zero-valued stalled flag is not news.
+	// A field the record does not carry is skipped, not printed as a dash.
 	var empty bytes.Buffer
-	if err := renderCreateSummary(&empty, protocol.SpawnResponseData{ChildID: "c_1", Stalled: false}, outputTable); err != nil {
+	if err := renderCreateSummary(&empty, &rafikiv1.SpawnResponse{}, outputTable); err != nil {
 		t.Fatalf("renderCreateSummary empty: %v", err)
 	}
-	if empty.String() != "childId: c_1\n" {
-		t.Errorf("empty-field output = %q, want only childId", empty.String())
-	}
-
-	// stalled is reported when it actually happened.
-	var stalled bytes.Buffer
-	if err := renderCreateSummary(&stalled, protocol.SpawnResponseData{ChildID: "c_1", Stalled: true}, outputTable); err != nil {
-		t.Fatalf("renderCreateSummary stalled: %v", err)
-	}
-	if !strings.Contains(stalled.String(), "stalled: true\n") {
-		t.Errorf("stalled output missing the flag; got:\n%s", stalled.String())
+	if empty.String() != "" {
+		t.Errorf("empty-field output = %q, want nothing", empty.String())
 	}
 }
 
-// The detached create JSON is unmarshalled by test/integration TODAY; its
-// shape must be byte-identical to the encoding the detached branch used
-// before the output-mode conversion.
-func TestCreateJSONShapeUnchanged(t *testing.T) {
-	data := protocol.SpawnResponseData{
-		ChildID:     "c_123",
-		SessionID:   "s_456",
-		SessionFile: "/sessions/c_123.jsonl",
-		Model:       "m",
-		Stalled:     true,
-	}
+// The detached create JSON is the Spawn response's canonical protojson —
+// pretty and JSONL are the same bytes modulo whitespace (protoout's contract).
+func TestCreateJSONShape(t *testing.T) {
+	resp := &rafikiv1.SpawnResponse{ChildId: "c_123"}
+
 	var buf bytes.Buffer
-	if err := renderCreateSummary(&buf, data, outputJSON); err != nil {
+	if err := renderCreateSummary(&buf, resp, outputJSON); err != nil {
 		t.Fatalf("renderCreateSummary: %v", err)
 	}
-	var want bytes.Buffer
-	enc := json.NewEncoder(&want)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(data); err != nil {
-		t.Fatalf("encode reference: %v", err)
+	if buf.String() != "{\n  \"childId\": \"c_123\"\n}\n" {
+		t.Errorf("json output = %q, want indented protojson", buf.String())
 	}
-	if buf.String() != want.String() {
-		t.Errorf("json output changed:\nold: %s\nnew: %s", want.String(), buf.String())
+
+	var line bytes.Buffer
+	if err := renderCreateSummary(&line, resp, outputJSONL); err != nil {
+		t.Fatalf("renderCreateSummary: %v", err)
+	}
+	if line.String() != `{"childId":"c_123"}`+"\n" {
+		t.Errorf("jsonl output = %q, want one compact line", line.String())
 	}
 }
 
-func TestCreateJSONLOneCompactLine(t *testing.T) {
-	data := protocol.SpawnResponseData{ChildID: "c_123", Model: "m"}
-	var buf bytes.Buffer
-	if err := renderCreateSummary(&buf, data, outputJSONL); err != nil {
-		t.Fatalf("renderCreateSummary: %v", err)
+// TestConnectSpawnRequestCarriesEveryField pins the protocol→wire conversion:
+// every field buildSpawnRequest assembles rides onto rafikiv1.SpawnRequest —
+// including the operator-only 15–29 (a child credential is refused daemon-side,
+// never client-side) — and the budgets stay pointers so unset and zero keep
+// their opposite meanings.
+func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
+	depth, cost, kids := 0, 0.0, 0 // explicit zeros must stay SET on the wire
+	in := protocol.SpawnRequest{
+		Name:               "worker",
+		Cwd:                "/tmp/w",
+		Kind:               protocol.KindFundi,
+		ConfigDir:          "/cfg",
+		AppendSystemPrompt: "be brief",
+		Model:              "anthropic/claude-sonnet-4-5",
+		Thinking:           "low",
+		NoSession:          true,
+		ResumeSession:      "s.jsonl",
+		ForkSession:        "f.jsonl",
+		NoExtensions:       true,
+		Extensions:         []string{"x"},
+		Verbose:            true,
+		ExtraArgs:          []string{"--fast"},
+		SkillsDirs:         []string{"/skills"},
+		MCPConfig:          "/mcp.json",
+		Labels:             map[string]string{"env": "home"},
+		ParentChildID:      "c_parent",
+		Env:                map[string]string{"K": "V"},
+		RecordRequests:     true,
+		PassthroughAuth:    "on",
+		ExecutorSelector:   "env=home",
+		ExecutorRef:        "greyshift",
+		Preset:             "impl",
+		Script:             &protocol.ScriptSpec{Repo: "local", Script: "driver", Args: []string{"--fast"}},
+		Prefill:            []protocol.PrefillRead{{Path: "/a.md", Start: 1, End: 9}},
+		MaxDepth:           &depth,
+		MaxCost:            &cost,
+		MaxChildren:        &kids,
 	}
-	// SpawnResponseData.Stalled has no omitempty, so the record always
-	// carries "stalled":false — JSONL is the record as-is.
-	if buf.String() != `{"childId":"c_123","model":"m","stalled":false}`+"\n" {
-		t.Errorf("jsonl output = %q, want one compact line", buf.String())
+	out := connectSpawnRequest(in)
+
+	if out.GetCwd() != in.Cwd || out.GetName() != in.Name || out.GetKind() != in.Kind ||
+		out.GetModel() != in.Model || out.GetPreset() != in.Preset ||
+		out.GetConfigDir() != in.ConfigDir || out.GetAppendSystemPrompt() != in.AppendSystemPrompt ||
+		out.GetThinking() != in.Thinking || out.GetNoSession() != in.NoSession ||
+		out.GetResumeSession() != in.ResumeSession || out.GetForkSession() != in.ForkSession ||
+		out.GetNoExtensions() != in.NoExtensions || !slices.Equal(out.GetExtensions(), in.Extensions) ||
+		out.GetVerbose() != in.Verbose || !slices.Equal(out.GetExtraArgs(), in.ExtraArgs) ||
+		!slices.Equal(out.GetSkillsDirs(), in.SkillsDirs) || out.GetMcpConfig() != in.MCPConfig ||
+		out.GetParentChildId() != in.ParentChildID || out.GetRecordRequests() != in.RecordRequests ||
+		out.GetPassthroughAuth() != in.PassthroughAuth || out.GetExecutorSelector() != in.ExecutorSelector ||
+		out.GetExecutorRef() != in.ExecutorRef {
+		t.Fatalf("a scalar field was lost on the wire: %+v", out)
+	}
+	if out.GetLabels()["env"] != "home" || out.GetEnv()["K"] != "V" {
+		t.Fatalf("a map field was lost: labels=%v env=%v", out.GetLabels(), out.GetEnv())
+	}
+	if out.Script == nil || out.Script.GetRepo() != "local" || out.Script.GetScript() != "driver" ||
+		!slices.Equal(out.Script.GetArgs(), []string{"--fast"}) {
+		t.Fatalf("script spec lost: %v", out.Script)
+	}
+	if len(out.Prefill) != 1 || out.Prefill[0].GetPath() != "/a.md" ||
+		out.Prefill[0].GetStart() != 1 || out.Prefill[0].GetEnd() != 9 {
+		t.Fatalf("prefill lost: %v", out.Prefill)
+	}
+
+	// Explicit zeros stay SET — zero means "may not spawn" / "spend nothing",
+	// and only the pointer preserves that on the wire.
+	if out.MaxDepth == nil || *out.MaxDepth != 0 {
+		t.Fatalf("zero max_depth must stay set, got %v", out.MaxDepth)
+	}
+	if out.MaxCost == nil || *out.MaxCost != 0 {
+		t.Fatalf("zero max_cost must stay set, got %v", out.MaxCost)
+	}
+	if out.MaxChildren == nil || *out.MaxChildren != 0 {
+		t.Fatalf("zero max_children must stay set, got %v", out.MaxChildren)
+	}
+
+	// Unset budgets stay unset: nil, not zero (unset means default/unlimited).
+	empty := connectSpawnRequest(protocol.SpawnRequest{Cwd: "/tmp"})
+	if empty.MaxDepth != nil || empty.MaxCost != nil || empty.MaxChildren != nil {
+		t.Fatalf("unset budgets must stay nil, got %v/%v/%v", empty.MaxDepth, empty.MaxCost, empty.MaxChildren)
 	}
 }
 

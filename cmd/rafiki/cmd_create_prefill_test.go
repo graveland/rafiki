@@ -25,9 +25,9 @@ func newPrefillTestCmd() *cobra.Command {
 }
 
 // TestCreatePrefillFlag exercises resolvePrefillFiles — the helper runCreate
-// calls BEFORE mustDial, so a bad list is refused without opening a
-// connection. The helper dials nothing, which is what makes these subtests
-// possible without a daemon.
+// calls BEFORE any connection, so a bad list is refused without opening one.
+// The helper dials nothing, which is what makes these subtests possible
+// without a daemon.
 func TestCreatePrefillFlag(t *testing.T) {
 	t.Run("file becomes entries", func(t *testing.T) {
 		dir := t.TempDir()

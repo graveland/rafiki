@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +12,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -516,6 +514,72 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	return req, nil
 }
 
+// connectSpawnRequest converts the client-assembled request onto the Connect
+// wire message. Field-for-field with the daemon's own plane mapping
+// (cmd/rafikid's buildProtocolSpawnRequest consumed exactly this shape over
+// the framed plane; pkg/connectapi's connectapiSpawnParams reads it back),
+// so every field buildSpawnRequest set rides — including the operator-only
+// 15–29 (config_dir … passthrough_auth), which the daemon refuses to a caller
+// with child provenance. The three budgets stay pointers end to end: unset
+// and zero mean opposite things per field, so collapsing them would silently
+// convert one meaning into the other.
+func connectSpawnRequest(req protocol.SpawnRequest) *rafikiv1.SpawnRequest {
+	out := &rafikiv1.SpawnRequest{
+		Cwd:                req.Cwd,
+		Name:               req.Name,
+		Model:              req.Model,
+		Kind:               req.Kind,
+		Labels:             req.Labels,
+		ParentChildId:      req.ParentChildID,
+		ExecutorSelector:   req.ExecutorSelector,
+		ExecutorRef:        req.ExecutorRef,
+		Preset:             req.Preset,
+		ConfigDir:          req.ConfigDir,
+		AppendSystemPrompt: req.AppendSystemPrompt,
+		Thinking:           req.Thinking,
+		NoSession:          req.NoSession,
+		ResumeSession:      req.ResumeSession,
+		ForkSession:        req.ForkSession,
+		Extensions:         req.Extensions,
+		NoExtensions:       req.NoExtensions,
+		Verbose:            req.Verbose,
+		ExtraArgs:          req.ExtraArgs,
+		SkillsDirs:         req.SkillsDirs,
+		McpConfig:          req.MCPConfig,
+		Env:                req.Env,
+		RecordRequests:     req.RecordRequests,
+		PassthroughAuth:    req.PassthroughAuth,
+	}
+	if req.MaxDepth != nil {
+		depth := int32(*req.MaxDepth)
+		out.MaxDepth = &depth
+	}
+	if req.MaxCost != nil {
+		cost := *req.MaxCost
+		out.MaxCost = &cost
+	}
+	if req.MaxChildren != nil {
+		kids := int32(*req.MaxChildren)
+		out.MaxChildren = &kids
+	}
+	if req.Script != nil {
+		out.Script = &rafikiv1.SpawnRequest_ScriptSpec{
+			Repo:    req.Script.Repo,
+			Script:  req.Script.Script,
+			Modules: req.Script.Modules,
+			Args:    req.Script.Args,
+		}
+	}
+	for _, pf := range req.Prefill {
+		out.Prefill = append(out.Prefill, &rafikiv1.PrefillRead{
+			Path:  pf.Path,
+			Start: int32(pf.Start),
+			End:   int32(pf.End),
+		})
+	}
+	return out
+}
+
 // resolvePymoduleFlag parses --pymodule <repo>:<script> into a ScriptSpec.
 // repo "local" is the spawning owner's saved modules; any other repo names a
 // registered git source. The script name is validated client-side (a bare
@@ -559,9 +623,9 @@ func applyCreatePreset(req *protocol.SpawnRequest, name string, rec presets.Reco
 
 // resolvePrefillFiles reads and parses the --prefill-files flag, if set, into
 // SpawnRequest entries. Extracted so the flag's failure modes are testable
-// without a daemon, and so runCreate can refuse a bad list BEFORE mustDial —
-// it dials nothing, and a parse error is a user-input error that must not
-// open a connection first.
+// without a daemon, and so runCreate can refuse a bad list BEFORE any
+// connection — it dials nothing, and a parse error is a user-input error that
+// must not open a connection first.
 func resolvePrefillFiles(cmd *cobra.Command) ([]protocol.PrefillRead, error) {
 	list, _ := cmd.Flags().GetString("prefill-files")
 	if list == "" {
@@ -624,15 +688,18 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Read and parse --prefill-files BEFORE any dial: a bad list is a
+	// Read and parse --prefill-files BEFORE any connection: a bad list is a
 	// user-input error and must not open a connection first.
 	prefillEntries, err := resolvePrefillFiles(cmd)
 	if err != nil {
 		return err
 	}
 
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	req, err := buildSpawnRequest(cmd, args)
 	if err != nil {
@@ -650,11 +717,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// the form is prefilled with the request that will actually spawn.
 	presetName := resolvePresetName(cmd)
 	if presetName != "" {
-		ep, err := newConnectEndpoint(cmd)
-		if err != nil {
-			return err
-		}
-		resp, err := ep.control().GetPreset(cmdCtx(cmd),
+		resp, err := ctrl.GetPreset(cmdCtx(cmd),
 			connect.NewRequest(&rafikiv1.GetPresetRequest{Name: presetName}))
 		if err != nil {
 			if connect.CodeOf(err) == connect.CodeNotFound {
@@ -694,7 +757,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		// here with -i, since it suppresses the form on its own -- is what the
 		// form is PREFILLED with, not what the spawn quietly does differently.
 		req.ExecutorRef = flagExecutor
-		return runCreateForm(cmd, c, req, noLocalExecutor)
+		return runCreateForm(cmd, req, noLocalExecutor)
 	}
 
 	// A kind that must be LAUNCHED (anything but fundi) can never be served by
@@ -744,7 +807,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	req.ExecutorRef, req.ExecutorSelector = ref, selector
 
 	if req.ExecutorRef == "" && req.ExecutorSelector == "" && req.Kind == protocol.KindFundi && !noLocalExecutor {
-		selector, stop, err := startSessionExecutor(cmdCtx(cmd), c, req.Cwd, p)
+		selector, stop, err := startSessionExecutor(cmdCtx(cmd), req.Cwd, p)
 		if err != nil {
 			return fmt.Errorf("this machine could not join as a workspace: %w", err)
 		}
@@ -758,19 +821,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resp, err := c.Request(cmdCtx(cmd), req)
+	resp, err := ctrl.Spawn(cmdCtx(cmd), connect.NewRequest(connectSpawnRequest(req)))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_spawn: %s", client.FormatError(resp))
+		return diagnoseConnectError(err, ep.describe)
 	}
 
 	// The child set changed, so whatever a TAB answered a moment ago is stale.
 	dropChildCompletionCache(cmd)
 
-	var data protocol.SpawnResponseData
-	_ = json.Unmarshal(resp.Data, &data)
 	// Remember what actually got spawned, not what was asked for: a preset or
 	// an alias may have supplied it, and replaying the resolved choice is what
 	// makes the next bare create land on the same model.
@@ -778,37 +836,32 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	if ref := req.ExecutorRef; ref != "" {
 		clientstate.RememberExecutor(p.Name, req.Kind, ref)
 	}
-	if err := setActive(p.Name, data.ChildID); err != nil {
+	childID := resp.Msg.GetChildId()
+	if err := setActive(p.Name, childID); err != nil {
 		// Best effort — log to stderr but don't fail.
 		fmt.Fprintln(os.Stderr, "warning: could not update active marker:", err)
 	}
 
 	if detached {
-		return renderCreateSummary(os.Stdout, data, mode)
+		return renderCreateSummary(os.Stdout, resp.Msg, mode)
 	}
 
 	killOnExit, _ := cmd.Flags().GetBool("kill-on-exit")
 	keepOnExit, _ := cmd.Flags().GetBool("keep-on-exit")
-	ep, err := newConnectEndpoint(cmd)
-	if err != nil {
-		return err
-	}
-	return attachAndDecide(cmd, ep, data.ChildID, killOnExit, keepOnExit)
+	return attachAndDecide(cmd, ep, childID, killOnExit, keepOnExit)
 }
 
 // renderCreateSummary writes the detached spawn record in the requested mode:
-// pretty JSON (byte-identical to the pre-tables output — test/integration
-// unmarshals it), one compact JSONL line, or one `key: value` line per field
-// the record actually carries, skipping empty ones. A non-detached create
-// attaches instead of printing and is unaffected by the mode.
-func renderCreateSummary(w io.Writer, data protocol.SpawnResponseData, mode outputMode) error {
+// pretty JSON and one compact JSONL line are the Spawn response's canonical
+// protojson, and the text view is one `key: value` line per field the record
+// actually carries. A non-detached create attaches instead of printing and is
+// unaffected by the mode.
+func renderCreateSummary(w io.Writer, resp *rafikiv1.SpawnResponse, mode outputMode) error {
 	switch mode {
-	case outputJSONL:
-		return writeJSONL(w, []any{data})
-	case outputJSON:
-		return writeJSON(w, data)
+	case outputJSON, outputJSONL:
+		return emitProto(w, resp, mode)
 	default:
-		for _, line := range spawnRecordLines(data) {
+		for _, line := range spawnRecordLines(resp) {
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				return err
 			}
@@ -818,22 +871,18 @@ func renderCreateSummary(w io.Writer, data protocol.SpawnResponseData, mode outp
 }
 
 // spawnRecordLines renders the record's fields as `key: value` text lines in
-// struct order. A field the record does not carry (json omitempty) or carries
-// empty is skipped — the text view reports what got spawned, nothing else.
-// stalled appears only when true: false is the field's zero value, not news.
-func spawnRecordLines(data protocol.SpawnResponseData) []string {
+// struct order. A field the record does not carry or carries empty is
+// skipped — the text view reports what got spawned, nothing else. The Connect
+// SpawnResponse carries the child id only: the framed payload's session and
+// model fields were dropped on the wire (the same lean-response call resume
+// made), and `rafiki get` is the way to read them back.
+func spawnRecordLines(resp *rafikiv1.SpawnResponse) []string {
 	var lines []string
 	add := func(key, value string) {
 		if value != "" {
 			lines = append(lines, key+": "+value)
 		}
 	}
-	add("childId", data.ChildID)
-	add("sessionId", data.SessionID)
-	add("sessionFile", data.SessionFile)
-	add("model", data.Model)
-	if data.Stalled {
-		lines = append(lines, "stalled: true")
-	}
+	add("childId", resp.GetChildId())
 	return lines
 }

@@ -200,14 +200,12 @@ func childCwd(ctx context.Context, cc rafikiv1connect.ControlClient, childID str
 // point — that executor outlives this process, so an agent keeps working after
 // the operator closes the terminal.
 //
-// The session's lifetime now rides the ExecutorSession Connect stream, opened
+// The session's lifetime rides the ExecutorSession Connect stream, opened
 // with a context that lives exactly as long as the session: the returned
-// cleanup cancels it, which is the daemon's eviction trigger. The framed
-// *client.Client parameter is unused here — it is kept only because
-// cmd_create.go and cmd_create_form.go still build one for their own,
-// still-framed calls; whichever task converts those two files to Connect can
-// drop it from this signature then.
-func startSessionExecutor(ctx context.Context, _ *client.Client, root string, p profile.Resolved) (string, func(), error) {
+// cleanup cancels it, which is the daemon's eviction trigger. The endpoint
+// resolves from the same profile the caller's spawn uses (sessionConnectEndpoint),
+// so the function needs no command and no connection of its own.
+func startSessionExecutor(ctx context.Context, root string, p profile.Resolved) (string, func(), error) {
 	noop := func() {}
 
 	name, _, err := paths.MachineName()

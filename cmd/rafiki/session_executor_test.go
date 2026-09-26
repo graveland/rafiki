@@ -205,7 +205,7 @@ func TestStartSessionExecutor_CleanupCancelsStreamAndLeavesNoGoroutine(t *testin
 	}
 	p := serveExecutorSessionStub(t, stub)
 
-	selector, cleanup, err := startSessionExecutor(context.Background(), nil, t.TempDir(), p)
+	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
 	if err != nil {
 		t.Fatalf("startSessionExecutor: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestStartSessionExecutor_StreamErrorAfterReadyEndsTheSession(t *testing.T) 
 	}
 	p := serveExecutorSessionStub(t, stub)
 
-	selector, cleanup, err := startSessionExecutor(context.Background(), nil, t.TempDir(), p)
+	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
 	if err != nil {
 		t.Fatalf("startSessionExecutor: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestStartSessionExecutor_CleanupWaitsForItsOwnGoroutines(t *testing.T) {
 	}
 	p := serveExecutorSessionStub(t, stub)
 
-	_, cleanup, err := startSessionExecutor(context.Background(), nil, t.TempDir(), p)
+	_, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
 	if err != nil {
 		t.Fatalf("startSessionExecutor: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestStartSessionExecutor_DurableExecutorStartsNothingLocally(t *testing.T) 
 	}
 	p := serveExecutorSessionStub(t, stub)
 
-	selector, cleanup, err := startSessionExecutor(context.Background(), nil, t.TempDir(), p)
+	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
 	if err != nil {
 		t.Fatalf("startSessionExecutor: %v", err)
 	}
