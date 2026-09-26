@@ -297,7 +297,7 @@ func TestDisplacedConnectionDoesNotReportDisconnect(t *testing.T) {
 // on a holder with no active stream (nil client). The channel stays open but
 // delivers no events until start() is called and the recvLoop begins receiving.
 func TestRelayHolderFanOutLifecycle(t *testing.T) {
-	holder := newRelayHolder("c1", nil) // nil client — no stream
+	holder := newRelayHolder("c1", nil, nil) // nil client — no stream
 
 	subCh, unsub := holder.subscribe()
 	defer unsub()
@@ -324,7 +324,7 @@ func TestRelayHolderFanOutLifecycle(t *testing.T) {
 // TestRelayHolderBroadcastToMultipleSubscribers verifies that broadcast sends
 // to all subscriber channels simultaneously (with backpressure via drop).
 func TestRelayHolderBroadcastToMultipleSubscribers(t *testing.T) {
-	holder := newRelayHolder("c1", nil)
+	holder := newRelayHolder("c1", nil, nil)
 
 	ch1, unsub1 := holder.subscribe()
 	ch2, unsub2 := holder.subscribe()
@@ -358,7 +358,7 @@ func TestRelayHolderBroadcastToMultipleSubscribers(t *testing.T) {
 // TestRelayHolderClosedRejectsNewSubscribers verifies that after shutdown,
 // subscribe returns immediately without adding to fanOut.
 func TestRelayHolderClosedRejectsNewSubscribers(t *testing.T) {
-	holder := newRelayHolder("c1", nil)
+	holder := newRelayHolder("c1", nil, nil)
 	holder.shutdown()
 
 	_, unsub := holder.subscribe()
@@ -382,7 +382,7 @@ func TestPoolEvictCleansUpRelayHolder(t *testing.T) {
 	_cred, _ := reg.IssueCredential("c1")
 	_ = _cred
 	pool.conns["c1"] = &liveConn{done: make(chan struct{})}
-	holder := newRelayHolder("c1", nil)
+	holder := newRelayHolder("c1", nil, nil)
 	pool.relayHolders["c1"] = holder
 
 	pool.Evict("c1")

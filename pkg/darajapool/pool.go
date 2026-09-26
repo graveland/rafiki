@@ -61,6 +61,12 @@ type Pool struct {
 
 	relayHolders map[string]*relayHolder // childID → relay holder (owned here)
 
+	// replay is the belt of events broadcast while no subscriber was attached
+	// (see relay.go's belt doc comment). Guarded by mu; lock order is always
+	// holder.mu → mu, never the reverse (RelayFor's stale-holder stop runs
+	// outside the lock for exactly this reason).
+	replay map[string][]fanEvent
+
 	onConnectMu    sync.Mutex
 	onConnect      map[uint64]func(childID string)
 	nextOnConnect  uint64
@@ -74,6 +80,7 @@ func New(reg *Registry) *Pool {
 		reg:          reg,
 		conns:        make(map[string]*liveConn),
 		relayHolders: make(map[string]*relayHolder),
+		replay:       make(map[string][]fanEvent),
 		onConnect:    make(map[uint64]func(childID string)),
 		onDisconnect: make([]func(childID string), 0),
 	}
@@ -145,6 +152,7 @@ func (p *Pool) Evict(childID string) {
 	if holder != nil {
 		holder.stop()
 	}
+	p.dropReplay(childID)
 }
 
 // OnConnect registers a callback invoked when a daraja connects, and returns
@@ -348,7 +356,7 @@ func (p *Pool) handleConn(conn net.Conn) {
 	relayCtx, relayCancel := context.WithCancel(context.Background())
 	holder := newRelayHolderWithCtx(childID, lc.daraja, relayCtx, relayCancel, func() {
 		lc.shutdown()
-	})
+	}, p)
 
 	// Open the relay stream BEFORE publishing the connection as live.
 	// OnConnect (fired by installLive, below) is the signal callers —

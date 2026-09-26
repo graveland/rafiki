@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -205,26 +206,48 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	return runDarajaConnectLoop(host, srv, opts)
 }
 
+// darajaRelayTailGrace bounds how long the host-gave-up path waits for the
+// daemon to acknowledge the relay stream's final frames before exiting (see
+// runDarajaConnectLoop). The normal acknowledgement is milliseconds — the
+// daemon closes the connection as soon as its receive loop sees the ended
+// stream — so the grace only ever fires on a wedged or suspended daemon.
+const darajaRelayTailGrace = 5 * time.Second
+
 // runDarajaConnectLoop is the tail both hosted kinds share: reverse-dial the
 // daemon and serve until the daemon asks for a shutdown, the host gives up
 // (claude's respawn limit — or a script's exit, which for a script child is
 // the normal end), a signal arrives, or the connection fails terminally.
+//
+// On the host-gave-up path the process does NOT die immediately: the relay's
+// final events — for a script, the Exited its settle is computed from — only
+// reach the daemon while this process is alive to flush them. The relay
+// handler drains its queue and ends the stream, the DAEMON answers the ended
+// stream by closing the connection, and Connect (whose reconnect loop is
+// cancelled on this path) returns — that close is the acknowledgement the
+// tail was delivered. darajaRelayTailGrace bounds the wait for a daemon that
+// never acknowledges, so a wedged peer delays the exit by seconds, not
+// forever.
 func runDarajaConnectLoop(host *daraja.Host, srv *daraja.Server, opts daraja.ConnectOptions) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- daraja.Connect(context.Background(), opts) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	errCh := make(chan error, 1)
+	go func() { errCh <- daraja.Connect(ctx, opts) }()
+
+	relayTail := false
 	select {
 	case <-srv.ShutdownRequested():
 	case <-host.Done():
 		// The host gave up on respawning (RespawnStopsAtTheLimit): a daraja
 		// whose child cannot be kept alive has nothing left to host. Exiting
 		// here is what makes that promise true — and for a script child it is
-		// also the NORMAL end: the script exited, its Exited event was
-		// relayed (the server drains the queue on done), and daraja dies with
-		// it.
+		// also the NORMAL end: the script exited, and its Exited event is
+		// about to be relayed (the server drains the queue on done). The
+		// relayTail wait below is what turns "about to" into "did".
+		relayTail = true
 	case <-sigCh:
 		_, _, _ = host.Shutdown(0)
 	case err := <-errCh:
@@ -237,6 +260,29 @@ func runDarajaConnectLoop(host *daraja.Host, srv *daraja.Server, opts daraja.Con
 		}
 		if !errors.Is(err, daraja.ErrRejected) && err != nil {
 			return err
+		}
+	}
+
+	if relayTail {
+		// Stop the reconnect loop FIRST: without it, Connect would happily
+		// dial a fresh connection once the daemon closes this one and the
+		// process would linger hosting a child that no longer exists. With
+		// it cancelled, Connect returns as soon as the daemon closes the
+		// connection — which it only does after the ended relay stream's
+		// final frames have been received and processed.
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "daraja: %v\n", err)
+				if !errors.Is(err, daraja.ErrRejected) {
+					return err
+				}
+			}
+		case <-time.After(darajaRelayTailGrace):
+			// The daemon never acknowledged the ended stream (wedged,
+			// suspended). Exit anyway — the tail is lost, but waiting
+			// forever on a dead peer is worse.
 		}
 	}
 	return nil
