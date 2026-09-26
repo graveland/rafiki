@@ -3671,9 +3671,13 @@ func (c *Controller) SubscribeLabeled(conn control.Connection, labels map[string
 // This is a known limitation — per-child sub sets are bounded by the child
 // lifetime and the subscriber count is small in practice.
 func (c *Controller) OnConnectionClose(conn control.Connection) {
-	// Cancels this connection's session context rather than releasing the
-	// executor directly: the ctx.Done() watcher spawned by ExecutorSession
-	// does that, the same path Connect's stream context uses on stream end.
+	// endConnSession cancels this connection's session context and then
+	// releases its session executor synchronously, so the transient executor
+	// is no longer live by the time this returns (the behavior the lifetime
+	// re-anchor briefly lost). The ctx.Done() watcher ExecutorSession spawned
+	// stays as the backstop — it is the only trigger on Connect's stream end,
+	// where there is no OnConnectionClose — and no-ops here because the entry
+	// is already gone.
 	c.endConnSession(conn)
 	c.cm.GlobalUnsubscribe(conn)
 	c.cm.RemoveLabeledSubsForConn(conn)

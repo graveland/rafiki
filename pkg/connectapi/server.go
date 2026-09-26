@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"connectrpc.com/connect"
@@ -79,9 +80,33 @@ type Server struct {
 	userAdmin      atomic.Pointer[UserAdmin]
 	rawIO          atomic.Pointer[RawChildIO]
 	execSessions   atomic.Pointer[ExecutorSessions]
+
+	// stopOnce guards closing stopped, the shutdown signal long-lived
+	// handlers select on. NewServer creates the channel; the zero value's
+	// nil channel simply blocks forever in a select, which is the same as
+	// having never been stopped.
+	stopOnce sync.Once
+	stopped  chan struct{}
 }
 
-func NewServer(h HistoryLoader) *Server { return &Server{history: h} }
+func NewServer(h HistoryLoader) *Server {
+	return &Server{history: h, stopped: make(chan struct{})}
+}
+
+// Stop unblocks long-lived handlers (ExecutorSession streams) so daemon
+// shutdown is not held by them: the loopback face is shut down with
+// http.Server.Shutdown, which waits for active requests without cancelling
+// their contexts, so a parked ExecutorSession stream would otherwise hold
+// shutdown for the stream's remaining lifetime. Safe to call multiple times —
+// every call after the first is a no-op. Handlers that return because of Stop
+// still release their executors: net/http cancels a request's context once
+// its handler returns, which is the eviction trigger.
+//
+// Only a Server from NewServer has a channel to close: Stop on a zero-value
+// Server is a misuse and panics on the nil channel.
+func (s *Server) Stop() {
+	s.stopOnce.Do(func() { close(s.stopped) })
+}
 
 // SetEventSource attaches the live-event source. Without one, StreamEvents
 // serves the durable replay and then ends the stream.

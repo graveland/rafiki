@@ -111,6 +111,80 @@ func TestExecutorSessionSendsReadyThenBlocksUntilStreamEnds(t *testing.T) {
 	}
 }
 
+// TestExecutorSessionStreamEndsWhenServerStops pins the daemon-shutdown exit:
+// http.Server.Shutdown does not cancel handler contexts, so without a stop
+// signal the parked handler holds daemon shutdown for the stream's remaining
+// lifetime. Server.Stop() must end the live stream promptly and idempotently,
+// and the eviction trigger must still fire afterward: net/http cancels the
+// request's context once the handler returns, which is what the backend
+// watches.
+func TestExecutorSessionStreamEndsWhenServerStops(t *testing.T) {
+	ctxDone := make(chan struct{})
+	seam := &fakeExecSessions{
+		ready: &rafikiv1.ExecutorSessionReady{
+			ExecutorId: "sess-1",
+			RunLocal:   true,
+			Ticket:     "tk-1",
+			Selector:   "owner=brent,machine=m1",
+		},
+		ctxDone: ctxDone,
+	}
+
+	// Own setup rather than setupExecSessionServer: the test needs the Server
+	// itself, to call Stop() the way the daemon's shutdown path will.
+	s := connectapi.NewServer(nil)
+	s.SetExecutorSessions(seam)
+	path, h := s.Routes()
+	mux := http.NewServeMux()
+	mux.Handle(path, h)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	client := rafikiv1connect.NewControlClient(srv.Client(), srv.URL)
+
+	streamCtx, cancelStream := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStream()
+
+	stream, err := client.ExecutorSession(streamCtx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "m1"}))
+	if err != nil {
+		t.Fatalf("ExecutorSession: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("expected the ready message, got err: %v", stream.Err())
+	}
+
+	s.Stop()
+	s.Stop() // a second call must be a no-op, not a close of a closed channel
+
+	// The handler must return promptly: the stream ends cleanly, not with an
+	// error and not by the client's own timeout.
+	ended := make(chan struct{})
+	go func() {
+		for stream.Receive() {
+		}
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ExecutorSession stream did not end after Server.Stop(); " +
+			"a live stream holds daemon shutdown")
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("expected a clean stream end after Stop(), got %v", err)
+	}
+
+	// The eviction trigger still fires: the handler returned, so net/http
+	// cancels the request ctx and the backend releases the executor.
+	select {
+	case <-ctxDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Open's ctx never ended after the Stop-ended stream returned; " +
+			"the executor would never be released")
+	}
+}
+
 func TestExecutorSessionUnavailableWhenNotWired(t *testing.T) {
 	client := setupExecSessionServer(t, nil)
 

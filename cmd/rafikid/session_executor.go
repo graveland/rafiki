@@ -198,7 +198,9 @@ func (c *Controller) executorSession(
 		// releaseSessionExecutor is idempotent and acts on whatever is
 		// CURRENTLY stored under key, so a watcher spawned for an earlier
 		// call on the same key still evicts correctly if a later call
-		// replaced the entry before ctx ended.
+		// replaced the entry before ctx ended. On the framed plane the close
+		// path (endConnSession) releases synchronously as well, so this
+		// watcher is the backstop there, not the only trigger.
 		c.sessionExecWg.Add(1)
 		go func() {
 			defer c.sessionExecWg.Done()
@@ -248,9 +250,16 @@ func (c *Controller) connSessionContext(conn control.Connection) context.Context
 	return ctx
 }
 
-// endConnSession cancels and forgets conn's session context. Called once
-// from OnConnectionClose; a no-op for a connection that never called
-// ExecutorSession.
+// endConnSession ends conn's session: it cancels and forgets the connection's
+// session context, then releases the connection's session executor
+// SYNCHRONOUSLY, so the executor is no longer live in the pool by the time
+// OnConnectionClose returns — the pre-re-anchor behavior. releaseSessionExecutor
+// is idempotent, so whichever of this call or the ctx.Done() watcher gets there
+// first releases and the other no-ops; the watcher remains the only trigger on
+// the Connect plane, where there is no OnConnectionClose.
+//
+// Called once from OnConnectionClose; a no-op for a connection that never
+// called ExecutorSession.
 func (c *Controller) endConnSession(conn control.Connection) {
 	c.connSessionsMu.Lock()
 	cs, ok := c.connSessions[conn]
@@ -258,9 +267,11 @@ func (c *Controller) endConnSession(conn control.Connection) {
 		delete(c.connSessions, conn)
 	}
 	c.connSessionsMu.Unlock()
-	if ok {
-		cs.cancel()
+	if !ok {
+		return
 	}
+	cs.cancel()
+	c.releaseSessionExecutor(conn)
 }
 
 // releaseSessionExecutor revokes a session's ticket and evicts its executor.

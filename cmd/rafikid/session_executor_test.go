@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -332,9 +333,9 @@ func TestExecutorSessionConcurrentSessionsFromOneIdentityDoNotEvictEachOther(t *
 }
 
 // TestExecutorSessionFramedConnectionCloseEvictsTransientExecutor is the framed path's end
-// to end version of the same rule: OnConnectionClose no longer releases the
-// executor directly, it cancels the connection's session context, and that
-// cancellation is what the ctx.Done() watcher reacts to.
+// to end version of the same rule: OnConnectionClose ends the connection's
+// session — cancelling its context and releasing the executor synchronously,
+// with the ctx.Done() watcher as the idempotent backstop.
 func TestExecutorSessionFramedConnectionCloseEvictsTransientExecutor(t *testing.T) {
 	pool := newSyncEvictPool()
 	c := &Controller{execPool: pool, cm: newChildManager()}
@@ -348,11 +349,54 @@ func TestExecutorSessionFramedConnectionCloseEvictsTransientExecutor(t *testing.
 
 	c.OnConnectionClose(conn)
 
+	// The release is synchronous: no wait, the executor must already be
+	// evicted by the time OnConnectionClose returns.
+	if !pool.wasEvicted(got.ExecutorID) {
+		t.Fatalf("OnConnectionClose must release %s before it returns", got.ExecutorID)
+	}
 	if !waitGroupDone(&c.sessionExecWg, 2*time.Second) {
 		t.Fatal("the session watcher never exited after OnConnectionClose")
 	}
+}
+
+// TestExecutorSessionFramedCloseEvictionIsSynchronous pins the exact behavior
+// the W2c review found lost: the transient executor is released before
+// OnConnectionClose returns, not queued behind a watcher goroutine.
+//
+// The test removes the watcher from the race so the assertion is deterministic:
+// the session ctx is context.Background, whose Done() channel is nil, so the
+// ctx.Done() watcher parks forever and can never perform the release. The
+// connection's session entry is registered by hand because connSessionContext
+// would have handed out a cancellable ctx. With the watcher unable to act, the
+// ONLY thing that can release the executor is endConnSession's synchronous
+// call — so if OnConnectionClose returns and the executor is still live, the
+// synchronous release is gone. (The watcher goroutine parks for the life of
+// the test process; the WaitGroup is deliberately not waited on here.)
+func TestExecutorSessionFramedCloseEvictionIsSynchronous(t *testing.T) {
+	pool := newSyncEvictPool()
+	c := &Controller{execPool: pool, cm: newChildManager()}
+	conn := &fakeConn{}
+
+	// A context that can never be cancelled: its watcher parks forever.
+	ctx := context.Background()
+	c.connSessions = map[control.Connection]connSession{
+		conn: {ctx: ctx, cancel: func() {}},
+	}
+
+	got, err := c.executorSession(ctx, conn, users.Identity{Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "laptop"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.OnConnectionClose(conn)
+
 	if !pool.wasEvicted(got.ExecutorID) {
-		t.Fatalf("OnConnectionClose must evict %s via its cancelled session context", got.ExecutorID)
+		t.Fatalf("the transient executor %s was still live when OnConnectionClose "+
+			"returned: close-time eviction must be synchronous", got.ExecutorID)
+	}
+	if _, ok := pool.Tickets().Redeem(got.Ticket); ok {
+		t.Fatal("the ticket was still redeemable when OnConnectionClose returned")
 	}
 }
 
