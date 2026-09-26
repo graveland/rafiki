@@ -13,7 +13,7 @@ import (
 func TestSubcommandsAreRegistered(t *testing.T) {
 	root := newRootCmd()
 
-	want := map[string]bool{protocol.KindFundi: true, "agent": true, "migrate": true}
+	want := map[string]bool{protocol.KindFundi: true, "agent": true, "migrate": true, "user": true}
 	for _, c := range root.Commands() {
 		if !want[c.Name()] {
 			t.Errorf("unexpected subcommand %q", c.Name())
