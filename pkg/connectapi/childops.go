@@ -5,9 +5,11 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -41,67 +43,214 @@ func (s *Server) SetChildOps(o ChildOps) {
 	s.childOps.Store(&o)
 }
 
-// Resume serves the framed ctrl_resume face: re-spawn an exited child.
+// childOp returns the wired ChildOps backend. It fails closed with
+// CodeUnavailable until the daemon attaches it — the Controller is built
+// after this Server (see SetChildOps), so a request that arrives during that
+// window must report "not ready", not panic or hang.
+func (s *Server) childOp() (ChildOps, error) {
+	p := s.childOps.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("child ops not yet wired"))
+	}
+	return *p, nil
+}
+
+// mapChildOpsErr is childops.go's shared error mapping. It fails in the same
+// three ways every handler in this file can:
+//
+//   - An already-coded *connect.Error passes through untouched — the
+//     ConversationStats adapter's scopeFor refusal arrives as
+//     CodePermissionDenied, and ConnectErr would re-wrap it as internal.
+//   - A *control.ControllerError keeps its authored message under its
+//     protocol code (ConnectErr) — the code the daemon attached at the source
+//     IS the classification, the same decision the framed mapErr makes.
+//   - Anything else is infrastructure text ConnectErr redacts; its cause is
+//     logged here first or it is lost (the same discipline as close.go).
+func mapChildOpsErr(err error, logMsg string, logArgs ...any) error {
+	var cerr *connect.Error
+	if errors.As(err, &cerr) {
+		return err
+	}
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) {
+		// ConnectErr redacts this below; log the cause here or lose it.
+		slog.Error(logMsg, append(logArgs, "error", err)...)
+	}
+	return ConnectErr(err)
+}
+
+// Resume serves the Connect face of the framed ctrl_resume verb: re-spawn an
+// exited child against its persisted state record. api_key is used at spawn
+// time only and is never persisted — the adapter passes it through to the
+// same Controller.Resume the framed handler calls.
 func (s *Server) Resume(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ResumeRequest],
 ) (*connect.Response[rafikiv1.ResumeResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Resume: not yet implemented"))
+	childID := req.Msg.GetChildId()
+	if childID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("child_id is required"))
+	}
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	id, err := o.Resume(ctx, childID, req.Msg.GetApiKey())
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: resume failed", "child_id", childID)
+	}
+	return connect.NewResponse(&rafikiv1.ResumeResponse{ChildId: id}), nil
 }
 
-// CloseAllExited serves the framed ctrl_forget_all_exited face.
+// CloseAllExited serves the Connect face of the framed ctrl_forget_all_exited
+// verb: close (forget) every exited child, optionally older than
+// older_than_ms. The framed response carried a count alongside the ids; the
+// proto shape drops it as derivable from the repeated field.
 func (s *Server) CloseAllExited(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.CloseAllExitedRequest],
 ) (*connect.Response[rafikiv1.CloseAllExitedResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("CloseAllExited: not yet implemented"))
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	closed, err := o.CloseAllExited(ctx, req.Msg.GetOlderThanMs())
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: forget_all_exited failed")
+	}
+	return connect.NewResponse(&rafikiv1.CloseAllExitedResponse{ChildIds: closed}), nil
 }
 
-// SetLabels serves the framed ctrl_set_labels face.
+// SetLabels serves the Connect face of the framed ctrl_set_labels verb: set
+// entries apply first, then remove entries are deleted, and the full
+// post-mutation map comes back. Keys using the rafiki/ prefix are reserved
+// and rejected by the Controller.
 func (s *Server) SetLabels(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SetLabelsRequest],
 ) (*connect.Response[rafikiv1.SetLabelsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("SetLabels: not yet implemented"))
+	childID := req.Msg.GetChildId()
+	if childID == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("child_id is required"))
+	}
+	if len(req.Msg.GetSet()) == 0 && len(req.Msg.GetRemove()) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("at least one of set or remove is required"))
+	}
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	labels, err := o.SetLabels(ctx, childID, req.Msg.GetSet(), req.Msg.GetRemove())
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: set_labels failed", "child_id", childID)
+	}
+	return connect.NewResponse(&rafikiv1.SetLabelsResponse{Labels: labels}), nil
 }
 
-// Status serves the framed ctrl_status face.
+// Status serves the Connect face of the framed ctrl_status verb: the
+// daemon's process vitals and live/exited child counts.
 func (s *Server) Status(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.StatusRequest],
 ) (*connect.Response[rafikiv1.StatusResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Status: not yet implemented"))
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := o.Status(ctx)
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: status failed")
+	}
+	return connect.NewResponse(resp), nil
 }
 
-// Search serves the framed ctrl_search face.
+// Search serves the Connect face of the framed ctrl_search verb: in-memory
+// content search across children's session buffers. The query is the one
+// required field; limit's default is the Controller's own floor, applied
+// inside the adapter's delegated call exactly as the framed handler's was.
 func (s *Server) Search(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SearchRequest],
 ) (*connect.Response[rafikiv1.SearchResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("Search: not yet implemented"))
+	if req.Msg.GetQuery() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("query is required"))
+	}
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := o.Search(ctx, req.Msg)
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: search failed")
+	}
+	return connect.NewResponse(resp), nil
 }
 
-// ShutdownDaemon serves the framed ctrl_daemon_shutdown face.
+// ShutdownDaemon serves the Connect face of the framed ctrl_daemon_shutdown
+// verb. The framed plane never accepted a request of this type — it only
+// BROADCAST CtrlDaemonShutdown while shutting down — so this RPC is the
+// client-asking form of the same sequence: the response is written first
+// (the broadcast's "advance warning" role), then the adapter triggers the
+// child drain the framed signal path runs.
 func (s *Server) ShutdownDaemon(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ShutdownDaemonRequest],
 ) (*connect.Response[rafikiv1.ShutdownDaemonResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("ShutdownDaemon: not yet implemented"))
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	if err := o.ShutdownDaemon(ctx); err != nil {
+		return nil, mapChildOpsErr(err, "connect: daemon shutdown failed")
+	}
+	return connect.NewResponse(&rafikiv1.ShutdownDaemonResponse{}), nil
 }
 
-// ModelInfo serves the framed ctrl_model_info face: the daemon's own catalog
-// answer for one model, so the client never reads OpenRouter itself.
+// ModelInfo serves the Connect face of the framed ctrl_model_info verb: the
+// daemon's own catalog answer for one model, so the client never reads
+// OpenRouter itself. Never an error: an unknown model and an unconfigured
+// catalog are both known=false, which is what every caller degrades on.
 func (s *Server) ModelInfo(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ModelInfoRequest],
 ) (*connect.Response[rafikiv1.ModelInfoResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("ModelInfo: not yet implemented"))
+	model := req.Msg.GetModel()
+	if model == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("model is required"))
+	}
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := o.ModelInfo(ctx, model)
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: model_info failed", "model", model)
+	}
+	return connect.NewResponse(resp), nil
 }
 
-// ConversationStats serves the framed ctrl_conversation_stats face.
+// ConversationStats serves the Connect face of the framed
+// ctrl_conversation_stats verb: global (filtered) stats when conversation_id
+// is empty, scoped to one conversation otherwise. The stats come back as the
+// daemon's own insights.Stats JSON, opaque by design (precedent:
+// ToolUse.input_json) — the caller asked for an aggregate, not a schema.
 func (s *Server) ConversationStats(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ConversationStatsRequest],
 ) (*connect.Response[rafikiv1.ConversationStatsResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("ConversationStats: not yet implemented"))
+	o, err := s.childOp()
+	if err != nil {
+		return nil, err
+	}
+	statsJSON, err := o.ConversationStats(ctx, req.Msg)
+	if err != nil {
+		return nil, mapChildOpsErr(err, "connect: conversation_stats failed")
+	}
+	return connect.NewResponse(&rafikiv1.ConversationStatsResponse{StatsJson: statsJSON}), nil
 }

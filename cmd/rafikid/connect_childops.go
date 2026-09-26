@@ -1,0 +1,236 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"time"
+
+	"go.graveland.dev/rafiki/pkg/control"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/protocol"
+)
+
+// connectChildOps adapts *Controller to connectapi.ChildOps, the
+// operator-side slice behind the Connect Control service's Resume /
+// CloseAllExited / SetLabels / Status / Search / ShutdownDaemon / ModelInfo /
+// ConversationStats RPCs. Each method reproduces what the framed
+// dispatcher's handler (pkg/control/dispatch.go) did between decoding its
+// frame and writing the response — request validation stays on the connectapi
+// side, so an adapter method is pure convert-and-delegate — and converts with
+// the Task 1.1 mapping rule in reverse: one proto field per protocol JSON
+// field, in declaration order, skipping the framed envelope's Type and ID.
+//
+// The ControllerError values these methods return keep their authored
+// messages under their protocol codes: connectapi.ConnectErr maps them, the
+// same promise mapErr honors on the framed plane.
+type connectChildOps struct{ c *Controller }
+
+// daemonShutdownBudgets are the framed signal path's child-shutdown budgets
+// (cmd/rafikid/main.go's shutdown sequence: 120s graceful per child, 30s kill
+// escalation, 180s global bound). Declared here because main.go's are
+// function-local consts.
+const (
+	daemonShutdownChildTimeout = 120 * time.Second
+	daemonShutdownKillTimeout  = 30 * time.Second
+	daemonShutdownGlobalBound  = 180 * time.Second
+)
+
+// Resume re-spawns an exited child. The framed handler answered with the
+// SpawnResult it got from Controller.Resume; the proto response carries only
+// the child id, which is all ResumeResponse has.
+func (a connectChildOps) Resume(ctx context.Context, childID, apiKey string) (string, error) {
+	res, err := a.c.Resume(ctx, childID, apiKey)
+	if err != nil {
+		return "", err
+	}
+	return res.ChildID, nil
+}
+
+// CloseAllExited closes every exited child older than olderThanMs. It takes
+// the seam's ctx for symmetry but Controller.CloseAllExited has never needed
+// one (its per-child deletes bound themselves internally).
+func (a connectChildOps) CloseAllExited(_ context.Context, olderThanMs int64) ([]string, error) {
+	return a.c.CloseAllExited(olderThanMs)
+}
+
+// SetLabels applies set entries then remove entries, and returns the full
+// post-mutation map. The controller emits ctrl_child_labeled to framed
+// subscribers itself; this adapter adds nothing on top.
+func (a connectChildOps) SetLabels(_ context.Context, childID string, set map[string]string, remove []string) (map[string]string, error) {
+	return a.c.SetLabels(childID, set, remove)
+}
+
+// Status converts Controller.Status into the proto vitals message, nested
+// ChildCounts included. started_at is unix ms, matching
+// Controller.startedAt.UnixMilli on the framed plane.
+func (a connectChildOps) Status(_ context.Context) (*rafikiv1.StatusResponse, error) {
+	return statusResponseFrom(a.c.Status()), nil
+}
+
+// Search converts the proto request onto the framed SearchQuery the
+// Controller answers — limit and context pass through as-is, the session
+// filter value-copies only when present (a nil proto filter means "every
+// child", the zero value of the framed filter), and Controller.Search's own
+// limit<=0 floor is the default limit, exactly as on the framed plane.
+func (a connectChildOps) Search(_ context.Context, req *rafikiv1.SearchRequest) (*rafikiv1.SearchResponse, error) {
+	return searchResponseFrom(a.c.Search(buildSearchQuery(req))), nil
+}
+
+// buildSearchQuery maps the proto SearchRequest onto the framed SearchQuery.
+// Extracted so the field mapping is testable without a Controller behind it.
+func buildSearchQuery(req *rafikiv1.SearchRequest) control.SearchQuery {
+	q := control.SearchQuery{
+		Query:   req.GetQuery(),
+		Regex:   req.GetRegex(),
+		Limit:   int(req.GetLimit()),
+		Context: int(req.GetContext()),
+	}
+	if sf := req.GetSessionFilter(); sf != nil {
+		q.SessionFilter = protocol.SearchSessionFilter{
+			CwdContains:  sf.GetCwdContains(),
+			NameContains: sf.GetNameContains(),
+			Since:        sf.GetSince(),
+			Labels:       sf.GetLabels(),
+			HasLabel:     sf.GetHasLabel(),
+		}
+	}
+	return q
+}
+
+// searchResponseFrom converts the framed SearchResult onto the proto
+// response, hit by hit. Hits is never nil: an empty result is an empty
+// repeated field, never a missing one.
+func searchResponseFrom(result control.SearchResult) *rafikiv1.SearchResponse {
+	hits := make([]*rafikiv1.SearchResponse_SearchHit, 0, len(result.Hits))
+	for _, h := range result.Hits {
+		hits = append(hits, &rafikiv1.SearchResponse_SearchHit{
+			ChildId:     h.ChildID,
+			SessionFile: h.SessionFile,
+			SessionId:   h.SessionID,
+			SessionName: h.SessionName,
+			EntryId:     h.EntryID,
+			Timestamp:   h.Timestamp,
+			Role:        h.Role,
+			Snippet:     h.Snippet,
+			MatchStart:  int32(h.MatchStart),
+			MatchEnd:    int32(h.MatchEnd),
+		})
+	}
+	return &rafikiv1.SearchResponse{
+		Hits:      hits,
+		TotalHits: int32(result.TotalHits),
+		Scanned:   int32(result.Scanned),
+		Elapsed:   result.Elapsed,
+	}
+}
+
+// statusResponseFrom converts the framed ControllerStatus onto the proto
+// vitals message. Extracted for the same reason as buildSearchQuery.
+func statusResponseFrom(st control.ControllerStatus) *rafikiv1.StatusResponse {
+	return &rafikiv1.StatusResponse{
+		Version:     st.Version,
+		StartedAt:   st.StartedAt,
+		Children:    &rafikiv1.StatusResponse_ChildCounts{Live: int32(st.Children.Live), Exited: int32(st.Children.Exited)},
+		MemoryBytes: st.MemoryBytes,
+		Socket:      st.Socket,
+		LogsDir:     st.LogsDir,
+	}
+}
+
+// ShutdownDaemon triggers the child-drain half of the framed signal path's
+// shutdown sequence — the part the CtrlDaemonShutdown broadcast preceded.
+// It is fire-and-forget on purpose: the connectapi handler writes the
+// response BEFORE this drain runs (the broadcast's "advance warning" role),
+// so the caller learns the request was accepted while children are still
+// winding down instead of holding an RPC open for up to the global bound.
+// The drain runs on a Background context because the request context this
+// method receives dies with the response. The process exit that follows the
+// framed drain stays main.go's signal path's business; this RPC does not
+// terminate the daemon.
+func (a connectChildOps) ShutdownDaemon(_ context.Context) error {
+	go a.drainChildren()
+	return nil
+}
+
+// drainChildren is the framed shutdown sequence's child teardown, with the
+// same per-child budgets under the same global bound.
+func (a connectChildOps) drainChildren() {
+	ctx, cancel := context.WithTimeout(context.Background(), daemonShutdownGlobalBound)
+	defer cancel()
+	if err := a.c.ShutdownAllChildren(ctx, daemonShutdownChildTimeout, daemonShutdownKillTimeout); err != nil {
+		// The caller is already answered; a failed drain is a daemon-log
+		// concern, the same as the framed signal path's warn.
+		slog.Warn("connect: child shutdown errors", "error", err)
+	}
+}
+
+// ModelInfo delegates to Controller.ModelInfo — the exact answer the framed
+// ctrl_model_info handler served — and converts it. Never an error: an
+// unknown model is known=false, not a failure.
+func (a connectChildOps) ModelInfo(_ context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
+	return modelInfoResponseFrom(a.c.ModelInfo(model)), nil
+}
+
+// modelInfoResponseFrom converts the framed ModelInfoResponseData onto the
+// proto response. Extracted so the field-by-field equality against the
+// framed answer is testable directly.
+func modelInfoResponseFrom(mi protocol.ModelInfoResponseData) *rafikiv1.ModelInfoResponse {
+	return &rafikiv1.ModelInfoResponse{
+		Model:               mi.Model,
+		ResolvedId:          mi.ResolvedID,
+		ContextWindow:       int32(mi.ContextWindow),
+		MaxCompletionTokens: int32(mi.MaxCompletionTokens),
+		AutoCompactWindow:   int32(mi.AutoCompactWindow),
+		Known:               mi.Known,
+	}
+}
+
+// buildStatsFilter maps the proto request's filter fields onto the framed
+// insights.StatsFilter, exactly as the framed conversationStats handler
+// builds it: unixToTimePtr treats 0 as unset, matching
+// StatsFilter's nil-means-unbounded Since/Until. Extracted so the field
+// mapping is testable without a Controller behind it.
+func buildStatsFilter(req *rafikiv1.ConversationStatsRequest) insights.StatsFilter {
+	return insights.StatsFilter{
+		Since:   unixToTimePtr(req.GetSinceUnix()),
+		Until:   unixToTimePtr(req.GetUntilUnix()),
+		Owner:   req.GetOwner(),
+		Persona: req.GetPersona(),
+		Source:  req.GetSource(),
+		Model:   req.GetModel(),
+		Path:    insights.Path(req.GetPath()),
+	}
+}
+
+// ConversationStats computes the scope from the caller's own credential —
+// scopeFor is THE one place the Connect plane does that (the wire carries a
+// filter, never a scope: confused-deputy avoidance) — then dispatches to
+// ConversationStatsByID when conversation_id is set, otherwise to
+// ConversationStats with the StatsFilter built exactly as the framed
+// conversationStats handler built it. The scope error is already-coded
+// (CodePermissionDenied) and reaches the handler untouched. The result is
+// marshalled as-is: the caller asked for an aggregate, not a schema.
+func (a connectChildOps) ConversationStats(ctx context.Context, req *rafikiv1.ConversationStatsRequest) (string, error) {
+	scope, err := scopeFor(ctx)
+	if err != nil {
+		return "", err
+	}
+	var st *insights.Stats
+	if id := req.GetConversationId(); id != "" {
+		st, err = a.c.ConversationStatsByID(ctx, scope, id)
+	} else {
+		st, err = a.c.ConversationStats(ctx, scope, buildStatsFilter(req))
+	}
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
