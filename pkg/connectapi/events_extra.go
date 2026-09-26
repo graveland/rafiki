@@ -21,6 +21,7 @@ import (
 // wedged child uses, not the ones an agent talks through (children use Send).
 type RawChildIO interface {
 	GetStreams(ctx context.Context, childID, which string) (*rafikiv1.GetStreamsResponse, error)
+	// which must be pre-validated against {"", "in", "err", "all"}; Controller.GetStreams does not refuse an unknown value — it returns an empty capture.
 	SendFrame(ctx context.Context, childID string, frame json.RawMessage) error
 }
 

@@ -133,7 +133,11 @@ func adminListStore(n int) *fakeExecStore {
 // normalization: an absent (0) limit becomes the framed default of 50, an
 // oversized one is clamped to the framed max of 500, and an explicit one is
 // honored as-is. Passing 0 through to Controller.ExecutorList would mean "no
-// cap", turning an omitted field into an unbounded listing.
+// cap", turning an omitted field into an unbounded listing. The 50/500
+// expectations are literals — dispatch.go's maxExecutorListLimit and its
+// `Limit <= 0 → 50` default — NOT the adapter's executorListDefaultLimit/
+// executorListMaxLimit consts, so a const change fails here instead of
+// following it.
 func TestExecutorAdminListCarriesTheFramedLimitSemantics(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -141,9 +145,9 @@ func TestExecutorAdminListCarriesTheFramedLimitSemantics(t *testing.T) {
 		limit int32
 		want  int
 	}{
-		{"absent limit gets the framed default", 60, 0, executorListDefaultLimit},
+		{"absent limit gets the framed default", 60, 0, 50},
 		{"explicit limit is honored", 60, 7, 7},
-		{"oversized limit is clamped", 600, 700, executorListMaxLimit},
+		{"oversized limit is clamped", 600, 700, 500},
 		{"limit above the row count is inert", 3, 50, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -45,12 +45,19 @@ func (s *Server) SetExecutorAdmin(a ExecutorAdmin) {
 // ConnectErr: the code the daemon attached at the source IS the
 // classification, so translateExecutorErr's ControllerErrors — "enrollment
 // token already consumed", the machine-name collision — keep their authored
-// messages on this face too. An error that is NOT a ControllerError is
-// infrastructure text and is redacted by ConnectErr; its cause is logged here
+// messages on this face too. An already-coded *connect.Error returns before
+// any of that, untouched (the same early return mapChildOpsErr carries), so
+// a coded error from the seam is neither logged nor re-wrapped Internal. An
+// error that is neither is infrastructure text and is redacted by ConnectErr;
+// its cause is logged here
 // so it is not lost (the same discipline close.go and budget.go follow
 // inline, shared because this seam has seven error exits and seven inline
 // copies is seven ways for the log line to drift).
 func executorAdminErr(op string, err error) error {
+	var cerr *connect.Error
+	if errors.As(err, &cerr) {
+		return err
+	}
 	var ce *control.ControllerError
 	if !errors.As(err, &ce) {
 		// ConnectErr redacts this below; log the cause here or lose it.

@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -351,4 +352,46 @@ func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 			t.Errorf("err.Error() = %v, want the authored message", err)
 		}
 	})
+}
+
+// logRecorder is a slog handler that records every message routed to it, so
+// a test can pin that the mapper did NOT log.
+type logRecorder struct{ msgs *[]string }
+
+func (h logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h logRecorder) Handle(_ context.Context, r slog.Record) error {
+	*h.msgs = append(*h.msgs, r.Message)
+	return nil
+}
+func (h logRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h logRecorder) WithGroup(string) slog.Handler      { return h }
+
+// TestExecutorAdminCodedErrorPassesThrough mirrors
+// TestChildOpsCodedErrorPassesThrough: an already-coded *connect.Error from
+// the seam takes the early return the sibling mappers have, so it reaches the
+// client untouched — code preserved, authored text not redacted — and the
+// mapper never logs it, because a coded error is a classification, not an
+// infrastructure failure to investigate.
+func TestExecutorAdminCodedErrorPassesThrough(t *testing.T) {
+	var msgs []string
+	prev := slog.Default()
+	slog.SetDefault(slog.New(logRecorder{msgs: &msgs}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s := NewServer(nil)
+	s.SetExecutorAdmin(&fakeExecutorAdmin{
+		enrollErr: connect.NewError(connect.CodePermissionDenied,
+			errors.New("conversation queries require a user credential")),
+	})
+	_, err := s.EnrollExecutor(context.Background(),
+		connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
+	if connect.CodeOf(err) != connect.CodePermissionDenied {
+		t.Fatalf("got %v, want PermissionDenied", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "require a user credential") {
+		t.Errorf("err.Error() = %v, want the authored text, not redaction", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("mapper logged %d record(s) for a coded error: %q", len(msgs), msgs)
+	}
 }
