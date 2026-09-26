@@ -9,34 +9,17 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
-
-// setBudgetCode maps a Controller.SetChildBudgetAsOperator error onto its
-// Connect code, mirroring close.go's closeCode: the code the daemon attached
-// at the source IS the classification. The one addition over closeCode's
-// switch is ErrInvalidArgs -> CodeInvalidArgument, since limitError (the
-// negative-cap rejection in cmd/rafikid/limits.go) returns that code.
-func setBudgetCode(err error) connect.Code {
-	var ce *control.ControllerError
-	if !errors.As(err, &ce) {
-		return connect.CodeInternal
-	}
-	switch ce.Code {
-	case protocol.ErrNotFound:
-		return connect.CodeNotFound
-	case protocol.ErrInvalidArgs:
-		return connect.CodeInvalidArgument
-	default:
-		return connect.CodeInternal
-	}
-}
 
 // SetBudget changes a child's MaxCost with operator authority. See
 // SetBudgetRequest's comment in control.proto for what that means relative
 // to the agent-facing agent_set_budget tool.
+//
+// Errors go through ConnectErr: the code the daemon attached at the source IS
+// the classification, so the negative-cap rejection in cmd/rafikid/limits.go
+// (ErrInvalidArgs) reads as InvalidArgument and the authored message rides
+// along.
 func (s *Server) SetBudget(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SetBudgetRequest],
@@ -57,7 +40,7 @@ func (s *Server) SetBudget(
 			errors.New("child lifecycle not yet wired"))
 	}
 	if err := (*p).SetBudget(ctx, childID, maxCost); err != nil {
-		return nil, connect.NewError(setBudgetCode(err), err)
+		return nil, ConnectErr(err)
 	}
 	return connect.NewResponse(&rafikiv1.SetBudgetResponse{
 		ChildId: childID,
