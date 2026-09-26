@@ -343,6 +343,7 @@ var knownEventTypes = []string{
 	"tool_execution_start", "tool_execution_update", "tool_execution_end",
 	"queue_update",
 	"compaction_start", "compaction_end",
+	"batch_wait_start", "batch_wait_end",
 	"auto_retry_start", "auto_retry_end",
 	"extension_error",
 	"extension_ui_request",

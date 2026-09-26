@@ -59,14 +59,14 @@ func TestSeedAcceptsEveryLiveStatus(t *testing.T) {
 	var sums []*rafikiv1.ChildSummary
 	for i, st := range rail.LiveStatuses() {
 		if st == "running" {
-			t.Fatal(`"running" is not a protocol.Status value -- the set of eight is closed`)
+			t.Fatal(`"running" is not a protocol.Status value -- the set of nine is closed`)
 		}
 		sums = append(sums, summary("c_"+st, st, "", st, int32(i)))
 	}
 	r := rail.New()
 	r.Seed(sums)
-	if r.Len() != 7 {
-		t.Fatalf("Len = %d, want 7; LiveStatuses = %v", r.Len(), rail.LiveStatuses())
+	if r.Len() != 8 {
+		t.Fatalf("Len = %d, want 8; LiveStatuses = %v", r.Len(), rail.LiveStatuses())
 	}
 }
 

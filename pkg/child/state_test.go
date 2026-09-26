@@ -94,6 +94,26 @@ func TestStateMachine_ModalStack_Compaction(t *testing.T) {
 	}
 }
 
+// TestStateMachineBatchWaitPushPop pins the batch_wait modal pair: the
+// parked state is pushed on batch_wait_start and popped back to the
+// previous (streaming) state on batch_wait_end, exactly the way compaction
+// is. Deleting either switch case in OnPiEvent fails this test.
+func TestStateMachineBatchWaitPushPop(t *testing.T) {
+	sm := child.NewStateMachine()
+	sm.OnFirstResponse()
+	sm.OnPiEvent("agent_start", nil)
+
+	changed, _ := sm.OnPiEvent("batch_wait_start", nil)
+	if !changed || sm.Current() != protocol.StatusBatchWait {
+		t.Fatalf("batch_wait_start: changed=%v current=%v, want push to batch_wait", changed, sm.Current())
+	}
+
+	changed, prev := sm.OnPiEvent("batch_wait_end", nil)
+	if !changed || prev != protocol.StatusBatchWait || sm.Current() != protocol.StatusStreaming {
+		t.Fatalf("batch_wait_end: changed=%v prev=%v current=%v, want pop back to streaming", changed, prev, sm.Current())
+	}
+}
+
 func TestStateMachine_DialogUI_Push_OnlyForDialogMethods(t *testing.T) {
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()

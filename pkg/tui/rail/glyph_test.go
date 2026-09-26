@@ -15,6 +15,7 @@ func TestGlyphCoversEveryStatus(t *testing.T) {
 		{"streaming", "◐"},
 		{"tool_running", "⚒"},
 		{"compacting", "⊛"},
+		{"batch_wait", "⧖"},
 		{"blocked_ui", "‼"},
 		{"shutting_down", "◇"},
 	} {
@@ -120,5 +121,42 @@ func TestSpinnerFrameLoops(t *testing.T) {
 	const frameCount = 10 // len(spinnerFrames) in glyph.go
 	if got := rail.SpinnerFrame(0); got != rail.SpinnerFrame(frameCount) {
 		t.Errorf("SpinnerFrame did not loop after %d frames: %q != %q", frameCount, got, rail.SpinnerFrame(frameCount))
+	}
+}
+
+// TestLiveStatusesIncludesBatchWait pins batch_wait's membership in the
+// closed live-status set: without it, a parked child vanishes from any rail
+// filter built on that list (the exact silent-empty bug the set is closed to
+// prevent).
+func TestLiveStatusesIncludesBatchWait(t *testing.T) {
+	for _, st := range rail.LiveStatuses() {
+		if st == "batch_wait" {
+			return
+		}
+	}
+	t.Errorf("LiveStatuses = %v, want it to include batch_wait", rail.LiveStatuses())
+}
+
+// TestWorkingExcludesBatchWait pins that a parked child does not spin:
+// batch_wait is waiting on hours-scale work already submitted to the provider
+// Batch API, not mid-turn computation the spinner stands for.
+func TestWorkingExcludesBatchWait(t *testing.T) {
+	if rail.Working("batch_wait") {
+		t.Error(`Working("batch_wait") = true, want false -- a parked child must not spin`)
+	}
+}
+
+// TestGlyphBatchWaitIsStaticHourglass pins the parked glyph: the static
+// hourglass ⧖ (U+29D6, single column), and AnimatedGlyph must return it
+// unchanged at every tick of a full spinner cycle -- never a spinner frame.
+func TestGlyphBatchWaitIsStaticHourglass(t *testing.T) {
+	n := rail.Node{Status: "batch_wait"}
+	if got := rail.Glyph(n); got != "⧖" {
+		t.Fatalf("Glyph(batch_wait) = %q, want ⧖", got)
+	}
+	for tick := 0; tick < 10; tick++ {
+		if got := rail.AnimatedGlyph(n, tick); got != "⧖" {
+			t.Fatalf("AnimatedGlyph(batch_wait, tick=%d) = %q, want the static ⧖", tick, got)
+		}
 	}
 }

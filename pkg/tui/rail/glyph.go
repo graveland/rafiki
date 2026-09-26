@@ -57,6 +57,10 @@ func Glyph(n Node) string {
 		return "⚒"
 	case "compacting":
 		return "⊛"
+	case "batch_wait":
+		// U+29D6, single column. Not ⏳/⌛: those are double-width, and ⏳
+		// already means "message pending delivery".
+		return "⧖"
 	case "blocked_ui":
 		return "‼"
 	case "shutting_down":
@@ -64,7 +68,7 @@ func Glyph(n Node) string {
 	case "exited":
 		return "✗"
 	default:
-		// protocol.Status is a closed set of eight, but it is a STRING on the
+		// protocol.Status is a closed set of nine, but it is a STRING on the
 		// wire so a newer daemon can add one without every client being
 		// regenerated. An unknown value must render something rather than
 		// leaving a hole in the rail.

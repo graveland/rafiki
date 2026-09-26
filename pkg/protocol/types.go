@@ -60,6 +60,7 @@ const (
 	StatusStreaming    Status = "streaming"
 	StatusToolRunning  Status = "tool_running"
 	StatusCompacting   Status = "compacting"
+	StatusBatchWait    Status = "batch_wait"
 	StatusBlockedUI    Status = "blocked_ui"
 	StatusShuttingDown Status = "shutting_down"
 	StatusExited       Status = "exited"

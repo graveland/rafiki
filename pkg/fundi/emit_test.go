@@ -724,3 +724,34 @@ func TestStreamDelta_DoesNotAccumulateOrFoldUsage(t *testing.T) {
 		t.Fatalf("agent_end totalTokens = %d, want 15 (folded once, not once per delta)", ae.Usage.TotalTokens)
 	}
 }
+
+// TestEmitterBatchWaitFrames pins the batch_wait frame pair: each method
+// emits exactly its one-key frame through the same Frontend path AgentStart
+// uses, so pkg/child's state machine sees a bare batch_wait_start/
+// batch_wait_end event and nothing else (task 3.1 wires the callers).
+func TestEmitterBatchWaitFrames(t *testing.T) {
+	var out bytes.Buffer
+	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
+	e := NewEmitter(fe, "anthropic", nil)
+
+	e.AgentStart()
+	e.BatchWaitStart()
+	e.BatchWaitEnd()
+
+	types := frameTypes(t, out.String())
+	want := []string{"agent_start", "batch_wait_start", "batch_wait_end"}
+	if strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Fatalf("frame sequence = %v, want %v", types, want)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	for i, wantType := range want[1:] {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(lines[i+1]), &raw); err != nil {
+			t.Fatalf("unmarshal frame %q: %v", lines[i+1], err)
+		}
+		if len(raw) != 1 {
+			t.Fatalf("%s frame = %v, want only the type key", wantType, raw)
+		}
+	}
+}

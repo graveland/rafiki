@@ -25,10 +25,16 @@ const subagentEventSource = "subagents"
 // the parent to tell it about the child it just created — costing a turn to
 // learn nothing and, worse, arriving before the child has done anything a
 // coordinator could read.
+//
+// batch_wait is in the set: a parked child is mid-turn — its LLM call sits in
+// the provider Batch API, not finished — so the idle transition after
+// delivery must still fire the settle notification, and parent heartbeats
+// keep reporting elapsed time while it waits.
 func isWorkingStatus(s protocol.Status) bool {
 	switch s {
 	case protocol.StatusStreaming, protocol.StatusToolRunning,
-		protocol.StatusCompacting, protocol.StatusBlockedUI:
+		protocol.StatusCompacting, protocol.StatusBlockedUI,
+		protocol.StatusBatchWait:
 		return true
 	}
 	return false

@@ -313,6 +313,8 @@ func colorStatus(status string, useColor bool) string {
 		return cyan(status)
 	case "streaming", "tool_running", "compacting":
 		return green(status)
+	case "batch_wait":
+		return yellow(status)
 	case "exited":
 		return red(status)
 	case "shutting_down":

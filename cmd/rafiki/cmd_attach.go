@@ -68,6 +68,7 @@ func isAttachable(ch completionChild) bool {
 		protocol.StatusStreaming,
 		protocol.StatusToolRunning,
 		protocol.StatusCompacting,
+		protocol.StatusBatchWait,
 		protocol.StatusBlockedUI:
 		return true
 	}

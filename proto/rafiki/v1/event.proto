@@ -138,9 +138,9 @@ message ContentBlockDelta {
   }
 }
 
-// AgentStatus.state is one of protocol.Status's eight values, exactly:
+// AgentStatus.state is one of protocol.Status's nine values, exactly:
 // "spawning", "idle", "streaming", "tool_running", "compacting",
-// "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
+// "batch_wait", "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
 // so a new daemon status does not require regenerating every client, but the
 // set is CLOSED — do not invent values here. Note that pi's distinction
 // between "this run ended" and "truly idle" is expressed as a transition back

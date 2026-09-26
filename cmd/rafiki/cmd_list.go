@@ -25,7 +25,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().Bool("flat", false, "Render a flat list instead of a tree")
 
 	_ = cmd.RegisterFlagCompletionFunc("status", cobra.FixedCompletions(
-		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "blocked_ui", "shutting_down", "exited"},
+		[]string{"spawning", "idle", "streaming", "tool_running", "compacting", "batch_wait", "blocked_ui", "shutting_down", "exited"},
 		cobra.ShellCompDirectiveNoFileComp,
 	))
 	_ = cmd.RegisterFlagCompletionFunc("label", func(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {

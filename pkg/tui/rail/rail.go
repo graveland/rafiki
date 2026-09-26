@@ -27,22 +27,25 @@ const NativeSubagentLabel = "rafiki/native-subagent"
 
 // LiveStatuses is every protocol.Status except "exited".
 //
-// The set of eight is CLOSED and there is NO "running" status. A filter written
+// The set of nine is CLOSED and there is NO "running" status. A filter written
 // from intuition as status IN ('running', ...) selects nothing and silently
 // empties the rail; this repo has shipped that exact bug once already, in the
 // recovery predicate.
 func LiveStatuses() []string {
 	return []string{
 		"spawning", "idle", "streaming", "tool_running",
-		"compacting", "blocked_ui", "shutting_down",
+		"compacting", "batch_wait", "blocked_ui", "shutting_down",
 	}
 }
 
 // Working reports whether a child is mid-turn: streaming a reply, executing a
 // tool, or compacting its context. The set of statuses is CLOSED
-// (protocol.Status's eight) and there is NO "running" status -- a predicate
+// (protocol.Status's nine) and there is NO "running" status -- a predicate
 // written from intuition as status == "running" matches nothing and silently
 // does nothing, which this repo has shipped once already in the recovery path.
+// batch_wait is deliberately absent: a child parked on a provider Batch API is
+// waiting on hours-scale work that has already been submitted, so it must not
+// spin.
 func Working(status string) bool {
 	switch status {
 	case "streaming", "tool_running", "compacting":
@@ -58,7 +61,7 @@ type Node struct {
 	ParentID string
 	Depth    int
 
-	// Status is the last known agent state, one of protocol.Status's eight.
+	// Status is the last known agent state, one of protocol.Status's nine.
 	Status string
 	Kind   string // protocol kind: "claude" | "fundi". "pi" is retired; an old row still renders. Empty until seeded.
 

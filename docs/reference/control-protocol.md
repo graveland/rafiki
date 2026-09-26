@@ -742,9 +742,9 @@ bare one-sided format. A client renders the two-sided and one-sided cases
 differently for exactly this reason — see `pkg/tui/session`'s
 `formatCompactionBoundary`.
 
-`AgentStatus.state` is one of the eight `protocol.Status` values: `spawning`, `idle`,
-`streaming`, `tool_running`, `compacting`, `blocked_ui`, `shutting_down`, `exited`.
-It is a string rather than an enum so a new daemon status does not require
+`AgentStatus.state` is one of the nine `protocol.Status` values: `spawning`, `idle`,
+`streaming`, `tool_running`, `compacting`, `batch_wait`, `blocked_ui`, `shutting_down`,
+`exited`. It is a string rather than an enum so a new daemon status does not require
 regenerating every client.
 
 `AssistantMessage.cost_usd` and `TurnEnd.cost_usd` carry **different**
@@ -2362,7 +2362,7 @@ Defined error codes:
 
 ## 10. State machine
 
-Eight states. Transitions are driven by pi RPC events (forwarded by the
+Nine states. Transitions are driven by pi RPC events (forwarded by the
 supervise goroutine) and controller lifecycle actions. The state machine is
 maintained per-child by the supervise goroutine.
 
@@ -2387,6 +2387,7 @@ maintained per-child by the supervise goroutine.
                    │                                      │
   modal (stack):                                          ▼
     compacting ─── on compaction_start, push; on compaction_end, pop.
+    batch_wait ─── on batch_wait_start, push; on batch_wait_end, pop.
     blocked_ui ─── on extension_ui_request (dialog method), push;
                    on matching extension_ui_response, pop.
 
@@ -2412,6 +2413,8 @@ maintained per-child by the supervise goroutine.
 | `streaming`           | `agent_end`                                                 | `idle`          |
 | `streaming` or `tool_running` or `idle` | `compaction_start` (push)                | `compacting`    |
 | `compacting`          | `compaction_end` (pop)                                      | previous state  |
+| `streaming` or `tool_running` or `idle` | `batch_wait_start` (push)                | `batch_wait`    |
+| `batch_wait`          | `batch_wait_end` (pop)                                      | previous state  |
 | `streaming` or `tool_running` | `extension_ui_request` (dialog only) (push)         | `blocked_ui`    |
 | `blocked_ui`          | matching `extension_ui_response` forwarded by controller (pop) | previous state |
 | any except `exited` and `shutting_down` | `ctrl_kill` or interception starts        | `shutting_down` |
@@ -2437,11 +2440,14 @@ status. They are observable via `ctrl_get` / `ctrl_list`.
 
 ### 10.3 Modal stack
 
-`compacting` and `blocked_ui` are *modal* states implemented with a small
-state stack on the supervise goroutine. Push on entry, pop on the matching
-exit event. This handles arbitrary nesting (e.g., extension UI dialog
-during compaction during tool execution) without per-pair restoration
-logic.
+`compacting`, `batch_wait` and `blocked_ui` are *modal* states implemented with a
+small state stack on the supervise goroutine. Push on entry, pop on the matching
+exit event. This handles arbitrary nesting (e.g., extension UI dialog during
+compaction during tool execution) without per-pair restoration logic.
+
+`batch_wait` is entered on `batch_wait_start` and left on `batch_wait_end`.
+Emitted by a fundi child whose first call of a `:batch` model is parked in the
+OpenRouter Batch API; can last hours.
 
 Defensive: if `compaction_end` or `extension_ui_response` arrives with an
 empty stack (lost prior event, controller restart mid-flight, etc.), the
@@ -3141,6 +3147,7 @@ Notable events (all pass-through):
 - `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
 - `queue_update`
 - `compaction_start`, `compaction_end`
+- `batch_wait_start`, `batch_wait_end` (fundi: parked on a provider Batch API)
 - `auto_retry_start`, `auto_retry_end`
 - `extension_error`
 - `extension_ui_request`

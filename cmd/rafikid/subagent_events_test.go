@@ -109,6 +109,16 @@ func TestRepeatedSettlesFromOneWorkerCoalesce(t *testing.T) {
 	}
 }
 
+// TestIsWorkingStatusBatchWait pins batch_wait's membership in the working
+// set: a child parked on a provider Batch API is mid-turn, so the idle
+// transition after delivery must still fire the settle notification and
+// parent heartbeats keep reporting elapsed time.
+func TestIsWorkingStatusBatchWait(t *testing.T) {
+	if !isWorkingStatus(protocol.StatusBatchWait) {
+		t.Error("isWorkingStatus(batch_wait) = false, want true")
+	}
+}
+
 // spawning -> idle is not a settle. Without this guard every spawn immediately
 // wakes the parent to announce that the child it just created exists.
 func TestSpawningToIdleIsNotASettle(t *testing.T) {

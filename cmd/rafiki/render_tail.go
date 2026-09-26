@@ -261,6 +261,12 @@ func (r *tailRenderer) renderPiEvent(event json.RawMessage) error {
 	case "compaction_end":
 		r.printDim("─── compaction_end ───")
 
+	case "batch_wait_start":
+		r.printDim("─── waiting on batch ───")
+
+	case "batch_wait_end":
+		r.printDim("─── batch result ───")
+
 	case "auto_retry_start":
 		r.printDim("[auto-retry]")
 

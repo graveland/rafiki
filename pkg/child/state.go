@@ -146,6 +146,14 @@ func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (chan
 	case "compaction_end":
 		sm.pop()
 
+	case "batch_wait_start":
+		// Modal like compaction: a fundi child's LLM call is parked in a
+		// provider Batch API (can last hours); batch_wait_end pops back.
+		sm.push(protocol.StatusBatchWait)
+
+	case "batch_wait_end":
+		sm.pop()
+
 	case "extension_ui_request":
 		if meta != nil && dialogMethods[meta.Method] {
 			// Over-cap dialog requests are silently dropped: not tracked,

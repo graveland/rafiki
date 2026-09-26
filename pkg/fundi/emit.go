@@ -88,6 +88,20 @@ func (e *Emitter) AgentStart() {
 	e.fe.Emit(child.PiAgentStart())
 }
 
+// BatchWaitStart emits {"type":"batch_wait_start"}: the child's first LLM
+// call of a ":batch" model has been parked in the provider Batch API and the
+// turn is waiting for the result (can last hours). Nothing calls these yet;
+// task 3.1 of the batch-transport plan wires them into the park/unpark path.
+func (e *Emitter) BatchWaitStart() {
+	e.fe.Emit(map[string]any{"type": "batch_wait_start"})
+}
+
+// BatchWaitEnd emits {"type":"batch_wait_end"}: the parked batch call has a
+// result and the turn resumes.
+func (e *Emitter) BatchWaitEnd() {
+	e.fe.Emit(map[string]any{"type": "batch_wait_end"})
+}
+
 // UserMessage emits the message_start/message_end pair for an accepted
 // prompt or steer, and accumulates the echoed user message for the eventual
 // agent_end frame.
