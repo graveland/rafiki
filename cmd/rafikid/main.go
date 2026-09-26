@@ -97,6 +97,8 @@ Subcommands:
   agent     DSN-backed insights CLI: stats|search|export|
             analyze|findings. See 'rafikid agent' with no verb.
   migrate   Apply the conversations schema migration chain.
+  user      Create a user directly against the database, bypassing a
+            running daemon. See 'rafikid user create -h'.
 
 The command-line client is a separate binary, "rafiki".
 
@@ -162,6 +164,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newFundiCmd())
 	root.AddCommand(newAgentCmd())
 	root.AddCommand(newMigrateCmd())
+	root.AddCommand(newUserCmd())
 
 	return root
 }
