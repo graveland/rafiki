@@ -5,10 +5,12 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -19,7 +21,8 @@ import (
 // Errors go through ConnectErr: the code the daemon attached at the source IS
 // the classification, so the negative-cap rejection in cmd/rafikid/limits.go
 // (ErrInvalidArgs) reads as InvalidArgument and the authored message rides
-// along.
+// along. An error that is NOT a ControllerError is infrastructure text and is
+// redacted by ConnectErr; its cause is logged here so it is not lost.
 func (s *Server) SetBudget(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SetBudgetRequest],
@@ -40,6 +43,11 @@ func (s *Server) SetBudget(
 			errors.New("child lifecycle not yet wired"))
 	}
 	if err := (*p).SetBudget(ctx, childID, maxCost); err != nil {
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: set_budget failed", "child_id", childID, "error", err)
+		}
 		return nil, ConnectErr(err)
 	}
 	return connect.NewResponse(&rafikiv1.SetBudgetResponse{

@@ -141,8 +141,13 @@ func TestConnectErrRoundTripsReason(t *testing.T) {
 	}
 }
 
+// A non-ControllerError is infrastructure text this codebase did not author:
+// ConnectErr redacts it to the fixed internal text and attaches no detail —
+// a pgx failure cannot name the database through this surface. The cause is
+// the caller's to log, never the peer's to read.
 func TestConnectErrPlainErrorIsInternalNoReason(t *testing.T) {
-	err := ConnectErr(errors.New("boom"))
+	raw := "pgx: failed to connect to host=db.internal user=rafiki database=rafiki: connection refused"
+	err := ConnectErr(errors.New(raw))
 	if connect.CodeOf(err) != connect.CodeInternal {
 		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
 	}
@@ -153,8 +158,11 @@ func TestConnectErrPlainErrorIsInternalNoReason(t *testing.T) {
 	if !errors.As(err, &ce) || len(ce.Details()) != 0 {
 		t.Errorf("want a *connect.Error with no details, got %v", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Errorf("err.Error() = %v, want containing the original message", err)
+	if err == nil || !strings.Contains(err.Error(), internalErrText) {
+		t.Errorf("err.Error() = %v, want containing the fixed text %q", err, internalErrText)
+	}
+	if strings.Contains(err.Error(), "db.internal") {
+		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
 	}
 }
 

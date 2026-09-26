@@ -89,7 +89,9 @@ func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
 }
 
 // A generic error — something that is not a ControllerError — keeps the
-// blanket Internal the rest of this file uses.
+// blanket Internal the rest of this file uses, with the raw cause redacted:
+// the peer sees only the fixed internal text, never infrastructure text like
+// a pgx failure naming the database.
 func TestCloseErrorBecomesInternal(t *testing.T) {
 	f := &fakeLifecycle{closeErr: errors.New("still running")}
 	s := connectapi.NewServer(nil)
@@ -98,5 +100,8 @@ func TestCloseErrorBecomesInternal(t *testing.T) {
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
 	if connect.CodeOf(err) != connect.CodeInternal {
 		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
+	}
+	if err == nil || strings.Contains(err.Error(), "still running") {
+		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
 	}
 }

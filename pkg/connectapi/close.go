@@ -5,9 +5,11 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -20,7 +22,9 @@ import (
 // client the daemon is broken. Controller.Close returns only ControllerError
 // values whose text the daemon wrote (children.Delete failures are logged,
 // never returned), so the authored message is forwarded with it — the same
-// decision the framed forget handler makes.
+// decision the framed forget handler makes. An error that is NOT a
+// ControllerError is infrastructure text and is redacted by ConnectErr; its
+// cause is logged here so it is not lost.
 func (s *Server) Close(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.CloseRequest],
@@ -42,6 +46,11 @@ func (s *Server) Close(
 			errors.New("child lifecycle not yet wired"))
 	}
 	if err := (*p).Close(ctx, childID); err != nil {
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: close failed", "child_id", childID, "error", err)
+		}
 		return nil, ConnectErr(err)
 	}
 	return connect.NewResponse(&rafikiv1.CloseResponse{ChildId: childID}), nil

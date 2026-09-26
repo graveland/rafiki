@@ -38,20 +38,34 @@ var errCodeTable = map[string]connect.Code{
 	protocol.ErrInternal:           connect.CodeInternal,
 }
 
+// internalErrText is what a genuinely uncoded error says on the wire through
+// ConnectErr. Its raw text is never forwarded: text this codebase did not
+// author can name infrastructure the caller has no business learning from a
+// failed request (a pgx failure names the database host, user and database).
+// The same allowlist discipline pkg/control's mapErr applies on the framed
+// plane.
+const internalErrText = "internal error"
+
 // ConnectErr converts a daemon error into a *connect.Error. A
 // *control.ControllerError keeps its authored message, gets the Connect code
 // for its protocol.Err* code, and carries that code as a
 // google.rpc.ErrorInfo{Reason: <code>, Domain: "rafiki"} detail so a client
-// can branch on the precise reason (Connect codes are coarser). Any other
-// error is CodeInternal with no detail. A nil error returns nil. An unknown
-// ControllerError code is CodeInternal with the reason still attached.
+// can branch on the precise reason (Connect codes are coarser).
+//
+// Any other error is CodeInternal with the fixed text internalErrText: its raw
+// text is never forwarded and no detail is attached — matching the redaction
+// precedent of queryError in conversations.go, which keeps a pgx failure from
+// naming the database through this surface. ConnectErr does not log; a caller
+// that needs the cause preserved logs it at the call site. A nil error returns
+// nil. An unknown ControllerError code is CodeInternal with the reason still
+// attached.
 func ConnectErr(err error) error {
 	if err == nil {
 		return nil
 	}
 	var ce *control.ControllerError
 	if !errors.As(err, &ce) {
-		return connect.NewError(connect.CodeInternal, err)
+		return connect.NewError(connect.CodeInternal, errors.New(internalErrText))
 	}
 	code, ok := errCodeTable[ce.Code]
 	if !ok {
