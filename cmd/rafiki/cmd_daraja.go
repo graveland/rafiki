@@ -22,6 +22,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/daraja"
 	darajapb "go.graveland.dev/rafiki/pkg/darajapb"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
@@ -482,8 +483,9 @@ func runDarajaLaunch(cmd *cobra.Command, _ []string) error {
 		Spec: &darajapb.ChildSpec{
 			Kind: darajapb.Kind_KIND_CLAUDE,
 			Claude: &darajapb.ClaudeParams{
-				Model:         model,
-				ResumeSession: resume,
+				Model:             model,
+				ResumeSession:     resume,
+				AutoCompactWindow: int32(darajaAutoCompactWindow(client, model)),
 			},
 		},
 	}
@@ -497,4 +499,21 @@ func runDarajaLaunch(cmd *cobra.Command, _ []string) error {
 		resp.Msg.GetChildId(), resp.Msg.GetPid(), resp.Msg.GetPgid(),
 		resp.Msg.GetConnectedUnixMs())
 	return nil
+}
+
+// darajaAutoCompactWindow asks the daemon for the CLAUDE_CODE_AUTO_COMPACT_WINDOW
+// threshold for model, mirroring claudeAutoCompactWindow's best-effort
+// degrade: an unreachable daemon or an unknown model both return 0, and the
+// launch proceeds with Claude Code's own default rather than failing outright.
+// DarajaLaunch passes spec.Claude straight through with no resolution of its
+// own (pkg/connectapi's handler), so this client is the only place that fills
+// it in for a manually-launched daraja child.
+func darajaAutoCompactWindow(client rafikiv1connect.ControlClient, model string) int {
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCatalogBudget)
+	defer cancel()
+	resp, err := client.ModelInfo(ctx, connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: model}))
+	if err != nil {
+		return 0
+	}
+	return int(resp.Msg.GetAutoCompactWindow())
 }

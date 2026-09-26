@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,13 +14,14 @@ import (
 	"syscall"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/client"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
@@ -114,32 +114,24 @@ func claudeAutoCompactWindow(ctx context.Context, cmd *cobra.Command, model stri
 	ctx, cancel := context.WithTimeout(ctx, claudeCatalogBudget)
 	defer cancel()
 
-	c, err := dialDaemon(ctx, cmd)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return 0
 	}
-	defer c.Close()
-
-	resp, err := c.Request(ctx, protocol.ModelInfoRequest{
-		Type: protocol.TypeCtrlModelInfo, Model: model,
-	})
-	if err != nil || !resp.Success {
+	resp, err := ep.control().ModelInfo(ctx, connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: model}))
+	if err != nil {
 		return 0
 	}
-	var data protocol.ModelInfoResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return 0
-	}
-	return data.AutoCompactWindow
+	return int(resp.Msg.GetAutoCompactWindow())
 }
 
-// dialDaemon connects to the profile's daemon control endpoint, mirroring
-// mustDial but returning an error instead of exiting. Used where a dead daemon
-// is graceful degradation (return 0) rather than a fatal error. mustDial is
-// exactly wrong here: it calls os.Exit(2) on a connection failure, and
-// `rafiki claude` must keep working with the daemon down. resolveProfile
-// (rather than mustProfile) for the same reason: a misconfigured profile must
-// degrade the compaction-window lookup, not kill the launch.
+// dialDaemon connects to the profile's daemon control endpoint over the
+// framed protocol, mirroring mustDial but returning an error instead of
+// exiting. mustDial is wrong for a caller that must degrade gracefully rather
+// than exit on a connection failure — see completeUsers's own doc comment for
+// why it is still the one caller left (there is no Connect RPC for user rows).
+// resolveProfile (rather than mustProfile) for the same reason: a
+// misconfigured profile must degrade the lookup, not kill the command.
 func dialDaemon(ctx context.Context, cmd *cobra.Command) (*client.Client, error) {
 	p, err := resolveProfile(cmd)
 	if err != nil {

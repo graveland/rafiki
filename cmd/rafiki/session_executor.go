@@ -2,20 +2,23 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"sync"
 	"time"
+
+	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
-	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
@@ -42,6 +45,35 @@ func sessionConnectTarget(p profile.Resolved) (addr, socket string, err error) {
 		return a, "", nil
 	}
 	return "", paths.ExecutorSocketPath(), nil
+}
+
+// sessionConnectEndpoint resolves the Connect control-plane endpoint for an
+// already-resolved profile, mirroring newConnectEndpoint's own local/remote
+// branches (connectclient.go). startSessionExecutor runs after profile
+// resolution has already happened, with no *cobra.Command to hand
+// newConnectEndpoint — the CLI's usual single place that resolves an
+// endpoint — so this is the one other place that does it, from a
+// profile.Resolved instead of a command.
+func sessionConnectEndpoint(p profile.Resolved) connectEndpoint {
+	if p.URL == "" {
+		sock := connectSocketFor(p)
+		httpClient := connectHTTPClient(sock)
+		if p.Token != "" {
+			httpClient = &http.Client{Transport: &bearerTransport{base: httpClient.Transport, token: p.Token}}
+		}
+		return connectEndpoint{
+			httpClient: httpClient,
+			baseURL:    connectUDSBaseURL,
+			describe:   sock,
+			identity:   "unix:" + sock,
+		}
+	}
+	return connectEndpoint{
+		httpClient: &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: p.Token}},
+		baseURL:    p.URL,
+		describe:   p.URL,
+		identity:   p.URL,
+	}
 }
 
 // executorEnvURL is remoteDialURL's surviving half, kept local to the executor
@@ -104,41 +136,15 @@ func resolveExecutorConnectFlags(connect, connectSocket string) (string, string,
 	return connect, connectSocket, nil
 }
 
-// requestSessionExecutor asks the daemon how this client should reach an
-// executor that shares its filesystem.
-func requestSessionExecutor(ctx context.Context, c *client.Client, root string) (protocol.ExecutorSessionResponseData, error) {
-	name, _, err := paths.MachineName()
-	if err != nil {
-		return protocol.ExecutorSessionResponseData{}, err
-	}
-	req := protocol.ExecutorSessionRequest{
-		Type:  protocol.TypeCtrlExecutorSession,
-		Name:  name,
-		Roots: []string{root},
-	}
-	resp, err := c.Request(ctx, req)
-	if err != nil {
-		return protocol.ExecutorSessionResponseData{}, err
-	}
-	if !resp.Success {
-		return protocol.ExecutorSessionResponseData{}, fmt.Errorf("ctrl_executor_session: %s", client.FormatError(resp))
-	}
-	var data protocol.ExecutorSessionResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return protocol.ExecutorSessionResponseData{}, fmt.Errorf("malformed response: %w", err)
-	}
-	return data, nil
-}
-
-// waitExecutorLive polls the executor list until an enabled, connected executor
+// waitExecutorLive polls ListExecutors until an enabled, connected executor
 // matches selector, or sessionReadyTimeout elapses. chooseExecutor matches only
 // LIVE executors, so a spawn sent before this returns fails.
-func waitExecutorLive(ctx context.Context, c *client.Client, selector string) error {
+func waitExecutorLive(ctx context.Context, cc rafikiv1connect.ControlClient, selector string) error {
 	deadline := time.Now().Add(sessionReadyTimeout)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		ok, err := executorLive(ctx, c, selector)
+		ok, err := executorLive(ctx, cc, selector)
 		if err == nil && ok {
 			return nil
 		}
@@ -154,29 +160,19 @@ func waitExecutorLive(ctx context.Context, c *client.Client, selector string) er
 	}
 }
 
-// executorLive reports whether an enabled, connected executor matching selector
-// is in the daemon's list. The list reads the store and marks Connected from
-// the live pool, so both flags together mean the executor is up and usable.
-func executorLive(ctx context.Context, c *client.Client, selector string) (bool, error) {
-	req := protocol.ExecutorListRequest{
-		Type:     protocol.TypeCtrlExecutorList,
+// executorLive reports whether an enabled, connected executor matching
+// selector is in the daemon's list. ListExecutors reads the store and marks
+// Connected from the live pool, so both flags together mean the executor is
+// up and usable.
+func executorLive(ctx context.Context, cc rafikiv1connect.ControlClient, selector string) (bool, error) {
+	resp, err := cc.ListExecutors(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{
 		Selector: selector,
-	}
-	resp, err := c.Request(ctx, req)
+	}))
 	if err != nil {
 		return false, err
 	}
-	if !resp.Success {
-		return false, fmt.Errorf("ctrl_executor_list: %s", client.FormatError(resp))
-	}
-	var wrapper struct {
-		Executors []executors.Executor `json:"executors"`
-	}
-	if err := json.Unmarshal(resp.Data, &wrapper); err != nil {
-		return false, fmt.Errorf("malformed response: %w", err)
-	}
-	for _, e := range wrapper.Executors {
-		if e.Enabled && e.Connected {
+	for _, e := range resp.Msg.GetRows() {
+		if e.GetEnabled() && e.GetConnected() {
 			return true, nil
 		}
 	}
@@ -188,16 +184,12 @@ func executorLive(ctx context.Context, c *client.Client, selector string) (bool,
 // the machine offers the directory the child is actually working in.
 //
 //nolint:unused
-func childCwd(ctx context.Context, c *client.Client, childID string) string {
-	resp, err := c.Request(ctx, protocol.GetRequest{Type: protocol.TypeCtrlGet, ChildID: childID})
-	if err != nil || !resp.Success {
+func childCwd(ctx context.Context, cc rafikiv1connect.ControlClient, childID string) string {
+	resp, err := cc.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
+	if err != nil {
 		return ""
 	}
-	var child protocol.ChildSummary
-	if err := json.Unmarshal(resp.Data, &child); err != nil {
-		return ""
-	}
-	return child.Cwd
+	return resp.Msg.GetChild().GetCwd()
 }
 
 // startSessionExecutor makes this machine available as a workspace.
@@ -207,21 +199,60 @@ func childCwd(ctx context.Context, c *client.Client, childID string) string {
 // durable executor already covers this machine and owner, and using it is the
 // point — that executor outlives this process, so an agent keeps working after
 // the operator closes the terminal.
-func startSessionExecutor(ctx context.Context, c *client.Client, root string, p profile.Resolved) (string, func(), error) {
+//
+// The session's lifetime now rides the ExecutorSession Connect stream, opened
+// with a context that lives exactly as long as the session: the returned
+// cleanup cancels it, which is the daemon's eviction trigger. The framed
+// *client.Client parameter is unused here — it is kept only because
+// cmd_create.go and cmd_create_form.go still build one for their own,
+// still-framed calls; whichever task converts those two files to Connect can
+// drop it from this signature then.
+func startSessionExecutor(ctx context.Context, _ *client.Client, root string, p profile.Resolved) (string, func(), error) {
 	noop := func() {}
 
-	resp, err := requestSessionExecutor(ctx, c, root)
+	name, _, err := paths.MachineName()
 	if err != nil {
 		return "", noop, err
 	}
-	if !resp.RunLocal {
-		// A durable executor already covers this machine. Use it: it outlives
-		// this process, so an agent keeps working after the operator detaches.
-		return resp.Selector, noop, nil
+
+	ep := sessionConnectEndpoint(p)
+	cc := ep.control()
+
+	sessionCtx, cancel := context.WithCancel(ctx)
+
+	stream, err := cc.ExecutorSession(sessionCtx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{
+		Name:  name,
+		Roots: []string{root},
+	}))
+	if err != nil {
+		cancel()
+		return "", noop, diagnoseConnectError(err, ep.describe)
+	}
+	if !stream.Receive() {
+		cancel()
+		if err := stream.Err(); err != nil {
+			return "", noop, diagnoseConnectError(err, ep.describe)
+		}
+		return "", noop, fmt.Errorf("executor session: stream at %s ended before sending a ready event", ep.describe)
+	}
+	ready := stream.Msg().GetReady()
+	if ready == nil {
+		cancel()
+		return "", noop, errors.New("executor session: unexpected event before ready")
+	}
+
+	if !ready.GetRunLocal() {
+		// A durable executor already covers this machine. Use it: it
+		// outlives this process, so an agent keeps working after the
+		// operator detaches. Nothing was started, so there is nothing this
+		// session needs to keep the stream open for.
+		cancel()
+		return ready.GetSelector(), noop, nil
 	}
 
 	addr, socket, err := sessionConnectTarget(p)
 	if err != nil {
+		cancel()
 		return "", noop, err
 	}
 
@@ -230,17 +261,22 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string, p 
 		Version: version.String(),
 		RTK:     tools.RTKAuto,
 	})
-	runCtx, cancel := context.WithCancel(ctx)
+	var stopOnce sync.Once
 	stop := func() {
-		cancel()
-		_ = srv.Close()
+		stopOnce.Do(func() {
+			cancel()
+			_ = srv.Close()
+		})
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		err := execpool.Connect(runCtx, execpool.ConnectOptions{
+		defer wg.Done()
+		err := execpool.Connect(sessionCtx, execpool.ConnectOptions{
 			Addr:       addr,
 			SocketPath: socket,
-			Ticket:     resp.Ticket,
+			Ticket:     ready.GetTicket(),
 			SelfReported: map[string]string{
 				"version": version.String(),
 			},
@@ -249,8 +285,8 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string, p 
 		switch {
 		case err == nil, errors.Is(err, context.Canceled):
 		case errors.Is(err, execpool.ErrEnrollmentRejected):
-			// A ticket is one-shot and tied to this control connection.
-			// Rejection means the connection is gone or the ticket was spent,
+			// A ticket is one-shot and tied to this session's stream.
+			// Rejection means the stream is gone or the ticket was spent,
 			// and neither is recoverable by retrying.
 			slog.Warn("this session's executor ticket was refused; the machine " +
 				"is no longer offered as a workspace for this session")
@@ -258,10 +294,35 @@ func startSessionExecutor(ctx context.Context, c *client.Client, root string, p 
 			slog.Warn("this machine's executor stopped", "error", err)
 		}
 	}()
+	go func() {
+		defer wg.Done()
+		// ready is the only event shape this stream ever sends (see proto
+		// ExecutorSessionEvent); this loop just watches for the stream to
+		// end, which is the daemon's eviction signal.
+		for stream.Receive() {
+		}
+		if sessionCtx.Err() == nil {
+			// The stream ended without this session asking it to: the
+			// daemon evicted this executor. Surface it exactly the way a
+			// dropped connection was surfaced before, and tear the local
+			// executor down — the ticket that authenticated it belonged to
+			// this stream and is now spent.
+			if err := stream.Err(); err != nil {
+				slog.Warn("this machine's executor stopped", "error", err)
+			} else {
+				slog.Warn("this machine's executor stopped: the daemon ended the session")
+			}
+			stop()
+		}
+	}()
 
-	if err := waitExecutorLive(ctx, c, resp.Selector); err != nil {
+	if err := waitExecutorLive(ctx, cc, ready.GetSelector()); err != nil {
 		stop()
+		wg.Wait()
 		return "", noop, err
 	}
-	return resp.Selector, stop, nil
+	return ready.GetSelector(), func() {
+		stop()
+		wg.Wait()
+	}, nil
 }
