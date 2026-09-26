@@ -277,6 +277,7 @@ type sendConfig struct {
 	authorUserID  string
 	toolChoice    string
 	streamHandler StreamHandler
+	batchWait     func(bool)
 }
 
 type SendOption func(*sendConfig)
@@ -308,6 +309,16 @@ type StreamHandler func(ev anthropic.MessageStreamEventUnion)
 // is signalled only by Send/Continue returning a nil error.
 func WithStreamHandler(h StreamHandler) SendOption {
 	return func(s *sendConfig) { s.streamHandler = h }
+}
+
+// WithBatchWait registers fn as the send's batch-wait bracket: it is called
+// with true just before a send parks (a :batch first call handed to the
+// daemon's Batcher, which blocks for the batch's whole lifetime) and with
+// false when Park returns — on every path, including errors and ctx
+// cancellation. Callers use it to keep a UI/status surface honest while the
+// send is parked, and to make ctx cancellation observable.
+func WithBatchWait(fn func(waiting bool)) SendOption {
+	return func(s *sendConfig) { s.batchWait = fn }
 }
 
 // WithMaxTokens overrides the output cap for this send only.
@@ -545,6 +556,7 @@ func (conv *Conversation) sendWithTrim(ctx context.Context, span trace.Span, ord
 		AuthorUserID:     scfg.authorUserID,
 		AuthorKind:       conv.cfg.authorKind,
 		RateLimit:        conv.cfg.rateLimit,
+		OnBatchWait:      scfg.batchWait,
 		Primary:          conv.cfg.primary,
 		Fallback:         conv.cfg.fallback,
 	}

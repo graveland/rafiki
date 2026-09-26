@@ -40,6 +40,7 @@ type Client struct {
 	catalog  *routing.ModelCatalog
 	logger   *slog.Logger
 	tracer   trace.Tracer
+	batcher  Batcher
 
 	breakerWindow time.Duration
 	defaultModel  string
@@ -259,6 +260,11 @@ type SendMeta struct {
 	AuthorKind       string
 	RateLimit        RateLimitPolicy
 
+	// OnBatchWait, when non-nil, is called with true just before a send parks
+	// (a :batch first call handed to the Batcher) and with false when it
+	// returns — on every path, including errors and ctx cancellation.
+	OnBatchWait func(waiting bool)
+
 	Primary  string   // empty = the provider named by the model id
 	Fallback []string // nil = the provider's configured chain; empty non-nil = no failover
 }
@@ -279,7 +285,16 @@ type SendMeta struct {
 //     the provider preferences and the cache guard's ejections — BEFORE
 //     capture, so the recorded request matches the wire.
 //  4. Opens the "llm.send" tracing span and records breaker state.
+//  5. Applies the :batch routing rule: a model id ending in ":batch" is only
+//     ever served by an anthropic-openrouter provider (anything else is an
+//     error, never a live send), and the suffix survives into params.Model
+//     exactly when this send PARKS — a first call (no assistant-role message
+//     in params.Messages) keeps ":batch", a later call has it stripped and
+//     goes through the normal live sender.
 //
+// The resulting INVARIANT every later check reads instead of re-deriving the
+// rule: **after prepareSend, params.Model ends in ":batch" iff this send
+// parks.**
 // The returned error is a resolution failure (unknown provider, empty model);
 // callers must abort the send on it.
 func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, anthropic.MessageNewParams, error) {
@@ -292,6 +307,19 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 		return ctx, nil, "", nil, params, err
 	}
 	params.Model = anthropic.Model(modelID)
+
+	// The :batch routing rule, in one place. After this block: params.Model
+	// ends in ":batch" iff this send parks (the invariant SendParams,
+	// sendStreamingAttempt and everything downstream rely on).
+	if IsBatchModel(modelID) {
+		if p.Kind != providers.KindAnthropicOpenRouter {
+			return ctx, nil, "", nil, params, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
+		}
+		if !firstCall(params) {
+			modelID = strings.TrimSuffix(modelID, BatchSuffix)
+			params.Model = anthropic.Model(modelID)
+		}
+	}
 
 	primary := p.Name
 	fallbacks := p.Fallback
@@ -353,6 +381,10 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 		return nil, err
 	}
 	defer span.End()
+
+	if IsBatchModel(string(params.Model)) {
+		return c.parkSend(ctx, span, meta, params)
+	}
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
 		return nil, err
@@ -533,6 +565,13 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		return nil, false, false, err
 	}
 	defer span.End()
+
+	// The prepareSend park invariant: a ":batch" model here means this send
+	// parks. Step aside BEFORE beginTurn — no turn row, no stream opened — so
+	// the caller falls through to SendParams, which owns the batch path.
+	if IsBatchModel(string(params.Model)) {
+		return nil, false, false, nil
+	}
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
 		return nil, false, false, err
