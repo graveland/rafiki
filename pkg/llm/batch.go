@@ -73,8 +73,11 @@ func firstCall(params anthropic.MessageNewParams) bool {
 // parked call names no provider to gate or fail over between), write-aheads
 // the turn exactly as the live path does, and resolves the turn with the
 // batch result. c.guard.Observe is deliberately NOT called: a batch response
-// names no provider, so there is nothing to observe.
-func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+// names no provider, so there is nothing to observe. Capture still records
+// primary as the turn's upstream — the provider the send WOULD have gone
+// live through — so conversation_turn.upstream stays a provider name on the
+// batch path too (insights joins it, never a model id).
+func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, params anthropic.MessageNewParams, primary string) (*anthropic.Message, error) {
 	if c.batcher == nil {
 		return nil, errors.New("llm: " + string(params.Model) + ": no batcher configured")
 	}
@@ -104,7 +107,7 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 	if err != nil {
 		span.RecordError(err)
 		c.failTurn(ctx, ref.capturing, ref.turnID, ref.createdAt, err)
-		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, string(params.Model), latency, err, hdrs)
+		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, latency, err, hdrs)
 		return nil, err
 	}
 
@@ -115,8 +118,8 @@ func (c *Client) parkSend(ctx context.Context, span trace.Span, meta SendMeta, p
 		attribute.Int64("rafiki.tokens.cache_creation", resp.Usage.CacheCreationInputTokens),
 	)
 	if ref.capturing {
-		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, string(params.Model), latency)
+		c.completeTurn(ctx, ref.turnID, ref.createdAt, resp, primary, latency)
 	}
-	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, string(params.Model), latency, nil, hdrs)
+	c.recordRawTrace(ctx, meta, ref.turnID, params, resp, 200, primary, latency, nil, hdrs)
 	return resp, nil
 }

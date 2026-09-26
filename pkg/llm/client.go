@@ -383,7 +383,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	defer span.End()
 
 	if IsBatchModel(string(params.Model)) {
-		return c.parkSend(ctx, span, meta, params)
+		return c.parkSend(ctx, span, meta, params, primary)
 	}
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {

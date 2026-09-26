@@ -312,6 +312,20 @@ func TestBatchTurnCaptured(t *testing.T) {
 		return statuses[0]
 	}
 
+	turnUpstream := func(t *testing.T, convID string) string {
+		t.Helper()
+		var upstream *string
+		if err := pool.QueryRow(ctx,
+			`SELECT upstream FROM conversations.conversation_turn WHERE conversation_id=$1::uuid ORDER BY ordinal LIMIT 1`,
+			convID).Scan(&upstream); err != nil {
+			t.Fatal(err)
+		}
+		if upstream == nil {
+			t.Fatal("captured turn upstream is NULL, want the primary provider name")
+		}
+		return *upstream
+	}
+
 	// Success path.
 	b := &fakeBatcher{scripts: []func() (*anthropic.Message, error){func() (*anthropic.Message, error) { return batchReply(), nil }}}
 	c, conv := newConv(t, b)
@@ -320,6 +334,12 @@ func TestBatchTurnCaptured(t *testing.T) {
 	}
 	if got := turnStatus(t, c, conv.ID); got != "complete" {
 		t.Errorf("turn status = %q, want complete", got)
+	}
+	// The batch turn's upstream must be the PRIMARY PROVIDER NAME (what a
+	// live turn records, and what insights' failover joins read), never the
+	// model id the request carries.
+	if got := turnUpstream(t, conv.ID); got != "openrouter" {
+		t.Errorf("turn upstream = %q, want the primary provider name %q (not the model id)", got, "openrouter")
 	}
 
 	// Error path.
