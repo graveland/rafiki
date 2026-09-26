@@ -96,6 +96,10 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
 	cmd.Flags().String("pymodule", "", "--kind script only: the pymodule to run as the child, as <repo>:<script> (e.g. local:driver); repo is \"local\" or a git source's name. Everything after -- is passed to the script as argv")
+	// The form has no script-spec field, and -i with --pymodule would otherwise
+	// refuse through the form branch with a "pass --pymodule" the caller had
+	// already passed. Refuse at parse time instead, like --prefill-files above.
+	cmd.MarkFlagsMutuallyExclusive("interactive", "pymodule")
 	cmd.Flags().String("prefill-files", "",
 		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi only.")
 	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
@@ -499,6 +503,14 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 		if req.Name == "" {
 			req.Name = spec.Script
 		}
+	} else if cmd.Flags().Changed("pymodule") {
+		// Fail CLOSED: --pymodule is --kind script's payload, and a caller who
+		// typed it but let the kind resolve to something else (no --kind, or a
+		// profile with a different kind) would otherwise get a silent FUNDI
+		// child with the profile's default model attached — real spend where a
+		// script was meant. Refuse and name the flag that fixes it.
+		v, _ := cmd.Flags().GetString("pymodule")
+		return protocol.SpawnRequest{}, fmt.Errorf("--pymodule %q requires --kind script; add --kind script to spawn the module as a script child", v)
 	}
 
 	return req, nil

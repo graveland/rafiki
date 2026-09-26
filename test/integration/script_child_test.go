@@ -112,9 +112,10 @@ type scriptDaemon struct {
 }
 
 // bootScriptDaemon boots a DB-backed daemon whose LLM traffic goes to the
-// fake server, with a fast event buffer (the settle fragments aimed at a
-// script child are busy-deferred by the buffer, since a script child is
-// never idle while it runs; the fast MaxWait keeps the test honest and quick)
+// fake server, with a fast event buffer (a script child is EXEMPT from the
+// busy withhold — childIsBusy short-circuits on kind before the status
+// switch — so its settle fragments flush with the ordinary debounce; the
+// fast MaxWait keeps the test honest and quick)
 // and no executor pool (fundi children run in-process).
 func bootScriptDaemon(t *testing.T) *scriptDaemon {
 	t.Helper()

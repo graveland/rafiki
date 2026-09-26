@@ -134,6 +134,48 @@ func TestBuildSpawnRequest_ScriptSpec(t *testing.T) {
 			t.Errorf("Script = %+v, want nil", req.Script)
 		}
 	})
+	t.Run("--pymodule without --kind script refused", func(t *testing.T) {
+		// The fail-closed guard: --pymodule with the kind resolving non-script
+		// (here the fundi default, because no --kind was typed) is refused
+		// rather than silently dropped into a fundi spawn with the profile's
+		// default model attached.
+		cmd, args := parseCreate(t, "--cwd", "/tmp", "--pymodule", "local:driver")
+		_, err := buildSpawnRequest(cmd, args)
+		if err == nil || !strings.Contains(err.Error(), "--kind script") {
+			t.Errorf("err = %v, want the --kind script pointer", err)
+		}
+	})
+	t.Run("--pymodule with an explicit non-script kind refused", func(t *testing.T) {
+		cmd, args := parseCreate(t, "--cwd", "/tmp", "--kind", "fundi", "--pymodule", "local:driver")
+		_, err := buildSpawnRequest(cmd, args)
+		if err == nil || !strings.Contains(err.Error(), "--kind script") {
+			t.Errorf("err = %v, want the --kind script pointer", err)
+		}
+	})
+}
+
+// TestPymoduleInteractiveExclusive pins fix for the self-contradictory
+// refusal: -i opens the create form, the form has no script-spec field, and
+// without this exclusion `-i --kind script --pymodule local:driver` refused
+// through the form branch with a "pass --pymodule" the caller had already
+// passed. The flags are mutually exclusive at parse time, like -i and
+// --prefill-files (TestPrefillFilesInteractiveExclusive).
+func TestPymoduleInteractiveExclusive(t *testing.T) {
+	cmd := newCreateCmd()
+	if err := cmd.Flags().Set("interactive", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("pymodule", "local:driver"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := cmd.ValidateFlagGroups()
+	if err == nil {
+		t.Fatal("want -i and --pymodule to be rejected together, got none")
+	}
+	if !strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "pymodule") {
+		t.Errorf("error = %q, want it to name both flags", err)
+	}
 }
 
 // TestResolveSpawnModelSkipsScriptKind pins the model strip: a script kind

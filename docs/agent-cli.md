@@ -431,7 +431,10 @@ rafiki create -d --kind script --pymodule ops_tools:rotate
   — `repo` is `local` (the spawning owner's saved modules, what `rafiki python
   put` writes) or a registered git source's name (`rafiki python repo add`).
   The script name is checked client-side (a bare Python identifier), the repo
-  name by the daemon, whose registered sources are the authority.
+  name by the daemon, whose registered sources are the authority. On any other
+  resolved kind `--pymodule` is refused rather than silently dropped — the
+  refusal points at `--kind script` — so a forgotten `--kind` cannot spend a
+  default model on a fundi child where a script was meant.
 - Everything after `--` is the **script's argv**, passed through verbatim —
   a flag-shaped argument cannot be eaten by flag parsing. Without `--`, the
   single positional is still the child's name; with `--`, a positional BEFORE
@@ -447,7 +450,9 @@ rafiki create -d --kind script --pymodule ops_tools:rotate
   routing. Several eligible executors still refuse — pass `--executor` —
   because the daemon would otherwise silently pick one. The create form
   cannot carry a script spec, so a bare `create` on a profile with
-  `kind = "script"` is refused with a pointer to `--pymodule`.
+  `kind = "script"` is refused with a pointer to `--pymodule`; `-i` is
+  mutually exclusive with `--pymodule` at parse time (same treatment as
+  `--prefill-files`), so the refusal never asks for a flag already passed.
 
 From an agent, the same spawn is the `pymodule_start` tool (fundi children
 with a spawner; MCP-face children with a live executor binding — the same
