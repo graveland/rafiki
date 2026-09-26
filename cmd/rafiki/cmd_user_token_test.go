@@ -1,18 +1,21 @@
 package main
 
-// The stale-token dead end and its two unstick paths. A profile token that no
-// longer resolves would refuse every framed verb that presents it — including
-// `rafiki user create`, the one verb that mints its replacement — so:
+// The stale-token dead end and the central advice that names the way out.
+// A profile token that no longer resolves refuses every verb that presents
+// it, so main()'s error print (withTokenAdvice) appends the recovery: delete
+// the token file, or mint a replacement. The framed tests below pin the
+// advice's two halves while the framed plane exists:
 //
-//   - `user create` dials the LOCAL socket token-less (mustDialWithoutToken;
-//     a remote profile keeps its token, since TCP requires it): the UDS is local
-//     trust, and the credential's absence is what keeps the recovery verb
-//     working.
-//   - every other framed verb's refusal names the token file and the recovery,
-//     appended centrally at main()'s error print (withTokenAdvice).
+//   - the refusal really does surface `auth: auth_invalid` on the verb's
+//     first request over a refused dial — the text withTokenAdvice keys on;
+//   - the advice message itself names the token file and the recovery.
+//
+// The token-less `rafiki user create` recovery dial these notes used to
+// describe is retired: user create now rides Connect with the profile's
+// token like every other verb (cmd_user.go), and a stale token is unstuck
+// by running `rafikid user create` on the daemon host.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,16 +46,6 @@ func (d *refusingDaemon) record(first string) {
 	d.mu.Lock()
 	d.firsts = append(d.firsts, first)
 	d.mu.Unlock()
-}
-
-func (d *refusingDaemon) firstType() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if len(d.firsts) == 0 {
-		return ""
-	}
-	fields := strings.SplitN(d.firsts[0], " ", 2)
-	return fields[0]
 }
 
 func (d *refusingDaemon) serve(t *testing.T, sockPath string) {
@@ -128,45 +121,9 @@ func (d *refusingDaemon) serveConn(conn net.Conn) {
 	_ = protocol.WriteFrame(conn, resp)
 }
 
-// TestUserCreateDialsWithoutTheProfileToken pins the recovery path: a profile
-// whose token no longer resolves must still be able to mint a replacement.
-func TestUserCreateDialsWithoutTheProfileToken(t *testing.T) {
-	isolateProfiles(t)
-	resetProfileCache()
-
-	// os.MkdirTemp, not t.TempDir: macOS caps UDS paths at 104 bytes and the
-	// test name pushes t.TempDir over it.
-	dir, err := os.MkdirTemp("", "rafiki")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	sockPath := filepath.Join(dir, "controller.sock")
-	d := &refusingDaemon{}
-	d.serve(t, sockPath)
-	writeTokenedProfile(t, sockPath, "rfk_stale")
-
-	cmd := newUserCreateCmd()
-	cmd.SetArgs([]string{"operator"})
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("user create failed with a stale profile token: %v\n%s", err, out.String())
-	}
-
-	b, err := os.ReadFile(profile.TokenFile("it"))
-	if err != nil {
-		t.Fatalf("read token file: %v", err)
-	}
-	if got := strings.TrimSpace(string(b)); got != "rfk_new_minted" {
-		t.Fatalf("token file = %q, want the freshly minted token", got)
-	}
-	if first := d.firstType(); first != protocol.TypeCtrlUserCreate {
-		t.Fatalf("first frame = %q, want %q — the stale token must not go on the wire", first, protocol.TypeCtrlUserCreate)
-	}
-}
-
+// TestWithTokenAdvice pins the central advice text: it names the profile's
+// token file and the recovery, and only fires on the auth refusal — an
+// unrelated failure passes through untouched.
 func TestWithTokenAdvice(t *testing.T) {
 	isolateProfiles(t)
 	resetProfileCache()

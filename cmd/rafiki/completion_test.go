@@ -271,6 +271,54 @@ func TestCompleteUsers(t *testing.T) {
 	}
 }
 
+// TestUserCompletionFetchesFromListUsers pins the fetch path behind the
+// cache: on a miss the completer reads ListUsers over Connect — the same RPC
+// `rafiki user list` reads, through the same endpoint resolver every other
+// completion helper uses. It used to dial the framed control plane, which
+// ignored RAFIKI_URL entirely.
+func TestUserCompletionFetchesFromListUsers(t *testing.T) {
+	stub := &userStubControl{rows: sampleUserRows()}
+	serveUserScratch(t, stub, "rfk_tok")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	got := completeUsers(nil, "al")
+	if len(got) != 1 || got[0] != "alice" {
+		t.Fatalf("completeUsers(nil, \"al\") = %v, want [alice] straight from ListUsers", got)
+	}
+	if req := stub.lastList(); req == nil || req.Msg.GetIncludeDeleted() {
+		t.Fatal("the completion must list ACTIVE users only (the rm candidates)")
+	}
+}
+
+// A remote profile with no token cannot succeed. It must be a miss, not an
+// exit — the same contract the children completer pins.
+func TestUserCompletionWithoutATokenIsEmpty(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://example.invalid", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	if got := completeUsers(nil, ""); len(got) != 0 {
+		t.Errorf("got %v, want none", got)
+	}
+}
+
+// An unreachable daemon must yield no candidates, never an error or an exit,
+// and must not block the shell past the completer's own deadline.
+func TestUserCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
+	seedRemoteProfile(t, "personal", "https://127.0.0.1:1", "t")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	done := make(chan []string, 1)
+	go func() { done <- completeUsers(nil, "") }()
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Errorf("got %v, want none", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("user completion blocked the shell for 5s; it must bound its own deadline")
+	}
+}
+
 func TestCompleteClaudeModel(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedCompletionCache(t, "models-claude", []string{

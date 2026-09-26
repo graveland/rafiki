@@ -48,25 +48,6 @@ func mustDial(cmd *cobra.Command) *client.Client {
 	return c
 }
 
-// mustDialWithoutToken is mustDial with the profile's credential left off the
-// LOCAL socket: the UDS is locally trusted, so the credential's absence keeps a
-// STALE token from dead-ending the one verb that mints its replacement. A
-// remote profile keeps its token — TCP requires ctrl_auth once users exist, so
-// dropping it there would stop an admin creating users remotely. There is
-// exactly one caller, `rafiki user create`.
-func mustDialWithoutToken(cmd *cobra.Command) *client.Client {
-	p := mustProfile(cmd)
-	if p.URL != "" {
-		return mustDial(cmd)
-	}
-	c, err := client.Dial(p.Socket)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
-		os.Exit(2)
-	}
-	return c
-}
-
 // cmdCtx returns the cobra command's context — canceled on SIGINT/SIGTERM,
 // via the one signal.NotifyContext main() wraps around ExecuteContext. Falls
 // back to context.Background() only for a command driven directly in a test,

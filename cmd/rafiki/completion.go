@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // completionDeadline bounds a completion RPC. A shell is blocked while this
@@ -208,54 +206,42 @@ func dropUserCompletionCache(cmd *cobra.Command) {
 }
 
 // completeUsers returns username candidates for `rafiki user rm <name>`,
-// sourcing them from whatever `rafiki user list` calls: ctrl_user_list, the
-// framed control protocol.
-//
-// There is no Connect RPC for user rows, so this cannot ride the Connect
-// endpoint the other helpers dial — instead it dials the framed control plane
-// the way mustDial does, minus the exit: dialDaemon resolves the endpoint
-// from the same profile resolver (resolveProfile) and returns an error
-// rather than exiting, which is what a completion handler requires. The
-// cache key still goes through newConnectEndpoint's identity, so reads and
-// drops name the same endpoint every other completion cache entry does.
+// sourcing them from the same ListUsers RPC `rafiki user list` reads — the
+// Connect control plane, through the endpoint resolver every other helper
+// here uses.
 func completeUsers(cmd *cobra.Command, toComplete string) []string {
 	return filterByPrefix(completionUserNames(cmd), toComplete)
 }
 
 // completionUserNames returns every active username the daemon knows, cached.
+// ListUsers without include_deleted is the active set, the same default
+// `rafiki user list` serves.
+//
+// Every failure yields no candidates: a completion handler must never exit,
+// never block past completionDeadline, and never print.
 func completionUserNames(cmd *cobra.Command) []string {
 	var names []string
 	if cacheRead("users", completionEndpointKey(cmd), userCacheTTL, &names) {
 		return names
 	}
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return nil // remote with no token: a 401 is the only possible outcome
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), completionDeadline)
 	defer cancel()
 
-	c, err := dialDaemon(ctx, cmd)
+	resp, err := ep.control().ListUsers(ctx,
+		connect.NewRequest(&rafikiv1.ListUsersRequest{}))
 	if err != nil {
 		return nil
 	}
-	defer c.Close()
-
-	resp, err := c.Request(ctx, protocol.UserListRequest{Type: protocol.TypeCtrlUserList})
-	if err != nil || !resp.Success {
-		return nil
-	}
-	// ctrl_user_list wraps its rows (decodeUserList documents the shape); the
-	// completion needs only the username field.
-	var payload struct {
-		Users []struct {
-			Username string `json:"username"`
-		} `json:"users"`
-	}
-	if err := json.Unmarshal(resp.Data, &payload); err != nil {
-		return nil
-	}
-	for _, u := range payload.Users {
-		if u.Username != "" {
-			names = append(names, u.Username)
+	out := make([]string, 0, len(resp.Msg.GetUsers()))
+	for _, u := range resp.Msg.GetUsers() {
+		if name := u.GetUsername(); name != "" {
+			out = append(out, name)
 		}
 	}
-	cacheWrite("users", completionEndpointKey(cmd), names)
-	return names
+	cacheWrite("users", completionEndpointKey(cmd), out)
+	return out
 }
