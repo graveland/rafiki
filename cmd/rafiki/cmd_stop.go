@@ -2,16 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/table"
 )
@@ -44,8 +45,11 @@ finalize a child in one step.`,
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	ctx := cmdCtx(cmd)
 
@@ -60,10 +64,11 @@ func runStop(cmd *cobra.Command, args []string) error {
 		defer cancel()
 	}
 
+	profileName := mustProfile(cmd).Name
 	results := make([]stopTargetResult, 0, len(args))
 	var failures int
 	for _, arg := range args {
-		childID, kr, err := stopOne(ctx, c, arg, st, kt)
+		childID, kr, err := stopOne(ctx, ctrl, profileName, arg, st, kt)
 		results = append(results, stopTargetResult{Arg: arg, ChildID: childID, Kill: kr, Err: err})
 		if err != nil {
 			failures++
@@ -91,22 +96,19 @@ func runStop(cmd *cobra.Command, args []string) error {
 type stopTargetResult struct {
 	Arg     string
 	ChildID string
-	Kill    protocol.KillResponseData
+	Kill    *rafikiv1.KillResponse
 	Err     error
 }
 
-// stopOne resolves arg and sends ctrl_kill for it. It does not close —
+// stopOne resolves arg and sends Kill for it. It does not close —
 // that composition lives in `rafiki close` now.
-func stopOne(ctx context.Context, c *client.Client, arg string, st, kt time.Duration) (string, protocol.KillResponseData, error) {
-	childID, err := c.Resolve(ctx, arg)
+func stopOne(ctx context.Context, ctrl rafikiv1connect.ControlClient, profileName, arg string, st, kt time.Duration) (string, *rafikiv1.KillResponse, error) {
+	childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg)
 	if err != nil {
-		return "", protocol.KillResponseData{}, err
+		return "", nil, err
 	}
 
-	req := protocol.KillRequest{
-		Type:    protocol.TypeCtrlKill,
-		ChildID: childID,
-	}
+	req := &rafikiv1.KillRequest{ChildId: childID}
 	if st > 0 {
 		req.ShutdownTimeoutMs = st.Milliseconds()
 	}
@@ -114,37 +116,32 @@ func stopOne(ctx context.Context, c *client.Client, arg string, st, kt time.Dura
 		req.KillTimeoutMs = kt.Milliseconds()
 	}
 
-	resp, err := c.Request(ctx, req)
+	resp, err := ctrl.Kill(ctx, connect.NewRequest(req))
 	if err != nil {
-		return childID, protocol.KillResponseData{}, err
+		return childID, nil, fmt.Errorf("kill: %s", formatConnectErr(err))
 	}
-	if !resp.Success {
-		return childID, protocol.KillResponseData{}, fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
-	}
-
-	var kr protocol.KillResponseData
-	if err := json.Unmarshal(resp.Data, &kr); err != nil {
-		return childID, protocol.KillResponseData{}, fmt.Errorf("decode kill response: %w (raw=%s)", err, string(resp.Data))
-	}
-	return childID, kr, nil
+	return childID, resp.Msg, nil
 }
 
 // stopResultJSON is the JSON shape of one stopTargetResult. A distinct type
 // from stopTargetResult because error is not directly marshalable and ID
 // falls back to the typed arg when resolution never produced a childID.
+// These are the fields of the wire KillResponse the CLI renders; the framed
+// plane's abandoned flag has no Connect counterpart and is gone.
 type stopResultJSON struct {
 	ID         string `json:"id"`
-	ExitCode   *int   `json:"exitCode"`
+	ExitCode   *int32 `json:"exitCode"`
 	Signal     string `json:"signal,omitempty"`
 	DurationMs int64  `json:"durationMs"`
 	Escalated  bool   `json:"escalated"`
-	Abandoned  bool   `json:"abandoned,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 
 // renderStopResults writes the outcome of a `rafiki stop` run either as JSON
 // (one document, not one object per line — the bug this replaced) or as a
-// table matching renderList's styling.
+// table matching renderList's styling. The JSON is the CLI's own composite of
+// one KillResponse per target (there is no single response message for a
+// multi-target stop), so it stays encoding/json rather than protojson.
 func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode, useColor bool) error {
 	if mode == outputJSON {
 		out := make([]stopResultJSON, len(results))
@@ -153,13 +150,12 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 			if id == "" {
 				id = r.Arg
 			}
-			rj := stopResultJSON{
-				ID:         id,
-				ExitCode:   r.Kill.ExitCode,
-				Signal:     r.Kill.Signal,
-				DurationMs: r.Kill.DurationMs,
-				Escalated:  r.Kill.Escalated,
-				Abandoned:  r.Kill.Abandoned,
+			rj := stopResultJSON{ID: id}
+			if r.Kill != nil {
+				rj.ExitCode = r.Kill.ExitCode
+				rj.Signal = r.Kill.Signal
+				rj.DurationMs = r.Kill.DurationMs
+				rj.Escalated = r.Kill.Escalated
 			}
 			if r.Err != nil {
 				rj.Error = r.Err.Error()
@@ -188,8 +184,8 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 			id = r.Arg
 		}
 		exit := "-"
-		if r.Kill.ExitCode != nil {
-			exit = strconv.Itoa(*r.Kill.ExitCode)
+		if r.Kill != nil && r.Kill.ExitCode != nil {
+			exit = strconv.Itoa(int(*r.Kill.ExitCode))
 		}
 		errCell := ""
 		if r.Err != nil {
@@ -201,9 +197,9 @@ func renderStopResults(w io.Writer, results []stopTargetResult, mode outputMode,
 		tb.Row(
 			id,
 			exit,
-			defaultDash(r.Kill.Signal),
-			(time.Duration(r.Kill.DurationMs) * time.Millisecond).String(),
-			strconv.FormatBool(r.Kill.Escalated),
+			defaultDash(r.Kill.GetSignal()),
+			(time.Duration(r.Kill.GetDurationMs()) * time.Millisecond).String(),
+			strconv.FormatBool(r.Kill.GetEscalated()),
 			errCell,
 		)
 	}

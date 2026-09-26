@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newLabelCmd() *cobra.Command {
@@ -37,8 +36,11 @@ rafiki/cwd, etc.) and cannot be set or removed via this command.`,
 }
 
 func runLabel(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	ctx := cmdCtx(cmd)
 
@@ -60,34 +62,24 @@ func runLabel(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	childID, err := c.Resolve(ctx, target)
+	childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, target)
 	if err != nil {
 		return err
 	}
 
-	req := protocol.SetLabelsRequest{
-		Type:    protocol.TypeCtrlSetLabels,
-		ChildID: childID,
+	resp, err := ctrl.SetLabels(ctx, connect.NewRequest(&rafikiv1.SetLabelsRequest{
+		ChildId: childID,
 		Set:     set,
 		Remove:  removeKeys,
-	}
-
-	resp, err := c.Request(ctx, req)
+	}))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_set_labels: %s", client.FormatError(resp))
+		return diagnoseConnectError(err, ep.describe)
 	}
 
 	// Labels feed label completion; what the last TAB showed is now stale.
 	dropChildCompletionCache(cmd)
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	var data protocol.SetLabelsResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return enc.Encode(json.RawMessage(resp.Data))
-	}
-	return enc.Encode(data)
+	// Label has always answered with the post-mutation label map as JSON;
+	// now it is the SetLabels response's canonical protojson.
+	return emitProto(os.Stdout, resp.Msg, outputJSON)
 }

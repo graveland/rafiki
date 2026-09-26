@@ -1,16 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newSearchCmd() *cobra.Command {
@@ -46,8 +45,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
 	regex, _ := cmd.Flags().GetBool("regex")
 	limit, _ := cmd.Flags().GetInt("limit")
@@ -66,15 +67,14 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 	hasLabels, _ := cmd.Flags().GetStringArray("has-label")
 
-	req := protocol.SearchRequest{
-		Type:    protocol.TypeCtrlSearch,
+	req := &rafikiv1.SearchRequest{
 		Query:   args[0],
 		Regex:   regex,
-		Limit:   limit,
-		Context: context,
+		Limit:   int32(limit),
+		Context: int32(context),
 	}
 	if cwd != "" || name != "" || len(labelFilter) > 0 || len(hasLabels) > 0 {
-		req.SessionFilter = &protocol.SearchSessionFilter{
+		req.SessionFilter = &rafikiv1.SearchRequest_SearchSessionFilter{
 			CwdContains:  cwd,
 			NameContains: name,
 			Labels:       labelFilter,
@@ -82,33 +82,21 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resp, err := c.Request(cmdCtx(cmd), req)
+	resp, err := ep.control().Search(cmdCtx(cmd), connect.NewRequest(req))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_search: %s", client.FormatError(resp))
+		return diagnoseConnectError(err, ep.describe)
 	}
 
 	switch mode {
-	case outputJSON:
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(json.RawMessage(resp.Data))
-	case outputJSONL:
-		var raw struct {
-			Hits []json.RawMessage `json:"hits"`
+	case outputJSON, outputJSONL:
+		// The canonical protojson of the Search response, pretty or — for a
+		// piped consumer — one hit object per line, unwrapped.
+		if mode == outputJSONL {
+			return emitProtoRows(os.Stdout, resp.Msg.GetHits(), mode)
 		}
-		if err := json.Unmarshal(resp.Data, &raw); err != nil {
-			return fmt.Errorf("decode search response: %w", err)
-		}
-		return renderSearchJSONL(os.Stdout, raw.Hits)
+		return emitProto(os.Stdout, resp.Msg, mode)
 	default:
-		var data protocol.SearchResponseData
-		if err := json.Unmarshal(resp.Data, &data); err != nil {
-			return fmt.Errorf("decode search response: %w", err)
-		}
-		return renderSearchText(os.Stdout, data.Hits)
+		return renderSearchText(os.Stdout, resp.Msg.GetHits())
 	}
 }
 
@@ -121,14 +109,14 @@ func runSearch(cmd *cobra.Command, args []string) error {
 // bytes) and its MatchStart is an offset into the full event, so there is no
 // reliable way to locate the match inside the snippet. Zero hits write
 // nothing, like grep.
-func renderSearchText(w io.Writer, hits []protocol.SearchHit) error {
+func renderSearchText(w io.Writer, hits []*rafikiv1.SearchResponse_SearchHit) error {
 	var order []string
-	groups := make(map[string][]protocol.SearchHit)
+	groups := make(map[string][]*rafikiv1.SearchResponse_SearchHit)
 	for _, h := range hits {
-		if _, ok := groups[h.ChildID]; !ok {
-			order = append(order, h.ChildID)
+		if _, ok := groups[h.GetChildId()]; !ok {
+			order = append(order, h.GetChildId())
 		}
-		groups[h.ChildID] = append(groups[h.ChildID], h)
+		groups[h.GetChildId()] = append(groups[h.GetChildId()], h)
 	}
 	for _, id := range order {
 		group := groups[id]
@@ -140,7 +128,7 @@ func renderSearchText(w io.Writer, hits []protocol.SearchHit) error {
 			return err
 		}
 		for i, h := range group {
-			snippet := strings.TrimRight(h.Snippet, "\r\n")
+			snippet := strings.TrimRight(h.GetSnippet(), "\r\n")
 			for j, line := range strings.Split(snippet, "\n") {
 				var err error
 				if j == 0 {
@@ -165,20 +153,9 @@ func renderSearchText(w io.Writer, hits []protocol.SearchHit) error {
 // hit carries one, else the session file. SearchHit has no cwd — the plan's
 // `== <childID> <cwd>` becomes the identifying pair the record actually
 // carries.
-func searchGroupLabel(h protocol.SearchHit) string {
-	if h.SessionName != "" {
-		return h.SessionName
+func searchGroupLabel(h *rafikiv1.SearchResponse_SearchHit) string {
+	if h.GetSessionName() != "" {
+		return h.GetSessionName()
 	}
-	return h.SessionFile
-}
-
-// renderSearchJSONL writes one hit object per line. Hits pass through as
-// received rather than being decoded and re-encoded, so a field this client
-// binary does not know about still reaches the consumer.
-func renderSearchJSONL(w io.Writer, hits []json.RawMessage) error {
-	rows := make([]any, len(hits))
-	for i, h := range hits {
-		rows[i] = h
-	}
-	return writeJSONL(w, rows)
+	return h.GetSessionFile()
 }

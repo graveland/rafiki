@@ -21,6 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 func TestCloseCommandKeepsForgetAsAnAlias(t *testing.T) {
@@ -58,16 +59,16 @@ func TestCloseCmd_HasStopTimeoutFlags(t *testing.T) {
 func TestCloseAllExitedTextCount(t *testing.T) {
 	cases := []struct {
 		name string
-		raw  string
+		ids  []string
 		want string
 	}{
-		{"three closed", `{"count":3,"children":["a","b","c"]}`, "closed 3 exited children\n"},
-		{"zero closed", `{"count":0}`, "no exited children to close\n"},
+		{"three closed", []string{"a", "b", "c"}, "closed 3 exited children\n"},
+		{"zero closed", nil, "no exited children to close\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := renderCloseAllExited(&buf, json.RawMessage(tc.raw), outputTable); err != nil {
+			if err := renderCloseAllExited(&buf, &rafikiv1.CloseAllExitedResponse{ChildIds: tc.ids}, outputTable); err != nil {
 				t.Fatalf("renderCloseAllExited: %v", err)
 			}
 			if buf.String() != tc.want {
@@ -77,39 +78,39 @@ func TestCloseAllExitedTextCount(t *testing.T) {
 	}
 }
 
-// JSON mode stays the raw payload passthrough it has always been — the client
-// reshapes nothing, so whatever the daemon sent (including fields this client
-// does not know about) reaches the consumer.
-func TestCloseAllExitedJSONRawPassthrough(t *testing.T) {
-	raw := json.RawMessage(`{"count":2,"children":["a","b"],"extra":"field"}`)
+// JSON mode is the response's canonical protojson: the ids ride childIds (the
+// framed payload's separate count is derivable from the list and the wire
+// dropped it), and int64-free shape means no string-quoting surprises.
+func TestCloseAllExitedJSONShape(t *testing.T) {
 	var buf bytes.Buffer
-	if err := renderCloseAllExited(&buf, raw, outputJSON); err != nil {
+	if err := renderCloseAllExited(&buf, &rafikiv1.CloseAllExitedResponse{ChildIds: []string{"a", "b"}}, outputJSON); err != nil {
 		t.Fatalf("renderCloseAllExited: %v", err)
 	}
-	var want bytes.Buffer
-	enc := json.NewEncoder(&want)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(raw); err != nil {
-		t.Fatalf("encode reference: %v", err)
-	}
-	if buf.String() != want.String() {
-		t.Errorf("json output changed:\nold: %s\nnew: %s", want.String(), buf.String())
+	const want = `{
+  "childIds": [
+    "a",
+    "b"
+  ]
+}
+`
+	if buf.String() != want {
+		t.Errorf("json output =\n%s\nwant\n%s", buf.String(), want)
 	}
 }
 
 func TestCloseAllExitedJSONLIds(t *testing.T) {
 	var buf bytes.Buffer
-	raw := json.RawMessage(`{"count":3,"children":["c_a","c_b","c_c"]}`)
-	if err := renderCloseAllExited(&buf, raw, outputJSONL); err != nil {
+	if err := renderCloseAllExited(&buf,
+		&rafikiv1.CloseAllExitedResponse{ChildIds: []string{"c_a", "c_b", "c_c"}}, outputJSONL); err != nil {
 		t.Fatalf("renderCloseAllExited: %v", err)
 	}
 	if buf.String() != "\"c_a\"\n\"c_b\"\n\"c_c\"\n" {
 		t.Errorf("jsonl output = %q, want one id per line", buf.String())
 	}
 
-	// A zero-count response carries no children — zero lines.
+	// A zero-id response — zero lines.
 	var empty bytes.Buffer
-	if err := renderCloseAllExited(&empty, json.RawMessage(`{"count":0}`), outputJSONL); err != nil {
+	if err := renderCloseAllExited(&empty, &rafikiv1.CloseAllExitedResponse{}, outputJSONL); err != nil {
 		t.Fatalf("renderCloseAllExited zero: %v", err)
 	}
 	if empty.Len() != 0 {
@@ -119,28 +120,23 @@ func TestCloseAllExitedJSONLIds(t *testing.T) {
 
 // ─── review-close harness: a framed fake daemon plus a Connect stub ──────────
 //
-// runClose reaches the daemon on TWO planes: the close itself rides the
-// framed protocol (mustDial) and the post-close review rides Connect
-// (newConnectEndpoint). The harness below fakes both in the layout the real
-// client derives: the profile's Socket names controller.sock, and
-// connectSocketFor treats connect.sock as its SIBLING — so the framed fake
-// listens on controller.sock and the Connect stub on connect.sock, in a
-// short directory (unix socket paths cap at ~104 bytes).
+// runClose is now Connect-only (newConnectEndpoint → ep.control()), but the
+// harness keeps BOTH planes in the layout the real client derives — the
+// profile's Socket names controller.sock and connectSocketFor treats
+// connect.sock as its SIBLING — because cmd_conversations_test.go's review
+// test resolves its target by name through the framed fake's ctrl_list.
+// The close tests below assert against the Connect stub's records.
+
+func intPtr(i int) *int { return &i }
 
 // fakeFramedDaemon answers every ctrl_* request with success and records
-// what arrived, so a test can assert the close itself actually happened.
+// what arrived, so a test can assert what the framed plane received.
 type fakeFramedDaemon struct {
 	mu        sync.Mutex
 	list      protocol.ListResponseData
 	allExited protocol.ForgetAllExitedResponseData
 	kills     []string
 	forgets   []string
-}
-
-func (f *fakeFramedDaemon) forgotten() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.forgets...)
 }
 
 func (f *fakeFramedDaemon) handleConn(conn net.Conn) {
@@ -223,9 +219,11 @@ func serveFramedDaemon(t *testing.T, sockPath string, f *fakeFramedDaemon) {
 	}()
 }
 
-// reviewStubControl serves the two review verbs and records what arrived.
-// forbidReview turns any ConversationReview call into a test failure — the
-// "close with neither flag never dials Connect at all" assertion.
+// reviewStubControl serves the review verbs and the child operations the
+// Connect close path needs (GetChild for the pre-check, Kill, Close,
+// CloseAllExited) and records what arrived. forbidReview turns any
+// ConversationReview call into a test failure — the "close with neither flag
+// never reviews" assertion.
 type reviewStubControl struct {
 	rafikiv1connect.UnimplementedControlHandler
 	t            *testing.T
@@ -238,6 +236,72 @@ type reviewStubControl struct {
 	reviewErr     error
 	findingsResp  *rafikiv1.ConversationFindingsResponse
 	findingsErr   error
+
+	// The close path's fakes. childStatus is what GetChild answers per id
+	// (default exited — the shape `close <id>` usually meets); killErr and
+	// closeErr are returned by Kill/Close when set; closeAllIds is
+	// CloseAllExited's answer.
+	childStatus  map[string]string
+	killErr      error
+	closeErr     error
+	closeAllIds  []string
+	killCalls    []string
+	closeCalls   []string
+	allExitedReq []*rafikiv1.CloseAllExitedRequest
+}
+
+func (s *reviewStubControl) GetChild(
+	_ context.Context,
+	req *connect.Request[rafikiv1.GetChildRequest],
+) (*connect.Response[rafikiv1.GetChildResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status, ok := s.childStatus[req.Msg.GetChildId()]
+	if !ok {
+		status = "exited"
+	}
+	return connect.NewResponse(&rafikiv1.GetChildResponse{
+		Child: &rafikiv1.ChildSummary{ChildId: req.Msg.GetChildId(), Status: status},
+	}), nil
+}
+
+func (s *reviewStubControl) Kill(
+	_ context.Context,
+	req *connect.Request[rafikiv1.KillRequest],
+) (*connect.Response[rafikiv1.KillResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.killCalls = append(s.killCalls, req.Msg.GetChildId())
+	if s.killErr != nil {
+		return nil, s.killErr
+	}
+	code := int32(0)
+	return connect.NewResponse(&rafikiv1.KillResponse{
+		ChildId: req.Msg.GetChildId(), ExitCode: &code, DurationMs: 1,
+	}), nil
+}
+
+func (s *reviewStubControl) Close(
+	_ context.Context,
+	req *connect.Request[rafikiv1.CloseRequest],
+) (*connect.Response[rafikiv1.CloseResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeCalls = append(s.closeCalls, req.Msg.GetChildId())
+	if s.closeErr != nil {
+		return nil, s.closeErr
+	}
+	return connect.NewResponse(&rafikiv1.CloseResponse{ChildId: req.Msg.GetChildId()}), nil
+}
+
+func (s *reviewStubControl) CloseAllExited(
+	_ context.Context,
+	req *connect.Request[rafikiv1.CloseAllExitedRequest],
+) (*connect.Response[rafikiv1.CloseAllExitedResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allExitedReq = append(s.allExitedReq, req.Msg)
+	return connect.NewResponse(&rafikiv1.CloseAllExitedResponse{ChildIds: s.closeAllIds}), nil
 }
 
 func (s *reviewStubControl) ConversationReview(
@@ -343,10 +407,10 @@ func captureStderr(t *testing.T) func() string {
 
 // ─── the tests ──────────────────────────────────────────────────────────────
 
-// Closing with neither flag never dials Connect at all — the fake fails the
-// test if ConversationReview is reached.
+// Closing with neither flag never reviews — the stub fails the test if
+// ConversationReview is reached.
 func TestCloseReviewDefaultOff(t *testing.T) {
-	daemon, stub := newReviewHarness(t)
+	_, stub := newReviewHarness(t)
 	stub.forbidReview = true
 
 	cmd := newCloseCmd()
@@ -357,15 +421,15 @@ func TestCloseReviewDefaultOff(t *testing.T) {
 	if calls := stub.reviews(); len(calls) != 0 {
 		t.Errorf("ConversationReview called %d time(s) with no --review flag", len(calls))
 	}
-	// The close itself still went through both framed steps.
-	if got := daemon.forgotten(); len(got) != 1 || got[0] != "c_1" {
-		t.Errorf("ctrl_forget for %v, want [c_1]", got)
+	// The close itself still went through.
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
 	}
 }
 
 // --review sends one ConversationReview naming exactly the closed id.
 func TestCloseReviewSendsRequestForClosedID(t *testing.T) {
-	daemon, stub := newReviewHarness(t)
+	_, stub := newReviewHarness(t)
 	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
 		ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
 	}}}
@@ -388,14 +452,14 @@ func TestCloseReviewSendsRequestForClosedID(t *testing.T) {
 	if calls[0].Model != nil || calls[0].Profile != nil || calls[0].BudgetUsd != nil || calls[0].MinTurns != nil {
 		t.Errorf("all-optional request carries config fields: %+v", calls[0])
 	}
-	if got := daemon.forgotten(); len(got) != 1 || got[0] != "c_1" {
-		t.Errorf("ctrl_forget for %v, want [c_1]", got)
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
 	}
 }
 
 // --no-review is the explicit no-op spelling of the default.
 func TestCloseNoReviewIsExplicitNoOp(t *testing.T) {
-	daemon, stub := newReviewHarness(t)
+	_, stub := newReviewHarness(t)
 	stub.forbidReview = true
 
 	cmd := newCloseCmd()
@@ -406,8 +470,8 @@ func TestCloseNoReviewIsExplicitNoOp(t *testing.T) {
 	if calls := stub.reviews(); len(calls) != 0 {
 		t.Errorf("ConversationReview called under --no-review: %v", calls)
 	}
-	if got := daemon.forgotten(); len(got) != 1 || got[0] != "c_1" {
-		t.Errorf("ctrl_forget for %v, want [c_1]", got)
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
 	}
 }
 
@@ -415,7 +479,7 @@ func TestCloseNoReviewIsExplicitNoOp(t *testing.T) {
 // child was still closed, and the failure surfaces as the per-id stderr
 // note with the exact format the brief pins.
 func TestCloseReviewFailureNeverFailsTheClose(t *testing.T) {
-	daemon, stub := newReviewHarness(t)
+	_, stub := newReviewHarness(t)
 	stub.reviewErr = connect.NewError(connect.CodeFailedPrecondition, errors.New("unknown model"))
 	stderr := captureStderr(t)
 
@@ -425,8 +489,8 @@ func TestCloseReviewFailureNeverFailsTheClose(t *testing.T) {
 		t.Fatalf("close must not fail because its review failed: %v", err)
 	}
 
-	if got := daemon.forgotten(); len(got) != 1 || got[0] != "c_1" {
-		t.Errorf("ctrl_forget for %v, want [c_1] — the review failure swallowed the close", got)
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1] — the review failure swallowed the close", got)
 	}
 	out := stderr()
 	if !strings.HasPrefix(out, "review c_1: ") {
@@ -440,8 +504,8 @@ func TestCloseReviewFailureNeverFailsTheClose(t *testing.T) {
 // --all-exited --review reviews EVERY id the close reported, in one batched
 // request — not one request per id.
 func TestCloseAllExitedReviewBatchesEveryClosedID(t *testing.T) {
-	daemon, stub := newReviewHarness(t)
-	daemon.allExited = protocol.ForgetAllExitedResponseData{Count: 2, Children: []string{"c_1", "c_2"}}
+	_, stub := newReviewHarness(t)
+	stub.closeAllIds = []string{"c_1", "c_2"}
 	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
 		ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
 	}}}
@@ -477,5 +541,101 @@ func TestCloseReviewNotesNonEnqueuedStatuses(t *testing.T) {
 	}
 	if out := stderr(); out != "review c_1: queue full\n" {
 		t.Errorf("stderr = %q, want \"review c_1: queue full\\n\"", out)
+	}
+}
+
+// ─── the Connect close path ──────────────────────────────────────────────────
+
+// A child the daemon already reports exited skips the kill entirely: the
+// pre-check sees status=exited and goes straight to Close.
+func TestCloseExitedChildSkipsKill(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.childStatus = map[string]string{"c_1": "exited"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if got := stub.killCalls; len(got) != 0 {
+		t.Errorf("Kill called %v, want none — an exited child needs no stop", got)
+	}
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
+	}
+}
+
+// A live child is killed first, then closed.
+func TestCloseLiveChildStopsFirst(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.childStatus = map[string]string{"c_1": "streaming"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if got := stub.killCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Kill for %v, want [c_1]", got)
+	}
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
+	}
+}
+
+// THE RETIREMENT RULING: the "kill says the child already exited → proceed to
+// close" branch keys on the rafiki REASON riding the Connect error, never on
+// the bare FailedPrecondition code — which child_in_grace and
+// child_shutting_down share. The stub answers a live child (so the kill runs)
+// but its Kill fails with the reason attached; close must proceed anyway.
+func TestCloseKillSaysAlreadyExitedProceedsToClose(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.childStatus = map[string]string{"c_1": "streaming"}
+	stub.killErr = rpcreason.Attach(
+		connect.NewError(connect.CodeFailedPrecondition, errors.New("child has already exited")),
+		protocol.ErrChildExited)
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("a child_exited kill must proceed to close, got: %v", err)
+	}
+	if got := stub.closeCalls; len(got) != 1 || got[0] != "c_1" {
+		t.Errorf("Close for %v, want [c_1]", got)
+	}
+}
+
+// The same code with a DIFFERENT reason is a failure, not a close: this is
+// exactly what keying on the reason (instead of connect.CodeOf) buys.
+func TestCloseKillInGraceIsAFailure(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.childStatus = map[string]string{"c_1": "streaming"}
+	stub.killErr = rpcreason.Attach(
+		connect.NewError(connect.CodeFailedPrecondition, errors.New("child in grace")),
+		protocol.ErrChildInGrace)
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("a child_in_grace kill must fail the close, got nil")
+	}
+	if got := stub.closeCalls; len(got) != 0 {
+		t.Errorf("Close for %v, want none — the child is not stopped yet", got)
+	}
+}
+
+// A kill failure carrying no reason at all fails the close.
+func TestCloseKillUnknownReasonFails(t *testing.T) {
+	_, stub := newReviewHarness(t)
+	stub.childStatus = map[string]string{"c_1": "streaming"}
+	stub.killErr = connect.NewError(connect.CodeInternal, errors.New("boom"))
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("an unreasoned kill failure must fail the close, got nil")
+	}
+	if got := stub.closeCalls; len(got) != 0 {
+		t.Errorf("Close for %v, want none", got)
 	}
 }

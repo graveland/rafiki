@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,9 +10,10 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 func newCloseCmd() *cobra.Command {
@@ -80,8 +80,11 @@ that pass a fixed flag set.`,
 }
 
 func runClose(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	ctx := cmdCtx(cmd)
 	allExited, _ := cmd.Flags().GetBool("all-exited")
@@ -97,44 +100,34 @@ func runClose(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		olderThan, _ := cmd.Flags().GetDuration("older-than")
-		req := protocol.ForgetAllExitedRequest{
-			Type: protocol.TypeCtrlForgetAllExited,
-		}
+		req := &rafikiv1.CloseAllExitedRequest{}
 		if olderThan > 0 {
 			req.OlderThanMs = olderThan.Milliseconds()
 		}
-		resp, err := c.Request(ctx, req)
+		resp, err := ctrl.CloseAllExited(ctx, connect.NewRequest(req))
 		if err != nil {
-			return err
-		}
-		if !resp.Success {
-			return fmt.Errorf("ctrl_forget_all_exited: %s", client.FormatError(resp))
+			return diagnoseConnectError(err, ep.describe)
 		}
 		dropChildCompletionCache(cmd)
 		if review {
-			var data protocol.ForgetAllExitedResponseData
-			if err := json.Unmarshal(resp.Data, &data); err != nil {
-				// No ids to name without the decode; one unprefixed note.
-				fmt.Fprintf(os.Stderr, "review: decode close response: %v\n", err)
-			} else {
-				closeReview(cmd, data.Children)
-			}
+			closeReview(cmd, resp.Msg.GetChildIds())
 		}
-		return renderCloseAllExited(os.Stdout, json.RawMessage(resp.Data), mode)
+		return renderCloseAllExited(os.Stdout, resp.Msg, mode)
 	}
 
 	st, _ := cmd.Flags().GetDuration("shutdown-timeout")
 	kt, _ := cmd.Flags().GetDuration("kill-timeout")
+	profileName := mustProfile(cmd).Name
 
 	var failures int
 	for _, arg := range args {
-		childID, err := c.Resolve(ctx, arg)
+		childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: resolve %q: %v\n", arg, err)
 			failures++
 			continue
 		}
-		if err := closeChild(ctx, c, childID, st, kt); err != nil {
+		if err := closeChildConnect(ctx, ctrl, childID, st, kt); err != nil {
 			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
 			failures++
 			continue
@@ -152,10 +145,9 @@ func runClose(cmd *cobra.Command, args []string) error {
 }
 
 // closeReview asks the daemon to review the conversations just closed, over
-// Connect — the close ran on the framed protocol and this is a new verb, so
-// it goes on Connect only. Best-effort by design (design §5): the close has
-// already succeeded, so a review that fails must never fail it — every
-// whole-request failure becomes one stderr note per closed id, and a per-id
+// Connect. Best-effort by design (design §5): the close has already succeeded,
+// so a review that fails must never fail it — every whole-request failure
+// becomes one stderr note per closed id, and a per-id
 // ALREADY_RUNNING/QUEUE_FULL becomes the id's own note. Enqueued prints
 // nothing: silence is the success case here, the same way the close's own
 // `closed <id>` line is the only close output.
@@ -197,48 +189,108 @@ func closeReview(cmd *cobra.Command, ids []string) {
 	}
 }
 
-// renderCloseAllExited writes the ctrl_forget_all_exited result in the
-// requested mode. JSON stays the raw payload passthrough it has always been;
-// JSONL writes one closed child id per line (the response's children list);
-// text reports the count. The per-target `closed <id>` path lives in runClose
-// and is deliberately untouched here.
-func renderCloseAllExited(w io.Writer, raw json.RawMessage, mode outputMode) error {
+// renderCloseAllExited writes the CloseAllExited result in the requested
+// mode. JSON is the response's canonical protojson ({"childIds":[...]} — the
+// framed payload's separate count is derivable from the list and the wire
+// dropped it); JSONL writes one closed child id per line; text reports the
+// count. The per-target `closed <id>` path lives in runClose and is
+// deliberately untouched here.
+func renderCloseAllExited(w io.Writer, resp *rafikiv1.CloseAllExitedResponse, mode outputMode) error {
 	switch mode {
 	case outputJSON:
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(raw)
+		return emitProto(w, resp, mode)
 	case outputJSONL:
-		var data protocol.ForgetAllExitedResponseData
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("decode close response: %w", err)
-		}
-		rows := make([]any, 0, len(data.Children))
-		for _, id := range data.Children {
+		rows := make([]any, 0, len(resp.GetChildIds()))
+		for _, id := range resp.GetChildIds() {
 			rows = append(rows, id)
 		}
 		return writeJSONL(w, rows)
 	default:
-		var data protocol.ForgetAllExitedResponseData
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("decode close response: %w", err)
-		}
-		if data.Count == 0 {
+		if len(resp.GetChildIds()) == 0 {
 			_, err := fmt.Fprintln(w, "no exited children to close")
 			return err
 		}
-		_, err := fmt.Fprintf(w, "closed %d exited children\n", data.Count)
+		_, err := fmt.Fprintf(w, "closed %d exited children\n", len(resp.GetChildIds()))
 		return err
 	}
 }
 
+// closeChildConnect kills childID if it is still running — treating "already
+// exited" as nothing to stop, never as failure — then closes it. It is
+// close's semantics under the Connect plane: an explicit request to get rid
+// of the child, not an implicit safety net, so this does NOT gate on a clean
+// exit the way the old kill-then-auto-close policy did.
+//
+// Already-exited is detected twice, because the signal the framed plane read
+// off the kill's response now rides the rafiki reason on the Connect error
+// (the retirement ruling: rpcreason.Reason — NEVER connect.CodeOf, whose
+// FailedPrecondition also carries child_in_grace/child_shutting_down):
+//
+//   - A GetChild pre-check skips the kill entirely for a child the daemon
+//     already reports exited, so the ordinary `close <exited-child>` needs
+//     neither a kill nor a reason. (It also saves a graceful-shutdown wait
+//     the old flow always paid.)
+//   - The kill error's own ErrChildExited reason covers the race between the
+//     pre-check and the kill. A kill failure carrying no reason is reported
+//     as the failure it is.
+func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, childID string, st, kt time.Duration) error {
+	get, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
+	if err != nil {
+		return fmt.Errorf("get child: %s", formatConnectErr(err))
+	}
+	if get.Msg.GetChild().GetStatus() != string(protocol.StatusExited) {
+		req := &rafikiv1.KillRequest{ChildId: childID}
+		if st > 0 {
+			req.ShutdownTimeoutMs = st.Milliseconds()
+		}
+		if kt > 0 {
+			req.KillTimeoutMs = kt.Milliseconds()
+		}
+		_, err := ctrl.Kill(ctx, connect.NewRequest(req))
+		if err != nil {
+			if rpcreason.Reason(err) != protocol.ErrChildExited {
+				return fmt.Errorf("kill: %s", formatConnectErr(err))
+			}
+			// Already exited — proceed straight to close.
+		}
+	}
+
+	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
+	if err != nil {
+		return fmt.Errorf("close: %s", formatConnectErr(err))
+	}
+	return nil
+}
+
+// ─── the framed close path (attachAndDecide's kill-on-exit choice) ──────────
+//
+// Everything above this line is Connect. The helper below still rides the
+// framed plane because its one caller, attachAndDecide (cli_helpers.go),
+// re-dials framed for the kill-on-exit close. It is stated over a structural
+// interface so this file never imports pkg/client; Task 5.1 deletes both the
+// caller's framed re-dial and this helper together with the framed plane.
+
+// framedRequester is the slice of pkg/client.Client the framed close path
+// needs, stated structurally: *client.Client's Request method satisfies it,
+// and the CLI files this lives in must not link pkg/client (the framed plane
+// is being retired around them).
+type framedRequester interface {
+	Request(ctx context.Context, req any) (*protocol.Response, error)
+}
+
+// framedFormatErr renders a framed response error the way client.FormatError
+// does ("code: message"), inlined so no pkg/client import is needed.
+func framedFormatErr(resp *protocol.Response) string {
+	if resp == nil || resp.Error == nil {
+		return "unknown error"
+	}
+	return fmt.Sprintf("%s: %s", resp.Error.Code, resp.Error.Message)
+}
+
 // closeChild kills childID if it is still running — ignoring the "already
-// exited" case rather than treating it as failure — then closes it. Shared
-// by `rafiki close` and the attach/create exit prompt's "terminate" choice,
-// which is close's semantics under a different name: an explicit request to
-// get rid of the child, not an implicit safety net, so this does NOT gate on
-// a clean exit the way the old kill-then-auto-close policy did.
-func closeChild(ctx context.Context, c *client.Client, childID string, st, kt time.Duration) error {
+// exited" case rather than treating it as failure — then closes it. Framed;
+// see closeChildConnect for the Connect form this is retired by.
+func closeChild(ctx context.Context, c framedRequester, childID string, st, kt time.Duration) error {
 	req := protocol.KillRequest{
 		Type:    protocol.TypeCtrlKill,
 		ChildID: childID,
@@ -256,7 +308,7 @@ func closeChild(ctx context.Context, c *client.Client, childID string, st, kt ti
 	}
 	if !resp.Success {
 		if resp.Error == nil || resp.Error.Code != protocol.ErrChildExited {
-			return fmt.Errorf("ctrl_kill: %s", client.FormatError(resp))
+			return fmt.Errorf("ctrl_kill: %s", framedFormatErr(resp))
 		}
 		// Already exited — proceed straight to close.
 	}
@@ -269,7 +321,7 @@ func closeChild(ctx context.Context, c *client.Client, childID string, st, kt ti
 		return err
 	}
 	if !fresp.Success {
-		return fmt.Errorf("ctrl_forget: %s", client.FormatError(fresp))
+		return fmt.Errorf("ctrl_forget: %s", framedFormatErr(fresp))
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/table"
 )
@@ -88,16 +89,16 @@ func profileIndicator(name string) string {
 	return "profile: " + name + "\n"
 }
 
-// renderList writes a list of ChildSummary either as JSON or as a table.
-func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, useColor bool, flat bool) error {
+// renderList writes a list of wire ChildSummary either as protojson or as a
+// table. JSON is the {"children":[...]} envelope the framed plane shipped,
+// now protojson-encoded; JSONL is one canonical ChildSummary per line,
+// unwrapped.
+func renderList(w io.Writer, children []*rafikiv1.ChildSummary, mode outputMode, useColor bool, flat bool) error {
 	if mode == outputJSON {
-		return writeJSON(w, map[string]any{"children": children})
+		return writeProtoChildren(w, children)
 	}
 	if mode == outputJSONL {
-		// One ChildSummary object per line, unwrapped — the objects themselves,
-		// not a {"children":[...]} envelope, so a piped consumer reads one
-		// agent per line.
-		return writeJSONL(w, childRows(children))
+		return emitProtoRows(w, children, outputJSONL)
 	}
 
 	tb := table.New(w, table.Options{Color: useColor})
@@ -114,33 +115,33 @@ func renderList(w io.Writer, children []protocol.ChildSummary, mode outputMode, 
 	for _, tr := range treeRows {
 		ch := tr.Child
 		started := "-"
-		if ch.StartedAt > 0 {
-			started = time.UnixMilli(ch.StartedAt).Format("2006-01-02 15:04")
+		if ch.GetStartedAt() > 0 {
+			started = time.UnixMilli(ch.GetStartedAt()).Format("2006-01-02 15:04")
 		}
-		provider, model := splitProviderModel(ch.Model)
-		idCell := ch.ChildID
+		provider, model := splitProviderModel(ch.GetModel())
+		idCell := ch.GetChildId()
 		if tr.Depth > 0 {
-			idCell = strings.Repeat("  ", tr.Depth) + "└ " + ch.ChildID
+			idCell = strings.Repeat("  ", tr.Depth) + "└ " + ch.GetChildId()
 		}
 		var own, total float64
-		if ch.CostUSD != nil {
-			own = *ch.CostUSD
+		if ch.CostUsd != nil {
+			own = *ch.CostUsd
 		}
-		if t := totals[ch.ChildID]; t != nil {
+		if t := totals[ch.GetChildId()]; t != nil {
 			total = *t
 		}
 		tb.Row(
 			idCell,
-			defaultDash(ch.Name),
-			kindOrDefault(ch.Kind),
-			formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor),
+			defaultDash(ch.GetName()),
+			kindOrDefault(ch.GetKind()),
+			formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor),
 			defaultDash(provider),
 			defaultDash(model),
 			costfmt.Format(own, cur),
 			costfmt.Format(total, cur),
-			defaultDash(shortenCwd(ch.Cwd)),
+			defaultDash(shortenCwd(ch.GetCwd())),
 			started,
-			formatLabels(ch.Labels, 40, false),
+			formatLabels(ch.GetLabels(), 40, false),
 		)
 	}
 
@@ -168,13 +169,87 @@ func dimHeader(useColor bool, names ...string) []string {
 	return out
 }
 
-// childRows adapts a ChildSummary slice to writeJSONL's []any.
-func childRows(children []protocol.ChildSummary) []any {
+// childRows adapts the wire summaries to writeJSONL's []any as canonical
+// protojson bytes per row. The one remaining consumer is cmd_recent.go's
+// legacy children-payload path, which pipes rows through writeJSONL; handing
+// it the proto messages directly would marshal them with encoding/json
+// (int64 as numbers) instead of the canonical protojson encoding.
+func childRows(children []*rafikiv1.ChildSummary) []any {
 	rows := make([]any, len(children))
-	for i := range children {
-		rows[i] = children[i]
+	for i, ch := range children {
+		b, err := marshalProtoJSON(ch)
+		if err != nil {
+			// Unreachable for daemon-built proto3 messages; keep the row rather
+			// than dropping it silently, accepting encoding/json's shape.
+			b, _ = json.Marshal(ch)
+		}
+		rows[i] = json.RawMessage(b)
 	}
 	return rows
+}
+
+// writeProtoChildren writes list's -o json shape — the {"children":[...]}
+// envelope the framed plane shipped — with each row the canonical protojson
+// of its ChildSummary. Same construction as emitProtoRows, with the
+// envelope key the list verb's consumers already read.
+func writeProtoChildren(w io.Writer, children []*rafikiv1.ChildSummary) error {
+	parts := make([]string, len(children))
+	for i, ch := range children {
+		b, err := marshalProtoJSON(ch)
+		if err != nil {
+			return err
+		}
+		parts[i] = string(b)
+	}
+	env := []byte(`{"children":[` + strings.Join(parts, ",") + "]}")
+	return writeIndentedJSON(w, env)
+}
+
+// protoChildSummaries converts framed-plane summaries onto the wire type —
+// the one direction the CLI still needs, for a children-shaped payload
+// arriving as raw JSON (cmd_recent.go's legacy path). The optional fields
+// stay nil when the source is nil, the same rule connectapi.toProtoChild
+// applies.
+func protoChildSummaries(children []protocol.ChildSummary) []*rafikiv1.ChildSummary {
+	out := make([]*rafikiv1.ChildSummary, 0, len(children))
+	for _, c := range children {
+		ch := &rafikiv1.ChildSummary{
+			ChildId:             c.ChildID,
+			Name:                c.Name,
+			Kind:                c.Kind,
+			Status:              c.Status,
+			Model:               c.Model,
+			Cwd:                 c.Cwd,
+			SessionId:           c.SessionID,
+			SessionFile:         c.SessionFile,
+			StartedAt:           c.StartedAt,
+			LastActivity:        c.LastActivity,
+			Labels:              c.Labels,
+			SlashCommands:       c.SlashCommands,
+			ContextWindow:       int32(c.ContextWindow),
+			MaxCompletionTokens: int32(c.MaxCompletionTokens),
+			Result:              c.Result,
+			ExitSignal:          c.ExitSignal,
+		}
+		if c.PID != nil {
+			pid := int32(*c.PID)
+			ch.Pid = &pid
+		}
+		if c.ExitCode != nil {
+			code := int32(*c.ExitCode)
+			ch.ExitCode = &code
+		}
+		if c.CostUSD != nil {
+			cost := *c.CostUSD
+			ch.CostUsd = &cost
+		}
+		if c.MaxCost != nil {
+			maxCost := *c.MaxCost
+			ch.MaxCost = &maxCost
+		}
+		out = append(out, ch)
+	}
+	return out
 }
 
 // rawRows adapts already-encoded JSON objects to writeJSONL's []any, so a
@@ -185,6 +260,25 @@ func rawRows(rows []json.RawMessage) []any {
 		out[i] = r
 	}
 	return out
+}
+
+// decodeChildrenPayload reports whether data carries a children list — the
+// framed ctrl_list envelope {"children":[...]} or a bare array — and returns
+// the children as wire summaries. A pointer is used for the envelope so an
+// object with no children key (any other verb's payload) reads as absent
+// rather than as an empty list.
+func decodeChildrenPayload(data []byte) ([]*rafikiv1.ChildSummary, bool) {
+	var env struct {
+		Children *[]protocol.ChildSummary `json:"children"`
+	}
+	if err := json.Unmarshal(data, &env); err == nil && env.Children != nil {
+		return protoChildSummaries(*env.Children), true
+	}
+	var arr []protocol.ChildSummary
+	if err := json.Unmarshal(data, &arr); err == nil && arr != nil {
+		return protoChildSummaries(arr), true
+	}
+	return nil, false
 }
 
 // formatUnixMilli renders a wire millisecond timestamp the way the list
@@ -270,7 +364,7 @@ func writeJSONL(w io.Writer, rows []any) error {
 // it appends the exit code (or signal name) in parentheses so users can tell
 // clean exits (0) from failures (!= 0) and signal-driven terminations at a
 // glance — useful for spotting cleanup bugs vs. legitimate non-zero exits.
-func formatStatus(status string, exitCode *int, exitSignal string, useColor bool) string {
+func formatStatus(status string, exitCode *int32, exitSignal string, useColor bool) string {
 	colored := colorStatus(status, useColor)
 	if status != "exited" {
 		return colored
@@ -279,7 +373,7 @@ func formatStatus(status string, exitCode *int, exitSignal string, useColor bool
 	case exitSignal != "":
 		return colored + " (signal: " + exitSignal + ")"
 	case exitCode != nil:
-		return colored + " (" + strconv.Itoa(*exitCode) + ")"
+		return colored + " (" + strconv.Itoa(int(*exitCode)) + ")"
 	default:
 		return colored + " (?)"
 	}
@@ -320,7 +414,7 @@ func magenta(s string) string { return "\x1b[35m" + s + "\x1b[0m" }
 
 // treeRow is a child plus its indentation depth in the rendered tree.
 type treeRow struct {
-	Child protocol.ChildSummary
+	Child *rafikiv1.ChildSummary
 	Depth int
 }
 
@@ -329,19 +423,19 @@ type treeRow struct {
 // has no parent label, or its parent is absent from this list (filtered out
 // by --status, or already forgotten). Shared by sortChildrenAsTree and
 // subtreeCosts so the two never disagree about what "descendant" means.
-func effectiveParents(children []protocol.ChildSummary) map[string]string {
+func effectiveParents(children []*rafikiv1.ChildSummary) map[string]string {
 	byID := make(map[string]bool, len(children))
 	for _, ch := range children {
-		byID[ch.ChildID] = true
+		byID[ch.GetChildId()] = true
 	}
 	out := make(map[string]string, len(children))
 	for _, ch := range children {
-		p := ch.Labels["rafiki/parent"]
+		p := ch.GetLabels()["rafiki/parent"]
 		if p == "" {
-			p = ch.Labels["fundi/parent"]
+			p = ch.GetLabels()["fundi/parent"]
 		}
 		if byID[p] {
-			out[ch.ChildID] = p
+			out[ch.GetChildId()] = p
 		}
 	}
 	return out
@@ -356,7 +450,7 @@ func effectiveParents(children []protocol.ChildSummary) map[string]string {
 //
 // A nil entry means no cost anywhere in that subtree is known (e.g. no agent
 // database configured) -- present-and-zero is a different, reportable fact.
-func subtreeCosts(children []protocol.ChildSummary) map[string]*float64 {
+func subtreeCosts(children []*rafikiv1.ChildSummary) map[string]*float64 {
 	parent := effectiveParents(children)
 	kids := make(map[string][]string, len(children))
 	for id, p := range parent {
@@ -364,7 +458,7 @@ func subtreeCosts(children []protocol.ChildSummary) map[string]*float64 {
 	}
 	own := make(map[string]*float64, len(children))
 	for _, ch := range children {
-		own[ch.ChildID] = ch.CostUSD
+		own[ch.GetChildId()] = ch.CostUsd
 	}
 
 	memo := make(map[string]*float64, len(children))
@@ -400,7 +494,7 @@ func subtreeCosts(children []protocol.ChildSummary) map[string]*float64 {
 
 	out := make(map[string]*float64, len(children))
 	for _, ch := range children {
-		out[ch.ChildID] = walk(ch.ChildID, map[string]bool{})
+		out[ch.GetChildId()] = walk(ch.GetChildId(), map[string]bool{})
 	}
 	return out
 }
@@ -412,13 +506,13 @@ func subtreeCosts(children []protocol.ChildSummary) map[string]*float64 {
 // is absent from the input — filtered out by --status, or already forgotten —
 // is treated as a root so it stays visible; silently dropping it would make
 // a filtered list lie about what is running.
-func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
+func sortChildrenAsTree(children []*rafikiv1.ChildSummary) []treeRow {
 	parents := effectiveParents(children)
 
-	kids := make(map[string][]protocol.ChildSummary, len(children))
-	var roots []protocol.ChildSummary
+	kids := make(map[string][]*rafikiv1.ChildSummary, len(children))
+	var roots []*rafikiv1.ChildSummary
 	for _, ch := range children {
-		if p := parents[ch.ChildID]; p != "" {
+		if p := parents[ch.GetChildId()]; p != "" {
 			kids[p] = append(kids[p], ch)
 		} else {
 			roots = append(roots, ch)
@@ -426,37 +520,25 @@ func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
 	}
 
 	// Sort roots and sibling groups so output is deterministic across calls.
-	slices.SortStableFunc(roots, func(a, b protocol.ChildSummary) int {
-		if a.ChildID < b.ChildID {
-			return -1
-		}
-		if a.ChildID > b.ChildID {
-			return 1
-		}
-		return 0
+	slices.SortStableFunc(roots, func(a, b *rafikiv1.ChildSummary) int {
+		return strings.Compare(a.GetChildId(), b.GetChildId())
 	})
 	for _, p := range kids {
-		slices.SortStableFunc(p, func(a, b protocol.ChildSummary) int {
-			if a.ChildID < b.ChildID {
-				return -1
-			}
-			if a.ChildID > b.ChildID {
-				return 1
-			}
-			return 0
+		slices.SortStableFunc(p, func(a, b *rafikiv1.ChildSummary) int {
+			return strings.Compare(a.GetChildId(), b.GetChildId())
 		})
 	}
 
 	var out []treeRow
 	emitted := make(map[string]bool, len(children))
-	var walk func(ch protocol.ChildSummary, depth int)
-	walk = func(ch protocol.ChildSummary, depth int) {
-		if emitted[ch.ChildID] {
+	var walk func(ch *rafikiv1.ChildSummary, depth int)
+	walk = func(ch *rafikiv1.ChildSummary, depth int) {
+		if emitted[ch.GetChildId()] {
 			return
 		}
-		emitted[ch.ChildID] = true
+		emitted[ch.GetChildId()] = true
 		out = append(out, treeRow{Child: ch, Depth: depth})
-		for _, kid := range kids[ch.ChildID] {
+		for _, kid := range kids[ch.GetChildId()] {
 			walk(kid, depth+1)
 		}
 	}
@@ -466,8 +548,8 @@ func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
 	// Anything still unemitted was part of a cycle. Render it flat rather
 	// than dropping it.
 	for _, ch := range children {
-		if !emitted[ch.ChildID] {
-			emitted[ch.ChildID] = true
+		if !emitted[ch.GetChildId()] {
+			emitted[ch.GetChildId()] = true
 			out = append(out, treeRow{Child: ch, Depth: 0})
 		}
 	}
@@ -476,7 +558,7 @@ func sortChildrenAsTree(children []protocol.ChildSummary) []treeRow {
 
 // flattenTree returns every child as a treeRow at depth 0 — the flat
 // (--flat) mode.
-func flattenTree(children []protocol.ChildSummary) []treeRow {
+func flattenTree(children []*rafikiv1.ChildSummary) []treeRow {
 	out := make([]treeRow, len(children))
 	for i, ch := range children {
 		out[i] = treeRow{Child: ch, Depth: 0}

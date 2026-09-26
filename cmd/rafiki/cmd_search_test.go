@@ -4,18 +4,17 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func TestSearchTextGroupsByChild(t *testing.T) {
-	hits := []protocol.SearchHit{
-		{ChildID: "c_one", SessionName: "alpha", Snippet: "first match in one"},
-		{ChildID: "c_one", SessionName: "alpha", Snippet: "second match in one"},
-		{ChildID: "c_two", SessionName: "beta", Snippet: "match in two"},
+	hits := []*rafikiv1.SearchResponse_SearchHit{
+		{ChildId: "c_one", SessionName: "alpha", Snippet: "first match in one"},
+		{ChildId: "c_one", SessionName: "alpha", Snippet: "second match in one"},
+		{ChildId: "c_two", SessionName: "beta", Snippet: "match in two"},
 	}
 	var buf bytes.Buffer
 	if err := renderSearchText(&buf, hits); err != nil {
@@ -49,8 +48,8 @@ func TestSearchTextIndentsContextLines(t *testing.T) {
 	// A multi-line snippet: the first line carries the ordinal, the rest are
 	// context indented two spaces. A trailing newline must not produce a
 	// phantom context line.
-	hits := []protocol.SearchHit{
-		{ChildID: "c_one", SessionName: "alpha", Snippet: "hit line\ncontext after\n"},
+	hits := []*rafikiv1.SearchResponse_SearchHit{
+		{ChildId: "c_one", SessionName: "alpha", Snippet: "hit line\ncontext after\n"},
 	}
 	var buf bytes.Buffer
 	if err := renderSearchText(&buf, hits); err != nil {
@@ -63,8 +62,8 @@ func TestSearchTextIndentsContextLines(t *testing.T) {
 }
 
 func TestSearchTextHeaderFallsBackToSessionFile(t *testing.T) {
-	hits := []protocol.SearchHit{
-		{ChildID: "c_one", SessionFile: "/sessions/c_one.jsonl", Snippet: "hit"},
+	hits := []*rafikiv1.SearchResponse_SearchHit{
+		{ChildId: "c_one", SessionFile: "/sessions/c_one.jsonl", Snippet: "hit"},
 	}
 	var buf bytes.Buffer
 	if err := renderSearchText(&buf, hits); err != nil {
@@ -85,25 +84,25 @@ func TestSearchTextNoHitsWritesNothing(t *testing.T) {
 	}
 }
 
+// Search's JSONL is one canonical protojson hit object per line, unwrapped.
 func TestSearchJSONLHitPerLine(t *testing.T) {
-	raw := []json.RawMessage{
-		json.RawMessage(`{"childId":"c_one","snippet":"first"}`),
-		json.RawMessage(`{"childId":"c_two","snippet":"second"}`),
+	hits := []*rafikiv1.SearchResponse_SearchHit{
+		{ChildId: "c_one", Snippet: "first"},
+		{ChildId: "c_two", Snippet: "second"},
 	}
 	var buf bytes.Buffer
-	if err := renderSearchJSONL(&buf, raw); err != nil {
-		t.Fatalf("renderSearchJSONL: %v", err)
+	if err := emitProtoRows(&buf, hits, outputJSONL); err != nil {
+		t.Fatalf("emitProtoRows: %v", err)
 	}
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want one per hit: %q", len(lines), buf.String())
 	}
-	// Each line is the raw hit object, passed through byte-exactly — not
-	// decoded and re-encoded.
+	// Each line is the hit's canonical protojson, compact.
 	if lines[0] != `{"childId":"c_one","snippet":"first"}` {
-		t.Errorf("line 0 = %q, want the raw hit object", lines[0])
+		t.Errorf("line 0 = %q, want the hit's protojson", lines[0])
 	}
 	if lines[1] != `{"childId":"c_two","snippet":"second"}` {
-		t.Errorf("line 1 = %q, want the raw hit object", lines[1])
+		t.Errorf("line 1 = %q, want the hit's protojson", lines[1])
 	}
 }

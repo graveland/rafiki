@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func TestStopCmd_NoCloseFlagRemoved(t *testing.T) {
@@ -44,7 +44,7 @@ func TestStopCmd_KeepsKillAsAnAlias(t *testing.T) {
 
 func TestRenderStopResults_JSON_CarriesError(t *testing.T) {
 	results := []stopTargetResult{
-		{Arg: "c_ok", ChildID: "c_ok", Kill: protocol.KillResponseData{ExitCode: intPtr(0)}},
+		{Arg: "c_ok", ChildID: "c_ok", Kill: &rafikiv1.KillResponse{ExitCode: int32Ptr(0)}},
 		{Arg: "c_bad", Err: errors.New("child not found")},
 	}
 	var buf bytes.Buffer
@@ -81,5 +81,3 @@ func TestRenderStopResults_Table_NoPanicOnNilExitCode(t *testing.T) {
 		t.Errorf("table output missing id or error: %s", out)
 	}
 }
-
-func intPtr(i int) *int { return &i }

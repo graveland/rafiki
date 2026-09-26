@@ -1,15 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newGetCmd() *cobra.Command {
@@ -27,46 +26,36 @@ func newGetCmd() *cobra.Command {
 }
 
 func runGet(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	ctx := cmdCtx(cmd)
+	profileName := mustProfile(cmd).Name
 
 	mode, useColor, err := outputOpts(cmd)
 	if err != nil {
 		return err
 	}
 
-	var children []protocol.ChildSummary
+	var children []*rafikiv1.ChildSummary
 	var failures int
 	for _, arg := range args {
-		childID, err := c.Resolve(ctx, arg)
+		childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: resolve %q: %v\n", arg, err)
 			failures++
 			continue
 		}
-		resp, err := c.Request(ctx, protocol.GetRequest{
-			Type:    protocol.TypeCtrlGet,
-			ChildID: childID,
-		})
+		resp, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: get %q: %v\n", arg, err)
+			fmt.Fprintf(os.Stderr, "error: get %q: %s\n", arg, formatConnectErr(err))
 			failures++
 			continue
 		}
-		if !resp.Success {
-			fmt.Fprintf(os.Stderr, "error: get %q: %s\n", arg, client.FormatError(resp))
-			failures++
-			continue
-		}
-		var child protocol.ChildSummary
-		if err := json.Unmarshal(resp.Data, &child); err != nil {
-			fmt.Fprintf(os.Stderr, "error: decode %q: %v\n", arg, err)
-			failures++
-			continue
-		}
-		children = append(children, child)
+		children = append(children, resp.Msg.GetChild())
 	}
 
 	if err := emitGet(os.Stdout, args, children, failures, mode, useColor); err != nil {
@@ -85,23 +74,21 @@ func runGet(cmd *cobra.Command, args []string) error {
 // target failed.
 //
 // The JSON shapes are get's backward-compatibility contract and are preserved
-// exactly: a single successful target emits a bare ChildSummary object,
-// multiple targets (or any failures) wrap in {"children":[...]}. JSONL emits
-// one compact ChildSummary per line, unwrapped. Table mode renders the same
-// table `list` renders, flat.
-func emitGet(w io.Writer, args []string, children []protocol.ChildSummary, failures int, mode outputMode, useColor bool) error {
+// exactly (protojson-encoded now): a single successful target emits a bare
+// ChildSummary object, multiple targets (or any failures) wrap in
+// {"children":[...]}. JSONL emits one canonical ChildSummary per line,
+// unwrapped. Table mode renders the same table `list` renders, flat.
+func emitGet(w io.Writer, args []string, children []*rafikiv1.ChildSummary, failures int, mode outputMode, useColor bool) error {
 	switch mode {
 	case outputJSON:
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
 		// Single successful target: plain object for backward compatibility.
 		// Multiple targets (or any failures): wrap in {"children":[...]}.
 		if len(args) == 1 && failures == 0 && len(children) == 1 {
-			return enc.Encode(children[0])
+			return emitProto(w, children[0], outputJSON)
 		}
-		return enc.Encode(map[string]any{"children": children})
+		return writeProtoChildren(w, children)
 	case outputJSONL:
-		return writeJSONL(w, childRows(children))
+		return emitProtoRows(w, children, outputJSONL)
 	default:
 		return renderList(w, children, outputTable, useColor, true)
 	}

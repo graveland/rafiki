@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // cliStateDir is a scratch XDG_STATE_HOME shared by every CLI invocation in
@@ -40,7 +42,7 @@ var (
 // $XDG_CONFIG_HOME itself, and profile.ProfilesFile()/PointerFile() resolve
 // through it. This is how these tests aim the real CLI binary at a scratch
 // daemon now that --socket is gone (client dialing is entirely profile-driven
-// — see pkg/profile and cmd/rafiki's mustDial/newConnectEndpoint).
+// — see pkg/profile and cmd/rafiki's newConnectEndpoint).
 func writeCliProfile(t *testing.T, configDir, socketPath string) {
 	t.Helper()
 	dir := filepath.Join(configDir, "rafiki")
@@ -176,12 +178,13 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		t.Fatalf("stop failed: %v\n%s", err, out)
 	}
 
-	// poll until status=exited (up to 5 seconds)
+	// poll until status=exited (up to 5 seconds). `get` renders indented
+	// protojson, so the needle carries the space after the colon.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		getCmd := cliCmd(t, d, "--output", "json", "get", "smoke")
 		out, _ = getCmd.CombinedOutput()
-		if strings.Contains(string(out), `"status":"exited"`) {
+		if strings.Contains(string(out), `"status": "exited"`) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -205,6 +208,32 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	out, _ = getCmd.CombinedOutput()
 	if !strings.Contains(string(out), "no child matches") {
 		t.Fatalf("expected child to be gone after close; get output: %s", out)
+	}
+
+	// close on a LIVE child: stop-first-then-close in one verb. Whatever state
+	// the child is in by the time close's stop lands (spawning or streaming),
+	// the close must end with the child gone.
+	liveCreate := cliCmd(t, d,
+		"--output", "json",
+		"create", "smoke-live",
+		"--cwd", "/tmp",
+		"--no-session",
+		"--no-extensions",
+		"--model", "anthropic/claude-sonnet-4-5",
+		"--no-local-executor",
+		"--detached",
+	)
+	if _, err := liveCreate.Output(); err != nil {
+		t.Fatalf("create smoke-live failed: %v", err)
+	}
+	closeLive := cliCmd(t, d, "close", "smoke-live")
+	if out, err = closeLive.CombinedOutput(); err != nil {
+		t.Fatalf("close of a live child failed: %v\n%s", err, out)
+	}
+	getLive := cliCmd(t, d, "get", "smoke-live")
+	out, _ = getLive.CombinedOutput()
+	if !strings.Contains(string(out), "no child matches") {
+		t.Fatalf("expected live child to be gone after close; get output: %s", out)
 	}
 }
 
@@ -303,7 +332,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	for time.Now().Before(deadline) {
 		getCmd := cliCmd(t, d, "--output", "json", "get", "test-detached")
 		out, _ = getCmd.CombinedOutput()
-		if strings.Contains(string(out), `"status":"exited"`) {
+		if strings.Contains(string(out), `"status": "exited"`) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -459,7 +488,7 @@ func TestCLI_BudgetSet(t *testing.T) {
 		t.Fatalf("get: %v\n%s", err, getOut)
 	}
 	var got struct {
-		MaxCost *float64 `json:"max_cost"`
+		MaxCost *float64 `json:"maxCost"`
 	}
 	if err := json.Unmarshal(getOut, &got); err != nil {
 		t.Fatalf("decode get output %q: %v", getOut, err)
@@ -560,15 +589,19 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	})
 
 	// ── list: -J line count == -o json children count ─────────────────────
+	// Both faces are the canonical protojson now (camelCase; int64 fields as
+	// strings), decoded here with protojson — encoding/json would refuse
+	// string-rendered int64s.
 	jsonOut, err := cliCmd(t, d, "--output", "json", "list", "--label", jsonlTestLabel).Output()
 	if err != nil {
 		t.Fatalf("list -o json failed: %v", err)
 	}
-	var envelope struct {
-		Children []protocol.ChildSummary `json:"children"`
-	}
-	if err := json.Unmarshal(jsonOut, &envelope); err != nil {
+	var envelope rafikiv1.ListChildrenResponse
+	if err := protojson.Unmarshal(jsonOut, &envelope); err != nil {
 		t.Fatalf("decode list -o json envelope: %v\noutput: %s", err, jsonOut)
+	}
+	if len(envelope.GetChildren()) == 0 {
+		t.Fatalf("list -o json returned no children for label %s", jsonlTestLabel)
 	}
 
 	jsonlOut, err := cliCmd(t, d, "-J", "list", "--label", jsonlTestLabel).Output()
@@ -576,16 +609,16 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 		t.Fatalf("list -J failed: %v", err)
 	}
 	lines := splitJSONLines(t, jsonlOut)
-	if len(lines) != len(envelope.Children) {
+	if len(lines) != len(envelope.GetChildren()) {
 		t.Fatalf("list -J emitted %d lines for %d children in -o json's envelope; JSONL must carry every row",
-			len(lines), len(envelope.Children))
+			len(lines), len(envelope.GetChildren()))
 	}
 	for i, line := range lines {
-		var ch protocol.ChildSummary
-		if err := json.Unmarshal([]byte(line), &ch); err != nil {
-			t.Fatalf("list -J line %d is not a bare ChildSummary object (JSONL must unwrap the envelope): %v\nline: %s", i, err, line)
+		var ch rafikiv1.ChildSummary
+		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("list -J line %d is not a bare ChildSummary protojson object (JSONL must unwrap the envelope): %v\nline: %s", i, err, line)
 		}
-		if ch.ChildID == "" {
+		if ch.GetChildId() == "" {
 			t.Fatalf("list -J line %d has an empty childId: %s", i, line)
 		}
 	}
@@ -621,9 +654,12 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 		t.Fatalf("get -J with two targets emitted %d lines, want 2\noutput: %s", len(getLines), getOut)
 	}
 	for i, line := range getLines {
-		var ch protocol.ChildSummary
-		if err := json.Unmarshal([]byte(line), &ch); err != nil {
-			t.Fatalf("get -J line %d is not a bare ChildSummary object: %v\nline: %s", i, err, line)
+		var ch rafikiv1.ChildSummary
+		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("get -J line %d is not a bare ChildSummary protojson object: %v\nline: %s", i, err, line)
+		}
+		if ch.GetChildId() == "" {
+			t.Fatalf("get -J line %d has an empty childId: %s", i, line)
 		}
 	}
 
@@ -680,14 +716,6 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	}
 }
 
-// TestCLI_PresetPutThenCreateOnTheSameProfile is the regression for the
-// two-identities bug on a socket profile. `rafiki preset put` sends the
-// profile's bearer token over connect.sock (Connect), so the preset is owned
-// by that user; `rafiki create --preset` sends ctrl_spawn over the framed
-// control socket, which used to authenticate nobody — the spawn resolved the
-// preset against owner "" and failed with `no preset "review:fixer"; presets
-// in "review:": (none)` even though the SAME profile had just written it.
-//
 // operatorName mints a unique username per run: the suite shares one
 // disposable database across runs and daemons, so a fixed name would collide
 // with the user a previous run created ("username ... is already taken").
@@ -695,13 +723,19 @@ func operatorName() string {
 	return fmt.Sprintf("operator-%d", time.Now().UnixNano())
 }
 
-// The framed socket now accepts an optional ctrl_auth as its first frame and
-// the CLI sends the profile's token, so both verbs run as one identity. The
-// user is minted through the CLI itself: `rafiki user create` dials TOKEN-LESS
-// (it is the recovery path for a stale token, and must never present one), the
-// UDS admits it anonymously because the socket is the trust mechanism, and it
-// writes the minted token into the profile's token file, which every later
-// invocation in this test then authenticates with.
+// TestCLI_PresetPutThenCreateOnTheSameProfile is the preset round trip end to
+// end: `rafiki preset put` writes the preset (owned by the profile's user —
+// presets resolve against the connection's owner), then
+// `rafiki create --preset` spawns with it and without a --model flag (a
+// preset that did not apply would fail the spawn, not silently pass), and
+// `rafiki get` confirms the child actually runs the preset's model.
+//
+// The user is minted through the CLI itself: `rafiki user create` dials
+// TOKEN-LESS (it is the recovery path for a stale token, and must never
+// present one), the UDS admits it anonymously because the socket is the trust
+// mechanism, and it writes the minted token into the profile's token file,
+// which every later invocation in this test then authenticates with. The mint
+// also keeps this run's preset owner-scoped to a user no other run shares.
 func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
@@ -712,7 +746,8 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 
 	// 1. Mint the daemon's first user; the CLI writes its token into profile
 	// "it"'s token file (renderUserCreate) and prints it once on stderr. The
-	// dial is token-less (mustDialWithoutToken) and the UDS admits it
+	// dial presents no token (user create is the recovery path for a stale
+	// token, and must never present one) and the UDS admits it
 	// anonymously — the socket is the trust mechanism, there is no bootstrap
 	// window on the framed UDS. When this daemon genuinely has no users yet,
 	// the user minted here becomes its admin (UserCreateLocal's zero-users
@@ -745,11 +780,9 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 		t.Fatalf("preset put output missing confirmation: %s", putOut)
 	}
 
-	// 3. The regression: the framed socket must run as the SAME identity now,
-	// so the spawn resolves the preset instead of answering
-	// `no preset "review:fixer"; presets in "review:": (none)`. The preset
-	// supplies the model (no --model flag here on purpose: a preset that did
-	// not apply would fail the spawn, not silently pass).
+	// 3. Create with that preset and NO --model flag on purpose: the preset
+	// supplies the model, so a preset that did not apply would fail the
+	// spawn, not silently pass.
 	var createStderr bytes.Buffer
 	createCmd := cliCmdIn(t, d, configDir,
 		"--output", "json",
@@ -774,5 +807,23 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	}
 	if spawnResp.ChildID == "" {
 		t.Fatalf("create --preset returned empty childId; output: %s", createOut)
+	}
+	t.Cleanup(func() {
+		cmd := cliCmdIn(t, d, configDir, "kill", "preset-bug")
+		_, _ = cmd.CombinedOutput()
+	})
+
+	// 4. The round trip's payoff: the child runs the preset's model — the
+	// preset resolved in the daemon and the model comes back on `get`.
+	getOut, err := cliCmdIn(t, d, configDir, "--output", "json", "get", spawnResp.ChildID).CombinedOutput()
+	if err != nil {
+		t.Fatalf("get after preset create: %v\n%s", err, getOut)
+	}
+	var child rafikiv1.ChildSummary
+	if err := protojson.Unmarshal(getOut, &child); err != nil {
+		t.Fatalf("decode get output %q: %v", getOut, err)
+	}
+	if child.GetModel() != "anthropic/claude-sonnet-4-5" {
+		t.Fatalf("child created with --preset has model %q, want the preset's anthropic/claude-sonnet-4-5", child.GetModel())
 	}
 }

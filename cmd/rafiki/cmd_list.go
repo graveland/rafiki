@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newListCmd() *cobra.Command {
@@ -39,33 +40,35 @@ func newListCmd() *cobra.Command {
 }
 
 func runList(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
-	filter := protocol.ListFilter{}
+	req := &rafikiv1.ListChildrenRequest{}
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
-		filter.Status = v
+		// The wire filter is a plural OR-match; the flag is one status.
+		req.Statuses = []string{v}
 	}
 	if v, _ := cmd.Flags().GetString("name-contains"); v != "" {
-		filter.NameContains = v
+		req.NameContains = v
 	}
 	if v, _ := cmd.Flags().GetString("cwd-contains"); v != "" {
-		filter.CwdContains = v
+		req.CwdContains = v
 	}
 	if labelPairs, _ := cmd.Flags().GetStringArray("label"); len(labelPairs) > 0 {
 		labels, err := parseLabelPairs(labelPairs)
 		if err != nil {
 			return fmt.Errorf("--label: %w", err)
 		}
-		filter.Labels = labels
+		req.Labels = labels
 	}
 	if hasLabels, _ := cmd.Flags().GetStringArray("has-label"); len(hasLabels) > 0 {
-		filter.HasLabel = hasLabels
+		req.HasLabel = hasLabels
 	}
 
-	children, err := c.List(cmdCtx(cmd), filter)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
-		return fmt.Errorf("list: %w", err)
+		return err
+	}
+	resp, err := ep.control().ListChildren(cmdCtx(cmd), connect.NewRequest(req))
+	if err != nil {
+		return diagnoseConnectError(err, ep.describe)
 	}
 
 	mode, useColor, err := outputOpts(cmd)
@@ -76,5 +79,5 @@ func runList(cmd *cobra.Command, _ []string) error {
 		fmt.Fprint(os.Stdout, profileIndicator(mustProfile(cmd).Name))
 	}
 	flat, _ := cmd.Flags().GetBool("flat")
-	return renderList(os.Stdout, children, mode, useColor, flat)
+	return renderList(os.Stdout, resp.Msg.GetChildren(), mode, useColor, flat)
 }

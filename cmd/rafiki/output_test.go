@@ -8,16 +8,18 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestRenderList_Table(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{
-		{ChildID: "c_01HXABC", Name: "afk-impl", Status: "streaming", Model: "anthropic/claude-sonnet-4", StartedAt: 1716636789},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_01HXABC", Name: "afk-impl", Status: "streaming", Model: "anthropic/claude-sonnet-4", StartedAt: 1716636789},
 	}
 	if err := renderList(&buf, children, outputTable, false, false); err != nil {
 		t.Fatal(err)
@@ -32,9 +34,9 @@ func TestRenderList_Table(t *testing.T) {
 
 func TestRenderList_KindColumn(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{
-		{ChildID: "c_claude1", Name: "claude-worker", Kind: "claude", Status: "idle"},
-		{ChildID: "c_fundi1", Name: "fundi-worker", Kind: "", Status: "idle"},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_claude1", Name: "claude-worker", Kind: "claude", Status: "idle"},
+		{ChildId: "c_fundi1", Name: "fundi-worker", Status: "idle"},
 	}
 	if err := renderList(&buf, children, outputTable, false, false); err != nil {
 		t.Fatal(err)
@@ -57,9 +59,9 @@ func costPtr(v float64) *float64 { return &v }
 // its child's spend.
 func TestRenderList_CostColumns(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{
-		{ChildID: "parent", Name: "coordinator", CostUSD: costPtr(1.5)},
-		{ChildID: "kid", Name: "worker", Labels: map[string]string{"rafiki/parent": "parent"}, CostUSD: costPtr(0.25)},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "parent", Name: "coordinator", CostUsd: costPtr(1.5)},
+		{ChildId: "kid", Name: "worker", Labels: map[string]string{"rafiki/parent": "parent"}, CostUsd: costPtr(0.25)},
 	}
 	if err := renderList(&buf, children, outputTable, false, false); err != nil {
 		t.Fatal(err)
@@ -85,7 +87,7 @@ func TestRenderList_CostColumnsConvertCurrency(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{{ChildID: "c_1", Name: "x", CostUSD: costPtr(1.0)}}
+	children := []*rafikiv1.ChildSummary{{ChildId: "c_1", Name: "x", CostUsd: costPtr(1.0)}}
 	if err := renderList(&buf, children, outputTable, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +100,7 @@ func TestRenderList_CostColumnsConvertCurrency(t *testing.T) {
 // No cost known anywhere (no agent database) renders as "-", not "$0.00".
 func TestRenderList_CostColumnsUnknown(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{{ChildID: "c_1", Name: "x"}}
+	children := []*rafikiv1.ChildSummary{{ChildId: "c_1", Name: "x"}}
 	if err := renderList(&buf, children, outputTable, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -109,11 +111,11 @@ func TestRenderList_CostColumnsUnknown(t *testing.T) {
 }
 
 func TestSubtreeCosts(t *testing.T) {
-	in := []protocol.ChildSummary{
-		{ChildID: "a", CostUSD: costPtr(1)},
-		{ChildID: "b", Labels: map[string]string{"rafiki/parent": "a"}, CostUSD: costPtr(2)},
-		{ChildID: "c", Labels: map[string]string{"rafiki/parent": "b"}, CostUSD: costPtr(4)},
-		{ChildID: "z"}, // no cost known at all
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "a", CostUsd: costPtr(1)},
+		{ChildId: "b", Labels: map[string]string{"rafiki/parent": "a"}, CostUsd: costPtr(2)},
+		{ChildId: "c", Labels: map[string]string{"rafiki/parent": "b"}, CostUsd: costPtr(4)},
+		{ChildId: "z"}, // no cost known at all
 	}
 	got := subtreeCosts(in)
 	if v := got["a"]; v == nil || *v != 7 {
@@ -133,9 +135,9 @@ func TestSubtreeCosts(t *testing.T) {
 // A cyclic parent chain must not hang the rollup, matching
 // sortChildrenAsTree's own cycle guard.
 func TestSubtreeCostsCycleTerminates(t *testing.T) {
-	in := []protocol.ChildSummary{
-		{ChildID: "x", Labels: map[string]string{"rafiki/parent": "y"}, CostUSD: costPtr(1)},
-		{ChildID: "y", Labels: map[string]string{"rafiki/parent": "x"}, CostUSD: costPtr(2)},
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "x", Labels: map[string]string{"rafiki/parent": "y"}, CostUsd: costPtr(1)},
+		{ChildId: "y", Labels: map[string]string{"rafiki/parent": "x"}, CostUsd: costPtr(2)},
 	}
 	done := make(chan map[string]*float64, 1)
 	go func() { done <- subtreeCosts(in) }()
@@ -151,12 +153,13 @@ func TestSubtreeCostsCycleTerminates(t *testing.T) {
 
 func TestRenderList_JSON(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{{ChildID: "c_1", Name: "x"}}
+	children := []*rafikiv1.ChildSummary{{ChildId: "c_1", Name: "x"}}
 	if err := renderList(&buf, children, outputJSON, false, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	// Pretty-printed JSON has a space after the colon.
+	// Pretty-printed protojson has a space after the colon, and int64 fields
+	// render as strings.
 	if !strings.Contains(out, `"childId": "c_1"`) {
 		t.Fatalf("JSON output: %s", out)
 	}
@@ -203,17 +206,17 @@ func TestColorEnabled_AlwaysFlag(t *testing.T) {
 }
 
 func TestSortChildrenAsTree(t *testing.T) {
-	mk := func(id, parent, root string) protocol.ChildSummary {
+	mk := func(id, parent, root string) *rafikiv1.ChildSummary {
 		labels := map[string]string{}
 		if parent != "" {
 			labels["rafiki/parent"] = parent
 			labels["rafiki/root"] = root
 		}
-		return protocol.ChildSummary{ChildID: id, Labels: labels}
+		return &rafikiv1.ChildSummary{ChildId: id, Labels: labels}
 	}
 	// Deliberately out of order, and a second root, to prove ordering is
 	// derived rather than incidental.
-	in := []protocol.ChildSummary{
+	in := []*rafikiv1.ChildSummary{
 		mk("c", "b", "a"),
 		mk("z", "", ""),
 		mk("a", "", ""),
@@ -224,8 +227,8 @@ func TestSortChildrenAsTree(t *testing.T) {
 	var gotIDs []string
 	depth := map[string]int{}
 	for _, r := range rows {
-		gotIDs = append(gotIDs, r.Child.ChildID)
-		depth[r.Child.ChildID] = r.Depth
+		gotIDs = append(gotIDs, r.Child.GetChildId())
+		depth[r.Child.GetChildId()] = r.Depth
 	}
 
 	if len(rows) != 4 {
@@ -244,8 +247,8 @@ func TestSortChildrenAsTree(t *testing.T) {
 }
 
 func TestSortChildrenAsTreeOrphanedParent(t *testing.T) {
-	in := []protocol.ChildSummary{
-		{ChildID: "kid", Labels: map[string]string{"rafiki/parent": "gone", "rafiki/root": "gone"}},
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "kid", Labels: map[string]string{"rafiki/parent": "gone", "rafiki/root": "gone"}},
 	}
 	rows := sortChildrenAsTree(in)
 	if len(rows) != 1 {
@@ -257,9 +260,9 @@ func TestSortChildrenAsTreeOrphanedParent(t *testing.T) {
 }
 
 func TestSortChildrenAsTreeCycleTerminates(t *testing.T) {
-	in := []protocol.ChildSummary{
-		{ChildID: "x", Labels: map[string]string{"rafiki/parent": "y"}},
-		{ChildID: "y", Labels: map[string]string{"rafiki/parent": "x"}},
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "x", Labels: map[string]string{"rafiki/parent": "y"}},
+		{ChildId: "y", Labels: map[string]string{"rafiki/parent": "x"}},
 	}
 	done := make(chan int, 1)
 	go func() { done <- len(sortChildrenAsTree(in)) }()
@@ -386,16 +389,14 @@ func TestWriteJSONLOneCompactObjectPerLine(t *testing.T) {
 
 // ─── Task 4.1: list-shaped verbs under the three-way contract ───────────────
 
-func childIntPtr(i int) *int { return &i }
-
 // JSONL from renderList is the ChildSummary objects themselves — one per
-// line, unwrapped, compact.
+// line, unwrapped, compact, in canonical protojson.
 func TestRenderListJSONLOnePerLine(t *testing.T) {
 	var buf bytes.Buffer
-	children := []protocol.ChildSummary{
-		{ChildID: "c_01", Name: "alpha", Status: "idle"},
-		{ChildID: "c_02", Name: "beta", Status: "exited", ExitCode: childIntPtr(0)},
-		{ChildID: "c_03", Name: "gamma", Status: "streaming"},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_01", Name: "alpha", Status: "idle"},
+		{ChildId: "c_02", Name: "beta", Status: "exited", ExitCode: int32Ptr(0)},
+		{ChildId: "c_03", Name: "gamma", Status: "streaming"},
 	}
 	if err := renderList(&buf, children, outputJSONL, false, false); err != nil {
 		t.Fatal(err)
@@ -410,13 +411,17 @@ func TestRenderListJSONLOnePerLine(t *testing.T) {
 	}
 	var ids []string
 	for i, line := range lines {
-		var ch protocol.ChildSummary
-		if err := json.Unmarshal([]byte(line), &ch); err != nil {
-			t.Fatalf("line %d is not a bare ChildSummary object: %v (%q)", i+1, err, line)
+		var ch rafikiv1.ChildSummary
+		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("line %d is not a bare ChildSummary protojson object: %v (%q)", i+1, err, line)
 		}
-		ids = append(ids, ch.ChildID)
+		ids = append(ids, ch.ChildId)
 		if strings.Contains(line, "\"children\"") {
 			t.Fatalf("line %d carries an envelope: %q", i+1, line)
+		}
+		// The int64-rendered fields must be strings (protojson), not numbers.
+		if strings.Contains(line, `"startedAt":0`) || strings.Contains(line, `"startedAt":1`) {
+			t.Fatalf("line %d encodes an int64 field as a number, not a protojson string: %q", i+1, line)
 		}
 	}
 	want := []string{"c_01", "c_02", "c_03"}
@@ -429,9 +434,9 @@ func TestRenderListJSONLOnePerLine(t *testing.T) {
 
 // get's default (table) mode renders the same table `list` renders, flat.
 func TestGetTextRendersListTable(t *testing.T) {
-	children := []protocol.ChildSummary{
-		{ChildID: "c_get1", Name: "worker", Status: "streaming", Model: "anthropic/claude-sonnet-4"},
-		{ChildID: "c_get2", Name: "reviewer", Status: "idle"},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_get1", Name: "worker", Status: "streaming", Model: "anthropic/claude-sonnet-4"},
+		{ChildId: "c_get2", Name: "reviewer", Status: "idle"},
 	}
 	var buf bytes.Buffer
 	if err := emitGet(&buf, []string{"worker", "reviewer"}, children, 0, outputTable, false); err != nil {
@@ -449,16 +454,17 @@ func TestGetTextRendersListTable(t *testing.T) {
 }
 
 // get's JSON shapes are the backward-compatibility contract: single target,
-// no failures → bare object; multiple targets or any failures → wrapped.
+// no failures → bare object; multiple targets or any failures → wrapped. The
+// encoding is now the canonical protojson (camelCase, int64 as string).
 func TestGetJSONShapesUnchanged(t *testing.T) {
-	one := protocol.ChildSummary{ChildID: "c_1", Name: "solo", Status: "idle"}
-	two := []protocol.ChildSummary{
+	one := &rafikiv1.ChildSummary{ChildId: "c_1", Name: "solo", Status: "idle", StartedAt: 1700000000000}
+	two := []*rafikiv1.ChildSummary{
 		one,
-		{ChildID: "c_2", Name: "duo", Status: "exited", ExitCode: childIntPtr(3)},
+		{ChildId: "c_2", Name: "duo", Status: "exited", ExitCode: int32Ptr(3)},
 	}
 
 	var bare bytes.Buffer
-	if err := emitGet(&bare, []string{"c_1"}, []protocol.ChildSummary{one}, 0, outputJSON, false); err != nil {
+	if err := emitGet(&bare, []string{"c_1"}, []*rafikiv1.ChildSummary{one}, 0, outputJSON, false); err != nil {
 		t.Fatal(err)
 	}
 	var obj map[string]any
@@ -473,6 +479,10 @@ func TestGetJSONShapesUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(bare.String(), `"childId": "c_1"`) {
 		t.Fatalf("JSON mode must stay pretty-printed:\n%s", bare.String())
+	}
+	// protojson: int64 fields are strings.
+	if !strings.Contains(bare.String(), `"startedAt": "1700000000000"`) {
+		t.Fatalf("startedAt must render as a protojson string:\n%s", bare.String())
 	}
 
 	var wrapped bytes.Buffer
@@ -493,7 +503,7 @@ func TestGetJSONShapesUnchanged(t *testing.T) {
 
 	// A single target with a failed sibling falls to the wrapped shape.
 	var failed bytes.Buffer
-	if err := emitGet(&failed, []string{"gone"}, []protocol.ChildSummary{one}, 1, outputJSON, false); err != nil {
+	if err := emitGet(&failed, []string{"gone"}, []*rafikiv1.ChildSummary{one}, 1, outputJSON, false); err != nil {
 		t.Fatal(err)
 	}
 	obj = nil
@@ -508,9 +518,9 @@ func TestGetJSONShapesUnchanged(t *testing.T) {
 // JSONL from get is the successes only, one per line — failures have already
 // gone to stderr in runGet, before emitGet runs.
 func TestGetJSONLSuccessesOnly(t *testing.T) {
-	children := []protocol.ChildSummary{
-		{ChildID: "c_ok1", Name: "kept", Status: "idle"},
-		{ChildID: "c_ok2", Name: "also-kept", Status: "idle"},
+	children := []*rafikiv1.ChildSummary{
+		{ChildId: "c_ok1", Name: "kept", Status: "idle"},
+		{ChildId: "c_ok2", Name: "also-kept", Status: "idle"},
 	}
 	var buf bytes.Buffer
 	// Three targets requested, one failed: only the two successes arrive here.
@@ -529,9 +539,9 @@ func TestGetJSONLSuccessesOnly(t *testing.T) {
 		t.Fatalf("JSONL rows must be unwrapped:\n%s", buf.String())
 	}
 	for i, line := range lines {
-		var ch protocol.ChildSummary
-		if err := json.Unmarshal([]byte(line), &ch); err != nil {
-			t.Fatalf("line %d not a bare object: %v", i+1, err)
+		var ch rafikiv1.ChildSummary
+		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
+			t.Fatalf("line %d not a bare ChildSummary protojson object: %v", i+1, err)
 		}
 	}
 }
@@ -539,16 +549,13 @@ func TestGetJSONLSuccessesOnly(t *testing.T) {
 // status's text mode is a key/value block, one line per populated field.
 func TestStatusTextKeyValue(t *testing.T) {
 	started := time.UnixMilli(1757000000000)
-	daemon, err := json.Marshal(protocol.StatusResponseData{
+	daemon := &rafikiv1.StatusResponse{
 		Version:     "1.2.3",
 		StartedAt:   1757000000000,
-		Children:    protocol.ChildCounts{Live: 2, Exited: 1},
+		Children:    &rafikiv1.StatusResponse_ChildCounts{Live: 2, Exited: 1},
 		MemoryBytes: 16 << 20,
 		Socket:      "/tmp/d.sock",
 		LogsDir:     "/tmp/logs",
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	var buf bytes.Buffer
 	if err := emitStatus(&buf, daemon, outputTable, false); err != nil {
@@ -568,21 +575,18 @@ func TestStatusTextKeyValue(t *testing.T) {
 		}
 	}
 
-	// A child-shaped payload renders the same block with the child's fields.
-	child, err := json.Marshal(protocol.ChildSummary{
-		ChildID:   "c_9",
+	// A child summary renders the same block with the child's fields.
+	child := &rafikiv1.ChildSummary{
+		ChildId:   "c_9",
 		Name:      "worker",
 		Kind:      "claude",
 		Status:    "exited",
-		ExitCode:  childIntPtr(2),
+		ExitCode:  int32Ptr(2),
 		Model:     "openrouter/x/y",
-		CostUSD:   costPtr(0.5),
+		CostUsd:   costPtr(0.5),
 		Cwd:       "/repo",
 		StartedAt: 1757000000000,
 		Labels:    map[string]string{"env": "prod"},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	buf.Reset()
 	if err := emitStatus(&buf, child, outputTable, false); err != nil {
@@ -599,15 +603,13 @@ func TestStatusTextKeyValue(t *testing.T) {
 	}
 }
 
-// status's JSONL mode is the whole payload as one compact line.
+// status's JSONL mode is the whole payload as one compact line — the
+// canonical protojson of the Status response (int64 as string).
 func TestStatusJSONLCompactLine(t *testing.T) {
-	daemon, err := json.Marshal(protocol.StatusResponseData{
+	daemon := &rafikiv1.StatusResponse{
 		Version:   "1.2.3",
 		StartedAt: 1757000000000,
-		Children:  protocol.ChildCounts{Live: 1},
-	})
-	if err != nil {
-		t.Fatal(err)
+		Children:  &rafikiv1.StatusResponse_ChildCounts{Live: 1},
 	}
 	var buf bytes.Buffer
 	if err := emitStatus(&buf, daemon, outputJSONL, false); err != nil {
@@ -628,42 +630,31 @@ func TestStatusJSONLCompactLine(t *testing.T) {
 	if back["version"] != "1.2.3" {
 		t.Fatalf("payload changed: %q", line)
 	}
+	if back["startedAt"] != "1757000000000" {
+		t.Fatalf("int64 startedAt must render as a protojson string: %q", line)
+	}
 }
 
-// tasks' text mode is a table with all six columns, always.
+// tasks' text mode is a table with every column the wire row carries, always:
+// handle (the addressable id), status (with the drop reason), subject,
+// assignee. The framed table's CHILD and UPDATED columns are gone — the
+// Connect TaskRow carries no conversation id or updated timestamp.
 func TestTasksTextTableColumns(t *testing.T) {
-	rows, err := json.Marshal([]map[string]any{
-		{
-			"ID":             "11111111-1111-1111-1111-111111111111",
-			"Handle":         "2.1",
-			"ConversationID": "conv-1",
-			"Content":        "implement the parser",
-			"Status":         "in_progress",
-			"Assignee":       "c_worker",
-		},
-		{
-			"ID":             "22222222-2222-2222-2222-222222222222",
-			"Handle":         "3",
-			"ConversationID": "conv-1",
-			"Content":        "exploratory probe",
-			"Status":         "dropped",
-			"DropReason":     "turned out unnecessary",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := &rafikiv1.ListTasksResponse{Tasks: []*rafikiv1.TaskRow{
+		{Handle: "2.1", Content: "implement the parser", Status: "in_progress", Assignee: "c_worker"},
+		{Handle: "3", Content: "exploratory probe", Status: "dropped", DropReason: "turned out unnecessary"},
+	}}
 	var buf bytes.Buffer
-	if err := emitTasks(&buf, rows, outputTable, false); err != nil {
+	if err := emitTasks(&buf, resp, outputTable, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"ID", "CHILD", "STATUS", "SUBJECT", "ASSIGNEE", "UPDATED"} {
+	for _, want := range []string{"ID", "STATUS", "SUBJECT", "ASSIGNEE"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q header:\n%s", want, out)
 		}
 	}
-	for _, want := range []string{"2.1", "conv-1", "implement the parser", "c_worker", "in_progress"} {
+	for _, want := range []string{"2.1", "implement the parser", "c_worker", "in_progress"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
@@ -671,17 +662,21 @@ func TestTasksTextTableColumns(t *testing.T) {
 	if !strings.Contains(out, "dropped (turned out unnecessary)") {
 		t.Fatalf("drop reason should ride the STATUS cell:\n%s", out)
 	}
+	// Row 2 carries no assignee: the cell still renders, as a dash.
 	if !strings.Contains(out, " - ") && !strings.Contains(out, "- ") {
-		t.Fatalf("UPDATED column should render even without data:\n%s", out)
+		t.Fatalf("ASSIGNEE column should render even without data:\n%s", out)
 	}
 }
 
-// tasks' JSONL mode unwraps the response array to one row object per line.
+// tasks' JSONL mode unwraps the response to one canonical TaskRow protojson
+// object per line.
 func TestTasksJSONLUnwrapped(t *testing.T) {
-	data := []byte(`[{"ID":"u1","Handle":"1","Content":"a","Status":"pending"},` +
-		`{"ID":"u2","Handle":"2","Content":"b","Status":"completed","Assignee":"c_1"}]`)
+	resp := &rafikiv1.ListTasksResponse{Tasks: []*rafikiv1.TaskRow{
+		{Handle: "1", Content: "a", Status: "pending"},
+		{Handle: "2", Content: "b", Status: "completed", Assignee: "c_1"},
+	}}
 	var buf bytes.Buffer
-	if err := emitTasks(&buf, data, outputJSONL, false); err != nil {
+	if err := emitTasks(&buf, resp, outputJSONL, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -693,15 +688,15 @@ func TestTasksJSONLUnwrapped(t *testing.T) {
 		t.Fatalf("want 2 lines, got %d: %q", len(lines), out)
 	}
 	for i, line := range lines {
-		if strings.Contains(line, "\"rows\"") || strings.Contains(line, "\"tasks\"") {
+		if strings.Contains(line, "\"tasks\"") || strings.Contains(line, "\"rows\"") {
 			t.Fatalf("line %d carries an envelope: %q", i+1, line)
 		}
 		var row map[string]any
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatalf("line %d is not a bare object: %v", i+1, err)
 		}
-		if _, ok := row["ID"]; !ok {
-			t.Fatalf("line %d lost the wire row's field names: %q", i+1, line)
+		if _, ok := row["handle"]; !ok {
+			t.Fatalf("line %d lost the wire row's field names (protojson camelCase): %q", i+1, line)
 		}
 	}
 }

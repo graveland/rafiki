@@ -1,17 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	"go.graveland.dev/rafiki/pkg/costfmt"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -41,62 +41,49 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctrl := ep.control()
 
 	ctx := cmdCtx(cmd)
 
-	var payload []byte
+	var payload proto.Message
 	if len(args) == 1 {
 		// An id|name target: this is the child's status, not the daemon's.
 		// Same resolve/fetch pair `get` runs, but rendered through status's
 		// key/value block instead of the list table.
-		childID, err := c.Resolve(ctx, args[0])
+		childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, args[0])
 		if err != nil {
 			return fmt.Errorf("resolve %q: %w", args[0], err)
 		}
-		resp, err := c.Request(ctx, protocol.GetRequest{
-			Type:    protocol.TypeCtrlGet,
-			ChildID: childID,
-		})
+		resp, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 		if err != nil {
-			return err
+			return diagnoseConnectError(err, ep.describe)
 		}
-		if !resp.Success {
-			return fmt.Errorf("ctrl_get: %s", client.FormatError(resp))
-		}
-		payload = resp.Data
+		payload = resp.Msg.GetChild()
 	} else {
-		resp, err := c.Request(ctx, protocol.StatusRequest{
-			Type: protocol.TypeCtrlStatus,
-		})
+		resp, err := ctrl.Status(ctx, connect.NewRequest(&rafikiv1.StatusRequest{}))
 		if err != nil {
-			return err
+			return diagnoseConnectError(err, ep.describe)
 		}
-		if !resp.Success {
-			return fmt.Errorf("ctrl_status: %s", client.FormatError(resp))
-		}
-		payload = resp.Data
+		payload = resp.Msg
 	}
 	return emitStatus(os.Stdout, payload, mode, useColor)
 }
 
-// emitStatus writes status's payload in the resolved mode: pretty JSON
-// passthrough in JSON mode (today's shape, unchanged), one compact line in
-// JSONL, and a key/value block in table mode. The payload is ctrl_status's
-// daemon summary, or — when the command was given an id — ctrl_get's child
-// summary, which statusKeyValues renders with the same block.
-func emitStatus(w io.Writer, data []byte, mode outputMode, useColor bool) error {
+// emitStatus writes status's payload in the resolved mode: canonical protojson
+// pretty in JSON mode, one compact line in JSONL, and a key/value block in
+// table mode. The payload is Status's daemon summary, or — when the command
+// was given an id — GetChild's child summary, which statusKeyValues renders
+// with the same block.
+func emitStatus(w io.Writer, payload proto.Message, mode outputMode, useColor bool) error {
 	switch mode {
-	case outputJSON:
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(json.RawMessage(data))
-	case outputJSONL:
-		enc := json.NewEncoder(w)
-		return enc.Encode(json.RawMessage(data))
+	case outputJSON, outputJSONL:
+		return emitProto(w, payload, mode)
 	default:
-		for _, kv := range statusKeyValues(data, useColor) {
+		for _, kv := range statusKeyValues(payload, useColor) {
 			key := kv.Key + ":"
 			if useColor {
 				key = dim(key)
@@ -113,66 +100,69 @@ type statusKV struct {
 	Value string
 }
 
-// statusKeyValues decodes a status payload into ordered key/value pairs, one
-// per populated field. The payload is the daemon's own status summary
-// (protocol.StatusResponseData); a child summary (the get payload) is also
-// accepted and rendered with the same block, so the key/value shape serves
-// either. Unknown payloads yield no lines rather than a guess.
-func statusKeyValues(data []byte, useColor bool) []statusKV {
-	var child protocol.ChildSummary
-	if err := json.Unmarshal(data, &child); err == nil && child.ChildID != "" {
-		return childStatusKeyValues(child, useColor)
-	}
-
-	var st protocol.StatusResponseData
-	if err := json.Unmarshal(data, &st); err != nil {
+// statusKeyValues turns the payload into ordered key/value pairs, one per
+// populated field. The payload is Status's daemon summary, or GetChild's
+// child summary rendered with the same block. An unknown payload yields no
+// lines rather than a guess.
+func statusKeyValues(payload proto.Message, useColor bool) []statusKV {
+	switch m := payload.(type) {
+	case *rafikiv1.ChildSummary:
+		return childStatusKeyValues(m, useColor)
+	case *rafikiv1.StatusResponse:
+		return daemonStatusKeyValues(m)
+	default:
 		return nil
 	}
+}
+
+// daemonStatusKeyValues renders the daemon's vitals: one line per populated
+// field.
+func daemonStatusKeyValues(st *rafikiv1.StatusResponse) []statusKV {
 	var out []statusKV
-	if st.Version != "" {
-		out = append(out, statusKV{"version", st.Version})
+	if st.GetVersion() != "" {
+		out = append(out, statusKV{"version", st.GetVersion()})
 	}
-	if st.StartedAt > 0 {
-		out = append(out, statusKV{"started", formatUnixMilli(st.StartedAt)})
+	if st.GetStartedAt() > 0 {
+		out = append(out, statusKV{"started", formatUnixMilli(st.GetStartedAt())})
 	}
-	if st.Children.Live > 0 || st.Children.Exited > 0 {
+	if st.GetChildren().GetLive() > 0 || st.GetChildren().GetExited() > 0 {
 		out = append(out, statusKV{"children",
-			fmt.Sprintf("%d live, %d exited", st.Children.Live, st.Children.Exited)})
+			fmt.Sprintf("%d live, %d exited", st.GetChildren().GetLive(), st.GetChildren().GetExited())})
 	}
-	if st.MemoryBytes > 0 {
-		out = append(out, statusKV{"memory", humanBytes(st.MemoryBytes)})
+	if st.GetMemoryBytes() > 0 {
+		out = append(out, statusKV{"memory", humanBytes(st.GetMemoryBytes())})
 	}
-	if st.Socket != "" {
-		out = append(out, statusKV{"socket", st.Socket})
+	if st.GetSocket() != "" {
+		out = append(out, statusKV{"socket", st.GetSocket()})
 	}
-	if st.LogsDir != "" {
-		out = append(out, statusKV{"logs", st.LogsDir})
+	if st.GetLogsDir() != "" {
+		out = append(out, statusKV{"logs", st.GetLogsDir()})
 	}
 	return out
 }
 
 // childStatusKeyValues renders one child's summary as the key/value block:
 // one line per populated field, in the brief's field order.
-func childStatusKeyValues(ch protocol.ChildSummary, useColor bool) []statusKV {
+func childStatusKeyValues(ch *rafikiv1.ChildSummary, useColor bool) []statusKV {
 	cur := clientstate.LoadScoped(clientstate.Scope{}).Currency
 	out := []statusKV{
-		{"id", ch.ChildID},
+		{"id", ch.GetChildId()},
 	}
-	if ch.Name != "" {
-		out = append(out, statusKV{"name", ch.Name})
+	if ch.GetName() != "" {
+		out = append(out, statusKV{"name", ch.GetName()})
 	}
-	out = append(out, statusKV{"kind", kindOrDefault(ch.Kind)})
-	out = append(out, statusKV{"status", defaultDash(formatStatus(ch.Status, ch.ExitCode, ch.ExitSignal, useColor))})
-	if ch.Model != "" {
-		out = append(out, statusKV{"model", ch.Model})
+	out = append(out, statusKV{"kind", kindOrDefault(ch.GetKind())})
+	out = append(out, statusKV{"status", defaultDash(formatStatus(ch.GetStatus(), ch.ExitCode, ch.GetExitSignal(), useColor))})
+	if ch.GetModel() != "" {
+		out = append(out, statusKV{"model", ch.GetModel()})
 	}
-	if ch.CostUSD != nil {
-		out = append(out, statusKV{"cost", costfmt.Format(*ch.CostUSD, cur)})
+	if ch.CostUsd != nil {
+		out = append(out, statusKV{"cost", costfmt.Format(*ch.CostUsd, cur)})
 	}
-	if ch.Cwd != "" {
-		out = append(out, statusKV{"cwd", shortenCwd(ch.Cwd)})
+	if ch.GetCwd() != "" {
+		out = append(out, statusKV{"cwd", shortenCwd(ch.GetCwd())})
 	}
-	out = append(out, statusKV{"started", formatUnixMilli(ch.StartedAt)})
-	out = append(out, statusKV{"labels", formatLabels(ch.Labels, 40, false)})
+	out = append(out, statusKV{"started", formatUnixMilli(ch.GetStartedAt())})
+	out = append(out, statusKV{"labels", formatLabels(ch.GetLabels(), 40, false)})
 	return out
 }
