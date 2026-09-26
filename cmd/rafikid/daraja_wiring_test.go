@@ -104,6 +104,10 @@ func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 // TestCloseRevokesDarajaCredentials verifies that Close calls Registry.Forget
 // before deleting the row, preventing the dead child from authenticating
 // again. The ordering matters because Forget runs while the row still exists.
+// The pool is wired alongside the registry — the production shape — so
+// Close's belt drop (DropReplay, H-8) runs too; the belt's own behaviour is
+// pinned in pkg/darajapool (TestDropReplayKillsTheBeltAndItCannotBeRevived),
+// which is where the belt internals are reachable.
 func TestCloseRevokesDarajaCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -114,6 +118,7 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 
 	reg := darajapool.NewRegistry()
 	ctrl.darajaReg = reg
+	ctrl.darajaPool = darajapool.New(reg)
 
 	// Manually add an entry to the registry as if a ticket had been issued.
 	_, err := reg.IssueCredential("test-close-reg")
@@ -144,7 +149,10 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 // daraja's credentials, preventing a dead child from authenticating through
 // a stale connection replay or port scan. The revocation runs at the top of
 // Kill, before any process state lookups, so even if the CM lookup fails the
-// credential is already revoked.
+// credential is already revoked. The pool is wired alongside the registry —
+// the production shape — so Kill's belt drop (DropReplay, H-8) runs too; the
+// belt's own behaviour is pinned in pkg/darajapool
+// (TestDropReplayKillsTheBeltAndItCannotBeRevived).
 func TestKillRevokesDarajaCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -155,6 +163,7 @@ func TestKillRevokesDarajaCredentials(t *testing.T) {
 
 	reg := darajapool.NewRegistry()
 	ctrl.darajaReg = reg
+	ctrl.darajaPool = darajapool.New(reg)
 
 	// Seed a credential as if the child had connected.
 	cred, err := reg.IssueCredential("test-kill-reg")

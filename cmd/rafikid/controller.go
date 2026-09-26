@@ -2653,9 +2653,16 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 
 func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (control.KillResult, error) {
 	// Revoke the daraja's reconnect credential so a dead child cannot
-	// re-authenticate on a later port scan or stale-connection replay.
+	// re-authenticate on a later port scan or stale-connection replay. The
+	// belt dies with the credential: a killed child is settled by the kill
+	// ladder's Shutdown RPC, never from the belt, so leaving its events would
+	// only leak them (≤8 MiB per child, unbounded across children) and a
+	// later Watch could revive frames of a child that no longer exists.
 	if c.darajaReg != nil {
 		c.darajaReg.Forget(childID)
+	}
+	if c.darajaPool != nil {
+		c.darajaPool.DropReplay(childID)
 	}
 
 	// An operator's kill must not be undone by a pending rate-limit resume:
@@ -2913,9 +2920,14 @@ func (c *Controller) Close(childID string) error {
 
 	// Revoke the daraja's ability to reconnect — the row is going away.
 	// Must run before st.Delete; once the row is gone the OnDisconnect handler
-	// (fired if the daraja was still connected) has no child to label.
+	// (fired if the daraja was still connected) has no child to label. The
+	// belt goes with the row: a forgotten child can never be settled from it,
+	// and a later Watch must not revive its frames.
 	if c.darajaReg != nil {
 		c.darajaReg.Forget(childID)
+	}
+	if c.darajaPool != nil {
+		c.darajaPool.DropReplay(childID)
 	}
 
 	c.st.Delete(childID)

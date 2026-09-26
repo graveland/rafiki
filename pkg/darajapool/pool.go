@@ -152,7 +152,7 @@ func (p *Pool) Evict(childID string) {
 	if holder != nil {
 		holder.stop()
 	}
-	p.dropReplay(childID)
+	p.DropReplay(childID)
 }
 
 // OnConnect registers a callback invoked when a daraja connects, and returns

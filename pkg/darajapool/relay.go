@@ -302,16 +302,21 @@ func (h *relayHolder) stop() {
 
 // ─── Pool extensions ──────────────────────────────────────────────────────────
 
-// The replay belt. pending holds, per child, the events broadcast while NO
-// subscriber was attached — the drop window the fan used to have: a broadcast
-// to a zero-subscriber set vanished, so a script whose driver set its result
-// and exited before the daemon-side pump's first Watch could lose its Exited
-// event and strand the child row as `streaming` forever. The belt lives on
-// the POOL, not the holder, because the dangerous window is exactly the one
-// where the holder DIES before any subscribe: daraja exits with a fast script
-// (one Exited, done closes, process exit), the connection goes down, the
-// holder is torn down — and a holder-owned buffer would be dropped with it.
-// The first subscribe after a gap replays the belt in order and clears it.
+// The replay belt. The pool's replay map holds, per child, the events
+// broadcast while NO subscriber was attached — the drop window the fan used
+// to have: a broadcast to a zero-subscriber set vanished, so a script whose
+// driver set its result and exited before the daemon-side pump's first Watch
+// could lose its Exited event and strand the child row as `streaming`
+// forever. The belt lives on the POOL, not the holder, because the dangerous
+// window is exactly the one where the holder DIES before any subscribe:
+// daraja exits with a fast script (one Exited, done closes, process exit),
+// the connection goes down, the holder is torn down — and a holder-owned
+// buffer would be dropped with it. The first subscribe after a gap replays
+// the belt in order and clears it. The belt is also DROPPED whole wherever
+// the child is torn down deliberately — Evict (launch timeout) and the
+// controller's Kill/Close, next to the registry's Forget (`DropReplay`) —
+// so a killed or forgotten child's events cannot leak across children or be
+// revived by a later Watch.
 //
 // The replay is one-shot, NOT kind-aware, and NOT drain-on-consume, and that
 // is what makes it safe for claude:
@@ -397,9 +402,21 @@ func (p *Pool) takeReplayChan(childID string) (<-chan *fanEvent, bool) {
 	return ch, true
 }
 
-// dropReplay discards the child's belt — called only where the child is being
-// torn down deliberately (Evict), where nobody will ever come for the events.
-func (p *Pool) dropReplay(childID string) {
+// DropReplay discards the child's belt — called wherever the child is torn
+// down deliberately and nobody will ever come for the events: Evict (launch
+// timeout) and the controller's Kill and Close, where the daraja registry's
+// Forget revokes the reconnect credential. A killed or forgotten child can
+// never be settled from its belt (the kill ladder settles from the Shutdown
+// RPC; a forgotten row is gone), so leaving the belt would only leak it —
+// ≤relayReplayMax events per child, unbounded ACROSS children until daemon
+// restart. Dropping here also means a later Watch cannot revive a killed
+// child's frames: with no live connection and an empty belt, Watch
+// propagates the error instead of serving anything.
+//
+// Safe to call from the controller: it takes p.mu alone and never a holder
+// lock (the belt's nesting order is holder.mu → p.mu; nothing here nests),
+// and it is idempotent — Kill, Close and Evict may all run for one child.
+func (p *Pool) DropReplay(childID string) {
 	p.mu.Lock()
 	delete(p.replay, childID)
 	p.mu.Unlock()

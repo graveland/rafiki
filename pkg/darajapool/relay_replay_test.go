@@ -322,6 +322,53 @@ func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
 	}
 }
 
+// TestDropReplayKillsTheBeltAndItCannotBeRevived pins H-8: the controller's
+// kill/close/forget paths drop the belt. Kill and Close call DropReplay next
+// to the daraja registry's Forget (this function is that primitive — the
+// controller cannot reach a belt any other way), because a killed or
+// forgotten child can never be settled from its belt and leaving it would
+// leak ≤relayReplayMax events per child, unbounded ACROSS children until
+// daemon restart. After the drop a later Watch must not revive the frames:
+// with no live connection and an empty belt, Watch propagates the error (the
+// pump's retry contract) instead of serving anything.
+func TestDropReplayKillsTheBeltAndItCannotBeRevived(t *testing.T) {
+	pool := New(NewRegistry())
+	holder := newRelayHolder("c1", nil, pool)
+
+	// A script's whole life belted with zero subscribers — the leak the
+	// fix-now is about, here worth exactly two events.
+	holder.broadcast(fanEvent{resp: stdout([]byte("life "))})
+	holder.broadcast(fanEvent{resp: exited(7, "")})
+	pool.mu.RLock()
+	held := len(pool.replay["c1"])
+	pool.mu.RUnlock()
+	if held != 2 {
+		t.Fatalf("setup: belt holds %d events, want 2", held)
+	}
+
+	pool.DropReplay("c1")
+
+	pool.mu.RLock()
+	held = len(pool.replay["c1"])
+	pool.mu.RUnlock()
+	if held != 0 {
+		t.Fatalf("belt still holds %d events after DropReplay (the per-child leak)", held)
+	}
+
+	// A later Watch gets the no-connection error — the killed child's frames
+	// cannot be revived from anywhere.
+	if _, _, err := pool.Watch("c1"); err == nil {
+		t.Fatal("Watch after DropReplay served a belt; a killed child's frames must not be revivable")
+	}
+	if _, ok := pool.takeReplayChan("c1"); ok {
+		t.Fatal("takeReplayChan after DropReplay must find nothing")
+	}
+
+	// Idempotent: Kill, Close and Evict may all run for one child.
+	pool.DropReplay("c1")
+	pool.DropReplay("c1")
+}
+
 // stubFastExitDaraja answers Relay by emitting a script's whole life — one
 // stdout chunk, then the exit — the instant the stream opens, and then
 // RETURNS, ending the stream the way a script's daraja does when the child
