@@ -51,6 +51,19 @@ func (s *Server) Health(
 func (s *Server) Restart(
 	ctx context.Context, req *connect.Request[darajapb.RestartRequest],
 ) (*connect.Response[darajapb.RestartResponse], error) {
+	// A script child is never restarted — a script's exit IS its result, and
+	// respawn is off for the kind (Host.respawn gives up). The refusal is
+	// explicit rather than incidental: an explicit script spec maps to a kind
+	// -only ChildSpec (the executor owns the resolved argv) and would fail
+	// startLocked's empty-argv refusal anyway, but a nil-spec Restart would
+	// happily RE-RUN the held resolved spec — restarting work whose outcome
+	// the consumer is settling. Nothing calls this today (Restart's only
+	// caller is claude's abort path), so the refusal is structure, not
+	// behaviour: the RPC itself carries the invariant.
+	if s.host.hostedKind() == KindScript {
+		return nil, connect.NewError(connect.CodeFailedPrecondition,
+			errors.New("daraja: a script child is never restarted — its exit is its result"))
+	}
 	pid, err := s.host.Restart(
 		SpecFromProto(req.Msg.GetSpec()),
 		time.Duration(req.Msg.GetGraceMs())*time.Millisecond,

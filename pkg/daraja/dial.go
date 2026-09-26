@@ -131,12 +131,24 @@ func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error)
 		sni = host
 	}
 
+	// System-roots verification by default, mirroring execpool's dial posture:
+	// a peer presenting a certificate no trusted root vouches for is REFUSED,
+	// not waved through. Pinning REPLACES that verification with the pinned
+	// leaf-fingerprint check — the deliberate posture of an executor started
+	// with --pin-cert for a self-signed or internal-CA daemon. The old
+	// placeholder set InsecureSkipVerify unconditionally, which made the
+	// unpinned posture verify nothing at all — acceptable when this dial
+	// carried only the one-shot ticket, and no longer acceptable now that a
+	// script child's per-child credential rides the same listener.
 	tlsCfg := &tls.Config{
-		ServerName:         sni,
-		NextProtos:         []string{"http/1.1"}, // outer is http/1.1; inverted h2 begins after 101
-		InsecureSkipVerify: true,                 // placeholder — PinCert check below
+		ServerName: sni,
+		// http/1.1, not h2: the outer connection is an ordinary HTTP/1.1
+		// request that gets UPGRADED (the inverted h2 begins after the 101),
+		// so ALPN must not negotiate h2 here.
+		NextProtos: []string{"http/1.1"},
 	}
 	if o.PinCert != "" {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // replaced by the pinned fingerprint below
 		tlsCfg.VerifyPeerCertificate = pinVerify(o.PinCert)
 	}
 
@@ -265,25 +277,27 @@ func pinVerify(wantHex string) func([][]byte, [][]*x509.Certificate) error {
 }
 
 // TLSTransport returns an http.RoundTripper speaking TLS to the daemon's
-// control listener with the SAME verification posture dialDaemon uses: the
-// leaf certificate is verified by pinned SHA-256 fingerprint when pinCert is
-// given (the posture a --pin-cert executor itself dials with), and by system
-// roots otherwise. ServerName is the SNI to present when it differs from the
-// host in the URL the transport dials.
+// control listener with the SAME verification posture dialDaemon uses: system
+// roots by default, or — for a self-signed or internal-CA daemon — the leaf
+// certificate verified by pinned SHA-256 fingerprint when pinCert is given
+// (the posture a --pin-cert executor itself dials with). ServerName is the
+// SNI to present when it differs from the host in the URL the transport
+// dials. An unpinned transport therefore REFUSES a certificate no trusted
+// root vouches for — the per-child credential injected on this hop must not
+// ride a connection whose peer was never verified.
 //
 // This is the transport for the executor-hosted per-child socket's proxy
 // target: the face lives on the same listener this process reverse-dials, so
-// a self-signed or internal-CA daemon must be verified by the same pin for
-// both channels or one of them has no trust at all. No HTTP/2 is forced: the
-// listener advertises http/1.1 over ALPN (its h2 is reserved for the
-// INVERTED upgrade connections), and Connect's streaming rides HTTP/1.1
-// chunking fine.
+// a pinned daemon must be verified by the same pin for both channels or one
+// of them has no trust at all. No HTTP/2 is forced: the listener advertises
+// http/1.1 over ALPN (its h2 is reserved for the INVERTED upgrade
+// connections), and Connect's streaming rides HTTP/1.1 chunking fine.
 func TLSTransport(serverName, pinCert string) http.RoundTripper {
 	tlsCfg := &tls.Config{
-		ServerName:         serverName,
-		InsecureSkipVerify: true, // placeholder — PinCert check below
+		ServerName: serverName,
 	}
 	if pinCert != "" {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // replaced by the pinned fingerprint below
 		tlsCfg.VerifyPeerCertificate = pinVerify(pinCert)
 	}
 	return &http.Transport{TLSClientConfig: tlsCfg}

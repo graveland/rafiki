@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
 	"go.graveland.dev/rafiki/pkg/darajapb"
 )
 
@@ -173,5 +175,39 @@ func TestRelayDeliversQueuedEventsWhenTheHostIsDone(t *testing.T) {
 				t.Errorf("exited code = %d, want 0", resp.GetExited().GetExitCode())
 			}
 		}
+	}
+}
+
+// A Restart RPC on a script host is refused up front, whatever the request's
+// spec says: a script's exit is its result. The nil-spec case is the one that
+// matters structurally — "reuse the spec I hold" would otherwise re-run the
+// executor-resolved script whose outcome the consumer is settling.
+func TestRestartRefusesAScriptHost(t *testing.T) {
+	bin := testChildBinary(t, `sleep 30`)
+	h := NewHost(HostOptions{Binary: bin, Spec: ChildSpec{Kind: KindScript, ExtraArgs: []string{bin}}})
+	if err := h.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _, _, _ = h.Shutdown(time.Second) })
+	srv := NewServer(h)
+
+	for _, tc := range []struct {
+		name string
+		spec *darajapb.ChildSpec
+	}{
+		{"nil spec (reuse what you hold)", nil},
+		{"explicit script spec", &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_SCRIPT, Script: &darajapb.ScriptParams{Repo: "local", Script: "driver"}}},
+		{"claude spec", &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE, Claude: &darajapb.ClaudeParams{Model: "m"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := srv.Restart(context.Background(), connect.NewRequest(&darajapb.RestartRequest{Spec: tc.spec}))
+			if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+				t.Fatalf("Restart err = %v, want FailedPrecondition", err)
+			}
+		})
+	}
+	// The hosted script was never signalled: it is still running.
+	if !h.Running() {
+		t.Fatal("the refused restart took the hosted script down")
 	}
 }

@@ -405,6 +405,15 @@ func (h *Host) pumpStderr(stderr io.ReadCloser) {
 	}
 }
 
+// hostedKind reports the kind of the process the host holds (its configured
+// kind before the first successful start). Restart's script refusal consults
+// it — the RPC carries the "a script child is never restarted" invariant.
+func (h *Host) hostedKind() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.spec.Kind
+}
+
 // PID reports the hosted process id, or 0.
 func (h *Host) PID() int {
 	h.mu.Lock()

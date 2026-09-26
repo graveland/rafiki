@@ -3273,6 +3273,21 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 		}
 	}
 
+	// Refuse for a script child too, and before the kill — the fundi refusal
+	// above makes the same point the other way: killing-and-then-failing
+	// leaves the caller with a dead child AND an error, the worst of both. A
+	// script has no session to switch to, and respawn is off for the kind (a
+	// script's exit is its result): a respawn here would silently start the
+	// work over, reporting success for a different run.
+	if snap.Kind == protocol.KindScript {
+		return &control.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: string(decision.Type) + " is not supported for a script child: a script has no session " +
+				"and cannot be respawned — its exit is its result, so a respawn would silently start the " +
+				"work over. Spawn a new script child instead.",
+		}
+	}
+
 	// Save per-child subscribers before Kill. monitorChild.Remove (called by
 	// handleChildExit) will clear the list when the old process exits.
 	savedSubs := c.cm.GetSubscribers(childID)

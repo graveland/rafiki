@@ -514,3 +514,60 @@ func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
 		})
 	}
 }
+
+// TestSend_RejectsSessionSwitchForScriptChild covers the wave-4 review's
+// MINOR-3: a new_session/switch_session aimed at a script child must be
+// refused UP FRONT, the way the agent kind already is — not via the
+// kill-then-fail-respawn path (the script would die and the respawn would
+// fail with "a script's exit is its result", leaving a dead child and an
+// error, the worst of both). A script has no session, and respawning one
+// would silently start the work over.
+func TestSend_RejectsSessionSwitchForScriptChild(t *testing.T) {
+	for _, frame := range []string{
+		`{"type":"new_session","id":"req-1"}`,
+		`{"type":"switch_session","id":"req-2","sessionPath":"/tmp/other.jsonl"}`,
+	} {
+		t.Run(frame, func(t *testing.T) {
+			ctrl := newTestController(t)
+			const childID = "c_script_session_switch"
+			now := time.Now()
+			ctrl.st.Insert(&childstore.Session{
+				ChildID:      childID,
+				Status:       protocol.StatusStreaming,
+				Kind:         protocol.KindScript,
+				Cwd:          t.TempDir(),
+				StartedAt:    now,
+				LastActivity: now,
+			})
+
+			err := ctrl.Send(childID, json.RawMessage(frame))
+			if err == nil {
+				t.Fatal("Send accepted a session switch for a script child; a respawn would silently start the work over")
+			}
+			var ce *control.ControllerError
+			if !errors.As(err, &ce) {
+				t.Fatalf("error is %T, want *control.ControllerError so the client sees a coded failure: %v", err, err)
+			}
+			if ce.Code != protocol.ErrInvalidArgs {
+				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
+			}
+			if !strings.Contains(ce.Message, "script child") {
+				t.Errorf("message %q does not explain that the script kind is the problem", ce.Message)
+			}
+			if !strings.Contains(ce.Message, "exit is its result") {
+				t.Errorf("message %q does not name the respawn semantics that make the refusal the right answer", ce.Message)
+			}
+
+			// The refusal happens before the kill ceremony: the row is
+			// exactly as it was (a live child would still be live).
+			snap, ok := ctrl.st.Get(childID)
+			if !ok {
+				t.Fatal("the rejected request removed the child from the store")
+			}
+			if snap.Status != protocol.StatusStreaming {
+				t.Errorf("child status = %q after a rejected session switch, want %q untouched",
+					snap.Status, protocol.StatusStreaming)
+			}
+		})
+	}
+}
