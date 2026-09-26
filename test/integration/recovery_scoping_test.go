@@ -4,12 +4,13 @@ package integration_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"connectrpc.com/connect"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // TestRecoveryScopingLeavesAnotherDaemonsChildAlone is the live proof for
@@ -110,23 +111,22 @@ func TestRecoveryScopingSurfacesTheOwningDaemon(t *testing.T) {
 	waitUntilKnown(t, dB, childID)
 
 	summary := getChildSummary(t, dB, childID)
-	if got := summary.Labels["rafiki/daemon"]; got != idA {
+	if got := summary.GetLabels()["rafiki/daemon"]; got != idA {
 		t.Errorf("rafiki/daemon label = %q, want %q — ownership must be visible "+
 			"through daemon B with no new wire field", got, idA)
 	}
 }
 
-// waitUntilKnown blocks until d answers ctrl_get for childID, proving d's
+// waitUntilKnown blocks until d answers GetChild for childID, proving d's
 // recovery walked that row.
 func waitUntilKnown(t *testing.T, d *daemon, childID string) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		raw := d.request(t, fmt.Sprintf(
-			`{"type":"ctrl_get","id":"wait","childId":%q}`, childID))
-		var r protocol.Response
-		mustUnmarshal(t, raw, &r)
-		if r.Success {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := d.control(t).GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
+		cancel()
+		if err == nil {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -134,17 +134,8 @@ func waitUntilKnown(t *testing.T, d *daemon, childID string) {
 	t.Fatalf("daemon never reported child %s; recovery did not process the row", childID)
 }
 
-// getChildSummary reads one child through ctrl_get.
-func getChildSummary(t *testing.T, d *daemon, childID string) protocol.ChildSummary {
+// getChildSummary reads one child over Connect.
+func getChildSummary(t *testing.T, d *daemon, childID string) *rafikiv1.ChildSummary {
 	t.Helper()
-	raw := d.request(t, fmt.Sprintf(
-		`{"type":"ctrl_get","id":"g1","childId":%q}`, childID))
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get failed: %+v", r.Error)
-	}
-	var summary protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &summary)
-	return summary
+	return getChild(t, d.control(t), childID)
 }

@@ -10,7 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"math/big"
@@ -23,11 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // grantDaemon boots the daemon with an executor listener wired to the test
@@ -297,13 +297,14 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 // waitForLiveExecutors polls until the daemon's pool reports n live executors.
 // The live set is only observable through selection, so this drives a
 // throwaway spawn and inspects the refusal's live count until it reaches n.
+// The refusal's authored message — "N live executor(s), …" — is forwarded
+// verbatim on the Connect error, which is what makes the substring match work.
 func (g *grantDaemon) waitForLiveExecutors(t *testing.T, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		r := g.grantSpawnRaw(t, "", "env=definitely-not-a-match", "anthropic/claude-x")
-		msg := protocolErrorString(t, r)
-		if strings.Contains(msg, fmt.Sprintf("%d live executor(s)", want)) {
+		_, err := g.grantSpawn(t, "", "env=definitely-not-a-match", "anthropic/claude-x")
+		if err != nil && strings.Contains(err.Error(), fmt.Sprintf("%d live executor(s)", want)) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -311,24 +312,25 @@ func (g *grantDaemon) waitForLiveExecutors(t *testing.T, want int) {
 	t.Fatalf("executors never became live (%d expected)", want)
 }
 
-// grantSpawnRaw sends ctrl_spawn with a parent and selector, returning the raw
-// protocol.Response.
-func (g *grantDaemon) grantSpawnRaw(t *testing.T, parent, selector, model string) protocol.Response {
+// grantSpawn spawns a fundi child with a parent and selector over Connect and
+// returns the child id plus the spawn error, so callers can assert on both the
+// success path and the refusal text.
+func (g *grantDaemon) grantSpawn(t *testing.T, parent, selector, model string) (string, error) {
 	t.Helper()
-	req := map[string]any{
-		"type":             "ctrl_spawn",
-		"id":               "grant",
-		"cwd":              t.TempDir(),
-		"kind":             "fundi",
-		"model":            model,
-		"noSession":        true,
-		"parentChildId":    parent,
-		"executorSelector": selector,
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := g.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:              t.TempDir(),
+		Kind:             "fundi",
+		Model:            model,
+		NoSession:        true,
+		ParentChildId:    parent,
+		ExecutorSelector: selector,
+	}))
+	if err != nil {
+		return "", err
 	}
-	raw := g.request(t, mustMarshal(t, req))
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	return r
+	return resp.Msg.GetChildId(), nil
 }
 
 // TestGrant_NativeNarrowing drives the join over the wire with native
@@ -347,64 +349,39 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	g.waitForLiveExecutors(t, 2)
 
 	// The coordinator is a top-level agent (empty parent) that lands on env=home.
-	coord := g.grantSpawnRaw(t, "", "env=home", "anthropic/claude-x")
-	if !coord.Success {
-		t.Fatalf("coordinator spawn failed: %+v", coord.Error)
+	coordID, err := g.grantSpawn(t, "", "env=home", "anthropic/claude-x")
+	if err != nil {
+		t.Fatalf("coordinator spawn failed: %v", err)
 	}
-	var coordData protocol.SpawnResponseData
-	mustUnmarshal(t, coord.Data, &coordData)
-	coordID := coordData.ChildID
 
 	// A worker under the coordinator naming env=work starts UNBOUND: a
 	// parented child whose selector matches no live executor in its
 	// effective set may wait for one to connect, because an executor
 	// restart parks its connection for a full health tick and surviving
 	// that window is what lazy binding exists for.
-	unbound := g.grantSpawnRaw(t, coordID, "env=work", "anthropic/claude-x")
-	if !unbound.Success {
+	unboundID, err := g.grantSpawn(t, coordID, "env=work", "anthropic/claude-x")
+	if err != nil {
 		t.Fatalf("a parented worker with no matching executor must "+
-			"start unbound, not be refused: %+v", unbound.Error)
+			"start unbound, not be refused: %v", err)
 	}
-	var unboundData protocol.SpawnResponseData
-	mustUnmarshal(t, unbound.Data, &unboundData)
-	getRaw := g.request(t, mustMarshal(t, map[string]any{
-		"type": "ctrl_get", "id": "g", "childId": unboundData.ChildID,
-	}))
-	var unboundGetR protocol.Response
-	mustUnmarshal(t, getRaw, &unboundGetR)
-	if !unboundGetR.Success {
-		t.Fatalf("ctrl_get failed: %+v", unboundGetR.Error)
-	}
-	var unboundSummary protocol.ChildSummary
-	mustUnmarshal(t, unboundGetR.Data, &unboundSummary)
-	if unboundSummary.Labels["rafiki/executor-state"] != "unbound" {
+	unboundSummary := getChild(t, g.control(t), unboundID)
+	if unboundSummary.GetLabels()["rafiki/executor-state"] != "unbound" {
 		t.Fatalf("the worker outside its parent's set must carry "+
 			"rafiki/executor-state=unbound, got labels=%v",
-			unboundSummary.Labels)
+			unboundSummary.GetLabels())
 	}
 
 	// A worker naming env=home — inside the set — lands, and the child's
 	// store record carries the executor it landed on (the same label phase 09
 	// prompt visibility reads).
-	ok := g.grantSpawnRaw(t, coordID, "env=home", "anthropic/claude-x")
-	if !ok.Success {
-		t.Fatalf("a worker inside the parent's set was refused: %+v", ok.Error)
+	okID, err := g.grantSpawn(t, coordID, "env=home", "anthropic/claude-x")
+	if err != nil {
+		t.Fatalf("a worker inside the parent's set was refused: %v", err)
 	}
-	var okData protocol.SpawnResponseData
-	mustUnmarshal(t, ok.Data, &okData)
-	okRaw := g.request(t, mustMarshal(t, map[string]any{
-		"type": "ctrl_get", "id": "g", "childId": okData.ChildID,
-	}))
-	var okR protocol.Response
-	mustUnmarshal(t, okRaw, &okR)
-	if !okR.Success {
-		t.Fatalf("ctrl_get failed: %+v", okR.Error)
-	}
-	var snap protocol.ChildSummary
-	mustUnmarshal(t, okR.Data, &snap)
-	landedID := snap.Labels["rafiki/executor"]
+	snap := getChild(t, g.control(t), okID)
+	landedID := snap.GetLabels()["rafiki/executor"]
 	if landedID == "" {
-		t.Fatalf("worker did not record the executor it landed on (labels %v)", snap.Labels)
+		t.Fatalf("worker did not record the executor it landed on (labels %v)", snap.GetLabels())
 	}
 	// The worker must have landed on an executor bearing the env=home label —
 	// which, given multiple test runs, may be any such row, not one specific id.
@@ -415,13 +392,4 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	if landed.Labels["env"] != "home" {
 		t.Fatalf("worker landed on env=%q, want env=home (%v)", landed.Labels["env"], landed.Labels)
 	}
-}
-
-func protocolErrorString(t *testing.T, r protocol.Response) string {
-	t.Helper()
-	if r.Error == nil {
-		return ""
-	}
-	b, _ := json.Marshal(r.Error)
-	return string(b)
 }

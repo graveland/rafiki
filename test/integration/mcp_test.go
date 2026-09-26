@@ -32,7 +32,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // mcpToolNames is the exact surface the MCP face must expose: the
@@ -113,34 +112,33 @@ func bootMCPDaemon(t *testing.T) *daemon {
 	return d
 }
 
-// createMCPUser mints a user over the control UDS and returns its bearer
-// token. The UDS is the daemon's trust boundary, so the frame needs no
-// credential; the token is what the MCP face authenticates with.
+// createMCPUser mints a user over connect.sock with the generated Connect
+// client (CreateUser) and returns its bearer token. The UDS is the daemon's
+// trust boundary, so the call needs no credential; the token is what the MCP
+// face authenticates with.
 func (d *daemon) createMCPUser(t *testing.T) string {
 	t.Helper()
 	username := fmt.Sprintf("mcp-it-%d", time.Now().UnixNano())
-	raw := d.request(t, fmt.Sprintf(`{"type":"ctrl_user_create","id":"u1","username":%q}`, username))
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_user_create failed: %+v", r.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := d.control(t).CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: username}))
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
 	}
-	var data protocol.UserCreateResponseData
-	mustUnmarshal(t, r.Data, &data)
-	if data.Token == "" {
-		t.Fatal("ctrl_user_create returned no token")
+	if resp.Msg.GetToken() == "" {
+		t.Fatal("CreateUser returned no token")
 	}
 	// The token is shown exactly once by design, so there is nothing to
 	// re-derive later; remove the user on cleanup so the shared test database
 	// does not accumulate active test identities.
 	t.Cleanup(func() {
-		raw := d.request(t, fmt.Sprintf(`{"type":"ctrl_user_rm","id":"u2","username":%q}`, username))
-		var rm protocol.Response
-		if json.Unmarshal(raw, &rm) == nil && !rm.Success {
-			t.Logf("ctrl_user_rm(%s): %+v", username, rm.Error)
+		rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer rcancel()
+		if _, err := d.control(t).RemoveUser(rctx, connect.NewRequest(&rafikiv1.RemoveUserRequest{Username: username})); err != nil {
+			t.Logf("RemoveUser(%s): %v", username, err)
 		}
 	})
-	return data.Token
+	return resp.Msg.GetToken()
 }
 
 // ─── MCP client plumbing ─────────────────────────────────────────────────────

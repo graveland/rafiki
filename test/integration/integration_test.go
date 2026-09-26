@@ -1,16 +1,16 @@
 // Package integration_test contains end-to-end tests that build and run the
-// rafikid daemon binary as a subprocess, communicate with it via UDS, and
-// exercise the major control-protocol flows (spawn, list, get, kill, resume,
-// subscribe, forget).
+// rafikid daemon binary as a subprocess, communicate with it over its
+// connect.sock through the generated Connect client
+// (pkg/gen/rafiki/v1/rafikiv1connect), and exercise the major control flows
+// (spawn, list, get, kill, resume, stream events, close).
 //
-// Profile filtering (ctrl_subscribe with profile="coarse") is not tested here
-// because profile→event-set expansion is not yet implemented (it is currently
-// a no-op); add a test when that feature ships.
+// Event-tier filtering (StreamEvents with a profile-style type restriction)
+// is not tested here because profile→event-set expansion is not yet
+// implemented (it is currently a no-op); add a test when that feature ships.
 package integration_test
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -24,6 +24,11 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -224,240 +229,288 @@ func (d *daemon) stopDaemon() {
 	os.RemoveAll(d.homeDir)
 }
 
-// request sends one JSONL frame on a fresh connection and returns the response.
-func (d *daemon) request(t *testing.T, frame string) []byte {
-	t.Helper()
-	conn, err := net.Dial("unix", d.socketPath)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		t.Fatalf("set deadline: %v", err)
-	}
+// ─── Connect client ───────────────────────────────────────────────────────────
 
-	if _, err := fmt.Fprintln(conn, frame); err != nil {
-		t.Fatalf("write frame: %v", err)
-	}
-	br := bufio.NewReader(conn)
-	line, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	return []byte(strings.TrimRight(line, "\n"))
+// control returns the generated Connect client for the daemon's connect.sock.
+// The UDS is the credential: the listener admits anonymous local callers
+// (optionalIdentityInterceptor), so no bearer token is needed here. The dial
+// shape lives on connectClient (cockpit_subject_test.go) and must match
+// cmd/rafiki/connectclient.go.
+func (d *daemon) control(t *testing.T) rafikiv1connect.ControlClient {
+	t.Helper()
+	return d.connectClient()
 }
 
-// spawnChild sends ctrl_spawn with noSession:true (so resume works without a
-// real session file) and returns the assigned childId.
-// spawnChild sends ctrl_spawn with noSession:true (so resume works without a
-// real session file) and returns the assigned childId. The child is an
-// in-process fundi child, which requires a model; the throwaway model string
-// is never actually sent to a provider — these tests only exercise the
-// daemon's spawn/kill/subscribe lifecycle.
+// spawnChild spawns a fundi child with noSession:true (so resume works without
+// a real session file) over the daemon's connect.sock and returns the assigned
+// childId. The child is an in-process fundi child, which requires a model; the
+// throwaway model string is never actually sent to a provider — these tests
+// only exercise the daemon's spawn/kill/stream/close lifecycle.
 func (d *daemon) spawnChild(t *testing.T) string {
 	t.Helper()
-	raw := d.request(t, `{"type":"ctrl_spawn","id":"spawn","cwd":"/tmp","noSession":true,"kind":"fundi","model":"anthropic/sonnet-latest"}`)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_spawn failed: %+v", r.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:       "/tmp",
+		NoSession: true,
+		Kind:      protocol.KindFundi,
+		Model:     "anthropic/sonnet-latest",
+	}))
+	if err != nil {
+		t.Fatalf("spawn failed: %v", err)
 	}
-	var data protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &data)
-	if data.ChildID == "" {
+	if resp.Msg.GetChildId() == "" {
 		t.Fatal("spawn returned empty childId")
 	}
-	return data.ChildID
+	return resp.Msg.GetChildId()
 }
 
-// ─── subscriber connection ────────────────────────────────────────────────────
+// ─── Connect call helpers ─────────────────────────────────────────────────────
 
-// subConn is a persistent UDS connection that reads frames asynchronously.
-// ctrl_response frames are kept in a separate FIFO so that nextResponse()
-// can drain them in order without accidentally consuming event frames.
-type subConn struct {
-	t         *testing.T
-	conn      net.Conn
-	br        *bufio.Reader
-	mu        sync.Mutex
-	responses []json.RawMessage // ctrl_response frames
-	events    []json.RawMessage // all other frames (child events, lifecycle events)
-}
-
-// dial opens a persistent connection to the daemon for subscription use.
-func (d *daemon) dial(t *testing.T) *subConn {
+// getChild returns one child's summary over Connect, failing the test when the
+// child is unknown or the call errors.
+func getChild(t *testing.T, client rafikiv1connect.ControlClient, childID string) *rafikiv1.ChildSummary {
 	t.Helper()
-	conn, err := net.Dial("unix", d.socketPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 	if err != nil {
-		t.Fatalf("dial sub: %v", err)
+		t.Fatalf("GetChild(%s): %v", childID, err)
 	}
-	sc := &subConn{
-		t:    t,
-		conn: conn,
-		br:   bufio.NewReader(conn),
-	}
-	go sc.readLoop()
-	t.Cleanup(func() { conn.Close() })
-	return sc
+	return resp.Msg.GetChild()
 }
 
-func (sc *subConn) readLoop() {
-	for {
-		line, err := sc.br.ReadString('\n')
+// listChildren returns every child over one Connect call.
+func listChildren(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv1.ChildSummary {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	resp, err := client.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	return resp.Msg.GetChildren()
+}
+
+// ─── event subscription ───────────────────────────────────────────────────────
+
+// childEventsSubject names one child — the native equivalent of the framed
+// ctrl_subscribe.
+func childEventsSubject(childID string) *rafikiv1.EventSubject {
+	return &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}}
+}
+
+// allEventsSubject names everything the caller is entitled to — the native
+// equivalent of the framed ctrl_global_subscribe.
+func allEventsSubject() *rafikiv1.EventSubject {
+	return &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_All{All: true}}
+}
+
+// eventWatermark returns the child's latest durable event-log ordinal. A
+// stream opened with a replay cursor delivers every stored event with an
+// ordinal above the cursor value, so a test that must see only post-open
+// events takes the watermark first and excludes ordinals at or below it —
+// every event appended after the open has a strictly greater ordinal.
+func eventWatermark(t *testing.T, client rafikiv1connect.ControlClient, childID string) int32 {
+	t.Helper()
+	latest := getChild(t, client, childID).LatestOrdinal
+	if latest == nil {
+		t.Fatalf("child %s carries no event-log ordinal; nothing to replay from", childID)
+	}
+	return *latest
+}
+
+// eventStream is an open StreamEvents server stream whose messages a
+// background goroutine buffers as they arrive, so a test can wait for a
+// matching event without consuming the ones before it.
+type eventStream struct {
+	stream *connect.ServerStreamForClient[rafikiv1.Event]
+
+	// watermark is the subject child's latest durable ordinal at open time.
+	// Every replayed event carries an ordinal at or below it (the replay
+	// cursor covers the child's already-stored tail); every event appended
+	// after the open carries a strictly greater one — or none, when its
+	// best-effort log append failed. waits() admits only the latter two.
+	watermark int32
+
+	mu     sync.Mutex
+	events []*rafikiv1.Event
+}
+
+// openEvents opens a durable-tier event stream over connect.sock and starts
+// buffering it. replay maps child id → last ordinal SEEN (-1 replays the
+// child's whole log); pass the watermark for a minimal one-event replay.
+//
+// The cursor is load-bearing, and not because the tests want replay: a
+// from-now stream sends no response headers until its first live message,
+// so a test that opened one synchronously before the action it watches
+// would deadlock on the open itself (the server-side subscription only
+// attaches after the replay read). The replays also make the subscription
+// itself durable: an event published while the open was in flight is
+// appended to the log before it is published anywhere, so a replay that
+// starts late still covers it — the same property the framed plane's
+// subscribe-ack gave, minus the microseconds between the replay read and
+// the live subscription attaching.
+func (d *daemon) openEvents(t *testing.T, subject *rafikiv1.EventSubject, replay map[string]int32, watermark int32) *eventStream {
+	t.Helper()
+	// Long-lived on purpose: the stream is open for the whole test and every
+	// individual wait carries its own timeout. Cancelled in cleanup.
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := d.control(t).StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: subject,
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+		Cursor:  &rafikiv1.EventCursor{Ordinals: replay},
+	}))
+	if err != nil {
+		cancel()
+		t.Fatalf("StreamEvents: %v", err)
+	}
+	es := &eventStream{stream: stream, watermark: watermark}
+	go func() {
+		for stream.Receive() {
+			es.mu.Lock()
+			es.events = append(es.events, stream.Msg())
+			es.mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = stream.Close()
+	})
+	return es
+}
+
+// isLive reports whether ev was appended after the stream opened: its
+// ordinal is strictly above the watermark, or it carries none (a failed
+// best-effort log append — still a real live event, just an unresumable
+// one). Replayed events always carry their stored ordinal.
+func (es *eventStream) isLive(ev *rafikiv1.Event) bool {
+	if ord := ev.Ordinal; ord != nil && *ord <= es.watermark {
+		return false
+	}
+	return true
+}
+
+// dumpLocked renders every buffered event, newest index last; caller holds
+// es.mu.
+func (es *eventStream) dumpLocked() string {
+	dump := make([]string, 0, len(es.events))
+	for i, e := range es.events {
+		b, err := protojson.Marshal(e)
 		if err != nil {
-			return // connection closed
+			b = []byte(fmt.Sprintf("%+v", e))
 		}
-		frame := json.RawMessage(strings.TrimRight(line, "\n"))
-		var hdr struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(frame, &hdr); err != nil {
-			// Logf, not Fatal: this runs in a background goroutine, and
-			// FailNow-family calls are only safe from the test's own
-			// goroutine.
-			sc.t.Logf("subConn readLoop: malformed frame %q: %v", frame, err)
-		}
-
-		sc.mu.Lock()
-		if hdr.Type == "ctrl_response" {
-			sc.responses = append(sc.responses, frame)
-		} else {
-			sc.events = append(sc.events, frame)
-		}
-		sc.mu.Unlock()
+		dump = append(dump, fmt.Sprintf("  [%d] %s", i, b))
 	}
+	return strings.Join(dump, "\n")
 }
 
-// send writes a JSONL frame to the connection.
-func (sc *subConn) send(frame string) {
-	sc.t.Helper()
-	if err := sc.conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		sc.t.Fatalf("subConn set deadline: %v", err)
-	}
-	if _, err := fmt.Fprintln(sc.conn, frame); err != nil {
-		sc.t.Fatalf("subConn write: %v", err)
-	}
+// waitEvent blocks until es's buffer contains a LIVE event matching predicate
+// and returns it, failing the test on timeout. It never consumes a
+// non-matching event, so several waits can share one stream.
+func (es *eventStream) waitEvent(t *testing.T, predicate func(*rafikiv1.Event) bool, timeout time.Duration) *rafikiv1.Event {
+	t.Helper()
+	ev, _ := es.waitEventAfter(t, 0, predicate, timeout)
+	return ev
 }
 
-// nextResponse waits for (and removes) the next ctrl_response from the queue.
-func (sc *subConn) nextResponse(t *testing.T, timeout time.Duration) protocol.Response {
+// waitEventAfter scans es's buffer from index `from` until it finds a live
+// event matching predicate, returning the event and the index just past it.
+// The cursor form exists because the same event type recurs across turns on
+// one child — a wait for the SECOND occurrence must not succeed instantly on
+// the first. On timeout it dumps every buffered event: a wait that says only
+// "I didn't find it" leaves the reader guessing about which of "never
+// emitted", "emitted before `from`", or "emitted in a different shape"
+// happened.
+func (es *eventStream) waitEventAfter(t *testing.T, from int, predicate func(*rafikiv1.Event) bool, timeout time.Duration) (*rafikiv1.Event, int) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		sc.mu.Lock()
-		if len(sc.responses) > 0 {
-			raw := sc.responses[0]
-			sc.responses = sc.responses[1:]
-			sc.mu.Unlock()
-			var resp protocol.Response
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				t.Fatalf("unmarshal ctrl_response: %v\ndata: %s", err, raw)
-			}
-			return resp
-		}
-		sc.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timeout (%v) waiting for ctrl_response", timeout)
-	return protocol.Response{}
-}
-
-// waitForEvent polls the event buffer until predicate returns true, then
-// returns the matching frame. Fails the test on timeout.
-func (sc *subConn) waitForEvent(t *testing.T, predicate func(json.RawMessage) bool, timeout time.Duration) json.RawMessage {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		sc.mu.Lock()
-		for _, f := range sc.events {
-			if predicate(f) {
-				sc.mu.Unlock()
-				return f
+		es.mu.Lock()
+		for i := from; i < len(es.events); i++ {
+			if es.isLive(es.events[i]) && predicate(es.events[i]) {
+				ev := es.events[i]
+				es.mu.Unlock()
+				return ev, i + 1
 			}
 		}
-		sc.mu.Unlock()
+		es.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
-	sc.mu.Lock()
-	n := len(sc.events)
-	sc.mu.Unlock()
-	t.Fatalf("timeout (%v) waiting for matching event; received %d event(s)", timeout, n)
-	return nil
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	t.Fatalf("timeout (%v) waiting for matching event after index %d; buffered events:\n%s",
+		timeout, from, es.dumpLocked())
+	return nil, from
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-func mustUnmarshal(t *testing.T, data []byte, v any) {
-	t.Helper()
-	if err := json.Unmarshal(data, v); err != nil {
-		t.Fatalf("unmarshal: %v\ndata: %s", err, data)
+// agentStatusEvent matches a durable agent_status event for childID carrying
+// the wanted state. It is the native witness of a turn boundary: the framed
+// plane's inner agent_start/agent_settled events are one state machine here
+// (pkg/child/state.go — agent_start drives streaming, agent_settled drives
+// idle), and handleStatusChange (cmd/rafikid/controller.go) is the daemon's
+// only agent_status producer, fed by a DRAINED transition queue, so neither
+// end of a fast turn can be lost the way the old sampled status frames could.
+func agentStatusEvent(childID, state string) func(*rafikiv1.Event) bool {
+	return func(ev *rafikiv1.Event) bool {
+		st := ev.GetAgentStatus()
+		return ev.GetChildId() == childID && st != nil && st.GetState() == state
 	}
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 // TestIntegration_FullLifecycle exercises the canonical flow:
-// spawn → send prompt → kill → confirm exited → forget.
+// spawn → send frame → kill → confirm exited → close (forget).
 func TestIntegration_FullLifecycle(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
+	client := d.control(t)
 
 	childID := d.spawnChild(t)
 
-	// Send a frame to the child; the daemon's ctrl_send ack is what this asserts.
-	sendJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"s1","childId":%q,"frame":{"type":"get_state","id":"u1"}}`,
-		childID,
-	)
-	raw := d.request(t, sendJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Errorf("ctrl_send failed: %+v", r.Error)
+	// Send a raw child-protocol frame; the SendFrame ack is what this asserts.
+	sctx, scancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := client.SendFrame(sctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"get_state","id":"u1"}`,
+	})); err != nil {
+		t.Errorf("SendFrame failed: %v", err)
 	}
+	scancel()
 
 	// Kill.
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	raw = d.request(t, killJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Kill failed: %v", err)
 	}
+	kcancel()
 
-	// Confirm exited via ctrl_list.
-	raw = d.request(t, `{"type":"ctrl_list","id":"l1"}`)
-	mustUnmarshal(t, raw, &r)
-	var listData protocol.ListResponseData
-	mustUnmarshal(t, r.Data, &listData)
-
-	var found *protocol.ChildSummary
-	for i, c := range listData.Children {
-		if c.ChildID == childID {
-			found = &listData.Children[i]
+	// Confirm exited via ListChildren.
+	var found *rafikiv1.ChildSummary
+	for _, c := range listChildren(t, client) {
+		if c.GetChildId() == childID {
+			found = c
 		}
 	}
 	if found == nil {
-		t.Fatal("child not found in ctrl_list after kill")
+		t.Fatal("child not found in ListChildren after kill")
 	}
-	if found.Status != string(protocol.StatusExited) {
-		t.Errorf("want status=%s, got %s", protocol.StatusExited, found.Status)
-	}
-
-	// Forget.
-	forgetJSON := fmt.Sprintf(`{"type":"ctrl_forget","id":"f1","childId":%q}`, childID)
-	raw = d.request(t, forgetJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_forget failed: %+v", r.Error)
+	if found.GetStatus() != string(protocol.StatusExited) {
+		t.Errorf("want status=%s, got %s", protocol.StatusExited, found.GetStatus())
 	}
 
-	// Verify the child is gone from ctrl_list.
-	raw = d.request(t, `{"type":"ctrl_list","id":"l2"}`)
-	mustUnmarshal(t, raw, &r)
-	mustUnmarshal(t, r.Data, &listData)
-	for _, c := range listData.Children {
-		if c.ChildID == childID {
-			t.Error("child still present in ctrl_list after ctrl_forget")
+	// Close (forget).
+	cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := client.Close(cctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	ccancel()
+
+	// Verify the child is gone from ListChildren.
+	for _, c := range listChildren(t, client) {
+		if c.GetChildId() == childID {
+			t.Error("child still present in ListChildren after Close")
 		}
 	}
 }
@@ -467,65 +520,49 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 func TestIntegration_KillResume(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
+	client := d.control(t)
 
 	childID := d.spawnChild(t)
 
-	// Capture the initial PID via ctrl_get.
-	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
-	raw := d.request(t, getJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get failed: %+v", r.Error)
-	}
-	var child1 protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &child1)
-	if child1.Status == string(protocol.StatusExited) {
+	// Capture the initial state via GetChild.
+	child1 := getChild(t, client, childID)
+	if child1.GetStatus() == string(protocol.StatusExited) {
 		t.Fatal("child should be alive after spawn")
 	}
 
 	// Kill.
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	raw = d.request(t, killJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Kill failed: %v", err)
 	}
+	kcancel()
 
 	// Confirm exited.
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	var exitedChild protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &exitedChild)
-	if exitedChild.Status != string(protocol.StatusExited) {
-		t.Fatalf("want status=exited after kill, got %s", exitedChild.Status)
+	exitedChild := getChild(t, client, childID)
+	if exitedChild.GetStatus() != string(protocol.StatusExited) {
+		t.Fatalf("want status=exited after kill, got %s", exitedChild.GetStatus())
 	}
 
 	// Resume — should re-spawn with the same childId.
-	resumeJSON := fmt.Sprintf(`{"type":"ctrl_resume","id":"re1","childId":%q}`, childID)
-	raw = d.request(t, resumeJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_resume failed: %+v", r.Error)
+	rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	resp, err := client.Resume(rctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID}))
+	rcancel()
+	if err != nil {
+		t.Fatalf("Resume failed: %v", err)
 	}
-	var resumeData protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &resumeData)
-	if resumeData.ChildID != childID {
-		t.Errorf("resume: want childId=%s, got %s", childID, resumeData.ChildID)
+	if got := resp.Msg.GetChildId(); got != childID {
+		t.Errorf("resume: want childId=%s, got %s", childID, got)
 	}
 
 	// The resumed child must be alive and, for a kind with a real OS process
 	// (claude), have a different PID. An in-process fundi child has PID 0 and
 	// never forks, so the "different PID" assertion is only meaningful when the
 	// original child had a real PID.
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	var child2 protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &child2)
-	if child2.Status == string(protocol.StatusExited) {
+	child2 := getChild(t, client, childID)
+	if child2.GetStatus() == string(protocol.StatusExited) {
 		t.Fatal("resumed child should be alive, not exited")
 	}
-	if child1.PID != nil && child2.PID != nil && *child1.PID != 0 && *child1.PID == *child2.PID {
+	if child1.Pid != nil && child2.Pid != nil && child1.GetPid() != 0 && child1.GetPid() == child2.GetPid() {
 		t.Error("resumed child should have a different PID from the original")
 	}
 }
@@ -536,22 +573,22 @@ func TestIntegration_KillResume(t *testing.T) {
 func TestIntegration_LogDumpOnExit(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
+	client := d.control(t)
 
 	childID := d.spawnChild(t)
 
-	// Kill the child to trigger handleChildExit → LogDumper.Dump.
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	raw := d.request(t, killJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	// Kill the child to trigger handleChildExit → LogDumper.Dump. Kill returns
+	// after process exit, but handleChildExit runs in monitorChild which is
+	// concurrent, so the dump files may lag the response slightly.
+	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Kill failed: %v", err)
 	}
+	kcancel()
 
-	// Give the daemon a moment to finish the dump (kill returns after process
-	// exit, but handleChildExit runs in monitorChild which is concurrent).
-	// Poll for err.log.gz — the last file Dump writes — to avoid a race where
-	// meta.json appears before the gz files are flushed.
+	// Give the daemon a moment to finish the dump. Poll for err.log.gz — the
+	// last file Dump writes — to avoid a race where meta.json appears before
+	// the gz files are flushed.
 	childLogDir := filepath.Join(d.logsDir, childID)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -569,48 +606,42 @@ func TestIntegration_LogDumpOnExit(t *testing.T) {
 	}
 }
 
-// TestIntegration_ResumeEmitsSpawned verifies that ctrl_resume emits
-// ctrl_child_spawned (Fix 2 / spec §7.2).
+// TestIntegration_ResumeEmitsSpawned verifies that Resume emits the native
+// child_spawned event (Fix 2 / spec §7.2), observed on a global StreamEvents
+// subscription.
 func TestIntegration_ResumeEmitsSpawned(t *testing.T) {
 	t.Parallel()
 	d := bootDaemon(t)
+	client := d.control(t)
 
 	childID := d.spawnChild(t)
 
 	// Kill the child.
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	raw := d.request(t, killJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_kill failed: %+v", r.Error)
+	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Kill failed: %v", err)
 	}
+	kcancel()
 
-	// Set up a global subscriber to catch the ctrl_child_spawned event.
-	sc := d.dial(t)
-	sc.send(`{"type":"ctrl_global_subscribe","id":"gsub1"}`)
-	gsubResp := sc.nextResponse(t, 5*time.Second)
-	if !gsubResp.Success {
-		t.Fatalf("ctrl_global_subscribe failed: %+v", gsubResp.Error)
-	}
+	// Set up a global subscription to catch the resumed child's child_spawned
+	// event. The daemon publishes it on the RESUMED child's own bus and on the
+	// daemon-wide fan-out, both through publishEvent. The watermark read here
+	// is what keeps the original spawn's replayed child_spawned from passing
+	// the wait below: only an event appended after the open — the resumed
+	// child's own — carries a greater ordinal.
+	watermark := eventWatermark(t, client, childID)
+	es := d.openEvents(t, allEventsSubject(), map[string]int32{childID: watermark - 1}, watermark)
 
 	// Resume.
-	resumeJSON := fmt.Sprintf(`{"type":"ctrl_resume","id":"re1","childId":%q}`, childID)
-	raw = d.request(t, resumeJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_resume failed: %+v", r.Error)
+	rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if _, err := client.Resume(rctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID})); err != nil {
+		t.Fatalf("Resume failed: %v", err)
 	}
+	rcancel()
 
-	// Global subscriber must receive ctrl_child_spawned for the resumed child.
-	sc.waitForEvent(t, func(f json.RawMessage) bool {
-		var ev struct {
-			Type    string `json:"type"`
-			ChildID string `json:"childId"`
-		}
-		if json.Unmarshal(f, &ev) != nil {
-			return false
-		}
-		return ev.Type == protocol.TypeCtrlChildSpawned && ev.ChildID == childID
+	// The global subscription must receive child_spawned for the resumed child.
+	es.waitEvent(t, func(ev *rafikiv1.Event) bool {
+		cs := ev.GetChildSpawned()
+		return cs != nil && cs.GetChildId() == childID
 	}, 5*time.Second)
 }

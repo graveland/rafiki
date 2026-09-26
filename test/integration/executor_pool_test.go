@@ -12,11 +12,8 @@
 package integration_test
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
-
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // TestExecutorPool_FullLifecycle covers the join over a real reverse-dialled
@@ -41,20 +38,19 @@ func TestExecutorPool_FullLifecycle(t *testing.T) {
 	g.waitForLiveExecutors(t, 1)
 
 	// Selected by label: a spawn naming env=home lands on it.
-	resp := g.grantSpawnRaw(t, "", "env=home", "anthropic/claude-x")
-	if !resp.Success {
-		t.Fatalf("spawn onto the enrolled executor failed: %+v", resp.Error)
+	childID, err := g.grantSpawn(t, "", "env=home", "anthropic/claude-x")
+	if err != nil {
+		t.Fatalf("spawn onto the enrolled executor failed: %v", err)
 	}
-	var data protocol.SpawnResponseData
-	mustUnmarshal(t, resp.Data, &data)
-	if placed := g.executorOf(t, data.ChildID); placed != execID {
+	if placed := g.executorOf(t, childID); placed != execID {
 		t.Fatalf("child placed on executor %q, want the one we enrolled (%s)", placed, execID)
 	}
 
 	// A selector matching nothing is refused, and the refusal counts the pool —
 	// which is also how we know the executor is still live after the spawn.
-	if msg := protocolErrorString(t, g.grantSpawnRaw(t, "", "env=nowhere", "anthropic/claude-x")); !strings.Contains(msg, "1 live executor(s)") {
-		t.Errorf("expected a refusal naming 1 live executor, got: %s", msg)
+	_, err = g.grantSpawn(t, "", "env=nowhere", "anthropic/claude-x")
+	if err == nil || !strings.Contains(err.Error(), "1 live executor(s)") {
+		t.Errorf("expected a refusal naming 1 live executor, got: %v", err)
 	}
 
 }
@@ -62,19 +58,5 @@ func TestExecutorPool_FullLifecycle(t *testing.T) {
 // executorOf returns the executor id a child was placed on, from its auto-label.
 func (g *grantDaemon) executorOf(t *testing.T, childID string) string {
 	t.Helper()
-	raw := g.request(t, mustMarshal(t, map[string]any{
-		"type": "ctrl_get", "id": "get", "childId": childID,
-	}))
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get %s: %+v", childID, r.Error)
-	}
-	var snap struct {
-		Labels map[string]string `json:"labels"`
-	}
-	if err := json.Unmarshal(r.Data, &snap); err != nil {
-		t.Fatalf("decode ctrl_get: %v", err)
-	}
-	return snap.Labels["rafiki/executor"]
+	return getChild(t, g.control(t), childID).GetLabels()["rafiki/executor"]
 }

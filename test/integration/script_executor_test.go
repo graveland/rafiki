@@ -53,7 +53,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/persist"
 )
 
 // scriptExecutorDriverCode is the executor-hosted driver. Order matters: the
@@ -301,25 +301,32 @@ func TestScriptChildOnExecutor(t *testing.T) {
 			sum.GetResult(), err, probeData)
 	}
 	// The stdout relay leg: the driver's stdout line reached the daemon and
-	// is served back by the same framed verb the logs CLI drives (an exited
-	// child's out stream is the log dump, via ctrl_get_recent).
-	raw := d.request(t, mustMarshal(t, map[string]any{
-		"type": "ctrl_get_recent", "id": "recent", "childId": childID,
-	}))
-	var recent protocol.Response
-	mustUnmarshal(t, raw, &recent)
-	if !recent.Success {
-		t.Fatalf("ctrl_get_recent failed: %+v", recent.Error)
+	// was persisted with the child's exit dump. This reads the very file the
+	// retired framed verb served back: an exited child's ring is dumped to
+	// out.jsonl.gz on exit, and Controller.GetRecent's exited branch read it
+	// back through readDiskEvents — the dump IS the record, so reading it
+	// directly asserts the same property (the relayed stdout reached the
+	// daemon) without a framed call. Poll for the file: the dump is written
+	// by the concurrent monitorChild exit path, after the status already
+	// reads exited.
+	dumpPath := filepath.Join(d.logsDir, childID, "out.jsonl.gz")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(dumpPath); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	var recentData protocol.GetRecentResponseData
-	if err := json.Unmarshal(recent.Data, &recentData); err != nil {
-		t.Fatalf("decode get_recent: %v (raw %.400s)", err, recent.Data)
+	lines, err := persist.ReadGzLines(dumpPath)
+	if err != nil {
+		t.Fatalf("read the child's out dump %s: %v", dumpPath, err)
 	}
-	var outAll []byte
-	for _, e := range recentData.Events {
-		outAll = append(outAll, []byte(e)...)
+	var outAll strings.Builder
+	for _, l := range lines {
+		outAll.Write(l)
+		outAll.WriteByte('\n')
 	}
-	if !strings.Contains(string(outAll), "executor-hosted-script-ok") {
-		t.Fatalf("the script's stdout never reached the daemon:\n%.2000s", outAll)
+	if !strings.Contains(outAll.String(), "executor-hosted-script-ok") {
+		t.Fatalf("the script's stdout never reached the daemon:\n%.2000s", outAll.String())
 	}
 }

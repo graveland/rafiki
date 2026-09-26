@@ -11,16 +11,20 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 	"go.graveland.dev/rafiki/pkg/store"
 )
 
@@ -221,16 +225,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 	childID := d1.spawnChild(t)
 
 	// Send a message to create a conversation.
-	sendJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"s1","childId":%q,"frame":{"type":"get_state","id":"u1"}}`,
-		childID,
-	)
-	raw := d1.request(t, sendJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send failed: %+v", r.Error)
-	}
+	sendTurn(t, d1, childID)
 
 	// 2. Stop the daemon.
 	_ = d1.proc.Process.Signal(syscall.SIGTERM)
@@ -278,15 +273,10 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 	})
 
 	// 5. Assert the child is still listed.
-	raw = d2.request(t, `{"type":"ctrl_list","id":"l1"}`)
-	mustUnmarshal(t, raw, &r)
-	var listData protocol.ListResponseData
-	mustUnmarshal(t, r.Data, &listData)
-
-	var found *protocol.ChildSummary
-	for i, c := range listData.Children {
-		if c.ChildID == childID {
-			found = &listData.Children[i]
+	var found *rafikiv1.ChildSummary
+	for _, c := range listChildren(t, d2.control(t)) {
+		if c.GetChildId() == childID {
+			found = c
 		}
 	}
 	if found == nil {
@@ -299,7 +289,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 
 // TestDBChildState_ChildRowVisibleAfterRestart verifies that a child row
 // inserted directly into conversations.child is loaded by the daemon on
-// restart — it appears in ctrl_list as exited.
+// restart — it appears in ListChildren as exited.
 func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
 	if os.Getenv("RAFIKI_TEST_DSN") == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -349,24 +339,18 @@ func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
 
 	d := bootDaemonDB(t, "test-visible-daemon")
 
-	raw := d.request(t, `{"type":"ctrl_list","id":"l1"}`)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	var listData protocol.ListResponseData
-	mustUnmarshal(t, r.Data, &listData)
-
 	found := false
-	for _, c := range listData.Children {
-		if c.ChildID == childID {
+	for _, c := range listChildren(t, d.control(t)) {
+		if c.GetChildId() == childID {
 			found = true
-			if c.Status != string(protocol.StatusExited) {
-				t.Errorf("recovered child status = %q, want %q", c.Status, protocol.StatusExited)
+			if c.GetStatus() != string(protocol.StatusExited) {
+				t.Errorf("recovered child status = %q, want %q", c.GetStatus(), protocol.StatusExited)
 			}
 			break
 		}
 	}
 	if !found {
-		t.Error("child row not found in ctrl_list — recovery did not load it")
+		t.Error("child row not found in ListChildren — recovery did not load it")
 	}
 
 	d.stopDaemonNoRemove()
@@ -387,19 +371,17 @@ func insertTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 
 // ─── helpers for crash/recovery tests ─────────────────────────────────────────
 
-// sendTurn sends a ctrl_send with a get_state frame, which creates a conversation
-// for the child without needing a real model turn.
+// sendTurn sends one raw get_state frame to the child, which creates a
+// conversation for it without needing a real model turn.
 func sendTurn(t *testing.T, d *daemon, childID string) {
 	t.Helper()
-	sendJSON := fmt.Sprintf(
-		`{"type":"ctrl_send","id":"s1","childId":%q,"frame":{"type":"get_state","id":"u1"}}`,
-		childID,
-	)
-	raw := d.request(t, sendJSON)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send failed: %+v", r.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := d.control(t).SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"get_state","id":"u1"}`,
+	})); err != nil {
+		t.Fatalf("SendFrame failed: %v", err)
 	}
 }
 
@@ -416,34 +398,43 @@ func sendTurn(t *testing.T, d *daemon, childID string) {
 // succeeds converges on the one state both agree about.
 func killAndForget(t *testing.T, d *daemon, childID string) {
 	t.Helper()
+	client := d.control(t)
 
-	killJSON := fmt.Sprintf(`{"type":"ctrl_kill","id":"k1","childId":%q}`, childID)
-	forgetJSON := fmt.Sprintf(`{"type":"ctrl_forget","id":"f1","childId":%q}`, childID)
-
-	var last *protocol.ErrorBody
+	var last error
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		var r protocol.Response
-
-		// ctrl_kill returns only once the child reads as exited (Kill waits
-		// for cm.Remove), so a success here needs no poll before the forget.
-		// child_exited just means the resume had not landed yet.
-		mustUnmarshal(t, d.request(t, killJSON), &r)
-		if !r.Success && r.Error != nil && r.Error.Code != protocol.ErrChildExited {
-			t.Fatalf("ctrl_kill failed: %+v", r.Error)
+		// Kill returns only once the child reads as exited (it waits for
+		// cm.Remove), so a success here needs no poll before the close. The one
+		// tolerated failure is the exited refusal: the Connect Kill handler
+		// wraps every refusal in CodeInternal carrying the controller's authored
+		// message, and both child_exited wordings ("child has exited", "child
+		// has already exited") contain "exited" — a missing child or a
+		// mid-shutdown one does not. The framed plane branched on the
+		// protocol.ErrChildExited code; the Connect surface carries the same
+		// fact in the message it forwards verbatim.
+		kctx, kcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, killErr := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID}))
+		kcancel()
+		if killErr != nil && !strings.Contains(killErr.Error(), "exited") {
+			t.Fatalf("Kill failed: %v", killErr)
 		}
 
-		mustUnmarshal(t, d.request(t, forgetJSON), &r)
-		if r.Success {
+		// Close maps its refusals through ConnectErr, so the precise reason
+		// rides the error as a rafiki-domain detail — the same code the framed
+		// plane's error body carried, read here with rpcreason.Reason.
+		cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
+		_, closeErr := client.Close(cctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
+		ccancel()
+		if closeErr == nil {
 			return
 		}
-		last = r.Error
-		if r.Error != nil && r.Error.Code != protocol.ErrNotExited {
-			t.Fatalf("ctrl_forget failed: %+v", r.Error)
+		last = closeErr
+		if rpcreason.Reason(closeErr) != protocol.ErrNotExited {
+			t.Fatalf("Close failed: %v", closeErr)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Errorf("ctrl_forget never succeeded; last error: %+v", last)
+	t.Errorf("Close never succeeded; last error: %v", last)
 }
 
 // itDaemonSeq numbers the daemons this suite boots.
@@ -604,13 +595,8 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 	}
 
 	// Check the child is listed — that proves recovery ran.
-	raw := d2.request(t, `{"type":"ctrl_list","id":"l1"}`)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	var listData protocol.ListResponseData
-	mustUnmarshal(t, r.Data, &listData)
-	for _, c := range listData.Children {
-		if c.ChildID == childID {
+	for _, c := range listChildren(t, d2.control(t)) {
+		if c.GetChildId() == childID {
 			return // found
 		}
 	}

@@ -49,22 +49,23 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"go.graveland.dev/rafiki/pkg/claudeargv"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // ─── harness: daemon + fake claude children ──────────────────────────────────
 
 // bootMCPChildDaemon boots an MCP daemon whose claude children are the
 // fake-claude fixture, and returns the daemon plus the directory the fixture
-// dumps into. CLAUDE_BINARY selects the fixture for MCP-spawned children (the
-// MCP agent_spawn schema deliberately carries no binary override); a test that
-// spawns over the UDS can also name it explicitly via piBinary. Everything
-// else matches bootMCPDaemon: noRealProviderEnv, stop-then-remove cleanup, and
-// both readiness waits.
+// dumps into. CLAUDE_BINARY selects the fixture for every spawn on this
+// daemon (resolveClaudeBinary's override chain) — the wire spawn request
+// carries no binary override on either plane, so the boot-level env is the
+// one selection path. Everything else matches bootMCPDaemon:
+// noRealProviderEnv, stop-then-remove cleanup, and both readiness waits.
 func bootMCPChildDaemon(t *testing.T) (*daemon, string) {
 	t.Helper()
 	dumps := t.TempDir()
@@ -593,24 +594,25 @@ func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	d, dumps := bootMCPChildDaemon(t)
 
 	const wantPrompt = "integration-test system prompt appendix"
-	frame := fmt.Sprintf(
-		`{"type":"ctrl_spawn","id":"argv1","cwd":"/tmp","noSession":true,"kind":"claude",`+
-			`"model":"anthropic/sonnet-latest","piBinary":%q,`+
-			`"appendSystemPrompt":%q,"extraArgs":["--foo","bar"]}`,
-		fakeClaudeBin(t), wantPrompt)
-	raw := d.request(t, frame)
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_spawn (claude, argv flags) failed: %+v", r.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:                "/tmp",
+		NoSession:          true,
+		Kind:               "claude",
+		Model:              "anthropic/sonnet-latest",
+		AppendSystemPrompt: wantPrompt,
+		ExtraArgs:          []string{"--foo", "bar"},
+	}))
+	if err != nil {
+		t.Fatalf("spawn (claude, argv flags) failed: %v", err)
 	}
-	var data protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &data)
-	if data.ChildID == "" {
+	childID := resp.Msg.GetChildId()
+	if childID == "" {
 		t.Fatal("spawn returned empty childId")
 	}
 
-	dump := waitClaudeDump(t, d, dumps, data.ChildID)
+	dump := waitClaudeDump(t, d, dumps, childID)
 	for _, want := range []string{"--append-system-prompt", "--foo", "bar"} {
 		if !slices.Contains(dump.argv, want) {
 			t.Errorf("claude argv %q is missing %q; the spawn path dropped it", dump.argv, want)

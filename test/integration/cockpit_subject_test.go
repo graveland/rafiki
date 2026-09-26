@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -35,23 +34,26 @@ func (d *daemon) connectClient() rafikiv1connect.ControlClient {
 	return rafikiv1connect.NewControlClient(h, "http://connect.rafiki.invalid")
 }
 
-// spawnChildUnder spawns a child recording parentID as its tree edge.
+// spawnChildUnder spawns a child recording parentID as its tree edge, over
+// the daemon's connect.sock.
 func (d *daemon) spawnChildUnder(t *testing.T, parentID string) string {
 	t.Helper()
-	frame := fmt.Sprintf(
-		`{"type":"ctrl_spawn","id":"spawnkid","cwd":"/tmp","noSession":true,"kind":"fundi",`+
-			`"model":"anthropic/sonnet-latest","parentChildId":%q}`, parentID)
-	var r protocol.Response
-	mustUnmarshal(t, d.request(t, frame), &r)
-	if !r.Success {
-		t.Fatalf("ctrl_spawn under %s failed: %+v", parentID, r.Error)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
+		Cwd:           "/tmp",
+		NoSession:     true,
+		Kind:          protocol.KindFundi,
+		Model:         "anthropic/sonnet-latest",
+		ParentChildId: parentID,
+	}))
+	if err != nil {
+		t.Fatalf("spawn under %s failed: %v", parentID, err)
 	}
-	var data protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &data)
-	if data.ChildID == "" {
+	if resp.Msg.GetChildId() == "" {
 		t.Fatal("spawn returned empty childId")
 	}
-	return data.ChildID
+	return resp.Msg.GetChildId()
 }
 
 // The cockpit attached to a child subscribes to subtree + include_self. Without

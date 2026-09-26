@@ -1,16 +1,19 @@
 package integration_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -85,154 +88,91 @@ func waitForMarker(t *testing.T, path string, timeout time.Duration) {
 	t.Fatalf("timeout (%v) waiting for marker file %s to appear", timeout, path)
 }
 
-// waitForEventAfter polls sc's event buffer starting at index from until it
-// finds a frame matching predicate, returning that frame and the index just
-// past it. Unlike subConn.waitForEvent (which always scans from the start),
-// this lets a caller require a *new* occurrence of something that has already
-// fired once before - agent_start/agent_settled repeat across every prompt on
-// the same child, so plain "first match anywhere in history" semantics would
-// let a later wait succeed instantly on a stale frame from an earlier round.
+// turnStarted / turnSettled are the per-turn witnesses this test waits on:
+// a durable agent_status event carrying "streaming" / "idle" for childID.
 //
-// On timeout it dumps every buffered frame. A wait on a stream of frames that
-// says only "I didn't find it" leaves the reader guessing about which of
-// "never emitted", "emitted before `from`", or "emitted in a different shape"
-// happened, and all three have been live possibilities here.
-func waitForEventAfter(t *testing.T, sc *subConn, from int, predicate func(json.RawMessage) bool, timeout time.Duration) (json.RawMessage, int) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		sc.mu.Lock()
-		for i := from; i < len(sc.events); i++ {
-			if predicate(sc.events[i]) {
-				f := sc.events[i]
-				sc.mu.Unlock()
-				return f, i + 1
-			}
-		}
-		sc.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-	}
-	sc.mu.Lock()
-	dump := make([]string, 0, len(sc.events))
-	for i, e := range sc.events {
-		dump = append(dump, fmt.Sprintf("  [%d] %s", i, e))
-	}
-	sc.mu.Unlock()
-	t.Fatalf("timeout (%v) waiting for event after index %d; buffered events:\n%s", timeout, from, strings.Join(dump, "\n"))
-	return nil, from
+// Deliberately NOT a weaker proxy for the framed plane's inner pi events
+// than they were: agent_start and agent_settled both feed the same state
+// machine (pkg/child/state.go — agent_start → streaming, agent_settled →
+// idle), whose transitions monitorChild DRAINS loss-free and forwards to
+// handleStatusChange, the daemon's only agent_status producer. Status events
+// were only unreliable when they were SAMPLED per bus frame; see the doc
+// comment on monitorChild (cmd/rafikid/controller.go) for why draining
+// replaced that.
+func turnStarted(childID string) func(*rafikiv1.Event) bool {
+	return agentStatusEvent(childID, "streaming")
 }
 
-// childEventPredicate matches a ctrl_event envelope for childID carrying an
-// inner pi event of type eventType.
-//
-// Deliberately NOT a ctrl_child_status predicate, which is what this test used
-// to wait on. Status events are not a reliable witness of a turn: the daemon
-// DERIVES them by sampling ch.Status() once per bus frame monitorChild
-// receives (cmd/rafikid/controller.go), while readStdout updates the state
-// machine as it races ahead. A turn short enough to emit all its frames before
-// monitorChild's goroutine is next scheduled therefore completes its entire
-// streaming -> idle round trip between two samples and produces NO status
-// event at all. Measured, not theorised: the second prompt here (a scripted
-// reply with no tool call, so it finishes in about a millisecond) emitted zero
-// status frames in 5-7 runs out of 10, which is precisely why this test was
-// red half the time.
-//
-// The pi events themselves are lossless — every frame readStdout reads is
-// published to the bus — so they are what a turn should be witnessed by. See
-// docs/plans/2026-07-30-phase1a-followups.md for the daemon-side bug.
-func childEventPredicate(childID, eventType string) func(json.RawMessage) bool {
-	return func(f json.RawMessage) bool {
-		var ev struct {
-			Type    string `json:"type"`
-			ChildID string `json:"childId"`
-			Event   struct {
-				Type string `json:"type"`
-			} `json:"event"`
-		}
-		if json.Unmarshal(f, &ev) != nil {
-			return false
-		}
-		return ev.Type == protocol.TypeCtrlEvent && ev.ChildID == childID && ev.Event.Type == eventType
-	}
+func turnSettled(childID string) func(*rafikiv1.Event) bool {
+	return agentStatusEvent(childID, "idle")
 }
 
-// assistantTextIn returns the assistant message text carried by a
-// message_end ctrl_event for childID, or "" for any other frame. It is how
-// this test proves WHICH scripted turn a prompt consumed.
-func assistantTextIn(childID string, f json.RawMessage) string {
-	var ev struct {
-		Type    string `json:"type"`
-		ChildID string `json:"childId"`
-		Event   struct {
-			Type    string `json:"type"`
-			Message struct {
-				Role    string `json:"role"`
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"message"`
-		} `json:"event"`
-	}
-	if json.Unmarshal(f, &ev) != nil {
+// assistantTextIn returns the assistant message text carried by an
+// assistant_message event for childID, or "" for any other event. It is how
+// this test proves WHICH scripted turn a prompt consumed. The framed plane
+// carried the same content inside a message_end ctrl_event's message; the
+// durable assistant_message event is where publishAssistant puts it.
+func assistantTextIn(childID string, ev *rafikiv1.Event) string {
+	am := ev.GetAssistantMessage()
+	if am == nil || ev.GetChildId() != childID {
 		return ""
 	}
-	if ev.Type != protocol.TypeCtrlEvent || ev.ChildID != childID {
-		return ""
-	}
-	if ev.Event.Type != "message_end" || ev.Event.Message.Role != "assistant" {
-		return ""
-	}
-	for _, b := range ev.Event.Message.Content {
-		if b.Type == "text" && b.Text != "" {
-			return b.Text
+	for _, b := range am.GetContent() {
+		if t := b.GetText(); t != nil && t.GetText() != "" {
+			return t.GetText()
 		}
 	}
 	return ""
 }
 
-// assertNoErrorEventBetween fails if any agent_error frame for childID appears
-// in sc's buffered range [from, to). An agent_error in the second prompt's
-// window is the exact signature of the context-blind fake sender bug: the
-// aborted turn had consumed the second scripted message, so the follow-up
-// prompt failed with "scripted turns exhausted".
-func assertNoErrorEventBetween(t *testing.T, sc *subConn, from, to int, childID string) {
+// assertTurnEndedCleanlyBetween fails unless es's buffered window [from, to)
+// carries a turn_end whose raw stop reason is "end_turn".
+//
+// This is the native-plane translation of the framed plane's
+// assertNoErrorEventBetween, which failed if any agent_error frame for the
+// child appeared in the window — the exact signature of the context-blind
+// fake sender bug (the aborted turn had consumed the second scripted message,
+// so the follow-up prompt failed with "scripted turns exhausted"). The engine
+// emits agent_error only on the framed plane (pkg/fundi/engine.go); no
+// native error event exists for a failed fundi turn. A failed turn still
+// reaches AgentEnd and publishes turn_end, but with whatever raw stop reason
+// the last assistant message left — "tool_use" here, from the aborted turn —
+// never the clean "end_turn" of a completed one (publishAssistant sets
+// lastStop from the reply; publishTurnEnd copies it). Requiring end_turn in
+// the window therefore asserts the same property — this prompt's turn did not
+// error — in the native vocabulary.
+func assertTurnEndedCleanlyBetween(t *testing.T, es *eventStream, from, to int) {
 	t.Helper()
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	for i := from; i < to && i < len(sc.events); i++ {
-		if childEventPredicate(childID, "agent_error")(sc.events[i]) {
-			t.Fatalf("agent_error in window [%d,%d): %s", from, to, sc.events[i])
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	for i := from; i < to && i < len(es.events); i++ {
+		if te := es.events[i].GetTurnEnd(); te != nil && te.GetRawStopReason() == "end_turn" {
+			return
 		}
 	}
+	t.Fatalf("no turn_end with raw stop reason end_turn in window [%d,%d) — "+
+		"the turn errored; buffered events:\n%s", from, to, es.dumpLocked())
 }
 
-// assertNoRestartBetween scans sc's already-buffered events in the half-open
-// range [from, to) and fails the test if any of them is a ctrl_child_spawned
-// frame for childID. This is the restart witness for
+// assertNoRestartBetween scans es's already-buffered events in the half-open
+// range [from, to) and fails the test if any of them is a child_spawned event
+// for childID. This is the restart witness for
 // TestIntegration_AgentKind_AbortPreservesProcess: whether a respawn is a
 // real subprocess re-exec (pi, claude) or an in-process respawn (agent, no
-// pid), activateLiveChild's Resume/RespawnChild path re-emits
-// ctrl_child_spawned for the SAME childID to per-child subscribers
-// (cmd/rafikid/controller.go), so absence of that frame between the abort and
-// the following idle states "the child was not restarted" directly, instead
-// of inferring it from PID identity (which is degenerate for the agent kind
-// -- see the KEYSTONE ASSERTION comment below).
-func assertNoRestartBetween(t *testing.T, sc *subConn, from, to int, childID string) {
+// pid), activateLiveChild's Resume/RespawnChild path re-publishes a native
+// child_spawned event for the SAME childID (cmd/rafikid/controller.go), so
+// absence of that event between the abort and the following idle states "the
+// child was not restarted" directly, instead of inferring it from PID
+// identity (which is degenerate for the agent kind — see the KEYSTONE
+// ASSERTION comment below).
+func assertNoRestartBetween(t *testing.T, es *eventStream, from, to int, childID string) {
 	t.Helper()
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	for i := from; i < to && i < len(sc.events); i++ {
-		var ev struct {
-			Type    string `json:"type"`
-			ChildID string `json:"childId"`
-		}
-		if json.Unmarshal(sc.events[i], &ev) != nil {
-			continue
-		}
-		if ev.Type == protocol.TypeCtrlChildSpawned && ev.ChildID == childID {
-			t.Fatalf("child was restarted: unexpected %s frame for childId=%s between abort and idle: %s",
-				protocol.TypeCtrlChildSpawned, childID, sc.events[i])
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	for i := from; i < to && i < len(es.events); i++ {
+		if cs := es.events[i].GetChildSpawned(); cs != nil && cs.GetChildId() == childID {
+			t.Fatalf("child was restarted: unexpected child_spawned event for childId=%s "+
+				"between abort and idle: %s", childID, es.events[i])
 		}
 	}
 }
@@ -294,9 +234,10 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 
 	scriptPath := fakeTurnsScript(t, markerPath, fifoPath)
 
-	spawnReq := protocol.SpawnRequest{
-		Type: "ctrl_spawn",
-		ID:   "spawn1",
+	client := d.control(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	sresp, err := client.Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
 		Kind: protocol.KindFundi,
 		Cwd:  t.TempDir(),
 		// --model is required by `rafikid fundi` (parseAgentFlags) since the
@@ -305,70 +246,55 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		Model:            "anthropic/claude-x",
 		ExecutorSelector: "env=home",
 		ExtraArgs:        []string{"--fake-turns", scriptPath},
-	}
-	spawnFrame, err := json.Marshal(spawnReq)
+	}))
 	if err != nil {
-		t.Fatalf("marshal spawn request: %v", err)
+		t.Fatalf("spawn (agent kind) failed: %v", err)
 	}
-
-	raw := d.request(t, string(spawnFrame))
-	var r protocol.Response
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_spawn (agent kind) failed: %+v", r.Error)
-	}
-	var spawnData protocol.SpawnResponseData
-	mustUnmarshal(t, r.Data, &spawnData)
-	childID := spawnData.ChildID
+	childID := sresp.Msg.GetChildId()
 	if childID == "" {
 		t.Fatal("spawn returned empty childId")
 	}
 
-	getJSON := fmt.Sprintf(`{"type":"ctrl_get","id":"g1","childId":%q}`, childID)
-
 	// sessionId must get sniffed from the agent's get_state bootstrap reply
 	// (internal/child/sniff.go), same mechanism used for pi children.
-	var before protocol.ChildSummary
+	var before *rafikiv1.ChildSummary
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		raw = d.request(t, getJSON)
-		mustUnmarshal(t, raw, &r)
-		if !r.Success {
-			t.Fatalf("ctrl_get failed: %+v", r.Error)
-		}
-		mustUnmarshal(t, r.Data, &before)
-		if before.SessionID != "" {
+		before = getChild(t, client, childID)
+		if before.GetSessionId() != "" {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if before.SessionID == "" {
+	if before == nil || before.GetSessionId() == "" {
 		t.Fatal("sessionId was never sniffed from the agent child")
 	}
-	if before.PID == nil {
-		t.Fatal("ctrl_get returned a nil PID for a live child")
+	if before.Pid == nil {
+		t.Fatal("GetChild returned a nil PID for a live child")
 	}
-	pidBefore := *before.PID
+	pidBefore := *before.Pid
 
-	sc := d.dial(t)
-	sc.send(fmt.Sprintf(`{"type":"ctrl_subscribe","id":"sub1","childId":%q}`, childID))
-	subResp := sc.nextResponse(t, 5*time.Second)
-	if !subResp.Success {
-		t.Fatalf("ctrl_subscribe failed: %+v", subResp.Error)
-	}
+	// The watermark read here is what keeps the child's replayed pre-open
+	// events (the spawn's own child_spawned and statuses) from satisfying any
+	// wait below: only events appended after the stream opened — this child's
+	// first turn — carry a greater ordinal.
+	watermark := eventWatermark(t, client, childID)
+	es := d.openEvents(t, childEventsSubject(childID), map[string]int32{childID: watermark - 1}, watermark)
 
 	// Prompt 1: the scripted tool_use turn - the agent calls
 	// bash("touch <marker> && read -r _ < <fifo>"), which genuinely blocks
 	// (forever, absent the abort) in a subprocess.
-	sendJSON := fmt.Sprintf(`{"type":"ctrl_send","id":"p1","childId":%q,"frame":{"type":"prompt","message":"go"}}`, childID)
-	raw = d.request(t, sendJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send (prompt 1) failed: %+v", r.Error)
+	pctx, pcancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := client.SendFrame(pctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"prompt","message":"go"}`,
+	})); err != nil {
+		t.Fatalf("SendFrame (prompt 1) failed: %v", err)
 	}
+	pcancel()
 
 	eventIdx := 0
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_start"), 5*time.Second)
+	_, eventIdx = es.waitEventAfter(t, eventIdx, turnStarted(childID), 5*time.Second)
 
 	// Deterministic happens-before edge: block until the scripted tool has
 	// actually touched its marker file, proving it is genuinely executing
@@ -382,12 +308,14 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// the turn settling.
 	preAbortIdx := eventIdx
 
-	abortJSON := fmt.Sprintf(`{"type":"ctrl_send","id":"a1","childId":%q,"frame":{"type":"abort"}}`, childID)
-	raw = d.request(t, abortJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send (abort) failed: %+v", r.Error)
+	actx, acancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := client.SendFrame(actx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"abort"}`,
+	})); err != nil {
+		t.Fatalf("SendFrame (abort) failed: %v", err)
 	}
+	acancel()
 
 	// The turn must settle - agent_settled is the child's own "this turn is
 	// over" frame, emitted by the engine's AgentEnd after runTurn's abort arm
@@ -395,82 +323,75 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// opens the FIFO for writing), so reaching this frame at all is only
 	// possible through the abort.
 	var settledIdx int
-	_, settledIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_settled"), 10*time.Second)
+	_, settledIdx = es.waitEventAfter(t, eventIdx, turnSettled(childID), 10*time.Second)
 	eventIdx = settledIdx
 
 	// KEYSTONE ASSERTION: the abort must NOT have restarted the child.
 	//
 	// In-process children (kind="fundi") have no pid: Runner.PID() returns 0
-	// (Task 3), so ChildSummary.PID is a non-nil pointer to 0 for the entire
-	// life of the child. That made the old `*after.PID != pidBefore` check
+	// (Task 3), so ChildSummary.Pid is a non-nil pointer to 0 for the entire
+	// life of the child. That made the old `*after.Pid != pidBefore` check
 	// compare 0 != 0, which can never fail -- the agent kind ended up with no
 	// restart guard at all. Witness the restart directly instead: whether a
 	// respawn is a real subprocess re-exec (pi, claude) or an in-process
 	// respawn (agent), activateLiveChild's Resume/RespawnChild path re-emits
-	// ctrl_child_spawned for the SAME childID to per-child subscribers (see
+	// the spawn for the SAME childID to per-child subscribers (see
 	// cmd/rafikid/controller.go), so its absence between the abort and the turn
 	// settling states "not restarted" without relying on pid identity.
-	assertNoRestartBetween(t, sc, preAbortIdx, settledIdx, childID)
+	assertNoRestartBetween(t, es, preAbortIdx, settledIdx, childID)
 
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_get after abort failed: %+v", r.Error)
-	}
-	var after protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &after)
-	if after.Status == string(protocol.StatusExited) {
+	after := getChild(t, client, childID)
+	if after.GetStatus() == string(protocol.StatusExited) {
 		t.Fatal("child exited after abort; expected it to remain alive (in-band abort, no restart)")
 	}
-	if after.PID == nil {
-		t.Fatal("ctrl_get returned a nil PID for a live child after abort")
+	if after.Pid == nil {
+		t.Fatal("GetChild returned a nil PID for a live child after abort")
 	}
 	// Secondary check: kept for kinds that still have a real pid (pi,
 	// claude). Gated on pidBefore != 0 so it doesn't silently pass for the
 	// agent kind, whose pid is always 0 -- see the KEYSTONE ASSERTION above,
 	// which is what actually guards the agent kind now.
-	if pidBefore != 0 && *after.PID != pidBefore {
-		t.Fatalf("PID changed across abort: before=%d after=%d (abort must NOT restart the process)", pidBefore, *after.PID)
+	if pidBefore != 0 && after.GetPid() != pidBefore {
+		t.Fatalf("PID changed across abort: before=%d after=%d (abort must NOT restart the process)", pidBefore, after.GetPid())
 	}
 
 	// Prompt 2: prove the SAME process still works after the abort - this
 	// consumes the fake-turns script's second (plain end_turn) message, which
 	// the aborted turn must NOT have eaten.
-	sendJSON2 := fmt.Sprintf(`{"type":"ctrl_send","id":"p2","childId":%q,"frame":{"type":"prompt","message":"anything"}}`, childID)
-	raw = d.request(t, sendJSON2)
-	mustUnmarshal(t, raw, &r)
-	if !r.Success {
-		t.Fatalf("ctrl_send (prompt 2) failed: %+v", r.Error)
+	p2ctx, p2cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if _, err := client.SendFrame(p2ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: `{"type":"prompt","message":"anything"}`,
+	})); err != nil {
+		t.Fatalf("SendFrame (prompt 2) failed: %v", err)
 	}
+	p2cancel()
 
 	prePrompt2Idx := eventIdx
-	_, eventIdx = waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_start"), 5*time.Second)
+	_, eventIdx = es.waitEventAfter(t, eventIdx, turnStarted(childID), 5*time.Second)
 	// The scripted second turn's assistant text is "done" (see
 	// fakeTurnsScript). Requiring it, rather than just "a turn happened", is
 	// what proves the aborted turn left the script alone: with a fake sender
 	// that ignores its context, the post-abort iteration consumes this very
 	// message and prompt 2 gets "scripted turns exhausted" instead.
-	doneFrame, eventIdx := waitForEventAfter(t, sc, eventIdx, func(f json.RawMessage) bool {
-		return assistantTextIn(childID, f) == "done"
+	doneFrame, eventIdx := es.waitEventAfter(t, eventIdx, func(ev *rafikiv1.Event) bool {
+		return assistantTextIn(childID, ev) == "done"
 	}, 5*time.Second)
 	if doneFrame == nil {
 		t.Fatal("no assistant reply for prompt 2")
 	}
-	_, settled2Idx := waitForEventAfter(t, sc, eventIdx, childEventPredicate(childID, "agent_settled"), 5*time.Second)
-	assertNoErrorEventBetween(t, sc, prePrompt2Idx, settled2Idx, childID)
+	_, settled2Idx := es.waitEventAfter(t, eventIdx, turnSettled(childID), 5*time.Second)
+	assertTurnEndedCleanlyBetween(t, es, prePrompt2Idx, settled2Idx)
 
 	// Final PID check: still the same process throughout the second prompt.
 	// Gated on pidBefore != 0 for the same reason as the KEYSTONE ASSERTION
 	// above -- the agent kind's pid is always 0, so this only guards pi and
 	// claude.
-	raw = d.request(t, getJSON)
-	mustUnmarshal(t, raw, &r)
-	var final protocol.ChildSummary
-	mustUnmarshal(t, r.Data, &final)
-	if final.PID == nil {
-		t.Fatal("ctrl_get returned a nil PID for a live child after second prompt")
+	final := getChild(t, client, childID)
+	if final.Pid == nil {
+		t.Fatal("GetChild returned a nil PID for a live child after second prompt")
 	}
-	if pidBefore != 0 && *final.PID != pidBefore {
-		t.Fatalf("PID changed after second prompt: want %d, got %v", pidBefore, *final.PID)
+	if pidBefore != 0 && final.GetPid() != pidBefore {
+		t.Fatalf("PID changed after second prompt: want %d, got %d", pidBefore, final.GetPid())
 	}
 }
