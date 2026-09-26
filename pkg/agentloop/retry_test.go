@@ -16,6 +16,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/llm"
 )
 
@@ -74,6 +75,14 @@ func TestIsRetryable(t *testing.T) {
 		{"contains 'i/o timeout'", fmt.Errorf("i/o timeout"), liveCtx, true},
 		{"contains 'EOF'", fmt.Errorf("unexpected EOF"), liveCtx, true},
 		{"contains 'tls:'", fmt.Errorf("tls: handshake failure"), liveCtx, true},
+
+		// Parked-batch terminal outcomes (*batch.Error, pkg/batch): the text is
+		// provider-controlled, so fragments like "connection reset"/"EOF" must
+		// not satisfy the string fallback above — a retry would resubmit the
+		// batch up to 7 times (the global constraint's double-billing path).
+		{"batch.Error text contains 'connection reset'", &batch.Error{Msg: "upstream said: connection reset, giving up"}, liveCtx, false},
+		{"batch.Error text contains 'EOF'", &batch.Error{Msg: "upstream said unexpected EOF"}, liveCtx, false},
+		{"batch.Error whole-batch failure", &batch.Error{Msg: "batch failed: upstream exploded"}, liveCtx, false},
 
 		// Non-transient.
 		{"plain error", errors.New("something went wrong"), liveCtx, false},

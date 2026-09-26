@@ -314,7 +314,7 @@ func colorStatus(status string, useColor bool) string {
 	case "streaming", "tool_running", "compacting":
 		return green(status)
 	case "batch_wait":
-		return yellow(status)
+		return blue(status)
 	case "exited":
 		return red(status)
 	case "shutting_down":
@@ -331,6 +331,7 @@ func dim(s string) string     { return "\x1b[2m" + s + "\x1b[0m" }
 func red(s string) string     { return "\x1b[31m" + s + "\x1b[0m" }
 func green(s string) string   { return "\x1b[32m" + s + "\x1b[0m" }
 func yellow(s string) string  { return "\x1b[33m" + s + "\x1b[0m" }
+func blue(s string) string    { return "\x1b[34m" + s + "\x1b[0m" }
 func cyan(s string) string    { return "\x1b[36m" + s + "\x1b[0m" }
 func magenta(s string) string { return "\x1b[35m" + s + "\x1b[0m" }
 

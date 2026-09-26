@@ -79,6 +79,12 @@ func (s *Store) Live(ctx context.Context, customID string) (batch.Row, bool, err
 // Insert stores a new queued row. It refuses a State other than StateQueued
 // and an empty CustomID before touching the database; a live-duplicate
 // custom_id surfaces the underlying unique violation.
+//
+// Deliberate divergences from MemStore (see batch.Store.Insert): the caller's
+// CreatedAt/UpdatedAt are replaced by the database clock (the Batcher passes
+// its own now() for both, so the two are the same instant in prod), and a
+// caller-provided ProviderBatchID is ignored — provider_batch_id is written
+// only by MarkSubmitted.
 func (s *Store) Insert(ctx context.Context, r batch.Row) (batch.Row, error) {
 	if r.State != batch.StateQueued {
 		return batch.Row{}, fmt.Errorf("batch: insert requires state %q, got %q", batch.StateQueued, r.State)

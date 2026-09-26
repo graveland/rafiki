@@ -63,7 +63,13 @@ type Store interface {
 	// Live returns the non-tombstoned row for customID, ok=false if none.
 	Live(ctx context.Context, customID string) (Row, bool, error)
 	// Insert stores a new row; State must be StateQueued and the custom_id
-	// must not collide with a live row.
+	// must not collide with a live row. Timestamp contract: a zero
+	// CreatedAt/UpdatedAt is stamped by the store; a caller-provided value may
+	// be preserved (MemStore) or replaced by the store's clock (batchdb) —
+	// callers must not rely on either, and the Batcher passes its own now()
+	// for both. A caller-provided ProviderBatchID is likewise advisory:
+	// MemStore stores it, batchdb leaves it for MarkSubmitted. The Batcher
+	// never sets ProviderBatchID at insert time.
 	Insert(ctx context.Context, r Row) (Row, error)
 	// Tombstone marks the row deleted. It never removes the row.
 	Tombstone(ctx context.Context, id int64) error

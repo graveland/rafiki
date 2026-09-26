@@ -390,6 +390,12 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// ends up with the caller's catalog. nil (no daemon batcher) keeps the
 	// client's nil default, which fails a :batch first call rather than
 	// parking — see llm.WithBatcher.
+	//
+	// Consequence, deliberate: the fake replaces the live SENDERS, not the
+	// batcher, and parking precedes the sender (parkSend runs before any
+	// callModel) — so a --fake-turns child on a :batch model submits REAL
+	// batch jobs through the daemon's OpenRouter key. Reachable only by an
+	// operator who configures both; the same trade as the catalog above.
 	if c.Batcher != nil {
 		opts = append(opts, llm.WithBatcher(c.Batcher))
 	}

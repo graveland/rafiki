@@ -83,6 +83,18 @@ func isRetryable(err error, ctx context.Context) bool {
 
 	// String-based fallback for wrapped errors that lose type info.
 	s := err.Error()
+	// A parked batch's terminal outcome is a plain *batch.Error (pkg/batch),
+	// which renders "batch: " + Msg where Msg is provider-controlled body
+	// text. The fallback below must never see it: a failure message that
+	// happens to contain "connection reset"/"EOF" would make agentloop
+	// resubmit the batch up to 7 times. Every prefixed error that escapes
+	// Park is terminal (a delivered failure) or deterministic (invalid
+	// custom_id, marshal, adopt/insert exhaustion); pkg/batch's genuinely
+	// transient transport errors share the prefix but are absorbed by the
+	// Batcher's sweeps and never reach a caller.
+	if strings.HasPrefix(s, "batch: ") {
+		return false
+	}
 	for _, frag := range []string{"connection reset", "broken pipe", "i/o timeout", "EOF"} {
 		if strings.Contains(s, frag) {
 			return true

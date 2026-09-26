@@ -90,8 +90,9 @@ func (e *Emitter) AgentStart() {
 
 // BatchWaitStart emits {"type":"batch_wait_start"}: the child's first LLM
 // call of a ":batch" model has been parked in the provider Batch API and the
-// turn is waiting for the result (can last hours). Nothing calls these yet;
-// task 3.1 of the batch-transport plan wires them into the park/unpark path.
+// turn is waiting for the result (can last hours). Fired by llm.parkSend's
+// OnBatchWait bracket — the engine wires it in events() — just before Park
+// and on every return path (success, error, ctx cancel, panic unwind).
 func (e *Emitter) BatchWaitStart() {
 	e.fe.Emit(map[string]any{"type": "batch_wait_start"})
 }

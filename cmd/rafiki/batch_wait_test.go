@@ -2,15 +2,15 @@ package main
 
 import "testing"
 
-// TestColorStatusBatchWait pins batch_wait's list color. The brief asks for
-// blue if a blue helper exists in output.go, else yellow — output.go has no
-// blue helper (dim/red/green/yellow/cyan/magenta only), so batch_wait renders
-// yellow, alongside shutting_down.
+// TestColorStatusBatchWait pins batch_wait's list color. batch_wait renders
+// blue (final review): it is long-lived (a batch can take hours) and must not
+// collide with shutting_down's yellow — the brief's yellow fallback applied
+// only while output.go had no blue helper.
 func TestColorStatusBatchWait(t *testing.T) {
 	if got := colorStatus("batch_wait", false); got != "batch_wait" {
 		t.Errorf("colorStatus(batch_wait, false) = %q, want the bare status", got)
 	}
-	if got, want := colorStatus("batch_wait", true), yellow("batch_wait"); got != want {
+	if got, want := colorStatus("batch_wait", true), blue("batch_wait"); got != want {
 		t.Errorf("colorStatus(batch_wait, true) = %q, want %q", got, want)
 	}
 }
