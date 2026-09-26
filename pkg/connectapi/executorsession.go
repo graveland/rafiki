@@ -5,9 +5,11 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -39,10 +41,36 @@ func (s *Server) SetExecutorSessions(e ExecutorSessions) {
 // ExecutorSession serves the framed ctrl_executor_session face: the first
 // streamed message is ready. The stream stays open for the session's
 // lifetime; the daemon evicts a transient executor when the stream ends.
+//
+// Open is called with the STREAM's context, not req's: it is what the
+// backend watches to know the session has ended, and it outlives the initial
+// call. Once ready is sent, the handler blocks on ctx.Done() — stream end
+// (client disconnect or cancellation) is the eviction trigger, and Open's
+// caller (the backend) is what actually releases the executor.
 func (s *Server) ExecutorSession(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ExecutorSessionRequest],
 	stream *connect.ServerStream[rafikiv1.ExecutorSessionEvent],
 ) error {
-	return connect.NewError(connect.CodeUnimplemented, errors.New("ExecutorSession: not yet implemented"))
+	p := s.execSessions.Load()
+	if p == nil {
+		return connect.NewError(connect.CodeUnavailable,
+			errors.New("executor sessions not yet wired"))
+	}
+	ready, err := (*p).Open(ctx, req.Msg)
+	if err != nil {
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: executor session open failed", "error", err)
+		}
+		return ConnectErr(err)
+	}
+	if err := stream.Send(&rafikiv1.ExecutorSessionEvent{
+		Event: &rafikiv1.ExecutorSessionEvent_Ready{Ready: ready},
+	}); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
 }

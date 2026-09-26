@@ -376,8 +376,26 @@ type Controller struct {
 	wsLabels   map[string]workspaceLabels
 	wsLabelsMu sync.Mutex
 
+	// sessionExecMu guards sessionExecs, keyed by an opaque session key rather
+	// than by control.Connection directly: the framed ctrl_executor_session
+	// verb uses the connection itself (see connSessions below), while
+	// Connect's ExecutorSession stream uses its own per-call context, which
+	// is unique already and needs no separate lookup table.
 	sessionExecMu sync.Mutex
-	sessionExecs  map[control.Connection]sessionExecutor
+	sessionExecs  map[any]sessionExecutor
+
+	// connSessionsMu guards connSessions, which anchors the framed
+	// ctrl_executor_session verb's session lifetime on a context.Context so
+	// it evicts through the same ctx.Done() watcher (session_executor.go) as
+	// Connect's stream context, instead of a bespoke connection-keyed code
+	// path. One context per connection, reused across repeated calls and
+	// cancelled exactly once, by OnConnectionClose.
+	connSessionsMu sync.Mutex
+	connSessions   map[control.Connection]connSession
+
+	// sessionExecWg tracks each session's ctx.Done() watcher goroutine so it
+	// is provably gone, not just unreferenced, after its context ends.
+	sessionExecWg sync.WaitGroup
 
 	// darajaReg holds the in-memory credential registry, recorded by WireDaraja
 	// so Close and Kill can revoke credentials before the row vanishes.
@@ -3653,7 +3671,10 @@ func (c *Controller) SubscribeLabeled(conn control.Connection, labels map[string
 // This is a known limitation — per-child sub sets are bounded by the child
 // lifetime and the subscriber count is small in practice.
 func (c *Controller) OnConnectionClose(conn control.Connection) {
-	c.releaseSessionExecutor(conn)
+	// Cancels this connection's session context rather than releasing the
+	// executor directly: the ctx.Done() watcher spawned by ExecutorSession
+	// does that, the same path Connect's stream context uses on stream end.
+	c.endConnSession(conn)
 	c.cm.GlobalUnsubscribe(conn)
 	c.cm.RemoveLabeledSubsForConn(conn)
 }
