@@ -298,7 +298,12 @@ Its only channel to the daemon is a per-child unix socket, reached through
 the `RAFIKI_CHILD_CONNECT` environment variable. The socket is the
 credential — the process never holds a token, and whatever it sends arrives
 at the daemon as itself, subtree-scoped on Connect like any other per-child
-credential. The process environment is the daemon's full environment minus
+credential. The socket proxies the daemon's WHOLE proxy face, request path
+preserved — not just the Connect route — so the injected child credential
+authorizes Connect verbs AND LLM-face calls, every request attributed to the
+child and its owner; any inbound `Authorization`/`X-Rafiki-*` header is
+stripped first, so a caller cannot smuggle a stronger identity past the
+injection. The process environment is the daemon's full environment minus
 every `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*` variable, so no daemon
 credential leaks into a process the operator did not give them to.
 

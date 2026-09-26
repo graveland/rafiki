@@ -112,7 +112,11 @@ func TestServeHandlerFormStripsAndInjects(t *testing.T) {
 
 // TestServePermissions pins the filesystem contract: dir 0700, socket 0600.
 // The socket IS the credential — a group- or world-readable one would hand
-// the child's authority to every local user.
+// the child's authority to every local user. The dir is a NOT-YET-EXISTING
+// subdirectory so Serve's own MkdirAll does the creating (tempSocketDir
+// pre-creates its dir at 0700, which would make the assertion
+// self-fulfilling — MkdirAll would never re-mode an existing dir) and the
+// pin actually tests the creation path.
 func TestServePermissions(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +127,7 @@ func TestServePermissions(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	dir := tempSocketDir(t)
+	dir := filepath.Join(tempSocketDir(t), "host")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := Serve(ctx, dir, target, "s")

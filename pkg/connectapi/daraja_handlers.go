@@ -267,7 +267,13 @@ func (s *Server) DarajaWatch(
 			errors.New("child_id is required"))
 	}
 
-	subCh, unsub, err := h.darajaPool.Watch(childID)
+	// WatchLive, never Watch: belt consumption is pump-only (the runner's
+	// pump, Runner.pump). The belt exists to carry a script's terminal Exited
+	// to the runner's settle — an admin watch draining it from inside the
+	// pump's re-Watch backoff would re-strand the child as `streaming`
+	// forever. This surface sees live events only; whatever it misses while
+	// unsubscribed is dropped for it, never taken from the pump.
+	subCh, unsub, err := h.darajaPool.WatchLive(childID)
 	if err != nil {
 		return connect.NewError(connect.CodeNotFound,
 			fmt.Errorf("watch daraja %s: %w", childID, err))

@@ -23,6 +23,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/nativebus"
+	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
@@ -191,6 +192,70 @@ func TestValidateScriptSpawnRequiresSpec(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a script spawn with a non-identifier script name must be refused")
+	}
+}
+
+// TestValidateScriptSpawnRefusesSpecOnNonScriptKind is the server-side
+// backstop for the preset re-resolution gap (review-final W5-6): --pymodule
+// with a NON-script preset leaves req.Script set while applyPreset resolves
+// the kind to fundi — the launched fundi child would silently drop the spec.
+// Both shapes refuse: an explicit non-script kind, and the kind a preset
+// filled in after the CLI's client-side check ran.
+func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
+	spec := &protocol.ScriptSpec{Repo: "local", Script: "driver"}
+
+	// Shape 1: an explicit non-script kind carrying a spec.
+	err := validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindFundi, Script: spec})
+	if err == nil {
+		t.Fatal("a fundi-kind spawn carrying a script spec must be refused")
+	}
+	ce, ok := err.(*control.ControllerError)
+	if !ok || ce.Code != protocol.ErrInvalidArgs {
+		t.Fatalf("wrong error class %v", err)
+	}
+	for _, want := range []string{`"fundi"`, `"script"`} {
+		if !strings.Contains(ce.Message, want) {
+			t.Fatalf("refusal %q does not name %s", ce.Message, want)
+		}
+	}
+
+	// Shape 2: the preset re-resolution — applyPreset fills kind=fundi from
+	// a fundi preset while req.Script survives untouched; the resolved
+	// request must be refused, exactly as Controller.Spawn runs the pair.
+	c := presetController(newFakePresetStore("owner-1", presetFixture("worker-seat")))
+	resolved, _, err := c.applyPreset(context.Background(), protocol.SpawnRequest{
+		Preset: "worker-seat",
+		Cwd:    "/tmp/w",
+		Script: spec,
+	}, "owner-1")
+	if err != nil {
+		t.Fatalf("applyPreset: %v", err)
+	}
+	if resolved.Kind != protocol.KindFundi {
+		t.Fatalf("setup: resolved kind = %q, want fundi (the gap needs the preset to have won)", resolved.Kind)
+	}
+	if err := validateScriptSpawn(resolved); err == nil {
+		t.Fatal("the preset-resolved fundi spawn carrying a script spec must be refused")
+	}
+
+	// Positive control: a script preset resolves to kind script and the same
+	// spec passes.
+	c2 := presetController(newFakePresetStore("owner-1", presets.Record{
+		ID: 8, Name: "driver-seat", Kind: presets.KindScript, Labels: map[string]string{},
+	}))
+	resolved2, _, err := c2.applyPreset(context.Background(), protocol.SpawnRequest{
+		Preset: "driver-seat",
+		Cwd:    "/tmp/w",
+		Script: spec,
+	}, "owner-1")
+	if err != nil {
+		t.Fatalf("applyPreset (script preset): %v", err)
+	}
+	if resolved2.Kind != protocol.KindScript {
+		t.Fatalf("setup: resolved kind = %q, want script", resolved2.Kind)
+	}
+	if err := validateScriptSpawn(resolved2); err != nil {
+		t.Fatalf("a script-kind spawn with a spec must validate: %v", err)
 	}
 }
 

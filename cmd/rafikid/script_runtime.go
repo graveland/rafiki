@@ -81,7 +81,9 @@ func scriptEnvStripped(e string) bool { return child.ScriptEnvStripped(e) }
 //     stripped by the same rule, so a forwarded ANTHROPIC_API_KEY cannot
 //     resurrect what the strip removed;
 //   - then PYTHONPATH, recomputed by the materialization (never inherited:
-//     the key must appear exactly once);
+//     an inherited PYTHONPATH may survive, so the computed entry must come
+//     last — os/exec keeps the LAST duplicate, which is what makes the
+//     computed value authoritative);
 //   - then RAFIKI_CHILD_CONNECT, the child's control socket path.
 //
 // The order matters: the caller's entries override the daemon's inherited
@@ -447,6 +449,20 @@ func validateScriptSpawn(req protocol.SpawnRequest) error {
 		kind = protocol.KindFundi
 	}
 	if kind != protocol.KindScript {
+		// A script spec on a non-script kind would be SILENTLY DROPPED — the
+		// preset re-resolution gap: the CLI's client-side check passes because
+		// req.Kind is empty, then applyPreset fills the kind from a non-script
+		// preset while req.Script survives untouched, and the fundi child
+		// launched here can never run the spec. This is the server-side
+		// backstop; fail closed, naming both facts.
+		if req.Script != nil {
+			return &control.ControllerError{
+				Code: protocol.ErrInvalidArgs,
+				Message: fmt.Sprintf("a script spec was given but the resolved kind is %q, not %q — "+
+					"the spawn would silently drop it (a non-script preset re-resolved the kind)",
+					kind, protocol.KindScript),
+			}
+		}
 		return nil
 	}
 	for _, bad := range []struct {

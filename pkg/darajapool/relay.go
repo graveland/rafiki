@@ -117,14 +117,17 @@ func newRelayHolderWithCtx(
 	}
 }
 
-// subscribe returns a channel that receives every RelayResponse as it arrives,
-// plus an unsubscribe func. Must be called while the caller already holds a
-// valid ClientFor (the holder validates client identity at every call site).
+// subscribe attaches a belt-consuming subscriber: events broadcast before
+// this subscribe are replayed from the pool's belt into the channel first,
+// and the belt is drained by taking it (one-shot). This is the runner's
+// pump's path — belt consumption is pump-ONLY; see Pool.WatchLive for the
+// admin surface's live-only variant. Must be called while the caller already
+// holds a valid ClientFor (the holder validates client identity at every
+// call site).
 //
-// If events were broadcast before the first subscribe, they are replayed into
-// the returned channel first, in broadcast order — see the Pool belt's doc
-// comment for why the replay is one-shot and why that is safe for claude. The
-// channel is sized to hold the whole replay plus the live subscriberBuffer,
+// The replay is one-shot — see the Pool belt's doc comment for why that is
+// safe for claude. The channel is sized to hold the whole replay plus the
+// live subscriberBuffer,
 // so the replay sends cannot block; they run under h.mu because a broadcast
 // racing between the unlock and the replay sends would otherwise land a live
 // event in the channel AHEAD of the buffered ones and invert the order the
@@ -135,6 +138,21 @@ func newRelayHolderWithCtx(
 // recover onto the belt's stashed events or the next connection instead of
 // parking forever on an unreadable channel.
 func (h *relayHolder) subscribe() (<-chan *fanEvent, func()) {
+	return h.subscribeBelt(true)
+}
+
+// subscribeLive is subscribe WITHOUT the belt: the subscriber gets live
+// events from here on and never anything that was buffered before it
+// attached. This is the admin surface's path (Pool.WatchLive → the
+// DarajaWatch RPC): an admin watch must never drain the belt, because the
+// belt exists to carry a script's terminal Exited to the runner's settle —
+// consumed by an admin, the pump re-strands the child exactly as before the
+// belt existed.
+func (h *relayHolder) subscribeLive() (<-chan *fanEvent, func()) {
+	return h.subscribeBelt(false)
+}
+
+func (h *relayHolder) subscribeBelt(takeBelt bool) (<-chan *fanEvent, func()) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -143,7 +161,7 @@ func (h *relayHolder) subscribe() (<-chan *fanEvent, func()) {
 		return closedCh, func() {}
 	}
 	var replay []fanEvent
-	if h.pool != nil {
+	if takeBelt && h.pool != nil {
 		replay = h.pool.takeReplay(h.childID)
 	}
 	ch := make(chan *fanEvent, subscriberBuffer+len(replay))
@@ -305,17 +323,23 @@ func (h *relayHolder) stop() {
 //     therefore either delivered live to a subscriber or buffered for the
 //     next one, never both: no frame can reach the claude translator twice.
 //     A reconnect's replay carries only post-disconnect events for the same
-//     reason. Replayed events are ones the pre-belt code DROPPED, delivered
-//     in the original order on the same ordered stream pkg/child reads —
-//     TakeResetPending's ordering argument is unchanged — and for claude
-//     they can only be frames emitted before its stdout starts (claude emits
-//     nothing until its first prompt arrives on stdin), so in-order delivery
-//     of a previously-lost prefix cannot confuse it.
-//   - A later subscriber (e.g. the DarajaWatch admin RPC attaching
-//     mid-flight) gets live events only: whatever it finds in the belt it
-//     consumes once, and the belt refills only while a holder is again
-//     subscriber-less. It can never re-deliver frames a consumer already
-//     processed.
+//     reason. The safety argument is ORDER + ONE-SHOT, never a claim about
+//     which frames the belt can hold: across a disconnect gap the belt CAN
+//     hold post-prompt frames (claude may have been mid-turn when the relay
+//     dropped), but they are delivered in their original broadcast order
+//     ahead of the live events that followed them, on the same single
+//     ordered stream pkg/child reads — the translator sees the exact
+//     sequence an unbroken subscription would have shown, so
+//     TakeResetPending's ordering argument is unchanged.
+//   - Belt consumption is PUMP-ONLY. The pump's Watch (below) is the only
+//     path that drains the belt — the belt exists to carry a script's
+//     terminal Exited to the runner's settle, and anything else that took it
+//     would re-strand the child. The DarajaWatch admin RPC goes through
+//     WatchLive, which never serves the belt: an admin watch landing in the
+//     pump's re-Watch backoff (holder dead, belt non-empty) sees no buffered
+//     events, gets live events only, and leaves the belt for the pump. What
+//     the admin misses while unsubscribed is dropped FOR it, never taken
+//     from the pump.
 //   - Overflow (relayReplayMax) drops the OLDEST events, keeping the
 //     terminal one; a belt handed to a Watch that has no live connection
 //     delivers its events exactly once (the channel closes after) — there
@@ -452,6 +476,7 @@ func (p *Pool) Send(childID string, data []byte) error {
 // Watch returns a fan-out channel for the child's relay events. Multiple
 // concurrent watchers are allowed; if nobody is watching, responses go to the
 // pool's replay belt (see the belt's doc comment) instead of being dropped.
+// This is the PUMP's path — and the only belt-consuming one.
 //
 // With no live connection the belt is served FIRST: if it holds undelivered
 // events — typically a fast script's whole life, its Exited included, whose
@@ -469,6 +494,23 @@ func (p *Pool) Watch(childID string) (<-chan *fanEvent, func(), error) {
 		return ch, func() {}, nil
 	}
 	return nil, nil, err
+}
+
+// WatchLive is the admin surface's Watch (the DarajaWatch RPC): subscribe to
+// the child's live relay events and NEVER serve the replay belt. Belt
+// consumption is pump-only — the belt's whole job is carrying a script's
+// terminal Exited to the runner's settle, and an admin watch landing in the
+// pump's re-Watch backoff (holder dead, belt non-empty) that drained it would
+// re-strand the child exactly as before the belt existed. With no live
+// connection the error propagates to the caller (an admin surface reports it,
+// the pump retries); the belt stays where it is.
+func (p *Pool) WatchLive(childID string) (<-chan *fanEvent, func(), error) {
+	holder, err := p.RelayFor(childID)
+	if err != nil {
+		return nil, nil, err
+	}
+	subCh, unsub := holder.subscribeLive()
+	return subCh, unsub, nil
 }
 
 // Restart asks the connected daraja to replace its child process: signal,

@@ -15,12 +15,14 @@ package darajapool
 import (
 	"context"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
 )
 
 // replayStdout reads a fanEvent into its stdout payload for assertions.
@@ -226,6 +228,97 @@ func TestPoolReplayBeltSurvivesHolderDeath(t *testing.T) {
 	_, _, err = pool.Watch("c1")
 	if err == nil {
 		t.Fatal("Watch with no connection and an empty belt must fail (retry contract)")
+	}
+}
+
+// TestBeltIsPumpOnlyAdminWatchGetsLiveOnly pins H-7: the replay belt is the
+// runner's pump's alone. The admin surface (the DarajaWatch RPC, via
+// Pool.WatchLive) attaching BEFORE the pump — belt non-empty, no other
+// subscriber — must not consume it; the pump's Watch then drains it in
+// order, and from there the admin sees exactly the live events everyone
+// else does. Against the pre-fix code (the admin path calling pool.Watch)
+// the first assertion fails: the admin drains the belt and the pump's next
+// Watch re-strands the child as `streaming` forever.
+func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
+	reg := NewRegistry()
+	pool := New(reg)
+	// A registered "live" connection whose holder never starts a receive
+	// loop: ClientFor succeeds (the pump's Watch takes the holder fast path,
+	// not the belt-chan one) and every event below is a test-driven
+	// broadcast — deterministic, no transport involved.
+	lc := &liveConn{
+		childID: "c1",
+		httpCli: &http.Client{},
+		daraja:  darajapbconnect.NewDarajaServiceClient(&http.Client{}, "http://daraja"),
+		done:    make(chan struct{}),
+	}
+	pool.mu.Lock()
+	pool.conns["c1"] = lc
+	holder := newRelayHolder("c1", lc.daraja, pool)
+	pool.relayHolders["c1"] = holder
+	pool.mu.Unlock()
+
+	// A script's whole life, broadcast with zero subscribers: stdout, then
+	// the terminal Exited — the belt's drop window exactly.
+	holder.broadcast(fanEvent{resp: stdout([]byte("life "))})
+	holder.broadcast(fanEvent{resp: exited(7, "")})
+
+	// The admin (DarajaWatch) path attaches first, belt non-empty: it must
+	// see nothing buffered. What it misses while unsubscribed is dropped FOR
+	// it, never taken from the pump.
+	adminCh, unsubAdmin, err := pool.WatchLive("c1")
+	if err != nil {
+		t.Fatalf("WatchLive with a live connection: %v", err)
+	}
+	defer unsubAdmin()
+	select {
+	case ev := <-adminCh:
+		t.Fatalf("the admin watch consumed a buffered event (%T) — belt consumption must be pump-only", ev.Response().GetEvent())
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The pump's Watch drains the belt in broadcast order, terminal event
+	// included, and the belt is gone afterwards.
+	pumpCh, unsubPump, err := pool.Watch("c1")
+	if err != nil {
+		t.Fatalf("pump Watch with a non-empty belt: %v", err)
+	}
+	defer unsubPump()
+	select {
+	case ev := <-pumpCh:
+		if got := replayStdout(ev); got != "life " {
+			t.Fatalf("pump replay = %q, want the buffered stdout", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pump never received the belted stdout (the admin took it)")
+	}
+	select {
+	case ev := <-pumpCh:
+		if ev.Response().GetExited() == nil || ev.Response().GetExited().ExitCode != 7 {
+			t.Fatalf("pump replay delivered %T, want the terminal Exited", ev.Response().GetEvent())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pump never received the belted exit (the admin took it)")
+	}
+	pool.mu.RLock()
+	empty := len(pool.replay["c1"])
+	pool.mu.RUnlock()
+	if empty != 0 {
+		t.Fatalf("belt still holds %d events after the pump's Watch", empty)
+	}
+
+	// Live events reach BOTH subscribers from here on — the admin's
+	// live-only semantics are identical to today's live behaviour.
+	holder.broadcast(fanEvent{resp: stdout([]byte("live"))})
+	for name, ch := range map[string]<-chan *fanEvent{"pump": pumpCh, "admin": adminCh} {
+		select {
+		case ev := <-ch:
+			if got := replayStdout(ev); got != "live" {
+				t.Fatalf("%s subscriber got %q, want the live event", name, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s subscriber did not receive the live event", name)
+		}
 	}
 }
 
