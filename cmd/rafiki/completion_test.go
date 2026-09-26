@@ -187,29 +187,6 @@ func seedChildrenCompletionCache(t *testing.T) {
 	})
 }
 
-func TestCompleteHistoryOffersChildren(t *testing.T) {
-	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
-	seedChildrenCompletionCache(t)
-
-	cmd := newHistoryCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set — `rafiki history <TAB>` completes nothing")
-	}
-	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
-	for _, want := range []string{"c_01HXABC", "alpha", "beta"} {
-		if !containsCandidate(got, want) {
-			t.Errorf("candidates %v missing %q (ids and names both target history)", got, want)
-		}
-	}
-	// One target is all the verb takes; past it there is nothing to offer.
-	if got, _ := cmd.ValidArgsFunction(cmd, []string{"c_01HXABC"}, ""); len(got) != 0 {
-		t.Errorf("past the single target got %v, want none", got)
-	}
-}
-
 func TestCompleteStatusOffersChildren(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedChildrenCompletionCache(t)

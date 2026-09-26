@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,52 +12,49 @@ import (
 	"os"
 	"path/filepath"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
-	"go.graveland.dev/rafiki/pkg/client"
+
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "logs <id|name>",
 		Aliases: []string{"log"},
-		Short:   "Show the captured logs for a child",
-		Long: `logs == tail; -f follows. Rendered by default; --raw for verbatim bytes.
+		Short:   "Print a child's event history; -f follows the live stream after it",
+		Long: `Print a child's event history, then optionally follow the live stream.
 
-Filter the rendered out stream with --profile (a named preset) or
---include/--exclude (specific event types), same as rafiki tail. Note --profile
-applies only to the live follow stream, not the backfill.
+rafiki logs <id> prints the child's conversation history and exits. logs -f
+prints it and then follows the live event stream from where the history ended.
 
-Only the out stream can be followed; --in/--err are snapshots (live stderr is
-unavailable — captured to disk on exit) and ignore the filter flags.`,
+The rendered view is one line per event, the same lines rafiki tail prints.
+--types narrows the stream to named event types; --all-types widens it to
+every type, including the ephemeral deltas; -r emits one protojson Event per
+line instead of rendering.
+
+--stdin, --stderr and --all dump the captured process streams, raw: snapshots,
+not a follow. Live stderr is unavailable while the child runs — it is written
+to disk on exit — and --path prints the log directory without reading anything.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runLogs,
 	}
-	cmd.Flags().String("profile", "", "Subscription profile: firehose|results|coarse|lifecycle")
-	cmd.Flags().StringSlice("include", nil, "Include only these event types (repeatable)")
-	cmd.Flags().StringSlice("exclude", nil, "Exclude these event types (repeatable)")
-	cmd.Flags().Bool("in", false, "Dump the raw stdin stream (snapshot, no follow)")
-	cmd.Flags().Bool("err", false, "Dump the raw stderr stream (snapshot; live stderr unavailable — see logs after exit)")
-	cmd.Flags().Bool("all", false, "Print all three streams with separator headers")
+	cmd.Flags().Bool("stdin", false, "Dump the raw stdin stream (snapshot, no follow)")
+	cmd.Flags().Bool("stderr", false, "Dump the raw stderr stream (snapshot; live stderr unavailable — see logs after exit)")
+	cmd.Flags().Bool("all", false, "Print the process streams with separator headers")
 	cmd.Flags().Bool("path", false, "Print just the log directory path")
-	cmd.Flags().IntP("tail", "n", -1, "Show the last N events (-1 = all, 0 = none)")
-	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new output after catching up (≡ rafiki tail)")
-	cmd.Flags().BoolP("raw", "r", false, "Emit raw stream bytes/JSONL instead of the rendered view")
-	cmd.Flags().Bool("no-deltas", true, "Suppress token-by-token message_update deltas in the rendered view (default true)")
-	cmd.Flags().BoolP("verbose", "v", false, "Include internal RPC/lifecycle frames")
+	cmd.Flags().IntP("tail", "n", -1, "Backfill the last N events (-1 = all, 0 = none)")
+	cmd.Flags().BoolP("follow", "f", false, "Keep streaming new events after the history (≡ rafiki tail <id>)")
+	cmd.Flags().StringSlice("types", nil, "Only these event types (comma-separated)")
+	cmd.Flags().Bool("all-types", false, "Every event type, plus the ephemeral deltas (tier ALL)")
+	cmd.Flags().BoolP("raw", "r", false, "One protojson Event per line instead of the rendered view")
 
-	cmd.MarkFlagsMutuallyExclusive("in", "err", "all", "path")
+	cmd.MarkFlagsMutuallyExclusive("stdin", "stderr", "all", "path")
 
-	_ = cmd.RegisterFlagCompletionFunc("profile", cobra.FixedCompletions(
-		[]string{"firehose", "results", "coarse", "lifecycle"},
-		cobra.ShellCompDirectiveNoFileComp,
-	))
-	_ = cmd.RegisterFlagCompletionFunc("include", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
-	})
-	_ = cmd.RegisterFlagCompletionFunc("exclude", func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
-		return knownEventTypes, cobra.ShellCompDirectiveNoFileComp
+	_ = cmd.RegisterFlagCompletionFunc("types", func(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return prefixCompletions(allNativeTypes(), toComplete), cobra.ShellCompDirectiveNoFileComp
 	})
 
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -70,15 +68,22 @@ unavailable — captured to disk on exit) and ignore the filter flags.`,
 }
 
 func runLogs(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	client := ep.control()
 	ctx := cmdCtx(cmd)
 
 	target := ""
 	if len(args) > 0 {
 		target = args[0]
 	}
-	childID, err := resolveTarget(ctx, c, mustProfile(cmd).Name, target)
+	childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, target)
 	if err != nil {
 		return err
 	}
@@ -89,103 +94,82 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	wantIn, _ := cmd.Flags().GetBool("in")
-	wantErr, _ := cmd.Flags().GetBool("err")
+	wantStdin, _ := cmd.Flags().GetBool("stdin")
+	wantStderr, _ := cmd.Flags().GetBool("stderr")
 	wantAll, _ := cmd.Flags().GetBool("all")
+
+	// in/err/all → raw process-stream dump (snapshot; no follow).
+	which := ""
+	switch {
+	case wantStdin && !wantStderr && !wantAll:
+		which = "in"
+	case wantStderr && !wantStdin && !wantAll:
+		which = "err"
+	case wantAll && !wantStdin && !wantStderr:
+		which = "all"
+	}
+	if which != "" {
+		return dumpStreamsConnect(ctx, ep, client, childID, which)
+	}
+
 	tailN, _ := cmd.Flags().GetInt("tail")
 	follow, _ := cmd.Flags().GetBool("follow")
 	raw, _ := cmd.Flags().GetBool("raw")
-	noDeltas, _ := cmd.Flags().GetBool("no-deltas")
-	verbose, _ := cmd.Flags().GetBool("verbose")
-	mode, useColor, err := outputOpts(cmd)
+	allTypes, _ := cmd.Flags().GetBool("all-types")
+	explicit, _ := cmd.Flags().GetStringSlice("types")
+	types, tier, err := resolveTypeFilter(explicit, allTypes, true)
 	if err != nil {
 		return err
 	}
 
-	// in/err/all → raw stream dump (snapshot; no follow).
-	if wantIn || wantErr || wantAll {
-		return dumpRawStreams(ctx, c, childID, wantIn, wantErr, wantAll)
-	}
-
-	profile, _ := cmd.Flags().GetString("profile")
-	include, _ := cmd.Flags().GetStringSlice("include")
-	exclude, _ := cmd.Flags().GetStringSlice("exclude")
-	if noDeltas {
-		exclude = append(exclude, "message_update")
-	}
-
-	return runHistoryOut(ctx, c, childID, historyOpts{
-		follow:   follow,
-		tailN:    tailN,
-		raw:      raw,
-		profile:  profile,
-		include:  include,
-		exclude:  exclude,
-		verbose:  verbose,
-		mode:     mode,
-		useColor: useColor,
-	})
+	return runEventQuery(ctx, ep, client, eventQuery{
+		childID: childID,
+		subject: childSubject(childID),
+		types:   types,
+		tier:    tier,
+		tailN:   tailN,
+		follow:  follow,
+		raw:     raw,
+		mode:    mode,
+	}, cmd.OutOrStdout(), cmd.ErrOrStderr())
 }
 
-// dumpRawStreams prints the in/err (and out, for --all) raw streams. Live
-// children are served from the daemon's in-memory capture; exited children
-// fall back to the on-disk gzip dump. Live stderr is never available (the
-// daemon cannot read the stderr buffer without racing the reader goroutine),
-// so for a live child we print a notice instead.
-func dumpRawStreams(ctx context.Context, c *client.Client, childID string, wantIn, wantErr, wantAll bool) error {
-	which := "all"
-	switch {
-	case wantIn && !wantErr && !wantAll:
-		which = "in"
-	case wantErr && !wantIn && !wantAll:
-		which = "err"
-	}
-
-	resp, err := c.Request(ctx, protocol.GetStreamsRequest{
-		Type:    protocol.TypeCtrlGetStreams,
-		ChildID: childID,
-		Which:   which,
-	})
+// dumpStreamsConnect prints the in/err process streams a live child's capture
+// holds, via GetStreams. Live children are served from the daemon's in-memory
+// capture; exited children (alive=false) fall back to the on-disk dump. Live
+// stderr is never available (the daemon cannot read the stderr buffer without
+// racing the reader goroutine), so for a live child we print a notice instead.
+func dumpStreamsConnect(ctx context.Context, ep connectEndpoint, client rafikiv1connect.ControlClient, childID, which string) error {
+	resp, err := client.GetStreams(ctx, connect.NewRequest(&rafikiv1.GetStreamsRequest{ChildId: childID, Which: which}))
 	if err != nil {
-		return err
+		return diagnoseConnectError(err, ep.describe)
 	}
-	if resp.Success {
-		var data protocol.GetStreamsResponseData
-		if err := json.Unmarshal(resp.Data, &data); err != nil {
-			return err
-		}
-		if data.Alive {
-			if wantAll {
+	msg := resp.Msg
+	wantIn := which == "in" || which == "all"
+	wantErr := which == "err" || which == "all"
+	if msg.GetAlive() {
+		if wantIn {
+			if which == "all" {
 				fmt.Println("=== in ===")
 			}
-			if wantIn || wantAll {
-				for _, line := range data.In {
-					fmt.Fprintln(os.Stdout, string(line))
-				}
+			for _, line := range msg.GetIn() {
+				fmt.Fprintln(os.Stdout, string(line))
 			}
-			if wantAll {
-				fmt.Println("=== out ===")
-				bf, err := fetchBackfill(ctx, c, childID, historyOpts{tailN: -1, raw: true})
-				if err != nil {
-					return err
-				}
-				for _, f := range bf {
-					fmt.Fprintln(os.Stdout, string(f))
-				}
+		}
+		if wantErr {
+			if which == "all" {
 				fmt.Println("=== err ===")
 			}
-			if wantErr || wantAll {
-				if len(data.Err) > 0 {
-					os.Stdout.Write(data.Err)
-				} else {
-					fmt.Fprintln(os.Stderr, "note: stderr is not captured while the child is running; it is written to disk on exit (run `rafiki logs --err <child>` after it exits)")
-				}
+			if len(msg.GetErr()) > 0 {
+				_, _ = os.Stdout.Write(msg.GetErr())
+			} else {
+				fmt.Fprintln(os.Stderr, "note: stderr is not captured while the child is running; it is written to disk on exit (run `rafiki logs --stderr <child>` after it exits)")
 			}
-			return nil
 		}
+		return nil
 	}
-	// Exited (or RPC unsupported): fall back to the on-disk dump.
-	return dumpDiskStreams(childID, wantIn, wantErr, wantAll)
+	// Exited: fall back to the on-disk dump.
+	return dumpDiskStreams(childID, wantIn, wantErr, which == "all")
 }
 
 func dumpDiskStreams(childID string, wantIn, wantErr, wantAll bool) error {

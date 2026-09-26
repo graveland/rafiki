@@ -333,23 +333,3 @@ func resetTerminal() {
 		"\x1b[0m" // reset SGR attributes
 	_, _ = os.Stdout.WriteString(seq)
 }
-
-// knownEventTypes lists pi RPC event types used by --include/--exclude
-// flags on tail and recent. Source: docs/reference/control-protocol.md §7 and §10.
-var knownEventTypes = []string{
-	"agent_start", "agent_end",
-	"turn_start", "turn_end",
-	"message_start", "message_update", "message_end",
-	"tool_execution_start", "tool_execution_update", "tool_execution_end",
-	"queue_update",
-	"compaction_start", "compaction_end",
-	"batch_wait_start", "batch_wait_end",
-	"auto_retry_start", "auto_retry_end",
-	"extension_error",
-	"extension_ui_request",
-	// ctrl_child_* events used by the lifecycle profile
-	"ctrl_child_spawned",
-	"ctrl_child_exited",
-	"ctrl_child_status",
-	"ctrl_child_renamed",
-}

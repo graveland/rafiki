@@ -143,18 +143,15 @@ func TestShortFlags(t *testing.T) {
 		{[]string{"create"}, "model", "m"},
 		{[]string{"create"}, "detached", "d"},
 		{[]string{"create"}, "preset", "p"},
-		// -l limits, -r raw, and the pre-existing -n/-f/-v/-y.
+		// -l limits, -r raw, and the pre-existing -n/-f/-y.
 		{[]string{"search"}, "limit", "l"},
-		{[]string{"recent"}, "limit", "l"},
 		{[]string{"tasks"}, "limit", "l"},
 		{[]string{"executor", "list"}, "limit", "l"},
 		{[]string{"logs"}, "raw", "r"},
 		{[]string{"tail"}, "raw", "r"},
 		{[]string{"logs"}, "tail", "n"},
 		{[]string{"logs"}, "follow", "f"},
-		{[]string{"logs"}, "verbose", "v"},
 		{[]string{"tail"}, "tail", "n"},
-		{[]string{"tail"}, "verbose", "v"},
 		{[]string{"executor", "delete"}, "yes", "y"},
 		// Launcher.
 		{[]string{"claude"}, "url", "u"},

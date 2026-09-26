@@ -223,13 +223,6 @@ func TestAliases_Status(t *testing.T) {
 	}
 }
 
-func TestAliases_Recent(t *testing.T) {
-	cmd := newRecentCmd()
-	if containsAlias(cmd.Aliases, "history") {
-		t.Errorf("recent: unexpected alias 'history' — this was dropped so rafiki history (the Connect history command) does not collide")
-	}
-}
-
 func TestAliases_Logs(t *testing.T) {
 	cmd := newLogsCmd()
 	if !containsAlias(cmd.Aliases, "log") {

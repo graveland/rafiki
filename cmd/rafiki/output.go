@@ -187,25 +187,6 @@ func rawRows(rows []json.RawMessage) []any {
 	return out
 }
 
-// decodeChildrenPayload reports whether data carries a children list — the
-// ctrl_list envelope {"children":[...]} or a bare array — and returns the
-// children. A pointer is used for the envelope so an object with no children
-// key (any other verb's payload) reads as absent rather than as an empty
-// list.
-func decodeChildrenPayload(data []byte) ([]protocol.ChildSummary, bool) {
-	var env struct {
-		Children *[]protocol.ChildSummary `json:"children"`
-	}
-	if err := json.Unmarshal(data, &env); err == nil && env.Children != nil {
-		return *env.Children, true
-	}
-	var arr []protocol.ChildSummary
-	if err := json.Unmarshal(data, &arr); err == nil && arr != nil {
-		return arr, true
-	}
-	return nil, false
-}
-
 // formatUnixMilli renders a wire millisecond timestamp the way the list
 // table's STARTED column does, or "-" when absent.
 func formatUnixMilli(ms int64) string {

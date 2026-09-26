@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -6,20 +8,21 @@ import (
 	"io"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func newSendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "send [id|name] [frame-json]",
 		Aliases: []string{"snd"},
-		Short:   "Send a raw control frame to a child",
-		Long: `Send a raw control frame to a child's bus (debugging or scripting).
+		Short:   "Send a raw child-protocol frame to a live child",
+		Long: `Send a raw child-protocol frame to a child's stdin (debugging or scripting).
 
 If id|name is omitted, uses the active marker. If frame-json is omitted, reads from stdin.
+The frame is validated as JSON locally, before anything is sent.
 
 Example:
   rafiki send afk-impl '{"type":"prompt","message":"Hello!"}'`,
@@ -36,46 +39,49 @@ Example:
 }
 
 func runSend(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
 	ctx := cmdCtx(cmd)
-	var input string
-	if len(args) > 0 {
-		input = args[0]
-	}
-	childID, err := resolveTarget(ctx, c, mustProfile(cmd).Name, input)
-	if err != nil {
-		return err
-	}
 
-	var frame json.RawMessage
+	// The frame comes first, so an invalid one is refused before anything is
+	// dialled: the JSON gate is local, and the daemon never sees a frame the
+	// CLI itself would reject.
+	var frame string
 	if len(args) == 2 {
-		frame = json.RawMessage(args[1])
+		frame = args[1]
 	} else {
 		b, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return fmt.Errorf("read stdin: %w", err)
 		}
-		frame = json.RawMessage(b)
+		frame = string(b)
 	}
-
-	// Validate it parses before sending.
+	// Validate it parses — as an object — before sending. The daemon's
+	// SendFrame refuses anything but a JSON object too; refusing here first
+	// keeps a typo off the wire.
 	var probe map[string]any
-	if err := json.Unmarshal(frame, &probe); err != nil {
+	if err := json.Unmarshal([]byte(frame), &probe); err != nil {
 		return fmt.Errorf("frame is not valid JSON: %w", err)
 	}
 
-	resp, err := c.Request(ctx, protocol.SendRequest{
-		Type:    protocol.TypeCtrlSend,
-		ChildID: childID,
-		Frame:   frame,
-	})
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_send: %s", client.FormatError(resp))
+	client := ep.control()
+
+	target := ""
+	if len(args) > 0 {
+		target = args[0]
+	}
+	childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, target)
+	if err != nil {
+		return err
+	}
+
+	if _, err := client.SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+		ChildId:   childID,
+		FrameJson: frame,
+	})); err != nil {
+		return diagnoseConnectError(err, ep.describe)
 	}
 	return nil
 }
