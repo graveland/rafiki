@@ -331,6 +331,46 @@ owner's pymodule corpus sync and git-source refreshes on that executor
 explicitly). With no script-capable executor, the daemon hosts the child
 locally (the owner's own saved modules only; no git repos, no venvs).
 
+## The Python SDK
+
+`sdk/python` is rafiki's first SDK: a hand-written Connect JSON client over
+`httpx` and the standard library — no grpc, no protobuf runtime. Its message
+types are dataclasses generated from `control.proto` by `make proto` (the
+generator is `cmd/protoc-gen-rafikipy`), so the SDK cannot lag the wire: one
+run regenerates the Go code and the Python types together.
+
+Two ways to connect, per the script-children design. Inside a script child,
+`Client.inside()` dials the per-child unix socket in `RAFIKI_CHILD_CONNECT`
+— the socket is the credential, and no token is ever sent. Standalone (CI,
+drivers, notebooks), `Client.from_profile()` shells out to
+`rafiki profile show -o json` and lets `pkg/profile` do the resolving — the
+SDK parses no profile files. `Client(url, token)` is the explicit form: a
+unix socket path, `unix://`, `http+unix://`, or an `http(s)://` URL.
+
+```python
+from rafiki import Client
+
+c = Client.from_profile()                       # or Client.inside() in a script child
+child = c.spawn("one turn, please", model="anthropic/claude-sonnet-4-5")
+for settle in c.settled([child]):
+    print(settle)                               # Settle(child_id=..., state="idle")
+print(c.export(child).turns)                    # the child's transcript
+```
+
+The full method list and the error/retry contract live in
+[sdk/python/README.md](sdk/python/README.md). One rule is worth stating here:
+every failure raises `ConnectError` with a Connect code, and exactly ONE code
+is retried — `unavailable`, the daemon-restarting signal the per-child
+socket's proxy answers with (HTTP 503 and a Connect body naming the code) —
+with bounded exponential backoff. `permission_denied` and `invalid_argument`
+raise through immediately. Streaming calls resume rather than hang:
+`settled()` replays from the highest event ordinal it has seen, `receive()`
+re-opens under its documented at-most-once contract.
+
+A script child spawned with the SDK reports, receives and settles through
+the same `Client.inside()` face the wave-2 verbs define — see the script
+children section above for the socket's own contract.
+
 ## The agent inbox
 
 The daemon runs two durable stores for the same traffic with opposite
@@ -792,6 +832,15 @@ rafiki profile add prod --url https://rafiki.example.net --token "$TOKEN"
 rafiki profile use work
 rafiki -P prod status              # override for one command
 ```
+
+`rafiki profile show -o json` (or `-j`) prints the resolved profile as one
+machine-readable record — name, socket, url, connect_socket, token, kind,
+model, preset, labels. Its `token` field carries the RESOLVED token value
+(the human rendering deliberately shows only whether a token exists), which
+is what machine consumers like [the Python SDK's](sdk/python/README.md)
+`Client.from_profile` build their connection from; `connect_socket` names the
+Connect socket beside the profile's framed socket, the one a Connect-plane
+client dials locally.
 
 `RAFIKI_URL`, `RAFIKI_TOKEN`, `RAFIKI_SOCKET`, `RAFIKI_DEFAULT_MODEL`,
 `RAFIKI_DEFAULT_PRESET`, `RAFIKI_DEFAULT_LABELS` are hard client-side errors

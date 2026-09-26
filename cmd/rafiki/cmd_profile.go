@@ -99,7 +99,16 @@ func newProfileShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show [name]",
 		Short: "Print one profile in full",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Print one profile in full: its endpoint, credential state and spawn
+defaults. The default rendering is human text; -o json (or -j) prints a
+single machine-readable record instead, whose token field carries the
+RESOLVED token value (the human rendering deliberately shows only whether a
+token exists — machines that need the value, like rafiki's Python SDK's
+Client.from_profile, ask for it here). The record's connect_socket names the
+Connect control-plane socket beside the profile's framed socket, which is
+what a Connect-plane client dials locally; url names the remote endpoint of
+a remote profile, and exactly one of socket/connect_socket and url is set.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			set, err := loadForEdit()
 			if err != nil {
@@ -117,6 +126,33 @@ func newProfileShowCmd() *cobra.Command {
 				return fmt.Errorf("unknown profile %q (known: %s)", name, strings.Join(set.Names(), ", "))
 			}
 			w := cmd.OutOrStdout()
+			mode, _, err := outputOpts(cmd)
+			if err != nil {
+				return err
+			}
+			if mode == outputJSON || mode == outputJSONL {
+				// A nil map encodes as null; an absent label set is an empty
+				// object, so the record's shape never depends on the profile.
+				labels := p.Labels
+				if labels == nil {
+					labels = map[string]string{}
+				}
+				rec := map[string]any{
+					"name":           p.Name,
+					"socket":         p.Socket,
+					"url":            p.URL,
+					"connect_socket": connectSocketFor(profile.Resolved{Profile: p}),
+					"token":          profile.ReadToken(name),
+					"kind":           p.Kind,
+					"model":          p.Model,
+					"preset":         p.Preset,
+					"labels":         labels,
+				}
+				if mode == outputJSONL {
+					return writeJSONL(w, []any{rec})
+				}
+				return writeJSON(w, rec)
+			}
 			fmt.Fprintf(w, "name:     %s\n", p.Name)
 			fmt.Fprintf(w, "endpoint: %s\n", endpointOf(p))
 			// The derived value (profile.EffectiveProxy), not the bare field: for

@@ -183,8 +183,13 @@ bin/protoc-gen-go:
 bin/protoc-gen-connect-go:
 	go build -o bin/protoc-gen-connect-go connectrpc.com/connect/cmd/protoc-gen-connect-go
 
+# The SDK's Python dataclass generator (cmd/protoc-gen-rafikipy) builds from
+# this repo's own module, like bin/protoc-gen-go.
+bin/protoc-gen-rafikipy: $(wildcard cmd/protoc-gen-rafikipy/*.go)
+	go build -o bin/protoc-gen-rafikipy ./cmd/protoc-gen-rafikipy
+
 .PHONY: proto
-proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from proto/ definitions (executorpb + darajapb + adminpb + pkg/gen).
+proto: bin/protoc-gen-go bin/protoc-gen-connect-go bin/protoc-gen-rafikipy ## Regenerate Go code from proto/ definitions (executorpb + darajapb + adminpb + pkg/gen) and the SDK's Python types (sdk/python).
 	$(PROTOC) \
 		--proto_path=proto/rafiki/executor/v1 \
 		--go_out=pkg/executorpb \
@@ -220,6 +225,16 @@ proto: bin/protoc-gen-go bin/protoc-gen-connect-go ## Regenerate Go code from pr
 		--go_out=pkg/gen --go_opt=module=go.graveland.dev/rafiki/pkg/gen \
 		--connect-go_out=pkg/gen --connect-go_opt=module=go.graveland.dev/rafiki/pkg/gen \
 		proto/rafiki/v1/*.proto
+	# The SDK's message types regenerate in the same run, so sdk/python can
+	# never lag control.proto. Three files: the two rafiki.v1 protos plus
+	# daraja (its messages appear in Control's Daraja* RPCs). The generator
+	# also rewrites the package __init__.py.
+	mkdir -p sdk/python/rafiki/_gen
+	$(PROTOC) \
+		--plugin=protoc-gen-rafikipy=bin/protoc-gen-rafikipy \
+		--rafikipy_out=sdk/python/rafiki/_gen \
+		--proto_path=proto \
+		proto/rafiki/v1/control.proto proto/rafiki/v1/event.proto proto/rafiki/daraja/v1/daraja.proto
 	$(MAKE) fmt
 
 .PHONY: check
@@ -248,6 +263,11 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 	if [ -z "$${RAFIKI_TEST_DSN}" ]; then \
 		echo "WARNING: RAFIKI_TEST_DSN unset (no .env?) — every DB-backed test will SKIP."; \
 		echo "         A green result here does NOT mean the store/insights code was exercised."; \
+	fi; \
+	if ! python3 -c 'import httpx' 2>/dev/null && [ -z "$${RAFIKI_TEST_SDK_PYTHON:-}" ]; then \
+		echo "WARNING: no python3 with httpx — the sdk/python tests (test/integration TestPythonSDK*) will SKIP."; \
+		echo "         Install httpx for the interpreter named python3 (or set RAFIKI_TEST_SDK_PYTHON to one)"; \
+		echo "         to exercise the SDK against a scratch daemon."; \
 	fi; \
 	go test -race -count=1 ./...
 

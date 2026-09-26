@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -234,4 +235,84 @@ func TestProfileAddValidatesBeforeWriting(t *testing.T) {
 	if strings.Contains(out, "bad") {
 		t.Fatalf("profile list output shows the rejected profile:\n%s", out)
 	}
+}
+
+// TestProfileShowJSONRecord pins the machine-readable record the Python SDK's
+// Client.from_profile shells out to: -o json (and -j) emit ONE record with the
+// resolved token value, the Connect socket beside the profile's framed socket,
+// and exactly one of socket/url — the shape pkg/profile is the only resolver
+// of, and a shape that must not drift without breaking from_profile.
+func TestProfileShowJSONRecord(t *testing.T) {
+	isolateProfiles(t)
+
+	if _, err := runProfileCmd(t, "add", "it", "--socket", "/tmp/show.sock"); err != nil {
+		t.Fatalf("profile add: %v", err)
+	}
+	tokDir := filepath.Join(paths.ConfigDir(), "profiles", "it")
+	if err := os.MkdirAll(tokDir, 0o700); err != nil {
+		t.Fatalf("mkdir token dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tokDir, "token"), []byte("tok-show-1\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	out, err := runProfileShowViaRoot(t, "-o", "json")
+	if err != nil {
+		t.Fatalf("profile show -o json: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(out), &rec); err != nil {
+		t.Fatalf("show -o json is not one JSON record: %v\n%s", err, out)
+	}
+	for _, key := range []string{"name", "socket", "url", "connect_socket", "token", "kind", "model", "preset", "labels"} {
+		if _, ok := rec[key]; !ok {
+			t.Errorf("show -o json record missing %q: %s", key, out)
+		}
+	}
+	if rec["name"] != "it" {
+		t.Errorf("name = %v, want it", rec["name"])
+	}
+	if rec["socket"] != "/tmp/show.sock" {
+		t.Errorf("socket = %v, want /tmp/show.sock", rec["socket"])
+	}
+	if rec["url"] != "" {
+		t.Errorf("url = %v, want empty on a socket profile", rec["url"])
+	}
+	if rec["connect_socket"] != "/tmp/connect.sock" {
+		t.Errorf("connect_socket = %v, want /tmp/connect.sock (the sibling of the framed socket)", rec["connect_socket"])
+	}
+	if rec["token"] != "tok-show-1" {
+		t.Errorf("token = %v, want the RESOLVED value tok-show-1", rec["token"])
+	}
+	if labels, ok := rec["labels"].(map[string]any); !ok || len(labels) != 0 {
+		t.Errorf("labels = %v, want an empty object (never null)", rec["labels"])
+	}
+
+	// -j is the shorthand for the same record, compact on one line under -J.
+	jOut, err := runProfileShowViaRoot(t, "it", "-j")
+	if err != nil {
+		t.Fatalf("profile show it -j: %v", err)
+	}
+	var rec2 map[string]any
+	if err := json.Unmarshal([]byte(jOut), &rec2); err != nil {
+		t.Fatalf("show -j is not one JSON record: %v\n%s", err, jOut)
+	}
+	if rec2["connect_socket"] != rec["connect_socket"] || rec2["token"] != rec["token"] {
+		t.Errorf("-j record drifted from -o json: %v vs %v", rec2, rec)
+	}
+}
+
+// runProfileShowViaRoot executes `rafiki profile show <args...>` through the
+// ROOT command, because --output/-j/-J are root PERSISTENT flags: they do not
+// exist on the profile subcommand driven directly, which is how the other
+// runProfileCmd tests run it.
+func runProfileShowViaRoot(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	root := newRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs(append([]string{"profile", "show"}, args...))
+	err := root.Execute()
+	return buf.String(), err
 }

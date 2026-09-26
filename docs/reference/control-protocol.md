@@ -140,8 +140,13 @@ machine:
   JSON, the Connect plane is HTTP/2, and distinguishing them on one socket
   means sniffing the first bytes — the demultiplexer this repo has rejected.
 - **Mode:** socket `0600` in a `0700` directory, same as the control socket.
-- **Transport:** h2c (HTTP/2 cleartext). There is no TLS on a unix socket, and
-  Connect's server-streaming (`StreamEvents`) wants HTTP/2.
+- **Transport:** h2c (HTTP/2 cleartext) AND HTTP/1.1 — a non-nil `Protocols`
+  lists ONLY the supported protocols, so both are set explicitly (the same
+  rule `pkg/childsock` serves the per-child socket under): the Go Connect
+  client speaks prior-knowledge h2c, and a plain-httpx/curl client (the
+  Python SDK's standalone face, a debugging `curl --unix-socket`) speaks
+  HTTP/1.1; unary and server-streaming both work over either. Connect's
+  server-streaming (`StreamEvents`) is what wants HTTP/2.
 - **Auth:** an interceptor (`pkg/connectapi.NewAuthInterceptor`) performs a
   constant-time bearer comparison on every call. An **empty configured token
   disables the check** — that is the unix socket case, where the trust
@@ -184,6 +189,14 @@ machine:
   not reach — the same table on the proxy face and on `connect.sock`, since
   both mount through `connectControlRoute`. See "Who may call what" below.
 - **Encoding:** protobuf or JSON. A unary call is an ordinary HTTP POST:
+
+A server stream's **headers arrive with its first message**, not before — a
+stream with nothing yet to say sends no bytes at all (connect-go flushes
+headers on the first `Send`). A client must therefore budget an idle-read
+timeout rather than wait for headers: a quiet stream is the normal case, not
+a dead connection. The Python SDK turns that quiet window into a
+`deadline_exceeded` error its callers re-open on (cursor-replayed for
+`settled()`, at-most-once for `Receive`).
 
 ```bash
 curl -H 'Content-Type: application/json' \

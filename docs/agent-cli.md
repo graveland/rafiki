@@ -82,6 +82,16 @@ old global `~/.config/rafiki/token` (and the even older, already-unread
 `~/.config/rafiki/control.token`) are no longer read at all — see README's
 "Profiles" section for the schema and resolution order.
 
+`rafiki profile show` honours the root `--output` contract: `-o json` (or
+`-j`) prints the resolved profile as ONE machine-readable record —
+`name`, `socket`, `url`, `connect_socket`, `token`, `kind`, `model`,
+`preset`, `labels` — whose `token` carries the resolved credential value (the
+human rendering shows only whether a token exists) and whose
+`connect_socket` names the Connect socket beside the profile's framed one.
+This is what [rafiki's Python SDK](../sdk/python/README.md) shells out to in
+`Client.from_profile`; a rafiki binary that predates `-o json` on this verb
+makes the SDK fail with a rebuild hint rather than parse the text form.
+
 **This only bites on a remote (`https://`) daemon, not the local dev loop.**
 `mustDial` (`cmd/rafiki/cli_helpers.go`) resolves the client's one profile
 (`pkg/profile`) and dials it: a profile with a `url` presents that profile's

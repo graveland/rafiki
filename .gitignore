@@ -8,6 +8,7 @@
 /bin/
 /bin/protoc-gen-go
 /bin/protoc-gen-connect-go
+/bin/protoc-gen-rafikipy
 
 # Isolated worktrees for multi-task feature work
 /.worktrees/
@@ -49,3 +50,7 @@ go.work.sum
 
 # superpowers SDD scratch — briefs, ledgers, review packages
 .superpowers/
+
+# Python
+__pycache__/
+*.pyc
