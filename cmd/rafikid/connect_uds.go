@@ -47,8 +47,9 @@ import (
 // other verb that never looks at identity at all.
 //
 // h2c rather than TLS: there is no TLS on a unix socket, and Connect's
-// server-streaming (StreamEvents) wants HTTP/2. The client half is in
-// cmd/rafiki/connectclient.go and must match.
+// server-streaming (StreamEvents) wants HTTP/2. HTTP/1.1 rides the same
+// listener for plain clients (see the Protocols setup below). The Go client
+// half is in cmd/rafiki/connectclient.go and must match.
 func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.UserTokenAuth, path string) (net.Listener, error) {
 	// Refuse rather than clobber. Two daemons serving one path means the
 	// second bind silently wins and the first's clients connect into a void.
@@ -81,13 +82,17 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	routePath, handler := connectControlRoute(srv, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
 	mux.Handle(routePath, handler)
 
-	// Unencrypted HTTP/2 (h2c) via the standard library's Protocols field,
-	// rather than the deprecated x/net/http2/h2c wrapper. Connect's
-	// server-streaming (StreamEvents) wants HTTP/2; there is no TLS on a unix
-	// socket, so this is prior-knowledge h2c. The client half is in
+	// h2c AND HTTP/1.1, per pkg/childsock's rule for the same situation: a
+	// non-nil Protocols lists ONLY the supported protocols, so HTTP/1 must be
+	// set explicitly alongside h2c — a plain-httpx/curl client (the Python
+	// SDK's standalone face) speaks HTTP/1.1, the Go Connect client speaks
+	// prior-knowledge h2c, and both must work on one listener. Connect's
+	// server-streaming (StreamEvents) is what wants HTTP/2; unary and
+	// server-streaming both ride HTTP/1.1 fine. The Go client half is in
 	// cmd/rafiki/connectclient.go and must match.
 	proto := &http.Protocols{}
 	proto.SetUnencryptedHTTP2(true)
+	proto.SetHTTP1(true)
 	httpSrv := &http.Server{
 		Handler:           mux,
 		Protocols:         proto,

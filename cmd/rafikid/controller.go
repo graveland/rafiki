@@ -1490,6 +1490,31 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		return control.SpawnResult{}, err
 	}
 
+	// An empty kind is the fundi default, and it is resolved ONCE here so
+	// every consumer agrees on it. resolveSpawnPlan applies the same default
+	// when it builds argv, but that is too late for agentRunner's switch: a
+	// raw empty kind fell through the switch (no case matches "") to the
+	// nil-Runner subprocess path, where the fundi engine runs as a
+	// `rafikid fundi` subprocess that cannot know its owner — the child's
+	// conversation row landed unattributed (owner_user_id NULL) and every
+	// owner-scoped read over it (ConversationExport first among them)
+	// answered not-found. A preset's kind, if any, already replaced req.Kind
+	// above, so this only fills the genuinely-absent case.
+
+	// An empty kind is the fundi default, and it is resolved ONCE here so
+	// every consumer agrees on it. resolveSpawnPlan applies the same default
+	// when it builds argv, but that is too late for agentRunner's switch: a
+	// raw empty kind fell through the switch (no case matches "") to the
+	// nil-Runner subprocess path, where the fundi engine runs as a
+	// `rafikid fundi` subprocess that cannot know its owner — the child's
+	// conversation row landed unattributed (owner_user_id NULL) and every
+	// owner-scoped read over it (ConversationExport first among them)
+	// answered not-found. A preset's kind, if any, already replaced req.Kind
+	// above, so this only fills the genuinely-absent case.
+	if req.Kind == "" {
+		req.Kind = protocol.KindFundi
+	}
+
 	// A pre-fill the child could not run is refused here, before anything
 	// else reads req — same ordering argument as applyPreset above: the
 	// preset's kind and tool shaping are already resolved, so the check sees
