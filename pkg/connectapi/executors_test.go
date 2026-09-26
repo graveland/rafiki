@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -39,6 +40,41 @@ func TestListExecutorsMapsRows(t *testing.T) {
 	}
 	if rows[1].GetReason() == "" {
 		t.Error("row 1 should carry its exclusion reason")
+	}
+}
+
+// TestListExecutorsKindScopedTimestampsRideThrough pins the kind-scoped
+// path's timestamp contract: the lister's rows map onto the wire AS-IS — a
+// timestamp the lister set reaches the caller unchanged, and one it left
+// unset stays 0 rather than sprouting a value. ListExecutorRows populates
+// neither field today (a live-only row has no persisted sighting to show),
+// so 0 is what the daemon's kind-scoped listing actually serves.
+func TestListExecutorsKindScopedTimestampsRideThrough(t *testing.T) {
+	joined := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	seen := joined.Add(-time.Hour)
+	s := NewServer(nil)
+	s.SetExecutorLister(fakeExecutorLister{rows: []ExecutorRow{
+		{ID: "exec-set", ConnectedAtMs: joined.UnixMilli(), LastSeenMs: seen.UnixMilli()},
+		{ID: "exec-unset"},
+	}})
+	resp, err := s.ListExecutors(context.Background(),
+		connect.NewRequest(&rafikiv1.ListExecutorsRequest{Kind: "claude"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := resp.Msg.GetRows()
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(rows))
+	}
+	if got, want := rows[0].GetConnectedAtMs(), joined.UnixMilli(); got != want {
+		t.Errorf("row 0 connected_at_ms = %d, want the lister's %d", got, want)
+	}
+	if got, want := rows[0].GetLastSeenMs(), seen.UnixMilli(); got != want {
+		t.Errorf("row 0 last_seen_ms = %d, want the lister's %d", got, want)
+	}
+	if rows[1].GetConnectedAtMs() != 0 || rows[1].GetLastSeenMs() != 0 {
+		t.Errorf("row 1 = (connected_at_ms %d, last_seen_ms %d), want both 0",
+			rows[1].GetConnectedAtMs(), rows[1].GetLastSeenMs())
 	}
 }
 

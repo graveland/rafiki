@@ -27,6 +27,12 @@ type ExecutorRow struct {
 	Admits        string
 	Enabled       bool
 	Connected     bool
+	// ConnectedAtMs is unix ms of the current connection's join time; 0 = not
+	// connected. LastSeenMs is unix ms of the row's last pool sighting; 0 =
+	// never seen. Both pass through whatever the source set — a row built
+	// without them carries 0.
+	ConnectedAtMs int64
+	LastSeenMs    int64
 	LaunchKinds   []string
 	Eligible      bool
 	Reason        string
@@ -107,6 +113,8 @@ func toProtoExecutor(r ExecutorRow) *rafikiv1.ExecutorRow {
 		Admits:        r.Admits,
 		Enabled:       r.Enabled,
 		Connected:     r.Connected,
+		ConnectedAtMs: r.ConnectedAtMs,
+		LastSeenMs:    r.LastSeenMs,
 		LaunchKinds:   r.LaunchKinds,
 		Eligible:      r.Eligible,
 		Reason:        r.Reason,

@@ -752,6 +752,10 @@ message ExecutorRow {
   // do with an ineligible row (show it greyed out, exclude it from a count).
   bool eligible = 11;
   string reason = 12;
+  // unix ms of the current connection's join time; 0 = not connected.
+  int64 connected_at_ms = 13;
+  // unix ms of the last pool sighting; 0 = unknown.
+  int64 last_seen_ms = 14;
 }
 
 message ListExecutorsRequest {

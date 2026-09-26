@@ -4330,8 +4330,12 @@ type ExecutorRow struct {
 	// kind by this caller, and reason names the exclusion when eligible is
 	// false. Never true FILTER these rows itself — the CLI/TUI decide what to
 	// do with an ineligible row (show it greyed out, exclude it from a count).
-	Eligible      bool   `protobuf:"varint,11,opt,name=eligible,proto3" json:"eligible,omitempty"`
-	Reason        string `protobuf:"bytes,12,opt,name=reason,proto3" json:"reason,omitempty"`
+	Eligible bool   `protobuf:"varint,11,opt,name=eligible,proto3" json:"eligible,omitempty"`
+	Reason   string `protobuf:"bytes,12,opt,name=reason,proto3" json:"reason,omitempty"`
+	// unix ms of the current connection's join time; 0 = not connected.
+	ConnectedAtMs int64 `protobuf:"varint,13,opt,name=connected_at_ms,json=connectedAtMs,proto3" json:"connected_at_ms,omitempty"`
+	// unix ms of the last pool sighting; 0 = unknown.
+	LastSeenMs    int64 `protobuf:"varint,14,opt,name=last_seen_ms,json=lastSeenMs,proto3" json:"last_seen_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4448,6 +4452,20 @@ func (x *ExecutorRow) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *ExecutorRow) GetConnectedAtMs() int64 {
+	if x != nil {
+		return x.ConnectedAtMs
+	}
+	return 0
+}
+
+func (x *ExecutorRow) GetLastSeenMs() int64 {
+	if x != nil {
+		return x.LastSeenMs
+	}
+	return 0
 }
 
 type ListExecutorsRequest struct {
@@ -12199,7 +12217,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	" \x01(\x03R\rcreatedAtUnix\"\x8b\x01\n" +
 	"\x1cConversationFindingsResponse\x124\n" +
 	"\bfindings\x18\x01 \x03(\v2\x18.rafiki.v1.ReviewFindingR\bfindings\x125\n" +
-	"\banalyses\x18\x02 \x03(\v2\x19.rafiki.v1.ReviewAnalysisR\banalyses\"\xb0\x03\n" +
+	"\banalyses\x18\x02 \x03(\v2\x19.rafiki.v1.ReviewAnalysisR\banalyses\"\xfa\x03\n" +
 	"\vExecutorRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\amachine\x18\x02 \x01(\tR\amachine\x12:\n" +
@@ -12213,7 +12231,10 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\flaunch_kinds\x18\n" +
 	" \x03(\tR\vlaunchKinds\x12\x1a\n" +
 	"\beligible\x18\v \x01(\bR\beligible\x12\x16\n" +
-	"\x06reason\x18\f \x01(\tR\x06reason\x1a9\n" +
+	"\x06reason\x18\f \x01(\tR\x06reason\x12&\n" +
+	"\x0fconnected_at_ms\x18\r \x01(\x03R\rconnectedAtMs\x12 \n" +
+	"\flast_seen_ms\x18\x0e \x01(\x03R\n" +
+	"lastSeenMs\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\\\n" +

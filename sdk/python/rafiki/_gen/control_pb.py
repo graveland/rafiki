@@ -2141,6 +2141,8 @@ class ExecutorRow:
     launch_kinds: list[str] = dataclasses.field(default_factory=list)
     eligible: bool = False
     reason: str = ""
+    connected_at_ms: int = 0
+    last_seen_ms: int = 0
 
     def to_dict(self) -> dict:
         out = {}
@@ -2168,6 +2170,10 @@ class ExecutorRow:
             out["eligible"] = self.eligible
         if self.reason != "":
             out["reason"] = self.reason
+        if self.connected_at_ms != 0:
+            out["connectedAtMs"] = str(self.connected_at_ms)
+        if self.last_seen_ms != 0:
+            out["lastSeenMs"] = str(self.last_seen_ms)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ExecutorRow":
@@ -2208,6 +2214,12 @@ class ExecutorRow:
         _v = _d.get("reason")
         if _v is not None:
             obj.reason = _v
+        _v = _d.get("connectedAtMs")
+        if _v is not None:
+            obj.connected_at_ms = _int_in(_v)
+        _v = _d.get("lastSeenMs")
+        if _v is not None:
+            obj.last_seen_ms = _int_in(_v)
         return obj
 
 @dataclasses.dataclass

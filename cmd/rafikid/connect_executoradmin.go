@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -137,10 +138,13 @@ func (a connectExecutorAdmin) List(ctx context.Context, selector string, limit i
 // The field mapping duplicates Controller.ListExecutorRows' inline conversion
 // rather than calling it: that one is fused to the live pool's Describe (for
 // launch kinds) and to an eligibility evaluation, which a plain listing must
-// not perform. What a plain listing therefore leaves ZERO is deliberate, and
-// pinned by TestExecutorAdminListLeavesEligibilityUnevaluated: LaunchKinds is
-// a live-pool observation the store row does not carry, and Eligible/Reason
-// are unset on this path by ListExecutorsRequest's contract.
+// not perform. What a plain listing leaves ZERO is deliberate, and pinned by
+// TestExecutorAdminListLeavesEligibilityUnevaluated: LaunchKinds is a
+// live-pool observation the store row does not carry, and Eligible/Reason are
+// unset on this path by ListExecutorsRequest's contract. The timestamps ride
+// the row's own fields: ConnectedAtMs from the live pool's join time (0 when
+// the executor has no current connection) and LastSeenMs from the store's
+// last_seen_at (0 when the row has never been seen).
 func executorRowFrom(e executors.Executor) connectapi.ExecutorRow {
 	return connectapi.ExecutorRow{
 		ID:            e.ID,
@@ -152,5 +156,21 @@ func executorRowFrom(e executors.Executor) connectapi.ExecutorRow {
 		Admits:        e.Admits,
 		Enabled:       e.Enabled,
 		Connected:     e.Connected,
+		ConnectedAtMs: unixMs(e.ConnectedAt),
+		LastSeenMs:    unixMs(&e.LastSeenAt),
 	}
+}
+
+// unixMs renders an observation time as the wire's unix-ms encoding: a nil
+// pointer or the zero time.Time is 0, the wire's "absent". The zero time is a
+// meaningful state here, not a bug: the store leaves LastSeenAt at its zero
+// value when last_seen_at is NULL (an executor never seen), and Controller.
+// ExecutorList leaves ConnectedAt nil for an executor with no live
+// connection. UnixMilli of the zero time would otherwise surface a year-1
+// count no client can render.
+func unixMs(t *time.Time) int64 {
+	if t == nil || t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
 }

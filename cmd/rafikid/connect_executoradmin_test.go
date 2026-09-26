@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os/user"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/control"
@@ -252,6 +253,52 @@ func TestExecutorAdminListMarksConnectedFromTheLivePool(t *testing.T) {
 	}
 	if byID["exec-off"].Connected {
 		t.Error("exec-off marked connected though the pool does not have it")
+	}
+}
+
+// TestExecutorAdminListCarriesConnectionTimestamps pins the timestamp
+// pass-through on the empty-kind path: connected_at_ms comes from the live
+// pool's join time and is 0 for an executor with no current connection
+// (ConnectedAt nil), and last_seen_ms mirrors the store's last_seen_at — set
+// when the row carries one, 0 when the column is NULL (the Go zero time: an
+// executor never seen).
+func TestExecutorAdminListCarriesConnectionTimestamps(t *testing.T) {
+	joined := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	seen := joined.Add(-time.Hour)
+	s := newFakeExecStore()
+	s.execs["exec-live"] = executors.Executor{
+		ID: "exec-live", Enabled: true, LastSeenAt: seen,
+	}
+	s.execs["exec-off"] = executors.Executor{ID: "exec-off", Enabled: true}
+	live := ex("exec-live", nil, "")
+	live.ConnectedAt = joined
+	a := connectExecutorAdmin{c: &Controller{
+		execStore: s,
+		execPool:  &fakePool{live: []execpool.LiveExecutor{live}},
+	}}
+
+	rows, err := a.List(context.Background(), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]connectapi.ExecutorRow{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	if !byID["exec-live"].Connected {
+		t.Error("exec-live not marked connected though the pool has it live")
+	}
+	if got, want := byID["exec-live"].ConnectedAtMs, joined.UnixMilli(); got != want {
+		t.Errorf("exec-live connected_at_ms = %d, want the pool's join time %d", got, want)
+	}
+	if got, want := byID["exec-live"].LastSeenMs, seen.UnixMilli(); got != want {
+		t.Errorf("exec-live last_seen_ms = %d, want the store row's sighting %d", got, want)
+	}
+	if got := byID["exec-off"].ConnectedAtMs; got != 0 {
+		t.Errorf("exec-off connected_at_ms = %d, want 0 (no current connection)", got)
+	}
+	if got := byID["exec-off"].LastSeenMs; got != 0 {
+		t.Errorf("exec-off last_seen_ms = %d, want 0 (NULL last_seen_at)", got)
 	}
 }
 
