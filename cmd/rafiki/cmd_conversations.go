@@ -14,11 +14,9 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/conversationview"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insightstypes"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/table"
 )
 
@@ -115,28 +113,46 @@ func conversationsMode(cmd *cobra.Command) (conversationview.Mode, error) {
 	return conversationview.ModeJSON, nil
 }
 
-// renderConversationResponse decodes a ctrl_conversation_* payload into the
-// domain type the daemon marshalled it from (pkg/control/dispatch.go hands
-// *insightstypes.Stats and friends straight to okResponse) and hands it to the same
-// renderer `rafikid agent` uses. Both surfaces read the same rows through the
-// same pkg/insights queries; routing both through conversationview.Render is what keeps
-// them from presenting those rows differently.
-func renderConversationResponse[T any](w io.Writer, m conversationview.Mode, resp *protocol.Response, table func(io.Writer, T) error) error {
-	var v T
-	if err := decodeConversationData(resp, &v); err != nil {
-		return err
+// conversationConnectErr renders a Connect failure from the conversation RPCs
+// for stderr. The conversation path attaches rafiki's precise reasons as
+// google.rpc.ErrorInfo details, which connect's own rendering drops;
+// formatConnectErr surfaces them as `<reason>: <message>` — the same
+// `<x>: <message>` line shape every other Connect-backed verb prints through
+// main(). The three infrastructure codes keep diagnoseConnectError's endpoint
+// advice, which formatConnectErr alone would collapse away.
+func conversationConnectErr(err error, endpoint string) error {
+	switch connect.CodeOf(err) {
+	case connect.CodeUnimplemented, connect.CodeUnauthenticated, connect.CodeUnavailable:
+		return diagnoseConnectError(err, endpoint)
 	}
-	return conversationview.Render(w, v, m, table)
+	return fmt.Errorf("%s", formatConnectErr(err))
 }
 
-// decodeConversationData decodes a ctrl_conversation_* payload into v. Split
-// out of renderConversationResponse for search, whose payload is an envelope
-// around the value it renders rather than the value itself.
-func decodeConversationData[T any](resp *protocol.Response, v *T) error {
-	if err := json.Unmarshal(resp.Data, v); err != nil {
-		return fmt.Errorf("decode %s response: %w", resp.Command, err)
+// renderStatsResponse renders ConversationStatsResponse. Its payload is
+// stats_json — the daemon's insights.Stats marshalled with encoding/json,
+// opaque by design (precedent: ToolUse.input_json) — so the client renders it
+// without pkg/insights: JSON mode decodes those bytes into a map and prints
+// that; table mode decodes the same bytes into the domain shape
+// conversationview.RenderStats consumes (pkg/insightstypes is types-only and
+// pgx-free), keeping the table byte-identical to `rafikid agent stats`. One
+// wire payload, two decoders — no second request, no pkg/insights import.
+func renderStatsResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.ConversationStatsResponse) error {
+	raw := []byte(resp.GetStatsJson())
+	if m == conversationview.ModeTable {
+		var st insightstypes.Stats
+		if err := json.Unmarshal(raw, &st); err != nil {
+			return fmt.Errorf("decode stats payload: %w", err)
+		}
+		return conversationview.RenderStats(w, &st)
 	}
-	return nil
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return fmt.Errorf("decode stats payload: %w", err)
+	}
+	if m == conversationview.ModeJSONCompact {
+		return writeJSONL(w, []any{v})
+	}
+	return writeJSON(w, v)
 }
 
 // ─── stats ──────────────────────────────────────────────────────────────────
@@ -153,12 +169,14 @@ func newConversationsStatsCmd() *cobra.Command {
 }
 
 func runConversationsStats(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
-	req := protocol.ConversationStatsRequest{Type: protocol.TypeCtrlConversationStats}
+	req := &rafikiv1.ConversationStatsRequest{}
 	if len(args) == 1 {
-		req.ConversationID = args[0]
+		req.ConversationId = args[0]
 	} else {
 		f, err := conversationview.BindStatsFilter(conversationFilterVals(cmd))
 		if err != nil {
@@ -173,18 +191,15 @@ func runConversationsStats(cmd *cobra.Command, args []string) error {
 		req.Path = string(f.Path)
 	}
 
-	resp, err := c.Request(cmdCtx(cmd), req)
+	resp, err := ep.control().ConversationStats(cmdCtx(cmd), connect.NewRequest(req))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_conversation_stats: %s", client.FormatError(resp))
+		return conversationConnectErr(err, ep.describe)
 	}
 	mode, err := conversationsMode(cmd)
 	if err != nil {
 		return err
 	}
-	return renderConversationResponse(os.Stdout, mode, resp, conversationview.RenderStats)
+	return renderStatsResponse(os.Stdout, mode, resp.Msg)
 }
 
 // ─── search ─────────────────────────────────────────────────────────────────
@@ -206,8 +221,10 @@ func newConversationsSearchCmd() *cobra.Command {
 }
 
 func runConversationsSearch(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
 	v := conversationFilterVals(cmd)
 	v.Status, _ = cmd.Flags().GetString("status")
@@ -219,11 +236,15 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if f.Limit > math.MaxInt32 {
+		return fmt.Errorf("--limit must be at most %d", int32(math.MaxInt32))
+	}
 
-	req := protocol.ConversationSearchRequest{
-		Type:      protocol.TypeCtrlConversationSearch,
-		SinceUnix: unixOrZero(f.Since),
-		UntilUnix: unixOrZero(f.Until),
+	// Since/Until ride the proto's optional int64: absent means unbounded, so
+	// a resolved nil stays absent rather than being sent as a present zero.
+	req := &rafikiv1.ConversationSearchRequest{
+		SinceUnix: unixPtrOrNil(f.Since),
+		UntilUnix: unixPtrOrNil(f.Until),
 		Owner:     f.Owner,
 		Persona:   f.Persona,
 		Source:    f.Source,
@@ -232,37 +253,54 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 		Status:    f.Status,
 		MinTokens: f.MinTokens,
 		Text:      f.Text,
-		Limit:     f.Limit,
+		Limit:     int32(f.Limit),
 	}
 
-	resp, err := c.Request(cmdCtx(cmd), req)
+	resp, err := ep.control().ConversationSearch(cmdCtx(cmd), connect.NewRequest(req))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_conversation_search: %s", client.FormatError(resp))
+		return conversationConnectErr(err, ep.describe)
 	}
 	mode, err := conversationsMode(cmd)
 	if err != nil {
 		return err
 	}
-	return renderConversationSearch(os.Stdout, mode, resp)
+	return renderSearchResponse(os.Stdout, mode, resp.Msg)
 }
 
-// renderConversationSearch unwraps ctrl_conversation_search's payload before
-// rendering. Alone among the three verbs it wraps its rows in a {"rows": [...]}
-// envelope (control-protocol.md §6.18) where stats and export send the domain
-// value bare, so it cannot go through renderConversationResponse. Unwrapping
-// here keeps both the table and the JSON matching `rafikid agent search`, which
-// prints the rows themselves.
-func renderConversationSearch(w io.Writer, m conversationview.Mode, resp *protocol.Response) error {
-	var payload struct {
-		Rows []insightstypes.ConversationSummary `json:"rows"`
+// renderSearchResponse renders ConversationSearchResponse through the same
+// conversationview renderer `rafikid agent search` uses. The wire now carries
+// typed proto rows, so the framed envelope (control-protocol.md §6.18) that
+// the old client unwrapped is gone: converting the rows to the domain shape
+// keeps both the table and the JSON (bare rows, no envelope, matching
+// `rafikid agent search`) byte-identical to the agent CLI.
+func renderSearchResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.ConversationSearchResponse) error {
+	rows := make([]insightstypes.ConversationSummary, 0, len(resp.GetRows()))
+	for _, r := range resp.GetRows() {
+		rows = append(rows, summaryFromProto(r))
 	}
-	if err := decodeConversationData(resp, &payload); err != nil {
-		return err
+	return conversationview.Render(w, rows, m, conversationview.RenderSearch)
+}
+
+// summaryFromProto converts a wire ConversationSummary to the domain shape
+// conversationview renders. CreatedAt is rebuilt from the wire's Unix seconds
+// in UTC so the JSON rendering does not depend on the client machine's
+// timezone; the table renderer Local()s it, so both surfaces are stable.
+func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.ConversationSummary {
+	return insightstypes.ConversationSummary{
+		ID: r.GetId(), Name: r.GetName(), Owner: r.GetOwner(), Persona: r.GetPersona(),
+		Source: r.GetSource(), Model: r.GetModel(), Status: r.GetStatus(), DrivenBy: r.GetDrivenBy(),
+		CreatedAt: time.Unix(r.GetCreatedAtUnix(), 0).UTC(),
+		Turns:     int(r.GetTurns()),
+
+		InputTokens:     r.GetInputTokens(),
+		OutputTokens:    r.GetOutputTokens(),
+		CacheReadTokens: r.GetCacheReadTokens(),
+
+		CacheHitRatio: r.GetCacheHitRatio(),
+		TotalCostUSD:  r.GetTotalCostUsd(),
+
+		FirstMessage: r.GetFirstMessage(),
 	}
-	return conversationview.Render(w, payload.Rows, m, conversationview.RenderSearch)
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────
@@ -277,34 +315,75 @@ func newConversationsExportCmd() *cobra.Command {
 }
 
 func runConversationsExport(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-
-	req := protocol.ConversationExportRequest{
-		Type:           protocol.TypeCtrlConversationExport,
-		ConversationID: args[0],
-	}
-
-	resp, err := c.Request(cmdCtx(cmd), req)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_conversation_export: %s", client.FormatError(resp))
+
+	resp, err := ep.control().ConversationExport(cmdCtx(cmd),
+		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: args[0]}))
+	if err != nil {
+		return conversationConnectErr(err, ep.describe)
 	}
 	mode, err := conversationsMode(cmd)
 	if err != nil {
 		return err
 	}
-	return renderConversationResponse(os.Stdout, mode, resp, conversationview.RenderTranscriptMD)
+	return renderExportResponse(os.Stdout, mode, resp.Msg)
+}
+
+// renderExportResponse renders ConversationExportResponse through the same
+// conversationview renderer `rafikid agent export` uses: a markdown transcript
+// for tables, the decoded transcript as JSON for -j/-J.
+func renderExportResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.ConversationExportResponse) error {
+	return conversationview.Render(w, transcriptFromProto(resp), m, conversationview.RenderTranscriptMD)
+}
+
+// transcriptFromProto converts the wire transcript to the domain shape
+// conversationview renders. Content arrives as the verbatim JSON bytes of the
+// content-block array (proto bytes, no base64 once decoded); LatencyMs
+// narrows from the proto's optional int32 back to *int, keeping "not
+// reported" distinct from a measured zero.
+func transcriptFromProto(resp *rafikiv1.ConversationExportResponse) *insightstypes.Transcript {
+	tr := &insightstypes.Transcript{
+		ConversationID:  resp.GetConversationId(),
+		Owner:           resp.GetOwner(),
+		Persona:         resp.GetPersona(),
+		Source:          resp.GetSource(),
+		DrivenBy:        resp.GetDrivenBy(),
+		AvailableSkills: resp.GetAvailableSkills(),
+		Turns:           make([]insightstypes.TranscriptTurn, 0, len(resp.GetTurns())),
+	}
+	for _, t := range resp.GetTurns() {
+		turn := insightstypes.TranscriptTurn{
+			Ordinal: int(t.GetOrdinal()),
+			Role:    t.GetRole(),
+			Content: json.RawMessage(t.GetContent()),
+			Skills:  t.GetSkills(),
+			// The optional metrics are accessed as fields, not getters: the
+			// generated getters dereference (nil → 0), collapsing "not
+			// reported" into a measured zero.
+			InputTokens:     t.InputTokens,
+			OutputTokens:    t.OutputTokens,
+			CacheReadTokens: t.CacheReadTokens,
+			Model:           t.GetModel(),
+			PrefixHash:      t.GetPrefixHash(),
+			ServedProvider:  t.GetServedProvider(),
+		}
+		if t.LatencyMs != nil {
+			ms := int(*t.LatencyMs)
+			turn.LatencyMS = &ms
+		}
+		tr.Turns = append(tr.Turns, turn)
+	}
+	return tr
 }
 
 // ─── query ────────────────────────────────────────────────────────────────
 
 // newConversationsQueryCmd returns `rafiki conversations query <name>`, the
-// client half of the conversation-query catalogue. Unlike its stats/search
-// siblings it goes over Connect rather than the framed protocol — the framed
-// protocol is frozen and takes no new verbs.
+// client half of the conversation-query catalogue, served over Connect like
+// every verb in this file.
 func newConversationsQueryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query <name>",
@@ -349,7 +428,7 @@ func runConversationsQuery(cmd *cobra.Command, args []string) error {
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model, Path: string(f.Path),
 	}))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return conversationConnectErr(err, ep.describe)
 	}
 	mode, err := conversationsMode(cmd)
 	if err != nil {
@@ -362,8 +441,8 @@ func runConversationsQuery(cmd *cobra.Command, args []string) error {
 
 // newConversationsReviewCmd returns `rafiki conversations review <id|name>…`,
 // the general entry for the review verb (design §5) — `rafiki close --review`
-// is only the close-triggered convenience spelling of it. Like `query` it
-// goes over Connect: the framed protocol is frozen and takes no new verbs.
+// is only the close-triggered convenience spelling of it. Target resolution
+// and the request both ride Connect, like every verb in this file.
 func newConversationsReviewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "review <id|name>...",
@@ -447,11 +526,12 @@ func applyReviewFlags(cmd *cobra.Command, req *rafikiv1.ConversationReviewReques
 	}
 }
 
-// runConversationsReview resolves each target through the same framed-client
-// Resolve every other client verb uses, then sends ONE batched review
-// request over Connect. The batch is convenience only: the daemon treats it
-// as N independent per-conversation calls (design §4), each accepted or
-// rejected on its own.
+// runConversationsReview resolves each target through resolveTargetConnect —
+// the Connect twin of the framed resolveTarget (same active-marker fallback,
+// same name/exact-id/prefix matching and error strings) — then sends ONE
+// batched review request over Connect. The batch is convenience only: the
+// daemon treats it as N independent per-conversation calls (design §4), each
+// accepted or rejected on its own.
 func runConversationsReview(cmd *cobra.Command, args []string) error {
 	// Resolve the stage before any dial: --stage garbage is a user-input
 	// error and must not spend a round trip.
@@ -460,17 +540,16 @@ func runConversationsReview(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	c := mustDial(cmd)
-	defer c.Close()
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
+	client := ep.control()
 	ctx := cmdCtx(cmd)
 
 	ids := make([]string, 0, len(args))
 	for _, arg := range args {
-		id, err := c.Resolve(ctx, arg)
+		id, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, arg)
 		if err != nil {
 			return fmt.Errorf("resolve %q: %w", arg, err)
 		}
@@ -487,9 +566,9 @@ func runConversationsReview(cmd *cobra.Command, args []string) error {
 	}
 	cfg.mergeInto(req)
 
-	resp, err := ep.control().ConversationReview(ctx, connect.NewRequest(req))
+	resp, err := client.ConversationReview(ctx, connect.NewRequest(req))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return conversationConnectErr(err, ep.describe)
 	}
 	return renderReviewAccepts(os.Stdout, resp.Msg.GetAccepted())
 }
