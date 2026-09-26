@@ -112,6 +112,9 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListPresets":        policyAnyCaller,
 	"GetPreset":          policyAnyCaller,
 	"GetRateLimitStatus": policyAnyCaller,
+	// ModelInfo is a read-only catalog lookup, the per-model twin of
+	// ListModels: same non-owned answer, same reasoning.
+	"ModelInfo": policyAnyCaller,
 
 	// userOnly: everything that acts with operator authority or answers as
 	// the caller's identity. Listed explicitly so the completeness test can
@@ -155,6 +158,29 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListProviderBans": policyAnyCaller,
 	"BanProvider":      policyUserOnly,
 	"UnbanProvider":    policyUserOnly,
+
+	// userOnly: the framed-protocol retirement verbs — operator verbs; no
+	// child tool reaches them; CreateUser/ListUsers/RemoveUser add an admin
+	// check in the handler.
+	"Resume":            policyUserOnly,
+	"CloseAllExited":    policyUserOnly,
+	"SetLabels":         policyUserOnly,
+	"Status":            policyUserOnly,
+	"Search":            policyUserOnly,
+	"ShutdownDaemon":    policyUserOnly,
+	"ConversationStats": policyUserOnly,
+	"EnrollExecutor":    policyUserOnly,
+	"CreateExecutor":    policyUserOnly,
+	"LabelExecutor":     policyUserOnly,
+	"DisableExecutor":   policyUserOnly,
+	"EnableExecutor":    policyUserOnly,
+	"DeleteExecutor":    policyUserOnly,
+	"ExecutorSession":   policyUserOnly,
+	"CreateUser":        policyUserOnly,
+	"ListUsers":         policyUserOnly,
+	"RemoveUser":        policyUserOnly,
+	"GetStreams":        policyUserOnly,
+	"SendFrame":         policyUserOnly,
 }
 
 // policyFor resolves a Connect procedure path to its policy. A path that is

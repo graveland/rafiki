@@ -223,12 +223,32 @@ message ChildSummary {
   // because a stored result is always non-empty (a JSON value has at least
   // one byte).
   string result = 17;
+  // session_file is the child's on-disk session path (claude children),
+  // empty for kinds that keep none.
+  string session_file = 18;
+  // exit_signal names the signal a signalled child died by, empty on a
+  // normal exit-code exit.
+  string exit_signal = 19;
+  repeated string slash_commands = 20;
+  // max_completion_tokens is the daemon's own model catalog's answer for
+  // model, zero when the catalog has no entry — the same rule
+  // ChildSummary.context_window follows.
+  int32 max_completion_tokens = 21;
 }
 
 message ListChildrenRequest {
   // Empty means every child. Otherwise only children whose status matches one
   // of these values (protocol.Status strings).
   repeated string statuses = 1;
+  // The remaining filters mirror protocol.ListFilter: exact name, substring
+  // name/cwd, unix-ms age floor, AND-match labels (every k=v present) and
+  // key-presence has_label.
+  string name = 2;
+  string name_contains = 3;
+  string cwd_contains = 4;
+  int64 since = 5;
+  map<string, string> labels = 6;
+  repeated string has_label = 7;
 }
 
 message ListChildrenResponse {
@@ -286,6 +306,30 @@ message SpawnRequest {
     repeated string args = 4;
   }
   ScriptSpec script = 14;
+
+  // Fields 15-29 are OPERATOR-ONLY: Spawn refuses them with PermissionDenied when the caller has child provenance.
+  //
+  // Types are mirrors of protocol.SpawnRequest (pkg/protocol/types.go); where
+  // the plan sketch said bool but the Go field is a string (fork_session,
+  // passthrough_auth), the Go type wins.
+  string config_dir = 15;
+  string append_system_prompt = 16;
+  string thinking = 17;
+  bool no_session = 18;
+  string resume_session = 19;
+  // fork_session is the session id to fork FROM, a string — not a bool.
+  string fork_session = 20;
+  repeated string extensions = 21;
+  bool no_extensions = 22;
+  bool verbose = 23;
+  repeated string extra_args = 24;
+  repeated string skills_dirs = 25;
+  string mcp_config = 26;
+  map<string, string> env = 27;
+  bool record_requests = 28;
+  // passthrough_auth is kind=claude's tri-state billing choice: empty/auto,
+  // "on" or "off" — a string, never a bool.
+  string passthrough_auth = 29;
 
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
@@ -369,6 +413,13 @@ message ListTasksRequest {
   // include_dropped surfaces rows an agent decided not to do. Dropped rows are
   // hidden by default.
   bool include_dropped = 2;
+  // The framed verb's remaining filter fields: tasks assigned to one child,
+  // one status value, a row cap, and all (include dropped — the framed
+  // spelling of include_dropped).
+  string child_id = 3;
+  string status = 4;
+  int32 limit = 5;
+  bool all = 6;
 }
 
 message ListTasksResponse {
@@ -690,7 +741,13 @@ message ListExecutorsRequest {
   // kind scopes eligibility: "claude" checks launch-kind support, "fundi" (or
   // empty) checks only admission/workspace-mode, matching chooseExecutor vs
   // chooseLaunchExecutor.
+  //
+  // kind empty = plain listing, eligibility unevaluated (eligible/reason unset).
   string kind = 1;
+
+  // selector filters rows by label selector; limit caps them (0 = default).
+  string selector = 2;
+  int32 limit = 3;
 }
 
 message ListExecutorsResponse {
@@ -866,6 +923,33 @@ service Control {
   rpc Report(ReportRequest) returns (ReportResponse);
   rpc Receive(ReceiveRequest) returns (stream ScriptMessage);
   rpc SetResult(SetResultRequest) returns (SetResultResponse);
+  // ─── Framed-protocol retirement RPCs ─────────────────────────────────────
+  // The Connect faces of the framed ctrl_* verbs the retirement moves over.
+  // Wave 2 fills the handlers; until then they answer Unimplemented.
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
+  rpc CloseAllExited(CloseAllExitedRequest) returns (CloseAllExitedResponse);
+  rpc SetLabels(SetLabelsRequest) returns (SetLabelsResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc ShutdownDaemon(ShutdownDaemonRequest) returns (ShutdownDaemonResponse);
+  rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+  rpc ConversationStats(ConversationStatsRequest) returns (ConversationStatsResponse);
+  rpc EnrollExecutor(EnrollExecutorRequest) returns (EnrollExecutorResponse);
+  rpc CreateExecutor(CreateExecutorRequest) returns (CreateExecutorResponse);
+  rpc LabelExecutor(LabelExecutorRequest) returns (LabelExecutorResponse);
+  rpc DisableExecutor(DisableExecutorRequest) returns (DisableExecutorResponse);
+  rpc EnableExecutor(EnableExecutorRequest) returns (EnableExecutorResponse);
+  rpc DeleteExecutor(DeleteExecutorRequest) returns (DeleteExecutorResponse);
+  // The first message is ready. The stream stays open for the session's
+  // lifetime; the daemon evicts a transient executor when the stream ends.
+  rpc ExecutorSession(ExecutorSessionRequest) returns (stream ExecutorSessionEvent);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc RemoveUser(RemoveUserRequest) returns (RemoveUserResponse);
+  rpc GetStreams(GetStreamsRequest) returns (GetStreamsResponse);
+  // A raw child-protocol frame, for debugging/scripting. userOnly: children
+  // use Send.
+  rpc SendFrame(SendFrameRequest) returns (SendFrameResponse);
 }
 
 // SkillRow is one row of conversations.skills. body is omitted from list
@@ -1169,3 +1253,354 @@ message BanProviderResponse {
 // live.
 message UnbanProviderRequest { string provider = 1; }
 message UnbanProviderResponse {}
+
+// ─── Framed-protocol retirement messages ───────────────────────────────────
+// The request/response shapes behind the RPCs above that replace the framed
+// ctrl_* verbs. Unless a comment says otherwise, each message mirrors its
+// protocol.X counterpart (pkg/protocol/types.go) one Go field per proto
+// field, in declaration order, skipping the framed envelope's Type and ID
+// fields.
+
+// ResumeRequest mirrors protocol.ResumeRequest: re-spawn an exited child
+// against its persisted state record. api_key is used at spawn time only and
+// is never persisted.
+message ResumeRequest {
+  string child_id = 1;
+  string api_key = 2;
+}
+
+message ResumeResponse {
+  string child_id = 1;
+}
+
+// CloseAllExitedRequest mirrors protocol.ForgetAllExitedRequest.
+// older_than_ms filters by age; zero means all exited entries.
+message CloseAllExitedRequest {
+  int64 older_than_ms = 1;
+}
+
+// CloseAllExitedResponse lists the ids of the children that were closed, in
+// close order, so a consumer can record exactly what was closed.
+message CloseAllExitedResponse {
+  repeated string child_ids = 1;
+}
+
+// SetLabelsRequest mirrors protocol.SetLabelsRequest: set entries apply
+// first, then remove entries are deleted. Keys using the rafiki/ prefix are
+// reserved and rejected.
+message SetLabelsRequest {
+  string child_id = 1;
+  map<string, string> set = 2;
+  repeated string remove = 3;
+}
+
+// SetLabelsResponse carries the full post-mutation map.
+message SetLabelsResponse {
+  map<string, string> labels = 1;
+}
+
+message StatusRequest {}
+
+// StatusResponse mirrors protocol.StatusResponseData.
+message StatusResponse {
+  string version = 1;
+  int64 started_at = 2;
+  ChildCounts children = 3;
+  int64 memory_bytes = 4;
+  string socket = 5;
+  string logs_dir = 6;
+
+  // ChildCounts breaks down live vs exited child totals, mirroring
+  // protocol.ChildCounts.
+  message ChildCounts {
+    int32 live = 1;
+    int32 exited = 2;
+  }
+}
+
+// SearchRequest mirrors protocol.SearchRequest: in-memory content search
+// across children's sessions.
+message SearchRequest {
+  string query = 1;
+  bool regex = 2;
+  int32 limit = 3;
+  int32 context = 4;
+  // session_filter narrows which children are scanned; absent means every
+  // child.
+  SearchSessionFilter session_filter = 5;
+
+  // SearchSessionFilter mirrors protocol.SearchSessionFilter. Labels is an
+  // AND-match (every k=v present); HasLabel tests key presence only.
+  message SearchSessionFilter {
+    string cwd_contains = 1;
+    string name_contains = 2;
+    int64 since = 3;
+    map<string, string> labels = 4;
+    repeated string has_label = 5;
+  }
+}
+
+// SearchResponse mirrors protocol.SearchResponseData.
+message SearchResponse {
+  repeated SearchHit hits = 1;
+  int32 total_hits = 2;
+  int32 scanned = 3;
+  int64 elapsed = 4;
+
+  // SearchHit mirrors protocol.SearchHit: one content match.
+  message SearchHit {
+    string child_id = 1;
+    string session_file = 2;
+    string session_id = 3;
+    string session_name = 4;
+    string entry_id = 5;
+    int64 timestamp = 6;
+    string role = 7;
+    string snippet = 8;
+    int32 match_start = 9;
+    int32 match_end = 10;
+  }
+}
+
+message ShutdownDaemonRequest {}
+message ShutdownDaemonResponse {}
+
+// ModelInfoRequest asks the daemon what it knows about one model, so the
+// client need not read the OpenRouter catalog itself.
+message ModelInfoRequest {
+  string model = 1;
+}
+
+// ModelInfoResponse mirrors protocol.ModelInfoResponseData. known=false means
+// "the daemon has no entry for this model" — an ordinary answer, not an
+// error: every caller degrades by leaving the model's own defaults alone.
+message ModelInfoResponse {
+  string model = 1;
+  string resolved_id = 2;
+  int32 context_window = 3;
+  int32 max_completion_tokens = 4;
+  int32 auto_compact_window = 5;
+  bool known = 6;
+}
+
+// ConversationStatsRequest mirrors protocol.ConversationStatsRequest: global
+// (filtered) stats when conversation_id is empty, scoped to one conversation
+// otherwise — in which case the filter fields are ignored. since_unix and
+// until_unix are Unix seconds; 0 means unbounded.
+message ConversationStatsRequest {
+  string conversation_id = 1;
+  int64 since_unix = 2;
+  int64 until_unix = 3;
+  string owner = 4;
+  string persona = 5;
+  string source = 6;
+  string model = 7;
+  string path = 8;
+}
+
+message ConversationStatsResponse {
+  // The daemon's insights.Stats marshalled with encoding/json, opaque by
+  // design (precedent: ToolUse.input_json).
+  string stats_json = 1;
+}
+
+// ─── Executor admin verbs (ctrl_executor_enroll/create/label/disable/enable/delete) ───
+
+// EnrollExecutorRequest mirrors protocol.ExecutorEnrollRequest: mint a
+// one-time enrollment token.
+message EnrollExecutorRequest {
+  // name is the name of the MACHINE the executor will run on, which is not
+  // necessarily the one that minted the token: the daemon writes it to the
+  // `machine` trust label. It cannot be sent as a label.
+  string name = 1;
+  // labels are the operator's own trust labels. `owner` and `machine` are
+  // written by the daemon (from the connection and from name); a request
+  // carrying either key is REFUSED rather than silently overwritten.
+  map<string, string> labels = 2;
+  repeated string roots = 3;
+  string isolation = 4;
+  string workspace_mode = 5;
+  string admits = 6;
+  int64 ttl_seconds = 7;
+}
+
+// EnrollExecutorResponse mirrors protocol.ExecutorEnrollResponseData.
+message EnrollExecutorResponse {
+  string token = 1;
+}
+
+// CreateExecutorRequest mirrors protocol.ExecutorCreateRequest: mint an
+// executor row and its durable credential in one step, with no enrollment
+// handshake. Same label rules as EnrollExecutorRequest.
+message CreateExecutorRequest {
+  string name = 1;
+  map<string, string> labels = 2;
+  repeated string roots = 3;
+  string isolation = 4;
+  string workspace_mode = 5;
+  string admits = 6;
+}
+
+// CreateExecutorResponse mirrors protocol.ExecutorCreateResponseData. The
+// credential is shown ONCE; only its hash is stored.
+message CreateExecutorResponse {
+  string executor_id = 1;
+  string credential = 2;
+}
+
+// LabelExecutorRequest mirrors protocol.ExecutorLabelRequest: set or remove
+// labels on an executor's database row.
+message LabelExecutorRequest {
+  string executor_id = 1;
+  map<string, string> set = 2;
+  repeated string remove = 3;
+}
+
+message LabelExecutorResponse {
+  ExecutorRow executor = 1;
+}
+
+// DisableExecutorRequest disables an executor. Its credential stops working.
+message DisableExecutorRequest { string executor_id = 1; }
+message DisableExecutorResponse {}
+
+// EnableExecutorRequest re-enables a disabled executor.
+message EnableExecutorRequest { string executor_id = 1; }
+message EnableExecutorResponse {}
+
+// DeleteExecutorRequest permanently removes an executor row. Unlike disable,
+// this cannot be undone.
+message DeleteExecutorRequest { string executor_id = 1; }
+message DeleteExecutorResponse {}
+
+// ExecutorSessionRequest mirrors protocol.ExecutorSessionRequest: ask the
+// daemon for an executor row belonging to the caller's own machine, so the
+// client can serve its operator's filesystem as a workspace. It carries only
+// fields that do NOT gate access — owner, isolation, workspace_mode and
+// admits are all decided by the daemon from the connection, because a client
+// that names them can grant itself anything.
+message ExecutorSessionRequest {
+  // name is the operator-chosen name of the client's machine, so the daemon
+  // can find a durable executor that shares this filesystem. It does NOT
+  // gate access — owner and admits are still derived from the connection.
+  string name = 1;
+  // roots describes the directories this machine offers, for humans and for
+  // selectors. Nothing enforces them and nothing may imply it does.
+  repeated string roots = 2;
+}
+
+// ExecutorSessionEvent is the one message shape the ExecutorSession stream
+// sends.
+message ExecutorSessionEvent {
+  oneof event {
+    ExecutorSessionReady ready = 1;
+  }
+}
+
+// ExecutorSessionReady mirrors protocol.ExecutorSessionResponseData.
+// Credential alone cannot express its three outcomes, which is why run_local
+// is a separate field rather than inferred from an empty ticket:
+//
+//	run_local=false             a durable executor already covers this name
+//	                            and owner. executor_id names it and the client
+//	                            starts nothing.
+//	run_local=true, no ticket   the client already holds a credential. Start
+//	                            an executor and connect with the one it has.
+//	run_local=true, with ticket a new row was minted. Persist the credential
+//	                            and connect.
+message ExecutorSessionReady {
+  // executor_id names the row — minted or existing — that represents this
+  // machine.
+  string executor_id = 1;
+  // run_local says whether the client should serve an executor at all.
+  bool run_local = 2;
+  // ticket authenticates the transient executor this client should now
+  // start. One-shot, and revoked when this control connection closes. Empty
+  // when run_local is false.
+  string ticket = 3;
+  // selector is the label selector the client should put on a spawn to land
+  // it on this row. The client cannot build it itself: it does not know the
+  // owner, which is derived server-side from the connection.
+  string selector = 4;
+}
+
+// ─── User admin verbs (ctrl_user_create/list/rm) ───────────────────────────
+
+// CreateUserRequest mints a user and its bearer token.
+message CreateUserRequest {
+  string username = 1;
+}
+
+// CreateUserResponse mirrors protocol.UserCreateResponseData: the plaintext
+// token, the only time it is ever transmitted — the daemon stores a digest
+// and cannot reproduce it.
+// Never mints an admin. Admins come only from rafikid user create --admin.
+message CreateUserResponse {
+  string id = 1;
+  string username = 2;
+  string token = 3;
+  string created_at = 4;
+}
+
+// ListUsersRequest mirrors protocol.UserListRequest. Tokens are never
+// returned.
+message ListUsersRequest {
+  bool include_deleted = 1;
+  int32 limit = 2;
+}
+
+message ListUsersResponse {
+  repeated UserRow users = 1;
+}
+
+// UserRow mirrors users.User (pkg/users/users.go): one identity row.
+// deleted_at_unix is set when the row is tombstoned: the token no longer
+// authenticates, but history still resolves the username through it.
+// OMITTED: the bearer-token digest usersdb stores beside the row
+// (users.HashToken) — a token is transmitted exactly once, at mint
+// (CreateUserResponse.token), and only its digest is stored server-side.
+message UserRow {
+  string id = 1;
+  string username = 2;
+  bool is_admin = 3;
+  int64 created_at_unix = 4;
+  optional int64 deleted_at_unix = 5;
+}
+
+// RemoveUserRequest tombstones a user: the token stops working, history
+// keeps resolving the username.
+message RemoveUserRequest {
+  string username = 1;
+}
+message RemoveUserResponse {}
+
+// ─── Raw child I/O (ctrl_get_streams / ctrl_send) ──────────────────────────
+
+// GetStreamsRequest names a live child and which streams to read: "in",
+// "err", or "all" (empty means "all").
+message GetStreamsRequest {
+  string child_id = 1;
+  string which = 2;
+}
+
+// GetStreamsResponse mirrors protocol.GetStreamsResponseData: raw,
+// uncompressed stream bytes for a live child. `in` holds stdin frames (one
+// []byte per frame, no trailing newline). alive=false means the child has
+// already exited, signalling the caller to fall back to the on-disk dump.
+// `err` is never populated for a live child by design: the stderr buffer is
+// unguarded and racing the reader goroutine, so live stderr is never served
+// — it is available post-exit via the on-disk dump.
+message GetStreamsResponse {
+  bool alive = 1;
+  repeated bytes in = 2;
+  bytes err = 3;
+}
+
+// SendFrameRequest forwards a raw child-protocol frame to a live child's
+// stdin, for debugging and scripting. frame_json is forwarded verbatim; the
+// daemon does not inspect it.
+message SendFrameRequest {
+  string child_id = 1;
+  string frame_json = 2;
+}
+message SendFrameResponse {}

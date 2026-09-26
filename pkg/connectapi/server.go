@@ -74,6 +74,11 @@ type Server struct {
 	daraja         atomic.Pointer[*darajaHandlers]
 	scopes         atomic.Pointer[ChildScopeSource]
 	scripts        atomic.Pointer[ScriptHub]
+	childOps       atomic.Pointer[ChildOps]
+	execAdmin      atomic.Pointer[ExecutorAdmin]
+	userAdmin      atomic.Pointer[UserAdmin]
+	rawIO          atomic.Pointer[RawChildIO]
+	execSessions   atomic.Pointer[ExecutorSessions]
 }
 
 func NewServer(h HistoryLoader) *Server { return &Server{history: h} }

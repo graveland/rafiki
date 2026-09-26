@@ -412,6 +412,10 @@ class ChildSummary:
     cost_usd: Optional[float] = None
     max_cost: Optional[float] = None
     result: str = ""
+    session_file: str = ""
+    exit_signal: str = ""
+    slash_commands: list[str] = dataclasses.field(default_factory=list)
+    max_completion_tokens: int = 0
 
     def to_dict(self) -> dict:
         out = {}
@@ -449,6 +453,14 @@ class ChildSummary:
             out["maxCost"] = _float_out(self.max_cost)
         if self.result != "":
             out["result"] = self.result
+        if self.session_file != "":
+            out["sessionFile"] = self.session_file
+        if self.exit_signal != "":
+            out["exitSignal"] = self.exit_signal
+        if self.slash_commands:
+            out["slashCommands"] = [x for x in self.slash_commands]
+        if self.max_completion_tokens != 0:
+            out["maxCompletionTokens"] = self.max_completion_tokens
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -504,16 +516,46 @@ class ChildSummary:
         _v = _d.get("result")
         if _v is not None:
             obj.result = _v
+        _v = _d.get("sessionFile")
+        if _v is not None:
+            obj.session_file = _v
+        _v = _d.get("exitSignal")
+        if _v is not None:
+            obj.exit_signal = _v
+        _v = _d.get("slashCommands")
+        if _v is not None:
+            obj.slash_commands = [x for x in _v]
+        _v = _d.get("maxCompletionTokens")
+        if _v is not None:
+            obj.max_completion_tokens = _int_in(_v)
         return obj
 
 @dataclasses.dataclass
 class ListChildrenRequest:
     statuses: list[str] = dataclasses.field(default_factory=list)
+    name: str = ""
+    name_contains: str = ""
+    cwd_contains: str = ""
+    since: int = 0
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    has_label: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.statuses:
             out["statuses"] = [x for x in self.statuses]
+        if self.name != "":
+            out["name"] = self.name
+        if self.name_contains != "":
+            out["nameContains"] = self.name_contains
+        if self.cwd_contains != "":
+            out["cwdContains"] = self.cwd_contains
+        if self.since != 0:
+            out["since"] = str(self.since)
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.has_label:
+            out["hasLabel"] = [x for x in self.has_label]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ListChildrenRequest":
@@ -521,6 +563,24 @@ class ListChildrenRequest:
         _v = _d.get("statuses")
         if _v is not None:
             obj.statuses = [x for x in _v]
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("nameContains")
+        if _v is not None:
+            obj.name_contains = _v
+        _v = _d.get("cwdContains")
+        if _v is not None:
+            obj.cwd_contains = _v
+        _v = _d.get("since")
+        if _v is not None:
+            obj.since = _int_in(_v)
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("hasLabel")
+        if _v is not None:
+            obj.has_label = [x for x in _v]
         return obj
 
 @dataclasses.dataclass
@@ -616,6 +676,21 @@ class SpawnRequest:
     preset: str = ""
     prefill: list[PrefillRead] = dataclasses.field(default_factory=list)
     script: Optional[SpawnRequest.ScriptSpec] = None
+    config_dir: str = ""
+    append_system_prompt: str = ""
+    thinking: str = ""
+    no_session: bool = False
+    resume_session: str = ""
+    fork_session: str = ""
+    extensions: list[str] = dataclasses.field(default_factory=list)
+    no_extensions: bool = False
+    verbose: bool = False
+    extra_args: list[str] = dataclasses.field(default_factory=list)
+    skills_dirs: list[str] = dataclasses.field(default_factory=list)
+    mcp_config: str = ""
+    env: dict[str, str] = dataclasses.field(default_factory=dict)
+    record_requests: bool = False
+    passthrough_auth: str = ""
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -644,6 +719,36 @@ class SpawnRequest:
             out["prefill"] = [x.to_dict() for x in self.prefill]
         if self.script is not None:
             out["script"] = self.script.to_dict()
+        if self.config_dir != "":
+            out["configDir"] = self.config_dir
+        if self.append_system_prompt != "":
+            out["appendSystemPrompt"] = self.append_system_prompt
+        if self.thinking != "":
+            out["thinking"] = self.thinking
+        if self.no_session != False:
+            out["noSession"] = self.no_session
+        if self.resume_session != "":
+            out["resumeSession"] = self.resume_session
+        if self.fork_session != "":
+            out["forkSession"] = self.fork_session
+        if self.extensions:
+            out["extensions"] = [x for x in self.extensions]
+        if self.no_extensions != False:
+            out["noExtensions"] = self.no_extensions
+        if self.verbose != False:
+            out["verbose"] = self.verbose
+        if self.extra_args:
+            out["extraArgs"] = [x for x in self.extra_args]
+        if self.skills_dirs:
+            out["skillsDirs"] = [x for x in self.skills_dirs]
+        if self.mcp_config != "":
+            out["mcpConfig"] = self.mcp_config
+        if self.env:
+            out["env"] = dict((k, v) for k, v in self.env.items())
+        if self.record_requests != False:
+            out["recordRequests"] = self.record_requests
+        if self.passthrough_auth != "":
+            out["passthroughAuth"] = self.passthrough_auth
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -687,6 +792,51 @@ class SpawnRequest:
         _v = _d.get("script")
         if _v is not None:
             obj.script = SpawnRequest.ScriptSpec.from_dict(_v)
+        _v = _d.get("configDir")
+        if _v is not None:
+            obj.config_dir = _v
+        _v = _d.get("appendSystemPrompt")
+        if _v is not None:
+            obj.append_system_prompt = _v
+        _v = _d.get("thinking")
+        if _v is not None:
+            obj.thinking = _v
+        _v = _d.get("noSession")
+        if _v is not None:
+            obj.no_session = _v
+        _v = _d.get("resumeSession")
+        if _v is not None:
+            obj.resume_session = _v
+        _v = _d.get("forkSession")
+        if _v is not None:
+            obj.fork_session = _v
+        _v = _d.get("extensions")
+        if _v is not None:
+            obj.extensions = [x for x in _v]
+        _v = _d.get("noExtensions")
+        if _v is not None:
+            obj.no_extensions = _v
+        _v = _d.get("verbose")
+        if _v is not None:
+            obj.verbose = _v
+        _v = _d.get("extraArgs")
+        if _v is not None:
+            obj.extra_args = [x for x in _v]
+        _v = _d.get("skillsDirs")
+        if _v is not None:
+            obj.skills_dirs = [x for x in _v]
+        _v = _d.get("mcpConfig")
+        if _v is not None:
+            obj.mcp_config = _v
+        _v = _d.get("env")
+        if _v is not None:
+            obj.env = {k: v for k, v in _v.items()}
+        _v = _d.get("recordRequests")
+        if _v is not None:
+            obj.record_requests = _v
+        _v = _d.get("passthroughAuth")
+        if _v is not None:
+            obj.passthrough_auth = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)
@@ -951,6 +1101,10 @@ class TaskRow:
 class ListTasksRequest:
     conversation_id: str = ""
     include_dropped: bool = False
+    child_id: str = ""
+    status: str = ""
+    limit: int = 0
+    all: bool = False
 
     def to_dict(self) -> dict:
         out = {}
@@ -958,6 +1112,14 @@ class ListTasksRequest:
             out["conversationId"] = self.conversation_id
         if self.include_dropped != False:
             out["includeDropped"] = self.include_dropped
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.status != "":
+            out["status"] = self.status
+        if self.limit != 0:
+            out["limit"] = self.limit
+        if self.all != False:
+            out["all"] = self.all
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ListTasksRequest":
@@ -968,6 +1130,18 @@ class ListTasksRequest:
         _v = _d.get("includeDropped")
         if _v is not None:
             obj.include_dropped = _v
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("status")
+        if _v is not None:
+            obj.status = _v
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        _v = _d.get("all")
+        if _v is not None:
+            obj.all = _v
         return obj
 
 @dataclasses.dataclass
@@ -2039,11 +2213,17 @@ class ExecutorRow:
 @dataclasses.dataclass
 class ListExecutorsRequest:
     kind: str = ""
+    selector: str = ""
+    limit: int = 0
 
     def to_dict(self) -> dict:
         out = {}
         if self.kind != "":
             out["kind"] = self.kind
+        if self.selector != "":
+            out["selector"] = self.selector
+        if self.limit != 0:
+            out["limit"] = self.limit
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ListExecutorsRequest":
@@ -2051,6 +2231,12 @@ class ListExecutorsRequest:
         _v = _d.get("kind")
         if _v is not None:
             obj.kind = _v
+        _v = _d.get("selector")
+        if _v is not None:
+            obj.selector = _v
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
         return obj
 
 @dataclasses.dataclass
@@ -3901,6 +4087,1323 @@ class RecallStatusResponse:
         _v = _d.get("summaryModel")
         if _v is not None:
             obj.summary_model = _v
+        return obj
+
+@dataclasses.dataclass
+class ProviderBan:
+    provider: str = ""
+    model_line: str = ""
+    reason: str = ""
+    created_at: int = 0
+    expires_at: Optional[int] = None
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        if self.model_line != "":
+            out["modelLine"] = self.model_line
+        if self.reason != "":
+            out["reason"] = self.reason
+        if self.created_at != 0:
+            out["createdAt"] = str(self.created_at)
+        if self.expires_at is not None:
+            out["expiresAt"] = str(self.expires_at)
+        if self.note != "":
+            out["note"] = self.note
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ProviderBan":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        _v = _d.get("modelLine")
+        if _v is not None:
+            obj.model_line = _v
+        _v = _d.get("reason")
+        if _v is not None:
+            obj.reason = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _int_in(_v)
+        _v = _d.get("expiresAt")
+        if _v is not None:
+            obj.expires_at = _int_in(_v)
+        _v = _d.get("note")
+        if _v is not None:
+            obj.note = _v
+        return obj
+
+@dataclasses.dataclass
+class ListProviderBansRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListProviderBansRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ListProviderBansResponse:
+    bans: list[ProviderBan] = dataclasses.field(default_factory=list)
+    persistent: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.bans:
+            out["bans"] = [x.to_dict() for x in self.bans]
+        if self.persistent != False:
+            out["persistent"] = self.persistent
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListProviderBansResponse":
+        obj = cls()
+        _v = _d.get("bans")
+        if _v is not None:
+            obj.bans = [ProviderBan.from_dict(x) for x in _v]
+        _v = _d.get("persistent")
+        if _v is not None:
+            obj.persistent = _v
+        return obj
+
+@dataclasses.dataclass
+class BanProviderRequest:
+    provider: str = ""
+    duration_seconds: Optional[int] = None
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        if self.duration_seconds is not None:
+            out["durationSeconds"] = str(self.duration_seconds)
+        if self.note != "":
+            out["note"] = self.note
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BanProviderRequest":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        _v = _d.get("durationSeconds")
+        if _v is not None:
+            obj.duration_seconds = _int_in(_v)
+        _v = _d.get("note")
+        if _v is not None:
+            obj.note = _v
+        return obj
+
+@dataclasses.dataclass
+class BanProviderResponse:
+    ban: Optional[ProviderBan] = None
+    persistent: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.ban is not None:
+            out["ban"] = self.ban.to_dict()
+        if self.persistent != False:
+            out["persistent"] = self.persistent
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BanProviderResponse":
+        obj = cls()
+        _v = _d.get("ban")
+        if _v is not None:
+            obj.ban = ProviderBan.from_dict(_v)
+        _v = _d.get("persistent")
+        if _v is not None:
+            obj.persistent = _v
+        return obj
+
+@dataclasses.dataclass
+class UnbanProviderRequest:
+    provider: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UnbanProviderRequest":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        return obj
+
+@dataclasses.dataclass
+class UnbanProviderResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UnbanProviderResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ResumeRequest:
+    child_id: str = ""
+    api_key: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.api_key != "":
+            out["apiKey"] = self.api_key
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ResumeRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("apiKey")
+        if _v is not None:
+            obj.api_key = _v
+        return obj
+
+@dataclasses.dataclass
+class ResumeResponse:
+    child_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ResumeResponse":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        return obj
+
+@dataclasses.dataclass
+class CloseAllExitedRequest:
+    older_than_ms: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.older_than_ms != 0:
+            out["olderThanMs"] = str(self.older_than_ms)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CloseAllExitedRequest":
+        obj = cls()
+        _v = _d.get("olderThanMs")
+        if _v is not None:
+            obj.older_than_ms = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class CloseAllExitedResponse:
+    child_ids: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_ids:
+            out["childIds"] = [x for x in self.child_ids]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CloseAllExitedResponse":
+        obj = cls()
+        _v = _d.get("childIds")
+        if _v is not None:
+            obj.child_ids = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class SetLabelsRequest:
+    child_id: str = ""
+    set: dict[str, str] = dataclasses.field(default_factory=dict)
+    remove: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.set:
+            out["set"] = dict((k, v) for k, v in self.set.items())
+        if self.remove:
+            out["remove"] = [x for x in self.remove]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetLabelsRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("set")
+        if _v is not None:
+            obj.set = {k: v for k, v in _v.items()}
+        _v = _d.get("remove")
+        if _v is not None:
+            obj.remove = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class SetLabelsResponse:
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetLabelsResponse":
+        obj = cls()
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        return obj
+
+@dataclasses.dataclass
+class StatusRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "StatusRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class StatusResponse:
+    version: str = ""
+    started_at: int = 0
+    children: Optional[StatusResponse.ChildCounts] = None
+    memory_bytes: int = 0
+    socket: str = ""
+    logs_dir: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.version != "":
+            out["version"] = self.version
+        if self.started_at != 0:
+            out["startedAt"] = str(self.started_at)
+        if self.children is not None:
+            out["children"] = self.children.to_dict()
+        if self.memory_bytes != 0:
+            out["memoryBytes"] = str(self.memory_bytes)
+        if self.socket != "":
+            out["socket"] = self.socket
+        if self.logs_dir != "":
+            out["logsDir"] = self.logs_dir
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "StatusResponse":
+        obj = cls()
+        _v = _d.get("version")
+        if _v is not None:
+            obj.version = _v
+        _v = _d.get("startedAt")
+        if _v is not None:
+            obj.started_at = _int_in(_v)
+        _v = _d.get("children")
+        if _v is not None:
+            obj.children = StatusResponse.ChildCounts.from_dict(_v)
+        _v = _d.get("memoryBytes")
+        if _v is not None:
+            obj.memory_bytes = _int_in(_v)
+        _v = _d.get("socket")
+        if _v is not None:
+            obj.socket = _v
+        _v = _d.get("logsDir")
+        if _v is not None:
+            obj.logs_dir = _v
+        return obj
+
+    @dataclasses.dataclass
+    class ChildCounts:
+        live: int = 0
+        exited: int = 0
+
+        def to_dict(self) -> dict:
+            out = {}
+            if self.live != 0:
+                out["live"] = self.live
+            if self.exited != 0:
+                out["exited"] = self.exited
+            return out
+        @classmethod
+        def from_dict(cls, _d: dict) -> "StatusResponse.ChildCounts":
+            obj = cls()
+            _v = _d.get("live")
+            if _v is not None:
+                obj.live = _int_in(_v)
+            _v = _d.get("exited")
+            if _v is not None:
+                obj.exited = _int_in(_v)
+            return obj
+    
+@dataclasses.dataclass
+class SearchRequest:
+    query: str = ""
+    regex: bool = False
+    limit: int = 0
+    context: int = 0
+    session_filter: Optional[SearchRequest.SearchSessionFilter] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.query != "":
+            out["query"] = self.query
+        if self.regex != False:
+            out["regex"] = self.regex
+        if self.limit != 0:
+            out["limit"] = self.limit
+        if self.context != 0:
+            out["context"] = self.context
+        if self.session_filter is not None:
+            out["sessionFilter"] = self.session_filter.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SearchRequest":
+        obj = cls()
+        _v = _d.get("query")
+        if _v is not None:
+            obj.query = _v
+        _v = _d.get("regex")
+        if _v is not None:
+            obj.regex = _v
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        _v = _d.get("context")
+        if _v is not None:
+            obj.context = _int_in(_v)
+        _v = _d.get("sessionFilter")
+        if _v is not None:
+            obj.session_filter = SearchRequest.SearchSessionFilter.from_dict(_v)
+        return obj
+
+    @dataclasses.dataclass
+    class SearchSessionFilter:
+        cwd_contains: str = ""
+        name_contains: str = ""
+        since: int = 0
+        labels: dict[str, str] = dataclasses.field(default_factory=dict)
+        has_label: list[str] = dataclasses.field(default_factory=list)
+
+        def to_dict(self) -> dict:
+            out = {}
+            if self.cwd_contains != "":
+                out["cwdContains"] = self.cwd_contains
+            if self.name_contains != "":
+                out["nameContains"] = self.name_contains
+            if self.since != 0:
+                out["since"] = str(self.since)
+            if self.labels:
+                out["labels"] = dict((k, v) for k, v in self.labels.items())
+            if self.has_label:
+                out["hasLabel"] = [x for x in self.has_label]
+            return out
+        @classmethod
+        def from_dict(cls, _d: dict) -> "SearchRequest.SearchSessionFilter":
+            obj = cls()
+            _v = _d.get("cwdContains")
+            if _v is not None:
+                obj.cwd_contains = _v
+            _v = _d.get("nameContains")
+            if _v is not None:
+                obj.name_contains = _v
+            _v = _d.get("since")
+            if _v is not None:
+                obj.since = _int_in(_v)
+            _v = _d.get("labels")
+            if _v is not None:
+                obj.labels = {k: v for k, v in _v.items()}
+            _v = _d.get("hasLabel")
+            if _v is not None:
+                obj.has_label = [x for x in _v]
+            return obj
+    
+@dataclasses.dataclass
+class SearchResponse:
+    hits: list[SearchResponse.SearchHit] = dataclasses.field(default_factory=list)
+    total_hits: int = 0
+    scanned: int = 0
+    elapsed: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.hits:
+            out["hits"] = [x.to_dict() for x in self.hits]
+        if self.total_hits != 0:
+            out["totalHits"] = self.total_hits
+        if self.scanned != 0:
+            out["scanned"] = self.scanned
+        if self.elapsed != 0:
+            out["elapsed"] = str(self.elapsed)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SearchResponse":
+        obj = cls()
+        _v = _d.get("hits")
+        if _v is not None:
+            obj.hits = [SearchResponse.SearchHit.from_dict(x) for x in _v]
+        _v = _d.get("totalHits")
+        if _v is not None:
+            obj.total_hits = _int_in(_v)
+        _v = _d.get("scanned")
+        if _v is not None:
+            obj.scanned = _int_in(_v)
+        _v = _d.get("elapsed")
+        if _v is not None:
+            obj.elapsed = _int_in(_v)
+        return obj
+
+    @dataclasses.dataclass
+    class SearchHit:
+        child_id: str = ""
+        session_file: str = ""
+        session_id: str = ""
+        session_name: str = ""
+        entry_id: str = ""
+        timestamp: int = 0
+        role: str = ""
+        snippet: str = ""
+        match_start: int = 0
+        match_end: int = 0
+
+        def to_dict(self) -> dict:
+            out = {}
+            if self.child_id != "":
+                out["childId"] = self.child_id
+            if self.session_file != "":
+                out["sessionFile"] = self.session_file
+            if self.session_id != "":
+                out["sessionId"] = self.session_id
+            if self.session_name != "":
+                out["sessionName"] = self.session_name
+            if self.entry_id != "":
+                out["entryId"] = self.entry_id
+            if self.timestamp != 0:
+                out["timestamp"] = str(self.timestamp)
+            if self.role != "":
+                out["role"] = self.role
+            if self.snippet != "":
+                out["snippet"] = self.snippet
+            if self.match_start != 0:
+                out["matchStart"] = self.match_start
+            if self.match_end != 0:
+                out["matchEnd"] = self.match_end
+            return out
+        @classmethod
+        def from_dict(cls, _d: dict) -> "SearchResponse.SearchHit":
+            obj = cls()
+            _v = _d.get("childId")
+            if _v is not None:
+                obj.child_id = _v
+            _v = _d.get("sessionFile")
+            if _v is not None:
+                obj.session_file = _v
+            _v = _d.get("sessionId")
+            if _v is not None:
+                obj.session_id = _v
+            _v = _d.get("sessionName")
+            if _v is not None:
+                obj.session_name = _v
+            _v = _d.get("entryId")
+            if _v is not None:
+                obj.entry_id = _v
+            _v = _d.get("timestamp")
+            if _v is not None:
+                obj.timestamp = _int_in(_v)
+            _v = _d.get("role")
+            if _v is not None:
+                obj.role = _v
+            _v = _d.get("snippet")
+            if _v is not None:
+                obj.snippet = _v
+            _v = _d.get("matchStart")
+            if _v is not None:
+                obj.match_start = _int_in(_v)
+            _v = _d.get("matchEnd")
+            if _v is not None:
+                obj.match_end = _int_in(_v)
+            return obj
+    
+@dataclasses.dataclass
+class ShutdownDaemonRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ShutdownDaemonRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ShutdownDaemonResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ShutdownDaemonResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ModelInfoRequest:
+    model: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model != "":
+            out["model"] = self.model
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ModelInfoRequest":
+        obj = cls()
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        return obj
+
+@dataclasses.dataclass
+class ModelInfoResponse:
+    model: str = ""
+    resolved_id: str = ""
+    context_window: int = 0
+    max_completion_tokens: int = 0
+    auto_compact_window: int = 0
+    known: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model != "":
+            out["model"] = self.model
+        if self.resolved_id != "":
+            out["resolvedId"] = self.resolved_id
+        if self.context_window != 0:
+            out["contextWindow"] = self.context_window
+        if self.max_completion_tokens != 0:
+            out["maxCompletionTokens"] = self.max_completion_tokens
+        if self.auto_compact_window != 0:
+            out["autoCompactWindow"] = self.auto_compact_window
+        if self.known != False:
+            out["known"] = self.known
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ModelInfoResponse":
+        obj = cls()
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        _v = _d.get("resolvedId")
+        if _v is not None:
+            obj.resolved_id = _v
+        _v = _d.get("contextWindow")
+        if _v is not None:
+            obj.context_window = _int_in(_v)
+        _v = _d.get("maxCompletionTokens")
+        if _v is not None:
+            obj.max_completion_tokens = _int_in(_v)
+        _v = _d.get("autoCompactWindow")
+        if _v is not None:
+            obj.auto_compact_window = _int_in(_v)
+        _v = _d.get("known")
+        if _v is not None:
+            obj.known = _v
+        return obj
+
+@dataclasses.dataclass
+class ConversationStatsRequest:
+    conversation_id: str = ""
+    since_unix: int = 0
+    until_unix: int = 0
+    owner: str = ""
+    persona: str = ""
+    source: str = ""
+    model: str = ""
+    path: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.conversation_id != "":
+            out["conversationId"] = self.conversation_id
+        if self.since_unix != 0:
+            out["sinceUnix"] = str(self.since_unix)
+        if self.until_unix != 0:
+            out["untilUnix"] = str(self.until_unix)
+        if self.owner != "":
+            out["owner"] = self.owner
+        if self.persona != "":
+            out["persona"] = self.persona
+        if self.source != "":
+            out["source"] = self.source
+        if self.model != "":
+            out["model"] = self.model
+        if self.path != "":
+            out["path"] = self.path
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ConversationStatsRequest":
+        obj = cls()
+        _v = _d.get("conversationId")
+        if _v is not None:
+            obj.conversation_id = _v
+        _v = _d.get("sinceUnix")
+        if _v is not None:
+            obj.since_unix = _int_in(_v)
+        _v = _d.get("untilUnix")
+        if _v is not None:
+            obj.until_unix = _int_in(_v)
+        _v = _d.get("owner")
+        if _v is not None:
+            obj.owner = _v
+        _v = _d.get("persona")
+        if _v is not None:
+            obj.persona = _v
+        _v = _d.get("source")
+        if _v is not None:
+            obj.source = _v
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        _v = _d.get("path")
+        if _v is not None:
+            obj.path = _v
+        return obj
+
+@dataclasses.dataclass
+class ConversationStatsResponse:
+    stats_json: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.stats_json != "":
+            out["statsJson"] = self.stats_json
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ConversationStatsResponse":
+        obj = cls()
+        _v = _d.get("statsJson")
+        if _v is not None:
+            obj.stats_json = _v
+        return obj
+
+@dataclasses.dataclass
+class EnrollExecutorRequest:
+    name: str = ""
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    roots: list[str] = dataclasses.field(default_factory=list)
+    isolation: str = ""
+    workspace_mode: str = ""
+    admits: str = ""
+    ttl_seconds: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.roots:
+            out["roots"] = [x for x in self.roots]
+        if self.isolation != "":
+            out["isolation"] = self.isolation
+        if self.workspace_mode != "":
+            out["workspaceMode"] = self.workspace_mode
+        if self.admits != "":
+            out["admits"] = self.admits
+        if self.ttl_seconds != 0:
+            out["ttlSeconds"] = str(self.ttl_seconds)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "EnrollExecutorRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("roots")
+        if _v is not None:
+            obj.roots = [x for x in _v]
+        _v = _d.get("isolation")
+        if _v is not None:
+            obj.isolation = _v
+        _v = _d.get("workspaceMode")
+        if _v is not None:
+            obj.workspace_mode = _v
+        _v = _d.get("admits")
+        if _v is not None:
+            obj.admits = _v
+        _v = _d.get("ttlSeconds")
+        if _v is not None:
+            obj.ttl_seconds = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class EnrollExecutorResponse:
+    token: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.token != "":
+            out["token"] = self.token
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "EnrollExecutorResponse":
+        obj = cls()
+        _v = _d.get("token")
+        if _v is not None:
+            obj.token = _v
+        return obj
+
+@dataclasses.dataclass
+class CreateExecutorRequest:
+    name: str = ""
+    labels: dict[str, str] = dataclasses.field(default_factory=dict)
+    roots: list[str] = dataclasses.field(default_factory=list)
+    isolation: str = ""
+    workspace_mode: str = ""
+    admits: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.labels:
+            out["labels"] = dict((k, v) for k, v in self.labels.items())
+        if self.roots:
+            out["roots"] = [x for x in self.roots]
+        if self.isolation != "":
+            out["isolation"] = self.isolation
+        if self.workspace_mode != "":
+            out["workspaceMode"] = self.workspace_mode
+        if self.admits != "":
+            out["admits"] = self.admits
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateExecutorRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("labels")
+        if _v is not None:
+            obj.labels = {k: v for k, v in _v.items()}
+        _v = _d.get("roots")
+        if _v is not None:
+            obj.roots = [x for x in _v]
+        _v = _d.get("isolation")
+        if _v is not None:
+            obj.isolation = _v
+        _v = _d.get("workspaceMode")
+        if _v is not None:
+            obj.workspace_mode = _v
+        _v = _d.get("admits")
+        if _v is not None:
+            obj.admits = _v
+        return obj
+
+@dataclasses.dataclass
+class CreateExecutorResponse:
+    executor_id: str = ""
+    credential: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        if self.credential != "":
+            out["credential"] = self.credential
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateExecutorResponse":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        _v = _d.get("credential")
+        if _v is not None:
+            obj.credential = _v
+        return obj
+
+@dataclasses.dataclass
+class LabelExecutorRequest:
+    executor_id: str = ""
+    set: dict[str, str] = dataclasses.field(default_factory=dict)
+    remove: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        if self.set:
+            out["set"] = dict((k, v) for k, v in self.set.items())
+        if self.remove:
+            out["remove"] = [x for x in self.remove]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "LabelExecutorRequest":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        _v = _d.get("set")
+        if _v is not None:
+            obj.set = {k: v for k, v in _v.items()}
+        _v = _d.get("remove")
+        if _v is not None:
+            obj.remove = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class LabelExecutorResponse:
+    executor: Optional[ExecutorRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor is not None:
+            out["executor"] = self.executor.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "LabelExecutorResponse":
+        obj = cls()
+        _v = _d.get("executor")
+        if _v is not None:
+            obj.executor = ExecutorRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class DisableExecutorRequest:
+    executor_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DisableExecutorRequest":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        return obj
+
+@dataclasses.dataclass
+class DisableExecutorResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DisableExecutorResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class EnableExecutorRequest:
+    executor_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "EnableExecutorRequest":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        return obj
+
+@dataclasses.dataclass
+class EnableExecutorResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "EnableExecutorResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class DeleteExecutorRequest:
+    executor_id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteExecutorRequest":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteExecutorResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteExecutorResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ExecutorSessionRequest:
+    name: str = ""
+    roots: list[str] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.roots:
+            out["roots"] = [x for x in self.roots]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ExecutorSessionRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("roots")
+        if _v is not None:
+            obj.roots = [x for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class ExecutorSessionEvent:
+    ready: Optional[ExecutorSessionReady] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        _set_event = [x for x in (self.ready) if x is not None]
+        if len(_set_event) > 1:
+            raise ValueError("ExecutorSessionEvent: at most one arm of oneof 'event' may be set")
+        if self.ready is not None:
+            out["ready"] = self.ready.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ExecutorSessionEvent":
+        obj = cls()
+        _v = _d.get("ready")
+        if _v is not None:
+            obj.ready = ExecutorSessionReady.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class ExecutorSessionReady:
+    executor_id: str = ""
+    run_local: bool = False
+    ticket: str = ""
+    selector: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.executor_id != "":
+            out["executorId"] = self.executor_id
+        if self.run_local != False:
+            out["runLocal"] = self.run_local
+        if self.ticket != "":
+            out["ticket"] = self.ticket
+        if self.selector != "":
+            out["selector"] = self.selector
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ExecutorSessionReady":
+        obj = cls()
+        _v = _d.get("executorId")
+        if _v is not None:
+            obj.executor_id = _v
+        _v = _d.get("runLocal")
+        if _v is not None:
+            obj.run_local = _v
+        _v = _d.get("ticket")
+        if _v is not None:
+            obj.ticket = _v
+        _v = _d.get("selector")
+        if _v is not None:
+            obj.selector = _v
+        return obj
+
+@dataclasses.dataclass
+class CreateUserRequest:
+    username: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.username != "":
+            out["username"] = self.username
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateUserRequest":
+        obj = cls()
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        return obj
+
+@dataclasses.dataclass
+class CreateUserResponse:
+    id: str = ""
+    username: str = ""
+    token: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        if self.username != "":
+            out["username"] = self.username
+        if self.token != "":
+            out["token"] = self.token
+        if self.created_at != "":
+            out["createdAt"] = self.created_at
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CreateUserResponse":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("token")
+        if _v is not None:
+            obj.token = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _v
+        return obj
+
+@dataclasses.dataclass
+class ListUsersRequest:
+    include_deleted: bool = False
+    limit: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.include_deleted != False:
+            out["includeDeleted"] = self.include_deleted
+        if self.limit != 0:
+            out["limit"] = self.limit
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListUsersRequest":
+        obj = cls()
+        _v = _d.get("includeDeleted")
+        if _v is not None:
+            obj.include_deleted = _v
+        _v = _d.get("limit")
+        if _v is not None:
+            obj.limit = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class ListUsersResponse:
+    users: list[UserRow] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.users:
+            out["users"] = [x.to_dict() for x in self.users]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListUsersResponse":
+        obj = cls()
+        _v = _d.get("users")
+        if _v is not None:
+            obj.users = [UserRow.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class UserRow:
+    id: str = ""
+    username: str = ""
+    is_admin: bool = False
+    created_at_unix: int = 0
+    deleted_at_unix: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        if self.username != "":
+            out["username"] = self.username
+        if self.is_admin != False:
+            out["isAdmin"] = self.is_admin
+        if self.created_at_unix != 0:
+            out["createdAtUnix"] = str(self.created_at_unix)
+        if self.deleted_at_unix is not None:
+            out["deletedAtUnix"] = str(self.deleted_at_unix)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UserRow":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("isAdmin")
+        if _v is not None:
+            obj.is_admin = _v
+        _v = _d.get("createdAtUnix")
+        if _v is not None:
+            obj.created_at_unix = _int_in(_v)
+        _v = _d.get("deletedAtUnix")
+        if _v is not None:
+            obj.deleted_at_unix = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class RemoveUserRequest:
+    username: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.username != "":
+            out["username"] = self.username
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RemoveUserRequest":
+        obj = cls()
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        return obj
+
+@dataclasses.dataclass
+class RemoveUserResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RemoveUserResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class GetStreamsRequest:
+    child_id: str = ""
+    which: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.which != "":
+            out["which"] = self.which
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "GetStreamsRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("which")
+        if _v is not None:
+            obj.which = _v
+        return obj
+
+@dataclasses.dataclass
+class GetStreamsResponse:
+    alive: bool = False
+    in_: list[bytes] = dataclasses.field(default_factory=list)
+    err: bytes = b""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.alive != False:
+            out["alive"] = self.alive
+        if self.in_:
+            out["in"] = [_b64_out(x) for x in self.in_]
+        if self.err != b"":
+            out["err"] = _b64_out(self.err)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "GetStreamsResponse":
+        obj = cls()
+        _v = _d.get("alive")
+        if _v is not None:
+            obj.alive = _v
+        _v = _d.get("in")
+        if _v is not None:
+            obj.in_ = [_b64_in(x) for x in _v]
+        _v = _d.get("err")
+        if _v is not None:
+            obj.err = _b64_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class SendFrameRequest:
+    child_id: str = ""
+    frame_json: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.frame_json != "":
+            out["frameJson"] = self.frame_json
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SendFrameRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("frameJson")
+        if _v is not None:
+            obj.frame_json = _v
+        return obj
+
+@dataclasses.dataclass
+class SendFrameResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SendFrameResponse":
+        obj = cls()
         return obj
 
 

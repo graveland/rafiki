@@ -148,6 +148,47 @@ const (
 	ControlReceiveProcedure = "/rafiki.v1.Control/Receive"
 	// ControlSetResultProcedure is the fully-qualified name of the Control's SetResult RPC.
 	ControlSetResultProcedure = "/rafiki.v1.Control/SetResult"
+	// ControlResumeProcedure is the fully-qualified name of the Control's Resume RPC.
+	ControlResumeProcedure = "/rafiki.v1.Control/Resume"
+	// ControlCloseAllExitedProcedure is the fully-qualified name of the Control's CloseAllExited RPC.
+	ControlCloseAllExitedProcedure = "/rafiki.v1.Control/CloseAllExited"
+	// ControlSetLabelsProcedure is the fully-qualified name of the Control's SetLabels RPC.
+	ControlSetLabelsProcedure = "/rafiki.v1.Control/SetLabels"
+	// ControlStatusProcedure is the fully-qualified name of the Control's Status RPC.
+	ControlStatusProcedure = "/rafiki.v1.Control/Status"
+	// ControlSearchProcedure is the fully-qualified name of the Control's Search RPC.
+	ControlSearchProcedure = "/rafiki.v1.Control/Search"
+	// ControlShutdownDaemonProcedure is the fully-qualified name of the Control's ShutdownDaemon RPC.
+	ControlShutdownDaemonProcedure = "/rafiki.v1.Control/ShutdownDaemon"
+	// ControlModelInfoProcedure is the fully-qualified name of the Control's ModelInfo RPC.
+	ControlModelInfoProcedure = "/rafiki.v1.Control/ModelInfo"
+	// ControlConversationStatsProcedure is the fully-qualified name of the Control's ConversationStats
+	// RPC.
+	ControlConversationStatsProcedure = "/rafiki.v1.Control/ConversationStats"
+	// ControlEnrollExecutorProcedure is the fully-qualified name of the Control's EnrollExecutor RPC.
+	ControlEnrollExecutorProcedure = "/rafiki.v1.Control/EnrollExecutor"
+	// ControlCreateExecutorProcedure is the fully-qualified name of the Control's CreateExecutor RPC.
+	ControlCreateExecutorProcedure = "/rafiki.v1.Control/CreateExecutor"
+	// ControlLabelExecutorProcedure is the fully-qualified name of the Control's LabelExecutor RPC.
+	ControlLabelExecutorProcedure = "/rafiki.v1.Control/LabelExecutor"
+	// ControlDisableExecutorProcedure is the fully-qualified name of the Control's DisableExecutor RPC.
+	ControlDisableExecutorProcedure = "/rafiki.v1.Control/DisableExecutor"
+	// ControlEnableExecutorProcedure is the fully-qualified name of the Control's EnableExecutor RPC.
+	ControlEnableExecutorProcedure = "/rafiki.v1.Control/EnableExecutor"
+	// ControlDeleteExecutorProcedure is the fully-qualified name of the Control's DeleteExecutor RPC.
+	ControlDeleteExecutorProcedure = "/rafiki.v1.Control/DeleteExecutor"
+	// ControlExecutorSessionProcedure is the fully-qualified name of the Control's ExecutorSession RPC.
+	ControlExecutorSessionProcedure = "/rafiki.v1.Control/ExecutorSession"
+	// ControlCreateUserProcedure is the fully-qualified name of the Control's CreateUser RPC.
+	ControlCreateUserProcedure = "/rafiki.v1.Control/CreateUser"
+	// ControlListUsersProcedure is the fully-qualified name of the Control's ListUsers RPC.
+	ControlListUsersProcedure = "/rafiki.v1.Control/ListUsers"
+	// ControlRemoveUserProcedure is the fully-qualified name of the Control's RemoveUser RPC.
+	ControlRemoveUserProcedure = "/rafiki.v1.Control/RemoveUser"
+	// ControlGetStreamsProcedure is the fully-qualified name of the Control's GetStreams RPC.
+	ControlGetStreamsProcedure = "/rafiki.v1.Control/GetStreams"
+	// ControlSendFrameProcedure is the fully-qualified name of the Control's SendFrame RPC.
+	ControlSendFrameProcedure = "/rafiki.v1.Control/SendFrame"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -215,6 +256,33 @@ type ControlClient interface {
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
 	Receive(context.Context, *connect.Request[v1.ReceiveRequest]) (*connect.ServerStreamForClient[v1.ScriptMessage], error)
 	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
+	// ─── Framed-protocol retirement RPCs ─────────────────────────────────────
+	// The Connect faces of the framed ctrl_* verbs the retirement moves over.
+	// Wave 2 fills the handlers; until then they answer Unimplemented.
+	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
+	CloseAllExited(context.Context, *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error)
+	SetLabels(context.Context, *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error)
+	Status(context.Context, *connect.Request[v1.StatusRequest]) (*connect.Response[v1.StatusResponse], error)
+	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
+	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
+	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error)
+	EnrollExecutor(context.Context, *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error)
+	CreateExecutor(context.Context, *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error)
+	LabelExecutor(context.Context, *connect.Request[v1.LabelExecutorRequest]) (*connect.Response[v1.LabelExecutorResponse], error)
+	DisableExecutor(context.Context, *connect.Request[v1.DisableExecutorRequest]) (*connect.Response[v1.DisableExecutorResponse], error)
+	EnableExecutor(context.Context, *connect.Request[v1.EnableExecutorRequest]) (*connect.Response[v1.EnableExecutorResponse], error)
+	DeleteExecutor(context.Context, *connect.Request[v1.DeleteExecutorRequest]) (*connect.Response[v1.DeleteExecutorResponse], error)
+	// The first message is ready. The stream stays open for the session's
+	// lifetime; the daemon evicts a transient executor when the stream ends.
+	ExecutorSession(context.Context, *connect.Request[v1.ExecutorSessionRequest]) (*connect.ServerStreamForClient[v1.ExecutorSessionEvent], error)
+	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
+	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
+	RemoveUser(context.Context, *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error)
+	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
+	// A raw child-protocol frame, for debugging/scripting. userOnly: children
+	// use Send.
+	SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error)
 }
 
 // NewControlClient constructs a client for the rafiki.v1.Control service. By default, it uses the
@@ -540,6 +608,126 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("SetResult")),
 			connect.WithClientOptions(opts...),
 		),
+		resume: connect.NewClient[v1.ResumeRequest, v1.ResumeResponse](
+			httpClient,
+			baseURL+ControlResumeProcedure,
+			connect.WithSchema(controlMethods.ByName("Resume")),
+			connect.WithClientOptions(opts...),
+		),
+		closeAllExited: connect.NewClient[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse](
+			httpClient,
+			baseURL+ControlCloseAllExitedProcedure,
+			connect.WithSchema(controlMethods.ByName("CloseAllExited")),
+			connect.WithClientOptions(opts...),
+		),
+		setLabels: connect.NewClient[v1.SetLabelsRequest, v1.SetLabelsResponse](
+			httpClient,
+			baseURL+ControlSetLabelsProcedure,
+			connect.WithSchema(controlMethods.ByName("SetLabels")),
+			connect.WithClientOptions(opts...),
+		),
+		status: connect.NewClient[v1.StatusRequest, v1.StatusResponse](
+			httpClient,
+			baseURL+ControlStatusProcedure,
+			connect.WithSchema(controlMethods.ByName("Status")),
+			connect.WithClientOptions(opts...),
+		),
+		search: connect.NewClient[v1.SearchRequest, v1.SearchResponse](
+			httpClient,
+			baseURL+ControlSearchProcedure,
+			connect.WithSchema(controlMethods.ByName("Search")),
+			connect.WithClientOptions(opts...),
+		),
+		shutdownDaemon: connect.NewClient[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse](
+			httpClient,
+			baseURL+ControlShutdownDaemonProcedure,
+			connect.WithSchema(controlMethods.ByName("ShutdownDaemon")),
+			connect.WithClientOptions(opts...),
+		),
+		modelInfo: connect.NewClient[v1.ModelInfoRequest, v1.ModelInfoResponse](
+			httpClient,
+			baseURL+ControlModelInfoProcedure,
+			connect.WithSchema(controlMethods.ByName("ModelInfo")),
+			connect.WithClientOptions(opts...),
+		),
+		conversationStats: connect.NewClient[v1.ConversationStatsRequest, v1.ConversationStatsResponse](
+			httpClient,
+			baseURL+ControlConversationStatsProcedure,
+			connect.WithSchema(controlMethods.ByName("ConversationStats")),
+			connect.WithClientOptions(opts...),
+		),
+		enrollExecutor: connect.NewClient[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse](
+			httpClient,
+			baseURL+ControlEnrollExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("EnrollExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		createExecutor: connect.NewClient[v1.CreateExecutorRequest, v1.CreateExecutorResponse](
+			httpClient,
+			baseURL+ControlCreateExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("CreateExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		labelExecutor: connect.NewClient[v1.LabelExecutorRequest, v1.LabelExecutorResponse](
+			httpClient,
+			baseURL+ControlLabelExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("LabelExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		disableExecutor: connect.NewClient[v1.DisableExecutorRequest, v1.DisableExecutorResponse](
+			httpClient,
+			baseURL+ControlDisableExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("DisableExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		enableExecutor: connect.NewClient[v1.EnableExecutorRequest, v1.EnableExecutorResponse](
+			httpClient,
+			baseURL+ControlEnableExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("EnableExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteExecutor: connect.NewClient[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse](
+			httpClient,
+			baseURL+ControlDeleteExecutorProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteExecutor")),
+			connect.WithClientOptions(opts...),
+		),
+		executorSession: connect.NewClient[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent](
+			httpClient,
+			baseURL+ControlExecutorSessionProcedure,
+			connect.WithSchema(controlMethods.ByName("ExecutorSession")),
+			connect.WithClientOptions(opts...),
+		),
+		createUser: connect.NewClient[v1.CreateUserRequest, v1.CreateUserResponse](
+			httpClient,
+			baseURL+ControlCreateUserProcedure,
+			connect.WithSchema(controlMethods.ByName("CreateUser")),
+			connect.WithClientOptions(opts...),
+		),
+		listUsers: connect.NewClient[v1.ListUsersRequest, v1.ListUsersResponse](
+			httpClient,
+			baseURL+ControlListUsersProcedure,
+			connect.WithSchema(controlMethods.ByName("ListUsers")),
+			connect.WithClientOptions(opts...),
+		),
+		removeUser: connect.NewClient[v1.RemoveUserRequest, v1.RemoveUserResponse](
+			httpClient,
+			baseURL+ControlRemoveUserProcedure,
+			connect.WithSchema(controlMethods.ByName("RemoveUser")),
+			connect.WithClientOptions(opts...),
+		),
+		getStreams: connect.NewClient[v1.GetStreamsRequest, v1.GetStreamsResponse](
+			httpClient,
+			baseURL+ControlGetStreamsProcedure,
+			connect.WithSchema(controlMethods.ByName("GetStreams")),
+			connect.WithClientOptions(opts...),
+		),
+		sendFrame: connect.NewClient[v1.SendFrameRequest, v1.SendFrameResponse](
+			httpClient,
+			baseURL+ControlSendFrameProcedure,
+			connect.WithSchema(controlMethods.ByName("SendFrame")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -597,6 +785,26 @@ type controlClient struct {
 	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
 	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
 	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
+	resume                   *connect.Client[v1.ResumeRequest, v1.ResumeResponse]
+	closeAllExited           *connect.Client[v1.CloseAllExitedRequest, v1.CloseAllExitedResponse]
+	setLabels                *connect.Client[v1.SetLabelsRequest, v1.SetLabelsResponse]
+	status                   *connect.Client[v1.StatusRequest, v1.StatusResponse]
+	search                   *connect.Client[v1.SearchRequest, v1.SearchResponse]
+	shutdownDaemon           *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
+	modelInfo                *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
+	conversationStats        *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
+	enrollExecutor           *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
+	createExecutor           *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
+	labelExecutor            *connect.Client[v1.LabelExecutorRequest, v1.LabelExecutorResponse]
+	disableExecutor          *connect.Client[v1.DisableExecutorRequest, v1.DisableExecutorResponse]
+	enableExecutor           *connect.Client[v1.EnableExecutorRequest, v1.EnableExecutorResponse]
+	deleteExecutor           *connect.Client[v1.DeleteExecutorRequest, v1.DeleteExecutorResponse]
+	executorSession          *connect.Client[v1.ExecutorSessionRequest, v1.ExecutorSessionEvent]
+	createUser               *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
+	listUsers                *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
+	removeUser               *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
+	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
+	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
 }
 
 // GetHistory calls rafiki.v1.Control.GetHistory.
@@ -859,6 +1067,106 @@ func (c *controlClient) SetResult(ctx context.Context, req *connect.Request[v1.S
 	return c.setResult.CallUnary(ctx, req)
 }
 
+// Resume calls rafiki.v1.Control.Resume.
+func (c *controlClient) Resume(ctx context.Context, req *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error) {
+	return c.resume.CallUnary(ctx, req)
+}
+
+// CloseAllExited calls rafiki.v1.Control.CloseAllExited.
+func (c *controlClient) CloseAllExited(ctx context.Context, req *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error) {
+	return c.closeAllExited.CallUnary(ctx, req)
+}
+
+// SetLabels calls rafiki.v1.Control.SetLabels.
+func (c *controlClient) SetLabels(ctx context.Context, req *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error) {
+	return c.setLabels.CallUnary(ctx, req)
+}
+
+// Status calls rafiki.v1.Control.Status.
+func (c *controlClient) Status(ctx context.Context, req *connect.Request[v1.StatusRequest]) (*connect.Response[v1.StatusResponse], error) {
+	return c.status.CallUnary(ctx, req)
+}
+
+// Search calls rafiki.v1.Control.Search.
+func (c *controlClient) Search(ctx context.Context, req *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error) {
+	return c.search.CallUnary(ctx, req)
+}
+
+// ShutdownDaemon calls rafiki.v1.Control.ShutdownDaemon.
+func (c *controlClient) ShutdownDaemon(ctx context.Context, req *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error) {
+	return c.shutdownDaemon.CallUnary(ctx, req)
+}
+
+// ModelInfo calls rafiki.v1.Control.ModelInfo.
+func (c *controlClient) ModelInfo(ctx context.Context, req *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error) {
+	return c.modelInfo.CallUnary(ctx, req)
+}
+
+// ConversationStats calls rafiki.v1.Control.ConversationStats.
+func (c *controlClient) ConversationStats(ctx context.Context, req *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error) {
+	return c.conversationStats.CallUnary(ctx, req)
+}
+
+// EnrollExecutor calls rafiki.v1.Control.EnrollExecutor.
+func (c *controlClient) EnrollExecutor(ctx context.Context, req *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error) {
+	return c.enrollExecutor.CallUnary(ctx, req)
+}
+
+// CreateExecutor calls rafiki.v1.Control.CreateExecutor.
+func (c *controlClient) CreateExecutor(ctx context.Context, req *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error) {
+	return c.createExecutor.CallUnary(ctx, req)
+}
+
+// LabelExecutor calls rafiki.v1.Control.LabelExecutor.
+func (c *controlClient) LabelExecutor(ctx context.Context, req *connect.Request[v1.LabelExecutorRequest]) (*connect.Response[v1.LabelExecutorResponse], error) {
+	return c.labelExecutor.CallUnary(ctx, req)
+}
+
+// DisableExecutor calls rafiki.v1.Control.DisableExecutor.
+func (c *controlClient) DisableExecutor(ctx context.Context, req *connect.Request[v1.DisableExecutorRequest]) (*connect.Response[v1.DisableExecutorResponse], error) {
+	return c.disableExecutor.CallUnary(ctx, req)
+}
+
+// EnableExecutor calls rafiki.v1.Control.EnableExecutor.
+func (c *controlClient) EnableExecutor(ctx context.Context, req *connect.Request[v1.EnableExecutorRequest]) (*connect.Response[v1.EnableExecutorResponse], error) {
+	return c.enableExecutor.CallUnary(ctx, req)
+}
+
+// DeleteExecutor calls rafiki.v1.Control.DeleteExecutor.
+func (c *controlClient) DeleteExecutor(ctx context.Context, req *connect.Request[v1.DeleteExecutorRequest]) (*connect.Response[v1.DeleteExecutorResponse], error) {
+	return c.deleteExecutor.CallUnary(ctx, req)
+}
+
+// ExecutorSession calls rafiki.v1.Control.ExecutorSession.
+func (c *controlClient) ExecutorSession(ctx context.Context, req *connect.Request[v1.ExecutorSessionRequest]) (*connect.ServerStreamForClient[v1.ExecutorSessionEvent], error) {
+	return c.executorSession.CallServerStream(ctx, req)
+}
+
+// CreateUser calls rafiki.v1.Control.CreateUser.
+func (c *controlClient) CreateUser(ctx context.Context, req *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error) {
+	return c.createUser.CallUnary(ctx, req)
+}
+
+// ListUsers calls rafiki.v1.Control.ListUsers.
+func (c *controlClient) ListUsers(ctx context.Context, req *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error) {
+	return c.listUsers.CallUnary(ctx, req)
+}
+
+// RemoveUser calls rafiki.v1.Control.RemoveUser.
+func (c *controlClient) RemoveUser(ctx context.Context, req *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error) {
+	return c.removeUser.CallUnary(ctx, req)
+}
+
+// GetStreams calls rafiki.v1.Control.GetStreams.
+func (c *controlClient) GetStreams(ctx context.Context, req *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
+	return c.getStreams.CallUnary(ctx, req)
+}
+
+// SendFrame calls rafiki.v1.Control.SendFrame.
+func (c *controlClient) SendFrame(ctx context.Context, req *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error) {
+	return c.sendFrame.CallUnary(ctx, req)
+}
+
 // ControlHandler is an implementation of the rafiki.v1.Control service.
 type ControlHandler interface {
 	GetHistory(context.Context, *connect.Request[v1.GetHistoryRequest]) (*connect.Response[v1.GetHistoryResponse], error)
@@ -924,6 +1232,33 @@ type ControlHandler interface {
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
 	Receive(context.Context, *connect.Request[v1.ReceiveRequest], *connect.ServerStream[v1.ScriptMessage]) error
 	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
+	// ─── Framed-protocol retirement RPCs ─────────────────────────────────────
+	// The Connect faces of the framed ctrl_* verbs the retirement moves over.
+	// Wave 2 fills the handlers; until then they answer Unimplemented.
+	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
+	CloseAllExited(context.Context, *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error)
+	SetLabels(context.Context, *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error)
+	Status(context.Context, *connect.Request[v1.StatusRequest]) (*connect.Response[v1.StatusResponse], error)
+	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
+	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
+	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error)
+	EnrollExecutor(context.Context, *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error)
+	CreateExecutor(context.Context, *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error)
+	LabelExecutor(context.Context, *connect.Request[v1.LabelExecutorRequest]) (*connect.Response[v1.LabelExecutorResponse], error)
+	DisableExecutor(context.Context, *connect.Request[v1.DisableExecutorRequest]) (*connect.Response[v1.DisableExecutorResponse], error)
+	EnableExecutor(context.Context, *connect.Request[v1.EnableExecutorRequest]) (*connect.Response[v1.EnableExecutorResponse], error)
+	DeleteExecutor(context.Context, *connect.Request[v1.DeleteExecutorRequest]) (*connect.Response[v1.DeleteExecutorResponse], error)
+	// The first message is ready. The stream stays open for the session's
+	// lifetime; the daemon evicts a transient executor when the stream ends.
+	ExecutorSession(context.Context, *connect.Request[v1.ExecutorSessionRequest], *connect.ServerStream[v1.ExecutorSessionEvent]) error
+	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
+	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
+	RemoveUser(context.Context, *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error)
+	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
+	// A raw child-protocol frame, for debugging/scripting. userOnly: children
+	// use Send.
+	SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error)
 }
 
 // NewControlHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -1245,6 +1580,126 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("SetResult")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlResumeHandler := connect.NewUnaryHandler(
+		ControlResumeProcedure,
+		svc.Resume,
+		connect.WithSchema(controlMethods.ByName("Resume")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlCloseAllExitedHandler := connect.NewUnaryHandler(
+		ControlCloseAllExitedProcedure,
+		svc.CloseAllExited,
+		connect.WithSchema(controlMethods.ByName("CloseAllExited")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetLabelsHandler := connect.NewUnaryHandler(
+		ControlSetLabelsProcedure,
+		svc.SetLabels,
+		connect.WithSchema(controlMethods.ByName("SetLabels")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlStatusHandler := connect.NewUnaryHandler(
+		ControlStatusProcedure,
+		svc.Status,
+		connect.WithSchema(controlMethods.ByName("Status")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSearchHandler := connect.NewUnaryHandler(
+		ControlSearchProcedure,
+		svc.Search,
+		connect.WithSchema(controlMethods.ByName("Search")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlShutdownDaemonHandler := connect.NewUnaryHandler(
+		ControlShutdownDaemonProcedure,
+		svc.ShutdownDaemon,
+		connect.WithSchema(controlMethods.ByName("ShutdownDaemon")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlModelInfoHandler := connect.NewUnaryHandler(
+		ControlModelInfoProcedure,
+		svc.ModelInfo,
+		connect.WithSchema(controlMethods.ByName("ModelInfo")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlConversationStatsHandler := connect.NewUnaryHandler(
+		ControlConversationStatsProcedure,
+		svc.ConversationStats,
+		connect.WithSchema(controlMethods.ByName("ConversationStats")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlEnrollExecutorHandler := connect.NewUnaryHandler(
+		ControlEnrollExecutorProcedure,
+		svc.EnrollExecutor,
+		connect.WithSchema(controlMethods.ByName("EnrollExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlCreateExecutorHandler := connect.NewUnaryHandler(
+		ControlCreateExecutorProcedure,
+		svc.CreateExecutor,
+		connect.WithSchema(controlMethods.ByName("CreateExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlLabelExecutorHandler := connect.NewUnaryHandler(
+		ControlLabelExecutorProcedure,
+		svc.LabelExecutor,
+		connect.WithSchema(controlMethods.ByName("LabelExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDisableExecutorHandler := connect.NewUnaryHandler(
+		ControlDisableExecutorProcedure,
+		svc.DisableExecutor,
+		connect.WithSchema(controlMethods.ByName("DisableExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlEnableExecutorHandler := connect.NewUnaryHandler(
+		ControlEnableExecutorProcedure,
+		svc.EnableExecutor,
+		connect.WithSchema(controlMethods.ByName("EnableExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteExecutorHandler := connect.NewUnaryHandler(
+		ControlDeleteExecutorProcedure,
+		svc.DeleteExecutor,
+		connect.WithSchema(controlMethods.ByName("DeleteExecutor")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlExecutorSessionHandler := connect.NewServerStreamHandler(
+		ControlExecutorSessionProcedure,
+		svc.ExecutorSession,
+		connect.WithSchema(controlMethods.ByName("ExecutorSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlCreateUserHandler := connect.NewUnaryHandler(
+		ControlCreateUserProcedure,
+		svc.CreateUser,
+		connect.WithSchema(controlMethods.ByName("CreateUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListUsersHandler := connect.NewUnaryHandler(
+		ControlListUsersProcedure,
+		svc.ListUsers,
+		connect.WithSchema(controlMethods.ByName("ListUsers")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRemoveUserHandler := connect.NewUnaryHandler(
+		ControlRemoveUserProcedure,
+		svc.RemoveUser,
+		connect.WithSchema(controlMethods.ByName("RemoveUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlGetStreamsHandler := connect.NewUnaryHandler(
+		ControlGetStreamsProcedure,
+		svc.GetStreams,
+		connect.WithSchema(controlMethods.ByName("GetStreams")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSendFrameHandler := connect.NewUnaryHandler(
+		ControlSendFrameProcedure,
+		svc.SendFrame,
+		connect.WithSchema(controlMethods.ByName("SendFrame")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.v1.Control/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlGetHistoryProcedure:
@@ -1351,6 +1806,46 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlReceiveHandler.ServeHTTP(w, r)
 		case ControlSetResultProcedure:
 			controlSetResultHandler.ServeHTTP(w, r)
+		case ControlResumeProcedure:
+			controlResumeHandler.ServeHTTP(w, r)
+		case ControlCloseAllExitedProcedure:
+			controlCloseAllExitedHandler.ServeHTTP(w, r)
+		case ControlSetLabelsProcedure:
+			controlSetLabelsHandler.ServeHTTP(w, r)
+		case ControlStatusProcedure:
+			controlStatusHandler.ServeHTTP(w, r)
+		case ControlSearchProcedure:
+			controlSearchHandler.ServeHTTP(w, r)
+		case ControlShutdownDaemonProcedure:
+			controlShutdownDaemonHandler.ServeHTTP(w, r)
+		case ControlModelInfoProcedure:
+			controlModelInfoHandler.ServeHTTP(w, r)
+		case ControlConversationStatsProcedure:
+			controlConversationStatsHandler.ServeHTTP(w, r)
+		case ControlEnrollExecutorProcedure:
+			controlEnrollExecutorHandler.ServeHTTP(w, r)
+		case ControlCreateExecutorProcedure:
+			controlCreateExecutorHandler.ServeHTTP(w, r)
+		case ControlLabelExecutorProcedure:
+			controlLabelExecutorHandler.ServeHTTP(w, r)
+		case ControlDisableExecutorProcedure:
+			controlDisableExecutorHandler.ServeHTTP(w, r)
+		case ControlEnableExecutorProcedure:
+			controlEnableExecutorHandler.ServeHTTP(w, r)
+		case ControlDeleteExecutorProcedure:
+			controlDeleteExecutorHandler.ServeHTTP(w, r)
+		case ControlExecutorSessionProcedure:
+			controlExecutorSessionHandler.ServeHTTP(w, r)
+		case ControlCreateUserProcedure:
+			controlCreateUserHandler.ServeHTTP(w, r)
+		case ControlListUsersProcedure:
+			controlListUsersHandler.ServeHTTP(w, r)
+		case ControlRemoveUserProcedure:
+			controlRemoveUserHandler.ServeHTTP(w, r)
+		case ControlGetStreamsProcedure:
+			controlGetStreamsHandler.ServeHTTP(w, r)
+		case ControlSendFrameProcedure:
+			controlSendFrameHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1566,4 +2061,84 @@ func (UnimplementedControlHandler) Receive(context.Context, *connect.Request[v1.
 
 func (UnimplementedControlHandler) SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetResult is not implemented"))
+}
+
+func (UnimplementedControlHandler) Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Resume is not implemented"))
+}
+
+func (UnimplementedControlHandler) CloseAllExited(context.Context, *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CloseAllExited is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetLabels(context.Context, *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetLabels is not implemented"))
+}
+
+func (UnimplementedControlHandler) Status(context.Context, *connect.Request[v1.StatusRequest]) (*connect.Response[v1.StatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Status is not implemented"))
+}
+
+func (UnimplementedControlHandler) Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.Search is not implemented"))
+}
+
+func (UnimplementedControlHandler) ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ShutdownDaemon is not implemented"))
+}
+
+func (UnimplementedControlHandler) ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ModelInfo is not implemented"))
+}
+
+func (UnimplementedControlHandler) ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ConversationStats is not implemented"))
+}
+
+func (UnimplementedControlHandler) EnrollExecutor(context.Context, *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.EnrollExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) CreateExecutor(context.Context, *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CreateExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) LabelExecutor(context.Context, *connect.Request[v1.LabelExecutorRequest]) (*connect.Response[v1.LabelExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.LabelExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) DisableExecutor(context.Context, *connect.Request[v1.DisableExecutorRequest]) (*connect.Response[v1.DisableExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DisableExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) EnableExecutor(context.Context, *connect.Request[v1.EnableExecutorRequest]) (*connect.Response[v1.EnableExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.EnableExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteExecutor(context.Context, *connect.Request[v1.DeleteExecutorRequest]) (*connect.Response[v1.DeleteExecutorResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteExecutor is not implemented"))
+}
+
+func (UnimplementedControlHandler) ExecutorSession(context.Context, *connect.Request[v1.ExecutorSessionRequest], *connect.ServerStream[v1.ExecutorSessionEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ExecutorSession is not implemented"))
+}
+
+func (UnimplementedControlHandler) CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.CreateUser is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListUsers is not implemented"))
+}
+
+func (UnimplementedControlHandler) RemoveUser(context.Context, *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemoveUser is not implemented"))
+}
+
+func (UnimplementedControlHandler) GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetStreams is not implemented"))
+}
+
+func (UnimplementedControlHandler) SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SendFrame is not implemented"))
 }
