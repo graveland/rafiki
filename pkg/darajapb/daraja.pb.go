@@ -29,6 +29,9 @@ type Kind int32
 const (
 	Kind_KIND_UNSPECIFIED Kind = 0
 	Kind_KIND_CLAUDE      Kind = 1
+	// KIND_SCRIPT hosts a saved pymodule run. Only the spawn path consults the
+	// kind (to pick the resolution and disable respawn); the relay is blind.
+	Kind_KIND_SCRIPT Kind = 2
 )
 
 // Enum value maps for Kind.
@@ -36,10 +39,12 @@ var (
 	Kind_name = map[int32]string{
 		0: "KIND_UNSPECIFIED",
 		1: "KIND_CLAUDE",
+		2: "KIND_SCRIPT",
 	}
 	Kind_value = map[string]int32{
 		"KIND_UNSPECIFIED": 0,
 		"KIND_CLAUDE":      1,
+		"KIND_SCRIPT":      2,
 	}
 )
 
@@ -123,6 +128,7 @@ type RelayResponse struct {
 	//	*RelayResponse_Stdout
 	//	*RelayResponse_Restarted
 	//	*RelayResponse_Exited
+	//	*RelayResponse_Stderr
 	Event         isRelayResponse_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -192,6 +198,15 @@ func (x *RelayResponse) GetExited() *ProcessExited {
 	return nil
 }
 
+func (x *RelayResponse) GetStderr() []byte {
+	if x != nil {
+		if x, ok := x.Event.(*RelayResponse_Stderr); ok {
+			return x.Stderr
+		}
+	}
+	return nil
+}
+
 type isRelayResponse_Event interface {
 	isRelayResponse_Event()
 }
@@ -208,11 +223,22 @@ type RelayResponse_Exited struct {
 	Exited *ProcessExited `protobuf:"bytes,3,opt,name=exited,proto3,oneof"`
 }
 
+type RelayResponse_Stderr struct {
+	// stderr relays the child's standard error. Claude's is discarded
+	// (its protocol is stdout); a script's stderr is load-bearing — the
+	// daemon keeps the tail and a failed run's settle carries it. One arm
+	// per stream direction keeps both byte streams ordered within their own
+	// channel, which is all either consumer reads.
+	Stderr []byte `protobuf:"bytes,4,opt,name=stderr,proto3,oneof"`
+}
+
 func (*RelayResponse_Stdout) isRelayResponse_Event() {}
 
 func (*RelayResponse_Restarted) isRelayResponse_Event() {}
 
 func (*RelayResponse_Exited) isRelayResponse_Event() {}
+
+func (*RelayResponse_Stderr) isRelayResponse_Event() {}
 
 // ProcessRestarted marks the boundary between one child process's output and
 // its replacement's, IN the byte stream.
@@ -476,22 +502,144 @@ func (x *ClaudeParams) GetMcpToken() string {
 	return ""
 }
 
+// ScriptParams is the script variant of a ChildSpec: a saved pymodule run
+// hosted on the executor the way pymodule_run runs one.
+//
+// Unlike ClaudeParams, nothing here names a binary or a path: the EXECUTOR
+// resolves the script against its own synced pymodule cache at Launch time —
+// the same layout SyncPyModules (blob modules, with per-module venvs) and
+// SyncPyModuleGitSource (checkouts) produce — and hands daraja the resolved
+// interpreter and argv. The daemon never ships code to an executor it did not
+// already sync, and the executor never runs code its cache does not hold.
+//
+// A script child is never Restarted and never respawned: a script's exit is
+// its result. daraja's respawn loop is disabled for this kind.
+type ScriptParams struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// repo names the pymodule source: "local" for the owner's synced blob
+	// modules (pymodule_put), or a registered git source's name for its synced
+	// checkout. Resolved on the executor; an unsynced name is a Launch refusal,
+	// not a runtime surprise.
+	Repo string `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
+	// script is the pymodule/script name to run — a bare Python identifier.
+	Script string `protobuf:"bytes,2,opt,name=script,proto3" json:"script,omitempty"`
+	// modules names further pymodules the script imports, resolved within the
+	// same repo and joined to PYTHONPATH in call order.
+	Modules []string `protobuf:"bytes,3,rep,name=modules,proto3" json:"modules,omitempty"`
+	// args are the script's own command-line arguments, passed verbatim.
+	Args []string `protobuf:"bytes,4,rep,name=args,proto3" json:"args,omitempty"`
+	// env is the spawn's forwarded environment (--forward-env). The daemon
+	// strips every RAFIKI_*/ANTHROPIC_*/OPENROUTER_* variable before sending
+	// (a forwarded credential must not resurrect what the strip removed) and
+	// the executor strips again before applying — same rule, both planes.
+	Env map[string]string `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// child_secret is the per-child Connect credential the executor's per-child
+	// socket (pkg/childsock) injects as the Authorization bearer on everything
+	// the script sends the daemon. LAUNCH-ONLY, like proxy_token/mcp_token: it
+	// travels this authenticated RPC and then into the daraja process's
+	// environment (RAFIKI_CHILD_SECRET, set by AdminService.Launch) — never any
+	// argv, because ps is world-readable — and it is held in memory only. The
+	// script itself never sees it: its RAFIKI_CHILD_CONNECT names a socket, not
+	// a token.
+	ChildSecret   string `protobuf:"bytes,6,opt,name=child_secret,json=childSecret,proto3" json:"child_secret,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScriptParams) Reset() {
+	*x = ScriptParams{}
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScriptParams) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScriptParams) ProtoMessage() {}
+
+func (x *ScriptParams) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScriptParams.ProtoReflect.Descriptor instead.
+func (*ScriptParams) Descriptor() ([]byte, []int) {
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ScriptParams) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *ScriptParams) GetScript() string {
+	if x != nil {
+		return x.Script
+	}
+	return ""
+}
+
+func (x *ScriptParams) GetModules() []string {
+	if x != nil {
+		return x.Modules
+	}
+	return nil
+}
+
+func (x *ScriptParams) GetArgs() []string {
+	if x != nil {
+		return x.Args
+	}
+	return nil
+}
+
+func (x *ScriptParams) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *ScriptParams) GetChildSecret() string {
+	if x != nil {
+		return x.ChildSecret
+	}
+	return ""
+}
+
 // ChildSpec is everything needed to (re)build the child's command line.
 //
 // Typed rather than raw argv because the executor's Launch and daraja's Restart
 // would otherwise each need an argv builder, on opposite sides of an RPC. Both
 // call pkg/claudeargv instead.
+//
+// Exactly one variant is set. For kind SCRIPT the executor resolves
+// ScriptParams against its synced cache before starting daraja; a Restart of a
+// script child is refused semantically (a script's exit is its result), so the
+// wire spec never needs to rebuild a script's resolved argv.
 type ChildSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Kind          Kind                   `protobuf:"varint,1,opt,name=kind,proto3,enum=rafiki.daraja.v1.Kind" json:"kind,omitempty"`
 	Claude        *ClaudeParams          `protobuf:"bytes,2,opt,name=claude,proto3" json:"claude,omitempty"`
+	Script        *ScriptParams          `protobuf:"bytes,3,opt,name=script,proto3" json:"script,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChildSpec) Reset() {
 	*x = ChildSpec{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[5]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -503,7 +651,7 @@ func (x *ChildSpec) String() string {
 func (*ChildSpec) ProtoMessage() {}
 
 func (x *ChildSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[5]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -516,7 +664,7 @@ func (x *ChildSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChildSpec.ProtoReflect.Descriptor instead.
 func (*ChildSpec) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{5}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ChildSpec) GetKind() Kind {
@@ -529,6 +677,13 @@ func (x *ChildSpec) GetKind() Kind {
 func (x *ChildSpec) GetClaude() *ClaudeParams {
 	if x != nil {
 		return x.Claude
+	}
+	return nil
+}
+
+func (x *ChildSpec) GetScript() *ScriptParams {
+	if x != nil {
+		return x.Script
 	}
 	return nil
 }
@@ -548,7 +703,7 @@ type RestartRequest struct {
 
 func (x *RestartRequest) Reset() {
 	*x = RestartRequest{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[6]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -560,7 +715,7 @@ func (x *RestartRequest) String() string {
 func (*RestartRequest) ProtoMessage() {}
 
 func (x *RestartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[6]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -573,7 +728,7 @@ func (x *RestartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestartRequest.ProtoReflect.Descriptor instead.
 func (*RestartRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{6}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RestartRequest) GetSpec() *ChildSpec {
@@ -599,7 +754,7 @@ type RestartResponse struct {
 
 func (x *RestartResponse) Reset() {
 	*x = RestartResponse{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[7]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -611,7 +766,7 @@ func (x *RestartResponse) String() string {
 func (*RestartResponse) ProtoMessage() {}
 
 func (x *RestartResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[7]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -624,7 +779,7 @@ func (x *RestartResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RestartResponse.ProtoReflect.Descriptor instead.
 func (*RestartResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{7}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RestartResponse) GetPid() int32 {
@@ -643,7 +798,7 @@ type ShutdownRequest struct {
 
 func (x *ShutdownRequest) Reset() {
 	*x = ShutdownRequest{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[8]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -655,7 +810,7 @@ func (x *ShutdownRequest) String() string {
 func (*ShutdownRequest) ProtoMessage() {}
 
 func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[8]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -668,7 +823,7 @@ func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{8}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ShutdownRequest) GetGraceMs() int32 {
@@ -688,7 +843,7 @@ type ShutdownResponse struct {
 
 func (x *ShutdownResponse) Reset() {
 	*x = ShutdownResponse{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[9]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +855,7 @@ func (x *ShutdownResponse) String() string {
 func (*ShutdownResponse) ProtoMessage() {}
 
 func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[9]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +868,7 @@ func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{9}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ShutdownResponse) GetExitCode() int32 {
@@ -738,7 +893,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[10]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -750,7 +905,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[10]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -763,7 +918,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{10}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{11}
 }
 
 type HealthResponse struct {
@@ -776,7 +931,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[11]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -788,7 +943,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[11]
+	mi := &file_rafiki_daraja_v1_daraja_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -801,7 +956,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{11}
+	return file_rafiki_daraja_v1_daraja_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *HealthResponse) GetPid() int32 {
@@ -824,11 +979,12 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\n" +
 	"\x1drafiki/daraja/v1/daraja.proto\x12\x10rafiki.daraja.v1\"$\n" +
 	"\fRelayRequest\x12\x14\n" +
-	"\x05stdin\x18\x01 \x01(\fR\x05stdin\"\xb1\x01\n" +
+	"\x05stdin\x18\x01 \x01(\fR\x05stdin\"\xcb\x01\n" +
 	"\rRelayResponse\x12\x18\n" +
 	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12B\n" +
 	"\trestarted\x18\x02 \x01(\v2\".rafiki.daraja.v1.ProcessRestartedH\x00R\trestarted\x129\n" +
-	"\x06exited\x18\x03 \x01(\v2\x1f.rafiki.daraja.v1.ProcessExitedH\x00R\x06exitedB\a\n" +
+	"\x06exited\x18\x03 \x01(\v2\x1f.rafiki.daraja.v1.ProcessExitedH\x00R\x06exited\x12\x18\n" +
+	"\x06stderr\x18\x04 \x01(\fH\x00R\x06stderrB\a\n" +
 	"\x05event\"$\n" +
 	"\x10ProcessRestarted\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"D\n" +
@@ -849,10 +1005,21 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\n" +
 	"extra_args\x18\n" +
 	" \x03(\tR\textraArgs\x12\x1b\n" +
-	"\tmcp_token\x18\v \x01(\tR\bmcpToken\"o\n" +
+	"\tmcp_token\x18\v \x01(\tR\bmcpToken\"\xfe\x01\n" +
+	"\fScriptParams\x12\x12\n" +
+	"\x04repo\x18\x01 \x01(\tR\x04repo\x12\x16\n" +
+	"\x06script\x18\x02 \x01(\tR\x06script\x12\x18\n" +
+	"\amodules\x18\x03 \x03(\tR\amodules\x12\x12\n" +
+	"\x04args\x18\x04 \x03(\tR\x04args\x129\n" +
+	"\x03env\x18\x05 \x03(\v2'.rafiki.daraja.v1.ScriptParams.EnvEntryR\x03env\x12!\n" +
+	"\fchild_secret\x18\x06 \x01(\tR\vchildSecret\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x01\n" +
 	"\tChildSpec\x12*\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x16.rafiki.daraja.v1.KindR\x04kind\x126\n" +
-	"\x06claude\x18\x02 \x01(\v2\x1e.rafiki.daraja.v1.ClaudeParamsR\x06claude\"\\\n" +
+	"\x06claude\x18\x02 \x01(\v2\x1e.rafiki.daraja.v1.ClaudeParamsR\x06claude\x126\n" +
+	"\x06script\x18\x03 \x01(\v2\x1e.rafiki.daraja.v1.ScriptParamsR\x06script\"\\\n" +
 	"\x0eRestartRequest\x12/\n" +
 	"\x04spec\x18\x01 \x01(\v2\x1b.rafiki.daraja.v1.ChildSpecR\x04spec\x12\x19\n" +
 	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs\"#\n" +
@@ -866,10 +1033,11 @@ const file_rafiki_daraja_v1_daraja_proto_rawDesc = "" +
 	"\rHealthRequest\"<\n" +
 	"\x0eHealthResponse\x12\x10\n" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\x12\x18\n" +
-	"\arunning\x18\x02 \x01(\bR\arunning*-\n" +
+	"\arunning\x18\x02 \x01(\bR\arunning*>\n" +
 	"\x04Kind\x12\x14\n" +
 	"\x10KIND_UNSPECIFIED\x10\x00\x12\x0f\n" +
-	"\vKIND_CLAUDE\x10\x012\xcd\x02\n" +
+	"\vKIND_CLAUDE\x10\x01\x12\x0f\n" +
+	"\vKIND_SCRIPT\x10\x022\xcd\x02\n" +
 	"\rDarajaService\x12L\n" +
 	"\x05Relay\x12\x1e.rafiki.daraja.v1.RelayRequest\x1a\x1f.rafiki.daraja.v1.RelayResponse(\x010\x01\x12N\n" +
 	"\aRestart\x12 .rafiki.daraja.v1.RestartRequest\x1a!.rafiki.daraja.v1.RestartResponse\x12Q\n" +
@@ -889,7 +1057,7 @@ func file_rafiki_daraja_v1_daraja_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_daraja_v1_daraja_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_daraja_v1_daraja_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_rafiki_daraja_v1_daraja_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_rafiki_daraja_v1_daraja_proto_goTypes = []any{
 	(Kind)(0),                // 0: rafiki.daraja.v1.Kind
 	(*RelayRequest)(nil),     // 1: rafiki.daraja.v1.RelayRequest
@@ -897,33 +1065,37 @@ var file_rafiki_daraja_v1_daraja_proto_goTypes = []any{
 	(*ProcessRestarted)(nil), // 3: rafiki.daraja.v1.ProcessRestarted
 	(*ProcessExited)(nil),    // 4: rafiki.daraja.v1.ProcessExited
 	(*ClaudeParams)(nil),     // 5: rafiki.daraja.v1.ClaudeParams
-	(*ChildSpec)(nil),        // 6: rafiki.daraja.v1.ChildSpec
-	(*RestartRequest)(nil),   // 7: rafiki.daraja.v1.RestartRequest
-	(*RestartResponse)(nil),  // 8: rafiki.daraja.v1.RestartResponse
-	(*ShutdownRequest)(nil),  // 9: rafiki.daraja.v1.ShutdownRequest
-	(*ShutdownResponse)(nil), // 10: rafiki.daraja.v1.ShutdownResponse
-	(*HealthRequest)(nil),    // 11: rafiki.daraja.v1.HealthRequest
-	(*HealthResponse)(nil),   // 12: rafiki.daraja.v1.HealthResponse
+	(*ScriptParams)(nil),     // 6: rafiki.daraja.v1.ScriptParams
+	(*ChildSpec)(nil),        // 7: rafiki.daraja.v1.ChildSpec
+	(*RestartRequest)(nil),   // 8: rafiki.daraja.v1.RestartRequest
+	(*RestartResponse)(nil),  // 9: rafiki.daraja.v1.RestartResponse
+	(*ShutdownRequest)(nil),  // 10: rafiki.daraja.v1.ShutdownRequest
+	(*ShutdownResponse)(nil), // 11: rafiki.daraja.v1.ShutdownResponse
+	(*HealthRequest)(nil),    // 12: rafiki.daraja.v1.HealthRequest
+	(*HealthResponse)(nil),   // 13: rafiki.daraja.v1.HealthResponse
+	nil,                      // 14: rafiki.daraja.v1.ScriptParams.EnvEntry
 }
 var file_rafiki_daraja_v1_daraja_proto_depIdxs = []int32{
 	3,  // 0: rafiki.daraja.v1.RelayResponse.restarted:type_name -> rafiki.daraja.v1.ProcessRestarted
 	4,  // 1: rafiki.daraja.v1.RelayResponse.exited:type_name -> rafiki.daraja.v1.ProcessExited
-	0,  // 2: rafiki.daraja.v1.ChildSpec.kind:type_name -> rafiki.daraja.v1.Kind
-	5,  // 3: rafiki.daraja.v1.ChildSpec.claude:type_name -> rafiki.daraja.v1.ClaudeParams
-	6,  // 4: rafiki.daraja.v1.RestartRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	1,  // 5: rafiki.daraja.v1.DarajaService.Relay:input_type -> rafiki.daraja.v1.RelayRequest
-	7,  // 6: rafiki.daraja.v1.DarajaService.Restart:input_type -> rafiki.daraja.v1.RestartRequest
-	9,  // 7: rafiki.daraja.v1.DarajaService.Shutdown:input_type -> rafiki.daraja.v1.ShutdownRequest
-	11, // 8: rafiki.daraja.v1.DarajaService.Health:input_type -> rafiki.daraja.v1.HealthRequest
-	2,  // 9: rafiki.daraja.v1.DarajaService.Relay:output_type -> rafiki.daraja.v1.RelayResponse
-	8,  // 10: rafiki.daraja.v1.DarajaService.Restart:output_type -> rafiki.daraja.v1.RestartResponse
-	10, // 11: rafiki.daraja.v1.DarajaService.Shutdown:output_type -> rafiki.daraja.v1.ShutdownResponse
-	12, // 12: rafiki.daraja.v1.DarajaService.Health:output_type -> rafiki.daraja.v1.HealthResponse
-	9,  // [9:13] is the sub-list for method output_type
-	5,  // [5:9] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	14, // 2: rafiki.daraja.v1.ScriptParams.env:type_name -> rafiki.daraja.v1.ScriptParams.EnvEntry
+	0,  // 3: rafiki.daraja.v1.ChildSpec.kind:type_name -> rafiki.daraja.v1.Kind
+	5,  // 4: rafiki.daraja.v1.ChildSpec.claude:type_name -> rafiki.daraja.v1.ClaudeParams
+	6,  // 5: rafiki.daraja.v1.ChildSpec.script:type_name -> rafiki.daraja.v1.ScriptParams
+	7,  // 6: rafiki.daraja.v1.RestartRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	1,  // 7: rafiki.daraja.v1.DarajaService.Relay:input_type -> rafiki.daraja.v1.RelayRequest
+	8,  // 8: rafiki.daraja.v1.DarajaService.Restart:input_type -> rafiki.daraja.v1.RestartRequest
+	10, // 9: rafiki.daraja.v1.DarajaService.Shutdown:input_type -> rafiki.daraja.v1.ShutdownRequest
+	12, // 10: rafiki.daraja.v1.DarajaService.Health:input_type -> rafiki.daraja.v1.HealthRequest
+	2,  // 11: rafiki.daraja.v1.DarajaService.Relay:output_type -> rafiki.daraja.v1.RelayResponse
+	9,  // 12: rafiki.daraja.v1.DarajaService.Restart:output_type -> rafiki.daraja.v1.RestartResponse
+	11, // 13: rafiki.daraja.v1.DarajaService.Shutdown:output_type -> rafiki.daraja.v1.ShutdownResponse
+	13, // 14: rafiki.daraja.v1.DarajaService.Health:output_type -> rafiki.daraja.v1.HealthResponse
+	11, // [11:15] is the sub-list for method output_type
+	7,  // [7:11] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_daraja_v1_daraja_proto_init() }
@@ -935,6 +1107,7 @@ func file_rafiki_daraja_v1_daraja_proto_init() {
 		(*RelayResponse_Stdout)(nil),
 		(*RelayResponse_Restarted)(nil),
 		(*RelayResponse_Exited)(nil),
+		(*RelayResponse_Stderr)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -942,7 +1115,7 @@ func file_rafiki_daraja_v1_daraja_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_daraja_v1_daraja_proto_rawDesc), len(file_rafiki_daraja_v1_daraja_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

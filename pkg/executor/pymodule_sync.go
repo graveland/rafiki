@@ -12,7 +12,6 @@ import (
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
-	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
@@ -21,7 +20,7 @@ import (
 // synced mirror is -- unlike claudeSkillsDir(), there is no third-party
 // contract pinning this location, so it lives under rafiki's own directory.
 func pymoduleCacheDir() string {
-	return filepath.Join(paths.CacheDir(), "pymodules")
+	return pymodules.BlobCacheDir()
 }
 
 // SyncPyModules replaces this executor's rafiki-managed pymodule tree with

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
+	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 )
 
@@ -78,6 +80,16 @@ type AdminOptions struct {
 	// profile was configured (or resolution failed) — Launch then falls back
 	// to the request's value, exactly as before this field existed.
 	ProxyURL string
+
+	// PinCert and ServerName are THIS executor's own TLS posture toward the
+	// daemon (from --pin-cert/--server-name). They ride every launch so the
+	// daraja it spawns — and the per-child socket that daraja serves for a
+	// script child — verifies the SAME listener the executor itself does, by
+	// pinned fingerprint rather than system roots. Empty means the executor
+	// verifies against system roots (or dials a unix socket, where neither
+	// applies), and Launch passes nothing on.
+	PinCert    string
+	ServerName string
 }
 
 // launched is one daraja this executor started and is responsible for.
@@ -151,6 +163,20 @@ func (a *AdminServer) Launch(
 		return nil, err
 	}
 
+	// A script launch is resolved BEFORE the claim is taken: the executor
+	// reads its own synced cache here (interpreter, script path, PYTHONPATH),
+	// and a name the cache does not hold is refused with nothing started and
+	// no claim left behind — the same "a refusal must leave nothing running"
+	// ordering the daemon-side spawn path enforces.
+	var script scriptLaunch
+	if sp := req.Msg.GetSpec().GetScript(); kind == "script" {
+		script, err = resolveScriptLaunch(sp)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeFailedPrecondition,
+				fmt.Errorf("cannot host script child %s: %w", childID, err))
+		}
+	}
+
 	a.mu.Lock()
 	if _, dup := a.m[childID]; dup {
 		a.mu.Unlock()
@@ -191,54 +217,77 @@ func (a *AdminServer) Launch(
 			}
 		}
 	}
+	// The pinned certificate rides to daraja, for BOTH of its outbound
+	// channels: its own reverse dial and the per-child socket's proxy to the
+	// daemon's face. An executor that pins its own connection must not launch
+	// children that verify the same listener against the system roots instead
+	// — a self-signed or internal-CA daemon would fail exactly the children
+	// whose host was configured to trust it.
+	if a.opts.PinCert != "" {
+		argv = append(argv, "--pin-cert", a.opts.PinCert)
+	}
+	if a.opts.ServerName != "" {
+		argv = append(argv, "--server-name", a.opts.ServerName)
+	}
 	argv = append(argv, "--child-id", childID)
-	argv = append(argv, "--binary", a.opts.ChildBinary)
 	argv = append(argv, "--cwd", req.Msg.GetCwd())
 	argv = append(argv, "--kind", kind)
-	if c.GetModel() != "" {
-		argv = append(argv, "--model", c.GetModel())
-	}
-	if c.GetResumeSession() != "" {
-		argv = append(argv, "--resume", c.GetResumeSession())
-	}
-	if c.GetPermissionMode() != "" {
-		argv = append(argv, "--permission-mode", c.GetPermissionMode())
-	}
-	// Prefer THIS executor's own resolved proxy URL over the request's
-	// proxy_url — same rationale as ConnectAddr: the daemon's proxy_url is
-	// derived from its own bind address, which is not necessarily reachable
-	// from this executor's machine. Empty means no profile was configured
-	// (or resolution failed) — then fall back to the request's value.
-	proxyURL := c.GetProxyUrl()
-	if a.opts.ProxyURL != "" {
-		proxyURL = a.opts.ProxyURL
-	}
-	if proxyURL != "" {
-		argv = append(argv, "--proxy-url", proxyURL)
-	}
-	if c.GetPassthroughAuth() {
-		argv = append(argv, "--passthrough")
-	}
-	if c.GetAutoCompactWindow() > 0 {
-		argv = append(argv, "--auto-compact-window", strconv.Itoa(int(c.GetAutoCompactWindow())))
-	}
-	if c.GetRecordRequests() {
-		argv = append(argv, "--record-requests")
-	}
-	if c.GetAppendSystemPrompt() != "" {
-		argv = append(argv, "--append-system-prompt", c.GetAppendSystemPrompt())
-	}
-	// ExtraArgs are the operator escape hatch and carry no serve-side flag of
-	// their own: they are appended verbatim after a bare "--" separator, which
-	// pflag treats as the end of flags — runDarajaServe receives them as
-	// positional args and they land in HostOptions.Spec.ExtraArgs
-	// (claudeargv.Params.ExtraArgs, appended last so they can override
-	// anything). Without the separator a flag-shaped extra ("--model", "x")
-	// would be parsed as a SERVE flag — mangling the mapped --model above or
-	// dying on an unknown flag — instead of surviving into the child's argv.
-	if len(c.GetExtraArgs()) > 0 {
+	switch kind {
+	case "claude":
+		argv = append(argv, "--binary", a.opts.ChildBinary)
+		if c.GetModel() != "" {
+			argv = append(argv, "--model", c.GetModel())
+		}
+		if c.GetResumeSession() != "" {
+			argv = append(argv, "--resume", c.GetResumeSession())
+		}
+		if c.GetPermissionMode() != "" {
+			argv = append(argv, "--permission-mode", c.GetPermissionMode())
+		}
+		// Prefer THIS executor's own resolved proxy URL over the request's
+		// proxy_url — same rationale as ConnectAddr: the daemon's proxy_url is
+		// derived from its own bind address, which is not necessarily reachable
+		// from this executor's machine. Empty means no profile was configured
+		// (or resolution failed) — then fall back to the request's value.
+		proxyURL := c.GetProxyUrl()
+		if a.opts.ProxyURL != "" {
+			proxyURL = a.opts.ProxyURL
+		}
+		if proxyURL != "" {
+			argv = append(argv, "--proxy-url", proxyURL)
+		}
+		if c.GetPassthroughAuth() {
+			argv = append(argv, "--passthrough")
+		}
+		if c.GetAutoCompactWindow() > 0 {
+			argv = append(argv, "--auto-compact-window", strconv.Itoa(int(c.GetAutoCompactWindow())))
+		}
+		if c.GetRecordRequests() {
+			argv = append(argv, "--record-requests")
+		}
+		if c.GetAppendSystemPrompt() != "" {
+			argv = append(argv, "--append-system-prompt", c.GetAppendSystemPrompt())
+		}
+		// ExtraArgs are the operator escape hatch and carry no serve-side flag of
+		// their own: they are appended verbatim after a bare "--" separator, which
+		// pflag treats as the end of flags — runDarajaServe receives them as
+		// positional args and they land in HostOptions.Spec.ExtraArgs
+		// (claudeargv.Params.ExtraArgs, appended last so they can override
+		// anything). Without the separator a flag-shaped extra ("--model", "x")
+		// would be parsed as a SERVE flag — mangling the mapped --model above or
+		// dying on an unknown flag — instead of surviving into the child's argv.
+		if len(c.GetExtraArgs()) > 0 {
+			argv = append(argv, "--")
+			argv = append(argv, c.GetExtraArgs()...)
+		}
+	case "script":
+		// The RESOLVED script: the interpreter is the binary daraja runs; the
+		// script path and the spec's own args are positionals, so a flag-shaped
+		// script argument cannot be eaten by pflag. PYTHONPATH and the forwarded
+		// environment ride the daraja process's environment (below), never argv.
+		argv = append(argv, "--binary", script.interpreter)
 		argv = append(argv, "--")
-		argv = append(argv, c.GetExtraArgs()...)
+		argv = append(argv, script.argv...)
 	}
 
 	// The ticket is one-shot auth for the daraja's reverse dial. It must not
@@ -253,30 +302,68 @@ func (a *AdminServer) Launch(
 	// expands — never argv.
 	envVars := []string{
 		"RAFIKI_DARAJA_TICKET=" + req.Msg.GetTicket(),
-		"RAFIKI_DARAJA_PROXY_TOKEN=" + c.GetProxyToken(),
 	}
-	if mcpToken := c.GetMcpToken(); mcpToken != "" {
-		envVars = append(envVars, "RAFIKI_MCP_TOKEN="+mcpToken)
+	// The script's launch environment: the per-child secret (env, never argv
+	// — same treatment as every other rafiki credential), then the forwarded
+	// environment in a deterministic order, then the resolved PYTHONPATH.
+	// Each name is scrubbed from the inherited environ below, so every one of
+	// them appears AT MOST ONCE with THIS spec's value, independent of
+	// os/exec's duplicate handling.
+	var scrubNames []string
+	if sp := req.Msg.GetSpec().GetScript(); kind == "script" && sp != nil {
+		if sec := sp.GetChildSecret(); sec != "" {
+			envVars = append(envVars, "RAFIKI_CHILD_SECRET="+sec)
+		}
+		// Same strip rule the daemon applied before sending (a forwarded
+		// credential must not resurrect what the strip removed) and the
+		// script child's env build applies a third time. Sorted for a
+		// deterministic environ: the launch payload is a map.
+		keys := make([]string, 0, len(sp.GetEnv()))
+		for k := range sp.GetEnv() {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if k == "" || child.ScriptEnvStripped(k) {
+				continue
+			}
+			envVars = append(envVars, k+"="+sp.GetEnv()[k])
+			scrubNames = append(scrubNames, k)
+		}
+		if script.pythonPath != "" {
+			envVars = append(envVars, "PYTHONPATH="+script.pythonPath)
+			scrubNames = append(scrubNames, "PYTHONPATH")
+		}
+	}
+	if kind == "claude" {
+		// Unconditional for claude, exactly as before this wave: a spec without
+		// a token yields one EMPTY-valued entry (never a stale inherited copy),
+		// and ClaudeEnv reads the empty as "no proxy credential".
+		envVars = append(envVars, "RAFIKI_DARAJA_PROXY_TOKEN="+c.GetProxyToken())
+		if mcpToken := c.GetMcpToken(); mcpToken != "" {
+			envVars = append(envVars, "RAFIKI_MCP_TOKEN="+mcpToken)
+		}
 	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)
-	// Scrub inherited copies of the three credential names this Launch manages
-	// BEFORE the fresh values are appended, so the launched environ carries
-	// each name AT MOST ONCE and always with THIS spec's value. Note this is
-	// an explicit invariant, not a shadowing fix: os/exec dedups the child
-	// environ keeping the LAST duplicate (exec.environs), so the appended
-	// fresh value would win even without the scrub — but that is an accident
-	// of Cmd internals and append order, not a contract; the scrub makes the
-	// single-entry/fresh property hold regardless of how the child environ is
-	// built or which environ reader (Go os.Getenv, libc getenv) runs, and it
-	// is what makes the spec-without-a-token case safe: a stale inherited
-	// copy is DROPPED, not overridden, so a spec without a token yields no
-	// entry at all rather than leaking the executor's own stale copy as if it
-	// had been minted. All three are rafiki credentials whose inherited copies
-	// are stale by definition — this executor's copy belongs to whatever
-	// process launched IT. Everything else (PATH, HOME, ...) passes through
-	// unchanged.
-	cmd.Env = append(scrubRafikiCredentialEnv(os.Environ()), envVars...)
+	// Scrub inherited copies of every credential name this Launch manages
+	// (plus PYTHONPATH and the forwarded names, which must also appear exactly
+	// once with THIS launch's value) BEFORE the fresh values are appended, so
+	// the launched environ carries each name AT MOST ONCE and always with
+	// THIS spec's value. Note this is an explicit invariant, not a shadowing
+	// fix: os/exec dedups the child environ keeping the LAST duplicate
+	// (exec.environs), so the appended fresh value would win even without the
+	// scrub — but that is an accident of Cmd internals and append order, not a
+	// contract; the scrub makes the single-entry/fresh property hold
+	// regardless of how the child environ is built or which environ reader
+	// (Go os.Getenv, libc getenv) runs, and it is what makes the
+	// spec-without-a-token case safe: a stale inherited copy is DROPPED, not
+	// overridden, so a spec without a token yields no entry at all rather than
+	// leaking the executor's own stale copy as if it had been minted. All the
+	// rafiki credentials are credentials whose inherited copies are stale by
+	// definition — this executor's copy belongs to whatever process launched
+	// IT. Everything else (PATH, HOME, ...) passes through unchanged.
+	cmd.Env = append(scrubEnvNames(scrubRafikiCredentialEnv(os.Environ()), scrubNames...), envVars...)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit
@@ -337,22 +424,43 @@ var rafikiCredentialEnvNames = []string{
 	"RAFIKI_DARAJA_TICKET",
 	"RAFIKI_DARAJA_PROXY_TOKEN",
 	"RAFIKI_MCP_TOKEN",
+	// The per-child Connect secret a script launch carries (the executor's
+	// childsock proxy injects it; the script itself never sees it). Same
+	// rule as the three above: env only, one entry, never a stale copy.
+	"RAFIKI_CHILD_SECRET",
 }
 
-// scrubRafikiCredentialEnv returns environ without any entry whose key is one
-// of rafikiCredentialEnvNames, passing everything else (PATH, HOME, ...)
-// through unchanged. See Launch for why the scrub happens before the fresh
-// values are appended.
-func scrubRafikiCredentialEnv(environ []string) []string {
+// scrubEnvNames returns environ without any entry whose key is one of names,
+// passing everything else through unchanged. The generalization of
+// scrubRafikiCredentialEnv, for the launch-managed names beyond the
+// credential set: PYTHONPATH and the forwarded environment, which must
+// appear exactly once with THIS launch's value.
+func scrubEnvNames(environ []string, names ...string) []string {
+	if len(names) == 0 {
+		return environ
+	}
 	kept := make([]string, 0, len(environ))
 	for _, kv := range environ {
-		if key, _, _ := strings.Cut(kv, "="); slices.Contains(rafikiCredentialEnvNames, key) {
+		if key, _, _ := strings.Cut(kv, "="); slices.Contains(names, key) {
 			continue
 		}
 		kept = append(kept, kv)
 	}
 	return kept
 }
+
+// scrubRafikiCredentialEnv drops every rafikiCredentialEnvNames entry, passing
+// everything else (PATH, HOME, ...) through unchanged.
+func scrubRafikiCredentialEnv(environ []string) []string {
+	return scrubEnvNames(environ, rafikiCredentialEnvNames...)
+}
+
+// scriptEnvNameStripped reports whether a variable name carries one of the
+// prefixes a script child's environment is stripped of. The single definition
+// lives in pkg/child (ScriptEnvStripPrefixes) — the daemon-side build, this
+// launch payload check, and the daraja host's own env build all apply the
+// same rule, and a credential that survives any one plane is out. The daemon
+// already applied it before sending; this check is defense in depth.
 
 // Reap ends one launched daraja and its child, on demand.
 func (a *AdminServer) Reap(
@@ -448,12 +556,20 @@ func (a *AdminServer) waitSupervise() {
 }
 
 // kindFor validates the requested kind against the operator's declaration.
+// The kind names what daraja hosts, and the operator's --launch list is the
+// whole declaration: a machine that never volunteered to host children must
+// refuse even a well-formed request.
 func (a *AdminServer) kindFor(spec *darajapb.ChildSpec) (string, error) {
-	if spec.GetKind() != darajapb.Kind_KIND_CLAUDE {
+	var kind string
+	switch spec.GetKind() {
+	case darajapb.Kind_KIND_CLAUDE:
+		kind = "claude"
+	case darajapb.Kind_KIND_SCRIPT:
+		kind = "script"
+	default:
 		return "", connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("unsupported child kind %v", spec.GetKind()))
 	}
-	const kind = "claude"
 	if !slices.Contains(a.opts.LaunchKinds, kind) {
 		return "", connect.NewError(connect.CodeFailedPrecondition,
 			fmt.Errorf("this executor does not host %q; start it with --launch %s", kind, kind))

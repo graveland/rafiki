@@ -284,3 +284,65 @@ func TestRunnerInterruptReturnsErrInterruptNotSupported(t *testing.T) {
 		t.Fatalf("got %v, want ErrInterruptNotSupported", err)
 	}
 }
+
+// stderrEvent builds a stderr relay response — a script's stderr reaches the
+// controller (its tail is what a failed run's settle carries); claude's never
+// does.
+func stderrEvent(b []byte) *darajapb.RelayResponse {
+	return &darajapb.RelayResponse{Event: &darajapb.RelayResponse_Stderr{Stderr: b}}
+}
+
+// TestRunnerRelaysScriptStderr pins the script-hosted stderr leg: Stderr
+// events arrive on the runner's stderr reader, interleaved with stdout on
+// their own channel, and neither one's bytes appear on the other's pipe.
+func TestRunnerRelaysScriptStderr(t *testing.T) {
+	stub := newScriptedDaraja()
+	pool, childID, teardown := connectFakeDaraja(t, stub)
+	defer teardown()
+
+	r := NewRunner(pool, childID)
+	_, stdoutR, stderrR, err := r.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stub.send <- stdout([]byte("out-1"))
+	stub.send <- stderrEvent([]byte("err-1"))
+	stub.send <- stdout([]byte("out-2"))
+
+	// Both pipes are synchronous: a consumer that reads one to EOF before
+	// touching the other deadlocks, exactly as it would on the child side
+	// (pkg/child drains stdout and stderr on their own goroutines). Read them
+	// concurrently, the way the real consumer does.
+	type result struct {
+		name string
+		data string
+		err  error
+	}
+	results := make(chan result, 2)
+	read := func(name string, rd io.Reader, n int) {
+		b := make([]byte, n)
+		_, err := io.ReadFull(rd, b)
+		results <- result{name: name, data: string(b), err: err}
+	}
+	go read("stderr", stderrR, len("err-1"))
+	go read("stdout", stdoutR, len("out-1out-2"))
+
+	for range 2 {
+		select {
+		case res := <-results:
+			if res.err != nil {
+				t.Fatalf("read %s: %v", res.name, res.err)
+			}
+			want := "out-1out-2"
+			if res.name == "stderr" {
+				want = "err-1"
+			}
+			if res.data != want {
+				t.Fatalf("%s = %q, want %q", res.name, res.data, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout reading the relayed streams")
+		}
+	}
+}

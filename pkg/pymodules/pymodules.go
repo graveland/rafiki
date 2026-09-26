@@ -9,8 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"time"
+
+	"go.graveland.dev/rafiki/pkg/paths"
 )
 
 // ErrNotFound means the module does not exist for the given owner.
@@ -24,6 +27,20 @@ var ErrNotFound = errors.New("pymodule not found")
 // the daemon adapters and the CLI all quote one constant instead of three
 // copies of the literal "local".
 const LocalRepo = "local"
+
+// BlobCacheDir is the synced blob-module cache root on an executor: one
+// directory per saved module name, <dir>/<name>/<name>.py, with an optional
+// per-module .venv beside it. SyncPyModules (pkg/executor) writes it;
+// pymodule_run and the executor-hosted script launcher read it. One shared
+// function, not three literals, so the layout cannot drift between the
+// writer and the readers.
+func BlobCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodules") }
+
+// GitCacheDir is the synced git-source cache root: one checkout per
+// registered source at <dir>/<repo>, whose callable scripts live under
+// scripts/ and whose top-level __init__-carrying directories are importable
+// packages. SyncPyModuleGitSource writes it; the same readers read it.
+func GitCacheDir() string { return filepath.Join(paths.CacheDir(), "pymodule-repos") }
 
 // Record is one row of conversations.pymodules.
 type Record struct {

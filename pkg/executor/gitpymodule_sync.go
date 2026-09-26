@@ -15,7 +15,7 @@ import (
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
-	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 // gitPymoduleReposRoot is the parent cache root every git checkout lives
@@ -24,7 +24,7 @@ import (
 // must not be interleaved with the flat per-module directories
 // pymodule_sync.go manages and prunes by name.
 func gitPymoduleReposRoot() string {
-	return filepath.Join(paths.CacheDir(), "pymodule-repos")
+	return pymodules.GitCacheDir()
 }
 
 func gitPymoduleRepoDir(name string) string {

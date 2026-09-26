@@ -42,6 +42,12 @@ message RelayResponse {
     bytes stdout = 1;
     ProcessRestarted restarted = 2;
     ProcessExited exited = 3;
+    // stderr relays the child's standard error. Claude's is discarded
+    // (its protocol is stdout); a script's stderr is load-bearing — the
+    // daemon keeps the tail and a failed run's settle carries it. One arm
+    // per stream direction keeps both byte streams ordered within their own
+    // channel, which is all either consumer reads.
+    bytes stderr = 4;
   }
 }
 
@@ -70,6 +76,9 @@ message ProcessExited {
 enum Kind {
   KIND_UNSPECIFIED = 0;
   KIND_CLAUDE = 1;
+  // KIND_SCRIPT hosts a saved pymodule run. Only the spawn path consults the
+  // kind (to pick the resolution and disable respawn); the relay is blind.
+  KIND_SCRIPT = 2;
 }
 
 message ClaudeParams {
@@ -126,14 +135,61 @@ message ClaudeParams {
   string mcp_token = 11;
 }
 
+// ScriptParams is the script variant of a ChildSpec: a saved pymodule run
+// hosted on the executor the way pymodule_run runs one.
+//
+// Unlike ClaudeParams, nothing here names a binary or a path: the EXECUTOR
+// resolves the script against its own synced pymodule cache at Launch time —
+// the same layout SyncPyModules (blob modules, with per-module venvs) and
+// SyncPyModuleGitSource (checkouts) produce — and hands daraja the resolved
+// interpreter and argv. The daemon never ships code to an executor it did not
+// already sync, and the executor never runs code its cache does not hold.
+//
+// A script child is never Restarted and never respawned: a script's exit is
+// its result. daraja's respawn loop is disabled for this kind.
+message ScriptParams {
+  // repo names the pymodule source: "local" for the owner's synced blob
+  // modules (pymodule_put), or a registered git source's name for its synced
+  // checkout. Resolved on the executor; an unsynced name is a Launch refusal,
+  // not a runtime surprise.
+  string repo = 1;
+  // script is the pymodule/script name to run — a bare Python identifier.
+  string script = 2;
+  // modules names further pymodules the script imports, resolved within the
+  // same repo and joined to PYTHONPATH in call order.
+  repeated string modules = 3;
+  // args are the script's own command-line arguments, passed verbatim.
+  repeated string args = 4;
+  // env is the spawn's forwarded environment (--forward-env). The daemon
+  // strips every RAFIKI_*/ANTHROPIC_*/OPENROUTER_* variable before sending
+  // (a forwarded credential must not resurrect what the strip removed) and
+  // the executor strips again before applying — same rule, both planes.
+  map<string, string> env = 5;
+  // child_secret is the per-child Connect credential the executor's per-child
+  // socket (pkg/childsock) injects as the Authorization bearer on everything
+  // the script sends the daemon. LAUNCH-ONLY, like proxy_token/mcp_token: it
+  // travels this authenticated RPC and then into the daraja process's
+  // environment (RAFIKI_CHILD_SECRET, set by AdminService.Launch) — never any
+  // argv, because ps is world-readable — and it is held in memory only. The
+  // script itself never sees it: its RAFIKI_CHILD_CONNECT names a socket, not
+  // a token.
+  string child_secret = 6;
+}
+
 // ChildSpec is everything needed to (re)build the child's command line.
 //
 // Typed rather than raw argv because the executor's Launch and daraja's Restart
 // would otherwise each need an argv builder, on opposite sides of an RPC. Both
 // call pkg/claudeargv instead.
+//
+// Exactly one variant is set. For kind SCRIPT the executor resolves
+// ScriptParams against its synced cache before starting daraja; a Restart of a
+// script child is refused semantically (a script's exit is its result), so the
+// wire spec never needs to rebuild a script's resolved argv.
 message ChildSpec {
   Kind kind = 1;
   ClaudeParams claude = 2;
+  ScriptParams script = 3;
 }
 
 message RestartRequest {

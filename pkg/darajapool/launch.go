@@ -68,8 +68,8 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 	if p.DialAddr == "" {
 		return LaunchResult{}, errors.New("darajapool: Launch requires a non-empty DialAddr")
 	}
-	if p.Spec == nil || p.Spec.GetClaude() == nil {
-		return LaunchResult{}, errors.New("darajapool: Launch requires spec.claude")
+	if p.Spec == nil || (p.Spec.GetClaude() == nil && p.Spec.GetScript() == nil) {
+		return LaunchResult{}, errors.New("darajapool: Launch requires spec.claude or spec.script")
 	}
 
 	ticket, err := p.Registry.MintTicket(p.ChildID)

@@ -3,7 +3,6 @@
 package darajapool
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -61,6 +60,15 @@ type Runner struct {
 	pr *io.PipeReader
 	pw *io.PipeWriter
 
+	// sr/sw are the stderr side, for the kinds whose stderr reaches the
+	// controller (a script's settle carries its tail; claude's relay carries no
+	// stderr at all). Same pipe discipline as stdout: a synchronous io.Pipe the
+	// consumer must drain on its own goroutine (pkg/child's readStderr does),
+	// open across a reconnect so buffered bytes are never reported as an exit,
+	// and closed only with the runner itself.
+	sr *io.PipeReader
+	sw *io.PipeWriter
+
 	doneOnce sync.Once
 	done     chan struct{} // closed by Terminate/Kill: tells the pump to stop retrying
 
@@ -83,11 +91,14 @@ type Runner struct {
 // childID.
 func NewRunner(pool *Pool, childID string) *Runner {
 	pr, pw := io.Pipe()
+	sr, sw := io.Pipe()
 	return &Runner{
 		pool:    pool,
 		childID: childID,
 		pr:      pr,
 		pw:      pw,
+		sr:      sr,
+		sw:      sw,
 		done:    make(chan struct{}),
 		exitCh:  make(chan exitInfo, 1),
 	}
@@ -134,14 +145,15 @@ func (s *darajaStdin) StopsOnClose() bool { return true }
 
 func (r *Runner) Start() (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	go r.pump()
-	return &darajaStdin{runner: r}, r.pr, io.NopCloser(bytes.NewReader(nil)), nil
+	return &darajaStdin{runner: r}, r.pr, r.sr, nil
 }
 
 // pump feeds r.pw from the child's relay events for as long as r.done is
 // open, transparently re-subscribing across a disconnect/reconnect. It is
-// the only writer to r.pw and the only sender to r.exitCh.
+// the only writer to r.pw, r.sw and the only sender to r.exitCh.
 func (r *Runner) pump() {
 	defer r.pw.Close()
+	defer r.sw.Close()
 	for {
 		select {
 		case <-r.done:
@@ -188,6 +200,10 @@ func (r *Runner) drain(events <-chan *fanEvent) bool {
 			switch e := ev.Response().GetEvent().(type) {
 			case *darajapb.RelayResponse_Stdout:
 				if _, err := r.pw.Write(e.Stdout); err != nil {
+					return true // reader gone: Terminate/Kill closed things down
+				}
+			case *darajapb.RelayResponse_Stderr:
+				if _, err := r.sw.Write(e.Stderr); err != nil {
 					return true // reader gone: Terminate/Kill closed things down
 				}
 			case *darajapb.RelayResponse_Exited:

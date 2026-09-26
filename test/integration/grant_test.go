@@ -153,7 +153,12 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	daemonID := nextDaemonID()
 	dropDaemonRows(t, daemonID)
 
+	// The proxy face is captured so its stderr can be waited on — and its
+	// listen is an ephemeral loopback port (the daemon logs the real port),
+	// so two grant daemons in one suite never fight over the fixed default.
+	stderr := &stderrBuf{}
 	cmd := exec.Command(binaryPath)
+	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
 		"XDG_RUNTIME_DIR="+homeDir,
@@ -165,6 +170,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		"RAFIKI_CONTROL_LISTEN="+listenAddr,
 		"RAFIKI_CONTROL_TLS_CERT="+certPath,
 		"RAFIKI_CONTROL_TLS_KEY="+keyPath,
+		"RAFIKI_PROXY_LISTEN=127.0.0.1:0",
 	)
 
 	if err := cmd.Start(); err != nil {
@@ -177,6 +183,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		proc:       cmd,
 		homeDir:    homeDir,
 		logsDir:    filepath.Join(appDir, "logs"),
+		stderr:     stderr,
 	}
 	// Poll until the daemon accepts, same as bootDaemon.
 	deadline := time.Now().Add(10 * time.Second)
@@ -193,9 +200,13 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	}
 	if lastErr != nil {
 		d.stopDaemon()
-		t.Fatalf("daemon never accepted on %s: %v", socketPath, lastErr)
+		t.Fatalf("daemon never accepted on %s: %v\nstderr:\n%s", socketPath, lastErr, stderr.tail(4000))
 	}
 	t.Cleanup(d.stopDaemon)
+
+	// The proxy face announces itself on stderr once it is serving; the
+	// Connect-plane tests (script children on executors) dial it.
+	d.proxyURL = waitProxyListen(t, stderr)
 
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)

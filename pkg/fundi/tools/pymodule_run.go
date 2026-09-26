@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
@@ -125,7 +124,7 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	// lands inside the modules' own cache dirs (__pycache__/) -- the point
 	// of running from the cache: it survives between runs, and the sync
 	// prune sweeps at root level only, so it is left alone.
-	cacheDir := filepath.Join(paths.CacheDir(), "pymodules")
+	cacheDir := pymodules.BlobCacheDir()
 	scriptDir := filepath.Join(cacheDir, in.Script)
 	scriptPath := filepath.Join(scriptDir, in.Script+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
@@ -139,14 +138,14 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	// self-consistent with the venv that was built -- a changed
 	// RAFIKI_PYMODULE_PYTHON never re-points or rebuilds an existing venv;
 	// only future venv builds use the new interpreter.
-	scriptVenvPython := pymoduleVenvPython(scriptDir)
+	scriptVenvPython := PymoduleVenvPython(scriptDir)
 	_, scriptVenvErr := os.Stat(scriptVenvPython)
 	scriptHasVenv := scriptVenvErr == nil
 	scriptCode, err := os.ReadFile(scriptPath)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: script %q: %w", in.Script, err)
 	}
-	if err := pymoduleVenvReadiness("script", in.Script, scriptDir, pymodules.ParseRequirements(string(scriptCode)), scriptHasVenv); err != nil {
+	if err := PymoduleVenvReadiness("script", in.Script, scriptDir, pymodules.ParseRequirements(string(scriptCode)), scriptHasVenv); err != nil {
 		return ToolResult{}, err
 	}
 
@@ -161,13 +160,13 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 		if _, err := os.Stat(path); err != nil {
 			return ToolResult{}, fmt.Errorf("pymodule_run: module %q is not synced to this executor (has it been saved with pymodule_put yet?): %w", m, err)
 		}
-		_, venvErr := os.Stat(pymoduleVenvPython(dir))
+		_, venvErr := os.Stat(PymoduleVenvPython(dir))
 		hasVenv := venvErr == nil
 		code, err := os.ReadFile(path)
 		if err != nil {
 			return ToolResult{}, fmt.Errorf("pymodule_run: module %q: %w", m, err)
 		}
-		if err := pymoduleVenvReadiness("module", m, dir, pymodules.ParseRequirements(string(code)), hasVenv); err != nil {
+		if err := PymoduleVenvReadiness("module", m, dir, pymodules.ParseRequirements(string(code)), hasVenv); err != nil {
 			return ToolResult{}, err
 		}
 		entries = append(entries, pymoduleEntry{dir: dir, hasVenv: hasVenv})
@@ -182,14 +181,14 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 	// its site-packages; the pre-existing PYTHONPATH value trails last.
 	var ppEntries []string
 	if scriptHasVenv {
-		if sp, ok := pymoduleSitePackages(scriptDir); ok {
+		if sp, ok := PymoduleSitePackages(scriptDir); ok {
 			ppEntries = append(ppEntries, sp)
 		}
 	}
 	for _, e := range entries {
 		ppEntries = append(ppEntries, e.dir)
 		if e.hasVenv {
-			if sp, ok := pymoduleSitePackages(e.dir); ok {
+			if sp, ok := PymoduleSitePackages(e.dir); ok {
 				ppEntries = append(ppEntries, sp)
 			}
 		}
@@ -277,7 +276,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 
 	// A checkout keeps its callable scripts under scripts/, not the flat
 	// <name>/<name>.py layout of the blob-sourced cache.
-	repoDir := filepath.Join(paths.CacheDir(), "pymodule-repos", in.Repo)
+	repoDir := filepath.Join(pymodules.GitCacheDir(), in.Repo)
 	scriptPath := filepath.Join(repoDir, "scripts", in.Script+".py")
 	if _, err := os.Stat(scriptPath); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: script %q is not synced to this executor under repo %q (has the git source been refreshed on it yet?): %w", in.Script, in.Repo, err)
@@ -295,7 +294,7 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	// readiness check either: a checkout's dependencies come from its own
 	// manifest (uv sync's input), not from a per-name block.
 	interpreter := rt.interpreter
-	repoVenvPython := pymoduleVenvPython(repoDir)
+	repoVenvPython := PymoduleVenvPython(repoDir)
 	if _, err := os.Stat(repoVenvPython); err == nil {
 		interpreter = repoVenvPython
 	}
@@ -378,19 +377,19 @@ func envWithPythonPath(pp string) []string {
 	return append(env, "PYTHONPATH="+pp)
 }
 
-// pymoduleVenvPython is the interpreter path of a pymodule's per-module
+// PymoduleVenvPython is the interpreter path of a pymodule's per-module
 // dependency venv, a sibling of the module's own .py inside its synced cache
 // directory. Venvs are consumed in place, never copied.
-func pymoduleVenvPython(dir string) string {
+func PymoduleVenvPython(dir string) string {
 	return filepath.Join(dir, ".venv", "bin", "python3")
 }
 
-// pymoduleSitePackages resolves a pymodule's venv site-packages directory by
+// PymoduleSitePackages resolves a pymodule's venv site-packages directory by
 // globbing <dir>/.venv/lib/python3.*/site-packages and taking the first
 // match. ok is false when the glob finds nothing (a malformed or partially
 // built venv): the caller then proceeds with the code directory alone,
 // silently.
-func pymoduleSitePackages(dir string) (sitePackages string, ok bool) {
+func PymoduleSitePackages(dir string) (sitePackages string, ok bool) {
 	matches, err := filepath.Glob(filepath.Join(dir, ".venv", "lib", "python3.*", "site-packages"))
 	if err != nil || len(matches) == 0 {
 		return "", false
@@ -402,7 +401,7 @@ func pymoduleSitePackages(dir string) (sitePackages string, ok bool) {
 	return matches[0], true
 }
 
-// pymoduleVenvReadiness refuses a run whose entry declares dependencies but
+// PymoduleVenvReadiness refuses a run whose entry declares dependencies but
 // has no usable venv, instead of running against missing or half-installed
 // packages. An entry with no requirements -- the common case -- or with a
 // venv already present always passes. The staging check distinguishes a
@@ -410,7 +409,7 @@ func pymoduleSitePackages(dir string) (sitePackages string, ok bool) {
 // only a staging DIRECTORY counts as in flight -- a leftover file that
 // happens to carry the prefix is not a build, so it falls through to the
 // terminal refusal.
-func pymoduleVenvReadiness(role, name, dir string, reqs []string, hasVenv bool) error {
+func PymoduleVenvReadiness(role, name, dir string, reqs []string, hasVenv bool) error {
 	if hasVenv || len(reqs) == 0 {
 		return nil
 	}

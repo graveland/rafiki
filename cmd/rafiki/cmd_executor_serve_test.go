@@ -168,7 +168,11 @@ func pymoduleGitSyncFromArgv(t *testing.T, argv []string, env string) bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return pymoduleGitSyncEnabled(cmd, on)
+	launchKinds, err := cmd.Flags().GetStringArray("launch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pymoduleGitSyncEnabled(cmd, on, launchKinds)
 }
 
 func TestPymoduleGitSyncDefaultsOff(t *testing.T) {
@@ -192,5 +196,54 @@ func TestPymoduleGitSyncExplicitFalseBeatsTheEnvironment(t *testing.T) {
 func TestPymoduleGitSyncFlagTurnsItOn(t *testing.T) {
 	if !pymoduleGitSyncFromArgv(t, []string{"--pymodule-git-sync"}, "") {
 		t.Error("--pymodule-git-sync must enable git-source sync")
+	}
+}
+
+// --launch script implies both pymodule syncs: a script child resolves its
+// pymodule from THIS machine's synced cache (blob corpus with venvs, git
+// checkouts), and an executor whose caches stay empty hosts scripts that can
+// never resolve. The same flag-vs-env-vs-launch precedence skills sync uses:
+// an explicit false wins, the environment turns it on regardless.
+func TestPymoduleSyncImpliedByLaunchScript(t *testing.T) {
+	t.Setenv("RAFIKI_EXECUTOR_PYMODULES_SYNC", "")
+	cmd := newExecutorServeCmd()
+	if err := cmd.Flags().Parse([]string{"--launch", "script"}); err != nil {
+		t.Fatal(err)
+	}
+	on, err := cmd.Flags().GetBool("pymodules-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchKinds, _ := cmd.Flags().GetStringArray("launch")
+	if !pymodulesSyncEnabled(cmd, on, launchKinds) {
+		t.Error("--launch script must imply pymodules sync — a script host without the corpus hosts scripts that cannot resolve")
+	}
+}
+
+func TestPymoduleGitSyncImpliedByLaunchScript(t *testing.T) {
+	if !pymoduleGitSyncFromArgv(t, []string{"--launch", "script"}, "") {
+		t.Error("--launch script must imply git-source sync — a script host that refuses checkouts only hosts half the scripts")
+	}
+}
+
+func TestPymoduleSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
+	t.Setenv("RAFIKI_EXECUTOR_PYMODULES_SYNC", "")
+	cmd := newExecutorServeCmd()
+	if err := cmd.Flags().Parse([]string{"--launch", "script", "--pymodules-sync=false"}); err != nil {
+		t.Fatal(err)
+	}
+	on, err := cmd.Flags().GetBool("pymodules-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchKinds, _ := cmd.Flags().GetStringArray("launch")
+	if pymodulesSyncEnabled(cmd, on, launchKinds) {
+		t.Error("an explicit --pymodules-sync=false must beat the --launch script implication")
+	}
+}
+
+func TestPymoduleGitSyncExplicitFalseBeatsLaunchScript(t *testing.T) {
+	if pymoduleGitSyncFromArgv(t, []string{"--launch", "script", "--pymodule-git-sync=false"}, "") {
+		t.Error("an explicit --pymodule-git-sync=false must beat the --launch script implication")
 	}
 }

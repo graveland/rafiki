@@ -15,10 +15,10 @@ import (
 	"strings"
 )
 
-// scriptsDirName is the one directory whose *.py files are agent-callable
+// ScriptsDirName is the one directory whose *.py files are agent-callable
 // scripts. A dedicated directory, not every top-level .py file, keeps a
 // repo's noxfile.py/conftest.py/setup.py clutter out of the callable set.
-const scriptsDirName = "scripts"
+const ScriptsDirName = "scripts"
 
 // DiscoveredScript is one callable entry found under <root>/scripts/.
 type DiscoveredScript struct {
@@ -57,7 +57,7 @@ func Discover(root string) ([]DiscoveredScript, []DiscoveredPackage, error) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		if e.Name() == scriptsDirName {
+		if e.Name() == ScriptsDirName {
 			scripts = discoverScripts(dir)
 			continue
 		}

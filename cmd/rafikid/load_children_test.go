@@ -70,6 +70,8 @@ func TestScriptNeedsRestartSettle(t *testing.T) {
 		{"shutting_down script (daemon died mid-stop)", childstore.ChildRecord{Kind: protocol.KindScript, Status: "shutting_down"}, ownedByMe, true},
 		{"foreign-live script is another daemon's", childstore.ChildRecord{Kind: protocol.KindScript, Status: "streaming"}, foreignLive, false},
 		{"exited script settled when it exited", childstore.ChildRecord{Kind: protocol.KindScript, Status: "exited"}, ownedByMe, false},
+		{"daraja-hosted script does not die with the daemon", childstore.ChildRecord{Kind: protocol.KindScript, Status: "streaming", Labels: map[string]string{"rafiki/daraja-pgid": "4242"}}, ownedByMe, false},
+		{"daraja-hosted script, adopted, still not settled", childstore.ChildRecord{Kind: protocol.KindScript, Status: "idle", Labels: map[string]string{"rafiki/daraja-pgid": "4242"}}, foreignLapsed, false},
 		{"row with no status settles nothing", childstore.ChildRecord{Kind: protocol.KindScript, Status: ""}, ownedByMe, false},
 		{"fundi rows resume instead", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle"}, ownedByMe, false},
 		{"claude rows were never hosted here", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "streaming"}, ownedByMe, false},

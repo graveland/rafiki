@@ -1033,7 +1033,7 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 	out := make([]json.RawMessage, 0, len(events))
 	for _, ev := range events {
 		if framePassesTypeFilter(ev.Bytes, q.Include, q.Exclude) {
-			out = append(out, json.RawMessage(ev.Bytes))
+			out = append(out, jsonSafeEvent(ev.Bytes))
 		}
 	}
 
@@ -1064,6 +1064,28 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 // recentResponseBudget bounds the summed event bytes in one GetRecent
 // response so the marshaled frame stays well under protocol.MaxFrameBytes.
 const recentResponseBudget = protocol.MaxFrameBytes / 2
+
+// jsonSafeEvent returns b unchanged when it is already valid JSON, and as a
+// JSON string otherwise. The ring is a JSONL store whose appenders are
+// supposed to emit frames — but a script child's stdout is free-form text
+// (its provider publishes every line verbatim), so its ring events are bare
+// lines, and one non-JSON event among them made json.Marshal drop the ENTIRE
+// response's data (okResponse swallows the marshal error) — `rafiki logs` and
+// every other GetRecent consumer read an empty payload for a child whose logs
+// were sitting right there. Quoting the strays keeps the content verbatim (a
+// JSON string escapes it) and makes the response always marshalable.
+func jsonSafeEvent(b []byte) json.RawMessage {
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	quoted, err := json.Marshal(string(b))
+	if err != nil {
+		// Cannot happen for any Go string, but a fallback that is still valid
+		// JSON beats reintroducing the silent drop.
+		return json.RawMessage(`"<unmarshalable event>"`)
+	}
+	return json.RawMessage(quoted)
+}
 
 // readDiskEvents reads a per-child on-disk dump file (out.jsonl.gz /
 // render.jsonl.gz) into ring.Events with zero timestamps. Returns nil when the
@@ -1499,7 +1521,8 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// (claudeRunner's local-subprocess fallback), so that is the only
 	// remaining case this check applies to.
 	checksCwdLocally := req.Kind != protocol.KindFundi &&
-		(req.Kind != protocol.KindClaude || c.execPoolConn == nil)
+		(req.Kind != protocol.KindClaude || c.execPoolConn == nil) &&
+		(req.Kind != protocol.KindScript || !c.scriptExecutorRouted())
 	if checksCwdLocally {
 		if _, err := os.Stat(req.Cwd); err != nil {
 			return control.SpawnResult{}, &control.ControllerError{
@@ -1527,7 +1550,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// Before the grant is inherited, not after: this asks what the PARENT was
 	// confined to, and inheritExecutorGrant would copy that grant onto a child
 	// whose kind cannot honour it, making the two indistinguishable.
-	if err := checkKindNarrowing(c.st, req, c.claudeExecutorRouted()); err != nil {
+	if err := checkKindNarrowing(c.st, req, c.claudeExecutorRouted(), c.scriptExecutorRouted()); err != nil {
 		return control.SpawnResult{}, err
 	}
 

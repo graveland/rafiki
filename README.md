@@ -298,6 +298,18 @@ its stderr when it never set one). A locally hosted script dies with its
 daemon; recovery settles it `failed` with the reason "daemon restarted"
 rather than leaving it running-with-no-process.
 
+**Where scripts run.** When an executor pool is configured and one of its
+executors was started with `--launch script`, the child is hosted ON that
+executor under daraja: the executor resolves the pymodule from its own synced
+cache (so git-sourced repos and requirements venvs work, exactly like
+`pymodule_run` there), serves the child's per-child socket against the
+daemon's face over the same TLS the executor itself dials with, and never
+respawns a script — its exit is its result. `--launch script` implies the
+owner's pymodule corpus sync and git-source refreshes on that executor
+(`--pymodules-sync=false` / `--pymodule-git-sync=false` refuse them
+explicitly). With no script-capable executor, the daemon hosts the child
+locally (the owner's own saved modules only; no git repos, no venvs).
+
 ## The agent inbox
 
 The daemon runs two durable stores for the same traffic with opposite
@@ -380,6 +392,12 @@ declares `claude` in `--launch` — no operator action needed. A daraja-routed
 claude child is proxied through the daemon (capture, cost accounting, routing
 visibility) while still billing the user's own Claude subscription by default
 (`--passthrough-auth auto|on|off`, mirroring `rafiki claude --passthrough-auth`).
+
+`--launch` takes the child protocol the executor will host: `claude` (implying
+the skill corpus sync) or `script` (implying the owner's pymodule corpus sync
+and git-source refreshes, so script children can resolve their pymodules from
+that machine's synced cache). They are independent opt-ins; an executor that
+declares neither hosts nothing.
 
 `rafiki daraja launch` is the manual entry point — useful for debugging the
 launch path without a full spawn. It resolves an executor matching the

@@ -365,7 +365,7 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // stamped and daemon-local pool state — nothing from the caller, nothing from
 // the model — so ctrl_spawn, ctrl_resume and agent_spawn are all covered by
 // the one check, with no route left to enumerate.
-func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executorPoolConnected bool) error {
+func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executorPoolConnected, scriptExecutorRouted bool) error {
 	// An omitted kind is fundi (spawnKindLabel), so normalize it the same way
 	// resolveSpawnPlan and spawnKindLabel do before testing against the kinds
 	// that honour an executor grant.
@@ -398,6 +398,17 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 		return nil
 	}
 
+	// script honours the grant when a live executor actually advertises the
+	// script launch kind (scriptExecutorRouted — the same predicate the
+	// runner routes on): the child's daraja launches on the pool's machine
+	// through chooseLaunchExecutor, the same admission pipeline. When no
+	// executor declares the kind, the runner falls back to a local fork —
+	// which is exactly the widening this guard refuses for a confined
+	// parent, so the fallback must be refused rather than taken.
+	if kind == protocol.KindScript && scriptExecutorRouted {
+		return nil
+	}
+
 	if kind == protocol.KindClaude {
 		return &control.ControllerError{
 			Code: protocol.ErrInvalidArgs,
@@ -405,6 +416,24 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 				"no executor pool connection — its local-subprocess fallback would fork on the " +
 				"daemon's own host with the daemon's filesystem. Configure an executor pool " +
 				"(RAFIKI_EXECUTORS_ENABLED) or run this spawn top-level.",
+		}
+	}
+	if kind == protocol.KindScript {
+		if executorPoolConnected {
+			return &control.ControllerError{
+				Code: protocol.ErrInvalidArgs,
+				Message: "spawn refused: the parent runs under an executor grant, and no live executor " +
+					"advertises the script launch kind (start one with --launch script) — the local " +
+					"fallback would fork on the daemon's own host with the daemon's filesystem. " +
+					"Run this spawn top-level, or host a script-capable executor.",
+			}
+		}
+		return &control.ControllerError{
+			Code: protocol.ErrInvalidArgs,
+			Message: "spawn refused: the parent runs under an executor grant, and kind script has " +
+				"no executor pool connection — its local-subprocess fallback would fork on the " +
+				"daemon's own host with the daemon's filesystem. Configure an executor pool " +
+				"(RAFIKI_EXECUTORS_ENABLED) with --launch script, or run this spawn top-level.",
 		}
 	}
 	return &control.ControllerError{

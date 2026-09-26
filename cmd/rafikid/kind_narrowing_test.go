@@ -9,6 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
+	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -29,6 +31,7 @@ func TestKindNarrowing(t *testing.T) {
 		parentSel     string
 		kind          string
 		poolConnected bool
+		scriptRouted  bool // a live executor advertises the script launch kind
 		wantRefused   bool
 		wantLocalNote bool // refusal must name the local-subprocess fallback
 	}{
@@ -38,6 +41,13 @@ func TestKindNarrowing(t *testing.T) {
 		{name: "confined parent, fundi child", parentSel: "env=ci", kind: protocol.KindFundi, wantRefused: false},
 		{name: "unconfined parent, claude child, no pool", kind: protocol.KindClaude, wantRefused: false},
 		{name: "unconfined parent, omitted kind", kind: "", wantRefused: false},
+		// Script honours the grant only through the launch path: admitted
+		// exactly when a live executor advertises --launch script, refused
+		// whenever the local fallback (with or without a pool connection)
+		// would fork on the daemon's own host.
+		{name: "confined parent, script child, script executor live", parentSel: "env=ci", kind: protocol.KindScript, poolConnected: true, scriptRouted: true, wantRefused: false},
+		{name: "confined parent, script child, pool without a script executor", parentSel: "env=ci", kind: protocol.KindScript, poolConnected: true, wantRefused: true},
+		{name: "confined parent, script child, no pool", parentSel: "env=ci", kind: protocol.KindScript, wantRefused: true, wantLocalNote: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := childstore.New()
@@ -49,7 +59,7 @@ func TestKindNarrowing(t *testing.T) {
 			err := checkKindNarrowing(st, protocol.SpawnRequest{
 				Kind:          tc.kind,
 				ParentChildID: "c_parent",
-			}, tc.poolConnected)
+			}, tc.poolConnected, tc.scriptRouted)
 
 			if tc.wantRefused {
 				if err == nil {
@@ -83,7 +93,7 @@ func TestKindNarrowing(t *testing.T) {
 func TestKindNarrowingIgnoresTopLevelSpawns(t *testing.T) {
 	st := childstore.New()
 	for _, poolConnected := range []bool{false, true} {
-		if err := checkKindNarrowing(st, protocol.SpawnRequest{Kind: protocol.KindClaude}, poolConnected); err != nil {
+		if err := checkKindNarrowing(st, protocol.SpawnRequest{Kind: protocol.KindClaude}, poolConnected, false); err != nil {
 			t.Fatalf("a top-level claude spawn was refused (poolConnected=%v): %v", poolConnected, err)
 		}
 	}
@@ -107,5 +117,36 @@ func TestClaudeExecutorRoutedMatchesClaudeRunnerFallback(t *testing.T) {
 	c.darajaPool = &darajapool.Pool{}
 	if !c.claudeExecutorRouted() {
 		t.Fatal("both pool connections set: claude children launch on the pool")
+	}
+}
+
+// The guard's script predicate and scriptRunner's fallback predicate must be
+// the SAME predicate, exactly like the claude pair below them: the guard may
+// only admit a confined parent's script child when the child would actually
+// launch on the pool, and scriptRunner may only fall back to the daemon host
+// in exactly the cases the guard refused. scriptExecutorRouted is that shared
+// definition; this test pins it to the three things that decide the fallback
+// (both pool connections, and a live executor advertising the launch kind) so
+// the two cannot drift.
+func TestScriptExecutorRoutedMatchesScriptRunnerFallback(t *testing.T) {
+	c := &Controller{}
+	if c.scriptExecutorRouted() {
+		t.Fatal("no pool: scriptExecutorRouted must be false (scriptRunner falls back locally)")
+	}
+	c.execPoolConn = &execpool.Pool{}
+	if c.scriptExecutorRouted() {
+		t.Fatal("execPoolConn alone is not enough: the runner also requires darajaPool")
+	}
+	c.darajaPool = &darajapool.Pool{}
+	c.execPool = &fakePool{live: []execpool.LiveExecutor{ex("e1", map[string]string{"env": "ci"}, "")}}
+	if c.scriptExecutorRouted() {
+		t.Fatal("no live executor advertises the script launch kind: the local fallback stays")
+	}
+	c.execPool = &fakePool{live: []execpool.LiveExecutor{{
+		Executor: executors.Executor{ID: "e1", Labels: map[string]string{"env": "ci"}, Enabled: true},
+		Describe: &executorpb.DescribeResponse{LaunchKinds: []string{"script"}},
+	}}}
+	if !c.scriptExecutorRouted() {
+		t.Fatal("a live executor advertising --launch script: script children launch on the pool")
 	}
 }

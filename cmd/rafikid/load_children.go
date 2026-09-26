@@ -91,16 +91,25 @@ func shouldAutoResume(rec childstore.ChildRecord) bool {
 // scriptNeedsRestartSettle reports whether a recovered row is a script
 // child that was ALIVE when the daemon hosting it died, and whose death this
 // daemon must therefore settle (loadChildren collects them and settles after
-// the walk). A locally hosted script dies with its daemon — same as a local
+// the walk). A LOCALLY hosted script dies with its daemon — same as a local
 // claude child — but unlike claude, its parent is told: the row's own
 // non-terminal status is the proof the process is gone, and a foreign-LIVE
 // row (another daemon hosts it right now) is none of this daemon's business.
 // A terminal row settled when it exited and settles again never.
+//
+// A DARAJA-hosted script does not die with its daemon: daraja keeps the
+// process on the executor, keeps re-dialing while the daemon is down, and the
+// script's own SDK calls fail Unavailable during the gap. Its
+// rafiki/daraja-pgid label (stamped at launch, like claude's) is the marker;
+// such a row is loaded as exited (the same posture a daraja-hosted claude
+// gets), NOT settled — settling "failed (daemon restarted)" toward the parent
+// would be a lie about a process that may still be running.
 func scriptNeedsRestartSettle(rec childstore.ChildRecord, own ownership) bool {
 	return rec.Kind == protocol.KindScript &&
 		rec.Status != "" &&
 		rec.Status != string(protocol.StatusExited) &&
-		own != foreignLive
+		own != foreignLive &&
+		rec.Labels["rafiki/daraja-pgid"] == ""
 }
 
 // ownership is recovery's answer to "may this daemon run this child".

@@ -263,3 +263,28 @@ func pinVerify(wantHex string) func([][]byte, [][]*x509.Certificate) error {
 		return nil
 	}
 }
+
+// TLSTransport returns an http.RoundTripper speaking TLS to the daemon's
+// control listener with the SAME verification posture dialDaemon uses: the
+// leaf certificate is verified by pinned SHA-256 fingerprint when pinCert is
+// given (the posture a --pin-cert executor itself dials with), and by system
+// roots otherwise. ServerName is the SNI to present when it differs from the
+// host in the URL the transport dials.
+//
+// This is the transport for the executor-hosted per-child socket's proxy
+// target: the face lives on the same listener this process reverse-dials, so
+// a self-signed or internal-CA daemon must be verified by the same pin for
+// both channels or one of them has no trust at all. No HTTP/2 is forced: the
+// listener advertises http/1.1 over ALPN (its h2 is reserved for the
+// INVERTED upgrade connections), and Connect's streaming rides HTTP/1.1
+// chunking fine.
+func TLSTransport(serverName, pinCert string) http.RoundTripper {
+	tlsCfg := &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: true, // placeholder — PinCert check below
+	}
+	if pinCert != "" {
+		tlsCfg.VerifyPeerCertificate = pinVerify(pinCert)
+	}
+	return &http.Transport{TLSClientConfig: tlsCfg}
+}

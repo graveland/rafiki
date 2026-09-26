@@ -516,6 +516,20 @@ the daemon has an executor pool configured and one of its executors declares
 back to spawning claude as a local subprocess of the daemon, unchanged from
 before this existed.
 
+`rafiki executor serve --launch script` hosts script children the same way:
+the executor resolves the spawn's pymodule from its own synced cache (blob
+corpus with per-module venvs, git checkouts with their one shared venv —
+`pymodule_run`'s resolution), serves the child's per-child Connect socket
+against the daemon's face (TLS with the executor's own `--pin-cert`; the
+child secret arrives in the launch payload's environment, never argv), runs
+the interpreter on the resolved argv, and does NOT respawn a script — a
+script's exit is its result. `--launch script` implies `--pymodules-sync` and
+`--pymodule-git-sync` unless each is refused explicitly. A script spawn on a
+daemon whose executors declare no `script` launch kind falls back to the
+daemon's own host (the owner's saved modules only), and under an
+executor-granted parent that fallback is refused instead — the grant would be
+widened by a fork on the daemon's host.
+
 A daraja-routed `--kind claude` child is proxied through the daemon (capture,
 cost accounting, routing visibility) while still billing the user's own
 Claude subscription by default. `rafiki create --passthrough-auth

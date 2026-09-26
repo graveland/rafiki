@@ -186,6 +186,41 @@ func TestLaunchRejectsASpecWithNoClaudeParams(t *testing.T) {
 	}
 }
 
+// A SCRIPT spec is the second valid launch payload: the executor resolves the
+// script from its synced cache and Launch ships the params to it. The empty
+// ScriptParams message (a kind without either variant) stays refused.
+func TestLaunchAcceptsAScriptSpec(t *testing.T) {
+	reg := NewRegistry()
+	pool := New(reg)
+	_, err := Launch(context.Background(), LaunchParams{
+		ExecPool:   &fakeExecPool{err: errors.New("no admin client")},
+		Pool:       pool,
+		Registry:   reg,
+		DialAddr:   "/tmp/whatever.sock",
+		ExecutorID: "exec-1",
+		ChildID:    "c1",
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_SCRIPT,
+			Script: &darajapb.ScriptParams{Repo: "local", Script: "driver"},
+		},
+	})
+	// The fake pool refuses every admin client, so Launch fails there — the
+	// assertion is only that the spec VALIDATED: the failure is the fake's,
+	// not Launch's payload check.
+	if err == nil || !strings.Contains(err.Error(), "no admin client") {
+		t.Fatalf("a script spec must pass Launch's payload check (the fake pool refuses next), got: %v", err)
+	}
+
+	_, err = Launch(context.Background(), LaunchParams{
+		ExecPool: &fakeExecPool{}, Pool: pool, Registry: reg,
+		DialAddr: "/tmp/whatever.sock", ExecutorID: "exec-1", ChildID: "c2",
+		Spec: &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_SCRIPT},
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires spec") {
+		t.Fatalf("an empty script spec must still be refused, got: %v", err)
+	}
+}
+
 func TestLaunchPropagatesAdminClientForFailure(t *testing.T) {
 	reg := NewRegistry()
 	pool := New(reg)

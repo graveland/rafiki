@@ -69,19 +69,32 @@ func (s *Server) Restart(
 // and come out here — and test/integration's TestClaudeArgvIdenticalAcrossPaths
 // drives that whole chain against the local-subprocess builder, so the wire→
 // host mapping cannot drift from what production sends.
+//
+// A SCRIPT spec maps to a kind-only ChildSpec, deliberately without argv: the
+// script's argv is resolved by the executor from its synced cache BEFORE
+// daraja starts (repo/script names are not paths), and nothing that can call
+// Restart ever calls it for a script — a script's exit is its result. A spec
+// this function maps carries no run, and restarting into one fails at
+// startLocked's empty-argv refusal rather than re-running the script blind.
 func SpecFromProto(p *darajapb.ChildSpec) ChildSpec {
-	if p == nil || p.GetKind() != darajapb.Kind_KIND_CLAUDE {
+	if p == nil {
 		return ChildSpec{}
 	}
-	c := p.GetClaude()
-	return ChildSpec{
-		Kind:               KindClaude,
-		Model:              c.GetModel(),
-		ResumeSession:      c.GetResumeSession(),
-		PermissionMode:     c.GetPermissionMode(),
-		AppendSystemPrompt: c.GetAppendSystemPrompt(),
-		ExtraArgs:          c.GetExtraArgs(),
+	switch p.GetKind() {
+	case darajapb.Kind_KIND_CLAUDE:
+		c := p.GetClaude()
+		return ChildSpec{
+			Kind:               KindClaude,
+			Model:              c.GetModel(),
+			ResumeSession:      c.GetResumeSession(),
+			PermissionMode:     c.GetPermissionMode(),
+			AppendSystemPrompt: c.GetAppendSystemPrompt(),
+			ExtraArgs:          c.GetExtraArgs(),
+		}
+	case darajapb.Kind_KIND_SCRIPT:
+		return ChildSpec{Kind: KindScript}
 	}
+	return ChildSpec{}
 }
 
 func (s *Server) Shutdown(
@@ -175,9 +188,29 @@ func (s *Server) Relay(
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.host.Done():
-			// The event channel is never closed — it has several senders and
-			// closing it under one would panic. Done is the end signal.
-			return nil
+			// The host is finished — but an event already taken off the channel
+			// may still be queued in front of this select, and select picks
+			// randomly between two ready cases. A final Exited stranded that way
+			// would never reach the consumer, whose Wait would then hang for a
+			// child that ended long ago (a script's exit is its result — exactly
+			// the case where the last event is the one that matters). Drain the
+			// remaining events before ending the stream; nothing new can arrive
+			// behind a closed done.
+			for {
+				select {
+				case ev := <-s.host.Events():
+					resp, err := relayResponse(ev)
+					if err != nil {
+						return err
+					}
+					if err := stream.Send(resp); err != nil {
+						s.stash(resp)
+						return err
+					}
+				default:
+					return nil
+				}
+			}
 		case ev := <-s.host.Events():
 			resp, err := relayResponse(ev)
 			if err != nil {
@@ -198,6 +231,10 @@ func relayResponse(ev Event) (*darajapb.RelayResponse, error) {
 	case len(ev.Stdout) > 0:
 		return &darajapb.RelayResponse{
 			Event: &darajapb.RelayResponse_Stdout{Stdout: ev.Stdout},
+		}, nil
+	case len(ev.Stderr) > 0:
+		return &darajapb.RelayResponse{
+			Event: &darajapb.RelayResponse_Stderr{Stderr: ev.Stderr},
 		}, nil
 	case ev.Restarted != nil:
 		return &darajapb.RelayResponse{

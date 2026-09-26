@@ -92,6 +92,18 @@ func (s *Server) Close() error {
 // bind, like serveConnectUDS does; a live server on that path is refused
 // rather than clobbered.
 func Serve(ctx context.Context, dir string, target *url.URL, secret string) (*Server, error) {
+	return ServeTransport(ctx, dir, target, secret, nil)
+}
+
+// ServeTransport is Serve with a caller-supplied outbound RoundTripper. The
+// executor-hosted child needs one: its target is the daemon's TLS control
+// listener, verified by a pinned certificate fingerprint rather than the
+// system roots a default transport would demand, or — when the executor
+// itself dialled a unix socket — the daemon's local Connect socket, which no
+// URL can address on its own. A nil rt means the default transport, which is
+// what the daemon's own local-hosted children use (their target is a
+// loopback URL).
+func ServeTransport(ctx context.Context, dir string, target *url.URL, secret string, rt http.RoundTripper) (*Server, error) {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			out := pr.Out
@@ -109,8 +121,38 @@ func Serve(ctx context.Context, dir string, target *url.URL, secret string) (*Se
 		// those bytes until the stream ends, and a waiting script would see
 		// nothing until it stopped caring.
 		FlushInterval: -1,
+		Transport:     rt,
+		// A dead or restarting daemon is not a script bug: it is an outage the
+		// caller must be able to recognise and wait out. ReverseProxy's default
+		// answer is a bare 502; the explicit handler keeps the status (503 —
+		// and 502 would map the same way) and adds a Connect error body naming
+		// code "unavailable", so a Connect client — the wave-6 SDK above all —
+		// reads a typed Unavailable with a reason instead of an unparseable
+		// gateway error. Nothing here logs: the failure belongs to the caller
+		// that made the request, and the error text carries only the transport
+		// failure (never headers, never the secret).
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprintf(w, `{"code":"unavailable","message":%q}`,
+				fmt.Sprintf("rafiki daemon unreachable: %v", err))
+		},
 	}
 	return serve(ctx, dir, proxy)
+}
+
+// UnixTransport returns a RoundTripper that ignores the URL's host entirely
+// and dials the given unix socket — the shape that reaches a daemon's
+// Connect control socket, which has no TCP address at all. The caller pairs
+// it with a target URL whose scheme/host are irrelevant placeholders; the
+// Rewrite above still sets them, but the dialer never reads them.
+func UnixTransport(socketPath string) http.RoundTripper {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
 }
 
 // ServeHandler is Serve against an http.Handler instead of a URL — the shape

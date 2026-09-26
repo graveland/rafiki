@@ -207,18 +207,31 @@ func skillsSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bo
 }
 
 // pymodulesSyncEnabled resolves the effective --pymodules-sync value from the
-// flag and its environment form, with the same flag-vs-env precedence as
-// skillsSyncEnabled (see that function for why the environment is read here
-// rather than as the flag's default).
+// flag, its environment form, and the --launch list. The environment is read
+// HERE rather than as the flag's default for two reasons: flag registration
+// runs before loadExecutorEnv has applied executor.env, so a default captured
+// at construction time would miss what the file provides; and an explicit
+// --pymodules-sync=false must stay able to switch the feature off on a machine
+// whose environment enables it — Flags().Changed tells the explicit spelling
+// apart from an untouched default, which the flag's value alone cannot.
 //
-// Unlike skills sync there is NO launch-kind implication: there is no single
-// launch kind pymodules correlates with, so an operator opts in explicitly --
-// by flag or by environment -- and nothing implies it for them.
-func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+// --launch script implies the sync. An executor that hosts script children
+// needs the owner's corpus — a script child's pymodule resolves from THIS
+// machine's synced cache, and without the sync it is always empty — and the
+// daemon's pusher keys its eligibility off this same Describe, so a script
+// host with the sync off launches children that can never resolve their
+// script. An explicit --pymodules-sync=false still wins over the implication:
+// refusing the corpus on a script host is a deliberate act and must be
+// spelled as one. (There is deliberately no implication for any other launch
+// kind: pymodules correlate with hosting scripts, nothing else.)
+func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool {
 	if cmd.Flags().Changed("pymodules-sync") {
 		return flagOn
 	}
-	return os.Getenv("RAFIKI_EXECUTOR_PYMODULES_SYNC") != ""
+	if os.Getenv("RAFIKI_EXECUTOR_PYMODULES_SYNC") != "" {
+		return true
+	}
+	return slices.Contains(launchKinds, "script")
 }
 
 // pymoduleGitSyncEnabled resolves the effective --pymodule-git-sync value
@@ -226,15 +239,21 @@ func pymodulesSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
 // as pymodulesSyncEnabled (see that function for why the environment is read
 // here rather than as the flag's default).
 //
-// Like pymodules sync there is NO launch-kind implication: git-sourced
-// pymodules correlate with no single launch kind either, so an operator opts
-// in explicitly -- by flag or by environment -- and nothing implies it for
-// them.
-func pymoduleGitSyncEnabled(cmd *cobra.Command, flagOn bool) bool {
+// --launch script implies the sync, like pymodules sync: a script child whose
+// repo names a git source resolves against THIS machine's synced checkout, so
+// a script host that refuses refreshes hosts only the blob-corpus half of its
+// scripts. An explicit --pymodule-git-sync=false still wins: refusing the
+// checkouts is a deliberate act (the executor's own git does the cloning, a
+// real network side effect an operator may not want) and must be spelled as
+// one.
+func pymoduleGitSyncEnabled(cmd *cobra.Command, flagOn bool, launchKinds []string) bool {
 	if cmd.Flags().Changed("pymodule-git-sync") {
 		return flagOn
 	}
-	return os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != ""
+	if os.Getenv("RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC") != "" {
+		return true
+	}
+	return slices.Contains(launchKinds, "script")
 }
 
 // ─── serve ─────────────────────────────────────────────────────────────────────
@@ -307,8 +326,8 @@ Two transports, exactly one of which is used:
 				LSPConfig:       lspConfig,
 				NoLSP:           noLSP,
 				SkillsSync:      skillsSyncEnabled(cmd, skillsSync, launchKinds),
-				PyModulesSync:   pymodulesSyncEnabled(cmd, pymodulesSync),
-				PymoduleGitSync: pymoduleGitSyncEnabled(cmd, pymoduleGitSync),
+				PyModulesSync:   pymodulesSyncEnabled(cmd, pymodulesSync, launchKinds),
+				PymoduleGitSync: pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
 			})
@@ -318,13 +337,21 @@ Two transports, exactly one of which is used:
 			if err != nil {
 				return fmt.Errorf("resolve own binary: %w", err)
 			}
-			childBin, err := exec.LookPath("claude")
-			if err != nil && len(launchKinds) > 0 {
-				return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
+			// The hosted claude binary is only needed when this executor
+			// volunteers to host claude children. --launch script alone must
+			// start on a box that has no claude install at all -- a script's
+			// interpreter is resolved per launch (the script's venv python
+			// when one was built, else python3), not here.
+			var childBin string
+			if slices.Contains(launchKinds, "claude") {
+				childBin, err = exec.LookPath("claude")
+				if err != nil {
+					return fmt.Errorf("--launch claude given but claude is not on PATH: %w", err)
+				}
 			}
 
 			var proxyURL string
-			if len(launchKinds) > 0 {
+			if slices.Contains(launchKinds, "claude") {
 				proxyURL = executorProfileProxy(cmd)
 			}
 			// daraja's Relay carries the child's stdio both ways, so its socket
@@ -344,6 +371,12 @@ Two transports, exactly one of which is used:
 				ConnectAddr:   resolvedConnect,
 				ConnectSocket: resolvedSocket,
 				ProxyURL:      proxyURL,
+				// The executor's own TLS posture rides every launch: the
+				// daraja it spawns, and the per-child socket that daraja
+				// serves for a script child, verify the SAME listener this
+				// executor dials, by the same pinned fingerprint.
+				PinCert:    pinnedFingerprint,
+				ServerName: serverName,
 			})
 			defer admin.Close()
 			handler := executorHandler(srv, admin)
@@ -389,9 +422,12 @@ Two transports, exactly one of which is used:
 			"own git (RAFIKI_EXECUTOR_PYMODULE_GIT_SYNC enables it from a service unit)")
 	cmd.Flags().StringArrayVar(&proxyArgs, "proxy", nil, "LLM endpoint this executor will forward to, name=base_url (repeatable)")
 	cmd.Flags().StringArrayVar(&launchKinds, "launch", nil,
-		"child protocol this executor will host for the daemon, e.g. --launch claude "+
-			"(repeatable). Opt-in: with no --launch this executor hosts nothing. "+
-			"--launch claude also accepts the skill corpus unless --skills-sync=false")
+		"child protocol this executor will host for the daemon: claude or script (repeatable). "+
+			"Opt-in: with no --launch this executor hosts nothing. --launch claude also accepts the "+
+			"skill corpus unless --skills-sync=false. --launch script implies the owner's pymodule "+
+			"corpus sync and git-source refreshes (unless --pymodules-sync=false / "+
+			"--pymodule-git-sync=false): a script child resolves its pymodule from THIS machine's "+
+			"synced cache")
 	cmd.Flags().StringVar(&enrollToken, "enroll-token", os.Getenv("RAFIKI_ENROLL_TOKEN"),
 		"one-time enrollment token, required on first --connect")
 	cmd.Flags().StringVar(&credentialFile, "credential-file", "",

@@ -16,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childsock"
 	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -57,27 +59,16 @@ func scriptHostDir(stateDir, childID string) string {
 // fragment carries when it never called SetResult.
 const scriptStderrTailBytes = 4 * 1024
 
-// envStripPrefixes are the variable-name prefixes a script child's
-// environment is stripped of. The daemon's own RAFIKI_* variables name
+// scriptEnvStripped is the script child's environment strip, delegated to the
+// single definition in pkg/child — the same rule the executor applies to a
+// launch payload and the daraja host applies to its own inherited environ
+// (pkg/child.ScriptEnvStripPrefixes). Three applications of one rule; the
+// daemon's is the primary one. The daemon's own RAFIKI_* variables name
 // daemon internals (the control socket, the profile, the test DSN); the
 // ANTHROPIC_*/OPENROUTER_* families carry LLM credentials the child has no
 // business holding. RAFIKI_CHILD_CONNECT is the deliberate exception — the
 // one channel the child is given — and is appended after the strip.
-var envStripPrefixes = []string{"RAFIKI_", "ANTHROPIC_", "OPENROUTER_"}
-
-// scriptEnvStripped reports whether env entry e carries a stripped prefix.
-func scriptEnvStripped(e string) bool {
-	k := e
-	if i := strings.IndexByte(e, '='); i >= 0 {
-		k = e[:i]
-	}
-	for _, p := range envStripPrefixes {
-		if strings.HasPrefix(k, p) {
-			return true
-		}
-	}
-	return false
-}
+func scriptEnvStripped(e string) bool { return child.ScriptEnvStripped(e) }
 
 // scriptChildEnv builds a script child's process environment:
 //
@@ -135,13 +126,124 @@ func scriptInterpreter() string {
 	return "python3"
 }
 
-// scriptRunner builds the local Runner for a kind=script child: materialize
+// scriptRunner routes a script child's hosting: an executor that advertises
+// the script launch kind hosts it under daraja (the executor resolves the
+// pymodule from its synced cache, where git sources and venvs exist); with no
+// such executor the wave-3 local runner stays the fallback — the daemon forks
+// the pymodule process itself. The routing decision is the same predicate
+// checkKindNarrowing consults (scriptExecutorRouted): the guard admits a
+// confined parent's script child exactly when this would launch on the pool,
+// and this falls back to the daemon host in exactly the cases the guard
+// refused, so the two can never drift (pinned by the TestClaudeExecutorRouted
+// and TestKindNarrowing tests).
+//
+// A selection failure while the pool DOES advertise the kind propagates: the
+// parent's grant, selector or workspace mode refused every candidate, and
+// silently running on the daemon's own host instead would be the exact
+// widening the kind-narrowing guard exists to prevent.
+func (c *Controller) scriptRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string) (child.Runner, error) {
+	if c.scriptExecutorRouted() {
+		return c.darajaScriptRunner(req, childID, ownerName)
+	}
+	return c.localScriptRunner(req, childID, ownerUserID)
+}
+
+// scriptExecutorRouted reports whether a script child would LAUNCH on the
+// executor pool rather than falling back to a local fork on the daemon's own
+// host. Two conditions, both required: the daemon must be able to launch
+// daraja children at all (the same two connections claude's routing needs —
+// see claudeExecutorRouted), and some live executor must actually advertise
+// the script launch kind — the brief's "no executor declaring it → the local
+// runner". A pool that exists but advertises nothing scriptable is the wave-3
+// world, and the local runner stays.
+func (c *Controller) scriptExecutorRouted() bool {
+	if !c.claudeExecutorRouted() {
+		return false
+	}
+	return len(launchKindSet(c.execPool.Live(), protocol.KindScript)) > 0
+}
+
+// darajaScriptRunner launches the script child on an executor: the executor
+// resolves the pymodule from its synced cache (so repo="local" resolves from
+// the pushed corpus and a git source from its synced checkout — both with
+// their venvs), builds the child's environment the way the executor itself
+// was configured, and serves the child's per-child Connect socket against the
+// daemon's face. The daemon-side side of the launch is deliberately thin:
+// choose the executor, send the spec, take the relay-backed Runner.
+func (c *Controller) darajaScriptRunner(req protocol.SpawnRequest, childID, ownerName string) (child.Runner, error) {
+	if req.Script == nil {
+		return nil, errors.New("script kind requires a script spec (repo + script)")
+	}
+	exec, err := c.chooseLaunchExecutor(req, ownerName, protocol.KindScript)
+	if err != nil {
+		return nil, err
+	}
+	spec := &darajapb.ChildSpec{
+		Kind: darajapb.Kind_KIND_SCRIPT,
+		Script: &darajapb.ScriptParams{
+			Repo:    req.Script.Repo,
+			Script:  req.Script.Script,
+			Modules: req.Script.Modules,
+			Args:    req.Script.Args,
+			Env:     scriptLaunchEnv(req.Env),
+			// The per-child Connect secret rides the launch payload (the same
+			// authenticated channel proxy_token/mcp_token travel over) and
+			// then the daraja process's environment — never argv, which ps
+			// renders world-readable. One mint, one resolver (ChildForMCPToken),
+			// dies with the child (handleChildExit's forgetMCPToken) — the same
+			// per-child secret the MCP face authenticates.
+			ChildSecret: c.mintMCPToken(childID),
+		},
+	}
+	// Same bound as the local path's mint: the credential map grows one entry
+	// per mint, and a spawn that fails after the mint leaks it (forget only
+	// runs from handleChildExit).
+	c.sweepMCPTokensIfDue()
+
+	result, err := darajapool.Launch(c.baseCtx, darajapool.LaunchParams{
+		ExecPool:   c.execPoolConn,
+		Pool:       c.darajaPool,
+		Registry:   c.darajaReg,
+		DialAddr:   c.darajaDialAddr,
+		ExecutorID: exec.ID,
+		ChildID:    childID,
+		Cwd:        req.Cwd,
+		Spec:       spec,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("launch daraja on executor %s: %w", exec.ID, err)
+	}
+	c.stashDarajaBinding(childID, exec.ID, result.Pgid)
+	return darajapool.NewRunner(c.darajaPool, childID), nil
+}
+
+// scriptLaunchEnv filters the spawn's forwarded environment for the launch
+// payload: the same strip rule the script child's env build applies (and the
+// executor applies again on arrival) — a forwarded RAFIKI_/ANTHROPIC_/
+// OPENROUTER_ variable must not resurrect what the strip removes, and the
+// only name under those prefixes a child is ever GIVEN (RAFIKI_CHILD_CONNECT)
+// is written by the hosting side after the strip.
+func scriptLaunchEnv(forwarded map[string]string) map[string]string {
+	if len(forwarded) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(forwarded))
+	for k, v := range forwarded {
+		if k == "" || scriptEnvStripped(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// localScriptRunner builds the local Runner for a kind=script child: materialize
 // the pymodule, open the per-child Connect socket, exec the interpreter. The
 // returned runner wraps child.NewProcessRunner so the process gets exactly
 // the subprocess semantics every other child gets — its own process group,
 // process-group SIGTERM/SIGKILL, the Wait contract — and closes the socket
 // when the child exits.
-func (c *Controller) scriptRunner(req protocol.SpawnRequest, childID, ownerUserID string) (child.Runner, error) {
+func (c *Controller) localScriptRunner(req protocol.SpawnRequest, childID, ownerUserID string) (child.Runner, error) {
 	if req.Script == nil {
 		return nil, errors.New("script kind requires a script spec (repo + script)")
 	}
@@ -295,7 +397,7 @@ func (c *Controller) materializeScript(spec *protocol.ScriptSpec, childID, owner
 		ppEntries = append(ppEntries, mdir)
 	}
 	if scriptReqs || anyModuleReqs {
-		// pymoduleVenvReadiness's rule, adapted to the local host: a
+		// tools.PymoduleVenvReadiness.s rule, adapted to the local host: a
 		// requirements block needs a dependency venv, and venvs exist only in
 		// an executor's synced cache. Refuse rather than run against missing
 		// imports.

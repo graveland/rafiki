@@ -371,36 +371,96 @@ refused the same fields at save time (pkg/presets.Validate; the database's
 own CHECK, migration 0040, backs it). A script child cannot be resumed: its
 exit IS its result, so `Resume` refuses with "spawn it again".
 
-**Hosting.** A locally hosted script (no executor pool route yet — wave 4
-moves hosting onto executors via daraja) forks on the daemon's own host, in
-its own process group, from the daemon's state dir
-(`script-host/<childID>/`, 0700). Its environment is the daemon's FULL
-environment minus every `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*` variable —
-no credential, no retired client socket, no child-id global — plus a
-recomputed `PYTHONPATH` (script dir is `sys.path[0]`; each named module's
+**Hosting.** A script child is hosted where its pymodule cache is. The
+daemon routes the spawn through `scriptExecutorRouted`: when an executor pool
+is configured AND a live executor advertises `--launch script`, the child is
+launched under daraja ON that executor; otherwise the local runner stays the
+fallback — the daemon forks the pymodule on its own host. The routing
+predicate is the SAME one `checkKindNarrowing` consults, so a child whose
+parent carries an executor grant is admitted exactly when it would launch on
+the pool and refused when its fallback would fork on the daemon's host — the
+two can never drift.
+
+The executor-hosted path (wave 4):
+
+- The launch payload is a daraja `ChildSpec` with the `script` variant
+  (`ScriptParams{repo, script, modules, args, env, child_secret}`). The
+  EXECUTOR resolves it against its own synced pymodule cache at launch time —
+  the same layout `SyncPyModules` (blob modules, with per-module venvs) and
+  `SyncPyModuleGitSource` (checkouts) produce, and the same resolution
+  `pymodule_run` performs: the script's venv python is the interpreter when
+  one was built, the repo's single venv for a git checkout, `python3`
+  (or `RAFIKI_PYMODULE_PYTHON` on the executor) otherwise. A name the cache
+  does not hold is a `FailedPrecondition` refusal at launch, not a runtime
+  surprise; a requirements block without a built venv is refused with
+  `pymodule_run`'s readiness wording (including the build-in-progress case).
+- `--launch script` implies the owner's pymodule corpus sync and git-source
+  refreshes on that executor (unless `--pymodules-sync=false` /
+  `--pymodule-git-sync=false` is spelled explicitly) — a script host without
+  the corpus hosts scripts that cannot resolve. The corpus is owner-scoped:
+  the executor's `owner` label gates what it receives, and the spawn's owner
+  must be the same user.
+- Respawn is OFF for scripts. daraja's respawn loop exists for claude (a
+  process whose value is its continuing conversation); a script's exit is its
+  result, so an unexpected exit ends the daraja with it — the host emits the
+  one `Exited` event, gives up, and the daraja process exits. A Restart of a
+  script kind is refused semantically: the wire spec carries names, not the
+  executor-resolved argv, and nothing that can call Restart ever calls it for
+  a script.
+- A script child's stderr is RELAYED (a `stderr` arm on daraja's relay
+  oneof), because the settle tail is computed from it; claude's stderr stays
+  discarded. Both pipes are synchronous, and the daemon-side consumer drains
+  stdout and stderr on their own goroutines (as `pkg/child` does) — a
+  consumer that stops reading either pipe stalls the other.
+- The per-child Connect socket moves to the executor: daraja serves
+  `pkg/childsock` against the daemon's face — the address it already
+  reverse-dials. A TLS executor dial verifies the same pinned certificate the
+  executor itself dials with (`--pin-cert`/`--server-name` ride every
+  launch); a socket-dialled executor proxies to the daemon's local Connect
+  control socket. The child secret travels in the launch payload
+  (`child_secret`) and then in the daraja process's environment
+  (`RAFIKI_CHILD_SECRET`) — never argv, which `ps` renders world-readable —
+  and is held in memory only, dying with the child. The script's environment
+  is the executor's full environment minus every
+  `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*` variable (executor-set functional
+  variables survive — the strip runs on the daemon, on the launch payload,
+  and in daraja, all from the one list in
+  `pkg/child.ScriptEnvStripPrefixes`), plus the forwarded `env`, the resolved
+  `PYTHONPATH`, and the one channel: `RAFIKI_CHILD_CONNECT`.
+
+The locally hosted fallback (no executor pool route, or no executor declares
+the kind) forks on the daemon's own host, in its own process group, from the
+daemon's state dir (`script-host/<childID>/`, 0700). Its environment is the
+daemon's FULL environment minus every `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*`
+variable — no credential, no retired client socket, no child-id global — plus
+a recomputed `PYTHONPATH` (script dir is `sys.path[0]`; each named module's
 directory joins in call order) and exactly one control variable:
 
 - `RAFIKI_CHILD_CONNECT` — the per-child socket path. NOT `RAFIKI_SOCKET` (a
   retired client variable and a hard CLI error).
 
-A script that declares `# pymodule-requirements:` without a venv is refused
-(venvs live in an executor's synced cache, not on the daemon host), and a
-git-sourced `repo` is refused with a pointer to executor hosting.
+The local runner resolves only the SPAWNING OWNER's own saved modules: a
+git-sourced `repo` is refused with a pointer to executor hosting, and so is a
+requirements block without a venv (venvs live in an executor's synced cache,
+not on the daemon host).
 
 **The per-child socket.** The socket is the credential: the process never
 sees a token, only a filesystem path it can reach and nobody else can. The
-socket (`pkg/childsock`, listening on `<script-host>/<childID>/connect.sock`,
-dir 0700 / socket 0600, HTTP/1.1 AND h2c) reverse-proxies every request to
-the daemon's Connect route with the child's per-child secret injected as
-`Authorization: Bearer …` — the same per-child secret every other child
-credential resolves through (`ChildForMCPToken`) — after stripping any
+socket (`pkg/childsock`; on the daemon host
+`<script-host>/<childID>/connect.sock`, on an executor under rafiki's own
+cache dir, dir 0700 / socket 0600, HTTP/1.1 AND h2c) reverse-proxies every
+request to the daemon's Connect route with the child's per-child secret
+injected as `Authorization: Bearer …` — the same per-child secret every other
+child credential resolves through (`ChildForMCPToken`) — after stripping any
 inbound `Authorization`/`X-Rafiki-*` header, so a caller cannot smuggle a
 stronger identity past the injection. The socket is closed and unlinked when
 the child exits, and the proxy's per-spawn bind deliberately does NOT touch
 the process umask (it is process-global; the 0700 directory is the access
 boundary). Any language with an HTTP client can speak to it: unary calls are
 `application/json`, server-streaming (`Receive`) is enveloped
-`application/connect+json`.
+`application/connect+json`. When the daemon is unreachable (restarting), the
+proxy answers HTTP 503 with a Connect error body naming code `unavailable` —
+the typed signal a retrying client waits on.
 
 **Messages.** `agent_send` to a script child lands in its inbox and the
 `Receive` stream delivers it. The inbox DELIVERY for a script child defers to
@@ -420,10 +480,20 @@ can exit before the signal rungs. A script that holds NO stream is told
 nothing before the signals — the default 180 s graceful window applies, so
 callers that want a prompt death pass explicit timeouts.
 
-**Restart.** A locally hosted script dies with its daemon. Recovery loads
+**Restart.** A LOCALLY hosted script dies with its daemon. Recovery loads
 its still-live row as exited and settles it `failed` with the reason
 "daemon restarted" toward its parent — never left running-with-no-process,
-never re-run (a re-run would silently start the work over).
+never re-run (a re-run would silently start the work over). A daraja-hosted
+script does NOT die with its daemon: daraja keeps the process on the
+executor, keeps re-dialing while the daemon is down (the script's own SDK
+calls fail `Unavailable` during the gap and retry with bounded backoff — the
+wave-6 SDK's contract), and its row — marked by the `rafiki/daraja-pgid`
+label, stamped at launch like claude's — is loaded as exited without the
+settle. Re-attaching such a child to the RESTARTED daemon (persisting the
+daraja credential across the restart and re-binding the per-child socket) is
+the design's named next step, deferred beyond "the process survives and the
+SDK retries": the daemon's daraja credential registry is in memory, so the
+restarted daemon refuses the reconnect and daraja exits with its child.
 
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 

@@ -135,12 +135,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 	case protocol.KindClaude:
 		return c.claudeRunner(req, childID, ownerName, snap)
 	case protocol.KindScript:
-		// Locally hosted: the daemon forks the pymodule process itself. Wave
-		// 4 routes this through daraja on an executor; until then a script
-		// child under an executor-granted parent is refused
-		// (checkKindNarrowing — the fork would escape the grant onto the
-		// daemon's own host).
-		return c.scriptRunner(req, childID, ownerUserID)
+		return c.scriptRunner(req, childID, ownerName, ownerUserID)
 	default:
 		return nil, nil
 	}

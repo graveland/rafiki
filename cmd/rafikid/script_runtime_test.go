@@ -331,7 +331,7 @@ print("cwd-ok=" + str(os.getcwd() == os.environ.get("PROBE_CWD")), flush=True)
 			Args:    []string{"--one", "two"},
 		},
 	}
-	runner, err := c.scriptRunner(req, "c_script_probe", "owner-1")
+	runner, err := c.scriptRunner(req, "c_script_probe", "", "owner-1")
 	if err != nil {
 		t.Fatalf("scriptRunner: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestScriptRunnerDialThroughSocket(t *testing.T) {
 		Kind:   protocol.KindScript,
 		Cwd:    t.TempDir(),
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "sleeper"},
-	}, "c_script_dial", "owner-1")
+	}, "c_script_dial", "", "owner-1")
 	if err != nil {
 		t.Fatalf("scriptRunner: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestScriptRunnerProcessGroupKillsTheSubtree(t *testing.T) {
 		Kind:   protocol.KindScript,
 		Cwd:    t.TempDir(),
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "forker"},
-	}, "c_script_group", "owner-1")
+	}, "c_script_group", "", "owner-1")
 	if err != nil {
 		t.Fatalf("scriptRunner: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Kind:   protocol.KindScript,
 		Cwd:    "/tmp",
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "s"},
-	}, "c_x", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
+	}, "c_x", "", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
 		t.Fatalf("want a proxy-face refusal, got %v", err)
 	}
 
@@ -553,7 +553,7 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Kind:   protocol.KindScript,
 		Cwd:    "/tmp",
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "s"},
-	}, "c_x", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
+	}, "c_x", "", "owner"); err == nil || !strings.Contains(err.Error(), "proxy face") {
 		t.Fatalf("want a proxy-face refusal, got %v", err)
 	}
 
@@ -565,7 +565,7 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Kind:   protocol.KindScript,
 		Cwd:    "/tmp",
 		Script: &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
-	}, "c_x", "owner")
+	}, "c_x", "", "owner")
 	if err == nil || !strings.Contains(err.Error(), "git source") {
 		t.Fatalf("want the git-source refusal, got %v", err)
 	}

@@ -50,6 +50,7 @@ const eventBuffer = 64
 // sequenced against the bytes.
 type Event struct {
 	Stdout    []byte
+	Stderr    []byte
 	Restarted *int
 	Exited    *ExitInfo
 }
@@ -82,8 +83,12 @@ func (s ChildSpec) IsZero() bool {
 		s.PermissionMode == "" && s.AppendSystemPrompt == "" && len(s.ExtraArgs) == 0
 }
 
-// KindClaude is the only child protocol daraja hosts today.
-const KindClaude = "claude"
+// KindClaude and KindScript are the child protocols daraja hosts. The relay is
+// blind to both; only the spawn path and the respawn decision consult them.
+const (
+	KindClaude = "claude"
+	KindScript = "script"
+)
 
 // Argv builds the child's command line for this spec. mcpConfig and modelArgs
 // ride in from HostOptions — they are launch-wide rather than spec state, and
@@ -98,18 +103,29 @@ const KindClaude = "claude"
 // TestClaudeArgvIdenticalAcrossPaths drives end to end against the
 // local-subprocess builder so the two cannot drift on flags again.
 func (s ChildSpec) Argv(mcpConfig string, modelArgs []string) []string {
-	if s.Kind != KindClaude {
-		return nil
+	switch s.Kind {
+	case KindClaude:
+		return claudeargv.Build(claudeargv.Params{
+			Model:              s.Model,
+			ResumeSession:      s.ResumeSession,
+			PermissionMode:     s.PermissionMode,
+			AppendSystemPrompt: s.AppendSystemPrompt,
+			ExtraArgs:          s.ExtraArgs,
+			MCPConfig:          mcpConfig,
+			ModelArgs:          modelArgs,
+		})
+	case KindScript:
+		// A script's argv is RESOLVED BY THE EXECUTOR before daraja starts: the
+		// interpreter rides HostOptions.Binary, the script path and its args
+		// arrive positionally and land in ExtraArgs. There is no claude-style
+		// builder to reconcile — and the nil-returning unknown-kind path would
+		// misreport a script with no resolved argv as an unsupported kind, so
+		// the empty case returns a NON-NIL empty slice and startLocked turns
+		// it into its own refusal ("resolved to an empty command line").
+		out := make([]string, 0, len(s.ExtraArgs))
+		return append(out, s.ExtraArgs...)
 	}
-	return claudeargv.Build(claudeargv.Params{
-		Model:              s.Model,
-		ResumeSession:      s.ResumeSession,
-		PermissionMode:     s.PermissionMode,
-		AppendSystemPrompt: s.AppendSystemPrompt,
-		ExtraArgs:          s.ExtraArgs,
-		MCPConfig:          mcpConfig,
-		ModelArgs:          modelArgs,
-	})
+	return nil
 }
 
 // HostOptions describes the process to host.
@@ -229,6 +245,12 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	if argv == nil {
 		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}
+	if len(argv) == 0 {
+		// A resolved script with no positional argv (the executor did not hand
+		// daraja a script path) would exec the interpreter into its REPL with
+		// no script at all — visible as a hung child. Refuse instead.
+		return nil, fmt.Errorf("daraja: child kind %q resolved to an empty command line", spec.Kind)
+	}
 	h.spec = spec
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
 		PiBinary:    h.opts.Binary,
@@ -253,9 +275,18 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 	h.runner, h.stdin, h.exitCh, h.running = runner, stdin, exitCh, true
 
 	go h.watch(runner, exitCh)
-	// stderr is drained and discarded: the controller reads the child's
-	// protocol on stdout, and an undrained pipe eventually blocks the writer.
-	go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	if spec.Kind == KindScript {
+		// A script's stderr is load-bearing, not noise: its tail is what a
+		// failed run's settle carries when the script never reported a result
+		// (see the daemon-side script settle). Relay it. Claude's stderr stays
+		// discarded — its protocol is stdout and its stderr is engine chatter
+		// the controller cannot use.
+		go h.pumpStderr(stderr)
+	} else {
+		// stderr is drained and discarded: the controller reads the child's
+		// protocol on stdout, and an undrained pipe eventually blocks the writer.
+		go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	}
 	return stdout, nil
 }
 
@@ -290,7 +321,18 @@ func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo) {
 // sees the death before the replacement. Giving up closes done: a daraja whose
 // child cannot be kept alive has nothing left to host, and the invariant is
 // that a daraja always has exactly one child.
+//
+// Scripts never respawn. A script's exit IS its result: the process that
+// produced exit code 3 is not replaced by one that might not, and the
+// consumer's settle semantics (exit 0 = done, anything else = failed with the
+// stderr tail) are computed from the ONE run the caller asked for. Giving up
+// here is also what ends the daraja process itself — runDarajaServe exits when
+// done closes — so a finished script leaves no host behind.
 func (h *Host) respawn() {
+	if h.spec.Kind != KindClaude {
+		h.doneOnce.Do(func() { close(h.done) })
+		return
+	}
 	limit, backoff := h.opts.RespawnLimit, h.opts.RespawnBackoff
 	if limit <= 0 {
 		limit = defaultRespawnLimit
@@ -334,6 +376,26 @@ func (h *Host) pump(stdout io.ReadCloser) {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			if !h.emit(Event{Stdout: chunk}) {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// pumpStderr is pump for the stderr side, for the kinds whose stderr reaches
+// the controller (scripts). Same chunking, same shutdown discipline.
+func (h *Host) pumpStderr(stderr io.ReadCloser) {
+	defer stderr.Close()
+	buf := make([]byte, stdoutChunk)
+	for {
+		n, err := stderr.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			if !h.emit(Event{Stderr: chunk}) {
 				return
 			}
 		}
