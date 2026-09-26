@@ -5,8 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
-	"time"
+	"errors"
 
 	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -28,16 +27,6 @@ import (
 // messages under their protocol codes: connectapi.ConnectErr maps them, the
 // same promise mapErr honors on the framed plane.
 type connectChildOps struct{ c *Controller }
-
-// daemonShutdownBudgets are the framed signal path's child-shutdown budgets
-// (cmd/rafikid/main.go's shutdown sequence: 120s graceful per child, 30s kill
-// escalation, 180s global bound). Declared here because main.go's are
-// function-local consts.
-const (
-	daemonShutdownChildTimeout = 120 * time.Second
-	daemonShutdownKillTimeout  = 30 * time.Second
-	daemonShutdownGlobalBound  = 180 * time.Second
-)
 
 // Resume re-spawns an exited child. The framed handler answered with the
 // SpawnResult it got from Controller.Resume; the proto response carries only
@@ -141,31 +130,18 @@ func statusResponseFrom(st control.ControllerStatus) *rafikiv1.StatusResponse {
 	}
 }
 
-// ShutdownDaemon triggers the child-drain half of the framed signal path's
-// shutdown sequence — the part the CtrlDaemonShutdown broadcast preceded.
-// It is fire-and-forget on purpose: the connectapi handler writes the
-// response BEFORE this drain runs (the broadcast's "advance warning" role),
-// so the caller learns the request was accepted while children are still
-// winding down instead of holding an RPC open for up to the global bound.
-// The drain runs on a Background context because the request context this
-// method receives dies with the response. The process exit that follows the
-// framed drain stays main.go's signal path's business; this RPC does not
-// terminate the daemon.
+// ShutdownDaemon is a fail-closed stub: the child-drain half of the framed
+// signal path is NOT served from here. Calling Controller.ShutdownAllChildren
+// while the daemon keeps running flips Controller's one-way stopping latch
+// (whose contract is "the daemon is dying"), and from then on every child
+// exit skips its status persist — so the next daemon start would auto-resume
+// children the operator explicitly killed. The full sequence (broadcast →
+// drain → close listeners → exit) is wired into main.go's signal path when
+// the framed-plane retirement lands (Task 5.1 handoff); until then the
+// connectapi handler refuses CodeUnimplemented before this method is ever
+// reached, so the seam stays declared but inert.
 func (a connectChildOps) ShutdownDaemon(_ context.Context) error {
-	go a.drainChildren()
-	return nil
-}
-
-// drainChildren is the framed shutdown sequence's child teardown, with the
-// same per-child budgets under the same global bound.
-func (a connectChildOps) drainChildren() {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonShutdownGlobalBound)
-	defer cancel()
-	if err := a.c.ShutdownAllChildren(ctx, daemonShutdownChildTimeout, daemonShutdownKillTimeout); err != nil {
-		// The caller is already answered; a failed drain is a daemon-log
-		// concern, the same as the framed signal path's warn.
-		slog.Warn("connect: child shutdown errors", "error", err)
-	}
+	return errors.New("ShutdownDaemon: not served until the daemon shutdown path lands")
 }
 
 // ModelInfo delegates to Controller.ModelInfo — the exact answer the framed

@@ -33,21 +33,20 @@ type fakeChildOps struct {
 	shutdownCalled bool
 
 	// Injected answers.
-	resumeID    string
-	resumeErr   error
-	exitedIDs   []string
-	exitedErr   error
-	labelsOut   map[string]string
-	labelsErr   error
-	statusOut   *rafikiv1.StatusResponse
-	statusErr   error
-	searchOut   *rafikiv1.SearchResponse
-	searchErr   error
-	shutdownErr error
-	modelOut    *rafikiv1.ModelInfoResponse
-	modelErr    error
-	statsJSON   string
-	statsErr    error
+	resumeID  string
+	resumeErr error
+	exitedIDs []string
+	exitedErr error
+	labelsOut map[string]string
+	labelsErr error
+	statusOut *rafikiv1.StatusResponse
+	statusErr error
+	searchOut *rafikiv1.SearchResponse
+	searchErr error
+	modelOut  *rafikiv1.ModelInfoResponse
+	modelErr  error
+	statsJSON string
+	statsErr  error
 }
 
 func (f *fakeChildOps) Resume(_ context.Context, childID, apiKey string) (string, error) {
@@ -89,9 +88,14 @@ func (f *fakeChildOps) Search(_ context.Context, req *rafikiv1.SearchRequest) (*
 	return f.searchOut, nil
 }
 
+// ShutdownDaemon only records that it was reached — the handler refuses
+// CodeUnimplemented before the seam this wave (the drain it used to trigger
+// poisons recovery state), so no test drives an error through it; the
+// recording stays so a future test that calls the seam directly still
+// observes it.
 func (f *fakeChildOps) ShutdownDaemon(_ context.Context) error {
 	f.shutdownCalled = true
-	return f.shutdownErr
+	return nil
 }
 
 func (f *fakeChildOps) ModelInfo(_ context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
@@ -217,18 +221,22 @@ func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
 	}
 }
 
-func TestChildOpsShutdownDaemonAnswersAndCallsThrough(t *testing.T) {
+// ShutdownDaemon is a fail-closed stub this wave: the handler refuses before
+// the seam, so the seam is never consulted — even with one wired — and the
+// answer is CodeUnimplemented with the stub's own text, not a mapped
+// ControllerError or a redacted internal.
+func TestChildOpsShutdownDaemonFailsClosedUnimplemented(t *testing.T) {
 	f := &fakeChildOps{}
-	resp, err := newChildOpsServer(f).ShutdownDaemon(context.Background(),
+	_, err := newChildOpsServer(f).ShutdownDaemon(context.Background(),
 		connect.NewRequest(&rafikiv1.ShutdownDaemonRequest{}))
-	if err != nil {
-		t.Fatalf("ShutdownDaemon: %v", err)
+	if connect.CodeOf(err) != connect.CodeUnimplemented {
+		t.Errorf("code = %v, want Unimplemented", connect.CodeOf(err))
 	}
-	if resp.Msg == nil {
-		t.Error("resp = nil, want an empty ShutdownDaemonResponse")
+	if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("message = %v, want the stub's not-yet-implemented text", err)
 	}
-	if !f.shutdownCalled {
-		t.Error("the seam's ShutdownDaemon was never called")
+	if f.shutdownCalled {
+		t.Error("the seam's ShutdownDaemon was called; the handler must refuse before the seam")
 	}
 }
 
@@ -315,11 +323,13 @@ func TestChildOpsModelInfoRequiresModel(t *testing.T) {
 
 // ─── Unwired fails closed ─────────────────────────────────────────────────────
 
-// Every handler in childops.go reads the same seam, so every one of them must
-// answer CodeUnavailable — not Unimplemented, not a panic — before the daemon
-// attaches the Controller. SetChildOps(nil) is refused, so an explicit nil
-// store lands here too: this doubles as the handler-shaped pin newseams_test
-// asks Wave 2 to grow.
+// Every seam-reading handler in childops.go must answer CodeUnavailable —
+// not Unimplemented, not a panic — before the daemon attaches the Controller.
+// (ShutdownDaemon is not in this table: it refuses CodeUnimplemented before
+// its seam is consulted this wave, pinned by
+// TestChildOpsShutdownDaemonFailsClosedUnimplemented.) SetChildOps(nil) is
+// refused, so an explicit nil store lands here too: this doubles as the
+// handler-shaped pin newseams_test asks Wave 2 to grow.
 func TestChildOpsUnwiredFailsClosed(t *testing.T) {
 	cases := []struct {
 		name string
@@ -344,10 +354,6 @@ func TestChildOpsUnwiredFailsClosed(t *testing.T) {
 		}},
 		{"Search", func(s *connectapi.Server) error {
 			_, err := s.Search(context.Background(), connect.NewRequest(&rafikiv1.SearchRequest{Query: "q"}))
-			return err
-		}},
-		{"ShutdownDaemon", func(s *connectapi.Server) error {
-			_, err := s.ShutdownDaemon(context.Background(), connect.NewRequest(&rafikiv1.ShutdownDaemonRequest{}))
 			return err
 		}},
 		{"ModelInfo", func(s *connectapi.Server) error {
@@ -408,6 +414,57 @@ func TestChildOpsUncodedErrorIsRedactedInternal(t *testing.T) {
 	}
 	if err == nil || strings.Contains(err.Error(), "relation does not exist") {
 		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
+	}
+}
+
+// The remaining handlers share mapChildOpsErr with CloseAllExited, so their
+// uncoded-error path is pinned the same way: blanket Internal with the raw
+// cause redacted — the peer never sees infrastructure text naming the
+// database. (shutdownErr has no row here: the ShutdownDaemon handler refuses
+// before the seam this wave, so its injector is unreachable.)
+func TestChildOpsUncodedErrorsRedactedInternalPerHandler(t *testing.T) {
+	cases := []struct {
+		name   string
+		inject func(f *fakeChildOps, err error)
+		call   func(s *connectapi.Server) error
+	}{
+		{"SetLabels", func(f *fakeChildOps, err error) { f.labelsErr = err },
+			func(s *connectapi.Server) error {
+				_, err := s.SetLabels(context.Background(),
+					connect.NewRequest(&rafikiv1.SetLabelsRequest{ChildId: "c_1", Set: map[string]string{"a": "b"}}))
+				return err
+			}},
+		{"Status", func(f *fakeChildOps, err error) { f.statusErr = err },
+			func(s *connectapi.Server) error {
+				_, err := s.Status(context.Background(), connect.NewRequest(&rafikiv1.StatusRequest{}))
+				return err
+			}},
+		{"Search", func(f *fakeChildOps, err error) { f.searchErr = err },
+			func(s *connectapi.Server) error {
+				_, err := s.Search(context.Background(), connect.NewRequest(&rafikiv1.SearchRequest{Query: "q"}))
+				return err
+			}},
+		{"ModelInfo", func(f *fakeChildOps, err error) {
+			f.modelOut = &rafikiv1.ModelInfoResponse{} // the fake echoes the model onto it before failing
+			f.modelErr = err
+		},
+			func(s *connectapi.Server) error {
+				_, err := s.ModelInfo(context.Background(), connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: "m"}))
+				return err
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeChildOps{}
+			tc.inject(f, errors.New("pq: relation does not exist"))
+			err := tc.call(newChildOpsServer(f))
+			if connect.CodeOf(err) != connect.CodeInternal {
+				t.Errorf("code = %v, want Internal", connect.CodeOf(err))
+			}
+			if err == nil || strings.Contains(err.Error(), "relation does not exist") {
+				t.Errorf("err.Error() = %v, want the raw cause redacted", err)
+			}
+		})
 	}
 }
 

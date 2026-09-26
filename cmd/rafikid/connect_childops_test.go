@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"testing"
-	"time"
 
 	"connectrpc.com/connect"
 
@@ -215,21 +214,4 @@ func TestChildOpsStatsFilterMapping(t *testing.T) {
 			t.Errorf("since/until = %v/%v, want nil (unbounded)", f.Since, f.Until)
 		}
 	})
-}
-
-// TestChildOpsShutdownDaemonBudgetsMatchMain pins the drain budgets to the
-// framed signal path's values. The drain itself fires from a goroutine the
-// response does not wait on; this pin is the compile-adjacent guarantee that
-// a drift between the two shutdown sequences is at least a reviewed
-// constant, not a silent one.
-func TestChildOpsShutdownDaemonBudgetsMatchMain(t *testing.T) {
-	if daemonShutdownChildTimeout != 120*time.Second {
-		t.Errorf("daemonShutdownChildTimeout = %v, want main.go's 120s", daemonShutdownChildTimeout)
-	}
-	if daemonShutdownKillTimeout != 30*time.Second {
-		t.Errorf("daemonShutdownKillTimeout = %v, want main.go's 30s", daemonShutdownKillTimeout)
-	}
-	if daemonShutdownGlobalBound != 180*time.Second {
-		t.Errorf("daemonShutdownGlobalBound = %v, want main.go's 180s", daemonShutdownGlobalBound)
-	}
 }

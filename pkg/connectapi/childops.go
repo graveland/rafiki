@@ -192,23 +192,24 @@ func (s *Server) Search(
 }
 
 // ShutdownDaemon serves the Connect face of the framed ctrl_daemon_shutdown
-// verb. The framed plane never accepted a request of this type — it only
-// BROADCAST CtrlDaemonShutdown while shutting down — so this RPC is the
-// client-asking form of the same sequence: the response is written first
-// (the broadcast's "advance warning" role), then the adapter triggers the
-// child drain the framed signal path runs.
+// verb — as a fail-closed stub this wave. The full contract (broadcast →
+// drain → close listeners → exit) turns on Controller's one-way stopping
+// latch: a drain fired while the daemon keeps running flips that latch (its
+// contract is "the daemon is dying"), permanently suppressing child status
+// persists, which makes the next daemon start auto-resume children the
+// operator explicitly killed. So the daemon shutdown path lands with the
+// framed-plane retirement (Task 5.1), wired into main.go's signal path — not
+// from an RPC whose context dies with its response. Until then this handler
+// refuses BEFORE its seam is consulted (no wiring state can reach the
+// adapter), and the refusal is answered Unimplemented, not an uncoded error
+// mapped through mapChildOpsErr: an unimplemented RPC is a wire fact, not an
+// infrastructure failure to redact.
 func (s *Server) ShutdownDaemon(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ShutdownDaemonRequest],
 ) (*connect.Response[rafikiv1.ShutdownDaemonResponse], error) {
-	o, err := s.childOp()
-	if err != nil {
-		return nil, err
-	}
-	if err := o.ShutdownDaemon(ctx); err != nil {
-		return nil, mapChildOpsErr(err, "connect: daemon shutdown failed")
-	}
-	return connect.NewResponse(&rafikiv1.ShutdownDaemonResponse{}), nil
+	return nil, connect.NewError(connect.CodeUnimplemented,
+		errors.New("ShutdownDaemon: not yet implemented — the daemon shutdown path lands with the framed-plane retirement"))
 }
 
 // ModelInfo serves the Connect face of the framed ctrl_model_info verb: the
