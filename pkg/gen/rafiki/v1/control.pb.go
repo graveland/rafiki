@@ -2241,15 +2241,20 @@ func (x *SetBudgetResponse) GetMaxCost() float64 {
 // ("2.1"), computed on read and never persisted -- an agent addresses tasks by
 // handle so it never has to carry a UUID across turns.
 type TaskRow struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Handle        string                 `protobuf:"bytes,1,opt,name=handle,proto3" json:"handle,omitempty"`
-	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
-	ActiveForm    string                 `protobuf:"bytes,3,opt,name=active_form,json=activeForm,proto3" json:"active_form,omitempty"`
-	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	Assignee      string                 `protobuf:"bytes,5,opt,name=assignee,proto3" json:"assignee,omitempty"`
-	DropReason    string                 `protobuf:"bytes,6,opt,name=drop_reason,json=dropReason,proto3" json:"drop_reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Handle     string                 `protobuf:"bytes,1,opt,name=handle,proto3" json:"handle,omitempty"`
+	Content    string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	ActiveForm string                 `protobuf:"bytes,3,opt,name=active_form,json=activeForm,proto3" json:"active_form,omitempty"`
+	Status     string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Assignee   string                 `protobuf:"bytes,5,opt,name=assignee,proto3" json:"assignee,omitempty"`
+	DropReason string                 `protobuf:"bytes,6,opt,name=drop_reason,json=dropReason,proto3" json:"drop_reason,omitempty"`
+	// conversation_id is the ledger row's owning conversation -- the framed
+	// ctrl_task_list row carried it (tasks.Task's untagged `ConversationID`
+	// key) and `rafiki tasks`' CHILD column rendered it. It is a conversation
+	// id, NOT a child id: the child working the row rides assignee.
+	ConversationId string `protobuf:"bytes,7,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *TaskRow) Reset() {
@@ -2320,6 +2325,13 @@ func (x *TaskRow) GetAssignee() string {
 func (x *TaskRow) GetDropReason() string {
 	if x != nil {
 		return x.DropReason
+	}
+	return ""
+}
+
+func (x *TaskRow) GetConversationId() string {
+	if x != nil {
+		return x.ConversationId
 	}
 	return ""
 }
@@ -12010,7 +12022,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bmax_cost\x18\x02 \x01(\x01R\amaxCost\"I\n" +
 	"\x11SetBudgetResponse\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x19\n" +
-	"\bmax_cost\x18\x02 \x01(\x01R\amaxCost\"\xb1\x01\n" +
+	"\bmax_cost\x18\x02 \x01(\x01R\amaxCost\"\xda\x01\n" +
 	"\aTaskRow\x12\x16\n" +
 	"\x06handle\x18\x01 \x01(\tR\x06handle\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1f\n" +
@@ -12019,7 +12031,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x1a\n" +
 	"\bassignee\x18\x05 \x01(\tR\bassignee\x12\x1f\n" +
 	"\vdrop_reason\x18\x06 \x01(\tR\n" +
-	"dropReason\"\xbf\x01\n" +
+	"dropReason\x12'\n" +
+	"\x0fconversation_id\x18\a \x01(\tR\x0econversationId\"\xbf\x01\n" +
 	"\x10ListTasksRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
 	"\x0finclude_dropped\x18\x02 \x01(\bR\x0eincludeDropped\x12\x19\n" +

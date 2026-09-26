@@ -15,11 +15,18 @@ import (
 
 // fakeAccepter is the narrow inbox seam the Server holds: it records what Send
 // submitted and hands back an id. Delivery is the Queue's job and is not what
-// these tests are about.
-type fakeAccepter struct{ got inbox.Inbound }
+// these tests are about. err exercises the accept-failure path (send_test.go's
+// redaction pin uses it).
+type fakeAccepter struct {
+	got inbox.Inbound
+	err error
+}
 
 func (f *fakeAccepter) Accept(_ context.Context, in inbox.Inbound) (string, error) {
 	f.got = in
+	if f.err != nil {
+		return "", f.err
+	}
 	return "m_1", nil
 }
 

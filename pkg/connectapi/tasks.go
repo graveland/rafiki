@@ -81,12 +81,13 @@ func (s *Server) ListTasks(
 	}
 	for _, t := range rows {
 		out.Tasks = append(out.Tasks, &rafikiv1.TaskRow{
-			Handle:     t.Handle,
-			Content:    t.Content,
-			ActiveForm: t.ActiveForm,
-			Status:     string(t.Status),
-			Assignee:   t.Assignee,
-			DropReason: t.DropReason,
+			Handle:         t.Handle,
+			Content:        t.Content,
+			ActiveForm:     t.ActiveForm,
+			Status:         string(t.Status),
+			Assignee:       t.Assignee,
+			DropReason:     t.DropReason,
+			ConversationId: t.ConversationID,
 		})
 	}
 	return connect.NewResponse(out), nil

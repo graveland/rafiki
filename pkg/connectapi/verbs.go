@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -20,6 +22,13 @@ import (
 // than calling the controller directly, so the durable queue described in the
 // Phase B design §5 can replace the in-memory implementation without touching
 // this handler.
+//
+// Accept's errors go through ConnectErr (the same discipline as Close): the
+// controller's send validation answers authored ControllerErrors — child not
+// found reads as NotFound, an exited or shutting-down child as
+// FailedPrecondition, each with its reason attached — while an uncoded error
+// (a store failure) is logged here first, then redacted by ConnectErr, so a
+// pgx failure cannot name the database to the caller.
 func (s *Server) Send(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SendRequest],
@@ -72,7 +81,12 @@ func (s *Server) Send(
 		Attachments: attachments,
 	})
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: send failed", "child_id", childID, "error", err)
+		}
+		return nil, ConnectErr(err)
 	}
 	return connect.NewResponse(&rafikiv1.SendResponse{MessageId: id}), nil
 }
@@ -293,6 +307,13 @@ func firstOperatorOnlySet(req *rafikiv1.SpawnRequest) string {
 // admission fundi's agent_spawn gets). The owner stamp then comes from the
 // same source fundi's spawner uses — the caller's own stored row — resolved
 // in cmd/rafikid's lifecycle adapter from the credential.
+//
+// Spawn's errors go through ConnectErr (the same discipline as Close): the
+// controller answers authored ControllerErrors — a bad cwd or a spent budget
+// reads as InvalidArgument, a failed process start as Internal with reason
+// spawn_failed — while an uncoded error is logged here first, then redacted
+// by ConnectErr. There is no child id to log yet (the failure IS the
+// creation), so the log carries the cwd and the parent instead.
 func (s *Server) Spawn(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SpawnRequest],
@@ -329,7 +350,13 @@ func (s *Server) Spawn(
 	}
 	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: spawn failed", "cwd", sp.Cwd,
+				"parent_child_id", sp.ParentChildID, "error", err)
+		}
+		return nil, ConnectErr(err)
 	}
 	return connect.NewResponse(&rafikiv1.SpawnResponse{ChildId: id}), nil
 }
@@ -415,6 +442,12 @@ func scriptFromProto(m *rafikiv1.SpawnRequest_ScriptSpec) *protocol.ScriptSpec {
 }
 
 // Kill ends a child and reports the status it settled on.
+//
+// Kill's errors go through ConnectErr (the same discipline as Close): the
+// controller answers authored ControllerErrors — an already-exited child reads
+// as FailedPrecondition with reason child_exited, an unknown child as
+// NotFound — while an uncoded error is logged here first, then redacted by
+// ConnectErr, so a store failure cannot name the database to the caller.
 func (s *Server) Kill(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.KillRequest],
@@ -438,7 +471,12 @@ func (s *Server) Kill(
 	out, err := (*p).Kill(ctx, childID,
 		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		var ce *control.ControllerError
+		if !errors.As(err, &ce) {
+			// ConnectErr redacts this below; log the cause here or lose it.
+			slog.Error("connect: kill failed", "child_id", childID, "error", err)
+		}
+		return nil, ConnectErr(err)
 	}
 	resp := &rafikiv1.KillResponse{
 		ChildId:    childID,

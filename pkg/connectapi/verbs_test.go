@@ -3,7 +3,10 @@
 package connectapi_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -11,8 +14,10 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 // namedChildScope is a ChildScope whose ChildID is fixed and non-empty -- the
@@ -285,4 +290,157 @@ func mapsEqualBool(a, b map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// captureSlog swaps the default logger for a text handler over a buffer, runs
+// run, and returns what was logged. Every captureSlog call replaces the
+// default for the duration of one run — the tests using it never go parallel.
+func captureSlog(t *testing.T, run func() error) (string, error) {
+	t.Helper()
+	prev := slog.Default()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	err := run()
+	return buf.String(), err
+}
+
+// TestKillChildExitedKeepsCodeAndReason pins Kill's child-exited
+// ControllerError: it reaches the client as FailedPrecondition — the code
+// errCodeTable maps ErrChildExited to — with the precise reason riding the
+// google.rpc.ErrorInfo detail and the daemon's authored message forwarded.
+// The raw-Internal wrap this replaces told every client the daemon was broken
+// and carried no branchable reason.
+func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
+	f := &fakeLifecycle{killErr: &control.ControllerError{
+		Code:    protocol.ErrChildExited,
+		Message: "child has already exited",
+	}}
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(f)
+
+	_, err := s.Kill(context.Background(),
+		connect.NewRequest(&rafikiv1.KillRequest{ChildId: "c_1"}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	if got := rpcreason.Reason(err); got != protocol.ErrChildExited {
+		t.Errorf("Reason = %q, want %q", got, protocol.ErrChildExited)
+	}
+	if err == nil || !strings.Contains(err.Error(), "child has already exited") {
+		t.Errorf("err = %v, want the daemon's authored message", err)
+	}
+}
+
+// TestSendChildExitedMapsToFailedPrecondition pins the same classification on
+// Send: the controller's send validation (validateSendTarget) answers an
+// exited or shutting-down child with an authored ControllerError, which the
+// raw-Internal wrap flattened into a code-less Internal.
+func TestSendChildExitedMapsToFailedPrecondition(t *testing.T) {
+	acc := &fakeAccepter{err: &control.ControllerError{
+		Code:    protocol.ErrChildExited,
+		Message: "child has exited",
+	}}
+	s := connectapi.NewServer(nil)
+	s.SetInbox(acc)
+
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
+	}))
+	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
+	}
+	if got := rpcreason.Reason(err); got != protocol.ErrChildExited {
+		t.Errorf("Reason = %q, want %q", got, protocol.ErrChildExited)
+	}
+}
+
+// TestSpawnControllerErrorKeepsItsCode pins the Spawn side: a budget refusal
+// arrives as InvalidArgument with its reason, not Internal.
+func TestSpawnControllerErrorKeepsItsCode(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	s.SetChildLifecycle(&fakeLifecycle{spawnErr: &control.ControllerError{
+		Code:    protocol.ErrInvalidArgs,
+		Message: "max_depth below the floor",
+	}})
+
+	_, err := s.Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
+	}
+	if got := rpcreason.Reason(err); got != protocol.ErrInvalidArgs {
+		t.Errorf("Reason = %q, want %q", got, protocol.ErrInvalidArgs)
+	}
+}
+
+// TestSendSpawnKillUncodedErrorsAreRedactedAndLogged walks Send, Spawn and Kill's
+// uncoded path: an error that is not a ControllerError is infrastructure text
+// this codebase did not author, so the caller sees only the fixed internal
+// text with no reason and no raw fragment, while the cause is logged with the
+// verb's context so it is not lost.
+func TestSendSpawnKillUncodedErrorsAreRedactedAndLogged(t *testing.T) {
+	raw := "pgx: failed to connect to host=db.internal user=rafiki database=rafiki: connection refused"
+	cases := []struct {
+		name      string
+		wantInLog []string
+		call      func(t *testing.T) error
+	}{
+		{
+			name:      "send",
+			wantInLog: []string{"connect: send failed", "c_1", raw},
+			call: func(t *testing.T) error {
+				s := connectapi.NewServer(nil)
+				s.SetInbox(&fakeAccepter{err: errors.New(raw)})
+				_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+					ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
+				}))
+				return err
+			},
+		},
+		{
+			name:      "spawn",
+			wantInLog: []string{"connect: spawn failed", "/work", raw},
+			call: func(t *testing.T) error {
+				s := connectapi.NewServer(nil)
+				s.SetChildLifecycle(&fakeLifecycle{spawnErr: errors.New(raw)})
+				_, err := s.Spawn(context.Background(),
+					connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
+				return err
+			},
+		},
+		{
+			name:      "kill",
+			wantInLog: []string{"connect: kill failed", "c_1", raw},
+			call: func(t *testing.T) error {
+				s := connectapi.NewServer(nil)
+				s.SetChildLifecycle(&fakeLifecycle{killErr: errors.New(raw)})
+				_, err := s.Kill(context.Background(),
+					connect.NewRequest(&rafikiv1.KillRequest{ChildId: "c_1"}))
+				return err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs, err := captureSlog(t, func() error { return tc.call(t) })
+			if connect.CodeOf(err) != connect.CodeInternal {
+				t.Errorf("code = %v, want Internal", connect.CodeOf(err))
+			}
+			if err == nil || !strings.Contains(err.Error(), "internal error") {
+				t.Errorf("err = %v, want the fixed internal text", err)
+			}
+			if strings.Contains(err.Error(), "db.internal") {
+				t.Errorf("err = %v, want the raw cause redacted", err)
+			}
+			if got := rpcreason.Reason(err); got != "" {
+				t.Errorf("Reason = %q, want none", got)
+			}
+			for _, want := range tc.wantInLog {
+				if !strings.Contains(logs, want) {
+					t.Errorf("log %q missing %q", logs, want)
+				}
+			}
+		})
+	}
 }

@@ -1058,6 +1058,7 @@ class TaskRow:
     status: str = ""
     assignee: str = ""
     drop_reason: str = ""
+    conversation_id: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -1073,6 +1074,8 @@ class TaskRow:
             out["assignee"] = self.assignee
         if self.drop_reason != "":
             out["dropReason"] = self.drop_reason
+        if self.conversation_id != "":
+            out["conversationId"] = self.conversation_id
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "TaskRow":
@@ -1095,6 +1098,9 @@ class TaskRow:
         _v = _d.get("dropReason")
         if _v is not None:
             obj.drop_reason = _v
+        _v = _d.get("conversationId")
+        if _v is not None:
+            obj.conversation_id = _v
         return obj
 
 @dataclasses.dataclass

@@ -29,7 +29,7 @@ func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
 	f := &fakeTaskLister{rows: []tasks.Task{
 		{Handle: "1", Content: "read the design", Status: tasks.StatusCompleted},
 		{Handle: "2.1", Content: "wire the rollup", ActiveForm: "wiring the rollup",
-			Status: tasks.StatusInProgress, Assignee: "c9"},
+			Status: tasks.StatusInProgress, Assignee: "c9", ConversationID: "conv-9"},
 	}}
 	s := NewServer(nil)
 	s.SetTaskLister(f)
@@ -51,6 +51,35 @@ func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
 	}
 	if rows[0].GetStatus() != string(tasks.StatusCompleted) {
 		t.Errorf("status not carried: %q", rows[0].GetStatus())
+	}
+}
+
+// TestTaskRowCarriesConversationID pins the framed row's conversation id on
+// the Connect wire. The framed ctrl_task_list row serialized tasks.Task
+// untagged, so ConversationID rode every response, and `rafiki tasks`' CHILD
+// column rendered it -- the Connect TaskRow dropped it and Task 4.1's CLI
+// conversion lost the column as a result. It is a conversation id, not a
+// child id (the child working the row is assignee), so it lands under its own
+// name rather than a child-shaped one.
+func TestTaskRowCarriesConversationID(t *testing.T) {
+	f := &fakeTaskLister{rows: []tasks.Task{
+		{Handle: "2.1", Content: "wire the rollup", Status: tasks.StatusInProgress,
+			Assignee: "c9", ConversationID: "conv-9"},
+	}}
+	s := NewServer(nil)
+	s.SetTaskLister(f)
+
+	resp, err := s.ListTasks(context.Background(),
+		connect.NewRequest(&rafikiv1.ListTasksRequest{}))
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	rows := resp.Msg.GetTasks()
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if got := rows[0].GetConversationId(); got != "conv-9" {
+		t.Errorf("ConversationId = %q, want conv-9", got)
 	}
 }
 

@@ -420,6 +420,11 @@ message TaskRow {
   string status = 4;
   string assignee = 5;
   string drop_reason = 6;
+  // conversation_id is the ledger row's owning conversation -- the framed
+  // ctrl_task_list row carried it (tasks.Task's untagged `ConversationID`
+  // key) and `rafiki tasks`' CHILD column rendered it. It is a conversation
+  // id, NOT a child id: the child working the row rides assignee.
+  string conversation_id = 7;
 }
 
 message ListTasksRequest {
