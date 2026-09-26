@@ -149,6 +149,12 @@ var controlPolicyTable = map[string]controlPolicy{
 	"DarajaLaunch":             policyUserOnly,
 	"DarajaSend":               policyUserOnly,
 	"DarajaWatch":              policyUserOnly,
+	// :batch's provider-ban verbs. List is a read-only, non-scoped surface
+	// (the ban list names providers, not users); Ban/Unban are operator
+	// writes, so userOnly.
+	"ListProviderBans": policyAnyCaller,
+	"BanProvider":      policyUserOnly,
+	"UnbanProvider":    policyUserOnly,
 }
 
 // policyFor resolves a Connect procedure path to its policy. A path that is
