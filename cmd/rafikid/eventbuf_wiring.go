@@ -13,11 +13,25 @@ import (
 // childIsBusy reports whether a flush to childID must be deferred. Anything
 // other than idle or exited means a turn may be in flight.
 //
+// A script child is EXEMPT: "busy" means a turn may be in flight that an
+// injected frame would corrupt, and a script has no turns — its whole life is
+// one streaming run (the provider marks every stdout line streaming),
+// delivery is its Receive stream's pull of pending rows (nothing a flush can
+// interrupt), and it goes idle only at exit. The gate could therefore never
+// release a batch for a live script except through MaxWait: a coordinating
+// script waiting on Receive for its worker's settle fragment would wait the
+// full RAFIKI_EVENTBUF_MAX_WAIT_MS (default 60s) every time, against the one
+// consumer that is actively waiting for exactly that news. The debounce is
+// untouched — reports still coalesce; only the busy withhold is skipped.
+//
 // An unknown child is NOT busy: a batch aimed at a child that has already
 // gone must drain and fail at Send rather than sit in the buffer forever.
 func childIsBusy(st *childstore.Store, childID string) bool {
 	snap, ok := st.Get(childID)
 	if !ok {
+		return false
+	}
+	if snap.Kind == protocol.KindScript {
 		return false
 	}
 	switch snap.Status {

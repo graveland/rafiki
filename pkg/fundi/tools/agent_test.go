@@ -50,7 +50,7 @@ func (f *fakeSpawner) Spawn(_ context.Context, spec SpawnSpec) (AgentInfo, error
 	if id == "" {
 		id = "c_fake"
 	}
-	info := AgentInfo{ChildID: id, Name: spec.Name, Model: spec.Model, Status: "idle", Cwd: spec.Cwd}
+	info := AgentInfo{ChildID: id, Name: spec.Name, Model: spec.Model, Status: "idle", Cwd: spec.Cwd, Kind: spec.Kind}
 	f.children = append(f.children, info)
 	return info, nil
 }

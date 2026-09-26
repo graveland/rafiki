@@ -416,6 +416,44 @@ Passing any of these (or any other shaping flag) spawns directly; `-i` opens
 the interactive form anyway, prefilled — where the executor field, `^E`'s
 picker, and the same kind-aware default apply.
 
+### Script children from the CLI
+
+`rafiki create -d --kind script --pymodule <repo>:<script> [-- args]` spawns
+a script child — a saved pymodule run as the child's process, no model
+attached (see the README's *Script children* for the runtime):
+
+```
+rafiki create -d --kind script --pymodule local:driver -- --fast 5
+rafiki create -d --kind script --pymodule ops_tools:rotate
+```
+
+- `--pymodule` is **required** for a script kind and shaped `<repo>:<script>`
+  — `repo` is `local` (the spawning owner's saved modules, what `rafiki python
+  put` writes) or a registered git source's name (`rafiki python repo add`).
+  The script name is checked client-side (a bare Python identifier), the repo
+  name by the daemon, whose registered sources are the authority.
+- Everything after `--` is the **script's argv**, passed through verbatim —
+  a flag-shaped argument cannot be eaten by flag parsing. Without `--`, the
+  single positional is still the child's name; with `--`, a positional BEFORE
+  it names the child. Unnamed children default to the script's name.
+- Model, tools, prompts and session flags do not apply and the daemon refuses
+  them by field name. The profile's default and the remembered per-kind model
+  are NOT sent either — they are inferences about LLM children — while an
+  explicitly typed `--model` still travels, so the refusal names the caller's
+  own choice.
+- On a daemon with **no executor pool** the executor pre-flight is tolerated:
+  a script child does not need an executor (the local fallback hosts it), so
+  a `ListExecutors` failure leaves the field blank for the daemon's own
+  routing. Several eligible executors still refuse — pass `--executor` —
+  because the daemon would otherwise silently pick one. The create form
+  cannot carry a script spec, so a bare `create` on a profile with
+  `kind = "script"` is refused with a pointer to `--pymodule`.
+
+From an agent, the same spawn is the `pymodule_start` tool (fundi children
+with a spawner; MCP-face children with a live executor binding — the same
+gate `pymodule_run` has). The coordinating-agents skill has the
+run-vs-start choice.
+
 ### Pre-filled spawns
 
 `--prefill-files <list>` makes the child read files **before its first
@@ -677,7 +715,11 @@ rafiki python delete <name>                 # soft-delete every live version
   than an empty answer.
 - Agents have the same corpus: the `pymodule_get`/`pymodule_put` tools a
   child carries read and write exactly what this command does, so a module
-  saved here is importable by a child and vice versa.
+  saved here is importable by a child and vice versa. A saved script can also
+  be run as a whole script CHILD — `rafiki create --kind script --pymodule
+  <repo>:<script>` (the human's verb) or an agent's `pymodule_start` tool;
+  the materializer reads the spawning OWNER's rows, so what you save here is
+  what your children start.
 
 ### `rafiki python repo` (git-backed sources)
 

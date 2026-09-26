@@ -32,6 +32,37 @@ func TestIsBusyMatchesStatus(t *testing.T) {
 	}
 }
 
+// TestIsBusyExemptsScriptChildren pins the wave-5 exemption: a script child
+// is never mid-turn — its whole life is one streaming run and delivery is its
+// Receive stream's pull — so the busy gate must never withhold a fragment
+// from it. Without the exemption a coordinating script waiting on Receive
+// for its worker's settle fragment waits the full RAFIKI_EVENTBUF_MAX_WAIT_MS
+// (default 60s) every time, against the one consumer actively waiting for
+// exactly that news. A fundi child at the SAME status stays busy: the two
+// kinds must not drift to the same answer.
+func TestIsBusyExemptsScriptChildren(t *testing.T) {
+	for _, status := range []protocol.Status{
+		protocol.StatusStreaming, protocol.StatusSpawning, protocol.StatusToolRunning,
+	} {
+		st := childstore.New()
+		st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript, Status: status})
+		st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi, Status: status})
+		if childIsBusy(st, "c_script") {
+			t.Errorf("script child at %s must not be reported busy: the busy gate can only withhold its fragments for the full MaxWait, and nothing a flush delivers can interrupt it", status)
+		}
+		if !childIsBusy(st, "c_fundi") {
+			t.Errorf("fundi child at %s must stay busy: a turn may be in flight", status)
+		}
+	}
+	// Exited scripts were already not busy by status; the exemption must not
+	// change the fundi answer either.
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript, Status: protocol.StatusExited})
+	if childIsBusy(st, "c_script") {
+		t.Error("exited script child must not be reported busy")
+	}
+}
+
 // TestBufferFlushCarriesOrphansWithTheirMode pins the eventbuf->controller
 // handoff: the flush names (childID, source) and carries the messages whose
 // durable write did not happen. With no Accepter attached every Push is an

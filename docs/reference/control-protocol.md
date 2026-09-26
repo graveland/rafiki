@@ -371,6 +371,29 @@ refused the same fields at save time (pkg/presets.Validate; the database's
 own CHECK, migration 0040, backs it). A script child cannot be resumed: its
 exit IS its result, so `Resume` refuses with "spawn it again".
 
+**Entry points.** Two surfaces build this request, and neither adds a new
+wire shape — they feed the same `Spawn` above. `pymodule_start` is the agent
+tool: a fundi child materializes it from its registry whenever it has a
+spawner (like `agent_spawn`), and on the MCP face it is gated exactly like
+`pymodule_run` — only a per-child credential whose own row carries a live
+executor binding gets it, so the delegate verbs of the pymodule family appear
+exactly where the caller demonstrably operates in the executor world that
+hosts scripts (the interactive human has the CLI and its `rafiki create`).
+Its input is the spec itself (`repo`, `script`, `modules`, `args`) plus the
+child furniture (`labels`, `max_cost`, `max_children`, `executor`, an
+optional `cwd`); it returns the child id at once and takes no prompt. The
+child's name defaults to the script's name, on both surfaces. The CLI verb is
+`rafiki create -d --kind script --pymodule <repo>:<script> [-- args]` —
+`--pymodule` is required, the after-`--` positionals are the script's argv,
+a positional before `--` names the child, and the profile's default and the
+remembered per-kind model are deliberately NOT sent (a script child has no
+model; a typed `--model` still travels and the daemon's field refusal names
+it). On a daemon with no executor pool the CLI's executor pre-flight is
+TOLERATED rather than fatal: a script child does not need an executor (the
+local fallback hosts it), so a lister that cannot answer leaves the field
+blank for Spawn's routing to decide — ambiguity (several eligible executors)
+still refuses, because the daemon would silently pick one.
+
 **Hosting.** A script child is hosted where its pymodule cache is. The
 daemon routes the spawn through `scriptExecutorRouted`: when an executor pool
 is configured AND a live executor advertises `--launch script`, the child is
@@ -468,7 +491,15 @@ the stream (`deliverInbox` returns a deferred sentinel rather than writing a
 frame to the script's stdin, which carries no protocol — the provider drops
 stray stdin frames as a backstop), so a script child's rows stay pending
 until its stream pulls them. Fragments the event buffer pushes INTO a script
-child (its own children's settles, budget warnings) ride the same rows.
+child (its own children's settles, budget warnings) ride the same rows, and
+the buffer does NOT busy-defer them: `childIsBusy` exempts script children,
+because "busy" means a turn may be in flight that an injected frame would
+corrupt, and a script has no turns — its whole life is one streaming run,
+delivery is its Receive stream's pull of pending rows, and it goes idle only
+at exit, so the gate could never release a batch except through
+`RAFIKI_EVENTBUF_MAX_WAIT_MS` (default 60s) against the one consumer actively
+waiting for exactly that news. The debounce still coalesces — five reports
+still cost one injected frame; only the busy withhold is skipped.
 
 **Settle.** A script child's exit is its settle: exit 0 settles `done`,
 anything else `failed`, and the parent's settle fragment carries the stored
@@ -479,6 +510,20 @@ SIGTERM/SIGKILL rungs after the caller's timeouts); a script holding an open
 can exit before the signal rungs. A script that holds NO stream is told
 nothing before the signals — the default 180 s graceful window applies, so
 callers that want a prompt death pass explicit timeouts.
+
+**What a kill contains, and what it does not.** Killing a script child
+signals its process group: the script's own subprocesses die with it. Its
+DAEMON-MANAGED descendants — the fundi children it spawned through its
+per-child socket — are NOT swept, and this is deliberate, the same boundary
+every kind has: there is no daemon-level descendant sweep for any kind, so
+adding one only for scripts would make kill semantics kind-dependent without
+a design that answers recursion, ordering and the budget accounting of the
+sweep itself. A surviving worker keeps its budget fence, stays visible in
+`rafiki list`, and can be killed by name; its settle fragment becomes a
+pending row in the dead parent's inbox (the inbox is dropped when the parent
+is forgotten, and the retention sweep reaches terminal rows only). If
+subtree teardown ever lands, it is a decision about ALL kinds at once, not a
+script-only patch.
 
 **Restart.** A LOCALLY hosted script dies with its daemon. Recovery loads
 its still-live row as exited and settles it `failed` with the reason
@@ -827,17 +872,21 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Thirty, materialized per caller: twenty-eight come from the same
+**Tools.** Thirty-one, materialized per caller: twenty-eight come from the same
 registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
 child gets the same twenty-eight, subject to the same per-caller declines), and
-two (`pymodule_list`, `pymodule_run`) from MCP-face-only blueprints fundi
-never sees — all assembled in `mcpBlueprints`; descriptions are reworded on
-this surface for a caller that is not a fundi child (`mcpToolDescriptions`).
-The four pymodule tools decline together when the daemon has no executor
-pool (`claudeExecutorRouted`); `pymodule_run` declines further unless the
-caller is a claude-kind child with a live executor binding. The four preset
-tools decline together when the daemon has no database — no preset store, so
-nothing to read or write. A tool failure
+three (`pymodule_list`, `pymodule_run`, `pymodule_start`) from MCP-face-only
+blueprints fundi never sees — all assembled in `mcpBlueprints`; descriptions
+are reworded on this surface for a caller that is not a fundi child
+(`mcpToolDescriptions`). The four pymodule tools decline together when the
+daemon has no executor pool (`claudeExecutorRouted`); `pymodule_run` and
+`pymodule_start` decline further unless the caller is a child with a live
+executor binding (the pymodule family's delegate verbs — run one of the
+caller's modules, start a saved script as a managed child — appear exactly
+where the caller demonstrably operates in the executor world that hosts
+them; the interactive human has `rafiki create` and `rafiki py`). The four
+preset tools decline together when the daemon has no database — no preset
+store, so nothing to read or write. A tool failure
 is `CallToolResult.IsError = true` carrying the diagnostic — never a JSON-RPC
 transport error, and never a successful result carrying the text.
 
@@ -863,6 +912,7 @@ transport error, and never a successful result carrying the text.
 | `pymodule_delete` | Soft-delete every saved version of one of the caller's pymodules by name; the required `repo` argument must be `"local"` (git sources are read-only through this tool); failed dependency-venv cleanups on the owner's executors ride the result text as a notice. A child caller is REFUSED by rule, like `pymodule_put` |
 | `pymodule_list` | List the caller's pymodules (name + one-line description) across all scopes — the blob store plus every registered git source's discovered scripts and packages, git rows labeled `reponame/name`; an optional `repo` argument narrows to one scope (`"local"` or a git source's name — the one place an empty value legitimately means "everything"). MCP-face-only — fundi renders the same inventory as a dynamic skill instead |
 | `pymodule_run` | Run one of the caller's pymodules by name — the required `repo` argument selects the source: `"local"` runs a saved module out of the executor's synced pymodule cache, a git source's name runs its discovered script out of that source's synced checkout (`scripts/<script>.py`, the checkout root on `PYTHONPATH` so intra-repo imports resolve, the repo's shared `.venv` interpreter when present) — never a workspace file, with the child's workspace as the process cwd (or the call's own `cwd`); a thin proxy to the executor's own `pymodule_run`. Present only for a child with a live executor binding, absent otherwise; the interactive human never gets it. MCP-face-only blueprint — fundi's own `pymodule_run` routes through its tiered tool-routing instead |
+| `pymodule_start` | Start a saved Python script as a SCRIPT child — a daemon-managed process that runs to completion with no model, no API key and no turn loop; returns the child id at once. The spec (`repo`, `script`, `modules`, `args`) rides the ordinary `Spawn` path — kind `script`, every fundi/claude-only field refused by the daemon — plus the child furniture: `labels`, `max_cost`, `max_children`, `executor`, an optional `cwd` (a face caller without one is refused, the same contract `agent_spawn` has). Gated exactly like `pymodule_run` (a child with a live executor binding; the interactive human uses `rafiki create --kind script`); the child's name defaults to the script's name, and the child materializes the SPAWNING OWNER's pymodule rows, so a module another user saved is not yours to start |
 | `preset_list` | List the presets the caller can spawn agents with — one row per preset with name, kind, model and description; an optional `prefix` narrows to one group (e.g. `default:`). Declined, with the other three, when the daemon has no database |
 | `preset_get` | Read one preset — version stamp and full spec (kind, model, tools, prompts, budget) as JSON; `history` returns every past version, deleted ones included. What a spawn with that preset will get |
 | `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker. A child caller is REFUSED by rule: presets are operator-authored, and a child writing the owner's namespace would shadow — latest-live-wins — what the operator's next spawn resolves |

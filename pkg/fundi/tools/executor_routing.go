@@ -99,9 +99,14 @@ var tierByTool = map[string]Tier{
 	// Daemon — pymodule_put, pymodule_get and pymodule_delete touch the
 	// daemon's database, owner-scoped; nothing in the workspace is touched.
 	// Saved modules reach executors via the pusher, never via the tool.
+	// pymodule_start is daemon-side too: it SPAWNS a script child (the same
+	// daemon authority agent_spawn exercises); the child it starts may later
+	// be HOSTED on an executor, but the start call itself touches no
+	// workspace.
 	"pymodule_put":    TierDaemon,
 	"pymodule_get":    TierDaemon,
 	"pymodule_delete": TierDaemon,
+	"pymodule_start":  TierDaemon,
 
 	// Daemon — presets live in the daemon's database; nothing in the
 	// workspace is touched.

@@ -278,11 +278,21 @@ budget/depth/`max_children` grant that bounds its whole subtree, an inbox,
 its stdout and stderr.
 
 Spawn it with kind `script` and a spec naming the pymodule — `rafiki
-create --kind script` (wave 5) or Connect `Spawn` with
-`script{repo, script, modules, args}`; `repo: "local"` runs one of the
-spawning owner's own saved modules. The fundi/claude-only fields (model,
-tools, skills, MCP, prompts, sessions) are refused on the spawn, and a
-script child cannot be resumed: its exit IS its result.
+create -d --kind script --pymodule <repo>:<script> [-- args]`, Connect
+`Spawn` with `script{repo, script, modules, args}`, or (from an agent) the
+`pymodule_start` tool. `repo: "local"` runs one of the spawning owner's own
+saved modules. The fundi/claude-only fields (model, tools, skills, MCP,
+prompts, sessions) are refused on the spawn, and a script child cannot be
+resumed: its exit IS its result.
+
+The child's name defaults to the script's name on both entry points.
+`pymodule_start` is gated on the MCP face exactly like `pymodule_run` (a
+child with a live executor binding; the human uses `rafiki create`), and a
+fundi child gets it from its registry whenever it has a spawner. The CLI
+never sends a profile default or remembered model to a script spawn — a
+script child has no model — and on a daemon with no executor pool its
+executor pre-flight is tolerated rather than fatal, since the local fallback
+hosts the child.
 
 Its only channel to the daemon is a per-child unix socket, reached through
 the `RAFIKI_CHILD_CONNECT` environment variable. The socket is the
@@ -296,7 +306,18 @@ Exit 0 settles the child `done`, anything else `failed`; the parent's settle
 notification carries the child's `SetResult` payload (or the last 4 KiB of
 its stderr when it never set one). A locally hosted script dies with its
 daemon; recovery settles it `failed` with the reason "daemon restarted"
-rather than leaving it running-with-no-process.
+rather than leaving it running-with-no-process. Progress reports from a
+script into its parent's event buffer coalesce like any subagent fragment,
+and the buffer does not busy-defer them for a RUNNING script child — a
+script has no turns to corrupt, so a coordinating script waiting on its
+`Receive` stream hears its workers' settles after the debounce, not after
+the 60s `RAFIKI_EVENTBUF_MAX_WAIT_MS` ceiling.
+
+Killing a script child signals its process group: the script's own
+subprocesses die with it. Its daemon-managed descendants (children it
+spawned through its socket) are NOT swept — the same boundary every kind
+has — so they keep running, keep their budget fence, and can be killed by
+name.
 
 **Where scripts run.** When an executor pool is configured and one of its
 executors was started with `--launch script`, the child is hosted ON that

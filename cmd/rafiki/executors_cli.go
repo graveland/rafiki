@@ -98,14 +98,38 @@ func refFor(row *rafikiv1.ExecutorRow) string {
 // clearly than duplicating it here) or exactly one is eligible and does not
 // need explicit naming... no: exactly one IS returned. Empty+nil means ZERO
 // eligible executors.
+//
+// The two failure shapes are separated so a caller can treat them
+// differently: errAmbiguousExecutors is a USER-input situation (several
+// eligible executors — the daemon would silently pick one), while a lister
+// failure is a daemon-state answer the caller may tolerate. resolveScriptExecutor
+// is the tolerant shape (a script child does not need an executor); every
+// other kind treats both as fatal.
 func resolveLaunchExecutor(ctx context.Context, cmd *cobra.Command, profileName, kind string) (string, error) {
-	ep, err := newConnectEndpoint(cmd)
+	ref, ambiguous, err := resolveLaunchExecutorDetailed(ctx, cmd, profileName, kind)
+	if ambiguous != "" {
+		return "", errors.New(ambiguous)
+	}
 	if err != nil {
 		return "", err
 	}
+	return ref, nil
+}
+
+// errAmbiguousExecutors marks the multiple-candidates refusal, so a caller
+// that tolerates a lister failure can still surface ambiguity.
+var errAmbiguousExecutors = errors.New("multiple eligible executors")
+
+// resolveLaunchExecutorDetailed is resolveLaunchExecutor's core, with the
+// ambiguity refusal kept apart from the list-fetch failure.
+func resolveLaunchExecutorDetailed(ctx context.Context, cmd *cobra.Command, profileName, kind string) (ref, ambiguous string, err error) {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return "", "", err
+	}
 	resp, err := ep.control().ListExecutors(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{Kind: kind}))
 	if err != nil {
-		return "", fmt.Errorf("listing executors for --kind %s: %w", kind, err)
+		return "", "", fmt.Errorf("listing executors for --kind %s: %w", kind, err)
 	}
 	var eligible []*rafikiv1.ExecutorRow
 	for _, row := range resp.Msg.GetRows() {
@@ -117,21 +141,21 @@ func resolveLaunchExecutor(ctx context.Context, cmd *cobra.Command, profileName,
 	remembered := clientstate.LastExecutorFor(profileName, kind)
 	for _, row := range eligible {
 		if refFor(row) == remembered {
-			return remembered, nil
+			return remembered, "", nil
 		}
 	}
 
 	switch len(eligible) {
 	case 0:
-		return "", nil
+		return "", "", nil
 	case 1:
-		return refFor(eligible[0]), nil
+		return refFor(eligible[0]), "", nil
 	default:
 		var b strings.Builder
 		fmt.Fprintf(&b, "multiple executors can launch a %q child; pass --executor to pick one:\n", kind)
 		for _, row := range eligible {
 			fmt.Fprintf(&b, "  %-20s  %s\n", refFor(row), row.GetId())
 		}
-		return "", errors.New(b.String())
+		return "", b.String(), errAmbiguousExecutors
 	}
 }

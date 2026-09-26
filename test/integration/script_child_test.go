@@ -862,3 +862,98 @@ func TestScriptChildEndToEnd(t *testing.T) {
 	waitHistoryContains(t, opClient, parent, "final result of "+driverID+": ", 60*time.Second)
 	waitHistoryContains(t, opClient, parent, ") done. Read what it did", 60*time.Second)
 }
+
+// scriptCliDriverCode is the CLI test's driver: it records the argv it was
+// handed (the after-`--` tail) and exits 0. No Connect calls, so the test
+// pins the CLI → spec → runtime handoff without the per-child socket.
+const scriptCliDriverCode = `
+import json, sys
+
+args = sys.argv[1:]
+probe = args[args.index("--probe-out") + 1]
+with open(probe, "w") as f:
+    f.write(json.dumps({"argv": args}))
+`
+
+// TestScriptChildFromTheCLI exercises the wave-5 entry point end to end:
+// `rafiki create -d --kind script --pymodule <repo>:<script> [-- args]`
+// through the real client binary. The daemon has NO executor pool, so the
+// test also pins the pool-less pre-flight tolerance: before wave 5 the CLI's
+// ListExecutors auto-resolve hard-failed the create on a daemon that would
+// happily have hosted the child locally, and a profile default model (a
+// declaration about LLM children) must not ride the spawn — with the strip
+// gone the daemon refuses the whole create on `field "model" does not apply`.
+func TestScriptChildFromTheCLI(t *testing.T) {
+	t.Parallel()
+	if _, err := lookPython3(); err != nil {
+		t.Skip("python3 not available: script children need an interpreter")
+	}
+	sd := bootScriptDaemon(t)
+	d := sd.daemon
+	token, configDir := scriptUser(t, d)
+	opClient := faceClient(t, d, token)
+
+	putPymodule(t, d, configDir, "script_cli_it", scriptCliDriverCode)
+
+	probePath := filepath.Join(t.TempDir(), "cli-probe.json")
+	cwd := t.TempDir()
+	cmd := cliCmdIn(t, d, configDir, "--output", "json", "create", "-d",
+		"--kind", "script", "--cwd", cwd,
+		"--pymodule", "local:script_cli_it",
+		"--", "--probe-out", probePath)
+	// The create call's profile carries a default model — a declaration about
+	// LLM children that must not reach a script spawn. Rewritten AFTER
+	// cliCmdIn (which rewrites the manifest itself) and BEFORE the subprocess
+	// starts, so the env is in place but the manifest is the model-carrying
+	// one.
+	manifest := fmt.Sprintf("[profile.it]\nsocket = %q\nmodel = %q\n",
+		d.socketPath, "anthropic/claude-sonnet-4")
+	if err := os.WriteFile(filepath.Join(configDir, "rafiki", "profiles.toml"),
+		[]byte(manifest), 0o600); err != nil {
+		t.Fatalf("rewrite profiles.toml with a default model: %v", err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("create --kind script: %v\nstderr: %s", err, stderr.String())
+	}
+	var created struct {
+		ChildID string `json:"childId"`
+	}
+	if err := json.Unmarshal(out, &created); err != nil || created.ChildID == "" {
+		t.Fatalf("create output %q does not name a childId (err=%v)", out, err)
+	}
+	childID := created.ChildID
+
+	sum := waitChildExited(t, opClient, childID, 60*time.Second)
+	if sum.ExitCode == nil || *sum.ExitCode != 0 {
+		probe, perr := os.ReadFile(probePath)
+		if perr != nil {
+			probe = []byte(fmt.Sprintf("probe file unread: %v", perr))
+		}
+		t.Fatalf("script child exited %v; its log/probe:\n%.4000s", sum.ExitCode, probe)
+	}
+	if sum.GetKind() != "script" {
+		t.Errorf("GetChild kind = %q, want script", sum.GetKind())
+	}
+	// The name defaults to the script's name — the same default the
+	// pymodule_start tool applies, so both entry points read the same way.
+	if sum.GetName() != "script_cli_it" {
+		t.Errorf("GetChild name = %q, want the script's name", sum.GetName())
+	}
+	probeRaw, err := os.ReadFile(probePath)
+	if err != nil {
+		t.Fatalf("probe file never written: %v", err)
+	}
+	var probe struct {
+		Argv []string `json:"argv"`
+	}
+	if err := json.Unmarshal(probeRaw, &probe); err != nil {
+		t.Fatalf("probe %s does not parse: %v", probeRaw, err)
+	}
+	want := []string{"--probe-out", probePath}
+	if len(probe.Argv) != len(want) || probe.Argv[0] != want[0] || probe.Argv[1] != want[1] {
+		t.Errorf("script argv = %v, want %v (the after-`--` tail must reach the process verbatim)", probe.Argv, want)
+	}
+}

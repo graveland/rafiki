@@ -1,6 +1,6 @@
 ---
 name: coordinating-agents
-description: Use when spawning, steering, budgeting or waiting on subagents - covers agent_spawn/send/view/kill/set_budget, dispatching by preset, the async settle model, worktree isolation, task_* as a ledger, and cost budgets as an instrument.
+description: Use when spawning, steering, budgeting or waiting on subagents - covers agent_spawn/send/view/kill/set_budget, dispatching by preset, pymodule_start vs pymodule_run, the async settle model, worktree isolation, task_* as a ledger, and cost budgets as an instrument.
 ---
 
 # Coordinating agents
@@ -59,6 +59,34 @@ business.
   captured 5h and 7d utilization; consult it **once per plan**, not per
   dispatch. "No data captured yet" is normal and means *no signal*, not
   headroom.
+
+## Scripts: `pymodule_start` vs `pymodule_run`
+
+You have two ways to run a saved Python script (what `pymodule_put` saves,
+`rafiki:python-modules` inventories), and the choice is about WHERE the
+output goes and WHO waits:
+
+- **`pymodule_run`** blocks until the script exits and returns its
+  stdout/stderr into this conversation. It costs no child, no budget entry
+  and no settle — use it for everything you want the ANSWER of now:
+  analysis, queries, one-shot transforms over your workspace.
+- **`pymodule_start`** starts the script as a whole rafiki **script child** —
+  a daemon-managed process with its own id, budget grant and executor
+  placement, that runs to completion on its own while you keep working. It
+  returns the child id at once; you are notified when it settles (exit 0 =
+  done, anything else = failed, the result carrying what the script set).
+  Use it when the script should outlive your turn: a workflow driver that
+  orchestrates subagents of its own, a long-running poller, a batch job too
+  long to hold your turn.
+
+A started script child gets the ordinary child furniture — pass `labels` so
+`rafiki list` can group it, and set `max_cost` when the script will spawn
+subagents, exactly as you would for any dispatch. Its stdin carries no
+protocol: it is steered through `agent_send` (delivered to its inbox) and
+told to stop with `agent_kill`, and it can receive structured messages on
+its own Receive stream. Do not start a child for work `pymodule_run` answers
+in place — every child is a process and a settle the operator can see, which
+is visibility for work that runs on, and overhead for work that doesn't.
 
 ## Pre-filling a worker's files
 

@@ -346,13 +346,18 @@ func spawnKind(spec tools.SpawnSpec) string {
 	return spec.Kind
 }
 
-// applySpawnSpecShaping copies the preset name and the tri-state shaping
-// requests from spec onto req. nil means "no request"; a non-nil empty
-// list means "none".
+// applySpawnSpecShaping copies the preset name, the tri-state shaping
+// requests, and the two spawn-generic identity fields pymodule_start adds
+// (the script spec and user labels) from spec onto req. nil means "no
+// request"; a non-nil empty list means "none". Script and Labels carry
+// through verbatim: the controller validates both (a script kind requires a
+// spec; the rafiki/ prefix and the owner key are reserved on labels).
 func applySpawnSpecShaping(req *protocol.SpawnRequest, spec tools.SpawnSpec) {
 	req.Preset = spec.Preset
 	req.Thinking = spec.Thinking
 	req.AppendSystemPrompt = spec.AppendSystemPrompt
+	req.Script = spec.Script
+	req.Labels = spec.Labels
 	if spec.Tools != nil {
 		if len(*spec.Tools) == 0 {
 			req.NoBuiltinTools = true

@@ -338,6 +338,16 @@ type ToolOpts struct {
 	// executes via its own tiered tool-routing and does not use this field.
 	PyModuleExecutor PyModuleExecutor
 
+	// PyModuleStarter, when non-nil, gives an MCP-connected child the
+	// pymodule_start tool -- the same AgentSpawner the face already bound
+	// for agent_spawn, re-exposed under the pymodule family's delegate-verb
+	// gate so the tool appears exactly where pymodule_run does (a child
+	// whose own row carries a live executor binding; the interactive human
+	// uses `rafiki create --kind script`). nil means decline, same rule as
+	// PyModuleExecutor. Never set by fundi: the registry surfaces
+	// pymodule_start through Agents, like agent_spawn.
+	PyModuleStarter AgentSpawner
+
 	// Presets, when non-nil, gives this agent the preset_list/get/put/delete
 	// tools over its owner's preset store -- reading, and (only on request)
 	// writing, the operator's seat policy. nil declines the preset_* tools,

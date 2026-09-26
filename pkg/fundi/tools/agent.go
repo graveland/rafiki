@@ -44,9 +44,17 @@ type SpawnSpec struct {
 	// Assignment happens only after the controller admits the spawn, so a
 	// refused spawn leaves no row pointing at a child that never started.
 	Task string
-	// Kind selects the child runtime ("fundi", "claude", "pi"). Empty means
-	// fundi.
+	// Kind selects the child runtime ("fundi", "claude", "script"). Empty
+	// means fundi.
 	Kind string
+	// Script, for Kind "script", names the pymodule that IS the child's
+	// brain — a saved Python module run as the child's process. Nil for
+	// every other kind; the controller refuses a script kind without one.
+	Script *protocol.ScriptSpec
+	// Labels are user-supplied labels on the new child. The rafiki/ and
+	// fundi/ prefixes and the "owner" key are daemon-reserved; the
+	// controller validates and refuses.
+	Labels map[string]string
 
 	// MaxDepth / MaxCost / MaxChildren are GRANTS, not claims. The controller
 	// treats them as a request and enforces its own stored limits regardless

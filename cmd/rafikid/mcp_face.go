@@ -297,10 +297,15 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		// pymodule_run is scoped further: only a ProvenanceChildToken
 		// caller (a claude-kind child, never the interactive human) whose
 		// own childstore row carries a live executor binding gets it.
+		// pymodule_start is gated the same way: the delegate verbs of the
+		// pymodule family appear exactly where the caller demonstrably
+		// operates in the executor world that hosts scripts; the
+		// interactive human has `rafiki create --kind script`.
 		if isChild {
 			if snap, ok := ctrl.st.Get(id.ChildID); ok {
 				if exec, ok := newMCPPyModuleExecutor(ctrl.execPoolConn, snap); ok {
 					opts.PyModuleExecutor = exec
+					opts.PyModuleStarter = spawner
 				}
 			}
 		}
@@ -401,6 +406,7 @@ var mcpBlueprints = []tools.Tool{
 	&tools.PyModuleDeleteBlueprint{},
 	&mcpPyModuleListBlueprint{},
 	&mcpPyModuleRunBlueprint{},
+	&mcpPyModuleStartBlueprint{},
 	&tools.PresetListBlueprint{},
 	&tools.PresetGetBlueprint{},
 	&tools.PresetPutBlueprint{},
@@ -456,12 +462,13 @@ const mcpLedgerPrefix = "This is a shared, durable, cross-agent ledger. Rows per
 // mcpPymoduleRunPointer is appended to pymodule_put/pymodule_get/
 // pymodule_delete's text on this surface: the blueprint text's "Only you can
 // see or run what you save here" is still true here, but "run" now also
-// covers a claude child
-// you spawn calling pymodule_run on this same surface -- worth stating
-// explicitly, the same "prepare state, then delegate" framing
+// covers a claude child you spawn calling pymodule_run on this same surface,
+// and pymodule_start can run a saved script as its own managed child --
+// worth stating explicitly, the same "prepare state, then delegate" framing
 // mcpLedgerPrefix gives task_add.
 const mcpPymoduleRunPointer = " A claude-kind child you spawn " +
-	"can then pymodule_run whatever you save here."
+	"can then pymodule_run whatever you save here, and pymodule_start can " +
+	"run a saved script as its own managed child."
 
 // mcpSurfacePrefix marks the agent-steering verbs as operating on daemon-managed
 // processes rather than the client's own subagents.

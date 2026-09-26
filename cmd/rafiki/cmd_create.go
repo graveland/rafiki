@@ -20,8 +20,10 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/presets"
+	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 func newCreateCmd() *cobra.Command {
@@ -69,10 +71,20 @@ Without a preset, model precedence, strongest first:
 Labels: --label flags are merged over the resolved profile's labels, with the
 flags winning on a key collision.
 
+--kind script spawns a script child: a saved pymodule run as the child's
+process, no model attached. Pass --pymodule <repo>:<script> (repo "local" or
+a git source's name) and put the script's argv after --:
+
+  rafiki create -d --kind script --pymodule local:driver -- --fast 5
+
+The child's name defaults to the script's name; a positional argument before
+-- still names it. Model, tools, prompts and session flags do not apply to a
+script child and are refused by the daemon.
+
 Set these defaults on a profile, not an environment variable: see
 'rafiki profile show' and 'rafiki profile add --help'.`,
 
-		Args: cobra.MaximumNArgs(1),
+		Args: validateCreateArgs,
 		RunE: runCreate,
 	}
 	addSpawnFlags(cmd)
@@ -83,6 +95,7 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
+	cmd.Flags().String("pymodule", "", "--kind script only: the pymodule to run as the child, as <repo>:<script> (e.g. local:driver); repo is \"local\" or a git source's name. Everything after -- is passed to the script as argv")
 	cmd.Flags().String("prefill-files", "",
 		"File listing files the child reads before its first turn (one per line; path[:N-M] or a glob; '-' for stdin, only with --detached). fundi only.")
 	// The create form cannot carry a pre-fill (pkg/tui's SpawnRequest has no
@@ -197,6 +210,39 @@ func addSpawnFlags(cmd *cobra.Command) {
 	})
 }
 
+// validateCreateArgs accepts the child's optional name positional plus —
+// for a script spawn — the script's argv after `--`. The strictness the old
+// MaximumNArgs(1) enforced (one positional at most) is kept for the name;
+// the after-`--` tail is allowed only when it can be script argv, judged as
+// far as flags allow here (a kind arriving from a PROFILE is re-checked in
+// buildSpawnRequest, where the profile is resolved anyway).
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	nameArgs, scriptArgs := splitCreatePositionals(cmd, args)
+	if len(nameArgs) > 1 {
+		return fmt.Errorf("accepts at most 1 arg for the child's name, received %d", len(nameArgs))
+	}
+	if len(scriptArgs) > 0 {
+		flagKind, _ := cmd.Flags().GetString("kind")
+		if flagKind != "" && flagKind != protocol.KindScript {
+			return fmt.Errorf("arguments after -- are the script child's argv and require --kind script")
+		}
+	}
+	return nil
+}
+
+// splitCreatePositionals splits create's positional args at `--`: anything
+// before it names the child (at most one, enforced by validateCreateArgs),
+// anything after it is the script child's argv. No `--` means every
+// positional is a name candidate.
+func splitCreatePositionals(cmd *cobra.Command, args []string) (nameArgs, scriptArgs []string) {
+	if dash := cmd.ArgsLenAtDash(); dash >= 0 && dash <= len(args) {
+		return args[:dash], args[dash:]
+	}
+	return args, nil
+}
+
+// Extracted so tests exercise this resolution rather than reimplementing it —
+// an inlined copy in a test passes no matter what the real command reads.
 // resolvePresetName returns the preset to apply: the --preset flag if given,
 // else the resolved profile's `preset` field.
 // Extracted so tests exercise this resolution rather than reimplementing it —
@@ -236,6 +282,21 @@ func resolveModel(flagModel, profileModel, remembered string) string {
 		}
 	}
 	return ""
+}
+
+// resolveSpawnModel applies the no-preset model chain (--model already on
+// req, then the profile's default, then the remembered per-kind model) —
+// except for a script kind: a script child has no model, and the profile's
+// default and the remembered model are inferences about LLM children that
+// must not ride a script spawn (sending one would be refused as `field
+// "model" does not apply to kind "script"` on every spawn for a profile
+// that names a default model). An explicitly typed --model still travels:
+// the daemon's refusal is the honest answer to a flag the caller chose.
+func resolveSpawnModel(req *protocol.SpawnRequest, p profile.Resolved, profileName string) {
+	if req.Kind == protocol.KindScript {
+		return
+	}
+	req.Model = resolveModel(req.Model, p.Model, clientstate.LastModelFor(profileName, req.Kind))
 }
 
 // resolveExecutor picks the executor reference and/or selector to send with a
@@ -338,9 +399,21 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	// Merge order: profile defaults < explicit flags.
 	labels := mergeLabels(profileLabels, flagLabels)
 
-	name := ""
-	if len(args) > 0 {
-		name = args[0]
+	nameArgs, scriptArgs := splitCreatePositionals(cmd, args)
+	if len(nameArgs) > 1 {
+		// Mirrors validateCreateArgs for direct callers (tests, or a code
+		// path that skipped cobra's Args validation).
+		return protocol.SpawnRequest{}, fmt.Errorf("accepts at most 1 arg for the child's name, received %d", len(nameArgs))
+	}
+	var name string
+	if len(nameArgs) > 0 {
+		name = nameArgs[0]
+	}
+	if kind != protocol.KindScript && len(scriptArgs) > 0 {
+		// The profile's kind resolved non-script while the line carried a
+		// `--` tail: the same refusal validateCreateArgs gives an explicit
+		// --kind, now that the kind is fully resolved.
+		return protocol.SpawnRequest{}, fmt.Errorf("arguments after -- are the script child's argv and require --kind script")
 	}
 
 	forwardEnv, _ := cmd.Flags().GetBool("forward-env")
@@ -409,7 +482,47 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	// gating on it makes a computed default unreachable.
 	req.ExecutorSelector, _ = cmd.Flags().GetString("executor-selector")
 
+	// A script spawn carries its pymodule spec client-side: --pymodule is
+	// REQUIRED here, because the daemon's own refusal for a script kind
+	// without a spec describes a request this CLI should never have built,
+	// and the after-`--` positionals are the script's argv.
+	if kind == protocol.KindScript {
+		spec, err := resolvePymoduleFlag(cmd)
+		if err != nil {
+			return protocol.SpawnRequest{}, err
+		}
+		spec.Args = append(spec.Args, scriptArgs...)
+		req.Script = spec
+		// Same default the pymodule_start tool applies: an unnamed script
+		// child reads as its script in `rafiki list`, which is the honest
+		// summary of what it is. Ids stay unique regardless.
+		if req.Name == "" {
+			req.Name = spec.Script
+		}
+	}
+
 	return req, nil
+}
+
+// resolvePymoduleFlag parses --pymodule <repo>:<script> into a ScriptSpec.
+// repo "local" is the spawning owner's saved modules; any other repo names a
+// registered git source. The script name is validated client-side (a bare
+// Python identifier, the same rule every consumer applies) so a typo fails
+// before any dial; the repo name is left to the daemon, whose registered
+// sources are the authority on what exists.
+func resolvePymoduleFlag(cmd *cobra.Command) (*protocol.ScriptSpec, error) {
+	v, _ := cmd.Flags().GetString("pymodule")
+	if v == "" {
+		return nil, errors.New("--kind script requires --pymodule <repo>:<script> (e.g. --pymodule local:driver)")
+	}
+	repo, script, ok := strings.Cut(v, ":")
+	if !ok || repo == "" || script == "" {
+		return nil, fmt.Errorf("--pymodule must be <repo>:<script> (got %q); repo is \"local\" or a git source's name", v)
+	}
+	if err := pymodules.ValidName(script); err != nil {
+		return nil, fmt.Errorf("--pymodule: script: %w", err)
+	}
+	return &protocol.ScriptSpec{Repo: repo, Script: script}, nil
 }
 
 // applyCreatePreset shapes a spawn request to carry a named preset. The
@@ -548,7 +661,7 @@ func runCreate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		req.Model = resolveModel(req.Model, p.Model, clientstate.LastModelFor(p.Name, req.Kind))
+		resolveSpawnModel(&req, p, p.Name)
 	}
 
 	noLocalExecutor, _ := cmd.Flags().GetBool("no-local-executor")
@@ -556,6 +669,14 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	flagExecutor, _ := cmd.Flags().GetString("executor")
 
 	if wantsCreateForm(cmd, args, isStdinTTY()) {
+		if req.Kind == protocol.KindScript {
+			// Reachable only for a profile with `kind = "script"` and a bare
+			// create: --pymodule and --kind are shaping flags, so a spelled
+			// one takes the direct path above the form. The form has no
+			// script-spec field, so letting it open would spawn a request
+			// the daemon refuses for the least legible reason.
+			return errors.New("the create form cannot spawn a script child; pass --pymodule <repo>:<script> (e.g. --pymodule local:driver)")
+		}
 		// The form resolves the executor interactively (its own field, the
 		// picker, and the daemon's auto-resolve), so the flag -- only reachable
 		// here with -i, since it suppresses the form on its own -- is what the
@@ -572,14 +693,32 @@ func runCreate(cmd *cobra.Command, args []string) error {
 	// gave an explicit --executor or --executor-selector of their own. See
 	// docs/plans/2026-09-06-executor-selection-design.md §1 and §5.
 	if req.Kind != protocol.KindFundi && flagExecutor == "" && req.ExecutorSelector == "" {
-		auto, err := resolveLaunchExecutor(cmdCtx(cmd), cmd, p.Name, req.Kind)
-		if err != nil {
-			return err
+		if req.Kind == protocol.KindScript {
+			// A script child does not NEED an executor: the daemon hosts it
+			// locally when none can launch it, and a daemon with no pool at
+			// all hosts locally by design — so a lister that cannot answer
+			// is not a reason to refuse the spawn. Leave the field blank
+			// and let Spawn's own routing decide, exactly like the
+			// zero-eligible case below. AMBIGUITY is not tolerated: several
+			// eligible executors with no --executor would let the daemon
+			// silently pick one, the exact thing this pre-flight exists to
+			// prevent.
+			auto, ambiguous, lerr := resolveLaunchExecutorDetailed(cmdCtx(cmd), cmd, p.Name, req.Kind)
+			if ambiguous != "" {
+				return errors.New(ambiguous)
+			}
+			_ = lerr // tolerated: see above
+			flagExecutor = auto
+		} else {
+			auto, err := resolveLaunchExecutor(cmdCtx(cmd), cmd, p.Name, req.Kind)
+			if err != nil {
+				return err
+			}
+			// auto == "" means zero executors support this kind; leave it
+			// blank so Spawn's own clear refusal explains why, rather than
+			// duplicating that message here.
+			flagExecutor = auto
 		}
-		// auto == "" means zero executors support this kind; leave it blank
-		// so Spawn's own clear refusal explains why, rather than duplicating
-		// that message here.
-		flagExecutor = auto
 	}
 
 	// By this point flagExecutor is already fully resolved for a
