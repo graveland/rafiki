@@ -1476,6 +1476,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		return control.SpawnResult{}, err
 	}
 
+	// A kind=script request that names any fundi/claude-only field is
+	// refused here, before lineage or limits read req. It runs after
+	// applyPreset so the kind is resolved and preset-filled fields are seen
+	// as they would reach the runner.
+	if err := validateScriptSpawn(req); err != nil {
+		return control.SpawnResult{}, err
+	}
+
 	// Validate cwd exists on THIS machine (dispatch already checks it's
 	// absolute) — but only for kinds the daemon itself forks a subprocess
 	// for. A fundi child never touches the daemon's own filesystem: its
@@ -1849,7 +1857,13 @@ func (c *Controller) activateLiveChild(
 	if baseSnap == nil {
 		// Fresh Spawn path. Perform name reconciliation before reading final
 		// metadata so the returned SessionName reflects any rename.
-		if !stalled && req.Kind != protocol.KindClaude && req.Name != "" && meta.SessionName != req.Name {
+		//
+		// kind=script is excluded with claude: the reconciliation writes a
+		// set_session_name frame to the child's stdin, and a script child has
+		// no stdin protocol — the frame would be dropped by the provider (and
+		// the rename could never apply anyway). The name the spawn asked for
+		// is recorded on the row at insert time.
+		if !stalled && req.Kind != protocol.KindClaude && req.Kind != protocol.KindScript && req.Name != "" && meta.SessionName != req.Name {
 			renameID := "controller-rename-1"
 			frame := []byte(fmt.Sprintf(`{"type":"set_session_name","id":%q,"name":%q}`, renameID, req.Name))
 			if err := ch.Send(frame); err == nil {
@@ -2340,6 +2354,15 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	kind := snap.Kind
 	if kind == "" {
 		kind = protocol.KindFundi
+	}
+	if kind == protocol.KindScript {
+		// A script's exit IS its result: re-running the pymodule from a resume
+		// would silently start the work over, and the childstore row carries
+		// no ScriptSpec to rebuild the spawn from anyway. Re-spawn it.
+		return control.SpawnResult{}, &control.ControllerError{
+			Code:    protocol.ErrNotResumable,
+			Message: "script children cannot be resumed: a script's exit is its result; spawn it again",
+		}
 	}
 
 	req := resumeRequestFromSnapshot(snap, apiKey)
@@ -2910,6 +2933,15 @@ func (c *Controller) Close(childID string) error {
 			slog.Warn("delete spill dir", "childId", childID, "error", err)
 		}
 	}
+	if snap.Kind == protocol.KindScript {
+		// The script host directory held the child's materialized pymodule
+		// and its per-child socket; the socket was unlinked at exit
+		// (scriptRunner.Wait). Removing the directory finishes removing the
+		// child's footprint, the same way the spill dir goes for fundi.
+		if err := c.deleteScriptHostDir(childID); err != nil {
+			slog.Warn("delete script host dir", "childId", childID, "error", err)
+		}
+	}
 	return nil
 }
 
@@ -2951,6 +2983,18 @@ UPDATE conversations.conversation c SET closed_at = now()
         OR c.external_ref LIKE replace(replace($1,'_','\_'),'%','\%') || ':%' ESCAPE '\')`
 	if _, err := c.pool.Exec(ctx, q, childID); err != nil {
 		return fmt.Errorf("stamp conversations closed %s: %w", childID, err)
+	}
+	return nil
+}
+
+// deleteScriptHostDir removes a script child's materialization directory
+// (scriptHostDir: the pymodule tree plus its per-child socket path). Close
+// and CloseAllExited call it so 'rafiki forget' fully removes the child's
+// footprint, mirroring deleteSpillDir. Missing directory is not an error.
+func (c *Controller) deleteScriptHostDir(childID string) error {
+	path := scriptHostDir(c.stateDir, childID)
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -3023,6 +3067,11 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 		if s.Kind == protocol.KindFundi {
 			if err := c.deleteSpillDir(s.ChildID); err != nil {
 				slog.Warn("delete spill dir", "childId", s.ChildID, "error", err)
+			}
+		}
+		if s.Kind == protocol.KindScript {
+			if err := c.deleteScriptHostDir(s.ChildID); err != nil {
+				slog.Warn("delete script host dir", "childId", s.ChildID, "error", err)
 			}
 		}
 		closed = append(closed, s.ChildID)
@@ -3708,7 +3757,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {
 		if c.evbuf != nil {
 			if isWorkingStatus(storePrev) {
-				c.notifySubagentSettled(childID, c.settleReason(childID), "")
+				c.notifySubagentSettled(childID, c.settleReason(childID), "", "")
 			}
 			c.evbuf.DrainIdle(childID)
 		}
@@ -3971,7 +4020,13 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	case d.suppressParent:
 		c.checkTaskResidue(childID)
 	default:
-		c.notifySubagentSettled(childID, "exited", d.excludeMCPUser)
+		// A script child's settle is its exit, with the semantics the kind
+		// implies: exit 0 settles done, anything else failed, and the
+		// fragment carries the stored SetResult — or, when the script never
+		// called SetResult, the last 4 KiB of its stderr. Every other kind
+		// keeps the plain "exited" reason with no tail.
+		reason, tail := scriptSettleFor(snap.Kind, res, ch.StderrSnapshot())
+		c.notifySubagentSettled(childID, reason, tail, d.excludeMCPUser)
 	}
 
 	// Drop any buffered events aimed at this child. It will never transition
@@ -4284,6 +4339,13 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string, vals 
 			return "", nil, nil, fmt.Errorf("resolving own binary for fundi kind: %w", selfErr)
 		}
 		return self, buildAgentArgv(req, childID, stateDir), child.IdentityProvider{}, nil
+	case protocol.KindScript:
+		// The Runner (scriptRunner) execs the interpreter and carries the
+		// process; only the provider is decided here, so stdout lines get the
+		// script provider's liveness semantics (and nothing is ever written
+		// to the script's stdin). bin/argv stay empty — a non-nil runner
+		// discards them, and a script has no binary of its own to resolve.
+		return "", nil, child.ScriptProvider{}, nil
 	default:
 		return "", nil, nil, fmt.Errorf("unknown kind: %s", kind)
 	}

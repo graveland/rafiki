@@ -94,6 +94,10 @@ type SpawnParams struct {
 	// controller, never here.
 	Prefill []protocol.PrefillRead
 
+	// Script, for kind=script, names the pymodule the child runs. Nil for
+	// every other kind; the controller refuses a script spawn without one.
+	Script *protocol.ScriptSpec
+
 	MaxDepth    *int
 	MaxCost     *float64
 	MaxChildren *int

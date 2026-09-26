@@ -222,6 +222,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Kind:             m.GetKind(),
 		Preset:           m.GetPreset(),
 		Prefill:          prefillFromProto(m.GetPrefill()),
+		Script:           scriptFromProto(m.GetScript()),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
 		ExecutorRef:      m.GetExecutorRef(),
@@ -258,6 +259,21 @@ func prefillFromProto(rows []*rafikiv1.PrefillRead) []protocol.PrefillRead {
 		})
 	}
 	return out
+}
+
+// scriptFromProto maps the wire ScriptSpec onto the domain type, nil when the
+// request carries none. Validation happens in the controller; this layer only
+// carries the spec.
+func scriptFromProto(m *rafikiv1.SpawnRequest_ScriptSpec) *protocol.ScriptSpec {
+	if m == nil {
+		return nil
+	}
+	return &protocol.ScriptSpec{
+		Repo:    m.GetRepo(),
+		Script:  m.GetScript(),
+		Modules: m.GetModules(),
+		Args:    m.GetArgs(),
+	}
 }
 
 // Kill ends a child and reports the status it settled on.

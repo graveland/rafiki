@@ -451,3 +451,43 @@ func TestPresetStoreCheckRejectsClaudeTools(t *testing.T) {
 		t.Fatal("raw INSERT of a claude preset with tools = nil error, want the CHECK constraint to reject it")
 	}
 }
+
+// TestPresetStoreScriptKindRoundTrip pins the script-kind preset: a clean
+// script preset inserts and reads back, and one carrying an LLM-shaping knob
+// is refused by the database's own CHECK (0040's script arm), not merely by
+// pkg/presets.Validate — the DB is the last gate Validate might be bypassed
+// by.
+func TestPresetStoreScriptKindRoundTrip(t *testing.T) {
+	st, _ := testStore(t)
+	ctx := context.Background()
+
+	if _, err := st.Put(ctx, "", presets.Record{
+		Name: "script-roundtrip", Kind: presets.KindScript, MaxDepth: intPtr(1),
+	}); err != nil {
+		t.Fatalf("put a clean script preset: %v", err)
+	}
+	got, err := st.Get(ctx, "", "script-roundtrip")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Kind != presets.KindScript {
+		t.Fatalf("kind = %q, want %q", got.Kind, presets.KindScript)
+	}
+
+	for _, bad := range []struct {
+		field string
+		rec   presets.Record
+	}{
+		{"model", presets.Record{Name: "script-bad-model", Kind: presets.KindScript, Model: "anthropic/x"}},
+		{"provider", presets.Record{Name: "script-bad-provider", Kind: presets.KindScript, Provider: "anthropic"}},
+		{"thinking", presets.Record{Name: "script-bad-thinking", Kind: presets.KindScript, Thinking: "high"}},
+		{"tools", presets.Record{Name: "script-bad-tools", Kind: presets.KindScript, Tools: []string{"read"}}},
+		{"system_prompt", presets.Record{Name: "script-bad-prompt", Kind: presets.KindScript, SystemPrompt: "sp"}},
+	} {
+		if _, err := st.Put(ctx, "", bad.rec); err == nil {
+			t.Errorf("script preset with %s set was accepted; the CHECK must refuse it", bad.field)
+		}
+	}
+}
+
+func intPtr(i int) *int { return &i }

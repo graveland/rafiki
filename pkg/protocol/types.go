@@ -162,6 +162,25 @@ type PrefillRead struct {
 	End   int    `json:"end,omitempty"`
 }
 
+// ScriptSpec, for kind=script, names the pymodule that IS the child's brain:
+// a saved Python module run as the child's process, with a per-child Connect
+// socket as its control channel (RAFIKI_CHILD_CONNECT). It is a pointer so
+// "absent" stays distinguishable from a spec with empty fields; the daemon
+// refuses a script spawn without one.
+//
+// Repo selects the pymodule source: "local" (pymodules.LocalRepo) for the
+// owner's own saved modules, or a registered git source's name. Script is the
+// entry module, a bare Python identifier exactly as saved. Modules names
+// further pymodules the script imports, resolved within the same repo and
+// put on PYTHONPATH for the run. Args are extra command-line arguments passed
+// to the script.
+type ScriptSpec struct {
+	Repo    string   `json:"repo"`
+	Script  string   `json:"script"`
+	Modules []string `json:"modules,omitempty"`
+	Args    []string `json:"args,omitempty"`
+}
+
 // SpawnRequest starts a new pi child (§6.3).
 // cwd is required; all other fields are optional and forwarded to pi as flags.
 // apiKey is used at spawn time only and is never written to the state record.
@@ -170,10 +189,17 @@ type SpawnRequest struct {
 	ID   string `json:"id,omitempty"`
 
 	// Kind selects the child protocol/binary: "fundi" (default, when empty —
-	// this repo's own agent runtime, run in-process) or "claude" (Claude Code
-	// CLI, driven over stream-json). See kinds.go; "pi" was a third kind and
+	// this repo's own agent runtime, run in-process), "claude" (Claude Code
+	// CLI, driven over stream-json), or "script" (a saved pymodule run as a
+	// process; ScriptSpec names it). See kinds.go; "pi" was a third kind and
 	// was retired, with no alias.
 	Kind string `json:"kind,omitempty"`
+
+	// Script, for kind=script, names the pymodule the child runs. The
+	// fundi/claude-only fields (model, tools, skills, MCP, prompts, sessions)
+	// are refused on a script spawn, and Prefill with them — a script has no
+	// engine to pre-fill and no model to think with. See ScriptSpec above.
+	Script *ScriptSpec `json:"script,omitempty"`
 
 	// Preset names a daemon-side preset (conversations.presets) that
 	// Controller.Spawn resolves FIRST, before any other field is read: it

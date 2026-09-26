@@ -52,6 +52,37 @@ func TestShouldAutoResume(t *testing.T) {
 	}
 }
 
+// TestScriptNeedsRestartSettle pins 3.5's predicate: a script row that was
+// ALIVE when its daemon died is settled failed ("daemon restarted") by the
+// next daemon, whatever its ownership — the script died with the daemon that
+// hosted it — except a foreign-LIVE row, which another daemon is hosting
+// right now. Terminal rows settled when they exited and never re-settle.
+func TestScriptNeedsRestartSettle(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  childstore.ChildRecord
+		own  ownership
+		want bool
+	}{
+		{"streaming script of my own", childstore.ChildRecord{Kind: protocol.KindScript, Status: "streaming"}, ownedByMe, true},
+		{"spawning script, unclaimed", childstore.ChildRecord{Kind: protocol.KindScript, Status: "spawning"}, unclaimed, true},
+		{"script adopted from a lapsed daemon", childstore.ChildRecord{Kind: protocol.KindScript, Status: "idle"}, foreignLapsed, true},
+		{"shutting_down script (daemon died mid-stop)", childstore.ChildRecord{Kind: protocol.KindScript, Status: "shutting_down"}, ownedByMe, true},
+		{"foreign-live script is another daemon's", childstore.ChildRecord{Kind: protocol.KindScript, Status: "streaming"}, foreignLive, false},
+		{"exited script settled when it exited", childstore.ChildRecord{Kind: protocol.KindScript, Status: "exited"}, ownedByMe, false},
+		{"row with no status settles nothing", childstore.ChildRecord{Kind: protocol.KindScript, Status: ""}, ownedByMe, false},
+		{"fundi rows resume instead", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle"}, ownedByMe, false},
+		{"claude rows were never hosted here", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "streaming"}, ownedByMe, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scriptNeedsRestartSettle(tc.rec, tc.own); got != tc.want {
+				t.Errorf("scriptNeedsRestartSettle = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRecoveryActionWorkspaceMode pins design §3.1. A pinned child must NOT be
 // moved to another machine by the restart path — HandleExecutorLost fails a
 // pinned child where it stood, and boundExecutor.recover refuses to re-select

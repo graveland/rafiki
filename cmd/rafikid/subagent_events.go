@@ -46,11 +46,17 @@ func isWorkingStatus(s protocol.Status) bool {
 // user, whose agent_kill result already answered what this fragment would
 // say. Empty means no exclusion — the ordinary settle path.
 //
+// stderrTail is the payload a script child that never called SetResult
+// settles with — the last 4 KiB of its stderr (scriptSettleFor), empty for
+// every other caller. When a result IS stored, the tail is dropped: the
+// result is the work product and the stderr is diagnostics for a script that
+// never said what it concluded.
+//
 // Keying is what makes this cheap: last-write-wins per key means a worker that
 // settles three times contributes one fragment, and Push's per-(child, source)
 // debounce means five workers finishing together contribute one injected frame
 // rather than five turns.
-func (c *Controller) notifySubagentSettled(childID, reason, excludeMCPUser string) {
+func (c *Controller) notifySubagentSettled(childID, reason, stderrTail, excludeMCPUser string) {
 	// The MCP fan-out runs first, independent of lineage AND of the event
 	// buffer: the caller that spawned a top-level MCP agent must hear about its
 	// settlement even though the parent gate below returns for it every time.
@@ -76,10 +82,14 @@ func (c *Controller) notifySubagentSettled(childID, reason, excludeMCPUser strin
 	// verbatim when it has one: for a script child the result IS the work
 	// product, and the parent reading the injected frame should not need a
 	// second verb call to learn what the script concluded. Last write wins —
-	// this is whatever was stored at settle time.
+	// this is whatever was stored at settle time. A script that never said what
+	// it concluded settles with its stderr tail instead (scriptSettleFor's
+	// contract: diagnostics for a failed script, carried rather than dropped).
 	fragment := settleFragment(childID, snap.Name, reason)
 	if res := snap.Result; res != "" {
 		fragment += "\nfinal result of " + childID + ": " + res
+	} else if stderrTail != "" {
+		fragment += "\n" + childID + " stderr tail:\n" + stderrTail
 	}
 	c.evbuf.Push(parent, subagentEventSource, childID, fragment)
 }

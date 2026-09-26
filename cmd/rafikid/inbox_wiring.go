@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -52,6 +53,13 @@ func inboxBatchConfig() inbox.BatchConfig {
 		MaxBytesPerFlush: envInt("RAFIKI_EVENTBUF_MAX_BYTES_PER_FLUSH", 65536),
 	}
 }
+
+// errInboxDeferred is the sentinel deliverInbox returns for a script child:
+// the batch is deliberately left PENDING (nothing was written, nothing was
+// consumed) because the child's Receive stream is its delivery path, not its
+// stdin. Callers that deliver opportunistically log it at Debug, never as a
+// failure — a queued row behind a script child is the normal state.
+var errInboxDeferred = errors.New("inbox: deferred to the child's Receive stream")
 
 // newInboxQueue builds the controller's queue. Validation runs before persist
 // so a send to a dead child is still a clean error rather than a row nobody
@@ -150,6 +158,12 @@ func buildInjectionFrame(b inbox.Batch, frameID string) (json.RawMessage, error)
 // a protocol with the seam. A claude child's rows are consumed on the write,
 // which is exactly today's guarantee and no worse — but it is also why a
 // claude child's queue does not survive a restart.
+//
+// A SCRIPT child gets neither: its stdin carries no frame protocol, so the
+// write is skipped and the batch is left PENDING for its Receive stream to
+// pull (the deferred sentinel). The stream's Pull takes the same per-child
+// lock, so a message that arrives while a stream is open is delivered there,
+// one row per message, and never written to stdin.
 func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, error) {
 	// Honour the caller's deadline. Every deadline on this path is generous
 	// and sendFrame itself never blocks, so this only ever fires part-way
@@ -157,6 +171,18 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 	// of time -- where writing one more frame is exactly the wrong move.
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+
+	snap, ok := c.st.Get(b.ChildID)
+	if ok && snap.Kind == protocol.KindScript {
+		// Deferred, not consumed and not written: a script child has no stdin
+		// protocol, and its rows are the Receive stream's to pull. The
+		// sentinel error makes deliver leave the batch pending — MarkSent and
+		// MarkConsumed both run only on success — so a stream opened now or
+		// later still sees it. Callers that deliver opportunistically treat
+		// this sentinel as "queued, nothing to see here" (acceptAndDeliver,
+		// flushInboxSource), not as a failure.
+		return false, errInboxDeferred
 	}
 
 	// A stored abort aimed at a claude child is retired here rather than
@@ -179,7 +205,7 @@ func (c *Controller) deliverInbox(ctx context.Context, b inbox.Batch) (bool, err
 	}
 
 	awaitAck := b.Mode != inbox.ModeAbort
-	if snap, ok := c.st.Get(b.ChildID); !ok || snap.Kind != protocol.KindFundi {
+	if !ok || snap.Kind != protocol.KindFundi {
 		awaitAck = false
 	}
 
@@ -285,8 +311,15 @@ func (c *Controller) acceptAndDeliver(ctx context.Context, in inbox.Inbound) (st
 		return "", err
 	}
 	if derr := c.inbox.Deliver(ctx, in.ChildID, in.Source); derr != nil {
-		slog.Warn("inbox: immediate delivery failed; message stays queued",
-			"childId", in.ChildID, "messageId", id, "error", derr)
+		if errors.Is(derr, errInboxDeferred) {
+			// A script child's rows stay pending for its Receive stream —
+			// the expected shape, not a failure.
+			slog.Debug("inbox: delivery deferred to the child's Receive stream",
+				"childId", in.ChildID, "messageId", id)
+		} else {
+			slog.Warn("inbox: immediate delivery failed; message stays queued",
+				"childId", in.ChildID, "messageId", id, "error", derr)
+		}
 	}
 	return id, nil
 }
@@ -298,8 +331,13 @@ func (c *Controller) flushInboxSource(childID, source string, orphans []inbox.In
 	defer cancel()
 	if c.inbox != nil {
 		if err := c.inbox.Deliver(ctx, childID, source); err != nil {
-			slog.Warn("eventbuf: flush failed; fragments stay queued",
-				"childId", childID, "source", source, "error", err)
+			if errors.Is(err, errInboxDeferred) {
+				slog.Debug("eventbuf: flush deferred to the child's Receive stream",
+					"childId", childID, "source", source)
+			} else {
+				slog.Warn("eventbuf: flush failed; fragments stay queued",
+					"childId", childID, "source", source, "error", err)
+			}
 		}
 	}
 	c.deliverOrphans(childID, orphans)
@@ -420,7 +458,11 @@ func (c *Controller) drainInbox(q *inbox.Queue, childID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := q.Deliver(ctx, childID, ""); err != nil {
-		slog.Warn("inbox: idle drain failed", "childId", childID, "error", err)
+		if errors.Is(err, errInboxDeferred) {
+			slog.Debug("inbox: idle drain deferred to the child's Receive stream", "childId", childID)
+		} else {
+			slog.Warn("inbox: idle drain failed", "childId", childID, "error", err)
+		}
 	}
 }
 

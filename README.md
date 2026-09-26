@@ -255,8 +255,8 @@ through `pkg/llm`/`pkg/agentloop` directly.
 | Child kind | Backend |
 |---|---|
 | `fundi` (default) | native loop over `pkg/agentloop` — in-band abort, per-turn token and cost accounting |
-| `pi` | a pi process in `--mode rpc` |
 | `claude` | Claude Code |
+| `script` | a saved pymodule run as the child's process (script children, below) |
 
 The kinds have **different model universes**, and `--model` completion is
 scoped to the one you picked: `fundi` takes concrete Anthropic ids,
@@ -267,6 +267,36 @@ pick one and the child spawns, attaches, and never answers. `fundi` needs
 plus `OPENROUTER_API_KEY` for any non-`anthropic/` model — both reach a
 spawned child from the caller's shell via `rafiki create --forward-env`, on
 by default.
+
+## Script children
+
+A `script` child is a child whose brain is a saved pymodule process instead
+of an LLM — a workflow driver, not a worker. It gets everything a child
+already has: an id, lineage (its spawns are its children), labels, a
+budget/depth/`max_children` grant that bounds its whole subtree, an inbox,
+`agent_list`/cockpit presence, `agent_kill`, and `logs`/`tail`/`watch` over
+its stdout and stderr.
+
+Spawn it with kind `script` and a spec naming the pymodule — `rafiki
+create --kind script` (wave 5) or Connect `Spawn` with
+`script{repo, script, modules, args}`; `repo: "local"` runs one of the
+spawning owner's own saved modules. The fundi/claude-only fields (model,
+tools, skills, MCP, prompts, sessions) are refused on the spawn, and a
+script child cannot be resumed: its exit IS its result.
+
+Its only channel to the daemon is a per-child unix socket, reached through
+the `RAFIKI_CHILD_CONNECT` environment variable. The socket is the
+credential — the process never holds a token, and whatever it sends arrives
+at the daemon as itself, subtree-scoped on Connect like any other per-child
+credential. The process environment is the daemon's full environment minus
+every `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*` variable, so no daemon
+credential leaks into a process the operator did not give them to.
+
+Exit 0 settles the child `done`, anything else `failed`; the parent's settle
+notification carries the child's `SetResult` payload (or the last 4 KiB of
+its stderr when it never set one). A locally hosted script dies with its
+daemon; recovery settles it `failed` with the reason "daemon restarted"
+rather than leaving it running-with-no-process.
 
 ## The agent inbox
 

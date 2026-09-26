@@ -23,6 +23,7 @@ var ErrNotFound = errors.New("preset not found")
 const (
 	KindFundi  = "fundi"
 	KindClaude = "claude"
+	KindScript = "script"
 )
 
 // Record is one row of conversations.presets.
@@ -31,7 +32,7 @@ type Record struct {
 	OwnerUserID        string // "" = the unattributed bucket, never "global"
 	Name               string
 	Description        string
-	Kind               string            // KindFundi | KindClaude
+	Kind               string            // KindFundi | KindClaude | KindScript
 	Provider           string            // "" = unset (NULL)
 	Model              string            // "" = unset (NULL)
 	Thinking           string            // "" = unset (NULL)
@@ -216,11 +217,15 @@ var thinkingLevels = map[string]bool{
 // Validate checks everything the database's CHECKs check, plus what they
 // cannot, so a bad preset fails with a readable message before the INSERT:
 //   - ValidName(r.Name)
-//   - r.Kind is KindFundi or KindClaude
+//   - r.Kind is KindFundi, KindClaude or KindScript
 //   - r.Thinking is "" or one of off|low|medium|high|xhigh
 //   - when r.Kind == KindClaude: Thinking == "", Tools == nil, Skills == nil,
 //     MCPServers == nil, ContextFiles == nil, SystemPrompt == "" -- the error
 //     names the first offending field: `field "tools" does not apply to kind "claude"`
+//   - when r.Kind == KindScript: the same LLM-shaping fields as claude, plus
+//     Model and Provider — a script child has no engine to shape and no model
+//     to think with. Budgets, labels and executor remain meaningful: a script
+//     spawns, spends against a grant and may be pinned to a machine.
 //   - MaxCost/MaxDepth/MaxChildren, when non-nil, are >= 0
 //   - every Labels key mirrors validateUserLabelKeys (cmd/rafikid/labels.go,
 //     the source of truth): non-empty, [A-Za-z0-9_./-] only, not "owner",
@@ -229,8 +234,8 @@ func Validate(r Record) error {
 	if err := ValidName(r.Name); err != nil {
 		return err
 	}
-	if r.Kind != KindFundi && r.Kind != KindClaude {
-		return fmt.Errorf("field %q must be %q or %q, got %q", "kind", KindFundi, KindClaude, r.Kind)
+	if r.Kind != KindFundi && r.Kind != KindClaude && r.Kind != KindScript {
+		return fmt.Errorf("field %q must be %q, %q or %q, got %q", "kind", KindFundi, KindClaude, KindScript, r.Kind)
 	}
 	if r.Thinking != "" && !thinkingLevels[r.Thinking] {
 		return fmt.Errorf("field %q must be one of off|low|medium|high|xhigh, got %q", "thinking", r.Thinking)
@@ -249,6 +254,25 @@ func Validate(r Record) error {
 		} {
 			if bad.set {
 				return fmt.Errorf("field %q does not apply to kind %q", bad.field, KindClaude)
+			}
+		}
+	}
+	if r.Kind == KindScript {
+		for _, bad := range []struct {
+			field string
+			set   bool
+		}{
+			{"thinking", r.Thinking != ""},
+			{"model", r.Model != ""},
+			{"provider", r.Provider != ""},
+			{"tools", r.Tools != nil},
+			{"skills", r.Skills != nil},
+			{"mcp_servers", r.MCPServers != nil},
+			{"context_files", r.ContextFiles != nil},
+			{"system_prompt", r.SystemPrompt != ""},
+		} {
+			if bad.set {
+				return fmt.Errorf("field %q does not apply to kind %q", bad.field, KindScript)
 			}
 		}
 	}

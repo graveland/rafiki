@@ -133,6 +133,54 @@ func TestConsumeFramesMapsFrameIdsToRows(t *testing.T) {
 	}
 }
 
+// TestDeliverInboxDefersForScriptChildren pins the delivery contract wave 3
+// introduced: a script child's batch is neither written to stdin nor
+// consumed — it stays PENDING for the child's Receive stream (the deferred
+// sentinel) — while every other kind keeps today's shape (claude: consumed
+// on the write; fundi: sent for an ack). The nil-error-but-consumed shape
+// would be the wave-2 review's F1 bug class all over again, so the test
+// asserts on the ROW STATE, not just the return.
+func TestDeliverInboxDefersForScriptChildren(t *testing.T) {
+	ctx := context.Background()
+
+	accept := func(childID string) (string, inbox.Store, inbox.Batch) {
+		st := inbox.NewMemory()
+		in := inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "hello " + childID}
+		rec, err := st.Accept(ctx, in)
+		if err != nil {
+			t.Fatalf("Accept: %v", err)
+		}
+		rows, err := st.Pending(ctx, childID)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		batches := inbox.Coalesce(rows, inbox.BatchConfig{MaxFragments: 30, MaxBytesPerFlush: 65536})
+		if len(batches) != 1 {
+			t.Fatalf("Coalesce = %d batches, want 1", len(batches))
+		}
+		return rec.ID, st, batches[0]
+	}
+
+	// A script child: deferred, row pending, nothing written.
+	rowID, st, batch := accept("c_script")
+	c := &Controller{st: childstore.New(), cm: newChildManager(), inbox: inbox.NewQueue(inbox.QueueConfig{Store: st})}
+	c.st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript, Status: protocol.StatusStreaming})
+	awaitAck, err := c.deliverInbox(ctx, batch)
+	if err == nil || !errors.Is(err, errInboxDeferred) {
+		t.Fatalf("script child delivery = (%v, %v), want the deferred sentinel", awaitAck, err)
+	}
+	if rows, _ := st.Pending(ctx, "c_script"); len(rows) != 1 || rows[0].ID != rowID {
+		t.Fatalf("the script child's row must stay pending for its Receive stream; pending = %+v", rows)
+	}
+
+	// The sentinel is a distinct value, so an opportunistic caller can tell
+	// "queued, nothing to see here" from a real failure without string
+	// matching.
+	if _, err := c.deliverInbox(ctx, batch); !errors.Is(err, errInboxDeferred) {
+		t.Fatalf("a second delivery must defer the same way, got %v", err)
+	}
+}
+
 // consumeRecorder records each MarkConsumed call as a separate set.
 //
 // The separation is the whole point: Queue.Consume takes the per-child lock on

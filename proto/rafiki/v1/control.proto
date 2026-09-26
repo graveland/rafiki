@@ -115,11 +115,12 @@ message ReportRequest {
   // verbatim inside the fragment the parent's frame carries.
   string kind = 1;
   // data_json is the report payload as a JSON object (or any valid JSON
-  // value). Required to PARSE as JSON and capped at MaxReportDataBytes (4
-  // KiB); oversized or malformed data is refused with CodeInvalidArgument
-  // rather than truncated — a silently truncated JSON payload is worse than
-  // an explicit error, and the cap keeps a report fragment well inside the
-  // event buffer's own per-fragment truncation.
+  // value). Required to PARSE as JSON — after trimming surrounding
+  // whitespace; the trimmed value is what is stored — and capped at
+  // MaxReportDataBytes (4 KiB); oversized or malformed data is refused with
+  // CodeInvalidArgument rather than truncated — a silently truncated JSON
+  // payload is worse than an explicit error, and the cap keeps a report
+  // fragment well inside the event buffer's own per-fragment truncation.
   string data_json = 2;
 }
 
@@ -174,7 +175,8 @@ message ScriptMessage {
 // once at the end of its work. See ReceiveRequest for the self-only rule.
 message SetResultRequest {
   // result_json is the script's structured final result as JSON. Required to
-  // PARSE as JSON and capped at MaxResultBytes (4 KiB); oversized or
+  // PARSE as JSON — after trimming surrounding whitespace; the trimmed value
+  // is what is stored — and capped at MaxResultBytes (4 KiB); oversized or
   // malformed data is refused with CodeInvalidArgument. Last write wins:
   // every call replaces the stored result, and the value present when the
   // child settles rides the settle fragment and GetChild.
@@ -272,6 +274,18 @@ message SpawnRequest {
 
   // Files the child reads before its first turn (fundi only).
   repeated PrefillRead prefill = 13;
+
+  // ScriptSpec, for kind = "script", names the pymodule that IS the child's
+  // brain: a saved Python module run as the child's process, with a per-child
+  // Connect socket as its control channel. The fundi/claude-only fields
+  // above are refused on a script spawn, and prefill with them.
+  message ScriptSpec {
+    string repo = 1;
+    string script = 2;
+    repeated string modules = 3;
+    repeated string args = 4;
+  }
+  ScriptSpec script = 14;
 
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not

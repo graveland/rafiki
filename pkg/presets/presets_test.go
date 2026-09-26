@@ -110,6 +110,43 @@ func TestPresetValidate(t *testing.T) {
 		})
 	}
 
+	// A script preset honours only executor, labels, budgets, description
+	// and append_system_prompt; every LLM-shaping knob is refused, and the
+	// empty-[]string tri-state must be rejected too (nil-check, not len).
+	script := func() Record {
+		return Record{Name: "ok", Kind: KindScript}
+	}
+	for _, bad := range []struct {
+		subtest string
+		r       Record
+		field   string
+	}{
+		{"script kind with thinking", func() Record { r := script(); r.Thinking = "low"; return r }(), "thinking"},
+		{"script kind with model", func() Record { r := script(); r.Model = "anthropic/x"; return r }(), "model"},
+		{"script kind with provider", func() Record { r := script(); r.Provider = "anthropic"; return r }(), "provider"},
+		{"script kind with tools=[]", func() Record { r := script(); r.Tools = []string{}; return r }(), "tools"},
+		{"script kind with skills", func() Record { r := script(); r.Skills = []string{}; return r }(), "skills"},
+		{"script kind with mcp_servers", func() Record { r := script(); r.MCPServers = []string{}; return r }(), "mcp_servers"},
+		{"script kind with context_files", func() Record { r := script(); r.ContextFiles = boolPtr(true); return r }(), "context_files"},
+		{"script kind with system_prompt", func() Record { r := script(); r.SystemPrompt = "be terse"; return r }(), "system_prompt"},
+	} {
+		t.Run(bad.subtest, func(t *testing.T) {
+			err := Validate(bad.r)
+			if err == nil || !strings.Contains(err.Error(), bad.field) {
+				t.Fatalf("Validate(%+v) = %v, want an error mentioning %q", bad.r, err, bad.field)
+			}
+		})
+	}
+	// A clean script preset — executor/labels/budgets only — validates.
+	okScript := script()
+	okScript.Executor = "home-lab"
+	okScript.MaxCost = floatPtr(0)
+	okScript.MaxDepth = intPtr(1)
+	okScript.AppendSystemPrompt = "extra"
+	if err := Validate(okScript); err != nil {
+		t.Errorf("Validate(clean script preset) = %v, want nil", err)
+	}
+
 	// A claude preset may carry the knobs claude actually honours.
 	ok := claude()
 	ok.Model = "claude-x"

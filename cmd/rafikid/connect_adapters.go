@@ -252,6 +252,7 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		Kind:             p.Kind,
 		Preset:           p.Preset,
 		Prefill:          p.Prefill,
+		Script:           p.Script,
 		Labels:           p.Labels,
 		ParentChildID:    p.ParentChildID,
 		ExecutorSelector: p.ExecutorSelector,

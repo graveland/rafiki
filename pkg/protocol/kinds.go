@@ -4,7 +4,9 @@ package protocol
 
 // Child kinds. Each names a backend by proper noun: claude is a foreign tool,
 // fundi is this repo's own agent runtime — the craftsman that does the work,
-// as distinct from rafiki, the friend that keeps the history.
+// as distinct from rafiki, the friend that keeps the history. script is a
+// child whose brain is a saved pymodule process instead of an LLM, talking
+// to the daemon over its per-child Connect socket.
 //
 // "pi" was a third kind and was retired in Phase C0 (2026-08-25). No alias for
 // it: zero pi children exist in any database, and a spawn naming it should
@@ -12,4 +14,5 @@ package protocol
 const (
 	KindFundi  = "fundi"
 	KindClaude = "claude"
+	KindScript = "script"
 )

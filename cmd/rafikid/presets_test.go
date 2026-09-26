@@ -232,6 +232,54 @@ func TestApplyPresetClaudeRejectsFundiFields(t *testing.T) {
 	}
 }
 
+func intPtr(i int) *int { return &i }
+
+func TestApplyPresetScriptRejectsFundiClaudeFields(t *testing.T) {
+	store := newFakePresetStore("owner-1", presets.Record{
+		ID: 9, Name: "sp", Kind: presets.KindScript, Labels: map[string]string{},
+	})
+	c := presetController(store)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		field string
+		req   protocol.SpawnRequest
+	}{
+		{"thinking", protocol.SpawnRequest{Thinking: "high"}},
+		{"tools", protocol.SpawnRequest{Tools: "read"}},
+		{"skills", protocol.SpawnRequest{Skills: []string{"s"}}},
+		{"mcp_servers", protocol.SpawnRequest{MCPServers: []string{"m"}}},
+		{"context_files", protocol.SpawnRequest{NoContextFiles: true}},
+		{"system_prompt", protocol.SpawnRequest{SystemPrompt: "sp"}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			req := tc.req
+			req.Preset = "sp"
+			req.Kind = protocol.KindScript
+			_, _, err := c.applyPreset(ctx, req, "owner-1")
+			msg := wantInvalidArgs(t, err)
+			want := fmt.Sprintf("field %q does not apply to a script preset", tc.field)
+			if msg != want {
+				t.Fatalf("message = %q, want %q", msg, want)
+			}
+		})
+	}
+
+	// A clean script spawn through the preset: no kind conflict, budgets and
+	// executor ride through.
+	req := protocol.SpawnRequest{Preset: "sp", Kind: protocol.KindScript, MaxDepth: intPtr(2)}
+	resolved, rec, err := c.applyPreset(ctx, req, "owner-1")
+	if err != nil {
+		t.Fatalf("a clean script spawn through a script preset: %v", err)
+	}
+	if rec == nil || rec.Kind != presets.KindScript {
+		t.Fatalf("resolved record = %+v, want the script preset", rec)
+	}
+	if resolved.MaxDepth == nil || *resolved.MaxDepth != 2 {
+		t.Fatalf("resolved maxDepth = %v, want the request's 2", resolved.MaxDepth)
+	}
+}
+
 func TestApplyPresetModelOverrideAndDefault(t *testing.T) {
 	store := newFakePresetStore("owner-1", presets.Record{
 		ID: 7, Name: "p", Kind: presets.KindFundi, Labels: map[string]string{},

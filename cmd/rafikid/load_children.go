@@ -88,6 +88,21 @@ func shouldAutoResume(rec childstore.ChildRecord) bool {
 	return rec.Status != "" && rec.Status != string(protocol.StatusExited)
 }
 
+// scriptNeedsRestartSettle reports whether a recovered row is a script
+// child that was ALIVE when the daemon hosting it died, and whose death this
+// daemon must therefore settle (loadChildren collects them and settles after
+// the walk). A locally hosted script dies with its daemon — same as a local
+// claude child — but unlike claude, its parent is told: the row's own
+// non-terminal status is the proof the process is gone, and a foreign-LIVE
+// row (another daemon hosts it right now) is none of this daemon's business.
+// A terminal row settled when it exited and settles again never.
+func scriptNeedsRestartSettle(rec childstore.ChildRecord, own ownership) bool {
+	return rec.Kind == protocol.KindScript &&
+		rec.Status != "" &&
+		rec.Status != string(protocol.StatusExited) &&
+		own != foreignLive
+}
+
 // ownership is recovery's answer to "may this daemon run this child".
 type ownership int
 
@@ -258,18 +273,39 @@ func (c *Controller) loadChildren(ctx context.Context) {
 	}
 
 	var skipped, adopted int
+	var scriptSettles []childstore.ChildRecord
 	for _, rec := range recs {
-		switch recoveryOwnership(rec, c.daemonID, live) {
+		own := recoveryOwnership(rec, c.daemonID, live)
+		switch own {
 		case foreignLive:
 			skipped++
 		case foreignLapsed:
 			adopted++
+		}
+		// A locally hosted script child dies with its daemon. Collect the
+		// non-terminal script rows here and settle them AFTER the walk: the
+		// settle fragment is pushed to the child's PARENT, and ParentOf needs
+		// the parent's own row in the store, which only recoverOne's earlier
+		// iteration guarantees once every row has been walked.
+		if scriptNeedsRestartSettle(rec, own) {
+			scriptSettles = append(scriptSettles, rec)
 		}
 		c.recoverOne(ctx, rec, live)
 	}
 	if skipped > 0 || adopted > 0 {
 		slog.Info("recovery scoped by daemon ownership",
 			"skippedForeignLive", skipped, "adoptedForeignLapsed", adopted)
+	}
+	for _, rec := range scriptSettles {
+		// The process is gone (local hosting: the script dies with whichever
+		// daemon hosted it, and this one just classified the row as adoptable
+		// or its own), so the honest settle is failed. The reason names why —
+		// "daemon restarted" — and no stderr tail exists to attach: the
+		// buffer died with the daemon. A stored result rides the fragment
+		// anyway; the script may have SetResult'd before the daemon died.
+		slog.Info("settling locally hosted script child whose daemon restarted",
+			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
+		c.notifySubagentSettled(rec.ChildID, "failed (daemon restarted)", "", "")
 	}
 }
 

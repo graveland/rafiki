@@ -461,11 +461,11 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 		},
 	})
 
-	c.notifySubagentSettled("c_mcp_desc", "exited", "")
+	c.notifySubagentSettled("c_mcp_desc", "exited", "", "")
 	if got := assertSilence(t, ss.got); got != "" {
 		t.Errorf("a stamped descendant must not fan out to the caller's session; got %q", got)
 	}
-	c.notifySubagentSettled("c_mcp_desc_legacy", "exited", "")
+	c.notifySubagentSettled("c_mcp_desc_legacy", "exited", "", "")
 	if got := assertSilence(t, ss.got); got != "" {
 		t.Errorf("an unowned descendant must not fan out to the caller's session; got %q", got)
 	}
@@ -551,7 +551,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 		Status:      protocol.StatusStreaming,
 		StartedAt:   time.Now(),
 	})
-	ctrl.notifySubagentSettled("c_mcp_wired", "exited", "")
+	ctrl.notifySubagentSettled("c_mcp_wired", "exited", "", "")
 
 	if gotMsg := waitFor(t, got); !strings.Contains(gotMsg, "c_mcp_wired") {
 		t.Errorf("the settled fragment must reach the initialized client: %q", gotMsg)
@@ -662,7 +662,7 @@ func TestMCPNotifyFiresForATopLevelChild(t *testing.T) {
 
 	// No evbuf at all: the fan-out must not depend on the event buffer being
 	// wired, only the parent push does.
-	c.notifySubagentSettled("c_mcp_top", "exited", "")
+	c.notifySubagentSettled("c_mcp_top", "exited", "", "")
 
 	got := waitFor(t, ss.got)
 	if !strings.Contains(got, "c_mcp_top") || !strings.Contains(got, "exited") {

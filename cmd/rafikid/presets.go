@@ -89,7 +89,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 	// prompts/budgets: every field that only a fundi child can honour is
 	// refused, in this order, so a request that sets several reports the
 	// first.
-	if rec.Kind == presets.KindClaude {
+	if rec.Kind == presets.KindClaude || rec.Kind == presets.KindScript {
 		for _, bad := range []struct {
 			field string
 			set   bool
@@ -107,9 +107,19 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 			if bad.set {
 				return req, nil, &control.ControllerError{
 					Code:    protocol.ErrInvalidArgs,
-					Message: fmt.Sprintf("field %q does not apply to a claude preset", bad.field),
+					Message: fmt.Sprintf("field %q does not apply to a %s preset", bad.field, rec.Kind),
 				}
 			}
+		}
+	}
+	// A script preset additionally fixes no model/provider: a script child has
+	// no LLM to point them at. The request fields are refused by
+	// validateScriptSpawn after this runs; a preset could still try to fill
+	// them, so refuse here too, where the offending row is named.
+	if rec.Kind == presets.KindScript && (rec.Model != "" || rec.Provider != "") {
+		return req, nil, &control.ControllerError{
+			Code:    protocol.ErrInvalidArgs,
+			Message: fmt.Sprintf("model/provider does not apply to a %s preset", presets.KindScript),
 		}
 	}
 

@@ -255,7 +255,7 @@ watch that row freeze.
 | `Send` | unary | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see below) |
 | `ListChildren` | unary | List children, optionally filtered by status (reports `latest_ordinal`, `cost_usd` and `max_cost` per child) |
 | `GetChild` | unary | Get one child's summary by id (reports `latest_ordinal`, `cost_usd` and `max_cost`) |
-| `Spawn` | unary | Create a child with budget, executor, and label options |
+| `Spawn` | unary | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them |
 | `Kill` | unary | Stop a child gracefully, escalating to SIGKILL if necessary |
 | `Close` | unary | Finalize an exited child: it leaves the store and its `conversations.child` row is dropped (§6.13 is the same operation on the framed protocol, whose wire spelling `ctrl_forget` stays frozen). An error for a live child — closing is never an implicit kill |
 | `ListModels` | unary | The daemon's model rows: one per id the daemon can resolve for a kind, with source and — when the catalog knows the id — optional context window, per-token USD prices and input modalities. `kind` scopes the sources (`claude` resolves only Anthropic ids; empty means the fundi default), `provider` filters by provider. This is what `rafiki models` and `--model` completion read |
@@ -298,9 +298,9 @@ watch that row freeze.
 | `ListProviderBans` | unary | Every live exclusion of an OpenRouter provider from routing: operator bans (`reason` `operator`, `model_line` `*` = every model line) and the provider cache guard's own ejections (`reason` `no_cache`, one model line). `expires_at` (unix seconds) is ABSENT for a ban that lasts until lifted; `persistent` is false when the daemon has no ejection log, meaning bans are lost on restart. Open to any caller (§"Provider bans") |
 | `BanProvider` | unary | Ban one provider slug from every model line, effective on the next OpenRouter request on both the proxy face and fundi children. `duration_seconds` is optional: absent = until lifted, present must be > 0 (`CodeInvalidArgument` otherwise). Re-banning replaces expiry and note. Admin user credential or the anonymous unix socket only; anything else `CodePermissionDenied` |
 | `UnbanProvider` | unary | Lift an operator ban (`CodeNotFound` when none is live). Does not clear the cache guard's own ejections of that provider. Same authority rule as `BanProvider` |
-| `Report` | unary | Publishes one progress report from a SCRIPT child to the CALLER'S OWN PARENT's event buffer, where it coalesces and defers exactly like a subagent settle (`scriptEventSource`, keyed on the script's own id — five reports between the parent's turns cost one injected frame, not five). A top-level script has no parent to push to, so its report is appended to its OWN durable event log instead as a `script_report` event. `kind` is the caller's discriminator (required, ≤64 bytes, no control characters — it is rendered verbatim inside the injected frame) and `data_json` the payload, required to parse as a complete JSON value and capped at 4 KiB (`connectapi.MaxReportDataBytes`); oversized or malformed data is refused with `CodeInvalidArgument`, never truncated. The caller's position is resolved from its credential, never from a request field — the request carries no address to authorize against |
+| `Report` | unary | Publishes one progress report from a SCRIPT child to the CALLER'S OWN PARENT's event buffer, where it coalesces and defers exactly like a subagent settle (`scriptEventSource`, keyed on the script's own id — five reports between the parent's turns cost one injected frame, not five). A top-level script has no parent to push to, so its report is appended to its OWN durable event log instead as a `script_report` event. `kind` is the caller's discriminator (required, ≤64 bytes, no control characters — it is rendered verbatim inside the injected frame) and `data_json` the payload, required to parse as a complete JSON value — after trimming surrounding whitespace; the trimmed value is what is stored — and capped at 4 KiB (`connectapi.MaxReportDataBytes`); oversized or malformed data is refused with `CodeInvalidArgument`, never truncated. The caller's position is resolved from its credential, never from a request field — the request carries no address to authorize against |
 | `Receive` | server-streaming | The calling script child's inbox, streamed: everything addressed to it from now on arrives as a `ScriptMessage.Text` (text, `PROMPT`/`STEER` mode, the durable inbox row id on `message_ids` (one row per message today; the field is repeated so a future batching change needs no wire change), attachments), and the lifecycle news a script must react to arrives as the `Stop` variant — an inbox abort row ("abort requested"), the child entering `shutting_down` ("stopping"), or its exit ("child exited"); each stop ENDS the stream, and the text rows ahead of an abort row in the same pulled batch are delivered before its stop (work first, stop last; rows behind it are discarded). Delivery is at-most-once, in the same family as the claude children's contract but slightly weaker: a claude child's failed frame write leaves its rows pending for the idle-drain retry, while a stream that dies between pull and wire has nothing left to retry, because the rows were consumed at the pull — the stream does retain and deliver every row of a batch it has pulled, and the per-child lock still means a row is never handed to two consumers. `child_id` in the request is a SELF-CHECK, not an address: empty means the caller's own inbox, and anything else must equal the caller's own id (`CodePermissionDenied` — this is the one childScoped verb whose check is identity, not subtree, so it cannot go through `ChildScope.Authorize`, which refuses the caller's own id) |
-| `SetResult` | unary | Stores the calling script child's structured final result: verbatim JSON, required to parse as a complete JSON value and capped at 4 KiB (`connectapi.MaxResultBytes`), refused with `CodeInvalidArgument` otherwise. Last write wins: every call replaces the stored value (`conversations.child.result`, migration 0039 — nullable TEXT so the bytes the script wrote are the bytes every reader gets), and the value present when the child settles rides the settle fragment injected into the parent's event buffer and `GetChild`'s `ChildSummary.result`. Self-only: the caller's own row, resolved from the credential |
+| `SetResult` | unary | Stores the calling script child's structured final result: verbatim JSON, required to parse as a complete JSON value — after trimming surrounding whitespace; the trimmed value is what is stored — and capped at 4 KiB (`connectapi.MaxResultBytes`), refused with `CodeInvalidArgument` otherwise. Last write wins: every call replaces the stored value (`conversations.child.result`, migration 0039 — nullable TEXT so the bytes the script wrote are the bytes every reader gets), and the value present when the child settles rides the settle fragment injected into the parent's event buffer and `GetChild`'s `ChildSummary.result`. Self-only: the caller's own row, resolved from the credential |
 
 #### Who may call what (the provenance gate)
 
@@ -349,6 +349,81 @@ agent-control surface (§2.4) has its own entitlement gate, and wave 1 of the
 script-children plan scoped its per-child bindings too: conversation reads
 to the child's own subtree, and the recall/memory, preset and pymodule
 authoring surfaces refused outright — see `mcp_face.go`'s `getServer`.
+
+### Script children (kind `script`)
+
+A script child is a child whose brain is a saved pymodule process instead of
+an LLM. It gets everything a child already has — an id, lineage, labels, a
+budget/depth/`max_children` grant, an inbox, `list`/`get`/`logs`/cockpit
+presence, `kill` — and its control channel is real Connect over a per-child
+unix socket.
+
+**Spawning.** `Spawn` with `kind: "script"` and a `script` spec
+(`repo`, `script`, `modules`, `args`). `repo` is `"local"` (the spawning
+owner's own saved pymodules — the materializer reads the owner's rows, so a
+module another user saved is not yours to run) or a registered git source's
+name (executor-hosted; a locally hosted child refuses it). The three budget
+pointers, labels, executor selector and a preset behave as for any other
+kind; every fundi/claude-only field — model, provider, api_key, thinking,
+tools, skills, MCP, prompts, sessions, `extra_args`, `prefill` — is refused
+(`field "…" does not apply to kind "script"`), and a script-kind preset is
+refused the same fields at save time (pkg/presets.Validate; the database's
+own CHECK, migration 0040, backs it). A script child cannot be resumed: its
+exit IS its result, so `Resume` refuses with "spawn it again".
+
+**Hosting.** A locally hosted script (no executor pool route yet — wave 4
+moves hosting onto executors via daraja) forks on the daemon's own host, in
+its own process group, from the daemon's state dir
+(`script-host/<childID>/`, 0700). Its environment is the daemon's FULL
+environment minus every `RAFIKI_*`/`ANTHROPIC_*`/`OPENROUTER_*` variable —
+no credential, no retired client socket, no child-id global — plus a
+recomputed `PYTHONPATH` (script dir is `sys.path[0]`; each named module's
+directory joins in call order) and exactly one control variable:
+
+- `RAFIKI_CHILD_CONNECT` — the per-child socket path. NOT `RAFIKI_SOCKET` (a
+  retired client variable and a hard CLI error).
+
+A script that declares `# pymodule-requirements:` without a venv is refused
+(venvs live in an executor's synced cache, not on the daemon host), and a
+git-sourced `repo` is refused with a pointer to executor hosting.
+
+**The per-child socket.** The socket is the credential: the process never
+sees a token, only a filesystem path it can reach and nobody else can. The
+socket (`pkg/childsock`, listening on `<script-host>/<childID>/connect.sock`,
+dir 0700 / socket 0600, HTTP/1.1 AND h2c) reverse-proxies every request to
+the daemon's Connect route with the child's per-child secret injected as
+`Authorization: Bearer …` — the same per-child secret every other child
+credential resolves through (`ChildForMCPToken`) — after stripping any
+inbound `Authorization`/`X-Rafiki-*` header, so a caller cannot smuggle a
+stronger identity past the injection. The socket is closed and unlinked when
+the child exits, and the proxy's per-spawn bind deliberately does NOT touch
+the process umask (it is process-global; the 0700 directory is the access
+boundary). Any language with an HTTP client can speak to it: unary calls are
+`application/json`, server-streaming (`Receive`) is enveloped
+`application/connect+json`.
+
+**Messages.** `agent_send` to a script child lands in its inbox and the
+`Receive` stream delivers it. The inbox DELIVERY for a script child defers to
+the stream (`deliverInbox` returns a deferred sentinel rather than writing a
+frame to the script's stdin, which carries no protocol — the provider drops
+stray stdin frames as a backstop), so a script child's rows stay pending
+until its stream pulls them. Fragments the event buffer pushes INTO a script
+child (its own children's settles, budget warnings) ride the same rows.
+
+**Settle.** A script child's exit is its settle: exit 0 settles `done`,
+anything else `failed`, and the parent's settle fragment carries the stored
+`SetResult` payload — or, when the script never called `SetResult`, the last
+4 KiB of its stderr. The kill ladder is unchanged (stdin close, then the
+SIGTERM/SIGKILL rungs after the caller's timeouts); a script holding an open
+`Receive` stream sees the `shutting_down` stop within one poll interval and
+can exit before the signal rungs. A script that holds NO stream is told
+nothing before the signals — the default 180 s graceful window applies, so
+callers that want a prompt death pass explicit timeouts.
+
+**Restart.** A locally hosted script dies with its daemon. Recovery loads
+its still-live row as exited and settles it `failed` with the reason
+"daemon restarted" toward its parent — never left running-with-no-process,
+never re-run (a re-run would silently start the work over).
 
 ### Skill management verbs (`ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`)
 
