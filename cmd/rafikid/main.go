@@ -624,6 +624,17 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})
 			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
+			// The new-seam backends: child ops, executor admin, user admin,
+			// raw child I/O and executor sessions. Each adapter is pure
+			// convert-and-delegate to the Controller; a seam left unwired
+			// answers its handler's "not yet wired" Unavailable, so these five
+			// wires are what makes the RPCs reachable (pinned end to end by
+			// TestConnectNewRPCsWired in test/integration).
+			face.Control.SetChildOps(connectChildOps{c: ctrl})
+			face.Control.SetExecutorAdmin(connectExecutorAdmin{c: ctrl})
+			face.Control.SetUserAdmin(connectUserAdmin{c: ctrl})
+			face.Control.SetRawChildIO(connectRawChildIO{c: ctrl})
+			face.Control.SetExecutorSessions(connectExecutorSessions{c: ctrl})
 			if skillStore != nil {
 				// Push-on-write: a skill edit reaches every eligible executor on
 				// the write itself, not on a reconnect or a timer.
@@ -870,6 +881,16 @@ func runDaemon(opts runDaemonOpts) error {
 	)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), globalTimeout)
 	defer shutdownCancel()
+	// Stop the Connect control plane BEFORE draining children: face.Close's
+	// http.Server.Shutdown waits for active requests without cancelling their
+	// contexts, so a parked ExecutorSession stream would otherwise hold the
+	// drain for its remaining lifetime against the 180s budget. Stop unblocks
+	// those handlers; net/http then cancels each stream's context, which is
+	// the eviction trigger, so the session executors release while the drain
+	// proceeds. Idempotent — every call after the first is a no-op.
+	if face != nil && face.Control != nil {
+		face.Control.Stop()
+	}
 	if err := ctrl.ShutdownAllChildren(shutdownCtx, childShutdownTimeout, childKillTimeout); err != nil {
 		slog.Warn("child shutdown errors", "error", err)
 	}
