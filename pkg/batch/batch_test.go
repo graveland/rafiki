@@ -837,3 +837,96 @@ func TestBatchErrorIsPlain(t *testing.T) {
 		t.Fatalf("delivered error wraps a context error: %v", res.err)
 	}
 }
+
+func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
+	h := newHarness(t)
+	invalid := []string{
+		"",                      // empty
+		"conv:1",                // ":" — the separator the constraint forbids
+		"conv id",               // space
+		"conv/1",                // slash
+		"conv.1",                // dot
+		"héllo",                 // non-ASCII
+		strings.Repeat("a", 65), // too long
+	}
+	for _, id := range invalid {
+		// Park returns before any store interaction, so the call is
+		// synchronous and must fail fast with a plain *batch.Error.
+		msg, err := h.b.Park(h.ctx, id, "vendor/m:batch", testParams("vendor/m:batch"))
+		if err == nil {
+			t.Fatalf("Park(%q): expected a rejection, got msg=%v", id, msg)
+		}
+		var be *batch.Error
+		if !errors.As(err, &be) {
+			t.Errorf("Park(%q): err %v (%T) is not *batch.Error", id, err, err)
+		}
+		if !strings.Contains(err.Error(), "custom_id") {
+			t.Errorf("Park(%q): err = %q, want it to name custom_id", id, err.Error())
+		}
+		if msg != nil {
+			t.Errorf("Park(%q): returned a message with the error", id)
+		}
+	}
+	// Nothing durable, nothing sent.
+	for _, st := range []batch.State{
+		batch.StateQueued, batch.StateSubmitting, batch.StateSubmitted,
+		batch.StateCompleted, batch.StateFailed,
+	} {
+		rows, _ := h.ms.InState(context.Background(), st)
+		if len(rows) != 0 {
+			t.Errorf("InState(%q) = %+v, want none for rejected ids", st, rows)
+		}
+	}
+	if got := h.submitCount(); got != 0 {
+		t.Errorf("submits = %d, want 0", got)
+	}
+	if got := h.listCount(); got != 0 {
+		t.Errorf("list calls = %d, want 0", got)
+	}
+	// Boundary: exactly 64 valid characters IS accepted and lands a row.
+	_ = h.park(strings.Repeat("a", 64), "vendor/m:batch")
+	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
+}
+
+func TestBatchContradictoryResultFails(t *testing.T) {
+	h := newHarness(t)
+	ch1 := h.park("conv-1", "vendor/m:batch")
+	ch2 := h.park("conv-2", "vendor/m:batch")
+	h.waitInState(t, batch.StateQueued, 2, 5*time.Second)
+	h.start()
+	submits := h.waitSubmits(t, 1, 5*time.Second)
+	// conv-1's result item contradicts itself: a non-null error beside a
+	// 200 response with a body. The error is the provider's last word: the
+	// call fails, and the 200 body must not be stored as a success.
+	h.completeBatch(submits[0].batchID,
+		batch.BatchResult{
+			CustomID: "conv-1",
+			Error:    &batch.APIError{Message: "upstream said error"},
+			Response: &batch.BatchResponse{StatusCode: 200, Body: msgBody("msg_1")},
+		},
+		batch.BatchResult{
+			CustomID: "conv-2",
+			Response: &batch.BatchResponse{StatusCode: 200, Body: msgBody("msg_2")},
+		},
+	)
+	res1 := h.await(t, ch1, 5*time.Second)
+	res2 := h.await(t, ch2, 5*time.Second)
+	var be *batch.Error
+	if !errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "upstream said error") {
+		t.Errorf("conv-1: err = %v, want *batch.Error with the item's error", res1.err)
+	}
+	if res1.msg != nil {
+		t.Errorf("conv-1: completed despite the contradictory error item: %+v", res1.msg)
+	}
+	if res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2" {
+		t.Errorf("conv-2: msg=%+v err=%v, want the clean sibling unaffected", res2.msg, res2.err)
+	}
+	rows, _ := h.ms.InState(context.Background(), batch.StateFailed)
+	if len(rows) != 1 || rows[0].CustomID != "conv-1" {
+		t.Errorf("InState(failed) = %+v, want conv-1 failed", rows)
+	}
+	completed, _ := h.ms.InState(context.Background(), batch.StateCompleted)
+	if len(completed) != 1 || completed[0].CustomID != "conv-2" {
+		t.Errorf("InState(completed) = %+v, want conv-2 completed", completed)
+	}
+}

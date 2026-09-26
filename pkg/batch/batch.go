@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -55,6 +56,21 @@ const (
 	// maxListPages bounds how many listing pages one recovery sweep walks.
 	maxListPages = 50
 )
+
+// customIDPattern is the binding charset/length rule for a custom_id
+// (`<conversation id>-<ordinal>`): [A-Za-z0-9_-]{1,64}. The provider refuses
+// anything else with a 422 that fails the WHOLE batch — every call coalesced
+// into that model's window, including unrelated conversations — so the
+// Batcher refuses an invalid id at Park entry, before any row or group
+// exists and the failure can still be contained to the single offending call.
+const customIDPattern = `^[A-Za-z0-9_-]{1,64}$`
+
+var customIDRe = regexp.MustCompile(customIDPattern)
+
+// validCustomID reports whether customID satisfies customIDPattern.
+func validCustomID(customID string) bool {
+	return customIDRe.MatchString(customID)
+}
 
 // Options tunes the Batcher; zero fields take defaults.
 type Options struct {
@@ -147,6 +163,11 @@ func (b *Batcher) Start(ctx context.Context) {
 // Park parks one Messages-API call. It returns when the call's batch result
 // is delivered, or ctx is cancelled.
 //
+// A custom_id failing ^[A-Za-z0-9_-]{1,64}$ is refused at entry with a plain
+// *Error, before any store call or POST: the provider answers such an id
+// with a 422 that fails the WHOLE batch, taking every call coalesced into
+// the window down with it.
+//
 // A parked call is adopted, not duplicated: if a live row for customID
 // already exists, Park registers on it — completed rows return the stored
 // response with no POST, pending rows wait, failed rows are tombstoned and
@@ -154,6 +175,9 @@ func (b *Batcher) Start(ctx context.Context) {
 // completes later (a resumed child adopts it by custom_id); ctx.Err() is
 // returned raw, never wrapped in *Error.
 func (b *Batcher) Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+	if !validCustomID(customID) {
+		return nil, &Error{Msg: fmt.Sprintf("invalid custom_id %q: must match %s", customID, customIDPattern)}
+	}
 	body, err := requestJSON(params)
 	if err != nil {
 		return nil, err
@@ -414,7 +438,9 @@ func batchFailureMessage(batch Batch) string {
 
 // applyResults matches results to submitted rows by custom_id — NEVER by
 // index, results arrive out of order — completing or failing each row and
-// delivering each outcome.
+// delivering each outcome. A result item with a non-null error fails that
+// call even when it also carries a 200 response with a body: the two fields
+// are contradictory, and the error is the provider's last word.
 func (b *Batcher) applyResults(ctx context.Context, batch Batch) {
 	rows, err := b.store.InState(ctx, StateSubmitted)
 	if err != nil {
@@ -431,7 +457,7 @@ func (b *Batcher) applyResults(ctx context.Context, batch Batch) {
 		if !ok {
 			continue // already resolved, tombstoned, or not ours
 		}
-		if res.Response != nil && res.Response.StatusCode == http.StatusOK && len(res.Response.Body) > 0 {
+		if res.Error == nil && res.Response != nil && res.Response.StatusCode == http.StatusOK && len(res.Response.Body) > 0 {
 			msg, ferr := decodeMessage(res.Response.Body)
 			if ferr != nil {
 				// An undecodable body is stored as the row's failure:
