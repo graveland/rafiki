@@ -13,7 +13,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
-	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func TestRenderList_Table(t *testing.T) {
@@ -636,12 +635,12 @@ func TestStatusJSONLCompactLine(t *testing.T) {
 }
 
 // tasks' text mode is a table with every column the wire row carries, always:
-// handle (the addressable id), status (with the drop reason), subject,
-// assignee. The framed table's CHILD and UPDATED columns are gone — the
-// Connect TaskRow carries no conversation id or updated timestamp.
+// handle (the addressable id), the owning conversation (CHILD), status (with
+// the drop reason), subject, assignee. UPDATED is the one framed column that
+// stays gone — it was always a client-side dash, never carried on the wire.
 func TestTasksTextTableColumns(t *testing.T) {
 	resp := &rafikiv1.ListTasksResponse{Tasks: []*rafikiv1.TaskRow{
-		{Handle: "2.1", Content: "implement the parser", Status: "in_progress", Assignee: "c_worker"},
+		{Handle: "2.1", ConversationId: "conv_9", Content: "implement the parser", Status: "in_progress", Assignee: "c_worker"},
 		{Handle: "3", Content: "exploratory probe", Status: "dropped", DropReason: "turned out unnecessary"},
 	}}
 	var buf bytes.Buffer
@@ -649,12 +648,12 @@ func TestTasksTextTableColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"ID", "STATUS", "SUBJECT", "ASSIGNEE"} {
+	for _, want := range []string{"ID", "CHILD", "STATUS", "SUBJECT", "ASSIGNEE"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q header:\n%s", want, out)
 		}
 	}
-	for _, want := range []string{"2.1", "implement the parser", "c_worker", "in_progress"} {
+	for _, want := range []string{"2.1", "conv_9", "implement the parser", "c_worker", "in_progress"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
@@ -662,9 +661,10 @@ func TestTasksTextTableColumns(t *testing.T) {
 	if !strings.Contains(out, "dropped (turned out unnecessary)") {
 		t.Fatalf("drop reason should ride the STATUS cell:\n%s", out)
 	}
-	// Row 2 carries no assignee: the cell still renders, as a dash.
+	// Row 2 carries no conversation id or assignee: those cells still render,
+	// as dashes — a column's presence never depends on the rows beneath it.
 	if !strings.Contains(out, " - ") && !strings.Contains(out, "- ") {
-		t.Fatalf("ASSIGNEE column should render even without data:\n%s", out)
+		t.Fatalf("CHILD/ASSIGNEE columns should render even without data:\n%s", out)
 	}
 }
 
@@ -672,7 +672,7 @@ func TestTasksTextTableColumns(t *testing.T) {
 // object per line.
 func TestTasksJSONLUnwrapped(t *testing.T) {
 	resp := &rafikiv1.ListTasksResponse{Tasks: []*rafikiv1.TaskRow{
-		{Handle: "1", Content: "a", Status: "pending"},
+		{Handle: "1", ConversationId: "conv_9", Content: "a", Status: "pending"},
 		{Handle: "2", Content: "b", Status: "completed", Assignee: "c_1"},
 	}}
 	var buf bytes.Buffer
@@ -699,4 +699,16 @@ func TestTasksJSONLUnwrapped(t *testing.T) {
 			t.Fatalf("line %d lost the wire row's field names (protojson camelCase): %q", i+1, line)
 		}
 	}
+	// The restored CHILD field rides every row's protojson under its camelCase
+	// name, present only when the row carries one.
+	if !strings.Contains(lines[0], "\"conversationId\":\"conv_9\"") {
+		t.Fatalf("row's owning conversation must render as protojson conversationId: %q", lines[0])
+	}
+	if strings.Contains(lines[1], "conversationId") {
+		t.Fatalf("a row without a conversation must omit the field (protojson zero semantics): %q", lines[1])
+	}
 }
+
+// int32Ptr is a shared test helper (the watch tests' definition died with
+// cmd_watch_test.go; conversations/stop/output tests use it).
+func int32Ptr(v int32) *int32 { return &v }

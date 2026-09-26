@@ -81,12 +81,13 @@ func emitTasks(w io.Writer, resp *rafikiv1.ListTasksResponse, mode outputMode, u
 // renderTasksTable renders the ledger as a table. Every column renders for
 // every row — no per-row dynamic hiding — so a column's presence never
 // depends on the rows beneath it. Handle is the dotted ordinal path ("2.1")
-// and is what every consumer addresses rows by; the wire row carries no
-// conversation id or updated timestamp, so those framed-plane columns are
-// gone.
+// and is what every consumer addresses rows by. CHILD is the row's owning
+// conversation (TaskRow.conversation_id — a conversation id, NOT a child id;
+// the child working the row rides ASSIGNEE). UPDATED stays dropped: the
+// framed plane never carried it either — it rendered a client-side dash.
 func renderTasksTable(w io.Writer, rows []*rafikiv1.TaskRow, useColor bool) error {
 	tb := table.New(w, table.Options{Color: useColor})
-	tb.Header(dimHeader(useColor, "ID", "STATUS", "SUBJECT", "ASSIGNEE")...)
+	tb.Header(dimHeader(useColor, "ID", "CHILD", "STATUS", "SUBJECT", "ASSIGNEE")...)
 
 	for _, r := range rows {
 		status := r.GetStatus()
@@ -95,6 +96,7 @@ func renderTasksTable(w io.Writer, rows []*rafikiv1.TaskRow, useColor bool) erro
 		}
 		tb.Row(
 			defaultDash(r.GetHandle()),
+			defaultDash(r.GetConversationId()),
 			defaultDash(status),
 			defaultDash(r.GetContent()),
 			defaultDash(r.GetAssignee()),
