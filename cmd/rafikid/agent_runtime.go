@@ -345,6 +345,16 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// (catalog-less daemon) keeps the client building its own.
 	ro.Catalog = c.catalog
 
+	// Same nil-means-decline guard as Quota above, and for the same reason:
+	// c.batcher is a *batch.Batcher, and ro.Batcher an llm.Batcher — a typed
+	// nil c.batcher would widen into a NON-nil interface here. SetBatcher
+	// refuses a nil pointer at write time, so this assignment can never see
+	// one; the explicit nil check keeps the guard true even if a test or a
+	// future caller sets the field directly.
+	if c.batcher != nil {
+		ro.Batcher = c.batcher
+	}
+
 	// The single lease-acquisition site. Every agent path — spawn, resume,
 	// startup recovery — reaches BuildEngine, so hooking here is what makes the
 	// guard cover all of them. Acquiring in loadChildren alone left every

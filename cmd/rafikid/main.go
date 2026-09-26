@@ -445,6 +445,14 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Info("provider registry loaded", "providers", prov.Names())
 	}
 
+	// The parked-call batcher, built once right after the provider registry
+	// it submits through. ok=false (no usable openrouter provider, or a
+	// DB-less daemon) leaves the daemon without batch transport: :batch first
+	// calls fail with pkg/llm's "no batcher configured" error. Start BLOCKS
+	// and is begun after ctrl exists (below), on the daemon's base context,
+	// so shutdown cancels it alongside the sweeper and the recall indexer.
+	batcher, batcherOK := newBatcher(prov, pool)
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:        pool,
 		Logger:      slog.Default(),
@@ -492,6 +500,10 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
+	if batcherOK {
+		ctrl.SetBatcher(batcher)
+		go batcher.Start(baseCtx)
+	}
 	// The conversation-review worker: one bounded queue drained by a single
 	// goroutine, pool-gated like every other DB-backed component. A DSN-less
 	// daemon gets no reviewer at all — ConversationReview then answers

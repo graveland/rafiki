@@ -123,6 +123,21 @@ type RuntimeOptions struct {
 	// fetch and the memory daemon-wide, not per-child.
 	Catalog *routing.ModelCatalog
 
+	// Batcher is the daemon's ONE parked-call batcher, passed to the child's
+	// llm.Client via llm.WithBatcher. nil = no batcher: a :batch first call
+	// fails with pkg/llm's "no batcher configured" error (the standalone
+	// `rafikid fundi` process, and any daemon without a usable OpenRouter
+	// provider).
+	//
+	// The field is deliberately the llm.Batcher INTERFACE, never a concrete
+	// *batch.Batcher pointer: pkg/fundi would then have to decide at every
+	// use whether a non-nil pointer was handed in, and a caller that stores a
+	// typed-nil pointer in the interface — the classic trap — makes the
+	// interface non-nil while every Park call nil-panics. cmd/rafikid's
+	// SetBatcher refuses a nil *batch.Batcher for exactly that reason, so
+	// this field is nil ONLY when there is genuinely no batcher.
+	Batcher llm.Batcher
+
 	// ProviderSenders overrides the sender for specific providers, keyed by
 	// provider name. The daemon populates this for every provider with a
 	// via_executor table — it has already resolved the executor and built
@@ -711,6 +726,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		APIKeyOverride:         opts.APIKeyOverride,
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
+		Batcher:                opts.Batcher,
 		Pool:                   opts.Pool,
 		Tools:                  registry,
 		AutoResume:             opts.AutoResume,

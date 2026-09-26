@@ -272,7 +272,8 @@ func TestEventsShouldStopIsWiredFromMaxCost(t *testing.T) {
 	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleEndTurn), func(cfg *EngineConfig) {
 		cfg.MaxCost = 5.0
 	})
-	ev, _ := eng.events()
+	ev, sendOpts := eng.events()
+	_ = sendOpts
 	if ev.ShouldStop == nil {
 		t.Fatal("ShouldStop is nil; MaxCost can never be enforced")
 	}
@@ -878,7 +879,8 @@ func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
 		// directly.
 		cfg.CurrentMaxCost = func() float64 { return 5.0 }
 	})
-	ev, _ := eng.events()
+	ev, sendOpts := eng.events()
+	_ = sendOpts
 	if ev.ShouldStop == nil {
 		t.Fatal("ShouldStop is nil; a CurrentMaxCost-only config can never be enforced")
 	}

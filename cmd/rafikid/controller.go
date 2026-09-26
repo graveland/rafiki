@@ -27,6 +27,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
+	"go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -45,6 +46,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/insights"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
@@ -168,6 +170,15 @@ type Controller struct {
 	// just means ContextWindow always returns ok=false, matching "the proxy
 	// face failed to start" or any other reason main.go has none to give.
 	catalog *routing.ModelCatalog
+
+	// batcher is the daemon's ONE parked-call batcher (see newBatcher), set
+	// once at startup via SetBatcher next to SetCatalog. nil means the daemon
+	// runs without batch transport: every :batch first call fails with
+	// pkg/llm's "no batcher configured" error, and no child parks. The field
+	// is the CONCRETE *batch.Batcher (not the llm.Batcher interface) exactly
+	// so SetBatcher can refuse a typed nil before it can ever reach an
+	// interface field — see that setter's doc comment.
+	batcher *batch.Batcher
 
 	// reviewQ is the conversation-review worker's bounded queue. Non-nil
 	// only when pool is non-nil (main.go constructs and starts it there): a
@@ -440,6 +451,23 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 			c.coster = insights.New(c.pool).WithPricer(cat.Pricing)
 		}
 	}
+}
+
+// SetBatcher records the daemon's parked-call batcher, consulted by
+// agentRuntimeOptions (ro.Batcher) so every in-process child's llm.Client can
+// park :batch first calls. Called once at startup, before the socket accepts
+// anything — mirrors SetCatalog. Passing nil (the no-batcher case) leaves the
+// controller with none, which is fine; passing a nil *batch.Batcher is REFUSED
+// and leaves the field nil, never stored: a typed-nil pointer assigned to the
+// llm.Batcher interface field downstream would be a NON-nil interface value,
+// so pkg/llm would believe a batcher exists and nil-panic on the first :batch
+// send. Same rule as connectapi's Set*Manager setters — the interface widening
+// must happen only over a value that is actually usable.
+func (c *Controller) SetBatcher(b *batch.Batcher) {
+	if b == nil {
+		return
+	}
+	c.batcher = b
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, rawTraceAll bool, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
@@ -1566,6 +1594,22 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// whose kind cannot honour it, making the two indistinguishable.
 	if err := checkKindNarrowing(c.st, req, c.claudeExecutorRouted(), c.scriptExecutorRouted()); err != nil {
 		return control.SpawnResult{}, err
+	}
+
+	// A :batch model is submitted with the DAEMON's OpenRouter key (the
+	// batcher built at startup, SetBatcher), so a spawn carrying its own
+	// per-spawn key could never honour it — and running the batch on the
+	// daemon's key while the caller believed their own was billing would be
+	// worse than refusing. Refused here, in the same request-validation block
+	// as the other refusals, before anything is minted. The resolved model id
+	// (alias substitution included) is what carries the suffix.
+	if req.APIKey != "" && req.Model != "" {
+		if _, modelID, err := providersOrDefault(c.providers).Split(req.Model); err == nil && llm.IsBatchModel(modelID) {
+			return control.SpawnResult{}, &control.ControllerError{
+				Code:    protocol.ErrInvalidArgs,
+				Message: ":batch models are submitted with the daemon's OpenRouter key; this spawn carries its own API key",
+			}
+		}
 	}
 
 	// A silent executor grant INHERITS the spawner's. Done here, before

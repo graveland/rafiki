@@ -627,8 +627,8 @@ func (e *Engine) worker() {
 // history) emits an agent_error frame and ends the child via fatal.
 func (e *Engine) startupResume() {
 	e.em.AgentStart()
-	events, streamOpt := e.events()
-	result, err := agentloop.Resume(context.Background(), e.conv, e.tools, events, streamOpt)
+	events, sendOpts := e.events()
+	result, err := agentloop.Resume(context.Background(), e.conv, e.tools, events, sendOpts...)
 	switch {
 	case err != nil:
 		slog.Error("agent: startup resume failed; ending this child",
@@ -787,8 +787,8 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	e.em.UserMessage(text)
 	e.em.AgentStart()
 
-	events, streamOpt := e.events()
-	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), streamOpt)
+	events, sendOpts := e.events()
+	result, err := agentloop.Run(ctx, e.conv, e.tools, events, llm.UserContent(text, images), sendOpts...)
 	// Read the abort signal BEFORE releasing the context: our own cancel() would
 	// otherwise make every failure look like an abort.
 	aborted := errors.Is(ctx.Err(), context.Canceled)
@@ -873,8 +873,8 @@ func (e *Engine) priorConversationCost() float64 {
 }
 
 // events wires the agent loop's observation callbacks to the pi emitter, and
-// returns the llm.SendOption that must ride along on every conv.Continue call
-// of THIS turn so the loop actually streams.
+// returns the llm.SendOptions that must ride along on every conv.Continue call
+// of THIS turn so the loop actually streams and parks honestly.
 //
 // The stream handler and OnTurn are built together, sharing one accumulator,
 // because of how agentloop.drive is structured: it builds its sendOpts ONCE
@@ -896,7 +896,7 @@ func (e *Engine) priorConversationCost() float64 {
 // message_end with no preceding message_start — so streamed tracks whether
 // the handler ran (past the hasContent gate) THIS iteration, and OnTurn
 // falls back to the plain AssistantTurn triple when it didn't.
-func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
+func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 	// Fetched once per turn: prior completed turns don't change while THIS
 	// turn is in flight, so the conversation-lifetime rollup is constant across
 	// the turn's iterations and only the current turn's running cost (tracked
@@ -1056,7 +1056,25 @@ func (e *Engine) events() (*agentloop.Events, llm.SendOption) {
 			return costGuardrail(runningTotal, e.effectiveMaxCost())
 		},
 	}
-	return ev, llm.WithStreamHandler(handler)
+	// The batch-wait bracket: a :batch FIRST call is handed to the daemon's
+	// Batcher, whose Park blocks for the batch's whole lifetime (minutes to
+	// hours). llm calls the fn synchronously around Park — true just before,
+	// false when it returns, on every path including errors and ctx
+	// cancellation — so the child's status can show the parked state. It rides
+	// on EVERY send rather than only batch ones: pkg/llm fires it only on the
+	// park path, so a live send never calls it. Same recoverEmit guard as the
+	// tool callbacks: a panicking emitter must not kill the turn, and
+	// recovering inside the closure keeps the send's own Unlock discipline
+	// intact.
+	batchWait := func(waiting bool) {
+		defer recoverEmit("OnBatchWait", "")
+		if waiting {
+			e.em.BatchWaitStart()
+		} else {
+			e.em.BatchWaitEnd()
+		}
+	}
+	return ev, []llm.SendOption{llm.WithStreamHandler(handler), llm.WithBatchWait(batchWait)}
 }
 
 // effectiveMaxCost returns the live cap when an accessor was configured,

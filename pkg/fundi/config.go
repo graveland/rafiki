@@ -141,6 +141,15 @@ type Config struct {
 	// doing.
 	Catalog *routing.ModelCatalog
 
+	// Batcher is the daemon's parked-call batcher, handed to the engine's
+	// llm.Client via llm.WithBatcher. nil (the standalone `rafikid fundi`
+	// process, or a daemon with no OpenRouter provider) means a :batch first
+	// call fails with pkg/llm's "no batcher configured" error instead of
+	// parking. Deliberately the INTERFACE, not a concrete type: an interface
+	// field can only be nil or a real Batcher — see RuntimeOptions.Batcher's
+	// doc comment for why the concrete-pointer route is a trap here.
+	Batcher llm.Batcher
+
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/rafikid before calling BuildEngine.
 	Tools agentloop.ToolSet
@@ -374,6 +383,15 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// defaulting its own, exactly as before — see llm.NewClient.
 	if c.Catalog != nil {
 		opts = append(opts, llm.WithCatalog(c.Catalog))
+	}
+
+	// The daemon's shared batcher, before the FakeTurns early-return below:
+	// a --fake-turns child must end up with the caller's batcher just as it
+	// ends up with the caller's catalog. nil (no daemon batcher) keeps the
+	// client's nil default, which fails a :batch first call rather than
+	// parking — see llm.WithBatcher.
+	if c.Batcher != nil {
+		opts = append(opts, llm.WithBatcher(c.Batcher))
 	}
 
 	if c.FakeTurns != "" {
