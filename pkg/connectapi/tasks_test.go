@@ -85,6 +85,82 @@ func TestListTasksClampsRowCount(t *testing.T) {
 	}
 }
 
+// TestListTasksForwardsChildIDStatusAndLimit pins the framed TaskListRequest
+// parity fields: child_id maps to Assignee (Controller.TaskList's own
+// mapping), status forwards verbatim, and an explicit limit under the
+// ceiling survives instead of being replaced by taskListMaxRows.
+func TestListTasksForwardsChildIDStatusAndLimit(t *testing.T) {
+	f := &fakeTaskLister{}
+	s := NewServer(nil)
+	s.SetTaskLister(f)
+
+	if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+		ConversationId: "conv-1", ChildId: "c9", Status: "in_progress", Limit: 5,
+	})); err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if f.got.ChildID != "c9" {
+		t.Errorf("ChildID = %q, want c9", f.got.ChildID)
+	}
+	if f.got.Status != "in_progress" {
+		t.Errorf("Status = %q, want in_progress", f.got.Status)
+	}
+	if f.got.Limit != 5 {
+		t.Errorf("Limit = %d, want 5 (an explicit under-ceiling limit must survive)", f.got.Limit)
+	}
+}
+
+// TestListTasksOverLimitStillClamps mirrors TestListTasksClampsRowCount for an
+// explicit, too-large wire limit: the ceiling applies to a caller-supplied
+// value too, not only to the unset (zero) case.
+func TestListTasksOverLimitStillClamps(t *testing.T) {
+	f := &fakeTaskLister{}
+	s := NewServer(nil)
+	s.SetTaskLister(f)
+
+	if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+		Limit: taskListMaxRows + 500,
+	})); err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if f.got.Limit != taskListMaxRows {
+		t.Errorf("Limit = %d, want %d (clamped)", f.got.Limit, taskListMaxRows)
+	}
+}
+
+// TestListTasksAllOrIncludeDroppedBothMeanIncludeDropped pins ruling 3: the
+// handler treats include_dropped OR all set as include-dropped, and both
+// spellings stay on the wire (control.proto's comment on ListTasksRequest).
+func TestListTasksAllOrIncludeDroppedBothMeanIncludeDropped(t *testing.T) {
+	cases := []struct {
+		name           string
+		includeDropped bool
+		all            bool
+	}{
+		{"neither", false, false},
+		{"include_dropped only", true, false},
+		{"all only", false, true},
+		{"both", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeTaskLister{}
+			s := NewServer(nil)
+			s.SetTaskLister(f)
+
+			if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+				IncludeDropped: tc.includeDropped, All: tc.all,
+			})); err != nil {
+				t.Fatalf("ListTasks: %v", err)
+			}
+			want := tc.includeDropped || tc.all
+			if f.got.All != want {
+				t.Errorf("All (include-dropped) = %v, want %v", f.got.All, want)
+			}
+		})
+	}
+}
+
 // rafiki requires a database, so a ledger that cannot answer is a real
 // failure. Disguising it as an empty list hides a broken daemon behind a
 // cockpit that simply shows no tasks.

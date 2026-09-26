@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
@@ -106,11 +107,65 @@ func contentFromBlocks(blocks []*rafikiv1.ContentBlock) (string, []inbox.Attachm
 	return sb.String(), atts, nil
 }
 
-// ListChildren returns the daemon's children, optionally filtered by status.
+// listFilterFromWire maps the wire request's non-status filter fields onto
+// protocol.ListFilter, the same shape the framed ctrl_list verb applies
+// through Controller.List. Status is left zero: the wire's Statuses is a
+// plural OR-match with no framed equivalent, and stays a separate parameter
+// (see ChildLister.ListChildren and ChildScope.Subtree) rather than folding
+// into ListFilter's singular Status field.
+func listFilterFromWire(req *rafikiv1.ListChildrenRequest) protocol.ListFilter {
+	return protocol.ListFilter{
+		Name:         req.GetName(),
+		NameContains: req.GetNameContains(),
+		CwdContains:  req.GetCwdContains(),
+		Since:        req.GetSince(),
+		Labels:       req.GetLabels(),
+		HasLabel:     req.GetHasLabel(),
+	}
+}
+
+// matchesChildFilter reports whether c satisfies filter's non-status fields —
+// name/name_contains/cwd_contains/since/labels/has_label — with the same
+// semantics protocol.ListFilter carries on the framed plane. Applied to both
+// ListChildren branches as a post-filter over the already-mapped summaries:
+// ChildLister.ListChildren and ChildScope.Subtree take only a status list
+// (unchanged interfaces both cmd/rafikid and pkg/connectapi's tests already
+// implement), so there is no lower-level function to route these fields
+// through instead.
+func matchesChildFilter(c protocol.ChildSummary, f protocol.ListFilter) bool {
+	if f.Name != "" && c.Name != f.Name {
+		return false
+	}
+	if f.NameContains != "" && !strings.Contains(c.Name, f.NameContains) {
+		return false
+	}
+	if f.CwdContains != "" && !strings.Contains(c.Cwd, f.CwdContains) {
+		return false
+	}
+	if f.Since > 0 && c.StartedAt < f.Since {
+		return false
+	}
+	for k, v := range f.Labels {
+		if c.Labels[k] != v {
+			return false
+		}
+	}
+	for _, k := range f.HasLabel {
+		if _, ok := c.Labels[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// ListChildren returns the daemon's children, filtered by status and, for the
+// operator path, by name/name_contains/cwd_contains/since/labels/has_label —
+// the framed ctrl_list filter set (protocol.ListFilter).
 //
 // childScoped: a per-child credential gets ONLY its own subtree, resolved by
 // the wired ChildScope (the same descendants controllerSpawner.List answers),
-// never the operator's fleet view.
+// never the operator's fleet view. The subtree is narrowed further by the same
+// filter fields; it is never widened by them.
 func (s *Server) ListChildren(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListChildrenRequest],
@@ -121,10 +176,14 @@ func (s *Server) ListChildren(
 			errors.New("child lister not yet wired"))
 	}
 	elog := s.eventLog()
+	filter := listFilterFromWire(req.Msg)
 	if sc := s.childScope(ctx); sc != nil {
 		summaries := sc.Subtree(req.Msg.GetStatuses())
 		out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 		for _, c := range summaries {
+			if !matchesChildFilter(c, filter) {
+				continue
+			}
 			out = append(out, toProtoChild(c, elog, ctx))
 		}
 		return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: out}), nil
@@ -132,6 +191,9 @@ func (s *Server) ListChildren(
 	summaries := (*p).ListChildren(req.Msg.GetStatuses())
 	out := make([]*rafikiv1.ChildSummary, 0, len(summaries))
 	for _, c := range summaries {
+		if !matchesChildFilter(c, filter) {
+			continue
+		}
 		out = append(out, toProtoChild(c, elog, ctx))
 	}
 	return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: out}), nil
@@ -168,8 +230,45 @@ func (s *Server) GetChild(
 	return connect.NewResponse(&rafikiv1.GetChildResponse{Child: toProtoChild(summary, elog, ctx)}), nil
 }
 
+// operatorOnlyFieldMin and operatorOnlyFieldMax bound SpawnRequest's
+// OPERATOR-ONLY range (control.proto fields 15-29: config_dir through
+// passthrough_auth). firstOperatorOnlySet walks the descriptor by number
+// rather than a literal field list, so a field added later inside the range
+// is refused to a child credential with no second edit here.
+const (
+	operatorOnlyFieldMin protoreflect.FieldNumber = 15
+	operatorOnlyFieldMax protoreflect.FieldNumber = 29
+)
+
+// firstOperatorOnlySet returns the wire name of the lowest-numbered
+// OPERATOR-ONLY field req has set, or "" if none are set. Has() supplies the
+// "non-zero" test directly: none of fields 15-29 declare explicit presence
+// (no "optional" keyword), so for a proto3 scalar it reports true only for a
+// non-default value and for a repeated/map field only when non-empty —
+// exactly the non-empty-string/slice/map, true-bool rule Spawn's child
+// refusal applies.
+func firstOperatorOnlySet(req *rafikiv1.SpawnRequest) string {
+	m := req.ProtoReflect()
+	fields := m.Descriptor().Fields()
+	for n := operatorOnlyFieldMin; n <= operatorOnlyFieldMax; n++ {
+		fd := fields.ByNumber(n)
+		if fd != nil && m.Has(fd) {
+			return string(fd.Name())
+		}
+	}
+	return ""
+}
+
 // Spawn creates a child. The budget pointers are copied as pointers, never
 // dereferenced into values, so "unset" survives the trip to the daemon.
+//
+// Security boundary, checked before anything else runs: a caller with child
+// provenance may not set any OPERATOR-ONLY field (fields 15-29 — see
+// firstOperatorOnlySet). This is a privilege-escalation guard, not a
+// convenience default, so it runs ahead of the cwd check, the lifecycle-wired
+// check, and every other validation — a child credential must never learn
+// anything about the daemon's state from a request the security boundary
+// alone should have refused.
 //
 // childScoped: a per-child credential spawns into its OWN position —
 // ParentChildID is forced to the caller's child id, overwriting whatever the
@@ -182,6 +281,13 @@ func (s *Server) Spawn(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SpawnRequest],
 ) (*connect.Response[rafikiv1.SpawnResponse], error) {
+	sc := s.childScope(ctx)
+	if sc != nil {
+		if field := firstOperatorOnlySet(req.Msg); field != "" {
+			return nil, connect.NewError(connect.CodePermissionDenied,
+				fmt.Errorf("%s is operator-only: a child credential may not set it", field))
+		}
+	}
 	if req.Msg.GetCwd() == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("cwd is required"))
@@ -193,7 +299,7 @@ func (s *Server) Spawn(
 	}
 
 	sp := connectapiSpawnParams(req.Msg)
-	if sc := s.childScope(ctx); sc != nil {
+	if sc != nil {
 		if sc.ChildID() == "" {
 			// A per-child credential that names no child must not spawn — and
 			// MUST NOT fall through to the forced-empty-parent path below:
@@ -227,6 +333,22 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		ExecutorSelector: m.GetExecutorSelector(),
 		ExecutorRef:      m.GetExecutorRef(),
 		Labels:           m.GetLabels(),
+
+		ConfigDir:          m.GetConfigDir(),
+		AppendSystemPrompt: m.GetAppendSystemPrompt(),
+		Thinking:           m.GetThinking(),
+		NoSession:          m.GetNoSession(),
+		ResumeSession:      m.GetResumeSession(),
+		ForkSession:        m.GetForkSession(),
+		Extensions:         m.GetExtensions(),
+		NoExtensions:       m.GetNoExtensions(),
+		Verbose:            m.GetVerbose(),
+		ExtraArgs:          m.GetExtraArgs(),
+		SkillsDirs:         m.GetSkillsDirs(),
+		MCPConfig:          m.GetMcpConfig(),
+		Env:                m.GetEnv(),
+		RecordRequests:     m.GetRecordRequests(),
+		PassthroughAuth:    m.GetPassthroughAuth(),
 	}
 	if m.MaxDepth != nil {
 		v := int(*m.MaxDepth)

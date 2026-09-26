@@ -64,6 +64,10 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 		out.MaxCost = &maxCost
 	}
 	out.Result = c.Result
+	out.SessionFile = c.SessionFile
+	out.ExitSignal = c.ExitSignal
+	out.SlashCommands = c.SlashCommands
+	out.MaxCompletionTokens = int32(c.MaxCompletionTokens)
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {
 			out.LatestOrdinal = &latest
@@ -101,6 +105,27 @@ type SpawnParams struct {
 	MaxDepth    *int
 	MaxCost     *float64
 	MaxChildren *int
+
+	// The remaining fields mirror SpawnRequest's OPERATOR-ONLY range (proto
+	// fields 15-29, control.proto) — verbs.go's Spawn handler refuses to let a
+	// child-provenance caller set any of them before this struct is even
+	// built. EnvOverride stays false and is never carried on the wire: it is
+	// a framed-protocol escape hatch with no Connect equivalent.
+	ConfigDir          string
+	AppendSystemPrompt string
+	Thinking           string
+	NoSession          bool
+	ResumeSession      string
+	ForkSession        string
+	Extensions         []string
+	NoExtensions       bool
+	Verbose            bool
+	ExtraArgs          []string
+	SkillsDirs         []string
+	MCPConfig          string
+	Env                map[string]string
+	RecordRequests     bool
+	PassthroughAuth    string
 }
 
 // ChildLifecycle is the narrow slice of the daemon's Controller needed to

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -244,6 +245,9 @@ func (l connectLifecycle) Spawn(ctx context.Context, p connectapi.SpawnParams) (
 // buildProtocolSpawnRequest maps the Connect-plane params onto the framed
 // protocol request Controller.Spawn applies. Extracted so the field mapping is
 // testable without a Controller behind it.
+//
+// EnvOverride is never set here: it has no Connect-plane field (see
+// connectapi.SpawnParams's doc comment) and stays false, its framed default.
 func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 	return protocol.SpawnRequest{
 		Cwd:              p.Cwd,
@@ -260,6 +264,22 @@ func buildProtocolSpawnRequest(p connectapi.SpawnParams) protocol.SpawnRequest {
 		MaxDepth:         p.MaxDepth,
 		MaxCost:          p.MaxCost,
 		MaxChildren:      p.MaxChildren,
+
+		ConfigDir:          p.ConfigDir,
+		AppendSystemPrompt: p.AppendSystemPrompt,
+		Thinking:           p.Thinking,
+		NoSession:          p.NoSession,
+		ResumeSession:      p.ResumeSession,
+		ForkSession:        p.ForkSession,
+		Extensions:         p.Extensions,
+		NoExtensions:       p.NoExtensions,
+		Verbose:            p.Verbose,
+		ExtraArgs:          p.ExtraArgs,
+		SkillsDirs:         p.SkillsDirs,
+		MCPConfig:          p.MCPConfig,
+		Env:                p.Env,
+		RecordRequests:     p.RecordRequests,
+		PassthroughAuth:    p.PassthroughAuth,
 	}
 }
 
@@ -453,11 +473,12 @@ func (q connectQuota) RateLimitStatus(ctx context.Context) (connectapi.RateLimit
 	}, true, nil
 }
 
-// errNotAUserCredential is scopeFor's refusal for any identity that is not a
-// real user credential -- the only provenance the design's Scope mechanism
-// accepts. The agent-control verbs get the identical reasoning from the
-// route's policy interceptor (cmd/rafikid/connect_policy.go), which refuses
-// them before these handlers run.
+// errNotAUserCredential is scopeFor's refusal for any NON-NIL identity that is
+// not a real user credential -- the only provenance the design's Scope
+// mechanism accepts, besides the nil identity itself (unix-socket local
+// trust, see scopeFor). The agent-control verbs get the identical reasoning
+// from the route's policy interceptor (cmd/rafikid/connect_policy.go), which
+// refuses them before these handlers run.
 var errNotAUserCredential = errors.New("conversation queries require a user credential")
 
 // scopeFor is the ONE place the Connect plane turns an authenticated
@@ -465,9 +486,20 @@ var errNotAUserCredential = errors.New("conversation queries require a user cred
 // a non-empty UserID (a child-attributed identity carries its owner's
 // UserID and must never inherit that owner's scope); IsAdmin is a column
 // read that only Authenticate ever sets.
+//
+// A nil identity is the unix socket's local trust, not a missing credential:
+// tokenAuth.Middleware refuses a request with no Authorization header before
+// it ever reaches a Connect handler on the proxy face (TestScopeForNilIsUnreachableOffTheUDS
+// proves this), so nil can only arrive here via the UDS mount's optional
+// identity interceptor. It resolves ScopeAll, the same inference the framed
+// plane already makes for an unauthenticated local caller -- without this a
+// token-less local profile loses `rafiki conversations` entirely.
 func scopeFor(ctx context.Context) (insights.Scope, error) {
 	id := server.IdentityFromContext(ctx)
-	if id == nil || !id.IsUserCredential() {
+	if id == nil {
+		return insights.ScopeAll(), nil
+	}
+	if !id.IsUserCredential() {
 		return insights.Scope{}, connect.NewError(connect.CodePermissionDenied, errNotAUserCredential)
 	}
 	if id.IsAdmin {
@@ -491,7 +523,8 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 		Text: f.Text, Limit: f.Limit,
 	})
 	if err != nil {
-		return nil, controllerConnectError(err)
+		logIfUncoded("connect: conversation search failed", err)
+		return nil, connectapi.ConnectErr(err)
 	}
 	out := make([]connectapi.ConversationSummaryRow, 0, len(rows))
 	for _, r := range rows {
@@ -516,7 +549,8 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 		return connectapi.TranscriptRow{}, false, nil
 	}
 	if err != nil {
-		return connectapi.TranscriptRow{}, false, controllerConnectError(err)
+		logIfUncoded("connect: conversation export failed", err)
+		return connectapi.TranscriptRow{}, false, connectapi.ConnectErr(err)
 	}
 	turns := make([]connectapi.TranscriptTurnRow, 0, len(tr.Turns))
 	for _, t := range tr.Turns {
@@ -550,7 +584,8 @@ func (a connectConversations) RunQuery(ctx context.Context, name string, f conne
 		Path: insights.Path(f.Path),
 	})
 	if err != nil {
-		return connectapi.CatalogueResult{}, controllerConnectError(err)
+		logIfUncoded("connect: conversation query failed", err)
+		return connectapi.CatalogueResult{}, connectapi.ConnectErr(err)
 	}
 	cols := make([]connectapi.QueryColumnMeta, 0, len(res.Columns))
 	for _, c := range res.Columns {
@@ -605,25 +640,17 @@ func conversationReadNotFound(err error) bool {
 	return false
 }
 
-// controllerConnectError maps the Controller's *control.ControllerError onto
-// a connect error so its curated Message reaches the peer under its protocol
-// code. The ControllerError contract (pkg/control/dispatch.go) is that the
-// codebase wrote the message -- the same promise mapErr honors on the framed
-// plane -- so forwarding it is safe. Any error that is NOT a ControllerError
-// is returned unchanged; the handler (connectapi.queryError) redacts it, so
-// a pgx failure cannot name the database through this surface either. The
-// translation lives HERE for the same reasons as translateSkillErr and
-// scopeFor beside it: the ControllerError is produced by this package's own
-// Controller, and the protocol-code-to-connect-code table is knowledge the
-// adapter plane already owns -- keeping it here holds conversations.go to a
-// no-new-imports discipline even though pkg/connectapi does (pre-existing)
-// import pkg/control elsewhere.
-func controllerConnectError(err error) error {
+// logIfUncoded logs err's cause when it is NOT a *control.ControllerError --
+// connectapi.ConnectErr redacts an uncoded error to a fixed "internal error"
+// text and does not log, so the cause is lost unless the call site logs it
+// first (the same rule pkg/connectapi's own SetBudget and Close follow).
+// A ControllerError's message is already curated for the wire and reaches the
+// caller unredacted, so logging it here would be noise.
+func logIfUncoded(msg string, err error) {
 	var ce *control.ControllerError
 	if !errors.As(err, &ce) {
-		return err
+		slog.Error(msg, "error", err)
 	}
-	return connect.NewError(controllerConnectCode(ce.Code), errors.New(ce.Message))
 }
 
 // connectReview adapts *Controller to connectapi.ConversationReviewer. Scope
@@ -660,23 +687,6 @@ func (a connectFindingsReader) RecentAnalyses(ctx context.Context, conversationI
 	}
 	_, analyses, err := a.c.ConversationFindings(ctx, scope, connectapi.ReviewFindingsFilter{ConversationIDs: conversationIDs, Limit: limit})
 	return analyses, err
-}
-
-// controllerConnectCode translates the protocol codes a ControllerError can
-// carry onto connect codes. ErrNoAgentDB is a daemon configuration gap, not
-// a transient failure -- the request is fine and the operator must set
-// RAFIKI_DB -- so FailedPrecondition, never Unavailable: a retry cannot
-// heal it. Unrecognized codes stay Internal; their messages are still
-// curated, so the text forwards unchanged.
-func controllerConnectCode(code string) connect.Code {
-	switch code {
-	case protocol.ErrNotFound:
-		return connect.CodeNotFound
-	case protocol.ErrNoAgentDB:
-		return connect.CodeFailedPrecondition
-	default:
-		return connect.CodeInternal
-	}
 }
 
 // unixToTimePtr converts a wire Unix-seconds value to *time.Time, treating 0

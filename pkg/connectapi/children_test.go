@@ -180,6 +180,37 @@ func TestGetChildUnknownIsNotFound(t *testing.T) {
 	}
 }
 
+// TestListChildrenCarriesTheNewSummaryFields pins ChildSummary parity: the
+// four fields wave 1 added to the wire type (session_file, exit_signal,
+// slash_commands, max_completion_tokens) must reach the client from the same
+// protocol.ChildSummary source pkg/control's SnapshotToSummary populates.
+func TestListChildrenCarriesTheNewSummaryFields(t *testing.T) {
+	s := connectapi.NewServer(nil)
+	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{
+		ChildID: "c_1", SessionFile: "/state/c_1.jsonl", ExitSignal: "KILL",
+		SlashCommands: []string{"/compact", "/clear"}, MaxCompletionTokens: 8192,
+	}}})
+
+	resp, err := s.ListChildren(context.Background(),
+		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	c := resp.Msg.GetChildren()[0]
+	if c.GetSessionFile() != "/state/c_1.jsonl" {
+		t.Errorf("SessionFile = %q, want /state/c_1.jsonl", c.GetSessionFile())
+	}
+	if c.GetExitSignal() != "KILL" {
+		t.Errorf("ExitSignal = %q, want KILL", c.GetExitSignal())
+	}
+	if len(c.GetSlashCommands()) != 2 || c.GetSlashCommands()[0] != "/compact" {
+		t.Errorf("SlashCommands = %v, want [/compact /clear]", c.GetSlashCommands())
+	}
+	if c.GetMaxCompletionTokens() != 8192 {
+		t.Errorf("MaxCompletionTokens = %d, want 8192", c.GetMaxCompletionTokens())
+	}
+}
+
 func TestGetChildRejectsEmptyID(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(&fakeLister{})

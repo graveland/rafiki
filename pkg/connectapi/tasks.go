@@ -25,13 +25,12 @@ type TaskLister interface {
 // same reason as SetChildLister: the Controller is built after this Server.
 func (s *Server) SetTaskLister(l TaskLister) { s.taskLister.Store(&l) }
 
-// taskListMaxRows mirrors pkg/control/dispatch.go's clamp.
-//
-// ListTasksRequest has no limit field and tasks.ListFilter.Limit == 0 means
-// UNLIMITED, so without this one call with an empty conversation_id -- which
-// means every conversation -- materialises the whole ledger into memory and
-// onto the wire, past protocol.MaxFrameBytes' worth of rows. The frame verb
-// has carried this clamp all along; the Connect path shipped without it.
+// taskListMaxRows mirrors pkg/control/dispatch.go's clamp: an unset or
+// too-large wire limit becomes this ceiling, never tasks.ListFilter's own
+// Limit == 0 meaning UNLIMITED. Without it, one call with an empty
+// conversation_id -- which means every conversation -- materialises the whole
+// ledger into memory and onto the wire, past protocol.MaxFrameBytes' worth of
+// rows.
 const taskListMaxRows = 2000
 
 // ListTasks answers the task ledger for one conversation.
@@ -64,10 +63,18 @@ func (s *Server) ListTasks(
 	if lp == nil || *lp == nil {
 		return connect.NewResponse(out), nil
 	}
+	limit := int(req.Msg.GetLimit())
+	if limit <= 0 || limit > taskListMaxRows {
+		limit = taskListMaxRows
+	}
 	rows, err := (*lp).TaskList(ctx, protocol.TaskListRequest{
 		ConversationID: req.Msg.GetConversationId(),
-		All:            req.Msg.GetIncludeDropped(),
-		Limit:          taskListMaxRows,
+		ChildID:        req.Msg.GetChildId(),
+		Status:         req.Msg.GetStatus(),
+		// Both spellings stay on the wire (control.proto's comment on
+		// ListTasksRequest.all); either one set means include dropped rows.
+		All:   req.Msg.GetIncludeDropped() || req.Msg.GetAll(),
+		Limit: limit,
 	})
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)

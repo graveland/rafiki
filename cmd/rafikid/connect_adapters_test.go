@@ -24,6 +24,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 	"go.graveland.dev/rafiki/pkg/server"
 )
 
@@ -294,11 +295,13 @@ func TestConversationExportAdapterFoldsNotFoundIntoOkFalse(t *testing.T) {
 }
 
 // TestConversationSearchAdapterMapsNoAgentDB pins the ControllerError
-// translation end to end: the backend's ErrNoPool is promoted by
-// translateInsightsErr to a ControllerError carrying a curated, actionable
-// message, which must reach the caller as FailedPrecondition with that text
-// -- not redacted (it is ours) and not Internal (the request is fine; the
-// daemon is unconfigured).
+// translation end to end, now routed through connectapi.ConnectErr instead of
+// the retired controllerConnectError/controllerConnectCode: the backend's
+// ErrNoPool is promoted by translateInsightsErr to a ControllerError carrying
+// a curated, actionable message, which must reach the caller as Unavailable
+// with that text -- Unavailable per connectapi's errCodeTable (ErrNoAgentDB),
+// not FailedPrecondition (the retired mapper's own answer) and not Internal
+// (the message is ours, not redacted).
 func TestConversationSearchAdapterMapsNoAgentDB(t *testing.T) {
 	fb := &fakeInsightsBackend{searchErr: local.ErrNoPool}
 	a := connectConversations{c: &Controller{insights: fb}}
@@ -307,43 +310,73 @@ func TestConversationSearchAdapterMapsNoAgentDB(t *testing.T) {
 		&server.Identity{UserID: "u1", Via: server.ProvenanceUser})
 	_, err := a.Search(ctx, connectapi.ConversationSearchFilter{})
 	var ce *connect.Error
-	if !errors.As(err, &ce) || ce.Code() != connect.CodeFailedPrecondition {
-		t.Fatalf("Search ErrNoPool err = %v, want CodeFailedPrecondition", err)
+	if !errors.As(err, &ce) || ce.Code() != connect.CodeUnavailable {
+		t.Fatalf("Search ErrNoPool err = %v, want CodeUnavailable", err)
 	}
 	if !strings.Contains(ce.Message(), "no agent database configured") {
 		t.Errorf("message = %q, want the curated no-agent-db text", ce.Message())
 	}
-}
-
-// TestControllerConnectCodeCoversTheProtocolCodes pins the code table so a
-// new ControllerError code fails here instead of silently degrading to
-// Internal (with its curated message intact, but the wrong code).
-func TestControllerConnectCodeCoversTheProtocolCodes(t *testing.T) {
-	cases := map[string]connect.Code{
-		protocol.ErrNotFound:  connect.CodeNotFound,
-		protocol.ErrNoAgentDB: connect.CodeFailedPrecondition,
-		protocol.ErrInternal:  connect.CodeInternal,
-		"some future code":    connect.CodeInternal,
-	}
-	for code, want := range cases {
-		if got := controllerConnectCode(code); got != want {
-			t.Errorf("controllerConnectCode(%q) = %v, want %v", code, got, want)
-		}
+	if got := rpcreason.Reason(err); got != protocol.ErrNoAgentDB {
+		t.Errorf("rpcreason.Reason(err) = %q, want %q", got, protocol.ErrNoAgentDB)
 	}
 }
 
-// TestScopeForRefusesANonUserCredential covers both refusals: no identity at
-// all, and a child-attributed identity. The second is the case the design's
-// §3 warns about -- it CARRIES the owner's UserID (here "u1"), so a
+// TestScopeForRefusesANonUserCredential covers the credential that CARRIES a
+// UserID but is not a user: child-attributed identity, the case the design's
+// §3 warns about -- it carries the owner's UserID (here "u1"), so a
 // non-empty-UserID check would hand the agent its owner's whole corpus.
+// The nil-identity case moved to TestScopeForNilIsScopeAll: nil is UDS local
+// trust, not a refusal (see TestScopeForNilIsUnreachableOffTheUDS for the
+// proof that nil cannot reach here off the UDS).
 func TestScopeForRefusesANonUserCredential(t *testing.T) {
-	if _, err := scopeFor(context.Background()); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("scopeFor(nil identity) err = %v, want %v", err, connect.CodePermissionDenied)
-	}
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
 	if _, err := scopeFor(ctx); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("scopeFor(child-attributed with owner UserID) err = %v, want %v", err, connect.CodePermissionDenied)
+	}
+}
+
+// TestScopeForNilIsScopeAll pins the local-trust rule: a nil identity is the
+// unix socket's local trust, the same inference the framed plane already
+// makes, and must resolve every conversation (ScopeAll), not a refusal --
+// without this a token-less local profile loses `rafiki conversations`.
+func TestScopeForNilIsScopeAll(t *testing.T) {
+	got, err := scopeFor(context.Background())
+	if err != nil {
+		t.Fatalf("scopeFor(nil identity) err = %v, want nil", err)
+	}
+	if got != insights.ScopeAll() {
+		t.Errorf("scopeFor(nil identity) = %v, want ScopeAll()", got)
+	}
+}
+
+// TestScopeForNilIsUnreachableOffTheUDS is the proof scopeFor's nil-is-local-
+// trust rule depends on: a nil identity must never reach scopeFor on the
+// proxy face (TLS/loopback), only on the local unix socket. It drives
+// ConversationSearch -- a userOnly, scopeFor-backed verb -- through the exact
+// route proxy.go mounts (proxyFaceConnectRoute: connectControlRoute behind
+// tokenAuth.Middleware) with NO credential at all, and asserts the request is
+// refused before any Control handler -- and so before scopeFor -- ever runs.
+//
+// tokenAuth.Middleware (pkg/server/usertoken.go) answers a missing
+// Authorization/x-api-key/X-Rafiki-Token header with a plain HTTP 401 before
+// calling next.ServeHTTP, so the Connect handler is never invoked; connect-go's
+// httpToCode maps HTTP 401 to CodeUnauthenticated on the client's side. If the
+// proxy face ever started admitting an unauthenticated request instead
+// (downgrading it to a nil identity, the UDS's own trust shape), this test
+// fails: scopeFor would then read that nil as local trust and grant it
+// ScopeAll over every user's conversations from the network-reachable face.
+func TestScopeForNilIsUnreachableOffTheUDS(t *testing.T) {
+	client := proxyFaceConnectRoute(t)
+	_, err := client.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
+	if err == nil {
+		t.Fatal("ConversationSearch with no credential on the proxy face succeeded, want a refusal")
+	}
+	switch code := connect.CodeOf(err); code {
+	case connect.CodeUnauthenticated, connect.CodePermissionDenied:
+	default:
+		t.Fatalf("ConversationSearch with no credential err = %v (code %v), want Unauthenticated or PermissionDenied", err, code)
 	}
 }
 
