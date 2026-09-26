@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -13,13 +12,13 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
+	"connectrpc.com/connect"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
-	"go.graveland.dev/rafiki/pkg/client"
-	"go.graveland.dev/rafiki/pkg/executors"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 )
 
 func newExecutorCmd() *cobra.Command {
@@ -116,9 +115,10 @@ func newExecutorEnrollCmd() *cobra.Command {
 }
 
 func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-	ctx := cmdCtx(cmd)
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
 	name, _ := cmd.Flags().GetString("name")
 	labelPairs, _ := cmd.Flags().GetStringArray("label")
@@ -132,33 +132,22 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 	admits, _ := cmd.Flags().GetString("admits")
 	ttl, _ := cmd.Flags().GetDuration("ttl")
 
-	req := protocol.ExecutorEnrollRequest{
-		Type:          protocol.TypeCtrlExecutorEnroll,
+	resp, err := ep.control().EnrollExecutor(cmdCtx(cmd), connect.NewRequest(&rafikiv1.EnrollExecutorRequest{
 		Name:          name,
 		Labels:        labels,
 		Roots:         roots,
 		Isolation:     isolation,
 		WorkspaceMode: wm,
 		Admits:        admits,
-		TTLSeconds:    int64(ttl.Seconds()),
-	}
-
-	resp, err := c.Request(ctx, req)
+		TtlSeconds:    int64(ttl.Seconds()),
+	}))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_enroll: %s", client.FormatError(resp))
-	}
-
-	var data protocol.ExecutorEnrollResponseData
-	if err := json.Unmarshal(resp.Data, &data); err != nil {
-		return fmt.Errorf("malformed response: %w", err)
+		return fmt.Errorf("executor enroll: %s", formatConnectErr(err))
 	}
 
 	// Token to stdout ONLY; nothing else on stdout so it pipes.
 	fmt.Fprintln(os.Stderr, "Token minted — this will not be shown again.")
-	fmt.Println(data.Token)
+	fmt.Println(resp.Msg.GetToken())
 	return nil
 }
 
@@ -190,54 +179,50 @@ an ambiguous one names the rows it matches instead of picking one.`,
 }
 
 func runExecutorList(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-	ctx := cmdCtx(cmd)
-
-	selector, _ := cmd.Flags().GetString("selector")
-	limit, _ := cmd.Flags().GetInt("limit")
-
-	execs, err := fetchExecutors(ctx, c, selector, limit)
-	if err != nil {
-		return err
-	}
-
+	// The output mode is a user-input decision (-j and -J together is an
+	// error), so resolve it before any round trip.
 	mode, useColor, err := outputOpts(cmd)
 	if err != nil {
 		return err
 	}
-	if mode == outputTable {
-		return renderExecutorTable(os.Stdout, execs, useColor)
+
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(struct {
-		Executors []executors.Executor `json:"executors"`
-	}{execs})
+	selector, _ := cmd.Flags().GetString("selector")
+	limit, _ := cmd.Flags().GetInt("limit")
+
+	rows, err := fetchExecutorRows(cmdCtx(cmd), ep.control(), selector, limit)
+	if err != nil {
+		return err
+	}
+
+	if mode == outputTable {
+		return renderExecutorTable(os.Stdout, rows, useColor)
+	}
+	// JSON is the canonical protojson of the wire's ExecutorRow rows; the
+	// framed full executors.Executor shape is retired with its transport.
+	return emitProtoRows(os.Stdout, rows, mode)
 }
 
-// fetchExecutors issues ctrl_executor_list and decodes its {"executors": [...]}
-// wrapper. Shared by `list` and `delete --all-*`, which both need the raw rows.
-func fetchExecutors(ctx context.Context, c *client.Client, selector string, limit int) ([]executors.Executor, error) {
-	req := protocol.ExecutorListRequest{
-		Type:     protocol.TypeCtrlExecutorList,
+// fetchExecutorRows lists the executor pool over the Connect executor-admin
+// listing. kind is deliberately EMPTY: that selects the plain management
+// listing — the durable table merged with the live pool, selector and
+// limit-cap semantics included, eligibility unevaluated — which both `list`
+// and `delete --all-*` want. A non-empty kind would ask the spawn-shaped
+// eligibility question instead. The limit rides the request as given; the
+// daemon applies the same default-50/clamp-500 contract its framed
+// dispatcher carried.
+func fetchExecutorRows(ctx context.Context, ctl rafikiv1connect.ControlClient, selector string, limit int) ([]*rafikiv1.ExecutorRow, error) {
+	resp, err := ctl.ListExecutors(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{
 		Selector: selector,
-		Limit:    limit,
-	}
-	resp, err := c.Request(ctx, req)
+		Limit:    int32(limit),
+	}))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("executor list: %s", formatConnectErr(err))
 	}
-	if !resp.Success {
-		return nil, fmt.Errorf("ctrl_executor_list: %s", client.FormatError(resp))
-	}
-	var wrapper struct {
-		Executors []executors.Executor `json:"executors"`
-	}
-	if err := json.Unmarshal(resp.Data, &wrapper); err != nil {
-		return nil, fmt.Errorf("malformed response: %w", err)
-	}
-	return wrapper.Executors, nil
+	return resp.Msg.GetRows(), nil
 }
 
 // Column indexes into an executor table row; StyleFunc styles by column.
@@ -276,7 +261,7 @@ const executorShortIDLen = 12
 // When it is true, output goes through colorprofile so codes degrade to what
 // the terminal actually supports (NO_COLOR never reaches here — colorEnabled
 // already answered false).
-func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool) error {
+func renderExecutorTable(w io.Writer, execs []*rafikiv1.ExecutorRow, useColor bool) error {
 	if len(execs) == 0 {
 		fmt.Fprintln(w, "No enrolled executors.")
 		return nil
@@ -290,19 +275,19 @@ func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool)
 	rows := make([][]string, len(execs))
 	for i, ex := range execs {
 		lastSeen := "-"
-		if !ex.LastSeenAt.IsZero() {
-			lastSeen = humanize.Time(ex.LastSeenAt)
+		if ms := ex.GetLastSeenMs(); ms != 0 {
+			lastSeen = humanize.Time(time.UnixMilli(ms))
 		}
 		connectedSince := "-"
-		if ex.ConnectedAt != nil && !ex.ConnectedAt.IsZero() {
-			connectedSince = humanize.Time(*ex.ConnectedAt)
+		if ms := ex.GetConnectedAtMs(); ms != 0 {
+			connectedSince = humanize.Time(time.UnixMilli(ms))
 		}
 		rows[i] = []string{
-			shortExecutorID(ex.ID),
-			defaultDash(ex.Labels["machine"]),
+			shortExecutorID(ex.GetId()),
+			defaultDash(ex.GetMachine()),
 			executorStatus(ex),
-			executorFormatLabels(ex.Labels, 48),
-			defaultDash(ex.Admits),
+			executorFormatLabels(ex.GetLabels(), 48),
+			defaultDash(ex.GetAdmits()),
 			connectedSince,
 			lastSeen,
 		}
@@ -341,13 +326,15 @@ func renderExecutorTable(w io.Writer, execs []executors.Executor, useColor bool)
 
 // executorStatus collapses the row's two booleans into one operational word:
 // whether the machine can take work right now (live), exists but is not
-// talking to us (offline), or has been switched off (disabled). Connected is a
-// view field from the daemon's live pool, not the row — see ExecutorList.
-func executorStatus(ex executors.Executor) string {
+// talking to us (offline), or has been switched off (disabled). Connected is
+// the daemon's live-pool view of the row, and connected_at_ms/last_seen_ms
+// are the wire's 0 when there is no current connection or no sighting ever —
+// exactly what renderExecutorTable dashes.
+func executorStatus(ex *rafikiv1.ExecutorRow) string {
 	switch {
-	case !ex.Enabled:
+	case !ex.GetEnabled():
 		return "disabled"
-	case ex.Connected:
+	case ex.GetConnected():
 		return "live"
 	default:
 		return "offline"
@@ -420,8 +407,17 @@ func newExecutorCreateCmd() *cobra.Command {
 }
 
 func runExecutorCreate(cmd *cobra.Command, _ []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
+	// The output mode is a user-input decision (-j and -J together is an
+	// error), so resolve it before minting anything.
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
 	name, _ := cmd.Flags().GetString("name")
 	labelPairs, _ := cmd.Flags().GetStringArray("label")
@@ -434,24 +430,21 @@ func runExecutorCreate(cmd *cobra.Command, _ []string) error {
 	workspaceMode, _ := cmd.Flags().GetString("workspace-mode")
 	admits, _ := cmd.Flags().GetString("admits")
 
-	resp, err := c.Request(cmdCtx(cmd), protocol.ExecutorCreateRequest{
-		Type:          protocol.TypeCtrlExecutorCreate,
+	resp, err := ep.control().CreateExecutor(cmdCtx(cmd), connect.NewRequest(&rafikiv1.CreateExecutorRequest{
 		Name:          name,
 		Labels:        labels,
 		Roots:         roots,
 		Isolation:     isolation,
 		WorkspaceMode: workspaceMode,
 		Admits:        admits,
-	})
+	}))
 	if err != nil {
-		return err
+		return fmt.Errorf("executor create: %s", formatConnectErr(err))
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_create: %s", client.FormatError(resp))
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(json.RawMessage(resp.Data))
+	// The credential echo stays JSON in every mode — this verb renders no
+	// table: the response's canonical protojson, pretty by default and one
+	// compact line under -J.
+	return emitProto(os.Stdout, resp.Msg, mode)
 }
 
 // ─── label ─────────────────────────────────────────────────────────────────────
@@ -476,9 +469,17 @@ four or more characters, such as the short form shown by 'executor list'.`,
 }
 
 func runExecutorLabel(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-	ctx := cmdCtx(cmd)
+	// The output mode is a user-input decision (-j and -J together is an
+	// error), so resolve it before touching the row.
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
 
 	executorID := args[0]
 	kvPairs := args[1:]
@@ -493,32 +494,22 @@ func runExecutorLabel(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("label: %w", err)
 	}
 
-	req := protocol.ExecutorLabelRequest{
-		Type:       protocol.TypeCtrlExecutorLabel,
-		ExecutorID: executorID,
+	resp, err := ep.control().LabelExecutor(cmdCtx(cmd), connect.NewRequest(&rafikiv1.LabelExecutorRequest{
+		ExecutorId: executorID,
 		Set:        set,
 		Remove:     removeKeys,
-	}
-
-	resp, err := c.Request(ctx, req)
+	}))
 	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_label: %s", client.FormatError(resp))
+		return fmt.Errorf("executor label: %s", formatConnectErr(err))
 	}
 
-	// Response is the full executor object.
-	var ex executors.Executor
-	if err := json.Unmarshal(resp.Data, &ex); err != nil {
-		// Fallback: print raw JSON.
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(json.RawMessage(resp.Data))
+	// The echo is the response's updated row as canonical protojson, in every
+	// mode — this verb renders no table.
+	ex := resp.Msg.GetExecutor()
+	if ex == nil {
+		return fmt.Errorf("executor label: daemon returned no executor row")
 	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(ex)
+	return emitProto(os.Stdout, ex, mode)
 }
 
 // ─── disable / enable ──────────────────────────────────────────────────────────
@@ -538,21 +529,14 @@ four or more characters, such as the short form shown by 'executor list'.`,
 }
 
 func runExecutorDisable(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-	ctx := cmdCtx(cmd)
-
-	req := protocol.ExecutorDisableRequest{
-		Type:       protocol.TypeCtrlExecutorDisable,
-		ExecutorID: args[0],
-	}
-
-	resp, err := c.Request(ctx, req)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_disable: %s", client.FormatError(resp))
+	_, err = ep.control().DisableExecutor(cmdCtx(cmd),
+		connect.NewRequest(&rafikiv1.DisableExecutorRequest{ExecutorId: args[0]}))
+	if err != nil {
+		return fmt.Errorf("executor disable: %s", formatConnectErr(err))
 	}
 	fmt.Printf("Executor %s disabled.\n", args[0])
 	return nil
@@ -572,21 +556,14 @@ four or more characters, such as the short form shown by 'executor list'.`,
 }
 
 func runExecutorEnable(cmd *cobra.Command, args []string) error {
-	c := mustDial(cmd)
-	defer c.Close()
-	ctx := cmdCtx(cmd)
-
-	req := protocol.ExecutorEnableRequest{
-		Type:       protocol.TypeCtrlExecutorEnable,
-		ExecutorID: args[0],
-	}
-
-	resp, err := c.Request(ctx, req)
+	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_enable: %s", client.FormatError(resp))
+	_, err = ep.control().EnableExecutor(cmdCtx(cmd),
+		connect.NewRequest(&rafikiv1.EnableExecutorRequest{ExecutorId: args[0]}))
+	if err != nil {
+		return fmt.Errorf("executor enable: %s", formatConnectErr(err))
 	}
 	fmt.Printf("Executor %s enabled.\n", args[0])
 	return nil
@@ -624,11 +601,12 @@ is given, and are mutually exclusive with an <executor-id> argument.`,
 // target, as the UNION of whichever criteria are on — not their intersection,
 // since intersecting would make --all-disabled and --all-offline together
 // behave almost exactly like --all-disabled alone (a disabled row goes
-// offline within one health interval anyway).
-func filterExecutorsForDelete(execs []executors.Executor, allDisabled, allOffline bool) []executors.Executor {
-	var out []executors.Executor
+// offline within one health interval anyway). Only Enabled/Connected are
+// consulted: the two flags need nothing else the row carries.
+func filterExecutorsForDelete(execs []*rafikiv1.ExecutorRow, allDisabled, allOffline bool) []*rafikiv1.ExecutorRow {
+	var out []*rafikiv1.ExecutorRow
 	for _, e := range execs {
-		if (allDisabled && !e.Enabled) || (allOffline && !e.Connected) {
+		if (allDisabled && !e.GetEnabled()) || (allOffline && !e.GetConnected()) {
 			out = append(out, e)
 		}
 	}
@@ -648,16 +626,21 @@ func runExecutorDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("requires an <executor-id>, or --all-disabled/--all-offline")
 	}
 
-	c := mustDial(cmd)
-	defer c.Close()
 	ctx := cmdCtx(cmd)
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	ctl := ep.control()
 
 	if !bulk {
-		return deleteOneExecutor(ctx, c, args[0])
+		return deleteOneExecutor(ctx, ctl, args[0])
 	}
 
-	// 500 is the ceiling ctrl_executor_list enforces; there is no "no limit".
-	all, err := fetchExecutors(ctx, c, "", 500)
+	// 500 is the ceiling the executor-admin listing enforces (the same
+	// default-50/clamp-500 contract the framed dispatcher carried); there is
+	// no "no limit".
+	all, err := fetchExecutorRows(ctx, ctl, "", 500)
 	if err != nil {
 		return err
 	}
@@ -687,8 +670,8 @@ func runExecutorDelete(cmd *cobra.Command, args []string) error {
 
 	var failed int
 	for _, e := range matches {
-		if err := deleteOneExecutor(ctx, c, e.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "executor %s: %v\n", shortExecutorID(e.ID), err)
+		if err := deleteOneExecutor(ctx, ctl, e.GetId()); err != nil {
+			fmt.Fprintf(os.Stderr, "executor %s: %s\n", shortExecutorID(e.GetId()), formatConnectErr(err))
 			failed++
 		}
 	}
@@ -719,17 +702,13 @@ func confirmBulkDelete(n int) (bool, error) {
 	return confirmed, nil
 }
 
-func deleteOneExecutor(ctx context.Context, c *client.Client, executorID string) error {
-	req := protocol.ExecutorDeleteRequest{
-		Type:       protocol.TypeCtrlExecutorDelete,
-		ExecutorID: executorID,
-	}
-	resp, err := c.Request(ctx, req)
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("ctrl_executor_delete: %s", client.FormatError(resp))
+// deleteOneExecutor removes one row. executorID may be the full row id or any
+// unique trailing fragment of four or more characters — the daemon resolves
+// it, exactly as the framed verb did.
+func deleteOneExecutor(ctx context.Context, ctl rafikiv1connect.ControlClient, executorID string) error {
+	if _, err := ctl.DeleteExecutor(ctx,
+		connect.NewRequest(&rafikiv1.DeleteExecutorRequest{ExecutorId: executorID})); err != nil {
+		return fmt.Errorf("executor delete: %s", formatConnectErr(err))
 	}
 	fmt.Printf("Executor %s deleted.\n", executorID)
 	return nil
