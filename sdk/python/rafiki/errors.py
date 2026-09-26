@@ -95,4 +95,5 @@ class ClientSetupError(Exception):
 
 class StreamEnded(Exception):
     """Internal: a server stream closed without an error envelope. Not
-    raised to callers — generators end instead."""
+    raised to callers — the client's watch loops translate it into the clean
+    end (or the follow-up poll) a truncated stream can only mean."""

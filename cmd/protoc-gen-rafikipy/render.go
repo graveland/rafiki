@@ -276,6 +276,14 @@ func resolveFields(m *descriptorpb.DescriptorProto, reg *registry) []genField {
 func kindOf(f *descriptorpb.FieldDescriptorProto, reg *registry) string {
 	if f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE {
 		if entry := reg.entries[f.GetTypeName()]; entry != nil {
+			// Map values: only scalars are supported by the generated codec.
+			// encodeScalarExpr/decodeScalarExpr pass unknown kinds through
+			// unconverted, so a message value here would silently emit raw
+			// dicts on the wire and dataclass objects into json.dumps — refuse
+			// at generation time instead of mis-encoding.
+			if vk := elemKind(entry.value, reg); strings.HasPrefix(vk, "msg:") {
+				panic(fmt.Sprintf("protoc-gen-rafikipy: map<_, %s> in %s: message-valued maps are not supported; use a repeated message field", strings.TrimPrefix(vk, "msg:"), f.GetName()))
+			}
 			return "map:" + elemKind(entry.value, reg)
 		}
 	}

@@ -12,7 +12,7 @@ runtime. The message types in `rafiki/_gen/` are dataclasses generated from
 proto` run that regenerates the Go code regenerates these.
 
 ```bash
-pip install rafiki-py          # or: PYTHONPATH=<repo>/sdk/python
+pip install ./sdk/python      # from a repo checkout; or: PYTHONPATH=<repo>/sdk/python
 ```
 
 ## Building a client

@@ -207,6 +207,13 @@ class ConnectClient:
     def _describe(self) -> str:
         return self._uds if self._uds else self._base
 
+    @property
+    def is_unix(self) -> bool:
+        """True when the transport rides a unix socket (death is EOF, so an
+        unbounded read can only ever end, never hang); False for a remote
+        (TCP) endpoint, where a dropped connection can look like silence."""
+        return self._uds is not None
+
     # ── server-streaming ─────────────────────────────────────────────────────
 
     def stream(

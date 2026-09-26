@@ -31,7 +31,19 @@ from typing import Iterable
 
 from . import _gen
 from .connect import ConnectClient
-from .errors import CODE_DEADLINE_EXCEEDED, ClientSetupError, ConnectError
+from .errors import (
+    CODE_DEADLINE_EXCEEDED,
+    ClientSetupError,
+    ConnectError,
+    StreamEnded,
+)
+
+# Ceiling on an untimed settled() watch's idle read over a remote (TCP)
+# endpoint: 0.0 would mean an infinite read timeout, and a silently-dropped
+# TCP connection looks exactly like a quiet stream — the watch would hang
+# forever. Unix sockets keep the unbounded wait (death is EOF). See
+# _settle_one.remaining.
+REMOTE_IDLE_CEILING = 60.0
 
 # The states that mean "settled": a fundi child sits idle between turns
 # (agent_settled is pi's true-idle event; the daemon maps it to idle), and
@@ -334,6 +346,11 @@ class Client:
                     if msg.stop is not None:
                         return
                 return  # clean stream end without a stop: the run is over
+            except StreamEnded:
+                # A stream truncated without its end-of-stream envelope is
+                # not caller-visible (see StreamEnded's docstring): treat it
+                # as the clean end it can only mean here — the run is over.
+                return
             except ConnectError as exc:
                 if exc.code != CODE_DEADLINE_EXCEEDED:
                     raise
@@ -390,10 +407,15 @@ class Client:
         def remaining() -> float:
             # The idle-read budget for one attempt: the WAIT budget's
             # remainder when there is one (a quiet child raises
-            # deadline_exceeded when the budget is spent), else the client's
-            # default idle window.
+            # deadline_exceeded when the budget is spent). Untimed, the
+            # budget is 0.0 — which _stream_once turns into read=None, an
+            # INFINITE read timeout, NOT the transport's stream_idle
+            # default. That unbounded wait is deliberate on a unix socket
+            # (death is EOF, so the read always ends), but on a remote TCP
+            # endpoint a silently-dropped connection would hang it forever,
+            # so untimed watches there get REMOTE_IDLE_CEILING instead.
             if deadline is None:
-                return 0.0  # 0 = the transport's stream_idle default
+                return 0.0 if self._conn.is_unix else REMOTE_IDLE_CEILING
             return max(0.05, deadline - time.monotonic())
 
         while True:
@@ -425,6 +447,16 @@ class Client:
                         return
                 # Clean stream end without a settle: poll once more, in case
                 # the terminal status raced the stream closed.
+                summary = self.get(child_id)
+                if summary.status in SETTLED_STATES:
+                    yield Settle(child_id, summary.status)
+                    return
+                continue
+            except StreamEnded:
+                # Truncated without an end-of-stream envelope: not
+                # caller-visible (StreamEnded's docstring). Treat it as the
+                # clean end it can only mean here: poll once for a settle
+                # that raced the stream closed, else keep watching.
                 summary = self.get(child_id)
                 if summary.status in SETTLED_STATES:
                     yield Settle(child_id, summary.status)

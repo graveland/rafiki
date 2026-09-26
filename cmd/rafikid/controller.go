@@ -1500,17 +1500,6 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// owner-scoped read over it (ConversationExport first among them)
 	// answered not-found. A preset's kind, if any, already replaced req.Kind
 	// above, so this only fills the genuinely-absent case.
-
-	// An empty kind is the fundi default, and it is resolved ONCE here so
-	// every consumer agrees on it. resolveSpawnPlan applies the same default
-	// when it builds argv, but that is too late for agentRunner's switch: a
-	// raw empty kind fell through the switch (no case matches "") to the
-	// nil-Runner subprocess path, where the fundi engine runs as a
-	// `rafikid fundi` subprocess that cannot know its owner — the child's
-	// conversation row landed unattributed (owner_user_id NULL) and every
-	// owner-scoped read over it (ConversationExport first among them)
-	// answered not-found. A preset's kind, if any, already replaced req.Kind
-	// above, so this only fills the genuinely-absent case.
 	if req.Kind == "" {
 		req.Kind = protocol.KindFundi
 	}
@@ -2548,12 +2537,18 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	if kind == "" {
 		kind = protocol.KindFundi
 	}
+	// Legacy rows written before the empty-kind default existed carry Kind
+	// "" in their snapshot; resumeRequestFromSnapshot copies it verbatim.
+	// agentRunner's switch has no case for "" — it would route a fundi argv
+	// through the owner-less `rafikid fundi` subprocess path — so the
+	// resolved default rides on the request too, mirroring Spawn.
+	req.Kind = kind
 
 	env, vals := c.buildEnv(req, childID, c.socketPath)
 	// See Resume's identical guard: claudeEnv is dead weight once
 	// claudeRunner returns a daraja-backed Runner (child.Spawn never reads
 	// spec.Env in that case).
-	if kind == protocol.KindClaude && c.execPoolConn == nil {
+	if req.Kind == protocol.KindClaude && c.execPoolConn == nil {
 		env = append(env, claudeEnv(req.ConfigDir)...)
 	}
 

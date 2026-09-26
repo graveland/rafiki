@@ -202,6 +202,11 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/connect+json")
             self.end_headers()
             env(self.wfile, {"text": {"text": "work one", "mode": "SEND_MODE_PROMPT", "messageIds": ["r1"]}})
+            if STATE.get("truncate"):
+                # Close WITHOUT the end-of-stream envelope: a truncated
+                # stream. The client must translate the internal StreamEnded,
+                # not leak it.
+                return
             env(self.wfile, {"stop": {"reason": "stopping"}})
             env(self.wfile, {"error": None}, end=True)
             return
@@ -297,6 +302,37 @@ def run():
         except ValueError:
             pass
         note("5 codec OK")
+
+        # 6. a stream truncated without its end-of-stream envelope: the
+        # internal StreamEnded is translated (the generator ends), not
+        # raised raw to callers.
+        STATE["truncate"] = True
+        msgs2 = list(c.receive())
+        STATE["truncate"] = False
+        assert len(msgs2) == 1 and msgs2[0].text.text == "work one", msgs2
+        note("6 truncated-stream OK")
+
+        # 7. an untimed settled() on a REMOTE (TCP) endpoint must carry the
+        # finite idle ceiling (0.0 would mean an infinite read timeout — a
+        # silently-dropped connection would hang the watch forever); a unix
+        # socket client keeps the unbounded wait.
+        import rafiki.client as rc
+        from rafiki.connect import ConnectClient
+        assert c._conn.is_unix is False, c._conn.is_unix
+        assert rc.REMOTE_IDLE_CEILING == 60.0, rc.REMOTE_IDLE_CEILING
+        captured = {}
+        orig_stream = c._conn.stream
+        def spy(method, payload, **kw):
+            captured["read_timeout"] = kw.get("read_timeout")
+            return orig_stream(method, payload, **kw)
+        c._conn.stream = spy
+        settles = list(c.settled(["c_1"]))
+        assert [s.state for s in settles] == ["exited"], settles
+        assert captured["read_timeout"] == 60.0, captured
+        uds = ConnectClient("/tmp/rafiki-sdk-test-does-not-exist.sock")
+        assert uds.is_unix is True, uds.is_unix
+        uds.close()
+        note("7 remote-idle-ceiling OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:
