@@ -194,6 +194,28 @@ unbanning require an admin user credential or the local socket. The provider
 is OpenRouter's slug; a display name is lowercased with spaces turned into
 dashes. See `docs/reference/control-protocol.md` §"Provider bans".
 
+### Batch transport (`:batch` model ids)
+
+A fundi child on an OpenRouter model id ending `:batch` (e.g.
+`openrouter/z-ai/glm-5.3:batch`) sends its **first call** through the
+OpenRouter Batch API: the call parks, rafikid coalesces parked calls per
+model every 30 s into one batch, polls every 60 s, and delivers the result.
+Every later call of that child (once an assistant turn exists) goes live on
+the base model id. There is no batch flag, id, or verb anywhere — batch is a
+property of the model id.
+
+While parked the child's status is `batch_wait` (cockpit glyph `⧖`, static; a
+parked child counts as working and stays attachable). The wait can last
+hours — OpenRouter's completion window is 24 h, and measured turnaround
+(2026-09-25) was 38 min to 3+ h. Batch seats should be tool-less
+(`tools: []`, `mcp_servers: []`): a child whose first request already
+contains an assistant message (a tool-shaped pre-fill) is never parked.
+Discounts are per model, not a rule — check `rafiki models` pricing for the
+`:batch` id against the base id before choosing one (e.g.
+`glm-5.3-flash:batch` costs MORE than live). A spawn carrying its own API
+key on a `:batch` model is refused; batches use the daemon's `openrouter`
+provider key.
+
 ## `rafikid agent`
 
 `rafikid agent <stats|search|export|query|analyze|findings>` is a DSN-backed
@@ -1132,6 +1154,7 @@ take away your terminal's own select-and-copy.
 ```
 ◌ spawning   ○ idle        ◐ streaming   ⚒ running a tool
 ⊛ compacting ‼ needs you   ◇ stopping    ⟳ retrying    ✓/✗ exited
+⧖ batch_wait (static — hours-scale work already submitted to the provider)
 ```
 
 The badge counts only events worth a human (a finished turn, going idle,

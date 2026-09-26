@@ -426,6 +426,16 @@ Passing any of these (or any other shaping flag) spawns directly; `-i` opens
 the interactive form anyway, prefilled — where the executor field, `^E`'s
 picker, and the same kind-aware default apply.
 
+### Batch models (`:batch`)
+
+A fundi child spawned on an OpenRouter model id ending `:batch` (e.g.
+`openrouter/z-ai/glm-5.3:batch`) parks its first call on the OpenRouter
+Batch API and shows status `batch_wait` until the batched result is
+delivered — hours is normal (OpenRouter's completion window is 24 h), and
+the child stays working and attachable throughout. Batch is a property of
+the model id: no batch flag, id, or verb exists anywhere in the CLI. See the
+README's *Batch transport* section for the full mechanics.
+
 ### Script children from the CLI
 
 `rafiki create -d --kind script --pymodule <repo>:<script> [-- args]` spawns
