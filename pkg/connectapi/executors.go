@@ -46,10 +46,40 @@ func (s *Server) SetExecutorLister(l ExecutorLister) { s.execLister.Store(&l) }
 
 // ListExecutors enumerates the executors the daemon's pool currently knows
 // about, for this caller.
+//
+// kind selects WHICH listing this is. A non-empty kind asks the kind-scoped
+// question — "which executors could serve a spawn of this kind right now" —
+// and goes to the ExecutorLister, whose rows are live executors with
+// eligibility evaluated exactly as chooseExecutor vs chooseLaunchExecutor
+// would. An EMPTY kind is the management listing the framed ctrl_executor_list
+// served: the executor admin's plain rows over the durable table merged with
+// the live pool, selector and default-limit semantics included, with
+// eligibility UNEVALUATED — eligible/reason unset, per ListExecutorsRequest's
+// comment in control.proto.
+//
+// Errors on the kind path wrap the lister's error as-is (the lister's errors
+// are the daemon's own already); the admin path goes through executorAdminErr,
+// which logs an uncoded cause before ConnectErr redacts it.
 func (s *Server) ListExecutors(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListExecutorsRequest],
 ) (*connect.Response[rafikiv1.ListExecutorsResponse], error) {
+	if req.Msg.GetKind() == "" {
+		p := s.execAdmin.Load()
+		if p == nil {
+			return nil, connect.NewError(connect.CodeUnavailable,
+				errors.New("executor admin not yet wired"))
+		}
+		rows, err := (*p).List(ctx, req.Msg.GetSelector(), req.Msg.GetLimit())
+		if err != nil {
+			return nil, executorAdminErr("list_executors", err)
+		}
+		out := make([]*rafikiv1.ExecutorRow, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, toProtoExecutor(r))
+		}
+		return connect.NewResponse(&rafikiv1.ListExecutorsResponse{Rows: out}), nil
+	}
 	p := s.execLister.Load()
 	if p == nil {
 		return nil, connect.NewError(connect.CodeUnavailable,

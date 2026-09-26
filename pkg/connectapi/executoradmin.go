@@ -5,9 +5,11 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -38,13 +40,47 @@ func (s *Server) SetExecutorAdmin(a ExecutorAdmin) {
 	s.execAdmin.Store(&a)
 }
 
+// executorAdminErr is the seam's one error exit, shared by every handler in
+// this file and by ListExecutors' empty-kind path. Errors go through
+// ConnectErr: the code the daemon attached at the source IS the
+// classification, so translateExecutorErr's ControllerErrors — "enrollment
+// token already consumed", the machine-name collision — keep their authored
+// messages on this face too. An error that is NOT a ControllerError is
+// infrastructure text and is redacted by ConnectErr; its cause is logged here
+// so it is not lost (the same discipline close.go and budget.go follow
+// inline, shared because this seam has seven error exits and seven inline
+// copies is seven ways for the log line to drift).
+func executorAdminErr(op string, err error) error {
+	var ce *control.ControllerError
+	if !errors.As(err, &ce) {
+		// ConnectErr redacts this below; log the cause here or lose it.
+		slog.Error("connect: executor admin "+op+" failed", "error", err)
+	}
+	return ConnectErr(err)
+}
+
 // EnrollExecutor serves the framed ctrl_executor_enroll face: mint a one-time
-// enrollment token.
+// enrollment token. ttl_seconds must be positive — the framed dispatcher
+// refuses a non-positive one rather than silently minting the Controller's
+// 72h default, and this face serves the same verb.
 func (s *Server) EnrollExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.EnrollExecutorRequest],
 ) (*connect.Response[rafikiv1.EnrollExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("EnrollExecutor: not yet implemented"))
+	if req.Msg.GetTtlSeconds() <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("ttl_seconds must be positive"))
+	}
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	resp, err := (*p).Enroll(ctx, req.Msg)
+	if err != nil {
+		return nil, executorAdminErr("enroll_executor", err)
+	}
+	return connect.NewResponse(resp), nil
 }
 
 // CreateExecutor serves the framed ctrl_executor_create face: mint an
@@ -53,15 +89,44 @@ func (s *Server) CreateExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.CreateExecutorRequest],
 ) (*connect.Response[rafikiv1.CreateExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("CreateExecutor: not yet implemented"))
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	resp, err := (*p).Create(ctx, req.Msg)
+	if err != nil {
+		return nil, executorAdminErr("create_executor", err)
+	}
+	return connect.NewResponse(resp), nil
 }
 
-// LabelExecutor serves the framed ctrl_executor_label face.
+// LabelExecutor serves the framed ctrl_executor_label face. executor_id and at
+// least one of set/remove are required — the framed dispatcher refuses an
+// empty change rather than paying a store round trip to change nothing, and
+// this face serves the same verb.
 func (s *Server) LabelExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.LabelExecutorRequest],
 ) (*connect.Response[rafikiv1.LabelExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("LabelExecutor: not yet implemented"))
+	if req.Msg.GetExecutorId() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("executor_id is required"))
+	}
+	if len(req.Msg.GetSet()) == 0 && len(req.Msg.GetRemove()) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("at least one of set or remove is required"))
+	}
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	row, err := (*p).Label(ctx, req.Msg)
+	if err != nil {
+		return nil, executorAdminErr("label_executor", err)
+	}
+	return connect.NewResponse(&rafikiv1.LabelExecutorResponse{Executor: toProtoExecutor(row)}), nil
 }
 
 // DisableExecutor serves the framed ctrl_executor_disable face.
@@ -69,7 +134,19 @@ func (s *Server) DisableExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.DisableExecutorRequest],
 ) (*connect.Response[rafikiv1.DisableExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("DisableExecutor: not yet implemented"))
+	if req.Msg.GetExecutorId() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("executor_id is required"))
+	}
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	if err := (*p).Disable(ctx, req.Msg.GetExecutorId()); err != nil {
+		return nil, executorAdminErr("disable_executor", err)
+	}
+	return connect.NewResponse(&rafikiv1.DisableExecutorResponse{}), nil
 }
 
 // EnableExecutor serves the framed ctrl_executor_enable face.
@@ -77,7 +154,19 @@ func (s *Server) EnableExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.EnableExecutorRequest],
 ) (*connect.Response[rafikiv1.EnableExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("EnableExecutor: not yet implemented"))
+	if req.Msg.GetExecutorId() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("executor_id is required"))
+	}
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	if err := (*p).Enable(ctx, req.Msg.GetExecutorId()); err != nil {
+		return nil, executorAdminErr("enable_executor", err)
+	}
+	return connect.NewResponse(&rafikiv1.EnableExecutorResponse{}), nil
 }
 
 // DeleteExecutor serves the framed ctrl_executor_delete face.
@@ -85,5 +174,17 @@ func (s *Server) DeleteExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.DeleteExecutorRequest],
 ) (*connect.Response[rafikiv1.DeleteExecutorResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("DeleteExecutor: not yet implemented"))
+	if req.Msg.GetExecutorId() == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("executor_id is required"))
+	}
+	p := s.execAdmin.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("executor admin not yet wired"))
+	}
+	if err := (*p).Delete(ctx, req.Msg.GetExecutorId()); err != nil {
+		return nil, executorAdminErr("delete_executor", err)
+	}
+	return connect.NewResponse(&rafikiv1.DeleteExecutorResponse{}), nil
 }
