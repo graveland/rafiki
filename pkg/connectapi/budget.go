@@ -13,9 +13,9 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// SetBudget changes a child's MaxCost with operator authority. See
-// SetBudgetRequest's comment in control.proto for what that means relative
-// to the agent-facing agent_set_budget tool.
+// SetBudget changes a child's MaxCost: with operator authority for a user
+// credential, with agent_set_budget's rule for a per-child credential. See
+// SetBudgetRequest's comment in control.proto.
 //
 // Errors go through ConnectErr: the code the daemon attached at the source IS
 // the classification, so the negative-cap rejection in cmd/rafikid/limits.go
@@ -35,6 +35,13 @@ func (s *Server) SetBudget(
 	if maxCost < 0 || math.IsNaN(maxCost) || math.IsInf(maxCost, 0) {
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			errors.New("max_cost cannot be negative, NaN, or infinite"))
+	}
+	// childScoped: the subtree boundary runs first; the lifecycle then
+	// applies the child rule (direct parentage, remaining grant).
+	if sc := s.childScope(ctx); sc != nil {
+		if err := sc.Authorize(childID); err != nil {
+			return nil, err
+		}
 	}
 	p := s.lifecycle.Load()
 	if p == nil {

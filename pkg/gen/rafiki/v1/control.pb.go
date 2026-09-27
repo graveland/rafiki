@@ -2127,9 +2127,11 @@ func (x *CloseResponse) GetChildId() string {
 	return ""
 }
 
-// SetBudgetRequest changes a child's MaxCost with OPERATOR authority: no
-// lineage check (any child at any depth may be targeted) and no
-// remaining-budget check against a parent's grant. max_cost is plain
+// SetBudgetRequest changes a child's MaxCost. From a user credential it is
+// OPERATOR authority: no lineage check (any child at any depth may be
+// targeted) and no remaining-budget check against a parent's grant. From a
+// per-child credential it is the agent_set_budget rule: a direct child only,
+// bounded by the caller's own remaining grant. max_cost is plain
 // double, not optional -- unlike ChildSummary.max_cost, 0 here is an
 // actively requested value ("make unlimited"), never an absent-field
 // sentinel.

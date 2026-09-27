@@ -218,10 +218,22 @@ func TestProxyFaceConnectAdmitsUserAndAnyCaller(t *testing.T) {
 		t.Fatalf("ListModels with a per-child credential = %v, want %v (anyCaller)", err, connect.CodeUnavailable)
 	}
 
+	// The child-scoped reads admit the per-child secret too: the conversation
+	// and pymodule managers are unwired here, so CodeUnavailable again means
+	// the gate let it through to the handler.
+	getPymodule := connect.NewRequest(&rafikiv1.GetPymoduleRequest{Name: "m"})
+	child(getPymodule.Header())
+	_, err := client.GetPymodule(ctx, getPymodule)
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "GetPymodule with a per-child credential = %v, want", err)
+	export := connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "01a0e4a1-4a46-7866-b2a3-5dc7501689c8"})
+	child(export.Header())
+	_, err = client.ConversationExport(ctx, export)
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "ConversationExport with a per-child credential = %v, want", err)
+
 	// No credential at all never reaches the Control service on this face:
 	// the proxy middleware answers 401 before Connect runs, which the client
 	// surfaces as Unauthenticated.
-	_, err := client.ListModels(ctx, connect.NewRequest(&rafikiv1.ListModelsRequest{}))
+	_, err = client.ListModels(ctx, connect.NewRequest(&rafikiv1.ListModelsRequest{}))
 	assert.NewAborting(t).Eq(connect.CodeUnauthenticated, connect.CodeOf(err), "ListModels with no credential = %v, want", err)
 }
 
@@ -347,7 +359,7 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 func TestAuthorizeControlProcedure(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const (
-		userOnly   = controlProcedurePrefix + "SetBudget"
+		userOnly   = controlProcedurePrefix + "PutPreset"
 		anyCaller  = controlProcedurePrefix + "ListModels"
 		childScope = controlProcedurePrefix + "Kill"
 	)

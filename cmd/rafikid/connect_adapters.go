@@ -338,7 +338,14 @@ func (l connectLifecycle) Kill(ctx context.Context, childID string, shutdownMs, 
 	}, nil
 }
 
+// SetBudget is operator authority for a user credential (or the socket's
+// nil identity) and agent_set_budget's rule for a per-child credential:
+// SetChildBudget checks direct parentage and the caller's remaining grant,
+// so a child cannot lift its way past its own budget fence.
 func (l connectLifecycle) SetBudget(ctx context.Context, childID string, maxCost float64) error {
+	if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken {
+		return l.c.SetChildBudget(ctx, id.ChildID, childID, maxCost)
+	}
 	return l.c.SetChildBudgetAsOperator(ctx, childID, maxCost)
 }
 
@@ -550,11 +557,24 @@ func scopeFor(ctx context.Context) (insights.Scope, error) {
 	return insights.ScopeOwner(id.UserID), nil
 }
 
+// childConversationScope is scopeFor for the conversation reads a per-child
+// credential may make (ConversationSearch/Export/Query): that caller reads
+// its own subtree through insights.ScopeSubtree — the MCP face's
+// newMCPChildConversationReader boundary — never its owner's corpus. Every
+// other identity resolves through scopeFor unchanged, so the per-boot child
+// shapes stay refused here as they are at the gate.
+func childConversationScope(ctx context.Context, c *Controller) (insights.Scope, error) {
+	if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken {
+		return insights.ScopeSubtree(c.subtreeSelector(id.ChildID)), nil
+	}
+	return scopeFor(ctx)
+}
+
 // connectConversations adapts *Controller to connectapi.ConversationInsights.
 type connectConversations struct{ c *Controller }
 
 func (a connectConversations) Search(ctx context.Context, f connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
-	scope, err := scopeFor(ctx)
+	scope, err := childConversationScope(ctx, a.c)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +602,7 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 }
 
 func (a connectConversations) Export(ctx context.Context, conversationID string) (connectapi.TranscriptRow, bool, error) {
-	scope, err := scopeFor(ctx)
+	scope, err := childConversationScope(ctx, a.c)
 	if err != nil {
 		return connectapi.TranscriptRow{}, false, err
 	}
@@ -616,7 +636,7 @@ func (a connectConversations) Export(ctx context.Context, conversationID string)
 // interface keeps a stray value out at compile time elsewhere); failing loud
 // here beats guessing a cell's type.
 func (a connectConversations) RunQuery(ctx context.Context, name string, f connectapi.CatalogueFilter) (connectapi.CatalogueResult, error) {
-	scope, err := scopeFor(ctx)
+	scope, err := childConversationScope(ctx, a.c)
 	if err != nil {
 		return connectapi.CatalogueResult{}, err
 	}

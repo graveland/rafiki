@@ -44,10 +44,14 @@ const (
 	// ModelInfo. Anything writable must never be listed here.
 	policyAnyCaller
 
-	// policyChildScoped marks the twelve agent-control verbs a child credential
-	// with subtree authority may call — Spawn, Kill, Close, Send, GetHistory,
-	// StreamEvents, ListChildren, GetChild, ListTasks, and the three
-	// script-child verbs Report, Receive, SetResult. The gate admits a
+	// policyChildScoped marks the verbs a child credential with subtree
+	// authority may call — the agent-control verbs Spawn, Kill, Close, Send,
+	// SetBudget, GetHistory, StreamEvents, ListChildren, GetChild, ListTasks;
+	// the three script-child verbs Report, Receive, SetResult; the
+	// conversation reads ConversationSearch/Export/Query, answered through the
+	// caller's subtree (childConversationScope); and the pymodule reads
+	// ListPymodules/GetPymodule, answered from the owner's corpus exactly as
+	// the MCP face's pymodule_get does. The gate admits a
 	// ProvenanceChildToken caller on them, but a procedure name carries no
 	// target child id, so the gate cannot check the subtree itself: it admits
 	// and the HANDLER resolves the caller's subtree authority through
@@ -101,6 +105,21 @@ var controlPolicyTable = map[string]controlPolicy{
 	"Kill":         policyChildScoped,
 	"Close":        policyChildScoped,
 	"ListTasks":    policyChildScoped,
+	// SetBudget from a child is NOT operator authority: connectLifecycle
+	// routes it to SetChildBudget (direct parentage, bounded by the caller's
+	// own remaining grant) — the agent_set_budget tool's rule.
+	"SetBudget": policyChildScoped,
+	// Conversation reads a child may make on its own subtree, the MCP face's
+	// conversation_* tools' boundary (insights.ScopeSubtree). Review,
+	// Findings and Stats stay userOnly: nothing a child runs needs them.
+	"ConversationSearch": policyChildScoped,
+	"ConversationExport": policyChildScoped,
+	"ConversationQuery":  policyChildScoped,
+	// Owner-corpus pymodule READS: what the child's own executor can already
+	// run. Put/Delete stay userOnly — a child writing the corpus would change
+	// what every later spawn of the owner runs.
+	"ListPymodules": policyChildScoped,
+	"GetPymodule":   policyChildScoped,
 	// Script children (Report / Receive / SetResult). Report acts OUTWARD on
 	// the caller's own parent; Receive and SetResult are self-only. All three
 	// resolve the caller's position from the credential — the request carries
@@ -122,15 +141,12 @@ var controlPolicyTable = map[string]controlPolicy{
 	// userOnly: everything that acts with operator authority or answers as
 	// the caller's identity. Listed explicitly so the completeness test can
 	// tell "classified userOnly" from "missing".
-	"SetBudget":                policyUserOnly,
 	"ListExecutors":            policyUserOnly,
 	"ListSkills":               policyUserOnly,
 	"GetSkill":                 policyUserOnly,
 	"UpsertSkill":              policyUserOnly,
 	"DeleteSkill":              policyUserOnly,
 	"SetSkillEnabled":          policyUserOnly,
-	"ListPymodules":            policyUserOnly,
-	"GetPymodule":              policyUserOnly,
 	"PutPymodule":              policyUserOnly,
 	"DeletePymodule":           policyUserOnly,
 	"AddPymoduleGitSource":     policyUserOnly,
@@ -147,9 +163,6 @@ var controlPolicyTable = map[string]controlPolicy{
 	"DeleteMemory":             policyUserOnly,
 	"RecallBackfill":           policyUserOnly,
 	"RecallStatus":             policyUserOnly,
-	"ConversationSearch":       policyUserOnly,
-	"ConversationExport":       policyUserOnly,
-	"ConversationQuery":        policyUserOnly,
 	"ConversationReview":       policyUserOnly,
 	"ConversationFindings":     policyUserOnly,
 	"DarajaLaunch":             policyUserOnly,
