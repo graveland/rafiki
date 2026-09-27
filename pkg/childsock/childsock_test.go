@@ -173,6 +173,44 @@ func TestCloseUnlinksAndStopsServing(t *testing.T) {
 	c.NoError(srv.Close(), "second close")
 }
 
+// TestServeFallsBackWhenDirIsTooDeepForSunPath pins the deep-XDG case: a
+// socket directory whose child.sock would overflow sun_path must still serve,
+// on a path that fits, and Close must remove the fallback directory with it.
+func TestServeFallsBackWhenDirIsTooDeepForSunPath(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+
+	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(inner.Close)
+	target, err := url.Parse(inner.URL)
+	c.NoError(err, "parse")
+
+	dir := filepath.Join(tempSocketDir(t), strings.Repeat("d", 60), strings.Repeat("e", 60))
+	c.True(len(SocketPath(dir)) > maxSocketPath, "fixture path must overflow: %d bytes", len(SocketPath(dir)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv, err := Serve(ctx, dir, target, "s")
+	c.NoError(err, "serve")
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c.True(len(srv.Path()) <= maxSocketPath, "served path %q is %d bytes", srv.Path(), len(srv.Path()))
+	fi, err := os.Stat(filepath.Dir(srv.Path()))
+	c.NoError(err, "stat fallback dir")
+	c.Eq(0o700, fi.Mode().Perm(), "fallback dir mode")
+
+	resp := dial(t, srv.Path(), nil, "/x")
+	resp.Body.Close()
+	c.Eq(http.StatusOK, resp.StatusCode, "status through the fallback socket")
+
+	c.NoError(srv.Close(), "close")
+	if _, err := os.Stat(filepath.Dir(srv.Path())); !os.IsNotExist(err) {
+		t.Fatalf("fallback dir survived Close: err=%v", err)
+	}
+}
+
 // TestServeHTTP11AndH2C proves both transports the plan promises work
 // against one listener: a plain HTTP/1.1 client (the httpx/curl shape) and a
 // prior-knowledge h2c client (the Connect client shape).

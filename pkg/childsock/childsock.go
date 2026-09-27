@@ -39,11 +39,17 @@ const SocketName = "child.sock"
 // SocketPath returns the socket path served inside dir.
 func SocketPath(dir string) string { return filepath.Join(dir, SocketName) }
 
+// maxSocketPath is the longest unix socket path Serve binds: sun_path is 104
+// bytes on darwin (108 on linux) including the terminating NUL. The smaller
+// limit applies everywhere so a path that serves on linux serves on darwin.
+const maxSocketPath = 103
+
 // Server is one per-child socket. Close stops the listener and the HTTP
 // server and unlinks the socket file; it is safe to call more than once.
 type Server struct {
-	path string
-	srv  *http.Server
+	path        string
+	fallbackDir string // removed on Close; empty when the caller's dir was used
+	srv         *http.Server
 
 	closeOnce sync.Once
 	closeErr  error
@@ -63,9 +69,19 @@ func (s *Server) Close() error {
 		if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
 			s.closeErr = err
 		}
+		if s.fallbackDir != "" {
+			if err := os.RemoveAll(s.fallbackDir); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
+		}
 	})
 	return s.closeErr
 }
+
+// Path is the socket path actually served — <dir>/child.sock, or the
+// fallback Serve chose when that would not fit in sun_path. Callers hand
+// THIS to the child, never SocketPath(dir).
+func (s *Server) Path() string { return s.path }
 
 // Serve listens on <dir>/child.sock and reverse-proxies every request to
 // target — the daemon's proxy-face URL, whose Connect route sits behind the
@@ -93,6 +109,11 @@ func (s *Server) Close() error {
 // Stale socket files from a previous incarnation are removed before the
 // bind, like serveConnectUDS does; a live server on that path is refused
 // rather than clobbered.
+//
+// When <dir>/child.sock would overflow sun_path (a deep XDG_CACHE_HOME or
+// state dir), the socket is served instead from a fresh 0700 os.MkdirTemp
+// directory — the same access boundary under a short, unguessable name —
+// which Close removes. Server.Path reports where it landed.
 func Serve(ctx context.Context, dir string, target *url.URL, secret string) (*Server, error) {
 	return ServeTransport(ctx, dir, target, secret, nil)
 }
@@ -173,6 +194,18 @@ func ServeHandler(ctx context.Context, dir string, h http.Handler, secret string
 
 func serve(ctx context.Context, dir string, handler http.Handler) (*Server, error) {
 	sockPath := SocketPath(dir)
+	fallbackDir := ""
+	if len(sockPath) > maxSocketPath {
+		d, err := os.MkdirTemp("", "rafiki-sock-")
+		if err != nil {
+			return nil, fmt.Errorf("%s exceeds the %d-byte socket path limit, and creating a fallback directory failed: %w", sockPath, maxSocketPath, err)
+		}
+		if p := SocketPath(d); len(p) > maxSocketPath {
+			_ = os.RemoveAll(d)
+			return nil, fmt.Errorf("%s exceeds the %d-byte socket path limit, and so does the fallback %s: shorten TMPDIR", sockPath, maxSocketPath, p)
+		}
+		dir, sockPath, fallbackDir = d, SocketPath(d), d
+	}
 
 	// Refuse rather than clobber, exactly like serveConnectUDS: two servers on
 	// one path means the second bind silently wins and the first's clients
@@ -189,6 +222,9 @@ func serve(ctx context.Context, dir string, handler http.Handler) (*Server, erro
 	}
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
+		if fallbackDir != "" {
+			_ = os.RemoveAll(fallbackDir)
+		}
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
 	// The socket file's own mode is bound to the process umask, which this
@@ -204,6 +240,9 @@ func serve(ctx context.Context, dir string, handler http.Handler) (*Server, erro
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		_ = ln.Close()
 		_ = os.Remove(sockPath)
+		if fallbackDir != "" {
+			_ = os.RemoveAll(fallbackDir)
+		}
 		return nil, fmt.Errorf("chmod %s: %w", sockPath, err)
 	}
 
@@ -228,7 +267,7 @@ func serve(ctx context.Context, dir string, handler http.Handler) (*Server, erro
 		_ = srv.Serve(ln)
 	}()
 
-	return &Server{path: sockPath, srv: srv}, nil
+	return &Server{path: sockPath, fallbackDir: fallbackDir, srv: srv}, nil
 }
 
 // stripCredentials removes every header a caller could use to present an

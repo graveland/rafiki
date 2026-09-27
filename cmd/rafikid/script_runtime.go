@@ -288,7 +288,7 @@ func (c *Controller) localScriptRunner(req protocol.SpawnRequest, childID, owner
 		// Argv[0] of a SpawnSpec is PiBinary, so the script path is Argv[1].
 		PiBinary: mat.interpreter,
 		Argv:     mat.argv,
-		Env:      scriptChildEnv(os.Environ(), req.Env, mat.pythonPath, childsock.SocketPath(dir)),
+		Env:      scriptChildEnv(os.Environ(), req.Env, mat.pythonPath, sock.Path()),
 		// The runner builds the COMPLETE environment (the full daemon env
 		// minus the credential prefixes); nothing is inherited on top of it.
 		EnvOverride: true,

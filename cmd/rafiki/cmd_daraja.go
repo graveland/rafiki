@@ -358,7 +358,7 @@ func runDarajaScriptServe(childID, interpreter, cwd string, argv []string, pinCe
 		// touch them (PYTHONPATH is functional, and a forwarded name that
 		// carried a credential prefix was already refused twice before it got
 		// here).
-		Env:         darajaScriptEnv(os.Environ(), childsock.SocketPath(dir)),
+		Env:         darajaScriptEnv(os.Environ(), sock.Path()),
 		EnvOverride: true,
 		Spec: daraja.ChildSpec{
 			Kind: daraja.KindScript,
