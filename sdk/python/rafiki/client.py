@@ -22,6 +22,7 @@ generated dataclasses in ``rafiki._gen``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -311,6 +312,30 @@ class Client:
         req = _gen.control_pb.ConversationExportRequest(conversation_id=session)
         return self._call("ConversationExport", req, _gen.control_pb.ConversationExportResponse)
 
+    # ── presets ──────────────────────────────────────────────────────────────
+
+    def list_presets(self, prefix: "str | None" = None) -> "list":
+        """The caller's live presets (latest row per name), optionally
+        narrowed to a name prefix such as ``"review:"``. Readable by a child
+        credential; presets resolve against the connection's owner."""
+        req = _gen.control_pb.ListPresetsRequest(prefix=prefix or "")
+        return self._call("ListPresets", req, _gen.control_pb.ListPresetsResponse).rows
+
+    def get_preset(self, name: str) -> _gen.control_pb.PresetRow:
+        """One preset's latest live row; an unknown name raises ConnectError
+        not_found."""
+        req = _gen.control_pb.GetPresetRequest(name=name)
+        return self._call("GetPreset", req, _gen.control_pb.GetPresetResponse).rows[0]
+
+    def put_preset(self, preset) -> _gen.control_pb.PresetRow:
+        """Save a new version of a preset (a user credential only). ``preset``
+        is a PresetRow or a dict in ``rafiki preset get -j``'s shape: snake_case
+        fields, and tools/skills/mcp_servers as plain lists — absent means the
+        kind's default (all), ``[]`` means none. Returns the stored row."""
+        row = preset if isinstance(preset, _gen.control_pb.PresetRow) else _preset_from_dict(preset)
+        req = _gen.control_pb.PutPresetRequest(preset=row)
+        return self._call("PutPreset", req, _gen.control_pb.PutPresetResponse).preset
+
     # ── script-child verbs (Report / Receive / SetResult) ────────────────────
 
     def report(self, kind: str, data) -> None:
@@ -507,6 +532,26 @@ class Client:
                     ) from exc
                 # A quiet window inside an untimed wait: re-open and keep
                 # watching from the last ordinal seen.
+
+
+# Fields a stored preset row carries that a put never sets: accepted (so a
+# `rafiki preset get -j` document round-trips) and dropped.
+_PRESET_READ_ONLY = ("version", "written_by_child", "created_at", "deleted_at")
+_PRESET_LISTS = ("tools", "skills", "mcp_servers")
+
+
+def _preset_from_dict(d: dict) -> _gen.control_pb.PresetRow:
+    fields = {f.name for f in dataclasses.fields(_gen.control_pb.PresetRow)}
+    unknown = sorted(set(d) - fields)
+    if unknown:
+        raise ValueError("preset: unknown field(s) %s" % ", ".join(unknown))
+    kw = {k: v for k, v in d.items() if k not in _PRESET_READ_ONLY}
+    for k in _PRESET_LISTS:
+        # Tri-state: absent/None stays None (the kind's default, everything);
+        # a list — empty included — is an explicit allowlist.
+        if kw.get(k) is not None:
+            kw[k] = _gen.control_pb.StringList(items=[str(x) for x in kw[k]])
+    return _gen.control_pb.PresetRow(**kw)
 
 
 def _script_spec(spec) -> _gen.control_pb.SpawnRequest.ScriptSpec:

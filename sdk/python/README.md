@@ -60,6 +60,13 @@ states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 transcript = c.export(child)              # the child's decomposed transcript
 c.stop(child)                             # graceful, then the kill ladder
 
+# Presets (owner-scoped; a child credential may read, only a user may put).
+# put_preset takes a PresetRow or `rafiki preset get -j`'s dict shape:
+# tools/skills/mcp_servers absent = the kind's default, [] = none.
+seats = c.list_presets("review:")         # latest live row per name
+seat  = c.get_preset("review:reviewer")   # not_found raises ConnectError
+c.put_preset({"name": "review:reviewer", "kind": "fundi", "model": "...", "skills": []})
+
 # Script-child verbs (identity = the child; from a user credential they
 # are refused — a user has no position in the tree to report from):
 c.report("progress", {"stage": "halfway"})     # → the parent's event buffer

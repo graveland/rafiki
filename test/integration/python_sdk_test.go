@@ -454,6 +454,25 @@ def run():
         assert other not in found, found
         note("list+labels OK")
 
+        # presets: the dict shape round-trips through the daemon with the
+        # tri-state lists intact (absent = all, [] = none), read-only fields
+        # of a "preset get -j" document are dropped, and a typo is refused
+        # before the wire.
+        put = c.put_preset({"name": "sdk:seat", "kind": "fundi", "model": model, "skills": [],
+                            "max_cost": 0.25, "version": 99, "created_at": "ignored"})
+        assert put.name == "sdk:seat" and put.version != 99, put
+        got = c.get_preset("sdk:seat")
+        assert got.tools is None, got.tools
+        assert got.skills is not None and got.skills.items == [], got.skills
+        assert got.max_cost == 0.25 and got.model == model, got
+        assert [p.name for p in c.list_presets("sdk:")] == ["sdk:seat"]
+        try:
+            c.put_preset({"name": "sdk:seat", "tool": ["read"]})
+            raise AssertionError("an unknown preset field was accepted")
+        except ValueError:
+            pass
+        note("presets OK")
+
         # send lands an inbox row with a durable id.
         mid = c.send(cid, "a steer, unsteerable but durable")
         assert mid != "", mid
