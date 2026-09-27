@@ -838,7 +838,7 @@ func (c *Child) readStdout() {
 	if c.abandoned {
 		// Shutdown gave up on this reap and already published an outcome; the
 		// daemon has moved on (the store record is written, the log dump
-		// taken, ctrl_child_exited delivered). Overwriting c.exit now would
+		// taken, the exited event delivered). Overwriting c.exit now would
 		// silently contradict what everyone was told, so keep the record and
 		// just note that the straggler did eventually land.
 		c.mu.Unlock()

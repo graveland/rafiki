@@ -11,7 +11,7 @@ package integration_test
 // Two rules from this package, restated because they bite exactly here:
 //   - every run must pass -count=1, because go test caching cannot see through
 //     to a daemon subprocess;
-//   - a proxy-listener failure surfaces as a missing connect.sock / dead MCP
+//   - a proxy-listener failure surfaces as a dead MCP face
 //     endpoint rather than a meaningful error, so every fatal below carries the
 //     daemon's captured stderr.
 
@@ -112,7 +112,7 @@ func bootMCPDaemon(t *testing.T) *daemon {
 	return d
 }
 
-// createMCPUser mints a user over connect.sock with the generated Connect
+// createMCPUser mints a user over the daemon's control socket with the generated Connect
 // client (CreateUser) and returns its bearer token. The UDS is the daemon's
 // trust boundary, so the call needs no credential; the token is what the MCP
 // face authenticates with.

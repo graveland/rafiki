@@ -36,7 +36,7 @@ func aliasProviders() *providers.Set {
 // TestChildOpsModelInfoMatchesFramed pins the one answer a client consumes
 // daemon-side (so it never reads OpenRouter itself): the Connect adapter's
 // ModelInfo must equal, field by field, the ModelInfoResponseData the framed
-// ctrl_model_info handler served from the same Controller. Both sides of the
+// ModelInfo RPC served from the same Controller. Both sides of the
 // comparison run against the SAME Controller here, so a mapping that drops
 // or misnames a field fails loudly rather than agreeing with itself by
 // accident.

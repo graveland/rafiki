@@ -10,7 +10,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -43,7 +42,7 @@ func (s *Server) SetBudget(
 			errors.New("child lifecycle not yet wired"))
 	}
 	if err := (*p).SetBudget(ctx, childID, maxCost); err != nil {
-		var ce *control.ControllerError
+		var ce *ControllerError
 		if !errors.As(err, &ce) {
 			// ConnectErr redacts this below; log the cause here or lose it.
 			slog.Error("connect: set_budget failed", "child_id", childID, "error", err)

@@ -14,7 +14,7 @@ import (
 
 // normalizeSingleDash converts single-dash long flags to double-dash form for
 // pflag compatibility. stdlib flag accepts both -db and --db; pflag rejects -db
-// as "unknown shorthand flag: 'd'". ctrl_spawn's caller-supplied ExtraArgs reach
+// as "unknown shorthand flag: 'd'". Spawn's caller-supplied ExtraArgs reach
 // rafikid fundi through buildAgentArgv, so single-dash forms are a wire-visible
 // contract. This shim preserves them.
 func normalizeSingleDash(f *pflag.FlagSet, name string) pflag.NormalizedName {

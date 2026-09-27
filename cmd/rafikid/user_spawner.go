@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -74,7 +73,6 @@ func (s *userSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (tools.Ag
 	// and MCP does not go through it, while Controller.Spawn only stats cwd
 	// for kinds it forks locally — so this surface carries the check itself.
 	req := protocol.SpawnRequest{
-		Type:             protocol.TypeCtrlSpawn,
 		Kind:             kind,
 		Name:             spec.Name,
 		Model:            spec.Model,
@@ -113,7 +111,7 @@ func (s *userSpawner) View(_ context.Context, childID string, limit int) (string
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, control.RecentQuery{Limit: limit, Rendered: false})
+	res, err := s.c.GetRecent(childID, recentQuery{Limit: limit, Rendered: false})
 	if err != nil {
 		return "", err
 	}

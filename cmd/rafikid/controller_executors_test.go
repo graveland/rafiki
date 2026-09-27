@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -189,7 +189,7 @@ func TestExecutorEnrollRefusesAClientSuppliedOwner(t *testing.T) {
 			Labels:     map[string]string{key: "someone-else"},
 			TTLSeconds: 3600,
 		})
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 			t.Fatalf("--label %s=: got %v, want ERR_INVALID_ARGS -- %s is derived "+
 				"by the daemon and a request naming it must be refused rather "+
@@ -225,7 +225,7 @@ func TestExecutorEnrollRefusesANameASelectorCannotCarry(t *testing.T) {
 // mistake only the operator can fix.
 func TestDuplicateMachineNameIsAClientError(t *testing.T) {
 	err := translateExecutorErr(fmt.Errorf("create executor: %w", executors.ErrMachineNameTaken))
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("got %v, want ERR_INVALID_ARGS", err)
 	}
@@ -234,7 +234,7 @@ func TestDuplicateMachineNameIsAClientError(t *testing.T) {
 	}
 }
 
-// The daemon half of the same rule. ctrl_executor_label is the verb the
+// The daemon half of the same rule. LabelExecutor is the RPC the
 // collision message RECOMMENDS, and it lost this mapping once already -- the
 // detection moved into the store, SetLabels was not wired to it, and an
 // operator following the daemon's own advice onto a taken name was told the
@@ -248,7 +248,7 @@ func TestExecutorLabelMapsATakenMachineName(t *testing.T) {
 	_, err := c.ExecutorLabel(protocol.ExecutorLabelRequest{
 		ExecutorID: e0.ID, Set: map[string]string{"machine": "taken"},
 	})
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("got %v, want ERR_INVALID_ARGS", err)
 	}
@@ -266,7 +266,7 @@ func TestExecutorLabelMapsATakenMachineName(t *testing.T) {
 func TestUnclassifiedStoreErrorsAreStillInternal(t *testing.T) {
 	err := translateExecutorErr(fmt.Errorf("insert executor: %w",
 		errors.New(`duplicate key value violates unique constraint "executors_credential_hash_key"`)))
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if errors.As(err, &ce) {
 		t.Fatalf("an unrelated failure must not inherit the rename advice: %+v", ce)
 	}
@@ -312,7 +312,7 @@ func TestExecutorDeleteRemovesTheRow(t *testing.T) {
 func TestExecutorDeleteUnknownIsNotFound(t *testing.T) {
 	_, c := seedSuffixFixture(t)
 	err := c.ExecutorDelete(protocol.ExecutorDeleteRequest{ExecutorID: "ffffffffffff"})
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrNotFound {
 		t.Fatalf("got %v, want ERR_NOT_FOUND", err)
 	}
@@ -448,7 +448,7 @@ func TestAmbiguousFragmentFailsWithoutGuessing(t *testing.T) {
 	err := c.ExecutorEnable(protocol.ExecutorEnableRequest{
 		ExecutorID: uuidTailA, // A and C both end in it
 	})
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
 		t.Fatalf("expected a ControllerError, got %T: %v", err, err)
 	}
@@ -468,7 +468,7 @@ func TestUnknownAndShortFragmentsAreNotFound(t *testing.T) {
 
 	for _, ref := range []string{"ffffffffffff", "a1b" /* shorter than executorRefMinLen */} {
 		err := c.ExecutorDisable(protocol.ExecutorDisableRequest{ExecutorID: ref})
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) || ce.Code != protocol.ErrNotFound {
 			t.Errorf("fragment %q: got %v, want ERR_NOT_FOUND", ref, err)
 		}

@@ -90,9 +90,8 @@ func (s *repoStubControl) removes() []*rafikiv1.RemovePymoduleGitSourceRequest {
 	return append([]*rafikiv1.RemovePymoduleGitSourceRequest(nil), s.removeCalls...)
 }
 
-// newRepoHarness wires an isolated profile whose connect.sock sibling serves
-// the stub, and returns the stub — the Connect-only variant of
-// newReviewHarness (the python repo verbs never touch the framed plane).
+// newRepoHarness wires an isolated profile whose own socket serves the stub,
+// and returns the stub.
 func newRepoHarness(t *testing.T, stub *repoStubControl) {
 	t.Helper()
 	isolateProfiles(t)
@@ -104,13 +103,13 @@ func newRepoHarness(t *testing.T, stub *repoStubControl) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
+	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, filepath.Join(dir, "connect.sock"), routePath, handler)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: controlSock},
+		"scratch": {Name: "scratch", Socket: sock},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

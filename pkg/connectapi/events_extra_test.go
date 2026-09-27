@@ -12,7 +12,6 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
@@ -166,7 +165,7 @@ func TestSendFrameArrayAndGarbageAreInvalidArgument(t *testing.T) {
 // Controller.GetStreams' ErrChildNotFound reads as NotFound with the precise
 // reason riding the detail.
 func TestGetStreamsUnknownChildIsNotFound(t *testing.T) {
-	f := &fakeRawChildIO{streamsErr: &control.ControllerError{
+	f := &fakeRawChildIO{streamsErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildNotFound,
 		Message: "child not found: c_missing",
 	}}
@@ -185,7 +184,7 @@ func TestGetStreamsUnknownChildIsNotFound(t *testing.T) {
 
 // Send's unknown-child refusal maps the same way.
 func TestSendFrameUnknownChildIsNotFound(t *testing.T) {
-	f := &fakeRawChildIO{sendErr: &control.ControllerError{
+	f := &fakeRawChildIO{sendErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildNotFound,
 		Message: "child not found: c_missing",
 	}}
@@ -199,7 +198,7 @@ func TestSendFrameUnknownChildIsNotFound(t *testing.T) {
 	}
 }
 
-// A generic error — not a ControllerError — keeps the blanket Internal, with
+// A generic error — not a connectapi.ControllerError — keeps the blanket Internal, with
 // the raw cause redacted and logged (ConnectErr never logs; the handler does).
 func TestRawChildIOUncodedErrorIsRedactedInternal(t *testing.T) {
 	f := &fakeRawChildIO{sendErr: errors.New("pq: relation does not exist")}

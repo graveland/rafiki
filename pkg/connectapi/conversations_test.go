@@ -131,7 +131,7 @@ func TestConversationSearchErrorFailsInternalAndRedacts(t *testing.T) {
 	}
 }
 
-// An error the source already coded -- scopeFor's refusal, or a ControllerError
+// An error the source already coded -- scopeFor's refusal, or a connectapi.ControllerError
 // the adapter translated -- must reach the wire under its own code and message,
 // never re-wrapped as internal.
 func TestConversationSearchPreservesACodedError(t *testing.T) {

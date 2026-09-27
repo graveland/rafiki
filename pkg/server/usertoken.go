@@ -156,7 +156,7 @@ func (a *UserTokenAuth) Middleware(next http.Handler) http.Handler {
 
 // IdentifyStrict resolves the credential carried in header values, for a
 // mount that must REFUSE a bad credential the same way the framed unix socket
-// refuses a bad ctrl_auth: the two planes must agree, because one that
+// refuses a bad credential: both planes must agree, because one that
 // swallows an invalid credential and one that refuses it answer the same
 // operator differently. The outcomes are distinct on purpose:
 //

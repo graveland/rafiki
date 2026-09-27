@@ -407,7 +407,7 @@ func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
 }
 
 // IdentifyStrict backs the Connect UDS mount's identity resolution, which must
-// AGREE with the framed socket's refusal of a bad ctrl_auth: no credential →
+// AGREE with the unix socket's refusal of a bad credential: no credential →
 // anonymous, a credential that resolves → identity, an unrecognized one →
 // users.ErrNotFound (the caller refuses, never downgrades to anonymous), and a
 // store outage → ErrAuthUnavailable (an outage, never a bad-credential

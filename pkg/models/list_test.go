@@ -303,7 +303,7 @@ func TestLoadAliases_NilSet(t *testing.T) {
 	}
 }
 
-// A declared alias must reach both ctrl_list_models and --model completion —
+// A declared alias must reach both ListModels and --model completion —
 // List/ListSources is the single function that serves both. base_url is
 // deliberately omitted so loadLocal skips this provider entirely (it only
 // probes providers with an explicit base_url); the alias must still surface

@@ -435,7 +435,6 @@ func buildSpawnRequest(cmd *cobra.Command, args []string) (protocol.SpawnRequest
 	parent, _ := cmd.Flags().GetString("parent")
 
 	req := protocol.SpawnRequest{
-		Type:               protocol.TypeCtrlSpawn,
 		Name:               name,
 		Cwd:                cwd,
 		Kind:               kind,

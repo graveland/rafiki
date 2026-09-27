@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 // TestResume_ConcurrentCallsSpawnExactlyOneChild proves the fix for the
 // Controller.Resume check-then-act race (task H8): two genuinely concurrent
-// ctrl_resume calls for the same exited childID must result in exactly one
+// Resume calls for the same exited childID must result in exactly one
 // forked OS process and exactly one successful SpawnResult; the loser must
 // get a clear, immediate error (protocol.ErrNotResumable), never a second
 // live process sharing the ref and never a block.
@@ -58,7 +58,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	type outcome struct {
-		res control.SpawnResult
+		res protocol.SpawnResponseData
 		err error
 	}
 	results := make([]outcome, n)
@@ -84,9 +84,9 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 			}
 			continue
 		}
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *control.ControllerError: %v", i, r.err)
+			t.Fatalf("result %d: error is not *connectapi.ControllerError: %v", i, r.err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
@@ -111,7 +111,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 // counterpart to TestResume_ConcurrentCallsSpawnExactlyOneChild: it has the
 // identical check-then-act-around-a-fork shape (see the doc comment on
 // Controller.RespawnChild), reachable via two concurrent
-// ctrl_send{new_session|switch_session} frames for the same exited childID
+// intercepted new_session/switch_session sends for the same exited childID
 // racing through handleInterceptedSend. This calls RespawnChild directly
 // (bypassing handleInterceptedSend's kill/subscriber-restore ceremony, which
 // is orthogonal to the race) to isolate the same fork-in-window defect.
@@ -139,7 +139,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	type outcome struct {
-		res control.SpawnResult
+		res protocol.SpawnResponseData
 		err error
 	}
 	results := make([]outcome, n)
@@ -165,9 +165,9 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 			}
 			continue
 		}
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *control.ControllerError: %v", i, r.err)
+			t.Fatalf("result %d: error is not *connectapi.ControllerError: %v", i, r.err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
@@ -189,8 +189,8 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 }
 
 // TestResumeRespawn_CrossPathClaimIsShared proves the cross-function half of
-// the race this task asked to investigate: a ctrl_resume racing an
-// intercepted ctrl_send{new_session} for the same exited childID. If Resume
+// the race this task asked to investigate: a Resume racing an
+// intercepted new_session send for the same exited childID. If Resume
 // and RespawnChild each had their own independent claim set, this would
 // still race (each guard only sees calls to its own function) — this test
 // fails unless both share Controller.spawnClaims.
@@ -212,7 +212,7 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 
-	var resumeRes control.SpawnResult
+	var resumeRes protocol.SpawnResponseData
 	var resumeErr error
 	wg.Add(1)
 	go func() {
@@ -221,7 +221,7 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 		resumeRes, resumeErr = ctrl.Resume(context.Background(), id, "")
 	}()
 
-	var respawnRes control.SpawnResult
+	var respawnRes protocol.SpawnResponseData
 	var respawnErr error
 	wg.Add(1)
 	go func() {
@@ -239,9 +239,9 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 			successes++
 			continue
 		}
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) {
-			t.Fatalf("error is not *control.ControllerError: %v", err)
+			t.Fatalf("error is not *connectapi.ControllerError: %v", err)
 		}
 		if ce.Code != protocol.ErrNotResumable {
 			t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrNotResumable)

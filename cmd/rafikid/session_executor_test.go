@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -34,7 +33,7 @@ func TestExecutorSessionDefersToADurableExecutorOnThisMachine(t *testing.T) {
 		"machine": "m-abc",
 	}))
 
-	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
+	got, err := c.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{Name: "m-abc", Roots: []string{"/src"}})
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +56,7 @@ func TestExecutorSessionIgnoresAnotherOwnersExecutorOnTheSameName(t *testing.T) 
 		"machine": "laptop",
 	}))
 
-	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
+	got, err := c.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{Name: "laptop"})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +70,7 @@ func TestExecutorSessionIgnoresAnotherOwnersExecutorOnTheSameName(t *testing.T) 
 func TestExecutorSessionMintsATicketWhenNoDurableExecutorExists(t *testing.T) {
 	c := newSessionTestController(t)
 
-	got, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
+	got, err := c.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{Name: "m-abc", Roots: []string{"/src"}})
 	if err != nil {
 		t.Fatal(err)
@@ -100,12 +99,12 @@ func TestExecutorSessionSelectorIsIdenticalInBothCases(t *testing.T) {
 	}))
 	without := newSessionTestController(t)
 
-	a, err := withDurable.ExecutorSession(nil, users.Identity{Username: "brent"},
+	a, err := withDurable.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{Name: "m-abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := without.ExecutorSession(nil, users.Identity{Username: "brent"},
+	b, err := without.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{Name: "m-abc"})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +116,7 @@ func TestExecutorSessionSelectorIsIdenticalInBothCases(t *testing.T) {
 
 func TestExecutorSessionRequiresAName(t *testing.T) {
 	c := newSessionTestController(t)
-	_, err := c.ExecutorSession(nil, users.Identity{Username: "brent"},
+	_, err := c.executorSession(context.Background(), nil, users.Identity{Username: "brent"},
 		protocol.ExecutorSessionRequest{})
 	if err == nil {
 		t.Fatal("without a name the daemon cannot tell which durable executor " +
@@ -128,29 +127,23 @@ func TestExecutorSessionRequiresAName(t *testing.T) {
 	}
 }
 
-// fakeConn is a control.Connection stub for testing ExecutorSession
-type fakeConn struct{}
-
-func (fakeConn) Deliver([]byte)           {}
-func (fakeConn) Identity() users.Identity { return users.Identity{} }
-func (fakeConn) Restricted() bool         { return false }
-
 // TestASecondSessionRequestReleasesTheFirst verifies M5: a second
-// ctrl_executor_session on the same connection releases the first. Before
-// this fix, the map assignment overwrote silently: the incumbent's ticket
-// was never revoked and its executor never evicted.
+// executorSession under one session key releases the first. Before this
+// fix, the map assignment overwrote silently: the incumbent's ticket
+// was never revoked and its executor never evicted. (The framed plane's
+// connection keyed these; today only a misbehaving caller could repeat a
+// key, but the release-on-overwrite is the thing this pins.)
 func TestASecondSessionRequestReleasesTheFirst(t *testing.T) {
 	pool := &fakePool{evicted: make(map[string]bool)}
 	c := &Controller{execPool: pool}
-	conn := &fakeConn{}
+	ctx := context.Background()
+	id := users.Identity{Username: "brent"}
 
-	first, err := c.ExecutorSession(conn, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{Name: "laptop"})
+	first, err := c.executorSession(ctx, "one-key", id, protocol.ExecutorSessionRequest{Name: "laptop"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.ExecutorSession(conn, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{Name: "laptop"})
+	second, err := c.executorSession(ctx, "one-key", id, protocol.ExecutorSessionRequest{Name: "laptop"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,85 +325,6 @@ func TestExecutorSessionConcurrentSessionsFromOneIdentityDoNotEvictEachOther(t *
 	}
 }
 
-// TestExecutorSessionFramedConnectionCloseEvictsTransientExecutor is the framed path's end
-// to end version of the same rule: OnConnectionClose ends the connection's
-// session — cancelling its context and releasing the executor synchronously,
-// with the ctx.Done() watcher as the idempotent backstop.
-func TestExecutorSessionFramedConnectionCloseEvictsTransientExecutor(t *testing.T) {
-	pool := newSyncEvictPool()
-	c := &Controller{execPool: pool, cm: newChildManager()}
-	conn := &fakeConn{}
-
-	got, err := c.ExecutorSession(conn, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{Name: "laptop"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.OnConnectionClose(conn)
-
-	// The release is synchronous: no wait, the executor must already be
-	// evicted by the time OnConnectionClose returns.
-	if !pool.wasEvicted(got.ExecutorID) {
-		t.Fatalf("OnConnectionClose must release %s before it returns", got.ExecutorID)
-	}
-	if !waitGroupDone(&c.sessionExecWg, 2*time.Second) {
-		t.Fatal("the session watcher never exited after OnConnectionClose")
-	}
-}
-
-// TestExecutorSessionFramedCloseEvictionIsSynchronous pins the exact behavior
-// the W2c review found lost: the transient executor is released before
-// OnConnectionClose returns, not queued behind a watcher goroutine.
-//
-// The test removes the watcher from the race so the assertion is deterministic:
-// the session ctx is context.Background, whose Done() channel is nil, so the
-// ctx.Done() watcher parks forever and can never perform the release. The
-// connection's session entry is registered by hand because connSessionContext
-// would have handed out a cancellable ctx. With the watcher unable to act, the
-// ONLY thing that can release the executor is endConnSession's synchronous
-// call — so if OnConnectionClose returns and the executor is still live, the
-// synchronous release is gone. (The watcher goroutine parks for the life of
-// the test process; the WaitGroup is deliberately not waited on here.)
-func TestExecutorSessionFramedCloseEvictionIsSynchronous(t *testing.T) {
-	pool := newSyncEvictPool()
-	c := &Controller{execPool: pool, cm: newChildManager()}
-	conn := &fakeConn{}
-
-	// A context that can never be cancelled: its watcher parks forever.
-	ctx := context.Background()
-	c.connSessions = map[control.Connection]connSession{
-		conn: {ctx: ctx, cancel: func() {}},
-	}
-
-	got, err := c.executorSession(ctx, conn, users.Identity{Username: "brent"},
-		protocol.ExecutorSessionRequest{Name: "laptop"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.OnConnectionClose(conn)
-
-	if !pool.wasEvicted(got.ExecutorID) {
-		t.Fatalf("the transient executor %s was still live when OnConnectionClose "+
-			"returned: close-time eviction must be synchronous", got.ExecutorID)
-	}
-	if _, ok := pool.Tickets().Redeem(got.Ticket); ok {
-		t.Fatal("the ticket was still redeemable when OnConnectionClose returned")
-	}
-}
-
-// TestExecutorSessionFramedOnConnectionCloseWithoutSessionIsANoOp: a connection that never
-// called ExecutorSession has no entry in connSessions; closing it must not
-// panic or touch the pool.
-func TestExecutorSessionFramedOnConnectionCloseWithoutSessionIsANoOp(t *testing.T) {
-	pool := newSyncEvictPool()
-	c := &Controller{execPool: pool, cm: newChildManager()}
-	conn := &fakeConn{}
-
-	c.OnConnectionClose(conn)
-}
-
 // TestExecutorSessionConnectOwnerComesFromIdentityNotRequest: the request
 // proto carries no owner-shaped field at all, and this pins why — the
 // adapter must read the caller's identity off ctx, never anything in req,
@@ -437,8 +351,8 @@ func TestExecutorSessionConnectOwnerComesFromIdentityNotRequest(t *testing.T) {
 
 // TestExecutorSessionConnectNilIdentityFallsBackToUDSTrust: an absent
 // identity is the unix socket's local trust, the same rule sessionOwner
-// documents for the framed path — the owner becomes the daemon's own OS
-// user, never empty and never attacker-suppliable.
+// documents — the owner becomes the daemon's own OS user, never empty and
+// never attacker-suppliable.
 func TestExecutorSessionConnectNilIdentityFallsBackToUDSTrust(t *testing.T) {
 	pool := newSyncEvictPool()
 	c := &Controller{execPool: pool}

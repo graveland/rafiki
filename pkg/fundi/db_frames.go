@@ -12,7 +12,7 @@ import (
 
 // DBToPiFrames converts persisted conversation messages (from
 // store.Messages.Load) into the pi AgentSessionEvent frames the attach TUI
-// and ctrl_get_recent consumers expect. This is the read path for fundi
+// and GetRecent consumers expect. This is the read path for fundi
 // children once the DB is the canonical store — the ring buffer is bypassed
 // entirely.
 //

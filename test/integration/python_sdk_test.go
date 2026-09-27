@@ -12,7 +12,7 @@ package integration_test
 //     retry that fires on the proxy's 503-unavailable body only).
 //
 //   - TestPythonSDK_StandaloneLifecycle runs Client.from_profile() against a
-//     scratch daemon's connect.sock: spawn (with the fake-LLM seat), send,
+//     scratch daemon's control socket: spawn (with the fake-LLM seat), send,
 //     list with a label filter, wait for the settle, export the transcript,
 //     stop. export is the test that pins the Connect-plane spawn's owner
 //     attribution: ConversationExport is owner-scoped, so it answers

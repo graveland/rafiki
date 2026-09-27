@@ -1,64 +1,34 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"net"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// TestIntegration_CtrlConversationStats_NoAgentDB boots the controller with a
-// nil pool — matching production when RAFIKI_DB is unset — and confirms
-// ctrl_conversation_stats answers no_agent_db instead of panicking on the nil
-// pool. testSocketDir is defined in integration_test.go (same package).
-func TestIntegration_CtrlConversationStats_NoAgentDB(t *testing.T) {
+// TestConversationStatsNoAgentDB boots the controller with a nil pool —
+// matching production when RAFIKI_DB is unset — and confirms
+// ConversationStats answers no_agent_db instead of panicking on the nil pool.
+func TestConversationStatsNoAgentDB(t *testing.T) {
 	t.Parallel()
 
 	dir := testSocketDir(t)
-	socketPath := filepath.Join(dir, "c.sock")
-	stateDir := filepath.Join(dir, "state")
-	logsDir := filepath.Join(dir, "logs")
-
 	st := childstore.New()
-	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
+	ctrl := NewController(st, filepath.Join(dir, "state"), filepath.Join(dir, "logs"),
+		filepath.Join(dir, "c.sock"), nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
 
-	handler := control.NewDispatch(ctrl)
-	srv, err := control.Listen(socketPath, handler)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	_, err := ctrl.ConversationStats(t.Context(), insights.ScopeAll(), insights.StatsFilter{})
+	var ce *connectapi.ControllerError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
 	}
-	t.Cleanup(func() { srv.Close() })
-
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.Write([]byte(`{"type":"ctrl_conversation_stats","id":"1"}` + "\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	reader := bufio.NewReader(conn)
-	line, err := reader.ReadBytes('\n')
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-
-	var resp protocol.Response
-	if err := json.Unmarshal(line, &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if resp.Success {
-		t.Fatal("expected failure with nil pool")
-	}
-	if resp.Error == nil || resp.Error.Code != protocol.ErrNoAgentDB {
-		t.Fatalf("expected code %s, got %+v", protocol.ErrNoAgentDB, resp.Error)
+	if ce.Code != protocol.ErrNoAgentDB {
+		t.Fatalf("expected code %s, got %q", protocol.ErrNoAgentDB, ce.Code)
 	}
 }
 

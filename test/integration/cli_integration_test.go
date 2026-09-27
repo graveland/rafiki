@@ -516,7 +516,7 @@ func TestCLI_BudgetSet(t *testing.T) {
 
 // jsonlTestLabel is the label every child this test creates carries, so the
 // list assertions below are immune to children OTHER tests' daemons create
-// concurrently: the test daemons share one database and ctrl_list is not
+// concurrently: the test daemons share one database and the list is not
 // daemon-scoped (childstoredb's listSQL has no WHERE beyond closed_at), so
 // an unfiltered `rafiki list` sees the whole shared set and can change between
 // two invocations as parallel tests spawn and exit their own children.
@@ -766,7 +766,7 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	}
 
 	// 2. Write a preset over Connect: the profile's bearer token rides
-	// connect.sock, so the preset is owned by the user minted in step 1.
+	// control socket, so the preset is owned by the user minted in step 1.
 	presetFile := filepath.Join(t.TempDir(), "review-fixer.json")
 	presetJSON := `{"description":"uds-auth regression fixture","kind":"fundi","model":"anthropic/claude-sonnet-4-5"}`
 	if err := os.WriteFile(presetFile, []byte(presetJSON), 0o600); err != nil {

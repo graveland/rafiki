@@ -5,7 +5,6 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,13 +19,6 @@ func newTestRoot() *cobra.Command {
 	root := &cobra.Command{Use: "rafiki"}
 	root.PersistentFlags().StringP("profile", "P", "", "")
 	return root
-}
-
-func TestConnectSocketIsASiblingOfTheProfilesControlSocket(t *testing.T) {
-	p := profile.Resolved{Profile: profile.Profile{Name: "scratch", Socket: "/tmp/scratch/controller.sock"}}
-	if got, want := connectSocketFor(p), filepath.Join("/tmp/scratch", "connect.sock"); got != want {
-		t.Fatalf("connectSocketFor = %q, want %q", got, want)
-	}
 }
 
 func TestConnectEndpointFollowsTheProfileToARemote(t *testing.T) {
@@ -77,10 +69,10 @@ func TestConnectEndpointFollowsTheProfileToASocket(t *testing.T) {
 	if ep.baseURL != connectUDSBaseURL {
 		t.Fatalf("baseURL = %q, want the UDS sentinel", ep.baseURL)
 	}
-	if !strings.HasSuffix(ep.describe, "/tmp/work/connect.sock") {
-		t.Fatalf("describe = %q, want the profile's connect socket", ep.describe)
+	if !strings.HasSuffix(ep.describe, "/tmp/work/controller.sock") {
+		t.Fatalf("describe = %q, want the profile's own socket", ep.describe)
 	}
-	if ep.identity != "unix:/tmp/work/connect.sock" {
+	if ep.identity != "unix:/tmp/work/controller.sock" {
 		t.Fatalf("identity = %q", ep.identity)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -52,13 +51,13 @@ func TestCloseWithoutLifecycleFailsClosed(t *testing.T) {
 	}
 }
 
-// Controller.Close returns authored ControllerError values, and the code the
+// Controller.Close returns authored connectapi.ControllerError values, and the code the
 // daemon attached at the source is the classification. A double-close must
 // read as NotFound and closing a still-running child as FailedPrecondition —
 // not Internal, which tells the client the daemon is broken. The authored
 // message text is forwarded with it (the daemon writes both strings).
 func TestCloseNotFoundBecomesNotFound(t *testing.T) {
-	f := &fakeLifecycle{closeErr: &control.ControllerError{
+	f := &fakeLifecycle{closeErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNotFound,
 		Message: "child not found: c_1",
 	}}
@@ -75,7 +74,7 @@ func TestCloseNotFoundBecomesNotFound(t *testing.T) {
 }
 
 func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
-	f := &fakeLifecycle{closeErr: &control.ControllerError{
+	f := &fakeLifecycle{closeErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNotExited,
 		Message: "child is still running",
 	}}
@@ -88,7 +87,7 @@ func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
 	}
 }
 
-// A generic error — something that is not a ControllerError — keeps the
+// A generic error — something that is not a connectapi.ControllerError — keeps the
 // blanket Internal the rest of this file uses, with the raw cause redacted:
 // the peer sees only the fixed internal text, never infrastructure text like
 // a pgx failure naming the database.

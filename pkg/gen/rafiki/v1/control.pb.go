@@ -1578,8 +1578,8 @@ type SpawnRequest struct {
 	// here as a Connect-WIRE policy, not a capability boundary: a child can
 	// already set both through the tool plane (fundi/MCP agent_spawn, and any
 	// preset it can name, including one it wrote itself) before this guard ever
-	// runs. The wire guard exists to keep Connect at least as strict as the
-	// framed plane, not to claim these two fields are otherwise unreachable.
+	// runs. The wire guard exists to keep Connect at least as strict as any
+	// other surface, not to claim these two fields are otherwise unreachable.
 	//
 	// Types are mirrors of protocol.SpawnRequest (pkg/protocol/types.go); where
 	// the plan sketch said bool but the Go field is a string (fork_session,
@@ -2248,10 +2248,10 @@ type TaskRow struct {
 	Status     string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
 	Assignee   string                 `protobuf:"bytes,5,opt,name=assignee,proto3" json:"assignee,omitempty"`
 	DropReason string                 `protobuf:"bytes,6,opt,name=drop_reason,json=dropReason,proto3" json:"drop_reason,omitempty"`
-	// conversation_id is the ledger row's owning conversation -- the framed
-	// ctrl_task_list row carried it (tasks.Task's untagged `ConversationID`
-	// key) and `rafiki tasks`' CHILD column rendered it. It is a conversation
-	// id, NOT a child id: the child working the row rides assignee.
+	// conversation_id is the ledger row's owning conversation --
+	// tasks.Task's untagged `ConversationID` key carries it and `rafiki
+	// tasks`' CHILD column renders it. It is a conversation id, NOT a child
+	// id: the child working the row rides assignee.
 	ConversationId string `protobuf:"bytes,7,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -2343,14 +2343,13 @@ type ListTasksRequest struct {
 	// include_dropped surfaces rows an agent decided not to do. Dropped rows are
 	// hidden by default.
 	IncludeDropped bool `protobuf:"varint,2,opt,name=include_dropped,json=includeDropped,proto3" json:"include_dropped,omitempty"`
-	// The framed verb's remaining filter fields: tasks assigned to one child,
+	// The remaining filter fields: tasks assigned to one child,
 	// one status value, a row cap, and all (include dropped).
 	ChildId string `protobuf:"bytes,3,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
 	Status  string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
 	Limit   int32  `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
-	// all is the framed verb's include-dropped flag. Both spellings stay on
-	// the wire; the handler treats include_dropped OR all set as
-	// include-dropped.
+	// all is the include-dropped flag. Both spellings stay on the wire; the
+	// handler treats include_dropped OR all set as include-dropped.
 	All           bool `protobuf:"varint,6,opt,name=all,proto3" json:"all,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

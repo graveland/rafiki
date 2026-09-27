@@ -213,7 +213,9 @@ conversation and turn they authored keeps resolving to their name. The token
 stops authenticating at once on the control plane, and within the face's
 5-second verification cache.
 
-Removing the last user returns the daemon to bootstrap mode.`,
+A daemon with no users left refuses every connection: identity is row-backed,
+so nothing can authenticate. Recovery is ` + "`rafikid user create <name> --admin`" + `
+run on the daemon host, which opens the database directly.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runUserRm,
 	}

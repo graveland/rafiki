@@ -190,11 +190,9 @@ func closeReview(cmd *cobra.Command, ids []string) {
 }
 
 // renderCloseAllExited writes the CloseAllExited result in the requested
-// mode. JSON is the response's canonical protojson ({"childIds":[...]} — the
-// framed payload's separate count is derivable from the list and the wire
-// dropped it); JSONL writes one closed child id per line; text reports the
-// count. The per-target `closed <id>` path lives in runClose and is
-// deliberately untouched here.
+// mode. JSON is the response's canonical protojson ({"childIds":[...]}); JSONL
+// writes one closed child id per line; text reports the count. The per-target
+// `closed <id>` path lives in runClose and is deliberately untouched here.
 func renderCloseAllExited(w io.Writer, resp *rafikiv1.CloseAllExitedResponse, mode outputMode) error {
 	switch mode {
 	case outputJSON:
@@ -221,9 +219,8 @@ func renderCloseAllExited(w io.Writer, resp *rafikiv1.CloseAllExitedResponse, mo
 // of the child, not an implicit safety net, so this does NOT gate on a clean
 // exit the way the old kill-then-auto-close policy did.
 //
-// Already-exited is detected twice, because the signal the framed plane read
-// off the kill's response now rides the rafiki reason on the Connect error
-// (the retirement ruling: rpcreason.Reason — NEVER connect.CodeOf, whose
+// Already-exited is detected twice, because the signal is now the rafiki
+// reason on the Connect error (rpcreason.Reason — NEVER connect.CodeOf, whose
 // FailedPrecondition also carries child_in_grace/child_shutting_down):
 //
 //   - A GetChild pre-check skips the kill entirely for a child the daemon
@@ -258,70 +255,6 @@ func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, 
 	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
 	if err != nil {
 		return fmt.Errorf("close: %s", formatConnectErr(err))
-	}
-	return nil
-}
-
-// ─── the framed close path (attachAndDecide's kill-on-exit choice) ──────────
-//
-// Everything above this line is Connect. The helper below still rides the
-// framed plane because its one caller, attachAndDecide (cli_helpers.go),
-// re-dials framed for the kill-on-exit close. It is stated over a structural
-// interface so this file never imports pkg/client; Task 5.1 deletes both the
-// caller's framed re-dial and this helper together with the framed plane.
-
-// framedRequester is the slice of pkg/client.Client the framed close path
-// needs, stated structurally: *client.Client's Request method satisfies it,
-// and the CLI files this lives in must not link pkg/client (the framed plane
-// is being retired around them).
-type framedRequester interface {
-	Request(ctx context.Context, req any) (*protocol.Response, error)
-}
-
-// framedFormatErr renders a framed response error the way client.FormatError
-// does ("code: message"), inlined so no pkg/client import is needed.
-func framedFormatErr(resp *protocol.Response) string {
-	if resp == nil || resp.Error == nil {
-		return "unknown error"
-	}
-	return fmt.Sprintf("%s: %s", resp.Error.Code, resp.Error.Message)
-}
-
-// closeChild kills childID if it is still running — ignoring the "already
-// exited" case rather than treating it as failure — then closes it. Framed;
-// see closeChildConnect for the Connect form this is retired by.
-func closeChild(ctx context.Context, c framedRequester, childID string, st, kt time.Duration) error {
-	req := protocol.KillRequest{
-		Type:    protocol.TypeCtrlKill,
-		ChildID: childID,
-	}
-	if st > 0 {
-		req.ShutdownTimeoutMs = st.Milliseconds()
-	}
-	if kt > 0 {
-		req.KillTimeoutMs = kt.Milliseconds()
-	}
-
-	resp, err := c.Request(ctx, req)
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		if resp.Error == nil || resp.Error.Code != protocol.ErrChildExited {
-			return fmt.Errorf("ctrl_kill: %s", framedFormatErr(resp))
-		}
-		// Already exited — proceed straight to close.
-	}
-
-	fresp, err := c.Request(ctx, protocol.ForgetRequest{
-		Type:    protocol.TypeCtrlForget,
-		ChildID: childID,
-	})
-	if err != nil {
-		return err
-	}
-	if !fresp.Success {
-		return fmt.Errorf("ctrl_forget: %s", framedFormatErr(fresp))
 	}
 	return nil
 }

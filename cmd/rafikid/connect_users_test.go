@@ -132,7 +132,7 @@ func TestUserRPCsAdmitNilAndAdmin(t *testing.T) {
 
 // TestCreateUserNeverMintsAdmin proves Create can never produce an admin,
 // even when the caller administering it IS an admin: Controller.UserCreate
-// (unlike UserCreateBootstrap/UserCreateLocal) never infers admin from an
+// never infers admin from an
 // empty user table, and this adapter passes no admin bit of its own.
 func TestCreateUserNeverMintsAdmin(t *testing.T) {
 	ctx := server.WithIdentity(context.Background(), &server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})

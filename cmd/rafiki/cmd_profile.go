@@ -104,10 +104,11 @@ defaults. The default rendering is human text; -o json (or -j) prints a
 single machine-readable record instead, whose token field carries the
 RESOLVED token value (the human rendering deliberately shows only whether a
 token exists — machines that need the value, like rafiki's Python SDK's
-Client.from_profile, ask for it here). The record's connect_socket names the
-Connect control-plane socket beside the profile's framed socket, which is
-what a Connect-plane client dials locally; url names the remote endpoint of
-a remote profile, and exactly one of socket/connect_socket and url is set.`,
+Client.from_profile, ask for it here). The record's connect_socket duplicates
+socket — the daemon serves its Connect control plane on the one socket a
+profile names — and is kept so rafiki-py, which reads that key, keeps working
+against either spelling; url names the remote endpoint of a remote profile,
+and exactly one of socket/connect_socket and url is set.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			set, err := loadForEdit()
@@ -138,10 +139,13 @@ a remote profile, and exactly one of socket/connect_socket and url is set.`,
 					labels = map[string]string{}
 				}
 				rec := map[string]any{
-					"name":           p.Name,
-					"socket":         p.Socket,
-					"url":            p.URL,
-					"connect_socket": connectSocketFor(profile.Resolved{Profile: p}),
+					"name":   p.Name,
+					"socket": p.Socket,
+					"url":    p.URL,
+					// connect_socket duplicates socket (the daemon serves its
+					// Connect plane on the one socket a profile names) and is
+					// kept so rafiki-py's Client.from_profile keeps working.
+					"connect_socket": p.Socket,
 					"token":          profile.ReadToken(name),
 					"kind":           p.Kind,
 					"model":          p.Model,
@@ -270,9 +274,9 @@ func runProfileAdd(cmd *cobra.Command, args []string) error {
 	case url == "" && socket == "":
 		return errors.New("one of --url or --socket is required")
 	}
-	// This plane has no bootstrap mode — there is no user-create RPC on it —
-	// so a remote with no credential can only ever produce a 401. Refuse now
-	// rather than after a round trip.
+	// This plane has no bootstrap mode — a daemon with no users refuses every
+	// connection — so a remote with no credential can only ever produce an
+	// Unauthenticated. Refuse now rather than after a round trip.
 	if url != "" && token == "" {
 		return errors.New("--token is required with --url: a remote profile with no token can only ever be rejected")
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -69,16 +69,8 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 	st := childstore.New()
 	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
 
-	handler := control.NewDispatch(ctrl)
-	srv, err := control.Listen(socketPath, handler)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-
 	// Spawn a top-level child.
 	res, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
-		Type:     protocol.TypeCtrlSpawn,
 		Cwd:      os.TempDir(),
 		Kind:     protocol.KindClaude,
 		PiBinary: fakePiBin(t),
@@ -113,7 +105,6 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 
 	// Spawn a child with ParentChildID set.
 	res2, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
 		Cwd:           os.TempDir(),
 		Kind:          protocol.KindClaude,
 		PiBinary:      fakePiBin(t),
@@ -145,17 +136,9 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 	st := childstore.New()
 	ctrl := NewController(st, stateDir, logsDir, socketPath, nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
 
-	handler := control.NewDispatch(ctrl)
-	srv, err := control.Listen(socketPath, handler)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { srv.Close() })
-
 	before := len(st.List())
 
-	_, err = ctrl.Spawn(t.Context(), protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
+	_, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
 		Cwd:           os.TempDir(),
 		ParentChildID: "c_does_not_exist",
 	}, users.Identity{})
@@ -163,9 +146,9 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 		t.Fatal("expected an error for unknown parent, got nil")
 	}
 
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
-		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
+		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
 	}
 	if ce.Code != protocol.ErrChildNotFound {
 		t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrChildNotFound)

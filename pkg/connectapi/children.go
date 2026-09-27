@@ -110,7 +110,7 @@ type SpawnParams struct {
 	// fields 15-29, control.proto) — verbs.go's Spawn handler refuses to let a
 	// child-provenance caller set any of them before this struct is even
 	// built. EnvOverride stays false and is never carried on the wire: it is
-	// a framed-protocol escape hatch with no Connect equivalent.
+	// an escape hatch with no Connect equivalent.
 	ConfigDir          string
 	AppendSystemPrompt string
 	Thinking           string

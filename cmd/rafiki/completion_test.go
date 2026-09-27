@@ -138,12 +138,12 @@ func TestCompletionKeyFollowsTheProfileOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "unix:/tmp/scratch-1/rafiki/connect.sock"
+	want := "unix:/tmp/scratch-1/rafiki/controller.sock"
 	if got := completionEndpointKey(cmd); got != want {
 		t.Errorf("key = %q, want %q — the override must move the identity off the default profile", got, want)
 	}
-	if got := completionEndpointKey(cmd); got == "unix:/tmp/default-scratch/connect.sock" {
-		t.Errorf("key = %q, still the DEFAULT profile's connect socket", got)
+	if got := completionEndpointKey(cmd); got == "unix:/tmp/default-scratch/controller.sock" {
+		t.Errorf("key = %q, still the DEFAULT profile's socket", got)
 	}
 
 	ep, err := newConnectEndpoint(cmd)

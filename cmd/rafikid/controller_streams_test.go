@@ -11,7 +11,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
@@ -29,9 +29,9 @@ func TestController_GetStreams_StoreMiss(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for missing child, got nil")
 	}
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
-		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
+		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
 	}
 	if ce.Code != protocol.ErrChildNotFound {
 		t.Fatalf("expected code %s, got %s", protocol.ErrChildNotFound, ce.Code)
@@ -79,7 +79,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 		ExitedRenderRing: []ring.Event{{Bytes: []byte(`{"type":"message_end"}`)}},
 	})
 
-	raw, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c1", recentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
 	}
 
-	rendered, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c1", recentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 		// ExitedRenderRing intentionally empty; no logsDir dump.
 	})
 
-	rendered, err := ctrl.GetRecent("c2", control.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c2", recentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 		t.Fatalf("rendered events = %v, want zero (no raw fallback for claude)", rendered.Events)
 	}
 
-	raw, err := ctrl.GetRecent("c2", control.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c2", recentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
 		Status:    protocol.StatusExited,
 		SessionID: "/tmp/session-file.json",
 	})
-	res, err := c.GetRecent("c_claude", control.RecentQuery{Limit: 10, Rendered: true})
+	res, err := c.GetRecent("c_claude", recentQuery{Limit: 10, Rendered: true})
 	if err != nil {
 		t.Fatalf("GetRecent: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 		SessionID: "/tmp/session-file.json",
 	})
 
-	res, err := c.GetRecent(childID, control.RecentQuery{Limit: 10, Rendered: true})
+	res, err := c.GetRecent(childID, recentQuery{Limit: 10, Rendered: true})
 	if err != nil {
 		t.Fatalf("GetRecent: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestGetRecentDiskFallback(t *testing.T) {
 		// ExitedRing / ExitedRenderRing intentionally empty (lost on restart).
 	})
 
-	raw, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("c1", recentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestGetRecentDiskFallback(t *testing.T) {
 		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
 	}
 
-	rendered, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true})
+	rendered, err := ctrl.GetRecent("c1", recentQuery{Rendered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 		Status:  protocol.StatusExited,
 	})
 
-	res, err := ctrl.GetRecent("c1", control.RecentQuery{Rendered: true, Since: 1716000000})
+	res, err := ctrl.GetRecent("c1", recentQuery{Rendered: true, Since: 1716000000})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestGetRecentByteBudget(t *testing.T) {
 		ExitedRing: events,
 	})
 
-	res, err := ctrl.GetRecent("c1", control.RecentQuery{})
+	res, err := ctrl.GetRecent("c1", recentQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestGetRecentByteBudget(t *testing.T) {
 		Status:     protocol.StatusExited,
 		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}},
 	})
-	small, err := ctrl.GetRecent("c2", control.RecentQuery{})
+	small, err := ctrl.GetRecent("c2", recentQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestGetRecentFundiNoDB(t *testing.T) {
 	})
 
 	// Fundi children read from the DB, not disk. With no pool, result is empty.
-	raw, err := ctrl.GetRecent("f1", control.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent("f1", recentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestGetRecentFundiAliveNoDB(t *testing.T) {
 		t.Fatalf("dump: %v", err)
 	}
 
-	raw, err := ctrl.GetRecent(childID, control.RecentQuery{Rendered: false})
+	raw, err := ctrl.GetRecent(childID, recentQuery{Rendered: false})
 	if err != nil {
 		t.Fatal(err)
 	}

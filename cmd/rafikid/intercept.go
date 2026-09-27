@@ -18,7 +18,7 @@ type interceptDecision struct {
 	SessionPath string // for switch_session only
 }
 
-// inspect decodes a ctrl_send frame payload and returns a interceptDecision if the
+// inspect decodes a raw frame payload and returns an interceptDecision if the
 // command should be intercepted rather than forwarded to pi.
 func inspect(frame []byte) (interceptDecision, bool) {
 	if len(frame) == 0 {

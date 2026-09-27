@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -47,15 +46,15 @@ func (a connectChildOps) CloseAllExited(_ context.Context, olderThanMs int64) ([
 }
 
 // SetLabels applies set entries then remove entries, and returns the full
-// post-mutation map. The controller emits ctrl_child_labeled to framed
-// subscribers itself; this adapter adds nothing on top.
+// post-mutation map. The controller handles nothing beyond the store update;
+// this adapter adds nothing on top.
 func (a connectChildOps) SetLabels(_ context.Context, childID string, set map[string]string, remove []string) (map[string]string, error) {
 	return a.c.SetLabels(childID, set, remove)
 }
 
 // Status converts Controller.Status into the proto vitals message, nested
 // ChildCounts included. started_at is unix ms, matching
-// Controller.startedAt.UnixMilli on the framed plane.
+// Controller.startedAt.UnixMilli.
 func (a connectChildOps) Status(_ context.Context) (*rafikiv1.StatusResponse, error) {
 	return statusResponseFrom(a.c.Status()), nil
 }
@@ -71,8 +70,8 @@ func (a connectChildOps) Search(_ context.Context, req *rafikiv1.SearchRequest) 
 
 // buildSearchQuery maps the proto SearchRequest onto the framed SearchQuery.
 // Extracted so the field mapping is testable without a Controller behind it.
-func buildSearchQuery(req *rafikiv1.SearchRequest) control.SearchQuery {
-	q := control.SearchQuery{
+func buildSearchQuery(req *rafikiv1.SearchRequest) searchQuery {
+	q := searchQuery{
 		Query:   req.GetQuery(),
 		Regex:   req.GetRegex(),
 		Limit:   int(req.GetLimit()),
@@ -93,7 +92,7 @@ func buildSearchQuery(req *rafikiv1.SearchRequest) control.SearchQuery {
 // searchResponseFrom converts the framed SearchResult onto the proto
 // response, hit by hit. Hits is never nil: an empty result is an empty
 // repeated field, never a missing one.
-func searchResponseFrom(result control.SearchResult) *rafikiv1.SearchResponse {
+func searchResponseFrom(result protocol.SearchResponseData) *rafikiv1.SearchResponse {
 	hits := make([]*rafikiv1.SearchResponse_SearchHit, 0, len(result.Hits))
 	for _, h := range result.Hits {
 		hits = append(hits, &rafikiv1.SearchResponse_SearchHit{
@@ -119,7 +118,7 @@ func searchResponseFrom(result control.SearchResult) *rafikiv1.SearchResponse {
 
 // statusResponseFrom converts the framed ControllerStatus onto the proto
 // vitals message. Extracted for the same reason as buildSearchQuery.
-func statusResponseFrom(st control.ControllerStatus) *rafikiv1.StatusResponse {
+func statusResponseFrom(st protocol.StatusResponseData) *rafikiv1.StatusResponse {
 	return &rafikiv1.StatusResponse{
 		Version:     st.Version,
 		StartedAt:   st.StartedAt,
@@ -137,16 +136,15 @@ func statusResponseFrom(st control.ControllerStatus) *rafikiv1.StatusResponse {
 // exit skips its status persist — so the next daemon start would auto-resume
 // children the operator explicitly killed. The full sequence (broadcast →
 // drain → close listeners → exit) is wired into main.go's signal path when
-// the framed-plane retirement lands (Task 5.1 handoff); until then the
-// connectapi handler refuses CodeUnimplemented before this method is ever
-// reached, so the seam stays declared but inert.
+// the daemon shutdown path lands; until then the connectapi handler refuses
+// CodeUnimplemented before this method is ever reached, so the seam stays
+// declared but inert.
 func (a connectChildOps) ShutdownDaemon(_ context.Context) error {
 	return errors.New("ShutdownDaemon: not served until the daemon shutdown path lands")
 }
 
-// ModelInfo delegates to Controller.ModelInfo — the exact answer the framed
-// ctrl_model_info handler served — and converts it. Never an error: an
-// unknown model is known=false, not a failure.
+// ModelInfo delegates to Controller.ModelInfo and converts it. Never an
+// error: an unknown model is known=false, not a failure.
 func (a connectChildOps) ModelInfo(_ context.Context, model string) (*rafikiv1.ModelInfoResponse, error) {
 	return modelInfoResponseFrom(a.c.ModelInfo(model)), nil
 }

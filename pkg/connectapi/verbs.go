@@ -12,7 +12,6 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -81,7 +80,7 @@ func (s *Server) Send(
 		Attachments: attachments,
 	})
 	if err != nil {
-		var ce *control.ControllerError
+		var ce *ControllerError
 		if !errors.As(err, &ce) {
 			// ConnectErr redacts this below; log the cause here or lose it.
 			slog.Error("connect: send failed", "child_id", childID, "error", err)
@@ -122,9 +121,9 @@ func contentFromBlocks(blocks []*rafikiv1.ContentBlock) (string, []inbox.Attachm
 }
 
 // listFilterFromWire maps the wire request's non-status filter fields onto
-// protocol.ListFilter, the same shape the framed ctrl_list verb applies
+// protocol.ListFilter, the same shape Controller.List applies
 // through Controller.List. Status is left zero: the wire's Statuses is a
-// plural OR-match with no framed equivalent, and stays a separate parameter
+// plural OR-match, and stays a separate parameter
 // (see ChildLister.ListChildren and ChildScope.Subtree) rather than folding
 // into ListFilter's singular Status field.
 func listFilterFromWire(req *rafikiv1.ListChildrenRequest) protocol.ListFilter {
@@ -140,7 +139,7 @@ func listFilterFromWire(req *rafikiv1.ListChildrenRequest) protocol.ListFilter {
 
 // matchesChildFilter reports whether c satisfies filter's non-status fields —
 // name/name_contains/cwd_contains/since/labels/has_label — with the same
-// semantics protocol.ListFilter carries on the framed plane. Applied to both
+// semantics protocol.ListFilter carries. Applied to both
 // ListChildren branches as a post-filter over the already-mapped summaries:
 // ChildLister.ListChildren and ChildScope.Subtree take only a status list
 // (unchanged interfaces both cmd/rafikid and pkg/connectapi's tests already
@@ -174,7 +173,7 @@ func matchesChildFilter(c protocol.ChildSummary, f protocol.ListFilter) bool {
 
 // ListChildren returns the daemon's children, filtered by status and, for the
 // operator path, by name/name_contains/cwd_contains/since/labels/has_label —
-// the framed ctrl_list filter set (protocol.ListFilter).
+// the child-list filter set (protocol.ListFilter).
 //
 // childScoped: a per-child credential gets ONLY its own subtree, resolved by
 // the wired ChildScope (the same descendants controllerSpawner.List answers),
@@ -350,7 +349,7 @@ func (s *Server) Spawn(
 	}
 	id, err := (*p).Spawn(ctx, sp)
 	if err != nil {
-		var ce *control.ControllerError
+		var ce *ControllerError
 		if !errors.As(err, &ce) {
 			// ConnectErr redacts this below; log the cause here or lose it.
 			slog.Error("connect: spawn failed", "cwd", sp.Cwd,
@@ -471,7 +470,7 @@ func (s *Server) Kill(
 	out, err := (*p).Kill(ctx, childID,
 		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
 	if err != nil {
-		var ce *control.ControllerError
+		var ce *ControllerError
 		if !errors.As(err, &ce) {
 			// ConnectErr redacts this below; log the cause here or lose it.
 			slog.Error("connect: kill failed", "child_id", childID, "error", err)

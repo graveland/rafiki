@@ -242,7 +242,7 @@ func TestServeHTTP11AndH2C(t *testing.T) {
 	}
 
 	// h2c: prior-knowledge HTTP/2 over cleartext — the same shape
-	// cmd/rafiki's Connect client uses against connect.sock.
+	// cmd/rafiki's Connect client uses against the daemon's control socket.
 	h2c := &http.Client{Transport: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {

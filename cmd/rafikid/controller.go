@@ -34,7 +34,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/eventbuf"
@@ -66,8 +65,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/version"
 )
 
-// Controller wires together the store, child lifecycle, persistence and the
-// control.Controller interface. It is safe for concurrent use.
+// Controller wires together the store, child lifecycle and persistence behind
+// the Connect control plane. It is safe for concurrent use.
 type Controller struct {
 	st          *childstore.Store
 	cm          *ChildManager
@@ -134,7 +133,7 @@ type Controller struct {
 	// opt-in" rule the proxy face already applies.
 	rawTraceAll bool
 
-	// insights answers the ctrl_conversation_* RPCs. Always constructed —
+	// insights answers the conversation-insight RPCs. Always constructed —
 	// agentcli/local.New is nil-pool-safe, so a nil pool just means every
 	// read method below returns local.ErrNoPool instead of panicking.
 	insights agentcli.Backend
@@ -163,7 +162,7 @@ type Controller struct {
 	mcpTokensByChild map[string]string // childID -> secret
 	mcpSweepAt       int
 
-	// catalog answers ContextWindow (ctrl_get/ctrl_list's ContextWindow/
+	// catalog answers ChildSummary's ContextWindow/
 	// MaxCompletionTokens fields). Set once at startup via SetCatalog, from
 	// the SAME *routing.ModelCatalog instance the proxy face's llm.Client
 	// uses (main.go builds one and hands it to both) — a nil catalog here
@@ -359,7 +358,7 @@ type Controller struct {
 	// no store, in which case children get only their on-disk tiers.
 	skillStore skills.Store
 
-	// users is the identity store backing ctrl_user_*. Nil when RAFIKI_DB is
+	// users is the identity store backing the user RPCs. Nil when RAFIKI_DB is
 	// unset — every user verb then returns errNoUserStore rather than
 	// pretending an empty user table.
 	users users.Store
@@ -376,22 +375,11 @@ type Controller struct {
 	wsLabels   map[string]workspaceLabels
 	wsLabelsMu sync.Mutex
 
-	// sessionExecMu guards sessionExecs, keyed by an opaque session key rather
-	// than by control.Connection directly: the framed ctrl_executor_session
-	// verb uses the connection itself (see connSessions below), while
-	// Connect's ExecutorSession stream uses its own per-call context, which
-	// is unique already and needs no separate lookup table.
+	// sessionExecMu guards sessionExecs, keyed by an opaque session key:
+	// Connect's ExecutorSession stream uses its own per-call context, which is
+	// unique already and needs no separate lookup table.
 	sessionExecMu sync.Mutex
 	sessionExecs  map[any]sessionExecutor
-
-	// connSessionsMu guards connSessions, which anchors the framed
-	// ctrl_executor_session verb's session lifetime on a context.Context so
-	// it evicts through the same ctx.Done() watcher (session_executor.go) as
-	// Connect's stream context, instead of a bespoke connection-keyed code
-	// path. One context per connection, reused across repeated calls and
-	// cancelled exactly once, by OnConnectionClose.
-	connSessionsMu sync.Mutex
-	connSessions   map[control.Connection]connSession
 
 	// sessionExecWg tracks each session's ctx.Done() watcher goroutine so it
 	// is provably gone, not just unreferenced, after its context ends.
@@ -682,7 +670,7 @@ func (c *Controller) sweepExpired() {
 	}
 }
 
-// ─── control.Controller implementation ────────────────────────────────────────
+// ─── Control-plane queries and lifecycle ─────────────────────────────────────
 
 // publishEvent is the ONE path by which a native event reaches anybody.
 //
@@ -993,11 +981,33 @@ func (c *Controller) recentSource() string {
 	return v
 }
 
-func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.RecentResult, error) {
+// recentQuery carries the parameters for GetRecent. It used to be
+// pkg/control's RecentQuery — the framed dispatch's request struct — and
+// moves here with the dispatch retired, since GetRecent is now reachable
+// only through the Connect adapters and this package's own callers.
+type recentQuery struct {
+	Limit    int
+	Since    int64
+	Include  []string
+	Exclude  []string
+	Rendered bool
+}
+
+// searchQuery carries the parameters for Search, with the same history as
+// recentQuery.
+type searchQuery struct {
+	Query         string
+	Regex         bool
+	Limit         int
+	Context       int
+	SessionFilter protocol.SearchSessionFilter
+}
+
+func (c *Controller) GetRecent(childID string, q recentQuery) (protocol.GetRecentResponseData, error) {
 	c.lastRecentSource.Store("")
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return control.RecentResult{}, &control.ControllerError{
+		return protocol.GetRecentResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
@@ -1098,7 +1108,7 @@ func (c *Controller) GetRecent(childID string, q control.RecentQuery) (control.R
 	truncatedBySize := cut > 0
 	out = out[cut:]
 
-	return control.RecentResult{
+	return protocol.GetRecentResponseData{
 		Events:           out,
 		TotalInBuffer:    total,
 		OldestTimestamp:  oldestTS,
@@ -1154,18 +1164,18 @@ func (c *Controller) readDiskEvents(childID, name string) []ring.Event {
 	return out
 }
 
-func (c *Controller) GetStreams(childID string, which string) (control.GetStreamsResult, error) {
+func (c *Controller) GetStreams(childID string, which string) (protocol.GetStreamsResponseData, error) {
 	if _, ok := c.st.Get(childID); !ok {
-		return control.GetStreamsResult{}, &control.ControllerError{
+		return protocol.GetStreamsResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	ch, alive := c.cm.Get(childID)
 	if !alive {
-		return control.GetStreamsResult{Alive: false}, nil
+		return protocol.GetStreamsResponseData{Alive: false}, nil
 	}
-	res := control.GetStreamsResult{Alive: true}
+	res := protocol.GetStreamsResponseData{Alive: true}
 	if which == "" || which == "all" || which == "in" {
 		res.In = ch.InSnapshot()
 	}
@@ -1176,7 +1186,7 @@ func (c *Controller) GetStreams(childID string, which string) (control.GetStream
 	return res, nil
 }
 
-func (c *Controller) Search(q control.SearchQuery) control.SearchResult {
+func (c *Controller) Search(q searchQuery) protocol.SearchResponseData {
 	start := time.Now()
 	limit := q.Limit
 	if limit <= 0 {
@@ -1219,7 +1229,7 @@ func (c *Controller) Search(q control.SearchQuery) control.SearchResult {
 				MatchEnd:    idx + len(q.Query),
 			})
 			if len(hits) >= limit {
-				return control.SearchResult{
+				return protocol.SearchResponseData{
 					Hits:      hits,
 					TotalHits: len(hits),
 					Scanned:   scanned,
@@ -1228,7 +1238,7 @@ func (c *Controller) Search(q control.SearchQuery) control.SearchResult {
 			}
 		}
 	}
-	return control.SearchResult{
+	return protocol.SearchResponseData{
 		Hits:      hits,
 		TotalHits: len(hits),
 		Scanned:   scanned,
@@ -1236,7 +1246,7 @@ func (c *Controller) Search(q control.SearchQuery) control.SearchResult {
 	}
 }
 
-func (c *Controller) Status() control.ControllerStatus {
+func (c *Controller) Status() protocol.StatusResponseData {
 	snaps := c.st.List()
 	var live, exited int
 	for _, s := range snaps {
@@ -1248,7 +1258,7 @@ func (c *Controller) Status() control.ControllerStatus {
 	}
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	return control.ControllerStatus{
+	return protocol.StatusResponseData{
 		Version:     version.String(),
 		StartedAt:   c.startedAt.UnixMilli(),
 		Children:    protocol.ChildCounts{Live: live, Exited: exited},
@@ -1272,13 +1282,13 @@ func (c *Controller) Status() control.ControllerStatus {
 // protocol.ErrInternal.
 func translateInsightsErr(err error) error {
 	if errors.Is(err, local.ErrNoPool) {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrNoAgentDB,
 			Message: "no agent database configured (RAFIKI_DB unset); set it and run `rafiki service install`",
 		}
 	}
 	if errors.Is(err, insights.ErrNotFound) {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrNotFound,
 			Message: err.Error(),
 		}
@@ -1526,14 +1536,14 @@ func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Sc
 	return findings, analysisRows, nil
 }
 
-func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (control.SpawnResult, error) {
+func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
 	// Preset resolution runs FIRST, before anything reads req — notably
 	// checksCwdLocally below, which reads req.Kind, and every later step that
 	// overrides or narrows a preset-supplied field. The error is already a
-	// *control.ControllerError.
+	// *connectapi.ControllerError.
 	req, presetRec, err := c.applyPreset(ctx, req, owner.UserID)
 	if err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// An empty kind is the fundi default, and it is resolved ONCE here so
@@ -1555,7 +1565,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// preset's kind and tool shaping are already resolved, so the check sees
 	// the request the child would actually receive.
 	if err := validatePrefill(req); err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// A kind=script request that names any fundi/claude-only field is
@@ -1563,7 +1573,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// applyPreset so the kind is resolved and preset-filled fields are seen
 	// as they would reach the runner.
 	if err := validateScriptSpawn(req); err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// Validate cwd exists on THIS machine (dispatch already checks it's
@@ -1585,7 +1595,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		(req.Kind != protocol.KindScript || !c.scriptExecutorRouted())
 	if checksCwdLocally {
 		if _, err := os.Stat(req.Cwd); err != nil {
-			return control.SpawnResult{}, &control.ControllerError{
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
 				Message: "cwd: " + err.Error(),
 			}
@@ -1594,7 +1604,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	// Validate user-supplied labels: no invalid keys, no rafiki/ prefix.
 	if err := validateUserLabelKeys(req.Labels); err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: err.Error(),
 		}
@@ -1604,14 +1614,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// leaving a started process behind.
 	parentLabel, rootLabel, err := computeLineageLabels(c.st, req.ParentChildID)
 	if err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// Before the grant is inherited, not after: this asks what the PARENT was
 	// confined to, and inheritExecutorGrant would copy that grant onto a child
 	// whose kind cannot honour it, making the two indistinguishable.
 	if err := checkKindNarrowing(c.st, req, c.claudeExecutorRouted(), c.scriptExecutorRouted()); err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// A :batch model is submitted with the DAEMON's OpenRouter key (the
@@ -1623,7 +1633,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// (alias substitution included) is what carries the suffix.
 	if req.APIKey != "" && req.Model != "" {
 		if _, modelID, err := providersOrDefault(c.providers).Split(req.Model); err == nil && llm.IsBatchModel(modelID) {
-			return control.SpawnResult{}, &control.ControllerError{
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
 				Message: ":batch models are submitted with the daemon's OpenRouter key; this spawn carries its own API key",
 			}
@@ -1659,7 +1669,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// Runs while nothing is minted, so a refusal starts no process.
 	req, err = c.persistRefAsSelector(req, ownerName)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "executor grant: " + err.Error(),
 		}
@@ -1670,7 +1680,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// store entry, no record and — with phase 04's ordering — no task
 	// assignment to roll back.
 	if err := c.checkSpawnLimits(req); err != nil {
-		return control.SpawnResult{}, err
+		return protocol.SpawnResponseData{}, err
 	}
 
 	// childID is minted before resolveSpawnPlan (rather than after, as
@@ -1689,7 +1699,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -1697,14 +1707,14 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	runner, err := c.agentRunner(req, childID, false, ownerName, owner.UserID, nil)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
-			return control.SpawnResult{}, &control.ControllerError{
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrSpawnFailed,
 				Message: "spawn plan: " + err.Error(),
 			}
@@ -1733,17 +1743,15 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
 	}
 
-	// Register the child in the ChildManager immediately after spawn so that any
-	// global subscriber that calls ctrl_subscribe in response to
-	// ctrl_child_spawned (below) will find the child ready in the manager.
-	// monitorChild is still started after Idle(), but the Subscribe endpoint
-	// must be non-racy from the moment the spawn event is visible.
+	// Register the child in the ChildManager immediately after spawn, so any
+	// watcher of the spawned announcement (below) finds the child ready in
+	// the manager. monitorChild is still started after Idle().
 	c.cm.Add(childID, ch)
 
 	// Build initial labels: user-supplied labels (already validated) plus
@@ -1876,30 +1884,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		cancel()
 	}
 
-	// Emit ctrl_child_spawned immediately after the process is running and the
-	// state record is persisted (spec §6.3.3, §7.2). Delivered to global,
-	// per-child, and label-filtered subscribers.
-	spawnedEvt := protocol.CtrlChildSpawned{
-		Type:    protocol.TypeCtrlChildSpawned,
-		ChildID: childID,
-		Name:    req.Name,
-		Cwd:     req.Cwd,
-		PID:     ch.PID(),
-		Model:   joinModel(req.Provider, req.Model),
-		At:      now.UnixMilli(),
-	}
-	if b, err := json.Marshal(spawnedEvt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-		if snap, ok := c.st.Get(childID); ok {
-			c.cm.DeliverToMatching(childID, snap.Labels, b)
-		}
-	}
-
-	// The native twin of the ctrl_child_spawned frame above. Published on the
-	// SPAWNED child's bus, not the parent's, so child_id and the delivery bus
-	// agree -- a subtree subscriber sees it because the child is in the subtree,
-	// and every subject predicate stays free of a lifecycle special case.
+	// Announce the spawn. Published on the SPAWNED child's bus, not the
+	// parent's, so child_id and the delivery bus agree -- a subtree subscriber
+	// sees it because the child is in the subtree, and every subject predicate
+	// stays free of a lifecycle special case.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
@@ -1922,7 +1910,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 // takes one of two paths based on whether baseSnap is nil.
 //
 // Fresh Spawn (baseSnap == nil): the caller has already inserted a
-// StatusSpawning session, called cm.Add, and emitted ctrl_child_spawned.
+// StatusSpawning session, called cm.Add, and announced the spawn.
 // This method performs name reconciliation (if req.Name is set), updates the
 // existing session with post-Idle metadata, persists a record, emits the
 // spawning→idle status transition, and starts monitorChild.
@@ -1931,7 +1919,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 // old exited session. noSession/resumeSession/forkSession are the session-
 // continuity fields that differ between the two callers. This method builds
 // the full Session from baseSnap with those overrides, inserts it, calls
-// cm.Add, persists a record, emits ctrl_child_spawned, and starts monitorChild.
+// cm.Add, persists a record, announces the spawn, and starts monitorChild.
 func (c *Controller) activateLiveChild(
 	childID string,
 	ch *child.Child,
@@ -1941,7 +1929,7 @@ func (c *Controller) activateLiveChild(
 	noSession bool,
 	resumeSession string,
 	forkSession string,
-) (control.SpawnResult, error) {
+) (protocol.SpawnResponseData, error) {
 	stalled := false
 	select {
 	case <-ch.Idle():
@@ -2041,7 +2029,7 @@ func (c *Controller) activateLiveChild(
 
 		go c.monitorChild(childID, ch)
 
-		return control.SpawnResult{
+		return protocol.SpawnResponseData{
 			ChildID:     childID,
 			SessionID:   meta.SessionID,
 			SessionFile: meta.SessionFile,
@@ -2064,7 +2052,7 @@ func (c *Controller) activateLiveChild(
 	// emitting them — and do it BEFORE the ch.Status() read that populates the
 	// record below. This path inserts its record already post-idle, so no
 	// subscriber ever saw the resumed child as spawning, and announcing
-	// spawning→idle after the ctrl_child_spawned below would describe a
+	// spawning→idle after the spawned announcement below would describe a
 	// transition none of them could have observed.
 	//
 	// The ORDER is the point: draining after the Status() read leaves a window
@@ -2154,7 +2142,7 @@ func (c *Controller) activateLiveChild(
 	}
 	// Replace the old exited entry HERE, not back in Resume/RespawnChild
 	// before the Idle() wait above. Deleting there left the child absent from
-	// the store — and so from ctrl_list, ctrl_get and every subscriber — for
+	// the store — and so from every list and get — for
 	// as long as the new process took to answer, up to activateLiveChild's
 	// full 5s stall timeout. That hole is reached on every daemon restart now
 	// that recovery auto-resumes children, and it made a recovered child
@@ -2175,28 +2163,10 @@ func (c *Controller) activateLiveChild(
 		slog.Warn("write state record", "childId", childID, "error", err)
 	}
 
-	// Emit ctrl_child_spawned for the resumed/respawned child (spec §7.2).
-	spawnedEvt := protocol.CtrlChildSpawned{
-		Type:    protocol.TypeCtrlChildSpawned,
-		ChildID: childID,
-		Name:    snap.Name,
-		Cwd:     snap.Cwd,
-		PID:     ch.PID(),
-		Model:   joinModel(provider, model),
-		At:      now.UnixMilli(),
-	}
-	if b, err := json.Marshal(spawnedEvt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-		if spawnSnap, ok := c.st.Get(childID); ok {
-			c.cm.DeliverToMatching(childID, spawnSnap.Labels, b)
-		}
-	}
-
-	// The native twin of the ctrl_child_spawned frame above. Published on the
-	// SPAWNED child's bus, not the parent's, so child_id and the delivery bus
-	// agree -- a subtree subscriber sees it because the child is in the subtree,
-	// and every subject predicate stays free of a lifecycle special case.
+	// Announce the resumed/respawned child. Published on the SPAWNED child's
+	// bus, not the parent's, so child_id and the delivery bus agree -- a
+	// subtree subscriber sees it because the child is in the subtree, and every
+	// subject predicate stays free of a lifecycle special case.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
@@ -2208,7 +2178,7 @@ func (c *Controller) activateLiveChild(
 
 	go c.monitorChild(childID, ch)
 
-	return control.SpawnResult{
+	return protocol.SpawnResponseData{
 		ChildID:     childID,
 		SessionID:   meta.SessionID,
 		SessionFile: meta.SessionFile,
@@ -2403,19 +2373,19 @@ func (c *Controller) resolveUsernameToUserID(ctx context.Context, username strin
 	return id, true
 }
 
-func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (control.SpawnResult, error) {
+func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (protocol.SpawnResponseData, error) {
 	return c.resumeInternal(ctx, childID, apiKey, false)
 }
 
 // resumeWithAutoRecovery is the auto-recovery version of Resume: it sets
 // AutoResume on the engine so the worker calls agentloop.Resume on startup
 // (finalising any incomplete previous turn) before accepting inbound prompts.
-func (c *Controller) resumeWithAutoRecovery(ctx context.Context, childID string) (control.SpawnResult, error) {
+func (c *Controller) resumeWithAutoRecovery(ctx context.Context, childID string) (protocol.SpawnResponseData, error) {
 	return c.resumeInternal(ctx, childID, "", true)
 }
 
 // resumeInternal is the shared implementation of Resume and auto-recovery resume.
-func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey string, autoResume bool) (control.SpawnResult, error) {
+func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey string, autoResume bool) (protocol.SpawnResponseData, error) {
 	// Claim childID for the whole check-then-act window below: from before
 	// the exited-status check, through the child.Spawn fork, to after the
 	// old exited record is replaced by activateLiveChild. See childClaimSet's
@@ -2429,7 +2399,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// duration of a spawn would just convert a client bug/retry into a
 	// confusing hang instead of an actionable error.
 	if !c.spawnClaims.tryClaim(childID) {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "resume already in progress for child: " + childID,
 		}
@@ -2438,13 +2408,13 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if snap.Status != protocol.StatusExited {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "child is not exited (status: " + string(snap.Status) + ")",
 		}
@@ -2458,7 +2428,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		// A script's exit IS its result: re-running the pymodule from a resume
 		// would silently start the work over, and the childstore row carries
 		// no ScriptSpec to rebuild the spawn from anyway. Re-spawn it.
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "script children cannot be resumed: a script's exit is its result; spawn it again",
 		}
@@ -2478,7 +2448,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -2494,14 +2464,14 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// is what attributes the resumed conversation and feeds quota_status.
 	runner, err := c.agentRunner(req, childID, autoResume, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
-			return control.SpawnResult{}, &control.ControllerError{
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrSpawnFailed,
 				Message: "spawn plan: " + err.Error(),
 			}
@@ -2528,7 +2498,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
@@ -2537,7 +2507,7 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 	// activateLiveChild (baseSnap != nil path): waits for Idle, replaces the
 	// old exited entry, builds the full Session from snap with Resume's
 	// session-continuity values, inserts it,
-	// adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
+	// adds to cm, persists, announces the spawn, starts monitorChild.
 	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		snap.NoSession, snap.SessionFile, snap.ForkSession)
 }
@@ -2555,14 +2525,14 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 //
 // Shares Controller.spawnClaims with Resume: RespawnChild has the identical
 // check-then-act-around-a-fork shape (read exited status, child.Spawn, then
-// delete-and-replace the record), reached via a concurrent ctrl_send
+// delete-and-replace the record), reached via a concurrent Send
 // {new_session|switch_session} on the same childID (see
 // handleInterceptedSend), and a shared claim set also blocks the cross-path
 // case of a resume racing an intercepted respawn for the same exited
 // childID. See childClaimSet's doc comment for the full rationale.
-func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (control.SpawnResult, error) {
+func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath string) (protocol.SpawnResponseData, error) {
 	if !c.spawnClaims.tryClaim(childID) {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "respawn already in progress for child: " + childID,
 		}
@@ -2571,13 +2541,13 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if snap.Status != protocol.StatusExited {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrNotResumable,
 			Message: "child is not exited (status: " + string(snap.Status) + ")",
 		}
@@ -2616,7 +2586,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	bin, argv, prov, err := resolveSpawnPlan(req, childID, c.stateDir, vals)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "spawn plan: " + err.Error(),
 		}
@@ -2628,14 +2598,14 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// the users store).
 	runner, err := c.agentRunner(req, childID, false, snap.Labels["owner"], c.resumeOwnerUserID(ctx, childID, snap), &snap)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: "agent runner: " + err.Error(),
 		}
 	}
 	if req.Kind == protocol.KindClaude {
 		if bin, err = resolveClaudeBinaryIfNeeded(req, runner); err != nil {
-			return control.SpawnResult{}, &control.ControllerError{
+			return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrSpawnFailed,
 				Message: "spawn plan: " + err.Error(),
 			}
@@ -2661,7 +2631,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 
 	ch, err := child.Spawn(ctx, spec)
 	if err != nil {
-		return control.SpawnResult{}, &control.ControllerError{
+		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrSpawnFailed,
 			Message: err.Error(),
 		}
@@ -2671,7 +2641,7 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 	// old exited entry, builds the full Session from snap with RespawnChild's
 	// session-continuity values (fresh
 	// start: noSession=false, resumeSession=sessionPath, forkSession=""),
-	// inserts, adds to cm, persists, emits ctrl_child_spawned, starts monitorChild.
+	// inserts, adds to cm, persists, announces the spawn, starts monitorChild.
 	return c.activateLiveChild(childID, ch, bin, protocol.SpawnRequest{}, &snap,
 		false, sessionPath, "")
 }
@@ -2713,7 +2683,7 @@ func waitForChildRemoval(cm *ChildManager, childID string, within time.Duration)
 	return false
 }
 
-func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (control.KillResult, error) {
+func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs, killTimeoutMs int64) (protocol.KillResponseData, error) {
 	// Revoke the daraja's reconnect credential so a dead child cannot
 	// re-authenticate on a later port scan or stale-connection replay. The
 	// belt dies with the credential: a killed child is settled by the kill
@@ -2740,31 +2710,31 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 	// emits the same exit events a real one does.
 	if snap, ok := c.st.Get(childID); ok && snap.Native {
 		if snap.Status == protocol.StatusExited {
-			return control.KillResult{}, &control.ControllerError{
+			return protocol.KillResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrChildExited,
 				Message: "child has already exited",
 			}
 		}
 		c.exitNativeChild(childID)
 		code := 0
-		return control.KillResult{ExitCode: &code}, nil
+		return protocol.KillResponseData{ExitCode: &code}, nil
 	}
 
 	ch, ok := c.cm.Get(childID)
 	if !ok {
 		if snap, ok2 := c.st.Get(childID); ok2 && snap.Status == protocol.StatusExited {
-			return control.KillResult{}, &control.ControllerError{
+			return protocol.KillResponseData{}, &connectapi.ControllerError{
 				Code:    protocol.ErrChildExited,
 				Message: "child has already exited",
 			}
 		}
-		return control.KillResult{}, &control.ControllerError{
+		return protocol.KillResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 
-	// Drive the SM to shutting_down so ctrl_child_status subscribers see the
+	// Drive the SM to shutting_down so every watcher sees the
 	// transition before the graceful-shutdown sequence begins (spec §6.5).
 	if changed, prev := ch.BeginShutdown(); changed {
 		c.handleStatusChange(childID, protocol.StatusShuttingDown, prev)
@@ -2775,7 +2745,7 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 
 	res, err := ch.Shutdown(shutdownTimeout, killTimeout)
 	if err != nil {
-		return control.KillResult{}, fmt.Errorf("shutdown: %w", err)
+		return protocol.KillResponseData{}, fmt.Errorf("shutdown: %w", err)
 	}
 
 	// ch.Shutdown returns when the child PROCESS is reaped, but the status
@@ -2793,7 +2763,7 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 		code := res.ExitCode
 		exitCode = &code
 	}
-	return control.KillResult{
+	return protocol.KillResponseData{
 		ExitCode:   exitCode,
 		Signal:     res.Signal,
 		DurationMs: res.Duration.Milliseconds(),
@@ -2861,7 +2831,7 @@ func (c *Controller) ShutdownAllChildren(ctx context.Context, perChildShutdown, 
 			done <- result{id: id}
 			continue
 		}
-		// Drive SM to shutting_down and emit ctrl_child_status to subscribers
+		// Drive SM to shutting_down and publish the transition
 		// before the Shutdown sequence begins (mirrors what Kill does).
 		if changed, prev := ch.BeginShutdown(); changed {
 			c.handleStatusChange(id, protocol.StatusShuttingDown, prev)
@@ -2934,7 +2904,7 @@ func (c *Controller) ownsChildRow(snap childstore.Snapshot) bool {
 // conversations.child, so conversation_message, event_log and conversation_turn
 // all survive and stay readable through `rafiki history`.
 //
-// The framed wire type is still spelled ctrl_forget, deliberately: that
+// The verb is spelled Forget
 // protocol is frozen (see docs/plans/2026-09-01-model-catalog-and-close-design.md
 // §3.0), and its old clients must keep working regardless.
 func (c *Controller) Close(childID string) error {
@@ -2964,10 +2934,10 @@ func (c *Controller) Close(childID string) error {
 
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &control.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
+		return &connectapi.ControllerError{Code: protocol.ErrNotFound, Message: "child not found: " + childID}
 	}
 	if snap.Status != protocol.StatusExited {
-		return &control.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
+		return &connectapi.ControllerError{Code: protocol.ErrNotExited, Message: "child is still running"}
 	}
 
 	// A synthetic thread child exists only in the in-memory store: no durable
@@ -3197,52 +3167,31 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 }
 
 // SetLabels mutates labels on the named child. Rejects keys with the rafiki/
-// prefix or invalid characters. Emits ctrl_child_labeled to subscribers.
+// prefix or invalid characters.
 func (c *Controller) SetLabels(childID string, set map[string]string, remove []string) (map[string]string, error) {
 	if _, ok := c.st.Get(childID); !ok {
-		return nil, &control.ControllerError{
+		return nil, &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
 	}
 	if err := validateUserLabelKeys(set); err != nil {
-		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	if err := validateUserRemoveKeys(remove); err != nil {
-		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	merged, err := c.st.SetLabels(childID, set, remove)
 	if err != nil {
-		return nil, &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return nil, &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after set_labels", "childId", childID, "error", err)
 	}
-	c.emitChildLabeled(childID, merged)
 	return merged, nil
 }
 
-// emitChildLabeled broadcasts a ctrl_child_labeled event carrying the full
-// post-mutation label map to global, per-child, and label-filtered subscribers.
-//
-// Label-filtered delivery uses the NEW (post-mutation) labels for matching.
-// Subscribers that matched the old labels but not the new simply stop
-// receiving future events — no synthetic "left filter" event is emitted (v1).
-func (c *Controller) emitChildLabeled(childID string, labels map[string]string) {
-	evt := protocol.CtrlChildLabeled{
-		Type:    protocol.TypeCtrlChildLabeled,
-		ChildID: childID,
-		Labels:  labels,
-	}
-	if b, err := json.Marshal(evt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-		// Use new labels for dynamic filter evaluation.
-		c.cm.DeliverToMatching(childID, labels, b)
-	}
-}
-
-// Send is the control.Controller seam and the one place a frame is classified.
+// Send is the one place a frame is classified.
 //
 // A prompt, a steer or an abort is work for a turn: it is durably accepted
 // before it is written, so a daemon that dies between accepting and delivering
@@ -3302,7 +3251,7 @@ func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 
 	ch, ok := c.cm.Get(childID)
 	if !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 
 	// Detect extension_ui_response frames and update the SM so the blocked_ui
@@ -3320,10 +3269,10 @@ func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 	if err := ch.Send(frame); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "backpressure") {
-			return &control.ControllerError{Code: protocol.ErrBackpressure, Message: msg}
+			return &connectapi.ControllerError{Code: protocol.ErrBackpressure, Message: msg}
 		}
 		if strings.Contains(msg, "shutting down") {
-			return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: msg}
+			return &connectapi.ControllerError{Code: protocol.ErrChildShuttingDown, Message: msg}
 		}
 		return err
 	}
@@ -3338,7 +3287,7 @@ func (c *Controller) sendFrame(childID string, frame json.RawMessage) error {
 func (c *Controller) handleInterceptedSend(childID string, decision interceptDecision) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "child not found: " + childID,
 		}
@@ -3359,7 +3308,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 	// loudly is the honest replacement; it stays this way until agent
 	// conversations have an identity of their own, separate from the child id.
 	if snap.Kind == protocol.KindFundi {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: string(decision.Type) + " is not supported for an agent child: an agent conversation is " +
 				"identified by the child id itself, so a respawn would silently reattach the same conversation " +
@@ -3374,7 +3323,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 	// script's exit is its result): a respawn here would silently start the
 	// work over, reporting success for a different run.
 	if snap.Kind == protocol.KindScript {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: string(decision.Type) + " is not supported for a script child: a script has no session " +
 				"and cannot be respawned — its exit is its result, so a respawn would silently start the " +
@@ -3382,13 +3331,9 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 		}
 	}
 
-	// Save per-child subscribers before Kill. monitorChild.Remove (called by
-	// handleChildExit) will clear the list when the old process exits.
-	savedSubs := c.cm.GetSubscribers(childID)
-
 	// Gracefully shut down the current child.
 	if _, err := c.Kill(context.Background(), childID, 3000, 500); err != nil {
-		var ce *control.ControllerError
+		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) ||
 			(ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
 			return fmt.Errorf("intercept kill: %w", err)
@@ -3419,17 +3364,10 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 		return fmt.Errorf("intercept respawn: %w", err)
 	}
 
-	// Restore preserved subscriptions on the new child instance and deliver
-	// the synthetic pi-level response so subscribers observe the transition.
-	// Wrap in ctrl_event so subscribers see the correct envelope shape (§7.1).
-	c.cm.RestoreSubscribers(childID, savedSubs)
-	synthFrame := synthesizeResponse(string(decision.Type), decision.PiRequestID)
-	c.cm.DeliverToChild(childID, wrapCtrlEvent(childID, synthFrame))
-
 	return nil
 }
 
-// isAbortFrame reports whether a ctrl_send frame is the normalized abort
+// isAbortFrame reports whether a raw frame is the normalized abort
 // command ({"type":"abort"}). Used to special-case claude children, whose
 // headless stream-json stdin has no abort frame (see handleClaudeAbort).
 func isAbortFrame(frame []byte) bool {
@@ -3454,17 +3392,17 @@ func isAbortFrame(frame []byte) bool {
 func (c *Controller) handleClaudeAbort(childID string) error {
 	ch, ok := c.cm.Get(childID)
 	if !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	if snap.Status == protocol.StatusShuttingDown {
-		return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
+		return &connectapi.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
 	}
 	if snap.Status == protocol.StatusExited {
-		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		return &connectapi.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
 	}
 
 	// A daraja-routed claude child never exits on abort: the relay stream and
@@ -3488,14 +3426,11 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	// (this window only exists before claude's first system/init).
 	sessionID := ch.Metadata().SessionID
 	if sessionID == "" {
-		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
+		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
 	}
 	if snap.SessionID != sessionID {
 		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
 	}
-
-	// Save subscribers before exit: handleChildExit clears them on process exit.
-	savedSubs := c.cm.GetSubscribers(childID)
 
 	if err := ch.Interrupt(); err != nil {
 		return fmt.Errorf("claude abort interrupt: %w", err)
@@ -3514,7 +3449,7 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 	}
 	if !exited {
 		if _, err := c.Kill(context.Background(), childID, 1000, 500); err != nil {
-			var ce *control.ControllerError
+			var ce *connectapi.ControllerError
 			if !errors.As(err, &ce) || (ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
 				return fmt.Errorf("claude abort kill: %w", err)
 			}
@@ -3531,7 +3466,7 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 
 	// Wait for handleChildExit to call cm.Remove before calling Resume, which
 	// calls cm.Add. If cm.Add races with cm.Remove, the new entry can be
-	// silently deleted, causing the restored subscribers to be dropped.
+	// silently deleted.
 	cmDeadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(cmDeadline) {
 		if _, alive := c.cm.Get(childID); !alive {
@@ -3546,7 +3481,6 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 		return fmt.Errorf("claude abort resume: %w", err)
 	}
 
-	c.cm.RestoreSubscribers(childID, savedSubs)
 	return nil
 }
 
@@ -3575,11 +3509,11 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 // is launched the same way the original one was.
 func (c *Controller) handleDarajaClaudeAbort(childID string, ch *child.Child, snap childstore.Snapshot) error {
 	if c.darajaPool == nil {
-		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "daraja pool not wired"}
+		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "daraja pool not wired"}
 	}
 	sessionID := ch.Metadata().SessionID
 	if sessionID == "" {
-		return &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
+		return &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: "cannot abort claude child before its session is established"}
 	}
 	if snap.SessionID != sessionID {
 		_ = c.st.Update(childID, func(s *childstore.Session) { s.SessionID = sessionID })
@@ -3626,68 +3560,11 @@ func buildDarajaAbortSpec(snap childstore.Snapshot, sessionID string) *darajapb.
 	}
 }
 
-func (c *Controller) Subscribe(childID string, conn control.Connection, filter protocol.SubscribeFilter) error {
-	if _, ok := c.st.Get(childID); !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
-	}
-	c.cm.Subscribe(childID, conn, filter)
-	return nil
-}
-
-func (c *Controller) Unsubscribe(childID string, conn control.Connection) error {
-	c.cm.Unsubscribe(childID, conn)
-	return nil
-}
-
-func (c *Controller) GlobalSubscribe(conn control.Connection) error {
-	c.cm.GlobalSubscribe(conn)
-	return nil
-}
-
-func (c *Controller) GlobalUnsubscribe(conn control.Connection) error {
-	c.cm.GlobalUnsubscribe(conn)
-	return nil
-}
-
-// SubscribeLabeled registers conn as a label-filtered subscriber. Events are
-// delivered from every child whose labels match the filter, evaluated
-// dynamically on each event. A nil filter means "pass everything".
-// Cleanup occurs automatically in OnConnectionClose.
-func (c *Controller) SubscribeLabeled(conn control.Connection, labels map[string]string, hasLabel []string, filter protocol.SubscribeFilter) error {
-	var fp *protocol.SubscribeFilter
-	if filter.Profile != "" || len(filter.Include) > 0 || len(filter.Exclude) > 0 {
-		f := filter
-		fp = &f
-	}
-	c.cm.RegisterLabeled(conn, labels, hasLabel, fp)
-	return nil
-}
-
-// OnConnectionClose is called by the server when a client connection closes.
-// It removes global and label-filtered subscriptions held by this connection.
-//
-// Note: per-child subscribers for this connection are not cleaned up here;
-// they accumulate until the child is removed from the ChildManager on exit.
-// This is a known limitation — per-child sub sets are bounded by the child
-// lifetime and the subscriber count is small in practice.
-func (c *Controller) OnConnectionClose(conn control.Connection) {
-	// endConnSession cancels this connection's session context and then
-	// releases its session executor synchronously, so the transient executor
-	// is no longer live by the time this returns (the behavior the lifetime
-	// re-anchor briefly lost). The ctx.Done() watcher ExecutorSession spawned
-	// stays as the backstop — it is the only trigger on Connect's stream end,
-	// where there is no OnConnectionClose — and no-ops here because the entry
-	// is already gone.
-	c.endConnSession(conn)
-	c.cm.GlobalUnsubscribe(conn)
-	c.cm.RemoveLabeledSubsForConn(conn)
-}
-
 // ─── monitorChild ─────────────────────────────────────────────────────────────
 
-// monitorChild runs as a goroutine for each live child. It forwards bus events
-// to per-child subscribers (wrapped in ctrl_event envelopes per §7.1), delivers
-// status transitions, handles rename detection, model-label updates, and child exit.
+// monitorChild runs as a goroutine for each live child. It consumes the
+// child's bus frames, delivers status transitions, handles rename detection,
+// model-label updates, and child exit.
 //
 // Status transitions are DRAINED from the child, never sampled off Status().
 // The state machine transitions on the child's readStdout goroutine, which runs
@@ -3722,30 +3599,21 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 
 	for {
 		select {
-		case frame, ok := <-busCh:
+		case _, ok := <-busCh:
 			if !ok {
 				// Bus was closed (shouldn't happen in normal operation).
 				// Drain first: a transition recorded just before the bus went
-				// away is still owed to subscribers, and handleChildExit reports
+				// away is still owed to the store, and handleChildExit reports
 				// the store's status as last_status.
 				drainStatus()
 				c.handleChildExit(childID, ch)
 				return
 			}
-			// Wrap in ctrl_event envelope so subscribers can correlate events to
-			// their source child (spec §7.1).
-			wrapped := wrapCtrlEvent(childID, frame)
-			c.cm.DeliverToChild(childID, wrapped)
-			// Deliver to label-filtered subscribers using the child's current labels.
-			if snap, ok := c.st.Get(childID); ok {
-				c.cm.DeliverToMatching(childID, snap.Labels, wrapped)
-			}
-
 			// Emit any status transitions this frame (or an earlier one) caused,
-			// keeping store + subscribers in sync. Draining here rather than only
-			// on the StatusChanged wake keeps a status change behind the frames
-			// that produced it in the common case: handleFrame records a
-			// transition only after publishing the frame that caused it.
+			// keeping the store in sync. Draining here rather than only on the
+			// StatusChanged wake keeps a status change behind the frames that
+			// produced it in the common case: handleFrame records a transition
+			// only after publishing the frame that caused it.
 			drainStatus()
 
 			// Detect session name changes produced by the sniffer. The sniffer
@@ -3760,7 +3628,7 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			}
 
 			// Detect model changes from set_model / cycle_model responses.
-			// Update the store, persist, and emit ctrl_child_labeled.
+			// Update the store and persist.
 			if md.Model != "" && md.Model != lastKnownModel {
 				c.handleModelChange(childID, md.Model)
 				lastKnownModel = md.Model
@@ -3800,30 +3668,10 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 			drainStatus()
 
 		case <-ch.Done():
-			// Drain any frames that arrived before the done signal.
-			drained := false
-			for !drained {
-				select {
-				case frame, ok := <-busCh:
-					if !ok {
-						drained = true
-					} else {
-						wrapped := wrapCtrlEvent(childID, frame)
-						c.cm.DeliverToChild(childID, wrapped)
-						if snap, ok := c.st.Get(childID); ok {
-							c.cm.DeliverToMatching(childID, snap.Labels, wrapped)
-						}
-					}
-				default:
-					drained = true
-				}
-			}
-			// Then the transitions those frames caused, BEFORE handleChildExit:
-			// a transition recorded just before exit is still owed to
-			// subscribers, and after handleChildExit it would be unreachable
-			// (cm.Remove clears the per-child subscriber list) as well as
-			// announced after ctrl_child_exited. Draining first also means the
-			// exit event's last_status reflects the child's real final status.
+			// Then the transitions the frames caused, BEFORE handleChildExit:
+			// after handleChildExit a transition would be unreachable
+			// (cm.Remove drops the child). Draining first also means the exit
+			// event's last_status reflects the child's real final status.
 			//
 			// This drain is DEFENSIVE, and deliberately kept as such: no test
 			// covers it, and deleting it breaks nothing (30 runs of the
@@ -3842,19 +3690,6 @@ func (c *Controller) monitorChild(childID string, ch *child.Child) {
 	}
 }
 
-// wrapCtrlEvent wraps a raw pi event in a ctrl_event envelope (spec §7.1).
-// This lets per-child subscribers correlate events to their source child and
-// filter by inner event type.
-func wrapCtrlEvent(childID string, raw []byte) []byte {
-	env := protocol.CtrlEvent{
-		Type:    protocol.TypeCtrlEvent,
-		ChildID: childID,
-		Event:   json.RawMessage(raw),
-	}
-	b, _ := json.Marshal(env)
-	return b
-}
-
 // drainChildStatus emits every status transition the child has queued, oldest
 // first. It is used by activateLiveChild to flush the startup transitions
 // synchronously, before monitorChild takes over draining for the rest of the
@@ -3867,7 +3702,7 @@ func (c *Controller) drainChildStatus(childID string, ch *child.Child) {
 }
 
 func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol.Status) {
-	// now feeds only the ctrl_child_status event's timestamp below (At); it
+	// now feeds only the transition announcement's timestamp; it
 	// is NOT threaded into startWorking/heartbeats, which track elapsed time
 	// entirely on sweepHeartbeats' own caller-supplied clock (see
 	// heartbeatState.due's doc) — hoisted here only because that is where
@@ -3916,21 +3751,6 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	if ok && isWorkingStatus(newStatus) {
 		c.heartbeats.startWorking(childID)
 	}
-	evt := protocol.CtrlChildStatus{
-		Type:     protocol.TypeCtrlChildStatus,
-		ChildID:  childID,
-		Status:   string(newStatus),
-		Previous: string(prev),
-		At:       now.UnixMilli(),
-	}
-	if b, err := json.Marshal(evt); err == nil {
-		// Deliver to global, per-child, and label-filtered subscribers (spec §7.4).
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-		if snap, ok := c.st.Get(childID); ok {
-			c.cm.DeliverToMatching(childID, snap.Labels, b)
-		}
-	}
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after status change", "childId", childID, "error", err)
 	}
@@ -3938,7 +3758,7 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 
 // handleModelChange updates the store's Provider/Model fields and the
 // rafiki/model + rafiki/provider auto-labels when the sniffer detects a model change
-// via set_model or cycle_model responses. Emits ctrl_child_labeled.
+// via set_model or cycle_model responses.
 func (c *Controller) handleModelChange(childID, modelStr string) {
 	provider, model := splitModel(modelStr)
 	_ = c.st.Update(childID, func(s *childstore.Session) {
@@ -3958,14 +3778,9 @@ func (c *Controller) handleModelChange(childID, modelStr string) {
 			delete(s.Labels, "rafiki/model")
 		}
 	})
-	snap, ok := c.st.Get(childID)
-	if !ok {
-		return
-	}
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after model change", "childId", childID, "error", err)
 	}
-	c.emitChildLabeled(childID, snap.Labels)
 }
 
 // handleSessionMetaChange syncs the child's sniffed session id / file into the
@@ -3987,24 +3802,11 @@ func (c *Controller) handleSessionMetaChange(childID, sessionID, sessionFile str
 	}
 }
 
-// handleChildRenamed updates the store and emits ctrl_child_renamed when the
-// sniffer detects that pi changed the session name (spec §7.5).
+// handleChildRenamed updates the store when the sniffer detects that the
+// child's process changed its session name.
 func (c *Controller) handleChildRenamed(childID, newName, previous string) {
 	_ = c.st.Rename(childID, newName)
-	evt := protocol.CtrlChildRenamed{
-		Type:     protocol.TypeCtrlChildRenamed,
-		ChildID:  childID,
-		Name:     newName,
-		Previous: previous,
-		At:       time.Now().UnixMilli(),
-	}
-	if b, err := json.Marshal(evt); err == nil {
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToChild(childID, b)
-		if snap, ok := c.st.Get(childID); ok {
-			c.cm.DeliverToMatching(childID, snap.Labels, b)
-		}
-	}
+	_ = previous // kept in the signature: the previous name is caller context
 }
 
 func (c *Controller) handleChildExit(childID string, ch *child.Child) {
@@ -4033,7 +3835,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		}
 	}
 
-	// Snapshot the ring before removing the child so ctrl_get_recent continues
+	// Snapshot the ring before removing the child so GetRecent continues
 	// to work after the child is gone (spec §11.4).
 	ringSnapshot := ch.Ring().Recent(ring.Query{})
 	// RenderRecent has returned nil since B4 removed the render ring; the call
@@ -4094,7 +3896,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	}
 
 	// A Task subagent runs inside this process, so it dies with it. Before the
-	// exit events below purely for ordering legibility: a subscriber that sees
+	// exit event below purely for ordering legibility: a subscriber that sees
 	// the parent gone has already been told about its threads.
 	c.exitNativeChildrenOf(childID)
 
@@ -4102,25 +3904,6 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	if res.Signal == "" {
 		code := res.ExitCode
 		exitCode = &code
-	}
-	exitEvt := protocol.CtrlChildExited{
-		Type:       protocol.TypeCtrlChildExited,
-		ChildID:    childID,
-		ExitCode:   exitCode,
-		Signal:     res.Signal,
-		LastStatus: lastStatus,
-		Duration:   res.Duration.Seconds(),
-		At:         now.UnixMilli(),
-	}
-	if b, err := json.Marshal(exitEvt); err == nil {
-		// Deliver to per-child and global subscribers BEFORE Remove so the
-		// subscriber list is still reachable (spec §7.3).
-		c.cm.DeliverToChild(childID, b)
-		c.cm.DeliverToGlobal(b)
-		// Deliver to label-filtered subscribers; read snap (already marked exited).
-		if snap, ok := c.st.Get(childID); ok {
-			c.cm.DeliverToMatching(childID, snap.Labels, b)
-		}
 	}
 
 	var exitCodePtr *int32
@@ -4350,7 +4133,7 @@ func computeLineageLabels(st *childstore.Store, parentID string) (parent, root s
 		return "", "", nil
 	}
 	if _, ok := st.Get(parentID); !ok {
-		return "", "", &control.ControllerError{
+		return "", "", &connectapi.ControllerError{
 			Code:    protocol.ErrChildNotFound,
 			Message: "parentChildId: no such child: " + parentID,
 		}
@@ -4881,7 +4664,7 @@ func parseEventType(frame []byte, hdr any) error {
 	return json.Unmarshal(frame, hdr)
 }
 
-// TaskList queries the task ledger for the ctrl_task_list verb.
+// TaskList queries the task ledger for the ListTasks RPC.
 //
 // No conversation scope: this verb answers "what is every agent doing",
 // which is a cross-conversation question. The dispatcher clamps Limit before
@@ -4889,7 +4672,7 @@ func parseEventType(frame []byte, hdr any) error {
 // response inside protocol.MaxFrameBytes.
 func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error) {
 	if c.tasks == nil {
-		return nil, &control.ControllerError{
+		return nil, &connectapi.ControllerError{
 			Code:    protocol.ErrNoAgentDB,
 			Message: "task ledger unavailable: no database configured",
 		}
@@ -4912,7 +4695,7 @@ func (c *Controller) TaskList(ctx context.Context, req protocol.TaskListRequest)
 // instead of five places that must all agree on wording.
 func (c *Controller) requireExecutorStore() error {
 	if c.execStore == nil {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrInternal,
 			Message: "no executor store configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)",
 		}
@@ -4953,12 +4736,12 @@ func translateExecutorErr(err error) error {
 		// operator holding a control connection has the row in reach instead.
 		//
 		// Phrased to be true on BOTH control paths. It reaches an operator
-		// naming a new executor (ctrl_executor_create) and one renaming an
-		// existing one (ctrl_executor_label), so it must not say "--name",
+		// naming a new executor (CreateExecutor) and one renaming an
+		// existing one (LabelExecutor), so it must not say "--name",
 		// which the label verb has no flag for, nor "relabel the existing
 		// executor", which on the label path is the thing they just tried.
 		// What both need is the same: which executor is holding the name.
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: "that executor name is already taken for this owner — (owner, " +
 				"machine) names exactly one executor. Choose a different name, or " +
@@ -4968,7 +4751,7 @@ func translateExecutorErr(err error) error {
 	default:
 		return err
 	}
-	return &control.ControllerError{Code: code, Message: err.Error()}
+	return &connectapi.ControllerError{Code: code, Message: err.Error()}
 }
 
 // executorTrustLabels merges the operator's own labels with the two the DAEMON
@@ -4985,20 +4768,20 @@ func translateExecutorErr(err error) error {
 // wrote.
 func executorTrustLabels(id users.Identity, name string, given map[string]string) (map[string]string, error) {
 	if _, ok := given["owner"]; ok {
-		return nil, &control.ControllerError{
+		return nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "owner is derived from the connection and cannot be set with --label",
 		}
 	}
 	if _, ok := given["machine"]; ok {
-		return nil, &control.ControllerError{
+		return nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "machine is set with --name, not with --label",
 		}
 	}
 	owner, err := sessionOwner(id)
 	if err != nil {
-		return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	labels := make(map[string]string, len(given)+2)
 	for k, v := range given {
@@ -5010,7 +4793,7 @@ func executorTrustLabels(id users.Identity, name string, given map[string]string
 		// comma-separated selector, so a comma or an equals sign silently
 		// reparses into a different selector.
 		if err := paths.ValidateMachineName(name); err != nil {
-			return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+			return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 		}
 		labels["machine"] = name
 	}
@@ -5102,7 +4885,7 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 	if req.Selector != "" {
 		sel, pErr := executors.ParseSelector(req.Selector)
 		if pErr != nil {
-			return nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: pErr.Error()}
+			return nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: pErr.Error()}
 		}
 		var filtered []executors.Executor
 		for _, e := range execs {
@@ -5237,12 +5020,12 @@ const maxAmbiguousRefs = 5
 // A fragment that matches no row is not-found; one that matches several rows is
 // an invalid-args error naming them, never a silent pick.
 func (c *Controller) resolveExecutorRef(ctx context.Context, ref string) (executors.Executor, error) {
-	notFound := &control.ControllerError{
+	notFound := &connectapi.ControllerError{
 		Code:    protocol.ErrNotFound,
 		Message: fmt.Sprintf("executor %q: no such row", ref),
 	}
 	if ref == "" {
-		return executors.Executor{}, &control.ControllerError{
+		return executors.Executor{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "executor id required",
 		}
@@ -5289,7 +5072,7 @@ func (c *Controller) resolveExecutorRef(ctx context.Context, ref string) (execut
 	if more > 0 {
 		msg += fmt.Sprintf(", and %d more", more)
 	}
-	return executors.Executor{}, &control.ControllerError{
+	return executors.Executor{}, &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
 		Message: msg,
 	}
@@ -5299,7 +5082,7 @@ func (c *Controller) resolveExecutorRef(ctx context.Context, ref string) (execut
 
 // errNoUserStore is returned when identity commands are used on a daemon with
 // no database. Every user verb needs a row; there is nothing to degrade to.
-var errNoUserStore = &control.ControllerError{
+var errNoUserStore = &connectapi.ControllerError{
 	Code:    protocol.ErrNoAgentDB,
 	Message: "no database configured (RAFIKI_DB unset); user identity requires one",
 }
@@ -5309,9 +5092,9 @@ func (c *Controller) UserCreate(ctx context.Context, username string) (protocol.
 }
 
 // createUser is the one place a users row is minted. isAdmin is never
-// inferred: the bootstrap path passes true because the daemon's first
-// operator must be able to review every owner's conversations, and every
-// ordinary authenticated create passes false. Nothing else may set the bit.
+// inferred: `rafikid user create --admin` passes true because an operator
+// must be able to review every owner's conversations, and every
+// authenticated Connect create passes false. Nothing else may set the bit.
 func (c *Controller) createUser(ctx context.Context, username string, isAdmin bool) (protocol.UserCreateResponseData, error) {
 	if c.users == nil {
 		return protocol.UserCreateResponseData{}, errNoUserStore
@@ -5325,69 +5108,6 @@ func (c *Controller) createUser(ctx context.Context, username string, isAdmin bo
 		ID: u.ID, Username: u.Username, Token: token,
 		CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
 	}, nil
-}
-
-// errBootstrapClosed is the answer to an unauthenticated user_create once a
-// user exists. It is ErrAuthRequired rather than ErrInvalidArgs because that
-// is what the caller must do about it: present a token.
-var errBootstrapClosed = &control.ControllerError{
-	Code:    protocol.ErrAuthRequired,
-	Message: "a user already exists; authenticate with ctrl_auth to create more users",
-}
-
-// UserCreateBootstrap serves ctrl_user_create on a connection that was
-// admitted with NO credential, because no user existed when it connected.
-//
-// The re-check is the whole point of this method existing. Admission is
-// decided once, at accept time, and is never revisited for the life of the
-// connection — so without a check here a peer that connected during the
-// window and simply held the socket open would keep minting users for as
-// long as the daemon ran, days after the operator's first user closed the
-// window for everyone else. Reading the count from the STORE, per request,
-// is what makes "the first user closes the window" true.
-//
-// A store error is not an answer: it propagates as an internal error (the
-// dispatcher strips its text before it reaches an unauthenticated peer) and
-// never as "the window is closed" or as permission to proceed.
-func (c *Controller) UserCreateBootstrap(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
-	if c.users == nil {
-		return protocol.UserCreateResponseData{}, errNoUserStore
-	}
-	n, err := c.users.CountActive(ctx)
-	if err != nil {
-		return protocol.UserCreateResponseData{}, err
-	}
-	if n > 0 {
-		return protocol.UserCreateResponseData{}, errBootstrapClosed
-	}
-	// The bootstrap user is the daemon's first operator and already owns it
-	// outright (an unauthenticated TLS connection may only call this verb
-	// until a user exists) -- admin here is what makes ANY admin reachable at
-	// all, since granting the bit later needs an admin caller or a
-	// hand-edited row.
-	return c.createUser(ctx, username, true)
-}
-
-// UserCreateLocal serves ctrl_user_create on a locally trusted connection —
-// the plain UDS, whose connections are anonymous unless they presented
-// ctrl_auth, and never bootstrap-restricted. The framed UDS never takes the
-// bootstrap PATH, but it must reach the same first-user OUTCOME: with zero
-// active users there is no admin and none is otherwise reachable (granting
-// the bit later needs an admin caller), so the user minted here is one. With
-// users already present this mints an ordinary non-admin user, exactly as
-// this socket has always done — local trust, no re-check window to close.
-// The count is read from the store per request, like UserCreateBootstrap: a
-// decision baked into the connection would go stale the moment a parallel
-// client minted the first user.
-func (c *Controller) UserCreateLocal(ctx context.Context, username string) (protocol.UserCreateResponseData, error) {
-	if c.users == nil {
-		return protocol.UserCreateResponseData{}, errNoUserStore
-	}
-	n, err := c.users.CountActive(ctx)
-	if err != nil {
-		return protocol.UserCreateResponseData{}, err
-	}
-	return c.createUser(ctx, username, n == 0)
 }
 
 func (c *Controller) UserList(ctx context.Context, includeDeleted bool, limit int) ([]users.User, error) {

@@ -11,7 +11,6 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -90,7 +89,7 @@ func TestSetBudgetNegativeBecomesInvalidArgument(t *testing.T) {
 
 func TestSetBudgetNotFoundBecomesNotFound(t *testing.T) {
 	authoredMsg := "agent c_x is not registered"
-	f := &fakeLifecycle{budgetErr: &control.ControllerError{Code: protocol.ErrNotFound, Message: authoredMsg}}
+	f := &fakeLifecycle{budgetErr: &connectapi.ControllerError{Code: protocol.ErrNotFound, Message: authoredMsg}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
@@ -105,7 +104,7 @@ func TestSetBudgetNotFoundBecomesNotFound(t *testing.T) {
 
 func TestSetBudgetInvalidArgumentFromLifecycleBecomesInvalidArgument(t *testing.T) {
 	authoredMsg := "limit exceeded or invalid"
-	f := &fakeLifecycle{budgetErr: &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: authoredMsg}}
+	f := &fakeLifecycle{budgetErr: &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: authoredMsg}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
@@ -119,7 +118,7 @@ func TestSetBudgetInvalidArgumentFromLifecycleBecomesInvalidArgument(t *testing.
 }
 
 func TestSetBudgetErrorBecomesInternal(t *testing.T) {
-	f := &fakeLifecycle{budgetErr: &control.ControllerError{Code: protocol.ErrInternal, Message: "boom"}}
+	f := &fakeLifecycle{budgetErr: &connectapi.ControllerError{Code: protocol.ErrInternal, Message: "boom"}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 

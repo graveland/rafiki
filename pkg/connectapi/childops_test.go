@@ -11,7 +11,6 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
@@ -232,8 +231,8 @@ func TestChildOpsShutdownDaemonFailsClosedUnimplemented(t *testing.T) {
 	if connect.CodeOf(err) != connect.CodeUnimplemented {
 		t.Errorf("code = %v, want Unimplemented", connect.CodeOf(err))
 	}
-	if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("message = %v, want the stub's not-yet-implemented text", err)
+	if err == nil || !strings.Contains(err.Error(), "not yet wired") {
+		t.Errorf("message = %v, want the stub's not-yet-wired text", err)
 	}
 	if f.shutdownCalled {
 		t.Error("the seam's ShutdownDaemon was called; the handler must refuse before the seam")
@@ -384,7 +383,7 @@ func TestChildOpsUnwiredFailsClosed(t *testing.T) {
 // precise reason riding the detail, so a client can branch on not_resumable
 // without parsing message text.
 func TestChildOpsResumeNotResumableBecomesFailedPrecondition(t *testing.T) {
-	f := &fakeChildOps{resumeErr: &control.ControllerError{
+	f := &fakeChildOps{resumeErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNotResumable,
 		Message: "child is not exited (status: running)",
 	}}
@@ -488,7 +487,7 @@ func TestChildOpsCodedErrorPassesThrough(t *testing.T) {
 // conversation stats face too, same as resume: ErrNoAgentDB is the daemon
 // configuration gap the Controller writes a curated message for.
 func TestChildOpsConversationStatsNoAgentDBKeepsAuthoredText(t *testing.T) {
-	f := &fakeChildOps{statsErr: &control.ControllerError{
+	f := &fakeChildOps{statsErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNoAgentDB,
 		Message: "no agent database configured (RAFIKI_DB unset)",
 	}}

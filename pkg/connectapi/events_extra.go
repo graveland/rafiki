@@ -10,12 +10,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// RawChildIO is the debug/operator slice of the daemon behind the framed
-// ctrl_get_streams and ctrl_send verbs: raw, uninterpreted access to a live
+// RawChildIO is the debug/operator slice of the daemon behind the
+// GetStreams and SendFrame RPCs: raw, uninterpreted access to a live
 // child's stdin/stderr capture and stdin pipe. Deliberately raw — no
 // event model, no parsing — because these are the faces a human debugging a
 // wedged child uses, not the ones an agent talks through (children use Send).
@@ -55,9 +54,9 @@ func (s *Server) rawIOOp() (RawChildIO, error) {
 //
 //   - An already-coded *connect.Error passes through untouched — ConnectErr
 //     would re-wrap it as internal.
-//   - A *control.ControllerError keeps its authored message under its
+//   - A *ControllerError keeps its authored message under its
 //     protocol code (ConnectErr) — the code the daemon attached at the source
-//     IS the classification, the same decision the framed mapErr makes.
+//     IS the classification.
 //   - Anything else is infrastructure text ConnectErr redacts; its cause is
 //     logged here first or it is lost (the same discipline as close.go).
 func mapRawChildIOErr(err error, logMsg string, logArgs ...any) error {
@@ -65,7 +64,7 @@ func mapRawChildIOErr(err error, logMsg string, logArgs ...any) error {
 	if errors.As(err, &cerr) {
 		return err
 	}
-	var ce *control.ControllerError
+	var ce *ControllerError
 	if !errors.As(err, &ce) {
 		// ConnectErr redacts this below; log the cause here or lose it.
 		slog.Error(logMsg, append(logArgs, "error", err)...)
@@ -73,9 +72,9 @@ func mapRawChildIOErr(err error, logMsg string, logArgs ...any) error {
 	return ConnectErr(err)
 }
 
-// GetStreams serves the framed ctrl_get_streams face: a live child's raw
+// GetStreams serves the GetStreams RPC: a live child's raw
 // stdin/stderr capture. which is one of "in", "err", "all" (empty means
-// "all"); the framed dispatcher validated the same set, and an unlisted value
+// "all"); an unlisted value
 // stays CodeInvalidArgument. alive=false in the response means the child has
 // already exited — the caller falls back to the on-disk dump.
 func (s *Server) GetStreams(
@@ -104,10 +103,10 @@ func (s *Server) GetStreams(
 	return connect.NewResponse(resp), nil
 }
 
-// SendFrame serves the framed ctrl_send face: a raw child-protocol frame,
+// SendFrame serves the SendFrame RPC: a raw child-protocol frame,
 // for debugging/scripting. userOnly — children use Send. frame_json is
 // forwarded verbatim after one syntactic gate: it must parse as a JSON
-// OBJECT. The framed dispatcher required a frame at all and delegated the
+// OBJECT. Send delegates
 // rest to Controller.Send; here the request carries the frame as a string, so
 // the object check is what stands between a client typo and the child's
 // stdin (a JSON array or bare scalar is not a child protocol frame).

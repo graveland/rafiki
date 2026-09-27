@@ -15,7 +15,7 @@ import (
 //
 // An EMPTY configured token disables the check entirely. That is the unix
 // socket mount, where the trust mechanism is filesystem permissions (a 0600
-// socket inside a 0700 directory) — the same model the framed-JSON control
+// socket inside a 0700 directory) — the same model the unix control
 // socket has always used. The TCP/TLS mount configures a real token.
 //
 // The comparison is constant-time. The error text never echoes the presented

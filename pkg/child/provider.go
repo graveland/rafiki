@@ -47,7 +47,7 @@ type ProtocolProvider interface {
 	BusFrames(line []byte, ts int64) [][]byte
 
 	// EncodeOutbound translates a normalized outbound frame (as sent by clients
-	// via ctrl_send: {"type":"prompt"|"steer"|"abort"|...}) into the child's
+	// via Send: {"type":"prompt"|"steer"|"abort"|...}) into the child's
 	// native stdin envelope. Returning nil drops the frame (unsupported for this
 	// protocol). Providers whose native protocol already matches the normalized
 	// vocabulary return frame unchanged.

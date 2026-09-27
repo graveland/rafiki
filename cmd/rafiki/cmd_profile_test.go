@@ -278,8 +278,8 @@ func TestProfileShowJSONRecord(t *testing.T) {
 	if rec["url"] != "" {
 		t.Errorf("url = %v, want empty on a socket profile", rec["url"])
 	}
-	if rec["connect_socket"] != "/tmp/connect.sock" {
-		t.Errorf("connect_socket = %v, want /tmp/connect.sock (the sibling of the framed socket)", rec["connect_socket"])
+	if rec["connect_socket"] != "/tmp/show.sock" {
+		t.Errorf("connect_socket = %v, want /tmp/show.sock (it duplicates socket)", rec["connect_socket"])
 	}
 	if rec["token"] != "tok-show-1" {
 		t.Errorf("token = %v, want the RESOLVED value tok-show-1", rec["token"])

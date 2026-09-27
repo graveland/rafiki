@@ -197,7 +197,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 //
 // ExitedRing and ExitedRenderRing are NOT restored — they are not persisted
 // (they can be megabytes and they die with the daemon today), so a recovered
-// session has nil rings, which ctrl_get_recent already handles.
+// session has nil rings, which GetRecent already handles.
 func SessionFromRecord(rec ChildRecord) *Session {
 	return &Session{
 		ChildID:     rec.ChildID,

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
@@ -65,9 +65,9 @@ func TestKindNarrowing(t *testing.T) {
 				if err == nil {
 					t.Fatal("spawn was admitted; want a refusal")
 				}
-				var ce *control.ControllerError
+				var ce *connectapi.ControllerError
 				if !errors.As(err, &ce) {
-					t.Fatalf("error is %T, want *control.ControllerError: %v", err, err)
+					t.Fatalf("error is %T, want *connectapi.ControllerError: %v", err, err)
 				}
 				if ce.Code != protocol.ErrInvalidArgs {
 					t.Errorf("code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)

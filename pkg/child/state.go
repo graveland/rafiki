@@ -69,7 +69,7 @@ type StateMachine struct {
 
 // NewStateMachine creates a fresh state machine in StatusSpawning.
 //
-// Lifecycle note: when a child is resumed via ctrl_resume (per protocol
+// Lifecycle note: when a child is resumed by the daemon's resume path (per protocol
 // §10.1 row 18), the supervise loop creates a new StateMachine — the
 // state machine is intentionally not designed to transition out of
 // StatusExited. This keeps the lifetime of an SM instance tied 1:1 to
@@ -211,7 +211,7 @@ func (sm *StateMachine) OnAutoRetryFinalFailure(finalError string) {
 
 // OnShutdownStart transitions to shutting_down. It clears the modal stack
 // because shutdown overrides any in-progress compaction or UI block.
-// Called by Child when it initiates a graceful shutdown (ctrl_kill or
+// Called by Child when it initiates a graceful shutdown (a Kill or
 // process-exit interception).
 func (sm *StateMachine) OnShutdownStart() (changed bool, prev protocol.Status) {
 	if sm.current == protocol.StatusShuttingDown || sm.current == protocol.StatusExited {

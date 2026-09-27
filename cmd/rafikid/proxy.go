@@ -167,7 +167,7 @@ type faceOptions struct {
 	Registry    *prometheus.Registry    // nil = metrics not mounted
 	Config      Config                  // openai routes, default model
 	Listen      string                  // overrides RAFIKI_PROXY_LISTEN when non-empty
-	Catalog     *routing.ModelCatalog   // shared with the Controller (ctrl_get/list's ContextWindow) via llm.WithCatalog; nil = the client builds its own
+	Catalog     *routing.ModelCatalog   // shared with the Controller (ChildSummary's ContextWindow) via llm.WithCatalog; nil = the client builds its own
 	RawTrace    *rawtrace.RawTraceStore // nil when no pool configured
 	RawTraceAll bool                    // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
 	Users       users.Store             // nil = RAFIKI_DB unset; only the per-boot child token authenticates

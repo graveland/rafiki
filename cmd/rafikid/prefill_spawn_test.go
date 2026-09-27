@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
 )
@@ -52,9 +52,9 @@ func TestPrefillValidateRefusals(t *testing.T) {
 			if err == nil {
 				t.Fatalf("validatePrefill: want %q, got nil", tc.want)
 			}
-			var ce *control.ControllerError
+			var ce *connectapi.ControllerError
 			if !errors.As(err, &ce) {
-				t.Fatalf("want *control.ControllerError, got %T: %v", err, err)
+				t.Fatalf("want *connectapi.ControllerError, got %T: %v", err, err)
 			}
 			if ce.Code != protocol.ErrInvalidArgs {
 				t.Errorf("Code = %v, want ErrInvalidArgs", ce.Code)
@@ -85,9 +85,9 @@ func TestPrefillSpawnCallsValidate(t *testing.T) {
 	if err == nil {
 		t.Fatal("Spawn with a pre-fill on a claude child must be refused")
 	}
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
-		t.Fatalf("want *control.ControllerError, got %T: %v", err, err)
+		t.Fatalf("want *connectapi.ControllerError, got %T: %v", err, err)
 	}
 	if ce.Code != protocol.ErrInvalidArgs {
 		t.Errorf("Code = %v, want ErrInvalidArgs", ce.Code)

@@ -1,6 +1,6 @@
 // Package integration_test contains end-to-end tests that build and run the
 // rafikid daemon binary as a subprocess, communicate with it over its
-// connect.sock through the generated Connect client
+// the daemon's control socket through the generated Connect client
 // (pkg/gen/rafiki/v1/rafikiv1connect), and exercise the major control flows
 // (spawn, list, get, kill, resume, stream events, close).
 //
@@ -231,18 +231,18 @@ func (d *daemon) stopDaemon() {
 
 // ─── Connect client ───────────────────────────────────────────────────────────
 
-// control returns the generated Connect client for the daemon's connect.sock.
-// The UDS is the credential: the listener admits anonymous local callers
-// (optionalIdentityInterceptor), so no bearer token is needed here. The dial
-// shape lives on connectClient (cockpit_subject_test.go) and must match
-// cmd/rafiki/connectclient.go.
+// control returns the generated Connect client for the daemon's control
+// socket. The UDS is the credential: the listener admits anonymous local
+// callers (optionalIdentityInterceptor), so no bearer token is needed here.
+// The dial shape lives on connectClient (cockpit_subject_test.go) and must
+// match cmd/rafiki/connectclient.go.
 func (d *daemon) control(t *testing.T) rafikiv1connect.ControlClient {
 	t.Helper()
 	return d.connectClient()
 }
 
 // spawnChild spawns a fundi child with noSession:true (so resume works without
-// a real session file) over the daemon's connect.sock and returns the assigned
+// a real session file) over the daemon's control socket and returns the assigned
 // childId. The child is an in-process fundi child, which requires a model; the
 // throwaway model string is never actually sent to a provider — these tests
 // only exercise the daemon's spawn/kill/stream/close lifecycle.
@@ -294,14 +294,13 @@ func listChildren(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv
 
 // ─── event subscription ───────────────────────────────────────────────────────
 
-// childEventsSubject names one child — the native equivalent of the framed
-// ctrl_subscribe.
+// childEventsSubject names one child — the native per-child subscription.
 func childEventsSubject(childID string) *rafikiv1.EventSubject {
 	return &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}}
 }
 
 // allEventsSubject names everything the caller is entitled to — the native
-// equivalent of the framed ctrl_global_subscribe.
+// global subscription.
 func allEventsSubject() *rafikiv1.EventSubject {
 	return &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_All{All: true}}
 }
@@ -337,7 +336,7 @@ type eventStream struct {
 	events []*rafikiv1.Event
 }
 
-// openEvents opens a durable-tier event stream over connect.sock and starts
+// openEvents opens a durable-tier event stream over the control socket and starts
 // buffering it. replay maps child id → last ordinal SEEN (-1 replays the
 // child's whole log); pass the watermark for a minimal one-event replay.
 //

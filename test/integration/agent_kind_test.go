@@ -109,9 +109,8 @@ func turnSettled(childID string) func(*rafikiv1.Event) bool {
 
 // assistantTextIn returns the assistant message text carried by an
 // assistant_message event for childID, or "" for any other event. It is how
-// this test proves WHICH scripted turn a prompt consumed. The framed plane
-// carried the same content inside a message_end ctrl_event's message; the
-// durable assistant_message event is where publishAssistant puts it.
+// this test proves WHICH scripted turn a prompt consumed — the durable
+// assistant_message event is where publishAssistant puts it.
 func assistantTextIn(childID string, ev *rafikiv1.Event) string {
 	am := ev.GetAssistantMessage()
 	if am == nil || ev.GetChildId() != childID {

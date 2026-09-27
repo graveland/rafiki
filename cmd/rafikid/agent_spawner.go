@@ -11,7 +11,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/modelquery"
@@ -267,7 +266,7 @@ func (s *controllerSpawner) View(ctx context.Context, childID string, limit int)
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, control.RecentQuery{Limit: limit, Rendered: true})
+	res, err := s.c.GetRecent(childID, recentQuery{Limit: limit, Rendered: true})
 	if err != nil {
 		return "", err
 	}
@@ -416,7 +415,6 @@ func (s *controllerSpawner) Spawn(ctx context.Context, spec tools.SpawnSpec) (to
 	}
 
 	req := protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
 		Kind:          kind,
 		Name:          spec.Name,
 		Model:         spec.Model,

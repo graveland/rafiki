@@ -11,7 +11,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -339,7 +338,7 @@ func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 	})
 	t.Run("controller error keeps code and message", func(t *testing.T) {
 		s := NewServer(nil)
-		s.SetExecutorAdmin(&fakeExecutorAdmin{enrollErr: &control.ControllerError{
+		s.SetExecutorAdmin(&fakeExecutorAdmin{enrollErr: &ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "that executor name is already taken for this owner",
 		}})

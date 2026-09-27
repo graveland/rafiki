@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -91,7 +90,7 @@ func TestExecutorAdminEnrollRefusesAClientSuppliedOwner(t *testing.T) {
 		Labels:     map[string]string{"owner": "mallory"},
 		TtlSeconds: 3600,
 	})
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("got %v, want a ControllerError with code %s", err, protocol.ErrInvalidArgs)
 	}
@@ -184,7 +183,7 @@ func TestExecutorAdminListHonoursTheSelector(t *testing.T) {
 	// "os in linux" is a broken compound (set membership without parentheses),
 	// which ParseSelector refuses.
 	_, err = a.List(context.Background(), "os in linux", 0)
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrInvalidArgs {
 		t.Errorf("got %v, want a ControllerError with code %s", err, protocol.ErrInvalidArgs)
 	}
@@ -330,7 +329,7 @@ func TestExecutorAdminErrorsPassThroughUnmapped(t *testing.T) {
 	a, s := adminFixture()
 
 	err := a.Disable(context.Background(), "no-such-executor")
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrNotFound {
 		t.Fatalf("got %v, want a ControllerError with code %s", err, protocol.ErrNotFound)
 	}

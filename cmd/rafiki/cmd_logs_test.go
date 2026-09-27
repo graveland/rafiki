@@ -119,9 +119,9 @@ func (s *stubControl) ListChildren(
 	return connect.NewResponse(&rafikiv1.ListChildrenResponse{}), nil
 }
 
-// serveStubControl isolates profiles, then serves stub over the connect.sock
-// sibling of a profile's control socket — the same wiring production uses, so
-// a test exercises newConnectEndpoint's real dial path.
+// serveStubControl isolates profiles, then serves stub on a profile's own
+// socket — the one path the client dials — so a test exercises
+// newConnectEndpoint's real dial path.
 func serveStubControl(t *testing.T, stub *stubControl) {
 	t.Helper()
 	isolateProfiles(t)
@@ -135,14 +135,13 @@ func serveStubControl(t *testing.T, stub *stubControl) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
-	connectSock := filepath.Join(dir, "connect.sock") // sibling, per connectSocketFor
+	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, connectSock, routePath, handler)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: controlSock},
+		"scratch": {Name: "scratch", Socket: sock},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -262,7 +261,7 @@ func TestLogsRejectsAnUnknownEventType(t *testing.T) {
 	}
 }
 
-// logs prints the history served by the profile's OWN connect.sock — the pin
+// logs prints the history served by the profile's OWN socket — the pin
 // that used to hold for `history` holds for its replacement: a socket
 // profile's logs must not query whatever daemon happens to listen elsewhere.
 func TestLogsReachesTheSocketProfilesOwnDaemon(t *testing.T) {
@@ -440,7 +439,7 @@ func TestCompleteTypesOffersNativeNames(t *testing.T) {
 		t.Errorf("--types candidates %v missing agent_status", got)
 	}
 	for _, c := range allNativeTypes() {
-		if strings.Contains(c, "ctrl_") || strings.HasPrefix(c, "message_") {
+		if strings.HasPrefix(c, "message_") {
 			t.Errorf("--types candidate %q is framed-era vocabulary", c)
 		}
 	}

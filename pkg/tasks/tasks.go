@@ -119,7 +119,7 @@ type Change struct {
 // is set.
 //
 // ConversationID == "" deliberately means "every conversation": that is the
-// ctrl_task_list case, where a human asks "what is every agent doing" and
+// task-list case, where a human asks "what is every agent doing" and
 // there is no single conversation to scope to.
 type ListFilter struct {
 	ConversationID string

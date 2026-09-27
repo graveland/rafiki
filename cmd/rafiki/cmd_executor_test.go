@@ -262,7 +262,7 @@ func (s *executorStubControl) DeleteExecutor(
 }
 
 // executorTestDaemon stands a stub Control handler up on a scratch profile's
-// own connect.sock — the harness TestHistoryReachesTheSocketProfilesOwnDaemon
+// own socket — the harness TestHistoryReachesTheSocketProfilesOwnDaemon
 // uses — so a CLI verb dials THAT daemon and no other.
 func executorTestDaemon(t *testing.T, ctl *executorStubControl) {
 	t.Helper()
@@ -277,14 +277,13 @@ func executorTestDaemon(t *testing.T, ctl *executorStubControl) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
-	connectSock := filepath.Join(dir, "connect.sock") // sibling, per connectSocketFor
+	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(ctl)
-	serveConnectOnUnixSocket(t, connectSock, routePath, handler)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: controlSock},
+		"scratch": {Name: "scratch", Socket: sock},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

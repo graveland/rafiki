@@ -9,7 +9,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
@@ -18,29 +18,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
-// ExecutorSession is the framed ctrl_executor_session face. It anchors its
-// transient executor's lifetime on this connection's session context (see
-// connSessionContext), keyed by the connection itself: repeated calls from
-// the same connection therefore share one context, cancelled exactly once
-// when the connection closes (OnConnectionClose -> endConnSession).
-//
-// conn is nil in dispatch tests; a ticket with no connection to key off is
-// still one-shot and still dies with the daemon, so no lifetime tracking is
-// registered for it at all.
-func (c *Controller) ExecutorSession(
-	conn control.Connection,
-	id users.Identity,
-	req protocol.ExecutorSessionRequest,
-) (protocol.ExecutorSessionResponseData, error) {
-	ctx := context.Background()
-	var key any
-	if conn != nil {
-		key = conn
-		ctx = c.connSessionContext(conn)
-	}
-	return c.executorSession(ctx, key, id, req)
-}
-
 // connectExecutorSessions adapts Controller.executorSession to
 // connectapi.ExecutorSessions, the seam behind Connect's server-streaming
 // ExecutorSession RPC.
@@ -48,11 +25,11 @@ type connectExecutorSessions struct{ c *Controller }
 
 // Open mints (or finds) the caller's session executor for one Connect
 // stream. ctx is the STREAM's context and doubles as the opaque session key:
-// unlike the framed connection, a Connect stream never repeats a call, so it
-// needs no separate lookup to reuse — and using a fresh key per call is what
-// keeps two concurrent streams from the same identity from evicting each
-// other's executors. Stream end cancels ctx, which is the eviction trigger
-// (see executorSession's ctx.Done() watcher).
+// a stream never repeats a call, so it needs no separate lookup to reuse —
+// and using a fresh key per call is what keeps two concurrent streams from
+// the same identity from evicting each other's executors. Stream end cancels
+// ctx, which is the eviction trigger (see executorSession's ctx.Done()
+// watcher).
 func (a connectExecutorSessions) Open(
 	ctx context.Context,
 	req *rafikiv1.ExecutorSessionRequest,
@@ -76,7 +53,7 @@ func (a connectExecutorSessions) Open(
 // connectIdentity maps the Connect face's authenticated identity onto the
 // daemon's. A nil identity is the unix socket's local trust, which
 // sessionOwner already treats as "fall back to the daemon's own OS user" —
-// the same UDS rule the framed path relies on.
+// the same UDS rule every local connection relies on.
 func connectIdentity(ctx context.Context) users.Identity {
 	id := server.IdentityFromContext(ctx)
 	if id == nil {
@@ -85,9 +62,9 @@ func connectIdentity(ctx context.Context) users.Identity {
 	return users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
 }
 
-// executorSession is the shared implementation behind both the framed
-// ExecutorSession face and Connect's ExecutorSessions.Open: it tells an
-// interactive client how to reach an executor that shares its filesystem.
+// executorSession is the implementation behind Connect's ExecutorSessions.Open:
+// it tells an interactive client how to reach an executor that shares its
+// filesystem.
 //
 // Two answers, one selector. When a durable executor already covers this
 // machine and owner, the client starts nothing and uses it — it outlives the
@@ -104,9 +81,9 @@ func connectIdentity(ctx context.Context) users.Identity {
 // from the request. A client that could name its own owner or admits would be
 // granting itself access.
 //
-// key identifies this session for eviction purposes. A nil key (the framed
-// path's conn==nil case) registers no lifetime tracking at all: the ticket is
-// still one-shot and still dies with the daemon.
+// key identifies this session for eviction purposes. A nil key registers no
+// lifetime tracking at all: the ticket is still one-shot and still dies with
+// the daemon.
 func (c *Controller) executorSession(
 	ctx context.Context,
 	key any,
@@ -115,13 +92,13 @@ func (c *Controller) executorSession(
 ) (protocol.ExecutorSessionResponseData, error) {
 	owner, err := sessionOwner(id)
 	if err != nil {
-		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+		return protocol.ExecutorSessionResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: err.Error(),
 		}
 	}
 	if req.Name == "" {
-		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+		return protocol.ExecutorSessionResponseData{}, &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: "this machine has no executor name, so the daemon cannot tell " +
 				"which durable executor shares its filesystem: run " +
@@ -129,12 +106,12 @@ func (c *Controller) executorSession(
 		}
 	}
 	if err := paths.ValidateMachineName(req.Name); err != nil {
-		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+		return protocol.ExecutorSessionResponseData{}, &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs, Message: err.Error(),
 		}
 	}
 	if c.execPool == nil {
-		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+		return protocol.ExecutorSessionResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInternal,
 			Message: "no executor pool is configured",
 		}
@@ -167,7 +144,7 @@ func (c *Controller) executorSession(
 		Roots:       req.Roots,
 	})
 	if err != nil {
-		return protocol.ExecutorSessionResponseData{}, &control.ControllerError{
+		return protocol.ExecutorSessionResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInternal,
 			Message: "mint session ticket: " + err.Error(),
 		}
@@ -221,57 +198,6 @@ func (c *Controller) executorSession(
 type sessionExecutor struct {
 	executorID string
 	ticket     string
-}
-
-// connSession pairs a context with the cancel that ends it, so the framed
-// ExecutorSession verb can hand out the SAME context on every call from one
-// connection and cancel it exactly once, from OnConnectionClose.
-type connSession struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-// connSessionContext returns the context anchoring conn's session-executor
-// lifetime, minting one on first use so repeated ExecutorSession calls from
-// the same connection share it. This is what lets the framed verb evict
-// through the same ctx.Done() watcher as Connect's stream context, instead of
-// a bespoke connection-keyed release path.
-func (c *Controller) connSessionContext(conn control.Connection) context.Context {
-	c.connSessionsMu.Lock()
-	defer c.connSessionsMu.Unlock()
-	if cs, ok := c.connSessions[conn]; ok {
-		return cs.ctx
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	if c.connSessions == nil {
-		c.connSessions = make(map[control.Connection]connSession)
-	}
-	c.connSessions[conn] = connSession{ctx: ctx, cancel: cancel}
-	return ctx
-}
-
-// endConnSession ends conn's session: it cancels and forgets the connection's
-// session context, then releases the connection's session executor
-// SYNCHRONOUSLY, so the executor is no longer live in the pool by the time
-// OnConnectionClose returns — the pre-re-anchor behavior. releaseSessionExecutor
-// is idempotent, so whichever of this call or the ctx.Done() watcher gets there
-// first releases and the other no-ops; the watcher remains the only trigger on
-// the Connect plane, where there is no OnConnectionClose.
-//
-// Called once from OnConnectionClose; a no-op for a connection that never
-// called ExecutorSession.
-func (c *Controller) endConnSession(conn control.Connection) {
-	c.connSessionsMu.Lock()
-	cs, ok := c.connSessions[conn]
-	if ok {
-		delete(c.connSessions, conn)
-	}
-	c.connSessionsMu.Unlock()
-	if !ok {
-		return
-	}
-	cs.cancel()
-	c.releaseSessionExecutor(conn)
 }
 
 // releaseSessionExecutor revokes a session's ticket and evicts its executor.

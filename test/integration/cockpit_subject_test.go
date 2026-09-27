@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,10 +19,10 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-// connectClient dials the daemon's second unix socket, where the Connect
+// connectClient dials the daemon's control unix socket, where the Connect
 // control plane is served as h2c. It must match cmd/rafiki/connectclient.go.
 func (d *daemon) connectClient() rafikiv1connect.ControlClient {
-	sock := filepath.Join(filepath.Dir(d.socketPath), "connect.sock")
+	sock := d.socketPath
 	h := &http.Client{Transport: &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
@@ -35,7 +34,7 @@ func (d *daemon) connectClient() rafikiv1connect.ControlClient {
 }
 
 // spawnChildUnder spawns a child recording parentID as its tree edge, over
-// the daemon's connect.sock.
+// the daemon's control socket.
 func (d *daemon) spawnChildUnder(t *testing.T, parentID string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

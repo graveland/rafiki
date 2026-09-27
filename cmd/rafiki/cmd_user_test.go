@@ -8,7 +8,7 @@ package main
 //   - writeTokenFile / the render functions against in-memory types,
 //   - userConnectErr's rendering of Connect errors,
 //   - the real commands against a fake Connect server served on a socket
-//     profile's own connect.sock (the same harness cmd_history_test.go uses),
+//     profile's own socket (the same harness cmd_history_test.go uses),
 //     which pins that the request actually carries the profile's credential.
 
 import (
@@ -31,6 +31,26 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
+
+// writeTokenedProfile isolates the profile environment and writes one profile
+// "it" at sockPath, with a token file when token != "".
+func writeTokenedProfile(t *testing.T, sockPath, token string) {
+	t.Helper()
+	set := profile.Set{Profiles: map[string]profile.Profile{
+		"it": {Name: "it", Socket: sockPath},
+	}}
+	if err := profile.Save(set); err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+	if err := profile.SavePointer("it"); err != nil {
+		t.Fatalf("save pointer: %v", err)
+	}
+	if token != "" {
+		if err := profile.WriteToken("it", token); err != nil {
+			t.Fatalf("write token: %v", err)
+		}
+	}
+}
 
 // `rafiki user create` is also the login step: the token is shown once, so
 // the CLI must persist it or the user is locked out of their own daemon.
@@ -374,8 +394,8 @@ func TestUserConnectErr_RendersTheRafikiReason(t *testing.T) {
 // instead of the bare code-and-message rendering.
 func TestUserConnectErr_KeepsTheInfrastructureAdvice(t *testing.T) {
 	unreachable := connect.NewError(connect.CodeUnavailable, errors.New("connection refused"))
-	got := userConnectErr(unreachable, "/tmp/x/connect.sock")
-	if !strings.Contains(got.Error(), "cannot reach the rafiki daemon at /tmp/x/connect.sock") {
+	got := userConnectErr(unreachable, "/tmp/x/controller.sock")
+	if !strings.Contains(got.Error(), "cannot reach the rafiki daemon at /tmp/x/controller.sock") {
 		t.Fatalf("unreachable error lost the daemon-down advice: %v", got)
 	}
 	if !errors.Is(got, unreachable) {
@@ -506,10 +526,9 @@ func userTestRoot(t *testing.T, sub *cobra.Command, args ...string) (*cobra.Comm
 	return root, &out
 }
 
-// serveUserScratch seeds one socket profile "it" at dir and serves stub on the
-// profile's connect.sock sibling. dir must be a SHORT path: unix socket paths
-// are capped at ~104 bytes on darwin (the same reasoning
-// TestUserCreateDialsWithoutTheProfileToken's predecessor used).
+// serveUserScratch seeds one socket profile "it" at dir and serves stub on
+// the profile's own socket — the one path the client dials. dir must be a
+// SHORT path: unix socket paths are capped at ~104 bytes on darwin.
 func serveUserScratch(t *testing.T, stub *userStubControl, token string) {
 	t.Helper()
 	isolateProfiles(t)
@@ -521,19 +540,16 @@ func serveUserScratch(t *testing.T, stub *userStubControl, token string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
-	connectSock := filepath.Join(dir, "connect.sock")
+	sock := filepath.Join(dir, "controller.sock")
 
-	serveUserConnect(t, connectSock, stub)
-	writeTokenedProfile(t, controlSock, token)
+	serveUserConnect(t, sock, stub)
+	writeTokenedProfile(t, sock, token)
 }
 
-// TestUserCreateSendsTheProfileTokenOverConnect pins the credential contract
-// of the move onto Connect: the request carries the profile's token as a
-// Bearer credential (there is NO token-less dial — the framed recovery-path
-// dial is gone; a stale token is unstuck on the daemon host, per the design's
-// replacement of the bootstrap window) — and the minted token lands in the
-// profile's token file and on stdout exactly once.
+// TestUserCreateSendsTheProfileTokenOverConnect pins the credential contract:
+// the request carries the profile's token as a Bearer credential (there is no
+// token-less dial; a stale token is unstuck on the daemon host) — and the
+// minted token lands in the profile's token file and on stdout exactly once.
 func TestUserCreateSendsTheProfileTokenOverConnect(t *testing.T) {
 	stub := &userStubControl{}
 	serveUserScratch(t, stub, "rfk_stale")
@@ -567,8 +583,7 @@ func TestUserCreateSendsTheProfileTokenOverConnect(t *testing.T) {
 }
 
 // TestUserListReachesTheSocketProfilesDaemon drives `user list` against a
-// daemon served on the profile's OWN connect.sock — the property the framed
-// completion helper once got wrong by dialing a hardcoded socket.
+// daemon served on the profile's OWN socket.
 func TestUserListReachesTheSocketProfilesDaemon(t *testing.T) {
 	stub := &userStubControl{rows: sampleUserRows()}
 	serveUserScratch(t, stub, "")
@@ -666,12 +681,11 @@ func TestUserRmPropagatesARefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
-	connectSock := filepath.Join(dir, "connect.sock")
+	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(&refusingUserControl{})
-	serveConnectOnUnixSocket(t, connectSock, routePath, handler)
-	writeTokenedProfile(t, controlSock, "rfk_tok")
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
+	writeTokenedProfile(t, sock, "rfk_tok")
 
 	root, out := userTestRoot(t, newUserRmCmd(), "rm", "alice")
 	if err := root.Execute(); err == nil {

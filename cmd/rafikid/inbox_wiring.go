@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/inboxdb"
@@ -79,13 +79,13 @@ func (c *Controller) newInboxQueue(store inbox.Store) *inbox.Queue {
 func (c *Controller) validateSendTarget(childID string) error {
 	snap, ok := c.st.Get(childID)
 	if !ok {
-		return &control.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
+		return &connectapi.ControllerError{Code: protocol.ErrChildNotFound, Message: "child not found: " + childID}
 	}
 	switch snap.Status {
 	case protocol.StatusShuttingDown:
-		return &control.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
+		return &connectapi.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
 	case protocol.StatusExited:
-		return &control.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		return &connectapi.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
 	}
 	return nil
 }

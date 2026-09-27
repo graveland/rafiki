@@ -218,7 +218,7 @@ func (s *Server) ConversationQuery(
 // host, user and database, which a caller has no business learning from a
 // failed request. Mirrors pkg/control's mapErr, whose comment explains the
 // allowlist discipline -- an error that must reach the caller is promoted to
-// a curated error at its source (the *control.ControllerError the daemon's
+// a curated error at its source (the *ControllerError the daemon's
 // adapter translates), and everything else is redacted by default. This
 // package deliberately does not import pkg/control to inspect that type: it
 // imports pkg/insights, which this package must never reach, so the

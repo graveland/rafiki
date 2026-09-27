@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -28,7 +28,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 		return req, nil, nil
 	}
 	if c.presetStore == nil {
-		return req, nil, &control.ControllerError{
+		return req, nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "presets unavailable: this daemon has no database",
 		}
@@ -36,7 +36,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 	rec, err := c.presetStore.Get(ctx, ownerUserID, req.Preset)
 	if err != nil {
 		if !errors.Is(err, presets.ErrNotFound) {
-			return req, nil, &control.ControllerError{
+			return req, nil, &connectapi.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
 				Message: fmt.Sprintf("preset %q: %s", req.Preset, err),
 			}
@@ -47,7 +47,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 		group := presets.Group(req.Preset)
 		others, listErr := c.presetStore.List(ctx, ownerUserID, group)
 		if listErr != nil {
-			return req, nil, &control.ControllerError{
+			return req, nil, &connectapi.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
 				Message: fmt.Sprintf("preset %q: %s", req.Preset, listErr),
 			}
@@ -66,7 +66,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 		} else {
 			where = fmt.Sprintf("presets in %q: ", group)
 		}
-		return req, nil, &control.ControllerError{
+		return req, nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("no preset %q; %s%s", req.Preset, where, shown),
 		}
@@ -78,7 +78,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 	case req.Kind == "":
 		req.Kind = rec.Kind
 	case req.Kind != rec.Kind:
-		return req, nil, &control.ControllerError{
+		return req, nil, &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("kind %q conflicts with preset %q (kind %q)",
 				req.Kind, req.Preset, rec.Kind),
@@ -105,7 +105,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 			{"system_prompt", req.SystemPrompt != ""},
 		} {
 			if bad.set {
-				return req, nil, &control.ControllerError{
+				return req, nil, &connectapi.ControllerError{
 					Code:    protocol.ErrInvalidArgs,
 					Message: fmt.Sprintf("field %q does not apply to a %s preset", bad.field, rec.Kind),
 				}
@@ -117,7 +117,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 	// validateScriptSpawn after this runs; a preset could still try to fill
 	// them, so refuse here too, where the offending row is named.
 	if rec.Kind == presets.KindScript && (rec.Model != "" || rec.Provider != "") {
-		return req, nil, &control.ControllerError{
+		return req, nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("model/provider does not apply to a %s preset", presets.KindScript),
 		}
@@ -147,7 +147,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 
 	// System prompt: fixed by the preset. The request may append, not replace.
 	if req.SystemPrompt != "" {
-		return req, nil, &control.ControllerError{
+		return req, nil, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: fmt.Sprintf("system_prompt is fixed by preset %q", req.Preset),
 		}
@@ -176,7 +176,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 	// none, else exactly those) and may only be NARROWED by the request.
 	toolList, toolOff, err := narrowAllowlist("tools", req.Preset, rec.Tools, splitComma(req.Tools), req.NoBuiltinTools)
 	if err != nil {
-		return req, nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return req, nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	if rec.Tools == nil && len(toolList) > 0 {
 		// An open preset leaves the kind's full tool surface available; a
@@ -184,7 +184,7 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 		known := knownToolNames()
 		for _, name := range toolList {
 			if !known[name] {
-				return req, nil, &control.ControllerError{
+				return req, nil, &connectapi.ControllerError{
 					Code:    protocol.ErrInvalidArgs,
 					Message: fmt.Sprintf("unknown tool %q", name),
 				}
@@ -196,14 +196,14 @@ func (c *Controller) applyPreset(ctx context.Context, req protocol.SpawnRequest,
 
 	skillList, skillOff, err := narrowAllowlist("skills", req.Preset, rec.Skills, req.Skills, req.NoSkills)
 	if err != nil {
-		return req, nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return req, nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	req.Skills = skillList
 	req.NoSkills = skillOff
 
 	mcpList, mcpOff, err := narrowAllowlist("mcp_servers", req.Preset, rec.MCPServers, req.MCPServers, req.NoMCP)
 	if err != nil {
-		return req, nil, &control.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
+		return req, nil, &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: err.Error()}
 	}
 	req.MCPServers = mcpList
 	req.NoMCP = mcpOff

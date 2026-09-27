@@ -13,40 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-
-	"go.graveland.dev/rafiki/pkg/client"
 )
-
-// mustDial connects to the profile's daemon: its URL over TLS when it names a
-// remote, else its unix socket. Exits with code 2 on failure so connection
-// errors stay distinguishable from user-input errors (exit 1).
-//
-// There is no scheme dispatch and no flag to consult any more. The profile
-// already decided, once, and the failure this replaces was that RAFIKI_URL
-// silently outranked --socket — so an error naming TCP appeared while a socket
-// path sat in the argv.
-func mustDial(cmd *cobra.Command) *client.Client {
-	p := mustProfile(cmd)
-	if p.URL != "" {
-		c, err := client.DialURL(cmdCtx(cmd), p.URL, p.Token)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
-			os.Exit(2)
-		}
-		return c
-	}
-	// The profile's token rides the framed socket too: without it, framed
-	// verbs ran anonymous while Connect verbs ran as the profile's user, so a
-	// preset written over Connect was invisible to `rafiki create --preset` on
-	// the same profile (presets resolve against the connection's owner).
-	// sendAuthFrame skips an empty token, so a token-less profile is unchanged.
-	c, err := client.DialWithToken(p.Socket, p.Token)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connect profile %s: %v\n", p.Describe(), err)
-		os.Exit(2)
-	}
-	return c
-}
 
 // cmdCtx returns the cobra command's context — canceled on SIGINT/SIGTERM,
 // via the one signal.NotifyContext main() wraps around ExecuteContext. Falls
@@ -159,13 +126,10 @@ func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, kil
 		return nil
 	}
 
-	// Re-dial: rafiki-attach's connection has already closed when it exited.
-	c := mustDial(cmd)
-	defer c.Close()
-
+	// New client: the TUI's connection has already closed when it exited.
 	// "Terminate" is close's semantics under a different name: stop the
 	// child if still running, then finalize it — unconditionally.
-	if err := closeChild(cmdCtx(cmd), c, childID, 0, 0); err != nil {
+	if err := closeChildConnect(cmdCtx(cmd), ep.control(), childID, 0, 0); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
 	return nil

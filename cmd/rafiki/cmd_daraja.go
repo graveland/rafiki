@@ -316,8 +316,10 @@ func runDarajaScriptServe(childID, interpreter, cwd string, argv []string, pinCe
 	// executor verifies it — by pinned fingerprint when one was configured,
 	// never by silently trusting whatever the network presents. A
 	// --connect-socket executor is on the daemon's own machine: the face for
-	// Connect verbs is the daemon's Connect control socket (a sibling of the
-	// executor socket it dialled), and no TLS applies to a unix socket.
+	// Connect verbs is the daemon's control socket, the SIBLING of the
+	// executor socket it dialled (paths.SocketPath's file name, in whatever
+	// directory the operator pointed --connect-socket at), and no TLS applies
+	// to a unix socket.
 	var target *url.URL
 	var rt http.RoundTripper
 	switch {
@@ -325,7 +327,9 @@ func runDarajaScriptServe(childID, interpreter, cwd string, argv []string, pinCe
 		target = &url.URL{Scheme: "https", Host: connect}
 		rt = daraja.TLSTransport(serverName, pinCert)
 	default:
-		faceSocket := paths.ConnectSocketPath()
+		// connect == "" here means --connect-socket named the executor socket;
+		// the control socket is beside it.
+		faceSocket := filepath.Join(filepath.Dir(connectSocket), "controller.sock")
 		target = &url.URL{Scheme: "http", Host: "connect.rafiki.invalid"}
 		rt = childsock.UnixTransport(faceSocket)
 	}

@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
@@ -59,7 +58,7 @@ func (c *Controller) conversationIDForChild(snap childstore.Snapshot) string {
 // render-time timestamps, not capture time), q.Rendered has no raw alternative
 // on this branch, and --raw on a resolvable child receives pi vocabulary rather
 // than the child's backend frames.
-func (c *Controller) dbRecent(conversationID string, q control.RecentQuery) []ring.Event {
+func (c *Controller) dbRecent(conversationID string, q recentQuery) []ring.Event {
 	if c.pool == nil || conversationID == "" {
 		return nil
 	}

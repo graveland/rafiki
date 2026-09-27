@@ -19,7 +19,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/insights"
@@ -252,13 +251,13 @@ func TestConversationReadNotFoundClassifiesTheControllersNotFoundAnswer(t *testi
 		err  error
 		want bool
 	}{
-		{"controller not-found", &control.ControllerError{
+		{"controller not-found", &connectapi.ControllerError{
 			Code: protocol.ErrNotFound, Message: "export: conversation x: insights: conversation not found",
 		}, true},
 		{"wrapped controller not-found", fmt.Errorf("load: %w",
-			&control.ControllerError{Code: protocol.ErrNotFound}), true},
+			&connectapi.ControllerError{Code: protocol.ErrNotFound}), true},
 		{"raw sentinel", insights.ErrNotFound, true},
-		{"controller internal", &control.ControllerError{
+		{"controller internal", &connectapi.ControllerError{
 			Code: protocol.ErrInternal, Message: "boom",
 		}, false},
 		{"nil", nil, false},

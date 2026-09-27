@@ -14,7 +14,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/nativebus"
@@ -25,9 +24,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
-// nativeEventSource adapts the nativebus registry to connectapi.EventSource,
-// avoiding a method-name collision with Controller.Subscribe (which already
-// exists with a different signature for the frame-based control protocol).
+// nativeEventSource adapts the nativebus registry to connectapi.EventSource.
 type nativeEventSource struct {
 	native *nativebus.Registry
 }
@@ -41,8 +38,6 @@ func (s *nativeEventSource) SubscribeAll() (<-chan *rafikiv1.Event, func()) {
 }
 
 // Subscribe satisfies connectapi.EventSource via the nativeEventSource adapter.
-// The Controller's own Subscribe method serves the frame-based protocol;
-// this is a distinct signature for the Connect-based StreamEvents path.
 func (c *Controller) nativeEventSource() *nativeEventSource {
 	return &nativeEventSource{native: c.native}
 }
@@ -63,7 +58,7 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 
 // summariesFor maps snapshots onto the protocol summaries every list-shaped
 // verb serves: ONE batched cost rollup (see costsFor — N serial round trips
-// was the cockpit's seed-path stall), and the SnapshotToSummary field mapping
+// was the cockpit's seed-path stall), and the snapshotToSummary field mapping
 // (provider+model join, nil PID for an exited child, Unix-millis stamps,
 // catalog-sourced context window) that is easy to get subtly wrong by hand.
 // Both the operator list and the child-scoped subtree list go through it, so
@@ -79,7 +74,7 @@ func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSu
 
 	out := make([]protocol.ChildSummary, 0, len(kept))
 	for _, s := range kept {
-		sum := control.SnapshotToSummary(s, c.ContextWindow)
+		sum := snapshotToSummary(s, c.ContextWindow)
 		if cost, ok := costs[s.ChildID]; ok {
 			sum.CostUSD = &cost
 		}
@@ -94,19 +89,66 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 	if !ok {
 		return protocol.ChildSummary{}, false
 	}
-	sum := control.SnapshotToSummary(snap, c.ContextWindow)
+	sum := snapshotToSummary(snap, c.ContextWindow)
 	if cost, ok := c.costsFor([]childstore.Snapshot{snap})[childID]; ok {
 		sum.CostUSD = &cost
 	}
 	return sum, true
 }
 
-// Costs satisfies control.Controller for the framed protocol's ctrl_list and
-// ctrl_get -- the same batched rollup ListChildren/GetChild already use for
-// the Connect plane, so cost_usd now populates on both surfaces from one
-// implementation.
-func (c *Controller) Costs(snaps []childstore.Snapshot) map[string]float64 {
-	return c.costsFor(snaps)
+// snapshotToSummary converts a childstore.Snapshot to the wire ChildSummary
+// shape. PID is omitted (nil) when the child has exited. Model is formatted as
+// "provider/model" when both fields are present.
+//
+// contextWindow, when non-nil, is consulted for the resolved Model to fill
+// ContextWindow/MaxCompletionTokens — a func rather than a *routing.ModelCatalog
+// so callers (and tests) need not depend on pkg/routing; callers pass
+// Controller.ContextWindow bound to the real implementation. A nil func or a
+// false ok leaves both fields at their zero value (omitted on the wire).
+func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string) (contextLen, maxCompletion int, ok bool)) protocol.ChildSummary {
+	model := snap.Model
+	if snap.Provider != "" && snap.Model != "" {
+		model = snap.Provider + "/" + snap.Model
+	}
+	var pid *int
+	if snap.Status != protocol.StatusExited {
+		pid = &snap.PID
+	}
+	cs := protocol.ChildSummary{
+		ChildID:      snap.ChildID,
+		PID:          pid,
+		Cwd:          snap.Cwd,
+		Name:         snap.Name,
+		Kind:         snap.Kind,
+		Model:        model,
+		SessionID:    snap.SessionID,
+		SessionFile:  snap.SessionFile,
+		Status:       string(snap.Status),
+		StartedAt:    snap.StartedAt.UnixMilli(),
+		LastActivity: snap.LastActivity.UnixMilli(),
+		ExitCode:     snap.ExitCode,
+		ExitSignal:   snap.ExitSignal,
+	}
+	if len(snap.Labels) > 0 {
+		cs.Labels = snap.Labels
+	}
+	if len(snap.SlashCommands) > 0 {
+		cs.SlashCommands = snap.SlashCommands
+	}
+	if contextWindow != nil && model != "" {
+		if cl, mc, ok := contextWindow(model); ok {
+			cs.ContextWindow = cl
+			cs.MaxCompletionTokens = mc
+		}
+	}
+	if snap.MaxCost > 0 {
+		maxCost := snap.MaxCost
+		cs.MaxCost = &maxCost
+	}
+	if snap.Result != "" {
+		cs.Result = snap.Result
+	}
+	return cs
 }
 
 // costRollupTimeout bounds the whole batch, not one child. It is a display
@@ -302,8 +344,8 @@ func (l connectLifecycle) SetBudget(ctx context.Context, childID string, maxCost
 
 // connectModels adapts *Controller to connectapi.ModelLister. A distinct type
 // for the same reason connectLifecycle is one: Controller.ListModels already
-// exists with a different signature (it answers the framed ctrl_list_models),
-// and renaming it would touch every existing caller for no gain.
+// exists with a different signature, and renaming it would touch every
+// existing caller for no gain.
 type connectModels struct{ c *Controller }
 
 func (m connectModels) ListModels(ctx context.Context, provider, kind string) ([]connectapi.ModelRow, error) {
@@ -620,7 +662,7 @@ func (a connectConversations) RunQuery(ctx context.Context, name string, f conne
 
 // conversationReadNotFound reports whether err is the Controller's not-found
 // answer for a conversation read. The Controller translates
-// insights.ErrNotFound into a *control.ControllerError carrying only a
+// insights.ErrNotFound into a *connectapi.ControllerError carrying only a
 // message string -- ControllerError does not Unwrap its original -- so
 // errors.Is against the sentinel never matches through the translation and
 // must be paired with the code comparison dispatch's mapErr uses. A bare
@@ -633,21 +675,21 @@ func conversationReadNotFound(err error) bool {
 	if errors.Is(err, insights.ErrNotFound) {
 		return true
 	}
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if errors.As(err, &ce) {
 		return ce.Code == protocol.ErrNotFound
 	}
 	return false
 }
 
-// logIfUncoded logs err's cause when it is NOT a *control.ControllerError --
+// logIfUncoded logs err's cause when it is NOT a *connectapi.ControllerError --
 // connectapi.ConnectErr redacts an uncoded error to a fixed "internal error"
 // text and does not log, so the cause is lost unless the call site logs it
 // first (the same rule pkg/connectapi's own SetBudget and Close follow).
 // A ControllerError's message is already curated for the wire and reaches the
 // caller unredacted, so logging it here would be noise.
 func logIfUncoded(msg string, err error) {
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
 		slog.Error(msg, "error", err)
 	}

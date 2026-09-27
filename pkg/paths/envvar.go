@@ -58,15 +58,14 @@ const (
 	// both always meant "where do I send this", just to different callers.
 	//
 	// Empty DISABLES the proxy mechanism: children talk to providers
-	// directly. client.IsRemoteURL decides whether a given value also
-	// names a control-plane host (https:// only — an http:// value is the
-	// local loopback face, which has no control listener).
+	// directly. A value also names a control-plane host only when its
+	// scheme is https — an http:// value is the local loopback face, which
+	// has no control listener.
 	URL = "RAFIKI_URL"
 
 	// Token is the bearer token this process PRESENTS — to a proxy's
-	// Authorization header, and to a remote daemon's ctrl_auth frame. One
-	// name now covers what a separate, retired control-token variable used
-	// to carry.
+	// Authorization header, and to a remote daemon's control plane. One name
+	// covers what a separate, retired control-token variable used to carry.
 	//
 	// Daemon-side only now: rafikid reads it from its own service environment
 	// to authenticate to an external proxy named by URL. The CLIENT takes its

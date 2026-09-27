@@ -15,7 +15,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childsock"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
@@ -49,7 +49,7 @@ import (
 
 // scriptHostRoot is the per-daemon directory script children materialize
 // into: <stateDir>/script-host/<childID>/ holds both the materialized
-// pymodule tree and the child's connect.sock. The integration suite
+// pymodule tree and the child's per-child socket. The integration suite
 // reconstructs the path, so it must move with childsock.SocketName.
 func scriptHostDir(stateDir, childID string) string {
 	return filepath.Join(stateDir, "script-host", childID)
@@ -456,7 +456,7 @@ func validateScriptSpawn(req protocol.SpawnRequest) error {
 		// launched here can never run the spec. This is the server-side
 		// backstop; fail closed, naming both facts.
 		if req.Script != nil {
-			return &control.ControllerError{
+			return &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
 				Message: fmt.Sprintf("a script spec was given but the resolved kind is %q, not %q — "+
 					"the spawn would silently drop it (a non-script preset re-resolved the kind)",
@@ -505,7 +505,7 @@ func validateScriptSpawn(req protocol.SpawnRequest) error {
 		{"env_override", req.EnvOverride},
 	} {
 		if bad.set {
-			return &control.ControllerError{
+			return &connectapi.ControllerError{
 				Code:    protocol.ErrInvalidArgs,
 				Message: fmt.Sprintf("field %q does not apply to kind %q", bad.field, protocol.KindScript),
 			}
@@ -514,7 +514,7 @@ func validateScriptSpawn(req protocol.SpawnRequest) error {
 	// prefill is refused by validatePrefill for every non-fundi kind; the
 	// spec check here is the script-specific shape the runner needs.
 	if req.Script == nil {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "script kind requires a script spec: repo (\"local\" or a git source's name) and the script's pymodule name",
 		}

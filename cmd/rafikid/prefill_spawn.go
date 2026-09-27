@@ -3,7 +3,7 @@ package main
 import (
 	"strings"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/prefill"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -28,7 +28,7 @@ func validatePrefill(req protocol.SpawnRequest) error {
 	}
 
 	if req.Kind != "" && req.Kind != protocol.KindFundi {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: "prefill: only kind fundi supports a pre-fill",
 		}
@@ -40,7 +40,7 @@ func validatePrefill(req protocol.SpawnRequest) error {
 		if !strings.HasPrefix(msg, "prefill: ") {
 			msg = "prefill: " + msg
 		}
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
 			Message: msg,
 		}

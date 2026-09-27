@@ -14,7 +14,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
@@ -225,7 +224,7 @@ func childIDsOf(cs []*rafikiv1.ChildSummary) map[string]bool {
 // cwd_contains / since / labels / has_label on BOTH ListChildren branches --
 // the operator path (ChildLister) and the childScoped path (ChildScope.
 // Subtree) -- with the exact protocol.ListFilter semantics the framed plane's
-// ctrl_list applies. Filters only ever narrow a child caller's subtree, never
+// the child-list filter applies. Filters only ever narrow a child caller's subtree, never
 // widen it.
 func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 	all := []protocol.ChildSummary{
@@ -306,13 +305,13 @@ func captureSlog(t *testing.T, run func() error) (string, error) {
 }
 
 // TestKillChildExitedKeepsCodeAndReason pins Kill's child-exited
-// ControllerError: it reaches the client as FailedPrecondition — the code
+// connectapi.ControllerError: it reaches the client as FailedPrecondition — the code
 // errCodeTable maps ErrChildExited to — with the precise reason riding the
 // google.rpc.ErrorInfo detail and the daemon's authored message forwarded.
 // The raw-Internal wrap this replaces told every client the daemon was broken
 // and carried no branchable reason.
 func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
-	f := &fakeLifecycle{killErr: &control.ControllerError{
+	f := &fakeLifecycle{killErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildExited,
 		Message: "child has already exited",
 	}}
@@ -334,10 +333,10 @@ func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
 
 // TestSendChildExitedMapsToFailedPrecondition pins the same classification on
 // Send: the controller's send validation (validateSendTarget) answers an
-// exited or shutting-down child with an authored ControllerError, which the
+// exited or shutting-down child with an authored connectapi.ControllerError, which the
 // raw-Internal wrap flattened into a code-less Internal.
 func TestSendChildExitedMapsToFailedPrecondition(t *testing.T) {
-	acc := &fakeAccepter{err: &control.ControllerError{
+	acc := &fakeAccepter{err: &connectapi.ControllerError{
 		Code:    protocol.ErrChildExited,
 		Message: "child has exited",
 	}}
@@ -359,7 +358,7 @@ func TestSendChildExitedMapsToFailedPrecondition(t *testing.T) {
 // arrives as InvalidArgument with its reason, not Internal.
 func TestSpawnControllerErrorKeepsItsCode(t *testing.T) {
 	s := connectapi.NewServer(nil)
-	s.SetChildLifecycle(&fakeLifecycle{spawnErr: &control.ControllerError{
+	s.SetChildLifecycle(&fakeLifecycle{spawnErr: &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
 		Message: "max_depth below the floor",
 	}})
@@ -375,7 +374,7 @@ func TestSpawnControllerErrorKeepsItsCode(t *testing.T) {
 }
 
 // TestSendSpawnKillUncodedErrorsAreRedactedAndLogged walks Send, Spawn and Kill's
-// uncoded path: an error that is not a ControllerError is infrastructure text
+// uncoded path: an error that is not a connectapi.ControllerError is infrastructure text
 // this codebase did not author, so the caller sees only the fixed internal
 // text with no reason and no raw fragment, while the cause is logged with the
 // verb's context so it is not lost.

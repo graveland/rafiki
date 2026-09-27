@@ -3,7 +3,7 @@
 package integration_test
 
 // Wiring proof for the Wave-1 Connect seams, on the real daemon: every new
-// Control RPC must answer over connect.sock through the backend main.go
+// Control RPC must answer over the daemon's control socket through the backend main.go
 // wires (cmd/rafikid: SetChildOps, SetExecutorAdmin, SetUserAdmin,
 // SetRawChildIO, SetExecutorSessions) instead of the generated handlers'
 // "not yet wired" Unavailable.
@@ -76,7 +76,7 @@ func TestConnectNewRPCsWired(t *testing.T) {
 		t.Logf("ModelInfo(\"x\"): known=%v", resp2.Msg.GetKnown())
 	}
 
-	// ListUsers: connectUserAdmin, admitted because the connect.sock caller
+	// ListUsers: connectUserAdmin, admitted because the local-socket caller
 	// is anonymous (UDS local trust — the socket is the credential).
 	_, err = client.ListUsers(ctx, connect.NewRequest(&rafikiv1.ListUsersRequest{}))
 	unwired("ListUsers", err)

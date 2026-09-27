@@ -256,9 +256,8 @@ type ControlClient interface {
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
 	Receive(context.Context, *connect.Request[v1.ReceiveRequest]) (*connect.ServerStreamForClient[v1.ScriptMessage], error)
 	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
-	// ─── Framed-protocol retirement RPCs ─────────────────────────────────────
-	// The Connect faces of the framed ctrl_* verbs the retirement moves over.
-	// Wave 2 fills the handlers; until then they answer Unimplemented.
+	// ─── Control-plane RPCs ─────────────────────────────────────────────────
+	// The verb faces the framed protocol once served, moved over wholesale.
 	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
 	CloseAllExited(context.Context, *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error)
 	SetLabels(context.Context, *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error)
@@ -1232,9 +1231,8 @@ type ControlHandler interface {
 	Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error)
 	Receive(context.Context, *connect.Request[v1.ReceiveRequest], *connect.ServerStream[v1.ScriptMessage]) error
 	SetResult(context.Context, *connect.Request[v1.SetResultRequest]) (*connect.Response[v1.SetResultResponse], error)
-	// ─── Framed-protocol retirement RPCs ─────────────────────────────────────
-	// The Connect faces of the framed ctrl_* verbs the retirement moves over.
-	// Wave 2 fills the handlers; until then they answer Unimplemented.
+	// ─── Control-plane RPCs ─────────────────────────────────────────────────
+	// The verb faces the framed protocol once served, moved over wholesale.
 	Resume(context.Context, *connect.Request[v1.ResumeRequest]) (*connect.Response[v1.ResumeResponse], error)
 	CloseAllExited(context.Context, *connect.Request[v1.CloseAllExitedRequest]) (*connect.Response[v1.CloseAllExitedResponse], error)
 	SetLabels(context.Context, *connect.Request[v1.SetLabelsRequest]) (*connect.Response[v1.SetLabelsResponse], error)

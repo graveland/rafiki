@@ -7,10 +7,36 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
+
+// ControllerError carries a machine-readable protocol error code from a
+// Controller method, letting ConnectErr translate it to the correct Connect
+// code without inspecting error strings.
+//
+// A ControllerError's Message is a promise: this codebase wrote it, and
+// ConnectErr forwards it to the caller unexamined.
+//
+// Building one from another error's text is therefore fine when that error is
+// OURS — a domain sentinel or a message from our own machinery, whose wording
+// we control (translateInsightsErr on insights.ErrNotFound, the spawn-plan
+// errors). It is NOT fine for an error from a dependency, whose text we do not
+// control and cannot audit: `&ControllerError{Message: err.Error()}` over a
+// driver or network error re-opens exactly the hole ConnectErr's redaction
+// closes, and errors.As finds it however deeply it is wrapped. That is what
+// the executor enroll/list paths used to do with pgx errors, which name the
+// database host, user and database on a connection failure.
+//
+// The test is not "did I write this line" but "do I control every string that
+// can reach it". If a dependency's error can flow into the Message, promote a
+// known sentinel instead, or let it through to be logged and generalised.
+type ControllerError struct {
+	Code    string
+	Message string
+}
+
+func (e *ControllerError) Error() string { return e.Message }
 
 // errCodeTable maps every protocol.Err* code onto its Connect code. The code
 // the daemon attached at the source IS the classification; Connect codes are
@@ -42,15 +68,14 @@ var errCodeTable = map[string]connect.Code{
 // ConnectErr. Its raw text is never forwarded: text this codebase did not
 // author can name infrastructure the caller has no business learning from a
 // failed request (a pgx failure names the database host, user and database).
-// The same allowlist discipline pkg/control's mapErr applies on the framed
-// plane.
+// The same allowlist discipline applies on every plane this package serves.
 const internalErrText = "internal error"
 
 // ConnectErr converts a daemon error into a *connect.Error. A
-// *control.ControllerError keeps its authored message, gets the Connect code
-// for its protocol.Err* code, and carries that code as a
-// google.rpc.ErrorInfo{Reason: <code>, Domain: "rafiki"} detail so a client
-// can branch on the precise reason (Connect codes are coarser).
+// *ControllerError keeps its authored message, gets the Connect code for its
+// protocol.Err* code, and carries that code as a google.rpc.ErrorInfo{Reason:
+// <code>, Domain: "rafiki"} detail so a client can branch on the precise
+// reason (Connect codes are coarser).
 //
 // Any other error is CodeInternal with the fixed text internalErrText: its raw
 // text is never forwarded and no detail is attached — matching the redaction
@@ -63,7 +88,7 @@ func ConnectErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	var ce *control.ControllerError
+	var ce *ControllerError
 	if !errors.As(err, &ce) {
 		return connect.NewError(connect.CodeInternal, errors.New(internalErrText))
 	}

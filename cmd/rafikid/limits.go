@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -46,7 +46,7 @@ func resolveAbsoluteDepthCeiling() int {
 // worded so the model that triggered it can act: what was asked, what the
 // limit is, and which limit it was.
 func limitError(format string, args ...any) error {
-	return &control.ControllerError{
+	return &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
 		Message: fmt.Sprintf(format, args...),
 	}
@@ -363,7 +363,7 @@ func grantedChildren(req protocol.SpawnRequest) int {
 // This is the same monotonicity effectiveExecutorSet enforces for selectors: a
 // descendant may narrow, never widen. It reads only the parent row the daemon
 // stamped and daemon-local pool state — nothing from the caller, nothing from
-// the model — so ctrl_spawn, ctrl_resume and agent_spawn are all covered by
+// the model — so Spawn, Resume and agent_spawn are all covered by
 // the one check, with no route left to enumerate.
 func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executorPoolConnected, scriptExecutorRouted bool) error {
 	// An omitted kind is fundi (spawnKindLabel), so normalize it the same way
@@ -410,7 +410,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 	}
 
 	if kind == protocol.KindClaude {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: "spawn refused: the parent runs under an executor grant, and kind claude has " +
 				"no executor pool connection — its local-subprocess fallback would fork on the " +
@@ -420,7 +420,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 	}
 	if kind == protocol.KindScript {
 		if executorPoolConnected {
-			return &control.ControllerError{
+			return &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
 				Message: "spawn refused: the parent runs under an executor grant, and no live executor " +
 					"advertises the script launch kind (start one with --launch script) — the local " +
@@ -428,7 +428,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 					"Run this spawn top-level, or host a script-capable executor.",
 			}
 		}
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code: protocol.ErrInvalidArgs,
 			Message: "spawn refused: the parent runs under an executor grant, and kind script has " +
 				"no executor pool connection — its local-subprocess fallback would fork on the " +
@@ -436,7 +436,7 @@ func checkKindNarrowing(st *childstore.Store, req protocol.SpawnRequest, executo
 				"(RAFIKI_EXECUTORS_ENABLED) with --launch script, or run this spawn top-level.",
 		}
 	}
-	return &control.ControllerError{
+	return &connectapi.ControllerError{
 		Code: protocol.ErrInvalidArgs,
 		Message: "spawn refused: the parent runs under an executor grant, and kind " + kind +
 			" ignores executors entirely — it would fork on the daemon's own host with the " +

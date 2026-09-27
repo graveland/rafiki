@@ -9,12 +9,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// ExecutorAdmin is the operator-side slice of the daemon behind the framed
-// ctrl_executor_enroll / create / label / disable / enable / delete verbs —
+// ExecutorAdmin is the operator-side slice of the daemon behind the
+// executor enroll / create / label / disable / enable / delete RPCs —
 // the management half of the executor plane, as distinct from the read-only
 // listing ExecutorLister already serves.
 type ExecutorAdmin interface {
@@ -58,7 +57,7 @@ func executorAdminErr(op string, err error) error {
 	if errors.As(err, &cerr) {
 		return err
 	}
-	var ce *control.ControllerError
+	var ce *ControllerError
 	if !errors.As(err, &ce) {
 		// ConnectErr redacts this below; log the cause here or lose it.
 		slog.Error("connect: executor admin "+op+" failed", "error", err)
@@ -66,8 +65,8 @@ func executorAdminErr(op string, err error) error {
 	return ConnectErr(err)
 }
 
-// EnrollExecutor serves the framed ctrl_executor_enroll face: mint a one-time
-// enrollment token. ttl_seconds must be positive — the framed dispatcher
+// EnrollExecutor serves the EnrollExecutor RPC: mint a one-time
+// enrollment token. ttl_seconds must be positive — the handler
 // refuses a non-positive one rather than silently minting the Controller's
 // 72h default, and this face serves the same verb.
 func (s *Server) EnrollExecutor(
@@ -90,7 +89,7 @@ func (s *Server) EnrollExecutor(
 	return connect.NewResponse(resp), nil
 }
 
-// CreateExecutor serves the framed ctrl_executor_create face: mint an
+// CreateExecutor serves the CreateExecutor RPC: mint an
 // executor row and its durable credential in one step.
 func (s *Server) CreateExecutor(
 	ctx context.Context,
@@ -108,8 +107,8 @@ func (s *Server) CreateExecutor(
 	return connect.NewResponse(resp), nil
 }
 
-// LabelExecutor serves the framed ctrl_executor_label face. executor_id and at
-// least one of set/remove are required — the framed dispatcher refuses an
+// LabelExecutor serves the LabelExecutor RPC. executor_id and at
+// least one of set/remove are required — the handler refuses an
 // empty change rather than paying a store round trip to change nothing, and
 // this face serves the same verb.
 func (s *Server) LabelExecutor(
@@ -136,7 +135,7 @@ func (s *Server) LabelExecutor(
 	return connect.NewResponse(&rafikiv1.LabelExecutorResponse{Executor: toProtoExecutor(row)}), nil
 }
 
-// DisableExecutor serves the framed ctrl_executor_disable face.
+// DisableExecutor serves the DisableExecutor RPC.
 func (s *Server) DisableExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.DisableExecutorRequest],
@@ -156,7 +155,7 @@ func (s *Server) DisableExecutor(
 	return connect.NewResponse(&rafikiv1.DisableExecutorResponse{}), nil
 }
 
-// EnableExecutor serves the framed ctrl_executor_enable face.
+// EnableExecutor serves the EnableExecutor RPC.
 func (s *Server) EnableExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.EnableExecutorRequest],
@@ -176,7 +175,7 @@ func (s *Server) EnableExecutor(
 	return connect.NewResponse(&rafikiv1.EnableExecutorResponse{}), nil
 }
 
-// DeleteExecutor serves the framed ctrl_executor_delete face.
+// DeleteExecutor serves the DeleteExecutor RPC.
 func (s *Server) DeleteExecutor(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.DeleteExecutorRequest],

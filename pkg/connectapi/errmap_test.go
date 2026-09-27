@@ -15,7 +15,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
@@ -127,12 +126,12 @@ func parseProtocolErrConsts(t *testing.T) map[string]string {
 }
 
 func TestConnectErrRoundTripsReason(t *testing.T) {
-	if got := rpcreason.Reason(ConnectErr(&control.ControllerError{Code: protocol.ErrChildExited})); got != "child_exited" {
+	if got := rpcreason.Reason(ConnectErr(&ControllerError{Code: protocol.ErrChildExited})); got != "child_exited" {
 		t.Errorf("Reason(ConnectErr(ErrChildExited)) = %q, want child_exited", got)
 	}
 	// The authored message is forwarded alongside the classification.
 	authored := "child c_1 already exited"
-	err := ConnectErr(&control.ControllerError{Code: protocol.ErrChildExited, Message: authored})
+	err := ConnectErr(&ControllerError{Code: protocol.ErrChildExited, Message: authored})
 	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
 		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
 	}
@@ -173,7 +172,7 @@ func TestConnectErrNilIsNil(t *testing.T) {
 }
 
 func TestConnectErrUnknownReasonStillAttached(t *testing.T) {
-	err := ConnectErr(&control.ControllerError{Code: "some_future_code", Message: "explain"})
+	err := ConnectErr(&ControllerError{Code: "some_future_code", Message: "explain"})
 	if connect.CodeOf(err) != connect.CodeInternal {
 		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
 	}

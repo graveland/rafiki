@@ -15,7 +15,7 @@ import (
 
 // TaskLister is the narrow slice of the daemon's Controller this package needs
 // to answer ListTasks. It mirrors ChildLister: the Controller already serves
-// this shape for the ctrl_task_list frame verb, so there is one implementation
+// this shape for ListTasks, so there is one implementation
 // behind both faces rather than two that can disagree.
 type TaskLister interface {
 	TaskList(ctx context.Context, req protocol.TaskListRequest) ([]tasks.Task, error)

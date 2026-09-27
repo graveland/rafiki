@@ -327,15 +327,14 @@ func TestModelCompletionUsesTheResolvedProfilesKind(t *testing.T) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
-	connectSock := filepath.Join(dir, "connect.sock")
+	sock := filepath.Join(dir, "controller.sock")
 
 	stub := &stubModelsControl{}
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, connectSock, routePath, handler)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"claudework": {Name: "claudework", Socket: controlSock, Kind: protocol.KindClaude},
+		"claudework": {Name: "claudework", Socket: sock, Kind: protocol.KindClaude},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

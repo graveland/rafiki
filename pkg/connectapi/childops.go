@@ -9,14 +9,12 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// ChildOps is the operator-side slice of the daemon behind the framed
-// ctrl_resume / ctrl_forget_all_exited / ctrl_set_labels / ctrl_status /
-// ctrl_search / ctrl_daemon_shutdown / ctrl_model_info /
-// ctrl_conversation_stats verbs. It is a seam because the daemon's Controller
+// ChildOps is the operator-side slice of the daemon behind the Resume,
+// CloseAllExited, SetLabels, Status, Search, ShutdownDaemon, ModelInfo and
+// ConversationStats RPCs. It is a seam because the daemon's Controller
 // — the only thing that can answer any of it — is built after the proxy face
 // that owns this Server, so it attaches post-construction, and because
 // depending on the interface keeps the handler testable without a database.
@@ -62,9 +60,9 @@ func (s *Server) childOp() (ChildOps, error) {
 //   - An already-coded *connect.Error passes through untouched — the
 //     ConversationStats adapter's scopeFor refusal arrives as
 //     CodePermissionDenied, and ConnectErr would re-wrap it as internal.
-//   - A *control.ControllerError keeps its authored message under its
+//   - A *ControllerError keeps its authored message under its
 //     protocol code (ConnectErr) — the code the daemon attached at the source
-//     IS the classification, the same decision the framed mapErr makes.
+//     IS the classification.
 //   - Anything else is infrastructure text ConnectErr redacts; its cause is
 //     logged here first or it is lost (the same discipline as close.go).
 func mapChildOpsErr(err error, logMsg string, logArgs ...any) error {
@@ -72,7 +70,7 @@ func mapChildOpsErr(err error, logMsg string, logArgs ...any) error {
 	if errors.As(err, &cerr) {
 		return err
 	}
-	var ce *control.ControllerError
+	var ce *ControllerError
 	if !errors.As(err, &ce) {
 		// ConnectErr redacts this below; log the cause here or lose it.
 		slog.Error(logMsg, append(logArgs, "error", err)...)
@@ -80,10 +78,10 @@ func mapChildOpsErr(err error, logMsg string, logArgs ...any) error {
 	return ConnectErr(err)
 }
 
-// Resume serves the Connect face of the framed ctrl_resume verb: re-spawn an
+// Resume serves the Resume RPC: re-spawn an
 // exited child against its persisted state record. api_key is used at spawn
 // time only and is never persisted — the adapter passes it through to the
-// same Controller.Resume the framed handler calls.
+// the daemon's own Controller.Resume.
 func (s *Server) Resume(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ResumeRequest],
@@ -104,9 +102,9 @@ func (s *Server) Resume(
 	return connect.NewResponse(&rafikiv1.ResumeResponse{ChildId: id}), nil
 }
 
-// CloseAllExited serves the Connect face of the framed ctrl_forget_all_exited
+// CloseAllExited serves the CloseAllExited RPC
 // verb: close (forget) every exited child, optionally older than
-// older_than_ms. The framed response carried a count alongside the ids; the
+// older_than_ms. The count is derivable from the id list, so the wire carries
 // proto shape drops it as derivable from the repeated field.
 func (s *Server) CloseAllExited(
 	ctx context.Context,
@@ -123,7 +121,7 @@ func (s *Server) CloseAllExited(
 	return connect.NewResponse(&rafikiv1.CloseAllExitedResponse{ChildIds: closed}), nil
 }
 
-// SetLabels serves the Connect face of the framed ctrl_set_labels verb: set
+// SetLabels serves the SetLabels RPC: set
 // entries apply first, then remove entries are deleted, and the full
 // post-mutation map comes back. Keys using the rafiki/ prefix are reserved
 // and rejected by the Controller.
@@ -151,7 +149,7 @@ func (s *Server) SetLabels(
 	return connect.NewResponse(&rafikiv1.SetLabelsResponse{Labels: labels}), nil
 }
 
-// Status serves the Connect face of the framed ctrl_status verb: the
+// Status serves the Status RPC: the
 // daemon's process vitals and live/exited child counts.
 func (s *Server) Status(
 	ctx context.Context,
@@ -168,10 +166,10 @@ func (s *Server) Status(
 	return connect.NewResponse(resp), nil
 }
 
-// Search serves the Connect face of the framed ctrl_search verb: in-memory
+// Search serves the Search RPC: in-memory
 // content search across children's session buffers. The query is the one
 // required field; limit's default is the Controller's own floor, applied
-// inside the adapter's delegated call exactly as the framed handler's was.
+// inside the adapter's delegated call, unchanged.
 func (s *Server) Search(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.SearchRequest],
@@ -191,14 +189,14 @@ func (s *Server) Search(
 	return connect.NewResponse(resp), nil
 }
 
-// ShutdownDaemon serves the Connect face of the framed ctrl_daemon_shutdown
+// ShutdownDaemon serves the ShutdownDaemon RPC
 // verb — as a fail-closed stub this wave. The full contract (broadcast →
 // drain → close listeners → exit) turns on Controller's one-way stopping
 // latch: a drain fired while the daemon keeps running flips that latch (its
 // contract is "the daemon is dying"), permanently suppressing child status
 // persists, which makes the next daemon start auto-resume children the
 // operator explicitly killed. So the daemon shutdown path lands with the
-// framed-plane retirement (Task 5.1), wired into main.go's signal path — not
+// daemon shutdown, wired into main.go's signal path — not
 // from an RPC whose context dies with its response. Until then this handler
 // refuses BEFORE its seam is consulted (no wiring state can reach the
 // adapter), and the refusal is answered Unimplemented, not an uncoded error
@@ -209,10 +207,10 @@ func (s *Server) ShutdownDaemon(
 	req *connect.Request[rafikiv1.ShutdownDaemonRequest],
 ) (*connect.Response[rafikiv1.ShutdownDaemonResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented,
-		errors.New("ShutdownDaemon: not yet implemented — the daemon shutdown path lands with the framed-plane retirement"))
+		errors.New("ShutdownDaemon: not yet wired to the daemon's shutdown path"))
 }
 
-// ModelInfo serves the Connect face of the framed ctrl_model_info verb: the
+// ModelInfo serves the ModelInfo RPC: the
 // daemon's own catalog answer for one model, so the client never reads
 // OpenRouter itself. Never an error: an unknown model and an unconfigured
 // catalog are both known=false, which is what every caller degrades on.
@@ -236,8 +234,8 @@ func (s *Server) ModelInfo(
 	return connect.NewResponse(resp), nil
 }
 
-// ConversationStats serves the Connect face of the framed
-// ctrl_conversation_stats verb: global (filtered) stats when conversation_id
+// ConversationStats serves the ConversationStats RPC: global (filtered)
+// stats when conversation_id
 // is empty, scoped to one conversation otherwise. The stats come back as the
 // daemon's own insights.Stats JSON, opaque by design (precedent:
 // ToolUse.input_json) — the caller asked for an aggregate, not a schema.

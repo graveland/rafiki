@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package childsock serves a script child's per-child Connect socket: a unix
+// Package childsock serves a script child's per-child control socket: a unix
 // socket that reverse-proxies every request to the daemon's Connect control
 // route with the child's own credential injected.
 //
@@ -29,10 +29,12 @@ import (
 	"time"
 )
 
-// SocketName is the file name served inside a child's socket directory — the
-// same name the daemon's own Connect socket uses, so a client (the SDK) needs
-// only the directory-or-path convention of one variable.
-const SocketName = "connect.sock"
+// SocketName is the file name served inside a child's socket directory. The
+// socket is reached only through RAFIKI_CHILD_CONNECT (a path or the
+// directory's convention), so the name is the child's own — it no longer
+// mirrors the daemon's control socket, which serves the same plane on its one
+// canonical path.
+const SocketName = "child.sock"
 
 // SocketPath returns the socket path served inside dir.
 func SocketPath(dir string) string { return filepath.Join(dir, SocketName) }
@@ -65,7 +67,7 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-// Serve listens on <dir>/connect.sock and reverse-proxies every request to
+// Serve listens on <dir>/child.sock and reverse-proxies every request to
 // target — the daemon's proxy-face URL, whose Connect route sits behind the
 // same token middleware the children's own LLM traffic is authenticated
 // through — with secret injected as the Authorization bearer credential.

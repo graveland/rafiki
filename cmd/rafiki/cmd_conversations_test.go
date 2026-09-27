@@ -169,10 +169,8 @@ func (s *conversationStub) reviews() []*rafikiv1.ConversationReviewRequest {
 	return append([]*rafikiv1.ConversationReviewRequest(nil), s.reviewCalls...)
 }
 
-// newConversationsHarness wires an isolated profile at a Connect stub on
-// connect.sock and points the process at it. No framed fake is served: none of
-// these verbs dials controller.sock any more — the profile's socket path
-// exists only as the anchor connect.sock is resolved beside.
+// newConversationsHarness wires an isolated profile at a Connect stub served
+// on the profile's own socket, and points the process at it.
 func newConversationsHarness(t *testing.T) *conversationStub {
 	t.Helper()
 	isolateProfiles(t)
@@ -189,10 +187,11 @@ func newConversationsHarness(t *testing.T) *conversationStub {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	stub := &conversationStub{}
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, filepath.Join(dir, "connect.sock"), routePath, handler)
+	sock := filepath.Join(dir, "controller.sock")
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: filepath.Join(dir, "controller.sock")},
+		"scratch": {Name: "scratch", Socket: sock},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -444,7 +443,7 @@ func TestConversationsStatsUnreachableNamesTheSocket(t *testing.T) {
 	isolateProfiles(t)
 	resetProfileCache()
 
-	// A profile whose sibling connect.sock answers nothing.
+	// A profile whose socket answers nothing.
 	dir := t.TempDir()
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"scratch": {Name: "scratch", Socket: filepath.Join(dir, "controller.sock")},
@@ -461,7 +460,7 @@ func TestConversationsStatsUnreachableNamesTheSocket(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"cannot reach the rafiki daemon at", "is rafikid running", filepath.Join(dir, "connect.sock")} {
+	for _, want := range []string{"cannot reach the rafiki daemon at", "is rafikid running", filepath.Join(dir, "controller.sock")} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err.Error(), want)
 		}
@@ -1053,7 +1052,7 @@ func TestConversationsReviewRendersPerIDStatus(t *testing.T) {
 // status passes through (the daemon defaults "" to open), limit 0 means the
 // daemon's default.
 func TestConversationsFindingsSendsFilters(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.findingsResp = &rafikiv1.ConversationFindingsResponse{}
 
 	cmd := newConversationsFindingsCmd()

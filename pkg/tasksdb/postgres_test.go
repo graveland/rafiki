@@ -65,7 +65,7 @@ func newTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 	return convID
 }
 
-// The ctrl_task_list path passes no conversation id: a human asking "what is
+// The fleet-wide listing path passes no conversation id: a human asking "what is
 // every agent doing" has no single conversation to scope to. Before this was
 // fixed, loadAll sent "" to a UUID column and every call to the verb failed
 // with SQLSTATE 22P02.

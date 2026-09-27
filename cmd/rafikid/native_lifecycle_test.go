@@ -8,7 +8,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -49,7 +49,7 @@ func TestKillEndsANativeChild(t *testing.T) {
 
 	// A second kill is the ordinary already-exited answer, not not-found.
 	_, err = c.Kill(context.Background(), id, 0, 0)
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrChildExited {
 		t.Errorf("second Kill error = %v, want %s", err, protocol.ErrChildExited)
 	}

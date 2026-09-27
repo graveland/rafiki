@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
+	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -35,26 +35,24 @@ func main() {
 	}
 }
 
-// withTokenAdvice appends the recovery path to a framed connection that was
-// refused with auth_invalid — a profile token that no longer resolves. The
-// error surfaces on the verb's first Request (the auth frame is fire-and-
-// forget; the refusal closes the connection and readLoop stashes the reason),
-// and without advice it reads as an opaque "client connection closed". The
-// advice is exactly what unsticks the operator: delete the token file (the
-// profile then dials anonymous again, local trust as always) or run
-// `rafiki user create` — which dials token-less precisely so it still works
-// here — to mint a new one. Only an already-resolved profile is consulted:
-// formatting an error must never bootstrap a profiles.toml as a side effect.
+// withTokenAdvice appends the recovery path to a connection refused as
+// Unauthenticated — a profile token that no longer resolves. Every verb
+// presents the profile's credential on its transport, so the daemon's
+// "invalid auth token" surfaces on the verb's first call, and without advice
+// it reads as an opaque refusal. The advice is exactly what unsticks the
+// operator: delete the token file (the profile then connects anonymously —
+// local trust, on the daemon's own socket) or recover on the daemon host.
+// Only an already-resolved profile is consulted: formatting an error must
+// never bootstrap a profiles.toml as a side effect.
 func withTokenAdvice(err error) error {
-	msg := err.Error()
-	if !strings.Contains(msg, "auth: auth_invalid") && !strings.Contains(msg, "auth: rejected") {
+	if connect.CodeOf(err) != connect.CodeUnauthenticated {
 		return err
 	}
 	p, ok := resolvedProfile()
 	if !ok {
 		return err
 	}
-	return fmt.Errorf("%w\n\nthe token in %s did not authenticate: delete it, or run `rafiki user create` to mint a new one",
+	return fmt.Errorf("%w\n\nthe token in %s did not authenticate: delete it, or recover on the daemon host with: rafikid user create <name>",
 		err, profile.TokenFile(p.Name))
 }
 

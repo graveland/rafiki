@@ -6,7 +6,7 @@ import (
 	"math"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -110,7 +110,7 @@ func (c *Controller) SetChildBudgetAsOperator(ctx context.Context, childID strin
 			newCap)
 	}
 	if _, ok := c.st.Get(childID); !ok {
-		return &control.ControllerError{
+		return &connectapi.ControllerError{
 			Code:    protocol.ErrNotFound,
 			Message: fmt.Sprintf("agent %s is not registered", childID),
 		}

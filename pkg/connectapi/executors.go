@@ -57,8 +57,7 @@ func (s *Server) SetExecutorLister(l ExecutorLister) { s.execLister.Store(&l) }
 // question — "which executors could serve a spawn of this kind right now" —
 // and goes to the ExecutorLister, whose rows are live executors with
 // eligibility evaluated exactly as chooseExecutor vs chooseLaunchExecutor
-// would. An EMPTY kind is the management listing the framed ctrl_executor_list
-// served: the executor admin's plain rows over the durable table merged with
+// would. An EMPTY kind is the management listing: the executor admin's plain rows over the durable table merged with
 // the live pool, selector and default-limit semantics included, with
 // eligibility UNEVALUATED — eligible/reason unset, per ListExecutorsRequest's
 // comment in control.proto.

@@ -15,9 +15,8 @@ import (
 )
 
 // MaxFrameBytes is the protocol-wide per-frame size cap. Every frame reader
-// (daemon, Go client, TS attach client) enforces it, so no writer may emit a
-// frame this large or larger — response payloads that aggregate history
-// (ctrl_get_recent) must be trimmed to fit.
+// enforces it, so no writer may emit a frame this large or larger — response
+// payloads that aggregate history (GetRecent) must be trimmed to fit.
 const MaxFrameBytes = 16 << 20
 
 // ErrFrameTooLarge is returned by ReadFrame when a frame exceeds the

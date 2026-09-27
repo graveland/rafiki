@@ -51,7 +51,7 @@ func (c *Controller) aliasContextWindow(model string) (contextLen, maxCompletion
 	return alias.ContextWindow, alias.MaxCompletionTokens, name + "/" + alias.ID, true
 }
 
-// ModelInfo answers ctrl_model_info from the provider registry plus the
+// ModelInfo answers the ModelInfo RPC from the provider registry plus the
 // daemon's already-warm catalog. Never returns an error: an unknown model and
 // an unconfigured catalog are both Known=false, which is what every caller
 // degrades on.

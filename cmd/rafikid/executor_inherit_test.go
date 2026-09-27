@@ -56,7 +56,6 @@ func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 	c.stateDir = t.TempDir()
 
 	got, err := c.Spawn(context.Background(), protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
 		Kind:          protocol.KindFundi,
 		Model:         "anthropic/sonnet-latest",
 		Cwd:           t.TempDir(),

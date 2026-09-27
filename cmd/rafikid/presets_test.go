@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -100,9 +100,9 @@ func wantInvalidArgs(t *testing.T, err error) string {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	cerr, ok := err.(*control.ControllerError)
+	cerr, ok := err.(*connectapi.ControllerError)
 	if !ok {
-		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
+		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
 	}
 	if cerr.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("expected code %q, got %q (%s)", protocol.ErrInvalidArgs, cerr.Code, cerr.Message)

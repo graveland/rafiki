@@ -29,22 +29,20 @@ import (
 //
 // No token required: the interceptor is constructed with an empty token,
 // which disables the ADMISSION check. Trust here is the 0600 socket inside
-// the 0700 directory, matching the framed-JSON control socket — auth is who
-// may connect, never gated by a credential over UDS.
+// the 0700 directory — auth is who may connect, never gated by a credential
+// over UDS.
 //
-// auth, when non-nil, still OPTIONALLY resolves identity — but now it must
-// AGREE with the framed socket's optional ctrl_auth: a request with NO
+// auth, when non-nil, still OPTIONALLY resolves identity: a request with NO
 // credential proceeds anonymously, one whose credential RESOLVES runs as that
 // user, and one presenting a credential that does not resolve is refused —
 // Unauthenticated for an unknown token, Unavailable for a store that could not
-// be checked (never the store's error text) — exactly as the framed handshake
-// refuses the same credential. A mount that silently downgraded a bad
-// credential to anonymous while its framed sibling refused it would answer the
-// same operator differently depending on which plane the request took. This
-// is what lets a per-user Connect read like GetRateLimitStatus resolve "who is
-// asking" over the local socket the cockpit and CLI dial by default, without
-// weakening the socket's own trust-by-filesystem-permissions model for every
-// other verb that never looks at identity at all.
+// be checked (never the store's error text). A mount that silently downgraded
+// a bad credential to anonymous would answer the same operator as a caller
+// who believed a credential meant something. This is what lets a per-user
+// read like GetRateLimitStatus resolve "who is asking" over the local socket
+// the cockpit and CLI dial by default, without weakening the socket's own
+// trust-by-filesystem-permissions model for every other verb that never looks
+// at identity at all.
 //
 // h2c rather than TLS: there is no TLS on a unix socket, and Connect's
 // server-streaming (StreamEvents) wants HTTP/2. HTTP/1.1 rides the same
@@ -112,19 +110,18 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 }
 
 // optionalIdentityInterceptor resolves caller identity for a request that
-// carries a credential, with the same three-way rule the framed unix socket
-// gives its optional ctrl_auth (pkg/control's ListenWithAuth):
+// carries a credential:
 //
 //   - no credential → proceed anonymous, untouched. The socket decided
 //     admission; a credential was never the price of entry.
 //   - credential resolves → the request runs as that user, which is what lets
-//     a per-user Connect read like GetRateLimitStatus resolve "who is asking"
+//     a per-user read like GetRateLimitStatus resolve "who is asking"
 //     over the local socket the cockpit and CLI dial by default.
-//   - credential present but unknown → Unauthenticated ("invalid auth token",
-//     the framed handshake's wording), never a silent downgrade to anonymous:
-//     the caller presented a credential expecting it to mean something, and
-//     running the request under another user's (or the daemon bucket's)
-//     identity would misattribute its work.
+//   - credential present but unknown → Unauthenticated ("invalid auth token"),
+//     never a silent downgrade to anonymous: the caller presented a
+//     credential expecting it to mean something, and running the request
+//     under another user's (or the daemon bucket's) identity would
+//     misattribute its work.
 //   - identity store unavailable → Unavailable with the fixed message, never
 //     the store's error text — an outage is not a bad credential, and a pgx
 //     error carries the DSN.

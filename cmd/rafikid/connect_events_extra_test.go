@@ -25,7 +25,7 @@ func childstoreWithSession(t *testing.T, childID string) *childstore.Store {
 
 // TestRawChildIOGetStreamsMatchesFramed pins the answer a debugging client
 // consumes: the Connect adapter's GetStreams must equal, field by field, the
-// GetStreamsResponseData the framed ctrl_get_streams handler served from the
+// GetStreamsResponseData the GetStreams RPC served from the
 // same Controller — alive flag, stdin frames (order preserved, one []byte per
 // frame) and the err field (always nil by design; live stderr races the
 // reader goroutine).

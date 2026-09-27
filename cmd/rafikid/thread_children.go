@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -186,8 +185,7 @@ func (c *Controller) nativeChildrenOf(parentChildID string) []string {
 // nothing to signal and nothing to reap. That also means none of
 // handleChildExit's work applies — no ring to snapshot, no log dump, no MCP
 // secret, no inbox to reset, no executor binding, no lease. What does apply is
-// the pair of exit events, because the rail and every ctrl_child_exited
-// subscriber learn about the transition from those alone.
+// the exit event, because the rail learns about the transition from it alone.
 //
 // Exit code 0 with no signal: the thread ended, and inventing a signal would
 // claim a death this child never had.
@@ -201,19 +199,6 @@ func (c *Controller) exitNativeChild(childID string) bool {
 		return false
 	}
 
-	zero := 0
-	evt := protocol.CtrlChildExited{
-		Type:       protocol.TypeCtrlChildExited,
-		ChildID:    childID,
-		ExitCode:   &zero,
-		LastStatus: string(snap.Status),
-		At:         now.UnixMilli(),
-	}
-	if b, err := json.Marshal(evt); err == nil {
-		c.cm.DeliverToChild(childID, b)
-		c.cm.DeliverToGlobal(b)
-		c.cm.DeliverToMatching(childID, snap.Labels, b)
-	}
 	var code int32
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -215,9 +215,9 @@ func TestSetChildBudgetAsOperatorUnknownChildIsNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on unknown child, got nil")
 	}
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) {
-		t.Fatalf("expected *control.ControllerError, got %T: %v", err, err)
+		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
 	}
 	if ce.Code != protocol.ErrNotFound {
 		t.Fatalf("ce.Code = %v, want ErrNotFound", ce.Code)

@@ -43,26 +43,26 @@ func dialTo(t *testing.T, addr string, proto Protocol) *Conn {
 	return c
 }
 
-// Two protocols, one port, routed by path — the whole point.
+// Executor and Daraja share one port, routed by path — the whole point.
 func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 	got := make(chan string, 2)
 	addr := serveMux(t, map[Protocol]func(*Conn){
-		Control: func(c *Conn) {
-			defer c.Close()
-			line, _ := bufio.NewReader(c).ReadString('\n')
-			got <- "control:" + strings.TrimSpace(line)
-		},
 		Executor: func(c *Conn) {
 			defer c.Close()
 			line, _ := bufio.NewReader(c).ReadString('\n')
 			got <- "executor:" + strings.TrimSpace(line)
 		},
+		Daraja: func(c *Conn) {
+			defer c.Close()
+			line, _ := bufio.NewReader(c).ReadString('\n')
+			got <- "daraja:" + strings.TrimSpace(line)
+		},
 	})
 
-	c1 := dialTo(t, addr, Control)
-	_, _ = c1.Write([]byte("{\"type\":\"ctrl_auth\"}\n"))
-	c2 := dialTo(t, addr, Executor)
-	_, _ = c2.Write([]byte("{\"type\":\"executor_hello\"}\n"))
+	c1 := dialTo(t, addr, Executor)
+	_, _ = c1.Write([]byte("{\"type\":\"executor_hello\"}\n"))
+	c2 := dialTo(t, addr, Daraja)
+	_, _ = c2.Write([]byte("{\"type\":\"daraja_hello\"}\n"))
 
 	seen := map[string]bool{}
 	for range 2 {
@@ -73,26 +73,23 @@ func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 			t.Fatal("timed out waiting for both handlers")
 		}
 	}
-	if !seen[`control:{"type":"ctrl_auth"}`] {
-		t.Errorf("control handler did not receive its frame; saw %v", seen)
-	}
 	if !seen[`executor:{"type":"executor_hello"}`] {
 		t.Errorf("executor handler did not receive its frame; saw %v", seen)
 	}
+	if !seen[`daraja:{"type":"daraja_hello"}`] {
+		t.Errorf("daraja handler did not receive its frame; saw %v", seen)
+	}
 }
 
-// THE hazard. A control client routinely writes its auth frame and its first
-// request in ONE segment, so by the time the HTTP server has finished parsing
+// THE hazard. A client routinely writes its hello frame and its first
+// payload in ONE segment, so by the time the HTTP server has finished parsing
 // the upgrade request those extra bytes are already in the hijack buffer — not
 // on the socket. A handler that reads the raw net.Conn loses them and the
 // client hangs to its timeout.
-//
-// This is the same bug the control plane already hit once, relocated: there it
-// was a second FrameReader discarding the first one's buffer.
 func TestBytesPipelinedBehindTheUpgradeAreNotLost(t *testing.T) {
 	lines := make(chan string, 4)
 	addr := serveMux(t, map[Protocol]func(*Conn){
-		Control: func(c *Conn) {
+		Daraja: func(c *Conn) {
 			defer c.Close()
 			br := bufio.NewReader(c)
 			for range 2 {
@@ -113,12 +110,12 @@ func TestBytesPipelinedBehindTheUpgradeAreNotLost(t *testing.T) {
 
 	// One write: the upgrade request AND both frames. This is what makes the
 	// bytes land in the hijack buffer rather than on the socket.
-	req := "GET " + PathFor(Control) + " HTTP/1.1\r\n" +
+	req := "GET " + PathFor(Daraja) + " HTTP/1.1\r\n" +
 		"Host: " + addr + "\r\n" +
-		"Upgrade: " + string(Control) + "\r\n" +
+		"Upgrade: " + string(Daraja) + "\r\n" +
 		"Connection: Upgrade\r\n\r\n" +
-		"{\"type\":\"ctrl_auth\"}\n" +
-		"{\"type\":\"ctrl_list\"}\n"
+		"{\"type\":\"daraja_hello\"}\n" +
+		"{\"type\":\"daraja_more\"}\n"
 	if _, err := raw.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +126,7 @@ func TestBytesPipelinedBehindTheUpgradeAreNotLost(t *testing.T) {
 		t.Fatalf("read 101: %v", err)
 	}
 
-	for _, want := range []string{`{"type":"ctrl_auth"}`, `{"type":"ctrl_list"}`} {
+	for _, want := range []string{`{"type":"daraja_hello"}`, `{"type":"daraja_more"}`} {
 		select {
 		case got := <-lines:
 			if got != want {
@@ -199,7 +196,7 @@ func TestAMismatchedUpgradeIsRefusedAtTheHandshake(t *testing.T) {
 	defer raw.Close()
 
 	// Right path, wrong protocol.
-	if _, err := Dial(raw, Control, addr); err == nil {
+	if _, err := Dial(raw, Daraja, addr); err == nil {
 		t.Fatal("an upgrade to the wrong protocol was accepted")
 	}
 }
@@ -208,9 +205,9 @@ func TestAMismatchedUpgradeIsRefusedAtTheHandshake(t *testing.T) {
 // a caller may also close it on teardown.
 func TestConcurrentCloseIsSafe(t *testing.T) {
 	addr := serveMux(t, map[Protocol]func(*Conn){
-		Control: func(c *Conn) { _ = c.Close() },
+		Executor: func(c *Conn) { _ = c.Close() },
 	})
-	c := dialTo(t, addr, Control)
+	c := dialTo(t, addr, Executor)
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(1)
@@ -224,7 +221,7 @@ func TestConcurrentCloseIsSafe(t *testing.T) {
 // HTTP status — which is the whole reason this indirection exists.
 func TestEveryProtocolHasItsOwnPath(t *testing.T) {
 	seen := map[string]Protocol{}
-	for _, p := range []Protocol{Control, Executor, Daraja} {
+	for _, p := range []Protocol{Executor, Daraja} {
 		path := PathFor(p)
 		if path == "/" {
 			t.Errorf("PathFor(%q) fell through to the default", p)

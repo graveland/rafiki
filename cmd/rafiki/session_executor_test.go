@@ -213,9 +213,9 @@ func (s *executorSessionStub) ListExecutors(
 }
 
 // serveExecutorSessionStub serves stub on a unix socket matching what
-// sessionConnectEndpoint resolves for a local (socket) profile: connect.sock
-// beside the profile's own control socket (serveConnectOnUnixSocket is
-// defined in cmd_history_test.go and shared package-wide).
+// sessionConnectEndpoint resolves for a local (socket) profile: the profile's
+// own socket (serveConnectOnUnixSocket is defined in cmd_history_test.go and
+// shared package-wide).
 //
 // A short os.MkdirTemp directory, not t.TempDir(): unix socket paths are
 // capped at ~104 bytes (sizeof sun_path on darwin), and t.TempDir() nests
@@ -227,10 +227,10 @@ func serveExecutorSessionStub(t *testing.T, stub *executorSessionStub) profile.R
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
+	sock := filepath.Join(dir, "controller.sock")
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, filepath.Join(dir, "connect.sock"), routePath, handler)
-	return profile.Resolved{Profile: profile.Profile{Socket: controlSock}}
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
+	return profile.Resolved{Profile: profile.Profile{Socket: sock}}
 }
 
 // isolateSessionExecutorEnv isolates the runtime/data/config dirs a session

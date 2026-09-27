@@ -9,7 +9,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -105,7 +104,7 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 func TestUserAdminErrMapping(t *testing.T) {
 	ctx := context.Background()
 	denied := connect.NewError(connect.CodePermissionDenied, errors.New("admins only"))
-	notFound := &control.ControllerError{Code: protocol.ErrNotFound, Message: "no such user"}
+	notFound := &ControllerError{Code: protocol.ErrNotFound, Message: "no such user"}
 
 	for _, tc := range []struct {
 		name string

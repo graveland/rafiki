@@ -36,7 +36,7 @@ func unreachableDaemonProfile(t *testing.T) {
 // The catalog-dependent assertions (a known model reserves 5%-10%, an unknown
 // model answers Known=false with zeroes) now live on the daemon side in
 // cmd/rafikid/controller_modelinfo_test.go, because the client no longer reads
-// the catalog itself — it asks the daemon over ctrl_model_info.
+// the catalog itself — it asks the daemon over the ModelInfo RPC.
 func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
 	unreachableDaemonProfile(t)
 

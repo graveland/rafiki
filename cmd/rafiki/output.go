@@ -348,7 +348,7 @@ func effectiveParents(children []*rafikiv1.ChildSummary) map[string]string {
 // subtreeCosts sums each child's own CostUSD across its full descendant
 // subtree, walking the same parent/child relationships sortChildrenAsTree
 // renders as a tree. This mirrors pkg/tui/rail.Rail.SubtreeCost's algorithm
-// client-side rather than asking the daemon for a rollup: ctrl_list already
+// client-side rather than asking the daemon for a rollup: the list already
 // returns every child's own cost in one batched round trip, so summing it
 // down the tree costs nothing further.
 //

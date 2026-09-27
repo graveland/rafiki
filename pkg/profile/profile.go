@@ -34,10 +34,9 @@ type Profile struct {
 	// file body, so it carries no toml tag.
 	Name string `toml:"-"`
 
-	// Socket is a local daemon's framed control socket. The Connect socket is
-	// NOT configured — it is always a sibling of this one, which is how
-	// pkg/paths pins them (SocketPath and ConnectSocketPath both live in
-	// RuntimeDir).
+	// Socket is a local daemon's control-plane unix socket — the one path
+	// paths.SocketPath serves. The profile deliberately carries no second
+	// socket field: two names for one daemon is two ways to be wrong.
 	Socket string `toml:"socket,omitempty"`
 
 	// URL is a remote daemon's control plane, "https://host[:port]". Only

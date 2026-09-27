@@ -31,7 +31,7 @@ c = Client.from_profile()            # the current profile
 c = Client.from_profile("work")      # a named one
 
 # Explicit: a unix socket path, unix://, http+unix://, or an http(s):// URL.
-c = Client("/run/user/1000/rafiki/connect.sock", token=...)   # local
+c = Client("/run/user/1000/rafiki/controller.sock", token=...)   # local
 c = Client("https://rafiki.example.net", token="rfk_...")     # remote
 ```
 

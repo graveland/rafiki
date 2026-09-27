@@ -4,24 +4,24 @@
 // several byte-stream protocols can share one TLS listener and be routed by
 // PATH like ordinary HTTP.
 //
-// Why this exists. rafiki has three network surfaces, and only one of them is
-// an ordinary HTTP server:
+// Why this exists. rafiki has two network surfaces that share one TLS
+// listener, and only one of them is an ordinary HTTP server:
 //
 //   - the proxy face — plain HTTP, a mux, paths;
-//   - the control plane — newline-delimited JSON frames, no paths at all;
 //   - the executor link — the executor DIALS in and then SERVES HTTP/2 on the
 //     connection it dialled, so rafikid is the HTTP *client* there and never
 //     receives a request it could route.
 //
-// The last one is the interesting case: it is not that the executor fails to
-// connect to us, it is that once connected the request direction reverses. A
-// mux answers requests; on that socket rafikid is the one asking. So neither
-// the control plane nor the executor link can be path-routed as they stand.
+// The second one is the interesting case: it is not that the executor fails
+// to connect to us, it is that once connected the request direction reverses.
+// A mux answers requests; on that socket rafikid is the one asking. So the
+// executor link cannot be path-routed as it stands.
 //
-// Putting an HTTP request IN FRONT of the stream fixes both. The client sends
-// an ordinary `GET /path` with an Upgrade header, the server's mux routes it by
-// path like anything else, the handler hijacks the connection and replies 101,
-// and only then does the byte-stream protocol begin. Same trick as WebSocket.
+// Putting an HTTP request IN FRONT of the stream fixes it. The client sends
+// an ordinary `GET /path` with an Upgrade header, the server's mux routes it
+// by path like anything else, the handler hijacks the connection and replies
+// 101, and only then does the byte-stream protocol begin. Same trick as
+// WebSocket.
 //
 // The payoff is one port, one certificate, one ingress rule — and, because an
 // Upgrade tunnel is what every HTTP proxy already understands, the option of
@@ -39,27 +39,15 @@ import (
 // Conn is a hijacked connection that reads through the buffer the HTTP server
 // left behind.
 //
-// This wrapper is the whole reason the two protocols underneath stay correct,
-// and both of their framing rules are otherwise landmines:
+// This wrapper exists because of one landmine: the executor link must not
+// have its HTTP/2 client preface swallowed. It sends a hello frame and then
+// immediately starts speaking h2, so a reader that buffers past the newline
+// and is then discarded takes the preface with it. Reading EVERYTHING through
+// this wrapper makes over-reading harmless — nothing is discarded, and
+// nothing is lost, because there is only ever one reader.
 //
-//   - The control plane must not lose a request the client PIPELINED right
-//     behind its auth frame. Clients routinely send both in one segment, so
-//     those bytes are sitting in the hijack buffer, not on the socket. Reading
-//     the raw net.Conn would silently drop them and hang the client to its
-//     timeout.
-//   - The executor link must not have its HTTP/2 client preface swallowed. It
-//     sends a hello frame and then immediately starts speaking h2, so a reader
-//     that buffers past the newline and is then discarded takes the preface
-//     with it.
-//
-// Those pull in opposite directions — one says "keep the buffer", the other
-// says "do not over-read" — which is why the codebase documents them as
-// opposite rules in two places. Reading EVERYTHING through one wrapper
-// dissolves the conflict: over-reading is harmless because nothing is
-// discarded, and nothing is lost because there is only ever one reader.
-//
-// The rule this replaces them with is simpler and harder to get wrong: after
-// Upgrade, never read the underlying net.Conn directly. Use this.
+// The rule is simple and hard to get wrong: after Upgrade, never read the
+// underlying net.Conn directly. Use this.
 type Conn struct {
 	net.Conn
 	r *bufio.Reader
@@ -77,8 +65,6 @@ func (c *Conn) Reader() *bufio.Reader { return c.r }
 type Protocol string
 
 const (
-	// Control is rafiki's framed JSON control plane.
-	Control Protocol = "rafiki-control"
 	// Executor is the reverse-dialled executor link: a hello frame, then
 	// HTTP/2 with the roles inverted.
 	Executor Protocol = "rafiki-executor"
@@ -171,8 +157,6 @@ func Dial(conn net.Conn, proto Protocol, host string) (*Conn, error) {
 // and the mux cannot disagree.
 func PathFor(proto Protocol) string {
 	switch proto {
-	case Control:
-		return "/control"
 	case Executor:
 		return "/executor/connect"
 	case Daraja:

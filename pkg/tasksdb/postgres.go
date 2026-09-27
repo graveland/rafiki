@@ -308,7 +308,7 @@ func (ps *postgresStore) OrphanAssigned(ctx context.Context, assignee string) (i
 }
 
 // loadAll reads every task row for convID, or every task row in the ledger
-// when convID is empty (the ctrl_task_list case).
+// when convID is empty (the fleet-wide listing case).
 //
 // The empty case is a separate statement rather than a guarded predicate:
 // conversation_id is UUID NOT NULL, and any expression that casts "" to uuid

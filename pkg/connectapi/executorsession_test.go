@@ -14,7 +14,6 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -204,11 +203,11 @@ func TestExecutorSessionUnavailableWhenNotWired(t *testing.T) {
 }
 
 // TestExecutorSessionOpenControllerErrorKeepsItsCode mirrors Close's
-// ControllerError passthrough: the code the daemon attached at the source IS
+// connectapi.ControllerError passthrough: the code the daemon attached at the source IS
 // the classification, so a missing-name refusal reads as InvalidArgument with
 // its authored text, not Internal.
 func TestExecutorSessionOpenControllerErrorKeepsItsCode(t *testing.T) {
-	seam := &fakeExecSessions{err: &control.ControllerError{
+	seam := &fakeExecSessions{err: &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
 		Message: "this machine has no executor name",
 	}}
@@ -234,7 +233,7 @@ func TestExecutorSessionOpenControllerErrorKeepsItsCode(t *testing.T) {
 
 // TestExecutorSessionOpenGenericErrorBecomesInternal is the redaction half of
 // the same discipline: an error the daemon did not author (not a
-// ControllerError) is infrastructure text and must not reach the caller.
+// connectapi.ControllerError) is infrastructure text and must not reach the caller.
 func TestExecutorSessionOpenGenericErrorBecomesInternal(t *testing.T) {
 	seam := &fakeExecSessions{err: errors.New("dial postgres: connection refused")}
 	client := setupExecSessionServer(t, seam)

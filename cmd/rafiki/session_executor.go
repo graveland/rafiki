@@ -11,7 +11,6 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/client"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -66,7 +65,7 @@ func boundedJoin(wg *sync.WaitGroup, cap time.Duration) {
 // different daemon than the spawn would serve a filesystem nobody asked for.
 func sessionConnectTarget(p profile.Resolved) (addr, socket string, err error) {
 	if p.URL != "" {
-		a, err := client.DialAddr(p.URL)
+		a, err := dialAddr(p.URL)
 		if err != nil {
 			return "", "", err
 		}
@@ -90,7 +89,7 @@ func sessionConnectTarget(p profile.Resolved) (addr, socket string, err error) {
 // connectEndpointFromProfile is parked in todo.md.)
 func sessionConnectEndpoint(p profile.Resolved) (connectEndpoint, error) {
 	if p.URL == "" {
-		sock := connectSocketFor(p)
+		sock := p.Socket
 		httpClient := connectHTTPClient(sock)
 		// Optional, unlike the remote branch below: the socket itself is
 		// the trust boundary, and a local profile with no token must keep
@@ -131,7 +130,7 @@ func sessionConnectEndpoint(p profile.Resolved) (connectEndpoint, error) {
 // useless there.
 func executorEnvURL() string {
 	u := paths.Get(paths.URL)
-	if client.IsRemoteURL(u) {
+	if isRemoteURL(u) {
 		return u
 	}
 	return ""
@@ -156,7 +155,7 @@ func executorEnvURL() string {
 func resolveExecutorConnectFlags(connect, connectSocket string) (string, string, error) {
 	if connect == "" && connectSocket == "" {
 		if u := executorEnvURL(); u != "" {
-			addr, err := client.DialAddr(u)
+			addr, err := dialAddr(u)
 			if err != nil {
 				return "", "", fmt.Errorf("derive --connect from RAFIKI_URL: %w", err)
 			}

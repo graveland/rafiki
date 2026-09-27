@@ -13,8 +13,10 @@ import (
 //nolint:unused // wired by full daemon integration (plan-07 task 5)
 const labelExecutorID = "rafiki/executor"
 
-// notifyExecutorLost sends a steer event to every child assigned to the given
-// executor, telling them their machine is gone.
+// notifyExecutorLost sends a prompt to every child assigned to the given
+// executor, telling them their machine is gone. The frame type is "prompt" —
+// the one the fundi frontend accepts on stdin (pkg/fundi/frontend.go); the
+// submit spelling this used to send is not a type any receiver parses.
 //
 // An executor that is gone for good invalidates the turn its children are
 // in the middle of, so this uses a direct send rather than a queued prompt —
@@ -27,7 +29,7 @@ func (c *Controller) notifyExecutorLost(executorID string) {
 			continue
 		}
 		msg := map[string]any{
-			"type":    "ctrl_submit",
+			"type":    "prompt",
 			"message": "EXECUTOR LOST: the machine running your file and shell tools is gone and is not coming back. Every read, write, edit and bash call will now fail. Stop what you are doing and report what you had completed.",
 		}
 		if b, err := json.Marshal(msg); err == nil {

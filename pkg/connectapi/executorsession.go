@@ -9,16 +9,13 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 // ExecutorSessions mints (or finds) the caller's own session executor — the
-// face of the framed ctrl_executor_session verb. The framed verb's
-// connection-scoped signature (a credential minted for one control
-// connection, revoked when it closes) is what kept the framed listener
-// alive; here the session rides a server-streaming RPC instead, so the
-// stream's lifetime IS the connection's.
+// face of the ExecutorSession RPC. The session's lifetime rides a
+// server-streaming RPC: the stream's lifetime IS the connection's, and its
+// context is the eviction trigger for a transient executor.
 type ExecutorSessions interface {
 	// Open mints (or finds) the caller's session executor. The transient
 	// executor lives until ctx ends.
@@ -38,7 +35,7 @@ func (s *Server) SetExecutorSessions(e ExecutorSessions) {
 	s.execSessions.Store(&e)
 }
 
-// ExecutorSession serves the framed ctrl_executor_session face: the first
+// ExecutorSession serves the ExecutorSession RPC: the first
 // streamed message is ready. The stream stays open for the session's
 // lifetime; the daemon evicts a transient executor when the stream ends.
 //
@@ -63,7 +60,7 @@ func (s *Server) ExecutorSession(
 	}
 	ready, err := (*p).Open(ctx, req.Msg)
 	if err != nil {
-		var ce *control.ControllerError
+		var ce *ControllerError
 		if !errors.As(err, &ce) {
 			// ConnectErr redacts this below; log the cause here or lose it.
 			slog.Error("connect: executor session open failed", "error", err)

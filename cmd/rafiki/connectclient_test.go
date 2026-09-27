@@ -16,7 +16,7 @@ import (
 func TestDiagnoseUnimplementedNamesAnOldDaemon(t *testing.T) {
 	err := diagnoseConnectError(
 		connect.NewError(connect.CodeUnimplemented, errors.New("404 Not Found")),
-		"/run/rafiki/connect.sock",
+		"/run/rafiki/controller.sock",
 	)
 	msg := err.Error()
 	if !strings.Contains(msg, "predates") && !strings.Contains(msg, "older") {
@@ -30,9 +30,9 @@ func TestDiagnoseUnimplementedNamesAnOldDaemon(t *testing.T) {
 func TestDiagnoseUnavailableNamesTheSocket(t *testing.T) {
 	err := diagnoseConnectError(
 		connect.NewError(connect.CodeUnavailable, errors.New("dial unix: connect: no such file or directory")),
-		"/run/rafiki/connect.sock",
+		"/run/rafiki/controller.sock",
 	)
-	if !strings.Contains(err.Error(), "/run/rafiki/connect.sock") {
+	if !strings.Contains(err.Error(), "/run/rafiki/controller.sock") {
 		t.Fatalf("want the socket path in the message, got: %s", err)
 	}
 }
@@ -41,7 +41,7 @@ func TestDiagnoseUnavailableNamesTheSocket(t *testing.T) {
 // unchanged so the user sees the daemon's own answer.
 func TestDiagnoseNotFoundPassesThrough(t *testing.T) {
 	orig := connect.NewError(connect.CodeNotFound, errors.New("no such child"))
-	got := diagnoseConnectError(orig, "/run/rafiki/connect.sock")
+	got := diagnoseConnectError(orig, "/run/rafiki/controller.sock")
 	if !strings.Contains(got.Error(), "no such child") {
 		t.Fatalf("want the original message preserved, got: %s", got)
 	}

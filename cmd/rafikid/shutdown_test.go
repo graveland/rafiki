@@ -14,6 +14,18 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
+// testSocketDir returns a temp directory with a short path (macOS UDS paths
+// are capped at 104 bytes; t.TempDir() names exceed this for long test names).
+func testSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "rafiki")
+	if err != nil {
+		t.Fatalf("mkdirtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // fakePiBin returns the path to fake-pi.sh for use in shutdown tests.
 func fakePiBin(t *testing.T) string {
 	t.Helper()

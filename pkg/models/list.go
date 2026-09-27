@@ -4,7 +4,7 @@
 //
 // All sources are best-effort: errors are swallowed and missing or unreachable
 // sources simply produce no entries.  The package is used both by the daemon
-// (ctrl_list_models RPC) and by the CLI (tab completion for --model).
+// (the ListModels RPC) and by the CLI (tab completion for --model).
 package models
 
 import (

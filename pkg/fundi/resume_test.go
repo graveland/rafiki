@@ -17,7 +17,7 @@ import (
 
 // TestResumeBootTimeOrphanRepair is Task 15's Requirement 1: a
 // DB-backed conversation reattached via the same external ref across a
-// process restart (ctrl_resume re-execs the agent with the same
+// process restart (the daemon's resume path re-execs the agent with the same
 // RAFIKI_CHILD_ID, and --ref defaults to it) can carry a dangling
 // tool_use left by a PREVIOUS process that crashed or was killed mid-turn.
 // Config.BuildEngine must repair it once, at boot, before the reattached
@@ -38,7 +38,7 @@ import (
 // simulation, not a shortcut.
 //
 // "Process 2" is a second, independent Config.BuildEngine call against the
-// SAME database with the SAME ref - simulating ctrl_resume's re-exec -
+// SAME database with the SAME ref - simulating the daemon's resume re-exec -
 // which must reattach to the very same conversation and run the boot-time
 // repair before returning.
 func TestResumeBootTimeOrphanRepair(t *testing.T) {
@@ -89,7 +89,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 	t.Log("confirmed: process 1 left a genuine dangling tool_use (tu_1), unrepaired")
 
 	// --- process 2: BuildEngine again with the same ref against the same
-	// database, simulating ctrl_resume's re-exec ---
+	// database, simulating the daemon's resume re-exec ---
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	cfg := Config{
 		Model:     "anthropic/claude-x",

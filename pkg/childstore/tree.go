@@ -159,7 +159,7 @@ func (s *Store) AbsoluteDepth(childID string) int {
 // "Live", not "ever spawned": a long-running coordinator that has cycled
 // through twenty workers must still be able to spawn a twenty-first, or the
 // cap is a leak rather than a limit. Exited children are still in the store
-// (ctrl_get_recent serves their rings after exit) so they must be filtered
+// (GetRecent serves their rings after exit) so they must be filtered
 // here rather than assumed absent.
 //
 // Native children are also excluded: a Claude Code Task subagent the proxy

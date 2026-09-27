@@ -9,34 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
-func TestListRequest_RoundTrip(t *testing.T) {
-	req := protocol.ListRequest{
-		Type: protocol.TypeCtrlList,
-		ID:   "req-1",
-		Filter: &protocol.ListFilter{
-			Status:       "streaming",
-			Name:         "afk-impl",
-			NameContains: "afk",
-			CwdContains:  "/savannah",
-			Since:        1716000000,
-		},
-	}
-	roundTrip(t, req, &protocol.ListRequest{})
-}
-
-func TestGetRequest_RoundTrip(t *testing.T) {
-	req := protocol.GetRequest{
-		Type:    protocol.TypeCtrlGet,
-		ID:      "req-2",
-		ChildID: "c_01HX...",
-	}
-	roundTrip(t, req, &protocol.GetRequest{})
-}
-
 func TestSpawnRequest_RoundTrip(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Type:               protocol.TypeCtrlSpawn,
-		ID:                 "req-3",
 		Name:               "afk-impl",
 		Cwd:                "/Users/brent/ts/dev",
 		Provider:           "anthropic",
@@ -72,9 +46,6 @@ func TestSpawnRequest_RoundTrip(t *testing.T) {
 	roundTrip(t, req, &protocol.SpawnRequest{})
 }
 
-// TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip locks down that
-// SkillsDirs/MCPConfig follow the protocol's camelCase convention, matching
-// every other SpawnRequest field and the wire spec (docs/reference/control-protocol.md §6.3).
 func TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip(t *testing.T) {
 	req := protocol.SpawnRequest{
 		SkillsDirs: []string{"/a", "/b"},
@@ -105,8 +76,6 @@ func TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSpawnRequestNewFieldsOmitWhenEmpty locks down omitempty so an older
-// daemon that predates these fields sees a request it fully understands.
 func TestSpawnRequestNewFieldsOmitWhenEmpty(t *testing.T) {
 	b, err := json.Marshal(protocol.SpawnRequest{})
 	if err != nil {
@@ -119,242 +88,6 @@ func TestSpawnRequestNewFieldsOmitWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestResumeRequest_RoundTrip(t *testing.T) {
-	req := protocol.ResumeRequest{
-		Type:    protocol.TypeCtrlResume,
-		ID:      "req-4",
-		ChildID: "c_01HX...",
-		APIKey:  "sk-ant-resume",
-	}
-	roundTrip(t, req, &protocol.ResumeRequest{})
-}
-
-func TestKillRequest_RoundTrip(t *testing.T) {
-	req := protocol.KillRequest{
-		Type:              protocol.TypeCtrlKill,
-		ID:                "req-5",
-		ChildID:           "c_01HX...",
-		ShutdownTimeoutMs: 180000,
-		KillTimeoutMs:     30000,
-	}
-	roundTrip(t, req, &protocol.KillRequest{})
-}
-
-func TestAuthRequest_RoundTrip(t *testing.T) {
-	req := protocol.AuthRequest{
-		Type:  protocol.TypeCtrlAuth,
-		ID:    "req-6",
-		Token: "secret-token",
-	}
-	roundTrip(t, req, &protocol.AuthRequest{})
-}
-
-func TestSubscribeRequest_RoundTrip(t *testing.T) {
-	req := protocol.SubscribeRequest{
-		Type:    protocol.TypeCtrlSubscribe,
-		ID:      "req-7",
-		ChildID: "c_01HX...",
-		Filter: &protocol.SubscribeFilter{
-			Profile: "coarse",
-			Include: []string{"turn_end", "agent_end"},
-			Exclude: []string{"message_update"},
-		},
-	}
-	roundTrip(t, req, &protocol.SubscribeRequest{})
-}
-
-func TestUnsubscribeRequest_RoundTrip(t *testing.T) {
-	req := protocol.UnsubscribeRequest{
-		Type:    protocol.TypeCtrlUnsubscribe,
-		ID:      "req-8",
-		ChildID: "c_01HX...",
-	}
-	roundTrip(t, req, &protocol.UnsubscribeRequest{})
-}
-
-func TestGlobalSubscribeRequest_RoundTrip(t *testing.T) {
-	req := protocol.GlobalSubscribeRequest{
-		Type: protocol.TypeCtrlGlobalSubscribe,
-		ID:   "req-9",
-	}
-	roundTrip(t, req, &protocol.GlobalSubscribeRequest{})
-}
-
-func TestGlobalUnsubscribeRequest_RoundTrip(t *testing.T) {
-	req := protocol.GlobalUnsubscribeRequest{
-		Type: protocol.TypeCtrlGlobalUnsubscribe,
-		ID:   "req-10",
-	}
-	roundTrip(t, req, &protocol.GlobalUnsubscribeRequest{})
-}
-
-func TestGetRecentRequest_RoundTrip(t *testing.T) {
-	req := protocol.GetRecentRequest{
-		Type:    protocol.TypeCtrlGetRecent,
-		ID:      "req-11",
-		ChildID: "c_01HX...",
-		Limit:   50,
-		Since:   1716636789,
-		Include: []string{"turn_end", "tool_execution_end"},
-		Exclude: []string{"message_update"},
-	}
-	roundTrip(t, req, &protocol.GetRecentRequest{})
-}
-
-func TestSendRequest_RoundTrip(t *testing.T) {
-	req := protocol.SendRequest{
-		Type:    protocol.TypeCtrlSend,
-		ID:      "req-12",
-		ChildID: "c_01HX...",
-		Frame:   json.RawMessage(`{"type":"prompt","message":"Hello","id":"p1"}`),
-	}
-	roundTrip(t, req, &protocol.SendRequest{})
-}
-
-func TestForgetRequest_RoundTrip(t *testing.T) {
-	req := protocol.ForgetRequest{
-		Type:    protocol.TypeCtrlForget,
-		ID:      "req-13",
-		ChildID: "c_01HX...",
-	}
-	roundTrip(t, req, &protocol.ForgetRequest{})
-}
-
-func TestForgetAllExitedRequest_RoundTrip(t *testing.T) {
-	req := protocol.ForgetAllExitedRequest{
-		Type:        protocol.TypeCtrlForgetAllExited,
-		ID:          "req-14",
-		OlderThanMs: 3600000,
-	}
-	roundTrip(t, req, &protocol.ForgetAllExitedRequest{})
-}
-
-func TestSearchRequest_RoundTrip(t *testing.T) {
-	req := protocol.SearchRequest{
-		Type:    protocol.TypeCtrlSearch,
-		ID:      "req-15",
-		Query:   "ublk_register",
-		Regex:   true,
-		Limit:   50,
-		Context: 2,
-		SessionFilter: &protocol.SearchSessionFilter{
-			CwdContains:  "/savannah",
-			NameContains: "afk",
-			Since:        1716000000,
-		},
-	}
-	roundTrip(t, req, &protocol.SearchRequest{})
-}
-
-func TestStatusRequest_RoundTrip(t *testing.T) {
-	req := protocol.StatusRequest{
-		Type: protocol.TypeCtrlStatus,
-		ID:   "req-16",
-	}
-	roundTrip(t, req, &protocol.StatusRequest{})
-}
-
-func TestConversationStatsRequest_RoundTrip(t *testing.T) {
-	req := protocol.ConversationStatsRequest{
-		Type:           protocol.TypeCtrlConversationStats,
-		ID:             "req-20",
-		ConversationID: "conv-abc",
-		SinceUnix:      1716000000,
-		UntilUnix:      1716100000,
-		Owner:          "brent",
-		Persona:        "default",
-		Source:         "cli",
-		Model:          "claude-sonnet-5",
-		Path:           "direct",
-	}
-	roundTrip(t, req, &protocol.ConversationStatsRequest{})
-}
-
-func TestConversationSearchRequest_RoundTrip(t *testing.T) {
-	req := protocol.ConversationSearchRequest{
-		Type:      protocol.TypeCtrlConversationSearch,
-		ID:        "req-21",
-		SinceUnix: 1716000000,
-		UntilUnix: 1716100000,
-		Owner:     "brent",
-		Persona:   "default",
-		Source:    "cli",
-		Model:     "claude-sonnet-5",
-		Path:      "direct",
-		Status:    "failed",
-		MinTokens: 5000,
-		Text:      "skill gap",
-		Limit:     20,
-	}
-	roundTrip(t, req, &protocol.ConversationSearchRequest{})
-}
-
-func TestConversationExportRequest_RoundTrip(t *testing.T) {
-	req := protocol.ConversationExportRequest{
-		Type:           protocol.TypeCtrlConversationExport,
-		ID:             "req-22",
-		ConversationID: "conv-abc",
-	}
-	roundTrip(t, req, &protocol.ConversationExportRequest{})
-}
-
-// roundTrip marshals src to JSON, unmarshals into dst, and asserts deep equality.
-// dst must be a pointer to the same type as src.
-func roundTrip[T any](t *testing.T, src T, dst *T) {
-	t.Helper()
-
-	b, err := json.Marshal(src)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	if err := json.Unmarshal(b, dst); err != nil {
-		t.Fatalf("unmarshal: %v (json: %s)", err, b)
-	}
-
-	if !reflect.DeepEqual(src, *dst) {
-		t.Fatalf("round-trip mismatch:\n got  %+v\n want %+v\n json %s", *dst, src, b)
-	}
-}
-
-// TestTypeConstants verifies that type constant strings match the protocol spec.
-func TestTypeConstants(t *testing.T) {
-	cases := []struct {
-		name string
-		val  string
-		want string
-	}{
-		{"TypeCtrlList", protocol.TypeCtrlList, "ctrl_list"},
-		{"TypeCtrlGet", protocol.TypeCtrlGet, "ctrl_get"},
-		{"TypeCtrlSpawn", protocol.TypeCtrlSpawn, "ctrl_spawn"},
-		{"TypeCtrlResume", protocol.TypeCtrlResume, "ctrl_resume"},
-		{"TypeCtrlKill", protocol.TypeCtrlKill, "ctrl_kill"},
-		{"TypeCtrlAuth", protocol.TypeCtrlAuth, "ctrl_auth"},
-		{"TypeCtrlSubscribe", protocol.TypeCtrlSubscribe, "ctrl_subscribe"},
-		{"TypeCtrlUnsubscribe", protocol.TypeCtrlUnsubscribe, "ctrl_unsubscribe"},
-		{"TypeCtrlGlobalSubscribe", protocol.TypeCtrlGlobalSubscribe, "ctrl_global_subscribe"},
-		{"TypeCtrlGlobalUnsubscribe", protocol.TypeCtrlGlobalUnsubscribe, "ctrl_global_unsubscribe"},
-		{"TypeCtrlGetRecent", protocol.TypeCtrlGetRecent, "ctrl_get_recent"},
-		{"TypeCtrlSend", protocol.TypeCtrlSend, "ctrl_send"},
-		{"TypeCtrlForget", protocol.TypeCtrlForget, "ctrl_forget"},
-		{"TypeCtrlForgetAllExited", protocol.TypeCtrlForgetAllExited, "ctrl_forget_all_exited"},
-		{"TypeCtrlSearch", protocol.TypeCtrlSearch, "ctrl_search"},
-		{"TypeCtrlStatus", protocol.TypeCtrlStatus, "ctrl_status"},
-		{"TypeCtrlResponse", protocol.TypeCtrlResponse, "ctrl_response"},
-		{"TypeCtrlEvent", protocol.TypeCtrlEvent, "ctrl_event"},
-		{"TypeCtrlChildSpawned", protocol.TypeCtrlChildSpawned, "ctrl_child_spawned"},
-		{"TypeCtrlChildExited", protocol.TypeCtrlChildExited, "ctrl_child_exited"},
-		{"TypeCtrlChildStatus", protocol.TypeCtrlChildStatus, "ctrl_child_status"},
-		{"TypeCtrlChildRenamed", protocol.TypeCtrlChildRenamed, "ctrl_child_renamed"},
-	}
-	for _, tc := range cases {
-		if tc.val != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
-		}
-	}
-}
-
-// TestStatusConstants verifies all §10 status values are defined.
 func TestStatusConstants(t *testing.T) {
 	cases := []struct {
 		name string
@@ -377,7 +110,6 @@ func TestStatusConstants(t *testing.T) {
 	}
 }
 
-// TestErrorCodeConstants verifies all §8 error codes are defined.
 func TestErrorCodeConstants(t *testing.T) {
 	cases := []struct {
 		name string
@@ -406,27 +138,9 @@ func TestErrorCodeConstants(t *testing.T) {
 	}
 }
 
-// TestListRequest_OmitEmpty verifies that absent optional fields don't appear in JSON.
-func TestListRequest_OmitEmpty(t *testing.T) {
-	req := protocol.ListRequest{Type: protocol.TypeCtrlList}
-	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// id and filter should be absent, not null / empty-string.
-	raw := string(b)
-	for _, absent := range []string{`"id"`, `"filter"`} {
-		if strings.Contains(raw, absent) {
-			t.Errorf("field %s should be absent from %s", absent, raw)
-		}
-	}
-}
-
-// TestSpawnRequest_OmitEmpty verifies optional SpawnRequest fields are absent when zero.
 func TestSpawnRequest_OmitEmpty(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Type: protocol.TypeCtrlSpawn,
-		Cwd:  "/tmp",
+		Cwd: "/tmp",
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
@@ -448,24 +162,8 @@ func TestSpawnRequest_OmitEmpty(t *testing.T) {
 	}
 }
 
-// TestSubscribeRequest_NilFilter verifies filter is absent when nil.
-func TestSubscribeRequest_NilFilter(t *testing.T) {
-	req := protocol.SubscribeRequest{
-		Type:    protocol.TypeCtrlSubscribe,
-		ChildID: "c_01HX...",
-	}
-	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), `"filter"`) {
-		t.Errorf(`"filter" should be absent when nil: %s`, b)
-	}
-}
-
 func TestSpawnRequestParentChildID(t *testing.T) {
 	req := protocol.SpawnRequest{
-		Type:          protocol.TypeCtrlSpawn,
 		Cwd:           "/tmp",
 		ParentChildID: "c_parent",
 	}
@@ -478,7 +176,7 @@ func TestSpawnRequestParentChildID(t *testing.T) {
 	}
 
 	// Omitted when empty — an absent parent must not appear as a null or "".
-	b2, err := json.Marshal(protocol.SpawnRequest{Type: protocol.TypeCtrlSpawn, Cwd: "/tmp"})
+	b2, err := json.Marshal(protocol.SpawnRequest{Cwd: "/tmp"})
 	if err != nil {
 		t.Fatalf("marshal empty: %v", err)
 	}
@@ -510,7 +208,6 @@ func TestSpawnRequestExecutorRefRoundTrips(t *testing.T) {
 	}
 }
 
-// TestChildSummary_NullPID verifies that *int PID and ExitCode serialize as null when nil.
 func TestChildSummary_NullPID(t *testing.T) {
 	cs := protocol.ChildSummary{
 		ChildID:      "c_01HX...",
@@ -533,9 +230,6 @@ func TestChildSummary_NullPID(t *testing.T) {
 	}
 }
 
-// The wire names are the contract between two processes that upgrade
-// independently; a rename here is a silent handshake failure, not a compile
-// error.
 func TestDarajaHelloWireNames(t *testing.T) {
 	b, err := json.Marshal(protocol.DarajaHelloRequest{
 		Type: "daraja_hello", ChildID: "c1", Ticket: "t", PID: 42,
@@ -550,5 +244,21 @@ func TestDarajaHelloWireNames(t *testing.T) {
 	}
 	if strings.Contains(string(b), `"credential"`) {
 		t.Error("an unset credential must be omitted, not sent empty")
+	}
+}
+
+// roundTrip marshals v and unmarshals it back into a fresh value, failing
+// when the data does not survive.
+func roundTrip[T any](t *testing.T, src T, dst *T) {
+	t.Helper()
+	b, err := json.Marshal(src)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := json.Unmarshal(b, dst); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(src, *dst) {
+		t.Errorf("round-trip lost data:\n sent: %+v\n  got: %+v", src, *dst)
 	}
 }

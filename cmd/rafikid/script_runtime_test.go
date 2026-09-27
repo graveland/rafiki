@@ -21,7 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childsock"
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -74,7 +74,7 @@ func TestScriptChildEnvStripsDaemonAndCredentialVariables(t *testing.T) {
 		// the only one.
 		"PYTHONPATH": "/smuggled",
 	}
-	env := envMap(scriptChildEnv(environ, forwarded, "/pp/one:/pp/two", "/sock/dir/connect.sock"))
+	env := envMap(scriptChildEnv(environ, forwarded, "/pp/one:/pp/two", "/sock/dir/child.sock"))
 
 	for _, keep := range []string{"PATH", "HOME", "LANG", "FORWARDED_VAR"} {
 		if _, ok := env[keep]; !ok {
@@ -93,7 +93,7 @@ func TestScriptChildEnvStripsDaemonAndCredentialVariables(t *testing.T) {
 	if env["PYTHONPATH"] != "/pp/one:/pp/two" {
 		t.Fatalf("PYTHONPATH = %q, want the daemon's computed value, exactly once", env["PYTHONPATH"])
 	}
-	if env["RAFIKI_CHILD_CONNECT"] != "/sock/dir/connect.sock" {
+	if env["RAFIKI_CHILD_CONNECT"] != "/sock/dir/child.sock" {
 		t.Fatalf("RAFIKI_CHILD_CONNECT = %q, want the per-child socket path", env["RAFIKI_CHILD_CONNECT"])
 	}
 }
@@ -126,7 +126,7 @@ func wantScriptRefusal(t *testing.T, err error, field string) {
 	if err == nil {
 		t.Fatalf("field %q was accepted on a script spawn", field)
 	}
-	ce, ok := err.(*control.ControllerError)
+	ce, ok := err.(*connectapi.ControllerError)
 	if !ok || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("field %q: wrong error class %v", field, err)
 	}
@@ -209,7 +209,7 @@ func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("a fundi-kind spawn carrying a script spec must be refused")
 	}
-	ce, ok := err.(*control.ControllerError)
+	ce, ok := err.(*connectapi.ControllerError)
 	if !ok || ce.Code != protocol.ErrInvalidArgs {
 		t.Fatalf("wrong error class %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -316,6 +315,3 @@ func TestLabelIsIdempotent(t *testing.T) {
 		t.Errorf("triple reconnect: label = %q, want empty", got)
 	}
 }
-
-// var _ control.Controller = (*Controller)(nil) — compile-time interface check.
-var _ control.Controller = (*Controller)(nil)

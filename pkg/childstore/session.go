@@ -140,11 +140,11 @@ type Session struct {
 
 	// ExitedRing holds a snapshot of the ring buffer captured when the child
 	// exited. It is populated by handleChildExit before the live Child is
-	// removed, so ctrl_get_recent remains queryable after exit (spec §11.4).
+	// removed, so GetRecent remains queryable after exit (spec §11.4).
 	ExitedRing []ring.Event
 
 	// ExitedRenderRing snapshots the render-ring at exit (normalizing children
-	// only), so the rendered ctrl_get_recent view survives the child's removal.
+	// only), so the rendered recent view survives the child's removal.
 	ExitedRenderRing []ring.Event
 
 	// Labels holds arbitrary user-defined and auto-derived key=value metadata.

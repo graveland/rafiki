@@ -9,12 +9,11 @@ import (
 
 	"connectrpc.com/connect"
 
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
-// UserAdmin is the operator-side slice of the daemon behind the framed
-// ctrl_user_create / ctrl_user_list / ctrl_user_rm verbs. Create here NEVER
+// UserAdmin is the operator-side slice of the daemon behind the user
+// create / list / remove RPCs. Create here NEVER
 // mints an admin — admins come only from rafikid user create --admin's
 // bootstrap path.
 type UserAdmin interface {
@@ -58,14 +57,14 @@ func userAdminErr(err error) error {
 	if errors.As(err, &ce) {
 		return err
 	}
-	var cerr *control.ControllerError
+	var cerr *ControllerError
 	if !errors.As(err, &cerr) {
 		slog.Error("connect: user-admin call failed", "error", err)
 	}
 	return ConnectErr(err)
 }
 
-// CreateUser serves the framed ctrl_user_create face. Never mints an admin:
+// CreateUser serves the CreateUser RPC. Never mints an admin:
 // admins come only from rafikid user create --admin.
 func (s *Server) CreateUser(
 	ctx context.Context,
@@ -82,7 +81,7 @@ func (s *Server) CreateUser(
 	return connect.NewResponse(resp), nil
 }
 
-// ListUsers serves the framed ctrl_user_list face. Tokens are never returned.
+// ListUsers serves the ListUsers RPC. Tokens are never returned.
 func (s *Server) ListUsers(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListUsersRequest],
@@ -98,7 +97,7 @@ func (s *Server) ListUsers(
 	return connect.NewResponse(&rafikiv1.ListUsersResponse{Users: rows}), nil
 }
 
-// RemoveUser serves the framed ctrl_user_rm face: tombstone a user.
+// RemoveUser serves the RemoveUser RPC: tombstone a user.
 func (s *Server) RemoveUser(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.RemoveUserRequest],

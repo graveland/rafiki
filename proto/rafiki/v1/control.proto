@@ -321,8 +321,8 @@ message SpawnRequest {
   // here as a Connect-WIRE policy, not a capability boundary: a child can
   // already set both through the tool plane (fundi/MCP agent_spawn, and any
   // preset it can name, including one it wrote itself) before this guard ever
-  // runs. The wire guard exists to keep Connect at least as strict as the
-  // framed plane, not to claim these two fields are otherwise unreachable.
+  // runs. The wire guard exists to keep Connect at least as strict as any
+  // other surface, not to claim these two fields are otherwise unreachable.
   //
   // Types are mirrors of protocol.SpawnRequest (pkg/protocol/types.go); where
   // the plan sketch said bool but the Go field is a string (fork_session,
@@ -420,10 +420,10 @@ message TaskRow {
   string status = 4;
   string assignee = 5;
   string drop_reason = 6;
-  // conversation_id is the ledger row's owning conversation -- the framed
-  // ctrl_task_list row carried it (tasks.Task's untagged `ConversationID`
-  // key) and `rafiki tasks`' CHILD column rendered it. It is a conversation
-  // id, NOT a child id: the child working the row rides assignee.
+  // conversation_id is the ledger row's owning conversation --
+  // tasks.Task's untagged `ConversationID` key carries it and `rafiki
+  // tasks`' CHILD column renders it. It is a conversation id, NOT a child
+  // id: the child working the row rides assignee.
   string conversation_id = 7;
 }
 
@@ -433,14 +433,13 @@ message ListTasksRequest {
   // include_dropped surfaces rows an agent decided not to do. Dropped rows are
   // hidden by default.
   bool include_dropped = 2;
-  // The framed verb's remaining filter fields: tasks assigned to one child,
+  // The remaining filter fields: tasks assigned to one child,
   // one status value, a row cap, and all (include dropped).
   string child_id = 3;
   string status = 4;
   int32 limit = 5;
-  // all is the framed verb's include-dropped flag. Both spellings stay on
-  // the wire; the handler treats include_dropped OR all set as
-  // include-dropped.
+  // all is the include-dropped flag. Both spellings stay on the wire; the
+  // handler treats include_dropped OR all set as include-dropped.
   bool all = 6;
 }
 
@@ -949,9 +948,8 @@ service Control {
   rpc Report(ReportRequest) returns (ReportResponse);
   rpc Receive(ReceiveRequest) returns (stream ScriptMessage);
   rpc SetResult(SetResultRequest) returns (SetResultResponse);
-  // ─── Framed-protocol retirement RPCs ─────────────────────────────────────
-  // The Connect faces of the framed ctrl_* verbs the retirement moves over.
-  // Wave 2 fills the handlers; until then they answer Unimplemented.
+  // ─── Control-plane RPCs ─────────────────────────────────────────────────
+  // The verb faces the framed protocol once served, moved over wholesale.
   rpc Resume(ResumeRequest) returns (ResumeResponse);
   rpc CloseAllExited(CloseAllExitedRequest) returns (CloseAllExitedResponse);
   rpc SetLabels(SetLabelsRequest) returns (SetLabelsResponse);
@@ -1280,12 +1278,11 @@ message BanProviderResponse {
 message UnbanProviderRequest { string provider = 1; }
 message UnbanProviderResponse {}
 
-// ─── Framed-protocol retirement messages ───────────────────────────────────
-// The request/response shapes behind the RPCs above that replace the framed
-// ctrl_* verbs. Unless a comment says otherwise, each message mirrors its
-// protocol.X counterpart (pkg/protocol/types.go) one Go field per proto
-// field, in declaration order, skipping the framed envelope's Type and ID
-// fields.
+// ─── Control-plane messages ────────────────────────────────────────────────
+// The request/response shapes behind the RPCs above. Unless a comment says
+// otherwise, each message mirrors its protocol.X counterpart
+// (pkg/protocol/types.go) one Go field per proto field, in declaration
+// order, skipping the legacy envelope's Type and ID fields.
 
 // ResumeRequest mirrors protocol.ResumeRequest: re-spawn an exited child
 // against its persisted state record. api_key is used at spawn time only and
@@ -1436,7 +1433,7 @@ message ConversationStatsResponse {
   string stats_json = 1;
 }
 
-// ─── Executor admin verbs (ctrl_executor_enroll/create/label/disable/enable/delete) ───
+// ─── Executor admin verbs (enroll/create/label/disable/enable/delete) ──────
 
 // EnrollExecutorRequest mirrors protocol.ExecutorEnrollRequest: mint a
 // one-time enrollment token.
@@ -1556,7 +1553,7 @@ message ExecutorSessionReady {
   string selector = 4;
 }
 
-// ─── User admin verbs (ctrl_user_create/list/rm) ───────────────────────────
+// ─── User admin verbs (create/list/remove) ────────────────────────────────
 
 // CreateUserRequest mints a user and its bearer token.
 message CreateUserRequest {
@@ -1608,7 +1605,7 @@ message RemoveUserRequest {
 }
 message RemoveUserResponse {}
 
-// ─── Raw child I/O (ctrl_get_streams / ctrl_send) ──────────────────────────
+// ─── Raw child I/O (GetStreams / SendFrame) ───────────────────────────────
 
 // GetStreamsRequest names a live child and which streams to read: "in",
 // "err", or "all" (empty means "all").

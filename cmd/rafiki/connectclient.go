@@ -5,10 +5,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"path/filepath"
+	"net/url"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -75,22 +76,57 @@ type connectEndpoint struct {
 	identity string
 }
 
-// connectSocketFor names the Connect socket beside a profile's control socket.
+// dialAddr returns the host:port a TLS client dials for rawURL: its host:port
+// if a port was given, else its host with the https default (443) appended.
+// url.URL leaves an unspecified port out of Host entirely, and net.Dial
+// requires one — without this, a "https://host" URL (no explicit :443) fails
+// with "missing port in address" before TLS is even attempted.
 //
-// connect.sock is a SIBLING of controller.sock by construction (pkg/paths pins
-// both in RuntimeDir), so a profile naming a scratch daemon's control socket
-// gets that daemon's Connect socket for free. It is deliberately not a profile
-// field: two names for one daemon is two ways to be wrong.
-func connectSocketFor(p profile.Resolved) string {
-	return filepath.Join(filepath.Dir(p.Socket), "connect.sock")
+// Inlined from the retired pkg/client.DialAddr, which existed for exactly one
+// caller (the executor link, sessionConnectTarget below) precisely so this
+// derivation could not drift between the control plane and the executor.
+func dialAddr(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("parse rafiki url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("RAFIKI_URL scheme must be 'https' to reach the control plane, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", errors.New("RAFIKI_URL missing host")
+	}
+	if u.Port() != "" {
+		return u.Host, nil
+	}
+	return net.JoinHostPort(u.Hostname(), "443"), nil
+}
+
+// isRemoteURL reports whether raw names a remote rafikid worth dialing for
+// the control plane. Only https does: an http:// URL is the local loopback
+// proxy face — one hostname serving the face, the control plane and the
+// executor link is a TLS-only arrangement, so there is no plaintext control
+// listener to dial. An empty URL means the local daemon.
+func isRemoteURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Host != ""
 }
 
 // newConnectEndpoint resolves where the Connect control plane lives, from the
 // profile and nothing else.
 //
-// Remote requires a token. There is no bootstrap mode on this plane — it has
-// no user-create RPC — so an absent credential can only ever produce a 401,
-// and saying so here beats saying so after a round trip.
+// The profile's Socket IS the Connect socket: the daemon serves its control
+// plane on paths.SocketPath, the one path profiles store. It is deliberately
+// not a second profile field: two names for one daemon is two ways to be
+// wrong.
+//
+// Remote requires a token. There is no bootstrap mode on this plane — a
+// daemon with no users refuses every connection — so an absent credential can
+// only ever produce an Unauthenticated, and saying so here beats saying so
+// after a round trip.
 func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	p, err := resolveProfile(cmd)
 	if err != nil {
@@ -98,7 +134,7 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	}
 
 	if p.URL == "" {
-		sock := connectSocketFor(p)
+		sock := p.Socket
 		httpClient := connectHTTPClient(sock)
 		// Attach the profile's token when it has one, so a per-user read
 		// (GetRateLimitStatus) can resolve identity locally too — see

@@ -13,11 +13,10 @@ import (
 )
 
 // connectExecutorAdmin adapts *Controller to connectapi.ExecutorAdmin — the
-// operator-side executor verbs the framed ctrl_executor_enroll/create/label/
-// disable/enable/delete faces served. A distinct type for the same reason
-// connectModels is one: the Controller methods this delegates to already exist
-// with the framed planes' signatures, and renaming them would touch every
-// existing caller for no gain.
+// operator-side executor enroll/create/label/disable/enable/delete RPCs. A
+// distinct type for the same reason connectModels is one: the Controller
+// methods this delegates to already exist with these signatures, and renaming
+// them would touch every existing caller for no gain.
 //
 // Errors pass through UNMAPPED. The connectapi handler owns error mapping —
 // executorAdminErr logs an uncoded cause (ConnectErr redacts it) and hands a
@@ -26,13 +25,9 @@ import (
 // own ConnectErr pass would re-classify as Internal and lose the code.
 type connectExecutorAdmin struct{ c *Controller }
 
-// executorListDefaultLimit and executorListMaxLimit are the framed
-// ctrl_executor_list dispatcher's limit contract (pkg/control/dispatch.go:
-// maxExecutorListLimit, and the `Limit <= 0 → 50` default). ListExecutors'
-// proto comment says `0 = default`, and this face serves the same listing, so
-// it carries the same contract. The numbers are duplicated here because the
-// dispatcher's const is unexported; if the framed default ever moves, move it
-// here with it.
+// executorListDefaultLimit and executorListMaxLimit are ListExecutors' limit
+// contract: the proto comment says `0 = default`, and this face serves the
+// management listing, so `Limit <= 0 → 50` and the cap live here.
 const (
 	executorListDefaultLimit = 50
 	executorListMaxLimit     = 500
@@ -40,9 +35,9 @@ const (
 
 // Enroll mints a one-time enrollment token. The owner rides the CONTEXT, never
 // the request: spawnOwner maps the proxy face's authenticated identity — nil
-// (UDS local trust) becomes users.Identity{}, the same value connIdentity
-// hands the framed dispatcher, whose owner then resolves to the daemon's own
-// OS user — and the request has no owner field and must never grow one. The
+// (UDS local trust) becomes users.Identity{}, whose owner then resolves to the
+// daemon's own OS user — and the request has no owner field and must never
+// grow one. The
 // same rule guards the labels: executorTrustLabels refuses a request carrying
 // `owner` (or `machine`, which --name owns).
 func (a connectExecutorAdmin) Enroll(

@@ -55,7 +55,7 @@ func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
 }
 
 // TestTaskRowCarriesConversationID pins the framed row's conversation id on
-// the Connect wire. The framed ctrl_task_list row serialized tasks.Task
+// the Connect wire. The task row serialized tasks.Task
 // untagged, so ConversationID rode every response, and `rafiki tasks`' CHILD
 // column rendered it -- the Connect TaskRow dropped it and Task 4.1's CLI
 // conversion lost the column as a result. It is a conversation id, not a

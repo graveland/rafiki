@@ -12,7 +12,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
-	"go.graveland.dev/rafiki/pkg/control"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
@@ -462,9 +462,9 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 			if err == nil {
 				t.Fatal("Send accepted a session switch for an agent child; it would silently reattach the same conversation")
 			}
-			var ce *control.ControllerError
+			var ce *connectapi.ControllerError
 			if !errors.As(err, &ce) {
-				t.Fatalf("error is %T, want *control.ControllerError so the client sees a coded failure: %v", err, err)
+				t.Fatalf("error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
 			}
 			if ce.Code != protocol.ErrInvalidArgs {
 				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
@@ -506,7 +506,7 @@ func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
 			})
 
 			err := ctrl.Send(childID, json.RawMessage(`{"type":"new_session","id":"req-1"}`))
-			var ce *control.ControllerError
+			var ce *connectapi.ControllerError
 			if errors.As(err, &ce) && ce.Code == protocol.ErrInvalidArgs &&
 				strings.Contains(ce.Message, "agent child") {
 				t.Fatalf("kind %q was refused with the agent-kind rejection: %v", kind, err)
@@ -544,9 +544,9 @@ func TestSend_RejectsSessionSwitchForScriptChild(t *testing.T) {
 			if err == nil {
 				t.Fatal("Send accepted a session switch for a script child; a respawn would silently start the work over")
 			}
-			var ce *control.ControllerError
+			var ce *connectapi.ControllerError
 			if !errors.As(err, &ce) {
-				t.Fatalf("error is %T, want *control.ControllerError so the client sees a coded failure: %v", err, err)
+				t.Fatalf("error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
 			}
 			if ce.Code != protocol.ErrInvalidArgs {
 				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)

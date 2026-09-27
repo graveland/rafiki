@@ -3,12 +3,9 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,106 +115,7 @@ func TestCloseAllExitedJSONLIds(t *testing.T) {
 	}
 }
 
-// ─── review-close harness: a framed fake daemon plus a Connect stub ──────────
-//
-// runClose is now Connect-only (newConnectEndpoint → ep.control()), but the
-// harness keeps BOTH planes in the layout the real client derives — the
-// profile's Socket names controller.sock and connectSocketFor treats
-// connect.sock as its SIBLING — because cmd_conversations_test.go's review
-// test resolves its target by name through the framed fake's ctrl_list.
-// The close tests below assert against the Connect stub's records.
-
 func intPtr(i int) *int { return &i }
-
-// fakeFramedDaemon answers every ctrl_* request with success and records
-// what arrived, so a test can assert what the framed plane received.
-type fakeFramedDaemon struct {
-	mu        sync.Mutex
-	list      protocol.ListResponseData
-	allExited protocol.ForgetAllExitedResponseData
-	kills     []string
-	forgets   []string
-}
-
-func (f *fakeFramedDaemon) handleConn(conn net.Conn) {
-	defer conn.Close()
-	r := bufio.NewScanner(conn)
-	w := bufio.NewWriter(conn)
-	for r.Scan() {
-		var hdr struct {
-			Type string `json:"type"`
-			ID   string `json:"id"`
-		}
-		if json.Unmarshal(r.Bytes(), &hdr) != nil {
-			continue
-		}
-		f.mu.Lock()
-		var data any
-		switch hdr.Type {
-		case protocol.TypeCtrlList:
-			data = f.list
-		case protocol.TypeCtrlKill:
-			f.kills = append(f.kills, requestField(r.Bytes(), "childId"))
-			data = protocol.KillResponseData{ExitCode: intPtr(0), DurationMs: 1}
-		case protocol.TypeCtrlForget:
-			f.forgets = append(f.forgets, requestField(r.Bytes(), "childId"))
-			data = struct{}{}
-		case protocol.TypeCtrlForgetAllExited:
-			data = f.allExited
-		default:
-			data = struct{}{}
-		}
-		f.mu.Unlock()
-		payload, err := json.Marshal(data)
-		if err != nil {
-			continue
-		}
-		resp, err := json.Marshal(protocol.Response{
-			Type: protocol.TypeCtrlResponse, Command: hdr.Type, ID: hdr.ID, Success: true, Data: payload,
-		})
-		if err != nil {
-			continue
-		}
-		if _, err := w.Write(resp); err != nil {
-			return
-		}
-		if err := w.WriteByte('\n'); err != nil {
-			return
-		}
-		if err := w.Flush(); err != nil {
-			return
-		}
-	}
-}
-
-// requestField pulls one top-level string field out of a framed request.
-func requestField(raw []byte, key string) string {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
-	}
-	var s string
-	_ = json.Unmarshal(m[key], &s)
-	return s
-}
-
-func serveFramedDaemon(t *testing.T, sockPath string, f *fakeFramedDaemon) {
-	t.Helper()
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen %s: %v", sockPath, err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go f.handleConn(conn)
-		}
-	}()
-}
 
 // reviewStubControl serves the review verbs and the child operations the
 // Connect close path needs (GetChild for the pre-check, Kill, Close,
@@ -345,10 +243,10 @@ func (s *reviewStubControl) findings() []*rafikiv1.ConversationFindingsRequest {
 	return append([]*rafikiv1.ConversationFindingsRequest(nil), s.findingsCalls...)
 }
 
-// newReviewHarness wires an isolated profile at a framed fake on
-// controller.sock with a Connect stub on the sibling connect.sock, and points
-// the process at it.
-func newReviewHarness(t *testing.T) (*fakeFramedDaemon, *reviewStubControl) {
+// newReviewHarness wires an isolated profile at a Connect stub served on the
+// profile's own socket — the one path the client dials — and points the
+// process at it.
+func newReviewHarness(t *testing.T) *reviewStubControl {
 	t.Helper()
 	isolateProfiles(t)
 	resetProfileCache()
@@ -358,23 +256,21 @@ func newReviewHarness(t *testing.T) (*fakeFramedDaemon, *reviewStubControl) {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	controlSock := filepath.Join(dir, "controller.sock")
+	sock := filepath.Join(dir, "controller.sock")
 
-	daemon := &fakeFramedDaemon{}
-	serveFramedDaemon(t, controlSock, daemon)
 	stub := &reviewStubControl{t: t}
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
-	serveConnectOnUnixSocket(t, filepath.Join(dir, "connect.sock"), routePath, handler)
+	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
 	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: controlSock},
+		"scratch": {Name: "scratch", Socket: sock},
 	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	if err := profile.SavePointer("scratch"); err != nil {
 		t.Fatalf("SavePointer: %v", err)
 	}
-	return daemon, stub
+	return stub
 }
 
 // captureStderr swaps os.Stderr for a temp file and returns a reader for
@@ -410,7 +306,7 @@ func captureStderr(t *testing.T) func() string {
 // Closing with neither flag never reviews — the stub fails the test if
 // ConversationReview is reached.
 func TestCloseReviewDefaultOff(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.forbidReview = true
 
 	cmd := newCloseCmd()
@@ -429,7 +325,7 @@ func TestCloseReviewDefaultOff(t *testing.T) {
 
 // --review sends one ConversationReview naming exactly the closed id.
 func TestCloseReviewSendsRequestForClosedID(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
 		ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
 	}}}
@@ -459,7 +355,7 @@ func TestCloseReviewSendsRequestForClosedID(t *testing.T) {
 
 // --no-review is the explicit no-op spelling of the default.
 func TestCloseNoReviewIsExplicitNoOp(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.forbidReview = true
 
 	cmd := newCloseCmd()
@@ -479,7 +375,7 @@ func TestCloseNoReviewIsExplicitNoOp(t *testing.T) {
 // child was still closed, and the failure surfaces as the per-id stderr
 // note with the exact format the brief pins.
 func TestCloseReviewFailureNeverFailsTheClose(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.reviewErr = connect.NewError(connect.CodeFailedPrecondition, errors.New("unknown model"))
 	stderr := captureStderr(t)
 
@@ -504,7 +400,7 @@ func TestCloseReviewFailureNeverFailsTheClose(t *testing.T) {
 // --all-exited --review reviews EVERY id the close reported, in one batched
 // request — not one request per id.
 func TestCloseAllExitedReviewBatchesEveryClosedID(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.closeAllIds = []string{"c_1", "c_2"}
 	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
 		ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_ENQUEUED,
@@ -528,7 +424,7 @@ func TestCloseAllExitedReviewBatchesEveryClosedID(t *testing.T) {
 // A per-id non-enqueued status is the same stderr note shape as a
 // whole-request failure: "review <id>: <status text>".
 func TestCloseReviewNotesNonEnqueuedStatuses(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.reviewResp = &rafikiv1.ConversationReviewResponse{Accepted: []*rafikiv1.ConversationReviewAccept{{
 		ConversationId: "c_1", Status: rafikiv1.ReviewAcceptStatus_REVIEW_ACCEPT_STATUS_QUEUE_FULL,
 	}}}
@@ -549,7 +445,7 @@ func TestCloseReviewNotesNonEnqueuedStatuses(t *testing.T) {
 // A child the daemon already reports exited skips the kill entirely: the
 // pre-check sees status=exited and goes straight to Close.
 func TestCloseExitedChildSkipsKill(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.childStatus = map[string]string{"c_1": "exited"}
 
 	cmd := newCloseCmd()
@@ -567,7 +463,7 @@ func TestCloseExitedChildSkipsKill(t *testing.T) {
 
 // A live child is killed first, then closed.
 func TestCloseLiveChildStopsFirst(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.childStatus = map[string]string{"c_1": "streaming"}
 
 	cmd := newCloseCmd()
@@ -589,7 +485,7 @@ func TestCloseLiveChildStopsFirst(t *testing.T) {
 // child_shutting_down share. The stub answers a live child (so the kill runs)
 // but its Kill fails with the reason attached; close must proceed anyway.
 func TestCloseKillSaysAlreadyExitedProceedsToClose(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.childStatus = map[string]string{"c_1": "streaming"}
 	stub.killErr = rpcreason.Attach(
 		connect.NewError(connect.CodeFailedPrecondition, errors.New("child has already exited")),
@@ -608,7 +504,7 @@ func TestCloseKillSaysAlreadyExitedProceedsToClose(t *testing.T) {
 // The same code with a DIFFERENT reason is a failure, not a close: this is
 // exactly what keying on the reason (instead of connect.CodeOf) buys.
 func TestCloseKillInGraceIsAFailure(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.childStatus = map[string]string{"c_1": "streaming"}
 	stub.killErr = rpcreason.Attach(
 		connect.NewError(connect.CodeFailedPrecondition, errors.New("child in grace")),
@@ -626,7 +522,7 @@ func TestCloseKillInGraceIsAFailure(t *testing.T) {
 
 // A kill failure carrying no reason at all fails the close.
 func TestCloseKillUnknownReasonFails(t *testing.T) {
-	_, stub := newReviewHarness(t)
+	stub := newReviewHarness(t)
 	stub.childStatus = map[string]string{"c_1": "streaming"}
 	stub.killErr = connect.NewError(connect.CodeInternal, errors.New("boom"))
 

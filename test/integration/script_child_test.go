@@ -208,9 +208,9 @@ func faceClient(t *testing.T, d *daemon, token string) rafikiv1connect.ControlCl
 		d.proxyURL)
 }
 
-// childConnectClient dials an arbitrary unix socket — the per-child Connect
+// childConnectClient dials an arbitrary unix socket — the per-child control
 // socket — with a prior-knowledge h2c client, the same shape
-// (*daemon).connectClient uses against connect.sock.
+// (*daemon).connectClient uses against the daemon's control socket.
 func childConnectClient(t *testing.T, sockPath string) rafikiv1connect.ControlClient {
 	t.Helper()
 	h := &http.Client{Transport: &http2.Transport{
@@ -229,7 +229,7 @@ func childConnectClient(t *testing.T, sockPath string) rafikiv1connect.ControlCl
 // binary cannot be imported. paths.StateDir() is $XDG_STATE_HOME/rafiki/state,
 // one "state" leaf below the app dir the socket path names.
 func scriptSocketPath(d *daemon, childID string) string {
-	return filepath.Join(filepath.Dir(d.socketPath), "state", "script-host", childID, "connect.sock")
+	return filepath.Join(filepath.Dir(d.socketPath), "state", "script-host", childID, "child.sock")
 }
 
 // scriptChildSpawn spawns one kind=script child over the operator Connect

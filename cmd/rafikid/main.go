@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,7 +25,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
@@ -54,7 +52,7 @@ import (
 
 // modelCatalogTTL matches llm.NewClient's own default (the catalog a
 // ClientOption-less client would build for itself) — sharing one instance
-// between the proxy face and the Controller (ctrl_get/list's ContextWindow)
+// between the proxy face and the Controller (ChildSummary's ContextWindow)
 // only makes sense if both see the same refresh cadence.
 const modelCatalogTTL = time.Hour
 
@@ -71,7 +69,7 @@ func main() {
 
 	// Normalize single-dash long flags (-model → --model) for pflag compatibility.
 	// stdlib flag accepted both forms; pflag rejects the single-dash form as an
-	// unknown shorthand. ctrl_spawn's caller-supplied ExtraArgs reach rafikid
+	// unknown shorthand. Spawn's caller-supplied ExtraArgs reach rafikid
 	// fundi through buildAgentArgv, so this is a wire-visible contract.
 	normalizeArgsForPflag()
 
@@ -389,9 +387,9 @@ func runDaemon(opts runDaemonOpts) error {
 	reg := prometheus.NewRegistry()
 
 	// One catalog shared between the proxy face's llm.Client and the
-	// Controller (ctrl_get/list's ContextWindow field) — built here,
+	// Controller (ChildSummary's ContextWindow field) — built here,
 	// independent of whether the proxy face itself manages to start, so a
-	// failed face doesn't also cost ctrl_get its context-window data.
+	// failed face doesn't also cost GetChild its context-window data.
 	//
 	// WithCache loads the on-disk snapshot immediately, so a freshly started
 	// or restarted daemon doesn't spawn agents against an empty catalog: without
@@ -715,17 +713,15 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	if face != nil && face.Control != nil {
-		connectSock := paths.ConnectSocketPath()
-		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, connectSock); err != nil {
-			// Fatal. This socket is how `rafiki attach` reaches the daemon; a
-			// daemon serving no local control plane looks alive and answers
-			// nothing the TUI asks for.
+		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, socketPath); err != nil {
+			// Fatal. This socket is how every local client reaches the daemon;
+			// a daemon serving no control plane looks alive and answers nothing.
 			slog.Error("cannot serve the local Connect control plane",
-				"path", connectSock, "error", err)
+				"path", socketPath, "error", err)
 			os.Exit(1)
 		} else {
 			defer ln.Close()
-			slog.Info("rafiki daemon serving Connect (unix)", "path", connectSock)
+			slog.Info("rafiki daemon serving Connect (unix)", "path", socketPath)
 		}
 	}
 
@@ -737,27 +733,11 @@ func runDaemon(opts runDaemonOpts) error {
 		go syncPricingLoop(baseCtx, pool, catalog)
 	}
 
-	handler := control.NewDispatch(ctrl)
-	// The same identity store the TCP listener and the upgrade path use. On
-	// the UDS a ctrl_auth first frame is OPTIONAL (ListenWithAuth): a profile
-	// that carries a token runs framed verbs as that user, so owner-scoped
-	// state (presets above all) agrees between this socket and connect.sock.
-	// A token-less client stays anonymous — local trust, as always.
-	srv, err := control.ListenWithAuth(socketPath, handler, userStore)
-	if err != nil {
-		slog.Error("listen", "socket", socketPath, "error", err)
-		os.Exit(1)
-	}
-	slog.Info("rafiki daemon listening", "socket", socketPath)
-
-	// TCP control listener (optional — for remote attach, k8s deployment).
-	var tcpSrv *control.Server
+	// Remote TLS listener (optional — for remote attach, k8s deployment).
 	if addr := controlAddr; addr != "" {
 		// Remote serving requires a database: user auth is row-backed and
 		// there is nothing to degrade to. Without this check the daemon
-		// comes up serving a TLS listener stuck in permanent bootstrap
-		// mode — unauthenticated ctrl_user_create accepted from anywhere,
-		// then failing on the insert.
+		// comes up serving a TLS listener that cannot authenticate anyone.
 		if userStore == nil {
 			slog.Error("RAFIKI_CONTROL_LISTEN requires RAFIKI_DB: user identity is database-backed")
 			os.Exit(1)
@@ -796,14 +776,7 @@ func runDaemon(opts runDaemonOpts) error {
 			os.Exit(1)
 		}
 
-		attached := control.NewAttached(handler)
-		tcpSrv = attached
-
 		mux := http.NewServeMux()
-		mux.Handle(upgradeconn.PathFor(upgradeconn.Control),
-			upgradeconn.Handler(upgradeconn.Control, func(c *upgradeconn.Conn) {
-				attached.ServeUpgraded(c, userStore)
-			}))
 		if execPool != nil {
 			mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), execPool.UpgradeHandler())
 		}
@@ -812,9 +785,10 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 
 		// Everything else on this listener is the proxy face: /v1/messages,
-		// /v1/chat/completions, /healthz, /metrics and its unrouted-request
-		// logger. ServeMux prefers the longest matching pattern, so the two
-		// exact paths above win and the rest falls through here.
+		// /v1/chat/completions, the Connect control route, /healthz, /metrics
+		// and its unrouted-request logger. ServeMux prefers the longest
+		// matching pattern, so the two exact paths above win and the rest
+		// falls through here.
 		//
 		// This is what makes ONE hostname on ONE port serve all three surfaces.
 		// The face keeps its loopback listener too — children talk to their own
@@ -826,16 +800,20 @@ func runDaemon(opts runDaemonOpts) error {
 		muxSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := muxSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("control/executor listener stopped", "error", err)
+				slog.Error("executor/proxy listener stopped", "error", err)
 			}
 		}()
-		// While no user exists, anyone who can reach this listener can claim
-		// the daemon with the first ctrl_user_create. That window is
-		// deliberate, but it should never be quiet.
-		go warnWhileUnclaimed(ctx, userStore, addr, unclaimedWarnInterval)
+		// A listener with no users is unreachable to everyone: identity is
+		// row-backed, so every credential presented is refused. Say so ONCE,
+		// where the operator is reading the log, and name the recovery —
+		// `rafikid user create` opens the database directly, bypassing this
+		// listener and everything else on the host.
+		if n, err := userStore.CountActive(ctx); err == nil && n == 0 {
+			slog.Warn("no users exist: create one on this host with rafikid user create <name> --admin",
+				"addr", addr)
+		}
 
 		slog.Info("rafiki daemon listening (TCP/TLS)", "addr", addr,
-			"control", upgradeconn.PathFor(upgradeconn.Control),
 			"executor", upgradeconn.PathFor(upgradeconn.Executor),
 			"daraja", upgradeconn.PathFor(upgradeconn.Daraja),
 			"executorEnabled", execPool != nil)
@@ -846,17 +824,6 @@ func runDaemon(opts runDaemonOpts) error {
 	sig := <-sigCh
 
 	slog.Info("shutting down", "signal", sig)
-
-	// Notify all connected clients so they can exit cleanly before pipes die.
-	shutdownEvent := protocol.CtrlDaemonShutdown{
-		Type:   protocol.TypeCtrlDaemonShutdown,
-		Reason: fmt.Sprintf("signal received: %s", sig),
-	}
-	if frame, err := json.Marshal(shutdownEvent); err == nil {
-		n := srv.Broadcast(frame)
-		slog.Info("notified clients of shutdown", "count", n)
-		time.Sleep(250 * time.Millisecond) // brief window for frames to land on the wire
-	}
 
 	cancel() // stop the background sweeper
 
@@ -909,14 +876,6 @@ func runDaemon(opts runDaemonOpts) error {
 
 	ctrl.Stop() // wait for sweeper goroutine to exit
 	ctrl.ReleaseAllLeases()
-	if err := srv.Close(); err != nil {
-		slog.Warn("server close", "error", err)
-	}
-	if tcpSrv != nil {
-		if err := tcpSrv.Close(); err != nil {
-			slog.Warn("TCP server close", "error", err)
-		}
-	}
 
 	// Close the pool only after ShutdownAllChildren has returned: every
 	// in-process agent's own shutdown (e.g. flushing conversation state) runs
@@ -977,42 +936,6 @@ func closePoolBounded(pool *pgxpool.Pool, timeout time.Duration) {
 		slog.Error("agent database pool did not close in time; exiting without it. "+
 			"A connection is still held by work no context could cancel — most likely an abandoned child",
 			"waited", timeout)
-	}
-}
-
-// unclaimedWarnInterval is how often the daemon repeats the bootstrap
-// warning while no user exists.
-const unclaimedWarnInterval = time.Minute
-
-// warnWhileUnclaimed logs a warning every unclaimedWarnInterval for as long as
-// the TLS listener is in bootstrap mode. It checks first and waits second, so
-// the warning lands when the listener comes up — the moment an operator is
-// actually reading the log — rather than a minute later.
-//
-// It stops only when a user exists. A store error keeps it ticking: "I could
-// not check" is not evidence the window is closed, and returning on the first
-// blip would silence the warning for the daemon's whole lifetime.
-func warnWhileUnclaimed(ctx context.Context, userStore users.Store, addr string, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		n, err := userStore.CountActive(ctx)
-		if err == nil {
-			if n > 0 {
-				return
-			}
-			slog.Warn("no users exist: this listener accepts an unauthenticated "+
-				"ctrl_user_create from anyone who can reach it. Run `rafiki user create <name>` now.",
-				"addr", addr)
-		}
-		// A store error falls through to the next tick: it is not evidence
-		// the window is closed. It is not logged here either — the outage
-		// logs itself, on every request that touches the database.
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
 	}
 }
 
@@ -1141,7 +1064,7 @@ func loadServiceEnv() {
 // normalizeArgsForPflag converts single-dash long flags (-model) to double-dash
 // form (--model) in os.Args before cobra parses them. stdlib flag accepts both
 // -db and --db; pflag rejects -db as "unknown shorthand flag: 'd'".
-// ctrl_spawn's caller-supplied ExtraArgs reach rafikid fundi through
+// Spawn's caller-supplied ExtraArgs reach rafikid fundi through
 // buildAgentArgv, so single-dash forms are a wire-visible contract.
 //
 // Single-character args (-j) are left alone as shorthands.

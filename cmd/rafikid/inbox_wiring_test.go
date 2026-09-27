@@ -17,7 +17,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
-	"go.graveland.dev/rafiki/pkg/control"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -337,7 +336,7 @@ func TestSendRefusesADeadChildBeforePersisting(t *testing.T) {
 		ChildID: "c_gone", Status: protocol.StatusExited, StartedAt: time.Now(),
 	})
 	err := ctrl.Send("c_gone", json.RawMessage(`{"type":"prompt","message":"hi"}`))
-	var ce *control.ControllerError
+	var ce *connectapi.ControllerError
 	if !errors.As(err, &ce) || ce.Code != protocol.ErrChildExited {
 		t.Fatalf("Send to an exited child = %v; want a coded child_exited error", err)
 	}
@@ -792,7 +791,6 @@ func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
 	}
 
 	got, err := ctrl.Spawn(context.Background(), protocol.SpawnRequest{
-		Type:      protocol.TypeCtrlSpawn,
 		Kind:      protocol.KindFundi,
 		Model:     "anthropic/sonnet-latest",
 		Cwd:       t.TempDir(),
