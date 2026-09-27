@@ -129,8 +129,16 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		`SELECT labels, roots, isolation, workspace_mode, admits, expires_at, consumed_at
 		   FROM conversations.executor_enrollment_token WHERE token_hash = $1`,
 		hashed).Scan(&tr.labels, &tr.roots, &tr.isolation, &tr.workspaceMode, &tr.admits, &tr.expiresAt, &tr.consumedAt)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return executors.Executor{}, "", ErrTokenUnknown
+	}
+	if err != nil {
+		// NOT ErrTokenUnknown. See authenticateByHash's comment: "I could not
+		// check this token" is not "this token is unknown", and
+		// IsTerminalAuthError treats ErrTokenUnknown as terminal — collapsing
+		// a dead connection into it told every executor enrolling during a
+		// database blip that its token was permanently invalid.
+		return executors.Executor{}, "", fmt.Errorf("look up enrollment token: %w", err)
 	}
 	if tr.consumedAt != nil {
 		return executors.Executor{}, "", ErrTokenConsumed
