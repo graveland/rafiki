@@ -823,6 +823,13 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 		slog.Info("agent: turn cancelled", "conversation", e.conv.ID, "error", err, "orphans_repaired", repaired)
 	case err != nil:
 		slog.Error("agent: turn failed", "conversation", e.conv.ID, "error", err)
+		// The native error event goes FIRST: publishNative is non-blocking
+		// (NativeSink's contract) while the framed Emit below can block
+		// indefinitely on a stopped stdout reader, and a subscriber that misses
+		// the frame should still get the failure durably. turn_end follows in
+		// AgentEnd with the PREVIOUS turn's stop reason — read publishError's
+		// doc before deriving "the turn failed" from that field.
+		e.em.publishError(err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
 		e.turnEnded(TurnOutcome{Err: err})
 	case result.LimitReached:

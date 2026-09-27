@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -405,17 +404,12 @@ func killAndForget(t *testing.T, d *daemon, childID string) {
 	for time.Now().Before(deadline) {
 		// Kill returns only once the child reads as exited (it waits for
 		// cm.Remove), so a success here needs no poll before the close. The one
-		// tolerated failure is the exited refusal: the Connect Kill handler
-		// wraps every refusal in CodeInternal carrying the controller's authored
-		// message, and both child_exited wordings ("child has exited", "child
-		// has already exited") contain "exited" — a missing child or a
-		// mid-shutdown one does not. The framed plane branched on the
-		// protocol.ErrChildExited code; the Connect surface carries the same
-		// fact in the message it forwards verbatim.
+		// tolerated failure is the exited refusal — read exactly, the same way
+		// the Close leg below reads its own refusal.
 		kctx, kcancel := context.WithTimeout(context.Background(), 15*time.Second)
 		_, killErr := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID}))
 		kcancel()
-		if killErr != nil && !strings.Contains(killErr.Error(), "exited") {
+		if killErr != nil && rpcreason.Reason(killErr) != protocol.ErrChildExited {
 			t.Fatalf("Kill failed: %v", killErr)
 		}
 

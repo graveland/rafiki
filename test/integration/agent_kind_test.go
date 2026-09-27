@@ -125,33 +125,69 @@ func assistantTextIn(childID string, ev *rafikiv1.Event) string {
 	return ""
 }
 
-// assertTurnEndedCleanlyBetween fails unless es's buffered window [from, to)
-// carries a turn_end whose raw stop reason is "end_turn".
+// assertTurnEndedCleanlyBetween fails unless the events buffered from index
+// `from` onward carry no error event AND a turn_end whose raw stop reason is
+// "end_turn". The stream is child-scoped, so every buffered event is this
+// child's; both requirements are checked independently of each other. `to` is
+// the settled-idle index the caller waited on — a snapshot, not a hard bound:
+// the turn's own turn_end is appended to the event log AFTER the agent_end
+// stdout frame that produces that idle status (Emitter.AgentEnd writes the pi
+// frames first, then publishes), so under load the append can land after the
+// test arrives here. The helper therefore WAITS (bounded, like every other
+// wait in this test) for the end_turn turn_end instead of scanning a frozen
+// window, and the error scan runs over the buffer as it grows. Waiting cannot
+// hide a failure: a failed turn publishes its native error event in runTurn's
+// error arm, strictly BEFORE AgentEnd publishes any turn_end, so by the time
+// an end_turn turn_end is visible any error for the same turn is already in
+// the buffer and fatal first.
 //
-// This is the native-plane translation of the framed plane's
-// assertNoErrorEventBetween, which failed if any agent_error frame for the
-// child appeared in the window — the exact signature of the context-blind
+// The error half is the like-for-like native replacement for the framed
+// plane's assertNoErrorEventBetween, which failed if any agent_error frame for
+// the child appeared in the window — the exact signature of the context-blind
 // fake sender bug (the aborted turn had consumed the second scripted message,
-// so the follow-up prompt failed with "scripted turns exhausted"). The engine
-// emits agent_error only on the framed plane (pkg/fundi/engine.go); no
-// native error event exists for a failed fundi turn. A failed turn still
-// reaches AgentEnd and publishes turn_end, but with whatever raw stop reason
-// the last assistant message left — "tool_use" here, from the aborted turn —
-// never the clean "end_turn" of a completed one (publishAssistant sets
-// lastStop from the reply; publishTurnEnd copies it). Requiring end_turn in
-// the window therefore asserts the same property — this prompt's turn did not
-// error — in the native vocabulary.
+// so the follow-up prompt failed with "scripted turns exhausted"). fundi
+// publishes that failure on the durable plane now too: runTurn's error arm
+// (pkg/fundi/engine.go) publishes a native ErrorEvent through the same
+// pipeline the turn_end below rides, so a StreamEvents subscriber sees it.
+//
+// The end_turn requirement is an INDEPENDENT check, not the error check: a
+// turn_end's stop reason is copied from the last assistant reply
+// (publishAssistant sets Emitter.lastStop, publishTurnEnd copies it), and
+// lastStop is neither updated by a failing turn nor reset between turns — so
+// a turn that fails can still publish a turn_end reading end_turn (the stale
+// previous reply's reason). Requiring a turn_end with raw stop reason
+// "end_turn" pins that an assistant turn reached a model end_turn here;
+// requiring no error event pins that the turn did not fail; requiring the
+// "done" assistant text (the caller checks it separately, before this runs)
+// pins that the reply was THIS script's second message. All three together
+// are the property the framed plane asserted.
 func assertTurnEndedCleanlyBetween(t *testing.T, es *eventStream, from, to int) {
 	t.Helper()
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	for i := from; i < to && i < len(es.events); i++ {
-		if te := es.events[i].GetTurnEnd(); te != nil && te.GetRawStopReason() == "end_turn" {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		found := false
+		es.mu.Lock()
+		for i := from; i < len(es.events); i++ {
+			if ee := es.events[i].GetError(); ee != nil {
+				es.mu.Unlock()
+				t.Fatalf("error event at index %d (window starts at %d) — the turn errored (code %q): %s; buffered events:\n%s",
+					i, from, ee.GetCode(), ee.GetMessage(), es.dumpLocked())
+			}
+			if te := es.events[i].GetTurnEnd(); te != nil && te.GetRawStopReason() == "end_turn" {
+				found = true
+			}
+		}
+		dump := es.dumpLocked()
+		es.mu.Unlock()
+		if found {
 			return
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no turn_end with raw stop reason end_turn after index %d within 5s "+
+				"(settled-idle snapshot at %d); buffered events:\n%s", from, to, dump)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("no turn_end with raw stop reason end_turn in window [%d,%d) — "+
-		"the turn errored; buffered events:\n%s", from, to, es.dumpLocked())
 }
 
 // assertNoRestartBetween scans es's already-buffered events in the half-open

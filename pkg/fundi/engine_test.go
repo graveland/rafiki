@@ -17,6 +17,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -549,6 +550,64 @@ func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
 	}
 	if !strings.Contains(errFrame.Error, "scripted turns exhausted") {
 		t.Fatalf("agent_error.error = %q, want it to mention the exhausted fake sender", errFrame.Error)
+	}
+}
+
+// recordingSink captures the native events an engine publishes, so a test can
+// assert on the durable plane the same turn drives. Engine runs its worker on
+// one goroutine and every Publish lands before Wait returns, so tests read the
+// slice without a lock after Wait.
+type recordingSink struct{ events []*rafikiv1.Event }
+
+func (s *recordingSink) Publish(ev *rafikiv1.Event) { s.events = append(s.events, ev) }
+
+// TestEnginePublishesNativeErrorEventOnLoopFailure pins the native-plane
+// ErrorEvent: when agentloop.Run fails outright (not via abort), the engine
+// must publish a native ErrorEvent carrying the error's text through the same
+// NativeSink pipeline every other durable event rides — the only failure
+// record a Connect StreamEvents subscriber gets, since the framed agent_error
+// this test's companion (TestEngineEmitsAgentErrorOnLoopFailure) pins reaches
+// only the child's stdout. The event must precede the turn_end AgentEnd
+// publishes, mirroring the framed plane's agent_error-before-agent_end order.
+func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		return "file.txt", nil
+	}}
+	// Only one scripted body (the tool_use turn): the loop's second Continue
+	// call finds the fake sender exhausted and fails the turn outright.
+	sink := &recordingSink{}
+	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleResp), func(cfg *EngineConfig) {
+		cfg.NativeSink = sink
+	})
+
+	eng.HandlePrompt("go")
+	eng.Wait()
+
+	errAt, turnEndAt := -1, -1
+	for i, ev := range sink.events {
+		if ev.GetError() != nil {
+			errAt = i
+		}
+		if ev.GetTurnEnd() != nil {
+			turnEndAt = i
+		}
+	}
+	if errAt < 0 {
+		t.Fatalf("no native error event published for the failed turn; events:\n%+v", sink.events)
+	}
+	if turnEndAt < 0 {
+		t.Fatal("no turn_end published alongside the failure; AgentEnd must still close the turn")
+	}
+	if errAt > turnEndAt {
+		t.Fatalf("error event (idx %d) published after turn_end (idx %d); the failure must precede the turn boundary",
+			errAt, turnEndAt)
+	}
+	got := sink.events[errAt].GetError()
+	if got.GetCode() == "" {
+		t.Fatal("error.code is empty; a subscriber routes on it")
+	}
+	if !strings.Contains(got.GetMessage(), "scripted turns exhausted") {
+		t.Fatalf("error.message = %q, want it to mention the exhausted fake sender", got.GetMessage())
 	}
 }
 

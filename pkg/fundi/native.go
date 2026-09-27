@@ -111,6 +111,30 @@ func (e *Emitter) publishTurnEnd() {
 	})
 }
 
+// publishError publishes a FAILED TURN as a durable native error event. It is
+// the native-plane counterpart of the framed agent_error, which reaches only
+// whatever is attached to the child's stdout — a Connect StreamEvents
+// subscriber saw nothing at all for a failed fundi turn until this existed.
+// runTurn's non-abort error arm is the only caller: an abort is not a loop
+// failure and publishes nothing, matching the framed plane (which also stays
+// silent on abort), and the fatal paths (startupResume, prefill) end the
+// child, whose child_exited lifecycle event is the record a subscriber gets.
+//
+// Errors deliberately do not touch lastStop, so the turn_end AgentEnd
+// publishes afterwards still carries the last assistant reply's stop reason —
+// possibly stale (publishAssistant sets it; nothing resets it between turns).
+// A consumer that needs to know whether a turn failed must read THIS event,
+// not infer it from turn_end's stop reason.
+func (e *Emitter) publishError(err error) {
+	if e.native == nil {
+		return
+	}
+	e.publishNative(&rafikiv1.ErrorEvent{
+		Code:    "agent_error",
+		Message: err.Error(),
+	})
+}
+
 // publishToolResult publishes a completed tool's OUTPUT.
 //
 // It rides a UserMessage carrying a tool_result block because that is exactly
@@ -153,6 +177,8 @@ func (e *Emitter) publishNative(payload any) {
 		ev.Payload = &rafikiv1.Event_TurnEnd{TurnEnd: p}
 	case *rafikiv1.ContentBlockDelta:
 		ev.Payload = &rafikiv1.Event_ContentBlockDelta{ContentBlockDelta: p}
+	case *rafikiv1.ErrorEvent:
+		ev.Payload = &rafikiv1.Event_Error{Error: p}
 	case *rafikiv1.ToolExecutionStart:
 		ev.Payload = &rafikiv1.Event_ToolExecutionStart{ToolExecutionStart: p}
 	case *rafikiv1.ToolExecutionEnd:
