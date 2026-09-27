@@ -40,7 +40,7 @@ type LaunchRequest struct {
 	// ticket is a one-shot credential the daraja presents on connect. It must not
 	// travel in argv because every process on the machine can read it via ps —
 	// arrive instead by environment (set from the server). Replaced by a durable
-	// credential on first successful hello.
+	// credential on first successful connection.
 	Ticket        string `protobuf:"bytes,5,opt,name=ticket,proto3" json:"ticket,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

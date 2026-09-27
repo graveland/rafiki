@@ -1,8 +1,7 @@
 // Package protocol defines the typed data shapes rafiki's control plane and
 // executor/daraja links exchange. This is a pure-data package: no logic, no
 // I/O. The Connect control plane maps these shapes onto its generated
-// protobuf types (pkg/gen/rafiki/v1); the executor link reads them as JSON
-// hello frames over its raw connection.
+// protobuf types (pkg/gen/rafiki/v1).
 //
 // Cross-references (historical spec section numbers retained by the field
 // comments):

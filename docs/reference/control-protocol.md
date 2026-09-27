@@ -891,8 +891,7 @@ routinely carried elsewhere and handed to the executor as `--enroll-token`.
 does not detect a collision (the token lives in the enrollment-token table,
 not in `executors`), so the index fires later, at REDEMPTION, as a terminal
 401 on the executor's upgrade request — while `CreateExecutor`, which writes
-the row
-immediately, answers the collision inline with `CodeInvalidArgument`.
+the row immediately, answers the collision inline with `CodeInvalidArgument`.
 
 `LabelExecutor` is how `owner` and `machine` are changed after the fact —
 they cannot be set through the mint verbs, but they are ordinary labels on

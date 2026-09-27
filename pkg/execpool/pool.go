@@ -38,9 +38,9 @@ const (
 	// for the lifetime of the daemon.
 	defaultHealthTimeout = 10 * time.Second
 	// defaultJoinTimeout bounds the Describe that admits an executor. The
-	// hello frame has its own read deadline, but that deadline is cleared
-	// before Describe runs -- an executor that completes the handshake and
-	// then stops answering held an accept goroutine open indefinitely.
+	// upgrade request's headers have their own read deadline, but it is
+	// cleared once they are read -- an executor that completes the upgrade
+	// and then stops answering held an accept goroutine open indefinitely.
 	defaultJoinTimeout = 10 * time.Second
 )
 
@@ -345,6 +345,10 @@ func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
 		if err != nil {
 			return admission{}, nil, authRefusal(err)
 		}
+	default:
+		// AuthorizationFrom returns only the schemes above; a new one must
+		// be handled here rather than admitted as a zero-valued executor.
+		return admission{}, nil, fmt.Errorf("unhandled authorization scheme %q", scheme)
 	}
 
 	// Decided BEFORE the 101, so a refused peer is told why rather than

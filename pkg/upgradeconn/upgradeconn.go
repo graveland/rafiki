@@ -43,6 +43,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 // Conn is a hijacked connection that reads through the buffer the HTTP server
@@ -53,9 +55,8 @@ import (
 // immediately after the 101, and those bytes can arrive pipelined behind the
 // 101 itself — already in the hijack buffer, not on the socket — so a reader
 // that over-reads and is then discarded takes the preface with it. Reading
-// EVERYTHING through
-// this wrapper makes over-reading harmless — nothing is discarded, and
-// nothing is lost, because there is only ever one reader.
+// EVERYTHING through this wrapper makes over-reading harmless — nothing is
+// discarded, and nothing is lost, because there is only ever one reader.
 //
 // The rule is simple and hard to get wrong: after Upgrade, never read the
 // underlying net.Conn directly. Use this.
@@ -134,6 +135,19 @@ func Handler[T any](proto Protocol,
 			slog.Error("upgradeconn: authorize failed", "proto", proto, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+
+		// The 101 is written by hand below, bypassing net/http's own header
+		// validation, so a CR or LF in anything authorize returned would
+		// inject lines into the response.
+		for k, vs := range hdr {
+			for _, v := range vs {
+				if !httpguts.ValidHeaderFieldName(k) || !httpguts.ValidHeaderFieldValue(v) {
+					slog.Error("upgradeconn: authorize returned an invalid header", "proto", proto, "header", k)
+					http.Error(w, "internal error", http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 
 		conn, brw, err := hj.Hijack()

@@ -137,11 +137,18 @@ func (p *Pool) authorize(r *http.Request) (string, http.Header, error) {
 			Status: http.StatusUnauthorized,
 			Reason: "daraja does not enroll; send a Ticket or Bearer credential",
 		}
+
+	default:
+		// AuthorizationFrom returns only the schemes above; a new one must
+		// be handled here rather than minting a credential for child "".
+		return "", nil, fmt.Errorf("unhandled authorization scheme %q", scheme)
 	}
 
 	// Issue a fresh credential, invalidating whatever an older connection
 	// still holds. Failure to mint one is a daemon fault, not a peer fault:
-	// it becomes a 500, which the client retries.
+	// it becomes a 500. A Bearer peer can retry with the credential it still
+	// holds (nothing was replaced); a Ticket peer cannot, because its ticket
+	// is already redeemed and the retry is a terminal 401.
 	cred, err := p.reg.IssueCredential(childID)
 	if err != nil {
 		return "", nil, fmt.Errorf("issue credential for %s: %w", childID, err)

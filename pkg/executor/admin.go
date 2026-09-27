@@ -293,7 +293,7 @@ func (a *AdminServer) Launch(
 	// The ticket is one-shot auth for the daraja's reverse dial. It must not
 	// travel in argv because every process on the machine can read it via ps —
 	// set it in the child's environment instead. Replaced by a credential on
-	// first successful hello. The proxy token gets the SAME treatment and for
+	// first successful connection. The proxy token gets the SAME treatment and for
 	// the same reason: it authenticates this child's traffic to rafiki's
 	// proxy, and ps is world-readable. The per-child MCP secret gets the same
 	// treatment too: runDarajaServe reads it back out of this process's

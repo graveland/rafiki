@@ -189,6 +189,53 @@ func TestUpgradeEnrollCarriesSelfReportedToTheStore(t *testing.T) {
 	}
 }
 
+// The whole enrollment path, real client against real pool: an Enroll token
+// buys a credential on the 101, the client persists it, and the next dial
+// presents it as Bearer rather than re-sending the now-spent token. Each side
+// is pinned on its own elsewhere; this pins that they agree with each other.
+func TestEnrollPersistsTheCredentialAndTheNextDialIsBearer(t *testing.T) {
+	store := newFakeStore("exec-1")
+	addr, pin, _ := servePool(t, store)
+
+	o := connectOpts(t, addr, pin)
+	if err := os.Remove(o.CredentialFile); err != nil {
+		t.Fatal(err)
+	}
+	o.EnrollToken = "t_token"
+	o.SelfReported = map[string]string{"os": "linux"}
+
+	runUntil := func(done func() bool) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		exited := make(chan struct{})
+		go func() { _ = Connect(ctx, o); close(exited) }()
+		deadline := time.Now().Add(5 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				cancel()
+				<-exited
+				t.Fatal("timed out")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+		<-exited
+	}
+
+	runUntil(func() bool {
+		b, err := os.ReadFile(o.CredentialFile)
+		return err == nil && string(b) == "credential\n"
+	})
+	if got := store.lastEnrollment(); got["os"] != "linux" {
+		t.Errorf("Enroll received %v, want the self-reported facts", got)
+	}
+	if n := len(store.authCalls); n != 0 {
+		t.Fatalf("Authenticate ran %d time(s) during enrollment", n)
+	}
+
+	runUntil(func() bool { return len(store.authCalls) > 0 })
+}
+
 // A malformed Rafiki-Self-Reported header is a bad request, not an auth
 // failure: the credential may be fine, the encoding is not.
 func TestUpgradeMalformedSelfReportedIs400(t *testing.T) {

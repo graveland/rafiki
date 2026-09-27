@@ -321,6 +321,35 @@ func TestUpgradeAuthNonRefusalErrorIs500(t *testing.T) {
 	}
 }
 
+// The 101 is written by hand, so a CR/LF in an authorize-returned value would
+// inject response lines. It must be refused before the hijack instead.
+func TestUpgradeAuthHeaderWithCRLFIs500(t *testing.T) {
+	var served atomic.Bool
+	addr := serveAuth(t, Executor,
+		func(*http.Request) (struct{}, http.Header, error) {
+			return struct{}{}, http.Header{HeaderCredential: []string{"c1\r\nX-Injected: yes"}}, nil
+		},
+		func(*Conn, struct{}) { served.Store(true) })
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	_, _, err = Dial(raw, Executor, addr, nil)
+	var ref *Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("want *Refused, got %v", err)
+	}
+	if ref.Status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", ref.Status)
+	}
+	if served.Load() {
+		t.Error("serve ran with an invalid 101 header")
+	}
+}
+
 // Headers authorize returns ride the 101 to the client — this is how a minted
 // credential reaches the executor in one round trip.
 func TestUpgradeAuthHeadersRideThe101(t *testing.T) {

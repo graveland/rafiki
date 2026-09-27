@@ -155,14 +155,16 @@ be upgraded.
 
 ### Auxiliary headers
 
-- `Rafiki-Self-Reported` (`Enroll` only) carries capability facts — os, arch,
+- `Rafiki-Self-Reported` (sent by the executor on every connection, read on
+  `Enroll` only) carries capability facts — os, arch,
   version — url.Values-encoded. They are recorded on the row but are NEVER
   merged into the trust labels: lying about arch only earns work the executor
   cannot run, but a label that gates access cannot be asserted by the thing
   it gates. A header that does not parse as url.Values is refused 400, not
   silently dropped — enrollment is one-shot, so a discarded self-report could
   not be corrected by retrying.
-- `Rafiki-Child-Id` (daraja, `Bearer` only) names the child the reconnect
+- `Rafiki-Child-Id` (sent by daraja on every connection, read on `Bearer`
+  only — a ticket already names its child) names the child the reconnect
   credential claims; the credential must match it or the connection is
   refused 401.
 - On the 101 response, `Rafiki-Executor-Id` names the row that answered, and

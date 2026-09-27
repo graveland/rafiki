@@ -78,3 +78,33 @@ func TestBuildAuthPrefersTheTicketOverACredentialFile(t *testing.T) {
 		t.Fatalf("the ticket must win over the credential file: got Authorization %q, want %q", got, want)
 	}
 }
+
+// The lower half of the precedence: an explicit Credential beats the file, and
+// the file beats the Enroll token. The second is the one that matters — an
+// enrolled executor must reconnect with its credential, not re-send a token
+// that enrollment already consumed.
+func TestBuildAuthPrefersCredentialThenFileThenEnrollToken(t *testing.T) {
+	credFile := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(credFile, []byte("filecred\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		o    ConnectOptions
+		want string
+	}{
+		{"credential over file", ConnectOptions{Credential: "cred", CredentialFile: credFile, EnrollToken: "tok"}, "Bearer cred"},
+		{"file over enroll token", ConnectOptions{CredentialFile: credFile, EnrollToken: "tok"}, "Bearer filecred"},
+		{"enroll token when no file", ConnectOptions{CredentialFile: filepath.Join(t.TempDir(), "absent"), EnrollToken: "tok"}, "Enroll tok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr, err := buildAuth(tc.o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := hdr.Get("Authorization"); got != tc.want {
+				t.Fatalf("Authorization = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
