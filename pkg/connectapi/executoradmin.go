@@ -40,7 +40,7 @@ func (s *Server) SetExecutorAdmin(a ExecutorAdmin) {
 }
 
 // executorAdminErr is the seam's one error exit, shared by every handler in
-// this file and by ListExecutors' empty-kind path. Errors go through
+// this file and by both of ListExecutors' paths. Errors go through
 // ConnectErr: the code the daemon attached at the source IS the
 // classification, so translateExecutorErr's ControllerErrors — "enrollment
 // token already consumed", the machine-name collision — keep their authored

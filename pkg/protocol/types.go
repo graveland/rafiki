@@ -382,14 +382,11 @@ type ChildSummary struct {
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).
-// When Stalled is true, the child started but did not respond to the initial get_state;
-// the other fields will be empty in that case.
 type SpawnResponseData struct {
 	ChildID     string `json:"childId"`
 	SessionID   string `json:"sessionId,omitempty"`
 	SessionFile string `json:"sessionFile,omitempty"`
 	Model       string `json:"model,omitempty"`
-	Stalled     bool   `json:"stalled"`
 }
 
 // KillResponseData is the data payload of a Kill answer (§6.5).

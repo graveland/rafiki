@@ -62,9 +62,11 @@ func (s *Server) SetExecutorLister(l ExecutorLister) { s.execLister.Store(&l) }
 // eligibility UNEVALUATED — eligible/reason unset, per ListExecutorsRequest's
 // comment in control.proto.
 //
-// Errors on the kind path wrap the lister's error as-is (the lister's errors
-// are the daemon's own already); the admin path goes through executorAdminErr,
-// which logs an uncoded cause before ConnectErr redacts it.
+// Both paths return errors through executorAdminErr, which logs an uncoded
+// cause before ConnectErr redacts it: the kind path's lister errors are not
+// all the daemon's own (ListExecutorRows can surface raw store text, which
+// names the database host, user and database on a connection failure), so
+// wrapping one as-is would leak it to the peer.
 func (s *Server) ListExecutors(
 	ctx context.Context,
 	req *connect.Request[rafikiv1.ListExecutorsRequest],
@@ -92,7 +94,7 @@ func (s *Server) ListExecutors(
 	}
 	rows, err := (*p).ListExecutors(ctx, req.Msg.GetKind())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, executorAdminErr("list_executors", err)
 	}
 	out := make([]*rafikiv1.ExecutorRow, 0, len(rows))
 	for _, r := range rows {

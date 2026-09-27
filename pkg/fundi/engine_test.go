@@ -583,10 +583,11 @@ func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	errAt, turnEndAt := -1, -1
+	errAt, turnEndAt, errCount := -1, -1, 0
 	for i, ev := range sink.events {
 		if ev.GetError() != nil {
 			errAt = i
+			errCount++
 		}
 		if ev.GetTurnEnd() != nil {
 			turnEndAt = i
@@ -594,6 +595,9 @@ func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
 	}
 	if errAt < 0 {
 		t.Fatalf("no native error event published for the failed turn; events:\n%+v", sink.events)
+	}
+	if errCount != 1 {
+		t.Fatalf("published %d native error events for the one failed turn, want exactly 1; events:\n%+v", errCount, sink.events)
 	}
 	if turnEndAt < 0 {
 		t.Fatal("no turn_end published alongside the failure; AgentEnd must still close the turn")

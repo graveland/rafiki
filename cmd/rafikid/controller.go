@@ -2034,7 +2034,6 @@ func (c *Controller) activateLiveChild(
 			SessionID:   meta.SessionID,
 			SessionFile: meta.SessionFile,
 			Model:       joinModel(provider, model),
-			Stalled:     stalled,
 		}, nil
 	}
 
@@ -2183,7 +2182,6 @@ func (c *Controller) activateLiveChild(
 		SessionID:   meta.SessionID,
 		SessionFile: meta.SessionFile,
 		Model:       joinModel(provider, model),
-		Stalled:     stalled,
 	}, nil
 }
 
