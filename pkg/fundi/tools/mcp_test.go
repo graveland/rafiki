@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -82,29 +83,29 @@ func newBigOutputMCPServer(serverName, toolName, output string) *mcp.Server {
 	return server
 }
 
-// connectInMemory connects a fresh client session to server over an
-// in-memory transport pair, mirroring what ConnectMCP does for a real
-// stdio/HTTP transport. The session is closed automatically via t.Cleanup.
-func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
+// inMemoryRef connects an in-process server the way connectInMemory did, but
+// wraps it in the redialable mcpServerSession, whose dial creates a FRESH
+// transport pair (and a fresh client) on every call — the in-process analogue
+// of a server that restarted and accepts a new initialize between calls.
+// The session is closed automatically via t.Cleanup.
+func inMemoryRef(t *testing.T, server *mcp.Server) *mcpServerSession {
 	t.Helper()
 	ctx := context.Background()
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-
-	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server.Connect: %v", err)
-	}
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client.Connect: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := session.Close(); err != nil {
-			t.Logf("session.Close: %v", err)
+	ref := &mcpServerSession{name: "test-server", dial: func(ctx context.Context) (*mcp.ClientSession, error) {
+		serverTransport, clientTransport := mcp.NewInMemoryTransports()
+		if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+			return nil, err
 		}
-	})
-	return session
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+		return client.Connect(ctx, clientTransport, nil)
+	}}
+	sess, err := ref.dial(ctx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	ref.sess = sess
+	t.Cleanup(ref.close)
+	return ref
 }
 
 // TestRegisterMCPServerTools covers the core registration + dispatch path:
@@ -112,7 +113,7 @@ func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 // mcp__<server>__<tool> and Execute round-trips a real call through the
 // protocol.
 func TestRegisterMCPServerTools(t *testing.T) {
-	session := connectInMemory(t, newTestMCPServer("test-server"))
+	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "my-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -146,7 +147,7 @@ func TestRegisterMCPServerTools(t *testing.T) {
 // the point here, this project's dispatch logic pattern-matches on the
 // underscore form).
 func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
-	session := connectInMemory(t, newTestMCPServer("test-server"))
+	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "my-cool-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -169,7 +170,7 @@ func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
 // error (so agentloop marks it an is_error tool result the model can react
 // to), not swallowed or returned as ordinary success text.
 func TestRegisterMCPServerToolsIsErrorBecomesGoError(t *testing.T) {
-	session := connectInMemory(t, newTestMCPServer("test-server"))
+	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -189,7 +190,7 @@ func TestRegisterMCPServerToolsIsErrorBecomesGoError(t *testing.T) {
 // that ListTools input schemas pass through verbatim into
 // anthropic.ToolInputSchemaParam, rather than being narrowed or dropped.
 func TestRegisterMCPServerToolsInputSchemaPassedThrough(t *testing.T) {
-	session := connectInMemory(t, newTestMCPServer("test-server"))
+	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -319,7 +320,7 @@ var anthropicToolNameRETest = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // the entire tools array on the next turn.
 func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 	const oddName = "github.create issue"
-	session := connectInMemory(t, newCustomMCPServer("test-server", oddName))
+	session := inMemoryRef(t, newCustomMCPServer("test-server", oddName))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -356,7 +357,7 @@ func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 // unaffected.
 func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
 	longName := strings.Repeat("a", 130)
-	session := connectInMemory(t, newCustomMCPServer("test-server", longName, "short"))
+	session := inMemoryRef(t, newCustomMCPServer("test-server", longName, "short"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -389,7 +390,7 @@ func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
 // Registry.Register's overwrite semantics. Only one registration must
 // result, and neither call may panic.
 func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
-	session := connectInMemory(t, newCustomMCPServer("test-server", "list-items", "list_items"))
+	session := inMemoryRef(t, newCustomMCPServer("test-server", "list-items", "list_items"))
 
 	r := NewRegistry()
 	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
@@ -415,7 +416,7 @@ func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
 func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
 	spillDir := t.TempDir()
 	full := strings.Repeat("x", 2000)
-	session := connectInMemory(t, newBigOutputMCPServer("test-server", "big", full))
+	session := inMemoryRef(t, newBigOutputMCPServer("test-server", "big", full))
 
 	r := NewRegistry()
 	p := OutputPolicy{Budget: 200, SpillDir: spillDir}
@@ -447,5 +448,101 @@ func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
 	}
 	if string(spilled) != full {
 		t.Fatalf("spilled file does not hold the full output: got %d bytes, want %d", len(spilled), len(full))
+	}
+}
+
+// TestMCPSessionRecoversAfterServerSideDeath covers the resilience contract
+// that motivated mcpServerSession: an MCP server MAY terminate a session at
+// any time (pod restart, rmcp session eviction after the SSE stream drops),
+// after which the go-sdk marks the client connection terminal and every
+// CallTool on it would fail forever. The next call after the server-side
+// death must redial through the same config and succeed, with tool
+// registration untouched.
+func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
+	server := newTestMCPServer("test-server")
+	ctx := context.Background()
+
+	// Same dial shape as inMemoryRef, plus a record of the CURRENT
+	// connection's server-side session so the test can kill it — the
+	// in-process analogue of the server dropping the session.
+	var (
+		mu   sync.Mutex
+		last *mcp.ServerSession
+	)
+	ref := &mcpServerSession{name: "test-server"}
+	ref.dial = func(ctx context.Context) (*mcp.ClientSession, error) {
+		serverTransport, clientTransport := mcp.NewInMemoryTransports()
+		ssess, err := server.Connect(ctx, serverTransport, nil)
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		last = ssess
+		mu.Unlock()
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client"}, nil)
+		return client.Connect(ctx, clientTransport, nil)
+	}
+	sess, err := ref.dial(ctx)
+	if err != nil {
+		t.Fatalf("initial dial: %v", err)
+	}
+	ref.sess = sess
+	t.Cleanup(ref.close)
+
+	r := NewRegistry()
+	if err := registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	out, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":2,"b":3}`))
+	if err != nil || out != "5" {
+		t.Fatalf("pre-kill call: err=%v out=%q", err, out)
+	}
+
+	mu.Lock()
+	ss := last
+	mu.Unlock()
+	if ss == nil {
+		t.Fatal("no server-side session was recorded")
+	}
+	if err := ss.Close(); err != nil {
+		t.Fatalf("server-side close: %v", err)
+	}
+
+	out, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":20,"b":22}`))
+	if err != nil {
+		t.Fatalf("post-kill call should recover via redial: %v", err)
+	}
+	if out != "42" {
+		t.Fatalf("post-kill call: expected %q, got %q", "42", out)
+	}
+}
+
+// TestMCPSessionRedialFailureIsReported covers the failure side: when the
+// redial itself fails (server down and staying down), the tool call surfaces
+// the dial error rather than hanging or panicking, and a call inside the
+// cooldown window fails fast without re-attempting the dial.
+func TestMCPSessionRedialFailureIsReported(t *testing.T) {
+	session := inMemoryRef(t, newTestMCPServer("test-server"))
+	ctx := context.Background()
+
+	r := NewRegistry()
+	if err := registerMCPServerTools(ctx, r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
+		t.Fatalf("registerMCPServerTools: %v", err)
+	}
+
+	session.dial = func(_ context.Context) (*mcp.ClientSession, error) {
+		return nil, errors.New("dial boom")
+	}
+	session.close() // drop the live session: the next call must redial
+
+	_, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
+	if err == nil || !strings.Contains(err.Error(), "dial boom") {
+		t.Fatalf("expected the redial failure to surface, got %v", err)
+	}
+
+	_, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
+	if err == nil || !strings.Contains(err.Error(), "unreachable") {
+		t.Fatalf("expected a cooldown-throttled failure, got %v", err)
 	}
 }

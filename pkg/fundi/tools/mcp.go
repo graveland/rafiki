@@ -3,14 +3,18 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -71,6 +75,12 @@ func LoadMCPConfig(path string) (MCPConfig, error) {
 // signature keeps that door open rather than encoding "always nil" into
 // every caller).
 //
+// Each session is wrapped in mcpServerSession: it is expected to outlive the
+// server's own session (servers MAY terminate at any time; the SDK treats
+// that as terminal), so a dead session is redialed through the same config
+// on the next tool call rather than bricking the server's tools for the
+// agent's lifetime.
+//
 // Two more per-tool failure modes are handled the same way, with a
 // slog.Warn rather than slog.Error since these are expected in the wild
 // rather than exceptional: a normalized name that still fails the
@@ -84,7 +94,7 @@ func LoadMCPConfig(path string) (MCPConfig, error) {
 // connected. It is always non-nil and safe to call even if every server was
 // skipped.
 func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy) (func(), error) {
-	var sessions []*mcp.ClientSession
+	var refs []*mcpServerSession
 
 	// registeredNames tracks every mcp__server__tool name registered so far
 	// across ALL servers processed by this ConnectMCP call, mapping it to a
@@ -103,22 +113,22 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy)
 			continue
 		}
 
-		if err := registerMCPServerTools(ctx, r, name, session, p, registeredNames); err != nil {
+		ref := &mcpServerSession{name: name, sess: session, dial: func(ctx context.Context) (*mcp.ClientSession, error) {
+			return dialMCPServer(ctx, name, sc)
+		}}
+
+		if err := registerMCPServerTools(ctx, r, name, ref, p, registeredNames); err != nil {
 			slog.Error("agent/tools: mcp: failed to list tools, skipping server", "server", name, "error", err)
-			if cerr := session.Close(); cerr != nil {
-				slog.Warn("agent/tools: mcp: error closing session after tool-list failure", "server", name, "error", cerr)
-			}
+			ref.close()
 			continue
 		}
 
-		sessions = append(sessions, session)
+		refs = append(refs, ref)
 	}
 
 	shutdown := func() {
-		for _, session := range sessions {
-			if err := session.Close(); err != nil {
-				slog.Warn("agent/tools: mcp: error closing session", "error", err)
-			}
+		for _, ref := range refs {
+			ref.close()
 		}
 	}
 	return shutdown, nil
@@ -151,6 +161,136 @@ func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig) (*mcp.C
 	return session, nil
 }
 
+// mcpRedialCooldown throttles reconnection attempts after a FAILED dial: a
+// dead server would otherwise be re-dialed on every tool call the model
+// makes (connection-refused fails in milliseconds, so a hot retry loop is
+// cheap to enter). Successful dials do not set it — a session that dies
+// moments after connecting is redialed immediately, since each attempt costs
+// a real HTTP round trip, not a hammering loop.
+const mcpRedialCooldown = 2 * time.Second
+
+// mcpServerSession couples one configured server with its live client
+// session and knows how to replace a dead one.
+//
+// The go-sdk treats a server-side session termination as TERMINAL: per the
+// MCP spec a server MAY terminate a session at any time, after which a
+// reconnecting client gets HTTP 404; the SDK maps that to ErrSessionMissing,
+// fails the connection, and every later CallTool on it returns "client is
+// closing" forever (its own docs cite this as too strict — issue #683 — but
+// neither v1.7.0 nor v1.8.0 re-initializes). A fundi agent holds its MCP
+// sessions for its whole lifetime — days — so any server restart or session
+// eviction would otherwise permanently brick every mcp__ tool from that
+// server while Definitions() still advertises them.
+//
+// call() therefore treats a dead-session error as recoverable: drop the
+// session, dial a fresh one through the same config, and retry the call
+// once. Tool REGISTRATION is deliberately not refreshed on redial: the
+// registered names must stay stable for the model across the agent's
+// lifetime, and a server that starts answering differently mid-session is a
+// problem for the human to notice, not for a retry to paper over.
+type mcpServerSession struct {
+	name string
+	// dial (re)connects to the server. Derived from the MCPServerConfig in
+	// production; tests inject an in-memory equivalent.
+	dial func(context.Context) (*mcp.ClientSession, error)
+
+	mu         sync.Mutex
+	sess       *mcp.ClientSession
+	lastRedial time.Time
+}
+
+// current returns the live session, dialing a new one if the stored session
+// was dropped. Failed dials set mcpRedialCooldown; a call inside the
+// cooldown window fails fast rather than re-attempting the dial.
+func (s *mcpServerSession) current(ctx context.Context) (*mcp.ClientSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess != nil {
+		return s.sess, nil
+	}
+	if !s.lastRedial.IsZero() && time.Since(s.lastRedial) < mcpRedialCooldown {
+		return nil, fmt.Errorf("mcp: server %q is unreachable (redial attempted %v ago)", s.name, time.Since(s.lastRedial).Round(time.Millisecond))
+	}
+	sess, err := s.dial(ctx)
+	if err != nil {
+		s.lastRedial = time.Now()
+		return nil, fmt.Errorf("mcp: redialing server %q: %w", s.name, err)
+	}
+	s.sess = sess
+	return sess, nil
+}
+
+// noteDead drops the stored session if it is still the one that failed —
+// a concurrent redial may have already replaced it. The failed session
+// object itself is simply dropped: the SDK's connection loops have already
+// exited by the time its errors reach us (terminal failure is signaled
+// before CallTool returns), and Close on it would be a no-op at best.
+func (s *mcpServerSession) noteDead(sess *mcp.ClientSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess == sess {
+		s.sess = nil
+	}
+}
+
+// call performs one CallTool against the live session, recovering once from
+// a dead session by redialing and retrying. Every other error — including
+// tool-level failures (which arrive as IsError results, not Go errors) and
+// caller-side context cancellation — passes through untouched.
+func (s *mcpServerSession) call(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	sess, err := s.current(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, err := sess.CallTool(ctx, params)
+	if err == nil || !deadSession(err) {
+		return res, err
+	}
+	s.noteDead(sess)
+	slog.Warn("agent/tools: mcp: session to server died; redialing", "server", s.name)
+	fresh, rerr := s.current(ctx)
+	if rerr != nil {
+		return nil, fmt.Errorf("mcp: calling tool %q: %w (session to server %q was dead and redial failed: %v)", params.Name, err, s.name, rerr)
+	}
+	return fresh.CallTool(ctx, params)
+}
+
+// deadSession reports whether err means "this session is finished and no
+// amount of retrying it will help" — the signal to redial. Two public
+// sentinels carry most terminal shapes: ErrSessionMissing (HTTP 404 on a
+// reconnect — the server terminated the session) and ErrConnectionClosed,
+// which mcp.call wraps AROUND the internal jsonrpc2 closing errors
+// ("client is closing"/"server is closing"). The io.EOF pair covers the
+// transport dying under an in-flight call, which no sentinel is guaranteed
+// to wrap on every transport (the in-memory pair surfaces a bare io.EOF);
+// a live connection never legitimately ends a call with EOF. Caller-side
+// context cancellation is excluded: the CALL gave up, the session did not
+// die.
+func deadSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, mcp.ErrSessionMissing) ||
+		errors.Is(err, mcp.ErrConnectionClosed) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// close drops the live session, if any. Safe to call repeatedly.
+func (s *mcpServerSession) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sess != nil {
+		if err := s.sess.Close(); err != nil {
+			slog.Warn("agent/tools: mcp: error closing session", "server", s.name, "error", err)
+		}
+		s.sess = nil
+	}
+}
+
 // headerRoundTripper injects a fixed set of headers (e.g. Authorization) on
 // every outgoing request, since StreamableClientTransport has no built-in
 // headers field.
@@ -176,7 +316,11 @@ func (t headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // distinct tools whose names fold to the same mcp__server__tool string — is
 // caught and the later one skipped, rather than silently shadowing the
 // first via Registry.Register's overwrite semantics.
-func registerMCPServerTools(ctx context.Context, r *Registry, serverName string, session *mcp.ClientSession, p OutputPolicy, registeredNames map[string]string) error {
+func registerMCPServerTools(ctx context.Context, r *Registry, serverName string, ref *mcpServerSession, p OutputPolicy, registeredNames map[string]string) error {
+	session, err := ref.current(ctx)
+	if err != nil {
+		return fmt.Errorf("mcp: listing tools for server %q: %w", serverName, err)
+	}
 	res, err := session.ListTools(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("mcp: listing tools for server %q: %w", serverName, err)
@@ -203,7 +347,7 @@ func registerMCPServerTools(ctx context.Context, r *Registry, serverName string,
 			name:           name,
 			description:    t.Description,
 			rawSchema:      rawSchemaJSON(t.InputSchema),
-			session:        session,
+			ref:            ref,
 			toolName:       t.Name,
 			registeredName: name,
 			p:              p,
@@ -220,7 +364,7 @@ type mcpAdapter struct {
 	name           string
 	description    string
 	rawSchema      json.RawMessage
-	session        *mcp.ClientSession
+	ref            *mcpServerSession
 	toolName       string
 	registeredName string
 	p              OutputPolicy
@@ -238,7 +382,7 @@ func (a *mcpAdapter) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		args = rawIn
 	}
 
-	res, err := a.session.CallTool(ctx, &mcp.CallToolParams{Name: a.toolName, Arguments: args})
+	res, err := a.ref.call(ctx, &mcp.CallToolParams{Name: a.toolName, Arguments: args})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("mcp: calling tool %q: %w", a.toolName, err)
 	}
