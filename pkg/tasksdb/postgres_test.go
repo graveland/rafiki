@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/tasks/tasktest"
 	"go.graveland.dev/rafiki/pkg/tasksdb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestPostgresStoreConformance(t *testing.T) {
@@ -35,9 +37,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "connect")
 	t.Cleanup(pool.Close)
 	return pool
 }
@@ -53,9 +53,7 @@ func newTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 		 VALUES ('test', 'postgres_store_conformance')
 		 RETURNING id`,
 	).Scan(&convID)
-	if err != nil {
-		t.Fatalf("create conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "create conversation")
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(),
 			`DELETE FROM conversations.tasks WHERE conversation_id = $1`, convID)
@@ -70,6 +68,7 @@ func newTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 // fixed, loadAll sent "" to a UUID column and every call to the verb failed
 // with SQLSTATE 22P02.
 func TestPostgresListWithoutConversationScope(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
@@ -84,9 +83,7 @@ func TestPostgresListWithoutConversationScope(t *testing.T) {
 	}
 
 	rows, err := st.List(ctx, tasks.ListFilter{})
-	if err != nil {
-		t.Fatalf("unscoped List failed: %v", err)
-	}
+	c.NoError(err, "unscoped List failed")
 	var sawA, sawB bool
 	for _, r := range rows {
 		if r.ConversationID == convA {
@@ -96,17 +93,11 @@ func TestPostgresListWithoutConversationScope(t *testing.T) {
 			sawB = true
 		}
 	}
-	if !sawA || !sawB {
-		t.Fatalf("unscoped List must span conversations; sawA=%v sawB=%v", sawA, sawB)
-	}
+	c.False(!sawA || !sawB, "unscoped List must span conversations; sawA=%v sawB=%v", sawA, sawB)
 
 	limited, err := st.List(ctx, tasks.ListFilter{Limit: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(limited) != 1 {
-		t.Fatalf("Limit 1 returned %d rows", len(limited))
-	}
+	c.NoError(err)
+	c.Len(limited, 1, "Limit 1 returned %d rows", len(limited))
 }
 
 // Drop must refuse when ANY row in the subtree has a live assignee, and that
@@ -126,6 +117,7 @@ func TestPostgresListWithoutConversationScope(t *testing.T) {
 //	unfixed: the UPDATE re-checks only id and status, both still matching,
 //	         and drops a task a live agent is holding.
 func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
@@ -138,24 +130,18 @@ func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, err := st.List(ctx, tasks.ListFilter{ConversationID: conv})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	var childID string
 	for _, r := range rows {
 		if r.Handle == "1.1" {
 			childID = r.ID
 		}
 	}
-	if childID == "" {
-		t.Fatalf("fixture: no child task; handles = %v", handlesOf(rows))
-	}
+	c.Require().NotEq("", childID, "fixture: no child task; handles = %v", handlesOf(rows))
 
 	// tx B assigns the CHILD and holds the row lock without committing.
 	txB, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer func() { _ = txB.Rollback(ctx) }()
 	if _, err := txB.Exec(ctx,
 		`UPDATE conversations.tasks SET assignee = 'c_live' WHERE id = $1`, childID,
@@ -182,22 +168,14 @@ func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 		// Blocked on the row lock, as both versions must be.
 	}
 
-	if err := txB.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(txB.Commit(ctx))
 
-	if err := <-dropErr; !errors.Is(err, tasks.ErrAssigned) {
-		t.Fatalf("Drop returned %v; want tasks.ErrAssigned — a task held by a live agent was dropped", err)
-	}
+	c.Require().ErrorIs(<-dropErr, tasks.ErrAssigned, "Drop returned")
 
 	after, err := st.List(ctx, tasks.ListFilter{ConversationID: conv, IncludeDropped: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	for _, r := range after {
-		if r.Status == tasks.StatusDropped {
-			t.Errorf("task %q was dropped despite the refusal; Drop is not atomic", r.Content)
-		}
+		c.NotEq(tasks.StatusDropped, r.Status, "task %q was dropped despite the refusal; Drop is not atomic", r.Content)
 	}
 }
 
@@ -207,6 +185,7 @@ func TestDropRefusesAgainstAConcurrentAssign(t *testing.T) {
 // tasks.ErrAssigned or tasks.ErrNotFound from a losing racer is a correct outcome and
 // must not be mistaken for one.
 func TestConcurrentAddAssignDropDoNotDeadlock(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
@@ -218,9 +197,8 @@ func TestConcurrentAddAssignDropDoNotDeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, h := range []string{"1", "2", "3"} {
-		if _, err := st.Add(ctx, conv, h, []tasks.NewTask{{Content: "child of " + h}}); err != nil {
-			t.Fatal(err)
-		}
+		_, err := st.Add(ctx, conv, h, []tasks.NewTask{{Content: "child of " + h}})
+		c.NoError(err)
 	}
 
 	const rounds = 12
@@ -254,9 +232,7 @@ func TestConcurrentAddAssignDropDoNotDeadlock(t *testing.T) {
 			continue
 		}
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
-			t.Fatalf("deadlock between Add, Assign and Drop: %v", err)
-		}
+		c.False(errors.As(err, &pgErr) && pgErr.Code == "40P01", "deadlock between Add, Assign and Drop: %v", err)
 		// Anything else is a legitimate refusal from a losing racer.
 	}
 }
@@ -274,6 +250,7 @@ func handlesOf(rows []tasks.Task) []string {
 // partition, so this is enforced by an advisory lock plus a unique
 // constraint that treats NULL parent_id as equal.
 func TestPostgresConcurrentFirstAddDoesNotDuplicateOrdinal(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	st := tasksdb.NewPostgresStore(pool)
 	ctx := context.Background()
@@ -297,23 +274,15 @@ func TestPostgresConcurrentFirstAddDoesNotDuplicateOrdinal(t *testing.T) {
 	wg.Wait()
 
 	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("add %d failed: %v", i, err)
-		}
+		c.NoError(err, "add %d failed", i)
 	}
 
 	rows, err := st.List(ctx, tasks.ListFilter{ConversationID: conv})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != n {
-		t.Fatalf("got %d tasks, want %d", len(rows), n)
-	}
+	c.NoError(err)
+	c.Len(rows, n, "got %d tasks, want", len(rows))
 	seen := map[string]bool{}
 	for _, r := range rows {
-		if seen[r.Handle] {
-			t.Fatalf("handle %q assigned twice — two tasks share one handle", r.Handle)
-		}
+		c.False(seen[r.Handle], "handle %q assigned twice — two tasks share one handle", r.Handle)
 		seen[r.Handle] = true
 	}
 }

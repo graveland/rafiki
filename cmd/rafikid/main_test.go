@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestMain isolates the config directory for the whole package.
@@ -59,9 +61,7 @@ func TestParseControlListenAddr(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(paths.ControlListen, tt.in)
 			got := parseControlListenAddr()
-			if got != tt.want {
-				t.Errorf("parseControlListenAddr(%q) = %q, want %q", tt.in, got, tt.want)
-			}
+			assert.NewCollecting(t).Eq(tt.want, got, "parseControlListenAddr(%q) = %q, want", tt.in, got)
 		})
 	}
 }
@@ -97,9 +97,7 @@ func TestExecutorsEnabled(t *testing.T) {
 				t.Setenv(paths.ExecutorsEnabled, "")
 			}
 			got := executorsEnabled(tt.controlAddr, tt.dbConfigured)
-			if got != tt.want {
-				t.Errorf("executorsEnabled(%q, %v) = %v, want %v", tt.controlAddr, tt.dbConfigured, got, tt.want)
-			}
+			assert.NewCollecting(t).Eq(tt.want, got, "executorsEnabled(%q, %v) = %v, want", tt.controlAddr, tt.dbConfigured, got)
 		})
 	}
 }
@@ -124,9 +122,7 @@ func TestParseLogLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got, err := parseLogLevel(tt.in)
-		if got != tt.want || (err != nil) != tt.wantErr {
-			t.Errorf("parseLogLevel(%q) = %v, %v; want %v, err=%v", tt.in, got, err, tt.want, tt.wantErr)
-		}
+		assert.NewCollecting(t).False(got != tt.want || (err != nil) != tt.wantErr, "parseLogLevel(%q) = %v, %v; want %v, err=%v", tt.in, got, err, tt.want, tt.wantErr)
 	}
 }
 
@@ -151,9 +147,7 @@ func TestResolveLogLevel(t *testing.T) {
 
 	t.Setenv(paths.LogLevel, "nonsense")
 	level, err := resolveLogLevel("")
-	if err != nil || level != slog.LevelInfo {
-		t.Errorf("invalid env = %v, %v; want info fallback, nil error", level, err)
-	}
+	assert.NewCollecting(t).False(err != nil || level != slog.LevelInfo, "invalid env = %v, %v; want info fallback, nil error", level, err)
 
 	t.Setenv(paths.LogLevel, "")
 	if level, err := resolveLogLevel(""); err != nil || level != slog.LevelInfo {

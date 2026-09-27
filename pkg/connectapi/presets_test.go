@@ -12,6 +12,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/presets"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakePresets struct {
@@ -65,9 +67,7 @@ func TestSetPresetManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetPresetManager(nil)
 	_, err := s.ListPresets(context.Background(), connect.NewRequest(&rafikiv1.ListPresetsRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("after SetPresetManager(nil): got code %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetPresetManager(nil): got code")
 }
 
 func TestPresetHandlersUnwiredAreUnavailable(t *testing.T) {
@@ -100,9 +100,7 @@ func TestPresetHandlersUnwiredAreUnavailable(t *testing.T) {
 			t.Errorf("%s with no manager: accepted", call.name)
 			continue
 		}
-		if connect.CodeOf(err) != connect.CodeUnavailable {
-			t.Errorf("%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
-		}
+		assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
 	}
 }
 
@@ -111,56 +109,43 @@ func TestPresetHandlersUnwiredAreUnavailable(t *testing.T) {
 // CodeInvalidArgument, and anything else — a store failure — is
 // CodeInternal.
 func TestPresetHandlersMapErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	boom := errors.New("connection refused")
 
 	s := &Server{}
 	s.SetPresetManager(&fakePresets{getErr: presets.ErrNotFound})
 	_, err := s.GetPreset(context.Background(), connect.NewRequest(&rafikiv1.GetPresetRequest{Name: "gone"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("get of unknown preset: got code %v, want NotFound", connect.CodeOf(err))
-	}
-	if !errors.Is(err, presets.ErrNotFound) {
-		t.Errorf("get of unknown preset: error does not wrap ErrNotFound: %v", err)
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "get of unknown preset: got code")
+	c.ErrorIs(err, presets.ErrNotFound, "get of unknown preset: error does not wrap ErrNotFound")
 
 	s = &Server{}
 	s.SetPresetManager(&fakePresets{delErr: presets.ErrNotFound})
 	_, err = s.DeletePreset(context.Background(), connect.NewRequest(&rafikiv1.DeletePresetRequest{Name: "gone"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("delete of unknown preset: got code %v, want NotFound", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "delete of unknown preset: got code")
 
 	s = &Server{}
 	s.SetPresetManager(&fakePresets{putErr: fmt.Errorf("%w: bad kind", ErrInvalidPreset)})
 	_, err = s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{
 		Preset: &rafikiv1.PresetRow{Name: "x"},
 	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("put with invalid preset: got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "put with invalid preset: got code")
 
 	s = &Server{}
 	s.SetPresetManager(&fakePresets{listErr: boom})
 	_, err = s.ListPresets(context.Background(), connect.NewRequest(&rafikiv1.ListPresetsRequest{}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("list failure: got code %v, want Internal", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "list failure: got code")
 
 	s = &Server{}
 	s.SetPresetManager(&fakePresets{getErr: boom})
 	_, err = s.GetPreset(context.Background(), connect.NewRequest(&rafikiv1.GetPresetRequest{Name: "x"}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("get failure: got code %v, want Internal", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "get failure: got code")
 
 	s = &Server{}
 	s.SetPresetManager(&fakePresets{putErr: boom})
 	_, err = s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{
 		Preset: &rafikiv1.PresetRow{Name: "x"},
 	}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("put failure: got code %v, want Internal", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "put failure: got code")
 }
 
 // TestPutPresetPreservesEmptyToolsOverTheWire pins the reason StringList
@@ -168,6 +153,7 @@ func TestPresetHandlersMapErrors(t *testing.T) {
 // non-nil pointer to an empty slice ("none"), not nil ("the kind's default
 // = everything"), and an absent tools must arrive nil.
 func TestPutPresetPreservesEmptyToolsOverTheWire(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakePresets{}
 	s.SetPresetManager(f)
@@ -175,26 +161,16 @@ func TestPutPresetPreservesEmptyToolsOverTheWire(t *testing.T) {
 	_, err := s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{
 		Preset: &rafikiv1.PresetRow{Name: "none", Tools: &rafikiv1.StringList{Items: []string{}}},
 	}))
-	if err != nil {
-		t.Fatalf("put with empty tools: %v", err)
-	}
-	if len(f.specs) != 1 {
-		t.Fatalf("got %d specs, want 1", len(f.specs))
-	}
+	c.Require().NoError(err, "put with empty tools")
+	c.Require().Len(f.specs, 1, "got %d specs, want 1", len(f.specs))
 	none := f.specs[0].Tools
-	if none == nil || len(*none) != 0 {
-		t.Errorf("empty StringList arrived as %#v, want non-nil empty (\"none\")", none)
-	}
+	c.False(none == nil || len(*none) != 0, "empty StringList arrived as %#v, want non-nil empty (\"none\")", none)
 
 	_, err = s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{
 		Preset: &rafikiv1.PresetRow{Name: "default"},
 	}))
-	if err != nil {
-		t.Fatalf("put without tools: %v", err)
-	}
-	if got := f.specs[1].Tools; got != nil {
-		t.Errorf("absent StringList arrived as %#v, want nil (the kind's default)", got)
-	}
+	c.Require().NoError(err, "put without tools")
+	c.Nil(f.specs[1].Tools, "absent StringList arrived as")
 
 	if f.specs[0].Name != "none" || f.specs[1].Name != "default" {
 		t.Errorf("specs = %q, %q; want none, default", f.specs[0].Name, f.specs[1].Name)
@@ -205,6 +181,7 @@ func TestPutPresetPreservesEmptyToolsOverTheWire(t *testing.T) {
 // a missing preset or a preset with no name is rejected with
 // CodeInvalidArgument before the manager is reached.
 func TestPutPresetRequiresPresetAndName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakePresets{}
 	s.SetPresetManager(f)
@@ -217,16 +194,10 @@ func TestPutPresetRequiresPresetAndName(t *testing.T) {
 		{"no name", &rafikiv1.PresetRow{}},
 	} {
 		_, err := s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{Preset: tc.preset}))
-		if err == nil {
-			t.Fatalf("put with %s: accepted", tc.name)
-		}
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("put with %s: got code %v, want InvalidArgument", tc.name, connect.CodeOf(err))
-		}
+		c.Require().Error(err, "put with %s: accepted", tc.name)
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "put with %s: got code %v, want InvalidArgument", tc.name, connect.CodeOf(err))
 	}
-	if len(f.specs) != 0 {
-		t.Errorf("store was written despite the rejections: %+v", f.specs)
-	}
+	c.Empty(f.specs, "store was written despite the rejections")
 
 	// An empty name is also required on Get and Delete.
 	for _, tc := range []struct {
@@ -247,18 +218,12 @@ func TestPutPresetRequiresPresetAndName(t *testing.T) {
 			t.Errorf("%s with empty name: accepted", tc.name)
 			continue
 		}
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("%s with empty name: got code %v, want InvalidArgument", tc.name, connect.CodeOf(err))
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s with empty name: got code %v, want InvalidArgument", tc.name, connect.CodeOf(err))
 	}
 
 	resp, err := s.PutPreset(context.Background(), connect.NewRequest(&rafikiv1.PutPresetRequest{
 		Preset: &rafikiv1.PresetRow{Name: "good_name", Kind: "fundi"},
 	}))
-	if err != nil {
-		t.Fatalf("put with preset and name: %v", err)
-	}
-	if resp.Msg.Preset.GetName() != "good_name" {
-		t.Errorf("put response name = %q, want good_name", resp.Msg.Preset.GetName())
-	}
+	c.Require().NoError(err, "put with preset and name")
+	c.Eq("good_name", resp.Msg.Preset.GetName(), "put response name")
 }

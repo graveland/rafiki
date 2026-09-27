@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/insightstypes"
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seedRemoteProfile isolates profile state for the test and seeds a single
@@ -18,36 +20,28 @@ import (
 // no token file is written at all).
 func seedRemoteProfile(t *testing.T, name, url, token string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		name: {Name: name, URL: url},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	}}), "Save")
 	if token != "" {
-		if err := profile.WriteToken(name, token); err != nil {
-			t.Fatalf("WriteToken: %v", err)
-		}
+		c.NoError(profile.WriteToken(name, token), "WriteToken")
 	}
-	if err := profile.SavePointer(name); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	c.NoError(profile.SavePointer(name), "SavePointer")
 }
 
 // seedLocalProfile is seedRemoteProfile's socket-based counterpart.
 func seedLocalProfile(t *testing.T, name, socket string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		name: {Name: name, Socket: socket},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer(name); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer(name), "SavePointer")
 }
 
 // The cache is the only part of this path testable without a live daemon: the
@@ -61,9 +55,7 @@ func TestChildCompletionServesFromCache(t *testing.T) {
 	cacheWrite("children", completionEndpointKey(nil), want)
 
 	got := completionChildrenCached(nil, childCacheTTL)
-	if len(got) != 1 || got[0].Name != "alpha" {
-		t.Fatalf("got %+v, want the cached row", got)
-	}
+	assert.NewAborting(t).False(len(got) != 1 || got[0].Name != "alpha", "got %+v, want the cached row", got)
 }
 
 func TestDropChildCompletionCacheForcesARefetch(t *testing.T) {
@@ -73,9 +65,7 @@ func TestDropChildCompletionCacheForcesARefetch(t *testing.T) {
 	cacheWrite("children", completionEndpointKey(nil), []completionChild{{Name: "alpha"}})
 	dropChildCompletionCache(nil)
 
-	if got := completionChildrenCached(nil, childCacheTTL); len(got) != 0 {
-		t.Errorf("got %+v after a drop, want no cached rows", got)
-	}
+	assert.NewCollecting(t).Empty(completionChildrenCached(nil, childCacheTTL), "got")
 }
 
 // An unreachable daemon must yield no candidates, never an error or an exit.
@@ -87,9 +77,7 @@ func TestChildCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 	go func() { done <- completionChildren(nil) }()
 	select {
 	case got := <-done:
-		if len(got) != 0 {
-			t.Errorf("got %+v, want none", got)
-		}
+		assert.NewCollecting(t).Empty(got, "got")
 	case <-time.After(5 * time.Second):
 		t.Fatal("completion blocked the shell for 5s; it must bound its own deadline")
 	}
@@ -102,9 +90,7 @@ func TestChildCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 // "unix:"-prefixed socket path when it names a local daemon.
 func TestCompletionEndpointKeyFollowsTheProfile(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://daemon.example", "t")
-	if got := completionEndpointKey(nil); got != "https://daemon.example" {
-		t.Errorf("key = %q, want the remote URL", got)
-	}
+	assert.NewCollecting(t).Eq("https://daemon.example", completionEndpointKey(nil), "key")
 
 	seedLocalProfile(t, "work", "/tmp/work-scratch/controller.sock")
 	if got := completionEndpointKey(nil); !strings.HasPrefix(got, "unix:") {
@@ -118,41 +104,28 @@ func TestCompletionEndpointKeyFollowsTheProfile(t *testing.T) {
 // must also equal the identity the endpoint resolver answers, so reads,
 // writes and drops can never drift from what is actually dialed.
 func TestCompletionKeyFollowsTheProfileOverride(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.Require().NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"default": {Name: "default", Socket: "/tmp/default-scratch/controller.sock"},
 		"scratch": {Name: "scratch", Socket: "/tmp/scratch-1/rafiki/controller.sock"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("default"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.Require().NoError(profile.SavePointer("default"), "SavePointer")
 
 	cmd := &cobra.Command{}
 	cmd.Flags().StringP("profile", "P", "", "")
-	if err := cmd.Flags().Set("profile", "scratch"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("profile", "scratch"))
 
 	want := "unix:/tmp/scratch-1/rafiki/controller.sock"
-	if got := completionEndpointKey(cmd); got != want {
-		t.Errorf("key = %q, want %q — the override must move the identity off the default profile", got, want)
-	}
-	if got := completionEndpointKey(cmd); got == "unix:/tmp/default-scratch/controller.sock" {
-		t.Errorf("key = %q, still the DEFAULT profile's socket", got)
-	}
+	c.Eq(want, completionEndpointKey(cmd), "key")
+	c.NotEq("unix:/tmp/default-scratch/controller.sock", completionEndpointKey(cmd), "key")
 
 	ep, err := newConnectEndpoint(cmd)
-	if err != nil {
-		t.Fatalf("newConnectEndpoint: %v", err)
-	}
-	if ep.identity != completionEndpointKey(cmd) {
-		t.Errorf("endpoint identity %q != cache key %q — reads, writes and drops must not drift from what is dialed", ep.identity, completionEndpointKey(cmd))
-	}
+	c.Require().NoError(err, "newConnectEndpoint")
+	c.Eq(completionEndpointKey(cmd), ep.identity, "endpoint identity")
 }
 
 // A remote endpoint with no token cannot succeed. It must be a miss, not the
@@ -161,9 +134,7 @@ func TestChildCompletionWithoutATokenIsEmpty(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	if got := completionChildren(nil); len(got) != 0 {
-		t.Errorf("got %+v, want none", got)
-	}
+	assert.NewCollecting(t).Empty(completionChildren(nil), "got")
 }
 
 // ─── Task 5.1: the completion sweep ───────────────────────────────────────────
@@ -188,39 +159,29 @@ func seedChildrenCompletionCache(t *testing.T) {
 }
 
 func TestCompleteStatusOffersChildren(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedChildrenCompletionCache(t)
 
 	cmd := newStatusCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set — `rafiki status <TAB>` completes nothing")
-	}
+	c.Require().NotNil(cmd.ValidArgsFunction, "ValidArgsFunction not set — `rafiki status <TAB>` completes nothing")
 	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
 	for _, want := range []string{"c_01HXABC", "alpha", "beta"} {
-		if !containsCandidate(got, want) {
-			t.Errorf("candidates %v missing %q", got, want)
-		}
+		c.True(containsCandidate(got, want), "candidates %v missing %q", got, want)
 	}
 	if got, _ := cmd.ValidArgsFunction(cmd, []string{"alpha"}, ""); len(got) != 0 {
 		t.Errorf("past the single target got %v, want none", got)
 	}
 	// The arg signature the completion promises: one OPTIONAL target. NoArgs
 	// would make the offered candidates unusable; more than one is rejected.
-	if err := cmd.Args(cmd, nil); err != nil {
-		t.Errorf("zero args rejected: %v", err)
-	}
-	if err := cmd.Args(cmd, []string{"alpha"}); err != nil {
-		t.Errorf("one arg rejected: %v", err)
-	}
-	if err := cmd.Args(cmd, []string{"alpha", "beta"}); err == nil {
-		t.Error("two args accepted; status takes at most one target")
-	}
+	c.NoError(cmd.Args(cmd, nil), "zero args rejected")
+	c.NoError(cmd.Args(cmd, []string{"alpha"}), "one arg rejected")
+	c.Error(cmd.Args(cmd, []string{"alpha", "beta"}), "two args accepted; status takes at most one target")
 }
 
 func TestCompleteSkillsNamespaced(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedCompletionCache(t, "skills", []completionSkill{
 		{Namespace: "rafiki", Name: "commit-style"},
@@ -234,19 +195,13 @@ func TestCompleteSkillsNamespaced(t *testing.T) {
 	// since splitQualified resolves a colonless arg against the default
 	// namespace only.
 	got := completeSkills(nil, "com")
-	if len(got) != 1 || got[0] != "rafiki:commit-style" {
-		t.Errorf("completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "com", got)
-	}
+	c.False(len(got) != 1 || got[0] != "rafiki:commit-style", "completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "com", got)
 	// A colon fixes the namespace; past it only the qualified form matches.
 	got = completeSkills(nil, "rafiki:co")
-	if len(got) != 1 || got[0] != "rafiki:commit-style" {
-		t.Errorf("completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "rafiki:co", got)
-	}
+	c.False(len(got) != 1 || got[0] != "rafiki:commit-style", "completeSkills(nil, %q) = %v, want [rafiki:commit-style]", "rafiki:co", got)
 	// The namespace alone is a prefix of the qualified ref.
 	got = completeSkills(nil, "acme")
-	if len(got) != 1 || got[0] != "acme:deploy" {
-		t.Errorf("completeSkills(nil, %q) = %v, want [acme:deploy]", "acme", got)
-	}
+	c.False(len(got) != 1 || got[0] != "acme:deploy", "completeSkills(nil, %q) = %v, want [acme:deploy]", "acme", got)
 	// A colon-prefixed query never falls back to bare names — it would offer
 	// unrelated namespaces' skills past a fixed namespace.
 	if got := completeSkills(nil, "nope:"); len(got) != 0 {
@@ -255,17 +210,14 @@ func TestCompleteSkillsNamespaced(t *testing.T) {
 }
 
 func TestCompleteUsers(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedCompletionCache(t, "users", []string{"brent", "alice"})
 
 	got := completeUsers(nil, "")
-	if len(got) != 2 || got[0] != "alice" || got[1] != "brent" {
-		t.Errorf("completeUsers(nil, \"\") = %v, want [alice brent]", got)
-	}
+	c.False(len(got) != 2 || got[0] != "alice" || got[1] != "brent", "completeUsers(nil, \"\") = %v, want [alice brent]", got)
 	got = completeUsers(nil, "br")
-	if len(got) != 1 || got[0] != "brent" {
-		t.Errorf("completeUsers(nil, \"br\") = %v, want [brent]", got)
-	}
+	c.False(len(got) != 1 || got[0] != "brent", "completeUsers(nil, \"br\") = %v, want [brent]", got)
 	if got := completeUsers(nil, "z"); len(got) != 0 {
 		t.Errorf("completeUsers(nil, \"z\") = %v, want none", got)
 	}
@@ -282,9 +234,7 @@ func TestUserCompletionFetchesFromListUsers(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	got := completeUsers(nil, "al")
-	if len(got) != 1 || got[0] != "alice" {
-		t.Fatalf("completeUsers(nil, \"al\") = %v, want [alice] straight from ListUsers", got)
-	}
+	assert.NewAborting(t).False(len(got) != 1 || got[0] != "alice", "completeUsers(nil, \"al\") = %v, want [alice] straight from ListUsers", got)
 	if req := stub.lastList(); req == nil || req.Msg.GetIncludeDeleted() {
 		t.Fatal("the completion must list ACTIVE users only (the rm candidates)")
 	}
@@ -296,9 +246,7 @@ func TestUserCompletionWithoutATokenIsEmpty(t *testing.T) {
 	seedRemoteProfile(t, "personal", "https://example.invalid", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	if got := completeUsers(nil, ""); len(got) != 0 {
-		t.Errorf("got %v, want none", got)
-	}
+	assert.NewCollecting(t).Empty(completeUsers(nil, ""), "got")
 }
 
 // An unreachable daemon must yield no candidates, never an error or an exit,
@@ -311,28 +259,23 @@ func TestUserCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 	go func() { done <- completeUsers(nil, "") }()
 	select {
 	case got := <-done:
-		if len(got) != 0 {
-			t.Errorf("got %v, want none", got)
-		}
+		assert.NewCollecting(t).Empty(got, "got")
 	case <-time.After(5 * time.Second):
 		t.Fatal("user completion blocked the shell for 5s; it must bound its own deadline")
 	}
 }
 
 func TestCompleteClaudeModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedCompletionCache(t, "models-claude", []string{
 		"claude-sonnet-5", "claude-opus-4-6", "glm-5.3-flash",
 	})
 
 	got := completeModel(nil, "claude", "")
-	if len(got) != 3 {
-		t.Fatalf("completeModel(nil, claude, \"\") = %v, want all three ids", got)
-	}
+	c.Require().Len(got, 3, "completeModel(nil, claude, \"\") = %v, want all three ids", got)
 	got = completeModel(nil, "claude", "clau")
-	if len(got) != 2 || got[0] != "claude-opus-4-6" || got[1] != "claude-sonnet-5" {
-		t.Errorf("completeModel(nil, claude, \"clau\") = %v, want the two claude ids", got)
-	}
+	c.False(len(got) != 2 || got[0] != "claude-opus-4-6" || got[1] != "claude-sonnet-5", "completeModel(nil, claude, \"clau\") = %v, want the two claude ids", got)
 }
 
 // TestEnumCompletions pins every FixedCompletions registration Task 5.1
@@ -364,22 +307,15 @@ func TestEnumCompletions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			cmd := tc.cmd()
 			fn, ok := cmd.GetFlagCompletionFunc(tc.flag)
-			if !ok {
-				t.Fatalf("no completion registered for --%s", tc.flag)
-			}
+			c.Require().True(ok, "no completion registered for --%s", tc.flag)
 			got, directive := fn(cmd, nil, "")
-			if directive != cobra.ShellCompDirectiveNoFileComp {
-				t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
+			c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
+			c.Require().Len(got, len(tc.want), "got %v, want %v", got, tc.want)
 			for _, w := range tc.want {
-				if !containsCandidate(got, w) {
-					t.Errorf("got %v, missing %q", got, w)
-				}
+				c.True(containsCandidate(got, w), "got %v, missing %q", got, w)
 			}
 		})
 	}
@@ -392,30 +328,19 @@ func TestEnumCompletions(t *testing.T) {
 // instead of silently offering nothing (the failure class the __complete
 // probe in the original bug report showed).
 func TestCompleteQueryNames(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newConversationsQueryCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set — `rafiki conversations query <TAB>` completes nothing")
-	}
+	c.Require().NotNil(cmd.ValidArgsFunction, "ValidArgsFunction not set — `rafiki conversations query <TAB>` completes nothing")
 	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
-	if len(got) != len(insightstypes.QueryNames) {
-		t.Fatalf("got %v, want all %v", got, insightstypes.QueryNames)
-	}
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
+	c.Require().Len(got, len(insightstypes.QueryNames), "got %v, want all %v", got, insightstypes.QueryNames)
 	for _, want := range insightstypes.QueryNames {
-		if !containsCandidate(got, want) {
-			t.Errorf("got %v, missing %q", got, want)
-		}
+		c.True(containsCandidate(got, want), "got %v, missing %q", got, want)
 	}
 	got, _ = cmd.ValidArgsFunction(cmd, nil, "co")
-	if len(got) != 1 || !containsCandidate(got, "coverage") {
-		t.Errorf("prefix 'co' got %v, want [coverage]", got)
-	}
+	c.False(len(got) != 1 || !containsCandidate(got, "coverage"), "prefix 'co' got %v, want [coverage]", got)
 	got, _ = cmd.ValidArgsFunction(cmd, nil, "c")
-	if len(got) != 2 || !containsCandidate(got, "classes") || !containsCandidate(got, "coverage") {
-		t.Errorf("prefix 'c' got %v, want [classes coverage]", got)
-	}
+	c.False(len(got) != 2 || !containsCandidate(got, "classes") || !containsCandidate(got, "coverage"), "prefix 'c' got %v, want [classes coverage]", got)
 	if got, _ := cmd.ValidArgsFunction(cmd, nil, "z"); len(got) != 0 {
 		t.Errorf("prefix 'z' got %v, want none", got)
 	}

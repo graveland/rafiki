@@ -9,6 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/darajapool"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // var _ strings.Builder = strings.Builder{} — import guard against unused dep.
@@ -25,6 +27,7 @@ var _ = strings.Builder{}
 // that the callbacks wired at startup are actually what fire on state changes.
 func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	st := childstore.New()
 	ctrl := &Controller{st: st}
@@ -49,12 +52,8 @@ func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 	darajaPool.FireDisconnect(childID)
 
 	snap, ok := st.Get(childID)
-	if !ok {
-		t.Fatal("child disappeared after insert")
-	}
-	if got := snap.Labels[darajaStateLabel]; got != "unreachable" {
-		t.Errorf("label = %q, want %q", got, "unreachable")
-	}
+	c.Require().True(ok, "child disappeared after insert")
+	c.Eq("unreachable", snap.Labels[darajaStateLabel], "label")
 }
 
 // TestReconnectClearsTheUnreachableLabel verifies that a reconnect clears the
@@ -67,6 +66,7 @@ func TestDisconnectMarksTheChildUnreachable(t *testing.T) {
 // connects the right functions (not that onDarajaConnect/disconnect are stubs).
 func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	st := childstore.New()
 	ctrl := &Controller{st: st}
@@ -88,16 +88,12 @@ func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 	// Disconnect → OnDisconnect sets label.
 	darajaPool.FireDisconnect(childID)
 	snap, _ := st.Get(childID)
-	if got := snap.Labels[darajaStateLabel]; got != "unreachable" {
-		t.Fatalf("after disconnect: label = %q, want %q", got, "unreachable")
-	}
+	c.Require().Eq("unreachable", snap.Labels[darajaStateLabel], "after disconnect: label")
 
 	// Connect → OnConnect clears label.
 	darajaPool.FireConnect(childID)
 	snap, _ = st.Get(childID)
-	if got := snap.Labels[darajaStateLabel]; got != "" {
-		t.Errorf("after reconnect: label = %q, want empty", got)
-	}
+	c.Eq("", snap.Labels[darajaStateLabel], "after reconnect: label")
 }
 
 // TestCloseRevokesDarajaCredentials verifies that Close calls Registry.Forget
@@ -109,6 +105,7 @@ func TestReconnectClearsTheUnreachableLabel(t *testing.T) {
 // which is where the belt internals are reachable.
 func TestCloseRevokesDarajaCredentials(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
@@ -121,9 +118,7 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 
 	// Manually add an entry to the registry as if a ticket had been issued.
 	_, err := reg.IssueCredential("test-close-reg")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	// Seed the child.
 	st.Insert(&childstore.Session{
@@ -134,14 +129,11 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 	})
 
 	// Close should revoke credentials BEFORE deleting the row.
-	if err := ctrl.Close("test-close-reg"); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	c.Require().NoError(ctrl.Close("test-close-reg"), "close")
 
 	// Row is gone — that's expected. Verify it was deleted.
-	if _, ok := st.Get("test-close-reg"); ok {
-		t.Error("child row still exists after Close")
-	}
+	_, ok := st.Get("test-close-reg")
+	c.False(ok, "child row still exists after Close")
 }
 
 // TestKillRevokesDarajaCredentials verifies that Kill also revokes the
@@ -154,6 +146,7 @@ func TestCloseRevokesDarajaCredentials(t *testing.T) {
 // (TestDropReplayKillsTheBeltAndItCannotBeRevived).
 func TestKillRevokesDarajaCredentials(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
@@ -166,12 +159,8 @@ func TestKillRevokesDarajaCredentials(t *testing.T) {
 
 	// Seed a credential as if the child had connected.
 	cred, err := reg.IssueCredential("test-kill-reg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cred == "" {
-		t.Fatal("expected non-empty credential from IssueCredential")
-	}
+	c.Require().NoError(err)
+	c.Require().NotEq("", cred, "expected non-empty credential from IssueCredential")
 
 	// Seed the child (we don't need a process here — the point is credential revocation).
 	st.Insert(&childstore.Session{
@@ -186,14 +175,11 @@ func TestKillRevokesDarajaCredentials(t *testing.T) {
 	_, _ = ctrl.Kill(context.Background(), "test-kill-reg", 0, 0)
 
 	// CheckCredential should return false now — the credential is gone.
-	if reg.CheckCredential(cred, "test-kill-reg") {
-		t.Error("credential still valid after Kill; Forget did not run")
-	}
+	c.False(reg.CheckCredential(cred, "test-kill-reg"), "credential still valid after Kill; Forget did not run")
 
 	// Verify the child row is still alive (Kill doesn't delete rows).
-	if _, ok := st.Get("test-kill-reg"); !ok {
-		t.Error("child row was deleted by Kill; it should survive until Close")
-	}
+	_, ok := st.Get("test-kill-reg")
+	c.True(ok, "child row was deleted by Kill; it should survive until Close")
 }
 
 // TestWireDarajaNilSafe verifies WireDaraja handles nil pool and registry
@@ -238,6 +224,7 @@ func TestOnDisconnectNoopWhenNotExists(t *testing.T) {
 // before any subsequent disconnect event reaches the label setter.
 func TestCloseCallsForgetBeforeRowDelete(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	dir := t.TempDir()
 	socketPath := dir + "/c.sock"
@@ -257,22 +244,17 @@ func TestCloseCallsForgetBeforeRowDelete(t *testing.T) {
 
 	// Issue a credential so Forget has something to wipe.
 	_, err := reg.IssueCredential(childID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	// Close: Forget must run while the row is still present.
 	err = ctrl.Close(childID)
-	if err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	c.Require().NoError(err, "close")
 
 	// Row is gone — that's expected. What matters is Forget ran BEFORE Delete.
 	// Since we can't observe the interleaving directly, we verify the
 	// post-condition: the child IS gone.
-	if _, ok := st.Get(childID); ok {
-		t.Error("child row survived Close")
-	}
+	_, ok := st.Get(childID)
+	c.False(ok, "child row survived Close")
 }
 
 // TestLabelIsIdempotent verifies that setting the label twice does not produce
@@ -280,6 +262,7 @@ func TestCloseCallsForgetBeforeRowDelete(t *testing.T) {
 // state and short-circuits).
 func TestLabelIsIdempotent(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	st := childstore.New()
 	ctrl := &Controller{st: st}
@@ -301,9 +284,7 @@ func TestLabelIsIdempotent(t *testing.T) {
 	ctrl.onDarajaDisconnect(childID)
 
 	snap, _ := st.Get(childID)
-	if got := snap.Labels[darajaStateLabel]; got != "unreachable" {
-		t.Errorf("double disconnect: label = %q, want %q", got, "unreachable")
-	}
+	c.Eq("unreachable", snap.Labels[darajaStateLabel], "double disconnect: label")
 
 	// Three reconnects — all should clear.
 	ctrl.onDarajaConnect(childID)
@@ -311,7 +292,5 @@ func TestLabelIsIdempotent(t *testing.T) {
 	ctrl.onDarajaConnect(childID)
 
 	snap, _ = st.Get(childID)
-	if got := snap.Labels[darajaStateLabel]; got != "" {
-		t.Errorf("triple reconnect: label = %q, want empty", got)
-	}
+	c.Eq("", snap.Labels[darajaStateLabel], "triple reconnect: label")
 }

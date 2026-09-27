@@ -21,24 +21,23 @@ import (
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ---- scaffolding ----------------------------------------------------------
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(admin.Close)
 	name := fmt.Sprintf("rafiki_loop_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
@@ -46,18 +45,12 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)") })
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(store.Migrate(ctx, pool))
 	return pool
 }
 
@@ -131,6 +124,7 @@ func (f *fakeTools) executedNames() []string {
 // to hand each concurrent racer its own handle on one stored conversation.
 func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string) *llm.Conversation {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
@@ -138,19 +132,16 @@ func newConvByRef(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref strin
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	conv, err := c.Conversation(context.Background(), llm.ByExternalRef(ref),
 		llm.Entrypoint("loop-test"), llm.Model("claude-test"), llm.SystemText("test system"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	return conv
 }
 
 func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversation {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
@@ -158,14 +149,10 @@ func newConv(t *testing.T, pool *pgxpool.Pool, sender llm.Sender) *llm.Conversat
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	conv, err := c.Conversation(context.Background(), llm.NewConversation("", "loop-test"),
 		llm.Model("claude-test"), llm.SystemText("test system"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	return conv
 }
 
@@ -173,9 +160,7 @@ func messageRows(t *testing.T, pool *pgxpool.Pool, convID string) []string {
 	t.Helper()
 	rows, err := pool.Query(context.Background(), `SELECT role || ':' || content::text
 		FROM conversations.conversation_message WHERE conversation_id=$1::uuid ORDER BY ordinal`, convID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
@@ -189,6 +174,7 @@ func messageRows(t *testing.T, pool *pgxpool.Pool, convID string) []string {
 // ---- full-run behavior ----------------------------------------------------
 
 func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respTwoTools, respEndTurn}}
 	tools := &fakeTools{}
@@ -213,25 +199,17 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 	}
 
 	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("diagnose it"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q", result.Text)
-	}
+	c.Require().NoError(err, "Run")
+	c.Eq("final analysis", result.Text, "Text =")
 	if result.Stats.ToolCalls != 2 || result.Stats.Iterations != 2 {
 		t.Errorf("stats = %+v, want 2 tool calls / 2 iterations", result.Stats)
 	}
-	if got := tools.executedNames(); len(got) != 2 {
-		t.Errorf("executed = %v, want alpha+beta", got)
-	}
+	c.Len(tools.executedNames(), 2, "executed")
 
 	// Persistence: user, assistant(tool_use), 2 per-tool result rows (in
 	// tool_use order), assistant(final) = 5 rows.
 	rows := messageRows(t, pool, conv.ID)
-	if len(rows) != 5 {
-		t.Fatalf("message rows = %d, want 5:\n%s", len(rows), strings.Join(rows, "\n"))
-	}
+	c.Require().Len(rows, 5, "message rows = %d, want 5:\n%s", len(rows), strings.Join(rows, "\n"))
 	if !strings.Contains(rows[2], "toolu_a") || !strings.Contains(rows[3], "toolu_b") {
 		t.Errorf("tool result rows out of tool_use order:\n%s", strings.Join(rows[2:4], "\n"))
 	}
@@ -241,16 +219,10 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 			toolCallEvents++
 		}
 	}
-	if toolCallEvents != 2 {
-		t.Errorf("OnToolCall fired %d times, want 2", toolCallEvents)
-	}
+	c.Eq(2, toolCallEvents, "OnToolCall fired")
 	// OnTurn fires once per LLM call with the response usage.
-	if turns != 2 {
-		t.Errorf("OnTurn fired %d times, want 2", turns)
-	}
-	if turnTokens != 30 { // 20 (tool_use turn) + 10 (end_turn)
-		t.Errorf("OnTurn token sum = %d, want 30", turnTokens)
-	}
+	c.Eq(2, turns, "OnTurn fired")
+	c.Eq(30, turnTokens, "OnTurn token sum") // 20 (tool_use turn) + 10 (end_turn)
 }
 
 // ---- kill-point recovery --------------------------------------------------
@@ -258,35 +230,27 @@ func TestRunToolLoopPersistsAndCompletes(t *testing.T) {
 // Kill point: after the user message persisted, before the LLM call
 // completed (pending turn). Resume must simply re-issue.
 func TestResumeReissuesPendingCall(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 
-	if err := conv.AppendUser(context.Background(), llm.UserText("diagnose it")); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(conv.AppendUser(context.Background(), llm.UserText("diagnose it")))
 	// (crash here: no assistant, no results)
 
 	result, err := Resume(context.Background(), conv, tools, nil)
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q", result.Text)
-	}
-	if n := len(tools.executedNames()); n != 0 {
-		t.Errorf("tools executed on re-issue = %d, want 0", n)
-	}
-	if sender.calls != 1 {
-		t.Errorf("sender calls = %d, want 1 (single re-issue)", sender.calls)
-	}
+	c.Require().NoError(err, "Resume")
+	c.Eq("final analysis", result.Text, "Text =")
+	c.Eq(0, len(tools.executedNames()), "tools executed on re-issue")
+	c.Eq(1, sender.calls, "sender calls")
 }
 
 // Kill point: assistant tool_use persisted, NO tool results. Resume must
 // fabricate synthetic results for every orphan — never re-execute — and
 // continue the loop.
 func TestResumeFabricatesAllOrphans(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	tools := &fakeTools{}
@@ -295,39 +259,28 @@ func TestResumeFabricatesAllOrphans(t *testing.T) {
 	seedInterruptedBatch(t, pool, conv, nil)
 
 	result, err := Resume(context.Background(), conv, tools, nil)
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q", result.Text)
-	}
-	if n := len(tools.executedNames()); n != 0 {
-		t.Fatalf("RESUME RE-EXECUTED TOOLS: %v", tools.executedNames())
-	}
+	c.Require().NoError(err, "Resume")
+	c.Eq("final analysis", result.Text, "Text =")
+	c.Require().Eq(0, len(tools.executedNames()), "RESUME RE-EXECUTED TOOLS: %v", tools.executedNames())
 
 	rows := messageRows(t, pool, conv.ID)
 	// user, assistant(2 tool_use), synthetic(a), synthetic(b), assistant(final)
-	if len(rows) != 5 {
-		t.Fatalf("rows = %d, want 5:\n%s", len(rows), strings.Join(rows, "\n"))
-	}
+	c.Require().Len(rows, 5, "rows = %d, want 5:\n%s", len(rows), strings.Join(rows, "\n"))
 	for i, id := range []string{"toolu_a", "toolu_b"} {
 		row := rows[2+i]
 		// JSONB text output puts a space after colons.
-		if !strings.Contains(row, id) || !strings.Contains(row, InterruptedSentinel) ||
-			!strings.Contains(row, `"is_error": true`) {
-			t.Errorf("synthetic row %d missing id/sentinel/is_error: %s", i, row)
-		}
+		c.False(!strings.Contains(row, id) || !strings.Contains(row, InterruptedSentinel) ||
+			!strings.Contains(row, `"is_error": true`), "synthetic row %d missing id/sentinel/is_error: %s", i, row)
 	}
 	// Synthetic order follows the assistant's tool_use order.
-	if !strings.Contains(rows[2], "toolu_a") || !strings.Contains(rows[3], "toolu_b") {
-		t.Error("synthetic rows not in tool_use order")
-	}
+	c.False(!strings.Contains(rows[2], "toolu_a") || !strings.Contains(rows[3], "toolu_b"), "synthetic rows not in tool_use order")
 }
 
 // Kill point: mid-batch — one result persisted, one lost. Resume fabricates
 // ONLY the missing one; the real partial result survives; wire order follows
 // the assistant's tool_use order.
 func TestResumeInterleavesPartialResults(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	tools := &fakeTools{}
@@ -336,18 +289,13 @@ func TestResumeInterleavesPartialResults(t *testing.T) {
 	realResult := anthropic.NewToolResultBlock("toolu_a", "real result of alpha", false)
 	seedInterruptedBatch(t, pool, conv, []anthropic.ContentBlockParamUnion{realResult})
 
-	if _, err := Resume(context.Background(), conv, tools, nil); err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if n := len(tools.executedNames()); n != 0 {
-		t.Fatalf("re-executed: %v", tools.executedNames())
-	}
+	_, err := Resume(context.Background(), conv, tools, nil)
+	c.NoError(err, "Resume")
+	c.Eq(0, len(tools.executedNames()), "re-executed: %v", tools.executedNames())
 
 	rows := messageRows(t, pool, conv.ID)
 	// user, assistant, real(a), synthetic(b), assistant(final)
-	if len(rows) != 5 {
-		t.Fatalf("rows = %d:\n%s", len(rows), strings.Join(rows, "\n"))
-	}
+	c.Len(rows, 5, "rows = %d:\n%s", len(rows), strings.Join(rows, "\n"))
 	if !strings.Contains(rows[2], "real result of alpha") || strings.Contains(rows[2], InterruptedSentinel) {
 		t.Errorf("row 2 should be the REAL result: %s", rows[2])
 	}
@@ -358,6 +306,7 @@ func TestResumeInterleavesPartialResults(t *testing.T) {
 
 // A conversation that already ended cleanly resumes as a no-op result.
 func TestResumeAlreadyComplete(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respTwoTools}} // must NOT be called
 	tools := &fakeTools{}
@@ -365,24 +314,14 @@ func TestResumeAlreadyComplete(t *testing.T) {
 
 	msgs := store.NewMessages(pool)
 	ctx := context.Background()
-	if err := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
-		&store.AssistantMeta{StopReason: "end_turn"}); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil))
+	c.Require().NoError(msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("done earlier")),
+		&store.AssistantMeta{StopReason: "end_turn"}))
 
 	result, err := Resume(ctx, conv, tools, nil)
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if result.Text != "done earlier" {
-		t.Errorf("Text = %q, want the persisted final text", result.Text)
-	}
-	if sender.calls != 0 {
-		t.Errorf("sender called %d times on an already-complete conversation", sender.calls)
-	}
+	c.Require().NoError(err, "Resume")
+	c.Eq("done earlier", result.Text, "Text")
+	c.Eq(0, sender.calls, "sender called")
 }
 
 // The attempt cap: fourth Resume refuses and marks the conversation failed.
@@ -393,6 +332,7 @@ func TestResumeAlreadyComplete(t *testing.T) {
 // error (see wrapUp) — a genuine upstream failure is what this test needs to
 // keep Resume failing every time, independent of that redesign.
 func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &erroringSender{err: errors.New("upstream unavailable")}
 	tools := &fakeTools{}
@@ -408,14 +348,10 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 	}
 
 	var syntheticRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
 		WHERE conversation_id=$1::uuid AND content::text LIKE '%`+InterruptedSentinel+`%'
-		AND tool_use_ids && ARRAY['toolu_a','toolu_b']`, conv.ID).Scan(&syntheticRows); err != nil {
-		t.Fatal(err)
-	}
-	if syntheticRows != 2 {
-		t.Fatalf("synthetic rows for the seeded batch = %d, want 2", syntheticRows)
-	}
+		AND tool_use_ids && ARRAY['toolu_a','toolu_b']`, conv.ID).Scan(&syntheticRows))
+	c.Require().Eq(2, syntheticRows, "synthetic rows for the seeded batch")
 
 	// Resumes 2 and 3: the seeded ids already have results — must not be
 	// fabricated again. Both still fail on the erroring sender — assert that
@@ -425,91 +361,69 @@ func TestResumeCapAndNoDoubleFabrication(t *testing.T) {
 			t.Fatalf("resume %d: err = %v, want upstream error", i, err)
 		}
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT count(*) FROM conversations.conversation_message
 		WHERE conversation_id=$1::uuid AND content::text LIKE '%`+InterruptedSentinel+`%'
-		AND tool_use_ids && ARRAY['toolu_a','toolu_b']`, conv.ID).Scan(&syntheticRows); err != nil {
-		t.Fatal(err)
-	}
-	if syntheticRows != 2 {
-		t.Fatalf("seeded ids fabricated again: %d rows, want still 2", syntheticRows)
-	}
+		AND tool_use_ids && ARRAY['toolu_a','toolu_b']`, conv.ID).Scan(&syntheticRows))
+	c.Require().Eq(2, syntheticRows, "seeded ids fabricated again")
 
 	// Resume 4: over the cap (3) → refused, conversation marked failed.
 	if _, err := Resume(ctx, conv, tools, nil); !errors.Is(err, ErrResumeCapExceeded) {
 		t.Fatalf("4th Resume err = %v, want ErrResumeCapExceeded", err)
 	}
 	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM conversations.conversation WHERE id=$1::uuid`, conv.ID).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != "failed" {
-		t.Errorf("conversation status = %q, want failed", status)
-	}
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT status FROM conversations.conversation WHERE id=$1::uuid`, conv.ID).Scan(&status))
+	c.Eq("failed", status, "conversation status")
 }
 
 // seedInterruptedBatch persists: user question + assistant with two tool_use
 // blocks + optional partial results — the state a crash mid-batch leaves.
 func seedInterruptedBatch(t *testing.T, pool *pgxpool.Pool, conv *llm.Conversation, partial []anthropic.ContentBlockParamUnion) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	if err := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("diagnose it")), nil))
 	assistant := anthropic.NewAssistantMessage(
 		anthropic.NewToolUseBlock("toolu_a", map[string]any{"k": "a"}, "alpha"),
 		anthropic.NewToolUseBlock("toolu_b", map[string]any{"k": "b"}, "beta"),
 	)
-	if err := msgs.Append(ctx, conv.ID, 1, assistant, nil); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(msgs.Append(ctx, conv.ID, 1, assistant, nil))
 	for i, block := range partial {
-		if err := msgs.Append(ctx, conv.ID, 2+i,
+		c.NoError(msgs.Append(ctx, conv.ID, 2+i,
 			anthropic.MessageParam{Role: anthropic.MessageParamRoleUser,
-				Content: []anthropic.ContentBlockParamUnion{block}}, nil); err != nil {
-			t.Fatal(err)
-		}
+				Content: []anthropic.ContentBlockParamUnion{block}}, nil))
 	}
 }
 
 // ---- units ----------------------------------------------------------------
 
 func TestInterruptedToolResultShape(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := InterruptedToolResult("service_logs", json.RawMessage(`{"service_id":"svc-1"}`))
 	for _, want := range []string{InterruptedSentinel, "tool=service_logs", `"service_id":"svc-1"`, "unknown whether the tool executed"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("synthetic result missing %q:\n%s", want, got)
-		}
+		c.StrContains(got, want, "synthetic result missing")
 	}
 	// No timestamps: the same inputs must produce identical bytes.
-	if got != InterruptedToolResult("service_logs", json.RawMessage(`{"service_id":"svc-1"}`)) {
-		t.Error("synthetic result is not deterministic")
-	}
+	c.Eq(InterruptedToolResult("service_logs", json.RawMessage(`{"service_id":"svc-1"}`)), got, "synthetic result is not deterministic")
 	// Input echo truncated at the bound.
 	long := InterruptedToolResult("x", json.RawMessage(`{"v":"`+strings.Repeat("a", 4096)+`"}`))
-	if len(long) > interruptedInputEcho+len(interruptedGuidance)+256 {
-		t.Errorf("input echo not truncated: len=%d", len(long))
-	}
+	c.LessOrEqual(interruptedInputEcho+len(interruptedGuidance)+256, len(long), "input echo not truncated: len=")
 }
 
 func TestTruncateToolResult(t *testing.T) {
+	c := assert.NewCollecting(t)
 	small := "short"
-	if truncateToolResult(small, toolmeta.MaxToolResultSize) != small {
-		t.Error("small result must pass through")
-	}
+	c.Eq(small, truncateToolResult(small, toolmeta.MaxToolResultSize), "small result must pass through")
 	big := strings.Repeat("line\n", 20*1024)
 	got := truncateToolResult(big, toolmeta.MaxToolResultSize)
-	if len(got) > toolmeta.MaxToolResultSize+64 {
-		t.Errorf("truncated result too big: %d", len(got))
-	}
-	if !strings.Contains(got, "truncated,") {
-		t.Error("missing truncation note")
-	}
+	c.LessOrEqual(toolmeta.MaxToolResultSize+64, len(got), "truncated result too big")
+	c.StrContains(got, "truncated,", "missing truncation note")
 }
 
 // The 5th kill point: all tool results persisted, crash BEFORE the follow-up
 // call. No orphans to fabricate; Resume just Continues.
 func TestResumePostToolsPersistedContinues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	tools := &fakeTools{}
@@ -522,61 +436,38 @@ func TestResumePostToolsPersistedContinues(t *testing.T) {
 	// (crash here: both results persisted, follow-up Continue never happened)
 
 	result, err := Resume(context.Background(), conv, tools, nil)
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q", result.Text)
-	}
-	if n := len(tools.executedNames()); n != 0 {
-		t.Errorf("tools executed = %d, want 0", n)
-	}
-	if sender.calls != 1 {
-		t.Errorf("sender calls = %d, want 1 (single follow-up)", sender.calls)
-	}
+	c.Require().NoError(err, "Resume")
+	c.Eq("final analysis", result.Text, "Text =")
+	c.Eq(0, len(tools.executedNames()), "tools executed")
+	c.Eq(1, sender.calls, "sender calls")
 	rows := messageRows(t, pool, conv.ID)
 	for _, row := range rows {
-		if strings.Contains(row, InterruptedSentinel) {
-			t.Errorf("no synthetics expected when all results persisted: %s", row)
-		}
+		c.NotStrContains(row, InterruptedSentinel, "no synthetics expected when all results persisted")
 	}
 }
 
 // A max_tokens-truncated trailing assistant is NOT completion: Resume must
 // re-issue rather than return the truncated text as a final result.
 func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	ctx := context.Background()
 	msgs := store.NewMessages(pool)
-	if err := msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
-		&store.AssistantMeta{StopReason: "max_tokens"}); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(msgs.Append(ctx, conv.ID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("q")), nil))
+	c.Require().NoError(msgs.Append(ctx, conv.ID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("truncated mid-")),
+		&store.AssistantMeta{StopReason: "max_tokens"}))
 
 	result, err := Resume(ctx, conv, tools, nil)
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if sender.calls != 1 {
-		t.Errorf("sender calls = %d, want 1 (truncated tail must re-issue)", sender.calls)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q, want the fresh completion, not the truncated tail", result.Text)
-	}
+	c.Require().NoError(err, "Resume")
+	c.Eq(1, sender.calls, "sender calls")
+	c.Eq("final analysis", result.Text, "Text")
 	// Attempts reset after the successful resume (consecutive-failure cap).
 	var attempts int
-	if err := pool.QueryRow(ctx, `SELECT resume_attempts FROM conversations.conversation WHERE id=$1::uuid`, conv.ID).Scan(&attempts); err != nil {
-		t.Fatal(err)
-	}
-	if attempts != 0 {
-		t.Errorf("resume_attempts = %d after successful resume, want 0", attempts)
-	}
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT resume_attempts FROM conversations.conversation WHERE id=$1::uuid`, conv.ID).Scan(&attempts))
+	c.Eq(0, attempts, "resume_attempts")
 }
 
 // A max_tokens stop during a Run (not Resume) is not an error — the loop
@@ -584,6 +475,7 @@ func TestResumeTruncatedTailIsNotComplete(t *testing.T) {
 // request receives a doubled output cap so the model doesn't immediately
 // hit the limit again.
 func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &trackingSender{scripts: []string{
 		`{"id":"msg1","type":"message","role":"assistant","model":"m",
@@ -593,30 +485,21 @@ func TestDriveHandlesMaxTokensTextOnly(t *testing.T) {
 	}}
 	conv := newConv(t, pool, sender)
 	result, err := Run(context.Background(), conv, &fakeTools{}, nil, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q, want 'final analysis'", result.Text)
-	}
+	c.Require().NoError(err, "Run")
+	c.Eq("final analysis", result.Text, "Text")
 	params := sender.allParams()
-	if len(params) != 2 {
-		t.Fatalf("got %d calls, want 2", len(params))
-	}
+	c.Require().Len(params, 2, "got %d calls, want 2", len(params))
 	// First call uses the conversation default (16384).
-	if params[0].MaxTokens != 16384 {
-		t.Errorf("call 0 MaxTokens = %d, want 16384 (conversation default)", params[0].MaxTokens)
-	}
+	c.Eq(16384, params[0].MaxTokens, "call 0 MaxTokens")
 	// Second call is the bump: 16384 * 2 = 32768.
-	if params[1].MaxTokens != 32768 {
-		t.Errorf("call 1 MaxTokens = %d, want 32768 (bump after truncation)", params[1].MaxTokens)
-	}
+	c.Eq(32768, params[1].MaxTokens, "call 1 MaxTokens")
 }
 
 // When max_tokens truncates a tool_use turn, every tool call must be failed
 // (is_error) — the model had its output cap hit and the arguments may be
 // incomplete, so executing them is unsafe.
 func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{
 		`{"id":"msg1","type":"message","role":"assistant","model":"m",
@@ -628,16 +511,10 @@ func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newConv(t, pool, sender)
 	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	c.Require().NoError(err, "Run")
 	// No tools should have been executed — both were truncated.
-	if got := tools.executedNames(); len(got) != 0 {
-		t.Errorf("executed = %v, want none (truncated tool calls must not execute)", got)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q, want 'final analysis'", result.Text)
-	}
+	c.Empty(tools.executedNames(), "executed")
+	c.Eq("final analysis", result.Text, "Text")
 	// The conversation must contain is_error results for both tools.
 	rows := messageRows(t, pool, conv.ID)
 	found := 0
@@ -647,26 +524,21 @@ func TestDriveHandlesMaxTokensWithToolCalls(t *testing.T) {
 			found++
 		}
 	}
-	if found != 2 {
-		t.Errorf("found %d is_error tool_results with 'truncated' in the message, want 2", found)
-	}
+	c.Eq(2, found, "found")
 }
 
 // A failing tool becomes an is_error result and the loop continues — never a
 // loop error.
 func TestToolErrorBecomesIsErrorResultAndLoopContinues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respTwoTools, respEndTurn}}
 	tools := &failingTools{failName: "beta"}
 	conv := newConv(t, pool, sender)
 
 	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Text != "final analysis" {
-		t.Errorf("Text = %q", result.Text)
-	}
+	c.Require().NoError(err, "Run")
+	c.Eq("final analysis", result.Text, "Text =")
 	rows := messageRows(t, pool, conv.ID)
 	var errRow string
 	for _, row := range rows {
@@ -674,9 +546,7 @@ func TestToolErrorBecomesIsErrorResultAndLoopContinues(t *testing.T) {
 			errRow = row
 		}
 	}
-	if !strings.Contains(errRow, `"is_error": true`) || !strings.Contains(errRow, "boom") {
-		t.Errorf("failing tool's result not marked is_error with the error text: %s", errRow)
-	}
+	c.False(!strings.Contains(errRow, `"is_error": true`) || !strings.Contains(errRow, "boom"), "failing tool's result not marked is_error with the error text: %s", errRow)
 }
 
 type failingTools struct {
@@ -728,6 +598,7 @@ func (f *failingTools) Execute(ctx context.Context, name string, input json.RawM
 // concurrent caller.
 func TestConcurrentResume(t *testing.T) {
 	t.Skip("known unfixed race in agentloop.Resume orphan fabrication (no production caller); see doc comment above")
+	c := assert.NewCollecting(t)
 	pool := testPool(t)
 	sender := &scriptedSender{scripts: []string{respEndTurn}}
 	conv := newConvByRef(t, pool, sender, "concurrent-resume")
@@ -750,20 +621,14 @@ func TestConcurrentResume(t *testing.T) {
 			failures++
 		}
 	}
-	if failures == 2 {
-		t.Fatal("both concurrent Resumes failed; at least one should complete")
-	}
+	c.Require().NotEq(2, failures, "both concurrent Resumes failed; at least one should complete")
 	// Exactly one synthetic row per orphaned id — never doubled by the race.
 	for _, id := range []string{"toolu_a", "toolu_b"} {
 		var n int
-		if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM conversations.conversation_message
+		c.Require().NoError(pool.QueryRow(context.Background(), `SELECT count(*) FROM conversations.conversation_message
 			WHERE conversation_id=$1::uuid AND content::text LIKE '%`+InterruptedSentinel+`%'
-			AND tool_use_ids @> ARRAY[$2::text]`, conv.ID, id).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 {
-			t.Errorf("synthetic rows for %s = %d, want exactly 1", id, n)
-		}
+			AND tool_use_ids @> ARRAY[$2::text]`, conv.ID, id).Scan(&n))
+		c.Eq(1, n, "synthetic rows for %s = %d, want exactly 1", id, n)
 	}
 }
 
@@ -773,20 +638,17 @@ func TestConcurrentResume(t *testing.T) {
 // semantics, no DB — the fast path for exercising drive() without a store.
 func newMemConv(t *testing.T, sender llm.Sender) *llm.Conversation {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	c, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithLogger(logger),
 		llm.WithDefaultModel("claude-test"),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	conv, err := c.Conversation(context.Background(), llm.NewConversation("", "loop-test"),
 		llm.Model("claude-test"), llm.SystemText("test system"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	return conv
 }
 
@@ -819,9 +681,8 @@ func TestOnToolStartEndCarryID(t *testing.T) {
 		OnToolStart: func(id, _ string, _ json.RawMessage) { startID = id },
 		OnToolEnd:   func(id, _, _ string, _ error) { endID = id },
 	}
-	if _, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi")); err != nil {
-		t.Fatal(err)
-	}
+	_, err := Run(context.Background(), conv, tools, ev, llm.UserText("hi"))
+	assert.NewAborting(t).NoError(err)
 	if startID != "tu_1" || endID != "tu_1" || tools.ctxID != "tu_1" {
 		t.Fatalf("ids: start=%q end=%q ctx=%q, want tu_1", startID, endID, tools.ctxID)
 	}
@@ -839,9 +700,7 @@ func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 		t.Fatal(err)
 	}
 	hist, err := conv.History(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	assertHistoryContainsUserText(t, hist, "steer!")
 }
 
@@ -859,6 +718,7 @@ func TestPendingUserInjectedBetweenIterations(t *testing.T) {
 // turn, and if something is buffered, treat it as a reason to keep going
 // (one more Continue) instead of returning.
 func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := newMemConv(t, &scriptedSender{scripts: []string{respEndTurn, respEndTurn}})
 	injected := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock("steer!")}
 	ev := &Events{PendingUser: func() []anthropic.ContentBlockParamUnion {
@@ -867,17 +727,11 @@ func TestPendingUserInjectedAtEndTurnContinuesTheLoop(t *testing.T) {
 		return out
 	}}
 	result, err := Run(context.Background(), conv, &recordingTools{}, ev, llm.UserText("hi"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Stats.Iterations != 2 {
-		t.Fatalf("Iterations = %d, want 2 -- the steer must force a second Continue "+
-			"call rather than ending on the first end_turn", result.Stats.Iterations)
-	}
+	c.NoError(err)
+	c.Eq(2, result.Stats.Iterations, "Iterations = %d, want 2 -- the steer must force a second Continue "+
+		"call rather than ending on the first end_turn", result.Stats.Iterations)
 	hist, err := conv.History(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	assertHistoryContainsUserText(t, hist, "steer!")
 }
 
@@ -956,6 +810,7 @@ func (s *trackingSender) allParams() []anthropic.MessageNewParams {
 // mutable shared state, so that specific rewrite is behavior-preserving and
 // this test correctly still passes against it.)
 func TestDriveKeepsToolsWhenExtraSendOptionsPassed(t *testing.T) {
+	c := assert.NewAborting(t)
 	// differentDefs stands in for a caller override: a single tool distinct
 	// from fakeTools' alpha/beta pair, so any leakage of drive's own defs
 	// into the wire request is unambiguous.
@@ -966,15 +821,12 @@ func TestDriveKeepsToolsWhenExtraSendOptionsPassed(t *testing.T) {
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
 
-	if _, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
-		llm.WithTools(differentDefs)); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	_, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
+		llm.WithTools(differentDefs))
+	c.NoError(err, "Run")
 
 	all := sender.allParams()
-	if len(all) != 2 {
-		t.Fatalf("Continue calls = %d, want 2 (two-iteration script didn't drive both turns)", len(all))
-	}
+	c.Len(all, 2, "Continue calls = %d, want 2 (two-iteration script didn't drive both turns)", len(all))
 	for i, params := range all {
 		got := params.Tools
 		if len(got) != 1 || got[0].OfTool == nil || got[0].OfTool.Name != "override" {
@@ -1041,6 +893,7 @@ func (s *streamingOnlySender) NewStreaming(_ context.Context, _ anthropic.Messag
 // from agentloop.Run — the seam this task adds. Asserted via an observable
 // effect (the handler firing with the streamed text), not internals.
 func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &streamingOnlySender{events: endTurnStreamEvents("streamed hello")}
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
@@ -1054,18 +907,10 @@ func TestRunThreadsCallerSendOptionToContinue(t *testing.T) {
 
 	result, err := Run(context.Background(), conv, tools, nil, llm.UserText("hi"),
 		llm.WithStreamHandler(handler))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if seen.String() != "streamed hello" {
-		t.Fatalf("stream handler saw %q, want %q (opts never reached conv.Continue)", seen.String(), "streamed hello")
-	}
-	if sender.streamCalls != 1 {
-		t.Fatalf("streamCalls = %d, want 1", sender.streamCalls)
-	}
-	if result.Text != "streamed hello" {
-		t.Errorf("Text = %q", result.Text)
-	}
+	c.Require().NoError(err, "Run")
+	c.Require().Eq("streamed hello", seen.String(), "stream handler saw")
+	c.Require().Eq(1, sender.streamCalls, "streamCalls")
+	c.Eq("streamed hello", result.Text, "Text =")
 }
 
 // toolAwareSender models a real model honoring an empty tools list: it
@@ -1095,6 +940,7 @@ func (s *toolAwareSender) New(_ context.Context, params anthropic.MessageNewPara
 // tool_use blocks it never got to run are recorded as explanatory is_error
 // results rather than silently vanishing.
 func TestIterationCapEndsGracefullyInsteadOfErroring(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &toolAwareSender{}
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
@@ -1108,35 +954,23 @@ func TestIterationCapEndsGracefullyInsteadOfErroring(t *testing.T) {
 	}
 
 	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !result.LimitReached {
-		t.Error("LimitReached = false, want true")
-	}
-	if !strings.Contains(result.LimitReason, "maximum tool iterations (2)") {
-		t.Errorf("LimitReason = %q", result.LimitReason)
-	}
-	if result.Text != "wrapping up now" {
-		t.Errorf("Text = %q, want the forced wrap-up call's own text", result.Text)
-	}
+	c.Require().NoError(err, "Run")
+	c.True(result.LimitReached, "LimitReached = false, want true")
+	c.StrContains(result.LimitReason, "maximum tool iterations (2)", "LimitReason =")
+	c.Eq("wrapping up now", result.Text, "Text")
 	// Iteration 1's batch ran for real; iteration 2 hit the cap and its
 	// pending tool_use blocks were never executed.
-	if got := tools.executedNames(); len(got) != 2 {
-		t.Errorf("executed = %v, want exactly iteration 1's alpha+beta", got)
-	}
-	if want := []int{1, 2, 3}; !slicesEqualInt(iterations, want) {
-		t.Errorf("OnTurn iterations = %v, want %v (iteration 1, capped iteration 2, wrap-up call 3)", iterations, want)
-	}
-	if result.Stats.Iterations != 3 {
-		t.Errorf("Stats.Iterations = %d, want 3", result.Stats.Iterations)
-	}
+	c.Len(tools.executedNames(), 2, "executed")
+	want := []int{1, 2, 3}
+	c.True(slicesEqualInt(iterations, want), "OnTurn iterations = %v, want %v (iteration 1, capped iteration 2, wrap-up call 3)", iterations, want)
+	c.Eq(3, result.Stats.Iterations, "Stats.Iterations")
 }
 
 // ShouldStop preempts a tool batch before it ever runs, distinct from the
 // iteration cap — a host's own guardrail (e.g. a cost budget) can end the
 // turn gracefully on the very first iteration.
 func TestShouldStopEndsTurnGracefully(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &toolAwareSender{}
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
@@ -1146,18 +980,12 @@ func TestShouldStopEndsTurnGracefully(t *testing.T) {
 	}
 
 	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	c.Require().NoError(err, "Run")
 	if !result.LimitReached || result.LimitReason != "cost budget exceeded" {
 		t.Errorf("LimitReached=%v LimitReason=%q, want true/%q", result.LimitReached, result.LimitReason, "cost budget exceeded")
 	}
-	if got := tools.executedNames(); len(got) != 0 {
-		t.Errorf("executed = %v, want none — ShouldStop should preempt the very first batch", got)
-	}
-	if result.Text != "wrapping up now" {
-		t.Errorf("Text = %q", result.Text)
-	}
+	c.Empty(tools.executedNames(), "executed")
+	c.Eq("wrapping up now", result.Text, "Text =")
 }
 
 // With no MaxIterations override and no ShouldStop, the loop must run past
@@ -1166,6 +994,7 @@ func TestShouldStopEndsTurnGracefully(t *testing.T) {
 // infinite loop would hang the test suite), and asserts the cutoff, not an
 // iteration count, is what actually stopped the turn.
 func TestNoDefaultIterationCap(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &toolAwareSender{}
 	tools := &fakeTools{}
 	conv := newMemConv(t, sender)
@@ -1179,12 +1008,8 @@ func TestNoDefaultIterationCap(t *testing.T) {
 	}
 
 	result, err := Run(context.Background(), conv, tools, ev, llm.UserText("go"))
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Stats.Iterations <= 250 {
-		t.Errorf("Stats.Iterations = %d, want > 250 — the old default cap must no longer apply", result.Stats.Iterations)
-	}
+	c.Require().NoError(err, "Run")
+	c.Greater(250, result.Stats.Iterations, "Stats.Iterations")
 	if !result.LimitReached || result.LimitReason != "test cutoff past the old 250 default" {
 		t.Errorf("LimitReached=%v LimitReason=%q, want true / the test's own cutoff reason",
 			result.LimitReached, result.LimitReason)

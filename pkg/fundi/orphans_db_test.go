@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // dbTestPool mirrors rafiki's own scratch-database pattern (see
@@ -28,18 +30,15 @@ import (
 // independent pool against the same scratch database).
 func dbTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin pool: %v", err)
-	}
+	c.NoError(err, "connect admin pool")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("fundi_agent_orphans_%d", time.Now().UnixNano())
@@ -53,19 +52,13 @@ func dbTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	})
 
 	scratchDSN, err := withDatabase(dsn, name)
-	if err != nil {
-		t.Fatalf("build scratch db dsn: %v", err)
-	}
+	c.NoError(err, "build scratch db dsn")
 
 	pool, err := pgxpool.New(ctx, scratchDSN)
-	if err != nil {
-		t.Fatalf("connect scratch db %s: %v", name, err)
-	}
+	c.NoError(err, "connect scratch db %s", name)
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate scratch db %s: %v", name, err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate scratch db %s", name)
 	return pool, scratchDSN
 }
 
@@ -120,6 +113,7 @@ func (c cancelOnExecuteTools) Execute(_ context.Context, name string, _ json.Raw
 // capturingSender's doc comment in orphans_test.go — the fake transport has
 // no capacity to reject a malformed request the way the real API would).
 func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool, _ := dbTestPool(t)
 	background := context.Background()
 
@@ -133,97 +127,59 @@ func TestRepairOrphansDBBackedGenuineOrphan(t *testing.T) {
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	c.NoError(err, "NewClient")
 	conv, err := client.Conversation(background, llm.NewConversation("", "agent"))
-	if err != nil {
-		t.Fatalf("Conversation: %v", err)
-	}
+	c.NoError(err, "Conversation")
 
 	turnCtx, cancel := context.WithCancel(background)
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
 
 	_, runErr := agentloop.Run(turnCtx, conv, tools, nil, llm.UserText("go"))
-	if runErr == nil {
-		t.Fatal("agentloop.Run succeeded, want an error from the cancelled-context persist " +
-			"(the tool cancels turnCtx before the tool_result gets persisted)")
-	}
+	c.Error(runErr, "agentloop.Run succeeded, want an error from the cancelled-context persist "+
+		"(the tool cancels turnCtx before the tool_result gets persisted)")
 	t.Logf("agentloop.Run failed as expected: %v", runErr)
 
 	// Prove the premise: the pre-repair history genuinely has a dangling
 	// tool_use, not an artificially seeded one. Use a fresh, uncancelled
 	// context to read it back.
 	before, err := conv.History(background)
-	if err != nil {
-		t.Fatalf("History (pre-repair): %v", err)
-	}
-	if len(before) != 2 {
-		t.Fatalf("pre-repair history has %d rows, want 2 (user + assistant tool_use); rows: %+v",
-			len(before), before)
-	}
+	c.NoError(err, "History (pre-repair)")
+	c.Len(before, 2, "pre-repair history has %d rows, want 2 (user + assistant tool_use); rows", len(before))
 	assistant := before[1]
-	if assistant.Param.Role != anthropic.MessageParamRoleAssistant {
-		t.Fatalf("row 1 role = %v, want assistant", assistant.Param.Role)
-	}
+	c.Eq(anthropic.MessageParamRoleAssistant, assistant.Param.Role, "row 1 role")
 	var sawToolUse bool
 	for _, block := range assistant.Param.Content {
 		if tu := block.OfToolUse; tu != nil {
 			sawToolUse = true
-			if tu.ID != "tu_1" {
-				t.Fatalf("assistant tool_use id = %q, want tu_1", tu.ID)
-			}
+			c.Eq("tu_1", tu.ID, "assistant tool_use id")
 		}
 	}
-	if !sawToolUse {
-		t.Fatal("assistant message has no tool_use block; the orphan never formed")
-	}
-	if len(assistant.ToolUseIDs) != 1 || assistant.ToolUseIDs[0] != "tu_1" {
-		t.Fatalf("assistant.ToolUseIDs = %v, want [tu_1]", assistant.ToolUseIDs)
-	}
+	c.True(sawToolUse, "assistant message has no tool_use block; the orphan never formed")
+	c.False(len(assistant.ToolUseIDs) != 1 || assistant.ToolUseIDs[0] != "tu_1", "assistant.ToolUseIDs = %v, want [tu_1]", assistant.ToolUseIDs)
 	// No trailing row at all means tu_1 has no tool_result following it —
 	// exactly the shape the real Anthropic API rejects on the next request.
 	t.Log("confirmed: pre-repair history ends on an unresolved assistant tool_use (genuine orphan)")
 
 	n, err := RepairOrphans(background, conv)
-	if err != nil {
-		t.Fatalf("RepairOrphans: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("RepairOrphans synthesized %d results, want 1 (tu_1)", n)
-	}
+	c.NoError(err, "RepairOrphans")
+	c.Eq(1, n, "RepairOrphans synthesized")
 
 	after, err := conv.History(background)
-	if err != nil {
-		t.Fatalf("History (post-repair): %v", err)
-	}
-	if len(after) != 3 {
-		t.Fatalf("post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows: %+v",
-			len(after), after)
-	}
+	c.NoError(err, "History (post-repair)")
+	c.Len(after, 3, "post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows", len(after))
 	repairRow := after[2]
-	if repairRow.Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("repair row role = %v, want user", repairRow.Param.Role)
-	}
-	if len(repairRow.Param.Content) != 1 {
-		t.Fatalf("repair row has %d blocks, want 1", len(repairRow.Param.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, repairRow.Param.Role, "repair row role")
+	c.Len(repairRow.Param.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Param.Content))
 	tr := repairRow.Param.Content[0].OfToolResult
 	if tr == nil || tr.ToolUseID != "tu_1" {
 		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Param.Content[0])
 	}
-	if !tr.IsError.Value {
-		t.Fatal("synthesized tool_result is not marked IsError")
-	}
+	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
 
 	resp, err := conv.Continue(background)
-	if err != nil {
-		t.Fatalf("Continue after RepairOrphans failed: %v", err)
-	}
-	if resp.StopReason != "end_turn" {
-		t.Fatalf("post-repair Continue stop_reason = %q, want end_turn", resp.StopReason)
-	}
+	c.NoError(err, "Continue after RepairOrphans failed")
+	c.Eq("end_turn", resp.StopReason, "post-repair Continue stop_reason")
 
 	// The real proof of the API-shape invariant: assert on the shape of the
 	// request this Continue actually sent. Without repair, the assistant
@@ -244,42 +200,30 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("prefill ids left untouched", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		ref := "repair-skips-prefill-ids"
 		seedClient := prefillDBSeedClient(t, pool)
 		conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-		if err != nil {
-			t.Fatalf("seed conversation: %v", err)
-		}
+		c.NoError(err, "seed conversation")
 		// r0+r1 with no r2: the state a dead process leaves mid-prefill,
 		// and what boot-time RepairOrphans sees in BuildEngine.
-		if err := conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]); err != nil {
-			t.Fatalf("seed history: %v", err)
-		}
+		c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
-		if err != nil {
-			t.Fatalf("RepairOrphans: %v", err)
-		}
-		if n != 0 {
-			t.Fatalf("RepairOrphans synthesized %d results for prefill_ ids, want 0 — "+
-				"completing an interrupted pre-fill is runPrefill's job, not the repair's", n)
-		}
+		c.NoError(err, "RepairOrphans")
+		c.Eq(0, n, "RepairOrphans synthesized %d results for prefill_ ids, want 0 — "+
+			"completing an interrupted pre-fill is runPrefill's job, not the repair's", n)
 		hist, err := conv.History(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(hist) != 2 {
-			t.Fatalf("history has %d rows, want 2 — repair must not append for a prefill_ id", len(hist))
-		}
+		c.NoError(err)
+		c.Len(hist, 2, "history has %d rows, want 2 — repair must not append for a prefill_ id", len(hist))
 	})
 
 	t.Run("non-prefill orphan still repaired", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		ref := "repair-still-fixes-real-orphan"
 		seedClient := prefillDBSeedClient(t, pool)
 		conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-		if err != nil {
-			t.Fatalf("seed conversation: %v", err)
-		}
+		c.NoError(err, "seed conversation")
 		// The same r0+r1-no-r2 shape, but the tool_use id is a real model id
 		// — an ordinary orphan, which repair must still fabricate a result for.
 		r0 := prefillSeedRows("/tmp/a.txt")[0]
@@ -290,35 +234,21 @@ func TestRepairOrphansSkipsPrefillIDs(t *testing.T) {
 					json.RawMessage(`{"path":"/tmp/a.txt","offset":1,"limit":1000000}`), "read"),
 			},
 		}
-		if err := conv.SeedHistory(ctx, []llm.Message{r0, r1}); err != nil {
-			t.Fatalf("seed history: %v", err)
-		}
+		c.NoError(conv.SeedHistory(ctx, []llm.Message{r0, r1}), "seed history")
 
 		n, err := RepairOrphans(ctx, conv)
-		if err != nil {
-			t.Fatalf("RepairOrphans: %v", err)
-		}
-		if n != 1 {
-			t.Fatalf("RepairOrphans synthesized %d results, want 1 (the non-prefill orphan)", n)
-		}
+		c.NoError(err, "RepairOrphans")
+		c.Eq(1, n, "RepairOrphans synthesized")
 		hist, err := conv.History(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(hist) != 3 {
-			t.Fatalf("history has %d rows, want 3 (one synthetic row appended)", len(hist))
-		}
+		c.NoError(err)
+		c.Len(hist, 3, "history has %d rows, want 3 (one synthetic row appended)", len(hist))
 		last := hist[2]
-		if last.Param.Role != anthropic.MessageParamRoleUser {
-			t.Fatalf("trailing row role = %v, want user", last.Param.Role)
-		}
+		c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "trailing row role")
 		tr := last.Param.Content[0].OfToolResult
 		if tr == nil || tr.ToolUseID != "toolu_01ABC" {
 			t.Fatalf("trailing block = %+v, want a tool_result for toolu_01ABC", last.Param.Content[0])
 		}
-		if !tr.IsError.Value || len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
-			tr.Content[0].OfText.Text != "Tool execution aborted by user." {
-			t.Fatalf("synthesized result = %+v, want the standard abort text marked IsError", tr)
-		}
+		c.False(!tr.IsError.Value || len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
+			tr.Content[0].OfText.Text != "Tool execution aborted by user.", "synthesized result = %+v, want the standard abort text marked IsError", tr)
 	})
 }

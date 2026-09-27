@@ -13,6 +13,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // userAdminFakeStore is a users.Store whose Create/List/Delete behaviour the
@@ -81,9 +83,8 @@ func TestUserRPCsRefuseNonAdmin(t *testing.T) {
 			if _, err := a.List(ctx, false, 0); connect.CodeOf(err) != connect.CodePermissionDenied {
 				t.Errorf("List code %v, want PermissionDenied", connect.CodeOf(err))
 			}
-			if err := a.Remove(ctx, "alice"); connect.CodeOf(err) != connect.CodePermissionDenied {
-				t.Errorf("Remove code %v, want PermissionDenied", connect.CodeOf(err))
-			}
+			err := a.Remove(ctx, "alice")
+			assert.NewCollecting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Remove code")
 			if len(st.rows) != 0 || len(st.removed) != 0 {
 				t.Errorf("a refused caller reached the store: rows=%v removed=%v", st.rows, st.removed)
 			}
@@ -102,6 +103,7 @@ func TestUserRPCsAdmitNilAndAdmin(t *testing.T) {
 		{"admin user", &server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			ctx := context.Background()
 			if tc.id != nil {
 				ctx = server.WithIdentity(ctx, tc.id)
@@ -110,19 +112,13 @@ func TestUserRPCsAdmitNilAndAdmin(t *testing.T) {
 			a := connectUserAdmin{c: &Controller{users: st}}
 
 			resp, err := a.Create(ctx, "alice")
-			if err != nil {
-				t.Fatalf("Create refused: %v", err)
-			}
-			if resp.GetUsername() != "alice" || resp.GetToken() != "rfk_tok" {
-				t.Errorf("Create response = %+v", resp)
-			}
+			ck.Require().NoError(err, "Create refused")
+			ck.False(resp.GetUsername() != "alice" || resp.GetToken() != "rfk_tok", "Create response = %+v", resp)
 
 			if _, err := a.List(ctx, false, 0); err != nil {
 				t.Errorf("List refused: %v", err)
 			}
-			if err := a.Remove(ctx, "alice"); err != nil {
-				t.Errorf("Remove refused: %v", err)
-			}
+			ck.NoError(a.Remove(ctx, "alice"), "Remove refused")
 			if len(st.rows) != 1 || len(st.removed) != 1 {
 				t.Fatalf("rows=%v removed=%v, want one of each", st.rows, st.removed)
 			}
@@ -135,16 +131,14 @@ func TestUserRPCsAdmitNilAndAdmin(t *testing.T) {
 // never infers admin from an
 // empty user table, and this adapter passes no admin bit of its own.
 func TestCreateUserNeverMintsAdmin(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctx := server.WithIdentity(context.Background(), &server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
 	st := &userAdminFakeStore{}
 	a := connectUserAdmin{c: &Controller{users: st}}
 
-	if _, err := a.Create(ctx, "bob"); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if len(st.rows) != 1 {
-		t.Fatalf("rows = %v, want one", st.rows)
-	}
+	_, err := a.Create(ctx, "bob")
+	ck.NoError(err, "Create")
+	ck.Len(st.rows, 1, "rows")
 	if st.rows[0].IsAdmin {
 		t.Errorf("Create minted an admin: %+v", st.rows[0])
 	}
@@ -155,9 +149,7 @@ func TestCreateUserNeverMintsAdmin(t *testing.T) {
 func connectErrMsg(t *testing.T, err error) string {
 	t.Helper()
 	var ce *connect.Error
-	if !errors.As(err, &ce) {
-		t.Fatalf("not a coded connect error: %v", err)
-	}
+	assert.NewAborting(t).True(errors.As(err, &ce), "not a coded connect error: %v", err)
 	return ce.Message()
 }
 
@@ -191,15 +183,12 @@ func TestCreateUserMapsSentinels(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			st := &userAdminFakeStore{createErr: tc.createErr}
 			a := connectUserAdmin{c: &Controller{users: st}}
 			_, err := a.Create(ctx, "alice")
-			if connect.CodeOf(err) != tc.wantCode {
-				t.Fatalf("code %v, want %v", connect.CodeOf(err), tc.wantCode)
-			}
-			if got := connectErrMsg(t, err); got != tc.wantMsg {
-				t.Errorf("message %q, want %q", got, tc.wantMsg)
-			}
+			ck.Require().Eq(tc.wantCode, connect.CodeOf(err), "code")
+			ck.Eq(tc.wantMsg, connectErrMsg(t, err), "message")
 		})
 	}
 	// Everything else keeps the current path: the error passes through UNCoded
@@ -231,14 +220,12 @@ func TestUserListClampsLimit(t *testing.T) {
 		{"ordinary value passes through", 25, 25},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			st := &userAdminFakeStore{}
 			a := connectUserAdmin{c: &Controller{users: st}}
-			if _, err := a.List(ctx, false, tc.limit); err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if st.listLimit != tc.want {
-				t.Errorf("store saw limit %d, want %d", st.listLimit, tc.want)
-			}
+			_, err := a.List(ctx, false, tc.limit)
+			ck.Require().NoError(err, "List")
+			ck.Eq(tc.want, st.listLimit, "store saw limit")
 		})
 	}
 }
@@ -247,47 +234,36 @@ func TestUserListClampsLimit(t *testing.T) {
 // (dispatch.go): an empty username is an invalid argument with framed's text,
 // and the store is never asked.
 func TestUserRemoveRefusesEmptyUsername(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
 	st := &userAdminFakeStore{}
 	a := connectUserAdmin{c: &Controller{users: st}}
 	err := a.Remove(ctx, "")
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if got := connectErrMsg(t, err); got != "username is required" {
-		t.Errorf("message %q, want %q", got, "username is required")
-	}
-	if len(st.removed) != 0 {
-		t.Errorf("empty username reached the store: removed=%v", st.removed)
-	}
+	ck.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	ck.Eq("username is required", connectErrMsg(t, err), "message")
+	ck.Empty(st.removed, "empty username reached the store: removed=")
 }
 
 // TestUserRemoveMapsNotFound pins the framed not-found text (dispatch.go
 // userRm): a miss is an answer naming the requested user, not a redacted
 // internal error, and composed from the requested name like framed does.
 func TestUserRemoveMapsNotFound(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceUser, IsAdmin: true})
 	st := &userAdminFakeStore{removeErr: fmt.Errorf("usersdb: %w", users.ErrNotFound)}
 	a := connectUserAdmin{c: &Controller{users: st}}
 	err := a.Remove(ctx, "alice")
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("code %v, want NotFound", connect.CodeOf(err))
-	}
-	if got := connectErrMsg(t, err); got != "no active user named alice" {
-		t.Errorf("message %q, want %q", got, "no active user named alice")
-	}
-	if len(st.removed) != 0 {
-		t.Errorf("failed removal recorded: removed=%v", st.removed)
-	}
+	ck.Require().Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	ck.Eq("no active user named alice", connectErrMsg(t, err), "message")
+	ck.Empty(st.removed, "failed removal recorded: removed=")
 }
 
 // TestCreateUserNoStore proves a daemon with no database surfaces as an
 // error rather than a silent success, for an admin-admitted caller.
 func TestCreateUserNoStore(t *testing.T) {
 	a := connectUserAdmin{c: &Controller{}}
-	if _, err := a.Create(context.Background(), "alice"); err == nil {
-		t.Fatal("Create succeeded with no user store configured")
-	}
+	_, err := a.Create(context.Background(), "alice")
+	assert.NewAborting(t).Error(err, "Create succeeded with no user store configured")
 }

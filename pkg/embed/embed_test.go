@@ -15,6 +15,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/embed"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func startServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
@@ -38,6 +40,7 @@ func outOfOrderData(w http.ResponseWriter) {
 
 func TestEmbedOrdersByIndexAndSendsBearer(t *testing.T) {
 	t.Setenv("EMBED_TEST_API_KEY", "sekrit")
+	ck := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var gotAuth, gotCT string
 	var gotBody sentBody
@@ -46,9 +49,7 @@ func TestEmbedOrdersByIndexAndSendsBearer(t *testing.T) {
 		defer mu.Unlock()
 		gotAuth = r.Header.Get("Authorization")
 		gotCT = r.Header.Get("Content-Type")
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Errorf("decode request body: %v", err)
-		}
+		ck.NoError(json.NewDecoder(r.Body).Decode(&gotBody), "decode request body")
 		outOfOrderData(w)
 	})
 	c := embed.New(providers.EmbeddingsConfig{
@@ -58,24 +59,14 @@ func TestEmbedOrdersByIndexAndSendsBearer(t *testing.T) {
 		Dimensions: 3,
 	}, nil)
 	vecs, err := c.Embed(context.Background(), []string{"a", "b"})
-	if err != nil {
-		t.Fatalf("Embed: %v", err)
-	}
-	if len(vecs) != 2 || vecs[0][0] != 1 || vecs[0][2] != 3 || vecs[1][0] != 4 || vecs[1][2] != 6 {
-		t.Errorf("vecs = %v, want [[1 2 3] [4 5 6]] (ordered by the server's index field)", vecs)
-	}
+	ck.Require().NoError(err, "Embed")
+	ck.False(len(vecs) != 2 || vecs[0][0] != 1 || vecs[0][2] != 3 || vecs[1][0] != 4 || vecs[1][2] != 6, "vecs = %v, want [[1 2 3] [4 5 6]] (ordered by the server's index field)", vecs)
 	mu.Lock()
 	defer mu.Unlock()
-	if gotAuth != "Bearer sekrit" {
-		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer sekrit")
-	}
-	if gotCT != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", gotCT)
-	}
-	if gotBody.Model != "bge-large" || len(gotBody.Input) != 2 ||
-		gotBody.Input[0] != "a" || gotBody.Input[1] != "b" || gotBody.Dimensions != 3 {
-		t.Errorf("request body = %+v, want model bge-large, input [a b], dimensions 3", gotBody)
-	}
+	ck.Eq("Bearer sekrit", gotAuth, "Authorization")
+	ck.Eq("application/json", gotCT, "Content-Type")
+	ck.False(gotBody.Model != "bge-large" || len(gotBody.Input) != 2 ||
+		gotBody.Input[0] != "a" || gotBody.Input[1] != "b" || gotBody.Dimensions != 3, "request body = %+v, want model bge-large, input [a b], dimensions 3", gotBody)
 }
 
 // Authorization must be present iff a credential resolves: no header at all
@@ -91,6 +82,7 @@ func TestEmbedOmitsAuthorizationWithoutKey(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			var gotAuth string
 			srv := startServer(t, func(w http.ResponseWriter, r *http.Request) {
 				gotAuth = r.Header.Get("Authorization")
@@ -99,28 +91,22 @@ func TestEmbedOmitsAuthorizationWithoutKey(t *testing.T) {
 			c := embed.New(providers.EmbeddingsConfig{
 				URL: srv.URL, APIKeyEnv: tc.apiKeyEnv, Model: "m", Dimensions: 1,
 			}, nil)
-			if _, err := c.Embed(context.Background(), []string{"x"}); err != nil {
-				t.Fatalf("Embed: %v", err)
-			}
-			if gotAuth != "" {
-				t.Errorf("Authorization = %q, want no header", gotAuth)
-			}
+			_, err := c.Embed(context.Background(), []string{"x"})
+			ck.Require().NoError(err, "Embed")
+			ck.Eq("", gotAuth, "Authorization")
 		})
 	}
 }
 
 func TestEmbedRejectsWrongDimensions(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	srv := startServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1,2,3]}]}`))
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 2}, nil)
 	_, err := c.Embed(context.Background(), []string{"x"})
-	if err == nil {
-		t.Fatal("Embed succeeded, want a dimensions error")
-	}
-	if !strings.Contains(err.Error(), "dimensions") {
-		t.Errorf("error = %q, want it to name the dimension mismatch", err)
-	}
+	ck.Require().Error(err, "Embed succeeded, want a dimensions error")
+	ck.StrContains(err.Error(), "dimensions", "error = %q, want it to name the dimension mismatch", err)
 }
 
 func TestEmbedRejectsWrongVectorCount(t *testing.T) {
@@ -129,9 +115,7 @@ func TestEmbedRejectsWrongVectorCount(t *testing.T) {
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 2}, nil)
 	_, err := c.Embed(context.Background(), []string{"x", "y"})
-	if err == nil || !strings.Contains(err.Error(), "1 vectors for 2 inputs") {
-		t.Errorf("error = %v, want a count mismatch naming both sides", err)
-	}
+	assert.NewCollecting(t).False(err == nil || !strings.Contains(err.Error(), "1 vectors for 2 inputs"), "error = %v, want a count mismatch naming both sides", err)
 }
 
 // The "fails loudly" contract: a non-2xx error carries the server's status
@@ -144,31 +128,24 @@ func TestEmbedNon2xxIncludesBody(t *testing.T) {
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 1}, nil)
 	_, err := c.Embed(context.Background(), []string{"x"})
-	if err == nil {
-		t.Fatal("Embed succeeded, want error")
-	}
+	assert.NewAborting(t).Error(err, "Embed succeeded, want error")
 	if msg := err.Error(); !strings.Contains(msg, "embed: 502") || !strings.Contains(msg, body) {
 		t.Errorf("error = %q, want status and body %q", msg, body)
 	}
 }
 
 func TestEmbedNon2xxBodyTruncated(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	srv := startServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(strings.Repeat("x", 600)))
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 1}, nil)
 	_, err := c.Embed(context.Background(), []string{"x"})
-	if err == nil {
-		t.Fatal("Embed succeeded, want error")
-	}
+	ck.Require().Error(err, "Embed succeeded, want error")
 	msg := err.Error()
-	if !strings.Contains(msg, strings.Repeat("x", 512)) {
-		t.Errorf("error %q lacks the first 512 bytes of the body", msg)
-	}
-	if strings.Contains(msg, strings.Repeat("x", 513)) {
-		t.Errorf("error %q carries more than the first 512 bytes of the body", msg)
-	}
+	ck.StrContains(msg, strings.Repeat("x", 512), "error")
+	ck.NotStrContains(msg, strings.Repeat("x", 513), "error")
 }
 
 func TestEmbedDecodeFailureIncludesBody(t *testing.T) {
@@ -177,15 +154,14 @@ func TestEmbedDecodeFailureIncludesBody(t *testing.T) {
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 1}, nil)
 	_, err := c.Embed(context.Background(), []string{"x"})
-	if err == nil {
-		t.Fatal("Embed succeeded, want a decode error")
-	}
+	assert.NewAborting(t).Error(err, "Embed succeeded, want a decode error")
 	if msg := err.Error(); !strings.Contains(msg, "decode response") || !strings.Contains(msg, "not json at all") {
 		t.Errorf("error = %q, want a decode failure naming the body", msg)
 	}
 }
 
 func TestEmbedEmptyInputNoRequest(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	called := false
 	srv := startServer(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -193,13 +169,9 @@ func TestEmbedEmptyInputNoRequest(t *testing.T) {
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 1}, nil)
 	for _, in := range [][]string{nil, {}} {
 		vecs, err := c.Embed(context.Background(), in)
-		if err != nil || vecs != nil {
-			t.Errorf("Embed(%v) = %v, %v; want nil, nil", in, vecs, err)
-		}
+		ck.False(err != nil || vecs != nil, "Embed(%v) = %v, %v; want nil, nil", in, vecs, err)
 	}
-	if called {
-		t.Error("server received a request for an empty batch")
-	}
+	ck.False(called, "server received a request for an empty batch")
 }
 
 // A gzipped body with Content-Encoding: gzip must decode transparently. The
@@ -207,23 +179,18 @@ func TestEmbedEmptyInputNoRequest(t *testing.T) {
 // the rule that the client never sets Accept-Encoding by hand (which would
 // disable decompression and hand the JSON decoder raw gzip bytes).
 func TestEmbedGzipResponse(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	srv := startServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
 		zw := gzip.NewWriter(&buf)
 		_, _ = zw.Write([]byte(`{"data":[{"index":0,"embedding":[1,2]}]}`))
-		if err := zw.Close(); err != nil {
-			t.Errorf("gzip close: %v", err)
-		}
+		ck.NoError(zw.Close(), "gzip close")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Encoding", "gzip")
 		_, _ = w.Write(buf.Bytes())
 	})
 	c := embed.New(providers.EmbeddingsConfig{URL: srv.URL, Model: "m", Dimensions: 2}, nil)
 	vecs, err := c.Embed(context.Background(), []string{"x"})
-	if err != nil {
-		t.Fatalf("Embed with a gzipped body: %v", err)
-	}
-	if len(vecs) != 1 || vecs[0][0] != 1 || vecs[0][1] != 2 {
-		t.Errorf("vecs = %v, want [[1 2]]", vecs)
-	}
+	ck.Require().NoError(err, "Embed with a gzipped body")
+	ck.False(len(vecs) != 1 || vecs[0][0] != 1 || vecs[0][1] != 2, "vecs = %v, want [[1 2]]", vecs)
 }

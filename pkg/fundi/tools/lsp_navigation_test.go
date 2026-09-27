@@ -3,8 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeLSPNavClient provides canned navigation responses.
@@ -46,6 +47,7 @@ func (f *fakeLSPNavClient) Rename(context.Context, string, int, int, string) ([]
 func (f *fakeLSPNavClient) Restart(context.Context, string) error { return nil }
 
 func TestLSPDefinition_Execute(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPNavClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
 		defLocs: []LSPLocation{
@@ -53,30 +55,22 @@ func TestLSPDefinition_Execute(t *testing.T) {
 		},
 	}
 	tool, err := LSPDefinitionBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(lspPosInput{Path: "main.go", Line: 10, Col: 3})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if result.Text == "" || result.Text == "Definition: none" {
-		t.Error("expected non-empty definition result")
-	}
+	c.Require().NoError(err, "Execute")
+	c.False(result.Text == "" || result.Text == "Definition: none", "expected non-empty definition result")
 }
 
 func TestLSPDefinition_Materialize_Declines(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bp := LSPDefinitionBlueprint{}
 	tool, err := bp.Materialize(ToolOpts{LSP: nil, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool != nil {
-		t.Error("expected nil tool when LSP is nil")
-	}
+	c.Require().NoError(err, "Materialize")
+	c.Nil(tool, "expected nil tool when LSP is nil")
 }
 
 func TestLSPReferences_Execute(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPNavClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
 		refLocs: []LSPLocation{
@@ -85,23 +79,18 @@ func TestLSPReferences_Execute(t *testing.T) {
 		},
 	}
 	tool, err := LSPReferencesBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(lspPosInput{Path: "main.go", Line: 10, Col: 3})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	// Assert on the rendered output. This test previously only logged it,
 	// so it could not fail except by panicking.
 	for _, want := range []string{"/tmp/a.go:6:1", "/tmp/b.go:13:1"} {
-		if !strings.Contains(result.Text, want) {
-			t.Errorf("references output missing %q:\n%s", want, result.Text)
-		}
+		c.StrContains(result.Text, want, "references output missing")
 	}
 }
 
 func TestLSPCallHierarchy_Incoming(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPNavClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
 		chItems: []LSPCallHierarchyItem{
@@ -112,24 +101,19 @@ func TestLSPCallHierarchy_Incoming(t *testing.T) {
 		},
 	}
 	tool, err := LSPCallHierarchyBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(lspCHInput{
 		Path: "main.go", Line: 10, Col: 6, Direction: "incoming",
 	})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	// The caller's name and location must both survive into the output.
 	for _, want := range []string{"main", "/tmp/main.go:20:2"} {
-		if !strings.Contains(result.Text, want) {
-			t.Errorf("incoming-calls output missing %q:\n%s", want, result.Text)
-		}
+		c.StrContains(result.Text, want, "incoming-calls output missing")
 	}
 }
 
 func TestLSPCallHierarchy_InvalidDirection(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPNavClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
 		chItems: []LSPCallHierarchyItem{
@@ -137,15 +121,11 @@ func TestLSPCallHierarchy_InvalidDirection(t *testing.T) {
 		},
 	}
 	tool, err := LSPCallHierarchyBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	_, err = tool.Execute(context.Background(), ToolInput(mustJSON(lspCHInput{
 		Path: "main.go", Line: 10, Col: 6, Direction: "sideways",
 	})))
-	if err == nil {
-		t.Error("expected error for invalid direction")
-	}
+	c.Error(err, "expected error for invalid direction")
 }
 
 // mustJSON is shared across test files.

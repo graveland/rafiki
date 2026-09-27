@@ -5,12 +5,13 @@ package analyze
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"go.graveland.dev/rafiki/pkg/insights"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func block(v any) map[string]any {
@@ -24,22 +25,19 @@ func block(v any) map[string]any {
 func marshalBlocks(t *testing.T, blocks []map[string]any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(blocks)
-	if err != nil {
-		t.Fatalf("marshal blocks: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal blocks")
 	return json.RawMessage(b)
 }
 
 func unmarshalBlocks(t *testing.T, content json.RawMessage) []map[string]any {
 	t.Helper()
 	var blocks []map[string]any
-	if err := json.Unmarshal(content, &blocks); err != nil {
-		t.Fatalf("unmarshal blocks: %v", err)
-	}
+	assert.NewAborting(t).NoError(json.Unmarshal(content, &blocks), "unmarshal blocks")
 	return blocks
 }
 
 func TestCompact_HugeToolResultElided(t *testing.T) {
+	c := assert.NewAborting(t)
 	huge := strings.Repeat("X", 10_000)
 	content := marshalBlocks(t, []map[string]any{
 		{"type": "tool_result", "content": huge},
@@ -54,24 +52,16 @@ func TestCompact_HugeToolResultElided(t *testing.T) {
 	policy := CompactPolicy{MaxToolResultBytes: 2048, MaxTranscriptBytes: 300 << 10, KeepFirstTurns: 4, KeepLastTurns: 20}
 	out := Compact(transcript, policy)
 
-	if !reflect.DeepEqual(transcript, before) {
-		t.Fatalf("Compact mutated input transcript")
-	}
-	if len(out.Turns) != 1 {
-		t.Fatalf("expected 1 turn, got %d", len(out.Turns))
-	}
+	c.EqDiff(before, transcript, "Compact mutated input transcript")
+	c.Len(out.Turns, 1, "expected 1 turn, got %d", len(out.Turns))
 	blocks := unmarshalBlocks(t, out.Turns[0].Content)
-	if len(blocks) != 1 {
-		t.Fatalf("expected 1 block, got %d", len(blocks))
-	}
+	c.Len(blocks, 1, "expected 1 block, got %d", len(blocks))
 	tr := block(blocks[0])
 	elided, ok := tr["content"].(string)
 	if !ok {
 		t.Fatalf("expected elided content to be a string, got %T", tr["content"])
 	}
-	if len(elided) >= len(huge) {
-		t.Fatalf("expected elided content to be shorter than original: %d vs %d", len(elided), len(huge))
-	}
+	c.Less(len(huge), len(elided), "expected elided content to be shorter than original")
 	if !strings.Contains(elided, "elided") {
 		t.Fatalf("expected elision marker in content: %q", elided[:min(200, len(elided))])
 	}
@@ -79,9 +69,7 @@ func TestCompact_HugeToolResultElided(t *testing.T) {
 	if !strings.HasPrefix(elided, "XXX") {
 		t.Fatalf("expected elided content to start with head bytes, got %q", elided[:min(50, len(elided))])
 	}
-	if !strings.HasSuffix(elided, "XXX") {
-		t.Fatalf("expected elided content to end with tail bytes")
-	}
+	c.True(strings.HasSuffix(elided, "XXX"), "expected elided content to end with tail bytes")
 }
 
 func TestCompact_ToolResultUnderBudgetUntouched(t *testing.T) {
@@ -136,6 +124,7 @@ func TestCompact_ToolResultArrayContentElided(t *testing.T) {
 }
 
 func TestCompact_ImageElided(t *testing.T) {
+	c := assert.NewAborting(t)
 	content := marshalBlocks(t, []map[string]any{
 		{"type": "text", "text": "look at this"},
 		{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": strings.Repeat("A", 5000)}},
@@ -150,27 +139,18 @@ func TestCompact_ImageElided(t *testing.T) {
 	policy := CompactPolicy{MaxToolResultBytes: 2048, MaxTranscriptBytes: 300 << 10, KeepFirstTurns: 4, KeepLastTurns: 20}
 	out := Compact(transcript, policy)
 
-	if !reflect.DeepEqual(transcript, before) {
-		t.Fatalf("Compact mutated input transcript")
-	}
+	c.EqDiff(before, transcript, "Compact mutated input transcript")
 	blocks := unmarshalBlocks(t, out.Turns[0].Content)
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 blocks, got %d", len(blocks))
-	}
+	c.Len(blocks, 2, "expected 2 blocks, got %d", len(blocks))
 	img := block(blocks[1])
-	if img["type"] != "image" {
-		t.Fatalf("expected image block preserved as type image, got %v", img)
-	}
+	c.False(img["type"] != "image", "expected image block preserved as type image, got %v", img)
 	src, ok := img["source"]
-	if ok {
-		t.Fatalf("expected image source removed/elided, got %v", src)
-	}
-	if img["elided"] != "[image elided]" {
-		t.Fatalf("expected elided marker on image block, got %v", img)
-	}
+	c.False(ok, "expected image source removed/elided, got %v", src)
+	c.False(img["elided"] != "[image elided]", "expected elided marker on image block, got %v", img)
 }
 
 func TestCompact_MiddleTurnCompaction(t *testing.T) {
+	c := assert.NewAborting(t)
 	const nTurns = 100
 	transcript := &insights.Transcript{Turns: make([]insights.TranscriptTurn, 0, nTurns)}
 	for i := 1; i <= nTurns; i++ {
@@ -195,15 +175,11 @@ func TestCompact_MiddleTurnCompaction(t *testing.T) {
 	for _, turn := range transcript.Turns {
 		originalBytes += len(turn.Content)
 	}
-	if originalBytes <= policy.MaxTranscriptBytes {
-		t.Fatalf("test setup bug: original %d bytes does not exceed ceiling %d", originalBytes, policy.MaxTranscriptBytes)
-	}
+	c.Greater(policy.MaxTranscriptBytes, originalBytes, "test setup bug: original")
 
 	out := Compact(transcript, policy)
 
-	if !reflect.DeepEqual(transcript, before) {
-		t.Fatalf("Compact mutated input transcript")
-	}
+	c.EqDiff(before, transcript, "Compact mutated input transcript")
 
 	var totalContentBytes int
 	ordinalsPresent := map[int]bool{}
@@ -211,26 +187,16 @@ func TestCompact_MiddleTurnCompaction(t *testing.T) {
 		totalContentBytes += len(turn.Content)
 		ordinalsPresent[turn.Ordinal] = true
 	}
-	if totalContentBytes > policy.MaxTranscriptBytes {
-		t.Fatalf("expected total content bytes <= %d, got %d", policy.MaxTranscriptBytes, totalContentBytes)
-	}
+	c.LessOrEqual(policy.MaxTranscriptBytes, totalContentBytes, "expected total content bytes <")
 
 	for i := 1; i <= policy.KeepFirstTurns; i++ {
-		if !ordinalsPresent[i] {
-			t.Fatalf("expected first turn %d to be kept", i)
-		}
+		c.False(!ordinalsPresent[i], "expected first turn %d to be kept", i)
 	}
 	for i := nTurns - policy.KeepLastTurns + 1; i <= nTurns; i++ {
-		if !ordinalsPresent[i] {
-			t.Fatalf("expected last turn %d to be kept", i)
-		}
+		c.False(!ordinalsPresent[i], "expected last turn %d to be kept", i)
 	}
-	if !ordinalsPresent[50] {
-		t.Fatalf("expected error turn 50 to be kept")
-	}
-	if !ordinalsPresent[60] {
-		t.Fatalf("expected skill turn 60 to be kept")
-	}
+	c.False(!ordinalsPresent[50], "expected error turn 50 to be kept")
+	c.False(!ordinalsPresent[60], "expected skill turn 60 to be kept")
 
 	// There should be at least one synthetic elision marker turn.
 	foundMarker := false
@@ -248,9 +214,7 @@ func TestCompact_MiddleTurnCompaction(t *testing.T) {
 			foundMarker = true
 		}
 	}
-	if !foundMarker {
-		t.Fatalf("expected at least one elision-marker turn shaped as a content-block array")
-	}
+	c.True(foundMarker, "expected at least one elision-marker turn shaped as a content-block array")
 }
 
 func TestCompact_InputNeverMutated(t *testing.T) {
@@ -266,12 +230,11 @@ func TestCompact_InputNeverMutated(t *testing.T) {
 	before := deepCopyTranscript(t, transcript)
 	policy := CompactPolicy{MaxToolResultBytes: 2048, MaxTranscriptBytes: 300 << 10, KeepFirstTurns: 4, KeepLastTurns: 20}
 	_ = Compact(transcript, policy)
-	if !reflect.DeepEqual(transcript, before) {
-		t.Fatalf("Compact mutated input transcript")
-	}
+	assert.NewAborting(t).EqDiff(before, transcript, "Compact mutated input transcript")
 }
 
 func TestCompact_RuneBoundarySafe(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Multi-byte rune positioned right at the head/tail split boundary.
 	huge := strings.Repeat("a", 1365) + "€" + strings.Repeat("b", 10_000)
 	content := marshalBlocks(t, []map[string]any{
@@ -288,23 +251,16 @@ func TestCompact_RuneBoundarySafe(t *testing.T) {
 	blocks := unmarshalBlocks(t, out.Turns[0].Content)
 	tr := block(blocks[0])
 	elided, ok := tr["content"].(string)
-	if !ok {
-		t.Fatalf("expected string content")
-	}
-	if !utf8.ValidString(elided) {
-		t.Fatalf("elided content is not valid utf-8: %q", elided)
-	}
+	c.True(ok, "expected string content")
+	c.True(utf8.ValidString(elided), "elided content is not valid utf-8: %q", elided)
 }
 
 func deepCopyTranscript(t *testing.T, tr *insights.Transcript) *insights.Transcript {
 	t.Helper()
+	c := assert.NewAborting(t)
 	b, err := json.Marshal(tr)
-	if err != nil {
-		t.Fatalf("marshal for deep copy: %v", err)
-	}
+	c.NoError(err, "marshal for deep copy")
 	var out insights.Transcript
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("unmarshal for deep copy: %v", err)
-	}
+	c.NoError(json.Unmarshal(b, &out), "unmarshal for deep copy")
 	return &out
 }

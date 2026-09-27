@@ -16,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // prefillReadCmd parses a fake read call's input the way the real tool does.
@@ -63,35 +65,22 @@ func prefillSimpleEngine(t *testing.T, ts fakeToolSet, entries []protocol.Prefil
 // assertPrefillRow checks one persisted pre-fill row's role and block types.
 func assertPrefillRow(t *testing.T, m store.Message, ordinal int, role anthropic.MessageParamRole, blockKind string) {
 	t.Helper()
-	if m.Ordinal != ordinal {
-		t.Fatalf("row %d has ordinal %d", ordinal, m.Ordinal)
-	}
-	if m.Param.Role != role {
-		t.Fatalf("row %d role = %v, want %v", ordinal, m.Param.Role, role)
-	}
-	if len(m.Param.Content) == 0 {
-		t.Fatalf("row %d has no content blocks", ordinal)
-	}
+	c := assert.NewAborting(t)
+	c.Eq(ordinal, m.Ordinal, "row")
+	c.Eq(role, m.Param.Role, "row %d role = %v, want", ordinal, m.Param.Role)
+	c.NotEmpty(m.Param.Content, "row %d has no content blocks", ordinal)
 	for i, b := range m.Param.Content {
 		switch blockKind {
 		case "text":
-			if b.OfText == nil {
-				t.Fatalf("row %d block %d is not a text block", ordinal, i)
-			}
+			c.NotNil(b.OfText, "row %d block %d is not a text block", ordinal, i)
 		case "tool_use":
-			if b.OfToolUse == nil {
-				t.Fatalf("row %d block %d is not a tool_use block", ordinal, i)
-			}
-			if b.OfToolUse.Name != "read" {
-				t.Fatalf("row %d block %d tool name = %q, want read", ordinal, i, b.OfToolUse.Name)
-			}
+			c.NotNil(b.OfToolUse, "row %d block %d is not a tool_use block", ordinal, i)
+			c.Eq("read", b.OfToolUse.Name, "row %d block %d tool name = %q, want read", ordinal, i, b.OfToolUse.Name)
 			if !strings.HasPrefix(b.OfToolUse.ID, "prefill_") {
 				t.Fatalf("row %d block %d tool_use id %q lacks the prefill_ prefix", ordinal, i, b.OfToolUse.ID)
 			}
 		case "tool_result":
-			if b.OfToolResult == nil {
-				t.Fatalf("row %d block %d is not a tool_result block", ordinal, i)
-			}
+			c.NotNil(b.OfToolResult, "row %d block %d is not a tool_result block", ordinal, i)
 			if !strings.HasPrefix(b.OfToolResult.ToolUseID, "prefill_") {
 				t.Fatalf("row %d block %d tool_result id %q lacks the prefill_ prefix", ordinal, i, b.OfToolResult.ToolUseID)
 			}
@@ -106,6 +95,7 @@ func assertPrefillRow(t *testing.T, m store.Message, ordinal int, role anthropic
 // the first prompt's request merges r2's tool_results with the task text
 // into ONE user message, task text last.
 func TestPrefillRowsShape(t *testing.T) {
+	c := assert.NewAborting(t)
 	eng, out, sender := prefillSimpleEngine(t, prefillFakeRead(nil),
 		[]protocol.PrefillRead{{Path: "/tmp/a.txt"}, {Path: "/tmp/b.txt"}})
 
@@ -113,102 +103,67 @@ func TestPrefillRowsShape(t *testing.T) {
 	eng.Wait()
 
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
 
 	// r0: user, one text block, exactly the preamble.
 	assertPrefillRow(t, hist[0], 0, anthropic.MessageParamRoleUser, "text")
-	if got := hist[0].Param.Content[0].OfText.Text; got != PrefillPreamble {
-		t.Fatalf("r0 text = %q, want %q", got, PrefillPreamble)
-	}
+	c.Eq(PrefillPreamble, hist[0].Param.Content[0].OfText.Text, "r0 text")
 
 	// r1: assistant, only tool_use blocks named read with prefill_ ids.
 	assertPrefillRow(t, hist[1], 1, anthropic.MessageParamRoleAssistant, "tool_use")
 	wantIDs := []string{"prefill_0001", "prefill_0002"}
 	for i, b := range hist[1].Param.Content {
-		if b.OfToolUse.ID != wantIDs[i] {
-			t.Fatalf("r1 block %d id = %q, want %q", i, b.OfToolUse.ID, wantIDs[i])
-		}
+		c.Eq(wantIDs[i], b.OfToolUse.ID, "r1 block %d id = %q, want", i, b.OfToolUse.ID)
 		var cmd prefillReadCmd
 		in, mErr := json.Marshal(b.OfToolUse.Input)
-		if mErr != nil {
-			t.Fatalf("marshal r1 block %d input: %v", i, mErr)
-		}
-		if err := json.Unmarshal(in, &cmd); err != nil {
-			t.Fatalf("unmarshal r1 block %d input: %v", i, err)
-		}
+		c.NoError(mErr, "marshal r1 block %d input", i)
+		c.NoError(json.Unmarshal(in, &cmd), "unmarshal r1 block %d input", i)
 		wantPath := "/tmp/a.txt"
 		if i == 1 {
 			wantPath = "/tmp/b.txt"
 		}
-		if cmd.Path != wantPath {
-			t.Fatalf("r1 block %d input path = %q, want %q", i, cmd.Path, wantPath)
-		}
-		if cmd.Offset != 1 || cmd.Limit != 1_000_000 {
-			t.Fatalf("r1 block %d input offset/limit = %d/%d, want 1/1000000", i, cmd.Offset, cmd.Limit)
-		}
+		c.Eq(wantPath, cmd.Path, "r1 block %d input path = %q, want", i, cmd.Path)
+		c.False(cmd.Offset != 1 || cmd.Limit != 1_000_000, "r1 block %d input offset/limit = %d/%d, want 1/1000000", i, cmd.Offset, cmd.Limit)
 	}
 
 	// r2: user, one tool_result per r1 id, same order, none an error.
 	assertPrefillRow(t, hist[2], 2, anthropic.MessageParamRoleUser, "tool_result")
 	for i, b := range hist[2].Param.Content {
-		if b.OfToolResult.ToolUseID != wantIDs[i] {
-			t.Fatalf("r2 block %d tool_use id = %q, want %q", i, b.OfToolResult.ToolUseID, wantIDs[i])
-		}
-		if b.OfToolResult.IsError.Value {
-			t.Fatalf("r2 block %d is an error result", i)
-		}
+		c.Eq(wantIDs[i], b.OfToolResult.ToolUseID, "r2 block %d tool_use id = %q, want", i, b.OfToolResult.ToolUseID)
+		c.False(b.OfToolResult.IsError.Value, "r2 block %d is an error result", i)
 	}
 
 	// r3: the task prompt, appended by the normal loop — the pre-fill rows
 	// sit at ordinals 0-2, strictly before it.
 	assertPrefillRow(t, hist[3], 3, anthropic.MessageParamRoleUser, "text")
-	if got := hist[3].Param.Content[0].OfText.Text; got != "do the task" {
-		t.Fatalf("r3 text = %q, want the task prompt", got)
-	}
-	if hist[4].Param.Role != anthropic.MessageParamRoleAssistant {
-		t.Fatalf("row 4 role = %v, want the turn's assistant reply", hist[4].Param.Role)
-	}
+	c.Eq("do the task", hist[3].Param.Content[0].OfText.Text, "r3 text")
+	c.Eq(anthropic.MessageParamRoleAssistant, hist[4].Param.Role, "row 4 role")
 
 	// No prefill activity is framed to the frontend, and no read leaked
 	// before the prefill rows were in place.
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 
 	// The request the sender received: r2's tool_results and the task text
 	// merged into ONE user message, task text last.
 	params := sender.lastParams(t)
-	if len(params.Messages) != 3 {
-		t.Fatalf("request has %d messages, want 3 (preamble, tool_use, merged tool_results+task)", len(params.Messages))
-	}
+	c.Len(params.Messages, 3, "request has %d messages, want 3 (preamble, tool_use, merged tool_results+task)", len(params.Messages))
 	merged := params.Messages[2]
-	if merged.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("request message 2 role = %v, want user", merged.Role)
-	}
-	if len(merged.Content) != 3 {
-		t.Fatalf("merged user message has %d blocks, want 2 tool_results + 1 text", len(merged.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 2 role")
+	c.Len(merged.Content, 3, "merged user message has %d blocks, want 2 tool_results + 1 text", len(merged.Content))
 	for i, id := range wantIDs {
 		tr := merged.Content[i].OfToolResult
-		if tr == nil || tr.ToolUseID != id {
-			t.Fatalf("merged block %d is not a tool_result for %q", i, id)
-		}
+		c.False(tr == nil || tr.ToolUseID != id, "merged block %d is not a tool_result for %q", i, id)
 	}
 	last := merged.Content[2]
-	if last.OfText == nil || last.OfText.Text != "do the task" {
-		t.Fatalf("merged block 2 = %+v, want the task text last", last)
-	}
+	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 2 = %+v, want the task text last", last)
 }
 
 // TestPrefillMissingFileIsErrorResult: one existing and one missing file —
 // the failed read is recorded as an is_error result and the walk continues;
 // the child keeps running and its first turn still happens.
 func TestPrefillMissingFileIsErrorResult(t *testing.T) {
+	c := assert.NewAborting(t)
 	eng, out, sender := prefillSimpleEngine(t, prefillFakeRead(map[string]bool{"/tmp/missing.txt": true}),
 		[]protocol.PrefillRead{{Path: "/tmp/a.txt"}, {Path: "/tmp/missing.txt"}})
 
@@ -216,34 +171,20 @@ func TestPrefillMissingFileIsErrorResult(t *testing.T) {
 	eng.Wait()
 
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 — the engine must keep running past a failed read", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 — the engine must keep running past a failed read", len(hist))
 	errResults := 0
 	for i, b := range hist[2].Param.Content {
 		tr := b.OfToolResult
-		if tr == nil {
-			t.Fatalf("r2 block %d is not a tool_result", i)
-		}
+		c.NotNil(tr, "r2 block %d is not a tool_result", i)
 		if tr.IsError.Value {
 			errResults++
-			if !strings.Contains(blockText(t, tr), "no such file") {
-				t.Fatalf("error result %q does not name the failure", blockText(t, tr))
-			}
+			c.StrContains(blockText(t, tr), "no such file", "error result")
 		}
 	}
-	if errResults != 1 {
-		t.Fatalf("r2 has %d is_error results, want 1", errResults)
-	}
-	if sender.callCount() != 1 {
-		t.Fatalf("sender was called %d times, want 1 (the prompt turn)", sender.callCount())
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("a failed read must not be fatal: %s", msg)
-	}
+	c.Eq(1, errResults, "r2 has")
+	c.Eq(1, sender.callCount(), "sender was called")
+	c.NotStrContains(out.String(), "agent_error", "a failed read must not be fatal")
 }
 
 // blockText flattens a tool_result block's text content for assertions.
@@ -263,6 +204,7 @@ func blockText(t *testing.T, tr *anthropic.ToolResultBlockParam) string {
 // carries the reads' own errors (which name the resolved path), capped, so a
 // caller who got a relative path wrong can see where it actually pointed.
 func TestPrefillAllReadsFailIsFatal(t *testing.T) {
+	c := assert.NewAborting(t)
 	paths := []string{"/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt", "/tmp/d.txt", "/tmp/e.txt"}
 	fail := map[string]bool{}
 	var entries []protocol.PrefillRead
@@ -280,28 +222,21 @@ func TestPrefillAllReadsFailIsFatal(t *testing.T) {
 		want := "prefill: every read failed: read: open /tmp/a.txt: no such file or directory; " +
 			"read: open /tmp/b.txt: no such file or directory; " +
 			"read: open /tmp/c.txt: no such file or directory (+2 more)"
-		if err == nil || err.Error() != want {
-			t.Fatalf("fatal error = %v, want %q", err, want)
-		}
+		c.False(err == nil || err.Error() != want, "fatal error = %v, want %q", err, want)
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for an all-failing pre-fill")
 	}
-	if msg := out.String(); !strings.Contains(msg, "agent_error") {
-		t.Fatalf("expected an agent_error frame, got %q", msg)
-	}
+	c.StrContains(out.String(), "agent_error", "expected an agent_error frame, got")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 0 {
-		t.Fatalf("history has %d rows, want none persisted on failure", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Empty(hist, "history has %d rows, want none persisted on failure", len(hist))
 }
 
 // TestPrefillPagesLargeFile: an open-ended entry whose first read carries a
 // continuation trailer pages again — two tool_use blocks for one entry, at
 // offsets 1 and next.
 func TestPrefillPagesLargeFile(t *testing.T) {
+	c := assert.NewAborting(t)
 	var cmds []prefillReadCmd
 	ts := fakeToolSet{
 		"read": func(_ context.Context, in json.RawMessage) (string, error) {
@@ -323,33 +258,22 @@ func TestPrefillPagesLargeFile(t *testing.T) {
 	eng.Wait()
 
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	}
-	if len(hist[1].Param.Content) != 2 {
-		t.Fatalf("r1 has %d blocks, want 2 pages for one entry", len(hist[1].Param.Content))
-	}
-	if len(cmds) != 2 {
-		t.Fatalf("fake read was called %d times, want 2", len(cmds))
-	}
-	if cmds[0].Offset != 1 || cmds[1].Offset != 3 {
-		t.Fatalf("read calls at offsets %v, want [1 3]", cmds)
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
+	c.Len(hist[1].Param.Content, 2, "r1 has %d blocks, want 2 pages for one entry", len(hist[1].Param.Content))
+	c.Len(cmds, 2, "fake read was called %d times, want 2", len(cmds))
+	c.False(cmds[0].Offset != 1 || cmds[1].Offset != 3, "read calls at offsets %v, want [1 3]", cmds)
 	if cmds[0].Limit != 1_000_000 || cmds[1].Limit != 1_000_000 {
 		t.Fatalf("open-ended pages carry limit %d/%d, want the open limit both times", cmds[0].Limit, cmds[1].Limit)
 	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillBoundedRangeStopsAtEnd: a bounded entry (Start 10, End 20) is
 // one call with offset 10 and limit 11, even when the result carries a
 // trailer — next (21) is past End.
 func TestPrefillBoundedRangeStopsAtEnd(t *testing.T) {
+	c := assert.NewAborting(t)
 	var cmds []prefillReadCmd
 	ts := fakeToolSet{
 		"read": func(_ context.Context, in json.RawMessage) (string, error) {
@@ -366,22 +290,14 @@ func TestPrefillBoundedRangeStopsAtEnd(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	if len(cmds) != 1 {
-		t.Fatalf("read was called %d times, want 1 (bounded range stops at End)", len(cmds))
-	}
+	c.Len(cmds, 1, "read was called %d times, want 1 (bounded range stops at End)", len(cmds))
 	if cmds[0].Offset != 10 || cmds[0].Limit != 11 {
 		t.Fatalf("read input offset/limit = %d/%d, want 10/11", cmds[0].Offset, cmds[0].Limit)
 	}
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillQuotedTrailerStopsPaging: a COMPLETE read whose last CONTENT
@@ -392,6 +308,7 @@ func TestPrefillBoundedRangeStopsAtEnd(t *testing.T) {
 // same page forever: exactly one recorded call per entry, open-ended and
 // bounded ranges alike.
 func TestPrefillQuotedTrailerStopsPaging(t *testing.T) {
+	c := assert.NewAborting(t)
 	var cmds []prefillReadCmd
 	ts := fakeToolSet{
 		"read": func(_ context.Context, in json.RawMessage) (string, error) {
@@ -414,32 +331,21 @@ func TestPrefillQuotedTrailerStopsPaging(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	if len(cmds) != 2 {
-		t.Fatalf("read was called %d times, want 2 (one page per entry, none on the quote)", len(cmds))
-	}
+	c.Len(cmds, 2, "read was called %d times, want 2 (one page per entry, none on the quote)", len(cmds))
 	for i, cmd := range cmds {
-		if cmd.Offset != 1 {
-			t.Fatalf("call %d paged to offset %d, want a single page at 1", i, cmd.Offset)
-		}
+		c.Eq(1, cmd.Offset, "call %d paged to offset %d, want a single page at 1", i, cmd.Offset)
 	}
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	}
-	if len(hist[1].Param.Content) != 2 {
-		t.Fatalf("r1 has %d blocks, want 2 (one per entry)", len(hist[1].Param.Content))
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
+	c.Len(hist[1].Param.Content, 2, "r1 has %d blocks, want 2 (one per entry)", len(hist[1].Param.Content))
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillGlobSortedAndExpanded: a glob entry expands to one open-ended
 // read per match, in lexicographic order — not the tool's mtime order.
 func TestPrefillGlobSortedAndExpanded(t *testing.T) {
+	c := assert.NewAborting(t)
 	var paths []string
 	ts := fakeToolSet{
 		"glob": func(_ context.Context, in json.RawMessage) (string, error) {
@@ -470,33 +376,19 @@ func TestPrefillGlobSortedAndExpanded(t *testing.T) {
 	eng.Wait()
 
 	want := []string{"/b/aaa.txt", "/b/mmm.txt", "/b/zzz.txt"}
-	if strings.Join(paths, ",") != strings.Join(want, ",") {
-		t.Fatalf("reads in order %v, want lexicographic %v", paths, want)
-	}
+	c.Eq(strings.Join(want, ","), strings.Join(paths, ","), "reads in order %v, want lexicographic %v", paths, want)
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
 	// Glob calls are NOT recorded; r1 carries one tool_use per matched path.
-	if len(hist[1].Param.Content) != 3 {
-		t.Fatalf("r1 has %d blocks, want 3 reads (no glob block)", len(hist[1].Param.Content))
-	}
+	c.Len(hist[1].Param.Content, 3, "r1 has %d blocks, want 3 reads (no glob block)", len(hist[1].Param.Content))
 	for i, b := range hist[1].Param.Content {
 		in, _ := json.Marshal(b.OfToolUse.Input)
 		var cmd prefillReadCmd
-		if err := json.Unmarshal(in, &cmd); err != nil {
-			t.Fatalf("unmarshal r1 block %d: %v", i, err)
-		}
-		if cmd.Path != want[i] {
-			t.Fatalf("r1 block %d path = %q, want %q", i, cmd.Path, want[i])
-		}
+		c.NoError(json.Unmarshal(in, &cmd), "unmarshal r1 block %d", i)
+		c.Eq(want[i], cmd.Path, "r1 block %d path = %q, want", i, cmd.Path)
 	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillGlobNoMatchIsFatal: a glob that matched nothing must not look
@@ -513,6 +405,7 @@ func TestPrefillGlobOverflowIsFatal(t *testing.T) {
 
 func testPrefillGlobFatal(t *testing.T, globResult, wantErrPart string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{
 		"glob": func(context.Context, json.RawMessage) (string, error) { return globResult, nil },
 		"read": func(context.Context, json.RawMessage) (string, error) {
@@ -526,22 +419,14 @@ func testPrefillGlobFatal(t *testing.T, globResult, wantErrPart string) {
 
 	select {
 	case err := <-fatalCalled:
-		if !strings.Contains(err.Error(), wantErrPart) {
-			t.Fatalf("fatal error = %v, want it to name %q", err, wantErrPart)
-		}
+		c.StrContains(err.Error(), wantErrPart, "fatal error = %v, want it to name", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for a failed glob")
 	}
-	if msg := out.String(); !strings.Contains(msg, "agent_error") {
-		t.Fatalf("expected an agent_error frame, got %q", msg)
-	}
+	c.StrContains(out.String(), "agent_error", "expected an agent_error frame, got")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 0 {
-		t.Fatalf("history has %d rows, want none persisted on failure", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Empty(hist, "history has %d rows, want none persisted on failure", len(hist))
 }
 
 // TestPrefillOverCapPersistsNothing: an estimated footprint beyond 60% of
@@ -549,6 +434,7 @@ func testPrefillGlobFatal(t *testing.T, globResult, wantErrPart string) {
 // persists NOTHING and ends the child with the estimate, the cap and the
 // five largest reads named.
 func TestPrefillOverCapPersistsNothing(t *testing.T) {
+	c := assert.NewAborting(t)
 	huge := strings.Repeat("x", 76800*4+4000) // > 76800 tokens' worth of bytes
 	ts := fakeToolSet{
 		"read": func(context.Context, json.RawMessage) (string, error) { return huge, nil },
@@ -561,23 +447,15 @@ func TestPrefillOverCapPersistsNothing(t *testing.T) {
 	select {
 	case err := <-fatalCalled:
 		for _, part := range []string{"estimated", "exceeds", "/tmp/huge.txt"} {
-			if !strings.Contains(err.Error(), part) {
-				t.Fatalf("over-cap error %q does not name %q", err.Error(), part)
-			}
+			c.StrContains(err.Error(), part, "over-cap error")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for an over-cap pre-fill")
 	}
-	if msg := out.String(); !strings.Contains(msg, "agent_error") {
-		t.Fatalf("expected an agent_error frame, got %q", msg)
-	}
+	c.StrContains(out.String(), "agent_error", "expected an agent_error frame, got")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 0 {
-		t.Fatalf("history has %d rows, want NOTHING persisted before the cap check", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Empty(hist, "history has %d rows, want NOTHING persisted before the cap check", len(hist))
 }
 
 // TestPrefillNeedsReadTool: without the read tool the pre-fill is refused at
@@ -597,6 +475,7 @@ func TestPrefillGlobNeedsGlobTool(t *testing.T) {
 
 func testPrefillToolRefused(t *testing.T, ts fakeToolSet, entries []protocol.PrefillRead, wantErrPart string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	fatalCalled := make(chan error, 1)
 	eng, out, _ := prefillSimpleEngine(t, ts, entries, func(cfg *EngineConfig) {
 		cfg.OnFatal = func(err error) { fatalCalled <- err }
@@ -604,28 +483,21 @@ func testPrefillToolRefused(t *testing.T, ts fakeToolSet, entries []protocol.Pre
 
 	select {
 	case err := <-fatalCalled:
-		if !strings.Contains(err.Error(), wantErrPart) {
-			t.Fatalf("fatal error = %v, want it to name the missing %q", err, wantErrPart)
-		}
+		c.StrContains(err.Error(), wantErrPart, "fatal error = %v, want it to name the missing", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for a pre-fill with missing tools")
 	}
-	if msg := out.String(); !strings.Contains(msg, "agent_error") {
-		t.Fatalf("expected an agent_error frame, got %q", msg)
-	}
+	c.StrContains(out.String(), "agent_error", "expected an agent_error frame, got")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 0 {
-		t.Fatalf("history has %d rows, want none persisted", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Empty(hist, "history has %d rows, want none persisted", len(hist))
 }
 
 // TestPrefillInputsAreByteStable: two runs over the same entries must
 // produce byte-identical r1 content — SeedHistory's idempotence check (and
 // every restart's HasR1 replay) relies on it.
 func TestPrefillInputsAreByteStable(t *testing.T) {
+	c := assert.NewAborting(t)
 	entries := []protocol.PrefillRead{
 		{Path: "/tmp/a.txt"},
 		{Path: "/tmp/ranged.txt", Start: 10, End: 20},
@@ -634,39 +506,26 @@ func TestPrefillInputsAreByteStable(t *testing.T) {
 	hist2 := runPrefillInMemory(t, entries)
 
 	got1, err := json.Marshal(hist1[1].Param)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	got2, err := json.Marshal(hist2[1].Param)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got1) != string(got2) {
-		t.Fatalf("r1 JSON differs between runs:\n%s\nvs\n%s", got1, got2)
-	}
-	if !strings.Contains(string(got1), `"path":"/tmp/a.txt","offset":1,"limit":1000000`) &&
-		!strings.Contains(string(got1), `{"path":"/tmp/a.txt","offset":1,"limit":1000000}`) {
-		t.Fatalf("r1 JSON does not carry the byte-stable field order: %s", got1)
-	}
+	c.NoError(err)
+	c.Eq(string(got2), string(got1), "r1 JSON differs between runs:\n%s\nvs\n%s", got1, got2)
+	c.False(!strings.Contains(string(got1), `"path":"/tmp/a.txt","offset":1,"limit":1000000`) &&
+		!strings.Contains(string(got1), `{"path":"/tmp/a.txt","offset":1,"limit":1000000}`), "r1 JSON does not carry the byte-stable field order: %s", got1)
 }
 
 // runPrefillInMemory runs one engine's pre-fill (via a prompt turn, which
 // serialises behind it) and returns the resulting history.
 func runPrefillInMemory(t *testing.T, entries []protocol.PrefillRead) []store.Message {
 	t.Helper()
+	c := assert.NewAborting(t)
 	eng, out, _ := prefillSimpleEngine(t, prefillFakeRead(nil), entries)
 	eng.HandlePrompt("go")
 	eng.Wait()
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (prefill, task, reply)", len(hist))
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 5, "history has %d rows, want 5 (prefill, task, reply)", len(hist))
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 	return hist
 }
 
@@ -718,6 +577,7 @@ func prefillToollessEngine(t *testing.T, reader fakeToolSet, entries []protocol.
 // the next user row and merges with the text row into ONE wire user message,
 // task text last.
 func TestPrefillToollessRendersTextRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	reader := prefillNumberedRead(map[string][]string{
 		"/tmp/a.txt": {"alpha", "beta"},
 		"/tmp/b.txt": {"gamma"},
@@ -729,12 +589,8 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	eng.Wait()
 
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply)", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply)", len(hist))
 
 	// r0: user, exactly ONE text block starting with the text marker.
 	if hist[0].Ordinal != 0 || hist[0].Param.Role != anthropic.MessageParamRoleUser {
@@ -750,12 +606,8 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	// Sections in call order, each header followed by the numbered contents.
 	wantA := "=== /tmp/a.txt ===\n     1\talpha\n     2\tbeta\n"
 	wantB := "=== /tmp/b.txt ===\n     1\tgamma\n"
-	if !strings.Contains(text, wantA) {
-		t.Fatalf("text row missing a.txt's header + numbered contents; got:\n%s", text)
-	}
-	if !strings.Contains(text, wantB) {
-		t.Fatalf("text row missing b.txt's header + numbered contents; got:\n%s", text)
-	}
+	c.StrContains(text, wantA, "text row missing a.txt's header + numbered contents; got:\n")
+	c.StrContains(text, wantB, "text row missing b.txt's header + numbered contents; got:\n")
 	if ia, ib := strings.Index(text, "=== /tmp/a.txt ==="), strings.Index(text, "=== /tmp/b.txt ==="); ia < 0 || ia >= ib {
 		t.Fatalf("sections out of order (a at %d, b at %d)", ia, ib)
 	}
@@ -763,9 +615,7 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	// No tool_use or tool_result block anywhere in the history.
 	for i, m := range hist {
 		for j, b := range m.Param.Content {
-			if b.OfToolUse != nil || b.OfToolResult != nil {
-				t.Fatalf("row %d block %d is a tool block; a tool-less pre-fill must be text only", i, j)
-			}
+			c.False(b.OfToolUse != nil || b.OfToolResult != nil, "row %d block %d is a tool block; a tool-less pre-fill must be text only", i, j)
 		}
 	}
 
@@ -773,34 +623,20 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 	if hist[1].Param.Content[0].OfText == nil || hist[1].Param.Content[0].OfText.Text != "do the task" {
 		t.Fatalf("row 1 = %+v, want the task prompt", hist[1].Param.Content)
 	}
-	if hist[2].Param.Role != anthropic.MessageParamRoleAssistant {
-		t.Fatalf("row 2 role = %v, want the assistant reply", hist[2].Param.Role)
-	}
+	c.Eq(anthropic.MessageParamRoleAssistant, hist[2].Param.Role, "row 2 role")
 
 	// The request: the text row and the task merged into ONE user message,
 	// task text last.
 	params := sender.lastParams(t)
-	if len(params.Messages) != 1 {
-		t.Fatalf("request has %d messages, want 1 (the merged user message)", len(params.Messages))
-	}
+	c.Len(params.Messages, 1, "request has %d messages, want 1 (the merged user message)", len(params.Messages))
 	merged := params.Messages[0]
-	if merged.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("request message 0 role = %v, want user", merged.Role)
-	}
-	if len(merged.Content) != 2 {
-		t.Fatalf("merged user message has %d blocks, want prefill text + task", len(merged.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 0 role")
+	c.Len(merged.Content, 2, "merged user message has %d blocks, want prefill text + task", len(merged.Content))
 	first := merged.Content[0]
-	if first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble) {
-		t.Fatalf("merged block 0 = %+v, want the pre-fill text", first)
-	}
+	c.False(first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", first)
 	last := merged.Content[1]
-	if last.OfText == nil || last.OfText.Text != "do the task" {
-		t.Fatalf("merged block 1 = %+v, want the task text last", last)
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 1 = %+v, want the task text last", last)
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillTextShapeGlobRangeAndError covers the text shape's trickier
@@ -809,6 +645,7 @@ func TestPrefillToollessRendersTextRow(t *testing.T) {
 // section without taking the child down; and a paged open entry shows the
 // span the trailer proved (lines 1-2) with the tail page unheadered.
 func TestPrefillTextShapeGlobRangeAndError(t *testing.T) {
+	c := assert.NewAborting(t)
 	reader := prefillNumberedRead(map[string][]string{
 		"/b/aaa.txt":      {"aaa body"},
 		"/b/zzz.txt":      {"zzz body"},
@@ -852,12 +689,8 @@ func TestPrefillTextShapeGlobRangeAndError(t *testing.T) {
 	eng.Wait()
 
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply) — a failed read must not be fatal", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply) — a failed read must not be fatal", len(hist))
 	text := hist[0].Param.Content[0].OfText.Text
 	for _, want := range []string{
 		"=== /b/aaa.txt ===\n     1\taaa body\n",
@@ -867,23 +700,20 @@ func TestPrefillTextShapeGlobRangeAndError(t *testing.T) {
 		"=== /tmp/paged.txt ===\n     3\tp3\n",
 		"=== /tmp/missing.txt ===\n(error: read: open /tmp/missing.txt: no such file or directory)",
 	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("text row missing section %q; got:\n%s", want, text)
-		}
+		c.StrContains(text, want, "text row missing section")
 	}
 	// Glob matches in lexicographic order, not the fake's output order.
 	if ia, iz := strings.Index(text, "=== /b/aaa.txt ==="), strings.Index(text, "=== /b/zzz.txt ==="); ia < 0 || ia >= iz {
 		t.Fatalf("glob matches not sorted (aaa at %d, zzz at %d)", ia, iz)
 	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("a failed read must not be fatal: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "a failed read must not be fatal")
 }
 
 // TestPrefillTextOverCapPersistsNothing: the token cap counts the RENDERED
 // text (marker, headers and all). Over the cap nothing is persisted and the
 // child ends with the estimate and the largest reads named.
 func TestPrefillTextOverCapPersistsNothing(t *testing.T) {
+	c := assert.NewAborting(t)
 	huge := strings.Repeat("x", 76800*4+4000) // > 76800 tokens' worth of bytes
 	reader := fakeToolSet{
 		"read": func(context.Context, json.RawMessage) (string, error) { return huge, nil },
@@ -896,23 +726,15 @@ func TestPrefillTextOverCapPersistsNothing(t *testing.T) {
 	select {
 	case err := <-fatalCalled:
 		for _, part := range []string{"estimated", "exceeds", "/tmp/huge.txt"} {
-			if !strings.Contains(err.Error(), part) {
-				t.Fatalf("over-cap error %q does not name %q", err.Error(), part)
-			}
+			c.StrContains(err.Error(), part, "over-cap error")
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("OnFatal was never called for an over-cap text pre-fill")
 	}
-	if msg := out.String(); !strings.Contains(msg, "agent_error") {
-		t.Fatalf("expected an agent_error frame, got %q", msg)
-	}
+	c.StrContains(out.String(), "agent_error", "expected an agent_error frame, got")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 0 {
-		t.Fatalf("history has %d rows, want NOTHING persisted before the cap check", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Empty(hist, "history has %d rows, want NOTHING persisted before the cap check", len(hist))
 }
 
 // prefillTestRow builds one store.Message for classifyPrefill's table.
@@ -996,9 +818,8 @@ func TestPrefillClassify(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyPrefill(tc.history, tc.configured); got != tc.want {
-				t.Fatalf("classifyPrefill(%d rows, configured=%v) = %d, want %d", len(tc.history), tc.configured, got, tc.want)
-			}
+			got := classifyPrefill(tc.history, tc.configured)
+			assert.NewAborting(t).Eq(tc.want, got, "classifyPrefill(%d rows, configured=%v) = %d, want", len(tc.history), tc.configured, got)
 		})
 	}
 }
@@ -1006,13 +827,10 @@ func TestPrefillClassify(t *testing.T) {
 // TestPrefillAssistantRowHasNoUsage: r1 is persisted with a nil meta, so the
 // in-memory row carries no stop reason (the DB test pins the NULL tokens).
 func TestPrefillAssistantRowHasNoUsage(t *testing.T) {
+	c := assert.NewAborting(t)
 	hist := runPrefillInMemory(t, []protocol.PrefillRead{{Path: "/tmp/a.txt"}})
-	if hist[1].StopReason != "" {
-		t.Fatalf("r1 stop reason = %q, want empty (nil meta — usage not reported)", hist[1].StopReason)
-	}
-	if hist[1].Param.Role != anthropic.MessageParamRoleAssistant {
-		t.Fatalf("r1 role = %v", hist[1].Param.Role)
-	}
+	c.Eq("", hist[1].StopReason, "r1 stop reason")
+	c.Eq(anthropic.MessageParamRoleAssistant, hist[1].Param.Role, "r1 role =")
 }
 
 // TestPrefillContextWindowUsesProviderLocalID pins the id the cap asks the
@@ -1022,15 +840,14 @@ func TestPrefillAssistantRowHasNoUsage(t *testing.T) {
 // cap silently falls back to 60% of 128K, refusing a whole-repo pre-fill a 1M
 // model could hold.
 func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	cat.SeedForTest([]routing.CatalogEntry{
 		{ID: "z-ai/glm-5.3-flash", Created: 1, ContextLength: 1048576},
 		{ID: "anthropic/claude-haiku-4.5", Created: 2, ContextLength: 200000},
 	})
 	client, err := llm.NewClient(llm.WithCatalog(cat), llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	for _, tc := range []struct {
 		modelID string
 		want    int
@@ -1039,8 +856,7 @@ func TestPrefillContextWindowUsesProviderLocalID(t *testing.T) {
 		{"claude-haiku-4-5", 200000}, // anthropic provider: bare id mapped by the catalog
 		{"unknown/model", prefillFallbackContext},
 	} {
-		if got := prefillContextWindow(client, tc.modelID); got != tc.want {
-			t.Errorf("prefillContextWindow(%q) = %d, want %d", tc.modelID, got, tc.want)
-		}
+		got := prefillContextWindow(client, tc.modelID)
+		c.Eq(tc.want, got, "prefillContextWindow(%q) = %d, want", tc.modelID, got)
 	}
 }

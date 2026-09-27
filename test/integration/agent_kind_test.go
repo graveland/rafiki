@@ -3,7 +3,6 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +14,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeTurnsScript writes a --fake-turns ndjson file (pkg/fundi's hidden
@@ -36,20 +37,17 @@ import (
 // second scripted message is left for the second prompt.
 func fakeTurnsScript(t *testing.T, markerPath, fifoPath string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	command := fmt.Sprintf("touch %s && read -r _ < %s", shellQuote(markerPath), shellQuote(fifoPath))
 	commandJSON, err := json.Marshal(command)
-	if err != nil {
-		t.Fatalf("marshal scripted command: %v", err)
-	}
+	c.NoError(err, "marshal scripted command")
 
 	toolUseTurn := fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"text","text":"on it"},{"type":"tool_use","id":"tu_1","name":"bash","input":{"command":%s}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":0}}`, commandJSON)
 	const endTurn = `{"id":"msg_2","type":"message","role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":4,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 
 	path := filepath.Join(t.TempDir(), "fake-turns.ndjson")
-	if err := os.WriteFile(path, []byte(toolUseTurn+"\n"+endTurn+"\n"), 0o600); err != nil {
-		t.Fatalf("write fake-turns script: %v", err)
-	}
+	c.NoError(os.WriteFile(path, []byte(toolUseTurn+"\n"+endTurn+"\n"), 0o600), "write fake-turns script")
 	return path
 }
 
@@ -234,6 +232,7 @@ func assertNoRestartBetween(t *testing.T, es *eventStream, from, to int, childID
 // wait instead of passing for the wrong reason.
 func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	// The scripted turn calls the real `bash` tool, which after the executor
 	// rule requires an enrolled executor. Boot the grant daemon (postgres) so
 	// the child can be placed on one; a fundi child with no executor has no
@@ -247,9 +246,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	scriptDir := t.TempDir()
 	markerPath := filepath.Join(scriptDir, "tool-started")
 	fifoPath := filepath.Join(scriptDir, "block.fifo")
-	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
-		t.Fatalf("mkfifo %s: %v", fifoPath, err)
-	}
+	c.NoError(syscall.Mkfifo(fifoPath, 0o600), "mkfifo %s", fifoPath)
 	// Teardown verification: the abort's process-group kill (see bash.go's
 	// Setpgid+cmd.Cancel) should have reaped the blocked reader before this
 	// runs. A non-blocking O_WRONLY open on a FIFO with no reader fails with
@@ -262,9 +259,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 			t.Error("orphaned blocked tool process: fifo still has a reader after test teardown")
 			return
 		}
-		if !errors.Is(err, syscall.ENXIO) {
-			t.Fatalf("unexpected error probing fifo for leftover readers: %v", err)
-		}
+		c.ErrorIs(err, syscall.ENXIO, "unexpected error probing fifo for leftover readers")
 	})
 
 	scriptPath := fakeTurnsScript(t, markerPath, fifoPath)
@@ -282,13 +277,9 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		ExecutorSelector: "env=home",
 		ExtraArgs:        []string{"--fake-turns", scriptPath},
 	}))
-	if err != nil {
-		t.Fatalf("spawn (agent kind) failed: %v", err)
-	}
+	c.NoError(err, "spawn (agent kind) failed")
 	childID := sresp.Msg.GetChildId()
-	if childID == "" {
-		t.Fatal("spawn returned empty childId")
-	}
+	c.NotEq("", childID, "spawn returned empty childId")
 
 	// sessionId must get sniffed from the agent's get_state bootstrap reply
 	// (internal/child/sniff.go), same mechanism used for pi children.
@@ -301,12 +292,8 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if before == nil || before.GetSessionId() == "" {
-		t.Fatal("sessionId was never sniffed from the agent child")
-	}
-	if before.Pid == nil {
-		t.Fatal("GetChild returned a nil PID for a live child")
-	}
+	c.False(before == nil || before.GetSessionId() == "", "sessionId was never sniffed from the agent child")
+	c.NotNil(before.Pid, "GetChild returned a nil PID for a live child")
 	pidBefore := *before.Pid
 
 	// The watermark read here is what keeps the child's replayed pre-open
@@ -376,12 +363,8 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	assertNoRestartBetween(t, es, preAbortIdx, settledIdx, childID)
 
 	after := getChild(t, client, childID)
-	if after.GetStatus() == string(protocol.StatusExited) {
-		t.Fatal("child exited after abort; expected it to remain alive (in-band abort, no restart)")
-	}
-	if after.Pid == nil {
-		t.Fatal("GetChild returned a nil PID for a live child after abort")
-	}
+	c.NotEq(string(protocol.StatusExited), after.GetStatus(), "child exited after abort; expected it to remain alive (in-band abort, no restart)")
+	c.NotNil(after.Pid, "GetChild returned a nil PID for a live child after abort")
 	// Secondary check: kept for kinds that still have a real pid (pi,
 	// claude). Gated on pidBefore != 0 so it doesn't silently pass for the
 	// agent kind, whose pid is always 0 -- see the KEYSTONE ASSERTION above,
@@ -412,9 +395,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	doneFrame, eventIdx := es.waitEventAfter(t, eventIdx, func(ev *rafikiv1.Event) bool {
 		return assistantTextIn(childID, ev) == "done"
 	}, 5*time.Second)
-	if doneFrame == nil {
-		t.Fatal("no assistant reply for prompt 2")
-	}
+	c.NotNil(doneFrame, "no assistant reply for prompt 2")
 	_, settled2Idx := es.waitEventAfter(t, eventIdx, turnSettled(childID), 5*time.Second)
 	assertTurnEndedCleanlyBetween(t, es, prePrompt2Idx, settled2Idx)
 
@@ -423,9 +404,7 @@ func TestIntegration_AgentKind_AbortPreservesProcess(t *testing.T) {
 	// above -- the agent kind's pid is always 0, so this only guards pi and
 	// claude.
 	final := getChild(t, client, childID)
-	if final.Pid == nil {
-		t.Fatal("GetChild returned a nil PID for a live child after second prompt")
-	}
+	c.NotNil(final.Pid, "GetChild returned a nil PID for a live child after second prompt")
 	if pidBefore != 0 && final.GetPid() != pidBefore {
 		t.Fatalf("PID changed after second prompt: want %d, got %d", pidBefore, final.GetPid())
 	}

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -18,6 +17,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestIsRetryable(t *testing.T) {
@@ -92,9 +93,7 @@ func TestIsRetryable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := isRetryable(tt.err, tt.ctx)
-			if got != tt.retry {
-				t.Errorf("isRetryable(%v) = %v, want %v", tt.err, got, tt.retry)
-			}
+			assert.NewCollecting(t).Eq(tt.retry, got, "isRetryable(%v) = %v, want", tt.err, got)
 		})
 	}
 }
@@ -113,15 +112,12 @@ func streamSSErr(payload string) error {
 }
 
 func TestContinueWithRetry_NonTransientError_ReturnsImmediately(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := newMemConv(t, &erroringSender{err: errors.New("permanent failure")})
 	seedUser(t, conv)
 	_, err := continueWithRetry(context.Background(), conv)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "permanent failure") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	c.Error(err, "expected error, got nil")
+	c.StrContains(err.Error(), "permanent failure", "unexpected error: %v", err)
 }
 
 func TestContinueWithRetry_TransientError_Recovers(t *testing.T) {
@@ -143,12 +139,11 @@ func TestContinueWithRetry_TransientError_Recovers(t *testing.T) {
 	conv := newMemConv(t, sender)
 	seedUser(t, conv)
 	_, err := continueWithRetry(context.Background(), conv)
-	if err != nil {
-		t.Fatalf("expected recovery, got error: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "expected recovery, got error")
 }
 
 func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
+	c := assert.NewAborting(t)
 	// An OpenRouter upstream timeout arriving as an in-band SSE "error" event
 	// (the exact payload from the live gemini abort that used to end the
 	// turn) must be retried like any other transient failure, not kill the
@@ -176,15 +171,9 @@ func TestContinueWithRetry_SSEStreamTimeout_Recovers(t *testing.T) {
 	conv := newMemConv(t, sender)
 	seedUser(t, conv)
 	resp, err := continueWithRetry(context.Background(), conv)
-	if err != nil {
-		t.Fatalf("expected recovery from sse timeout_error, got error: %v", err)
-	}
-	if resp == nil || resp.StopReason != "end_turn" {
-		t.Fatalf("expected an end_turn message after recovery, got %+v", resp)
-	}
-	if fails != 0 {
-		t.Fatalf("sender still has %d scripted failures left; retry never happened", fails)
-	}
+	c.NoError(err, "expected recovery from sse timeout_error, got error")
+	c.False(resp == nil || resp.StopReason != "end_turn", "expected an end_turn message after recovery, got %+v", resp)
+	c.Eq(0, fails, "sender still has")
 }
 
 func TestContinueWithRetry_ContextCanceled_StopsRetrying(t *testing.T) {
@@ -198,9 +187,7 @@ func TestContinueWithRetry_ContextCanceled_StopsRetrying(t *testing.T) {
 	conv := newMemConv(t, sender)
 	seedUser(t, conv)
 	_, err := continueWithRetry(ctx, conv)
-	if err == nil {
-		t.Fatal("expected error from cancelled context, got nil")
-	}
+	assert.NewAborting(t).Error(err, "expected error from cancelled context, got nil")
 }
 
 func TestContinueWithRetry_ExhaustedRetries_ReturnsLastError(t *testing.T) {
@@ -215,18 +202,14 @@ func TestContinueWithRetry_ExhaustedRetries_ReturnsLastError(t *testing.T) {
 	conv := newMemConv(t, sender)
 	seedUser(t, conv)
 	_, err := continueWithRetry(context.Background(), conv)
-	if err == nil {
-		t.Fatal("expected error after exhausted retries, got nil")
-	}
+	assert.NewAborting(t).Error(err, "expected error after exhausted retries, got nil")
 }
 
 // seedUser appends a user message so conv.Continue (Continue sends AS
 // STORED, unlike Send/Run) has something to send.
 func seedUser(t *testing.T, conv *llm.Conversation) {
 	t.Helper()
-	if err := conv.AppendUser(context.Background(), llm.UserText("hi")); err != nil {
-		t.Fatalf("seed user message: %v", err)
-	}
+	assert.NewAborting(t).NoError(conv.AppendUser(context.Background(), llm.UserText("hi")), "seed user message")
 }
 
 // conditionalSender calls fn on each New call.

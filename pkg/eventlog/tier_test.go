@@ -7,9 +7,12 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestTierOf(t *testing.T) {
+	c := assert.NewCollecting(t)
 	durable := []*rafikiv1.Event{
 		{Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{}}},
 		{Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{}}},
@@ -28,15 +31,12 @@ func TestTierOf(t *testing.T) {
 		{Payload: &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{}}},
 	}
 	for _, ev := range durable {
-		if got := eventlog.TierOf(ev); got != eventlog.TierDurable {
-			t.Errorf("TierOf(%s) = %v, want durable", eventlog.TypeName(ev), got)
-		}
+		got := eventlog.TierOf(ev)
+		c.Eq(eventlog.TierDurable, got, "TierOf(%s) = %v, want durable", eventlog.TypeName(ev), got)
 	}
 
 	delta := &rafikiv1.Event{Payload: &rafikiv1.Event_ContentBlockDelta{ContentBlockDelta: &rafikiv1.ContentBlockDelta{}}}
-	if got := eventlog.TierOf(delta); got != eventlog.TierEphemeral {
-		t.Errorf("TierOf(content_block_delta) = %v, want ephemeral", got)
-	}
+	c.Eq(eventlog.TierEphemeral, eventlog.TierOf(delta), "TierOf(content_block_delta)")
 }
 
 // A new payload added to the proto must be classified deliberately. Falling
@@ -44,18 +44,16 @@ func TestTierOf(t *testing.T) {
 // every resumable consumer — which is the failure mode this test exists to
 // prevent.
 func TestEveryEventTypeHasATier(t *testing.T) {
+	c := assert.NewCollecting(t)
 	names := eventlog.AllTypeNames()
 	fields := (&rafikiv1.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("payload").Fields()
-	if len(names) != fields.Len() {
-		t.Fatalf("AllTypeNames has %d entries but Event.payload has %d fields; classify the new one in tier.go", len(names), fields.Len())
-	}
+	c.Require().Len(names, fields.Len(), "AllTypeNames has %d entries but Event.payload has %d fields; classify the new one in tier.go", len(names), fields.Len())
 	have := make(map[string]bool, len(names))
 	for _, n := range names {
 		have[n] = true
 	}
 	for i := range fields.Len() {
-		if n := string(fields.Get(i).Name()); !have[n] {
-			t.Errorf("Event.payload field %q is not classified in tier.go", n)
-		}
+		n := string(fields.Get(i).Name())
+		c.False(!have[n], "Event.payload field %q is not classified in tier.go", n)
 	}
 }

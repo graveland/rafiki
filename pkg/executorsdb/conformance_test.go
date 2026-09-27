@@ -16,26 +16,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testStore returns a Store for conformance testing, backed by RAFIKI_TEST_DSN.
 func testStore(t *testing.T) executors.Store {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN is not set")
 	}
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	c.NoError(err, "connect")
 	t.Cleanup(pool.Close)
 	store := NewPostgresStore(pool)
 	// Ensure tables exist (migrations may not have run in test env).
-	if err := ensureTables(ctx, pool); err != nil {
-		t.Fatalf("ensure tables: %v", err)
-	}
+	c.NoError(ensureTables(ctx, pool), "ensure tables")
 	return store
 }
 
@@ -52,15 +51,14 @@ func ensureTables(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func TestConcurrentEnrollmentHasExactlyOneWinner(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	tok, err := s.MintToken(ctx, executors.NewToken{
 		Labels:    map[string]string{"rafiki/env": "work"},
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	const racers = 8
 	var wg sync.WaitGroup
@@ -83,56 +81,44 @@ func TestConcurrentEnrollmentHasExactlyOneWinner(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if wins != 1 {
-		t.Fatalf("%d racers enrolled; want exactly 1 (ids %v)", wins, ids)
-	}
+	c.Eq(1, wins, "%d racers enrolled; want exactly 1 (ids %v)", wins, ids)
 }
 
 func TestAuthenticateReadsTheCurrentRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "home"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, cred, err := s.Enroll(ctx, tok, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	if _, err := s.SetLabels(ctx, e.ID, map[string]string{"env": "work"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.Authenticate(ctx, cred)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Labels["env"] != "work" {
-		t.Fatalf("Authenticate returned stale labels %v — the credential is being trusted for what the row says", got.Labels)
-	}
+	c.NoError(err)
+	c.Eq("work", got.Labels["env"], "Authenticate returned stale labels %v — the credential is being trusted for what the row says", got.Labels)
 }
 
 func TestDisabledExecutorCannotAuthenticate(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(time.Hour)})
 	e, cred, _ := s.Enroll(ctx, tok, nil)
-	if err := s.SetEnabled(ctx, e.ID, false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Authenticate(ctx, cred); !errors.Is(err, ErrDisabled) {
-		t.Fatalf("want ErrDisabled, got %v", err)
-	}
+	c.NoError(s.SetEnabled(ctx, e.ID, false))
+	_, err := s.Authenticate(ctx, cred)
+	c.ErrorIs(err, ErrDisabled, "want ErrDisabled, got")
 }
 
 func TestDeleteRemovesTheRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Delete(ctx, e.ID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	c.NoError(err)
+	c.NoError(s.Delete(ctx, e.ID), "delete")
 	if _, err := s.Get(ctx, e.ID); !errors.Is(err, executors.ErrNotFound) {
 		t.Fatalf("Get after delete: want ErrNotFound, got %v", err)
 	}
@@ -140,45 +126,37 @@ func TestDeleteRemovesTheRow(t *testing.T) {
 
 func TestDeleteUnknownIDIsNotFound(t *testing.T) {
 	s := testStore(t)
-	if err := s.Delete(context.Background(), "00000000-0000-0000-0000-000000000000"); !errors.Is(err, executors.ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(s.Delete(context.Background(), "00000000-0000-0000-0000-000000000000"), executors.ErrNotFound, "want ErrNotFound, got")
 }
 
 func TestExpiredTokenIsRejected(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	tok, _ := s.MintToken(ctx, executors.NewToken{ExpiresAt: time.Now().Add(-time.Minute)})
-	if _, _, err := s.Enroll(ctx, tok, nil); !errors.Is(err, ErrTokenExpired) {
-		t.Fatalf("want ErrTokenExpired, got %v", err)
-	}
+	_, _, err := s.Enroll(ctx, tok, nil)
+	assert.NewAborting(t).ErrorIs(err, ErrTokenExpired, "want ErrTokenExpired, got")
 }
 
 func TestUnknownCredentialIsRejectedNotAutoEnrolled(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.Authenticate(context.Background(), "not-a-real-credential"); err == nil {
-		t.Fatal("an unknown identity must be rejected — auto-enrollment means anyone who reaches the endpoint joins the pool and starts receiving file contents")
-	}
+	_, err := s.Authenticate(context.Background(), "not-a-real-credential")
+	assert.NewAborting(t).Error(err, "an unknown identity must be rejected — auto-enrollment means anyone who reaches the endpoint joins the pool and starts receiving file contents")
 }
 
 func TestSelfReportCannotOverwriteATrustLabel(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"rafiki/env": "home"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, map[string]string{"rafiki/env": "work", "os": "linux"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if e.Labels["rafiki/env"] != "home" {
-		t.Fatalf("the executor claimed a trust label: %v", e.Labels)
-	}
-	if e.SelfReported["os"] != "linux" {
-		t.Fatalf("a harmless capability fact must still be recorded: %v", e.SelfReported)
-	}
+	c.NoError(err)
+	c.Eq("home", e.Labels["rafiki/env"], "the executor claimed a trust label: %v", e.Labels)
+	c.Eq("linux", e.SelfReported["os"], "a harmless capability fact must still be recorded: %v", e.SelfReported)
 }
 
 func TestAdmissionSelectorIgnoresAnnotations(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Annotations are never consulted for ADMISSION, or an agent could annotate
 	// its way onto a machine. They ARE selectable for FINDING one.
 	s := testStore(t)
@@ -186,30 +164,21 @@ func TestAdmissionSelectorIgnoresAnnotations(t *testing.T) {
 	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "work"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	// Annotate something — this must not make the executor match selectors
 	// that only look at labels.
-	if err := s.Annotate(ctx, e.ID, map[string]string{"sentinel": "built"}, nil); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(s.Annotate(ctx, e.ID, map[string]string{"sentinel": "built"}, nil))
 	// Get the executor by id to verify it has the annotation.
 	got, err := s.Get(ctx, e.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Annotations["sentinel"] != "built" {
-		t.Fatal("annotation was not stored")
-	}
+	c.NoError(err)
+	c.Eq("built", got.Annotations["sentinel"], "annotation was not stored")
 	// The annotation must not appear in a label selector match.
 	sel, _ := executors.ParseSelector("sentinel=built")
-	if sel.Matches(got.Labels) {
-		t.Fatal("annotation appeared in labels — the selector is reading annotations, which is the admission hole")
-	}
+	c.False(sel.Matches(got.Labels), "annotation appeared in labels — the selector is reading annotations, which is the admission hole")
 }
 
 func TestFindSelectorHonoursAnnotations(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Annotations ARE selectable for FINDING one — that is the entire use case.
 	// But they are not in Labels, so a selector over labels won't see them.
 	// The plan says annotations are selectable by key-presence and exact value
@@ -220,19 +189,11 @@ func TestFindSelectorHonoursAnnotations(t *testing.T) {
 	tok, _ := s.MintToken(ctx, executors.NewToken{
 		Labels: map[string]string{"env": "test"}, ExpiresAt: time.Now().Add(time.Hour)})
 	e, _, err := s.Enroll(ctx, tok, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Annotate(ctx, e.ID, map[string]string{"sentinel": "built"}, nil); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
+	c.NoError(s.Annotate(ctx, e.ID, map[string]string{"sentinel": "built"}, nil))
 	got, err := s.Get(ctx, e.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Annotations["sentinel"] != "built" {
-		t.Fatal("annotation was not stored")
-	}
+	c.NoError(err)
+	c.Eq("built", got.Annotations["sentinel"], "annotation was not stored")
 }
 
 // machineName returns a machine label unique to this test run. The conformance
@@ -243,9 +204,8 @@ func TestFindSelectorHonoursAnnotations(t *testing.T) {
 func machineName(t *testing.T) string {
 	t.Helper()
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		t.Fatalf("rand: %v", err)
-	}
+	_, err := rand.Read(b[:])
+	assert.NewAborting(t).NoError(err, "rand")
 	return "laptop-" + hex.EncodeToString(b[:])
 }
 
@@ -277,24 +237,21 @@ func createExecutor(t *testing.T, s executors.Store, labels map[string]string) (
 func mustCreateExecutor(t *testing.T, s executors.Store, labels map[string]string) executors.Executor {
 	t.Helper()
 	e, err := createExecutor(t, s, labels)
-	if err != nil {
-		t.Fatalf("seed executor %v: %v", labels, err)
-	}
+	assert.NewAborting(t).NoError(err, "seed executor %v", labels)
 	return e
 }
 
 func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	machine := machineName(t)
 
 	mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
 	_, err := createExecutor(t, s, map[string]string{"owner": "brent", "machine": machine})
-	if err == nil {
-		t.Fatal("a second executor claiming the same owner+machine must be " +
-			"refused: an interactive client picks the durable executor for its " +
-			"box by exactly that pair, and two matches is a coin flip over which " +
-			"filesystem a child lands on")
-	}
+	c.Error(err, "a second executor claiming the same owner+machine must be "+
+		"refused: an interactive client picks the durable executor for its "+
+		"box by exactly that pair, and two matches is a coin flip over which "+
+		"filesystem a child lands on")
 
 	// WHICH failure matters as much as that there was one. This insert path
 	// also carries a live nil-Roots defect that rejects the row with 23502
@@ -309,29 +266,25 @@ func TestTwoExecutorsCannotShareAnOwnerAndMachine(t *testing.T) {
 	// index added to this table later. The store no longer returns the raw
 	// pgconn error here -- it must not, since this same translation travels to
 	// an unauthenticated peer on the enrollment path.
-	if !errors.Is(err, executors.ErrMachineNameTaken) {
-		t.Fatalf("want executors.ErrMachineNameTaken, got %T: %v — the row was "+
-			"rejected by something other than the (owner, machine) index, so "+
-			"this test is no longer evidence that the index exists", err, err)
-	}
+	c.ErrorIs(err, executors.ErrMachineNameTaken, "want executors.ErrMachineNameTaken, got %T: %v — the row was "+
+		"rejected by something other than the (owner, machine) index, so "+
+		"this test is no longer evidence that the index exists", err, err)
 }
 
 func TestTwoOwnersMayEachHaveALaptop(t *testing.T) {
 	s := testStore(t)
 	machine := machineName(t)
 	for _, owner := range []string{"brent", "sam"} {
-		if _, err := createExecutor(t, s, map[string]string{"owner": owner, "machine": machine}); err != nil {
-			t.Fatalf("owner %s: %v", owner, err)
-		}
+		_, err := createExecutor(t, s, map[string]string{"owner": owner, "machine": machine})
+		assert.NewAborting(t).NoError(err, "owner %s", owner)
 	}
 }
 
 func TestExecutorsWithNoMachineLabelAreUnconstrained(t *testing.T) {
 	s := testStore(t)
 	for range 3 {
-		if _, err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"}); err != nil {
-			t.Fatalf("a fleet executor needs no machine name: %v", err)
-		}
+		_, err := createExecutor(t, s, map[string]string{"owner": "brent", "env": "prod"})
+		assert.NewAborting(t).NoError(err, "a fleet executor needs no machine name")
 	}
 }
 
@@ -347,6 +300,7 @@ func TestExecutorsWithNoMachineLabelAreUnconstrained(t *testing.T) {
 // "could not verify an executor credential" every attempt, so the operator sees
 // an executor that simply never appears. The sentinel is what stops the loop.
 func TestEnrollRefusesATokenWhoseMachineNameIsTaken(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	machine := machineName(t)
@@ -363,20 +317,16 @@ func TestEnrollRefusesATokenWhoseMachineNameIsTaken(t *testing.T) {
 		Roots:     []string{},
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if err != nil {
-		t.Fatalf("minting must still succeed -- the index does not cover tokens: %v", err)
-	}
+	c.NoError(err, "minting must still succeed -- the index does not cover tokens")
 
 	e, _, err := s.Enroll(ctx, tok, nil)
 	if err == nil {
 		t.Cleanup(func() { _ = s.Delete(context.Background(), e.ID) })
 		t.Fatal("redeeming a token for an already-claimed (owner, machine) must fail")
 	}
-	if !errors.Is(err, executors.ErrMachineNameTaken) {
-		t.Fatalf("Enroll returned %#v (%v); want an error satisfying "+
-			"errors.Is(err, executors.ErrMachineNameTaken) -- anything else is "+
-			"classified retryable and loops the executor forever", err, err)
-	}
+	c.ErrorIs(err, executors.ErrMachineNameTaken, "Enroll returned %#v (%v); want an error satisfying "+
+		"errors.Is(err, executors.ErrMachineNameTaken) -- anything else is "+
+		"classified retryable and loops the executor forever", err, err)
 	// The peer receives this text verbatim, so it must be the sentinel's own
 	// message and not a pgx one: a pgconn error carries the DSN to a peer that
 	// has not proved who it is.
@@ -390,21 +340,14 @@ func TestEnrollRefusesATokenWhoseMachineNameIsTaken(t *testing.T) {
 // advice nor, more importantly, the terminal classification that stops an
 // executor retrying.
 func TestOnlyTheOwnerMachineIndexMeansTheNameIsTaken(t *testing.T) {
+	c := assert.NewAborting(t)
 	other := &pgconn.PgError{Code: uniqueViolation, ConstraintName: "executors_credential_hash_key"}
-	if got := duplicateMachineName(other); got != nil {
-		t.Fatalf("an unrelated unique index reported %v, want nil", got)
-	}
+	c.NoError(duplicateMachineName(other), "an unrelated unique index reported")
 	notUnique := &pgconn.PgError{Code: "23502", ConstraintName: ownerMachineIndex}
-	if got := duplicateMachineName(notUnique); got != nil {
-		t.Fatalf("a not-null violation reported %v, want nil", got)
-	}
-	if got := duplicateMachineName(errors.New("dial tcp: connection refused")); got != nil {
-		t.Fatalf("a non-pg error reported %v, want nil", got)
-	}
+	c.NoError(duplicateMachineName(notUnique), "a not-null violation reported")
+	c.NoError(duplicateMachineName(errors.New("dial tcp: connection refused")), "a non-pg error reported")
 	match := &pgconn.PgError{Code: uniqueViolation, ConstraintName: ownerMachineIndex}
-	if !errors.Is(duplicateMachineName(match), executors.ErrMachineNameTaken) {
-		t.Fatal("the (owner, machine) index must translate to ErrMachineNameTaken")
-	}
+	c.ErrorIs(duplicateMachineName(match), executors.ErrMachineNameTaken, "the (owner, machine) index must translate to ErrMachineNameTaken")
 }
 
 // The remedy the collision message recommends must not itself collide opaquely.
@@ -414,6 +357,7 @@ func TestOnlyTheOwnerMachineIndexMeansTheNameIsTaken(t *testing.T) {
 // ERR_INTERNAL ("the daemon is broken") to an operator following the advice the
 // daemon had just given them.
 func TestRelabellingOntoATakenMachineNameIsRefused(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	taken, mine := machineName(t), machineName(t)
@@ -422,16 +366,12 @@ func TestRelabellingOntoATakenMachineNameIsRefused(t *testing.T) {
 	other := mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": mine})
 
 	_, err := s.SetLabels(ctx, other.ID, map[string]string{"machine": taken}, nil)
-	if err == nil {
-		t.Fatal("relabelling onto a name this owner already uses must be refused: " +
-			"an interactive client picks its durable executor by (owner, machine), " +
-			"and two matches is a coin flip over which filesystem a child lands on")
-	}
-	if !errors.Is(err, executors.ErrMachineNameTaken) {
-		t.Fatalf("SetLabels returned %T: %v; want an error satisfying "+
-			"errors.Is(err, executors.ErrMachineNameTaken) -- anything else "+
-			"reaches the operator as ERR_INTERNAL", err, err)
-	}
+	c.Error(err, "relabelling onto a name this owner already uses must be refused: "+
+		"an interactive client picks its durable executor by (owner, machine), "+
+		"and two matches is a coin flip over which filesystem a child lands on")
+	c.ErrorIs(err, executors.ErrMachineNameTaken, "SetLabels returned %T: %v; want an error satisfying "+
+		"errors.Is(err, executors.ErrMachineNameTaken) -- anything else "+
+		"reaches the operator as ERR_INTERNAL", err, err)
 	if strings.Contains(err.Error(), "SQLSTATE") || strings.Contains(err.Error(), "23505") {
 		t.Fatalf("the store's raw text must not travel: %q", err.Error())
 	}
@@ -439,18 +379,14 @@ func TestRelabellingOntoATakenMachineNameIsRefused(t *testing.T) {
 	// The refused UPDATE must leave the row alone -- a partially applied
 	// relabel would be worse than the refusal.
 	after, err := s.Get(ctx, other.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.Labels["machine"] != mine {
-		t.Fatalf("machine = %q after a refused relabel, want %q unchanged",
-			after.Labels["machine"], mine)
-	}
+	c.NoError(err)
+	c.Eq(mine, after.Labels["machine"], "machine")
 }
 
 // Relabelling onto a name a DIFFERENT owner holds is fine -- the key is the
 // pair, and two operators may each have a laptop.
 func TestRelabellingOntoAnotherOwnersMachineNameIsAllowed(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := testStore(t)
 	ctx := context.Background()
 	shared, mine := machineName(t), machineName(t)
@@ -459,10 +395,6 @@ func TestRelabellingOntoAnotherOwnersMachineNameIsAllowed(t *testing.T) {
 	mine1 := mustCreateExecutor(t, s, map[string]string{"owner": "brent", "machine": mine})
 
 	e, err := s.SetLabels(ctx, mine1.ID, map[string]string{"machine": shared}, nil)
-	if err != nil {
-		t.Fatalf("sam holding %q must not stop brent using it: %v", shared, err)
-	}
-	if e.Labels["machine"] != shared {
-		t.Fatalf("machine = %q, want %q", e.Labels["machine"], shared)
-	}
+	c.NoError(err, "sam holding %q must not stop brent using it", shared)
+	c.Eq(shared, e.Labels["machine"], "machine")
 }

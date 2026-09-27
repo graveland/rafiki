@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 const goodTOML = `
@@ -34,54 +36,27 @@ mcp_servers           = "codescan"
 `
 
 func TestParseGood(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte(goodTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if set.DefaultProvider != "anthropic" {
-		t.Errorf("DefaultProvider = %q, want %q", set.DefaultProvider, "anthropic")
-	}
-	if len(set.Providers) != 3 {
-		t.Fatalf("len(Providers) = %d, want 3", len(set.Providers))
-	}
+	c.Require().NoError(err, "Parse")
+	c.Eq("anthropic", set.DefaultProvider, "DefaultProvider")
+	c.Require().Len(set.Providers, 3, "len(Providers) = %d, want 3", len(set.Providers))
 	p, ok := set.Get("vmlx")
-	if !ok {
-		t.Fatal("Get(vmlx) not found")
-	}
-	if p.Name != "vmlx" {
-		t.Errorf("Name = %q, want vmlx (Load must stamp the map key onto the struct)", p.Name)
-	}
-	if p.Kind != providers.KindAnthropic {
-		t.Errorf("Kind = %q, want %q", p.Kind, providers.KindAnthropic)
-	}
-	if p.BaseURL != "http://localhost:8005" {
-		t.Errorf("BaseURL = %q", p.BaseURL)
-	}
-	if p.APIKeyEnv != "" {
-		t.Errorf("APIKeyEnv = %q, want empty: vmlx is keyless", p.APIKeyEnv)
-	}
+	c.Require().True(ok, "Get(vmlx) not found")
+	c.Eq("vmlx", p.Name, "Name")
+	c.Eq(providers.KindAnthropic, p.Kind, "Kind")
+	c.Eq("http://localhost:8005", p.BaseURL, "BaseURL =")
+	c.Eq("", p.APIKeyEnv, "APIKeyEnv")
 	if got := set.Providers["anthropic"].Fallback; len(got) != 1 || got[0] != "openrouter" {
 		t.Errorf("anthropic.Fallback = %v, want [openrouter]", got)
 	}
 	alias, ok := p.Models["qwen"]
-	if !ok {
-		t.Fatal("vmlx.models.qwen not found")
-	}
-	if alias.ID != "models/Qwen3.8-27B-Abliterated-MLX-4bit" {
-		t.Errorf("alias.ID = %q", alias.ID)
-	}
-	if alias.ContextWindow != 16384 {
-		t.Errorf("alias.ContextWindow = %d, want 16384", alias.ContextWindow)
-	}
-	if alias.ContextFilesTokens != 3277 {
-		t.Errorf("alias.ContextFilesTokens = %d, want 3277", alias.ContextFilesTokens)
-	}
-	if alias.Skills == nil || *alias.Skills != "" {
-		t.Errorf("alias.Skills = %v, want a pointer to \"\"", alias.Skills)
-	}
-	if alias.MCPServers == nil || *alias.MCPServers != "codescan" {
-		t.Errorf("alias.MCPServers = %v, want a pointer to \"codescan\"", alias.MCPServers)
-	}
+	c.Require().True(ok, "vmlx.models.qwen not found")
+	c.Eq("models/Qwen3.8-27B-Abliterated-MLX-4bit", alias.ID, "alias.ID =")
+	c.Eq(16384, alias.ContextWindow, "alias.ContextWindow")
+	c.Eq(3277, alias.ContextFilesTokens, "alias.ContextFilesTokens")
+	c.False(alias.Skills == nil || *alias.Skills != "", "alias.Skills = %v, want a pointer to \"\"", alias.Skills)
+	c.False(alias.MCPServers == nil || *alias.MCPServers != "codescan", "alias.MCPServers = %v, want a pointer to \"codescan\"", alias.MCPServers)
 }
 
 func TestParseRejects(t *testing.T) {
@@ -158,13 +133,10 @@ func TestParseRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			_, err := providers.Parse([]byte(tc.toml))
-			if err == nil {
-				t.Fatalf("Parse succeeded, want error containing %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
-			}
+			c.Require().Error(err, "Parse succeeded, want error containing %q", tc.want)
+			c.StrContains(err.Error(), tc.want, "error")
 		})
 	}
 }
@@ -172,33 +144,28 @@ func TestParseRejects(t *testing.T) {
 // The shipped default must be valid and must preserve the two names already
 // written into conversation_turn.upstream rows.
 func TestDefaultIsValid(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set := providers.Default()
-	if err := set.Validate(); err != nil {
-		t.Fatalf("Default() is invalid: %v", err)
-	}
+	c.Require().NoError(set.Validate(), "Default() is invalid")
 	for _, name := range []string{"anthropic", "openrouter"} {
-		if _, ok := set.Get(name); !ok {
-			t.Errorf("Default() is missing provider %q", name)
-		}
+		_, ok := set.Get(name)
+		c.True(ok, "Default() is missing provider %q", name)
 	}
-	if set.DefaultProvider != "anthropic" {
-		t.Errorf("Default().DefaultProvider = %q, want anthropic", set.DefaultProvider)
-	}
+	c.Eq("anthropic", set.DefaultProvider, "Default().DefaultProvider")
 }
 
 // A missing file is not an error: a fresh install has no providers.toml and
 // must behave exactly as the shipped default.
 func TestLoadMissingFileReturnsDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set, err := providers.Load(t.TempDir() + "/does-not-exist.toml")
-	if err != nil {
-		t.Fatalf("Load of a missing file: %v", err)
-	}
-	if _, ok := set.Get("anthropic"); !ok {
-		t.Error("Load of a missing file must return Default()")
-	}
+	c.Require().NoError(err, "Load of a missing file")
+	_, ok := set.Get("anthropic")
+	c.True(ok, "Load of a missing file must return Default()")
 }
 
 func TestParseModelAliasSkillsUnsetVsEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const toml = `
 default_provider = "x"
 [providers.x]
@@ -213,13 +180,9 @@ id = "m3"
 skills = "*"
 `
 	set, err := providers.Parse([]byte(toml))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	p, _ := set.Get("x")
-	if got := p.Models["unset"].Skills; got != nil {
-		t.Errorf("unset: Skills = %v, want nil (key absent)", got)
-	}
+	c.Nil(p.Models["unset"].Skills, "unset: Skills")
 	if got := p.Models["empty"].Skills; got == nil || *got != "" {
 		t.Errorf("empty: Skills = %v, want pointer to \"\"", got)
 	}
@@ -232,6 +195,7 @@ skills = "*"
 // SAME real id while pinning DIFFERENT provider slugs, which is what makes an
 // A/B eval on one model possible. Absent = nil (no pin).
 func TestParseModelAliasOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const toml = `
 default_provider = "openrouter"
 
@@ -251,31 +215,23 @@ only = ["fireworks"]
 id = "z-ai/glm-5.2"
 `
 	set, err := providers.Parse([]byte(toml))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	p, ok := set.Get("openrouter")
-	if !ok {
-		t.Fatal("Get(openrouter) not found")
-	}
+	c.Require().True(ok, "Get(openrouter) not found")
 	if got := p.Models["glm-flash@together"].Only; len(got) != 1 || got[0] != "together" {
 		t.Errorf("glm-flash@together.Only = %v, want [together]", got)
 	}
 	if got := p.Models["glm-flash@fireworks"].Only; len(got) != 1 || got[0] != "fireworks" {
 		t.Errorf("glm-flash@fireworks.Only = %v, want [fireworks]", got)
 	}
-	if got := p.Models["unpinned"].Only; got != nil {
-		t.Errorf("unpinned.Only = %v, want nil (key absent = no pin)", got)
-	}
+	c.Nil(p.Models["unpinned"].Only, "unpinned.Only")
 	// The two aliases above must still resolve to the same real id.
-	if p.Models["glm-flash@together"].ID != p.Models["glm-flash@fireworks"].ID {
-		t.Errorf("two-aliases-one-id setup lost: %q vs %q",
-			p.Models["glm-flash@together"].ID, p.Models["glm-flash@fireworks"].ID)
-	}
+	c.Eq(p.Models["glm-flash@fireworks"].ID, p.Models["glm-flash@together"].ID, "two-aliases-one-id setup lost")
 }
 
 func TestProvidersLoadsEmbeddingsAndSummaries(t *testing.T) {
 	t.Setenv("EMBED_TEST_API_KEY", "vk")
+	c := assert.NewCollecting(t)
 	const toml = `
 default_provider = "anthropic"
 
@@ -294,40 +250,24 @@ model = "anthropic/claude-haiku-4-5"
 max_segment_tokens = 6000
 `
 	set, err := providers.Parse([]byte(toml))
-	if err != nil {
-		t.Fatalf("Parse with [embeddings] and [summaries]: %v", err)
-	}
+	c.Require().NoError(err, "Parse with [embeddings] and [summaries]")
 	e := set.Embeddings
-	if e == nil {
-		t.Fatal("Embeddings = nil, want the decoded table")
-	}
-	if e.URL != "https://embed.internal:8443/v1/embeddings" {
-		t.Errorf("Embeddings.URL = %q", e.URL)
-	}
-	if e.APIKeyEnv != "EMBED_TEST_API_KEY" {
-		t.Errorf("Embeddings.APIKeyEnv = %q", e.APIKeyEnv)
-	}
+	c.Require().NotNil(e, "Embeddings = nil, want the decoded table")
+	c.Eq("https://embed.internal:8443/v1/embeddings", e.URL, "Embeddings.URL =")
+	c.Eq("EMBED_TEST_API_KEY", e.APIKeyEnv, "Embeddings.APIKeyEnv =")
 	if e.Model != "bge-large" || e.Dimensions != 1536 {
 		t.Errorf("Embeddings.Model = %q, Dimensions = %d, want bge-large, 1536", e.Model, e.Dimensions)
 	}
-	if got := e.APIKey(); got != "vk" {
-		t.Errorf("Embeddings.APIKey() = %q, want the env value", got)
-	}
+	c.Eq("vk", e.APIKey(), "Embeddings.APIKey()")
 	s := set.Summaries
-	if s == nil {
-		t.Fatal("Summaries = nil, want the decoded table")
-	}
-	if s.Model != "anthropic/claude-haiku-4-5" || s.MaxSegmentTokens != 6000 {
-		t.Errorf("Summaries = %+v, want model anthropic/claude-haiku-4-5, 6000", s)
-	}
+	c.Require().NotNil(s, "Summaries = nil, want the decoded table")
+	c.False(s.Model != "anthropic/claude-haiku-4-5" || s.MaxSegmentTokens != 6000, "Summaries = %+v, want model anthropic/claude-haiku-4-5, 6000", s)
 
 	// A config without the tables must leave them nil (absent = BM25-only
 	// recall, no summaries), and Undecoded must not reject the tables when
 	// they ARE present — Parse above would have failed otherwise.
 	plain, err := providers.Parse([]byte(goodTOML))
-	if err != nil {
-		t.Fatalf("Parse without the new tables: %v", err)
-	}
+	c.Require().NoError(err, "Parse without the new tables")
 	if plain.Embeddings != nil || plain.Summaries != nil {
 		t.Errorf("tables must be nil when absent: Embeddings = %v, Summaries = %v", plain.Embeddings, plain.Summaries)
 	}
@@ -383,13 +323,10 @@ dimensions = 1536
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			_, err := providers.Parse([]byte(base + tc.toml))
-			if err == nil {
-				t.Fatalf("Parse succeeded, want error containing %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
-			}
+			c.Require().Error(err, "Parse succeeded, want error containing %q", tc.want)
+			c.StrContains(err.Error(), tc.want, "error")
 		})
 	}
 }
@@ -418,13 +355,10 @@ kind = "anthropic"
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			_, err := providers.Parse([]byte(base + tc.toml))
-			if err == nil {
-				t.Fatalf("Parse succeeded, want error containing %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
-			}
+			c.Require().Error(err, "Parse succeeded, want error containing %q", tc.want)
+			c.StrContains(err.Error(), tc.want, "error")
 		})
 	}
 }

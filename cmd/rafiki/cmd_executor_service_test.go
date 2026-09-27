@@ -3,45 +3,37 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"reflect"
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestAppendProxyArgsNoopWhenEmpty(t *testing.T) {
+	c := assert.NewAborting(t)
 	args := []string{"executor", "serve"}
 	got, err := appendProxyArgs(args, nil)
-	if err != nil {
-		t.Fatalf("appendProxyArgs: %v", err)
-	}
-	if !reflect.DeepEqual(got, args) {
-		t.Fatalf("got %v, want unchanged %v", got, args)
-	}
+	c.NoError(err, "appendProxyArgs")
+	c.EqDiff(args, got, "got")
 }
 
 func TestAppendProxyArgsAppendsEachAsARepeatedFlag(t *testing.T) {
+	c := assert.NewAborting(t)
 	args := []string{"executor", "serve"}
 	got, err := appendProxyArgs(args, []string{"vmlx=http://localhost:8005", "ollama=http://localhost:11434"})
-	if err != nil {
-		t.Fatalf("appendProxyArgs: %v", err)
-	}
+	c.NoError(err, "appendProxyArgs")
 	want := []string{
 		"executor", "serve",
 		"--proxy", "vmlx=http://localhost:8005",
 		"--proxy", "ollama=http://localhost:11434",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
+	c.EqDiff(want, got, "got")
 }
 
 func TestAppendProxyArgsRejectsMalformedEntryBeforeInstalling(t *testing.T) {
 	_, err := appendProxyArgs([]string{"executor", "serve"}, []string{"not-a-pair"})
-	if err == nil {
-		t.Fatal("expected an error for a proxy flag with no '=name'")
-	}
+	assert.NewAborting(t).Error(err, "expected an error for a proxy flag with no '=name'")
 }
 
 // captureExecutorEnv is deliberately broad — the executor runs the operator's
@@ -51,6 +43,7 @@ func TestAppendProxyArgsRejectsMalformedEntryBeforeInstalling(t *testing.T) {
 // session/GUI residue. SSH_AUTH_SOCK is captured on purpose: operators fix
 // agent socket paths so they survive reboots.
 func TestCaptureExecutorEnvKeepsToolchainVarsAndDropsSessionOnes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	environ := []string{
 		"HOME=/Users/you",
 		"PATH=/usr/bin:/bin",
@@ -87,9 +80,8 @@ func TestCaptureExecutorEnvKeepsToolchainVarsAndDropsSessionOnes(t *testing.T) {
 	}
 	got := captureExecutorEnv(environ)
 	for _, k := range []string{"GOPATH", "GITHUB_TOKEN", "http_proxy", "NIX_PATH", "SSH_AUTH_SOCK"} {
-		if _, ok := got[k]; !ok {
-			t.Errorf("captureExecutorEnv dropped %s; toolchain vars must survive", k)
-		}
+		_, ok := got[k]
+		c.True(ok, "captureExecutorEnv dropped %s; toolchain vars must survive", k)
 	}
 	for _, k := range []string{
 		"HOME", "PATH", "TERM", "COLORTERM", "COLORFGBG", "TERM_SESSION_ID",
@@ -99,48 +91,35 @@ func TestCaptureExecutorEnvKeepsToolchainVarsAndDropsSessionOnes(t *testing.T) {
 		// Reserved rafiki variables and provider keys.
 		"RAFIKI_DB", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "FUNDI_SOMETHING",
 	} {
-		if _, ok := got[k]; ok {
-			t.Errorf("captureExecutorEnv kept %s; want it excluded", k)
-		}
+		_, ok := got[k]
+		c.False(ok, "captureExecutorEnv kept %s; want it excluded", k)
 	}
 }
 
 func TestExecutorEnvReportConflictSaysTheFileWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	res := paths.MergeResult{Added: []string{"NEWVAR"}, Existing: []string{"A", "B"}, Conflict: []string{"OLDVAR"}}
 	out := executorEnvReport("/tmp/executor.env", map[string]string{"NEWVAR": "v", "OLDVAR": "x"}, res, nil)
-	if !strings.Contains(out, "OLDVAR") {
-		t.Error("report should name conflicting variables")
-	}
-	if !strings.Contains(out, "file wins") {
-		t.Error("report should state that the file wins at serve time")
-	}
-	if strings.Contains(out, "ghp_") {
-		t.Error("report must never contain values")
-	}
-	if !strings.Contains(out, "/tmp/executor.env") {
-		t.Error("report should name the environment file")
-	}
+	c.StrContains(out, "OLDVAR", "report should name conflicting variables")
+	c.StrContains(out, "file wins", "report should state that the file wins at serve time")
+	c.NotStrContains(out, "ghp_", "report must never contain values")
+	c.StrContains(out, "/tmp/executor.env", "report should name the environment file")
 }
 
 // loadExecutorEnv is what makes the supervised executor see the installing
 // shell's environment: absent a login shell, the 0600 file is all it gets.
 // Precedence matches the daemon: the process environment overrides the file.
 func TestLoadExecutorEnvAppliesFileWithoutOverridingProcess(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "executor.env")
 	content := "EXECUTOR_ENV_TEST_FILEVAR=filevalue\nEXECUTOR_ENV_TEST_PROCVAR=filevalue\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(content), 0o600))
 	t.Setenv(paths.ExecutorEnvFileEnv, path)
 	t.Setenv("EXECUTOR_ENV_TEST_PROCVAR", "processvalue")
 
 	loadExecutorEnv()
 
-	if got := os.Getenv("EXECUTOR_ENV_TEST_FILEVAR"); got != "filevalue" {
-		t.Errorf("file var not applied: got %q", got)
-	}
-	if got := os.Getenv("EXECUTOR_ENV_TEST_PROCVAR"); got != "processvalue" {
-		t.Errorf("process env must win over the file: got %q", got)
-	}
+	c.Eq("filevalue", os.Getenv("EXECUTOR_ENV_TEST_FILEVAR"), "file var not applied: got")
+	c.Eq("processvalue", os.Getenv("EXECUTOR_ENV_TEST_PROCVAR"), "process env must win over the file: got")
 }

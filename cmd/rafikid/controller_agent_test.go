@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +14,15 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestResolveSpawnPlanAgentKind covers R1: the "fundi" case resolves to the
 // daemon's own binary (self re-exec) with the native pi protocol (no
 // translator - the agent runtime speaks pi's rpc protocol directly).
 func TestResolveSpawnPlanAgentKind(t *testing.T) {
+	c := assert.NewAborting(t)
 	req := protocol.SpawnRequest{
 		Kind:               protocol.KindFundi,
 		Model:              "deepseek/deepseek-chat",
@@ -34,25 +36,16 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 	}
 
 	bin, argv, prov, err := resolveSpawnPlan(req, "c_test123", "/var/rafiki-state", proxyenv.Values{})
-	if err != nil {
-		t.Fatalf("resolveSpawnPlan: %v", err)
-	}
+	c.NoError(err, "resolveSpawnPlan")
 
 	self, selfErr := os.Executable()
-	if selfErr != nil {
-		t.Fatalf("os.Executable: %v", selfErr)
-	}
-	if bin != self {
-		t.Fatalf("bin = %q, want self-exec %q", bin, self)
-	}
+	c.NoError(selfErr, "os.Executable")
+	c.Eq(self, bin, "bin")
 
-	if _, ok := prov.(child.IdentityProvider); !ok {
-		t.Fatalf("provider = %T, want child.IdentityProvider (agent speaks pi protocol natively)", prov)
-	}
+	_, ok := prov.(child.IdentityProvider)
+	c.True(ok, "provider = %T, want child.IdentityProvider (agent speaks pi protocol natively)", prov)
 
-	if len(argv) == 0 || argv[0] != protocol.KindFundi {
-		t.Fatalf("argv[0] = %v, want \"agent\" subcommand token: %v", argv, argv)
-	}
+	c.False(len(argv) == 0 || argv[0] != protocol.KindFundi, "argv[0] = %v, want \"agent\" subcommand token: %v", argv, argv)
 
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{
@@ -65,21 +58,15 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 		"--name my-session",
 		"--spill-dir " + filepath.Join("/var/rafiki-state", "spill", "c_test123"),
 	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("argv missing %q: %v", want, argv)
-		}
+		c.StrContains(joined, want, "argv missing %q: %v", want, argv)
 	}
 
 	// --provider no longer exists as a flag - the model id alone determines
 	// routing (see pkg/fundi/config.go's senderOptions).
-	if strings.Contains(joined, "--provider") {
-		t.Fatalf("argv unexpectedly contains --provider (removed in the provider/model redesign): %v", argv)
-	}
+	c.NotStrContains(joined, "--provider", "argv unexpectedly contains --provider (removed in the provider/model redesign): %v", argv)
 
 	// ExtraArgs must remain the trailing tokens (last-flag-wins escape hatch).
-	if argv[len(argv)-2] != "--fake-turns" || argv[len(argv)-1] != "/tmp/turns.ndjson" {
-		t.Fatalf("ExtraArgs not appended last: %v", argv)
-	}
+	c.False(argv[len(argv)-2] != "--fake-turns" || argv[len(argv)-1] != "/tmp/turns.ndjson", "ExtraArgs not appended last: %v", argv)
 }
 
 // TestResolveSpawnPlanAgentKindRequiresModel covers the daemon-side half of
@@ -90,9 +77,8 @@ func TestResolveSpawnPlanAgentKind(t *testing.T) {
 // error.
 func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi}
-	if _, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/rafiki-state", proxyenv.Values{}); err == nil {
-		t.Fatal("resolveSpawnPlan(agent kind, no model): want error, got nil")
-	}
+	_, _, _, err := resolveSpawnPlan(req, "c_test456", "/var/rafiki-state", proxyenv.Values{})
+	assert.NewAborting(t).Error(err, "resolveSpawnPlan(agent kind, no model): want error, got nil")
 }
 
 // TestResolveSpawnPlanAgentKindModelViaExtraArgs confirms the ExtraArgs
@@ -100,9 +86,8 @@ func TestResolveSpawnPlanAgentKindRequiresModel(t *testing.T) {
 // --model through ExtraArgs instead of SpawnRequest.Model.
 func TestResolveSpawnPlanAgentKindModelViaExtraArgs(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: []string{"--model", "anthropic/sonnet-latest"}}
-	if _, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/rafiki-state", proxyenv.Values{}); err != nil {
-		t.Fatalf("resolveSpawnPlan(agent kind, model via ExtraArgs): unexpected error: %v", err)
-	}
+	_, _, _, err := resolveSpawnPlan(req, "c_test789", "/var/rafiki-state", proxyenv.Values{})
+	assert.NewAborting(t).NoError(err, "resolveSpawnPlan(agent kind, model via ExtraArgs): unexpected error")
 }
 
 // TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue covers the fix to
@@ -121,9 +106,8 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := protocol.SpawnRequest{Kind: protocol.KindFundi, ExtraArgs: tc.extraArgs}
-			if _, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/rafiki-state", proxyenv.Values{}); err == nil {
-				t.Fatalf("resolveSpawnPlan(agent kind, %s): want error, got nil", tc.name)
-			}
+			_, _, _, err := resolveSpawnPlan(req, "c_testbare", "/var/rafiki-state", proxyenv.Values{})
+			assert.NewAborting(t).Error(err, "resolveSpawnPlan(agent kind, %s): want error, got nil", tc.name)
 		})
 	}
 }
@@ -135,9 +119,8 @@ func TestResolveSpawnPlanAgentKindBareModelFlagRequiresValue(t *testing.T) {
 // or double-prefixed onto the reported model.
 func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/sonnet-latest", Provider: "anthropic"}
-	if _, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/rafiki-state", proxyenv.Values{}); err == nil {
-		t.Fatal("resolveSpawnPlan(agent kind, Provider set): want error, got nil")
-	}
+	_, _, _, err := resolveSpawnPlan(req, "c_testprov", "/var/rafiki-state", proxyenv.Values{})
+	assert.NewAborting(t).Error(err, "resolveSpawnPlan(agent kind, Provider set): want error, got nil")
 }
 
 // TestResumeRequestFromSnapshotAgentRejoinsModel is the other half of
@@ -157,6 +140,7 @@ func TestResolveSpawnPlanAgentKindRejectsProvider(t *testing.T) {
 // something resolveSpawnPlan actually ACCEPTS. That holds regardless of how
 // the rejoin is implemented, so it still catches a future re-break.
 func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Kind:     protocol.KindFundi,
 		Cwd:      "/tmp/rafiki-smoke",
@@ -167,35 +151,28 @@ func TestResumeRequestFromSnapshotAgentRejoinsModel(t *testing.T) {
 
 	req := resumeRequestFromSnapshot(snap, "")
 
-	if req.Provider != "" {
-		t.Errorf("Provider = %q, want empty: the agent kind takes no separate provider", req.Provider)
-	}
-	if req.Model != "anthropic/sonnet-latest" {
-		t.Errorf("Model = %q, want %q (provider rejoined onto the model id)", req.Model, "anthropic/sonnet-latest")
-	}
-	if _, _, _, err := resolveSpawnPlan(req, "c_resume", "/var/rafiki-state", proxyenv.Values{}); err != nil {
-		t.Fatalf("resolveSpawnPlan(resumed agent request): %v\nresume must produce a request the spawn planner accepts", err)
-	}
+	c.Eq("", req.Provider, "Provider")
+	c.Eq("anthropic/sonnet-latest", req.Model, "Model")
+	_, _, _, err := resolveSpawnPlan(req, "c_resume", "/var/rafiki-state", proxyenv.Values{})
+	c.Require().NoError(err, "resolveSpawnPlan(resumed agent request)")
 }
 
 // TestResumeRequestFromSnapshotAgentBareModel covers the degenerate snapshot
 // where no provider was ever recorded: joinModel must leave the model alone
 // rather than emitting a leading "/", which would resolve to a bogus provider.
 func TestResumeRequestFromSnapshotAgentBareModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{Kind: protocol.KindFundi, Model: "sonnet-latest"}
 	req := resumeRequestFromSnapshot(snap, "")
-	if req.Model != "sonnet-latest" {
-		t.Errorf("Model = %q, want %q unchanged", req.Model, "sonnet-latest")
-	}
-	if req.Provider != "" {
-		t.Errorf("Provider = %q, want empty", req.Provider)
-	}
+	c.Eq("sonnet-latest", req.Model, "Model")
+	c.Eq("", req.Provider, "Provider")
 }
 
 // TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig covers I4: a
 // resumed agent-kind child must rejoin with the same skill inventory and MCP
 // tool set it was spawned with, not a silently shrunk one.
 func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
@@ -204,12 +181,8 @@ func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
 	}
 	req := resumeRequestFromSnapshot(snap, "")
 
-	if !reflect.DeepEqual(req.SkillsDirs, snap.SkillsDirs) {
-		t.Errorf("SkillsDirs = %v, want %v — a resumed child silently loses its skill dirs", req.SkillsDirs, snap.SkillsDirs)
-	}
-	if req.MCPConfig != snap.MCPConfig {
-		t.Errorf("MCPConfig = %q, want %q — a resumed child silently loses its MCP servers", req.MCPConfig, snap.MCPConfig)
-	}
+	c.EqDiff(snap.SkillsDirs, req.SkillsDirs, "SkillsDirs")
+	c.Eq(snap.MCPConfig, req.MCPConfig, "MCPConfig")
 }
 
 // TestResumeRequestFromSnapshotCarriesMCPServersAndNoMCP is the same guard for
@@ -219,6 +192,7 @@ func TestResumeRequestFromSnapshotCarriesSkillsDirsAndMCPConfig(t *testing.T) {
 // lost the config file, because the narrowing is usually there to keep a
 // small-context model's tool inventory inside its window.
 func TestResumeRequestFromSnapshotCarriesMCPServersAndNoMCP(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
@@ -226,35 +200,28 @@ func TestResumeRequestFromSnapshotCarriesMCPServersAndNoMCP(t *testing.T) {
 		MCPServers: []string{"codescan", "cachecache"},
 	}
 	req := resumeRequestFromSnapshot(snap, "")
-	if !reflect.DeepEqual(req.MCPServers, snap.MCPServers) {
-		t.Errorf("MCPServers = %v, want %v — a resumed child silently reconnects every MCP server", req.MCPServers, snap.MCPServers)
-	}
+	c.EqDiff(snap.MCPServers, req.MCPServers, "MCPServers")
 
 	off := resumeRequestFromSnapshot(childstore.Snapshot{
 		Kind:      protocol.KindFundi,
 		MCPConfig: "/work/.mcp.json",
 		NoMCP:     true,
 	}, "")
-	if !off.NoMCP {
-		t.Error("NoMCP = false, want true — a resumed child silently regains MCP it was spawned without")
-	}
+	c.True(off.NoMCP, "NoMCP = false, want true — a resumed child silently regains MCP it was spawned without")
 }
 
 // TestBuildAgentArgv_NoSkillsAndDefaults confirms the no-skills / minimal
 // request path emits only --spill-dir plus whatever ExtraArgs were given, with
 // none of the optional flags present when the request leaves them empty.
 func TestBuildAgentArgv_NoSkillsAndDefaults(t *testing.T) {
+	c := assert.NewAborting(t)
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, NoSkills: true}
 	argv := buildAgentArgv(req, "c1", "/state")
 
 	joined := strings.Join(argv, " ")
-	if !strings.Contains(joined, "--no-skills") {
-		t.Fatalf("argv missing --no-skills: %v", argv)
-	}
+	c.StrContains(joined, "--no-skills", "argv missing --no-skills: %v", argv)
 	for _, unwanted := range []string{"--model", "--thinking", "--system-prompt", "--skills ", "--name"} {
-		if strings.Contains(joined, unwanted) {
-			t.Fatalf("argv unexpectedly contains %q: %v", unwanted, argv)
-		}
+		c.NotStrContains(joined, unwanted, "argv unexpectedly contains %q: %v", unwanted, argv)
 	}
 }
 
@@ -263,6 +230,7 @@ func TestBuildAgentArgv_NoSkillsAndDefaults(t *testing.T) {
 // that ExtraArgs come strictly after it, preserving last-flag-wins semantics
 // (an ExtraArgs override of --spill-dir would win, matching pi/claude kinds).
 func TestBuildAgentArgv_SpillDirPinnedBeforeExtraArgs(t *testing.T) {
+	c := assert.NewAborting(t)
 	req := protocol.SpawnRequest{ExtraArgs: []string{"--fake-turns", "/tmp/t.ndjson"}}
 	argv := buildAgentArgv(req, "c9", "/state-dir")
 
@@ -276,22 +244,17 @@ func TestBuildAgentArgv_SpillDirPinnedBeforeExtraArgs(t *testing.T) {
 			extraIdx = i
 		}
 	}
-	if spillIdx == -1 {
-		t.Fatalf("argv missing --spill-dir: %v", argv)
-	}
-	if extraIdx == -1 || extraIdx < spillIdx {
-		t.Fatalf("ExtraArgs must come after --spill-dir: %v", argv)
-	}
+	c.NotEq(-1, spillIdx, "argv missing --spill-dir: %v", argv)
+	c.False(extraIdx == -1 || extraIdx < spillIdx, "ExtraArgs must come after --spill-dir: %v", argv)
 	wantSpill := filepath.Join("/state-dir", "spill", "c9")
-	if argv[spillIdx+1] != wantSpill {
-		t.Fatalf("--spill-dir value = %q, want %q", argv[spillIdx+1], wantSpill)
-	}
+	c.Eq(wantSpill, argv[spillIdx+1], "--spill-dir value")
 }
 
 // TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig covers task A6: --skills-dir
 // and --mcp-config, previously reachable only via --extra-arg, now render
 // straight from their own SpawnRequest fields.
 func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
@@ -301,16 +264,10 @@ func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
 	argv := buildAgentArgv(req, "child-1", "/state")
 	joined := strings.Join(argv, " ")
 
-	if strings.Count(joined, "--skills-dir") != 2 {
-		t.Errorf("want one --skills-dir per entry, got: %v", argv)
-	}
-	if !strings.Contains(joined, "--skills-dir /a/skills") ||
-		!strings.Contains(joined, "--skills-dir /b/skills") {
-		t.Errorf("skills dirs missing from argv: %v", argv)
-	}
-	if !strings.Contains(joined, "--mcp-config /cfg/.mcp.json") {
-		t.Errorf("mcp config missing from argv: %v", argv)
-	}
+	c.Eq(2, strings.Count(joined, "--skills-dir"), "want one --skills-dir per entry, got: %v", argv)
+	c.False(!strings.Contains(joined, "--skills-dir /a/skills") ||
+		!strings.Contains(joined, "--skills-dir /b/skills"), "skills dirs missing from argv: %v", argv)
+	c.StrContains(joined, "--mcp-config /cfg/.mcp.json", "mcp config missing from argv: %v", argv)
 }
 
 // TestBuildAgentArgv_OmitsUnsetKnobs confirms --skills-dir/--mcp-config are
@@ -319,36 +276,29 @@ func TestBuildAgentArgv_RendersSkillsDirsAndMCPConfig(t *testing.T) {
 func TestBuildAgentArgv_OmitsUnsetKnobs(t *testing.T) {
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-5"}
 	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
-	if strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") || strings.Contains(joined, "--mcp-servers") {
-		t.Errorf("unset knobs must not appear: %s", joined)
-	}
+	assert.NewCollecting(t).False(strings.Contains(joined, "--skills-dir") || strings.Contains(joined, "--mcp-config") || strings.Contains(joined, "--mcp-servers"), "unset knobs must not appear: %s", joined)
 }
 
 // TestBuildAgentArgv_RendersMCPServersAndNoMCP confirms --mcp-servers and
 // --no-mcp are emitted from their SpawnRequest fields.
 func TestBuildAgentArgv_RendersMCPServersAndNoMCP(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Kind:       protocol.KindFundi,
 		Model:      "anthropic/claude-sonnet-5",
 		MCPServers: []string{"codescan", "other"},
 	}
 	joined := strings.Join(buildAgentArgv(req, "child-1", "/state"), " ")
-	if !strings.Contains(joined, "--mcp-servers codescan,other") {
-		t.Errorf("mcp-servers missing from argv: %s", joined)
-	}
+	c.StrContains(joined, "--mcp-servers codescan,other", "mcp-servers missing from argv")
 
 	req2 := protocol.SpawnRequest{Kind: protocol.KindFundi, Model: "anthropic/claude-sonnet-5", NoMCP: true}
 	joined2 := strings.Join(buildAgentArgv(req2, "child-1", "/state"), " ")
-	if !strings.Contains(joined2, "--no-mcp") {
-		t.Errorf("--no-mcp missing from argv: %s", joined2)
-	}
+	c.StrContains(joined2, "--no-mcp", "--no-mcp missing from argv")
 }
 
 // TestSpawnKindLabel_Agent covers the rafiki/kind auto-label for the new kind.
 func TestSpawnKindLabel_Agent(t *testing.T) {
-	if got := spawnKindLabel(protocol.KindFundi); got != protocol.KindFundi {
-		t.Fatalf("spawnKindLabel(%q) = %q, want %q", protocol.KindFundi, got, protocol.KindFundi)
-	}
+	assert.NewAborting(t).Eq(protocol.KindFundi, spawnKindLabel(protocol.KindFundi), "spawnKindLabel(")
 }
 
 // TestForget_RemovesAgentSpillDir covers R4: Forget removes the agent kind's
@@ -357,17 +307,14 @@ func TestSpawnKindLabel_Agent(t *testing.T) {
 // spill dir's existence (not its contents) is what Forget must guarantee is
 // cleaned up.
 func TestForget_RemovesAgentSpillDir(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 
 	const childID = "c_spill_forget_test"
 	spillDir := agentSpillDir(ctrl.stateDir, childID)
-	if err := os.MkdirAll(spillDir, 0o700); err != nil {
-		t.Fatalf("mkdirall spill dir: %v", err)
-	}
+	c.NoError(os.MkdirAll(spillDir, 0o700), "mkdirall spill dir")
 	sentinel := filepath.Join(spillDir, "clipped-output.txt")
-	if err := os.WriteFile(sentinel, []byte("clipped tool output"), 0o600); err != nil {
-		t.Fatalf("write sentinel file: %v", err)
-	}
+	c.NoError(os.WriteFile(sentinel, []byte("clipped tool output"), 0o600), "write sentinel file")
 
 	now := time.Now()
 	ctrl.st.Insert(&childstore.Session{
@@ -380,29 +327,23 @@ func TestForget_RemovesAgentSpillDir(t *testing.T) {
 		ExitedAt:     now,
 	})
 
-	if err := ctrl.Close(childID); err != nil {
-		t.Fatalf("Forget: %v", err)
-	}
+	c.NoError(ctrl.Close(childID), "Forget")
 
-	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
-		t.Fatalf("spill dir %s still exists after Forget (err=%v)", spillDir, err)
-	}
+	_, err := os.Stat(spillDir)
+	c.True(os.IsNotExist(err), "spill dir %s still exists after Forget (err=%v)", spillDir, err)
 }
 
 // TestForgetAllExited_RemovesAgentSpillDir covers the same cleanup via the
 // bulk sweep path (ForgetAllExited), used by the sweeper and 'rafiki forget
 // --all'.
 func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 
 	const childID = "c_spill_forgetall_test"
 	spillDir := agentSpillDir(ctrl.stateDir, childID)
-	if err := os.MkdirAll(spillDir, 0o700); err != nil {
-		t.Fatalf("mkdirall spill dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(spillDir, "clipped-output.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write sentinel file: %v", err)
-	}
+	c.NoError(os.MkdirAll(spillDir, 0o700), "mkdirall spill dir")
+	c.NoError(os.WriteFile(filepath.Join(spillDir, "clipped-output.txt"), []byte("x"), 0o600), "write sentinel file")
 
 	now := time.Now()
 	ctrl.st.Insert(&childstore.Session{
@@ -416,12 +357,8 @@ func TestForgetAllExited_RemovesAgentSpillDir(t *testing.T) {
 	})
 
 	closed, err := ctrl.CloseAllExited(0)
-	if err != nil {
-		t.Fatalf("ForgetAllExited: %v", err)
-	}
-	if len(closed) != 1 {
-		t.Fatalf("ForgetAllExited count = %d, want 1", len(closed))
-	}
+	c.NoError(err, "ForgetAllExited")
+	c.Len(closed, 1, "ForgetAllExited count = %d, want 1", len(closed))
 
 	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
 		t.Fatalf("spill dir %s still exists after ForgetAllExited (err=%v)", spillDir, err)
@@ -446,6 +383,7 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 		`{"type":"switch_session","id":"req-2","sessionPath":"/tmp/other.jsonl"}`,
 	} {
 		t.Run(frame, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			ctrl := newTestController(t)
 			const childID = "c_agent_session_switch"
 			now := time.Now()
@@ -459,30 +397,17 @@ func TestSend_RejectsSessionSwitchForAgentChild(t *testing.T) {
 			})
 
 			err := ctrl.Send(childID, json.RawMessage(frame))
-			if err == nil {
-				t.Fatal("Send accepted a session switch for an agent child; it would silently reattach the same conversation")
-			}
+			c.Require().Error(err, "Send accepted a session switch for an agent child; it would silently reattach the same conversation")
 			var ce *connectapi.ControllerError
-			if !errors.As(err, &ce) {
-				t.Fatalf("error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
-			}
-			if ce.Code != protocol.ErrInvalidArgs {
-				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
-			}
-			if !strings.Contains(ce.Message, "agent child") {
-				t.Errorf("message %q does not explain that the agent kind is the problem", ce.Message)
-			}
+			c.Require().True(errors.As(err, &ce), "error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
+			c.Eq(protocol.ErrInvalidArgs, ce.Code, "error code")
+			c.StrContains(ce.Message, "agent child", "message")
 
 			// The child must be left completely alone: the rejection happens
 			// before the kill+respawn ceremony, so it is still exactly as it was.
 			snap, ok := ctrl.st.Get(childID)
-			if !ok {
-				t.Fatal("the rejected request removed the child from the store")
-			}
-			if snap.Status != protocol.StatusIdle {
-				t.Errorf("child status = %q after a rejected session switch, want %q untouched",
-					snap.Status, protocol.StatusIdle)
-			}
+			c.Require().True(ok, "the rejected request removed the child from the store")
+			c.Eq(protocol.StatusIdle, snap.Status, "child status")
 		})
 	}
 }
@@ -507,10 +432,8 @@ func TestSend_AllowsSessionSwitchForNonAgentKinds(t *testing.T) {
 
 			err := ctrl.Send(childID, json.RawMessage(`{"type":"new_session","id":"req-1"}`))
 			var ce *connectapi.ControllerError
-			if errors.As(err, &ce) && ce.Code == protocol.ErrInvalidArgs &&
-				strings.Contains(ce.Message, "agent child") {
-				t.Fatalf("kind %q was refused with the agent-kind rejection: %v", kind, err)
-			}
+			assert.NewAborting(t).False(errors.As(err, &ce) && ce.Code == protocol.ErrInvalidArgs &&
+				strings.Contains(ce.Message, "agent child"), "kind %q was refused with the agent-kind rejection: %v", kind, err)
 		})
 	}
 }
@@ -528,6 +451,7 @@ func TestSend_RejectsSessionSwitchForScriptChild(t *testing.T) {
 		`{"type":"switch_session","id":"req-2","sessionPath":"/tmp/other.jsonl"}`,
 	} {
 		t.Run(frame, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			ctrl := newTestController(t)
 			const childID = "c_script_session_switch"
 			now := time.Now()
@@ -541,33 +465,18 @@ func TestSend_RejectsSessionSwitchForScriptChild(t *testing.T) {
 			})
 
 			err := ctrl.Send(childID, json.RawMessage(frame))
-			if err == nil {
-				t.Fatal("Send accepted a session switch for a script child; a respawn would silently start the work over")
-			}
+			c.Require().Error(err, "Send accepted a session switch for a script child; a respawn would silently start the work over")
 			var ce *connectapi.ControllerError
-			if !errors.As(err, &ce) {
-				t.Fatalf("error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
-			}
-			if ce.Code != protocol.ErrInvalidArgs {
-				t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
-			}
-			if !strings.Contains(ce.Message, "script child") {
-				t.Errorf("message %q does not explain that the script kind is the problem", ce.Message)
-			}
-			if !strings.Contains(ce.Message, "exit is its result") {
-				t.Errorf("message %q does not name the respawn semantics that make the refusal the right answer", ce.Message)
-			}
+			c.Require().True(errors.As(err, &ce), "error is %T, want *connectapi.ControllerError so the client sees a coded failure: %v", err, err)
+			c.Eq(protocol.ErrInvalidArgs, ce.Code, "error code")
+			c.StrContains(ce.Message, "script child", "message")
+			c.StrContains(ce.Message, "exit is its result", "message")
 
 			// The refusal happens before the kill ceremony: the row is
 			// exactly as it was (a live child would still be live).
 			snap, ok := ctrl.st.Get(childID)
-			if !ok {
-				t.Fatal("the rejected request removed the child from the store")
-			}
-			if snap.Status != protocol.StatusStreaming {
-				t.Errorf("child status = %q after a rejected session switch, want %q untouched",
-					snap.Status, protocol.StatusStreaming)
-			}
+			c.Require().True(ok, "the rejected request removed the child from the store")
+			c.Eq(protocol.StatusStreaming, snap.Status, "child status")
 		})
 	}
 }

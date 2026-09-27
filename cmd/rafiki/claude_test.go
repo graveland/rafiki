@@ -6,14 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestClaudeCmd_FlagDefaults(t *testing.T) {
@@ -22,6 +22,7 @@ func TestClaudeCmd_FlagDefaults(t *testing.T) {
 	t.Setenv("RAFIKI_TOKEN", "")
 	t.Setenv("RAFIKI_MODEL", "")
 	t.Setenv("RAFIKI_SESSION", "")
+	c := assert.NewCollecting(t)
 
 	cmd := newClaudeCmd()
 
@@ -45,12 +46,8 @@ func TestClaudeCmd_FlagDefaults(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got, err := cmd.Flags().GetString(tt.flag)
-		if err != nil {
-			t.Fatalf("--%s not registered: %v", tt.flag, err)
-		}
-		if got != tt.want {
-			t.Errorf("--%s default = %q, want %q", tt.flag, got, tt.want)
-		}
+		c.Require().NoError(err, "--%s not registered", tt.flag)
+		c.Eq(tt.want, got, "--%s default = %q, want", tt.flag, got)
 	}
 }
 
@@ -71,9 +68,7 @@ func TestClaudeCmd_FlagDefaultsFromEnv(t *testing.T) {
 	}
 	for flag, wantVal := range want {
 		got, _ := cmd.Flags().GetString(flag)
-		if got != wantVal {
-			t.Errorf("--%s default = %q, want %q (from env)", flag, got, wantVal)
-		}
+		assert.NewCollecting(t).Eq(wantVal, got, "--%s default = %q, want %q (from env)", flag, got, wantVal)
 	}
 }
 
@@ -83,39 +78,30 @@ func TestClaudeCmd_FlagDefaultsFromEnv(t *testing.T) {
 // paths.TokenFromEnv (RAFIKI_TOKEN, then the global token file) happens one
 // layer up, in runClaude, via mustProfile.
 func TestResolveClaudeToken_FlagWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := resolveClaudeToken("from-flag", "from-profile")
-	if err != nil {
-		t.Fatalf("resolveClaudeToken: %v", err)
-	}
-	if got != "from-flag" {
-		t.Errorf("token = %q, want %q", got, "from-flag")
-	}
+	c.Require().NoError(err, "resolveClaudeToken")
+	c.Eq("from-flag", got, "token")
 }
 
 // With no --token, the resolved profile's token is the fallback — this is
 // what makes `rafiki user create` + `rafiki claude` work with nothing
 // exported.
 func TestResolveClaudeToken_FallsBackToProfileToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := resolveClaudeToken("", "from-profile")
-	if err != nil {
-		t.Fatalf("resolveClaudeToken: %v", err)
-	}
-	if got != "from-profile" {
-		t.Errorf("token = %q, want %q", got, "from-profile")
-	}
+	c.Require().NoError(err, "resolveClaudeToken")
+	c.Eq("from-profile", got, "token")
 }
 
 // No flag and no profile token: this must be a clear, actionable error, not
 // the old "dev" literal silently authenticating against nothing and failing
 // as a confusing 401 several steps later.
 func TestResolveClaudeToken_NoneResolvesIsAnError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, err := resolveClaudeToken("", "")
-	if err == nil {
-		t.Fatal("expected an error when no token resolves, got nil")
-	}
-	if !strings.Contains(err.Error(), "rafiki user create") {
-		t.Errorf("error = %v, want it to name `rafiki user create`", err)
-	}
+	c.Require().Error(err, "expected an error when no token resolves, got nil")
+	c.StrContains(err.Error(), "rafiki user create", "error = %v, want it to name `rafiki user create`", err)
 }
 
 // The two sources can be present and conflicting at once; only short-circuit
@@ -142,13 +128,10 @@ func TestResolveClaudeToken_Precedence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			got, err := resolveClaudeToken(tt.flagToken, tt.profileToken)
-			if err != nil {
-				t.Fatalf("resolveClaudeToken: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("token = %q, want %q", got, tt.want)
-			}
+			c.Require().NoError(err, "resolveClaudeToken")
+			c.Eq(tt.want, got, "token")
 		})
 	}
 }
@@ -162,16 +145,13 @@ func TestResolveClaudeToken_Precedence(t *testing.T) {
 // that ordering end to end: construct the command, THEN mint the token, and
 // confirm resolution still sees it.
 func TestResolveClaudeToken_ReflectsProfileTokenWrittenAfterConstruction(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.Require().NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"work": {Name: "work", Socket: filepath.Join(t.TempDir(), "d.sock")},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("work"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.Require().NoError(profile.SavePointer("work"), "SavePointer")
 
 	// Construct the command before any token exists. A correct implementation
 	// does nothing with the profile here — the flag's default stays "".
@@ -180,25 +160,15 @@ func TestResolveClaudeToken_ReflectsProfileTokenWrittenAfterConstruction(t *test
 	// The token is minted (or rotated) AFTER the command was built — e.g. a
 	// developer runs `rafiki user create` in another shell while `rafiki
 	// claude` is being invoked for the first time in a fresh process.
-	if err := profile.WriteToken("work", "fresh-token"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
+	c.Require().NoError(profile.WriteToken("work", "fresh-token"), "WriteToken")
 
 	p, err := resolveProfile(cmd)
-	if err != nil {
-		t.Fatalf("resolveProfile: %v", err)
-	}
+	c.Require().NoError(err, "resolveProfile")
 	flagToken, err := cmd.Flags().GetString("token")
-	if err != nil {
-		t.Fatalf("--token not registered: %v", err)
-	}
+	c.Require().NoError(err, "--token not registered")
 	got, err := resolveClaudeToken(flagToken, p.Token)
-	if err != nil {
-		t.Fatalf("resolveClaudeToken: %v", err)
-	}
-	if got != "fresh-token" {
-		t.Errorf("token = %q, want %q (resolution must happen at RunE time, not command-construction time)", got, "fresh-token")
-	}
+	c.Require().NoError(err, "resolveClaudeToken")
+	c.Eq("fresh-token", got, "token")
 }
 
 // pflag treats a bare "--" as the flag/arg terminator (unlike stdlib flag,
@@ -208,6 +178,7 @@ func TestResolveClaudeToken_ReflectsProfileTokenWrittenAfterConstruction(t *test
 // --permission-mode straight to the claude binary instead of rafiki trying
 // to parse it as its own flag.
 func TestClaudeCmd_DashDashPassesArgsThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newClaudeCmd()
 
 	var gotArgs []string
@@ -216,75 +187,53 @@ func TestClaudeCmd_DashDashPassesArgsThrough(t *testing.T) {
 		return nil
 	}
 	cmd.SetArgs([]string{"--model", "foo", "--", "--permission-mode", "plan"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	c.Require().NoError(cmd.Execute(), "unexpected error")
 
-	if model, _ := cmd.Flags().GetString("model"); model != "foo" {
-		t.Errorf("--model = %q, want foo", model)
-	}
+	model, _ := cmd.Flags().GetString("model")
+	c.Eq("foo", model, "--model")
 	want := []string{"--permission-mode", "plan"}
-	if !reflect.DeepEqual(gotArgs, want) {
-		t.Errorf("args passed to RunE = %v, want %v", gotArgs, want)
-	}
+	c.EqDiff(want, gotArgs, "args passed to RunE")
 }
 
 // An empty --url with a profile carrying no `proxy` field is an error: there
 // is nowhere left to look.
 func TestRunClaude_EmptyURLIsError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.Require().NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"noproxy": {Name: "noproxy", Socket: filepath.Join(t.TempDir(), "d.sock")},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("noproxy"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.Require().NoError(profile.SavePointer("noproxy"), "SavePointer")
 
 	cmd := newClaudeCmd()
-	if err := cmd.Flags().Set("url", ""); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("url", ""))
 
 	err := runClaude(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for empty --url, got nil")
-	}
-	if !strings.Contains(err.Error(), "--url") {
-		t.Errorf("error = %v, want it to mention --url", err)
-	}
+	c.Require().Error(err, "expected error for empty --url, got nil")
+	c.StrContains(err.Error(), "--url", "error = %v, want it to mention --url", err)
 }
 
 func TestClaudeCmd_PassthroughFlagDefaultsAuto(t *testing.T) {
 	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "")
+	c := assert.NewCollecting(t)
 
 	cmd := newClaudeCmd()
 	got, err := cmd.Flags().GetString("passthrough-auth")
-	if err != nil {
-		t.Fatalf("--passthrough-auth not registered: %v", err)
-	}
-	if got != "auto" {
-		t.Errorf("--passthrough-auth default = %q, want %q", got, "auto")
-	}
+	c.Require().NoError(err, "--passthrough-auth not registered")
+	c.Eq("auto", got, "--passthrough-auth default")
 }
 
 func TestClaudeCmd_PassthroughFlagFromEnv(t *testing.T) {
 	t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", "1")
+	c := assert.NewCollecting(t)
 
 	cmd := newClaudeCmd()
 	got, err := cmd.Flags().GetString("passthrough-auth")
-	if err != nil {
-		t.Fatalf("--passthrough-auth not registered: %v", err)
-	}
+	c.Require().NoError(err, "--passthrough-auth not registered")
 	mode, err := parsePassthroughMode(got)
-	if err != nil {
-		t.Fatalf("parsePassthroughMode(%q): %v", got, err)
-	}
-	if mode != passthroughOn {
-		t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=1 resolved to %q, want on", mode)
-	}
+	c.Require().NoError(err, "parsePassthroughMode(%q)", got)
+	c.Eq(passthroughOn, mode, "RAFIKI_CLAUDE_PASSTHROUGH=1 resolved to")
 }
 
 // "0" and "false" mean off. Treating any non-empty value as true would make a
@@ -294,17 +243,12 @@ func TestClaudeCmd_PassthroughFlagFalseyEnv(t *testing.T) {
 	for _, v := range []string{"0", "false", "no"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("RAFIKI_CLAUDE_PASSTHROUGH", v)
+			c := assert.NewCollecting(t)
 			got, err := newClaudeCmd().Flags().GetString("passthrough-auth")
-			if err != nil {
-				t.Fatalf("--passthrough-auth not registered: %v", err)
-			}
+			c.Require().NoError(err, "--passthrough-auth not registered")
 			mode, err := parsePassthroughMode(got)
-			if err != nil {
-				t.Fatalf("parsePassthroughMode(%q): %v", got, err)
-			}
-			if mode != passthroughOff {
-				t.Errorf("RAFIKI_CLAUDE_PASSTHROUGH=%q resolved to %q, want off", v, mode)
-			}
+			c.Require().NoError(err, "parsePassthroughMode(%q)", got)
+			c.Eq(passthroughOff, mode, "RAFIKI_CLAUDE_PASSTHROUGH=%q resolved to %q, want off", v, mode)
 		})
 	}
 }
@@ -312,22 +256,18 @@ func TestClaudeCmd_PassthroughFlagFalseyEnv(t *testing.T) {
 // A bare --passthrough-auth (no "=value") must keep meaning "on", matching the
 // flag's old boolean ergonomics and every existing example in README/Long.
 func TestClaudeCmd_PassthroughFlagBareMeansOn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newClaudeCmd()
 	cmd.SetArgs([]string{"--passthrough-auth"})
-	if err := cmd.ParseFlags([]string{"--passthrough-auth"}); err != nil {
-		t.Fatalf("ParseFlags: %v", err)
-	}
+	c.Require().NoError(cmd.ParseFlags([]string{"--passthrough-auth"}), "ParseFlags")
 	got, _ := cmd.Flags().GetString("passthrough-auth")
 	mode, err := parsePassthroughMode(got)
-	if err != nil {
-		t.Fatalf("parsePassthroughMode(%q): %v", got, err)
-	}
-	if mode != passthroughOn {
-		t.Errorf("bare --passthrough-auth resolved to %q, want on", mode)
-	}
+	c.Require().NoError(err, "parsePassthroughMode(%q)", got)
+	c.Eq(passthroughOn, mode, "bare --passthrough-auth resolved to")
 }
 
 func TestParsePassthroughMode(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tests := []struct {
 		in   string
 		want passthroughMode
@@ -345,25 +285,18 @@ func TestParsePassthroughMode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		got, err := parsePassthroughMode(tt.in)
-		if err != nil {
-			t.Fatalf("parsePassthroughMode(%q): %v", tt.in, err)
-		}
-		if got != tt.want {
-			t.Errorf("parsePassthroughMode(%q) = %q, want %q", tt.in, got, tt.want)
-		}
+		c.Require().NoError(err, "parsePassthroughMode(%q)", tt.in)
+		c.Eq(tt.want, got, "parsePassthroughMode(%q) = %q, want", tt.in, got)
 	}
 }
 
 // A typo must fail loudly rather than quietly falling back to auto: this
 // switch decides who gets billed.
 func TestParsePassthroughMode_InvalidIsError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, err := parsePassthroughMode("onn")
-	if err == nil {
-		t.Fatal("expected error for invalid --passthrough-auth value, got nil")
-	}
-	if !strings.Contains(err.Error(), "auto, on, or off") {
-		t.Errorf("error = %v, want it to list the valid values", err)
-	}
+	c.Require().Error(err, "expected error for invalid --passthrough-auth value, got nil")
+	c.StrContains(err.Error(), "auto, on, or off", "error = %v, want it to list the valid values", err)
 }
 
 // With mode=auto, passthrough follows the model: on for an Anthropic id
@@ -381,9 +314,8 @@ func TestPassthroughAuthFor_Auto(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := passthroughAuthFor(passthroughAuto, tt.model); got != tt.want {
-				t.Errorf("passthroughAuthFor(auto, %q) = %v, want %v", tt.model, got, tt.want)
-			}
+			got := passthroughAuthFor(passthroughAuto, tt.model)
+			assert.NewCollecting(t).Eq(tt.want, got, "passthroughAuthFor(auto, %q) = %v, want", tt.model, got)
 		})
 	}
 }
@@ -391,64 +323,50 @@ func TestPassthroughAuthFor_Auto(t *testing.T) {
 // on/off force the choice regardless of model; the OpenRouter+on combination
 // is rejected later by runClaude's guard, not by passthroughAuthFor itself.
 func TestPassthroughAuthFor_OnOffForceRegardlessOfModel(t *testing.T) {
-	if got := passthroughAuthFor(passthroughOn, "openai/gpt-4o"); !got {
-		t.Error("passthroughAuthFor(on, openrouter-model) = false, want true")
-	}
-	if got := passthroughAuthFor(passthroughOff, "claude-opus-5"); got {
-		t.Error("passthroughAuthFor(off, anthropic-model) = true, want false")
-	}
+	c := assert.NewCollecting(t)
+	c.True(passthroughAuthFor(passthroughOn, "openai/gpt-4o"), "passthroughAuthFor(on, openrouter-model) = false, want true")
+	c.False(passthroughAuthFor(passthroughOff, "claude-opus-5"), "passthroughAuthFor(off, anthropic-model) = true, want false")
 }
 
 // A subscription credential cannot buy an OpenRouter model. The proxy rejects
 // it too, but only on the first turn — by which point claude owns the TTY and
 // the failure reads as a hung session.
 func TestRunClaude_PassthroughRejectsNonAnthropicModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
 	cmd := newClaudeCmd()
 	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "dev", "model": "openai/gpt-4o"} {
-		if err := cmd.Flags().Set(flag, val); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set(flag, val))
 	}
-	if err := cmd.Flags().Set("passthrough-auth", "true"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("passthrough-auth", "true"))
 
 	err := runClaude(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for --passthrough-auth with an OpenRouter model, got nil")
-	}
-	if !strings.Contains(err.Error(), "--passthrough-auth") {
-		t.Errorf("error = %v, want it to name the conflicting flag", err)
-	}
+	c.Require().Error(err, "expected error for --passthrough-auth with an OpenRouter model, got nil")
+	c.StrContains(err.Error(), "--passthrough-auth", "error = %v, want it to name the conflicting flag", err)
 }
 
 // An unrecognised --passthrough-auth value must fail before ever dialing the
 // proxy, same as the OpenRouter+on guard below — a typo here decides who gets
 // billed, so it must not resolve to auto silently.
 func TestRunClaude_InvalidPassthroughModeIsError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
 	cmd := newClaudeCmd()
 	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "dev", "passthrough-auth": "onn"} {
-		if err := cmd.Flags().Set(flag, val); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set(flag, val))
 	}
 
 	err := runClaude(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for invalid --passthrough-auth value, got nil")
-	}
-	if !strings.Contains(err.Error(), "auto, on, or off") {
-		t.Errorf("error = %v, want it to list the valid values", err)
-	}
+	c.Require().Error(err, "expected error for invalid --passthrough-auth value, got nil")
+	c.StrContains(err.Error(), "auto, on, or off", "error = %v, want it to list the valid values", err)
 }
 
 func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
@@ -475,9 +393,7 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 		"model":   "claude-opus-5",
 		"session": "sess-1",
 	} {
-		if err := cmd.Flags().Set(flag, val); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set(flag, val))
 	}
 
 	// What pflag hands back for everything after `--`: claude-side flags
@@ -486,14 +402,10 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 	// through vals.ModelArgs, so this also proves the pair survived the switch
 	// from pre-rendered argv to claudeargv.Params.
 	userArgs := []string{"--resume", "abc-123", "--permission-mode", "plan"}
-	if err := runClaude(cmd, userArgs); err != nil {
-		t.Fatalf("runClaude: %v", err)
-	}
+	c.Require().NoError(runClaude(cmd, userArgs), "runClaude")
 
 	argv := captured.Args
-	if len(argv) <= len(userArgs) {
-		t.Fatalf("argv %v is degenerate: an interactive build must still carry the model, mcp-config and user args it was given", argv)
-	}
+	c.Require().Greater(len(userArgs), len(argv), "argv %v is degenerate: an interactive build must still carry the model, mcp-config and user args it was given", argv)
 	for _, unwanted := range []string{
 		"-p",
 		"--input-format",
@@ -502,9 +414,7 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 		"--dangerously-skip-permissions",
 		"--disallowedTools",
 	} {
-		if slices.Contains(argv, unwanted) {
-			t.Errorf("interactive argv %v carries headless flag %q", argv, unwanted)
-		}
+		c.NotContains(argv, unwanted, "interactive argv")
 	}
 	// (a) the model pair it was given is still there...
 	assertArgvPair(t, argv, "--model", "claude-opus-5")
@@ -514,32 +424,20 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 	for _, a := range argv {
 		if strings.HasPrefix(a, "--mcp-config=") {
 			mcpCount++
-			if a == "--mcp-config=" {
-				t.Errorf("argv %v carries an empty --mcp-config=", argv)
-			}
+			c.NotEq("--mcp-config=", a, "argv %v carries an empty --mcp-config=", argv)
 		}
 	}
-	if mcpCount != 1 {
-		t.Errorf("argv %v: want exactly one --mcp-config element, got %d", argv, mcpCount)
-	}
+	c.Eq(1, mcpCount, "argv %v: want exactly one --mcp-config element, got", argv)
 	// (b) the user's own args come last, after everything the builder emits.
-	if !slices.Equal(argv[len(argv)-len(userArgs):], userArgs) {
-		t.Errorf("argv %v: want user args %v last, got tail %v", argv, userArgs, argv[len(argv)-len(userArgs):])
-	}
-	if slices.Contains(argv[:len(argv)-len(userArgs)], "--resume") {
-		t.Errorf("argv %v: a user arg leaked ahead of the user tail", argv)
-	}
+	c.EqDiff(userArgs, argv[len(argv)-len(userArgs):], "argv %v: want user args %v last, got tail", argv, userArgs)
+	c.NotContains(argv[:len(argv)-len(userArgs)], "--resume", "argv %v: a user arg leaked ahead of the user tail", argv)
 
 	// ClaudeEnv (the only proxyenv entry point) must not have dropped the
 	// environment half: the proxy wiring and the session correlation header
 	// still arrive.
 	envJoined := strings.Join(captured.Env, "\n")
-	if !slices.Contains(captured.Env, "ANTHROPIC_BASE_URL="+srv.URL) {
-		t.Errorf("env does not point ANTHROPIC_BASE_URL at the proxy; got:\n%s", envJoined)
-	}
-	if !strings.Contains(envJoined, "X-Rafiki-Session: sess-1") {
-		t.Errorf("env is missing the X-Rafiki-Session correlation header; got:\n%s", envJoined)
-	}
+	c.Contains(captured.Env, "ANTHROPIC_BASE_URL="+srv.URL, "env does not point ANTHROPIC_BASE_URL at the proxy; got:\n%s", envJoined)
+	c.StrContains(envJoined, "X-Rafiki-Session: sess-1", "env is missing the X-Rafiki-Session correlation header; got:\n")
 }
 
 // assertArgvPair asserts argv carries flag immediately followed by value.
@@ -547,9 +445,7 @@ func assertArgvPair(t *testing.T, argv []string, flag, value string) {
 	t.Helper()
 	for i, a := range argv {
 		if a == flag {
-			if i+1 >= len(argv) || argv[i+1] != value {
-				t.Errorf("argv %v: %s is not followed by %q", argv, flag, value)
-			}
+			assert.NewCollecting(t).False(i+1 >= len(argv) || argv[i+1] != value, "argv %v: %s is not followed by %q", argv, flag, value)
 			return
 		}
 	}
@@ -562,21 +458,16 @@ func assertArgvPair(t *testing.T, argv []string, flag, value string) {
 // is worse than refusing outright, because it turns a missing credential
 // into a confusing 401 several steps later instead of a clear error here.
 func TestRunClaude_NoTokenIsError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t) // no profile token file either
 	resetProfileCache()
 
 	cmd := newClaudeCmd()
 	for flag, val := range map[string]string{"url": "http://localhost:8035", "token": "", "model": "claude-opus-5"} {
-		if err := cmd.Flags().Set(flag, val); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set(flag, val))
 	}
 
 	err := runClaude(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error with no token resolvable from any source, got nil")
-	}
-	if !strings.Contains(err.Error(), "rafiki user create") {
-		t.Errorf("error = %v, want it to name `rafiki user create`", err)
-	}
+	c.Require().Error(err, "expected error with no token resolvable from any source, got nil")
+	c.StrContains(err.Error(), "rafiki user create", "error = %v, want it to name `rafiki user create`", err)
 }

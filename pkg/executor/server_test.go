@@ -18,41 +18,34 @@ import (
 	"go.graveland.dev/rafiki/pkg/executor"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestDescribeReportsCapabilities(t *testing.T) {
+	c := assert.NewCollecting(t)
 	root := t.TempDir()
 	srv := executor.NewServer(executor.Options{Root: root, Concurrency: 6, Version: "test"})
 	client := newTestClient(t, srv)
 	ctx := context.Background()
 
 	resp, err := client.Describe(ctx, connect.NewRequest(&executorpb.DescribeRequest{}))
-	if err != nil {
-		t.Fatalf("Describe: %v", err)
-	}
+	c.Require().NoError(err, "Describe")
 	m := resp.Msg
-	if m.ExecutorId == "" {
-		t.Error("ExecutorId must be set")
-	}
-	if m.Platform != runtime.GOOS+"/"+runtime.GOARCH {
-		t.Errorf("Platform = %q; want %s/%s", m.Platform, runtime.GOOS, runtime.GOARCH)
-	}
+	c.NotEq("", m.ExecutorId, "ExecutorId must be set")
+	c.Eq(runtime.GOOS+"/"+runtime.GOARCH, m.Platform, "Platform = %q; want %s/%s", m.Platform, runtime.GOOS, runtime.GOARCH)
 	want := []string{"read", "write", "edit", "glob", "grep", "ls", "bash"}
 	got := map[string]bool{}
 	for _, tool := range m.Tools {
 		got[tool] = true
 	}
 	for _, w := range want {
-		if !got[w] {
-			t.Errorf("Describe omits tool %q — the parent uses this list to decide what to route", w)
-		}
+		c.False(!got[w], "Describe omits tool %q — the parent uses this list to decide what to route", w)
 	}
 	// Parent-side tools are RPCs the daemon implements itself; the executor's
 	// registry does not contain them, so Describe must not claim it does.
 	for _, p := range []string{"bash_start", "bash_output", "bash_kill", "task_add", "web_search"} {
-		if got[p] {
-			t.Errorf("Describe claims parent-side tool %q, which this registry does not serve", p)
-		}
+		c.False(got[p], "Describe claims parent-side tool %q, which this registry does not serve", p)
 	}
 	if len(m.Roots) != 1 || m.Roots[0] != root {
 		t.Errorf("Roots = %v; want [%s]", m.Roots, root)
@@ -68,20 +61,15 @@ func TestDescribeReportsCapabilities(t *testing.T) {
 }
 
 func TestHealthReportsNoRunningHandles(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
 	client := newTestClient(t, srv)
 	ctx := context.Background()
 
 	resp, err := client.Health(ctx, connect.NewRequest(&executorpb.HealthRequest{}))
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
-	if resp.Msg.Draining {
-		t.Error("a fresh executor must not report draining")
-	}
-	if len(resp.Msg.RunningHandles) != 0 {
-		t.Error("a fresh executor has no running handles")
-	}
+	c.Require().NoError(err, "Health")
+	c.False(resp.Msg.Draining, "a fresh executor must not report draining")
+	c.Empty(resp.Msg.RunningHandles, "a fresh executor has no running handles")
 }
 
 func TestConformance(t *testing.T) {
@@ -95,6 +83,7 @@ func TestConformance(t *testing.T) {
 // built from the full blueprint also has a nil task store, so an Execute
 // naming task_add nil-derefs and panics the handler.
 func TestExecutorDoesNotServeParentSideTools(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
 	client := newTestClient(t, srv)
 	ctx := context.Background()
@@ -103,25 +92,20 @@ func TestExecutorDoesNotServeParentSideTools(t *testing.T) {
 		stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 			CallId: "x", Tool: tool, InputJson: []byte(`{}`), TimeoutMs: 5000,
 		}))
-		if err != nil {
-			t.Fatalf("%s: transport error, want a typed Failure: %v", tool, err)
-		}
+		c.NoError(err, "%s: transport error, want a typed Failure", tool)
 		var failed bool
 		for stream.Receive() {
 			if _, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Failed); ok {
 				failed = true
 			}
 		}
-		if err := stream.Err(); err != nil {
-			t.Fatalf("%s: stream error, want a typed Failure: %v", tool, err)
-		}
-		if !failed {
-			t.Fatalf("%s: executor served a parent-side tool", tool)
-		}
+		c.NoError(stream.Err(), "%s: stream error, want a typed Failure", tool)
+		c.True(failed, "%s: executor served a parent-side tool", tool)
 	}
 }
 
 func TestExecuteHonoursTimeoutMs(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), Concurrency: 6, Version: "test"})
 	client := newTestClient(t, srv)
 	ctx := context.Background()
@@ -129,9 +113,7 @@ func TestExecuteHonoursTimeoutMs(t *testing.T) {
 	stream, err := client.Execute(ctx, connect.NewRequest(&executorpb.ExecuteRequest{
 		CallId: "slow", Tool: "bash", InputJson: []byte(`{"command":"sleep 10"}`), TimeoutMs: 500,
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var code executorpb.Failure_Code
 	for stream.Receive() {
 		if ev, ok := stream.Msg().Event.(*executorpb.ExecuteResponse_Failed); ok {
@@ -139,15 +121,14 @@ func TestExecuteHonoursTimeoutMs(t *testing.T) {
 		}
 	}
 	_ = stream.Err()
-	if code != executorpb.Failure_CODE_TIMEOUT {
-		t.Fatalf("failure code = %v, want CODE_TIMEOUT", code)
-	}
+	c.Eq(executorpb.Failure_CODE_TIMEOUT, code, "failure code")
 }
 
 // newTestClient starts a server on a temp unix socket and returns a Connect
 // client dialing it. The caller is responsible for cleanup via t.Cleanup.
 func newTestClient(t *testing.T, srv *executor.Server) executorpbconnect.ExecutorServiceClient {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	// t.Name() carries "/" for every subtest, which turns the socket path into
 	// a directory that does not exist; the failure ("bind: no such file or
@@ -163,12 +144,8 @@ func newTestClient(t *testing.T, srv *executor.Server) executorpbconnect.Executo
 	httpSrv := &http.Server{Handler: mux, Protocols: protos}
 
 	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
+	c.NoError(err, "listen")
+	c.NoError(os.Chmod(sockPath, 0o600), "chmod")
 	t.Cleanup(func() { httpSrv.Close() })
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {

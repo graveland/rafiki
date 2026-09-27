@@ -8,6 +8,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestReplaceFindingsPerAnalysisSkipsZeroRowsWithExistingFindings pins Fix 1's
@@ -17,6 +19,7 @@ import (
 // rather than calling store.ReplaceFindings and truncating the existing
 // rows via its DELETE-then-INSERT.
 func TestReplaceFindingsPerAnalysisSkipsZeroRowsWithExistingFindings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	ctx := context.Background()
 	convID := seedConversation(t, pool)
@@ -25,39 +28,25 @@ func TestReplaceFindingsPerAnalysisSkipsZeroRowsWithExistingFindings(t *testing.
 		ConversationID: convID, DetectorVersion: analyze.DetectorVersion, Model: "m", Status: "ok",
 		Analysis: []byte(`{"conversation_id":"` + convID + `"}`),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ReplaceFindings(ctx, pool, analysisID, []store.FindingRow{{
+	c.Require().NoError(err)
+	c.Require().NoError(store.ReplaceFindings(ctx, pool, analysisID, []store.FindingRow{{
 		Axis: "grind", TopicKey: "loop", Title: "retry loop", ExpectedSavingsTokens: 100,
-	}}, nil); err != nil {
-		t.Fatal(err)
-	}
+	}}, nil))
 	before := snapshotAnalysisFindings(t, pool)
-	if len(before) != 1 {
-		t.Fatalf("seed stored %d finding rows, want 1", len(before))
-	}
+	c.Require().Len(before, 1, "seed stored %d finding rows, want 1", len(before))
 
 	convs := []analyzedConversation{{conversationID: convID, analysisID: analysisID}}
 	skipped, err := replaceFindingsPerAnalysis(ctx, pool, convs, nil)
-	if err != nil {
-		t.Fatalf("replaceFindingsPerAnalysis: %v", err)
-	}
-	if len(skipped) != 1 {
-		t.Fatalf("skipped = %+v, want exactly 1 entry", skipped)
-	}
+	c.Require().NoError(err, "replaceFindingsPerAnalysis")
+	c.Require().Len(skipped, 1, "skipped")
 	if skipped[0].conversationID != convID || skipped[0].analysisID != analysisID || skipped[0].existing != 1 {
 		t.Errorf("skipped[0] = %+v, want conversationID=%s analysisID=%s existing=1", skipped[0], convID, analysisID)
 	}
 
 	after := snapshotAnalysisFindings(t, pool)
-	if len(after) != len(before) {
-		t.Fatalf("analysis_finding row count changed despite the guard: before=%d after=%d", len(before), len(after))
-	}
+	c.Require().Len(after, len(before), "analysis_finding row count changed despite the guard: before=%d after=%d", len(before), len(after))
 	for i := range before {
-		if before[i] != after[i] {
-			t.Errorf("analysis_finding row %d changed despite the guard: before=%+v after=%+v", i, before[i], after[i])
-		}
+		c.Eq(after[i], before[i], "analysis_finding row %d changed despite the guard: before=%+v after=", i, before[i])
 	}
 }
 
@@ -66,6 +55,7 @@ func TestReplaceFindingsPerAnalysisSkipsZeroRowsWithExistingFindings(t *testing.
 // with (nothing to protect) must still allow the zero-rows replace through
 // with no skip recorded.
 func TestReplaceFindingsPerAnalysisAllowsGenuineZeroFindings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := newTestPool(t)
 	ctx := context.Background()
 	convID := seedConversation(t, pool)
@@ -74,16 +64,10 @@ func TestReplaceFindingsPerAnalysisAllowsGenuineZeroFindings(t *testing.T) {
 		ConversationID: convID, DetectorVersion: analyze.DetectorVersion, Model: "m", Status: "ok",
 		Analysis: []byte(`{"conversation_id":"` + convID + `"}`),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	convs := []analyzedConversation{{conversationID: convID, analysisID: analysisID}}
 	skipped, err := replaceFindingsPerAnalysis(ctx, pool, convs, nil)
-	if err != nil {
-		t.Fatalf("replaceFindingsPerAnalysis: %v", err)
-	}
-	if len(skipped) != 0 {
-		t.Errorf("skipped = %+v, want none — this analysis genuinely had zero findings to begin with", skipped)
-	}
+	c.Require().NoError(err, "replaceFindingsPerAnalysis")
+	c.Empty(skipped, "skipped")
 }

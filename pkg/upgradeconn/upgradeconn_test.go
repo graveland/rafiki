@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // oldClientBody is the exact 401 body header auth must send to a peer still
@@ -24,9 +26,7 @@ const oldClientBody = `no credential on the upgrade request: send "Authorization
 func serveMux(t *testing.T, handlers map[Protocol]func(*Conn, struct{})) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	mux := http.NewServeMux()
 	for proto, fn := range handlers {
 		mux.Handle(PathFor(proto), Handler(proto,
@@ -48,9 +48,7 @@ func serveAuth[T any](t *testing.T, proto Protocol,
 ) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	mux := http.NewServeMux()
 	mux.Handle(PathFor(proto), Handler(proto, authorize, serve))
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -61,14 +59,11 @@ func serveAuth[T any](t *testing.T, proto Protocol,
 
 func dialTo(t *testing.T, addr string, proto Protocol) *Conn {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	c, _, err := Dial(raw, proto, addr, nil)
-	if err != nil {
-		t.Fatalf("upgrade %s: %v", proto, err)
-	}
+	ck.NoError(err, "upgrade %s", proto)
 	return c
 }
 
@@ -76,20 +71,18 @@ func dialTo(t *testing.T, addr string, proto Protocol) *Conn {
 // headers alongside the upgraded Conn.
 func dialHdr(t *testing.T, addr string, proto Protocol, hdr http.Header) (*Conn, http.Header) {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() { _ = raw.Close() })
 	c, respHdr, err := Dial(raw, proto, addr, hdr)
-	if err != nil {
-		t.Fatalf("upgrade %s: %v", proto, err)
-	}
+	ck.NoError(err, "upgrade %s", proto)
 	return c, respHdr
 }
 
 // Executor and Daraja share one port, routed by path — the whole point.
 func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	got := make(chan string, 2)
 	addr := serveMux(t, map[Protocol]func(*Conn, struct{}){
 		Executor: func(c *Conn, _ struct{}) {
@@ -118,12 +111,8 @@ func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 			t.Fatal("timed out waiting for both handlers")
 		}
 	}
-	if !seen[`executor:{"type":"executor_first"}`] {
-		t.Errorf("executor handler did not receive its frame; saw %v", seen)
-	}
-	if !seen[`daraja:{"type":"daraja_first"}`] {
-		t.Errorf("daraja handler did not receive its frame; saw %v", seen)
-	}
+	ck.False(!seen[`executor:{"type":"executor_first"}`], "executor handler did not receive its frame; saw %v", seen)
+	ck.False(!seen[`daraja:{"type":"daraja_first"}`], "daraja handler did not receive its frame; saw %v", seen)
 }
 
 // THE hazard. A client routinely writes its first frame and its first
@@ -136,6 +125,7 @@ func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 // extra header lines must not disturb the buffering the pipelined frames sit
 // in.
 func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	lines := make(chan string, 4)
 	addr := serveAuth(t, Daraja,
 		func(*http.Request) (struct{}, http.Header, error) {
@@ -154,9 +144,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 		})
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	defer raw.Close()
 
 	// One write: the upgrade request AND both frames. This is what makes the
@@ -175,9 +163,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 	// is positioned correctly.
 	br := bufio.NewReader(raw)
 	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("read 101: %v", err)
-	}
+	ck.Require().NoError(err, "read 101")
 	if got := resp.Header.Get(HeaderCredential); got != "c1" {
 		t.Errorf("101 carried %s %q, want %q", HeaderCredential, got, "c1")
 	}
@@ -185,9 +171,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 	for _, want := range []string{`{"type":"daraja_first"}`, `{"type":"daraja_more"}`} {
 		select {
 		case got := <-lines:
-			if got != want {
-				t.Errorf("got %q, want %q", got, want)
-			}
+			ck.Eq(want, got, "got")
 		case <-time.After(5 * time.Second):
 			t.Fatalf("timed out waiting for %q — a pipelined frame was dropped with the hijack buffer", want)
 		}
@@ -200,6 +184,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 // connection dies mid-frame. Reading everything through the one Conn keeps
 // them in order.
 func TestAStreamFollowingTheFirstFrameSurvives(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	done := make(chan string, 1)
 	addr := serveMux(t, map[Protocol]func(*Conn, struct{}){
 		Executor: func(c *Conn, _ struct{}) {
@@ -223,17 +208,14 @@ func TestAStreamFollowingTheFirstFrameSurvives(t *testing.T) {
 	})
 
 	c := dialTo(t, addr, Executor)
-	if _, err := c.Write([]byte("{\"type\":\"executor_first\"}\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
+	_, err := c.Write([]byte("{\"type\":\"executor_first\"}\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
+	ck.Require().NoError(err)
 	_ = c.Conn.(*net.TCPConn).CloseWrite()
 
 	select {
 	case got := <-done:
 		want := `{"type":"executor_first"}|PRI * HTTP/2.0` + "\r\n\r\nSM\r\n\r\n"
-		if got != want {
-			t.Errorf("stream after the first frame was corrupted:\n got %q\nwant %q", got, want)
-		}
+		ck.Eq(want, got, "stream after the first frame was corrupted:\n got")
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out")
 	}
@@ -247,9 +229,7 @@ func TestAMismatchedUpgradeIsRefusedAtTheHandshake(t *testing.T) {
 	})
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	defer raw.Close()
 
 	// A Daraja request lands on the Executor handler's mux path only if the
@@ -263,6 +243,7 @@ func TestAMismatchedUpgradeIsRefusedAtTheHandshake(t *testing.T) {
 // authorize runs BEFORE the hijack, so a refusal is an ordinary HTTP response:
 // the client sees a real status and body, and serve is never reached.
 func TestUpgradeAuthRefusalIsAnOrdinaryResponse(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var served atomic.Bool
 	addr := serveAuth(t, Executor,
 		func(*http.Request) (struct{}, http.Header, error) {
@@ -271,27 +252,22 @@ func TestUpgradeAuthRefusalIsAnOrdinaryResponse(t *testing.T) {
 		func(*Conn, struct{}) { served.Store(true) })
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer raw.Close()
 
 	_, _, err = Dial(raw, Executor, addr, nil)
 	var ref *Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("want *Refused, got %v", err)
-	}
+	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
 	if ref.Status != http.StatusUnauthorized || ref.Reason != "nope" {
 		t.Errorf("got %d %q, want 401 %q", ref.Status, ref.Reason, "nope")
 	}
-	if served.Load() {
-		t.Error("serve ran on a refused upgrade — a refusal must never hijack")
-	}
+	c.False(served.Load(), "serve ran on a refused upgrade — a refusal must never hijack")
 }
 
 // An authorize error that is not a *Refusal is a bug in the caller's code: log
 // it server-side and answer an opaque 500, never leaking the error text.
 func TestUpgradeAuthNonRefusalErrorIs500(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var served atomic.Bool
 	addr := serveAuth(t, Executor,
 		func(*http.Request) (struct{}, http.Header, error) {
@@ -300,30 +276,21 @@ func TestUpgradeAuthNonRefusalErrorIs500(t *testing.T) {
 		func(*Conn, struct{}) { served.Store(true) })
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer raw.Close()
 
 	_, _, err = Dial(raw, Executor, addr, nil)
 	var ref *Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("want *Refused, got %v", err)
-	}
-	if ref.Status != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", ref.Status)
-	}
-	if strings.Contains(ref.Reason, "boom") {
-		t.Errorf("reason %q leaks the authorize error; want the opaque body", ref.Reason)
-	}
-	if served.Load() {
-		t.Error("serve ran on a failed authorize")
-	}
+	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
+	c.Eq(http.StatusInternalServerError, ref.Status, "status")
+	c.NotStrContains(ref.Reason, "boom", "reason")
+	c.False(served.Load(), "serve ran on a failed authorize")
 }
 
 // The 101 is written by hand, so a CR/LF in an authorize-returned value would
 // inject response lines. It must be refused before the hijack instead.
 func TestUpgradeAuthHeaderWithCRLFIs500(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var served atomic.Bool
 	addr := serveAuth(t, Executor,
 		func(*http.Request) (struct{}, http.Header, error) {
@@ -332,22 +299,14 @@ func TestUpgradeAuthHeaderWithCRLFIs500(t *testing.T) {
 		func(*Conn, struct{}) { served.Store(true) })
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer raw.Close()
 
 	_, _, err = Dial(raw, Executor, addr, nil)
 	var ref *Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("want *Refused, got %v", err)
-	}
-	if ref.Status != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", ref.Status)
-	}
-	if served.Load() {
-		t.Error("serve ran with an invalid 101 header")
-	}
+	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
+	c.Eq(http.StatusInternalServerError, ref.Status, "status")
+	c.False(served.Load(), "serve ran with an invalid 101 header")
 }
 
 // Headers authorize returns ride the 101 to the client — this is how a minted
@@ -360,14 +319,14 @@ func TestUpgradeAuthHeadersRideThe101(t *testing.T) {
 		func(c *Conn, _ struct{}) { defer c.Close() })
 
 	_, hdr := dialHdr(t, addr, Executor, nil)
-	if got := hdr.Get(HeaderCredential); got != "c1" {
-		t.Errorf("101 carried %s %q, want %q", HeaderCredential, got, "c1")
-	}
+	got := hdr.Get(HeaderCredential)
+	assert.NewCollecting(t).Eq("c1", got, "101 carried %s %q, want", HeaderCredential, got)
 }
 
 // The authorize func sees the request's headers — e.g. Authorization — and the
 // value it returns reaches serve as T, the auth context the link then uses.
 func TestUpgradeAuthSeesRequestHeaders(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	seen := make(chan string, 1)
 	addr := serveAuth(t, Executor,
 		func(r *http.Request) (string, http.Header, error) {
@@ -385,15 +344,12 @@ func TestUpgradeAuthSeesRequestHeaders(t *testing.T) {
 			seen <- secret
 		})
 
-	if _, hdr := dialHdr(t, addr, Executor, http.Header{"Authorization": {"Ticket t1"}}); hdr.Get(HeaderCredential) != "" {
-		t.Error("no credential was minted; the 101 must not carry one")
-	}
+	_, hdr := dialHdr(t, addr, Executor, http.Header{"Authorization": {"Ticket t1"}})
+	ck.Eq("", hdr.Get(HeaderCredential), "no credential was minted; the 101 must not carry one")
 
 	select {
 	case got := <-seen:
-		if got != "t1" {
-			t.Errorf("serve got %q, want the secret authorize returned (\"t1\")", got)
-		}
+		ck.Eq("t1", got, "serve got %q, want the secret authorize returned (\"t1\")", got)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for serve")
 	}
@@ -403,6 +359,7 @@ func TestUpgradeAuthSeesRequestHeaders(t *testing.T) {
 // BEFORE authorize — auth is not consulted for a request the endpoint cannot
 // serve.
 func TestUpgradeAuthNotCalledOnMismatchedUpgrade(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var authorized atomic.Bool
 	// The Executor handler is mounted where a Daraja dial lands, so the
 	// request REACHES the handler and the refusal comes from the Upgrade
@@ -415,31 +372,21 @@ func TestUpgradeAuthNotCalledOnMismatchedUpgrade(t *testing.T) {
 		},
 		func(*Conn, struct{}) {}))
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close(); _ = ln.Close() })
 	addr := ln.Addr().String()
 
 	raw, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer raw.Close()
 
 	_, _, err = Dial(raw, Daraja, addr, nil)
 	var ref *Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("want *Refused, got %v", err)
-	}
-	if ref.Status != http.StatusUpgradeRequired {
-		t.Errorf("status = %d, want 426", ref.Status)
-	}
-	if authorized.Load() {
-		t.Error("authorize ran on a mismatched upgrade")
-	}
+	c.Require().True(errors.As(err, &ref), "want *Refused, got %v", err)
+	c.Eq(http.StatusUpgradeRequired, ref.Status, "status")
+	c.False(authorized.Load(), "authorize ran on a mismatched upgrade")
 }
 
 // AuthorizationFrom must accept exactly the three schemes rafiki speaks,
@@ -467,32 +414,21 @@ func TestUpgradeAuthorizationFromParses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			r := &http.Request{Header: http.Header{}}
 			for _, v := range tc.auth {
 				r.Header.Add("Authorization", v)
 			}
 			scheme, secret, ref := AuthorizationFrom(r)
 			if !tc.wantRefuse {
-				if ref != nil {
-					t.Fatalf("unexpected refusal: %v", ref)
-				}
-				if scheme != tc.wantScheme {
-					t.Errorf("scheme = %q, want canonical %q", scheme, tc.wantScheme)
-				}
-				if secret != tc.wantSecret {
-					t.Errorf("secret = %q, want %q", secret, tc.wantSecret)
-				}
+				c.Require().Nil(ref, "unexpected refusal")
+				c.Eq(tc.wantScheme, scheme, "scheme")
+				c.Eq(tc.wantSecret, secret, "secret")
 				return
 			}
-			if ref == nil {
-				t.Fatal("want a refusal")
-			}
-			if ref.Status != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", ref.Status)
-			}
-			if ref.Reason != oldClientBody {
-				t.Errorf("reason =\n%q\nwant the exact old-client body\n%q", ref.Reason, oldClientBody)
-			}
+			c.Require().NotNil(ref, "want a refusal")
+			c.Eq(http.StatusUnauthorized, ref.Status, "status")
+			c.Eq(oldClientBody, ref.Reason, "reason =\n")
 		})
 	}
 }
@@ -516,15 +452,13 @@ func TestConcurrentCloseIsSafe(t *testing.T) {
 // the mismatch surfaces as garbage in the first frame rather than as a readable
 // HTTP status — which is the whole reason this indirection exists.
 func TestEveryProtocolHasItsOwnPath(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seen := map[string]Protocol{}
 	for _, p := range []Protocol{Executor, Daraja} {
 		path := PathFor(p)
-		if path == "/" {
-			t.Errorf("PathFor(%q) fell through to the default", p)
-		}
-		if prev, dup := seen[path]; dup {
-			t.Errorf("PathFor(%q) == PathFor(%q) == %q", p, prev, path)
-		}
+		c.NotEq("/", path, "PathFor(%q) fell through to the default", p)
+		prev, dup := seen[path]
+		c.False(dup, "PathFor(%q) == PathFor(%q) == %q", p, prev, path)
 		seen[path] = p
 	}
 }

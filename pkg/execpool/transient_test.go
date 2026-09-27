@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubStore fails every call. A transient executor must never consult it.
@@ -33,11 +35,10 @@ func TestRefreshRowSkipsTransientExecutors(t *testing.T) {
 	}
 	p.live["e1"] = lc
 
-	if err := p.refreshRow(context.Background(), "e1", lc); err != nil {
-		t.Fatalf("a transient executor has no row to re-read; refreshRow must "+
-			"skip it entirely or ErrNotFound revokes it on the first health "+
-			"tick, 30 seconds in: %v", err)
-	}
+	err := p.refreshRow(context.Background(), "e1", lc)
+	assert.NewAborting(t).NoError(err, "a transient executor has no row to re-read; refreshRow must "+
+		"skip it entirely or ErrNotFound revokes it on the first health "+
+		"tick, 30 seconds in: %v", err)
 }
 
 func TestRefreshRowStillRevokesDurableExecutors(t *testing.T) {
@@ -50,9 +51,7 @@ func TestRefreshRowStillRevokesDurableExecutors(t *testing.T) {
 	lc := &liveConn{executor: executors.Executor{ID: "e2", Enabled: true}}
 	p.live["e2"] = lc
 
-	if err := p.refreshRow(context.Background(), "e2", lc); err != nil {
-		t.Fatalf("an unreadable row keeps the last known one: %v", err)
-	}
+	assert.NewAborting(t).NoError(p.refreshRow(context.Background(), "e2", lc), "an unreadable row keeps the last known one")
 }
 
 // countingStoreWithHook records TouchSeen calls so a test can assert.
@@ -87,9 +86,7 @@ func TestHealthCheckDoesNotTouchSeenATransientExecutor(t *testing.T) {
 	lc := &liveConn{executor: executors.Executor{ID: "sess-1", Enabled: true}, transient: true, client: ec}
 	p.live["sess-1"] = lc
 	_ = p.healthCheck(context.Background(), "sess-1", lc)
-	if touched != 0 {
-		t.Fatalf("TouchSeen called %d times for a row-less executor", touched)
-	}
+	assert.NewAborting(t).Eq(0, touched, "TouchSeen called")
 }
 
 func TestHealthCheckDoesTouchSeenADurableExecutor(t *testing.T) {
@@ -105,9 +102,7 @@ func TestHealthCheckDoesTouchSeenADurableExecutor(t *testing.T) {
 	lc := &liveConn{executor: executors.Executor{ID: "durable-1", Enabled: true}, client: ec}
 	p.live["durable-1"] = lc
 	_ = p.healthCheck(context.Background(), "durable-1", lc)
-	if touched == 0 {
-		t.Fatal("a durable executor must still get TouchSeen on every health check")
-	}
+	assert.NewAborting(t).NotEq(0, touched, "a durable executor must still get TouchSeen on every health check")
 }
 
 // testH2Client creates a working executorClient over a net.Pipe, the same
@@ -144,9 +139,8 @@ func TestEvictDoesNotCloseAReplacementConnection(t *testing.T) {
 	p.live["e1"] = replacement
 
 	p.evictConn("e1", old) // evicting the stale one
-	if _, ok := p.live["e1"]; !ok {
-		t.Fatal("evicting a stale connection must not remove its replacement")
-	}
+	_, ok := p.live["e1"]
+	assert.NewAborting(t).True(ok, "evicting a stale connection must not remove its replacement")
 	select {
 	case <-replacement.done:
 		t.Fatal("evicting the stale connection must not close the replacement")
@@ -159,15 +153,12 @@ func TestEvictDoesNotCloseAReplacementConnection(t *testing.T) {
 // Evict finds nothing live, so the executor installs afterwards and, because
 // refreshRow skips transients, is never reaped.
 func TestATicketRevokedDuringJoinDoesNotGoLive(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := New(stubStore{})
 	ticket, err := p.Tickets().Mint(TicketGrant{ExecutorID: "sess-1", Owner: "brent"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	_, ok := p.tickets.Redeem(ticket)
-	if !ok {
-		t.Fatal("redeem")
-	}
+	c.True(ok, "redeem")
 	p.Evict("sess-1") // the control connection closes here
 
 	if p.installTransient("sess-1", &liveConn{done: make(chan struct{})}) {
@@ -182,7 +173,6 @@ func TestEvictedTombstonesAreSwept(t *testing.T) {
 	p.evicted["sess-old"] = time.Now().Add(-2 * parkTimeout)
 
 	p.sweepParkedOnce(time.Now())
-	if _, ok := p.evicted["sess-old"]; ok {
-		t.Fatal("evicted entries older than parkTimeout must be swept")
-	}
+	_, ok := p.evicted["sess-old"]
+	assert.NewAborting(t).False(ok, "evicted entries older than parkTimeout must be swept")
 }

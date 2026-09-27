@@ -13,22 +13,21 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox/inboxtest"
 	"go.graveland.dev/rafiki/pkg/inboxdb"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
+	c.NoError(err, "pgxpool.New")
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(context.Background(), pool), "migrate")
 	return pool
 }
 
@@ -40,9 +39,7 @@ func TestPostgresConformance(t *testing.T) {
 		// suite applies to every DB-backed test in this repo.
 		pfx := "c_" + t.Name() + "_"
 		id, err := inbox.NewID()
-		if err != nil {
-			t.Fatalf("NewID: %v", err)
-		}
+		assert.NewAborting(t).NoError(err, "NewID")
 		pfx += id + "_"
 		t.Cleanup(func() {
 			_, _ = pool.Exec(context.Background(),

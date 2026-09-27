@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
@@ -64,10 +66,9 @@ func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			var ev anthropic.MessageStreamEventUnion
-			if err := json.Unmarshal([]byte(tt.rawJSON), &ev); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
+			c.Require().NoError(json.Unmarshal([]byte(tt.rawJSON), &ev), "unmarshal")
 
 			// FixEmptyToolInput operates on the typed event fields (Input any).
 			// The typed-input fix is redundant because the SDK's Accumulate
@@ -77,16 +78,12 @@ func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
 
 			// Accumulate the content_block_start.
 			var acc anthropic.Message
-			if aerr := acc.Accumulate(ev); aerr != nil {
-				t.Fatalf("accumulate content_block_start: %v", aerr)
-			}
+			c.Require().NoError(acc.Accumulate(ev), "accumulate content_block_start")
 
 			// FixAccumulatedEmptyToolInput patches the ContentBlockUnion.Input
 			// (json.RawMessage) that the SDK constructed from RawJSON.
 			fixedAcc := FixAccumulatedEmptyToolInput(&acc, ev)
-			if fixedAcc != tt.needFix {
-				t.Errorf("FixAccumulatedEmptyToolInput returned %v, want %v", fixedAcc, tt.needFix)
-			}
+			c.Eq(tt.needFix, fixedAcc, "FixAccumulatedEmptyToolInput returned")
 
 			// Send InputJSONDelta events (the real trigger for the bug).
 			for i, deltaJSON := range tt.deltas {
@@ -95,12 +92,8 @@ func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
 				escaped := strings.ReplaceAll(deltaJSON, `"`, `\"`)
 				deltaRaw := `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"` + escaped + `"}}`
 				var deltaEv anthropic.MessageStreamEventUnion
-				if err := json.Unmarshal([]byte(deltaRaw), &deltaEv); err != nil {
-					t.Fatalf("unmarshal delta %d: %v", i, err)
-				}
-				if aerr := acc.Accumulate(deltaEv); aerr != nil {
-					t.Fatalf("accumulate input_json_delta %d: %v", i, aerr)
-				}
+				c.Require().NoError(json.Unmarshal([]byte(deltaRaw), &deltaEv), "unmarshal delta %d", i)
+				c.Require().NoError(acc.Accumulate(deltaEv), "accumulate input_json_delta %d", i)
 			}
 
 			// content_block_stop triggers the marshal path that fails when
@@ -108,13 +101,9 @@ func TestFixEmptyToolInputAndAccumulate(t *testing.T) {
 			// content_block_start events — message_start has no content block.
 			if ev.Type == "content_block_start" {
 				stopEv := anthropic.MessageStreamEventUnion{}
-				if err := json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv); err != nil {
-					t.Fatalf("unmarshal stop: %v", err)
-				}
+				c.Require().NoError(json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv), "unmarshal stop")
 				SanitizeInvalidAccumulatedInput(&acc, stopEv)
-				if aerr := acc.Accumulate(stopEv); aerr != nil {
-					t.Fatalf("accumulate content_block_stop: %v", aerr)
-				}
+				c.Require().NoError(acc.Accumulate(stopEv), "accumulate content_block_stop")
 			}
 		})
 	}
@@ -140,27 +129,22 @@ func TestSanitizeInvalidAccumulatedInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			acc := anthropic.Message{
 				Content: []anthropic.ContentBlockUnion{{Type: "tool_use", ID: "toolu_01", Name: "read", Input: tt.input}},
 			}
 			stopEv := anthropic.MessageStreamEventUnion{}
-			if err := json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv); err != nil {
-				t.Fatalf("unmarshal stop: %v", err)
-			}
+			c.Require().NoError(json.Unmarshal([]byte(`{"type":"content_block_stop","index":0}`), &stopEv), "unmarshal stop")
 
 			SanitizeInvalidAccumulatedInput(&acc, stopEv)
 
 			if tt.wantValid {
-				if string(acc.Content[0].Input) != string(tt.input) {
-					t.Errorf("Input mutated: got %q, want untouched %q", acc.Content[0].Input, tt.input)
-				}
+				c.Eq(string(tt.input), string(acc.Content[0].Input), "Input mutated: got %q, want untouched %q", acc.Content[0].Input, tt.input)
 			} else if !json.Valid(acc.Content[0].Input) {
 				t.Errorf("Input still invalid after sanitize: %q", acc.Content[0].Input)
 			}
 
-			if aerr := acc.Accumulate(stopEv); aerr != nil {
-				t.Fatalf("accumulate content_block_stop after sanitize: %v", aerr)
-			}
+			c.Require().NoError(acc.Accumulate(stopEv), "accumulate content_block_stop after sanitize")
 		})
 	}
 }
@@ -169,6 +153,7 @@ func TestSanitizeInvalidAccumulatedInput(t *testing.T) {
 // path, which marshals the whole accumulated message rather than only the
 // last content block.
 func TestSanitizeInvalidAccumulatedInput_MessageStop(t *testing.T) {
+	c := assert.NewAborting(t)
 	acc := anthropic.Message{
 		Content: []anthropic.ContentBlockUnion{
 			{Type: "text", Text: "hi"},
@@ -176,13 +161,9 @@ func TestSanitizeInvalidAccumulatedInput_MessageStop(t *testing.T) {
 		},
 	}
 	stopEv := anthropic.MessageStreamEventUnion{}
-	if err := json.Unmarshal([]byte(`{"type":"message_stop"}`), &stopEv); err != nil {
-		t.Fatalf("unmarshal message_stop: %v", err)
-	}
+	c.NoError(json.Unmarshal([]byte(`{"type":"message_stop"}`), &stopEv), "unmarshal message_stop")
 
 	SanitizeInvalidAccumulatedInput(&acc, stopEv)
 
-	if aerr := acc.Accumulate(stopEv); aerr != nil {
-		t.Fatalf("accumulate message_stop after sanitize: %v", aerr)
-	}
+	c.NoError(acc.Accumulate(stopEv), "accumulate message_stop after sanitize")
 }

@@ -9,10 +9,13 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSpawnOwnerSurvivesResume(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 
 	req := protocol.SpawnRequest{
@@ -24,15 +27,11 @@ func TestSpawnOwnerSurvivesResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, req, users.Identity{UserID: "u_owner1"})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	childID := res.ChildID
 
 	snap, ok := ctrl.st.Get(childID)
-	if !ok || snap.OwnerUserID != "u_owner1" {
-		t.Fatalf("fresh spawn OwnerUserID = %q, ok=%v, want %q, true", snap.OwnerUserID, ok, "u_owner1")
-	}
+	c.False(!ok || snap.OwnerUserID != "u_owner1", "fresh spawn OwnerUserID = %q, ok=%v, want %q, true", snap.OwnerUserID, ok, "u_owner1")
 
 	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer killCancel()
@@ -48,8 +47,5 @@ func TestSpawnOwnerSurvivesResume(t *testing.T) {
 	}
 
 	resumedSnap, ok := ctrl.st.Get(childID)
-	if !ok || resumedSnap.OwnerUserID != "u_owner1" {
-		t.Fatalf("after resume OwnerUserID = %q, ok=%v, want %q, true — resume dropped the owner",
-			resumedSnap.OwnerUserID, ok, "u_owner1")
-	}
+	c.False(!ok || resumedSnap.OwnerUserID != "u_owner1", "after resume OwnerUserID = %q, ok=%v, want %q, true — resume dropped the owner", resumedSnap.OwnerUserID, ok, "u_owner1")
 }

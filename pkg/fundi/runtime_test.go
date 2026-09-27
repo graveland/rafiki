@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/skills"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeRuntimeOptions returns options that build a working engine with no API
@@ -47,17 +49,14 @@ func fakeRuntimeOptions(t *testing.T, cwd string) RuntimeOptions {
 // directly instead of going through Config.ContextFiles into a system prompt
 // no test can reach.
 func TestBuildRuntimeConstructsEngine(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := fakeRuntimeOptions(t, t.TempDir())
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime: %v", err)
-	}
+	c.NoError(err, "BuildRuntime")
 	defer shutdown()
-	if eng == nil {
-		t.Fatal("BuildRuntime returned a nil engine")
-	}
+	c.NotNil(eng, "BuildRuntime returned a nil engine")
 }
 
 // TestResolveContentUsesProjectContextOverride is the regression guard this
@@ -73,42 +72,27 @@ func TestBuildRuntimeConstructsEngine(t *testing.T) {
 // either of them instead of trusting the override would surface the WRONG
 // marker, not just fail to find the right one.
 func TestResolveContentUsesProjectContextOverride(t *testing.T) {
+	c := assert.NewCollecting(t)
 	childCwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(childCwd, "AGENTS.md"), []byte("MARKER-CHILD-CWD"), 0o644); err != nil {
-		t.Fatalf("write child AGENTS.md: %v", err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(childCwd, "AGENTS.md"), []byte("MARKER-CHILD-CWD"), 0o644), "write child AGENTS.md")
 
 	// The process cwd gets its OWN marker. That is what makes this a real
 	// discriminator: reading the wrong directory does not merely fail to find
 	// the right marker, it finds a different one.
 	processCwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(processCwd, "AGENTS.md"), []byte("MARKER-PROCESS-CWD"), 0o644); err != nil {
-		t.Fatalf("write process AGENTS.md: %v", err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(processCwd, "AGENTS.md"), []byte("MARKER-PROCESS-CWD"), 0o644), "write process AGENTS.md")
 	prev, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(processCwd); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	c.Require().NoError(err, "getwd")
+	c.Require().NoError(os.Chdir(processCwd), "chdir")
 	t.Cleanup(func() {
-		if err := os.Chdir(prev); err != nil {
-			t.Errorf("restore cwd: %v", err)
-		}
+		c.NoError(os.Chdir(prev), "restore cwd")
 	})
 
 	override := "MARKER-EXECUTOR-OVERRIDE"
 	got, _, err := resolveContent(RuntimeOptions{Cwd: childCwd, NoSkills: true, ProjectContext: &override})
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if !strings.Contains(got, "MARKER-EXECUTOR-OVERRIDE") {
-		t.Errorf("context files missing the override marker; got %q", got)
-	}
-	if strings.Contains(got, "MARKER-CHILD-CWD") || strings.Contains(got, "MARKER-PROCESS-CWD") {
-		t.Error("context files contain a cwd marker: content was resolved from disk instead of the ProjectContext override")
-	}
+	c.Require().NoError(err, "resolveContent")
+	c.StrContains(got, "MARKER-EXECUTOR-OVERRIDE", "context files missing the override marker; got")
+	c.False(strings.Contains(got, "MARKER-CHILD-CWD") || strings.Contains(got, "MARKER-PROCESS-CWD"), "context files contain a cwd marker: content was resolved from disk instead of the ProjectContext override")
 }
 
 // TestResolveContentNilProjectContextSkipsLocalRead proves the other half of
@@ -118,32 +102,24 @@ func TestResolveContentUsesProjectContextOverride(t *testing.T) {
 // project tier, never "read it locally instead"; see the workspace-tier rule
 // that a fundi child with no executor gets no filesystem tools either.
 func TestResolveContentNilProjectContextSkipsLocalRead(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("MARKER-SHOULD-NOT-APPEAR"), 0o644); err != nil {
-		t.Fatalf("write AGENTS.md: %v", err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("MARKER-SHOULD-NOT-APPEAR"), 0o644), "write AGENTS.md")
 
 	got, _, err := resolveContent(RuntimeOptions{Cwd: cwd, NoSkills: true})
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if strings.Contains(got, "MARKER-SHOULD-NOT-APPEAR") {
-		t.Error("resolveContent read opts.Cwd locally despite a nil ProjectContext (no executor bound)")
-	}
+	c.Require().NoError(err, "resolveContent")
+	c.NotStrContains(got, "MARKER-SHOULD-NOT-APPEAR", "resolveContent read opts.Cwd locally despite a nil ProjectContext (no executor bound)")
 }
 
 // TestResolveContentSkillsStarMeansAll checks that Skills: "*" is treated as
 // an explicit "all", not a literal filter name that matches nothing.
 func TestResolveContentSkillsStarMeansAll(t *testing.T) {
+	c := assert.NewAborting(t)
 	skillsDir := t.TempDir()
 	skillDir := filepath.Join(skillsDir, "example")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(skillDir, 0o755))
 	skillMD := "---\nname: example\ndescription: an example skill\n---\nbody\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644))
 
 	_, discovered, err := resolveContent(RuntimeOptions{
 		Cwd:            t.TempDir(),
@@ -151,12 +127,8 @@ func TestResolveContentSkillsStarMeansAll(t *testing.T) {
 		SkillsDirs:     []string{skillsDir},
 		Skills:         "*",
 	})
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if len(discovered) != 1 {
-		t.Fatalf("Skills=\"*\" must discover every skill (want 1, got %d): %+v", len(discovered), discovered)
-	}
+	c.NoError(err, "resolveContent")
+	c.Len(discovered, 1, "Skills=\"*\" must discover every skill (want 1, got %d)", len(discovered))
 }
 
 // TestBuildRuntimeRejectsRelativeCwd guards the same failure from the other
@@ -164,9 +136,8 @@ func TestResolveContentSkillsStarMeansAll(t *testing.T) {
 func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	opts := fakeRuntimeOptions(t, "relative/path")
-	if _, _, err := BuildRuntime(context.Background(), fe, opts); err == nil {
-		t.Fatal("expected an error for a relative Cwd, got nil")
-	}
+	_, _, err := BuildRuntime(context.Background(), fe, opts)
+	assert.NewAborting(t).Error(err, "expected an error for a relative Cwd, got nil")
 }
 
 // Later tiers shadow earlier ones, and shadowing is by QUALIFIED name — so a
@@ -174,6 +145,7 @@ func TestBuildRuntimeRejectsRelativeCwd(t *testing.T) {
 // different skills that coexist, while two skills with the same qualified name
 // collapse to the later tier's.
 func TestFoldSkillsLaterTiersShadowEarlier(t *testing.T) {
+	c := assert.NewCollecting(t)
 	db := []skills.SkillMeta{
 		{Namespace: "rafiki", Name: "coordinating", Description: "from db", Inline: true},
 		{Namespace: "rafiki", Name: "deploy", Description: "db deploy", Inline: true},
@@ -187,9 +159,7 @@ func TestFoldSkillsLaterTiersShadowEarlier(t *testing.T) {
 
 	got := FoldSkills(db, local, project)
 
-	if len(got) != 3 {
-		t.Fatalf("got %d skills, want 3: %+v", len(got), got)
-	}
+	c.Require().Len(got, 3, "got %d skills, want 3", len(got))
 	byQN := map[string]skills.SkillMeta{}
 	for _, s := range got {
 		byQN[s.QualifiedName()] = s
@@ -200,9 +170,8 @@ func TestFoldSkillsLaterTiersShadowEarlier(t *testing.T) {
 	if d := byQN["rafiki:deploy"]; d.Description != "db deploy" {
 		t.Errorf("rafiki:deploy: got %q, want the db row untouched by a bare local skill", d.Description)
 	}
-	if _, ok := byQN["rafiki:coordinating"]; !ok {
-		t.Error("rafiki:coordinating went missing")
-	}
+	_, ok := byQN["rafiki:coordinating"]
+	c.True(ok, "rafiki:coordinating went missing")
 }
 
 // Ordering is load-bearing: the inventory sits in the system prompt under
@@ -219,9 +188,7 @@ func TestFoldSkillsIsSortedByQualifiedName(t *testing.T) {
 		names = append(names, s.QualifiedName())
 	}
 	want := []string{"alpha", "pg:middle", "rafiki:zebra"}
-	if !slices.Equal(names, want) {
-		t.Errorf("got %v, want %v", names, want)
-	}
+	assert.NewCollecting(t).EqDiff(want, names, "got")
 }
 
 // TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools pins the standalone
@@ -230,14 +197,13 @@ func TestFoldSkillsIsSortedByQualifiedName(t *testing.T) {
 // path rather than an exemption. Without this the standalone CLI would compile
 // and run while silently losing every filesystem tool.
 func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
+	c := assert.NewCollecting(t)
 	opts := fakeRuntimeOptions(t, t.TempDir())
 	opts.InProcessWorkspace = true
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime: %v", err)
-	}
+	c.Require().NoError(err, "BuildRuntime")
 	defer shutdown()
 
 	names := map[string]bool{}
@@ -247,9 +213,7 @@ func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
-		if !names[name] {
-			t.Errorf("%q is missing; the standalone mode must keep its workspace tools", name)
-		}
+		c.False(!names[name], "%q is missing; the standalone mode must keep its workspace tools", name)
 	}
 }
 
@@ -259,10 +223,9 @@ func TestBuildRuntimeInProcessWorkspaceKeepsWorkspaceTools(t *testing.T) {
 // BuildRuntime materializes (real read via the in-process executor) — and
 // persists the ONE user text row, so a tool-less batch seat gets its files.
 func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
+	c := assert.NewAborting(t)
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("alpha line\nbeta line\n"), 0o644); err != nil {
-		t.Fatalf("write a.txt: %v", err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("alpha line\nbeta line\n"), 0o644), "write a.txt")
 	opts := fakeRuntimeOptions(t, cwd)
 	opts.InProcessWorkspace = true
 	opts.NoBuiltinTools = true
@@ -271,9 +234,7 @@ func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime: %v", err)
-	}
+	c.NoError(err, "BuildRuntime")
 	defer shutdown()
 
 	// The model sees no tools at all.
@@ -294,27 +255,17 @@ func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want 3 (text prefill, task, reply)", len(hist))
-	}
+	c.NoError(err, "history")
+	c.Len(hist, 3, "history has %d rows, want 3 (text prefill, task, reply)", len(hist))
 	row := hist[0].Param
-	if row.Role != anthropic.MessageParamRoleUser || len(row.Content) != 1 || row.Content[0].OfText == nil {
-		t.Fatalf("prefill row = %+v, want one user text block", row.Content)
-	}
+	c.False(row.Role != anthropic.MessageParamRoleUser || len(row.Content) != 1 || row.Content[0].OfText == nil, "prefill row = %+v, want one user text block", row.Content)
 	text := row.Content[0].OfText.Text
 	if !strings.HasPrefix(text, PrefillTextPreamble) {
 		t.Fatalf("prefill row does not start with the text marker: %q", text)
 	}
-	if !strings.Contains(text, "=== a.txt ===\n     1\talpha line\n     2\tbeta line\n") {
-		t.Fatalf("prefill row missing a.txt's header + numbered contents; got:\n%s", text)
-	}
+	c.StrContains(text, "=== a.txt ===\n     1\talpha line\n     2\tbeta line\n", "prefill row missing a.txt's header + numbered contents; got:\n")
 	for _, b := range row.Content {
-		if b.OfToolUse != nil || b.OfToolResult != nil {
-			t.Fatal("tool-less pre-fill row carries a tool block")
-		}
+		c.False(b.OfToolUse != nil || b.OfToolResult != nil, "tool-less pre-fill row carries a tool block")
 	}
 }
 
@@ -323,18 +274,15 @@ func TestBuildRuntimeNoBuiltinToolsPrefillRuns(t *testing.T) {
 // A BuildRuntime that dialled a database here would make every unit test in
 // this package require postgres.
 func TestBuildRuntimeNilPoolIsInMemory(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := fakeRuntimeOptions(t, t.TempDir())
 	opts.Pool = nil
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime with a nil pool: %v", err)
-	}
+	c.NoError(err, "BuildRuntime with a nil pool")
 	defer shutdown()
-	if eng == nil {
-		t.Fatal("nil engine")
-	}
+	c.NotNil(eng, "nil engine")
 }
 
 // hasToolNamed reports whether registry advertises a tool with the given
@@ -359,9 +307,7 @@ func hasToolNamed(registry *tools.Registry, name string) bool {
 // discovery, never registration.
 func TestMaterializeAllOmitsSkillToolWithZeroSkills(t *testing.T) {
 	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{})
-	if hasToolNamed(registry, "skill") {
-		t.Fatal("skill tool advertised despite zero discovered skills")
-	}
+	assert.NewAborting(t).False(hasToolNamed(registry, "skill"), "skill tool advertised despite zero discovered skills")
 }
 
 // TestMaterializeAllIncludesSkillToolWithSkills is the positive-side
@@ -371,30 +317,23 @@ func TestMaterializeAllIncludesSkillToolWithSkills(t *testing.T) {
 	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Skills: []skills.SkillMeta{{Name: "reviewer", Description: "reviews code"}},
 	})
-	if !hasToolNamed(registry, "skill") {
-		t.Fatal("skill tool missing despite a non-empty discovered skill set")
-	}
+	assert.NewAborting(t).True(hasToolNamed(registry, "skill"), "skill tool missing despite a non-empty discovered skill set")
 }
 
 // TestBuildRuntimeNoSkillsOmitsSkillTool exercises the same guarantee through
 // the real BuildRuntime → resolveContent → MaterializeAll path, pinning that
 // NoSkills actually reaches materialization and not just discovery.
 func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := fakeRuntimeOptions(t, t.TempDir())
 	opts.NoSkills = true
 
 	_, discovered, err := resolveContent(opts)
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if len(discovered) != 0 {
-		t.Fatalf("NoSkills discovered %d skills, want 0", len(discovered))
-	}
+	c.NoError(err, "resolveContent")
+	c.Empty(discovered, "NoSkills discovered %d skills, want 0", len(discovered))
 
 	registry := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{Skills: discovered})
-	if hasToolNamed(registry, "skill") {
-		t.Fatal("skill tool advertised with --no-skills set")
-	}
+	c.False(hasToolNamed(registry, "skill"), "skill tool advertised with --no-skills set")
 }
 
 // TestRuntimeToolAllowlistFiltersBuiltinsOnly drives the built-in tool
@@ -406,6 +345,7 @@ func TestBuildRuntimeNoSkillsOmitsSkillTool(t *testing.T) {
 // could not be distinguished from a typo. The registry is read through
 // eng.tools.Definitions(), the same list the model sees on every turn.
 func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	build := func(mutate func(*RuntimeOptions)) *Engine {
 		opts := fakeRuntimeOptions(t, t.TempDir())
 		opts.InProcessWorkspace = true
@@ -414,9 +354,7 @@ func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
 		}
 		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-		if err != nil {
-			t.Fatalf("BuildRuntime: %v", err)
-		}
+		c.Require().NoError(err, "BuildRuntime")
 		t.Cleanup(shutdown)
 		return eng
 	}
@@ -433,9 +371,7 @@ func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
 	allowed := build(func(o *RuntimeOptions) { o.Tools = "read,bash" })
 	got := toolNames(allowed)
 	slices.Sort(got)
-	if !slices.Equal(got, []string{"bash", "read"}) {
-		t.Errorf("Tools=\"read,bash\" left %v, want exactly [bash read]", got)
-	}
+	c.EqDiff([]string{"bash", "read"}, got, "Tools=\"read,bash\" left %v, want exactly [bash read]", got)
 
 	none := build(func(o *RuntimeOptions) { o.NoBuiltinTools = true })
 	if names := toolNames(none); len(names) != 0 {
@@ -447,9 +383,7 @@ func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
 	full := build(nil)
 	names := toolNames(full)
 	for _, name := range []string{"read", "write", "edit", "glob", "grep", "ls", "bash"} {
-		if !slices.Contains(names, name) {
-			t.Errorf("Tools=\"\" is missing %q; an empty allowlist must keep the full default set", name)
-		}
+		c.Contains(names, name, "Tools=\"\" is missing %q; an empty allowlist must keep the full default set", name)
 	}
 }
 
@@ -458,12 +392,9 @@ func TestRuntimeToolAllowlistFiltersBuiltinsOnly(t *testing.T) {
 // through opts.LSP; everywhere else they are proxied to the executor or not
 // registered at all.
 func TestWantsLSPOnlyForInProcessWorkspace(t *testing.T) {
-	if !wantsLSP(RuntimeOptions{InProcessWorkspace: true}) {
-		t.Error("InProcessWorkspace=true must want LSP; the standalone mode would lose its language servers")
-	}
-	if wantsLSP(RuntimeOptions{}) {
-		t.Error("a plain RuntimeOptions must not want LSP; the daemon's manager is unreachable")
-	}
+	c := assert.NewCollecting(t)
+	c.True(wantsLSP(RuntimeOptions{InProcessWorkspace: true}), "InProcessWorkspace=true must want LSP; the standalone mode would lose its language servers")
+	c.False(wantsLSP(RuntimeOptions{}), "a plain RuntimeOptions must not want LSP; the daemon's manager is unreachable")
 }
 
 // TestBuildRuntimeRequiresRipgrep pins the startup dependency check: a
@@ -508,9 +439,7 @@ func TestBuildRuntimeRequiresRTKWhenModeOn(t *testing.T) {
 	// their whole contract, and failing startup for them would break every
 	// deployment that never had rtk.
 	for _, mode := range []tools.RTKMode{tools.RTKAuto, tools.RTKOff} {
-		if err := checkRTK(mode); err != nil {
-			t.Errorf("checkRTK(%q) must not fail when rtk is absent, got: %v", mode, err)
-		}
+		assert.NewCollecting(t).NoError(checkRTK(mode), "checkRTK(%q) must not fail when rtk is absent, got", mode)
 	}
 }
 
@@ -523,26 +452,22 @@ func TestBuildRuntimeMissingMCPConfigIsAnError(t *testing.T) {
 	opts.MCPConfig = filepath.Join(t.TempDir(), "does-not-exist.json")
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
-	if _, _, err := BuildRuntime(context.Background(), fe, opts); err == nil {
-		t.Fatal("expected an error for a non-existent MCPConfig, got nil")
-	}
+	_, _, err := BuildRuntime(context.Background(), fe, opts)
+	assert.NewAborting(t).Error(err, "expected an error for a non-existent MCPConfig, got nil")
 }
 
 // TestBuildRuntimeAlwaysSuppliesATaskStore verifies the never-nil invariant:
 // even with a nil Pool, ToolOpts.Tasks must be non-nil (memory store). A nil
 // store would panic inside the task tools on first use.
 func TestBuildRuntimeAlwaysSuppliesATaskStore(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := fakeRuntimeOptions(t, t.TempDir())
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime: %v", err)
-	}
+	c.NoError(err, "BuildRuntime")
 	defer shutdown()
-	if eng == nil {
-		t.Fatal("BuildRuntime returned a nil engine")
-	}
+	c.NotNil(eng, "BuildRuntime returned a nil engine")
 	// Engine constructed without panic — the task store is non-nil.
 }
 
@@ -551,6 +476,7 @@ func TestBuildRuntimeAlwaysSuppliesATaskStore(t *testing.T) {
 // combined context-files content, the same way the earlier
 // TestResolveContentUsesProjectContextOverride proves the override source.
 func TestResolveContentTruncatesContextFilesToBudget(t *testing.T) {
+	c := assert.NewCollecting(t)
 	override := strings.Repeat("A", 10000)
 	got, _, err := resolveContent(RuntimeOptions{
 		Cwd:                t.TempDir(),
@@ -558,33 +484,24 @@ func TestResolveContentTruncatesContextFilesToBudget(t *testing.T) {
 		ProjectContext:     &override,
 		ContextFilesBudget: 10, // 40 bytes at estimatedCharsPerToken=4
 	})
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if len(got) >= len(override) {
-		t.Errorf("expected truncated content shorter than the 10000-byte input, got %d bytes", len(got))
-	}
-	if !strings.Contains(got, "truncated to fit this model's context budget") {
-		t.Errorf("expected a truncation marker, got %q", got)
-	}
+	c.Require().NoError(err, "resolveContent")
+	c.Less(len(override), len(got), "expected truncated content shorter than the 10000-byte input, got")
+	c.StrContains(got, "truncated to fit this model's context budget", "expected a truncation marker, got")
 }
 
 // TestResolveContentZeroBudgetIsUnlimited confirms the default
 // (ContextFilesBudget unset, the zero value) behaves exactly as before this
 // task — no truncation at all.
 func TestResolveContentZeroBudgetIsUnlimited(t *testing.T) {
+	c := assert.NewCollecting(t)
 	override := strings.Repeat("A", 10000)
 	got, _, err := resolveContent(RuntimeOptions{
 		Cwd:            t.TempDir(),
 		NoSkills:       true,
 		ProjectContext: &override,
 	})
-	if err != nil {
-		t.Fatalf("resolveContent: %v", err)
-	}
-	if got != override {
-		t.Errorf("expected content unchanged with no budget set, got %d bytes (want %d)", len(got), len(override))
-	}
+	c.Require().NoError(err, "resolveContent")
+	c.Eq(override, got, "expected content unchanged with no budget set, got %d bytes (want %d)", len(got), len(override))
 }
 
 func TestFilterMCPServers(t *testing.T) {
@@ -605,14 +522,12 @@ func TestFilterMCPServers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			got := filterMCPServers(cfg, tc.allowlist)
-			if len(got) != len(tc.wantKeys) {
-				t.Fatalf("filterMCPServers(%q) = %v, want keys %v", tc.allowlist, got, tc.wantKeys)
-			}
+			c.Require().Len(got, len(tc.wantKeys), "filterMCPServers(%q) = %v, want keys %v", tc.allowlist, got, tc.wantKeys)
 			for _, k := range tc.wantKeys {
-				if _, ok := got[k]; !ok {
-					t.Errorf("filterMCPServers(%q) missing key %q", tc.allowlist, k)
-				}
+				_, ok := got[k]
+				c.True(ok, "filterMCPServers(%q) missing key %q", tc.allowlist, k)
 			}
 		})
 	}
@@ -622,12 +537,11 @@ func TestFilterMCPServers(t *testing.T) {
 // whole MCP connect block even when MCPConfig points at a real file — no
 // attempt to dial anything.
 func TestBuildRuntimeNoMCPSkipsConnection(t *testing.T) {
+	c := assert.NewAborting(t)
 	mcpPath := filepath.Join(t.TempDir(), ".mcp.json")
 	// A server config that would fail to connect if ConnectMCP ever tried:
 	// "command-that-does-not-exist" is not on PATH.
-	if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{"x":{"command":"command-that-does-not-exist"}}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(mcpPath, []byte(`{"mcpServers":{"x":{"command":"command-that-does-not-exist"}}}`), 0o644))
 
 	opts := fakeRuntimeOptions(t, t.TempDir())
 	opts.MCPConfig = mcpPath
@@ -635,19 +549,16 @@ func TestBuildRuntimeNoMCPSkipsConnection(t *testing.T) {
 
 	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
 	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
-	if err != nil {
-		t.Fatalf("BuildRuntime: %v", err)
-	}
+	c.NoError(err, "BuildRuntime")
 	defer shutdown()
-	if eng == nil {
-		t.Fatal("BuildRuntime returned a nil engine")
-	}
+	c.NotNil(eng, "BuildRuntime returned a nil engine")
 }
 
 // The database tier is the BASE layer: a daemon-local directory or a workspace
 // project skill with the same qualified name wins over it. Bare names never
 // collide with namespaced ones, so this only bites within a namespace.
 func TestInlineSkillsAreTheLowestTier(t *testing.T) {
+	c := assert.NewCollecting(t)
 	inline := []skills.SkillMeta{
 		{Namespace: "rafiki", Name: "shared", Description: "from db", Inline: true},
 	}
@@ -655,10 +566,6 @@ func TestInlineSkillsAreTheLowestTier(t *testing.T) {
 		{Namespace: "rafiki", Name: "shared", Description: "from project", Remote: true},
 	}
 	got := FoldSkills(inline, nil, project)
-	if len(got) != 1 {
-		t.Fatalf("got %d, want 1: %+v", len(got), got)
-	}
-	if got[0].Description != "from project" {
-		t.Errorf("got %q, want the project tier to shadow the database tier", got[0].Description)
-	}
+	c.Require().Len(got, 1, "got %d, want 1", len(got))
+	c.Eq("from project", got[0].Description, "got")
 }

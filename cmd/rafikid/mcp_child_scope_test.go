@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +20,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The wave-1 tests for the MCP face's per-child bindings (review-0 F1): a
@@ -35,6 +36,7 @@ import (
 // the read verbs delegate untouched (they are the same read-only facts
 // Connect's anyCaller grants a child credential).
 func TestChildPresetBindingRefusesAuthoring(t *testing.T) {
+	c := assert.NewAborting(t)
 	// A nil store behind the binding: the refusal must fire before the store
 	// is ever reached, so "presets unavailable" must not win.
 	b := childPresetBinding{newPresetBinding(&Controller{}, "u-owner", "")}
@@ -42,9 +44,7 @@ func TestChildPresetBindingRefusesAuthoring(t *testing.T) {
 	if _, err := b.Put(context.Background(), presets.Spec{}); !errors.Is(err, errPresetChildAuthoring) {
 		t.Fatalf("Put = %v, want errPresetChildAuthoring", err)
 	}
-	if err := b.Delete(context.Background(), "reviewer"); !errors.Is(err, errPresetChildAuthoring) {
-		t.Fatalf("Delete = %v, want errPresetChildAuthoring", err)
-	}
+	c.ErrorIs(b.Delete(context.Background(), "reviewer"), errPresetChildAuthoring, "Delete")
 
 	// The read verbs still delegate to the store — here a store whose
 	// embedded nil panics if reached; reads must never be refused by the
@@ -58,12 +58,9 @@ func TestChildPresetBindingRefusesAuthoring(t *testing.T) {
 	if _, err := b2.Get(context.Background(), "reviewer"); err != nil {
 		t.Fatalf("Get = %v, want delegated", err)
 	}
-	if _, err := b2.History(context.Background(), "reviewer"); err != nil {
-		t.Fatalf("History = %v, want delegated", err)
-	}
-	if reads.owner != "u-owner" {
-		t.Fatalf("reads resolved owner %q, want u-owner (unchanged binding)", reads.owner)
-	}
+	_, err := b2.History(context.Background(), "reviewer")
+	c.NoError(err, "History")
+	c.Eq("u-owner", reads.owner, "reads resolved owner")
 }
 
 // recordingPresetStore satisfies presets.Store for the delegation assertions.
@@ -100,24 +97,22 @@ func (s *recordingPresetStore) Delete(_ context.Context, owner, _ string) error 
 // store: put/delete refuse by rule; get delegates (the corpus it reads is
 // exactly the one the child's own executor binding can run).
 func TestChildPyModuleStoreRefusesAuthoring(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := &Controller{}
 	w := &childPyModuleStore{newMCPPyModuleStore(ctrl, users.Identity{UserID: "u-owner"})}
 
 	if _, _, err := w.Put(context.Background(), "local", "m", "code", ""); !errors.Is(err, errPyModuleChildAuthoring) {
 		t.Fatalf("Put = %v, want errPyModuleChildAuthoring", err)
 	}
-	if _, err := w.Delete(context.Background(), "local", "m"); !errors.Is(err, errPyModuleChildAuthoring) {
-		t.Fatalf("Delete = %v, want errPyModuleChildAuthoring", err)
-	}
+	_, err := w.Delete(context.Background(), "local", "m")
+	c.ErrorIs(err, errPyModuleChildAuthoring, "Delete")
 
 	// Get delegates to the store. A nil pymoduleStore would panic, so prove
 	// the delegation with a stubbed Controller is impossible — instead prove
 	// the child store IS the wrapped store by construction: the same owner id
 	// rides through (a non-nil ctrl with a real store is DB territory, covered
 	// by the store's own tests).
-	if w.ownerUserID != "u-owner" {
-		t.Fatalf("wrapped store owner = %q, want u-owner", w.ownerUserID)
-	}
+	c.Eq("u-owner", w.ownerUserID, "wrapped store owner")
 	var _ tools.PyModuleStore = w
 }
 
@@ -126,14 +121,11 @@ func TestChildPyModuleStoreRefusesAuthoring(t *testing.T) {
 // are user ids), and with no per-child namespace to bind instead the child
 // gets nil — the blueprints' decline — never an owner-scoped binding.
 func TestRecallBindingRefusesChildCaller(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := &Controller{recall: &recallRuntime{st: &fakeRecallStore{}}}
-	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, true); rb != nil {
-		t.Fatal("child caller bound a recall binding, want nil")
-	}
+	ck.Nil(newRecallBinding(c, users.Identity{UserID: "u-owner"}, true), "child caller bound a recall binding, want nil")
 	// The user caller keeps its binding (owner == the caller).
-	if rb := newRecallBinding(c, users.Identity{UserID: "u-owner"}, false); rb == nil {
-		t.Fatal("user caller lost its recall binding")
-	}
+	ck.NotNil(newRecallBinding(c, users.Identity{UserID: "u-owner"}, false), "user caller lost its recall binding")
 }
 
 // --- subtree conversation scope ---------------------------------------------
@@ -144,6 +136,7 @@ func TestRecallBindingRefusesChildCaller(t *testing.T) {
 // external_ref — and its owner's other conversations never appear, in search
 // or export.
 func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	ctx := context.Background()
 	uniq := fmt.Sprintf("c_%d", time.Now().UnixNano())
@@ -186,19 +179,13 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	r := newMCPChildConversationReader(ctrl, caller)
 
 	rows, err := r.ConversationSearch(ctx, tools.ConversationQuery{Limit: 50})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	c.NoError(err, "search")
 	got := map[string]bool{}
 	for _, row := range rows {
 		got[row.ID] = true
 	}
-	if !got[own] || !got[desc] {
-		t.Fatalf("search = %v, want the subtree rows %s and %s", got, own, desc)
-	}
-	if got[outside] {
-		t.Fatalf("search returned the sibling conversation %s: the owner's corpus leaked", outside)
-	}
+	c.False(!got[own] || !got[desc], "search = %v, want the subtree rows %s and %s", got, own, desc)
+	c.False(got[outside], "search returned the sibling conversation %s: the owner's corpus leaked", outside)
 
 	// Export answers not-found for the sibling — the scope-miss rule, never a
 	// permission error that confirms existence.
@@ -212,18 +199,14 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 	// The catalogue runs under the same scope; the models rollup counts only
 	// the subtree's conversations.
 	res, err := r.RunQuery(ctx, "models", tools.CatalogueFilter{})
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
+	c.NoError(err, "query")
 	convs := 0
 	for _, row := range res.Rows {
 		if len(row) == 3 && row[1].IsInt {
 			convs += int(row[1].Int)
 		}
 	}
-	if convs != 2 {
-		t.Fatalf("models conversations = %d, want 2 (the subtree, never the sibling)", convs)
-	}
+	c.Eq(2, convs, "models conversations")
 }
 
 // TestMCPFaceChildConversationsBindingIsSubtree pins the getServer DECISION,
@@ -233,6 +216,7 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 // reappear here, because this drives the tool through the SDK session
 // getServer builds — the same path a real child's RAFIKI_MCP_TOKEN drives.
 func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	ctx := context.Background()
 	uniq := fmt.Sprintf("c_%d", time.Now().UnixNano())
@@ -251,12 +235,10 @@ func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
 	// oracle: reverting the binding to the owner reader (ScopeOwner) surfaces
 	// the sibling here, it does not merely return nothing.
 	var ownerID string
-	if err := pool.QueryRow(ctx,
+	c.NoError(pool.QueryRow(ctx,
 		`INSERT INTO conversations.users (username, token_sha256)
 		 VALUES ('mcp-child-scope-owner', 'mcp-child-scope-owner:' || gen_random_uuid()::text)
-		 RETURNING id::text`).Scan(&ownerID); err != nil {
-		t.Fatalf("insert owner user: %v", err)
-	}
+		 RETURNING id::text`).Scan(&ownerID), "insert owner user")
 	if _, err := pool.Exec(ctx,
 		`UPDATE conversations.conversation SET owner_user_id = $1::uuid
 		  WHERE id = ANY($2::uuid[])`, ownerID, []string{own, desc, sibling}); err != nil {
@@ -290,19 +272,11 @@ func TestMCPFaceChildConversationsBindingIsSubtree(t *testing.T) {
 	}))
 	cs := mcpConnect(t, face.getServer(child))
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "conversation_search"})
-	if err != nil {
-		t.Fatalf("conversation_search: %v", err)
-	}
+	c.NoError(err, "conversation_search")
 	// The tool renders rows by conversation id, so the ids are the oracle:
 	// both in-subtree rows surface, the sibling's never does.
 	text := mcpCallText(t, res)
-	if !strings.Contains(text, desc) {
-		t.Fatalf("conversation_search did not surface the in-subtree descendant %s:\n%s", desc, text)
-	}
-	if !strings.Contains(text, own) {
-		t.Fatalf("conversation_search did not surface the caller's own conversation %s:\n%s", own, text)
-	}
-	if strings.Contains(text, sibling) {
-		t.Fatalf("conversation_search leaked the owner's other child's conversation %s:\n%s", sibling, text)
-	}
+	c.StrContains(text, desc, "conversation_search did not surface the in-subtree descendant")
+	c.StrContains(text, own, "conversation_search did not surface the caller's own conversation")
+	c.NotStrContains(text, sibling, "conversation_search leaked the owner's other child's conversation")
 }

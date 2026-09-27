@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestThinkingBudgetFor(t *testing.T) {
@@ -33,16 +35,13 @@ func TestThinkingBudgetFor(t *testing.T) {
 			t.Errorf("ThinkingBudgetFor(%q): unexpected error: %v", tc.level, err)
 			continue
 		}
-		if got != tc.want {
-			t.Errorf("ThinkingBudgetFor(%q) = %d, want %d", tc.level, got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, got, "ThinkingBudgetFor(%q) = %d, want", tc.level, got)
 	}
 }
 
 func TestThinkingBudgetForUnknownLevel(t *testing.T) {
-	if _, err := ThinkingBudgetFor("turbo"); err == nil {
-		t.Fatal("ThinkingBudgetFor(\"turbo\"): want error, got nil")
-	}
+	_, err := ThinkingBudgetFor("turbo")
+	assert.NewAborting(t).Error(err, "ThinkingBudgetFor(\"turbo\"): want error, got nil")
 }
 
 // writeFakeTurns writes bodies (pretty-printed JSON anthropic.Message values)
@@ -51,18 +50,15 @@ func TestThinkingBudgetForUnknownLevel(t *testing.T) {
 // loaded Sender - Config.FakeTurns is a path, not a llm.Sender.
 func writeFakeTurns(t *testing.T, bodies ...string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	var lines []string
 	for _, b := range bodies {
 		var compact bytes.Buffer
-		if err := json.Compact(&compact, []byte(b)); err != nil {
-			t.Fatalf("compact scripted body: %v", err)
-		}
+		c.NoError(json.Compact(&compact, []byte(b)), "compact scripted body")
 		lines = append(lines, compact.String())
 	}
 	path := filepath.Join(t.TempDir(), "turns.ndjson")
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("write scripted turns: %v", err)
-	}
+	c.NoError(os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600), "write scripted turns")
 	return path
 }
 
@@ -72,6 +68,7 @@ func writeFakeTurns(t *testing.T, bodies ...string) string {
 // conversation options, Engine, Frontend wiring) with no API key and no
 // network.
 func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 
 	var ranCommand string
@@ -80,9 +77,7 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 			var input struct {
 				Command string `json:"command"`
 			}
-			if err := json.Unmarshal(in, &input); err != nil {
-				t.Fatalf("unmarshal tool input: %v", err)
-			}
+			c.NoError(json.Unmarshal(in, &input), "unmarshal tool input")
 			ranCommand = input.Command
 			return "total 0", nil
 		},
@@ -101,22 +96,16 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 
 	eng, shutdown, err := cfg.BuildEngine(context.Background(), fe)
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	c.NoError(err, "BuildEngine")
 	defer shutdown()
 
 	eng.HandlePrompt("list files")
 	eng.Wait()
 	eng.Close()
 
-	if ranCommand != "ls" {
-		t.Fatalf("ran command = %q, want %q (tool_use from the scripted turn never dispatched)", ranCommand, "ls")
-	}
+	c.Eq("ls", ranCommand, "ran command")
 	types := frameTypes(t, out.String())
-	if len(types) == 0 || types[0] != "message_start" {
-		t.Fatalf("frame types = %v, want to start with message_start (the user echo)", types)
-	}
+	c.False(len(types) == 0 || types[0] != "message_start", "frame types = %v, want to start with message_start (the user echo)", types)
 	var sawToolStart, sawEnd bool
 	for _, ty := range types {
 		switch ty {
@@ -126,12 +115,8 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 			sawEnd = true
 		}
 	}
-	if !sawToolStart {
-		t.Fatalf("frame types = %v, want a tool_execution_start frame (the scripted tool_use)", types)
-	}
-	if !sawEnd {
-		t.Fatalf("frame types = %v, want an agent_end frame", types)
-	}
+	c.True(sawToolStart, "frame types = %v, want a tool_execution_start frame (the scripted tool_use)", types)
+	c.True(sawEnd, "frame types = %v, want an agent_end frame", types)
 
 	if got := eng.State(); got.SessionName != "w1" || got.ModelID != "claude-x" || got.Provider != "anthropic" {
 		t.Fatalf("State() = %+v, want SessionName=w1 ModelID=claude-x Provider=anthropic", got)
@@ -141,9 +126,8 @@ func TestBuildEngineFakeTurnsEndToEnd(t *testing.T) {
 func TestBuildEngineRequiresTools(t *testing.T) {
 	cfg := Config{Model: "anthropic/claude-x", FakeTurns: writeFakeTurns(t, sampleEndTurn), Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with nil Tools: want error, got nil")
-	}
+	_, _, err := cfg.BuildEngine(context.Background(), fe)
+	assert.NewAborting(t).Error(err, "BuildEngine with nil Tools: want error, got nil")
 }
 
 // TestBuildEngineMissingAPIKey an agent's config with no Providers set fails validation
@@ -151,9 +135,8 @@ func TestBuildEngineRequiresTools(t *testing.T) {
 func TestBuildEngineMissingAPIKey(t *testing.T) {
 	cfg := Config{Model: "anthropic/claude-x", Tools: fakeToolSet{}}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with no Providers: want error, got nil")
-	}
+	_, _, err := cfg.BuildEngine(context.Background(), fe)
+	assert.NewAborting(t).Error(err, "BuildEngine with no Providers: want error, got nil")
 }
 
 // TestBuildEngineMissingAPIKeyNonAnthropicModel verifies that a config
@@ -161,9 +144,8 @@ func TestBuildEngineMissingAPIKey(t *testing.T) {
 func TestBuildEngineMissingAPIKeyNonAnthropicModel(t *testing.T) {
 	cfg := Config{Model: "deepseek/deepseek-chat", Tools: fakeToolSet{}, Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine with a model naming no configured provider: want error, got nil")
-	}
+	_, _, err := cfg.BuildEngine(context.Background(), fe)
+	assert.NewAborting(t).Error(err, "BuildEngine with a model naming no configured provider: want error, got nil")
 }
 
 // TestBuildEngineNonAnthropicModelRequiresOpenRouterKey verifies a
@@ -171,14 +153,14 @@ func TestBuildEngineMissingAPIKeyNonAnthropicModel(t *testing.T) {
 func TestBuildEngineNonAnthropicModelRequiresOpenRouterKey(t *testing.T) {
 	cfg := Config{Model: "openrouter/meta-llama/llama-3.1-70b", Tools: fakeToolSet{}, Providers: providers.Default()}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err != nil {
-		t.Fatalf("BuildEngine with a configured openrouter model: %v", err)
-	}
+	_, _, err := cfg.BuildEngine(context.Background(), fe)
+	assert.NewAborting(t).NoError(err, "BuildEngine with a configured openrouter model")
 }
 
 var _ agentloop.ToolSet = fakeToolSet{}
 
 func TestBuildEngineNeedsNoAnthropicKeyForLocalModel(t *testing.T) {
+	ck := assert.NewAborting(t)
 	set, err := providers.Parse([]byte(`
 default_provider = "vmlx"
 
@@ -186,32 +168,23 @@ default_provider = "vmlx"
 kind = "anthropic"
 base_url = "http://127.0.0.1:1"
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	ck.NoError(err, "Parse")
 	c := Config{Model: "vmlx/qwen3", Providers: set}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("Validate: a keyless local provider must need no ANTHROPIC_API_KEY: %v", err)
-	}
+	ck.NoError(c.Validate(), "Validate: a keyless local provider must need no ANTHROPIC_API_KEY")
 }
 
 func TestValidateRejectsUnknownProvider(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	set := providers.Default()
 	c := Config{Model: "deepseek/deepseek-chat", Providers: set}
 	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate accepted a model naming no configured provider")
-	}
-	if !strings.Contains(err.Error(), "unknown provider") {
-		t.Errorf("error = %q, want \"unknown provider\"", err.Error())
-	}
+	ck.Require().Error(err, "Validate accepted a model naming no configured provider")
+	ck.StrContains(err.Error(), "unknown provider", "error = %q, want \"unknown provider\"", err.Error())
 }
 
 func TestValidateRejectsMissingRegistry(t *testing.T) {
 	c := Config{Model: "anthropic/claude-sonnet-5"}
-	if err := c.Validate(); err == nil {
-		t.Fatal("Validate accepted a Config with no provider registry")
-	}
+	assert.NewAborting(t).Error(c.Validate(), "Validate accepted a Config with no provider registry")
 }
 
 // buildCatalogEngine is the shared construction helper for the catalog tests:
@@ -232,9 +205,7 @@ func buildCatalogEngine(t *testing.T, cat *routing.ModelCatalog) *Engine {
 		Catalog:   cat,
 	}
 	eng, shutdown, err := cfg.BuildEngine(context.Background(), NewFrontend(strings.NewReader(""), &syncBuffer{}, nil))
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "BuildEngine")
 	t.Cleanup(shutdown)
 	return eng
 }
@@ -253,9 +224,7 @@ func TestBuildEngineUsesSharedCatalog(t *testing.T) {
 	defer eng.Close()
 
 	got := catalogOf(eng.client)
-	if got != cat {
-		t.Fatalf("engine's client uses catalog %p, want the shared instance %p passed via Config.Catalog", got, cat)
-	}
+	assert.NewAborting(t).Eq(cat, got, "engine's client uses catalog")
 }
 
 // TestBuildEngineWithoutSharedCatalogBuildsOwn pins the standalone `rafikid
@@ -264,16 +233,13 @@ func TestBuildEngineUsesSharedCatalog(t *testing.T) {
 // engines never share one instance — nil must mean "build your own", not
 // "reuse something process-global".
 func TestBuildEngineWithoutSharedCatalogBuildsOwn(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := buildCatalogEngine(t, nil)
 	b := buildCatalogEngine(t, nil)
 	defer a.Close()
 	defer b.Close()
 
 	catA, catB := catalogOf(a.client), catalogOf(b.client)
-	if catA == nil || catB == nil {
-		t.Fatalf("standalone engines' catalogs = %p, %p; llm.NewClient was expected to default one in for each", catA, catB)
-	}
-	if catA == catB {
-		t.Fatalf("two standalone engines share one catalog instance (%p); nil Catalog must mean the client builds its own", catA)
-	}
+	c.False(catA == nil || catB == nil, "standalone engines' catalogs = %p, %p; llm.NewClient was expected to default one in for each", catA, catB)
+	c.NotEq(catB, catA, "two standalone engines share one catalog instance (")
 }

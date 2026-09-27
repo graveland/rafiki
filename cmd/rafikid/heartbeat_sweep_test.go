@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // heartbeatBatches counts only the batches pushed by the heartbeat sweep,
@@ -27,37 +28,28 @@ func heartbeatBatches(cap *capturedFlush) int {
 // A child continuously working past the interval gets exactly one heartbeat,
 // naming elapsed time and cost — not the settle-notification's message shape.
 func TestHeartbeatFiresOnceThePastTheInterval(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, clk, cap := settleFixture(t)
 	c.heartbeatInterval = 5 * time.Minute
 	c.coster = fakeCoster{spend: 2.50}
 
 	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
 	c.sweepHeartbeats(context.Background(), clk.Now())
-	if len(cap.batches()) != 0 {
-		t.Fatal("heartbeat fired before the interval elapsed")
-	}
+	ck.Require().Empty(cap.batches(), "heartbeat fired before the interval elapsed")
 
 	clk.Advance(6 * time.Minute)
 	c.sweepHeartbeats(context.Background(), clk.Now())
 	clk.Advance(6 * time.Second) // let the debounced push flush
 
 	batches := cap.batches()
-	if len(batches) != 1 {
-		t.Fatalf("want 1 heartbeat, got %d: %+v", len(batches), batches)
-	}
-	if batches[0].childID != "c_coord" {
-		t.Errorf("heartbeat went to %s, not the coordinator", batches[0].childID)
-	}
-	if !strings.Contains(batches[0].fragments[0], "$2.50") {
-		t.Errorf("heartbeat fragment must name running cost: %q", batches[0].fragments[0])
-	}
+	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
+	ck.Eq("c_coord", batches[0].childID, "heartbeat went to")
+	ck.StrContains(batches[0].fragments[0], "$2.50", "heartbeat fragment must name running cost")
 	// The sweep fires exactly 6 minutes (clk-time) after the child was first
 	// observed working — see heartbeatState.since's doc — so the fragment
 	// must name that elapsed time too, not just cost: cost alone conveys
 	// nothing for an unpriced local model, which always reads $0.00.
-	if !strings.Contains(batches[0].fragments[0], "6m0s so far") {
-		t.Errorf("heartbeat fragment must name elapsed time: %q", batches[0].fragments[0])
-	}
+	ck.StrContains(batches[0].fragments[0], "6m0s so far", "heartbeat fragment must name elapsed time")
 }
 
 // When no coster is configured, the fragment must not assert a false
@@ -65,6 +57,7 @@ func TestHeartbeatFiresOnceThePastTheInterval(t *testing.T) {
 // own best-effort handling of the identical situation. Elapsed time, which
 // does not depend on the coster, must still be reported.
 func TestHeartbeatOmitsCostClauseWithNoCoster(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, clk, cap := settleFixture(t)
 	c.heartbeatInterval = 5 * time.Minute
 	c.coster = nil
@@ -76,21 +69,16 @@ func TestHeartbeatOmitsCostClauseWithNoCoster(t *testing.T) {
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()
-	if len(batches) != 1 {
-		t.Fatalf("want 1 heartbeat, got %d: %+v", len(batches), batches)
-	}
+	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
 	frag := batches[0].fragments[0]
-	if strings.Contains(frag, "$") {
-		t.Errorf("heartbeat asserted a cost figure with no coster configured: %q", frag)
-	}
-	if !strings.Contains(frag, "so far") {
-		t.Errorf("heartbeat must still name elapsed time: %q", frag)
-	}
+	ck.NotStrContains(frag, "$", "heartbeat asserted a cost figure with no coster configured")
+	ck.StrContains(frag, "so far", "heartbeat must still name elapsed time")
 }
 
 // A coster that errors on the query must degrade the same way as a missing
 // coster: no cost clause, no false $0.00.
 func TestHeartbeatOmitsCostClauseOnQueryError(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, clk, cap := settleFixture(t)
 	c.heartbeatInterval = 5 * time.Minute
 	c.coster = fakeCoster{err: errors.New("db unreachable")}
@@ -102,18 +90,12 @@ func TestHeartbeatOmitsCostClauseOnQueryError(t *testing.T) {
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()
-	if len(batches) != 1 {
-		t.Fatalf("want 1 heartbeat, got %d: %+v", len(batches), batches)
-	}
+	ck.Require().Len(batches, 1, "want 1 heartbeat, got %d", len(batches))
 	frag := batches[0].fragments[0]
-	if strings.Contains(frag, "$0.00") {
-		t.Errorf("heartbeat asserted $0.00 on a failed cost query: %q", frag)
-	}
+	ck.NotStrContains(frag, "$0.00", "heartbeat asserted $0.00 on a failed cost query")
 	// due()'s lastSent bookkeeping must still have advanced despite the
 	// failed cost query — only the message content degrades.
-	if !strings.Contains(frag, "so far") {
-		t.Errorf("heartbeat must still fire and name elapsed time: %q", frag)
-	}
+	ck.StrContains(frag, "so far", "heartbeat must still fire and name elapsed time")
 }
 
 // A second sweep before the interval elapses again must not re-push.
@@ -125,6 +107,7 @@ func TestHeartbeatOmitsCostClauseOnQueryError(t *testing.T) {
 // interval doesn't push again. Without the genuine fire, "does not repeat"
 // would be checking nothing: both counts would trivially be zero.
 func TestHeartbeatDoesNotRepeatWithinTheInterval(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, clk, cap := settleFixture(t)
 	c.heartbeatInterval = 5 * time.Minute
 	c.coster = fakeCoster{spend: 1.0}
@@ -135,17 +118,13 @@ func TestHeartbeatDoesNotRepeatWithinTheInterval(t *testing.T) {
 	c.sweepHeartbeats(context.Background(), clk.Now()) // genuine fire
 	clk.Advance(6 * time.Second)
 	first := heartbeatBatches(cap)
-	if first != 1 {
-		t.Fatalf("setup: want 1 genuine heartbeat before the repeat check, got %d", first)
-	}
+	ck.Require().Eq(1, first, "setup: want 1 genuine heartbeat before the repeat check, got")
 
 	clk.Advance(1 * time.Minute) // still under a second full interval
 	c.sweepHeartbeats(context.Background(), clk.Now())
 	clk.Advance(6 * time.Second)
 
-	if got := heartbeatBatches(cap); got != first {
-		t.Errorf("a second sweep inside the interval pushed again: %d heartbeat batches, want %d", got, first)
-	}
+	ck.Eq(first, heartbeatBatches(cap), "a second sweep inside the interval pushed again")
 }
 
 // A child with no parent (top-level) has nobody to heartbeat to.
@@ -159,9 +138,7 @@ func TestHeartbeatSkipsTopLevelChildren(t *testing.T) {
 	c.sweepHeartbeats(context.Background(), clk.Now())
 	clk.Advance(6 * time.Second)
 
-	if got := len(cap.batches()); got != 0 {
-		t.Errorf("a top-level child got a heartbeat: %d batches", got)
-	}
+	assert.NewCollecting(t).Eq(0, len(cap.batches()), "a top-level child got a heartbeat")
 }
 
 // Going idle clears the working-since window, so a later working spell
@@ -180,6 +157,7 @@ func TestHeartbeatSkipsTopLevelChildren(t *testing.T) {
 // broken stopWorking would see the stale lastSent as "interval elapsed" and
 // fire immediately — that's what distinguishes the two.
 func TestHeartbeatWindowResetsOnGoingIdle(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, clk, cap := settleFixture(t)
 	c.heartbeatInterval = 5 * time.Minute
 	c.coster = fakeCoster{spend: 1.0}
@@ -190,9 +168,7 @@ func TestHeartbeatWindowResetsOnGoingIdle(t *testing.T) {
 	c.sweepHeartbeats(context.Background(), clk.Now()) // genuine fire, leaves lastSent behind
 	clk.Advance(6 * time.Second)
 	firstSpell := heartbeatBatches(cap)
-	if firstSpell != 1 {
-		t.Fatalf("setup: want 1 genuine heartbeat from the first spell, got %d", firstSpell)
-	}
+	ck.Require().Eq(1, firstSpell, "setup: want 1 genuine heartbeat from the first spell, got")
 
 	// The transition below is a genuine settle (working -> idle), so it also
 	// fires the pre-existing settle notification (subagentEventSource) —
@@ -207,7 +183,5 @@ func TestHeartbeatWindowResetsOnGoingIdle(t *testing.T) {
 	c.sweepHeartbeats(context.Background(), clk.Now())
 	clk.Advance(6 * time.Second)
 
-	if got := heartbeatBatches(cap); got != firstSpell {
-		t.Errorf("a leaked pre-reset heartbeat state fired on the new spell: %d heartbeat batches, want %d", got, firstSpell)
-	}
+	ck.Eq(firstSpell, heartbeatBatches(cap), "a leaked pre-reset heartbeat state fired on the new spell")
 }

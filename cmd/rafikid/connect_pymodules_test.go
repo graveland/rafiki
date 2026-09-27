@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestConnectPyModulesOwnerFromContext pins the security-relevant rule: the
@@ -19,6 +21,7 @@ import (
 // ctx carrying an identity writes that identity's bucket, and a later List
 // under the same identity sees only that owner's rows.
 func TestConnectPyModulesOwnerFromContext(t *testing.T) {
+	ck := assert.NewAborting(t)
 	f := newPymoduleFixture()
 	m := connectPyModules{c: &Controller{pymoduleStore: f.store}}
 
@@ -29,9 +32,7 @@ func TestConnectPyModulesOwnerFromContext(t *testing.T) {
 		t.Fatalf("PutPymodule with no identity: %v", err)
 	}
 	rows := f.store.rows[""]
-	if len(rows) != 1 || rows[0].OwnerUserID != "" || rows[0].Name != "shared_util" {
-		t.Fatalf("unattributed rows = %+v, want the write recorded under owner \"\"", rows)
-	}
+	ck.False(len(rows) != 1 || rows[0].OwnerUserID != "" || rows[0].Name != "shared_util", "unattributed rows = %+v, want the write recorded under owner \"\"", rows)
 
 	// An identified ctx: the same call records THAT identity's UserID.
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u-alice"})
@@ -46,19 +47,11 @@ func TestConnectPyModulesOwnerFromContext(t *testing.T) {
 	// rows, and the anonymous ctx never sees them. Unfiltered (repo "") is
 	// the default scope a caller gets.
 	got, err := m.ListPymodules(alice, "")
-	if err != nil {
-		t.Fatalf("ListPymodules as u-alice: %v", err)
-	}
-	if len(got) != 1 || got[0].Name != "alice_util" {
-		t.Fatalf("alice's list = %+v, want only [alice_util]", got)
-	}
+	ck.NoError(err, "ListPymodules as u-alice")
+	ck.False(len(got) != 1 || got[0].Name != "alice_util", "alice's list = %+v, want only [alice_util]", got)
 	anon, err := m.ListPymodules(context.Background(), "")
-	if err != nil {
-		t.Fatalf("ListPymodules with no identity: %v", err)
-	}
-	if len(anon) != 1 || anon[0].Name != "shared_util" {
-		t.Fatalf("anonymous list = %+v, want only [shared_util]", anon)
-	}
+	ck.NoError(err, "ListPymodules with no identity")
+	ck.False(len(anon) != 1 || anon[0].Name != "shared_util", "anonymous list = %+v, want only [shared_util]", anon)
 }
 
 // TestConnectPyModulesPushesAfterWrite covers push-on-write through the
@@ -66,6 +59,7 @@ func TestConnectPyModulesOwnerFromContext(t *testing.T) {
 // executors, asserted on the real client's recorded requests -- the same
 // assertion shape as TestNewControllerPyModuleWriterPutTriggersOwnerScopedPush.
 func TestConnectPyModulesPushesAfterWrite(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	f := newPymoduleFixture()
 	// Per-executor clients attribute each payload to its executor: pushAll
 	// fans out concurrently, so the shared client's arrival order is not
@@ -93,18 +87,15 @@ func TestConnectPyModulesPushesAfterWrite(t *testing.T) {
 		t.Errorf("alice's push after Put = %v, want it to contain alice_plot", got)
 	}
 
-	if err := m.DeletePymodule(ctx, "alice_plot"); err != nil {
-		t.Fatalf("DeletePymodule: %v", err)
-	}
+	ck.Require().NoError(m.DeletePymodule(ctx, "alice_plot"), "DeletePymodule")
 	// The delete pushed the pruned corpus too: one more RPC per executor,
 	// and neither payload may still carry the deleted module.
 	if len(aliceC.requests) != 2 || len(bobC.requests) != 2 {
 		t.Fatalf("after Delete: SyncPyModules requests = exec-alice %d, exec-bob %d; want 2 each", len(aliceC.requests), len(bobC.requests))
 	}
 	for _, req := range []*executorpb.SyncPyModulesRequest{aliceC.requests[1], bobC.requests[1]} {
-		if got := moduleNames(req); containsName(got, "alice_plot") {
-			t.Errorf("push after Delete = %v, want the deleted module gone", got)
-		}
+		got := moduleNames(req)
+		ck.False(containsName(got, "alice_plot"), "push after Delete = %v, want the deleted module gone", got)
 	}
 }
 
@@ -153,31 +144,25 @@ func seedGitInventory(g *gitSourceFixture, source string, resp *executorpb.SyncP
 // code. Owner scoping still holds: another owner's ctx sees neither alice's
 // git rows nor her local ones.
 func TestConnectPyModulesListSpansGitSources(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, g, m := newGitListingFixture()
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	if err := seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
+	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
 		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys", Description: "rotates keys"}},
 		Packages:  []*executorpb.GitSourcePackage{{Name: "opslib", Description: "ops helpers"}},
 		VenvReady: true,
-	}); err != nil {
-		t.Fatalf("seed ops_tools: %v", err)
-	}
-	if err := seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
+	}), "seed ops_tools")
+	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
 		Scripts: []*executorpb.GitSourceScript{{Name: "compile_helpers", Description: "compiles things"}},
-	}); err != nil {
-		t.Fatalf("seed shared_lib: %v", err)
-	}
+	}), "seed shared_lib")
 
 	rows, err := m.ListPymodules(alice, "")
-	if err != nil {
-		t.Fatalf("ListPymodules: %v", err)
-	}
+	c.Require().NoError(err, "ListPymodules")
 	byName := map[string]connectapi.PymoduleRow{}
 	for _, r := range rows {
-		if prev, seen := byName[r.Name]; seen {
-			t.Fatalf("duplicate row name %q (%+v vs %+v)", r.Name, prev, r)
-		}
+		prev, seen := byName[r.Name]
+		c.Require().False(seen, "duplicate row name %q (%+v vs %+v)", r.Name, prev, r)
 		byName[r.Name] = r
 	}
 	// The local row, stamped as local.
@@ -188,28 +173,20 @@ func TestConnectPyModulesListSpansGitSources(t *testing.T) {
 	// carrying neither version nor save time nor code.
 	for _, want := range []struct{ name, description string }{{"rotate_keys", "rotates keys"}, {"opslib", "ops helpers"}} {
 		r := byName[want.name]
-		if r.Repo != "ops_tools" || r.Version != 0 || r.CreatedAt != "" || r.Code != "" || r.Description != want.description {
-			t.Errorf("%s = %+v, want Repo ops_tools, zero version/createdAt/code, description %q", want.name, r, want.description)
-		}
+		c.False(r.Repo != "ops_tools" || r.Version != 0 || r.CreatedAt != "" || r.Code != "" || r.Description != want.description, "%s = %+v, want Repo ops_tools, zero version/createdAt/code, description %q", want.name, r, want.description)
 	}
 	// shared_lib's script, under its own source's name.
 	if r := byName["compile_helpers"]; r.Repo != "shared_lib" || r.Version != 0 || r.Code != "" {
 		t.Errorf("compile_helpers = %+v, want Repo shared_lib with zero version/code", r)
 	}
-	if len(byName) != 4 {
-		t.Errorf("got %d row(s) %v, want 4: alice_chart plus ops_tools' and shared_lib's discoveries", len(byName), rows)
-	}
+	c.Len(byName, 4, "got %d row(s) %v, want 4: alice_chart plus ops_tools' and shared_lib's discoveries", len(byName), rows)
 
 	// bob's ctx sees his own local row and nothing of alice's — not her git
 	// rows either: the inventory cache is keyed per owner.
 	bob := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_bob"})
 	bobRows, err := m.ListPymodules(bob, "")
-	if err != nil {
-		t.Fatalf("ListPymodules as u_bob: %v", err)
-	}
-	if len(bobRows) != 1 || bobRows[0].Name != "bob_util" || bobRows[0].Repo != "local" {
-		t.Errorf("bob's unfiltered list = %+v, want only his local bob_util", bobRows)
-	}
+	c.Require().NoError(err, "ListPymodules as u_bob")
+	c.False(len(bobRows) != 1 || bobRows[0].Name != "bob_util" || bobRows[0].Repo != "local", "bob's unfiltered list = %+v, want only his local bob_util", bobRows)
 }
 
 // TestConnectPyModulesListFiltersToOneRepo pins the narrowing: a named git
@@ -217,31 +194,22 @@ func TestConnectPyModulesListSpansGitSources(t *testing.T) {
 // "local" returns ONLY the blob-store rows; a name with no cached snapshot
 // is an empty result, not an error.
 func TestConnectPyModulesListFiltersToOneRepo(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, g, m := newGitListingFixture()
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
-	if err := seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
+	c.Require().NoError(seedGitInventory(g, "ops_tools", &executorpb.SyncPyModuleGitSourceResponse{
 		Scripts:  []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
 		Packages: []*executorpb.GitSourcePackage{{Name: "opslib"}},
-	}); err != nil {
-		t.Fatalf("seed ops_tools: %v", err)
-	}
-	if err := seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
+	}), "seed ops_tools")
+	c.Require().NoError(seedGitInventory(g, "shared_lib", &executorpb.SyncPyModuleGitSourceResponse{
 		Scripts: []*executorpb.GitSourceScript{{Name: "compile_helpers"}},
-	}); err != nil {
-		t.Fatalf("seed shared_lib: %v", err)
-	}
+	}), "seed shared_lib")
 
 	rows, err := m.ListPymodules(alice, "ops_tools")
-	if err != nil {
-		t.Fatalf("ListPymodules(ops_tools): %v", err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("ops_tools rows = %+v, want exactly its two discoveries", rows)
-	}
+	c.Require().NoError(err, "ListPymodules(ops_tools)")
+	c.Require().Len(rows, 2, "ops_tools rows")
 	for _, r := range rows {
-		if r.Repo != "ops_tools" {
-			t.Errorf("row %+v carries Repo %q, want ops_tools only", r, r.Repo)
-		}
+		c.Eq("ops_tools", r.Repo, "row %+v carries Repo %q, want ops_tools only", r, r.Repo)
 	}
 	if got := []string{rows[0].Name, rows[1].Name}; got[0] != "rotate_keys" || got[1] != "opslib" {
 		t.Errorf("rows = %v, want [rotate_keys opslib] (scripts before packages)", got)
@@ -249,21 +217,13 @@ func TestConnectPyModulesListFiltersToOneRepo(t *testing.T) {
 
 	// "local" narrows the other way: blob-store rows only, no git discoveries.
 	localRows, err := m.ListPymodules(alice, "local")
-	if err != nil {
-		t.Fatalf("ListPymodules(local): %v", err)
-	}
-	if len(localRows) != 1 || localRows[0].Name != "alice_chart" || localRows[0].Repo != "local" {
-		t.Errorf("local rows = %+v, want only alice_chart stamped local", localRows)
-	}
+	c.Require().NoError(err, "ListPymodules(local)")
+	c.False(len(localRows) != 1 || localRows[0].Name != "alice_chart" || localRows[0].Repo != "local", "local rows = %+v, want only alice_chart stamped local", localRows)
 
 	// An unrefreshed source name matches nothing — an empty list, not an error.
 	empty, err := m.ListPymodules(alice, "never_refreshed")
-	if err != nil {
-		t.Fatalf("ListPymodules(never_refreshed): %v", err)
-	}
-	if len(empty) != 0 {
-		t.Errorf("unrefreshed scope returned %+v, want no rows", empty)
-	}
+	c.Require().NoError(err, "ListPymodules(never_refreshed)")
+	c.Empty(empty, "unrefreshed scope returned")
 }
 
 // TestConnectPyModulesListSpansGitSourcesFiltersToOneRepo is a shim so the
@@ -280,21 +240,14 @@ func TestConnectPyModulesListSpansGitSourcesFiltersToOneRepo(t *testing.T) {
 // -- the guard is what keeps the write path from panicking, and no RPC can
 // have gone out because there is no pusher to make one.
 func TestConnectPyModulesNilPusherStillWrites(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	f := newPymoduleFixture()
 	m := connectPyModules{c: &Controller{pymoduleStore: f.store}} // pymodulePusher deliberately nil
 	ctx := server.WithIdentity(context.Background(), &server.Identity{UserID: "u-alice"})
 
 	row, err := m.PutPymodule(ctx, "alice_util", "def alice_util(): pass", "alice's util")
-	if err != nil {
-		t.Fatalf("PutPymodule with nil pusher: %v", err)
-	}
-	if row.Version != 1 || row.Name != "alice_util" || row.Code != "def alice_util(): pass" {
-		t.Errorf("PutPymodule row = %+v, want the saved record echoed back", row)
-	}
-	if err := m.DeletePymodule(ctx, "alice_util"); err != nil {
-		t.Fatalf("DeletePymodule with nil pusher: %v", err)
-	}
-	if len(f.client.requests) != 0 {
-		t.Errorf("SyncPyModules requests = %d, want 0 with no pusher configured", len(f.client.requests))
-	}
+	ck.Require().NoError(err, "PutPymodule with nil pusher")
+	ck.False(row.Version != 1 || row.Name != "alice_util" || row.Code != "def alice_util(): pass", "PutPymodule row = %+v, want the saved record echoed back", row)
+	ck.Require().NoError(m.DeletePymodule(ctx, "alice_util"), "DeletePymodule with nil pusher")
+	ck.Empty(f.client.requests, "SyncPyModules requests = %d, want 0 with no pusher configured", len(f.client.requests))
 }

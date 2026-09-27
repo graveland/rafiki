@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seedChild inserts a minimal childstore record directly, bypassing a real
@@ -31,6 +33,7 @@ func seedChild(t *testing.T, c *Controller) string {
 // finds affected children by them. A stale pair leaks the live workspace and
 // releases a dead one.
 func TestNoteBindingUpdatesAnExistingChildsLabels(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	childID := seedChild(t, c) // whatever this package already uses to insert a session
 
@@ -39,34 +42,24 @@ func TestNoteBindingUpdatesAnExistingChildsLabels(t *testing.T) {
 	b.NoteBinding(childID, "exec-B", "ws-2")
 
 	snap, ok := c.st.Get(childID)
-	if !ok {
-		t.Fatal("child vanished")
-	}
-	if snap.Labels["rafiki/executor"] != "exec-B" {
-		t.Fatalf(`rafiki/executor = %q, want exec-B -- a rebind that does not `+
-			`reach the childstore leaks the new workspace and releases the old`,
-			snap.Labels["rafiki/executor"])
-	}
-	if snap.Labels["rafiki/workspace"] != "ws-2" {
-		t.Fatalf(`rafiki/workspace = %q, want ws-2`, snap.Labels["rafiki/workspace"])
-	}
+	ck.True(ok, "child vanished")
+	ck.Eq("exec-B", snap.Labels["rafiki/executor"], `rafiki/executor = %q, want exec-B -- a rebind that does not `+
+		`reach the childstore leaks the new workspace and releases the old`, snap.Labels["rafiki/executor"])
+	ck.Eq("ws-2", snap.Labels["rafiki/workspace"], `rafiki/workspace = %q, want ws-2`, snap.Labels["rafiki/workspace"])
 }
 
 // Before the child record exists, NoteBinding has nowhere to write, so the
 // spawn-time stash is still needed -- but only as a bridge, and Spawn must
 // consume it under the mutex.
 func TestNoteBindingBeforeTheChildExistsIsPickedUpAtSpawn(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	b := &controllerBinder{c: c}
 	b.NoteBinding("c_notyet", "exec-A", "ws-1")
 
 	wl, ok := c.takeWorkspaceLabels("c_notyet")
-	if !ok {
-		t.Fatal("the pre-spawn stash must survive until Spawn consumes it")
-	}
-	if wl.executorID != "exec-A" || wl.workspaceID != "ws-1" {
-		t.Fatalf("got %+v", wl)
-	}
+	ck.True(ok, "the pre-spawn stash must survive until Spawn consumes it")
+	ck.False(wl.executorID != "exec-A" || wl.workspaceID != "ws-1", "got %+v", wl)
 	if _, again := c.takeWorkspaceLabels("c_notyet"); again {
 		t.Fatal("taking must delete: the map grew without bound because the " +
 			"only delete was the spawn-time one")

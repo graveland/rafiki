@@ -20,6 +20,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // prefillGateSender wraps a scripted replay and FAILS THE TEST if the model
@@ -60,13 +62,12 @@ func (s *prefillGateSender) callCount() int { return s.inner.callCount() }
 // by external ref, with the shared wiring every test in this file needs.
 func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref string, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	cfg := EngineConfig{
@@ -81,9 +82,7 @@ func prefillDBEngine(t *testing.T, pool *pgxpool.Pool, sender llm.Sender, ref st
 		extra(&cfg)
 	}
 	eng, err := NewEngine(cfg, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	return eng, out
 }
@@ -95,9 +94,7 @@ func prefillDBSeedClient(t *testing.T, pool *pgxpool.Pool) *llm.Client {
 		llm.WithProviderSender("anthropic", newCapturingSender(t, sampleEndTurn)),
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return client
 }
 
@@ -128,18 +125,15 @@ func prefillSeedRows(path string) []llm.Message {
 // rows (concurrent-safe through pgx), bailing early on an agent_error frame.
 func waitForPrefillDBRows(t *testing.T, eng *Engine, out *syncBuffer, wantRows int) []store.Message {
 	t.Helper()
+	c := assert.NewAborting(t)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		hist, err := eng.conv.History(context.Background())
-		if err != nil {
-			t.Fatalf("history: %v", err)
-		}
+		c.NoError(err, "history")
 		if len(hist) >= wantRows {
 			return hist
 		}
-		if msg := out.String(); strings.Contains(msg, "agent_error") {
-			t.Fatalf("prefill emitted agent_error instead of reaching %d rows: %s", wantRows, msg)
-		}
+		c.NotStrContains(out.String(), "agent_error", "prefill emitted agent_error instead of reaching %d rows", wantRows)
 		if time.Now().After(deadline) {
 			t.Fatalf("history never reached %d rows (have %d)", wantRows, len(hist))
 		}
@@ -161,6 +155,7 @@ func TestPrefillResumeDoesNotContinueCompletePrefill(t *testing.T) {
 
 func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.PrefillRead) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -169,12 +164,8 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	// Seed r0/r1/r2 directly, the way a previous process's pre-fill left it.
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
-	if err := conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")); err != nil {
-		t.Fatalf("seed history: %v", err)
-	}
+	c.NoError(err, "seed conversation")
+	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 3 {
 		t.Fatalf("seeded history = %d rows (%v), want 3", len(hist), err)
 	}
@@ -198,9 +189,7 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	// only gates when the prompt below arrives, not whether we can detect a
 	// violation.
 	time.Sleep(300 * time.Millisecond)
-	if gate.callCount() != 0 {
-		t.Fatalf("LLM was called %d times before any prompt", gate.callCount())
-	}
+	c.Eq(0, gate.callCount(), "LLM was called")
 	if hist, err := eng.conv.History(ctx); err != nil || len(hist) != 3 {
 		t.Fatalf("history after settle = %d rows (%v), want 3 unchanged", len(hist), err)
 	}
@@ -210,30 +199,20 @@ func testPrefillCompleteTailSkipsResume(t *testing.T, prefill []protocol.Prefill
 	eng.HandlePrompt("do the task")
 	eng.Wait()
 
-	if gate.callCount() != 1 {
-		t.Fatalf("sender served %d calls, want exactly 1 (the prompt turn)", gate.callCount())
-	}
+	c.Eq(1, gate.callCount(), "sender served")
 	params := gate.inner.lastParams(t)
 	msgs := params.Messages
-	if len(msgs) != 3 {
-		t.Fatalf("request has %d messages, want 3", len(msgs))
-	}
+	c.Len(msgs, 3, "request has %d messages, want 3", len(msgs))
 	last := msgs[len(msgs)-1]
-	if last.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("last request message role = %v, want user", last.Role)
-	}
+	c.Eq(anthropic.MessageParamRoleUser, last.Role, "last request message role")
 	text := ""
 	for _, b := range last.Content {
 		if b.OfText != nil {
 			text = b.OfText.Text
 		}
 	}
-	if text != "do the task" {
-		t.Fatalf("task text = %q, want it present (and last) in the merged message", text)
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.Eq("do the task", text, "task text")
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillResumeDoesNotContinueTextPrefill pins the same defensive rule
@@ -250,6 +229,7 @@ func TestPrefillResumeDoesNotContinueTextPrefill(t *testing.T) {
 
 func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -258,18 +238,14 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	// Seed exactly the text row a tool-less child's pre-fill leaves behind.
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
+	c.NoError(err, "seed conversation")
 	textRow := anthropic.MessageParam{
 		Role: anthropic.MessageParamRoleUser,
 		Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewTextBlock(PrefillTextPreamble + "\n\n=== /tmp/a.txt ===\n     1\tbody\n"),
 		},
 	}
-	if err := conv.SeedHistory(ctx, []llm.Message{textRow}); err != nil {
-		t.Fatalf("seed history: %v", err)
-	}
+	c.NoError(conv.SeedHistory(ctx, []llm.Message{textRow}), "seed history")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 1 {
 		t.Fatalf("seeded history = %d rows (%v), want 1", len(hist), err)
 	}
@@ -290,9 +266,7 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	// Settle: the startup classify runs against the 1-row text history and
 	// must do nothing — no Resume, no pre-fill, no LLM call.
 	time.Sleep(300 * time.Millisecond)
-	if gate.callCount() != 0 {
-		t.Fatalf("LLM was called %d times before any prompt", gate.callCount())
-	}
+	c.Eq(0, gate.callCount(), "LLM was called")
 	if hist, err := eng.conv.History(ctx); err != nil || len(hist) != 1 {
 		t.Fatalf("history after settle = %d rows (%v), want 1 unchanged", len(hist), err)
 	}
@@ -303,38 +277,25 @@ func testPrefillTextTailSkipsResume(t *testing.T, configured bool) {
 	eng.HandlePrompt("do the task")
 	eng.Wait()
 
-	if gate.callCount() != 1 {
-		t.Fatalf("sender served %d calls, want exactly 1 (the prompt turn)", gate.callCount())
-	}
+	c.Eq(1, gate.callCount(), "sender served")
 	params := gate.inner.lastParams(t)
 	msgs := params.Messages
-	if len(msgs) != 1 {
-		t.Fatalf("request has %d messages, want 1 (the merged user message)", len(msgs))
-	}
+	c.Len(msgs, 1, "request has %d messages, want 1 (the merged user message)", len(msgs))
 	merged := msgs[0]
-	if merged.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("request message 0 role = %v, want user", merged.Role)
-	}
-	if len(merged.Content) != 2 {
-		t.Fatalf("merged user message has %d blocks, want prefill text + task", len(merged.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, merged.Role, "request message 0 role")
+	c.Len(merged.Content, 2, "merged user message has %d blocks, want prefill text + task", len(merged.Content))
 	first := merged.Content[0]
-	if first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble) {
-		t.Fatalf("merged block 0 = %+v, want the pre-fill text", first)
-	}
+	c.False(first.OfText == nil || !strings.HasPrefix(first.OfText.Text, PrefillTextPreamble), "merged block 0 = %+v, want the pre-fill text", first)
 	last := merged.Content[1]
-	if last.OfText == nil || last.OfText.Text != "do the task" {
-		t.Fatalf("merged block 1 = %+v, want the task text last", last)
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.False(last.OfText == nil || last.OfText.Text != "do the task", "merged block 1 = %+v, want the task text last", last)
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillCompletesPartialR1: a process died after persisting r0+r1. The
 // restarted engine (pre-fill configured + AutoResume) re-executes r1's
 // inputs verbatim and writes r2 — with NO LLM call.
 func TestPrefillCompletesPartialR1(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -342,14 +303,10 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
+	c.NoError(err, "seed conversation")
 	// Seed only r0+r1: r2 is what the pre-fill must write.
 	rows := prefillSeedRows("/tmp/a.txt")
-	if err := conv.SeedHistory(ctx, rows[:2]); err != nil {
-		t.Fatalf("seed history: %v", err)
-	}
+	c.NoError(conv.SeedHistory(ctx, rows[:2]), "seed history")
 
 	var mu sync.Mutex
 	var readPaths []string
@@ -375,41 +332,30 @@ func TestPrefillCompletesPartialR1(t *testing.T) {
 	defer eng.Close()
 
 	hist := waitForPrefillDBRows(t, eng, out, 3)
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want exactly 3", len(hist))
-	}
+	c.Len(hist, 3, "history has %d rows, want exactly 3", len(hist))
 
 	// r2 was written by executing r1's inputs verbatim.
 	r1 := hist[1].Param.Content[0].OfToolUse
 	r2 := hist[2].Param.Content[0].OfToolResult
-	if r2.ToolUseID != r1.ID {
-		t.Fatalf("r2 tool_use_id = %q, want r1's %q", r2.ToolUseID, r1.ID)
-	}
+	c.Eq(r1.ID, r2.ToolUseID, "r2 tool_use_id")
 	if !strings.HasPrefix(r1.ID, "prefill_") {
 		t.Fatalf("r1 id %q lacks the prefill_ prefix", r1.ID)
 	}
-	if got := r2.Content[0].OfText.Text; got != "/tmp/a.txt body" {
-		t.Fatalf("r2 result = %q, want the re-executed read output", got)
-	}
+	c.Eq("/tmp/a.txt body", r2.Content[0].OfText.Text, "r2 result")
 
 	mu.Lock()
-	if len(readPaths) != 1 || readPaths[0] != "/tmp/a.txt" {
-		t.Fatalf("read calls = %v, want exactly r1's input path", readPaths)
-	}
+	c.False(len(readPaths) != 1 || readPaths[0] != "/tmp/a.txt", "read calls = %v, want exactly r1's input path", readPaths)
 	mu.Unlock()
 
-	if gate.callCount() != 0 {
-		t.Fatalf("LLM was called %d times completing a partial r1, want 0", gate.callCount())
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.Eq(0, gate.callCount(), "LLM was called")
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestPrefillSyntheticRowUsageIsNull: the pre-fill's rows persist with NULL
 // usage — "not reported", never zero. The prefix plus NULL usage is the
 // provenance marker that distinguishes a pre-fill from a real turn.
 func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -425,26 +371,15 @@ func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
 	convID := eng.conv.ID
 	for _, ordinal := range []int{0, 1, 2} {
 		var inTok, outTok *int64
-		if err := pool.QueryRow(ctx, `
+		c.NoError(pool.QueryRow(ctx, `
 			SELECT input_tokens, output_tokens
 			  FROM conversations.conversation_message
-			 WHERE conversation_id = $1::uuid AND ordinal = $2`, convID, ordinal).Scan(&inTok, &outTok); err != nil {
-			t.Fatalf("query ordinal %d: %v", ordinal, err)
-		}
-		if inTok != nil || outTok != nil {
-			t.Fatalf("ordinal %d has input_tokens=%v output_tokens=%v, want NULL (usage not reported)",
-				ordinal, inTok, outTok)
-		}
+			 WHERE conversation_id = $1::uuid AND ordinal = $2`, convID, ordinal).Scan(&inTok, &outTok), "query ordinal %d", ordinal)
+		c.False(inTok != nil || outTok != nil, "ordinal %d has input_tokens=%v output_tokens=%v, want NULL (usage not reported)", ordinal, inTok, outTok)
 	}
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want 3", len(hist))
-	}
-	if hist[1].StopReason != "" {
-		t.Fatalf("r1 stop reason = %q, want empty", hist[1].StopReason)
-	}
-	if gate.callCount() != 0 {
-		t.Fatalf("LLM was called %d times, want 0", gate.callCount())
-	}
+	c.Len(hist, 3, "history has %d rows, want 3", len(hist))
+	c.Eq("", hist[1].StopReason, "r1 stop reason")
+	c.Eq(0, gate.callCount(), "LLM was called")
 }
 
 // TestPrefillEmptyHistorySkipsResume pins the crash-recovery fix: a fundi
@@ -455,6 +390,7 @@ func TestPrefillSyntheticRowUsageIsNull(t *testing.T) {
 // MessageAfterCrash). The engine must stay alive, call the model zero times,
 // and consume a prompt normally afterwards.
 func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -464,9 +400,7 @@ func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
 	// SIGKILL'd child that only ever answered get_state frames is left in.
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
+	c.NoError(err, "seed conversation")
 	if hist, err := conv.History(ctx); err != nil || len(hist) != 0 {
 		t.Fatalf("seed history = %d rows (%v), want 0", len(hist), err)
 	}
@@ -488,9 +422,7 @@ func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
 		t.Fatalf("engine fataled on an empty-history startup: %v", err)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if gate.callCount() != 0 {
-		t.Fatalf("LLM was called %d times before any prompt", gate.callCount())
-	}
+	c.Eq(0, gate.callCount(), "LLM was called")
 	if hist, err := eng.conv.History(ctx); err != nil || len(hist) != 0 {
 		t.Fatalf("history after settle = %d rows (%v), want 0", len(hist), err)
 	}
@@ -499,12 +431,8 @@ func TestPrefillEmptyHistorySkipsResume(t *testing.T) {
 	gate.openGate()
 	eng.HandlePrompt("go")
 	eng.Wait()
-	if gate.callCount() != 1 {
-		t.Fatalf("sender served %d calls, want exactly 1 (the prompt turn)", gate.callCount())
-	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.Eq(1, gate.callCount(), "sender served")
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // failIfCalledToolSet is a ToolSet whose definitions look complete (read and
@@ -535,6 +463,7 @@ func failIfCalledToolSet(t *testing.T, msg string) fakeToolSet {
 // aborted by user." row beside them, and no SeedHistory divergence fatal from
 // a repair that won a different interleaving.
 func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -543,12 +472,8 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	// The interrupted-prefill shape a dead process leaves behind.
 	seedClient := prefillDBSeedClient(t, pool)
 	conv, err := seedClient.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("seed conversation: %v", err)
-	}
-	if err := conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]); err != nil {
-		t.Fatalf("seed history: %v", err)
-	}
+	c.NoError(err, "seed conversation")
+	c.NoError(conv.SeedHistory(ctx, prefillSeedRows("/tmp/a.txt")[:2]), "seed history")
 
 	var mu sync.Mutex
 	var reads int
@@ -579,19 +504,15 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	c.NoError(err, "BuildEngine")
 	t.Cleanup(eng.Close)
 	defer shutdown()
 
 	// BuildEngine's final Start() released the worker; the pre-fill has now
 	// completed the interrupted shape.
 	hist := waitForPrefillDBRows(t, eng, out, 3)
-	if len(hist) != 3 {
-		t.Fatalf("history has %d rows, want exactly 3 — a 4th row would be boot repair's "+
-			"synthetic results landing beside the real r2", len(hist))
-	}
+	c.Len(hist, 3, "history has %d rows, want exactly 3 — a 4th row would be boot repair's "+
+		"synthetic results landing beside the real r2", len(hist))
 	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
 		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
 	}
@@ -603,19 +524,16 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 	if tr == nil || tr.ToolUseID != "prefill_0001" {
 		t.Fatalf("r2 block = %+v, want the pre-fill's tool_result for prefill_0001", hist[2].Param.Content[0])
 	}
-	if got := tr.Content[0].OfText.Text; got != "/tmp/a.txt body" {
-		t.Fatalf("r2 result = %q, want the re-executed read output — a %q row here means "+
-			"boot repair fabricated results for a prefill_ id", got, "Tool execution aborted by user.")
-	}
+	got := tr.Content[0].OfText.Text
+	c.Eq("/tmp/a.txt body", got, "r2 result = %q, want the re-executed read output — a %q row here means "+
+		"boot repair fabricated results for a prefill_ id", got, "Tool execution aborted by user.")
 	mu.Lock()
 	if reads != 1 {
 		mu.Unlock()
 		t.Fatalf("read ran %d times, want 1 (r1's single input re-executed)", reads)
 	}
 	mu.Unlock()
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }
 
 // TestBuildEngineLeaseFailureReleasesWorker pins that a BuildEngine which
@@ -624,6 +542,7 @@ func TestBuildEngineRepairsBeforePrefill(t *testing.T) {
 // holds a handle that could release it — without the Close it parks forever,
 // one leaked engine per lost lease race.
 func TestBuildEngineLeaseFailureReleasesWorker(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	workers := func() int {
@@ -646,14 +565,12 @@ func TestBuildEngineLeaseFailureReleasesWorker(t *testing.T) {
 		},
 	}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
-	if _, _, err := cfg.BuildEngine(context.Background(), fe); err == nil {
-		t.Fatal("BuildEngine succeeded, want the lease error")
-	}
+	_, _, err := cfg.BuildEngine(context.Background(), fe)
+	c.Error(err, "BuildEngine succeeded, want the lease error")
 	deadline := time.Now().Add(3 * time.Second)
 	for workers() > before && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if n := workers(); n > before {
-		t.Fatalf("%d engine worker goroutine(s) still parked after a failed BuildEngine (baseline %d)", n, before)
-	}
+	n := workers()
+	c.LessOrEqual(before, n, "%d engine worker goroutine(s) still parked after a failed BuildEngine (baseline %d)", n, before)
 }

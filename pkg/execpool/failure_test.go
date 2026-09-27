@@ -3,10 +3,11 @@ package execpool
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestFailureErrorClassifiesToolFailure(t *testing.T) {
@@ -14,9 +15,7 @@ func TestFailureErrorClassifiesToolFailure(t *testing.T) {
 		Code:    executorpb.Failure_CODE_TOOL_FAILED,
 		Message: "exit status 1",
 	})
-	if !errors.Is(err, ErrToolFailed) {
-		t.Fatalf("a tool that ran and failed must be ErrToolFailed, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrToolFailed, "a tool that ran and failed must be ErrToolFailed, got")
 	if errors.Is(err, ErrExecutorGone) {
 		t.Fatal("a tool failure must never look like a departed executor: " +
 			"that would migrate a child every time bash exits nonzero")
@@ -28,22 +27,17 @@ func TestFailureErrorClassifiesExecutorLost(t *testing.T) {
 		Code:    executorpb.Failure_CODE_EXECUTOR_LOST,
 		Message: `unknown workspace "ws-123"`,
 	})
-	if !errors.Is(err, ErrExecutorGone) {
-		t.Fatalf("CODE_EXECUTOR_LOST must be ErrExecutorGone, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrExecutorGone, "CODE_EXECUTOR_LOST must be ErrExecutorGone, got")
 }
 
 func TestFailureErrorKeepsTheMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	err := failureError(&executorpb.Failure{
 		Code:    executorpb.Failure_CODE_DENIED,
 		Message: "permission denied",
 	})
-	if got := err.Error(); !strings.Contains(got, "permission denied") {
-		t.Fatalf("the executor's message must survive: %q", got)
-	}
-	if !errors.Is(err, ErrToolFailed) {
-		t.Fatalf("DENIED is a real answer from a live executor, not a departure: %v", err)
-	}
+	c.StrContains(err.Error(), "permission denied", "the executor's message must survive")
+	c.ErrorIs(err, ErrToolFailed, "DENIED is a real answer from a live executor, not a departure")
 }
 
 func TestFailureErrorUnspecifiedIsNotADeparture(t *testing.T) {
@@ -59,16 +53,11 @@ func TestFailureErrorUnspecifiedIsNotADeparture(t *testing.T) {
 // departure -- the tool may have already run. It must carry its own sentinel,
 // distinct from both.
 func TestErrStreamBrokenIsDistinctFromToolFailed(t *testing.T) {
+	c := assert.NewAborting(t)
 	err := fmt.Errorf("read: %w", ErrStreamBroken)
-	if !errors.Is(err, ErrStreamBroken) {
-		t.Fatalf("want errors.Is match on ErrStreamBroken, got %v", err)
-	}
-	if errors.Is(err, ErrToolFailed) {
-		t.Fatal("a broken stream must not look like a tool that ran and failed")
-	}
-	if errors.Is(err, ErrExecutorGone) {
-		t.Fatal("a broken stream must not look like a clean departure either")
-	}
+	c.ErrorIs(err, ErrStreamBroken, "want errors.Is match on ErrStreamBroken, got")
+	c.False(errors.Is(err, ErrToolFailed), "a broken stream must not look like a tool that ran and failed")
+	c.False(errors.Is(err, ErrExecutorGone), "a broken stream must not look like a clean departure either")
 }
 
 // A failure to even open the stream is distinct from one that opened and then
@@ -78,19 +67,14 @@ func TestErrStreamBrokenIsDistinctFromToolFailed(t *testing.T) {
 // the raw error and this sentinel via double %w, which is what the test
 // reproduces here.
 func TestErrDialFailedIsDistinctFromStreamBroken(t *testing.T) {
+	c := assert.NewAborting(t)
 	raw := errors.New("write tcp 127.0.0.1:9-> 10.0.0.1:41: write: broken pipe")
 	err := fmt.Errorf("executor execute: %w: %w", raw, ErrDialFailed)
-	if !errors.Is(err, ErrDialFailed) {
-		t.Fatalf("want errors.Is match on ErrDialFailed, got %v", err)
-	}
+	c.ErrorIs(err, ErrDialFailed, "want errors.Is match on ErrDialFailed, got")
 	if errors.Is(err, ErrStreamBroken) {
 		t.Fatal("a pre-dispatch failure must not look like a mid-stream break -- " +
 			"that would refuse to retry side-effecting tools for no reason")
 	}
-	if errors.Is(err, ErrToolFailed) {
-		t.Fatal("a pre-dispatch failure must not look like a tool that ran and failed")
-	}
-	if !errors.Is(err, raw) {
-		t.Fatal("the underlying transport error must survive for logging")
-	}
+	c.False(errors.Is(err, ErrToolFailed), "a pre-dispatch failure must not look like a tool that ran and failed")
+	c.ErrorIs(err, raw, "the underlying transport error must survive for logging")
 }

@@ -8,38 +8,30 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestLoadProfileAppendSystemPrompt_MissingFileIsEmptyNoError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 
 	got, err := loadProfileAppendSystemPrompt("nonexistent")
-	if err != nil {
-		t.Fatalf("loadProfileAppendSystemPrompt: %v", err)
-	}
-	if got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
+	c.Require().NoError(err, "loadProfileAppendSystemPrompt")
+	c.Eq("", got, "got")
 }
 
 func TestLoadProfileAppendSystemPrompt_ReadsAndTrimsTrailingNewline(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 
 	path := profile.AppendSystemPromptFile("work")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("be terse.\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(filepath.Dir(path), 0o700))
+	c.Require().NoError(os.WriteFile(path, []byte("be terse.\n"), 0o600))
 
 	got, err := loadProfileAppendSystemPrompt("work")
-	if err != nil {
-		t.Fatalf("loadProfileAppendSystemPrompt: %v", err)
-	}
-	if got != "be terse." {
-		t.Errorf("got %q, want %q", got, "be terse.")
-	}
+	c.Require().NoError(err, "loadProfileAppendSystemPrompt")
+	c.Eq("be terse.", got, "got")
 }
 
 func TestMergeAppendSystemPrompt(t *testing.T) {
@@ -56,9 +48,8 @@ func TestMergeAppendSystemPrompt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mergeAppendSystemPrompt(tc.file, tc.flag); got != tc.wantText {
-				t.Errorf("mergeAppendSystemPrompt(%q, %q) = %q, want %q", tc.file, tc.flag, got, tc.wantText)
-			}
+			got := mergeAppendSystemPrompt(tc.file, tc.flag)
+			assert.NewCollecting(t).Eq(tc.wantText, got, "mergeAppendSystemPrompt(%q, %q) = %q, want", tc.file, tc.flag, got)
 		})
 	}
 }
@@ -69,39 +60,24 @@ func TestMergeAppendSystemPrompt(t *testing.T) {
 // req.AppendSystemPrompt, file first, for any --kind (this test uses the
 // default kind, fundi, since the merge itself is kind-agnostic).
 func TestBuildSpawnRequest_AppendSystemPrompt_MergesProfileFileAndFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.Require().NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"work": {Name: "work", Socket: "/tmp/rafiki-test.sock"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("work"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.Require().NoError(profile.SavePointer("work"), "SavePointer")
 
 	path := profile.AppendSystemPromptFile("work")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("standing default\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(filepath.Dir(path), 0o700))
+	c.Require().NoError(os.WriteFile(path, []byte("standing default\n"), 0o600))
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/explicit/path"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("append-system-prompt", "be terse"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/explicit/path"))
+	c.Require().NoError(cmd.Flags().Set("append-system-prompt", "be terse"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("buildSpawnRequest: %v", err)
-	}
+	c.Require().NoError(err, "buildSpawnRequest")
 	want := "standing default\n\nbe terse"
-	if req.AppendSystemPrompt != want {
-		t.Errorf("AppendSystemPrompt = %q, want %q", req.AppendSystemPrompt, want)
-	}
+	c.Eq(want, req.AppendSystemPrompt, "AppendSystemPrompt")
 }

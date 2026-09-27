@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 const orFixture = `{"data":[
@@ -36,19 +38,16 @@ func newTestCatalog(t *testing.T, body string) (*ModelCatalog, *httptest.Server)
 }
 
 func TestResolveLatest(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, srv := newTestCatalog(t, orFixture)
 	defer srv.Close()
 
 	// sonnet-latest → newest non-alias, non-fast sonnet = claude-sonnet-5
 	ant, or, ok := c.ResolveLatest("sonnet")
-	if !ok || ant != "claude-sonnet-5" || or != "anthropic/claude-sonnet-5" {
-		t.Fatalf("sonnet: got (%q,%q,%v)", ant, or, ok)
-	}
+	ck.False(!ok || ant != "claude-sonnet-5" || or != "anthropic/claude-sonnet-5", "sonnet: got (%q,%q,%v)", ant, or, ok)
 	// opus-latest → 4.8 (the -fast variant is excluded)
 	ant, or, ok = c.ResolveLatest("opus")
-	if !ok || ant != "claude-opus-4-8" || or != "anthropic/claude-opus-4.8" {
-		t.Fatalf("opus: got (%q,%q,%v)", ant, or, ok)
-	}
+	ck.False(!ok || ant != "claude-opus-4-8" || or != "anthropic/claude-opus-4.8", "opus: got (%q,%q,%v)", ant, or, ok)
 }
 
 func TestLatestAlias(t *testing.T) {
@@ -57,9 +56,8 @@ func TestLatestAlias(t *testing.T) {
 			t.Errorf("LatestAlias(%q) = (%q,%v)", in, fam, ok)
 		}
 	}
-	if _, ok := LatestAlias("claude-sonnet-5"); ok {
-		t.Error("concrete id must not be a latest alias")
-	}
+	_, ok := LatestAlias("claude-sonnet-5")
+	assert.NewCollecting(t).False(ok, "concrete id must not be a latest alias")
 }
 
 // TestOpenRouterModel covers the catalog-backed reverse lookup that replaced the
@@ -67,6 +65,7 @@ func TestLatestAlias(t *testing.T) {
 // the catalog resolves to its real dotted OR id with no hardcoded map — so
 // failover stays valid as new models ship (the map-drift bug this fixes).
 func TestOpenRouterModel(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-haiku-4.5", Created: 1},
@@ -84,17 +83,12 @@ func TestOpenRouterModel(t *testing.T) {
 		"claude-future-9":           "anthropic/claude-future-9", // catalog miss: best-effort
 	}
 	for in, want := range cases {
-		if got := c.OpenRouterModel(in); got != want {
-			t.Errorf("OpenRouterModel(%q) = %q, want %q", in, got, want)
-		}
+		got := c.OpenRouterModel(in)
+		ck.Eq(want, got, "OpenRouterModel(%q) = %q, want", in, got)
 	}
 	var nilCat *ModelCatalog
-	if got := nilCat.OpenRouterModel("claude-opus-4-8"); got != "anthropic/claude-opus-4-8" {
-		t.Errorf("nil-catalog fallback = %q", got)
-	}
-	if got := nilCat.OpenRouterModel("openai/gpt-4o"); got != "openai/gpt-4o" {
-		t.Errorf("nil-catalog slash passthrough = %q", got)
-	}
+	ck.Eq("anthropic/claude-opus-4-8", nilCat.OpenRouterModel("claude-opus-4-8"), "nil-catalog fallback =")
+	ck.Eq("openai/gpt-4o", nilCat.OpenRouterModel("openai/gpt-4o"), "nil-catalog slash passthrough =")
 }
 
 // TestResolveNewest covers the model-alias resolver: newest release of a
@@ -119,21 +113,17 @@ func TestResolveNewest(t *testing.T) {
 	if got, ok := c.ResolveNewest("deepseek/deepseek-v4-pro"); !ok || got != "deepseek/deepseek-v4-pro" {
 		t.Errorf("deepseek-v4-pro: got (%q,%v), want deepseek/deepseek-v4-pro", got, ok)
 	}
-	if got, ok := c.ResolveNewest("deepseek/deepseek-v5"); ok {
-		t.Errorf("absent line must not resolve, got %q", got)
-	}
+	got, ok := c.ResolveNewest("deepseek/deepseek-v5")
+	assert.NewCollecting(t).False(ok, "absent line must not resolve, got %q", got)
 }
 
 func TestModelAliases(t *testing.T) {
+	c := assert.NewAborting(t)
 	got := ModelAliases()
 	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2", "kimi-k3"}
-	if len(got) != len(want) {
-		t.Fatalf("ModelAliases = %v, want %v", got, want)
-	}
+	c.Len(got, len(want), "ModelAliases = %v, want %v", got, want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("ModelAliases = %v, want %v", got, want)
-		}
+		c.Eq(want[i], got[i], "ModelAliases = %v, want %v", got, want)
 	}
 }
 
@@ -203,29 +193,26 @@ func TestResolveModel(t *testing.T) {
 	}
 	// No requested model AND no default must error loudly — there is no hardcoded
 	// silent default (haiku or otherwise) to paper over an unset model.
-	if _, err := ResolveModel(c, "", ""); err == nil {
-		t.Error("empty model + empty default must error, not silently pick a model")
-	}
+	_, err := ResolveModel(c, "", "")
+	assert.NewCollecting(t).Error(err, "empty model + empty default must error, not silently pick a model")
 }
 
 // TestProviderPrefsFor covers provider pinning: a pinned line matches its
 // base id and stamped point releases (same inModelLine semantics as aliases),
 // never a different line, and unpinned models carry no preferences.
 func TestProviderPrefsFor(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, id := range []string{"z-ai/glm-5.2", "z-ai/glm-5.2-0905"} {
 		prefs, ok := ProviderPrefsFor(id)
 		if !ok {
 			t.Errorf("%s: want a pin", id)
 			continue
 		}
-		if len(prefs.Only) != 1 || prefs.Only[0] != "fireworks" {
-			t.Errorf("%s: Only = %v, want [fireworks]", id, prefs.Only)
-		}
+		c.False(len(prefs.Only) != 1 || prefs.Only[0] != "fireworks", "%s: Only = %v, want [fireworks]", id, prefs.Only)
 	}
 	for _, id := range []string{"z-ai/glm-5.20", "z-ai/glm-5", "z-ai/glm-5.2.1", "moonshotai/kimi-k3", "claude-haiku-4-5"} {
-		if _, ok := ProviderPrefsFor(id); ok {
-			t.Errorf("%s: must not be pinned", id)
-		}
+		_, ok := ProviderPrefsFor(id)
+		c.False(ok, "%s: must not be pinned", id)
 	}
 }
 
@@ -253,12 +240,12 @@ func TestCatalogRefreshCoalesces(t *testing.T) {
 	close(release)
 	wg.Wait()
 
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Errorf("catalog fetched %d times under %d concurrent callers, want 1", got, n)
-	}
+	got := atomic.LoadInt32(&hits)
+	assert.NewCollecting(t).Eq(1, got, "catalog fetched %d times under %d concurrent callers, want 1", got, n)
 }
 
 func TestAllIDs(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "openai/gpt-4o", Created: 1},
@@ -268,13 +255,9 @@ func TestAllIDs(t *testing.T) {
 	})
 	got := c.AllIDs()
 	want := []string{"anthropic/claude-opus-4.8", "anthropic/claude-sonnet-latest", "openai/gpt-4o"}
-	if len(got) != len(want) {
-		t.Fatalf("AllIDs = %v, want %v", got, want)
-	}
+	ck.Len(got, len(want), "AllIDs = %v, want %v", got, want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("AllIDs = %v, want %v", got, want)
-		}
+		ck.Eq(want[i], got[i], "AllIDs = %v, want %v", got, want)
 	}
 }
 
@@ -292,13 +275,13 @@ func TestAutoCompactWindow(t *testing.T) {
 		{"negative context -> 0", -5, 64000, 0},
 	}
 	for _, c := range cases {
-		if got := AutoCompactWindow(c.contextLen, c.maxComp); got != c.want {
-			t.Errorf("%s: AutoCompactWindow(%d,%d) = %d, want %d", c.name, c.contextLen, c.maxComp, got, c.want)
-		}
+		got := AutoCompactWindow(c.contextLen, c.maxComp)
+		assert.NewCollecting(t).Eq(c.want, got, "%s: AutoCompactWindow(%d,%d) = %d, want", c.name, c.contextLen, c.maxComp, got)
 	}
 }
 
 func TestContextWindow(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	c.SeedForTest([]CatalogEntry{
 		{ID: "openai/gpt-5-codex", Created: 1, ContextLength: 400000, MaxCompletionTokens: 128000},
@@ -320,15 +303,11 @@ func TestContextWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		gotCtx, gotMax, ok := c.ContextWindow(tc.model)
-		if ok != tc.wantOK || gotCtx != tc.wantCtx || gotMax != tc.wantMax {
-			t.Errorf("%s: ContextWindow(%q) = (%d,%d,%v), want (%d,%d,%v)",
-				tc.name, tc.model, gotCtx, gotMax, ok, tc.wantCtx, tc.wantMax, tc.wantOK)
-		}
+		ck.False(ok != tc.wantOK || gotCtx != tc.wantCtx || gotMax != tc.wantMax, "%s: ContextWindow(%q) = (%d,%d,%v), want (%d,%d,%v)", tc.name, tc.model, gotCtx, gotMax, ok, tc.wantCtx, tc.wantMax, tc.wantOK)
 	}
 	var nilCat *ModelCatalog
-	if _, _, ok := nilCat.ContextWindow("openai/gpt-5-codex"); ok {
-		t.Error("nil catalog must return ok=false")
-	}
+	_, _, ok := nilCat.ContextWindow("openai/gpt-5-codex")
+	ck.False(ok, "nil catalog must return ok=false")
 }
 
 // memStore is an in-memory SnapshotStore for tests. An empty store returns
@@ -339,6 +318,7 @@ func (m *memStore) Load() ([]byte, error) { return m.data, nil }
 func (m *memStore) Save(b []byte) error   { m.data = b; return nil }
 
 func TestModelCatalogCache(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var hits atomic.Int32
 	body := `{"data":[{"id":"openai/gpt-5-codex","created":1,"context_length":400000,"top_provider":{"max_completion_tokens":128000}}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -355,12 +335,8 @@ func TestModelCatalogCache(t *testing.T) {
 	if ctxLen, maxComp, ok := c1.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 || maxComp != 128000 {
 		t.Fatalf("c1 ContextWindow = (%d,%d,%v), want (400000,128000,true)", ctxLen, maxComp, ok)
 	}
-	if got := hits.Load(); got != 1 {
-		t.Fatalf("cold cache should fetch once, got %d hits", got)
-	}
-	if len(store.data) == 0 {
-		t.Fatal("fetch must persist a snapshot to the store")
-	}
+	c.Require().Eq(1, hits.Load(), "cold cache should fetch once, got")
+	c.Require().NotEmpty(store.data, "fetch must persist a snapshot to the store")
 
 	// A fresh process sharing the warm store must not hit the network.
 	c2 := NewModelCatalog(srv.Client(), time.Hour, slog.New(slog.DiscardHandler))
@@ -369,14 +345,13 @@ func TestModelCatalogCache(t *testing.T) {
 	if ctxLen, _, ok := c2.ContextWindow("openai/gpt-5-codex"); !ok || ctxLen != 400000 {
 		t.Fatalf("c2 ContextWindow from cache = (%d,%v), want (400000,true)", ctxLen, ok)
 	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("warm cache must not re-fetch, got %d hits (want 1)", got)
-	}
+	c.Eq(1, hits.Load(), "warm cache must not re-fetch, got")
 }
 
 // TestModelPricingWireDecode guards the json tags on orPricing against the live
 // OpenRouter wire shape: the pricing object was previously dropped on decode.
 func TestModelPricingWireDecode(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	const wire = `{"data":[{"id":"anthropic/claude-sonnet-5","created":1,
 	 "pricing":{"prompt":"0.000002","completion":"0.00001","input_cache_read":"0.0000002",
 	           "input_cache_write":"0.0000025","input_cache_write_1h":"0.000004"}}]}`
@@ -389,16 +364,9 @@ func TestModelPricingWireDecode(t *testing.T) {
 	c.Warm()
 
 	p, ok := c.Pricing("anthropic/claude-sonnet-5")
-	if !ok {
-		t.Fatal("pricing not decoded from wire")
-	}
-	if p.PromptUSD != 0.000002 || p.CompletionUSD != 0.00001 {
-		t.Errorf("base price = prompt %g / completion %g, want 0.000002/0.00001", p.PromptUSD, p.CompletionUSD)
-	}
-	if p.CacheReadUSD != 0.0000002 || p.CacheWriteUSD != 0.0000025 || p.CacheWrite1hUSD != 0.000004 {
-		t.Errorf("cache prices = read %g / write %g / write1h %g, want 0.0000002/0.0000025/0.000004",
-			p.CacheReadUSD, p.CacheWriteUSD, p.CacheWrite1hUSD)
-	}
+	ck.Require().True(ok, "pricing not decoded from wire")
+	ck.False(p.PromptUSD != 0.000002 || p.CompletionUSD != 0.00001, "base price = prompt %g / completion %g, want 0.000002/0.00001", p.PromptUSD, p.CompletionUSD)
+	ck.False(p.CacheReadUSD != 0.0000002 || p.CacheWriteUSD != 0.0000025 || p.CacheWrite1hUSD != 0.000004, "cache prices = read %g / write %g / write1h %g, want 0.0000002/0.0000025/0.000004", p.CacheReadUSD, p.CacheWriteUSD, p.CacheWrite1hUSD)
 }
 
 func TestPricing(t *testing.T) {
@@ -439,9 +407,8 @@ func TestPricing(t *testing.T) {
 		t.Error("unknown model must not resolve pricing")
 	}
 	// Present model without prices → false.
-	if _, ok := c.Pricing("moonshotai/kimi-k3"); ok {
-		t.Error("model with no price strings must resolve ok=false")
-	}
+	_, ok := c.Pricing("moonshotai/kimi-k3")
+	assert.NewCollecting(t).False(ok, "model with no price strings must resolve ok=false")
 }
 
 func TestStripSnapshotDate(t *testing.T) {
@@ -458,9 +425,7 @@ func TestStripSnapshotDate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got, ok := stripSnapshotDate(tc.in)
-		if ok != tc.ok || (ok && got != tc.want) {
-			t.Errorf("stripSnapshotDate(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.ok)
-		}
+		assert.NewCollecting(t).False(ok != tc.ok || (ok && got != tc.want), "stripSnapshotDate(%q) = (%q,%v), want (%q,%v)", tc.in, got, ok, tc.want, tc.ok)
 	}
 }
 
@@ -479,9 +444,8 @@ func TestFetchBackoff(t *testing.T) {
 	for range 5 {
 		c.Warm() // each would refresh; backoff must cap fetches to one
 	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("fetch hits = %d, want 1 (failed fetch backs off for %s)", got, fetchBackoff)
-	}
+	got := hits.Load()
+	assert.NewCollecting(t).Eq(1, got, "fetch hits = %d, want 1 (failed fetch backs off for %s)", got, fetchBackoff)
 }
 
 // TestResolveIDUsesCatalogResolution proves ResolveID is a thin wrapper over
@@ -506,15 +470,14 @@ func TestResolveIDUsesCatalogResolution(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got, ok := c.ResolveID(tc.in)
-		if got != tc.want || ok != tc.wantOK {
-			t.Errorf("ResolveID(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
-		}
+		assert.NewCollecting(t).False(got != tc.want || ok != tc.wantOK, "ResolveID(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
 	}
 }
 
 // TestModelCatalogPriceSatisfiesStorePriceSource proves Price reports the
 // catalog's prices in the shape store.SyncModelPricing writes.
 func TestModelCatalogPriceSatisfiesStorePriceSource(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewModelCatalog(nil, time.Hour, nil)
 	c.SeedForTest([]CatalogEntry{
 		{
@@ -530,19 +493,10 @@ func TestModelCatalogPriceSatisfiesStorePriceSource(t *testing.T) {
 	})
 
 	got, ok := c.Price("claude-opus-5")
-	if !ok {
-		t.Fatal("Price(claude-opus-5) ok = false, want true")
-	}
-	if got.PromptUSD != 0.000005 || got.CompletionUSD != 0.000025 {
-		t.Errorf("Price(claude-opus-5) base = %g/%g, want 0.000005/0.000025",
-			got.PromptUSD, got.CompletionUSD)
-	}
-	if got.CacheReadUSD == nil || *got.CacheReadUSD != 0.0000005 {
-		t.Errorf("Price(claude-opus-5) cache read = %v, want 0.0000005", got.CacheReadUSD)
-	}
-	if got.CacheWriteUSD == nil || *got.CacheWriteUSD != 0.00000625 {
-		t.Errorf("Price(claude-opus-5) cache write = %v, want 0.00000625", got.CacheWriteUSD)
-	}
+	ck.Require().True(ok, "Price(claude-opus-5) ok = false, want true")
+	ck.False(got.PromptUSD != 0.000005 || got.CompletionUSD != 0.000025, "Price(claude-opus-5) base = %g/%g, want 0.000005/0.000025", got.PromptUSD, got.CompletionUSD)
+	ck.False(got.CacheReadUSD == nil || *got.CacheReadUSD != 0.0000005, "Price(claude-opus-5) cache read = %v, want 0.0000005", got.CacheReadUSD)
+	ck.False(got.CacheWriteUSD == nil || *got.CacheWriteUSD != 0.00000625, "Price(claude-opus-5) cache write = %v, want 0.00000625", got.CacheWriteUSD)
 
 	if _, ok := c.Price("kimi-k3"); ok {
 		t.Error("Price(kimi-k3) ok = true, want false: entry has no Pricing")
@@ -564,9 +518,7 @@ func TestPriceAbsentCachePriceIsNil(t *testing.T) {
 	})
 
 	got, ok := c.Price("vendor/no-cache-model")
-	if !ok {
-		t.Fatal("Price ok = false, want true: base prices are present")
-	}
+	assert.NewAborting(t).True(ok, "Price ok = false, want true: base prices are present")
 	if got.CacheReadUSD != nil {
 		t.Errorf("cache read = %v, want nil for an omitted price", *got.CacheReadUSD)
 	}
@@ -579,6 +531,7 @@ func TestPriceAbsentCachePriceIsNil(t *testing.T) {
 // prices and the priced/unpriced verdict that ResolveID + Price used to report
 // separately.
 func TestLookupReportsIDAndPriceInOneCall(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewModelCatalog(nil, time.Hour, nil)
 	c.SeedForTest([]CatalogEntry{
 		{ID: "anthropic/claude-opus-5", Pricing: &ModelPricing{
@@ -589,31 +542,18 @@ func TestLookupReportsIDAndPriceInOneCall(t *testing.T) {
 
 	// A bare Anthropic id resolves, and reports the same id ResolveID does.
 	info, ok := c.Lookup("claude-opus-5")
-	if !ok {
-		t.Fatal("Lookup(claude-opus-5) ok = false, want true")
-	}
-	if info.ORID != "anthropic/claude-opus-5" {
-		t.Errorf("ORID = %q, want anthropic/claude-opus-5", info.ORID)
-	}
-	if !info.Priced || info.Price.PromptUSD != 0.000005 {
-		t.Errorf("Lookup(claude-opus-5) = %+v, want priced with prompt 0.000005", info)
-	}
-	if id, _ := c.ResolveID("claude-opus-5"); id != info.ORID {
-		t.Errorf("Lookup ORID %q disagrees with ResolveID %q", info.ORID, id)
-	}
+	ck.Require().True(ok, "Lookup(claude-opus-5) ok = false, want true")
+	ck.Eq("anthropic/claude-opus-5", info.ORID, "ORID")
+	ck.False(!info.Priced || info.Price.PromptUSD != 0.000005, "Lookup(claude-opus-5) = %+v, want priced with prompt 0.000005", info)
+	id, _ := c.ResolveID("claude-opus-5")
+	ck.Eq(info.ORID, id, "Lookup ORID")
 
 	// An entry with no prices is still found — the syncer records the row with
 	// its or_id and NULL prices rather than dropping the model.
 	info, ok = c.Lookup("kimi-k3")
-	if !ok {
-		t.Fatal("Lookup(kimi-k3) ok = false, want true: the entry exists")
-	}
-	if info.ORID != "moonshotai/kimi-k3" {
-		t.Errorf("ORID = %q, want moonshotai/kimi-k3", info.ORID)
-	}
-	if info.Priced {
-		t.Errorf("Lookup(kimi-k3) Priced = true, want false: entry has no prices")
-	}
+	ck.Require().True(ok, "Lookup(kimi-k3) ok = false, want true: the entry exists")
+	ck.Eq("moonshotai/kimi-k3", info.ORID, "ORID")
+	ck.False(info.Priced, "Lookup(kimi-k3) Priced = true, want false: entry has no prices")
 
 	if _, ok := c.Lookup("gpt-5.6"); ok {
 		t.Error("Lookup(gpt-5.6) ok = true, want false: not in catalog")
@@ -625,15 +565,13 @@ func TestLookupReportsIDAndPriceInOneCall(t *testing.T) {
 // interface method must survive it: the sync runs in a bare goroutine with no
 // recover, so a panic here takes the server down.
 func TestNilCatalogSatisfiesPriceSourceWithoutPanic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var src store.PriceSource = (*ModelCatalog)(nil)
 
 	src.Warm()
-	if ids := src.AllIDs(); len(ids) != 0 {
-		t.Errorf("AllIDs on a nil catalog = %v, want empty", ids)
-	}
-	if _, ok := src.Lookup("claude-opus-5"); ok {
-		t.Error("Lookup on a nil catalog ok = true, want false")
-	}
+	c.Empty(src.AllIDs(), "AllIDs on a nil catalog")
+	_, ok := src.Lookup("claude-opus-5")
+	c.False(ok, "Lookup on a nil catalog ok = true, want false")
 }
 
 // TestProviderPrefsMarshal proves the wire shape OpenRouter expects: only the
@@ -652,18 +590,16 @@ func TestProviderPrefsMarshal(t *testing.T) {
 		{"empty", ProviderPrefs{}, `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			b, err := json.Marshal(tc.prefs)
-			if err != nil {
-				t.Fatalf("Marshal: %v", err)
-			}
-			if string(b) != tc.want {
-				t.Errorf("Marshal = %s, want %s", b, tc.want)
-			}
+			c.Require().NoError(err, "Marshal")
+			c.Eq(tc.want, string(b), "Marshal = %s, want", b)
 		})
 	}
 }
 
 func TestCatalogDecodesNameAndInputModalities(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[
 	 {"id":"openai/gpt-4o","name":"GPT-4o","created":1,"context_length":128000,
 	  "architecture":{"input_modalities":["text","image"]},
@@ -684,26 +620,14 @@ func TestCatalogDecodesNameAndInputModalities(t *testing.T) {
 	if !ok {
 		t.Fatalf("gpt-4o missing from Rows(); got %d rows", len(rows))
 	}
-	if got.Name != "GPT-4o" {
-		t.Errorf("Name = %q, want %q", got.Name, "GPT-4o")
-	}
-	if len(got.InputModalities) != 2 || got.InputModalities[0] != "text" ||
-		got.InputModalities[1] != "image" {
-		t.Errorf("InputModalities = %v, want [text image]", got.InputModalities)
-	}
-	if got.ContextLength == nil || *got.ContextLength != 128000 {
-		t.Errorf("ContextLength = %v, want 128000", got.ContextLength)
-	}
-	if got.PromptUSD == nil || *got.PromptUSD != 0.000005 {
-		t.Errorf("PromptUSD = %v, want 0.000005", got.PromptUSD)
-	}
-	if got.CompletionUSD == nil || *got.CompletionUSD != 0.000015 {
-		t.Errorf("CompletionUSD = %v, want 0.000015", got.CompletionUSD)
-	}
+	ck.Eq("GPT-4o", got.Name, "Name")
+	ck.False(len(got.InputModalities) != 2 || got.InputModalities[0] != "text" ||
+		got.InputModalities[1] != "image", "InputModalities = %v, want [text image]", got.InputModalities)
+	ck.False(got.ContextLength == nil || *got.ContextLength != 128000, "ContextLength = %v, want 128000", got.ContextLength)
+	ck.False(got.PromptUSD == nil || *got.PromptUSD != 0.000005, "PromptUSD = %v, want 0.000005", got.PromptUSD)
+	ck.False(got.CompletionUSD == nil || *got.CompletionUSD != 0.000015, "CompletionUSD = %v, want 0.000015", got.CompletionUSD)
 	// The fixture prices no cache rates: those must be ABSENT, not zero.
-	if got.CacheReadUSD != nil || got.CacheWriteUSD != nil {
-		t.Errorf("cache prices = %v/%v, want nil for a model OpenRouter prices without them", got.CacheReadUSD, got.CacheWriteUSD)
-	}
+	ck.False(got.CacheReadUSD != nil || got.CacheWriteUSD != nil, "cache prices = %v/%v, want nil for a model OpenRouter prices without them", got.CacheReadUSD, got.CacheWriteUSD)
 
 	// A text-only model reports ["text"] and must stay distinguishable from
 	// a model the catalog knows nothing about (nil).
@@ -716,17 +640,14 @@ func TestCatalogDecodesNameAndInputModalities(t *testing.T) {
 // non-nil slice: nil is what the picker reads as "unknown", and an empty slice
 // would read as "this model accepts nothing".
 func TestCatalogAbsentArchitectureYieldsNilModalities(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[{"id":"openai/bare","created":1,"context_length":4096}]}`
 	c, srv := newTestCatalog(t, body)
 	defer srv.Close()
 
 	rows := c.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("len(rows) = %d, want 1", len(rows))
-	}
-	if rows[0].InputModalities != nil {
-		t.Errorf("InputModalities = %#v, want nil", rows[0].InputModalities)
-	}
+	ck.Require().Len(rows, 1, "len(rows) = %d, want 1", len(rows))
+	ck.Nil(rows[0].InputModalities, "InputModalities")
 	if rows[0].PromptUSD != nil || rows[0].CompletionUSD != nil ||
 		rows[0].CacheReadUSD != nil || rows[0].CacheWriteUSD != nil {
 		t.Errorf("prices = %#v, want all-nil for an unpriced entry", rows[0])
@@ -744,9 +665,7 @@ func TestCatalogStaleSnapshotDecodesWithoutNewFields(t *testing.T) {
 	c := NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler)).WithCache(store)
 
 	rows := c.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("len(rows) = %d, want 1 from the stale snapshot", len(rows))
-	}
+	assert.NewAborting(t).Len(rows, 1, "len(rows) = %d, want 1 from the stale snapshot", len(rows))
 	if rows[0].Name != "" || rows[0].InputModalities != nil {
 		t.Errorf("stale row = %+v, want empty Name and nil InputModalities", rows[0])
 	}
@@ -767,9 +686,7 @@ func TestRowsSkipsTildeAliases(t *testing.T) {
 	c, srv := newTestCatalog(t, orFixture)
 	defer srv.Close()
 	for _, r := range c.Rows() {
-		if strings.HasPrefix(r.ID, "~") {
-			t.Errorf("Rows() returned alias id %q", r.ID)
-		}
+		assert.NewCollecting(t).False(strings.HasPrefix(r.ID, "~"), "Rows() returned alias id %q", r.ID)
 	}
 }
 
@@ -786,6 +703,7 @@ func TestRowsSkipsTildeAliases(t *testing.T) {
 //   - openai/unpriced: no pricing object at all — prompt/completion absent.
 //   - openai/zeroed: every optional field explicitly 0 — present-zero.
 func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[
 	 {"id":"openai/priced","name":"Priced","created":1,
 	  "context_length":128000,
@@ -811,21 +729,11 @@ func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
 	// ABSENT — including the cache rates, which the old assembly published as
 	// zeroes.
 	priced := byID["openai/priced"]
-	if priced.ID == "" {
-		t.Fatal("priced model missing from Rows()")
-	}
-	if priced.PromptUSD == nil || *priced.PromptUSD != 0.000005 {
-		t.Errorf("priced PromptUSD = %v, want 0.000005", priced.PromptUSD)
-	}
-	if priced.CompletionUSD == nil || *priced.CompletionUSD != 0.000015 {
-		t.Errorf("priced CompletionUSD = %v, want 0.000015", priced.CompletionUSD)
-	}
-	if priced.ContextLength == nil || *priced.ContextLength != 128000 {
-		t.Errorf("priced ContextLength = %v, want 128000", priced.ContextLength)
-	}
-	if priced.MaxCompletionTokens == nil || *priced.MaxCompletionTokens != 16384 {
-		t.Errorf("priced MaxCompletionTokens = %v, want 16384", priced.MaxCompletionTokens)
-	}
+	ck.Require().NotEq("", priced.ID, "priced model missing from Rows()")
+	ck.False(priced.PromptUSD == nil || *priced.PromptUSD != 0.000005, "priced PromptUSD = %v, want 0.000005", priced.PromptUSD)
+	ck.False(priced.CompletionUSD == nil || *priced.CompletionUSD != 0.000015, "priced CompletionUSD = %v, want 0.000015", priced.CompletionUSD)
+	ck.False(priced.ContextLength == nil || *priced.ContextLength != 128000, "priced ContextLength = %v, want 128000", priced.ContextLength)
+	ck.False(priced.MaxCompletionTokens == nil || *priced.MaxCompletionTokens != 16384, "priced MaxCompletionTokens = %v, want 16384", priced.MaxCompletionTokens)
 	if priced.CacheReadUSD != nil {
 		t.Errorf("priced CacheReadUSD = %v, want nil — an unreported cache rate must not read as free caching", *priced.CacheReadUSD)
 	}
@@ -835,9 +743,7 @@ func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
 
 	// unpriced: prompt/completion absent too.
 	unpriced := byID["openai/unpriced"]
-	if unpriced.ID == "" {
-		t.Fatal("unpriced model missing from Rows()")
-	}
+	ck.Require().NotEq("", unpriced.ID, "unpriced model missing from Rows()")
 	for name, got := range map[string]*float64{
 		"PromptUSD":     unpriced.PromptUSD,
 		"CompletionUSD": unpriced.CompletionUSD,
@@ -856,9 +762,7 @@ func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
 	}
 
 	zeroed := byID["openai/zeroed"]
-	if zeroed.ID == "" {
-		t.Fatal("zeroed model missing from Rows()")
-	}
+	ck.Require().NotEq("", zeroed.ID, "zeroed model missing from Rows()")
 	for name, got := range map[string]*float64{
 		"PromptUSD":     zeroed.PromptUSD,
 		"CompletionUSD": zeroed.CompletionUSD,
@@ -869,19 +773,14 @@ func TestRowsPreservePresenceOnEveryOptionalField(t *testing.T) {
 			t.Errorf("reported-zero %s = nil, want a pointer to 0 — presence is the fact", name)
 			continue
 		}
-		if *got != 0 {
-			t.Errorf("reported-zero %s = %v, want 0", name, *got)
-		}
+		ck.Eq(0, *got, "reported-zero %s = %v, want 0", name, *got)
 	}
-	if zeroed.ContextLength == nil || *zeroed.ContextLength != 0 {
-		t.Errorf("reported-zero ContextLength = %v, want a pointer to 0", zeroed.ContextLength)
-	}
-	if zeroed.MaxCompletionTokens == nil || *zeroed.MaxCompletionTokens != 0 {
-		t.Errorf("reported-zero MaxCompletionTokens = %v, want a pointer to 0", zeroed.MaxCompletionTokens)
-	}
+	ck.False(zeroed.ContextLength == nil || *zeroed.ContextLength != 0, "reported-zero ContextLength = %v, want a pointer to 0", zeroed.ContextLength)
+	ck.False(zeroed.MaxCompletionTokens == nil || *zeroed.MaxCompletionTokens != 0, "reported-zero MaxCompletionTokens = %v, want a pointer to 0", zeroed.MaxCompletionTokens)
 }
 
 func TestCatalogDecodesToolSupportAndExpiry(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[
 	 {"id":"a/tools","created":100,"context_length":1000,
 	  "supported_parameters":["tools","tool_choice","temperature"],
@@ -901,28 +800,19 @@ func TestCatalogDecodesToolSupportAndExpiry(t *testing.T) {
 	if got := by["a/tools"].SupportedParameters; len(got) != 3 || got[0] != "tools" {
 		t.Errorf("SupportedParameters = %v, want the declared three", got)
 	}
-	if got := by["a/tools"].ExpiresAt; got != "2026-09-08" {
-		t.Errorf("ExpiresAt = %q, want 2026-09-08", got)
-	}
-	if got := by["a/no-tools"].SupportedParameters; len(got) != 1 {
-		t.Errorf("SupportedParameters = %v, want the one declared", got)
-	}
-	if got := by["a/no-tools"].ExpiresAt; got != "" {
-		t.Errorf("ExpiresAt = %q, want empty for an entry with no expiry", got)
-	}
+	ck.Eq("2026-09-08", by["a/tools"].ExpiresAt, "ExpiresAt")
+	ck.Len(by["a/no-tools"].SupportedParameters, 1, "SupportedParameters")
+	ck.Eq("", by["a/no-tools"].ExpiresAt, "ExpiresAt")
 	// An entry with NO list means UNKNOWN, not "supports nothing" -- the same
 	// rule InputModalities follows. Three real catalog entries are like this,
 	// and every locally-served model has no entry at all.
-	if got := by["a/unknown"].SupportedParameters; got != nil {
-		t.Errorf("SupportedParameters = %#v, want nil for unknown", got)
-	}
+	ck.Nil(by["a/unknown"].SupportedParameters, "SupportedParameters")
 	// created carries through so a list can be ordered newest-first.
-	if got := by["a/unknown"].Created; got != 300 {
-		t.Errorf("Created = %d, want 300", got)
-	}
+	ck.Eq(300, by["a/unknown"].Created, "Created")
 }
 
 func TestCatalogDecodesCutoffAndAgenticScore(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[
 	 {"id":"a/scored","created":1,"context_length":1000,
 	  "knowledge_cutoff":"2026-02-16",
@@ -938,26 +828,21 @@ func TestCatalogDecodesCutoffAndAgenticScore(t *testing.T) {
 		by[r.ID] = r
 	}
 
-	if got := by["a/scored"].KnowledgeCutoff; got != "2026-02-16" {
-		t.Errorf("KnowledgeCutoff = %q, want 2026-02-16", got)
-	}
+	ck.Eq("2026-02-16", by["a/scored"].KnowledgeCutoff, "KnowledgeCutoff")
 	if got := by["a/scored"].AgenticIndex; got == nil || *got != 59.2 {
 		t.Errorf("AgenticIndex = %v, want 59.2", got)
 	}
 	// Absent is UNSCORED, never zero: 62% of the live catalog carries no
 	// benchmark at all, and a zero would sort as the worst model rather than
 	// as no answer.
-	if got := by["b/unscored"].AgenticIndex; got != nil {
-		t.Errorf("AgenticIndex = %v, want nil for an unscored model", got)
-	}
-	if got := by["b/unscored"].KnowledgeCutoff; got != "" {
-		t.Errorf("KnowledgeCutoff = %q, want empty", got)
-	}
+	ck.Nil(by["b/unscored"].AgenticIndex, "AgenticIndex")
+	ck.Eq("", by["b/unscored"].KnowledgeCutoff, "KnowledgeCutoff")
 }
 
 // The three artificial_analysis indices arrive together, so a row with one has
 // all three and a row with none has none.
 func TestCatalogDecodesAllThreeBenchmarkScores(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	body := `{"data":[{"id":"a/scored","created":1,"context_length":1000,
 	 "benchmarks":{"artificial_analysis":{"intelligence_index":65.7,
 	   "coding_index":81.6,"agentic_index":59.2}}}]}`
@@ -965,15 +850,9 @@ func TestCatalogDecodesAllThreeBenchmarkScores(t *testing.T) {
 	defer srv.Close()
 
 	r := c.Rows()[0]
-	if r.IntelligenceIndex == nil || *r.IntelligenceIndex != 65.7 {
-		t.Errorf("IntelligenceIndex = %v, want 65.7", r.IntelligenceIndex)
-	}
-	if r.CodingIndex == nil || *r.CodingIndex != 81.6 {
-		t.Errorf("CodingIndex = %v, want 81.6", r.CodingIndex)
-	}
-	if r.AgenticIndex == nil || *r.AgenticIndex != 59.2 {
-		t.Errorf("AgenticIndex = %v, want 59.2", r.AgenticIndex)
-	}
+	ck.False(r.IntelligenceIndex == nil || *r.IntelligenceIndex != 65.7, "IntelligenceIndex = %v, want 65.7", r.IntelligenceIndex)
+	ck.False(r.CodingIndex == nil || *r.CodingIndex != 81.6, "CodingIndex = %v, want 81.6", r.CodingIndex)
+	ck.False(r.AgenticIndex == nil || *r.AgenticIndex != 59.2, "AgenticIndex = %v, want 59.2", r.AgenticIndex)
 }
 
 // OpenRouter lists a ":batch" twin beside each Anthropic model with the SAME
@@ -987,9 +866,7 @@ func TestResolveLatestSkipsVariantTwins(t *testing.T) {
 		{ID: "anthropic/claude-opus-5", Created: 5},
 	})
 	ant, or, ok := c.ResolveLatest("opus")
-	if !ok || ant != "claude-opus-5-5" || or != "anthropic/claude-opus-5.5" {
-		t.Fatalf("opus: got (%q,%q,%v)", ant, or, ok)
-	}
+	assert.NewAborting(t).False(!ok || ant != "claude-opus-5-5" || or != "anthropic/claude-opus-5.5", "opus: got (%q,%q,%v)", ant, or, ok)
 }
 
 // AnthropicID is the native-sender spelling of a catalog row, and empty for
@@ -1012,8 +889,7 @@ func TestRowsCarryAnthropicID(t *testing.T) {
 		"openai/gpt-4o":                   "",
 	}
 	for _, r := range c.Rows() {
-		if got := r.AnthropicID; got != want[r.ID] {
-			t.Errorf("%s: AnthropicID = %q, want %q", r.ID, got, want[r.ID])
-		}
+		got := r.AnthropicID
+		assert.NewCollecting(t).Eq(want[r.ID], got, "%s: AnthropicID = %q, want", r.ID, got)
 	}
 }

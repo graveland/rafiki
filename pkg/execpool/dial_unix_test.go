@@ -10,25 +10,24 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The executor must be able to reach a daemon on the same machine without TLS,
 // a certificate, or a hostname — and must still speak the identical protocol
 // from the upgrade onward.
 func TestConnectOverUnixSocketReachesTheUpgradeEndpoint(t *testing.T) {
+	ck := assert.NewAborting(t)
 	// macOS TempDir paths often exceed the ~104-char unix-socket-path limit.
 	// Use /tmp directly with a unique short name.
 	dir, err := os.MkdirTemp("/tmp", "ep-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s")
 
 	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	defer ln.Close()
 
 	reached := make(chan struct{}, 1)

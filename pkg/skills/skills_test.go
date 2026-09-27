@@ -5,20 +5,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeSkill creates <dir>/<name>/SKILL.md with the given frontmatter
 // name/description and body.
 func writeSkill(t *testing.T, dir, name, fmName, fmDescription, body string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	skillDir := filepath.Join(dir, name)
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(skillDir, 0o755))
 	content := "---\nname: " + fmName + "\ndescription: " + fmDescription + "\n---\n" + body
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
 }
 
 // TestDiscoverSkillsLaterDirOverridesEarlier is the brief's named scenario: a
@@ -26,6 +25,7 @@ func writeSkill(t *testing.T, dir, name, fmName, fmDescription, body string) {
 // name, since callers build the dir list user-level first, project-level
 // second.
 func TestDiscoverSkillsLaterDirOverridesEarlier(t *testing.T) {
+	c := assert.NewAborting(t)
 	userDir := t.TempDir()
 	projectDir := t.TempDir()
 
@@ -33,27 +33,18 @@ func TestDiscoverSkillsLaterDirOverridesEarlier(t *testing.T) {
 	writeSkill(t, projectDir, "reviewer", "reviewer", "PROJECT_LEVEL description", "PROJECT_LEVEL body")
 
 	skills, err := DiscoverSkills([]string{userDir, projectDir}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skills) != 1 {
-		t.Fatalf("expected exactly one skill after override, got %d: %+v", len(skills), skills)
-	}
+	c.NoError(err)
+	c.Len(skills, 1, "expected exactly one skill after override, got %d", len(skills))
 	got := skills[0]
-	if got.Name != "reviewer" {
-		t.Fatalf("expected name %q, got %q", "reviewer", got.Name)
-	}
-	if got.Description != "PROJECT_LEVEL description" {
-		t.Fatalf("expected project-level description to win, got %q", got.Description)
-	}
-	if got.Dir != filepath.Join(projectDir, "reviewer") {
-		t.Fatalf("expected project-level dir to win, got %q", got.Dir)
-	}
+	c.Eq("reviewer", got.Name, "expected name")
+	c.Eq("PROJECT_LEVEL description", got.Description, "expected project-level description to win, got")
+	c.Eq(filepath.Join(projectDir, "reviewer"), got.Dir, "expected project-level dir to win, got")
 }
 
 // TestDiscoverSkillsFindsMultipleAcrossDirs covers the non-colliding path: two
 // distinct skills across two dirs both surface, sorted by name.
 func TestDiscoverSkillsFindsMultipleAcrossDirs(t *testing.T) {
+	c := assert.NewAborting(t)
 	userDir := t.TempDir()
 	projectDir := t.TempDir()
 
@@ -61,12 +52,8 @@ func TestDiscoverSkillsFindsMultipleAcrossDirs(t *testing.T) {
 	writeSkill(t, projectDir, "alpha", "alpha", "alpha description", "alpha body")
 
 	skills, err := DiscoverSkills([]string{userDir, projectDir}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skills) != 2 {
-		t.Fatalf("expected 2 skills, got %d: %+v", len(skills), skills)
-	}
+	c.NoError(err)
+	c.Len(skills, 2, "expected 2 skills, got %d", len(skills))
 	if skills[0].Name != "alpha" || skills[1].Name != "zeta" {
 		t.Fatalf("expected sorted [alpha, zeta], got [%s, %s]", skills[0].Name, skills[1].Name)
 	}
@@ -74,37 +61,29 @@ func TestDiscoverSkillsFindsMultipleAcrossDirs(t *testing.T) {
 
 // TestDiscoverSkillsOnlyFilter asserts the only filter drops unlisted skills.
 func TestDiscoverSkillsOnlyFilter(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeSkill(t, dir, "alpha", "alpha", "alpha description", "alpha body")
 	writeSkill(t, dir, "beta", "beta", "beta description", "beta body")
 	writeSkill(t, dir, "gamma", "gamma", "gamma description", "gamma body")
 
 	skills, err := DiscoverSkills([]string{dir}, []string{"beta"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skills) != 1 {
-		t.Fatalf("expected exactly one skill after only filter, got %d: %+v", len(skills), skills)
-	}
-	if skills[0].Name != "beta" {
-		t.Fatalf("expected beta to survive the only filter, got %q", skills[0].Name)
-	}
+	c.NoError(err)
+	c.Len(skills, 1, "expected exactly one skill after only filter, got %d", len(skills))
+	c.Eq("beta", skills[0].Name, "expected beta to survive the only filter, got")
 }
 
 // TestDiscoverSkillsNilOnlyMeansAll asserts that a nil only filter (as
 // opposed to an empty-but-non-nil slice) returns everything.
 func TestDiscoverSkillsNilOnlyMeansAll(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeSkill(t, dir, "alpha", "alpha", "alpha description", "alpha body")
 	writeSkill(t, dir, "beta", "beta", "beta description", "beta body")
 
 	skills, err := DiscoverSkills([]string{dir}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(skills) != 2 {
-		t.Fatalf("expected 2 skills with nil only filter, got %d", len(skills))
-	}
+	c.NoError(err)
+	c.Len(skills, 2, "expected 2 skills with nil only filter, got %d", len(skills))
 }
 
 // TestDiscoverSkillsSkipsMalformedFrontmatterWithoutFailing covers the
@@ -112,42 +91,32 @@ func TestDiscoverSkillsNilOnlyMeansAll(t *testing.T) {
 // frontmatter is skipped, but a sibling well-formed skill still surfaces and
 // DiscoverSkills returns no error.
 func TestDiscoverSkillsSkipsMalformedFrontmatterWithoutFailing(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeSkill(t, dir, "good", "good", "good description", "good body")
 
 	badDir := filepath.Join(dir, "bad")
-	if err := os.MkdirAll(badDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(badDir, 0o755))
 	// No closing "---" delimiter - malformed frontmatter.
-	if err := os.WriteFile(filepath.Join(badDir, "SKILL.md"), []byte("---\nname: bad\ndescription: [unterminated\nno closing delimiter here\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(badDir, "SKILL.md"), []byte("---\nname: bad\ndescription: [unterminated\nno closing delimiter here\n"), 0o644))
 
 	skills, err := DiscoverSkills([]string{dir}, nil)
-	if err != nil {
-		t.Fatalf("expected malformed frontmatter to be skipped, not returned as an error: %v", err)
-	}
-	if len(skills) != 1 || skills[0].Name != "good" {
-		t.Fatalf("expected only the well-formed skill to survive, got %+v", skills)
-	}
+	c.NoError(err, "expected malformed frontmatter to be skipped, not returned as an error")
+	c.False(len(skills) != 1 || skills[0].Name != "good", "expected only the well-formed skill to survive, got %+v", skills)
 }
 
 // TestDiscoverSkillsMissingDirIsNotFatal: a dir in the list that doesn't
 // exist on disk (the common case for an optional ~/.claude/skills that was
 // never created) must not fail discovery.
 func TestDiscoverSkillsMissingDirIsNotFatal(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeSkill(t, dir, "alpha", "alpha", "alpha description", "alpha body")
 
 	missing := filepath.Join(dir, "does-not-exist")
 	skills, err := DiscoverSkills([]string{missing, dir}, nil)
-	if err != nil {
-		t.Fatalf("expected a missing dir to be skipped, not fatal: %v", err)
-	}
-	if len(skills) != 1 || skills[0].Name != "alpha" {
-		t.Fatalf("expected the alpha skill from the present dir, got %+v", skills)
-	}
+	c.NoError(err, "expected a missing dir to be skipped, not fatal")
+	c.False(len(skills) != 1 || skills[0].Name != "alpha", "expected the alpha skill from the present dir, got %+v", skills)
 }
 
 // TestDiscoverSkillsFollowsSymlinks pins the symlink-traversal behaviour: a
@@ -157,30 +126,21 @@ func TestDiscoverSkillsMissingDirIsNotFatal(t *testing.T) {
 // itself, not the target, so a symlink to a directory is skipped unless the
 // entry is stat'ed. A broken symlink must be skipped, not fatal.
 func TestDiscoverSkillsFollowsSymlinks(t *testing.T) {
+	c := assert.NewAborting(t)
 	real := t.TempDir()
 	writeSkill(t, real, "linked", "linked", "linked description", "linked body")
 
 	dir := t.TempDir()
-	if err := os.Symlink(filepath.Join(real, "linked"), filepath.Join(dir, "linked")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(real, "gone"), filepath.Join(dir, "broken")); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Symlink(filepath.Join(real, "linked"), filepath.Join(dir, "linked")))
+	c.NoError(os.Symlink(filepath.Join(real, "gone"), filepath.Join(dir, "broken")))
 
 	skills, err := DiscoverSkills([]string{dir}, nil)
-	if err != nil {
-		t.Fatalf("expected the broken symlink to be skipped, not fatal: %v", err)
-	}
-	if len(skills) != 1 || skills[0].Name != "linked" {
-		t.Fatalf("expected the symlinked skill to be discovered, got %+v", skills)
-	}
+	c.NoError(err, "expected the broken symlink to be skipped, not fatal")
+	c.False(len(skills) != 1 || skills[0].Name != "linked", "expected the symlinked skill to be discovered, got %+v", skills)
 	// Dir/Path point at the symlink inside the scanned dir, not the resolved
 	// target: reads through them work either way, and the path the skill tool
 	// reports as the skill's base directory is the one the user configured.
-	if skills[0].Dir != filepath.Join(dir, "linked") {
-		t.Fatalf("expected Dir to be the symlink path, got %q", skills[0].Dir)
-	}
+	c.Eq(filepath.Join(dir, "linked"), skills[0].Dir, "expected Dir to be the symlink path, got")
 }
 
 // TestSkillsInventoryRendering covers the "- name: description" line format
@@ -192,37 +152,28 @@ func TestSkillsInventoryRendering(t *testing.T) {
 	}
 	got := SkillsInventory(skills)
 	want := "- alpha: does alpha things\n- beta: does beta things"
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
+	assert.NewAborting(t).Eq(want, got, "got")
 }
 
 // TestSkillsInventoryEmpty asserts an empty skill list renders as an empty
 // string, so BuildSystemPrompt's "omit empty sections" rule has nothing to
 // trip over.
 func TestSkillsInventoryEmpty(t *testing.T) {
-	if got := SkillsInventory(nil); got != "" {
-		t.Fatalf("expected empty string for no skills, got %q", got)
-	}
+	assert.NewAborting(t).Eq("", SkillsInventory(nil), "expected empty string for no skills, got")
 }
 
 // TestSkillBodyStripsFrontmatter covers the helper the skill tool uses to
 // load a skill's content at invocation time: the YAML frontmatter block must
 // not appear in the returned body.
 func TestSkillBodyStripsFrontmatter(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeSkill(t, dir, "alpha", "alpha", "alpha description", "ALPHA_BODY_MARKER\nmore body text\n")
 
 	body, err := SkillBody(filepath.Join(dir, "alpha", "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(body, "---") || strings.Contains(body, "description:") {
-		t.Fatalf("expected frontmatter stripped from body, got %q", body)
-	}
-	if !strings.Contains(body, "ALPHA_BODY_MARKER") {
-		t.Fatalf("expected body content preserved, got %q", body)
-	}
+	c.NoError(err)
+	c.False(strings.Contains(body, "---") || strings.Contains(body, "description:"), "expected frontmatter stripped from body, got %q", body)
+	c.StrContains(body, "ALPHA_BODY_MARKER", "expected body content preserved, got")
 }
 
 // TestSplitFrontmatterCRLF is the regression test for the CRLF body-split
@@ -232,15 +183,12 @@ func TestSkillBodyStripsFrontmatter(t *testing.T) {
 // left after the closing delimiter, and body comes back as
 // "\r\nBody text\r\nmore\r\n".
 func TestSplitFrontmatterCRLF(t *testing.T) {
+	c := assert.NewAborting(t)
 	content := "---\r\nname: x\r\ndescription: y\r\n---\r\nBody text\r\nmore\r\n"
 
 	_, body, err := splitFrontmatter(content)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.HasPrefix(body, "\r\n") || strings.HasPrefix(body, "\n") {
-		t.Fatalf("expected no leading blank line in CRLF body, got %q", body)
-	}
+	c.NoError(err)
+	c.False(strings.HasPrefix(body, "\r\n") || strings.HasPrefix(body, "\n"), "expected no leading blank line in CRLF body, got %q", body)
 	if !strings.HasPrefix(body, "Body text") {
 		t.Fatalf("expected body to start with %q, got %q", "Body text", body)
 	}
@@ -251,9 +199,7 @@ func TestSplitFrontmatterCRLF(t *testing.T) {
 // silently-wrong split.
 func TestSplitFrontmatterNoFrontmatter(t *testing.T) {
 	_, _, err := splitFrontmatter("Just a body, no frontmatter block here.\n")
-	if err == nil {
-		t.Fatal("expected an error for content with no opening frontmatter delimiter")
-	}
+	assert.NewAborting(t).Error(err, "expected an error for content with no opening frontmatter delimiter")
 }
 
 // TestSplitFrontmatterHorizontalRuleInBody asserts that a "---" appearing
@@ -261,27 +207,21 @@ func TestSplitFrontmatterNoFrontmatter(t *testing.T) {
 // and does not get mistaken for a second closing delimiter - splitFrontmatter
 // uses strings.Index, which finds the *first* "\n---" only.
 func TestSplitFrontmatterHorizontalRuleInBody(t *testing.T) {
+	c := assert.NewAborting(t)
 	content := "---\nname: x\ndescription: y\n---\nIntro text.\n\n---\n\nMore text after the rule.\n"
 
 	_, body, err := splitFrontmatter(content)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	want := "Intro text.\n\n---\n\nMore text after the rule.\n"
-	if body != want {
-		t.Fatalf("expected horizontal rule preserved in body, got %q, want %q", body, want)
-	}
+	c.Eq(want, body, "expected horizontal rule preserved in body, got")
 }
 
 func TestQualifiedNameUsesNamespaceWhenPresent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bare := SkillMeta{Name: "deploy"}
-	if got := bare.QualifiedName(); got != "deploy" {
-		t.Errorf("bare skill: got %q, want %q", got, "deploy")
-	}
+	c.Eq("deploy", bare.QualifiedName(), "bare skill: got")
 	ns := SkillMeta{Namespace: "rafiki", Name: "deploy"}
-	if got := ns.QualifiedName(); got != "rafiki:deploy" {
-		t.Errorf("namespaced skill: got %q, want %q", got, "rafiki:deploy")
-	}
+	c.Eq("rafiki:deploy", ns.QualifiedName(), "namespaced skill: got")
 }
 
 func TestSkillsInventoryRendersQualifiedNames(t *testing.T) {
@@ -290,7 +230,5 @@ func TestSkillsInventoryRendersQualifiedNames(t *testing.T) {
 		{Name: "local-only", Description: "from a directory"},
 	})
 	want := "- rafiki:coordinating: how to run subagents\n- local-only: from a directory"
-	if got != want {
-		t.Errorf("got:\n%s\nwant:\n%s", got, want)
-	}
+	assert.NewCollecting(t).Eq(want, got, "got:\n")
 }

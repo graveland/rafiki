@@ -19,6 +19,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // remoteProfileForTest seeds an isolated profile manifest naming a remote
@@ -26,16 +28,13 @@ import (
 // --cwd-against-a-remote-profile check (mustProfile(cmd).URL != "").
 func remoteProfileForTest(t *testing.T, url string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"remote": {Name: "remote", URL: url},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("remote"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("remote"), "SavePointer")
 }
 
 // newTestCreateCmd returns a cobra.Command with spawn flags registered, suitable
@@ -47,21 +46,17 @@ func newTestCreateCmd() *cobra.Command {
 }
 
 func TestBuildSpawnRequest_ExplicitCwd(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/explicit/path"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/explicit/path"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Cwd != "/explicit/path" {
-		t.Errorf("Cwd = %q, want /explicit/path", req.Cwd)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("/explicit/path", req.Cwd, "Cwd")
 }
 
 func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// When --cwd is omitted, buildSpawnRequest should use os.Getwd(). The
 	// default kind is fundi, which defaults cwd unconditionally regardless of
 	// where the profile's daemon lives — its filesystem access goes through
@@ -77,12 +72,8 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 	// cwd left at its zero value ("") intentionally.
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Cwd != wantCwd {
-		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq(wantCwd, req.Cwd, "Cwd")
 }
 
 // A claude child used to be a literal subprocess of rafikid (cmd.Dir =
@@ -96,6 +87,7 @@ func TestBuildSpawnRequest_DefaultCwd(t *testing.T) {
 // daemon or not, and buildSpawnRequest must NOT require an explicit --cwd
 // the way it used to.
 func TestBuildSpawnRequest_RemoteDefaultsCwdForClaude(t *testing.T) {
+	c := assert.NewCollecting(t)
 	remoteProfileForTest(t, "https://rafiki.example.dev")
 
 	wantCwd, err := os.Getwd()
@@ -104,30 +96,18 @@ func TestBuildSpawnRequest_RemoteDefaultsCwdForClaude(t *testing.T) {
 	}
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("kind", protocol.KindClaude))
 	// cwd left at its zero value ("") intentionally.
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error defaulting --cwd for a claude child against a remote daemon: %v", err)
-	}
-	if req.Cwd != wantCwd {
-		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
-	}
+	c.Require().NoError(err, "unexpected error defaulting --cwd for a claude child against a remote daemon")
+	c.Eq(wantCwd, req.Cwd, "Cwd")
 
 	// An explicit --cwd still wins.
-	if err := cmd.Flags().Set("cwd", "/remote/project"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/remote/project"))
 	req, err = buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error with explicit --cwd: %v", err)
-	}
-	if req.Cwd != "/remote/project" {
-		t.Errorf("Cwd = %q, want /remote/project", req.Cwd)
-	}
+	c.Require().NoError(err, "unexpected error with explicit --cwd")
+	c.Eq("/remote/project", req.Cwd, "Cwd")
 }
 
 // A fundi child never forks a daemon-local process: its filesystem access, if
@@ -136,6 +116,7 @@ func TestBuildSpawnRequest_RemoteDefaultsCwdForClaude(t *testing.T) {
 // exactly this cwd. So the client's own os.Getwd() is always a valid default,
 // remote daemon or not — the same reasoning the claude case above now shares.
 func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
+	c := assert.NewCollecting(t)
 	remoteProfileForTest(t, "https://rafiki.example.dev")
 
 	wantCwd, err := os.Getwd()
@@ -147,90 +128,58 @@ func TestBuildSpawnRequest_RemoteDefaultsCwdForFundi(t *testing.T) {
 	// kind left at its default (fundi); cwd left at its zero value ("").
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error defaulting --cwd for a fundi child against a remote daemon: %v", err)
-	}
-	if req.Cwd != wantCwd {
-		t.Errorf("Cwd = %q, want %q", req.Cwd, wantCwd)
-	}
+	c.Require().NoError(err, "unexpected error defaulting --cwd for a fundi child against a remote daemon")
+	c.Eq(wantCwd, req.Cwd, "Cwd")
 }
 
 func TestBuildSpawnRequest_RelativeCwdRejected(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "relative/path"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("cwd", "relative/path"))
 
 	_, err := buildSpawnRequest(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for relative --cwd, got nil")
-	}
+	c.Error(err, "expected error for relative --cwd, got nil")
 }
 
 // TestBuildSpawnRequest_SkillsDirAndMCPConfig covers task A6: --skills-dir
 // (repeatable) and --mcp-config, previously reachable only via --extra-arg,
 // now flow straight into their own SpawnRequest fields.
 func TestBuildSpawnRequest_SkillsDirAndMCPConfig(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("skills-dir", "/a/skills"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("skills-dir", "/b/skills"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("mcp-config", "/cfg/.mcp.json"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("skills-dir", "/a/skills"))
+	c.Require().NoError(cmd.Flags().Set("skills-dir", "/b/skills"))
+	c.Require().NoError(cmd.Flags().Set("mcp-config", "/cfg/.mcp.json"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if want := []string{"/a/skills", "/b/skills"}; !slices.Equal(req.SkillsDirs, want) {
-		t.Errorf("SkillsDirs = %v, want %v", req.SkillsDirs, want)
-	}
-	if req.MCPConfig != "/cfg/.mcp.json" {
-		t.Errorf("MCPConfig = %q, want /cfg/.mcp.json", req.MCPConfig)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.EqDiff([]string{"/a/skills", "/b/skills"}, req.SkillsDirs, "SkillsDirs")
+	c.Eq("/cfg/.mcp.json", req.MCPConfig, "MCPConfig")
 }
 
 // TestBuildSpawnRequest_SkillsDirAndMCPConfigOmittedByDefault confirms the
 // new fields stay unset (so buildAgentArgv emits neither flag) when the
 // caller never touches them — matching every other optional spawn flag.
 func TestBuildSpawnRequest_SkillsDirAndMCPConfigOmittedByDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(req.SkillsDirs) != 0 {
-		t.Errorf("SkillsDirs = %v, want empty", req.SkillsDirs)
-	}
-	if req.MCPConfig != "" {
-		t.Errorf("MCPConfig = %q, want empty", req.MCPConfig)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Empty(req.SkillsDirs, "SkillsDirs")
+	c.Eq("", req.MCPConfig, "MCPConfig")
 }
 
 func TestBuildSpawnRequest_NameFromArgs(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 
 	req, err := buildSpawnRequest(cmd, []string{"my-session"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Name != "my-session" {
-		t.Errorf("Name = %q, want my-session", req.Name)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("my-session", req.Name, "Name")
 }
 
 // ─── Mutual-exclusivity tests ─────────────────────────────────────────────────
@@ -247,50 +196,36 @@ func executeWithFlags(cmd *cobra.Command, flagArgs ...string) error {
 }
 
 func TestCreateCmd_KillAndKeepAreMutuallyExclusive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newCreateCmd()
 	err := executeWithFlags(cmd, "--kill-on-exit", "--keep-on-exit")
-	if err == nil {
-		t.Fatal("expected error when both --kill-on-exit and --keep-on-exit are set, got nil")
-	}
+	c.Require().Error(err, "expected error when both --kill-on-exit and --keep-on-exit are set, got nil")
 	// Cobra's message contains "if any flags in the group" when mutual exclusion fires.
-	if !strings.Contains(err.Error(), "kill-on-exit") || !strings.Contains(err.Error(), "keep-on-exit") {
-		t.Errorf("expected flag names in error, got: %v", err)
-	}
+	c.False(!strings.Contains(err.Error(), "kill-on-exit") || !strings.Contains(err.Error(), "keep-on-exit"), "expected flag names in error, got: %v", err)
 }
 
 func TestCreateCmd_KillOnExitAlone_OK(t *testing.T) {
 	cmd := newCreateCmd()
-	if err := executeWithFlags(cmd, "--kill-on-exit"); err != nil {
-		t.Errorf("unexpected error with only --kill-on-exit: %v", err)
-	}
+	assert.NewCollecting(t).NoError(executeWithFlags(cmd, "--kill-on-exit"), "unexpected error with only --kill-on-exit")
 }
 
 func TestCreateCmd_KeepOnExitAlone_OK(t *testing.T) {
 	cmd := newCreateCmd()
-	if err := executeWithFlags(cmd, "--keep-on-exit"); err != nil {
-		t.Errorf("unexpected error with only --keep-on-exit: %v", err)
-	}
+	assert.NewCollecting(t).NoError(executeWithFlags(cmd, "--keep-on-exit"), "unexpected error with only --keep-on-exit")
 }
 
 // ─── Label flag tests ─────────────────────────────────────────────────────────
 
 func TestBuildSpawnRequest_LabelFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 	// Register the --label flag (added by addSpawnFlags).
-	if err := cmd.Flags().Set("label", "env=prod"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("label", "env=prod"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Labels["env"] != "prod" {
-		t.Errorf("Labels[env] = %q, want prod", req.Labels["env"])
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("prod", req.Labels["env"], "Labels[env]")
 }
 
 // ─── --model completion respects the resolved profile's kind ──────────────────
@@ -318,14 +253,13 @@ func (s *stubModelsControl) ListModels(
 }
 
 func TestModelCompletionUsesTheResolvedProfilesKind(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
 
 	dir, err := os.MkdirTemp("", "h")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	c.NoError(err, "MkdirTemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 
@@ -333,27 +267,18 @@ func TestModelCompletionUsesTheResolvedProfilesKind(t *testing.T) {
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
 	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"claudework": {Name: "claudework", Socket: sock, Kind: protocol.KindClaude},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("claudework"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("claudework"), "SavePointer")
 
 	cmd := newTestCreateCmd()
 	// --kind deliberately left unset, matching the bug report exactly.
 	fn, ok := cmd.GetFlagCompletionFunc("model")
-	if !ok {
-		t.Fatal("no completion function registered for --model")
-	}
+	c.True(ok, "no completion function registered for --model")
 	fn(cmd, nil, "")
 
-	if stub.gotKind != protocol.KindClaude {
-		t.Fatalf("ListModels asked for kind %q, want %q (the resolved profile's kind, not the fundi default)",
-			stub.gotKind, protocol.KindClaude)
-	}
+	c.Eq(protocol.KindClaude, stub.gotKind, "ListModels asked for kind")
 }
 
 // localProfileForTest seeds an isolated profile manifest naming a local
@@ -363,16 +288,13 @@ func TestModelCompletionUsesTheResolvedProfilesKind(t *testing.T) {
 // default via those variables seeds a profile field instead.
 func localProfileForTest(t *testing.T, p profile.Profile) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 	p.Name = "test"
 	p.Socket = "/tmp/rafiki-test.sock"
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{"test": p}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("test"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{"test": p}}), "Save")
+	c.NoError(profile.SavePointer("test"), "SavePointer")
 }
 
 // TestBuildSpawnRequest_ModelNotDefaultedFromProfile confirms Step 4.3: the
@@ -381,165 +303,104 @@ func localProfileForTest(t *testing.T, p profile.Profile) {
 // remembered) is finished off in runCreate via resolveModel, pinned by
 // TestModelPrecedence.
 func TestBuildSpawnRequest_ModelNotDefaultedFromProfile(t *testing.T) {
+	c := assert.NewCollecting(t)
 	localProfileForTest(t, profile.Profile{Model: "prof-model"})
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Model != "" {
-		t.Errorf("Model = %q, want empty (buildSpawnRequest must not apply the profile default)", req.Model)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("", req.Model, "Model")
 }
 
 func TestBuildSpawnRequest_ProfileDefaultLabels(t *testing.T) {
+	c := assert.NewCollecting(t)
 	localProfileForTest(t, profile.Profile{Labels: map[string]string{"context": "work", "env": "prod"}})
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Labels["context"] != "work" || req.Labels["env"] != "prod" {
-		t.Errorf("Labels from the profile's default labels: %v", req.Labels)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.False(req.Labels["context"] != "work" || req.Labels["env"] != "prod", "Labels from the profile's default labels: %v", req.Labels)
 }
 
 func TestBuildSpawnRequest_FlagLabelWinsOverProfile(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Explicit --label should override the profile's labels on the same key.
 	localProfileForTest(t, profile.Profile{Labels: map[string]string{"env": "staging"}})
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("label", "env=prod"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("label", "env=prod"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Labels["env"] != "prod" {
-		t.Errorf("Labels[env] = %q, want prod (flag wins over profile default)", req.Labels["env"])
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("prod", req.Labels["env"], "Labels[env]")
 }
 
 func TestBuildSpawnRequest_InvalidLabelKey(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("label", "bad key=val"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.NoError(cmd.Flags().Set("label", "bad key=val"))
 	_, err := buildSpawnRequest(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for invalid label key")
-	}
+	c.Error(err, "expected error for invalid label key")
 }
 
 func TestBuildSpawnRequest_KindClaude(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("kind", protocol.KindClaude); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("config-dir", "/x"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("append-system-prompt", "be terse"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(cmd.Flags().Set("kind", protocol.KindClaude))
+	c.Require().NoError(cmd.Flags().Set("config-dir", "/x"))
+	c.Require().NoError(cmd.Flags().Set("append-system-prompt", "be terse"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.Kind != protocol.KindClaude {
-		t.Errorf("Kind = %q, want claude", req.Kind)
-	}
-	if req.ConfigDir != "/x" {
-		t.Errorf("ConfigDir = %q, want /x", req.ConfigDir)
-	}
-	if req.AppendSystemPrompt != "be terse" {
-		t.Errorf("AppendSystemPrompt = %q, want 'be terse'", req.AppendSystemPrompt)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq(protocol.KindClaude, req.Kind, "Kind")
+	c.Eq("/x", req.ConfigDir, "ConfigDir")
+	c.Eq("be terse", req.AppendSystemPrompt, "AppendSystemPrompt")
 }
 
 func TestBuildSpawnRequest_KindDefaultsAgent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	c.Require().NoError(err, "unexpected error")
 	// The default is the native runtime, not a foreign subprocess: it is the kind
 	// with in-band abort and per-turn cost accounting, and the only one whose
 	// model ids this repo can resolve. --model completion keys off the same
 	// default (kind scoping lives daemon-side; see cmd/rafikid's sourcesForKind).
-	if req.Kind != protocol.KindFundi {
-		t.Errorf("Kind = %q, want fundi (default)", req.Kind)
-	}
-	if req.ConfigDir != "" {
-		t.Errorf("ConfigDir = %q, want empty", req.ConfigDir)
-	}
+	c.Eq(protocol.KindFundi, req.Kind, "Kind")
+	c.Eq("", req.ConfigDir, "ConfigDir")
 }
 
 func TestBuildSpawnRequest_ReservedLabelKey(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("label", "rafiki/model=evil"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.NoError(cmd.Flags().Set("label", "rafiki/model=evil"))
 	_, err := buildSpawnRequest(cmd, nil)
-	if err == nil {
-		t.Fatal("expected error for rafiki/ prefix")
-	}
+	c.Error(err, "expected error for rafiki/ prefix")
 }
 
 func TestBuildSpawnRequest_ParentFlag(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("parent", "c_abc123"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("cwd", "/tmp"))
+	c.NoError(cmd.Flags().Set("parent", "c_abc123"))
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ParentChildID != "c_abc123" {
-		t.Fatalf("ParentChildID = %q; want c_abc123", req.ParentChildID)
-	}
+	c.NoError(err, "unexpected error")
+	c.Eq("c_abc123", req.ParentChildID, "ParentChildID")
 }
 
 func TestBuildSpawnRequest_ParentFlagOmitted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ParentChildID != "" {
-		t.Errorf("ParentChildID = %q, want empty", req.ParentChildID)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("", req.ParentChildID, "ParentChildID")
 }
 
 // The flag is the only way a human can target an executor: the sole other
@@ -547,22 +408,15 @@ func TestBuildSpawnRequest_ParentFlagOmitted(t *testing.T) {
 // agent_spawn tool.
 func TestBuildSpawnRequest_ExecutorSelectorFlag(t *testing.T) {
 	t.Setenv(paths.ExecutorSelector, "")
+	c := assert.NewCollecting(t)
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("executor-selector", "owner=brent,env=home"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("executor-selector", "owner=brent,env=home"))
+	c.Require().NoError(cmd.Flags().Set("cwd", "/w"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ExecutorSelector != "owner=brent,env=home" {
-		t.Errorf("ExecutorSelector = %q, want %q", req.ExecutorSelector, "owner=brent,env=home")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("owner=brent,env=home", req.ExecutorSelector, "ExecutorSelector")
 }
 
 // The environment default must apply when the flag is NOT passed. This is the
@@ -574,40 +428,28 @@ func TestBuildSpawnRequest_ExecutorSelectorFlag(t *testing.T) {
 // paths.Get(...) when it REGISTERS the flag, not when the flag is read.
 func TestBuildSpawnRequest_ExecutorSelectorFromEnv(t *testing.T) {
 	t.Setenv(paths.ExecutorSelector, "owner=brent")
+	c := assert.NewCollecting(t)
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/w"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ExecutorSelector != "owner=brent" {
-		t.Errorf("ExecutorSelector = %q, want the env default %q", req.ExecutorSelector, "owner=brent")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("owner=brent", req.ExecutorSelector, "ExecutorSelector")
 }
 
 // An explicit flag beats the environment.
 func TestBuildSpawnRequest_ExecutorSelectorFlagBeatsEnv(t *testing.T) {
 	t.Setenv(paths.ExecutorSelector, "owner=brent")
+	c := assert.NewCollecting(t)
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("executor-selector", "env=ci"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("executor-selector", "env=ci"))
+	c.Require().NoError(cmd.Flags().Set("cwd", "/w"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ExecutorSelector != "env=ci" {
-		t.Errorf("ExecutorSelector = %q, want the flag value %q", req.ExecutorSelector, "env=ci")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("env=ci", req.ExecutorSelector, "ExecutorSelector")
 }
 
 // --no-local-executor is a session posture, not a spawn field. It must not
@@ -615,25 +457,19 @@ func TestBuildSpawnRequest_ExecutorSelectorFlagBeatsEnv(t *testing.T) {
 // offered its own machine.
 func TestNoLocalExecutorIsNotASpawnField(t *testing.T) {
 	t.Setenv(paths.ExecutorSelector, "")
+	c := assert.NewCollecting(t)
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("no-local-executor", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("cwd", "/w"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("no-local-executor", "true"))
+	c.Require().NoError(cmd.Flags().Set("cwd", "/w"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if req.ExecutorSelector != "" {
-		t.Errorf("ExecutorSelector = %q, want empty", req.ExecutorSelector)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("", req.ExecutorSelector, "ExecutorSelector")
 }
 
 func TestMaxCostConvertsThroughConfiguredCurrency(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
 	clientstate.UpdateScoped(clientstate.Scope{}, func(s *clientstate.State) {
@@ -641,44 +477,29 @@ func TestMaxCostConvertsThroughConfiguredCurrency(t *testing.T) {
 	})
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("max-cost", "13.80"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("cwd", t.TempDir()))
+	c.NoError(cmd.Flags().Set("max-cost", "13.80"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.MaxCost == nil {
-		t.Fatal("MaxCost is nil, want a converted USD value")
-	}
+	c.NoError(err)
+	c.NotNil(req.MaxCost, "MaxCost is nil, want a converted USD value")
 	if diff := *req.MaxCost - 10.0; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("MaxCost = %v, want ~10.0 (13.80 CAD at 1.38 CAD/USD)", *req.MaxCost)
 	}
 }
 
 func TestMaxCostWithNoCurrencyIsUnconverted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
 
 	cmd := newTestCreateCmd()
-	if err := cmd.Flags().Set("cwd", t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("max-cost", "10"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", t.TempDir()))
+	c.Require().NoError(cmd.Flags().Set("max-cost", "10"))
 
 	req, err := buildSpawnRequest(cmd, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.MaxCost == nil || *req.MaxCost != 10 {
-		t.Errorf("MaxCost = %v, want 10 (no currency configured)", req.MaxCost)
-	}
+	c.Require().NoError(err)
+	c.False(req.MaxCost == nil || *req.MaxCost != 10, "MaxCost = %v, want 10 (no currency configured)", req.MaxCost)
 }
 
 func TestResolveExecutor(t *testing.T) {
@@ -698,55 +519,39 @@ func TestResolveExecutor(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gotRef, gotSel := resolveExecutor(tc.flagExecutor, tc.flagSelector, tc.remembered, tc.rememberedEligible)
-			if gotRef != tc.wantRef || gotSel != tc.wantSelector {
-				t.Fatalf("got ref=%q selector=%q, want ref=%q selector=%q", gotRef, gotSel, tc.wantRef, tc.wantSelector)
-			}
+			assert.NewAborting(t).False(gotRef != tc.wantRef || gotSel != tc.wantSelector, "got ref=%q selector=%q, want ref=%q selector=%q", gotRef, gotSel, tc.wantRef, tc.wantSelector)
 		})
 	}
 }
 
 func TestCreateTextFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// The Connect SpawnResponse carries the child id only (the framed payload's
 	// session/model fields were dropped on the wire); the text view renders
 	// exactly what the record carries.
 	var buf bytes.Buffer
-	if err := renderCreateSummary(&buf, &rafikiv1.SpawnResponse{ChildId: "c_123"}, outputTable); err != nil {
-		t.Fatalf("renderCreateSummary: %v", err)
-	}
-	if buf.String() != "childId: c_123\n" {
-		t.Errorf("text output = %q, want only the childId line", buf.String())
-	}
+	c.Require().NoError(renderCreateSummary(&buf, &rafikiv1.SpawnResponse{ChildId: "c_123"}, outputTable), "renderCreateSummary")
+	c.Eq("childId: c_123\n", buf.String(), "text output")
 
 	// A field the record does not carry is skipped, not printed as a dash.
 	var empty bytes.Buffer
-	if err := renderCreateSummary(&empty, &rafikiv1.SpawnResponse{}, outputTable); err != nil {
-		t.Fatalf("renderCreateSummary empty: %v", err)
-	}
-	if empty.String() != "" {
-		t.Errorf("empty-field output = %q, want nothing", empty.String())
-	}
+	c.Require().NoError(renderCreateSummary(&empty, &rafikiv1.SpawnResponse{}, outputTable), "renderCreateSummary empty")
+	c.Eq("", empty.String(), "empty-field output")
 }
 
 // The detached create JSON is the Spawn response's canonical protojson —
 // pretty and JSONL are the same bytes modulo whitespace (protoout's contract).
 func TestCreateJSONShape(t *testing.T) {
+	c := assert.NewCollecting(t)
 	resp := &rafikiv1.SpawnResponse{ChildId: "c_123"}
 
 	var buf bytes.Buffer
-	if err := renderCreateSummary(&buf, resp, outputJSON); err != nil {
-		t.Fatalf("renderCreateSummary: %v", err)
-	}
-	if buf.String() != "{\n  \"childId\": \"c_123\"\n}\n" {
-		t.Errorf("json output = %q, want indented protojson", buf.String())
-	}
+	c.Require().NoError(renderCreateSummary(&buf, resp, outputJSON), "renderCreateSummary")
+	c.Eq("{\n  \"childId\": \"c_123\"\n}\n", buf.String(), "json output")
 
 	var line bytes.Buffer
-	if err := renderCreateSummary(&line, resp, outputJSONL); err != nil {
-		t.Fatalf("renderCreateSummary: %v", err)
-	}
-	if line.String() != `{"childId":"c_123"}`+"\n" {
-		t.Errorf("jsonl output = %q, want one compact line", line.String())
-	}
+	c.Require().NoError(renderCreateSummary(&line, resp, outputJSONL), "renderCreateSummary")
+	c.Eq(`{"childId":"c_123"}`+"\n", line.String(), "jsonl output")
 }
 
 // TestConnectSpawnRequestCarriesEveryField pins the protocol→wire conversion:
@@ -789,7 +594,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 	}
 	out := connectSpawnRequest(in)
 
-	if out.GetCwd() != in.Cwd || out.GetName() != in.Name || out.GetKind() != in.Kind ||
+	assert.NewAborting(t).False(out.GetCwd() != in.Cwd || out.GetName() != in.Name || out.GetKind() != in.Kind ||
 		out.GetModel() != in.Model || out.GetPreset() != in.Preset ||
 		out.GetConfigDir() != in.ConfigDir || out.GetAppendSystemPrompt() != in.AppendSystemPrompt ||
 		out.GetThinking() != in.Thinking || out.GetNoSession() != in.NoSession ||
@@ -799,9 +604,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 		!slices.Equal(out.GetSkillsDirs(), in.SkillsDirs) || out.GetMcpConfig() != in.MCPConfig ||
 		out.GetParentChildId() != in.ParentChildID || out.GetRecordRequests() != in.RecordRequests ||
 		out.GetPassthroughAuth() != in.PassthroughAuth || out.GetExecutorSelector() != in.ExecutorSelector ||
-		out.GetExecutorRef() != in.ExecutorRef {
-		t.Fatalf("a scalar field was lost on the wire: %+v", out)
-	}
+		out.GetExecutorRef() != in.ExecutorRef, "a scalar field was lost on the wire: %+v", out)
 	if out.GetLabels()["env"] != "home" || out.GetEnv()["K"] != "V" {
 		t.Fatalf("a map field was lost: labels=%v env=%v", out.GetLabels(), out.GetEnv())
 	}
@@ -839,46 +642,29 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 // profile model exists), and an explicit --kind that contradicts the preset
 // fails.
 func TestCreatePresetDropsAmbientModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rec := presets.Record{Name: "reviewer", Kind: presets.KindClaude, Model: "claude-x"}
 
 	// No --model flag: Model stays empty even with a profile model in play.
 	req2 := &protocol.SpawnRequest{}
-	if err := applyCreatePreset(req2, "reviewer", rec, "", false, ""); err != nil {
-		t.Fatalf("applyCreatePreset: %v", err)
-	}
-	if req2.Preset != "reviewer" {
-		t.Errorf("Preset = %q, want reviewer", req2.Preset)
-	}
-	if req2.Kind != presets.KindClaude {
-		t.Errorf("Kind = %q, want the preset's kind claude", req2.Kind)
-	}
-	if req2.Model != "" {
-		t.Errorf("Model = %q, want empty (no --model flag; a profile model must not ride along)", req2.Model)
-	}
+	c.Require().NoError(applyCreatePreset(req2, "reviewer", rec, "", false, ""), "applyCreatePreset")
+	c.Eq("reviewer", req2.Preset, "Preset")
+	c.Eq(presets.KindClaude, req2.Kind, "Kind")
+	c.Eq("", req2.Model, "Model")
 
 	// An explicit --model flag is kept.
 	req3 := &protocol.SpawnRequest{}
-	if err := applyCreatePreset(req3, "reviewer", rec, "", false, "flag-model"); err != nil {
-		t.Fatalf("applyCreatePreset: %v", err)
-	}
-	if req3.Model != "flag-model" {
-		t.Errorf("Model = %q, want flag-model (an explicit flag outranks the preset)", req3.Model)
-	}
+	c.Require().NoError(applyCreatePreset(req3, "reviewer", rec, "", false, "flag-model"), "applyCreatePreset")
+	c.Eq("flag-model", req3.Model, "Model")
 
 	// A matching explicit --kind is fine.
 	req4 := &protocol.SpawnRequest{}
-	if err := applyCreatePreset(req4, "reviewer", rec, presets.KindClaude, true, ""); err != nil {
-		t.Errorf("applyCreatePreset with a matching --kind: %v", err)
-	}
+	c.NoError(applyCreatePreset(req4, "reviewer", rec, presets.KindClaude, true, ""), "applyCreatePreset with a matching --kind")
 
 	// A conflicting --kind fails.
 	err := applyCreatePreset(&protocol.SpawnRequest{}, "reviewer", rec, "fundi", true, "")
-	if err == nil {
-		t.Fatal("applyCreatePreset with a conflicting --kind = nil error, want a failure")
-	}
-	if !strings.Contains(err.Error(), `--kind "fundi" conflicts with preset "reviewer" (kind "claude")`) {
-		t.Errorf("error = %v, want the conflict named", err)
-	}
+	c.Require().Error(err, "applyCreatePreset with a conflicting --kind = nil error, want a failure")
+	c.StrContains(err.Error(), `--kind "fundi" conflicts with preset "reviewer" (kind "claude")`, "error = %v, want the conflict named", err)
 }
 
 // ─── resolvePresetName ───────────────────────────────────────────────────────
@@ -892,30 +678,24 @@ func TestCreatePresetDropsAmbientModel(t *testing.T) {
 // profile's `preset` field is read (via resolvePresetName) when --preset is
 // not passed.
 func TestProfilePresetName_AppliedWhenFlagUnset(t *testing.T) {
+	c := assert.NewCollecting(t)
 	localProfileForTest(t, profile.Profile{Preset: "mypreset"})
 
 	cmd := newCreateCmd()
-	if err := cmd.Flags().Set("cwd", "/tmp"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("cwd", "/tmp"))
 	// The same resolution runCreate does, not a copy of it.
-	if name := resolvePresetName(cmd); name != "mypreset" {
-		t.Errorf("presetName = %q, want mypreset (the profile's preset field)", name)
-	}
+	c.Eq("mypreset", resolvePresetName(cmd), "presetName")
 }
 
 // TestProfilePresetName_FlagWinsOverProfile checks that an explicit --preset
 // wins over the profile's `preset` field.
 func TestProfilePresetName_FlagWinsOverProfile(t *testing.T) {
+	c := assert.NewCollecting(t)
 	localProfileForTest(t, profile.Profile{Preset: "profpreset"})
 
 	cmd := newCreateCmd()
-	if err := cmd.Flags().Set("preset", "flagpreset"); err != nil {
-		t.Fatal(err)
-	}
-	if name := resolvePresetName(cmd); name != "flagpreset" {
-		t.Errorf("presetName = %q, want flagpreset (the flag wins over the profile default)", name)
-	}
+	c.Require().NoError(cmd.Flags().Set("preset", "flagpreset"))
+	c.Eq("flagpreset", resolvePresetName(cmd), "presetName")
 }
 
 // TestResolveModelChainWithoutPreset pins the 3-argument model chain: the
@@ -937,10 +717,7 @@ func TestResolveModelChainWithoutPreset(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := resolveModel(tc.flagModel, tc.profModel, tc.remembered)
-			if got != tc.want {
-				t.Fatalf("resolveModel(%q,%q,%q) = %q, want %q",
-					tc.flagModel, tc.profModel, tc.remembered, got, tc.want)
-			}
+			assert.NewAborting(t).Eq(tc.want, got, "resolveModel(%q,%q,%q) = %q, want", tc.flagModel, tc.profModel, tc.remembered, got)
 		})
 	}
 }

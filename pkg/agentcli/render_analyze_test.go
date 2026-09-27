@@ -11,20 +11,20 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRenderProgressLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
-	if err := RenderProgress(&b, &Progress{ConversationID: "c1", State: StateFailed, Detail: "detect: boom"}); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderProgress(&b, &Progress{ConversationID: "c1", State: StateFailed, Detail: "detect: boom"}))
 	out := b.String()
-	if !strings.Contains(out, "c1") || !strings.Contains(out, "failed") || !strings.Contains(out, "boom") {
-		t.Errorf("failure reason must be visible: %q", out)
-	}
+	c.False(!strings.Contains(out, "c1") || !strings.Contains(out, "failed") || !strings.Contains(out, "boom"), "failure reason must be visible: %q", out)
 }
 
 func TestRenderAnalyzeSummary(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Summary{
 		Ranked: []RankedFindingWithDraft{
 			{
@@ -48,14 +48,10 @@ func TestRenderAnalyzeSummary(t *testing.T) {
 		Totals: Totals{InputTokens: 1000, OutputTokens: 500, CostUSD: 0.5},
 	}
 	var b bytes.Buffer
-	if err := RenderAnalyzeSummary(&b, s); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderAnalyzeSummary(&b, s))
 	out := b.String()
 	for _, want := range []string{"missing vacuum skill", "skill-gap", "Analyzed 4", "remaining 2"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("summary missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "summary missing")
 	}
 
 	// Verify Draft column: "missing vacuum skill" has draft, "loop inefficiency" does not.
@@ -77,12 +73,8 @@ func TestRenderAnalyzeSummary(t *testing.T) {
 			}
 		}
 	}
-	if !foundDraftYes {
-		t.Errorf("should find a finding with 'yes' draft marker:\n%s", out)
-	}
-	if !foundDraftEmpty {
-		t.Errorf("should find a finding without 'yes' draft marker:\n%s", out)
-	}
+	c.True(foundDraftYes, "should find a finding with 'yes' draft marker:\n%s", out)
+	c.True(foundDraftEmpty, "should find a finding without 'yes' draft marker:\n%s", out)
 }
 
 // TestRenderAnalyzeSummary_SameTitleDifferentAxis guards against a Title-keyed
@@ -92,6 +84,7 @@ func TestRenderAnalyzeSummary(t *testing.T) {
 // the finding itself, so only the entry that was actually drafted shows the
 // marker — a Title-keyed map would show it on both.
 func TestRenderAnalyzeSummary_SameTitleDifferentAxis(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const sharedTitle = "duplicate title"
 	s := &Summary{
 		Ranked: []RankedFindingWithDraft{
@@ -113,9 +106,7 @@ func TestRenderAnalyzeSummary_SameTitleDifferentAxis(t *testing.T) {
 		Analyzed: 2, Population: 2,
 	}
 	var b bytes.Buffer
-	if err := RenderAnalyzeSummary(&b, s); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderAnalyzeSummary(&b, s))
 
 	lines := strings.Split(b.String(), "\n")
 	var withTitle []string
@@ -124,9 +115,7 @@ func TestRenderAnalyzeSummary_SameTitleDifferentAxis(t *testing.T) {
 			withTitle = append(withTitle, line)
 		}
 	}
-	if len(withTitle) != 2 {
-		t.Fatalf("want 2 rows for the shared title, got %d: %v", len(withTitle), withTitle)
-	}
+	c.Require().Len(withTitle, 2, "want 2 rows for the shared title, got %d", len(withTitle))
 
 	yesCount := 0
 	for _, line := range withTitle {
@@ -136,64 +125,47 @@ func TestRenderAnalyzeSummary_SameTitleDifferentAxis(t *testing.T) {
 			yesCount++
 		}
 	}
-	if yesCount != 1 {
-		t.Errorf("exactly one same-titled row should show the draft marker, got %d:\n%s", yesCount, b.String())
-	}
+	c.Eq(1, yesCount, "exactly one same-titled row should show the draft marker, got %d:\n%s", yesCount, b.String())
 }
 
 func TestWriteArtifactsAnalysis(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	a := &analyze.Analysis{ConversationID: "c1", Outcome: "did a thing",
 		Verdicts: map[string]string{"grind": "finding"},
 		Findings: []analyze.Finding{{Axis: "grind", Title: "loop", Evidence: []analyze.TurnCite{{Ordinal: 3, Quote: "retry"}}}}}
-	if err := WriteArtifacts(dir, "c1", "detect", a); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(WriteArtifacts(dir, "c1", "detect", a))
 	for _, name := range []string{"c1.detect.json", "c1.detect.md"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("missing artifact %s: %v", name, err)
 		}
 	}
 	md, err := os.ReadFile(filepath.Join(dir, "c1.detect.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(md), "did a thing") || !strings.Contains(string(md), "retry") {
-		t.Errorf("md artifact should carry outcome + evidence: %s", md)
-	}
+	c.Require().NoError(err)
+	c.False(!strings.Contains(string(md), "did a thing") || !strings.Contains(string(md), "retry"), "md artifact should carry outcome + evidence: %s", md)
 }
 
 func TestWriteArtifactsRejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteArtifacts(dir, "../escape", "detect", &analyze.Analysis{}); err == nil {
-		t.Fatal("conversation ids that change under filepath.Base must be rejected")
-	}
+	assert.NewAborting(t).Error(WriteArtifacts(dir, "../escape", "detect", &analyze.Analysis{}), "conversation ids that change under filepath.Base must be rejected")
 }
 
 func TestWritePromptsSidecar(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	p := &analyze.Profile{DetectorModel: "claude-haiku-4-5", DetectorPromptExtra: "also check X"}
 	p.Defaults()
-	if err := WritePromptsSidecar(dir, p); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(WritePromptsSidecar(dir, p))
 	b, err := os.ReadFile(filepath.Join(dir, "_prompts.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	out := string(b)
-	if !strings.Contains(out, "also check X") {
-		t.Error("sidecar must include the profile's extra")
-	}
-	if !strings.Contains(out, "detector pass") { // from the builtin base
-		t.Error("sidecar must include the effective base prompt text")
-	}
-	if !strings.Contains(out, p.PromptHash()) {
-		t.Error("sidecar must record the prompt hash")
-	}
+	c.StrContains(out, "also check X", "sidecar must include the profile's extra")
+	c.StrContains(out, "detector pass", "sidecar must include the effective base prompt text") // from the builtin base
+	c.StrContains(out, p.PromptHash(), "sidecar must record the prompt hash")
 }
 
 func TestWriteSkillEditsWritesDraftedFiles(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	s := &Summary{
 		Ranked: []RankedFindingWithDraft{
@@ -214,31 +186,20 @@ func TestWriteSkillEditsWritesDraftedFiles(t *testing.T) {
 	}
 
 	written, err := WriteSkillEdits(dir, s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(written) != 1 {
-		t.Fatalf("want exactly 1 file written (only the ranked finding with a Draft), got %d: %v", len(written), written)
-	}
+	c.Require().NoError(err)
+	c.Require().Len(written, 1, "want exactly 1 file written (only the ranked finding with a Draft), got %d", len(written))
 
 	want := filepath.Join(dir, "skills/vacuum-tuning/SKILL.md")
 	wantAbs, err := filepath.Abs(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if written[0] != wantAbs {
-		t.Errorf("wrote path %q, want %q", written[0], wantAbs)
-	}
+	c.Require().NoError(err)
+	c.Eq(wantAbs, written[0], "wrote path")
 	b, err := os.ReadFile(wantAbs)
-	if err != nil {
-		t.Fatalf("expected file to exist on disk: %v", err)
-	}
-	if string(b) != "# Vacuum Tuning\n" {
-		t.Errorf("file content mismatch: %q", b)
-	}
+	c.Require().NoError(err, "expected file to exist on disk")
+	c.Eq("# Vacuum Tuning\n", string(b), "file content mismatch: %q", b)
 }
 
 func TestWriteSkillEditsRejectsPathTraversal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	s := &Summary{
 		Ranked: []RankedFindingWithDraft{
@@ -252,18 +213,14 @@ func TestWriteSkillEditsRejectsPathTraversal(t *testing.T) {
 		},
 	}
 	written, err := WriteSkillEdits(dir, s)
-	if err == nil {
-		t.Fatal("a skill edit file path escaping outDir must be rejected")
-	}
-	if len(written) != 0 {
-		t.Errorf("no files should have been written before the traversal was caught: %v", written)
-	}
-	if _, statErr := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(dir)), "escaped.md")); statErr == nil {
-		t.Error("traversal file must not have been written outside outDir")
-	}
+	c.Require().Error(err, "a skill edit file path escaping outDir must be rejected")
+	c.Empty(written, "no files should have been written before the traversal was caught")
+	_, statErr := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(dir)), "escaped.md"))
+	c.Error(statErr, "traversal file must not have been written outside outDir")
 }
 
 func TestRenderFindings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []store.FindingRow{
 		{
 			ID:                    "f1",
@@ -283,17 +240,13 @@ func TestRenderFindings(t *testing.T) {
 		},
 	}
 	var b bytes.Buffer
-	if err := RenderFindings(&b, rows); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderFindings(&b, rows))
 	out := b.String()
 	for _, want := range []string{
 		"skill-gap", "distributed-tracing", "missing tracing setup",
 		"grind", "query-optimization", "n+1 query pattern",
 		"12,000", "45,000", "open", "actioned",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("findings output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "findings output missing")
 	}
 }

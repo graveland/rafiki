@@ -5,11 +5,12 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func strPtr(s string) *string   { return &s }
@@ -28,78 +29,51 @@ func allFieldsConfig() ReviewConfig {
 // is also how every config-file test below isolates itself — the default
 // path is never read by a test that points RAFIKI_REVIEW_CONFIG elsewhere.
 func TestReviewConfigMissingFileIsZeroValueNoError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	missing := filepath.Join(t.TempDir(), "absent.json")
 	t.Setenv("RAFIKI_REVIEW_CONFIG", missing)
 
 	cfg, err := loadReviewConfig()
-	if err != nil {
-		t.Fatalf("loadReviewConfig(%q): %v", missing, err)
-	}
-	if cfg.Model != nil || cfg.Profile != nil || cfg.BudgetUSD != nil || cfg.MinTurns != nil {
-		t.Errorf("missing file: got %+v, want the zero config", cfg)
-	}
-	if got := reviewConfigPath(); got != missing {
-		t.Errorf("reviewConfigPath() = %q, want the override %q", got, missing)
-	}
+	c.Require().NoError(err, "loadReviewConfig(%q)", missing)
+	c.False(cfg.Model != nil || cfg.Profile != nil || cfg.BudgetUSD != nil || cfg.MinTurns != nil, "missing file: got %+v, want the zero config", cfg)
+	c.Eq(missing, reviewConfigPath(), "reviewConfigPath()")
 
 	// The default path behaves the same: XDG_CONFIG_HOME is isolated
 	// package-wide by TestMain and nothing writes review.json there, so the
 	// read below is genuinely a miss.
 	t.Setenv("RAFIKI_REVIEW_CONFIG", "")
-	if got := reviewConfigPath(); got != filepath.Join(paths.ConfigDir(), "review.json") {
-		t.Errorf("reviewConfigPath() = %q, want %q", got, filepath.Join(paths.ConfigDir(), "review.json"))
-	}
+	c.Eq(filepath.Join(paths.ConfigDir(), "review.json"), reviewConfigPath(), "reviewConfigPath()")
 	cfg, err = loadReviewConfig()
-	if err != nil {
-		t.Fatalf("loadReviewConfig(default path): %v", err)
-	}
-	if cfg.Model != nil || cfg.Profile != nil || cfg.BudgetUSD != nil || cfg.MinTurns != nil {
-		t.Errorf("missing default file: got %+v, want the zero config", cfg)
-	}
+	c.Require().NoError(err, "loadReviewConfig(default path)")
+	c.False(cfg.Model != nil || cfg.Profile != nil || cfg.BudgetUSD != nil || cfg.MinTurns != nil, "missing default file: got %+v, want the zero config", cfg)
 }
 
 // A present file parses only the fields it carries, as pointers, so "absent"
 // stays distinguishable from a zero value.
 func TestReviewConfigParsesPresentFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "review.json")
-	if err := os.WriteFile(path, []byte(`{"model":"anthropic/claude-sonnet-5","budget_usd":0.75}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(`{"model":"anthropic/claude-sonnet-5","budget_usd":0.75}`), 0o600))
 	t.Setenv("RAFIKI_REVIEW_CONFIG", path)
 
 	cfg, err := loadReviewConfig()
-	if err != nil {
-		t.Fatalf("loadReviewConfig: %v", err)
-	}
-	if cfg.Model == nil || *cfg.Model != "anthropic/claude-sonnet-5" {
-		t.Errorf("Model = %v, want \"anthropic/claude-sonnet-5\"", cfg.Model)
-	}
-	if cfg.BudgetUSD == nil || *cfg.BudgetUSD != 0.75 {
-		t.Errorf("BudgetUSD = %v, want 0.75", cfg.BudgetUSD)
-	}
-	if cfg.Profile != nil {
-		t.Errorf("Profile = %v, want nil (absent from the file)", cfg.Profile)
-	}
-	if cfg.MinTurns != nil {
-		t.Errorf("MinTurns = %v, want nil (absent from the file)", cfg.MinTurns)
-	}
+	c.Require().NoError(err, "loadReviewConfig")
+	c.False(cfg.Model == nil || *cfg.Model != "anthropic/claude-sonnet-5", "Model = %v, want \"anthropic/claude-sonnet-5\"", cfg.Model)
+	c.False(cfg.BudgetUSD == nil || *cfg.BudgetUSD != 0.75, "BudgetUSD = %v, want 0.75", cfg.BudgetUSD)
+	c.Nil(cfg.Profile, "Profile")
+	c.Nil(cfg.MinTurns, "MinTurns")
 }
 
 // A malformed file is a parse error naming the path, not a silent zero.
 func TestReviewConfigMalformedFileErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "review.json")
-	if err := os.WriteFile(path, []byte(`{"budget_usd": "free"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(`{"budget_usd": "free"}`), 0o600))
 	t.Setenv("RAFIKI_REVIEW_CONFIG", path)
 
 	_, err := loadReviewConfig()
-	if err == nil {
-		t.Fatal("expected a parse error, got nil")
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("error %q does not name the config path", err)
-	}
+	c.Require().Error(err, "expected a parse error, got nil")
+	c.StrContains(err.Error(), path, "error %q does not name the config path", err)
 }
 
 // Flags win: mergeInto fills only the fields the request does not already
@@ -127,7 +101,5 @@ func TestReviewConfigMergeIntoNeverOverwritesASetField(t *testing.T) {
 func TestReviewConfigZeroValueMergesNothing(t *testing.T) {
 	req := &rafikiv1.ConversationReviewRequest{}
 	ReviewConfig{}.mergeInto(req)
-	if req.Model != nil || req.Profile != nil || req.BudgetUsd != nil || req.MinTurns != nil {
-		t.Errorf("zero config set fields on the request: %+v", req)
-	}
+	assert.NewCollecting(t).False(req.Model != nil || req.Profile != nil || req.BudgetUsd != nil || req.MinTurns != nil, "zero config set fields on the request: %+v", req)
 }

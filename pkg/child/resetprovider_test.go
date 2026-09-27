@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // resettableStubRunner is a Runner backed by an io.Pipe (so the test controls
@@ -66,9 +68,7 @@ func TestResetProviderIfDueClearsStaleStateBetweenFrames(t *testing.T) {
 		Runner:   stub,
 		Provider: ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
 	busCh, cancel := ch.Bus().Subscribe()

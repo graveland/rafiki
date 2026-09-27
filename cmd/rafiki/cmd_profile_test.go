@@ -12,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // isolateProfiles points this test at its own config/state tree. Every test
@@ -55,6 +57,7 @@ func runProfileCmd(t *testing.T, args ...string) (string, error) {
 }
 
 func TestProfileAddThenListThenUse(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 
 	if _, err := runProfileCmd(t, "add", "work", "--socket", "/tmp/work.sock"); err != nil {
@@ -65,65 +68,48 @@ func TestProfileAddThenListThenUse(t *testing.T) {
 	}
 
 	out, err := runProfileCmd(t, "list")
-	if err != nil {
-		t.Fatalf("profile list: %v", err)
-	}
+	c.Require().NoError(err, "profile list")
 	for _, want := range []string{"work", "personal", "/tmp/work.sock", "https://rafiki.example.net"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("list output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "list output missing")
 	}
 
 	if _, err := runProfileCmd(t, "use", "work"); err != nil {
 		t.Fatalf("profile use: %v", err)
 	}
-	if got := profile.LoadPointer(); got != "work" {
-		t.Fatalf("pointer = %q, want work", got)
-	}
+	c.Require().Eq("work", profile.LoadPointer(), "pointer")
 
 	out, err = runProfileCmd(t, "current")
-	if err != nil {
-		t.Fatalf("profile current: %v", err)
-	}
-	if strings.TrimSpace(out) != "work" {
-		t.Fatalf("current = %q, want work", strings.TrimSpace(out))
-	}
+	c.Require().NoError(err, "profile current")
+	c.Require().Eq("work", strings.TrimSpace(out), "current")
 }
 
 func TestProfileListOnABareMachineIsSilentAndSucceeds(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
 	out, err := runProfileCmd(t, "list")
-	if err != nil {
-		t.Fatalf("profile list on a bare machine = %v, want nil — the profile verbs must not need a profile, or the feature cannot bootstrap itself", err)
-	}
-	if strings.Contains(out, "default") {
-		t.Fatalf("profile list bootstrapped a profile:\n%s", out)
-	}
+	c.NoError(err, "profile list on a bare machine")
+	c.NotStrContains(out, "default", "profile list bootstrapped a profile:\n")
 }
 
 func TestProfileAddRefusesARemoteWithNoToken(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
 	_, err := runProfileCmd(t, "add", "personal", "--url", "https://rafiki.example.net")
-	if err == nil {
-		t.Fatal("profile add --url with no --token = nil error; a tokenless remote can only ever 401")
-	}
-	if !strings.Contains(err.Error(), "token") {
-		t.Fatalf("error %q does not mention the token", err)
-	}
+	c.Error(err, "profile add --url with no --token = nil error; a tokenless remote can only ever 401")
+	c.StrContains(err.Error(), "token", "error %q does not mention the token", err)
 }
 
 func TestProfileAddRefusesBothEndpoints(t *testing.T) {
 	isolateProfiles(t)
 
 	_, err := runProfileCmd(t, "add", "x", "--url", "https://h", "--socket", "/s", "--token", "t")
-	if err == nil {
-		t.Fatal("profile add with both --url and --socket = nil error")
-	}
+	assert.NewAborting(t).Error(err, "profile add with both --url and --socket = nil error")
 }
 
 func TestProfileRemoveRefusesTheCurrentOneWithoutForce(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
 	if _, err := runProfileCmd(t, "add", "work", "--socket", "/tmp/work.sock"); err != nil {
@@ -139,12 +125,9 @@ func TestProfileRemoveRefusesTheCurrentOneWithoutForce(t *testing.T) {
 		t.Fatalf("remove --force: %v", err)
 	}
 	set, err := profile.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if _, ok := set.Get("work"); ok {
-		t.Fatal("work survived remove --force")
-	}
+	c.NoError(err, "Load")
+	_, ok := set.Get("work")
+	c.False(ok, "work survived remove --force")
 }
 
 // TestProfileAddRejectsTraversalNames pins Fix 1: `rafiki profile add ..` (or
@@ -157,43 +140,33 @@ func TestProfileRemoveRefusesTheCurrentOneWithoutForce(t *testing.T) {
 func TestProfileAddRejectsTraversalNames(t *testing.T) {
 	for _, name := range []string{"..", "../etc", "a/b", "."} {
 		t.Run("name="+name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			isolateProfiles(t)
 
 			// A canary file inside the config dir stands in for
 			// profiles.toml/current-profile/service.env/etc: if `add` (wrongly)
 			// created a profile and a later `remove --force` (wrongly) deleted the
 			// config dir, this file would vanish with it.
-			if err := os.MkdirAll(paths.ConfigDir(), 0o700); err != nil {
-				t.Fatalf("MkdirAll: %v", err)
-			}
+			c.NoError(os.MkdirAll(paths.ConfigDir(), 0o700), "MkdirAll")
 			canary := filepath.Join(paths.ConfigDir(), "canary")
-			if err := os.WriteFile(canary, []byte("keep me"), 0o600); err != nil {
-				t.Fatalf("write canary: %v", err)
-			}
+			c.NoError(os.WriteFile(canary, []byte("keep me"), 0o600), "write canary")
 
 			_, err := runProfileCmd(t, "add", name, "--socket", "/tmp/x.sock")
-			if err == nil {
-				t.Fatalf("profile add %q = nil error, want a rejection", name)
-			}
+			c.Error(err, "profile add %q = nil error, want a rejection", name)
 
 			// Nothing should have been written: the manifest either doesn't exist
 			// or, if it does (a prior subtest step), does not contain this name.
 			if set, loadErr := profile.Load(); loadErr == nil {
-				if _, ok := set.Get(name); ok {
-					t.Fatalf("profile add %q was rejected but the profile still exists in the manifest", name)
-				}
+				_, ok := set.Get(name)
+				c.False(ok, "profile add %q was rejected but the profile still exists in the manifest", name)
 			}
 
 			// The canary must still be exactly what it was -- proving no
 			// RemoveAll reached the config directory as a side effect of this
 			// (rejected) add.
 			b, err := os.ReadFile(canary)
-			if err != nil {
-				t.Fatalf("canary file gone after rejected add %q: %v", name, err)
-			}
-			if string(b) != "keep me" {
-				t.Fatalf("canary file contents changed: %q", b)
-			}
+			c.NoError(err, "canary file gone after rejected add %q", name)
+			c.Eq("keep me", string(b), "canary file contents changed: %q", b)
 		})
 	}
 }
@@ -204,6 +177,7 @@ func TestProfileAddRejectsTraversalNames(t *testing.T) {
 // profiles.toml at all -- a later `rafiki profile list` must succeed and show
 // only what existed before the failed add.
 func TestProfileAddValidatesBeforeWriting(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
 	if _, err := runProfileCmd(t, "add", "work", "--socket", "/tmp/work.sock"); err != nil {
@@ -211,30 +185,19 @@ func TestProfileAddValidatesBeforeWriting(t *testing.T) {
 	}
 
 	_, err := runProfileCmd(t, "add", "bad", "--url", "http://insecure", "--token", "t")
-	if err == nil {
-		t.Fatal("profile add --url http://insecure = nil error, want a validation failure")
-	}
+	c.Error(err, "profile add --url http://insecure = nil error, want a validation failure")
 
 	// The manifest must still parse and must not contain "bad" -- proving
 	// nothing was written before validation ran.
 	set, err := profile.Load()
-	if err != nil {
-		t.Fatalf("profiles.toml does not parse after a rejected add: %v", err)
-	}
-	if _, ok := set.Get("bad"); ok {
-		t.Fatal("the invalid profile was written to the manifest despite validation failing")
-	}
+	c.NoError(err, "profiles.toml does not parse after a rejected add")
+	_, ok := set.Get("bad")
+	c.False(ok, "the invalid profile was written to the manifest despite validation failing")
 
 	out, err := runProfileCmd(t, "list")
-	if err != nil {
-		t.Fatalf("profile list after a rejected add: %v", err)
-	}
-	if !strings.Contains(out, "work") {
-		t.Fatalf("profile list output missing the pre-existing profile:\n%s", out)
-	}
-	if strings.Contains(out, "bad") {
-		t.Fatalf("profile list output shows the rejected profile:\n%s", out)
-	}
+	c.NoError(err, "profile list after a rejected add")
+	c.StrContains(out, "work", "profile list output missing the pre-existing profile:\n")
+	c.NotStrContains(out, "bad", "profile list output shows the rejected profile:\n")
 }
 
 // TestProfileShowJSONRecord pins the machine-readable record the Python SDK's
@@ -243,31 +206,25 @@ func TestProfileAddValidatesBeforeWriting(t *testing.T) {
 // and exactly one of socket/url — the shape pkg/profile is the only resolver
 // of, and a shape that must not drift without breaking from_profile.
 func TestProfileShowJSONRecord(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 
 	if _, err := runProfileCmd(t, "add", "it", "--socket", "/tmp/show.sock"); err != nil {
 		t.Fatalf("profile add: %v", err)
 	}
 	tokDir := filepath.Join(paths.ConfigDir(), "profiles", "it")
-	if err := os.MkdirAll(tokDir, 0o700); err != nil {
-		t.Fatalf("mkdir token dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tokDir, "token"), []byte("tok-show-1\n"), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
+	c.Require().NoError(os.MkdirAll(tokDir, 0o700), "mkdir token dir")
+	c.Require().NoError(os.WriteFile(filepath.Join(tokDir, "token"), []byte("tok-show-1\n"), 0o600), "write token")
 
 	out, err := runProfileShowViaRoot(t, "-o", "json")
-	if err != nil {
-		t.Fatalf("profile show -o json: %v", err)
-	}
+	c.Require().NoError(err, "profile show -o json")
 	var rec map[string]any
 	if err := json.Unmarshal([]byte(out), &rec); err != nil {
 		t.Fatalf("show -o json is not one JSON record: %v\n%s", err, out)
 	}
 	for _, key := range []string{"name", "socket", "url", "connect_socket", "token", "kind", "model", "preset", "labels"} {
-		if _, ok := rec[key]; !ok {
-			t.Errorf("show -o json record missing %q: %s", key, out)
-		}
+		_, ok := rec[key]
+		c.True(ok, "show -o json record missing %q: %s", key, out)
 	}
 	if rec["name"] != "it" {
 		t.Errorf("name = %v, want it", rec["name"])
@@ -290,16 +247,12 @@ func TestProfileShowJSONRecord(t *testing.T) {
 
 	// -j is the shorthand for the same record, compact on one line under -J.
 	jOut, err := runProfileShowViaRoot(t, "it", "-j")
-	if err != nil {
-		t.Fatalf("profile show it -j: %v", err)
-	}
+	c.Require().NoError(err, "profile show it -j")
 	var rec2 map[string]any
 	if err := json.Unmarshal([]byte(jOut), &rec2); err != nil {
 		t.Fatalf("show -j is not one JSON record: %v\n%s", err, jOut)
 	}
-	if rec2["connect_socket"] != rec["connect_socket"] || rec2["token"] != rec["token"] {
-		t.Errorf("-j record drifted from -o json: %v vs %v", rec2, rec)
-	}
+	c.False(rec2["connect_socket"] != rec["connect_socket"] || rec2["token"] != rec["token"], "-j record drifted from -o json: %v vs %v", rec2, rec)
 }
 
 // runProfileShowViaRoot executes `rafiki profile show <args...>` through the

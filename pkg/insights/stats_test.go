@@ -4,12 +4,13 @@ package insights
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seedTurns creates a conversation on the given path (owner uniquely derived
@@ -26,58 +27,50 @@ func seedTurns(t *testing.T, pool *pgxpool.Pool, drivenBy string, inTok, cacheRe
 }
 
 func TestGlobalStats_CacheHitByPath(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedTurns(t, pool, "client", 100, 900) // proxy: 900/(100+900) = 0.9
 	seedTurns(t, pool, "server", 100, 0)   // direct: 0/(100+0) = 0.0
 
 	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
-	if err != nil {
-		t.Fatalf("global stats: %v", err)
-	}
+	c.Require().NoError(err, "global stats")
 	if got := s.ByPath[string(PathProxy)].CacheHitRatio; !inDelta(got, 0.9, 0.01) {
 		t.Errorf("proxy cache-hit ratio = %v, want ~0.9", got)
 	}
 	if got := s.ByPath[string(PathDirect)].CacheHitRatio; !inDelta(got, 0.0, 0.01) {
 		t.Errorf("direct cache-hit ratio = %v, want ~0.0", got)
 	}
-	if s.Adoption.DistinctOwners < 2 {
-		t.Errorf("distinct owners = %d, want >= 2", s.Adoption.DistinctOwners)
-	}
+	c.GreaterOrEqual(2, s.Adoption.DistinctOwners, "distinct owners")
 	if s.Volume.Conversations != 2 || s.Volume.Turns != 2 {
 		t.Errorf("volume = %d conversations / %d turns, want 2/2", s.Volume.Conversations, s.Volume.Turns)
 	}
 	// Overall cache-hit ratio: 900 / (200 + 900) ≈ 0.818.
-	if got := s.Tokens.CacheHitRatio; !inDelta(got, 900.0/1100.0, 0.01) {
-		t.Errorf("overall cache-hit ratio = %v, want ~0.818", got)
-	}
+	got := s.Tokens.CacheHitRatio
+	c.True(inDelta(got, 900.0/1100.0, 0.01), "overall cache-hit ratio = %v, want ~0.818", got)
 }
 
 func TestGlobalStats_PathFilterAndFacets(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedTurns(t, pool, "client", 100, 900)
 	seedTurns(t, pool, "server", 100, 0)
 
 	proxy, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{Path: PathProxy})
-	if err != nil {
-		t.Fatalf("proxy stats: %v", err)
-	}
-	if proxy.Volume.Conversations != 1 {
-		t.Errorf("proxy conversations = %d, want 1", proxy.Volume.Conversations)
-	}
+	c.Require().NoError(err, "proxy stats")
+	c.Eq(1, proxy.Volume.Conversations, "proxy conversations")
 	if proxy.Failures.Turns != 1 || proxy.Failures.Errors != 0 {
 		t.Errorf("proxy failures = %d/%d, want 1 turns / 0 errors", proxy.Failures.Turns, proxy.Failures.Errors)
 	}
-	if proxy.Latency.P50 <= 0 {
-		t.Errorf("proxy p50 latency = %v, want > 0", proxy.Latency.P50)
-	}
+	c.Greater(0, proxy.Latency.P50, "proxy p50 latency")
 	if len(proxy.Cost) != 1 || proxy.Cost[0].Model != "claude-fable-5" {
 		t.Errorf("proxy cost rows = %+v, want one claude-fable-5 row", proxy.Cost)
 	}
 }
 
 func TestGlobalStats_CacheWasteAndPrefix(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	// A large-prompt turn with zero cache_read is waste; give it a shared prefix
@@ -88,36 +81,23 @@ func TestGlobalStats_CacheWasteAndPrefix(t *testing.T) {
 	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", inTok: 10000, cacheRead: 500, prefixHash: "shared"})
 
 	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
-	if err != nil {
-		t.Fatalf("stats: %v", err)
-	}
-	if s.CacheWaste.WastedTurns != 1 {
-		t.Errorf("wasted turns = %d, want 1", s.CacheWaste.WastedTurns)
-	}
-	if s.CacheWaste.WastedInputTokens != 10000 {
-		t.Errorf("wasted input tokens = %d, want 10000", s.CacheWaste.WastedInputTokens)
-	}
-	if s.Prefix.DistinctPrefixes != 1 {
-		t.Errorf("distinct prefixes = %d, want 1", s.Prefix.DistinctPrefixes)
-	}
-	if s.Prefix.TurnsWithPrefix != 2 {
-		t.Errorf("turns with prefix = %d, want 2", s.Prefix.TurnsWithPrefix)
-	}
-	if s.Prefix.CrossUserPrefixes != 0 {
-		t.Errorf("cross-user prefixes = %d, want 0 (single owner)", s.Prefix.CrossUserPrefixes)
-	}
+	c.Require().NoError(err, "stats")
+	c.Eq(1, s.CacheWaste.WastedTurns, "wasted turns")
+	c.Eq(10000, s.CacheWaste.WastedInputTokens, "wasted input tokens")
+	c.Eq(1, s.Prefix.DistinctPrefixes, "distinct prefixes")
+	c.Eq(2, s.Prefix.TurnsWithPrefix, "turns with prefix")
+	c.Eq(0, s.Prefix.CrossUserPrefixes, "cross-user prefixes")
 }
 
 func TestConversationStats_Scoped(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "erin") // two turns, in 100+120, cacheRead 0+80
 	seedConversation(t, pool, "server", "frank")          // must be excluded
 
 	s, err := New(pool).ConversationStats(ctx, ScopeAll(), convID)
-	if err != nil {
-		t.Fatalf("conversation stats: %v", err)
-	}
+	c.Require().NoError(err, "conversation stats")
 	if s.Volume.Conversations != 1 || s.Volume.Turns != 2 {
 		t.Errorf("volume = %d/%d, want 1 conversation / 2 turns", s.Volume.Conversations, s.Volume.Turns)
 	}
@@ -125,12 +105,8 @@ func TestConversationStats_Scoped(t *testing.T) {
 		t.Errorf("tokens = in %d / cache %d, want 220/80", s.Tokens.InputTokens, s.Tokens.CacheReadTokens)
 	}
 	// Both turns share prefix hash-a → no drift, no cross-user facet.
-	if s.Prefix.DriftedConversations != 0 {
-		t.Errorf("drifted = %d, want 0", s.Prefix.DriftedConversations)
-	}
-	if s.Prefix.CrossUserPrefixes != 0 {
-		t.Errorf("cross-user prefixes = %d, want 0 (not computed for a single conversation)", s.Prefix.CrossUserPrefixes)
-	}
+	c.Eq(0, s.Prefix.DriftedConversations, "drifted")
+	c.Eq(0, s.Prefix.CrossUserPrefixes, "cross-user prefixes")
 }
 
 func inDelta(got, want, delta float64) bool {
@@ -142,6 +118,7 @@ func inDelta(got, want, delta float64) bool {
 }
 
 func TestGlobalStats_CostFromPricer(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := insertConversation(t, pool, "client", "grace")
@@ -163,12 +140,8 @@ func TestGlobalStats_CostFromPricer(t *testing.T) {
 	ins := New(pool).WithPricer(pricer)
 
 	s, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{})
-	if err != nil {
-		t.Fatalf("stats: %v", err)
-	}
-	if len(s.Cost) != 1 {
-		t.Fatalf("cost rows = %d, want 1", len(s.Cost))
-	}
+	c.NoError(err, "stats")
+	c.Len(s.Cost, 1, "cost rows = %d, want 1", len(s.Cost))
 	// 1000*2e-6 + 200*1e-5 + 5000*2e-7 + 300*2.5e-6 = 0.002 + 0.002 + 0.001 + 0.00075 = 0.00575
 	want := 1000*0.000002 + 200*0.00001 + 5000*0.0000002 + 300*0.0000025
 	if !inDelta(s.Cost[0].CostUSD, want, 1e-9) {
@@ -189,9 +162,7 @@ func TestGlobalStats_UnpricedWithoutPricer(t *testing.T) {
 		"unknown-pricer": New(pool).WithPricer(func(string) (routing.ModelPricing, bool) { return routing.ModelPricing{}, false }),
 	} {
 		s, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{})
-		if err != nil {
-			t.Fatalf("%s: stats: %v", name, err)
-		}
+		assert.NewAborting(t).NoError(err, "%s: stats", name)
 		if len(s.Cost) != 1 || s.Cost[0].CostUSD != 0 {
 			t.Errorf("%s: cost_usd = %v, want 0 (unpriced)", name, s.Cost)
 		}
@@ -213,18 +184,15 @@ func TestStats_InvalidPathErrors(t *testing.T) {
 	if _, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{Path: PathProxy}); err != nil {
 		t.Errorf("GlobalStats(proxy) = %v, want nil", err)
 	}
-	if _, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: PathAny}); err != nil {
-		t.Errorf("Search(any) = %v, want nil", err)
-	}
+	_, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: PathAny})
+	assert.NewCollecting(t).NoError(err, "Search(any)")
 }
 
 func TestConversationStats_NotFound(t *testing.T) {
 	ctx := context.Background()
 	pool := newTestPool(t)
 	_, err := New(pool).ConversationStats(ctx, ScopeAll(), "00000000-0000-0000-0000-000000000000")
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("ConversationStats on a missing conversation err = %v, want ErrNotFound", err)
-	}
+	assert.NewCollecting(t).ErrorIs(err, ErrNotFound, "ConversationStats on a missing conversation err")
 }
 
 func TestConversationStats_MalformedIDIsNotFound(t *testing.T) {
@@ -232,13 +200,12 @@ func TestConversationStats_MalformedIDIsNotFound(t *testing.T) {
 	pool := newTestPool(t)
 	for _, id := range []string{"c_01M3AC3TYYJAW3RX40DQ9GNYYN", "not-a-uuid"} {
 		_, err := New(pool).ConversationStats(ctx, ScopeAll(), id)
-		if !errors.Is(err, ErrNotFound) {
-			t.Errorf("ConversationStats(%q) err = %v, want ErrNotFound", id, err)
-		}
+		assert.NewCollecting(t).ErrorIs(err, ErrNotFound, "ConversationStats(%q) err = %v, want ErrNotFound", id, err)
 	}
 }
 
 func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	// A NULL-owner conversation whose turn has no recorded upstream, next to a
@@ -249,13 +216,9 @@ func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
 	insertTurn(t, pool, c2, seedTurn{ordinal: 0, model: "m", upstream: "openrouter", inTok: 100})
 
 	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
-	if err != nil {
-		t.Fatalf("stats: %v", err)
-	}
+	c.Require().NoError(err, "stats")
 	// The NULL owner must count as one distinct owner, matching its '' per-owner row.
-	if s.Adoption.DistinctOwners != 2 {
-		t.Errorf("distinct owners = %d, want 2 (NULL owner counts)", s.Adoption.DistinctOwners)
-	}
+	c.Eq(2, s.Adoption.DistinctOwners, "distinct owners")
 	var sawEmpty bool
 	for _, oc := range s.Adoption.PerOwner {
 		if oc.Owner == "" {
@@ -279,6 +242,7 @@ func TestGlobalStats_NullOwnerAndNullUpstream(t *testing.T) {
 // it is a cache-isolation signal where a name collision must never read as one
 // principal. Both facets group by owner_user_id so they agree.
 func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 
@@ -297,21 +261,15 @@ func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
 	insertTurn(t, pool, second, seedTurn{ordinal: 0, model: "m", inTok: 100})
 
 	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{})
-	if err != nil {
-		t.Fatalf("stats: %v", err)
-	}
-	if s.Adoption.DistinctOwners != 2 {
-		t.Errorf("distinct owners = %d, want 2 (a recreated username is a second principal, not the same one)", s.Adoption.DistinctOwners)
-	}
+	c.Require().NoError(err, "stats")
+	c.Eq(2, s.Adoption.DistinctOwners, "distinct owners")
 	var zoeRows int
 	for _, oc := range s.Adoption.PerOwner {
 		if oc.Owner == "zoe" {
 			zoeRows++
 		}
 	}
-	if zoeRows != 2 {
-		t.Errorf("per-owner rows for 'zoe' = %d, want 2; rows = %+v", zoeRows, s.Adoption.PerOwner)
-	}
+	c.Eq(2, zoeRows, "per-owner rows for 'zoe' = %d, want 2; rows = %+v", zoeRows, s.Adoption.PerOwner)
 }
 
 // TestGlobalStatsScopeOwnerDegradesAdoptionToOneRow pins that GlobalStats
@@ -319,6 +277,7 @@ func TestGlobalStats_RecreatedUsernameIsTwoPrincipals(t *testing.T) {
 // cross-tenant read this task closes was GlobalStats counting every owner
 // unconditionally.
 func TestGlobalStatsScopeOwnerDegradesAdoptionToOneRow(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	bobID := ensureUser(t, pool, "bob")
@@ -328,18 +287,10 @@ func TestGlobalStatsScopeOwnerDegradesAdoptionToOneRow(t *testing.T) {
 	insertTurn(t, pool, cCarol, seedTurn{ordinal: 0, model: "m", inTok: 100})
 
 	s, err := New(pool).GlobalStats(ctx, ScopeOwner(bobID), StatsFilter{})
-	if err != nil {
-		t.Fatalf("global stats scoped to bob: %v", err)
-	}
-	if s.Adoption.DistinctOwners != 1 {
-		t.Errorf("distinct owners = %d, want 1 (scope hides carol)", s.Adoption.DistinctOwners)
-	}
-	if len(s.Adoption.PerOwner) != 1 {
-		t.Fatalf("per-owner rows = %d, want 1", len(s.Adoption.PerOwner))
-	}
-	if s.Adoption.PerOwner[0].Owner != "bob" {
-		t.Errorf("per-owner owner = %q, want bob", s.Adoption.PerOwner[0].Owner)
-	}
+	c.Require().NoError(err, "global stats scoped to bob")
+	c.Eq(1, s.Adoption.DistinctOwners, "distinct owners")
+	c.Require().Len(s.Adoption.PerOwner, 1, "per-owner rows = %d, want 1", len(s.Adoption.PerOwner))
+	c.Eq("bob", s.Adoption.PerOwner[0].Owner, "per-owner owner")
 }
 
 // TestConversationStatsScopeMissReturnsNotFound pins that a conversation
@@ -353,7 +304,5 @@ func TestConversationStatsScopeMissReturnsNotFound(t *testing.T) {
 	carolConvID := seedConversation(t, pool, "client", "carol")
 
 	_, err := New(pool).ConversationStats(ctx, ScopeOwner(bobID), carolConvID)
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("ConversationStats on another owner's conversation err = %v, want ErrNotFound (a scope miss reads as not-found)", err)
-	}
+	assert.NewCollecting(t).ErrorIs(err, ErrNotFound, "ConversationStats on another owner's conversation err")
 }

@@ -5,6 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // This file is the single source of truth for the rafiki CLI's command aliases
@@ -32,9 +34,7 @@ func findCmd(t *testing.T, path ...string) *cobra.Command {
 		return root
 	}
 	cmd, _, err := root.Find(path)
-	if err != nil {
-		t.Fatalf("find %v: %v", path, err)
-	}
+	assert.NewAborting(t).NoError(err, "find %v", path)
 	return cmd
 }
 
@@ -164,9 +164,7 @@ func TestShortFlags(t *testing.T) {
 			t.Errorf("command %v: flag --%s not found", tc.path, tc.flag)
 			continue
 		}
-		if f.Shorthand != tc.short {
-			t.Errorf("command %v: --%s shorthand = %q, want %q", tc.path, tc.flag, f.Shorthand, tc.short)
-		}
+		assert.NewCollecting(t).Eq(tc.short, f.Shorthand, "command %v: --%s shorthand = %q, want", tc.path, tc.flag, f.Shorthand)
 	}
 }
 

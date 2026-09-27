@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testStore gives each test its own scratch database, migrated fresh —
@@ -21,19 +23,16 @@ import (
 // DELETE-FROM pattern, so this never touches a developer's real database.
 func testStore(t *testing.T) (users.Store, *pgxpool.Pool) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
+	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_users_%d", time.Now().UnixNano())
@@ -45,65 +44,43 @@ func testStore(t *testing.T) (users.Store, *pgxpool.Pool) {
 	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
+	c.NoError(err, "parse dsn")
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect scratch db: %v", err)
-	}
+	c.NoError(err, "connect scratch db")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate")
 	return NewPostgresStore(pool), pool
 }
 
 func TestCreateReturnsPlaintextOnceAndAuthenticates(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, pool := testStore(t)
 
 	u, token, err := s.Create(ctx, "brent", false)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if u.ID == "" || u.Username != "brent" {
-		t.Fatalf("create returned %+v", u)
-	}
-	if len(token) < 20 || token[:4] != "rfk_" {
-		t.Fatalf("token %q does not look like rfk_<base64url>", token)
-	}
+	c.NoError(err, "create")
+	c.False(u.ID == "" || u.Username != "brent", "create returned %+v", u)
+	c.False(len(token) < 20 || token[:4] != "rfk_", "token %q does not look like rfk_<base64url>", token)
 
 	// The plaintext is never stored.
 	var stored string
-	if err := pool.QueryRow(ctx,
-		`SELECT token_sha256 FROM conversations.users WHERE id=$1`, u.ID).Scan(&stored); err != nil {
-		t.Fatalf("read row: %v", err)
-	}
-	if stored == token {
-		t.Fatal("plaintext token was stored in token_sha256")
-	}
-	if stored != users.HashToken(token) {
-		t.Fatalf("stored digest %q != HashToken(token)", stored)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT token_sha256 FROM conversations.users WHERE id=$1`, u.ID).Scan(&stored), "read row")
+	c.NotEq(token, stored, "plaintext token was stored in token_sha256")
+	c.Eq(users.HashToken(token), stored, "stored digest")
 
 	id, err := s.Authenticate(ctx, token)
-	if err != nil {
-		t.Fatalf("authenticate: %v", err)
-	}
-	if id.UserID != u.ID || id.Username != "brent" {
-		t.Fatalf("identity = %+v, want %s/brent", id, u.ID)
-	}
+	c.NoError(err, "authenticate")
+	c.False(id.UserID != u.ID || id.Username != "brent", "identity = %+v, want %s/brent", id, u.ID)
 }
 
 func TestAuthenticateUnknownTokenIsErrNotFound(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, err := s.Authenticate(ctx, "rfk_nope"); !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	_, err := s.Authenticate(ctx, "rfk_nope")
+	assert.NewAborting(t).ErrorIs(err, users.ErrNotFound, "err")
 }
 
 func TestDuplicateActiveUsernameIsRejected(t *testing.T) {
@@ -112,32 +89,24 @@ func TestDuplicateActiveUsernameIsRejected(t *testing.T) {
 	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	if _, _, err := s.Create(ctx, "brent", false); !errors.Is(err, users.ErrUsernameTaken) {
-		t.Fatalf("err = %v, want ErrUsernameTaken", err)
-	}
+	_, _, err := s.Create(ctx, "brent", false)
+	assert.NewAborting(t).ErrorIs(err, users.ErrUsernameTaken, "err")
 }
 
 func TestDeleteTombstonesRevokesAndFreesTheName(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, pool := testStore(t)
 
 	u, token, err := s.Create(ctx, "brent", false)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := s.Delete(ctx, "brent"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	c.NoError(err, "create")
+	c.NoError(s.Delete(ctx, "brent"), "delete")
 
 	// The row survives — history keeps resolving to it.
 	var deletedAt *string
-	if err := pool.QueryRow(ctx,
-		`SELECT deleted_at::text FROM conversations.users WHERE id=$1`, u.ID).Scan(&deletedAt); err != nil {
-		t.Fatalf("row was hard-deleted: %v", err)
-	}
-	if deletedAt == nil {
-		t.Fatal("deleted_at is still NULL after Delete")
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT deleted_at::text FROM conversations.users WHERE id=$1`, u.ID).Scan(&deletedAt), "row was hard-deleted")
+	c.NotNil(deletedAt, "deleted_at is still NULL after Delete")
 
 	// The token stops working immediately.
 	if _, err := s.Authenticate(ctx, token); !errors.Is(err, users.ErrNotFound) {
@@ -151,32 +120,24 @@ func TestDeleteTombstonesRevokesAndFreesTheName(t *testing.T) {
 }
 
 func TestCountActiveIgnoresTombstones(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
 	n, err := s.CountActive(ctx)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("CountActive on empty table = %d, want 0", n)
-	}
+	c.NoError(err, "count")
+	c.Eq(0, n, "CountActive on empty table")
 	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.Delete(ctx, "brent"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	c.NoError(s.Delete(ctx, "brent"), "delete")
 	n, err = s.CountActive(ctx)
-	if err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("CountActive after tombstoning the only user = %d, want 0 (bootstrap mode)", n)
-	}
+	c.NoError(err, "count")
+	c.Eq(0, n, "CountActive after tombstoning the only user")
 }
 
 func TestListExcludesTombstonesUnlessAsked(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 	if _, _, err := s.Create(ctx, "alice", false); err != nil {
@@ -185,40 +146,27 @@ func TestListExcludesTombstonesUnlessAsked(t *testing.T) {
 	if _, _, err := s.Create(ctx, "bob", false); err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
-	if err := s.Delete(ctx, "bob"); err != nil {
-		t.Fatalf("delete bob: %v", err)
-	}
+	c.NoError(s.Delete(ctx, "bob"), "delete bob")
 
 	active, err := s.List(ctx, false, 100)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(active) != 1 || active[0].Username != "alice" {
-		t.Fatalf("active list = %+v, want [alice]", active)
-	}
+	c.NoError(err, "list")
+	c.False(len(active) != 1 || active[0].Username != "alice", "active list = %+v, want [alice]", active)
 
 	all, err := s.List(ctx, true, 100)
-	if err != nil {
-		t.Fatalf("list all: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("full list = %d rows, want 2", len(all))
-	}
+	c.NoError(err, "list all")
+	c.Len(all, 2, "full list = %d rows, want 2", len(all))
 }
 
 // Tokens must never collide, and Create must not be the thing that notices.
 func TestTokensAreDistinctAcrossUsers(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 	seen := map[string]bool{}
 	for _, name := range []string{"a", "b", "c", "d", "e"} {
 		_, tok, err := s.Create(ctx, name, false)
-		if err != nil {
-			t.Fatalf("create %s: %v", name, err)
-		}
-		if seen[tok] {
-			t.Fatalf("duplicate token minted for %s", name)
-		}
+		c.NoError(err, "create %s", name)
+		c.False(seen[tok], "duplicate token minted for %s", name)
 		seen[tok] = true
 	}
 }
@@ -230,22 +178,20 @@ func TestTokensAreDistinctAcrossUsers(t *testing.T) {
 // modelled on (executorsdb.pgStore.authenticateByHash) gets this wrong today,
 // returning ErrNotFound for every error including a closed pool.
 func TestAuthenticateOnClosedPoolIsNotErrNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, pool := testStore(t)
 	pool.Close()
 
 	_, err := s.Authenticate(ctx, "rfk_whatever")
-	if err == nil {
-		t.Fatal("expected an error against a closed pool, got nil")
-	}
-	if errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("closed-pool error must not be ErrNotFound (that means the credential is invalid, not that the check failed): %v", err)
-	}
+	c.Error(err, "expected an error against a closed pool, got nil")
+	c.False(errors.Is(err, users.ErrNotFound), "closed-pool error must not be ErrNotFound (that means the credential is invalid, not that the check failed): %v", err)
 }
 
 // List's limit parameter must actually reach the query, not just be accepted
 // and ignored.
 func TestListRespectsLimit(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 	for _, name := range []string{"a", "b", "c"} {
@@ -255,135 +201,105 @@ func TestListRespectsLimit(t *testing.T) {
 	}
 
 	limited, err := s.List(ctx, false, 2)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(limited) != 2 {
-		t.Fatalf("List(limit=2) over 3 active users returned %d rows, want 2", len(limited))
-	}
+	c.NoError(err, "list")
+	c.Len(limited, 2, "List(limit=2) over 3 active users returned %d rows, want 2", len(limited))
 }
 
 func TestDeleteUnknownUsernameIsErrNotFound(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if err := s.Delete(ctx, "nobody"); !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	assert.NewAborting(t).ErrorIs(s.Delete(ctx, "nobody"), users.ErrNotFound, "err")
 }
 
 func TestDeleteAlreadyTombstonedUsernameIsErrNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.Delete(ctx, "brent"); err != nil {
-		t.Fatalf("first delete: %v", err)
-	}
-	if err := s.Delete(ctx, "brent"); !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("second delete on an already-tombstoned user: err = %v, want ErrNotFound", err)
-	}
+	c.NoError(s.Delete(ctx, "brent"), "first delete")
+	c.ErrorIs(s.Delete(ctx, "brent"), users.ErrNotFound, "second delete on an already-tombstoned user: err")
 }
 
 // LookupUsername resolves ACTIVE rows only. A username is unique only among
 // active users, so a lookup landing on a tombstone would attribute work to a
 // deleted account — the whole reason this method exists beside List.
 func TestLookupUsernameResolvesTheActiveRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
 	u, _, err := s.Create(ctx, "brent", false)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	c.NoError(err, "create")
 	got, err := s.LookupUsername(ctx, "brent")
-	if err != nil {
-		t.Fatalf("lookup: %v", err)
-	}
-	if got != u.ID {
-		t.Fatalf("lookup = %q, want the active row's id %q", got, u.ID)
-	}
+	c.NoError(err, "lookup")
+	c.Eq(u.ID, got, "lookup")
 }
 
 func TestLookupUsernameMissesATombstone(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.Delete(ctx, "brent"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	if _, err := s.LookupUsername(ctx, "brent"); !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("lookup of a tombstoned name: err = %v, want ErrNotFound (a deleted account must never be attributed)", err)
-	}
+	c.NoError(s.Delete(ctx, "brent"), "delete")
+	_, err := s.LookupUsername(ctx, "brent")
+	c.ErrorIs(err, users.ErrNotFound, "lookup of a tombstoned name: err")
 }
 
 // One name, one active row plus any number of tombstones: the lookup must
 // return the ACTIVE row, never the most recent row overall — created_at DESC
 // over the whole table would hand back the tombstone here.
 func TestLookupUsernameWithActiveAndTombstonesReturnsTheActiveRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
 	if _, _, err := s.Create(ctx, "brent", false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
-	if err := s.Delete(ctx, "brent"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	c.NoError(s.Delete(ctx, "brent"), "delete")
 	again, _, err := s.Create(ctx, "brent", false)
-	if err != nil {
-		t.Fatalf("recreate: %v", err)
-	}
+	c.NoError(err, "recreate")
 
 	got, err := s.LookupUsername(ctx, "brent")
-	if err != nil {
-		t.Fatalf("lookup: %v", err)
-	}
-	if got != again.ID {
-		t.Fatalf("lookup = %q, want the ACTIVE row's id %q (a tombstone under the same name must not win)", got, again.ID)
-	}
+	c.NoError(err, "lookup")
+	c.Eq(again.ID, got, "lookup")
 }
 
 func TestLookupUsernameUnknownIsErrNotFound(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testStore(t)
-	if _, err := s.LookupUsername(ctx, "nobody"); !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	_, err := s.LookupUsername(ctx, "nobody")
+	assert.NewAborting(t).ErrorIs(err, users.ErrNotFound, "err")
 }
 
 // Same rule as Authenticate: a store that cannot reach the database has not
 // learned the name is absent.
 func TestLookupUsernameOnClosedPoolIsNotErrNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, pool := testStore(t)
 	pool.Close()
 
 	_, err := s.LookupUsername(ctx, "brent")
-	if err == nil {
-		t.Fatal("expected an error against a closed pool, got nil")
-	}
-	if errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("closed-pool error must not be ErrNotFound (that means no such active user, not that the check failed): %v", err)
-	}
+	c.Error(err, "expected an error against a closed pool, got nil")
+	c.False(errors.Is(err, users.ErrNotFound), "closed-pool error must not be ErrNotFound (that means no such active user, not that the check failed): %v", err)
 }
 
 // The guard lives in the store so every caller gets it, not just the CLI.
 func TestCreateNormalizesAndRejectsBadUsernames(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
 	// Padding is trimmed, not stored — otherwise "brent" and "brent " would be
 	// two different people and the partial unique index would allow both.
 	u, _, err := s.Create(ctx, "  brent\t", false)
-	if err != nil {
-		t.Fatalf("create with padding: %v", err)
-	}
-	if u.Username != "brent" {
-		t.Fatalf("username = %q, want %q (padding must be trimmed before insert)", u.Username, "brent")
-	}
+	c.NoError(err, "create with padding")
+	c.Eq("brent", u.Username, "username")
 	if _, _, err := s.Create(ctx, "brent  ", false); !errors.Is(err, users.ErrUsernameTaken) {
 		t.Fatalf("a padded duplicate was accepted (err = %v); trimming must happen BEFORE the uniqueness check", err)
 	}
@@ -399,39 +315,24 @@ func TestCreateNormalizesAndRejectsBadUsernames(t *testing.T) {
 // the row, and read back by Authenticate — the ONLY path that ever populates
 // Identity.IsAdmin. A plain user's identity must carry the bit false.
 func TestCreateAdminSetsIsAdmin(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
 	u, token, err := s.Create(ctx, "root", true)
-	if err != nil {
-		t.Fatalf("create admin: %v", err)
-	}
-	if !u.IsAdmin {
-		t.Fatalf("returned User = %+v, want IsAdmin true", u)
-	}
+	c.NoError(err, "create admin")
+	c.True(u.IsAdmin, "returned User = %+v, want IsAdmin true", u)
 
 	id, err := s.Authenticate(ctx, token)
-	if err != nil {
-		t.Fatalf("authenticate: %v", err)
-	}
-	if id.UserID != u.ID || !id.IsAdmin {
-		t.Fatalf("identity = %+v, want IsAdmin true for %s", id, u.ID)
-	}
+	c.NoError(err, "authenticate")
+	c.False(id.UserID != u.ID || !id.IsAdmin, "identity = %+v, want IsAdmin true for %s", id, u.ID)
 
 	// The ordinary user created in the same database stays non-admin, so the
 	// assertion above cannot be passing on a default-true column.
 	plain, plainToken, err := s.Create(ctx, "peon", false)
-	if err != nil {
-		t.Fatalf("create plain user: %v", err)
-	}
-	if plain.IsAdmin {
-		t.Fatalf("returned User = %+v, want IsAdmin false", plain)
-	}
+	c.NoError(err, "create plain user")
+	c.False(plain.IsAdmin, "returned User = %+v, want IsAdmin false", plain)
 	plainID, err := s.Authenticate(ctx, plainToken)
-	if err != nil {
-		t.Fatalf("authenticate plain: %v", err)
-	}
-	if plainID.IsAdmin {
-		t.Fatalf("plain identity = %+v, want IsAdmin false", plainID)
-	}
+	c.NoError(err, "authenticate plain")
+	c.False(plainID.IsAdmin, "plain identity = %+v, want IsAdmin false", plainID)
 }

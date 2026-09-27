@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // capturedLogs redirects the default slog to a buffer for the duration of the
@@ -60,6 +61,7 @@ func capturedLogs(t *testing.T) *syncBuffer {
 // that RepairOrphans ran and found the history already consistent, rather than
 // quietly passing on whatever number turned up.
 func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	toolRunning := make(chan struct{})
 	var once sync.Once
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
@@ -89,25 +91,16 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 
 	// (1) The abort arm ran, and the plain-error arm did not.
 	logText := logs.String()
-	if !strings.Contains(logText, "agent: turn cancelled") {
-		t.Errorf("no %q log line; runTurn did not take its abort branch.\nlogs:\n%s",
-			"agent: turn cancelled", logText)
-	}
-	if strings.Contains(logText, "agent: turn failed") {
-		t.Errorf("runTurn took the plain-error branch instead of the abort branch.\nlogs:\n%s", logText)
-	}
+	c.StrContains(logText, "agent: turn cancelled", "no")
+	c.NotStrContains(logText, "agent: turn failed", "runTurn took the plain-error branch instead of the abort branch.\nlogs:\n")
 	turn1 := frameTypes(t, out.String())
 	for _, ty := range turn1 {
-		if ty == "agent_error" {
-			t.Fatalf("an aborted turn emitted agent_error; that frame belongs to the plain-error branch only: %v", turn1)
-		}
+		c.Require().NotEq("agent_error", ty, "an aborted turn emitted agent_error; that frame belongs to the plain-error branch only: %v", turn1)
 	}
 
 	// (2) RepairOrphans ran inside the abort arm and reported its count. See
 	// this test's doc comment for why 0 is the right number store-less.
-	if !strings.Contains(logText, "orphans_repaired=0") {
-		t.Errorf("abort branch did not report an orphan-repair count of 0; RepairOrphans may not have run.\nlogs:\n%s", logText)
-	}
+	c.StrContains(logText, "orphans_repaired=0", "abort branch did not report an orphan-repair count of 0; RepairOrphans may not have run.\nlogs:\n")
 
 	// (3) The aborted iteration issued no API call, so the second scripted turn
 	// was not consumed. Exactly one request for turn 1: the iteration that
@@ -130,18 +123,14 @@ func TestEngineAbortRunsTheAbortBranch(t *testing.T) {
 
 	turn2 := frameTypes(t, out.String()[before:])
 	for _, ty := range turn2 {
-		if ty == "agent_error" {
-			t.Fatalf("the prompt after the abort failed: %v\nlogs:\n%s", turn2, logs.String())
-		}
+		c.Require().NotEq("agent_error", ty, "the prompt after the abort failed: %v\nlogs:\n%s", turn2, logs.String())
 	}
 	assertFrameTypes(t, out.String()[before:], []string{
 		"message_start", "message_end", // user echo
 		"agent_start",
 		"message_start", "message_update", "message_end", // the scripted end_turn the abort preserved
 		"agent_end", "agent_settled"})
-	if got := sender.callCount(); got != 2 {
-		t.Fatalf("sender served %d requests in total, want 2 (turn 1's tool_use + turn 2's reply)", got)
-	}
+	c.Require().Eq(2, sender.callCount(), "sender served")
 	// The invariant RepairOrphans exists to protect: the request carries a
 	// tool_result for tu_1, so the real API would accept it.
 	assertToolResultFollowsToolUse(t, sender.lastParams(t).Messages, "tu_1")

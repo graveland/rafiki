@@ -5,20 +5,18 @@ package insights
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestScopeAllCond pins the all-owners scope: it renders a bare always-true
 // condition and must append no parameter.
 func TestScopeAllCond(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &argList{}
-	if got := ScopeAll().cond(a, "c.owner_user_id", "c.id", "c.external_ref"); got != "1=1" {
-		t.Fatalf("ScopeAll().cond() = %q, want %q", got, "1=1")
-	}
-	if len(a.args) != 0 {
-		t.Fatalf("ScopeAll().cond() appended %d args, want 0", len(a.args))
-	}
+	c.Eq("1=1", ScopeAll().cond(a, "c.owner_user_id", "c.id", "c.external_ref"), "ScopeAll().cond()")
+	c.Empty(a.args, "ScopeAll().cond() appended %d args, want 0", len(a.args))
 }
 
 // TestScopeOwnerCond pins the per-owner scope: the owner id rides a
@@ -26,9 +24,7 @@ func TestScopeAllCond(t *testing.T) {
 func TestScopeOwnerCond(t *testing.T) {
 	a := &argList{}
 	got := ScopeOwner("abc").cond(a, "c.owner_user_id", "c.id", "c.external_ref")
-	if got != "c.owner_user_id = $1::uuid" {
-		t.Fatalf("ScopeOwner().cond() = %q, want %q", got, "c.owner_user_id = $1::uuid")
-	}
+	assert.NewAborting(t).Eq("c.owner_user_id = $1::uuid", got, "ScopeOwner().cond()")
 	if len(a.args) != 1 || a.args[0] != "abc" {
 		t.Fatalf("cond() args = %v, want [abc]", a.args)
 	}
@@ -38,45 +34,34 @@ func TestScopeOwnerCond(t *testing.T) {
 // Scope{} that reached a query builder must render an always-false
 // condition, never behave like "no filter".
 func TestScopeZeroValueCond(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &argList{}
-	if got := (Scope{}).cond(a, "c.owner_user_id", "c.id", "c.external_ref"); got != "1=0" {
-		t.Fatalf("(Scope{}).cond() = %q, want %q", got, "1=0")
-	}
-	if len(a.args) != 0 {
-		t.Fatalf("Scope{}.cond() appended %d args, want 0", len(a.args))
-	}
+	c.Eq("1=0", (Scope{}).cond(a, "c.owner_user_id", "c.id", "c.external_ref"), "(Scope{}).cond()")
+	c.Empty(a.args, "Scope{}.cond() appended %d args, want 0", len(a.args))
 }
 
 // TestScopeOwnerEmptyIDIsInvalid pins that an empty owner id is not an
 // owner: ScopeOwner("") is invalid and fails closed.
 func TestScopeOwnerEmptyIDIsInvalid(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := ScopeOwner("")
-	if s.valid() {
-		t.Fatal("ScopeOwner(\"\").valid() = true, want false")
-	}
+	c.False(s.valid(), "ScopeOwner(\"\").valid() = true, want false")
 	a := &argList{}
-	if got := s.cond(a, "c.owner_user_id", "c.id", "c.external_ref"); got != "1=0" {
-		t.Fatalf("ScopeOwner(\"\").cond() = %q, want %q", got, "1=0")
-	}
-	if len(a.args) != 0 {
-		t.Fatalf("ScopeOwner(\"\").cond() appended %d args, want 0", len(a.args))
-	}
+	got := s.cond(a, "c.owner_user_id", "c.id", "c.external_ref")
+	c.Eq("1=0", got, "ScopeOwner(\"\").cond() = %q, want", got)
+	c.Empty(a.args, "ScopeOwner(\"\").cond() appended %d args, want 0", len(a.args))
 }
 
 // TestScopeAllIsValid pins that the all-owners constructor builds a valid
 // scope.
 func TestScopeAllIsValid(t *testing.T) {
-	if !ScopeAll().valid() {
-		t.Fatal("ScopeAll().valid() = false, want true")
-	}
+	assert.NewAborting(t).True(ScopeAll().valid(), "ScopeAll().valid() = false, want true")
 }
 
 // TestScopeOwnerIsValid pins that the per-owner constructor with a
 // non-empty id builds a valid scope.
 func TestScopeOwnerIsValid(t *testing.T) {
-	if !ScopeOwner("abc").valid() {
-		t.Fatal("ScopeOwner(\"abc\").valid() = false, want true")
-	}
+	assert.NewAborting(t).True(ScopeOwner("abc").valid(), "ScopeOwner(\"abc\").valid() = false, want true")
 }
 
 // TestScopeSubtreeCond pins the subtree scope's three correlation arms in one
@@ -84,6 +69,7 @@ func TestScopeOwnerIsValid(t *testing.T) {
 // same clause SubtreeCost rolls spend up with, over the columns the caller
 // names.
 func TestScopeSubtreeCond(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &argList{}
 	sel := SubtreeSelector{
 		// A well-formed UUID: the conversation arm routes through uuidsOnly,
@@ -98,13 +84,9 @@ func TestScopeSubtreeCond(t *testing.T) {
 		"c.external_ref = ANY($2::text[])",
 		"starts_with(c.external_ref, p)",
 	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("cond() = %q, want it to contain %q", got, want)
-		}
+		c.StrContains(got, want, "cond()")
 	}
-	if len(a.args) != 3 {
-		t.Fatalf("cond() appended %d args, want 3", len(a.args))
-	}
+	c.Len(a.args, 3, "cond() appended %d args, want 3", len(a.args))
 	for i, want := range [][]string{{"00000000-0000-0000-0000-000000000001"}, {"c_01"}, {"c_01:"}} {
 		gotArg, ok := a.args[i].([]string)
 		if !ok || len(gotArg) != len(want) || gotArg[0] != want[0] {
@@ -117,25 +99,18 @@ func TestScopeSubtreeCond(t *testing.T) {
 // names zero conversations and must render an always-false condition, never
 // "no filter" — the same rule the zero Scope obeys.
 func TestScopeSubtreeEmptyDenies(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := ScopeSubtree(SubtreeSelector{})
-	if s.valid() {
-		t.Fatal("empty subtree scope .valid() = true, want false")
-	}
+	c.False(s.valid(), "empty subtree scope .valid() = true, want false")
 	a := &argList{}
-	if got := s.cond(a, "c.owner_user_id", "c.id", "c.external_ref"); got != "1=0" {
-		t.Fatalf("empty subtree cond() = %q, want %q", got, "1=0")
-	}
-	if len(a.args) != 0 {
-		t.Fatalf("empty subtree cond() appended %d args, want 0", len(a.args))
-	}
+	c.Eq("1=0", s.cond(a, "c.owner_user_id", "c.id", "c.external_ref"), "empty subtree cond()")
+	c.Empty(a.args, "empty subtree cond() appended %d args, want 0", len(a.args))
 }
 
 // TestScopeSubtreeIsValid pins that a non-empty selector builds a valid
 // scope.
 func TestScopeSubtreeIsValid(t *testing.T) {
-	if !ScopeSubtree(SubtreeSelector{ExternalRefs: []string{"c_01"}}).valid() {
-		t.Fatal("ScopeSubtree(non-empty).valid() = false, want true")
-	}
+	assert.NewAborting(t).True(ScopeSubtree(SubtreeSelector{ExternalRefs: []string{"c_01"}}).valid(), "ScopeSubtree(non-empty).valid() = false, want true")
 }
 
 // TestScopeSubtreeQueriesAdmitOnlySelectorNames is the database proof of the
@@ -145,6 +120,7 @@ func TestScopeSubtreeIsValid(t *testing.T) {
 // those three — an owner-scoped or all-owners caller's other rows never
 // appear, and an empty selector denies everything.
 func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	ins := New(pool)
@@ -174,21 +150,15 @@ func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
 	scope := ScopeSubtree(sel)
 
 	rows, err := ins.Search(ctx, scope, SearchFilter{Limit: 100})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
+	ck.Require().NoError(err, "search")
 	got := map[string]bool{}
 	for _, r := range rows {
 		got[r.ID] = true
 	}
 	for _, want := range []string{inSubtree, byRef, byPrefix} {
-		if !got[want] {
-			t.Errorf("search missing in-subtree conversation %s (got %v)", want, got)
-		}
+		ck.False(!got[want], "search missing in-subtree conversation %s (got %v)", want, got)
 	}
-	if got[outside] {
-		t.Error("search returned a conversation outside the subtree")
-	}
+	ck.False(got[outside], "search returned a conversation outside the subtree")
 
 	for _, conv := range []struct {
 		name string
@@ -216,21 +186,15 @@ func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
 	// two turns each) give an exact total: 3 in-subtree conversations, never
 	// the fourth.
 	res, err := ins.Query(ctx, scope, "models", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
+	ck.Require().NoError(err, "query")
 	convs := int64(0)
 	for _, row := range res.Rows {
-		if len(row) != 3 {
-			t.Fatalf("models row %v, want [model, conversations, turns]", row)
-		}
+		ck.Require().Len(row, 3, "models row")
 		if c, ok := row[1].(IntEntry); ok {
 			convs += int64(c)
 		}
 	}
-	if convs != 3 {
-		t.Errorf("models conversations = %d, want 3 (the subtree, never the outside row)", convs)
-	}
+	ck.Eq(3, convs, "models conversations")
 
 	// ConversationStats probes ONE conversation with the alias-less spelling
 	// of the same boundary (the bare-table column names), so the subtree arms
@@ -245,19 +209,13 @@ func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
 	} {
 		_, err := ins.ConversationStats(ctx, scope, conv.id)
 		found := !errors.Is(err, ErrNotFound)
-		if found != conv.want {
-			t.Errorf("stats %s = err %v, want found=%v", conv.name, err, conv.want)
-		}
+		ck.Eq(conv.want, found, "stats %s = err %v, want found=", conv.name, err)
 	}
 
 	// An empty selector denies: zero rows, never the world.
 	rows, err = ins.Search(ctx, ScopeSubtree(SubtreeSelector{}), SearchFilter{Limit: 100})
-	if err != nil {
-		t.Fatalf("empty-selector search: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Errorf("empty-selector search returned %d rows, want 0", len(rows))
-	}
+	ck.Require().NoError(err, "empty-selector search")
+	ck.Empty(rows, "empty-selector search returned %d rows, want 0", len(rows))
 }
 
 // TestScopeSubtreeSurvivesANonUUIDSessionID mirrors
@@ -267,6 +225,7 @@ func TestScopeSubtreeQueriesAdmitOnlySelectorNames(t *testing.T) {
 // real conversation must degrade to "that row is unreachable", never fail the
 // query — the same batching risk the cost path already guards.
 func TestScopeSubtreeSurvivesANonUUIDSessionID(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	ins := New(pool)
@@ -280,24 +239,16 @@ func TestScopeSubtreeSurvivesANonUUIDSessionID(t *testing.T) {
 	rows, err := ins.Search(ctx, ScopeSubtree(SubtreeSelector{
 		ConversationIDs: []string{convA, "sess_not_a_uuid"},
 	}), SearchFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("one malformed id must not fail the query: %v", err)
-	}
-	if len(rows) != 1 || rows[0].ID != convA {
-		t.Fatalf("rows = %v, want exactly the one well-formed conversation", rows)
-	}
+	c.NoError(err, "one malformed id must not fail the query")
+	c.False(len(rows) != 1 || rows[0].ID != convA, "rows = %v, want exactly the one well-formed conversation", rows)
 
 	// All-non-UUID ConversationIDs with no refs: the array filters to empty,
 	// which must match nothing — not NULL-match, not error.
 	rows, err = ins.Search(ctx, ScopeSubtree(SubtreeSelector{
 		ConversationIDs: []string{"sess_not_a_uuid"},
 	}), SearchFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("all-malformed ids must not fail the query: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("rows = %v, want none", rows)
-	}
+	c.NoError(err, "all-malformed ids must not fail the query")
+	c.Empty(rows, "rows")
 
 	// The one-conversation probe renders the same arms over the bare table;
 	// the malformed element must survive there too.

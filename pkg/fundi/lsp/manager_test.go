@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"github.com/sourcegraph/jsonrpc2"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestManager_For_NoMatch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
 			"go": {Command: "gopls", Extensions: []string{".go"}},
@@ -21,15 +24,12 @@ func TestManager_For_NoMatch(t *testing.T) {
 
 	ctx := context.Background()
 	client, err := mgr.For(ctx, "/tmp/foo.py")
-	if err != nil {
-		t.Fatalf("For: %v", err)
-	}
-	if client != nil {
-		t.Error("expected nil client for unmatched extension")
-	}
+	c.Require().NoError(err, "For")
+	c.Nil(client, "expected nil client for unmatched extension")
 }
 
 func TestManager_For_Match(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 
 	goplsPath, err := exec.LookPath("gopls")
@@ -38,12 +38,8 @@ func TestManager_For_Match(t *testing.T) {
 	}
 
 	// Create a minimal Go module.
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644))
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644))
 
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
@@ -55,27 +51,20 @@ func TestManager_For_Match(t *testing.T) {
 	defer cancel()
 
 	client, err := mgr.For(ctx, filepath.Join(dir, "main.go"))
-	if err != nil {
-		t.Fatalf("For: %v", err)
-	}
-	if client == nil {
-		t.Fatal("expected non-nil client for .go file")
-	}
+	c.Require().NoError(err, "For")
+	c.Require().NotNil(client, "expected non-nil client for .go file")
 
 	// Second call for same language should return the same client.
 	client2, err := mgr.For(ctx, filepath.Join(dir, "main.go"))
-	if err != nil {
-		t.Fatalf("For (second): %v", err)
-	}
-	if client != client2 {
-		t.Error("expected same client on second For call")
-	}
+	c.Require().NoError(err, "For (second)")
+	c.Eq(client2, client, "expected same client on second For call")
 
 	// Shutdown.
 	mgr.Shutdown(ctx)
 }
 
 func TestManager_ServerFor(t *testing.T) {
+	c := assert.NewCollecting(t)
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
 			"go":     {Command: "gopls", Extensions: []string{".go"}},
@@ -96,16 +85,13 @@ func TestManager_ServerFor(t *testing.T) {
 
 	for _, tt := range tests {
 		name, _, ok := mgr.serverFor(tt.path)
-		if ok != tt.wantOk {
-			t.Errorf("serverFor(%q): ok=%v, want %v", tt.path, ok, tt.wantOk)
-		}
-		if name != tt.want {
-			t.Errorf("serverFor(%q): name=%q, want %q", tt.path, name, tt.want)
-		}
+		c.Eq(tt.wantOk, ok, "serverFor(%q): ok=%v, want", tt.path, ok)
+		c.Eq(tt.want, name, "serverFor(%q): name=%q, want", tt.path, name)
 	}
 }
 
 func TestManager_NotifyChange(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 
 	goplsPath, err := exec.LookPath("gopls")
@@ -113,12 +99,8 @@ func TestManager_NotifyChange(t *testing.T) {
 		t.Skipf("gopls not found: %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.21\n"), 0o644))
+	c.NoError(os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644))
 
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
@@ -130,9 +112,7 @@ func TestManager_NotifyChange(t *testing.T) {
 	defer cancel()
 
 	// NotifyChange on a path without first calling For should lazily start.
-	if err := mgr.NotifyChange(ctx, filepath.Join(dir, "main.go")); err != nil {
-		t.Fatalf("NotifyChange: %v", err)
-	}
+	c.NoError(mgr.NotifyChange(ctx, filepath.Join(dir, "main.go")), "NotifyChange")
 
 	mgr.Shutdown(ctx)
 }
@@ -148,9 +128,7 @@ func TestManager_Shutdown(t *testing.T) {
 
 	// Operations after shutdown should fail.
 	_, err := mgr.For(ctx, "/tmp/main.go")
-	if err == nil {
-		t.Error("expected error after shutdown")
-	}
+	assert.NewCollecting(t).Error(err, "expected error after shutdown")
 }
 
 // ---- fake LSP server subprocess (Finding 5 regression tests) ----
@@ -239,9 +217,7 @@ func runFakeLSPServerHelperProcess(mode string) {
 func fakeLSPServerCmd(t *testing.T, mode string) ServerConfig {
 	t.Helper()
 	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "os.Executable")
 	return ServerConfig{
 		Command:    exe,
 		Args:       []string{"-test.run=^TestFakeLSPServerHelperProcess$", "--", mode},
@@ -270,6 +246,7 @@ func waitDead(t *testing.T, client *Client, d time.Duration) {
 // LSP tool failed for the rest of the process with a message ("failed to
 // stay running") that was untrue: the server never failed on its own.
 func TestManager_RestartDoesNotConsumeBudget(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
@@ -291,16 +268,10 @@ func TestManager_RestartDoesNotConsumeBudget(t *testing.T) {
 	// Restart shuts the current client down; For lazily respawns a fresh
 	// "healthy" instance on the next call.
 	for i := 0; i < maxServerStarts+4; i++ {
-		if err := mgr.Restart(ctx, path); err != nil {
-			t.Fatalf("Restart (call %d): %v", i, err)
-		}
+		c.NoError(mgr.Restart(ctx, path), "Restart (call %d)", i)
 		client, err := mgr.For(ctx, path)
-		if err != nil {
-			t.Fatalf("For after Restart (call %d): %v -- a deliberate restart must not consume the crash budget", i, err)
-		}
-		if client == nil || client.Dead() {
-			t.Fatalf("For after Restart (call %d): expected a live client", i)
-		}
+		c.NoError(err, "For after Restart (call %d): %v -- a deliberate restart must not consume the crash budget", i, err)
+		c.False(client == nil || client.Dead(), "For after Restart (call %d): expected a live client", i)
 	}
 }
 
@@ -310,6 +281,7 @@ func TestManager_RestartDoesNotConsumeBudget(t *testing.T) {
 // maxServerStarts. The fix for Finding 5 must not turn the crash budget
 // into a no-op.
 func TestManager_CrashLoopStillTrips(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	mgr := NewManager(Config{
 		Servers: map[string]ServerConfig{
@@ -330,19 +302,13 @@ func TestManager_CrashLoopStillTrips(t *testing.T) {
 			lastErr = err
 		}
 	}
-	if lastErr == nil {
-		t.Fatal("expected the crash loop to have produced errors")
-	}
+	c.Error(lastErr, "expected the crash loop to have produced errors")
 
 	// The budget is now exhausted: the next call must fail with the
 	// "failed to stay running" message and must NOT attempt another spawn.
 	_, err := mgr.For(ctx, path)
-	if err == nil {
-		t.Fatal("expected maxServerStarts to trip after a genuine crash loop")
-	}
-	if !strings.Contains(err.Error(), "failed to stay running") {
-		t.Fatalf("got %q, want the budget-exhausted message", err)
-	}
+	c.Error(err, "expected maxServerStarts to trip after a genuine crash loop")
+	c.StrContains(err.Error(), "failed to stay running", "got %q, want the budget-exhausted message", err)
 }
 
 // TestManager_HealthyUptimeForgivesCrashBudget is the regression test for
@@ -357,6 +323,7 @@ func TestManager_CrashLoopStillTrips(t *testing.T) {
 // "has failed to stay running" even though every exit was preceded by a
 // healthy run.
 func TestManager_HealthyUptimeForgivesCrashBudget(t *testing.T) {
+	c := assert.NewAborting(t)
 	origUptime := healthyUptime
 	healthyUptime = 20 * time.Millisecond
 	t.Cleanup(func() { healthyUptime = origUptime })
@@ -375,12 +342,8 @@ func TestManager_HealthyUptimeForgivesCrashBudget(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		client, err := mgr.For(ctx, path)
 		cancel()
-		if err != nil {
-			t.Fatalf("For (cycle %d): %v -- a self-crash after healthyUptime should have been forgiven", i, err)
-		}
-		if client == nil {
-			t.Fatalf("For (cycle %d): nil client", i)
-		}
+		c.NoError(err, "For (cycle %d): %v -- a self-crash after healthyUptime should have been forgiven", i, err)
+		c.NotNil(client, "For (cycle %d): nil client", i)
 		// Wait for this instance to exit on its own (past healthyUptime)
 		// before asking again, so the next For call actually evicts and
 		// respawns rather than handing back the still-live client.

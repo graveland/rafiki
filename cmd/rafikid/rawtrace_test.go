@@ -12,11 +12,14 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // openTestPool opens a pool to RAFIKI_TEST_DSN or skips the test.
 func openTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
@@ -24,19 +27,16 @@ func openTestPool(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
+	c.NoError(err, "open pool")
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate")
 	return pool
 }
 
 // TestRawTrace_Insert verifies that RawTraceStore.Insert writes a row and the
 // row can be queried back. Requires RAFIKI_TEST_DSN.
 func TestRawTrace_Insert(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := openTestPool(t)
 
 	// Clean any leftover rows from prior runs.
@@ -45,9 +45,7 @@ func TestRawTrace_Insert(t *testing.T) {
 	}
 
 	store := rawtrace.NewRawTraceStore(pool)
-	if store == nil {
-		t.Fatal("NewRawTraceStore returned nil")
-	}
+	c.Require().NotNil(store, "NewRawTraceStore returned nil")
 
 	convID := "00000000-0000-0000-0000-000000000001"
 	turnID := "00000000-0000-0000-0000-000000000002"
@@ -71,21 +69,15 @@ func TestRawTrace_Insert(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := store.Insert(ctx, r); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
+	c.Require().NoError(store.Insert(ctx, r), "Insert")
 
 	// Query back the row.
 	var count int
 	err := pool.QueryRow(t.Context(),
 		`SELECT count(*) FROM conversations.raw_http_request
 		 WHERE source='proxy' AND model='claude-sonnet-4-5'`).Scan(&count)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 row, got %d", count)
-	}
+	c.Require().NoError(err, "query")
+	c.Require().Eq(1, count, "expected 1 row, got")
 
 	// Verify column values.
 	var gotModel, gotSource, gotReqMethod string
@@ -94,21 +86,11 @@ func TestRawTrace_Insert(t *testing.T) {
 		`SELECT model, source, req_method, latency_ms
 		 FROM conversations.raw_http_request
 		 WHERE source='proxy' LIMIT 1`).Scan(&gotModel, &gotSource, &gotReqMethod, &gotLatency)
-	if err != nil {
-		t.Fatalf("query columns: %v", err)
-	}
-	if gotModel != "claude-sonnet-4-5" {
-		t.Errorf("model: got %q, want %q", gotModel, "claude-sonnet-4-5")
-	}
-	if gotSource != "proxy" {
-		t.Errorf("source: got %q, want %q", gotSource, "proxy")
-	}
-	if gotReqMethod != "POST" {
-		t.Errorf("req_method: got %q, want %q", gotReqMethod, "POST")
-	}
-	if gotLatency != 42 {
-		t.Errorf("latency_ms: got %d, want 42", gotLatency)
-	}
+	c.Require().NoError(err, "query columns")
+	c.Eq("claude-sonnet-4-5", gotModel, "model: got")
+	c.Eq("proxy", gotSource, "source: got")
+	c.Eq("POST", gotReqMethod, "req_method: got")
+	c.Eq(42, gotLatency, "latency_ms: got")
 }
 
 // TestRawTrace_InsertNilStore verifies that Insert on a nil store is a no-op.
@@ -118,9 +100,7 @@ func TestRawTrace_InsertNilStore(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := nilStore.Insert(ctx, rawtrace.RawHTTPRequest{Source: "fundi"}); err != nil {
-		t.Fatalf("nil store Insert: %v", err)
-	}
+	assert.NewAborting(t).NoError(nilStore.Insert(ctx, rawtrace.RawHTTPRequest{Source: "fundi"}), "nil store Insert")
 }
 
 // TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag pins the actual bug:
@@ -131,6 +111,7 @@ func TestRawTrace_InsertNilStore(t *testing.T) {
 // on. No DB is needed: rawTrace only needs to be a non-nil sentinel, since
 // this test asserts on ro.RawTrace's nil-ness, never calls Insert.
 func TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	c.rawTrace = &rawtrace.RawTraceStore{}
 	c.rawTraceAll = true
@@ -140,17 +121,14 @@ func TestAgentRuntimeOptionsRawTraceAllOverridesPerSpawnFlag(t *testing.T) {
 		// RecordRequests deliberately left false: rawTraceAll must still win.
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_rawtraceall", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.RawTrace == nil {
-		t.Error("RawTrace = nil, want non-nil: RAFIKI_RECORD_REQUESTS=1 must capture every spawn, not just ones passing --record-requests")
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.NotNil(ro.RawTrace, "RawTrace = nil, want non-nil: RAFIKI_RECORD_REQUESTS=1 must capture every spawn, not just ones passing --record-requests")
 }
 
 // TestAgentRuntimeOptionsRawTraceOffByDefault guards the other side: with
 // rawTraceAll false and no per-spawn opt-in, capture must stay off.
 func TestAgentRuntimeOptionsRawTraceOffByDefault(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	c.rawTrace = &rawtrace.RawTraceStore{}
 	c.rawTraceAll = false
@@ -159,10 +137,6 @@ func TestAgentRuntimeOptionsRawTraceOffByDefault(t *testing.T) {
 		Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_rawtraceoff", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.RawTrace != nil {
-		t.Error("RawTrace != nil, want nil: neither --record-requests nor RAFIKI_RECORD_REQUESTS is set")
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Nil(ro.RawTrace, "RawTrace != nil, want nil: neither --record-requests nor RAFIKI_RECORD_REQUESTS is set")
 }

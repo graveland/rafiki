@@ -38,6 +38,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // sdkPython returns the interpreter the SDK tests run (RAFIKI_TEST_SDK_PYTHON
@@ -93,9 +95,7 @@ func bootSDKDaemon(t *testing.T, python string) *scriptDaemon {
 func sdkBinDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.Symlink(cliPath, filepath.Join(dir, "rafiki")); err != nil {
-		t.Fatalf("symlink rafiki: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.Symlink(cliPath, filepath.Join(dir, "rafiki")), "symlink rafiki")
 	return dir
 }
 
@@ -128,9 +128,7 @@ func runSDKScript(t *testing.T, py, source string, env []string, args ...string)
 	t.Helper()
 	dir := t.TempDir()
 	script := filepath.Join(dir, "driver.py")
-	if err := os.WriteFile(script, []byte(source), 0o600); err != nil {
-		t.Fatalf("write driver: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(source), 0o600), "write driver")
 	probe := filepath.Join(dir, "probe.log")
 	argv := append([]string{script, "--probe-out", probe}, args...)
 	cmd := exec.Command(py, argv...)

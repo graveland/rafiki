@@ -17,6 +17,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // connectClient dials the daemon's control unix socket, where the Connect
@@ -37,6 +39,7 @@ func (d *daemon) connectClient() rafikiv1connect.ControlClient {
 // the daemon's control socket.
 func (d *daemon) spawnChildUnder(t *testing.T, parentID string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
@@ -46,12 +49,8 @@ func (d *daemon) spawnChildUnder(t *testing.T, parentID string) string {
 		Model:         "anthropic/sonnet-latest",
 		ParentChildId: parentID,
 	}))
-	if err != nil {
-		t.Fatalf("spawn under %s failed: %v", parentID, err)
-	}
-	if resp.Msg.GetChildId() == "" {
-		t.Fatal("spawn returned empty childId")
-	}
+	c.NoError(err, "spawn under %s failed", parentID)
+	c.NotEq("", resp.Msg.GetChildId(), "spawn returned empty childId")
 	return resp.Msg.GetChildId()
 }
 
@@ -87,6 +86,7 @@ func TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant(t *testing.T) {
 		{"with include_self the root is present", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
 			defer scancel()
 
@@ -98,9 +98,7 @@ func TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant(t *testing.T) {
 				Tier:   rafikiv1.EventTier_EVENT_TIER_DURABLE,
 				Cursor: cursor,
 			}))
-			if err != nil {
-				t.Fatalf("StreamEvents: %v", err)
-			}
+			c.Require().NoError(err, "StreamEvents")
 			defer func() { _ = stream.Close() }()
 
 			seen := map[string]bool{}
@@ -122,13 +120,8 @@ func TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant(t *testing.T) {
 			case <-deadline:
 			}
 
-			if !seen[kid] {
-				t.Errorf("descendant %s absent from the subtree subscription; seen=%v", kid, seen)
-			}
-			if seen[parent] != tc.wantRoot {
-				t.Errorf("root %s present=%v, want %v (include_self=%v); seen=%v",
-					parent, seen[parent], tc.wantRoot, tc.includeSelf, seen)
-			}
+			c.False(!seen[kid], "descendant %s absent from the subtree subscription; seen=%v", kid, seen)
+			c.Eq(tc.wantRoot, seen[parent], "root %s present=%v, want %v (include_self=%v); seen=%v", parent, seen[parent], tc.wantRoot, tc.includeSelf, seen)
 		})
 	}
 }
@@ -137,6 +130,7 @@ func TestIntegration_SubtreeIncludeSelfCoversRootAndDescendant(t *testing.T) {
 // daemon writes. If that label key ever changes, the rail silently flattens
 // into a list of roots rather than failing.
 func TestIntegration_ListChildrenCarriesTheParentLabel(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	d := bootDaemon(t)
 	defer d.stopDaemon()
 
@@ -147,9 +141,7 @@ func TestIntegration_ListChildrenCarriesTheParentLabel(t *testing.T) {
 	defer cancel()
 	resp, err := d.connectClient().ListChildren(ctx,
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
+	ck.Require().NoError(err, "ListChildren")
 
 	var found bool
 	for _, c := range resp.Msg.GetChildren() {
@@ -162,11 +154,7 @@ func TestIntegration_ListChildrenCarriesTheParentLabel(t *testing.T) {
 			t.Errorf("rafiki/parent = %q, want %q -- pkg/tui/rail.ParentLabel reads this key; labels=%s",
 				got, parent, b)
 		}
-		if c.LatestOrdinal == nil {
-			t.Error("latest_ordinal absent; the rail seeds its clean-board watermark from it")
-		}
+		ck.NotNil(c.LatestOrdinal, "latest_ordinal absent; the rail seeds its clean-board watermark from it")
 	}
-	if !found {
-		t.Fatalf("child %s missing from ListChildren", kid)
-	}
+	ck.Require().True(found, "child %s missing from ListChildren", kid)
 }

@@ -7,29 +7,25 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestFindDaemonBinaryFromSibling verifies that a daemon binary sitting next to
 // the specified "self" path is returned without falling through to PATH.
 func TestFindDaemonBinaryFromSibling(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	sibling := filepath.Join(dir, "rafikid")
-	if err := os.WriteFile(sibling, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(sibling, []byte("fake"), 0755))
 
 	got, err := findDaemonBinaryFrom(filepath.Join(dir, "rafiki"))
-	if err != nil {
-		t.Fatalf("expected sibling lookup to succeed: %v", err)
-	}
-	if got != sibling {
-		t.Errorf("got %s, want %s", got, sibling)
-	}
+	c.Require().NoError(err, "expected sibling lookup to succeed")
+	c.Eq(sibling, got, "got")
 }
 
 // TestFindDaemonBinaryNeverPicksTheClient is the regression test for the one
@@ -41,21 +37,16 @@ func TestFindDaemonBinaryFromSibling(t *testing.T) {
 // pointing the service at the CLI. Nothing fails until launchd or systemd
 // actually starts it, long after the command that caused it returned 0.
 func TestFindDaemonBinaryNeverPicksTheClient(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	client := filepath.Join(dir, "rafiki")
-	if err := os.WriteFile(client, []byte("fake client"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(client, []byte("fake client"), 0755))
 
 	// Only the client exists. The lookup must not settle for it — it either
 	// finds a real rafikid on PATH or fails.
 	got, err := findDaemonBinaryFrom(client)
-	if err == nil && got == client {
-		t.Fatalf("findDaemonBinaryFrom returned the client binary %q as the daemon", got)
-	}
-	if err == nil && filepath.Base(got) != "rafikid" {
-		t.Errorf("resolved daemon %q is not named rafikid", got)
-	}
+	c.Require().False(err == nil && got == client, "findDaemonBinaryFrom returned the client binary %q as the daemon", got)
+	c.False(err == nil && filepath.Base(got) != "rafikid", "resolved daemon %q is not named rafikid", got)
 }
 
 // TestFindDaemonBinaryPrefersDaemonWhenBothPresent covers the layout `make
@@ -63,41 +54,33 @@ func TestFindDaemonBinaryNeverPicksTheClient(t *testing.T) {
 // That is the arrangement nearly every real user ends up with, so it is the
 // one the lookup most has to get right.
 func TestFindDaemonBinaryPrefersDaemonWhenBothPresent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	client := filepath.Join(dir, "rafiki")
 	daemon := filepath.Join(dir, "rafikid")
 	for _, p := range []string{client, daemon} {
-		if err := os.WriteFile(p, []byte("fake"), 0755); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(os.WriteFile(p, []byte("fake"), 0755))
 	}
 
 	got, err := findDaemonBinaryFrom(client)
-	if err != nil {
-		t.Fatalf("expected sibling lookup to succeed: %v", err)
-	}
-	if got != daemon {
-		t.Errorf("got %s, want %s (the daemon, not the client)", got, daemon)
-	}
+	c.Require().NoError(err, "expected sibling lookup to succeed")
+	c.Eq(daemon, got, "got")
 }
 
 // TestFindDaemonBinaryNoSibling verifies that when no sibling exists, the
 // function either succeeds via PATH or returns a clear "not found" error.
 func TestFindDaemonBinaryNoSibling(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir() // empty — no daemon binary here
 
 	got, err := findDaemonBinaryFrom(filepath.Join(dir, "rafiki"))
 	if err != nil {
 		// Expected when the daemon is not on PATH.
-		if !strings.Contains(err.Error(), "not found") {
-			t.Errorf("unexpected error message: %v", err)
-		}
+		c.StrContains(err.Error(), "not found", "unexpected error message: %v", err)
 		return
 	}
 	// If it succeeded (the daemon is on PATH), the result must be absolute.
-	if !filepath.IsAbs(got) {
-		t.Errorf("expected absolute path, got %s", got)
-	}
+	c.True(filepath.IsAbs(got), "expected absolute path, got %s", got)
 }
 
 // TestFindDaemonBinaryEmptySelf confirms that an empty self path falls
@@ -105,25 +88,20 @@ func TestFindDaemonBinaryNoSibling(t *testing.T) {
 func TestFindDaemonBinaryEmptySelf(t *testing.T) {
 	_, err := findDaemonBinaryFrom("")
 	// Either finds via PATH (nil error) or returns a useful error. Either is fine.
-	if err != nil && !strings.Contains(err.Error(), "not found") {
-		t.Errorf("unexpected error: %v", err)
-	}
+	assert.NewCollecting(t).False(err != nil && !strings.Contains(err.Error(), "not found"), "unexpected error: %v", err)
 }
 
 // TestBuildPathEnvContainsStandardPaths verifies standard directories are present.
 func TestBuildPathEnvContainsStandardPaths(t *testing.T) {
+	c := assert.NewCollecting(t)
 	result := buildPathEnv()
 
 	for _, want := range []string{"/usr/bin", "/bin"} {
-		if !strings.Contains(result, want) {
-			t.Errorf("buildPathEnv() missing %s; got %s", want, result)
-		}
+		c.StrContains(result, want, "buildPathEnv() missing")
 	}
 
 	parts := strings.Split(result, ":")
-	if len(parts) < 3 {
-		t.Errorf("buildPathEnv() too few entries (%d): %q", len(parts), result)
-	}
+	c.GreaterOrEqual(3, len(parts), "buildPathEnv() too few entries (%d): %q", len(parts), result)
 }
 
 // TestBuildPathEnvNoDuplicates verifies no directory appears twice.
@@ -132,9 +110,7 @@ func TestBuildPathEnvNoDuplicates(t *testing.T) {
 	parts := strings.Split(result, ":")
 	seen := make(map[string]bool)
 	for _, p := range parts {
-		if seen[p] {
-			t.Errorf("buildPathEnv() has duplicate entry %q in %q", p, result)
-		}
+		assert.NewCollecting(t).False(seen[p], "buildPathEnv() has duplicate entry %q in %q", p, result)
 		seen[p] = true
 	}
 }
@@ -142,21 +118,14 @@ func TestBuildPathEnvNoDuplicates(t *testing.T) {
 // TestNewServiceBackend verifies the factory returns a non-nil backend with
 // a valid log path.
 func TestNewServiceBackend(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b := newServiceBackend()
-	if b == nil {
-		t.Fatal("newServiceBackend() returned nil")
-	}
+	c.Require().NotNil(b, "newServiceBackend() returned nil")
 
 	lp := b.LogPath()
-	if lp == "" {
-		t.Error("LogPath() returned empty string")
-	}
-	if filepath.Base(lp) != "controller.log" {
-		t.Errorf("LogPath() base = %q, want controller.log", filepath.Base(lp))
-	}
-	if !filepath.IsAbs(lp) {
-		t.Errorf("LogPath() should be absolute, got %s", lp)
-	}
+	c.NotEq("", lp, "LogPath() returned empty string")
+	c.Eq("controller.log", filepath.Base(lp), "LogPath() base")
+	c.True(filepath.IsAbs(lp), "LogPath() should be absolute, got %s", lp)
 }
 
 // ─── daemon environment capture ────────────────────────────────────────────────
@@ -172,9 +141,7 @@ func TestCaptureDaemonEnv_PicksDaemonScopedVars(t *testing.T) {
 		"RAFIKI_SOCKET":        "/tmp/rafiki.sock",
 		"RAFIKI_DEFAULT_MODEL": "anthropic/opus-latest",
 	}
-	if !maps.Equal(got, want) {
-		t.Errorf("got %v, want %v", got, want)
-	}
+	assert.NewCollecting(t).True(maps.Equal(got, want), "got %v, want %v", got, want)
 }
 
 // RAFIKI_CHILD_ID must never be baked into the unit: the daemon sets it per
@@ -185,44 +152,37 @@ func TestCaptureDaemonEnv_ExcludesChildID(t *testing.T) {
 	if _, ok := unit["RAFIKI_CHILD_ID"]; ok {
 		t.Error("RAFIKI_CHILD_ID was captured into the unit")
 	}
-	if _, ok := secret["RAFIKI_CHILD_ID"]; ok {
-		t.Error("RAFIKI_CHILD_ID was captured into service.env")
-	}
+	_, ok := secret["RAFIKI_CHILD_ID"]
+	assert.NewCollecting(t).False(ok, "RAFIKI_CHILD_ID was captured into service.env")
 }
 
 // The regression this whole change exists for. A DSN carries a password and
 // unit files are 0644, so RAFIKI_DB must be routed to service.env — which the
 // list it used to sit in already said, about the API keys, while capturing it.
 func TestCaptureDaemonEnv_RoutesTheDSNToSecrets(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unit, secret, _ := captureDaemonEnv([]string{
 		"RAFIKI_DB=postgres://u:hunter2@localhost/rafiki",
 		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
 	})
-	if _, ok := unit["RAFIKI_DB"]; ok {
-		t.Error("RAFIKI_DB was captured into the world-readable unit")
-	}
-	if secret["RAFIKI_DB"] != "postgres://u:hunter2@localhost/rafiki" {
-		t.Errorf("secret[RAFIKI_DB] = %q, want the DSN", secret["RAFIKI_DB"])
-	}
-	if unit["RAFIKI_DEFAULT_MODEL"] != "anthropic/opus-latest" {
-		t.Error("a non-secret variable stopped reaching the unit")
-	}
+	_, ok := unit["RAFIKI_DB"]
+	c.False(ok, "RAFIKI_DB was captured into the world-readable unit")
+	c.Eq("postgres://u:hunter2@localhost/rafiki", secret["RAFIKI_DB"], "secret[RAFIKI_DB]")
+	c.Eq("anthropic/opus-latest", unit["RAFIKI_DEFAULT_MODEL"], "a non-secret variable stopped reaching the unit")
 }
 
 // Credentials and tokens all take the same route.
 func TestCaptureDaemonEnv_RoutesCredentialsToSecrets(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unit, secret, _ := captureDaemonEnv([]string{
 		"ANTHROPIC_API_KEY=sk-ant",
 		"OPENROUTER_API_KEY=sk-or",
 		"RAFIKI_TOKEN=client",
 	})
-	if len(unit) != 0 {
-		t.Errorf("credentials reached the unit: %v", unit)
-	}
+	c.Empty(unit, "credentials reached the unit")
 	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "RAFIKI_TOKEN"} {
-		if _, ok := secret[k]; !ok {
-			t.Errorf("%s was not routed to service.env", k)
-		}
+		_, ok := secret[k]
+		c.True(ok, "%s was not routed to service.env", k)
 	}
 }
 
@@ -230,13 +190,10 @@ func TestCaptureDaemonEnv_RoutesCredentialsToSecrets(t *testing.T) {
 // service.env quotes and escapes, so a secret carrying a newline is written
 // rather than skipped.
 func TestCaptureDaemonEnv_SecretsAreNotNewlineRestricted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, secret, skipped := captureDaemonEnv([]string{"RAFIKI_DB=postgres://u@h/db\n"})
-	if len(skipped) != 0 {
-		t.Errorf("skipped = %v, want none: service.env can hold a newline", skipped)
-	}
-	if secret["RAFIKI_DB"] == "" {
-		t.Error("a secret with a newline was dropped")
-	}
+	c.Empty(skipped, "skipped")
+	c.NotEq("", secret["RAFIKI_DB"], "a secret with a newline was dropped")
 }
 
 // RAFIKI_ENV_FILE is a path override for paths.ServiceEnvFile, not a secret,
@@ -245,25 +202,21 @@ func TestCaptureDaemonEnv_SecretsAreNotNewlineRestricted(t *testing.T) {
 // which never sees the installing shell's environment — falls back to the
 // default service.env and finds nothing there, with no warning at all.
 func TestCaptureDaemonEnv_CapturesEnvFileOverrideIntoTheUnit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_ENV_FILE=/custom/service.env"})
-	if unit[paths.EnvFile] != "/custom/service.env" {
-		t.Errorf("unit[%s] = %q, want the override path", paths.EnvFile, unit[paths.EnvFile])
-	}
-	if _, ok := secret[paths.EnvFile]; ok {
-		t.Error("RAFIKI_ENV_FILE was treated as a credential")
-	}
+	c.Eq("/custom/service.env", unit[paths.EnvFile], "unit[%s] = %q, want the override path", paths.EnvFile, unit[paths.EnvFile])
+	_, ok := secret[paths.EnvFile]
+	c.False(ok, "RAFIKI_ENV_FILE was treated as a credential")
 }
 
 // RAFIKI_PROXY_LISTEN is an address, not a secret, so it belongs in the unit —
 // and until now install could not carry it across a reinstall at all.
 func TestCaptureDaemonEnv_CapturesProxyListenIntoTheUnit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unit, secret, _ := captureDaemonEnv([]string{"RAFIKI_PROXY_LISTEN=127.0.0.1:8035"})
-	if unit["RAFIKI_PROXY_LISTEN"] != "127.0.0.1:8035" {
-		t.Errorf("unit[RAFIKI_PROXY_LISTEN] = %q, want the address", unit["RAFIKI_PROXY_LISTEN"])
-	}
-	if _, ok := secret["RAFIKI_PROXY_LISTEN"]; ok {
-		t.Error("an address was treated as a credential")
-	}
+	c.Eq("127.0.0.1:8035", unit["RAFIKI_PROXY_LISTEN"], "unit[RAFIKI_PROXY_LISTEN]")
+	_, ok := secret["RAFIKI_PROXY_LISTEN"]
+	c.False(ok, "an address was treated as a credential")
 }
 
 // An empty value is not the same as an absent one: writing RAFIKI_DB=""
@@ -276,22 +229,18 @@ func TestCaptureDaemonEnv_SkipsEmpty(t *testing.T) {
 	if _, ok := secret["RAFIKI_DB"]; ok {
 		t.Error("an empty secret value was captured")
 	}
-	if _, ok := unit["RAFIKI_SOCKET"]; ok {
-		t.Error("an empty unit value was captured")
-	}
+	_, ok := unit["RAFIKI_SOCKET"]
+	assert.NewCollecting(t).False(ok, "an empty unit value was captured")
 }
 
 func TestSortedEnv_IsDeterministic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	m := map[string]string{"RAFIKI_SOCKET": "/s", "RAFIKI_DB": "db", "RAFIKI_PI_BINARY": "/pi"}
 	first := sortedEnv(m)
 	for range 20 { // map iteration order varies per range; the output must not
-		if !slices.Equal(sortedEnv(m), first) {
-			t.Fatal("sortedEnv is not deterministic across calls")
-		}
+		c.Require().EqDiff(first, sortedEnv(m), "sortedEnv is not deterministic across calls")
 	}
-	if first[0].Key != "RAFIKI_DB" {
-		t.Errorf("not sorted by key: %v", first)
-	}
+	c.Eq("RAFIKI_DB", first[0].Key, "not sorted by key: %v", first)
 }
 
 // No unit file can carry a newline: systemd's Environment= is line-based, and
@@ -299,53 +248,42 @@ func TestSortedEnv_IsDeterministic(t *testing.T) {
 // platform and not the other. Such values must be skipped and reported, not
 // written into a unit that then fails to parse.
 func TestCaptureDaemonEnv_SkipsNewlineValues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	captured, _, skipped := captureDaemonEnv([]string{
 		"RAFIKI_DEFAULT_LABELS=a=1\nb=2",
 		"RAFIKI_SOCKET=/tmp/rafiki.sock",
 	})
-	if _, ok := captured["RAFIKI_DEFAULT_LABELS"]; ok {
-		t.Error("a newline-bearing value was written into the unit")
-	}
-	if !slices.Contains(skipped, "RAFIKI_DEFAULT_LABELS") {
-		t.Errorf("skipped = %v, want it to name RAFIKI_DEFAULT_LABELS", skipped)
-	}
+	_, ok := captured["RAFIKI_DEFAULT_LABELS"]
+	c.False(ok, "a newline-bearing value was written into the unit")
+	c.Contains(skipped, "RAFIKI_DEFAULT_LABELS", "skipped")
 	// Skipping one must not cost the others.
-	if captured["RAFIKI_SOCKET"] != "/tmp/rafiki.sock" {
-		t.Error("an unrelated variable was lost alongside the skipped one")
-	}
+	c.Eq("/tmp/rafiki.sock", captured["RAFIKI_SOCKET"], "an unrelated variable was lost alongside the skipped one")
 }
 
 // `logs` prints and exits; `tail` is the one that follows. The default on
 // --follow is the whole distinction, so it is worth pinning.
 func TestServiceLogsPrintsAndExitsByDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newServiceLogsCmd().Flags().Lookup("follow")
-	if f == nil {
-		t.Fatal("--follow not registered on service logs")
-	}
-	if f.DefValue != "false" {
-		t.Errorf("--follow default = %s, want false (logs prints and exits; use tail to follow)", f.DefValue)
-	}
-	if f.Shorthand != "f" {
-		t.Errorf("--follow shorthand = %q, want \"f\"", f.Shorthand)
-	}
+	c.Require().NotNil(f, "--follow not registered on service logs")
+	c.Eq("false", f.DefValue, "--follow default")
+	c.Eq("f", f.Shorthand, "--follow shorthand = %q, want \"f\"", f.Shorthand)
 }
 
 func TestServiceTailIsRegistered(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	var found bool
 	for _, c := range newServiceCmd().Commands() {
 		if c.Name() == "tail" {
 			found = true
-			if c.Flags().Lookup("follow") != nil {
-				t.Error("service tail should always follow, not carry a --follow flag")
-			}
+			ck.Nil(c.Flags().Lookup("follow"), "service tail should always follow, not carry a --follow flag")
 		}
 	}
-	if !found {
-		t.Error("service tail not registered")
-	}
+	ck.True(found, "service tail not registered")
 }
 
 func TestInstallReport_ListsEachDestination(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := serviceSpec{
 		ExtraEnv:  map[string]string{"RAFIKI_PROXY_KINDS": "pi,claude"},
 		SecretEnv: map[string]string{"RAFIKI_DB": "postgres://u@h/db", "ANTHROPIC_API_KEY": "sk-ant"},
@@ -359,32 +297,25 @@ func TestInstallReport_ListsEachDestination(t *testing.T) {
 	out := installReport(spec, "/cfg/service.env", res, nil)
 
 	for _, want := range []string{"RAFIKI_PROXY_KINDS", "ANTHROPIC_API_KEY", "RAFIKI_DB", "RAFIKI_SAMPLE_SECRET", "/cfg/service.env"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("report does not mention %s:\n%s", want, out)
-		}
+		c.StrContains(out, want, "report does not mention")
 	}
 	// The secret's VALUE must never be printed to a terminal or a scrollback.
 	for _, secret := range []string{"postgres://u@h/db", "sk-ant"} {
-		if strings.Contains(out, secret) {
-			t.Errorf("report leaked a secret value %q:\n%s", secret, out)
-		}
+		c.NotStrContains(out, secret, "report leaked a secret value")
 	}
 }
 
 // "Left alone" without this note quietly discards what the operator just
 // exported, which is the confusing outcome this whole command exists to avoid.
 func TestInstallReport_FlagsAConflictingValue(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := serviceSpec{SecretEnv: map[string]string{"RAFIKI_DB": "postgres://new@h/db"}}
 	res := paths.MergeResult{Conflict: []string{"RAFIKI_DB"}, Defined: []string{"RAFIKI_DB"}}
 
 	out := installReport(spec, "/cfg/service.env", res, nil)
 
-	if !strings.Contains(out, "RAFIKI_DB") {
-		t.Fatalf("report does not mention the conflicting key:\n%s", out)
-	}
-	if !strings.Contains(out, "differs") {
-		t.Errorf("report does not say the file's value differs from this shell's:\n%s", out)
-	}
+	c.Require().StrContains(out, "RAFIKI_DB", "report does not mention the conflicting key:\n")
+	c.StrContains(out, "differs", "report does not say the file's value differs from this shell's:\n")
 }
 
 // The missing-DSN warning is about the actual failure condition: no DSN
@@ -393,30 +324,23 @@ func TestInstallReport_NoDSNWarningWhenTheFileAlreadyHasOne(t *testing.T) {
 	spec := serviceSpec{SecretEnv: map[string]string{}} // nothing in this shell
 	res := paths.MergeResult{Defined: []string{"RAFIKI_DB"}}
 
-	if out := installReport(spec, "/cfg/service.env", res, nil); strings.Contains(out, "in-memory") {
-		t.Errorf("warned about a missing DSN that service.env already defines:\n%s", out)
-	}
+	assert.NewCollecting(t).NotStrContains(installReport(spec, "/cfg/service.env", res, nil), "in-memory", "warned about a missing DSN that service.env already defines:\n")
 }
 
 func TestInstallReport_WarnsWhenNoDSNAnywhere(t *testing.T) {
 	out := installReport(serviceSpec{SecretEnv: map[string]string{}}, "/cfg/service.env", paths.MergeResult{}, nil)
-	if !strings.Contains(out, "in-memory") {
-		t.Errorf("no missing-DSN warning when neither the shell nor the file has one:\n%s", out)
-	}
+	assert.NewCollecting(t).StrContains(out, "in-memory", "no missing-DSN warning when neither the shell nor the file has one:\n")
 }
 
 // A service.env write failure must be loud but must not look like the install
 // itself failed — by then the unit is written and the service is running.
 func TestInstallReport_SurfacesAMergeError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := serviceSpec{SecretEnv: map[string]string{"RAFIKI_DB": "postgres://u@h/db"}}
 	out := installReport(spec, "/cfg/service.env", paths.MergeResult{}, errors.New("permission denied"))
 
-	if !strings.Contains(out, "permission denied") {
-		t.Errorf("report does not surface the write error:\n%s", out)
-	}
-	if !strings.Contains(out, "RAFIKI_DB") {
-		t.Errorf("report does not name what failed to reach the file:\n%s", out)
-	}
+	c.StrContains(out, "permission denied", "report does not surface the write error:\n")
+	c.StrContains(out, "RAFIKI_DB", "report does not name what failed to reach the file:\n")
 }
 
 // MergeEnvFile categorizes into Added/Existing/Conflict BEFORE it ever attempts
@@ -427,6 +351,7 @@ func TestInstallReport_SurfacesAMergeError(t *testing.T) {
 // false, and it invites an operator to hand-edit a file that is already
 // correct.
 func TestInstallReport_MergeErrorOnlyNamesTheKeysThatFailed(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := serviceSpec{SecretEnv: map[string]string{
 		"RAFIKI_DB":    "postgres://u@h/db",
 		"RAFIKI_TOKEN": "tok",
@@ -441,15 +366,9 @@ func TestInstallReport_MergeErrorOnlyNamesTheKeysThatFailed(t *testing.T) {
 			failedLine = line
 		}
 	}
-	if failedLine == "" {
-		t.Fatalf("no failed-keys line in report:\n%s", out)
-	}
-	if !strings.Contains(failedLine, "RAFIKI_DB") {
-		t.Errorf("failed-keys line does not name the key that actually failed to write:\n%s", failedLine)
-	}
-	if strings.Contains(failedLine, "RAFIKI_TOKEN") {
-		t.Errorf("failed-keys line wrongly claims an already-persisted key failed to reach the file:\n%s", failedLine)
-	}
+	c.Require().NotEq("", failedLine, "no failed-keys line in report:\n%s", out)
+	c.StrContains(failedLine, "RAFIKI_DB", "failed-keys line does not name the key that actually failed to write:\n")
+	c.NotStrContains(failedLine, "RAFIKI_TOKEN", "failed-keys line wrongly claims an already-persisted key failed to reach the file:\n")
 }
 
 // The regression this test guards: b.Install bootstraps the launchd job (or
@@ -462,6 +381,7 @@ func TestInstallReport_MergeErrorOnlyNamesTheKeysThatFailed(t *testing.T) {
 // every backend's Install uses to actually start the daemon) and checks that
 // by the time ANY such command runs, service.env already holds the secret.
 func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
@@ -500,21 +420,13 @@ func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
 	}
 
 	daemonBin := filepath.Join(home, "rafikid")
-	if err := os.WriteFile(daemonBin, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(daemonBin, []byte("fake"), 0755))
 
 	cmd := newServiceInstallCmd()
-	if err := cmd.Flags().Set("daemon-binary", daemonBin); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("path-env", "/usr/bin"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(cmd.Flags().Set("daemon-binary", daemonBin))
+	c.NoError(cmd.Flags().Set("path-env", "/usr/bin"))
 
-	if err := runServiceInstall(cmd, nil); err != nil {
-		t.Fatalf("runServiceInstall: %v", err)
-	}
+	c.NoError(runServiceInstall(cmd, nil), "runServiceInstall")
 	if !sawSecretBeforeAnyOSCommand {
 		t.Error("a daemon-starting OS command ran before service.env held the secret; " +
 			"a freshly installed daemon would come up with no DSN")
@@ -530,6 +442,7 @@ func TestRunServiceInstall_WritesSecretsBeforeStartingTheDaemon(t *testing.T) {
 // disk by the time the reload itself failed. The operator must still see
 // that report, and must not see the success banner.
 func TestRunServiceInstall_PrintsReportEvenWhenInstallFails(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
@@ -550,22 +463,14 @@ func TestRunServiceInstall_PrintsReportEvenWhenInstallFails(t *testing.T) {
 	}
 
 	daemonBin := filepath.Join(home, "rafikid")
-	if err := os.WriteFile(daemonBin, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(daemonBin, []byte("fake"), 0755))
 
 	cmd := newServiceInstallCmd()
-	if err := cmd.Flags().Set("daemon-binary", daemonBin); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("path-env", "/usr/bin"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("daemon-binary", daemonBin))
+	c.Require().NoError(cmd.Flags().Set("path-env", "/usr/bin"))
 
 	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	origStdout := os.Stdout
 	os.Stdout = w
 	installErr := runServiceInstall(cmd, nil)
@@ -577,16 +482,8 @@ func TestRunServiceInstall_PrintsReportEvenWhenInstallFails(t *testing.T) {
 	}
 	out := buf.String()
 
-	if installErr == nil {
-		t.Fatal("runServiceInstall: got nil error, want a failure — every launchctl/systemctl call was stubbed to fail")
-	}
-	if !strings.Contains(out, "RAFIKI_DB") {
-		t.Errorf("installReport output did not reach the operator on the Install-failure path:\n%s", out)
-	}
-	if strings.Contains(out, "hunter2") {
-		t.Error("report leaked a secret VALUE, not just its name")
-	}
-	if strings.Contains(out, "rafiki service installed") {
-		t.Error("success banner printed despite Install failing")
-	}
+	c.Require().Error(installErr, "runServiceInstall: got nil error, want a failure — every launchctl/systemctl call was stubbed to fail")
+	c.StrContains(out, "RAFIKI_DB", "installReport output did not reach the operator on the Install-failure path:\n")
+	c.NotStrContains(out, "hunter2", "report leaked a secret VALUE, not just its name")
+	c.NotStrContains(out, "rafiki service installed", "success banner printed despite Install failing")
 }

@@ -9,6 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestConversationStatsNoAgentDB boots the controller with a nil pool —
@@ -16,6 +18,7 @@ import (
 // ConversationStats answers no_agent_db instead of panicking on the nil pool.
 func TestConversationStatsNoAgentDB(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	dir := testSocketDir(t)
 	st := childstore.New()
@@ -24,12 +27,8 @@ func TestConversationStatsNoAgentDB(t *testing.T) {
 
 	_, err := ctrl.ConversationStats(t.Context(), insights.ScopeAll(), insights.StatsFilter{})
 	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) {
-		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
-	}
-	if ce.Code != protocol.ErrNoAgentDB {
-		t.Fatalf("expected code %s, got %q", protocol.ErrNoAgentDB, ce.Code)
-	}
+	c.True(errors.As(err, &ce), "expected *connectapi.ControllerError, got %T: %v", err, err)
+	c.Eq(protocol.ErrNoAgentDB, ce.Code, "expected code")
 }
 
 // Controller.ConversationID backs connectapi.ConversationResolver, whose whole
@@ -67,9 +66,6 @@ func TestControllerConversationIDOnlyResolvesFundiChildren(t *testing.T) {
 		{"c_missing", "", false},
 	} {
 		got, ok := ctrl.ConversationID(tc.childID)
-		if ok != tc.wantOK || got != tc.want {
-			t.Errorf("ConversationID(%q) = (%q, %v), want (%q, %v)",
-				tc.childID, got, ok, tc.want, tc.wantOK)
-		}
+		assert.NewCollecting(t).False(ok != tc.wantOK || got != tc.want, "ConversationID(%q) = (%q, %v), want (%q, %v)", tc.childID, got, ok, tc.want, tc.wantOK)
 	}
 }

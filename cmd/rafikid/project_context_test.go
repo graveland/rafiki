@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeProjectContextFetcher implements the narrow projectContextFetcher
@@ -20,13 +22,10 @@ func (f fakeProjectContextFetcher) ProjectContext(context.Context) (string, erro
 }
 
 func TestFetchProjectContext(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := fetchProjectContext(context.Background(), fakeProjectContextFetcher{content: "EXECUTOR_MARKER"})
-	if err != nil {
-		t.Fatalf("fetchProjectContext: %v", err)
-	}
-	if got != "EXECUTOR_MARKER" {
-		t.Errorf("got %q, want EXECUTOR_MARKER", got)
-	}
+	c.Require().NoError(err, "fetchProjectContext")
+	c.Eq("EXECUTOR_MARKER", got, "got")
 
 	if _, err := fetchProjectContext(context.Background(), fakeProjectContextFetcher{err: errors.New("boom")}); err == nil {
 		t.Error("a fetch error was swallowed")
@@ -36,13 +35,9 @@ func TestFetchProjectContext(t *testing.T) {
 	// string is still passed down as a non-nil pointer, which is what keeps the
 	// daemon from falling back to its own cwd.
 	got, err = fetchProjectContext(context.Background(), struct{}{})
-	if err != nil || got != "" {
-		t.Errorf("non-fetcher: got (%q, %v), want (\"\", nil)", got, err)
-	}
+	c.False(err != nil || got != "", "non-fetcher: got (%q, %v), want (\"\", nil)", got, err)
 	got, err = fetchProjectContext(context.Background(), nil)
-	if err != nil || got != "" {
-		t.Errorf("nil: got (%q, %v), want (\"\", nil)", got, err)
-	}
+	c.False(err != nil || got != "", "nil: got (%q, %v), want (\"\", nil)", got, err)
 }
 
 // TestAgentRuntimeOptionsNoExecutorLeavesProjectContextNil pins the negative
@@ -51,6 +46,7 @@ func TestFetchProjectContext(t *testing.T) {
 // is most likely to break silently — a child that quietly loses its CLAUDE.md
 // looks like a model getting worse, not like a bug.
 func TestAgentRuntimeOptionsNoExecutorLeavesProjectContextNil(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
@@ -58,12 +54,8 @@ func TestAgentRuntimeOptionsNoExecutorLeavesProjectContextNil(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_noexec", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Executor != nil {
-		t.Error("Executor should be nil for a child with no executor")
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Nil(ro.Executor, "Executor should be nil for a child with no executor")
 	if ro.ProjectContext != nil {
 		t.Errorf("ProjectContext = %v, want nil for a child with no executor", *ro.ProjectContext)
 	}

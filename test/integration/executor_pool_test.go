@@ -14,6 +14,8 @@ package integration_test
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestExecutorPool_FullLifecycle covers the join over a real reverse-dialled
@@ -31,6 +33,7 @@ import (
 // pkg/execpool (refresh_test.go), where healthInterval is a field and the same
 // assertions take milliseconds instead of two health ticks.
 func TestExecutorPool_FullLifecycle(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dsn := requireExecutorDB(t)
 	g := bootGrantDaemon(t, dsn)
 
@@ -39,19 +42,13 @@ func TestExecutorPool_FullLifecycle(t *testing.T) {
 
 	// Selected by label: a spawn naming env=home lands on it.
 	childID, err := g.grantSpawn(t, "", "env=home", "anthropic/claude-x")
-	if err != nil {
-		t.Fatalf("spawn onto the enrolled executor failed: %v", err)
-	}
-	if placed := g.executorOf(t, childID); placed != execID {
-		t.Fatalf("child placed on executor %q, want the one we enrolled (%s)", placed, execID)
-	}
+	c.Require().NoError(err, "spawn onto the enrolled executor failed")
+	c.Require().Eq(execID, g.executorOf(t, childID), "child placed on executor")
 
 	// A selector matching nothing is refused, and the refusal counts the pool —
 	// which is also how we know the executor is still live after the spawn.
 	_, err = g.grantSpawn(t, "", "env=nowhere", "anthropic/claude-x")
-	if err == nil || !strings.Contains(err.Error(), "1 live executor(s)") {
-		t.Errorf("expected a refusal naming 1 live executor, got: %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "1 live executor(s)"), "expected a refusal naming 1 live executor, got: %v", err)
 
 }
 

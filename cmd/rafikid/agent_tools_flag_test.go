@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestAgentToolAllowlistFlagsRoundTrip pins the whole --tools/--no-builtin-tools
@@ -15,6 +17,7 @@ import (
 // command's own flag set must define them too, or the standalone process dies
 // on an unknown flag the in-process path accepts.
 func TestAgentToolAllowlistFlagsRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Kind:           protocol.KindFundi,
 		Model:          "anthropic/claude-sonnet-4-5",
@@ -23,42 +26,24 @@ func TestAgentToolAllowlistFlagsRoundTrip(t *testing.T) {
 	}
 	argv := buildAgentArgv(req, "c_tools", "/state")
 	joined := strings.Join(argv, " ")
-	if !strings.Contains(joined, "--tools read,bash") {
-		t.Fatalf("argv missing --tools read,bash: %v", argv)
-	}
-	if !strings.Contains(joined, "--no-builtin-tools") {
-		t.Fatalf("argv missing --no-builtin-tools: %v", argv)
-	}
+	c.Require().StrContains(joined, "--tools read,bash", "argv missing --tools read,bash: %v", argv)
+	c.Require().StrContains(joined, "--no-builtin-tools", "argv missing --no-builtin-tools: %v", argv)
 
 	f, err := parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags(%q): %v", argv[1:], err)
-	}
-	if f.tools != "read,bash" {
-		t.Errorf("f.tools = %q, want \"read,bash\"", f.tools)
-	}
-	if !f.noBuiltinTools {
-		t.Error("f.noBuiltinTools = false, want true")
-	}
+	c.Require().NoError(err, "parseAgentFlags(%q)", argv[1:])
+	c.Eq("read,bash", f.tools, "f.tools = %q, want \"read,bash\"", f.tools)
+	c.True(f.noBuiltinTools, "f.noBuiltinTools = false, want true")
 
 	got, err := f.toRuntimeOptions(t.TempDir(), nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if got.Tools != "read,bash" {
-		t.Errorf("RuntimeOptions.Tools = %q, want \"read,bash\"", got.Tools)
-	}
-	if !got.NoBuiltinTools {
-		t.Error("RuntimeOptions.NoBuiltinTools = false, want true")
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.Eq("read,bash", got.Tools, "RuntimeOptions.Tools = %q, want \"read,bash\"", got.Tools)
+	c.True(got.NoBuiltinTools, "RuntimeOptions.NoBuiltinTools = false, want true")
 
 	// The cobra face must know both flags as well. parseAgentFlags is built on
 	// newAgentFlagSet, so this Lookup is the only thing that fails when a flag
 	// is registered in one flag set but not the other.
 	cmd := newFundiCmd()
 	for _, name := range []string{"tools", "no-builtin-tools"} {
-		if cmd.Flags().Lookup(name) == nil {
-			t.Errorf("`rafikid fundi` does not define --%s; the flag is registered in only one of the two flag sets", name)
-		}
+		c.NotNil(cmd.Flags().Lookup(name), "`rafikid fundi` does not define --%s; the flag is registered in only one of the two flag sets", name)
 	}
 }

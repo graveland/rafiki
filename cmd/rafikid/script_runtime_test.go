@@ -26,6 +26,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── environment ─────────────────────────────────────────────────────────────
@@ -49,6 +51,7 @@ func envMap(env []string) map[string]string {
 // cannot be resurrected through it), a recomputed PYTHONPATH, and exactly one
 // control channel — RAFIKI_CHILD_CONNECT.
 func TestScriptChildEnvStripsDaemonAndCredentialVariables(t *testing.T) {
+	c := assert.NewAborting(t)
 	environ := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=/home/dev",
@@ -77,72 +80,53 @@ func TestScriptChildEnvStripsDaemonAndCredentialVariables(t *testing.T) {
 	env := envMap(scriptChildEnv(environ, forwarded, "/pp/one:/pp/two", "/sock/dir/child.sock"))
 
 	for _, keep := range []string{"PATH", "HOME", "LANG", "FORWARDED_VAR"} {
-		if _, ok := env[keep]; !ok {
-			t.Fatalf("%s must survive the strip", keep)
-		}
+		_, ok := env[keep]
+		c.True(ok, "%s must survive the strip", keep)
 	}
 	for _, banned := range []string{"RAFIKI_DB", "RAFIKI_SOCKET", "RAFIKI_TEST_DSN", "RAFIKI_PROFILE",
 		"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "OPENROUTER_API_KEY"} {
-		if _, ok := env[banned]; ok {
-			t.Fatalf("%s leaked into a script child's environment", banned)
-		}
+		_, ok := env[banned]
+		c.False(ok, "%s leaked into a script child's environment", banned)
 	}
-	if env["FORWARDED_VAR"] != "yes" {
-		t.Fatalf("FORWARDED_VAR = %q, want the forwarded value", env["FORWARDED_VAR"])
-	}
-	if env["PYTHONPATH"] != "/pp/one:/pp/two" {
-		t.Fatalf("PYTHONPATH = %q, want the daemon's computed value, exactly once", env["PYTHONPATH"])
-	}
-	if env["RAFIKI_CHILD_CONNECT"] != "/sock/dir/child.sock" {
-		t.Fatalf("RAFIKI_CHILD_CONNECT = %q, want the per-child socket path", env["RAFIKI_CHILD_CONNECT"])
-	}
+	c.Eq("yes", env["FORWARDED_VAR"], "FORWARDED_VAR")
+	c.Eq("/pp/one:/pp/two", env["PYTHONPATH"], "PYTHONPATH")
+	c.Eq("/sock/dir/child.sock", env["RAFIKI_CHILD_CONNECT"], "RAFIKI_CHILD_CONNECT")
 }
 
 // TestScriptChildEnvValueWithPrefixIsData pins the strip's rule: a prefix
 // matches KEY names, never values. A forwarded variable whose VALUE happens
 // to start with RAFIKI_ is data, and reaches the child.
 func TestScriptChildEnvValueWithPrefixIsData(t *testing.T) {
+	c := assert.NewAborting(t)
 	env := envMap(scriptChildEnv(nil, map[string]string{"NOTE": "RAFIKI_NOT_A_SECRET"}, "", "/sock"))
-	if env["FORWARDED_VALUE"] != "" {
-		t.Fatal("impossible key")
-	}
+	c.Eq("", env["FORWARDED_VALUE"], "impossible key")
 	if env["FORWARDED"] != "" {
 		_ = env["FORWARDED"]
 	}
 	// The actual assertion: a key that merely holds a RAFIKI_ value survives.
 	env = envMap(scriptChildEnv(nil, map[string]string{"NOTE": "RAFIKI_NOT_A_SECRET"}, "", "/sock"))
-	if env["NOTE"] != "RAFIKI_NOT_A_SECRET" {
-		t.Fatalf("NOTE = %q — a value beginning with RAFIKI_ is data, not a key", env["NOTE"])
-	}
-	if env["RAFIKI_CHILD_CONNECT"] != "/sock" {
-		t.Fatal("RAFIKI_CHILD_CONNECT missing")
-	}
+	c.Eq("RAFIKI_NOT_A_SECRET", env["NOTE"], "NOTE")
+	c.Eq("/sock", env["RAFIKI_CHILD_CONNECT"], "RAFIKI_CHILD_CONNECT missing")
 }
 
 // ─── validation ──────────────────────────────────────────────────────────────
 
 func wantScriptRefusal(t *testing.T, err error, field string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("field %q was accepted on a script spawn", field)
-	}
+	c := assert.NewAborting(t)
+	c.Error(err, "field %q was accepted on a script spawn", field)
 	ce, ok := err.(*connectapi.ControllerError)
-	if !ok || ce.Code != protocol.ErrInvalidArgs {
-		t.Fatalf("field %q: wrong error class %v", field, err)
-	}
-	if !strings.Contains(ce.Message, `"`+field+`"`) {
-		t.Fatalf("refusal for %q does not name the field: %s", field, ce.Message)
-	}
+	c.False(!ok || ce.Code != protocol.ErrInvalidArgs, "field %q: wrong error class %v", field, err)
+	c.StrContains(ce.Message, `"`+field+`"`, "refusal for %q does not name the field", field)
 }
 
 // TestValidateScriptSpawnRefusesFundiClaudeOnlyFields pins the 3.1 refusal
 // matrix: a kind=script spawn carrying any fundi/claude-only field is
 // refused, in table order, naming the field.
 func TestValidateScriptSpawnRefusesFundiClaudeOnlyFields(t *testing.T) {
+	c := assert.NewAborting(t)
 	spec := &protocol.ScriptSpec{Repo: "local", Script: "driver"}
-	if err := validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindScript, Script: spec, Cwd: "/tmp"}); err != nil {
-		t.Fatalf("a clean script spawn must validate: %v", err)
-	}
+	c.NoError(validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindScript, Script: spec, Cwd: "/tmp"}), "a clean script spawn must validate")
 
 	for _, tc := range []struct {
 		field string
@@ -168,31 +152,24 @@ func TestValidateScriptSpawnRefusesFundiClaudeOnlyFields(t *testing.T) {
 	}
 
 	// A fundi-kind request is untouched: the refusals are script-only.
-	if err := validateScriptSpawn(protocol.SpawnRequest{Model: "anthropic/x"}); err != nil {
-		t.Fatalf("a fundi-kind request with model set must pass the script check: %v", err)
-	}
+	c.NoError(validateScriptSpawn(protocol.SpawnRequest{Model: "anthropic/x"}), "a fundi-kind request with model set must pass the script check")
 }
 
 // TestValidateScriptSpawnRequiresSpec pins the shape rule: no spec, bad
 // names, or a path-shaped repo are refused before anything is minted.
 func TestValidateScriptSpawnRequiresSpec(t *testing.T) {
-	if err := validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindScript}); err == nil {
-		t.Fatal("a script spawn without a spec must be refused")
-	}
+	c := assert.NewAborting(t)
+	c.Error(validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindScript}), "a script spawn without a spec must be refused")
 	err := validateScriptSpawn(protocol.SpawnRequest{
 		Kind:   protocol.KindScript,
 		Script: &protocol.ScriptSpec{Repo: "../escape", Script: "driver"},
 	})
-	if err == nil {
-		t.Fatal("a script spawn with a path-shaped repo must be refused")
-	}
+	c.Error(err, "a script spawn with a path-shaped repo must be refused")
 	err = validateScriptSpawn(protocol.SpawnRequest{
 		Kind:   protocol.KindScript,
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "not-a-name!"},
 	})
-	if err == nil {
-		t.Fatal("a script spawn with a non-identifier script name must be refused")
-	}
+	c.Error(err, "a script spawn with a non-identifier script name must be refused")
 }
 
 // TestValidateScriptSpawnRefusesSpecOnNonScriptKind is the server-side
@@ -202,21 +179,16 @@ func TestValidateScriptSpawnRequiresSpec(t *testing.T) {
 // Both shapes refuse: an explicit non-script kind, and the kind a preset
 // filled in after the CLI's client-side check ran.
 func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
+	ck := assert.NewAborting(t)
 	spec := &protocol.ScriptSpec{Repo: "local", Script: "driver"}
 
 	// Shape 1: an explicit non-script kind carrying a spec.
 	err := validateScriptSpawn(protocol.SpawnRequest{Kind: protocol.KindFundi, Script: spec})
-	if err == nil {
-		t.Fatal("a fundi-kind spawn carrying a script spec must be refused")
-	}
+	ck.Error(err, "a fundi-kind spawn carrying a script spec must be refused")
 	ce, ok := err.(*connectapi.ControllerError)
-	if !ok || ce.Code != protocol.ErrInvalidArgs {
-		t.Fatalf("wrong error class %v", err)
-	}
+	ck.False(!ok || ce.Code != protocol.ErrInvalidArgs, "wrong error class %v", err)
 	for _, want := range []string{`"fundi"`, `"script"`} {
-		if !strings.Contains(ce.Message, want) {
-			t.Fatalf("refusal %q does not name %s", ce.Message, want)
-		}
+		ck.StrContains(ce.Message, want, "refusal")
 	}
 
 	// Shape 2: the preset re-resolution — applyPreset fills kind=fundi from
@@ -228,15 +200,9 @@ func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
 		Cwd:    "/tmp/w",
 		Script: spec,
 	}, "owner-1")
-	if err != nil {
-		t.Fatalf("applyPreset: %v", err)
-	}
-	if resolved.Kind != protocol.KindFundi {
-		t.Fatalf("setup: resolved kind = %q, want fundi (the gap needs the preset to have won)", resolved.Kind)
-	}
-	if err := validateScriptSpawn(resolved); err == nil {
-		t.Fatal("the preset-resolved fundi spawn carrying a script spec must be refused")
-	}
+	ck.NoError(err, "applyPreset")
+	ck.Eq(protocol.KindFundi, resolved.Kind, "setup: resolved kind")
+	ck.Error(validateScriptSpawn(resolved), "the preset-resolved fundi spawn carrying a script spec must be refused")
 
 	// Positive control: a script preset resolves to kind script and the same
 	// spec passes.
@@ -248,15 +214,9 @@ func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
 		Cwd:    "/tmp/w",
 		Script: spec,
 	}, "owner-1")
-	if err != nil {
-		t.Fatalf("applyPreset (script preset): %v", err)
-	}
-	if resolved2.Kind != protocol.KindScript {
-		t.Fatalf("setup: resolved kind = %q, want script", resolved2.Kind)
-	}
-	if err := validateScriptSpawn(resolved2); err != nil {
-		t.Fatalf("a script-kind spawn with a spec must validate: %v", err)
-	}
+	ck.NoError(err, "applyPreset (script preset)")
+	ck.Eq(protocol.KindScript, resolved2.Kind, "setup: resolved kind")
+	ck.NoError(validateScriptSpawn(resolved2), "a script-kind spawn with a spec must validate")
 }
 
 // ─── settle semantics ────────────────────────────────────────────────────────
@@ -266,10 +226,9 @@ func TestValidateScriptSpawnRefusesSpecOnNonScriptKind(t *testing.T) {
 // set, pkg/child's Wait contract) → failed, with the stderr tail attached.
 // Every other kind keeps "exited" and no tail.
 func TestScriptSettleFor(t *testing.T) {
+	c := assert.NewAborting(t)
 	reason, tail := scriptSettleFor(protocol.KindScript, child.ShutdownResult{ExitCode: 0}, []byte("ignored"))
-	if reason != "done" || tail != "" {
-		t.Fatalf("exit 0: (%q, %q), want (done, \"\")", reason, tail)
-	}
+	c.False(reason != "done" || tail != "", "exit 0: (%q, %q), want (done, \"\")", reason, tail)
 	if reason, _ := scriptSettleFor(protocol.KindScript, child.ShutdownResult{ExitCode: 2}, []byte("boom")); reason != "failed" {
 		t.Fatalf("exit 2: reason %q, want failed", reason)
 	}
@@ -277,31 +236,22 @@ func TestScriptSettleFor(t *testing.T) {
 		t.Fatalf("signalled: reason %q, want failed (a signalled child did not exit 0)", reason)
 	}
 	reason, tail = scriptSettleFor(protocol.KindFundi, child.ShutdownResult{ExitCode: 0}, []byte("whatever"))
-	if reason != "exited" || tail != "" {
-		t.Fatalf("fundi: (%q, %q), want (exited, \"\")", reason, tail)
-	}
+	c.False(reason != "exited" || tail != "", "fundi: (%q, %q), want (exited, \"\")", reason, tail)
 }
 
 // TestLastStderrTail pins the 4 KiB cap: the tail is the LAST bytes,
 // verbatim.
 func TestLastStderrTail(t *testing.T) {
-	if got := lastStderrTail(nil, scriptStderrTailBytes); got != "" {
-		t.Fatalf("empty stderr: %q", got)
-	}
-	if got := lastStderrTail([]byte("short"), scriptStderrTailBytes); got != "short" {
-		t.Fatalf("short stderr: %q", got)
-	}
+	c := assert.NewAborting(t)
+	c.Eq("", lastStderrTail(nil, scriptStderrTailBytes), "empty stderr")
+	c.Eq("short", lastStderrTail([]byte("short"), scriptStderrTailBytes), "short stderr")
 	big := make([]byte, scriptStderrTailBytes+10)
 	for i := range big {
 		big[i] = byte('a' + i%26)
 	}
 	got := lastStderrTail(big, scriptStderrTailBytes)
-	if len(got) != scriptStderrTailBytes {
-		t.Fatalf("tail length = %d, want %d", len(got), scriptStderrTailBytes)
-	}
-	if got != string(big[10:]) {
-		t.Fatal("tail must be the LAST cap bytes, verbatim")
-	}
+	c.Len(got, scriptStderrTailBytes, "tail length = %d, want", len(got))
+	c.Eq(string(big[10:]), got, "tail must be the LAST cap bytes, verbatim")
 }
 
 // ─── the runner itself ───────────────────────────────────────────────────────
@@ -313,9 +263,8 @@ func runnerPyModules(t *testing.T, modules map[string]string) *fakePymoduleStore
 	t.Helper()
 	s := &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
 	for name, code := range modules {
-		if _, err := s.Put(context.Background(), "owner-1", name, code, ""); err != nil {
-			t.Fatalf("seed module %s: %v", name, err)
-		}
+		_, err := s.Put(context.Background(), "owner-1", name, code, "")
+		assert.NewAborting(t).NoError(err, "seed module %s", name)
 	}
 	return s
 }
@@ -330,9 +279,7 @@ func scriptRunnerTestController(t *testing.T, faceURL string, store *fakePymodul
 		base = "/tmp"
 	}
 	stateDir, err := os.MkdirTemp(base, "script-rt-")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mkdirtemp")
 	t.Cleanup(func() { os.RemoveAll(stateDir) })
 	return &Controller{
 		st:            childstore.New(),
@@ -351,6 +298,7 @@ func scriptRunnerTestController(t *testing.T, faceURL string, store *fakePymodul
 // process, req.Cwd as the working directory, its own process group, and the
 // socket closed and unlinked when the child exits.
 func TestScriptRunnerEndToEnd(t *testing.T) {
+	ck := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available: the local script runner needs an interpreter")
 	}
@@ -397,9 +345,7 @@ print("cwd-ok=" + str(os.getcwd() == os.environ.get("PROBE_CWD")), flush=True)
 		},
 	}
 	runner, err := c.scriptRunner(req, "c_script_probe", "", "owner-1")
-	if err != nil {
-		t.Fatalf("scriptRunner: %v", err)
-	}
+	ck.NoError(err, "scriptRunner")
 
 	sockPath := childsock.SocketPath(scriptHostDir(c.stateDir, "c_script_probe"))
 	if _, err := os.Stat(sockPath); err != nil {
@@ -407,29 +353,17 @@ print("cwd-ok=" + str(os.getcwd() == os.environ.get("PROBE_CWD")), flush=True)
 	}
 
 	_, stdout, stderr, err := runner.Start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	ck.NoError(err, "start")
 
 	out, err := io.ReadAll(stdout)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
+	ck.NoError(err, "read stdout")
 	errBuf, _ := io.ReadAll(stderr)
 	code, sig := runner.Wait()
-	if code != 0 || sig != "" {
-		t.Fatalf("script exited (%d, %q); stdout:\n%s\nstderr:\n%s", code, sig, out, errBuf)
-	}
+	ck.False(code != 0 || sig != "", "script exited (%d, %q); stdout:\n%s\nstderr:\n%s", code, sig, out, errBuf)
 
-	if strings.Contains(string(out), "LEAKED:") {
-		t.Fatalf("credential variables leaked into the script child: %s", out)
-	}
-	if !strings.Contains(string(out), "cwd-ok=True") {
-		t.Fatalf("script did not run in req.Cwd (stdout: %s)", out)
-	}
-	if !strings.Contains(string(out), "connect="+sockPath) {
-		t.Fatalf("RAFIKI_CHILD_CONNECT did not name the per-child socket: %s", out)
-	}
+	ck.NotStrContains(string(out), "LEAKED:", "credential variables leaked into the script child: %s", out)
+	ck.StrContains(string(out), "cwd-ok=True", "script did not run in req.Cwd (stdout: %s)", out)
+	ck.StrContains(string(out), "connect="+sockPath, "RAFIKI_CHILD_CONNECT did not name the per-child socket: %s", out)
 
 	// Lifecycle: after Wait the socket is gone; the materialized tree stays
 	// for forensics until Close removes it.
@@ -446,6 +380,7 @@ print("cwd-ok=" + str(os.getcwd() == os.environ.get("PROBE_CWD")), flush=True)
 // reaches the proxy-face target carrying the child's own secret — and a
 // caller-supplied Authorization/X-Rafiki-* header does not survive the hop.
 func TestScriptRunnerDialThroughSocket(t *testing.T) {
+	ck := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available: the local script runner needs an interpreter")
 	}
@@ -469,13 +404,9 @@ func TestScriptRunnerDialThroughSocket(t *testing.T) {
 		Cwd:    t.TempDir(),
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "sleeper"},
 	}, "c_script_dial", "", "owner-1")
-	if err != nil {
-		t.Fatalf("scriptRunner: %v", err)
-	}
+	ck.NoError(err, "scriptRunner")
 	_, stdout, _, err := runner.Start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	ck.NoError(err, "start")
 
 	// Wait for the child to actually be alive before dialing.
 	br := bufio.NewReader(stdout)
@@ -487,28 +418,20 @@ func TestScriptRunnerDialThroughSocket(t *testing.T) {
 	resp, err := unixGet(t, sockPath, "/probe", map[string]string{
 		"Authorization": "Bearer EVIL", "X-Rafiki-Evil": "zzz",
 	})
-	if err != nil {
-		t.Fatalf("dial through the per-child socket: %v", err)
-	}
+	ck.NoError(err, "dial through the per-child socket")
 	resp.Body.Close()
 
 	select {
 	case s := <-got:
-		if !strings.HasPrefix(s.auth, "Bearer ") || strings.Contains(s.auth, "EVIL") {
-			t.Fatalf("Authorization at the face = %q, want the injected bearer, not the caller's", s.auth)
-		}
-		if s.evil != "" {
-			t.Fatalf("caller-supplied X-Rafiki-* survived the proxy: %q", s.evil)
-		}
+		ck.False(!strings.HasPrefix(s.auth, "Bearer ") || strings.Contains(s.auth, "EVIL"), "Authorization at the face = %q, want the injected bearer, not the caller's", s.auth)
+		ck.Eq("", s.evil, "caller-supplied X-Rafiki-* survived the proxy")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the face never saw the proxied request")
 	}
 
 	// Tear down: the process-group kill is the exit the child gets when it
 	// ignores its stop; then the socket is closed and unlinked.
-	if err := runner.Terminate(); err != nil {
-		t.Fatalf("terminate: %v", err)
-	}
+	ck.NoError(runner.Terminate(), "terminate")
 	runner.Wait()
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
 		t.Fatalf("socket file survived the child's exit: err=%v", err)
@@ -521,6 +444,7 @@ func TestScriptRunnerDialThroughSocket(t *testing.T) {
 // is checked with kill(-pgid, 0): once every member is gone the signal
 // returns ESRCH, which is the proof.
 func TestScriptRunnerProcessGroupKillsTheSubtree(t *testing.T) {
+	ck := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available: the local script runner needs an interpreter")
 	}
@@ -537,31 +461,21 @@ func TestScriptRunnerProcessGroupKillsTheSubtree(t *testing.T) {
 		Cwd:    t.TempDir(),
 		Script: &protocol.ScriptSpec{Repo: "local", Script: "forker"},
 	}, "c_script_group", "", "owner-1")
-	if err != nil {
-		t.Fatalf("scriptRunner: %v", err)
-	}
+	ck.NoError(err, "scriptRunner")
 	_, stdout, _, err := runner.Start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	ck.NoError(err, "start")
 	br := bufio.NewReader(stdout)
 	if _, err := br.ReadString('\n'); err != nil {
 		t.Fatalf("read forked line: %v", err)
 	}
 	pgid := runner.PID()
-	if pgid == 0 {
-		t.Fatal("runner.PID() = 0; the child has no process")
-	}
+	ck.NotEq(0, pgid, "runner.PID() = 0; the child has no process")
 
-	if err := runner.Terminate(); err != nil {
-		t.Fatalf("terminate: %v", err)
-	}
+	ck.NoError(runner.Terminate(), "terminate")
 	// pkg/child's Wait contract: a signalled child reports ExitCode 0 with
 	// Signal set — so the signal string is the death indicator here.
 	code, sig := runner.Wait()
-	if sig == "" {
-		t.Fatalf("a SIGTERMed script reported exit %d with no signal; want a signal death", code)
-	}
+	ck.NotEq("", sig, "a SIGTERMed script reported exit %d with no signal; want a signal death", code)
 
 	// The whole group is gone once every member has exited (a reparented
 	// orphan needs a moment to be reaped).
@@ -571,9 +485,7 @@ func TestScriptRunnerProcessGroupKillsTheSubtree(t *testing.T) {
 		if err == syscall.ESRCH {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("process group %d still alive after the kill: %v", pgid, err)
-		}
+		ck.False(time.Now().After(deadline), "process group %d still alive after the kill: %v", pgid, err)
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -589,9 +501,7 @@ func unixGet(t *testing.T, sockPath, urlPath string, headers map[string]string) 
 		},
 	}}
 	req, err := http.NewRequest(http.MethodGet, "http://childsock.invalid"+urlPath, nil)
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "build request")
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -631,7 +541,5 @@ func TestScriptRunnerRefusesWithoutProxyFaceAndStore(t *testing.T) {
 		Cwd:    "/tmp",
 		Script: &protocol.ScriptSpec{Repo: "somegit", Script: "s"},
 	}, "c_x", "", "owner")
-	if err == nil || !strings.Contains(err.Error(), "git source") {
-		t.Fatalf("want the git-source refusal, got %v", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "git source"), "want the git-source refusal, got %v", err)
 }

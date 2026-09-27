@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeModelLister struct {
@@ -35,9 +37,7 @@ func TestListModelsPassesFiltersThrough(t *testing.T) {
 
 	_, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{Provider: "anthropic", Kind: "claude"}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "ListModels")
 	if f.gotProvider != "anthropic" || f.gotKind != "claude" {
 		t.Errorf("got (%q,%q), want (anthropic,claude)", f.gotProvider, f.gotKind)
 	}
@@ -46,6 +46,7 @@ func TestListModelsPassesFiltersThrough(t *testing.T) {
 // The whole point of the pointer fields: a model the catalog does not know
 // must arrive with them ABSENT, not zeroed.
 func TestListModelsUnknownCatalogFieldsStayAbsent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeModelLister{rows: []connectapi.ModelRow{{
 		ID: "ollama/llama3", Provider: "ollama", Model: "llama3", Source: "local",
 	}}}
@@ -54,22 +55,15 @@ func TestListModelsUnknownCatalogFieldsStayAbsent(t *testing.T) {
 
 	resp, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
+	c.Require().NoError(err, "ListModels")
 	got := resp.Msg.GetModels()[0]
-	if got.ContextWindow != nil {
-		t.Errorf("ContextWindow = %v, want nil", got.ContextWindow)
-	}
-	if got.PromptUsd != nil {
-		t.Errorf("PromptUsd = %v, want nil", got.PromptUsd)
-	}
-	if len(got.GetInputModalities()) != 0 {
-		t.Errorf("InputModalities = %v, want empty", got.GetInputModalities())
-	}
+	c.Nil(got.ContextWindow, "ContextWindow")
+	c.Nil(got.PromptUsd, "PromptUsd")
+	c.Empty(got.GetInputModalities(), "InputModalities")
 }
 
 func TestListModelsCarriesKnownCatalogFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeModelLister{rows: []connectapi.ModelRow{{
 		ID: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o",
 		Name: "GPT-4o", Source: "openrouter",
@@ -82,23 +76,16 @@ func TestListModelsCarriesKnownCatalogFields(t *testing.T) {
 
 	resp, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
+	c.Require().NoError(err, "ListModels")
 	got := resp.Msg.GetModels()[0]
-	if got.GetContextWindow() != 128000 {
-		t.Errorf("ContextWindow = %d, want 128000", got.GetContextWindow())
-	}
-	if got.GetPromptUsd() != 0.000005 {
-		t.Errorf("PromptUsd = %v, want 0.000005", got.GetPromptUsd())
-	}
-	if len(got.GetInputModalities()) != 2 {
-		t.Errorf("InputModalities = %v, want 2 entries", got.GetInputModalities())
-	}
+	c.Eq(128000, got.GetContextWindow(), "ContextWindow")
+	c.Eq(0.000005, got.GetPromptUsd(), "PromptUsd")
+	c.Len(got.GetInputModalities(), 2, "InputModalities")
 }
 
 // A zero price is a REAL price and must survive as present-and-zero.
 func TestListModelsZeroPriceIsPresent(t *testing.T) {
+	c := assert.NewAborting(t)
 	f := &fakeModelLister{rows: []connectapi.ModelRow{{
 		ID: "x/free", PromptUSD: f64p(0),
 	}}}
@@ -107,21 +94,15 @@ func TestListModelsZeroPriceIsPresent(t *testing.T) {
 
 	resp, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
-	if resp.Msg.GetModels()[0].PromptUsd == nil {
-		t.Fatal("PromptUsd = nil for an explicitly free model; zero must stay present")
-	}
+	c.NoError(err, "ListModels")
+	c.NotNil(resp.Msg.GetModels()[0].PromptUsd, "PromptUsd = nil for an explicitly free model; zero must stay present")
 }
 
 func TestListModelsWithoutListerFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestListModelsErrorBecomesInternal(t *testing.T) {
@@ -131,13 +112,12 @@ func TestListModelsErrorBecomesInternal(t *testing.T) {
 
 	_, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInternal, connect.CodeOf(err), "code")
 }
 
 // Tool support, listing date and expiry ride the wire, and absence survives.
 func TestListModelsCarriesToolSupportAgeAndExpiry(t *testing.T) {
+	c := assert.NewCollecting(t)
 	created := int64(1750000000)
 	f := &fakeModelLister{rows: []connectapi.ModelRow{
 		{
@@ -151,35 +131,22 @@ func TestListModelsCarriesToolSupportAgeAndExpiry(t *testing.T) {
 
 	resp, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
+	c.Require().NoError(err, "ListModels")
 	got := resp.Msg.GetModels()
 
-	if got[0].GetCreated() != created {
-		t.Errorf("Created = %d, want %d", got[0].GetCreated(), created)
-	}
-	if got[0].GetExpiresAt() != "2026-09-08" {
-		t.Errorf("ExpiresAt = %q, want 2026-09-08", got[0].GetExpiresAt())
-	}
-	if len(got[0].GetSupportedParameters()) != 2 {
-		t.Errorf("SupportedParameters = %v, want two", got[0].GetSupportedParameters())
-	}
+	c.Eq(created, got[0].GetCreated(), "Created")
+	c.Eq("2026-09-08", got[0].GetExpiresAt(), "ExpiresAt")
+	c.Len(got[0].GetSupportedParameters(), 2, "SupportedParameters")
 
 	// A model with no catalog entry must arrive UNKNOWN on all three, never as
 	// "supports nothing" or "created at the epoch".
-	if got[1].Created != nil {
-		t.Errorf("Created = %v, want nil", got[1].Created)
-	}
-	if len(got[1].GetSupportedParameters()) != 0 {
-		t.Errorf("SupportedParameters = %v, want empty", got[1].GetSupportedParameters())
-	}
-	if got[1].GetExpiresAt() != "" {
-		t.Errorf("ExpiresAt = %q, want empty", got[1].GetExpiresAt())
-	}
+	c.Nil(got[1].Created, "Created")
+	c.Empty(got[1].GetSupportedParameters(), "SupportedParameters")
+	c.Eq("", got[1].GetExpiresAt(), "ExpiresAt")
 }
 
 func TestListModelsCarriesCutoffAndAgenticScore(t *testing.T) {
+	c := assert.NewCollecting(t)
 	score := 59.2
 	f := &fakeModelLister{rows: []connectapi.ModelRow{
 		{ID: "a/scored", KnowledgeCutoff: "2026-02-16", AgenticIndex: &score},
@@ -190,23 +157,13 @@ func TestListModelsCarriesCutoffAndAgenticScore(t *testing.T) {
 
 	resp, err := s.ListModels(context.Background(),
 		connect.NewRequest(&rafikiv1.ListModelsRequest{}))
-	if err != nil {
-		t.Fatalf("ListModels: %v", err)
-	}
+	c.Require().NoError(err, "ListModels")
 	got := resp.Msg.GetModels()
 
-	if got[0].GetKnowledgeCutoff() != "2026-02-16" {
-		t.Errorf("KnowledgeCutoff = %q", got[0].GetKnowledgeCutoff())
-	}
-	if got[0].GetAgenticIndex() != score {
-		t.Errorf("AgenticIndex = %v, want %v", got[0].GetAgenticIndex(), score)
-	}
+	c.Eq("2026-02-16", got[0].GetKnowledgeCutoff(), "KnowledgeCutoff =")
+	c.Eq(score, got[0].GetAgenticIndex(), "AgenticIndex")
 	// Absence must survive the wire: a nil score must not arrive as 0, which
 	// would sort as the worst model rather than as no answer.
-	if got[1].AgenticIndex != nil {
-		t.Errorf("AgenticIndex = %v, want nil", got[1].AgenticIndex)
-	}
-	if got[1].GetKnowledgeCutoff() != "" {
-		t.Errorf("KnowledgeCutoff = %q, want empty", got[1].GetKnowledgeCutoff())
-	}
+	c.Nil(got[1].AgenticIndex, "AgenticIndex")
+	c.Eq("", got[1].GetKnowledgeCutoff(), "KnowledgeCutoff")
 }

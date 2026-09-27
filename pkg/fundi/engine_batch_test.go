@@ -11,6 +11,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // blockingBatcher is a fake llm.Batcher whose Park blocks until released —
@@ -59,9 +61,7 @@ func batchEngineClient(t *testing.T, b llm.Batcher) *llm.Client {
 		llm.WithDefaultModel("openrouter/z-ai/glm-5.3-flash:batch"),
 		llm.WithBatcher(b),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return client
 }
 
@@ -92,9 +92,7 @@ func TestEngineBatchWaitFrames(t *testing.T) {
 		Name:     "w1",
 		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	eng.Start()
 	fe.handler = eng
 
@@ -147,6 +145,7 @@ func (r *recordPark) Park(_ context.Context, customID, model string, _ anthropic
 // over the persisted rows), so the re-issued call reproduces the id exactly;
 // this fails the moment the customID ever includes anything per-process.
 func TestEngineBatchResumeAdopts(t *testing.T) {
+	c := assert.NewCollecting(t)
 	silenceSlog(t)
 	if testing.Short() {
 		t.Skip("resume-adopts needs a database")
@@ -167,9 +166,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		llm.WithBatcher(b1),
 		llm.WithStore(pool),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	out1 := &syncBuffer{}
 	fe1 := NewFrontend(strings.NewReader(""), out1, nil)
 	eng1, err := NewEngine(EngineConfig{
@@ -180,9 +177,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		Name:     "w1",
 		ConvOpts: []llm.ConvOption{llm.Entrypoint("agent"), llm.ByExternalRef(ref)},
 	}, fe1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	eng1.Start()
 	fe1.handler = eng1
 
@@ -198,9 +193,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		if n == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("engine 1 never reached Park")
-		}
+		c.Require().False(time.Now().After(deadline), "engine 1 never reached Park")
 		time.Sleep(10 * time.Millisecond)
 	}
 	firstID := b1.ids[0]
@@ -216,21 +209,13 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		llm.WithBatcher(&recordPark{}), // placeholder; engine 2 gets its own below
 		llm.WithStore(pool),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	probe, err := clientResume.Conversation(ctx,
 		llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	history, err := probe.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(history) == 0 {
-		t.Fatal("engine 1 left no persisted history; the resume test is void")
-	}
+	c.Require().NoError(err)
+	c.Require().NotEmpty(history, "engine 1 left no persisted history; the resume test is void")
 
 	// Engine 2: AutoResume on the same conversation. Its Continue re-issues
 	// the pending turn and must land on Park with the SAME customID.
@@ -241,9 +226,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		llm.WithBatcher(b2),
 		llm.WithStore(pool),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	out2 := &syncBuffer{}
 	fe2 := NewFrontend(strings.NewReader(""), out2, nil)
 	eng2, err := NewEngine(EngineConfig{
@@ -255,9 +238,7 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		AutoResume: true,
 		ConvOpts:   []llm.ConvOption{llm.Entrypoint("agent"), llm.ByExternalRef(ref)},
 	}, fe2)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	eng2.Start()
 	fe2.handler = eng2
 
@@ -269,16 +250,10 @@ func TestEngineBatchResumeAdopts(t *testing.T) {
 		if n == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("engine 2 never reached Park (engine 1's id was %q)", firstID)
-		}
+		c.Require().False(time.Now().After(deadline), "engine 2 never reached Park (engine 1's id was %q)", firstID)
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := b2.ids[0]; got != firstID {
-		t.Errorf("resume parked with customID %q, want the SAME id %q (resume must adopt)", got, firstID)
-	}
-	if got := b2.models[0]; got != "z-ai/glm-5.3-flash:batch" {
-		t.Errorf("resume parked with model %q, want the :batch id", got)
-	}
+	c.Eq(firstID, b2.ids[0], "resume parked with customID")
+	c.Eq("z-ai/glm-5.3-flash:batch", b2.models[0], "resume parked with model")
 	eng2.Close()
 }

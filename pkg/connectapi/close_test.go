@@ -13,42 +13,35 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestClosePassesChildIDThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
 	resp, err := s.Close(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if f.closedID != "c_1" {
-		t.Errorf("closedID = %q, want c_1", f.closedID)
-	}
-	if resp.Msg.GetChildId() != "c_1" {
-		t.Errorf("resp child_id = %q, want c_1", resp.Msg.GetChildId())
-	}
+	c.Require().NoError(err, "Close")
+	c.Eq("c_1", f.closedID, "closedID")
+	c.Eq("c_1", resp.Msg.GetChildId(), "resp child_id")
 }
 
 func TestCloseRequiresChildID(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(&fakeLifecycle{})
 	_, err := s.Close(context.Background(), connect.NewRequest(&rafikiv1.CloseRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestCloseWithoutLifecycleFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.Close(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 // Controller.Close returns authored connectapi.ControllerError values, and the code the
@@ -57,6 +50,7 @@ func TestCloseWithoutLifecycleFailsClosed(t *testing.T) {
 // not Internal, which tells the client the daemon is broken. The authored
 // message text is forwarded with it (the daemon writes both strings).
 func TestCloseNotFoundBecomesNotFound(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{closeErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNotFound,
 		Message: "child not found: c_1",
@@ -65,12 +59,8 @@ func TestCloseNotFoundBecomesNotFound(t *testing.T) {
 	s.SetChildLifecycle(f)
 	_, err := s.Close(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
-	}
-	if err == nil || !strings.Contains(err.Error(), "child not found: c_1") {
-		t.Errorf("message = %v, want the daemon's authored text", err)
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	c.False(err == nil || !strings.Contains(err.Error(), "child not found: c_1"), "message = %v, want the daemon's authored text", err)
 }
 
 func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
@@ -82,9 +72,7 @@ func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
 	s.SetChildLifecycle(f)
 	_, err := s.Close(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 }
 
 // A generic error — something that is not a connectapi.ControllerError — keeps the
@@ -92,15 +80,12 @@ func TestCloseNotExitedBecomesFailedPrecondition(t *testing.T) {
 // the peer sees only the fixed internal text, never infrastructure text like
 // a pgx failure naming the database.
 func TestCloseErrorBecomesInternal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{closeErr: errors.New("still running")}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 	_, err := s.Close(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
-	if err == nil || strings.Contains(err.Error(), "still running") {
-		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+	c.False(err == nil || strings.Contains(err.Error(), "still running"), "err.Error() = %v, want the raw cause redacted", err)
 }

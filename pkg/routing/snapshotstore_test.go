@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestFileSnapshotStoreRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := FileSnapshotStore{Path: filepath.Join(t.TempDir(), "nested", "dir", "catalog.json")}
 
 	if _, err := s.Load(); !os.IsNotExist(err) {
@@ -17,45 +20,28 @@ func TestFileSnapshotStoreRoundTrip(t *testing.T) {
 	}
 
 	want := []byte(`{"data":[{"id":"openai/gpt-5-codex"}]}`)
-	if err := s.Save(want); err != nil {
-		t.Fatalf("Save: %v", err) // must create the parent directories itself
-	}
+	c.Require().NoError(s.Save(want), "Save") // must create the parent directories itself
 	got, err := s.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if string(got) != string(want) {
-		t.Errorf("round trip: got %q, want %q", got, want)
-	}
+	c.Require().NoError(err, "Load")
+	c.Eq(string(want), string(got), "round trip: got %q, want %q", got, want)
 
 	fi, err := os.Stat(s.Path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
+	c.Require().NoError(err, "stat")
 	// CreateTemp makes 0600; the snapshot is not a secret and other tools on
 	// the machine read it, so the rename must land 0644.
-	if perm := fi.Mode().Perm(); perm != 0o644 {
-		t.Errorf("mode: got %v, want 0644", perm)
-	}
+	c.Eq(0o644, fi.Mode().Perm(), "mode: got")
 }
 
 func TestFileSnapshotStoreOverwrite(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := FileSnapshotStore{Path: filepath.Join(t.TempDir(), "catalog.json")}
-	if err := s.Save([]byte("first-and-much-longer-than-the-second")); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := s.Save([]byte("second")); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	c.Require().NoError(s.Save([]byte("first-and-much-longer-than-the-second")), "Save")
+	c.Require().NoError(s.Save([]byte("second")), "Save")
 	got, err := s.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	c.Require().NoError(err, "Load")
 	// A rename replaces rather than overlays: no tail of the longer first
 	// write may survive.
-	if string(got) != "second" {
-		t.Errorf("overwrite: got %q, want %q", got, "second")
-	}
+	c.Eq("second", string(got), "overwrite: got %q, want", got)
 }
 
 // TestFileSnapshotStoreNoTornReads is the reason Save renames instead of
@@ -66,9 +52,7 @@ func TestFileSnapshotStoreNoTornReads(t *testing.T) {
 	s := FileSnapshotStore{Path: filepath.Join(t.TempDir(), "catalog.json")}
 	a := []byte(`{"data":[` + string(make([]byte, 4096)) + `]}`)
 	b := []byte(`{"data":[]}`)
-	if err := s.Save(a); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	assert.NewAborting(t).NoError(s.Save(a), "seed")
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -112,17 +96,14 @@ func TestFileSnapshotStoreNoTornReads(t *testing.T) {
 // TestFileSnapshotStoreLeavesNoTempFiles guards the cleanup: completion runs on
 // every TAB press, so a leaked temp per write would quietly fill the cache dir.
 func TestFileSnapshotStoreLeavesNoTempFiles(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	s := FileSnapshotStore{Path: filepath.Join(dir, "catalog.json")}
 	for range 5 {
-		if err := s.Save([]byte("x")); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+		c.NoError(s.Save([]byte("x")), "Save")
 	}
 	ents, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
+	c.NoError(err, "ReadDir")
 	if len(ents) != 1 {
 		names := make([]string, 0, len(ents))
 		for _, e := range ents {

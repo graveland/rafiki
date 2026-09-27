@@ -4,9 +4,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestMountRegistersMCPUnderWrap(t *testing.T) {
+	c := assert.NewAborting(t)
 	ran := false
 	h := Handler{
 		MCPPath: "/mcp/",
@@ -24,12 +27,8 @@ func TestMountRegistersMCPUnderWrap(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp/", nil))
-	if !ran {
-		t.Fatal("marker handler never ran")
-	}
-	if got := rec.Header().Get("X-Mount-Wrap"); got != "applied" {
-		t.Fatalf("wrap did not run before the handler: sentinel header %q", got)
-	}
+	c.True(ran, "marker handler never ran")
+	c.Eq("applied", rec.Header().Get("X-Mount-Wrap"), "wrap did not run before the handler: sentinel header")
 }
 
 func TestMountSkipsMCPWhenUnset(t *testing.T) {
@@ -54,9 +53,7 @@ func TestMountSkipsMCPWhenUnset(t *testing.T) {
 			tc.h.Mount(mux, nil)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp/", nil))
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("want 404, got %d", rec.Code)
-			}
+			assert.NewAborting(t).Eq(http.StatusNotFound, rec.Code, "want 404, got")
 		})
 	}
 }

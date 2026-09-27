@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // connectFakeDaraja drives a REAL hijacked HTTP/2 connection between a
@@ -27,12 +29,11 @@ import (
 // once.
 func connectFakeDaraja(t *testing.T, handler darajapbconnect.DarajaServiceHandler) (pool *Pool, childID string, teardown func()) {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	reg := NewRegistry()
 	tpk, err := reg.MintTicket("c1")
-	if err != nil {
-		t.Fatalf("mint ticket: %v", err)
-	}
+	c.NoError(err, "mint ticket")
 	pool = New(reg)
 
 	addr := servePoolOnTCP(t, pool)
@@ -41,12 +42,8 @@ func connectFakeDaraja(t *testing.T, handler darajapbconnect.DarajaServiceHandle
 	// the child id, exactly what a real daraja's first dial sends. The fresh
 	// reconnect credential comes back as a header on the 101.
 	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
-	if err != nil {
-		t.Fatalf("upgrade dial: %v", err)
-	}
-	if resp.Get(upgradeconn.HeaderCredential) == "" {
-		t.Fatal("no credential on the 101 response")
-	}
+	c.NoError(err, "upgrade dial")
+	c.NotEq("", resp.Get(upgradeconn.HeaderCredential), "no credential on the 101 response")
 
 	deadline := time.After(3 * time.Second)
 	for {

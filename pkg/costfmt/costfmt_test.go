@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestFormat_USD(t *testing.T) {
@@ -18,9 +20,8 @@ func TestFormat_USD(t *testing.T) {
 		{0.42, "$0.42"},
 		{12.5, "$12.50"},
 	} {
-		if got := Format(tc.usd, nil); got != tc.want {
-			t.Errorf("Format(%v, nil) = %q, want %q", tc.usd, got, tc.want)
-		}
+		got := Format(tc.usd, nil)
+		assert.NewCollecting(t).Eq(tc.want, got, "Format(%v, nil) = %q, want", tc.usd, got)
 	}
 }
 
@@ -30,31 +31,25 @@ func TestFormat_Converts(t *testing.T) {
 		t.Errorf("Format(1.0, cur) = %q, want %q", got, want)
 	}
 	// Sub-cent after conversion still keeps 4 decimals.
-	if got, want := Format(0.003, cur), "$0.0041 CAD"; got != want {
-		t.Errorf("Format(0.003, cur) = %q, want %q", got, want)
-	}
+	got, want := Format(0.003, cur), "$0.0041 CAD"
+	assert.NewCollecting(t).Eq(want, got, "Format(0.003, cur)")
 }
 
 // A zero or unset rate is "not configured" -- fall back to plain USD rather
 // than converting by a meaningless factor.
 func TestFormat_UnsetRateFallsBackToUSD(t *testing.T) {
 	cur := &clientstate.Currency{Code: "CAD"} // Rate: 0
-	if got, want := Format(1.0, cur), "$1.00"; got != want {
-		t.Errorf("Format(1.0, cur) = %q, want %q", got, want)
-	}
+	got, want := Format(1.0, cur), "$1.00"
+	assert.NewCollecting(t).Eq(want, got, "Format(1.0, cur)")
 }
 
 func TestToUSD_NoCurrency(t *testing.T) {
-	if got := ToUSD(12.5, nil); got != 12.5 {
-		t.Errorf("ToUSD(12.5, nil) = %v, want 12.5", got)
-	}
+	assert.NewCollecting(t).Eq(12.5, ToUSD(12.5, nil), "ToUSD(12.5, nil)")
 }
 
 func TestToUSD_UnsetRatePassesThrough(t *testing.T) {
 	cur := &clientstate.Currency{Code: "CAD"} // Rate: 0
-	if got := ToUSD(12.5, cur); got != 12.5 {
-		t.Errorf("ToUSD(12.5, cur) = %v, want 12.5 (unset rate passes through)", got)
-	}
+	assert.NewCollecting(t).Eq(12.5, ToUSD(12.5, cur), "ToUSD(12.5, cur)")
 }
 
 func TestToUSD_ConvertsAndRoundTripsWithFormat(t *testing.T) {
@@ -65,21 +60,17 @@ func TestToUSD_ConvertsAndRoundTripsWithFormat(t *testing.T) {
 	}
 	// Round-trips through Format: a local-currency amount converted to USD
 	// and displayed back through Format should read as the original amount.
-	if got, want := Format(usd, cur), "$1.38 CAD"; got != want {
-		t.Errorf("Format(ToUSD(1.38, cur), cur) = %q, want %q", got, want)
-	}
+	got, want := Format(usd, cur), "$1.38 CAD"
+	assert.NewCollecting(t).Eq(want, got, "Format(ToUSD(1.38, cur), cur)")
 }
 
 func TestToDisplay(t *testing.T) {
-	if got := ToDisplay(10.0, nil); got != 10.0 {
-		t.Errorf("ToDisplay(10, nil) = %v, want 10", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq(10.0, ToDisplay(10.0, nil), "ToDisplay(10, nil)")
 	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
 	if diff := ToDisplay(10.0, cur) - 13.8; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("ToDisplay(10, cur) = %v, want ~13.8", ToDisplay(10.0, cur))
 	}
 	curZero := &clientstate.Currency{Code: "CAD", Rate: 0}
-	if got := ToDisplay(10.0, curZero); got != 10.0 {
-		t.Errorf("ToDisplay(10, curZero) = %v, want 10", got)
-	}
+	c.Eq(10.0, ToDisplay(10.0, curZero), "ToDisplay(10, curZero)")
 }

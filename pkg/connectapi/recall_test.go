@@ -14,6 +14,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/recall"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeRecall struct {
@@ -94,9 +96,7 @@ func TestSetRecallManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetRecallManager(nil)
 	_, err := s.Recall(context.Background(), connect.NewRequest(&rafikiv1.RecallRequest{Query: "q"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("after SetRecallManager(nil): got code %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetRecallManager(nil): got code")
 }
 
 func TestRecallUnavailableWhenUnwired(t *testing.T) {
@@ -143,9 +143,7 @@ func TestRecallUnavailableWhenUnwired(t *testing.T) {
 			t.Errorf("%s with no manager: accepted", call.name)
 			continue
 		}
-		if connect.CodeOf(err) != connect.CodeUnavailable {
-			t.Errorf("%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
-		}
+		assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
 	}
 }
 
@@ -221,24 +219,20 @@ func TestRecallErrorMapping(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			s := &Server{}
 			f := &fakeRecall{}
 			s.SetRecallManager(f)
 			err := tc.fn(s, f, tc.err)
-			if err == nil {
-				t.Fatalf("accepted")
-			}
-			if connect.CodeOf(err) != tc.want {
-				t.Errorf("got code %v, want %v", connect.CodeOf(err), tc.want)
-			}
-			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
-				t.Errorf("error does not wrap %v: %v", tc.wantErr, err)
-			}
+			c.Require().Error(err, "accepted")
+			c.Eq(tc.want, connect.CodeOf(err), "got code")
+			c.False(tc.wantErr != nil && !errors.Is(err, tc.wantErr), "error does not wrap %v: %v", tc.wantErr, err)
 		})
 	}
 }
 
 func TestRecallLimitClamp(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct{ wire, want int }{
 		{0, recall.RecallDefaultLimit},
 		{1, 1},
@@ -252,12 +246,8 @@ func TestRecallLimitClamp(t *testing.T) {
 		s.SetRecallManager(f)
 		_, err := s.Recall(context.Background(),
 			connect.NewRequest(&rafikiv1.RecallRequest{Query: "q", Limit: int32(tc.wire)}))
-		if err != nil {
-			t.Fatalf("limit %d: %v", tc.wire, err)
-		}
-		if f.gotLimit != tc.want {
-			t.Errorf("limit %d arrived as %d, want %d", tc.wire, f.gotLimit, tc.want)
-		}
+		c.Require().NoError(err, "limit %d", tc.wire)
+		c.Eq(tc.want, f.gotLimit, "limit %d arrived as %d, want", tc.wire, f.gotLimit)
 	}
 }
 
@@ -266,6 +256,7 @@ func TestRecallLimitClamp(t *testing.T) {
 // manager receives (Scope/MemoryOwner left for the adapter), and hits come
 // back with RFC3339 UTC timestamps.
 func TestRecallMapsRequestToSearchQuery(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeRecall{hits: []recall.Hit{{
 		ID: "s:abc", Source: recall.SourceSummary, Snippet: "snip",
@@ -291,48 +282,31 @@ func TestRecallMapsRequestToSearchQuery(t *testing.T) {
 		SinceUnix: since,
 		UntilUnix: until,
 	}))
-	if err != nil {
-		t.Fatalf("recall: %v", err)
-	}
+	c.Require().NoError(err, "recall")
 
 	q := f.gotQuery
-	if q.Text != "needle" || q.Under != "projects" || q.Repo != "rafiki" {
-		t.Errorf("search query text/under/repo = %q/%q/%q", q.Text, q.Under, q.Repo)
-	}
-	if len(q.Sources) != 2 || q.Sources[0] != recall.SourceMemory || q.Sources[1] != recall.SourceWindow {
-		t.Errorf("sources = %v, want [memory window]", q.Sources)
-	}
-	if q.Scope != (recall.Scope{}) || q.MemoryOwner != "" {
-		t.Errorf("scope/owner resolved by handler: %+v/%q, want zero (adapter's job)", q.Scope, q.MemoryOwner)
-	}
-	if q.Since == nil || !q.Since.Equal(time.Unix(since, 0).UTC()) {
-		t.Errorf("since = %v, want unix %d", q.Since, since)
-	}
-	if q.Until == nil || !q.Until.Equal(time.Unix(until, 0).UTC()) {
-		t.Errorf("until = %v, want unix %d", q.Until, until)
-	}
+	c.False(q.Text != "needle" || q.Under != "projects" || q.Repo != "rafiki", "search query text/under/repo = %q/%q/%q", q.Text, q.Under, q.Repo)
+	c.False(len(q.Sources) != 2 || q.Sources[0] != recall.SourceMemory || q.Sources[1] != recall.SourceWindow, "sources = %v, want [memory window]", q.Sources)
+	c.False(q.Scope != (recall.Scope{}) || q.MemoryOwner != "", "scope/owner resolved by handler: %+v/%q, want zero (adapter's job)", q.Scope, q.MemoryOwner)
+	c.False(q.Since == nil || !q.Since.Equal(time.Unix(since, 0).UTC()), "since = %v, want unix %d", q.Since, since)
+	c.False(q.Until == nil || !q.Until.Equal(time.Unix(until, 0).UTC()), "until = %v, want unix %d", q.Until, until)
 
-	if len(resp.Msg.Hits) != 1 {
-		t.Fatalf("got %d hits, want 1", len(resp.Msg.Hits))
-	}
+	c.Require().Len(resp.Msg.Hits, 1, "got %d hits, want 1", len(resp.Msg.Hits))
 	h := resp.Msg.Hits[0]
 	if h.GetId() != "s:abc" || h.GetSource() != "summary" || h.GetSnippet() != "snip" {
 		t.Errorf("hit id/source/snippet = %q/%q/%q", h.GetId(), h.GetSource(), h.GetSnippet())
 	}
-	if h.GetWhen() != "2026-01-02T03:04:05Z" {
-		t.Errorf("when = %q, want RFC3339 UTC", h.GetWhen())
-	}
-	if h.GetConversationId() != "conv" || h.GetConversationName() != "name" ||
+	c.Eq("2026-01-02T03:04:05Z", h.GetWhen(), "when")
+	c.False(h.GetConversationId() != "conv" || h.GetConversationName() != "name" ||
 		h.GetRepo() != "rafiki" || h.GetKind() != "fundi" ||
 		h.GetOrdinalFrom() != 3 || h.GetOrdinalTo() != 9 ||
-		h.GetTitle() != "t" || h.GetScore() != 0.42 {
-		t.Errorf("hit fields drifted: %+v", h)
-	}
+		h.GetTitle() != "t" || h.GetScore() != 0.42, "hit fields drifted: %+v", h)
 }
 
 // TestRecallUnknownSourceRejected pins the source filter validation: an
 // unrecognized name is a bad request, not a silent no-match.
 func TestRecallUnknownSourceRejected(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeRecall{}
 	s.SetRecallManager(f)
@@ -340,18 +314,15 @@ func TestRecallUnknownSourceRejected(t *testing.T) {
 		Query:   "q",
 		Sources: []string{"memory", "bogus"},
 	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("unknown source: got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if f.recalls != 0 {
-		t.Errorf("manager reached despite the rejection")
-	}
+	c.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "unknown source: got code")
+	c.Eq(0, f.recalls, "manager reached despite the rejection")
 }
 
 // TestRecallPutMemoryMetaJson pins meta_json handling: absent means "{}",
 // invalid JSON is a bad request that never reaches the manager, valid JSON is
 // passed through byte-for-byte.
 func TestRecallPutMemoryMetaJson(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeRecall{mem: recall.Memory{Path: "a", Name: "b", Meta: json.RawMessage(`{"k":1}`)}}
 	s.SetRecallManager(f)
@@ -360,9 +331,7 @@ func TestRecallPutMemoryMetaJson(t *testing.T) {
 		connect.NewRequest(&rafikiv1.PutMemoryRequest{Path: "a", Name: "b", Body: "x"})); err != nil {
 		t.Fatalf("put without meta_json: %v", err)
 	}
-	if got := string(f.gotPut.Meta); got != "{}" {
-		t.Errorf("absent meta_json arrived as %q, want {}", got)
-	}
+	c.Eq("{}", string(f.gotPut.Meta), "absent meta_json arrived as")
 
 	if _, err := s.PutMemory(context.Background(),
 		connect.NewRequest(&rafikiv1.PutMemoryRequest{Path: "a", Name: "b", MetaJson: "{oops"})); err == nil {
@@ -370,26 +339,19 @@ func TestRecallPutMemoryMetaJson(t *testing.T) {
 	} else if connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Errorf("invalid meta_json: got code %v, want InvalidArgument", connect.CodeOf(err))
 	}
-	if f.puts != 1 {
-		t.Errorf("manager reached %d times after the invalid put, want 1 (the valid one)", f.puts)
-	}
+	c.Eq(1, f.puts, "manager reached")
 
 	resp, err := s.PutMemory(context.Background(),
 		connect.NewRequest(&rafikiv1.PutMemoryRequest{Path: "a", Name: "b", MetaJson: `{"k":1}`}))
-	if err != nil {
-		t.Fatalf("put with meta_json: %v", err)
-	}
-	if got := string(f.gotPut.Meta); got != `{"k":1}` {
-		t.Errorf("meta_json drifted: %q", got)
-	}
-	if resp.Msg.GetMemory().GetMetaJson() != `{"k":1}` {
-		t.Errorf("response meta_json = %q", resp.Msg.GetMemory().GetMetaJson())
-	}
+	c.Require().NoError(err, "put with meta_json")
+	c.Eq(`{"k":1}`, string(f.gotPut.Meta), "meta_json drifted")
+	c.Eq(`{"k":1}`, resp.Msg.GetMemory().GetMetaJson(), "response meta_json =")
 }
 
 // TestRecallStatusMapsFields pins the status conversion, including the two
 // shapes of backfill_since: RFC3339 UTC when backfill is on, empty when off.
 func TestRecallStatusMapsFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	since := time.Unix(1700000000, 0).UTC()
 	s := &Server{}
 	s.SetRecallManager(&fakeRecall{status: RecallStatus{
@@ -409,20 +371,12 @@ func TestRecallStatusMapsFields(t *testing.T) {
 		SummaryModel: "sum",
 	}})
 	resp, err := s.RecallStatus(context.Background(), connect.NewRequest(&rafikiv1.RecallStatusRequest{}))
-	if err != nil {
-		t.Fatalf("status: %v", err)
-	}
+	c.Require().NoError(err, "status")
 	m := resp.Msg
-	if m.GetConversations() != 3 || m.GetWindows() != 7 || m.GetWindowsUnembedded() != 2 ||
-		m.GetSummaries() != 5 || m.GetSummariesPending() != 1 || m.GetMemories() != 9 {
-		t.Errorf("counts drifted: %+v", m)
-	}
-	if m.GetSummaryCostUsd() != 0.25 || m.GetBackfillBudgetUsd() != 2 || m.GetBackfillSpentUsd() != 0.5 {
-		t.Errorf("costs drifted: %+v", m)
-	}
-	if m.GetBackfillSince() != "2023-11-14T22:13:20Z" {
-		t.Errorf("backfill_since = %q, want RFC3339 UTC", m.GetBackfillSince())
-	}
+	c.False(m.GetConversations() != 3 || m.GetWindows() != 7 || m.GetWindowsUnembedded() != 2 ||
+		m.GetSummaries() != 5 || m.GetSummariesPending() != 1 || m.GetMemories() != 9, "counts drifted: %+v", m)
+	c.False(m.GetSummaryCostUsd() != 0.25 || m.GetBackfillBudgetUsd() != 2 || m.GetBackfillSpentUsd() != 0.5, "costs drifted: %+v", m)
+	c.Eq("2023-11-14T22:13:20Z", m.GetBackfillSince(), "backfill_since")
 	if m.GetEmbeddingModel() != "emb" || m.GetSummaryModel() != "sum" {
 		t.Errorf("models drifted: %q/%q", m.GetEmbeddingModel(), m.GetSummaryModel())
 	}
@@ -430,10 +384,6 @@ func TestRecallStatusMapsFields(t *testing.T) {
 	s = &Server{}
 	s.SetRecallManager(&fakeRecall{})
 	resp, err = s.RecallStatus(context.Background(), connect.NewRequest(&rafikiv1.RecallStatusRequest{}))
-	if err != nil {
-		t.Fatalf("status without backfill: %v", err)
-	}
-	if resp.Msg.GetBackfillSince() != "" {
-		t.Errorf("backfill_since with no backfill = %q, want empty", resp.Msg.GetBackfillSince())
-	}
+	c.Require().NoError(err, "status without backfill")
+	c.Eq("", resp.Msg.GetBackfillSince(), "backfill_since with no backfill")
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // collectBusFrames replays a golden claude transcript through a single per-child
@@ -13,10 +15,9 @@ import (
 // frames published on the bus, decoded to maps for inspection.
 func collectBusFrames(t *testing.T, fixture string) []map[string]any {
 	t.Helper()
+	c := assert.NewAborting(t)
 	f, err := os.Open("testdata/claude/" + fixture)
-	if err != nil {
-		t.Fatalf("open fixture: %v", err)
-	}
+	c.NoError(err, "open fixture")
 	defer func() { _ = f.Close() }()
 
 	prov := (ClaudeProvider{}).Fresh()
@@ -38,9 +39,7 @@ func collectBusFrames(t *testing.T, fixture string) []map[string]any {
 		}
 		ts++
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan: %v", err)
-	}
+	c.NoError(sc.Err(), "scan")
 	return frames
 }
 
@@ -56,6 +55,7 @@ func types(frames []map[string]any) []string {
 // text turn (no tool use): agent_start, message_start, message_update,
 // message_end, agent_end. The init line emits nothing on the bus.
 func TestClaudeBusFrames_TextTurn(t *testing.T) {
+	ck := assert.NewAborting(t)
 	frames := collectBusFrames(t, "startup_and_turn.jsonl")
 	got := types(frames)
 
@@ -68,9 +68,7 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 		"message_start", "message_update", "message_end",
 		"agent_end", "agent_settled",
 	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("text turn sequence:\n got=%v\nwant=%v", got, want)
-	}
+	ck.Eq(strings.Join(want, ","), strings.Join(got, ","), "text turn sequence:\n got=%v\nwant=%v", got, want)
 
 	// agent_end must carry the full accumulated messages[] (2 assistant messages
 	// — no user message in this fixture since the turn is unsolicited startup).
@@ -79,9 +77,7 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 	if !ok {
 		t.Fatalf("agent_end.messages not an array: %v", end["messages"])
 	}
-	if len(msgs) != 2 {
-		t.Fatalf("agent_end.messages len = %d, want 2", len(msgs))
-	}
+	ck.Len(msgs, 2, "agent_end.messages len = %d, want 2", len(msgs))
 	for _, raw := range msgs {
 		m := raw.(map[string]any)
 		if m["role"] != "assistant" {
@@ -105,17 +101,13 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 		content, _ := msg["content"].([]any)
 		for _, c := range content {
 			blk := c.(map[string]any)
-			if blk["type"] == "thinking" {
-				t.Fatalf("emitted a thinking block (the only claude one was empty, must be skipped): %v", blk)
-			}
+			ck.False(blk["type"] == "thinking", "emitted a thinking block (the only claude one was empty, must be skipped): %v", blk)
 			if blk["type"] == "text" && blk["text"] == "pong" {
 				sawPong = true
 			}
 		}
 	}
-	if !sawPong {
-		t.Fatalf("expected a pi text block with \"pong\"")
-	}
+	ck.True(sawPong, "expected a pi text block with \"pong\"")
 }
 
 // TestClaudeBusFrames_ToolTurn asserts the tool-turn sequence includes
@@ -125,6 +117,7 @@ func TestClaudeBusFrames_TextTurn(t *testing.T) {
 // final agent_end.messages contains the assistant + toolResult messages with a
 // mapped toolResult.
 func TestClaudeBusFrames_ToolTurn(t *testing.T) {
+	c := assert.NewAborting(t)
 	frames := collectBusFrames(t, "turn_with_tool.jsonl")
 	got := types(frames)
 
@@ -137,9 +130,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 		"message_start", "message_update", "message_end",
 		"agent_end", "agent_settled",
 	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("tool turn sequence:\n got=%v\nwant=%v", got, want)
-	}
+	c.Eq(strings.Join(want, ","), strings.Join(got, ","), "tool turn sequence:\n got=%v\nwant=%v", got, want)
 
 	// The assistant's tool_use block must be mapped to a pi toolCall block:
 	// type=toolCall, arguments (NOT input), id/name preserved.
@@ -150,9 +141,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 	if tc["type"] != "toolCall" {
 		t.Fatalf("content block type = %v, want toolCall", tc["type"])
 	}
-	if tc["name"] != "Bash" || tc["id"] != "toolu_018XnHaLcfeVC7UT82WBjdz6" {
-		t.Fatalf("toolCall id/name wrong: %v", tc)
-	}
+	c.False(tc["name"] != "Bash" || tc["id"] != "toolu_018XnHaLcfeVC7UT82WBjdz6", "toolCall id/name wrong: %v", tc)
 	if _, ok := tc["input"]; ok {
 		t.Fatalf("toolCall must use arguments not input: %v", tc)
 	}
@@ -169,9 +158,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 
 	// tool_execution_start carries toolCallId/toolName/args.
 	tsFrame := frames[3]
-	if tsFrame["toolCallId"] != "toolu_018XnHaLcfeVC7UT82WBjdz6" || tsFrame["toolName"] != "Bash" {
-		t.Fatalf("tool_execution_start wrong: %v", tsFrame)
-	}
+	c.False(tsFrame["toolCallId"] != "toolu_018XnHaLcfeVC7UT82WBjdz6" || tsFrame["toolName"] != "Bash", "tool_execution_start wrong: %v", tsFrame)
 
 	// tool_execution_end carries result + isError=false.
 	teFrame := frames[5]
@@ -193,9 +180,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 		t.Fatalf("tool_execution_end result.content not a 1-element array: %v", teResult["content"])
 	}
 	teText, _ := teContent[0].(map[string]any)["text"].(string)
-	if !strings.Contains(teText, "go.mod") {
-		t.Fatalf("tool_execution_end result missing tool output: %v", teText)
-	}
+	c.StrContains(teText, "go.mod", "tool_execution_end result missing tool output")
 
 	// agent_end.messages: assistant(tool_use) + toolResult + assistant(text) = 3.
 	end := frames[len(frames)-2]
@@ -205,16 +190,12 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 		roles[i] = raw.(map[string]any)["role"].(string)
 	}
 	wantRoles := []string{"assistant", "toolResult", "assistant"}
-	if strings.Join(roles, ",") != strings.Join(wantRoles, ",") {
-		t.Fatalf("agent_end.messages roles = %v, want %v", roles, wantRoles)
-	}
+	c.Eq(strings.Join(wantRoles, ","), strings.Join(roles, ","), "agent_end.messages roles = %v, want %v", roles, wantRoles)
 
 	// The toolResult message must be pi-shaped: toolCallId/toolName, content as a
 	// text-block array, isError.
 	tr := msgs[1].(map[string]any)
-	if tr["toolCallId"] != "toolu_018XnHaLcfeVC7UT82WBjdz6" || tr["toolName"] != "Bash" {
-		t.Fatalf("toolResult message toolCallId/toolName wrong: %v", tr)
-	}
+	c.False(tr["toolCallId"] != "toolu_018XnHaLcfeVC7UT82WBjdz6" || tr["toolName"] != "Bash", "toolResult message toolCallId/toolName wrong: %v", tr)
 	trContent, ok := tr["content"].([]any)
 	if !ok || len(trContent) != 1 {
 		t.Fatalf("toolResult content not a 1-element array: %v", tr["content"])
@@ -231,6 +212,7 @@ func TestClaudeBusFrames_ToolTurn(t *testing.T) {
 // do not share translation state: a tool turn on one must not leak its pending
 // tool calls or accumulated messages into the other.
 func TestClaudeBusFrames_StateIsolated(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := (ClaudeProvider{}).Fresh()
 	b := (ClaudeProvider{}).Fresh()
 
@@ -241,36 +223,25 @@ func TestClaudeBusFrames_StateIsolated(t *testing.T) {
 	// Drive a full turn on a.
 	a.BusFrames([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`), 2)
 	aEnd := a.BusFrames([]byte(`{"type":"result","subtype":"success"}`), 3)
-	if len(aEnd) != 2 {
-		t.Fatalf("a result should emit agent_end + agent_settled, got %d", len(aEnd))
-	}
+	c.Len(aEnd, 2, "a result should emit agent_end + agent_settled, got %d", len(aEnd))
 
 	// b has seen no assistant message; its agent_end must carry zero messages.
 	bEnd := b.BusFrames([]byte(`{"type":"result","subtype":"success"}`), 4)
-	if len(bEnd) != 2 {
-		t.Fatalf("b result should emit agent_end + agent_settled, got %d", len(bEnd))
-	}
+	c.Len(bEnd, 2, "b result should emit agent_end + agent_settled, got %d", len(bEnd))
 	var m map[string]any
 	_ = json.Unmarshal(bEnd[0], &m)
 	msgs, _ := m["messages"].([]any)
-	if len(msgs) != 0 {
-		t.Fatalf("b agent_end.messages leaked from a: %v", msgs)
-	}
+	c.Empty(msgs, "b agent_end.messages leaked from a")
 }
 
 // TestClaudeBusFrames_InitEmitsNothing asserts the system/init line produces no
 // bus frames (it only sets model/sessionId state, observed via Parse).
 func TestClaudeBusFrames_InitEmitsNothing(t *testing.T) {
+	c := assert.NewAborting(t)
 	prov := (ClaudeProvider{}).Fresh()
 	frames := prov.BusFrames([]byte(`{"type":"system","subtype":"init","session_id":"s","model":"claude-x"}`), 1)
-	if len(frames) != 0 {
-		t.Fatalf("init should emit no bus frames, got %d", len(frames))
-	}
+	c.Empty(frames, "init should emit no bus frames, got %d", len(frames))
 	// hook lines and rate_limit_event also emit nothing.
-	if f := prov.BusFrames([]byte(`{"type":"system","subtype":"hook_started"}`), 2); len(f) != 0 {
-		t.Fatalf("hook line should emit nothing, got %v", f)
-	}
-	if f := prov.BusFrames([]byte(`{"type":"rate_limit_event"}`), 3); len(f) != 0 {
-		t.Fatalf("rate_limit_event should emit nothing, got %v", f)
-	}
+	c.Empty(prov.BusFrames([]byte(`{"type":"system","subtype":"hook_started"}`), 2), "hook line should emit nothing, got")
+	c.Empty(prov.BusFrames([]byte(`{"type":"rate_limit_event"}`), 3), "rate_limit_event should emit nothing, got")
 }

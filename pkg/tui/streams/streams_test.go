@@ -10,18 +10,17 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/streams"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The rail must never subscribe at tier=ALL: that is content_block_delta for
 // every child in the subtree, which is the load the rail/focus split exists to
 // avoid.
 func TestRailAsksForDurableTierAndSixTypes(t *testing.T) {
-	if len(rail.Types()) != 6 {
-		t.Fatalf("rail.Types() = %v, want six", rail.Types())
-	}
-	if rafikiv1.EventTier_EVENT_TIER_DURABLE == rafikiv1.EventTier_EVENT_TIER_ALL {
-		t.Fatal("tier constants collapsed")
-	}
+	c := assert.NewAborting(t)
+	c.Len(rail.Types(), 6, "rail.Types()")
+	c.NotEq(rafikiv1.EventTier_EVENT_TIER_ALL, rafikiv1.EventTier_EVENT_TIER_DURABLE, "tier constants collapsed")
 }
 
 func TestRailStopIsIdempotentAndPrompt(t *testing.T) {
@@ -105,9 +104,7 @@ func TestRailSendsNilResyncSentinelAfterEveryAttempt(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		select {
 		case ev := <-out:
-			if ev != nil {
-				t.Fatalf("attempt %d delivered %T, want the nil resync sentinel", i, ev)
-			}
+			assert.NewAborting(t).Nil(ev, "attempt %d delivered %T, want the nil resync sentinel", i, ev)
 		case <-time.After(5 * time.Second):
 			t.Fatalf("no resync sentinel after attempt %d", i)
 		}

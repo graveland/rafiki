@@ -12,18 +12,17 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // count_tokens is metadata, not a conversation turn: it must be proxied with
 // model resolution and upstream routing but must NOT open a capture turn.
 func TestServeCountTokensForwardsWithoutCapture(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/messages/count_tokens" {
-			t.Errorf("upstream path = %q, want /v1/messages/count_tokens", r.URL.Path)
-		}
-		if got := r.Header.Get("x-api-key"); got != "real-key" {
-			t.Errorf("upstream x-api-key = %q, want real-key", got)
-		}
+		c.Eq("/v1/messages/count_tokens", r.URL.Path, "upstream path")
+		c.Eq("real-key", r.Header.Get("x-api-key"), "upstream x-api-key")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"input_tokens":42}`)
 	}))
@@ -39,12 +38,8 @@ func TestServeCountTokensForwardsWithoutCapture(t *testing.T) {
 		strings.NewReader(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"hi"}]}`))
 	p.ServeCountTokens(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), `"input_tokens":42`) {
-		t.Errorf("client body = %q, want the count_tokens response", rec.Body.String())
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.StrContains(rec.Body.String(), `"input_tokens":42`, "client body")
 	if fs.intents != 0 || fs.completes != 0 || fs.fails != 0 {
 		t.Errorf("capture: intents=%d completes=%d fails=%d, want 0/0/0 (no turn for a token count)",
 			fs.intents, fs.completes, fs.fails)
@@ -54,13 +49,10 @@ func TestServeCountTokensForwardsWithoutCapture(t *testing.T) {
 // The connectivity preflight probe (HEAD /api/hello) is forwarded to the
 // Anthropic primary and does not open a capture turn either.
 func TestServeHelloForwardsProbeWithoutCapture(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodHead {
-			t.Errorf("upstream method = %q, want HEAD", r.Method)
-		}
-		if r.URL.Path != "/api/hello" {
-			t.Errorf("upstream path = %q, want /api/hello", r.URL.Path)
-		}
+		c.Eq(http.MethodHead, r.Method, "upstream method")
+		c.Eq("/api/hello", r.URL.Path, "upstream path")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
@@ -74,9 +66,7 @@ func TestServeHelloForwardsProbeWithoutCapture(t *testing.T) {
 	req := httptest.NewRequest(http.MethodHead, "/api/hello", nil)
 	p.ServeHello(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
 	if fs.intents != 0 || fs.completes != 0 || fs.fails != 0 {
 		t.Errorf("capture: intents=%d completes=%d fails=%d, want 0/0/0 (no turn for a probe)",
 			fs.intents, fs.completes, fs.fails)
@@ -86,31 +76,22 @@ func TestServeHelloForwardsProbeWithoutCapture(t *testing.T) {
 // Recording is the global RAFIKI_RECORD_REQUESTS=1 switch or the per-session
 // X-Rafiki-Record-Requests header; the store itself must be non-nil.
 func TestShouldRecord(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := &MessagesProxy{rawTrace: &rawtrace.RawTraceStore{}}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil)
-	if p.shouldRecord(req) {
-		t.Error("shouldRecord = true with no global switch and no header")
-	}
+	c.False(p.shouldRecord(req), "shouldRecord = true with no global switch and no header")
 	p.rawTraceAll = true
-	if !p.shouldRecord(req) {
-		t.Error("shouldRecord = false with rawTraceAll set")
-	}
+	c.True(p.shouldRecord(req), "shouldRecord = false with rawTraceAll set")
 	p.rawTraceAll = false
 	req.Header.Set("X-Rafiki-Record-Requests", "1")
-	if !p.shouldRecord(req) {
-		t.Error("shouldRecord = false with X-Rafiki-Record-Requests: 1")
-	}
+	c.True(p.shouldRecord(req), "shouldRecord = false with X-Rafiki-Record-Requests: 1")
 	req.Header.Set("X-Rafiki-Record-Requests", "0")
-	if p.shouldRecord(req) {
-		t.Error("shouldRecord = true with X-Rafiki-Record-Requests: 0")
-	}
+	c.False(p.shouldRecord(req), "shouldRecord = true with X-Rafiki-Record-Requests: 0")
 
 	p.rawTrace = nil
 	p.rawTraceAll = true
-	if p.shouldRecord(req) {
-		t.Error("shouldRecord = true with no raw trace store")
-	}
+	c.False(p.shouldRecord(req), "shouldRecord = true with no raw trace store")
 }
 
 // The mux must route /v1/messages/count_tokens to the count_tokens handler and

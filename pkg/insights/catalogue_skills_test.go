@@ -5,9 +5,12 @@ package insights
 import (
 	"context"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestQuerySkillsNormalizesNamespacePrefix(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "bob")
@@ -17,15 +20,11 @@ func TestQuerySkillsNormalizesNamespacePrefix(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "skills", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query skills: %v", err)
-	}
+	c.NoError(err, "query skills")
 	// All three spellings collapse into one row: the namespace prefix
 	// (everything up to and including the last ':') is stripped before
 	// grouping.
-	if len(got.Rows) != 1 {
-		t.Fatalf("skills rows = %d (%v), want exactly 1", len(got.Rows), got.Rows)
-	}
+	c.Len(got.Rows, 1, "skills rows = %d (%v), want exactly 1", len(got.Rows), got.Rows)
 	row := got.Rows[0]
 	skill, ok := row[0].(StringEntry)
 	if !ok || string(skill) != "brainstorming" {
@@ -40,6 +39,7 @@ func TestQuerySkillsNormalizesNamespacePrefix(t *testing.T) {
 }
 
 func TestQuerySkillsScopeOwnerExcludesOtherOwners(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	bobID := ensureUser(t, pool, "bob")
@@ -50,12 +50,8 @@ func TestQuerySkillsScopeOwnerExcludesOtherOwners(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeOwner(bobID), "skills", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query skills: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("skills rows for bob = %d (%v), want exactly 1", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query skills")
+	c.Len(got.Rows, 1, "skills rows for bob = %d (%v), want exactly 1", len(got.Rows), got.Rows)
 	row := got.Rows[0]
 	skill, ok := row[0].(StringEntry)
 	if !ok || string(skill) != "brainstorming" {

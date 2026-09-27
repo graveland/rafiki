@@ -5,28 +5,26 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/fundi"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestTurnOutcomeStoreTakeClearsIt(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var s turnOutcomeStore
 	s.set("c1", fundi.TurnOutcome{LimitReason: "budget exhausted"})
 
 	got, ok := s.take("c1")
-	if !ok || got.LimitReason != "budget exhausted" {
-		t.Fatalf("take = %+v, %v, want the stored outcome", got, ok)
-	}
+	c.Require().False(!ok || got.LimitReason != "budget exhausted", "take = %+v, %v, want the stored outcome", got, ok)
 
 	_, ok = s.take("c1")
-	if ok {
-		t.Error("second take found something; take must clear the entry")
-	}
+	c.False(ok, "second take found something; take must clear the entry")
 }
 
 func TestTurnOutcomeStoreMissingChild(t *testing.T) {
 	var s turnOutcomeStore
-	if _, ok := s.take("nope"); ok {
-		t.Error("take on an unknown child reported ok=true")
-	}
+	_, ok := s.take("nope")
+	assert.NewCollecting(t).False(ok, "take on an unknown child reported ok=true")
 }
 
 func TestTurnOutcomeStoreOverwrites(t *testing.T) {
@@ -35,7 +33,5 @@ func TestTurnOutcomeStoreOverwrites(t *testing.T) {
 	s.set("c1", fundi.TurnOutcome{Err: errors.New("boom")})
 
 	got, ok := s.take("c1")
-	if !ok || got.Err == nil {
-		t.Fatalf("take = %+v, %v, want the SECOND set's outcome", got, ok)
-	}
+	assert.NewAborting(t).False(!ok || got.Err == nil, "take = %+v, %v, want the SECOND set's outcome", got, ok)
 }

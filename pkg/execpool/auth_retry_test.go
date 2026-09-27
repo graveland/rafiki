@@ -18,6 +18,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A store that cannot be READ is not a store that REJECTED you. Conflating the
@@ -40,14 +42,13 @@ func TestTransientAuthFailureIsRetriedRatherThanDowningTheFleet(t *testing.T) {
 		t.Fatal("a store that could not be read was treated as a rejected credential; " +
 			"the executor gave up permanently over a transient failure")
 	}
-	if n := len(store.authCalls); n < 2 {
-		t.Fatalf("Authenticate was attempted %d time(s); a transient failure must be RETRIED", n)
-	}
+	assert.NewAborting(t).GreaterOrEqual(2, len(store.authCalls), "Authenticate was attempted")
 }
 
 // The other half, which the fix must not break: a genuinely revoked row still
 // stops the executor rather than spinning forever.
 func TestRevokedCredentialStillStopsTheExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 	store.authErr = executors.ErrDisabled
 
@@ -59,36 +60,25 @@ func TestRevokedCredentialStillStopsTheExecutor(t *testing.T) {
 	start := time.Now()
 	err := Connect(ctx, connectOpts(t, addr, pin))
 
-	if !errors.Is(err, ErrEnrollmentRejected) {
-		t.Fatalf("a revoked executor must stop, not retry: %v", err)
-	}
-	if time.Since(start) > time.Second {
-		t.Error("a terminal rejection must stop immediately, not after backoff")
-	}
-	if n := len(store.authCalls); n != 1 {
-		t.Errorf("a terminal rejection must not be retried; got %d attempts", n)
-	}
+	c.Require().ErrorIs(err, ErrEnrollmentRejected, "a revoked executor must stop, not retry")
+	c.LessOrEqual(time.Second, time.Since(start), "a terminal rejection must stop immediately, not after backoff")
+	c.Eq(1, len(store.authCalls), "a terminal rejection must not be retried; got")
 }
 
 // The peer on the other end of a failed Authenticate has by definition not
 // proved who it is. Forwarding the store's error handed it whatever the driver
 // put in the message — here a DSN with a host and a username.
 func TestRetryableFailureDoesNotLeakTheStoreError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 	store.authErr = errors.New("failed to connect to `host=db.internal user=rafiki`: connection refused")
 
 	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable {
-		t.Fatalf("a store failure must be refused 503, got %v", err)
-	}
-	if reason := ref.Reason; reason != "rafikid could not verify the credential right now; retry" {
-		t.Errorf("the 503 body must be the fixed retryable text, got %q", reason)
-	}
+	c.Require().False(!errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable, "a store failure must be refused 503, got %v", err)
+	c.Eq("rafikid could not verify the credential right now; retry", ref.Reason, "the 503 body must be the fixed retryable text, got")
 	for _, leak := range []string{"db.internal", "user=rafiki", "connection refused"} {
-		if strings.Contains(ref.Reason, leak) {
-			t.Errorf("the response leaked %q to an unauthenticated peer: %s", leak, ref.Reason)
-		}
+		c.NotStrContains(ref.Reason, leak, "the response leaked")
 	}
 }
 
@@ -96,17 +86,14 @@ func TestRetryableFailureDoesNotLeakTheStoreError(t *testing.T) {
 // sentinels, and an operator staring at a machine that will not join needs to
 // know it was disabled rather than unreachable.
 func TestTerminalRejectionNamesTheReason(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 	store.authErr = executors.ErrDisabled
 
 	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusUnauthorized {
-		t.Fatalf("a revoked credential must be refused 401, got %v", err)
-	}
-	if !strings.Contains(ref.Reason, "disabled") {
-		t.Errorf("the refusal must name the reason: %q", ref.Reason)
-	}
+	c.Require().False(!errors.As(err, &ref) || ref.Status != http.StatusUnauthorized, "a revoked credential must be refused 401, got %v", err)
+	c.StrContains(ref.Reason, "disabled", "the refusal must name the reason")
 }
 
 // An error nobody classified is assumed transient. Quitting on a genuinely
@@ -118,25 +105,20 @@ func TestUnclassifiedAuthErrorsAreTreatedAsRetryable(t *testing.T) {
 
 	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable {
-		t.Fatalf("an unclassified failure must be refused 503 toward retry, got %v", err)
-	}
+	assert.NewAborting(t).False(!errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable, "an unclassified failure must be refused 503 toward retry, got %v", err)
 }
 
 // A peer still speaking the old JSON hello frame sends no Authorization
 // header at all. The refusal must tell it that header auth replaced the hello
 // frame, so whoever operates the machine knows to upgrade.
 func TestUpgradeWithoutAuthorizationNamesTheUpgradeHint(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 
 	_, _, err := upgradeExchange(t, New(store), nil)
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusUnauthorized {
-		t.Fatalf("a missing Authorization header must be refused 401, got %v", err)
-	}
-	if !strings.Contains(ref.Reason, "predates header auth") {
-		t.Errorf("the 401 must name the old-client hint, got %q", ref.Reason)
-	}
+	c.Require().False(!errors.As(err, &ref) || ref.Status != http.StatusUnauthorized, "a missing Authorization header must be refused 401, got %v", err)
+	c.StrContains(ref.Reason, "predates header auth", "the 401 must name the old-client hint, got")
 }
 
 // One credential names one row, and the pool holds one connection per row: a
@@ -144,6 +126,7 @@ func TestUpgradeWithoutAuthorizationNamesTheUpgradeHint(t *testing.T) {
 // client classifies that as retryable rather than terminal — the incumbent
 // may simply be about to die.
 func TestUpgradeAlreadyConnectedIs409AndRetryable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 	addr, pin, p := servePool(t, store)
 
@@ -154,20 +137,15 @@ func TestUpgradeAlreadyConnectedIs409AndRetryable(t *testing.T) {
 
 	_, _, err := upgradeExchange(t, p, bearerHeader("a-credential"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusConflict {
-		t.Fatalf("a second live connection must be refused 409, got %v", err)
-	}
-	if !strings.Contains(ref.Reason, "already live") {
-		t.Errorf("the 409 must say why: %q", ref.Reason)
-	}
-	if errors.Is(classifyRefusal(err), ErrEnrollmentRejected) {
-		t.Error("a 409 is retryable; the client must not classify it as a rejected credential")
-	}
+	c.Require().False(!errors.As(err, &ref) || ref.Status != http.StatusConflict, "a second live connection must be refused 409, got %v", err)
+	c.StrContains(ref.Reason, "already live", "the 409 must say why")
+	c.False(errors.Is(classifyRefusal(err), ErrEnrollmentRejected), "a 409 is retryable; the client must not classify it as a rejected credential")
 }
 
 // Enrollment carries the executor's self-reported capability facts to the
 // store, and the 101 answers with the minted credential and the row id.
 func TestUpgradeEnrollCarriesSelfReportedToTheStore(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 
 	hdr := http.Header{
@@ -175,18 +153,12 @@ func TestUpgradeEnrollCarriesSelfReportedToTheStore(t *testing.T) {
 		upgradeconn.HeaderSelfReported: {"os=linux&arch=arm64"},
 	}
 	_, resp, err := upgradeExchange(t, New(store), hdr)
-	if err != nil {
-		t.Fatalf("enrollment upgrade refused: %v", err)
-	}
+	c.Require().NoError(err, "enrollment upgrade refused")
 	if got := store.lastEnrollment(); !mapsEqual(got, map[string]string{"os": "linux", "arch": "arm64"}) {
 		t.Errorf("Enroll received %v, want the self-reported facts", got)
 	}
-	if got := resp.Get(upgradeconn.HeaderCredential); got != "credential" {
-		t.Errorf("the 101 must carry the minted credential, got %q", got)
-	}
-	if got := resp.Get(upgradeconn.HeaderExecutorID); got != "exec-1" {
-		t.Errorf("the 101 must carry the executor id, got %q", got)
-	}
+	c.Eq("credential", resp.Get(upgradeconn.HeaderCredential), "the 101 must carry the minted credential, got")
+	c.Eq("exec-1", resp.Get(upgradeconn.HeaderExecutorID), "the 101 must carry the executor id, got")
 }
 
 // The whole enrollment path, real client against real pool: an Enroll token
@@ -194,13 +166,12 @@ func TestUpgradeEnrollCarriesSelfReportedToTheStore(t *testing.T) {
 // presents it as Bearer rather than re-sending the now-spent token. Each side
 // is pinned on its own elsewhere; this pins that they agree with each other.
 func TestEnrollPersistsTheCredentialAndTheNextDialIsBearer(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := newFakeStore("exec-1")
 	addr, pin, _ := servePool(t, store)
 
 	o := connectOpts(t, addr, pin)
-	if err := os.Remove(o.CredentialFile); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.Remove(o.CredentialFile))
 	o.EnrollToken = "t_token"
 	o.SelfReported = map[string]string{"os": "linux"}
 
@@ -226,12 +197,9 @@ func TestEnrollPersistsTheCredentialAndTheNextDialIsBearer(t *testing.T) {
 		b, err := os.ReadFile(o.CredentialFile)
 		return err == nil && string(b) == "credential\n"
 	})
-	if got := store.lastEnrollment(); got["os"] != "linux" {
-		t.Errorf("Enroll received %v, want the self-reported facts", got)
-	}
-	if n := len(store.authCalls); n != 0 {
-		t.Fatalf("Authenticate ran %d time(s) during enrollment", n)
-	}
+	got := store.lastEnrollment()
+	c.Eq("linux", got["os"], "Enroll received %v, want the self-reported facts", got)
+	c.Require().Eq(0, len(store.authCalls), "Authenticate ran")
 
 	runUntil(func() bool { return len(store.authCalls) > 0 })
 }
@@ -247,9 +215,7 @@ func TestUpgradeMalformedSelfReportedIs400(t *testing.T) {
 	}
 	_, _, err := upgradeExchange(t, New(store), hdr)
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) || ref.Status != http.StatusBadRequest {
-		t.Fatalf("a malformed self-reported header must be refused 400, got %v", err)
-	}
+	assert.NewAborting(t).False(!errors.As(err, &ref) || ref.Status != http.StatusBadRequest, "a malformed self-reported header must be refused 400, got %v", err)
 }
 
 func bearerHeader(cred string) http.Header {
@@ -289,9 +255,7 @@ func servePool(t *testing.T, store executors.Store) (addr, pin string, p *Pool) 
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   ALPNProtocols,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() { _ = ln.Close() })
 
 	p = New(store)
@@ -303,9 +267,7 @@ func servePool(t *testing.T, store executors.Store) (addr, pin string, p *Pool) 
 func connectOpts(t *testing.T, addr, pin string) ConnectOptions {
 	t.Helper()
 	credFile := filepath.Join(t.TempDir(), "credential")
-	if err := os.WriteFile(credFile, []byte("a-credential\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(credFile, []byte("a-credential\n"), 0o600))
 	_, handler := executorpbconnect.NewExecutorServiceHandler(&stubHandler{executorID: "exec-1"})
 	return ConnectOptions{
 		Addr:           addr,
@@ -327,9 +289,7 @@ func upgradeExchange(t *testing.T, p *Pool, hdr http.Header) (*upgradeconn.Conn,
 
 	host := strings.TrimPrefix(srv.URL, "http://")
 	conn, err := net.Dial("tcp", host)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() { _ = conn.Close() })
 
 	return upgradeconn.Dial(conn, upgradeconn.Executor, host, hdr)

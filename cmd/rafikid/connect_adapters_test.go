@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +24,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // capturingCoster records the selector it was handed.
@@ -61,13 +62,13 @@ func TestCostsForCorrelatesExternalRefByChildID(t *testing.T) {
 	if got, want := cap.sel.ConversationIDs, []string{"11111111-1111-1111-1111-111111111111"}; !slices.Equal(got, want) {
 		t.Errorf("ConversationIDs = %v, want %v (the SESSION id)", got, want)
 	}
-	if got, want := cap.sel.ExternalRefs, []string{"c_fundi", "c_proxy"}; !slices.Equal(got, want) {
-		t.Errorf("ExternalRefs = %v, want %v (the CHILD id, for every child)", got, want)
-	}
+	got, want := cap.sel.ExternalRefs, []string{"c_fundi", "c_proxy"}
+	assert.NewCollecting(t).EqDiff(want, got, "ExternalRefs")
 }
 
 // One round trip for the whole list, not one per child.
 func TestCostsForIssuesASingleRollup(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	cap := &capturingCoster{rows: []insights.ConversationCost{
 		{ConversationID: "22222222-2222-2222-2222-222222222222", Cost: 2.0},
 		{ConversationID: "33333333-3333-3333-3333-333333333333", ExternalRef: "c_proxy", Cost: 5.0},
@@ -80,12 +81,8 @@ func TestCostsForIssuesASingleRollup(t *testing.T) {
 		{ChildID: "c_idle", SessionID: "44444444-4444-4444-4444-444444444444"},
 	})
 
-	if got["c_fundi"] != 2.0 {
-		t.Errorf("c_fundi = %v, want 2.0 (matched by conversation UUID)", got["c_fundi"])
-	}
-	if got["c_proxy"] != 5.0 {
-		t.Errorf("c_proxy = %v, want 5.0 (matched by external_ref)", got["c_proxy"])
-	}
+	ck.Eq(2.0, got["c_fundi"], "c_fundi")
+	ck.Eq(5.0, got["c_proxy"], "c_proxy")
 	// Present and zero is a real answer -- the query ran and found no turns --
 	// and is distinct from absent, which leaves CostUSD nil.
 	if v, ok := got["c_idle"]; !ok || v != 0 {
@@ -103,9 +100,7 @@ func TestCostsForCountsOneConversationOnce(t *testing.T) {
 	c := &Controller{coster: cap}
 
 	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_both", SessionID: conv}})
-	if got["c_both"] != 4.0 {
-		t.Errorf("c_both = %v, want 4.0: matching both routes must not double it", got["c_both"])
-	}
+	assert.NewCollecting(t).Eq(4.0, got["c_both"], "c_both")
 }
 
 // A thread branch with no child of its own is a tool call the parent made --
@@ -114,6 +109,7 @@ func TestCostsForCountsOneConversationOnce(t *testing.T) {
 // agents. Their spend must land on the parent: TOTAL is summed from child rows,
 // so a branch nothing claims is money that silently leaves the report.
 func TestCostsForRollsUnclaimedBranchesIntoTheParent(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	cap := &capturingCoster{rows: []insights.ConversationCost{
 		{ConversationID: "66666666-6666-6666-6666-666666666666",
 			ExternalRef: "c_parent", Cost: 1.0},
@@ -129,20 +125,15 @@ func TestCostsForRollsUnclaimedBranchesIntoTheParent(t *testing.T) {
 	// The prefix route is what reaches those branches at all; without it the
 	// query never returns them and there is nothing to attribute.
 	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
-	if !slices.Contains(cap.sel.ExternalRefPrefixes, "c_parent:") {
-		t.Errorf("ExternalRefPrefixes = %v, want it to carry %q",
-			cap.sel.ExternalRefPrefixes, "c_parent:")
-	}
-	if got["c_parent"] != 2.0 {
-		t.Errorf("c_parent = %v, want 2.0 (own 1.0 plus two unclaimed branches)",
-			got["c_parent"])
-	}
+	ck.Contains(cap.sel.ExternalRefPrefixes, "c_parent:", "ExternalRefPrefixes")
+	ck.Eq(2.0, got["c_parent"], "c_parent")
 }
 
 // A branch a real subagent DOES claim is that subagent's spend, not the
 // parent's -- otherwise every Task subagent's cost is reported twice, once on
 // its own row and once folded into its parent's.
 func TestCostsForLeavesAClaimedBranchOnItsOwnChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	branch := "c_parent:cccc"
 	cap := &capturingCoster{rows: []insights.ConversationCost{
 		{ConversationID: "99999999-9999-9999-9999-999999999999",
@@ -159,13 +150,8 @@ func TestCostsForLeavesAClaimedBranchOnItsOwnChild(t *testing.T) {
 		{ChildID: "c_parent"},
 		{ChildID: branch},
 	})
-	if got["c_parent"] != 1.0 {
-		t.Errorf("c_parent = %v, want 1.0: a claimed branch is its own child's spend",
-			got["c_parent"])
-	}
-	if got[branch] != 3.0 {
-		t.Errorf("%s = %v, want 3.0", branch, got[branch])
-	}
+	ck.Eq(1.0, got["c_parent"], "c_parent")
+	ck.Eq(3.0, got[branch], "%s = %v, want 3.0", branch, got[branch])
 }
 
 // Claimed-ness is a property of the CHILDSTORE, never of the snapshot slice:
@@ -184,19 +170,14 @@ func TestCostsForChecksClaimsAgainstTheStoreNotTheFilteredList(t *testing.T) {
 
 	// Only the parent is listed -- the subagent exists but was filtered out.
 	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
-	if got["c_parent"] != 0 {
-		t.Errorf("c_parent = %v, want 0: a filtered-out subagent still owns its branch",
-			got["c_parent"])
-	}
+	assert.NewCollecting(t).Eq(0, got["c_parent"], "c_parent")
 }
 
 // No cost source means NOT KNOWN, which must leave CostUSD nil rather than
 // reporting a zero the rail would then adopt.
 func TestCostsForWithNoCosterIsAbsentNotZero(t *testing.T) {
 	c := &Controller{}
-	if got := c.costsFor([]childstore.Snapshot{{ChildID: "c1"}}); got != nil {
-		t.Errorf("costsFor with no coster = %v, want nil", got)
-	}
+	assert.NewCollecting(t).Nil(c.costsFor([]childstore.Snapshot{{ChildID: "c1"}}), "costsFor with no coster")
 }
 
 // ─── Conversation query adapters (Connect plane) ─────────────────────────────
@@ -264,9 +245,8 @@ func TestConversationReadNotFoundClassifiesTheControllersNotFoundAnswer(t *testi
 		{"plain error", errors.New("boom"), false},
 	}
 	for _, tc := range cases {
-		if got := conversationReadNotFound(tc.err); got != tc.want {
-			t.Errorf("%s: conversationReadNotFound(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
-		}
+		got := conversationReadNotFound(tc.err)
+		assert.NewCollecting(t).Eq(tc.want, got, "%s: conversationReadNotFound(%v) = %v, want", tc.name, tc.err, got)
 	}
 }
 
@@ -276,21 +256,16 @@ func TestConversationReadNotFoundClassifiesTheControllersNotFoundAnswer(t *testi
 // conversation must be indistinguishable all the way out of the adapter, and
 // the caller's scope must actually have been threaded down to the backend.
 func TestConversationExportAdapterFoldsNotFoundIntoOkFalse(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	fb := &fakeInsightsBackend{exportErr: insights.ErrNotFound}
 	a := connectConversations{c: &Controller{insights: fb}}
 
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 	tr, ok, err := a.Export(ctx, "conv-1")
-	if ok || err != nil || tr.ConversationID != "" || len(tr.Turns) != 0 {
-		t.Fatalf("Export not-found = (ok=%v, err=%v, tr=%+v), want (false, nil, zero)", ok, err, tr)
-	}
-	if fb.gotScope != insights.ScopeOwner("u1") {
-		t.Errorf("backend scope = %v, want ScopeOwner(u1)", fb.gotScope)
-	}
-	if fb.gotExport != "conv-1" {
-		t.Errorf("backend got conversation id %q, want conv-1", fb.gotExport)
-	}
+	ck.Require().False(ok || err != nil || tr.ConversationID != "" || len(tr.Turns) != 0, "Export not-found = (ok=%v, err=%v, tr=%+v), want (false, nil, zero)", ok, err, tr)
+	ck.Eq(insights.ScopeOwner("u1"), fb.gotScope, "backend scope")
+	ck.Eq("conv-1", fb.gotExport, "backend got conversation id")
 }
 
 // TestConversationSearchAdapterMapsNoAgentDB pins the ControllerError
@@ -302,6 +277,7 @@ func TestConversationExportAdapterFoldsNotFoundIntoOkFalse(t *testing.T) {
 // not FailedPrecondition (the retired mapper's own answer) and not Internal
 // (the message is ours, not redacted).
 func TestConversationSearchAdapterMapsNoAgentDB(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	fb := &fakeInsightsBackend{searchErr: local.ErrNoPool}
 	a := connectConversations{c: &Controller{insights: fb}}
 
@@ -309,15 +285,9 @@ func TestConversationSearchAdapterMapsNoAgentDB(t *testing.T) {
 		&server.Identity{UserID: "u1", Via: server.ProvenanceUser})
 	_, err := a.Search(ctx, connectapi.ConversationSearchFilter{})
 	var ce *connect.Error
-	if !errors.As(err, &ce) || ce.Code() != connect.CodeUnavailable {
-		t.Fatalf("Search ErrNoPool err = %v, want CodeUnavailable", err)
-	}
-	if !strings.Contains(ce.Message(), "no agent database configured") {
-		t.Errorf("message = %q, want the curated no-agent-db text", ce.Message())
-	}
-	if got := rpcreason.Reason(err); got != protocol.ErrNoAgentDB {
-		t.Errorf("rpcreason.Reason(err) = %q, want %q", got, protocol.ErrNoAgentDB)
-	}
+	ck.Require().False(!errors.As(err, &ce) || ce.Code() != connect.CodeUnavailable, "Search ErrNoPool err = %v, want CodeUnavailable", err)
+	ck.StrContains(ce.Message(), "no agent database configured", "message")
+	ck.Eq(protocol.ErrNoAgentDB, rpcreason.Reason(err), "rpcreason.Reason(err)")
 }
 
 // TestScopeForRefusesANonUserCredential covers the credential that CARRIES a
@@ -330,9 +300,8 @@ func TestConversationSearchAdapterMapsNoAgentDB(t *testing.T) {
 func TestScopeForRefusesANonUserCredential(t *testing.T) {
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
-	if _, err := scopeFor(ctx); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("scopeFor(child-attributed with owner UserID) err = %v, want %v", err, connect.CodePermissionDenied)
-	}
+	_, err := scopeFor(ctx)
+	assert.NewAborting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "scopeFor(child-attributed with owner UserID) err = %v, want", err)
 }
 
 // TestScopeForNilIsScopeAll pins the local-trust rule: a nil identity is the
@@ -340,13 +309,10 @@ func TestScopeForRefusesANonUserCredential(t *testing.T) {
 // makes, and must resolve every conversation (ScopeAll), not a refusal --
 // without this a token-less local profile loses `rafiki conversations`.
 func TestScopeForNilIsScopeAll(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := scopeFor(context.Background())
-	if err != nil {
-		t.Fatalf("scopeFor(nil identity) err = %v, want nil", err)
-	}
-	if got != insights.ScopeAll() {
-		t.Errorf("scopeFor(nil identity) = %v, want ScopeAll()", got)
-	}
+	c.Require().NoError(err, "scopeFor(nil identity) err")
+	c.Eq(insights.ScopeAll(), got, "scopeFor(nil identity)")
 }
 
 // TestScopeForNilIsUnreachableOffTheUDS is the proof scopeFor's nil-is-local-
@@ -369,9 +335,7 @@ func TestScopeForNilIsUnreachableOffTheUDS(t *testing.T) {
 	client := proxyFaceConnectRoute(t)
 	_, err := client.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if err == nil {
-		t.Fatal("ConversationSearch with no credential on the proxy face succeeded, want a refusal")
-	}
+	assert.NewAborting(t).Error(err, "ConversationSearch with no credential on the proxy face succeeded, want a refusal")
 	switch code := connect.CodeOf(err); code {
 	case connect.CodeUnauthenticated, connect.CodePermissionDenied:
 	default:
@@ -381,28 +345,22 @@ func TestScopeForNilIsUnreachableOffTheUDS(t *testing.T) {
 
 // TestScopeForMapsAUserCredentialOntoItsOwnScope pins the positive path.
 func TestScopeForMapsAUserCredentialOntoItsOwnScope(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 	got, err := scopeFor(ctx)
-	if err != nil {
-		t.Fatalf("scopeFor(user) err = %v", err)
-	}
-	if got != insights.ScopeOwner("u1") {
-		t.Errorf("scopeFor(user u1) = %v, want ScopeOwner(u1)", got)
-	}
+	c.Require().NoError(err, "scopeFor(user) err =")
+	c.Eq(insights.ScopeOwner("u1"), got, "scopeFor(user u1)")
 }
 
 // TestScopeForMapsAnAdminOntoAll pins the admin path.
 func TestScopeForMapsAnAdminOntoAll(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser, IsAdmin: true})
 	got, err := scopeFor(ctx)
-	if err != nil {
-		t.Fatalf("scopeFor(admin) err = %v", err)
-	}
-	if got != insights.ScopeAll() {
-		t.Errorf("scopeFor(admin) = %v, want ScopeAll()", got)
-	}
+	c.Require().NoError(err, "scopeFor(admin) err =")
+	c.Eq(insights.ScopeAll(), got, "scopeFor(admin)")
 }
 
 // TestConversationSearchHandlerPreservesTheRefusedCredentialCode drives a
@@ -419,9 +377,7 @@ func TestConversationSearchHandlerPreservesTheRefusedCredentialCode(t *testing.T
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
 	_, err := srv.ConversationSearch(ctx,
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("handler refused credential err = %v, want permission_denied (not re-wrapped internal)", err)
-	}
+	assert.NewAborting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "handler refused credential err = %v, want permission_denied (not re-wrapped internal)", err)
 }
 
 // TestConversationSearchOverUDSRefusesAChildAttributedCredential is the
@@ -430,6 +386,7 @@ func TestConversationSearchHandlerPreservesTheRefusedCredentialCode(t *testing.T
 // identity reaches must answer permission_denied on the wire, never
 // internal.
 func TestConversationSearchOverUDSRefusesAChildAttributedCredential(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -448,15 +405,11 @@ func TestConversationSearchOverUDSRefusesAChildAttributedCredential(t *testing.T
 	// the socket path past the sun_path limit (macOS 104) -- hence a short
 	// custom dir rather than the pattern the sibling UDS tests use.
 	dir, err := os.MkdirTemp("", "cuds")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	ck.NoError(err, "MkdirTemp")
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	ck.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
@@ -474,6 +427,7 @@ func TestConversationSearchOverUDSRefusesAChildAttributedCredential(t *testing.T
 // further down. The scope must also be threaded down -- RunQuery derives it
 // from ctx, never from the filter.
 func TestConnectConversationsQueryMapsEntryTypes(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	fb := &fakeInsightsBackend{queryRows: insights.QueryResult{
 		Columns: []insights.Column{
 			{Name: "tool", Kind: insights.ColString},
@@ -491,15 +445,9 @@ func TestConnectConversationsQueryMapsEntryTypes(t *testing.T) {
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 	got, err := a.RunQuery(ctx, "tools", connectapi.CatalogueFilter{Owner: "brent", Path: "proxy"})
-	if err != nil {
-		t.Fatalf("RunQuery: %v", err)
-	}
-	if fb.gotScope != insights.ScopeOwner("u1") {
-		t.Errorf("backend scope = %v, want ScopeOwner(u1)", fb.gotScope)
-	}
-	if fb.gotName != "tools" {
-		t.Errorf("backend got name %q, want tools", fb.gotName)
-	}
+	ck.Require().NoError(err, "RunQuery")
+	ck.Eq(insights.ScopeOwner("u1"), fb.gotScope, "backend scope")
+	ck.Eq("tools", fb.gotName, "backend got name")
 	if fb.gotFilter.Owner != "brent" || fb.gotFilter.Path != insights.Path("proxy") {
 		t.Errorf("backend filter = %+v, want owner=brent path=proxy", fb.gotFilter)
 	}
@@ -509,44 +457,29 @@ func TestConnectConversationsQueryMapsEntryTypes(t *testing.T) {
 		{Name: "calls", Kind: "int"},
 		{Name: "cost", Kind: "float", Format: "usd"},
 	}
-	if len(got.Columns) != len(wantCols) {
-		t.Fatalf("columns = %+v, want %+v", got.Columns, wantCols)
-	}
+	ck.Require().Len(got.Columns, len(wantCols), "columns = %+v, want %+v", got.Columns, wantCols)
 	for i, wc := range wantCols {
-		if got.Columns[i] != wc {
-			t.Errorf("column[%d] = %+v, want %+v", i, got.Columns[i], wc)
-		}
+		ck.Eq(wc, got.Columns[i], "column[%d] = %+v, want", i, got.Columns[i])
 	}
-	if len(got.Rows) != 1 || len(got.Rows[0]) != 3 {
-		t.Fatalf("rows = %+v, want one row of three cells", got.Rows)
-	}
+	ck.Require().False(len(got.Rows) != 1 || len(got.Rows[0]) != 3, "rows = %+v, want one row of three cells", got.Rows)
 	cells := got.Rows[0]
-	if cells[0] != (connectapi.QueryRowValue{Str: "bash"}) {
-		t.Errorf("cell[0] = %+v, want Str=bash (flags clear)", cells[0])
-	}
-	if cells[1] != (connectapi.QueryRowValue{Int: 42, IsInt: true}) {
-		t.Errorf("cell[1] = %+v, want Int=42 IsInt", cells[1])
-	}
-	if cells[2] != (connectapi.QueryRowValue{Float: 0.125, IsFloat: true}) {
-		t.Errorf("cell[2] = %+v, want Float=0.125 IsFloat", cells[2])
-	}
+	ck.Eq((connectapi.QueryRowValue{Str: "bash"}), cells[0], "cell[0]")
+	ck.Eq((connectapi.QueryRowValue{Int: 42, IsInt: true}), cells[1], "cell[1]")
+	ck.Eq((connectapi.QueryRowValue{Float: 0.125, IsFloat: true}), cells[2], "cell[2]")
 }
 
 // A child-attributed identity carries its owner's UserID, so scopeFor's
 // refusal -- not a scope -- is what RunQuery must answer it.
 func TestConnectConversationsQueryRequiresUserCredential(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	fb := &fakeInsightsBackend{}
 	a := connectConversations{c: &Controller{insights: fb}}
 
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
 	got, err := a.RunQuery(ctx, "tools", connectapi.CatalogueFilter{})
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("RunQuery(child-attributed) err = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if got.Columns != nil || got.Rows != nil {
-		t.Errorf("RunQuery refused returned a result %+v, want zero", got)
-	}
+	ck.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "RunQuery(child-attributed) err = %v, want", err)
+	ck.False(got.Columns != nil || got.Rows != nil, "RunQuery refused returned a result %+v, want zero", got)
 	if fb.gotName != "" || fb.gotScope != (insights.Scope{}) {
 		t.Errorf("backend reached (name %q, scope %v), want untouched", fb.gotName, fb.gotScope)
 	}

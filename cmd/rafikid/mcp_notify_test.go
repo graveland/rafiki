@@ -19,6 +19,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 const mcpNotifyWait = 2 * time.Second
@@ -40,14 +42,13 @@ type settleSession struct {
 // which the SDK silently drops every Log call.
 func newSettleSession(t *testing.T, level string) *settleSession {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	rec := &settleSession{got: make(chan string, 8)}
 	st, ct := mcp.NewInMemoryTransports()
 	srv := mcp.NewServer(&mcp.Implementation{Name: "rafiki-test", Version: "test"}, nil)
 	ss, err := srv.Connect(context.Background(), st, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	client := mcp.NewClient(
 		&mcp.Implementation{Name: "mcp-test-client", Version: "test"},
 		&mcp.ClientOptions{
@@ -58,14 +59,10 @@ func newSettleSession(t *testing.T, level string) *settleSession {
 			},
 		})
 	cs, err := client.Connect(context.Background(), ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	if level != "" {
 		//nolint:staticcheck // deprecated logging feature, as above.
-		if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: mcp.LoggingLevel(level)}); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: mcp.LoggingLevel(level)}))
 	}
 	rec.ss, rec.cs = ss, cs
 	t.Cleanup(func() { ss.Close() })
@@ -99,6 +96,7 @@ func assertSilence(t *testing.T, ch <-chan string) string {
 }
 
 func TestMCPNotifyReachesEverySessionForAUser(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := newMCPSessions()
 	aliceA := newSettleSession(t, "info")
 	aliceB := newSettleSession(t, "info")
@@ -110,15 +108,9 @@ func TestMCPNotifyReachesEverySessionForAUser(t *testing.T) {
 	msg := "agent c_1 (worker) settled (idle). Read what it did with task_list(assignee=\"c_1\")."
 	reg.Notify(context.Background(), "u-alice", msg)
 
-	if got := waitFor(t, aliceA.got); got != msg {
-		t.Errorf("first session got %q, want the message verbatim", got)
-	}
-	if got := waitFor(t, aliceB.got); got != msg {
-		t.Errorf("second session got %q, want the message verbatim", got)
-	}
-	if got := assertSilence(t, bob.got); got != "" {
-		t.Errorf("another user's session received %q", got)
-	}
+	c.Eq(msg, waitFor(t, aliceA.got), "first session got")
+	c.Eq(msg, waitFor(t, aliceB.got), "second session got")
+	c.Eq("", assertSilence(t, bob.got), "another user's session received")
 }
 
 // TestMCPNotifyDropsWhenTheClientNeverSetALevel pins the SDK behavior the
@@ -132,9 +124,7 @@ func TestMCPNotifyDropsWhenTheClientNeverSetALevel(t *testing.T) {
 
 	reg.Notify(context.Background(), "u-quiet", "settle")
 
-	if got := assertSilence(t, ss.got); got != "" {
-		t.Errorf("a client that never set a level must receive nothing; got %q", got)
-	}
+	assert.NewCollecting(t).Eq("", assertSilence(t, ss.got), "a client that never set a level must receive nothing; got")
 }
 
 // blockableConn is an mcp.Connection whose Write blocks once armed, until its
@@ -203,9 +193,7 @@ func newBlockedSession(t *testing.T, srv *mcp.Server) (*mcp.ServerSession, func(
 		conn = &blockableConn{c: srvEnd, release: make(chan struct{}), blocked: make(chan struct{})}
 		return conn, nil
 	}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() { peer.Close() })
 	t.Cleanup(func() { ss.Close() })
 	t.Cleanup(conn.Release) // runs first (LIFO), so nothing stays blocked
@@ -290,12 +278,11 @@ func TestMCPNotifyDoesNotHoldTheLockAcrossSend(t *testing.T) {
 	// Unstick the send; the fan-out must continue past the dead session and
 	// still deliver to the live one.
 	release()
-	if got := waitFor(t, live.got); !strings.Contains(got, "c_2") {
-		t.Errorf("the live session must still receive after a stuck one; got %q", got)
-	}
+	assert.NewCollecting(t).StrContains(waitFor(t, live.got), "c_2", "the live session must still receive after a stuck one; got")
 }
 
 func TestMCPNotifyRemoveEmptiesTheUserEntry(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := newMCPSessions()
 	first := newSettleSession(t, "info")
 	second := newSettleSession(t, "info")
@@ -303,19 +290,17 @@ func TestMCPNotifyRemoveEmptiesTheUserEntry(t *testing.T) {
 	reg.Add("u-1", second.ss)
 
 	reg.Remove("u-1", first.ss)
-	if got := len(reg.byUID["u-1"]); got != 1 {
-		t.Fatalf("want 1 session left for u-1, got %d", got)
-	}
+	c.Eq(1, len(reg.byUID["u-1"]), "want 1 session left for u-1, got")
 	reg.Remove("u-1", second.ss)
-	if _, ok := reg.byUID["u-1"]; ok {
-		t.Fatal("the user's entry must be deleted once its last session is removed")
-	}
+	_, ok := reg.byUID["u-1"]
+	c.False(ok, "the user's entry must be deleted once its last session is removed")
 	// Removing an unknown user or session is a no-op, not a panic.
 	reg.Remove("u-never", first.ss)
 	reg.Remove("u-1", first.ss)
 }
 
 func TestMCPNotifySurvivesAFailingSession(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := newMCPSessions()
 	dead := newSettleSession(t, "info")
 	live := newSettleSession(t, "info")
@@ -332,17 +317,11 @@ func TestMCPNotifySurvivesAFailingSession(t *testing.T) {
 
 	// Tearing the client down breaks the transport under its server session;
 	// the next Log on it errors instead of delivering.
-	if err := dead.cs.Close(); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(dead.cs.Close())
 	reg.Notify(context.Background(), "u-2", "agent c_3 (worker) exited")
 
-	if got := waitFor(t, live.got); !strings.Contains(got, "c_3") {
-		t.Errorf("one failing session must not stop the others; got %q", got)
-	}
-	if got := logs.String(); !strings.Contains(got, "mcp settlement notification failed") {
-		t.Errorf("the failed send must be logged at debug and skipped; log:\n%s", got)
-	}
+	c.StrContains(waitFor(t, live.got), "c_3", "one failing session must not stop the others; got")
+	c.StrContains(logs.String(), "mcp settlement notification failed", "the failed send must be logged at debug and skipped; log:\n")
 }
 
 // capturingHandler collects slog records so a test can assert a debug-level
@@ -403,9 +382,7 @@ func TestMCPNotifyReturnsWhileASendIsStuck(t *testing.T) {
 		t.Fatal("the send never blocked; the fixture is broken")
 	}
 	// ...and the other session must still receive while it is.
-	if got := waitFor(t, live.got); !strings.Contains(got, "c_4") {
-		t.Errorf("the live session must receive while another send is stuck; got %q", got)
-	}
+	assert.NewCollecting(t).StrContains(waitFor(t, live.got), "c_4", "the live session must receive while another send is stuck; got")
 	// The deadline returns the call even though the stuck send never ends.
 	select {
 	case <-returned:
@@ -426,6 +403,7 @@ func TestMCPNotifyReturnsWhileASendIsStuck(t *testing.T) {
 // owner's sessions on every worker settle. Both descendant shapes are
 // pinned: the unowned legacy row and the stamped current-row shape.
 func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	prev := mcpSettlements
 	reg := newMCPSessions()
 	mcpSettlements = reg
@@ -462,13 +440,9 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 	})
 
 	c.notifySubagentSettled("c_mcp_desc", "exited", "", "")
-	if got := assertSilence(t, ss.got); got != "" {
-		t.Errorf("a stamped descendant must not fan out to the caller's session; got %q", got)
-	}
+	ck.Eq("", assertSilence(t, ss.got), "a stamped descendant must not fan out to the caller's session; got")
 	c.notifySubagentSettled("c_mcp_desc_legacy", "exited", "", "")
-	if got := assertSilence(t, ss.got); got != "" {
-		t.Errorf("an unowned descendant must not fan out to the caller's session; got %q", got)
-	}
+	ck.Eq("", assertSilence(t, ss.got), "an unowned descendant must not fan out to the caller's session; got")
 }
 
 // TestMCPFaceWiresSessionsIntoTheSettlementFanOut is the end-to-end
@@ -486,6 +460,7 @@ func TestMCPNotifySkipsADescendantOfAnMCPChild(t *testing.T) {
 // legacy path is pinned separately by
 // TestMCPFaceInitializedHandlerRegistersALegacySession.
 func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
+	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
 	prev := mcpSettlements
 	reg := newMCPSessions()
@@ -493,15 +468,11 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	t.Cleanup(func() { mcpSettlements = prev })
 
 	srv := face.getServer(mcpRequestFor("u-op"))
-	if srv == nil {
-		t.Fatal("getServer returned nil for an authenticated user")
-	}
+	c.Require().NotNil(srv, "getServer returned nil for an authenticated user")
 
 	st, ct := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(context.Background(), st, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(func() { _ = ss.Close() })
 	got := make(chan string, 8)
 	client := mcp.NewClient(
@@ -513,9 +484,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 			},
 		})
 	cs, err := client.Connect(context.Background(), ct, nil) // discover handshake: no notifications/initialized
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(func() { _ = cs.Close() })
 
 	// The discover handshake registers nothing; the session joins the
@@ -534,15 +503,11 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 		if registered == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the face never registered the initialized session with the settlement registry")
-		}
+		c.Require().False(time.Now().After(deadline), "the face never registered the initialized session with the settlement registry")
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if err := cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: "info"}); err != nil { //nolint:staticcheck // deprecated logging feature, as newSettleSession.
-		t.Fatal(err)
-	}
+	c.Require().NoError(cs.SetLoggingLevel(context.Background(), &mcp.SetLoggingLevelParams{Level: "info"})) //nolint:staticcheck // deprecated logging feature, as newSettleSession.
 	ctrl := face.controller()
 	ctrl.st.Insert(&childstore.Session{
 		ChildID:     "c_mcp_wired",
@@ -553,9 +518,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 	})
 	ctrl.notifySubagentSettled("c_mcp_wired", "exited", "", "")
 
-	if gotMsg := waitFor(t, got); !strings.Contains(gotMsg, "c_mcp_wired") {
-		t.Errorf("the settled fragment must reach the initialized client: %q", gotMsg)
-	}
+	c.StrContains(waitFor(t, got), "c_mcp_wired", "the settled fragment must reach the initialized client")
 
 	// The Wait goroutine removes the session once its connection closes; the
 	// same bounded poll, because the removal also rides another goroutine.
@@ -568,9 +531,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 		if registered == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("a closed session was never removed from the settlement registry")
-		}
+		c.Require().False(time.Now().After(deadline), "a closed session was never removed from the settlement registry")
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -584,6 +545,7 @@ func TestMCPFaceWiresSessionsIntoTheSettlementFanOut(t *testing.T) {
 // hook the face ships in ServerOptions is therefore driven directly, with a
 // real session from srv.Connect, and must add it and remove it on close.
 func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
 	prev := mcpSettlements
 	reg := newMCPSessions()
@@ -591,14 +553,10 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 	t.Cleanup(func() { mcpSettlements = prev })
 
 	srv := face.getServer(mcpRequestFor("u-op"))
-	if srv == nil {
-		t.Fatal("getServer returned nil for an authenticated user")
-	}
+	c.NotNil(srv, "getServer returned nil for an authenticated user")
 	st, _ := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(context.Background(), st, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = ss.Close() })
 
 	hooks := settlementHooksFor(users.Identity{UserID: "u-op", Username: "u-op"})
@@ -607,9 +565,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 	reg.mu.Lock()
 	registered := len(reg.byUID["u-op"])
 	reg.mu.Unlock()
-	if registered != 1 {
-		t.Fatalf("the initialized handler must register the session; registered %d", registered)
-	}
+	c.Eq(1, registered, "the initialized handler must register the session; registered")
 
 	// A second registration — the bridge's tool-call hook also fires for a
 	// legacy client — must not double-book it or spawn a second Wait
@@ -618,9 +574,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 	reg.mu.Lock()
 	registered = len(reg.byUID["u-op"])
 	reg.mu.Unlock()
-	if registered != 1 {
-		t.Fatalf("a repeat registration must be a no-op; registered %d", registered)
-	}
+	c.Eq(1, registered, "a repeat registration must be a no-op; registered")
 
 	_ = ss.Close()
 	deadline := time.Now().Add(mcpNotifyWait)
@@ -631,9 +585,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 		if registered == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("a closed session was never removed from the settlement registry")
-		}
+		c.False(time.Now().After(deadline), "a closed session was never removed from the settlement registry")
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -643,6 +595,7 @@ func TestMCPFaceInitializedHandlerRegistersALegacySession(t *testing.T) {
 // which the pre-existing parent gate skipped every time. Every MCP-spawned
 // child is top-level, so without this the whole notification never fired.
 func TestMCPNotifyFiresForATopLevelChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	prev := mcpSettlements
 	reg := newMCPSessions()
 	mcpSettlements = reg
@@ -665,12 +618,8 @@ func TestMCPNotifyFiresForATopLevelChild(t *testing.T) {
 	c.notifySubagentSettled("c_mcp_top", "exited", "", "")
 
 	got := waitFor(t, ss.got)
-	if !strings.Contains(got, "c_mcp_top") || !strings.Contains(got, "exited") {
-		t.Errorf("notification must reuse the settle fragment verbatim: %q", got)
-	}
-	if !strings.Contains(got, "task_list") {
-		t.Errorf("fragment must point at the ledger like the inbox one: %q", got)
-	}
+	ck.False(!strings.Contains(got, "c_mcp_top") || !strings.Contains(got, "exited"), "notification must reuse the settle fragment verbatim: %q", got)
+	ck.StrContains(got, "task_list", "fragment must point at the ledger like the inbox one")
 }
 
 // spawnOwnedChild spawns a top-level fake-pi child attributed to owner, the
@@ -686,9 +635,7 @@ func spawnOwnedChild(t *testing.T, ctrl *Controller, owner users.Identity) strin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, req, owner)
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn")
 	return res.ChildID
 }
 
@@ -705,6 +652,7 @@ func spawnOwnedChild(t *testing.T, ctrl *Controller, owner users.Identity) strin
 // clear of every other test's fan-out.
 func TestMCPSelfKillSuppressesTheKillerFanOut(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	ctrl, _, _ := killNoticeFixture(t)
 
 	ss := newSettleSession(t, "info")
@@ -716,27 +664,19 @@ func TestMCPSelfKillSuppressesTheKillerFanOut(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := us.Kill(ctx, ownID); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.Require().NoError(us.Kill(ctx, ownID), "Kill")
 
-	if got := assertSilence(t, ss.got); got != "" {
-		t.Errorf("the killer's own session must not hear about its own kill; got %q", got)
-	}
-	if _, ok := ctrl.selfKilled.take(ownID); ok {
-		t.Fatal("the kill mark must have been consumed by the exit handler, not left behind")
-	}
+	c.Eq("", assertSilence(t, ss.got), "the killer's own session must not hear about its own kill; got")
+	_, ok := ctrl.selfKilled.take(ownID)
+	c.Require().False(ok, "the kill mark must have been consumed by the exit handler, not left behind")
 
 	// The counterpart: a kill that did NOT come from the caller's surface —
 	// straight into Controller.Kill, as the CLI and Connect do — must still
 	// reach the sessions of the child's owner.
 	otherID := spawnOwnedChild(t, ctrl, owner)
-	if _, err := ctrl.Kill(ctx, otherID, 0, 0); err != nil {
-		t.Fatalf("human Kill: %v", err)
-	}
-	if got := waitFor(t, ss.got); !strings.Contains(got, otherID) {
-		t.Errorf("a human kill must still fan out to the owner's sessions; got %q", got)
-	}
+	_, err := ctrl.Kill(ctx, otherID, 0, 0)
+	c.Require().NoError(err, "human Kill")
+	c.StrContains(waitFor(t, ss.got), otherID, "a human kill must still fan out to the owner's sessions; got")
 }
 
 // TestMCPKillStillNotifiesTheParent pins the half of the guard this surface
@@ -746,6 +686,7 @@ func TestMCPSelfKillSuppressesTheKillerFanOut(t *testing.T) {
 // audience; it must never set the parent-facing one.
 func TestMCPKillStillNotifiesTheParent(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl, clk, cap := killNoticeFixture(t)
 
 	coordID := spawnTestChild(t, ctrl, nil)
@@ -754,13 +695,9 @@ func TestMCPKillStillNotifiesTheParent(t *testing.T) {
 	us := newUserSpawner(ctrl, users.Identity{UserID: "u-op", Username: "op"})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := us.Kill(ctx, workerID); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.NoError(us.Kill(ctx, workerID), "Kill")
 
 	clk.Advance(6 * time.Second)
 	batches := cap.batches()
-	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited") {
-		t.Fatalf("an MCP kill of a parented worker must still notify its parent: %+v", batches)
-	}
+	c.False(len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited"), "an MCP kill of a parented worker must still notify its parent: %+v", batches)
 }

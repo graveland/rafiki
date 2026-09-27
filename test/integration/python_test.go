@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // roundtripModCode is the fixture body `rafiki py` round-trips. It ends in a
@@ -18,9 +19,7 @@ const roundtripModCode = "VALUE = \"round-trip\"\n\n\ndef greet():\n    return \
 func writeRoundtripFixture(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "roundtrip_mod.py")
-	if err := os.WriteFile(path, []byte(roundtripModCode), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(roundtripModCode), 0o600), "write fixture")
 	return path
 }
 
@@ -33,6 +32,7 @@ func writeRoundtripFixture(t *testing.T) string {
 // environment blanked.
 func TestPythonRoundTrip(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 	fixture := writeRoundtripFixture(t)
 
@@ -43,12 +43,8 @@ func TestPythonRoundTrip(t *testing.T) {
 		"--file", fixture, "--description", "integration fixture")
 	putCmd.Stderr = &putStderr
 	putOut, err := putCmd.Output() // stdout only
-	if err != nil {
-		t.Fatalf("py put failed: %v\nstderr: %s", err, putStderr.String())
-	}
-	if !strings.Contains(string(putOut), "saved roundtrip_mod as version") {
-		t.Fatalf("py put output %q does not announce the saved version", putOut)
-	}
+	c.NoError(err, "py put failed: %v\nstderr: %s", err, putStderr.String())
+	c.StrContains(string(putOut), "saved roundtrip_mod as version", "py put output %q does not announce the saved version", putOut)
 
 	// ── 2. list -j: the row is there, the code is not ────────────────────
 	// An inventory is not a document: the list response omits code entirely
@@ -56,9 +52,7 @@ func TestPythonRoundTrip(t *testing.T) {
 	// key). Parse rather than substring-match so the assertion is about the
 	// row's shape, not its rendering.
 	listOut, err := cliCmd(t, d, "py", "list", "-j").Output()
-	if err != nil {
-		t.Fatalf("py list -j failed: %v", err)
-	}
+	c.NoError(err, "py list -j failed")
 	var env struct {
 		Rows []struct {
 			Name string  `json:"name"`
@@ -74,44 +68,30 @@ func TestPythonRoundTrip(t *testing.T) {
 			continue
 		}
 		found = true
-		if row.Code != nil {
-			t.Fatalf("py list -j row for roundtrip_mod carries a code field; inventory must not: %s", listOut)
-		}
+		c.Nil(row.Code, "py list -j row for roundtrip_mod carries a code field; inventory must not: %s", listOut)
 	}
-	if !found {
-		t.Fatalf("py list -j has no row named roundtrip_mod: %s", listOut)
-	}
+	c.True(found, "py list -j has no row named roundtrip_mod: %s", listOut)
 	// The parse above is the real codeless guard; this substring check is the
 	// belt to those braces. The fragment is chosen escape-free on purpose —
 	// no quotes, no newlines — so it survives JSON escaping and the check can
 	// actually fire if the code ever leaks.
-	if bytes.Contains(listOut, []byte("hello from roundtrip_mod")) {
-		t.Fatalf("py list -j leaked the module body into the inventory: %s", listOut)
-	}
+	c.False(bytes.Contains(listOut, []byte("hello from roundtrip_mod")), "py list -j leaked the module body into the inventory: %s", listOut)
 
 	// ── 3. get: the code comes back byte-for-byte ────────────────────────
 	// Table mode prints the code raw to stdout (fmt.Fprintln on os.Stdout),
 	// so the output is the file's contents plus the one trailing newline
 	// the print adds on top of the one already in the body.
 	getOut, err := cliCmd(t, d, "py", "get", "roundtrip_mod").Output()
-	if err != nil {
-		t.Fatalf("py get failed: %v", err)
-	}
-	if want := roundtripModCode + "\n"; string(getOut) != want {
-		t.Fatalf("py get output mismatch:\n got: %q\nwant: %q", getOut, want)
-	}
+	c.NoError(err, "py get failed")
+	c.Eq(roundtripModCode+"\n", string(getOut), "py get output mismatch:\n got: %q\nwant", getOut)
 
 	// ── 4. delete: confirmed on stdout ───────────────────────────────────
 	var delStderr bytes.Buffer
 	delCmd := cliCmd(t, d, "py", "delete", "roundtrip_mod")
 	delCmd.Stderr = &delStderr
 	delOut, err := delCmd.Output()
-	if err != nil {
-		t.Fatalf("py delete failed: %v\nstderr: %s", err, delStderr.String())
-	}
-	if !strings.Contains(string(delOut), "deleted roundtrip_mod") {
-		t.Fatalf("py delete output %q does not confirm the deletion", delOut)
-	}
+	c.NoError(err, "py delete failed: %v\nstderr: %s", err, delStderr.String())
+	c.StrContains(string(delOut), "deleted roundtrip_mod", "py delete output %q does not confirm the deletion", delOut)
 
 	// ── 5. get after delete: not found, nonzero, on stderr ───────────────
 	// The daemon maps pymodules.ErrNotFound to Connect's CodeNotFound; the
@@ -122,12 +102,8 @@ func TestPythonRoundTrip(t *testing.T) {
 	goneCmd := cliCmd(t, d, "py", "get", "roundtrip_mod")
 	goneCmd.Stdout = &goneOut
 	goneCmd.Stderr = &goneErrBuf
-	if err := goneCmd.Run(); err == nil {
-		t.Fatalf("py get after delete must exit nonzero; stdout: %q", goneOut.String())
-	}
-	if !strings.Contains(goneErrBuf.String(), "not found") {
-		t.Fatalf("py get after delete: stderr %q does not mention not found", goneErrBuf.String())
-	}
+	c.Error(goneCmd.Run(), "py get after delete must exit nonzero; stdout: %q", goneOut.String())
+	c.StrContains(goneErrBuf.String(), "not found", "py get after delete: stderr")
 
 	// ── 6. put with a non-identifier name: refused CLIENT-side ───────────
 	// "9bad" cannot be a path segment or an import target. Both the client
@@ -143,12 +119,8 @@ func TestPythonRoundTrip(t *testing.T) {
 	badCmd := cliCmd(t, nil, "py", "put", "9bad", "--file", fixture)
 	badCmd.Stdout = &badOut
 	badCmd.Stderr = &badErrBuf
-	if err := badCmd.Run(); err == nil {
-		t.Fatalf("py put 9bad must exit nonzero; stdout: %q", badOut.String())
-	}
-	if !strings.Contains(badErrBuf.String(), "bare Python identifier") {
-		t.Fatalf("py put 9bad: stderr %q does not carry the identifier error", badErrBuf.String())
-	}
+	c.Error(badCmd.Run(), "py put 9bad must exit nonzero; stdout: %q", badOut.String())
+	c.StrContains(badErrBuf.String(), "bare Python identifier", "py put 9bad: stderr")
 
 	// Control: the same command with a VALID name and no daemon fails
 	// somewhere else — profile or endpoint resolution — and never with the
@@ -159,10 +131,6 @@ func TestPythonRoundTrip(t *testing.T) {
 	ctlCmd := cliCmd(t, nil, "py", "put", "roundtrip_mod", "--file", fixture)
 	ctlCmd.Stdout = &ctlOut
 	ctlCmd.Stderr = &ctlErrBuf
-	if err := ctlCmd.Run(); err == nil {
-		t.Fatalf("py put with a valid name and no daemon must exit nonzero; stdout: %q", ctlOut.String())
-	}
-	if ctlErr := ctlErrBuf.String(); strings.Contains(ctlErr, "bare Python identifier") {
-		t.Fatalf("py put control: no daemon yet the error is the identifier message; the client-side ValidName pre-check did not fire first: %q", ctlErr)
-	}
+	c.Error(ctlCmd.Run(), "py put with a valid name and no daemon must exit nonzero; stdout: %q", ctlOut.String())
+	c.NotStrContains(ctlErrBuf.String(), "bare Python identifier", "py put control: no daemon yet the error is the identifier message; the client-side ValidName pre-check did not fire first")
 }

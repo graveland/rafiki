@@ -4,9 +4,12 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestIsReservedEnvKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reserved := []string{
 		"RAFIKI_DB",    // a DSN, credentials included
 		"RAFIKI_TOKEN", // the control-plane bearer
@@ -17,9 +20,7 @@ func TestIsReservedEnvKey(t *testing.T) {
 		"OPENROUTER_API_KEY",
 	}
 	for _, k := range reserved {
-		if !paths.IsReservedEnvKey(k) {
-			t.Errorf("IsReservedEnvKey(%q) = false, want true", k)
-		}
+		c.True(paths.IsReservedEnvKey(k), "IsReservedEnvKey(%q) = false, want true", k)
 	}
 
 	// A blacklist of what rafiki owns, NOT a general secret filter. Everything
@@ -33,8 +34,6 @@ func TestIsReservedEnvKey(t *testing.T) {
 		"MY_RAFIKI_THING",       // prefix, not substring
 	}
 	for _, k := range allowed {
-		if paths.IsReservedEnvKey(k) {
-			t.Errorf("IsReservedEnvKey(%q) = true, want false", k)
-		}
+		c.False(paths.IsReservedEnvKey(k), "IsReservedEnvKey(%q) = true, want false", k)
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/quota"
 	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/usersdb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── fakes ───────────────────────────────────────────────────────────────────
@@ -63,6 +65,7 @@ func (s *countingUserStore) LookupUsername(ctx context.Context, name string) (st
 // never even be looked up, because the label can be stale while the id was
 // resolved at spawn time.
 func TestResumeOwnerUserIDPrefersTheSnapshotID(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	store := &ownerResolverStore{ids: map[string]string{"carol": "u_carol"}}
 	ctrl.users = store
@@ -71,12 +74,8 @@ func TestResumeOwnerUserIDPrefersTheSnapshotID(t *testing.T) {
 		OwnerUserID: "u_direct",
 		Labels:      map[string]string{"owner": "carol"},
 	}
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", snap); got != "u_direct" {
-		t.Fatalf("resumeOwnerUserID = %q, want the snapshot id", got)
-	}
-	if len(store.lookups) != 0 {
-		t.Fatalf("LookupUsername consulted %v for a snapshot that already carries the id", store.lookups)
-	}
+	c.Eq("u_direct", ctrl.resumeOwnerUserID(t.Context(), "c_x", snap), "resumeOwnerUserID")
+	c.Empty(store.lookups, "LookupUsername consulted")
 }
 
 func TestResumeOwnerUserIDResolvesTheLabel(t *testing.T) {
@@ -85,9 +84,7 @@ func TestResumeOwnerUserIDResolvesTheLabel(t *testing.T) {
 	ctrl.users = store
 
 	snap := childstore.Snapshot{Labels: map[string]string{"owner": "carol"}}
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", snap); got != "u_carol" {
-		t.Fatalf("resumeOwnerUserID = %q, want the resolved id", got)
-	}
+	assert.NewAborting(t).Eq("u_carol", ctrl.resumeOwnerUserID(t.Context(), "c_x", snap), "resumeOwnerUserID")
 	if len(store.lookups) != 1 || store.lookups[0] != "carol" {
 		t.Fatalf("lookups = %v, want exactly [carol]", store.lookups)
 	}
@@ -100,9 +97,7 @@ func TestResumeOwnerUserIDContinuesUnattributedOnAMiss(t *testing.T) {
 	ctrl.users = &ownerResolverStore{ids: map[string]string{}}
 
 	snap := childstore.Snapshot{Labels: map[string]string{"owner": "ghost"}}
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", snap); got != "" {
-		t.Fatalf("resumeOwnerUserID = %q, want empty (attribution is best-effort, never guessed)", got)
-	}
+	assert.NewAborting(t).Eq("", ctrl.resumeOwnerUserID(t.Context(), "c_x", snap), "resumeOwnerUserID")
 }
 
 // A store that cannot answer is not an answer either: continue unattributed
@@ -112,21 +107,16 @@ func TestResumeOwnerUserIDContinuesUnattributedOnAStoreFailure(t *testing.T) {
 	ctrl.users = &ownerResolverStore{err: errors.New("dial: connection refused")}
 
 	snap := childstore.Snapshot{Labels: map[string]string{"owner": "carol"}}
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", snap); got != "" {
-		t.Fatalf("resumeOwnerUserID = %q, want empty on a store failure", got)
-	}
+	assert.NewAborting(t).Eq("", ctrl.resumeOwnerUserID(t.Context(), "c_x", snap), "resumeOwnerUserID")
 }
 
 func TestResumeOwnerUserIDWithoutALabelOrStore(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t) // users store nil (no RAFIKI_DB wiring in tests)
 
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", childstore.Snapshot{}); got != "" {
-		t.Fatalf("resumeOwnerUserID = %q, want empty with no label and no store", got)
-	}
+	c.Eq("", ctrl.resumeOwnerUserID(t.Context(), "c_x", childstore.Snapshot{}), "resumeOwnerUserID")
 	ctrl.users = &ownerResolverStore{}
-	if got := ctrl.resumeOwnerUserID(t.Context(), "c_x", childstore.Snapshot{}); got != "" {
-		t.Fatalf("resumeOwnerUserID = %q, want empty with no label", got)
-	}
+	c.Eq("", ctrl.resumeOwnerUserID(t.Context(), "c_x", childstore.Snapshot{}), "resumeOwnerUserID")
 }
 
 // ─── the quota_status knock-on ───────────────────────────────────────────────
@@ -138,25 +128,22 @@ func TestResumeOwnerUserIDWithoutALabelOrStore(t *testing.T) {
 // id is what newControllerQuotaReader binds. Seeded against real Postgres —
 // both the users row and the captured rate-limit snapshot.
 func TestResumedChildQuotaStatusReturnsCapturedData(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := openTestPool(t)
 	store := usersdb.NewPostgresStore(pool)
 	username := fmt.Sprintf("resume-quota-it-%d", time.Now().UnixNano())
 	u, _, err := store.Create(t.Context(), username, false)
-	if err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
+	c.Require().NoError(err, "seed user")
 	t.Cleanup(func() { _ = store.Delete(context.Background(), username) })
 
 	util5 := 0.31
 	reset5 := time.Now().Add(3 * time.Hour).UTC()
 	qs := quota.NewStore(pool)
-	if err := qs.Upsert(t.Context(), u.ID, quota.Status{
+	c.Require().NoError(qs.Upsert(t.Context(), u.ID, quota.Status{
 		OrganizationID: "org_resume_it",
 		FiveH:          quota.Window{Utilization: &util5, ResetAt: &reset5, Status: "allowed"},
 		OverallStatus:  "allowed",
-	}); err != nil {
-		t.Fatalf("seed quota row: %v", err)
-	}
+	}), "seed quota row")
 
 	ctrl := newTestController(t)
 	ctrl.pool = pool
@@ -167,21 +154,15 @@ func TestResumedChildQuotaStatusReturnsCapturedData(t *testing.T) {
 	// agentRuntimeOptions does.
 	resolved := ctrl.resumeOwnerUserID(t.Context(), "c_resume_quota",
 		childstore.Snapshot{Labels: map[string]string{"owner": username}})
-	if resolved != u.ID {
-		t.Fatalf("resumeOwnerUserID = %q, want %q", resolved, u.ID)
-	}
+	c.Require().Eq(u.ID, resolved, "resumeOwnerUserID")
 	qr := newControllerQuotaReader(ctrl, resolved)
 	st, ok, err := qr.RateLimitStatus(t.Context())
-	if err != nil {
-		t.Fatalf("RateLimitStatus: %v", err)
-	}
+	c.Require().NoError(err, "RateLimitStatus")
 	if !ok {
 		t.Fatal("RateLimitStatus reported no data for a user with a captured snapshot — " +
 			"this is the 'resumed child loses quota visibility' bug this plan closes")
 	}
-	if st.OrganizationID != "org_resume_it" {
-		t.Errorf("OrganizationID = %q, want org_resume_it", st.OrganizationID)
-	}
+	c.Eq("org_resume_it", st.OrganizationID, "OrganizationID")
 }
 
 // ─── the two resume call sites ───────────────────────────────────────────────
@@ -211,9 +192,7 @@ func resumedConversation(t *testing.T, ctrl *Controller, childID string) string 
 func seedControllerUser(t *testing.T, pool *pgxpool.Pool, username string) string {
 	t.Helper()
 	id, _, err := usersdb.NewPostgresStore(pool).Create(t.Context(), username, false)
-	if err != nil {
-		t.Fatalf("seed user %s: %v", username, err)
-	}
+	assert.NewAborting(t).NoError(err, "seed user %s", username)
 	t.Cleanup(func() {
 		if err := usersdb.NewPostgresStore(pool).Delete(context.Background(), username); err != nil {
 			t.Logf("cleanup user %s: %v", username, err)
@@ -257,6 +236,7 @@ func dropConversation(t *testing.T, pool *pgxpool.Pool, conversationID string) {
 // id on the new conversation. A revert of the site to a literal "" leaves the
 // row NULL and fails here.
 func TestResumeAttributesTheConversationFromTheSnapshotID(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	ownerID := seedControllerUser(t, pool, fmt.Sprintf("resume-id-it-%d", os.Getpid()))
 	ctrl := newTestController(t)
@@ -275,19 +255,16 @@ func TestResumeAttributesTheConversationFromTheSnapshotID(t *testing.T) {
 	t.Cleanup(func() { dropConversation(t, pool, convID) })
 
 	var owner *string
-	if err := pool.QueryRow(ctx,
-		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if owner == nil || *owner != ownerID {
-		t.Fatalf("resumed conversation owner_user_id = %v, want %s — Resume dropped the owner", owner, ownerID)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner), "read conversation")
+	c.False(owner == nil || *owner != ownerID, "resumed conversation owner_user_id = %v, want %s — Resume dropped the owner", owner, ownerID)
 }
 
 // TestResumeAttributesTheConversationFromTheOwnerLabel guards the same site
 // for the older-row shape: no id, only the owner's USERNAME in Labels. The
 // label must resolve through the users store onto the new conversation.
 func TestResumeAttributesTheConversationFromTheOwnerLabel(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	username := fmt.Sprintf("resume-label-it-%d", time.Now().UnixNano())
 	wantID := seedControllerUser(t, pool, username)
@@ -309,13 +286,9 @@ func TestResumeAttributesTheConversationFromTheOwnerLabel(t *testing.T) {
 	t.Cleanup(func() { dropConversation(t, pool, convID) })
 
 	var owner *string
-	if err := pool.QueryRow(ctx,
-		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if owner == nil || *owner != wantID {
-		t.Fatalf("resumed conversation owner_user_id = %v, want %s (resolved from the owner label)", owner, wantID)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner), "read conversation")
+	c.False(owner == nil || *owner != wantID, "resumed conversation owner_user_id = %v, want %s (resolved from the owner label)", owner, wantID)
 	if len(resolver.lookups) != 1 || resolver.lookups[0] != username {
 		t.Fatalf("LookupUsername calls = %v, want exactly [%s] — a call site reverted to a literal \"\" would consult the store zero times", resolver.lookups, username)
 	}
@@ -325,6 +298,7 @@ func TestResumeAttributesTheConversationFromTheOwnerLabel(t *testing.T) {
 // call site, independently — RespawnChild is a separate function and reverts
 // separately.
 func TestRespawnChildAttributesTheConversationFromTheSnapshotID(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	ownerID := seedControllerUser(t, pool, fmt.Sprintf("respawn-id-it-%d", os.Getpid()))
 	ctrl := newTestController(t)
@@ -343,13 +317,9 @@ func TestRespawnChildAttributesTheConversationFromTheSnapshotID(t *testing.T) {
 	t.Cleanup(func() { dropConversation(t, pool, convID) })
 
 	var owner *string
-	if err := pool.QueryRow(ctx,
-		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if owner == nil || *owner != ownerID {
-		t.Fatalf("respawned conversation owner_user_id = %v, want %s — RespawnChild dropped the owner", owner, ownerID)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`, convID).Scan(&owner), "read conversation")
+	c.False(owner == nil || *owner != ownerID, "respawned conversation owner_user_id = %v, want %s — RespawnChild dropped the owner", owner, ownerID)
 }
 
 // TestAgentRuntimeOptionsCarriesTheOwnerID pins the mapping itself: whatever
@@ -358,32 +328,21 @@ func TestRespawnChildAttributesTheConversationFromTheSnapshotID(t *testing.T) {
 // in its methods — the constructor is the binding — so the captured field is
 // the only place this can be asserted.
 func TestAgentRuntimeOptionsCarriesTheOwnerID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 	ctrl.pool = openTestPool(t)
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-x"}
 	ro, err := ctrl.agentRuntimeOptions(req, "c_owned", false, "carol", "u_carol")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.OwnerUserID != "u_carol" {
-		t.Errorf("ro.OwnerUserID = %q, want %q — the owner never reaches the conversation", ro.OwnerUserID, "u_carol")
-	}
+	c.Require().NoError(err, "agentRuntimeOptions")
+	c.Eq("u_carol", ro.OwnerUserID, "ro.OwnerUserID")
 	qr, ok := ro.Quota.(*quotaReader)
-	if !ok || qr == nil {
-		t.Fatalf("ro.Quota = %T (%v), want *quotaReader", ro.Quota, ro.Quota)
-	}
-	if qr.userID != "u_carol" {
-		t.Errorf("quota reader userID = %q, want %q — a resumed child's quota_status would answer 'no data captured'", qr.userID, "u_carol")
-	}
+	c.Require().False(!ok || qr == nil, "ro.Quota = %T (%v), want *quotaReader", ro.Quota, ro.Quota)
+	c.Eq("u_carol", qr.userID, "quota reader userID")
 
 	// The anonymous shape stays legal and unattributed: empty in, empty out,
 	// and quota_status answers "no data captured" rather than guessing.
 	ro2, err := ctrl.agentRuntimeOptions(req, "c_anon", false, "carol", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions (anonymous): %v", err)
-	}
-	if ro2.OwnerUserID != "" {
-		t.Errorf("ro.OwnerUserID = %q for an anonymous spawn, want empty", ro2.OwnerUserID)
-	}
+	c.Require().NoError(err, "agentRuntimeOptions (anonymous)")
+	c.Eq("", ro2.OwnerUserID, "ro.OwnerUserID")
 }

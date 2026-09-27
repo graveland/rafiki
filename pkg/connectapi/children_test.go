@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeLister struct {
@@ -48,41 +50,27 @@ func sampleChildren() []protocol.ChildSummary {
 }
 
 func TestListChildrenMapsFields(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(&fakeLister{all: sampleChildren()})
 
 	resp, err := s.ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
-	if len(resp.Msg.GetChildren()) != 1 {
-		t.Fatalf("children = %d, want 1", len(resp.Msg.GetChildren()))
-	}
+	ck.Require().NoError(err, "ListChildren")
+	ck.Require().Len(resp.Msg.GetChildren(), 1, "children = %d, want 1", len(resp.Msg.GetChildren()))
 	c := resp.Msg.GetChildren()[0]
-	if c.GetChildId() != "c_1" || c.GetName() != "scout" || c.GetKind() != "fundi" {
-		t.Errorf("identity fields wrong: %+v", c)
-	}
-	if c.GetStatus() != "idle" || c.GetModel() != "claude-opus-5" || c.GetCwd() != "/tmp" {
-		t.Errorf("state fields wrong: %+v", c)
-	}
-	if c.GetPid() != 4242 {
-		t.Errorf("Pid = %d, want 4242", c.GetPid())
-	}
-	if c.GetStartedAt() != 100 || c.GetLastActivity() != 200 {
-		t.Errorf("timestamps wrong: %+v", c)
-	}
-	if c.GetSessionId() != "conv-uuid" || c.GetContextWindow() != 200000 {
-		t.Errorf("session/window wrong: %+v", c)
-	}
-	if c.GetLabels()["rafiki/parent"] != "c_0" {
-		t.Errorf("labels wrong: %+v", c.GetLabels())
-	}
+	ck.False(c.GetChildId() != "c_1" || c.GetName() != "scout" || c.GetKind() != "fundi", "identity fields wrong: %+v", c)
+	ck.False(c.GetStatus() != "idle" || c.GetModel() != "claude-opus-5" || c.GetCwd() != "/tmp", "state fields wrong: %+v", c)
+	ck.Eq(4242, c.GetPid(), "Pid")
+	ck.False(c.GetStartedAt() != 100 || c.GetLastActivity() != 200, "timestamps wrong: %+v", c)
+	ck.False(c.GetSessionId() != "conv-uuid" || c.GetContextWindow() != 200000, "session/window wrong: %+v", c)
+	ck.Eq("c_0", c.GetLabels()["rafiki/parent"], "labels wrong: %+v", c.GetLabels())
 }
 
 // TestListChildrenNilPidStaysNil proves the optional field survives: an exited
 // child has no pid, and 0 is a legal pid value.
 func TestListChildrenCarriesLatestOrdinal(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctx := context.Background()
 	elog := eventlog.NewMemory()
 	_, _ = elog.Append(ctx, "c_1", statusEvent("c_1", "idle"))
@@ -96,13 +84,9 @@ func TestListChildrenCarriesLatestOrdinal(t *testing.T) {
 	}})
 
 	resp, err := s.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
+	ck.NoError(err, "ListChildren")
 	children := resp.Msg.GetChildren()
-	if len(children) != 2 {
-		t.Fatalf("got %d children, want 2", len(children))
-	}
+	ck.Len(children, 2, "got %d children, want 2", len(children))
 	var c1, cEmpty *rafikiv1.ChildSummary
 	for _, c := range children {
 		if c.GetChildId() == "c_1" {
@@ -119,17 +103,14 @@ func TestListChildrenCarriesLatestOrdinal(t *testing.T) {
 	}
 }
 func TestListChildrenNilPidStaysNil(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{ChildID: "c_1"}}})
 
 	resp, err := s.ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
-	if resp.Msg.GetChildren()[0].Pid != nil {
-		t.Error("Pid must stay nil when the source PID is nil")
-	}
+	c.Require().NoError(err, "ListChildren")
+	c.Nil(resp.Msg.GetChildren()[0].Pid, "Pid must stay nil when the source PID is nil")
 }
 
 func TestListChildrenForwardsStatusFilter(t *testing.T) {
@@ -137,10 +118,9 @@ func TestListChildrenForwardsStatusFilter(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(f)
 
-	if _, err := s.ListChildren(context.Background(),
-		connect.NewRequest(&rafikiv1.ListChildrenRequest{Statuses: []string{"idle", "streaming"}})); err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
+	_, err := s.ListChildren(context.Background(),
+		connect.NewRequest(&rafikiv1.ListChildrenRequest{Statuses: []string{"idle", "streaming"}}))
+	assert.NewAborting(t).NoError(err, "ListChildren")
 	if len(f.gotStatus) != 2 || f.gotStatus[0] != "idle" || f.gotStatus[1] != "streaming" {
 		t.Errorf("forwarded statuses = %v, want [idle streaming]", f.gotStatus)
 	}
@@ -150,23 +130,18 @@ func TestListChildrenWithoutListerFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestGetChildReturnsOne(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(&fakeLister{all: sampleChildren()})
 
 	resp, err := s.GetChild(context.Background(),
 		connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: "c_1"}))
-	if err != nil {
-		t.Fatalf("GetChild: %v", err)
-	}
-	if resp.Msg.GetChild().GetChildId() != "c_1" {
-		t.Errorf("ChildId = %q, want c_1", resp.Msg.GetChild().GetChildId())
-	}
+	c.Require().NoError(err, "GetChild")
+	c.Eq("c_1", resp.Msg.GetChild().GetChildId(), "ChildId")
 }
 
 func TestGetChildUnknownIsNotFound(t *testing.T) {
@@ -175,9 +150,7 @@ func TestGetChildUnknownIsNotFound(t *testing.T) {
 
 	_, err := s.GetChild(context.Background(),
 		connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: "c_nope"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
 }
 
 // TestListChildrenCarriesTheNewSummaryFields pins ChildSummary parity: the
@@ -185,6 +158,7 @@ func TestGetChildUnknownIsNotFound(t *testing.T) {
 // slash_commands, max_completion_tokens) must reach the client from the same
 // protocol.ChildSummary source pkg/control's SnapshotToSummary populates.
 func TestListChildrenCarriesTheNewSummaryFields(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	s.SetChildLister(&fakeLister{all: []protocol.ChildSummary{{
 		ChildID: "c_1", SessionFile: "/state/c_1.jsonl", ExitSignal: "KILL",
@@ -193,22 +167,14 @@ func TestListChildrenCarriesTheNewSummaryFields(t *testing.T) {
 
 	resp, err := s.ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
+	ck.Require().NoError(err, "ListChildren")
 	c := resp.Msg.GetChildren()[0]
-	if c.GetSessionFile() != "/state/c_1.jsonl" {
-		t.Errorf("SessionFile = %q, want /state/c_1.jsonl", c.GetSessionFile())
-	}
-	if c.GetExitSignal() != "KILL" {
-		t.Errorf("ExitSignal = %q, want KILL", c.GetExitSignal())
-	}
+	ck.Eq("/state/c_1.jsonl", c.GetSessionFile(), "SessionFile")
+	ck.Eq("KILL", c.GetExitSignal(), "ExitSignal")
 	if len(c.GetSlashCommands()) != 2 || c.GetSlashCommands()[0] != "/compact" {
 		t.Errorf("SlashCommands = %v, want [/compact /clear]", c.GetSlashCommands())
 	}
-	if c.GetMaxCompletionTokens() != 8192 {
-		t.Errorf("MaxCompletionTokens = %d, want 8192", c.GetMaxCompletionTokens())
-	}
+	ck.Eq(8192, c.GetMaxCompletionTokens(), "MaxCompletionTokens")
 }
 
 func TestGetChildRejectsEmptyID(t *testing.T) {
@@ -216,7 +182,5 @@ func TestGetChildRejectsEmptyID(t *testing.T) {
 	s.SetChildLister(&fakeLister{})
 	_, err := s.GetChild(context.Background(),
 		connect.NewRequest(&rafikiv1.GetChildRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }

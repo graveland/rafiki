@@ -3,6 +3,8 @@ package child
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestClaudeBusFrames_SkipsEmptyTextAndThinking guards the crash where Fable 5
@@ -12,6 +14,7 @@ import (
 // blocks must be skipped entirely, and no emitted block may lack its payload
 // field.
 func TestClaudeBusFrames_SkipsEmptyTextAndThinking(t *testing.T) {
+	ck := assert.NewAborting(t)
 	prov := (ClaudeProvider{}).Fresh()
 	prov.BusFrames([]byte(`{"type":"system","subtype":"init","session_id":"s","model":"claude-fable-5"}`), 1)
 
@@ -25,9 +28,8 @@ func TestClaudeBusFrames_SkipsEmptyTextAndThinking(t *testing.T) {
 	sawHi := false
 	for _, raw := range frames {
 		var m map[string]any
-		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("emitted frame is not valid JSON: %v (%s)", err, raw)
-		}
+		err := json.Unmarshal(raw, &m)
+		ck.NoError(err, "emitted frame is not valid JSON: %v (%s)", err, raw)
 		msg, ok := m["message"].(map[string]any)
 		if !ok {
 			continue
@@ -38,28 +40,20 @@ func TestClaudeBusFrames_SkipsEmptyTextAndThinking(t *testing.T) {
 			switch blk["type"] {
 			case "thinking":
 				v, present := blk["thinking"]
-				if !present {
-					t.Fatalf("thinking block missing 'thinking' field (would crash pi TUI): %v", blk)
-				}
+				ck.True(present, "thinking block missing 'thinking' field (would crash pi TUI): %v", blk)
 				if s, _ := v.(string); s == "" {
 					t.Fatalf("emitted an empty thinking block; should be skipped: %v", blk)
 				}
 			case "text":
 				v, present := blk["text"]
-				if !present {
-					t.Fatalf("text block missing 'text' field (would crash pi TUI): %v", blk)
-				}
+				ck.True(present, "text block missing 'text' field (would crash pi TUI): %v", blk)
 				s, _ := v.(string)
-				if s == "" {
-					t.Fatalf("emitted an empty text block; should be skipped: %v", blk)
-				}
+				ck.NotEq("", s, "emitted an empty text block; should be skipped: %v", blk)
 				if s == "hi" {
 					sawHi = true
 				}
 			}
 		}
 	}
-	if !sawHi {
-		t.Fatal("expected the non-empty text block (\"hi\") to be emitted")
-	}
+	ck.True(sawHi, "expected the non-empty text block (\"hi\") to be emitted")
 }

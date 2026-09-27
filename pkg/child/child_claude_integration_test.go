@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeFakeClaude writes a bash script that mimics claude's stream-json stdio:
@@ -28,14 +30,13 @@ while IFS= read -r line; do
   printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-int"}'
 done
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake claude")
 	_ = capturePath
 	return script
 }
 
 func TestClaudeChild_EndToEnd(t *testing.T) {
+	c := assert.NewAborting(t)
 	capture := filepath.Join(t.TempDir(), "capture.txt")
 	bin := writeFakeClaude(t, capture)
 
@@ -47,9 +48,7 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 		Env:      []string{"CAPTURE=" + capture},
 		Provider: ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
 	// Process-up readiness: claude is idle on spawn (ReadyOnSpawn), before init.
@@ -58,24 +57,18 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("child never became idle")
 	}
-	if st := ch.Status(); st != protocol.StatusIdle {
-		t.Fatalf("status on spawn = %q, want idle", st)
-	}
+	c.Eq(protocol.StatusIdle, ch.Status(), "status on spawn")
 	// The fake emits system/init at startup; the session id is sniffed shortly
 	// after — not necessarily by the instant Idle() closes (process-up readiness).
 	sidDeadline := time.Now().Add(3 * time.Second)
 	for ch.Metadata().SessionID == "" && time.Now().Before(sidDeadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := ch.Metadata().SessionID; got != "sess-int" {
-		t.Fatalf("session id = %q, want sess-int", got)
-	}
+	c.Eq("sess-int", ch.Metadata().SessionID, "session id")
 
 	// Send a normalized prompt; the provider must encode it as a claude user
 	// envelope, and the assistant→result sequence must return the child to idle.
-	if err := ch.Send([]byte(`{"type":"prompt","message":"hi"}`)); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	c.NoError(ch.Send([]byte(`{"type":"prompt","message":"hi"}`)), "send")
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -90,9 +83,7 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 
 	b, _ := os.ReadFile(capture)
 	line := strings.TrimSpace(string(b))
-	if line == "" {
-		t.Fatal("fake claude received no stdin frame")
-	}
+	c.NotEq("", line, "fake claude received no stdin frame")
 	var env struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -102,9 +93,7 @@ func TestClaudeChild_EndToEnd(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.Split(line, "\n")[0]), &env); err != nil {
 		t.Fatalf("captured frame not JSON: %v (%q)", err, line)
 	}
-	if env.Type != "user" || env.Message.Content != "hi" {
-		t.Fatalf("outbound frame = %q, want a claude user envelope with content 'hi'", line)
-	}
+	c.False(env.Type != "user" || env.Message.Content != "hi", "outbound frame = %q, want a claude user envelope with content 'hi'", line)
 }
 
 // writeFakeClaudeToolTurn writes a fake-claude that, on the first stdin line,
@@ -124,9 +113,7 @@ printf '%s\n' '{"type":"assistant","session_id":"sess-tool","message":{"role":"a
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-tool","result":"Done."}'
 sleep 30
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake claude tool: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake claude tool")
 	return script
 }
 
@@ -139,6 +126,7 @@ sleep 30
 //     assistant(text) messages with mapped pi content blocks.
 //   - the RING still holds the RAW claude frames (subagent_view raw fidelity).
 func TestClaudeChild_BusCarriesNormalizedPiFrames(t *testing.T) {
+	ck := assert.NewAborting(t)
 	bin := writeFakeClaudeToolTurn(t)
 	cwd, _ := os.Getwd()
 	ch, err := Spawn(context.Background(), SpawnSpec{
@@ -147,9 +135,7 @@ func TestClaudeChild_BusCarriesNormalizedPiFrames(t *testing.T) {
 		PiBinary: bin,
 		Provider: ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	ck.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
 	// Subscribe to the bus BEFORE prompting so we capture the whole sequence.
@@ -162,9 +148,7 @@ func TestClaudeChild_BusCarriesNormalizedPiFrames(t *testing.T) {
 		t.Fatal("child never became idle from system/init")
 	}
 
-	if err := ch.Send([]byte(`{"type":"prompt","message":"list files"}`)); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	ck.NoError(ch.Send([]byte(`{"type":"prompt","message":"list files"}`)), "send")
 
 	// Collect bus frames until we observe agent_end (the turn terminator).
 	var busFrames []map[string]any
@@ -202,9 +186,7 @@ loop:
 		"message_start", "message_update", "message_end",
 		"agent_end",
 	}
-	if strings.Join(gotTypes, ",") != strings.Join(want, ",") {
-		t.Fatalf("bus sequence:\n got=%v\nwant=%v", gotTypes, want)
-	}
+	ck.Eq(strings.Join(want, ","), strings.Join(gotTypes, ","), "bus sequence:\n got=%v\nwant=%v", gotTypes, want)
 
 	// No raw claude frame types should ever appear on the bus.
 	for _, ty := range gotTypes {
@@ -225,23 +207,16 @@ loop:
 	for i, raw := range msgs {
 		roles[i] = raw.(map[string]any)["role"].(string)
 	}
-	if strings.Join(roles, ",") != "user,assistant,toolResult,assistant" {
-		t.Fatalf("agent_end.messages roles = %v, want [user assistant toolResult assistant]", roles)
-	}
+	ck.Eq("user,assistant,toolResult,assistant", strings.Join(roles, ","), "agent_end.messages roles = %v, want [user assistant toolResult assistant]", roles)
 	// The first assistant message must carry a mapped pi toolCall block.
 	a0 := msgs[1].(map[string]any)
 	block0 := a0["content"].([]any)[0].(map[string]any)
-	if block0["type"] != "toolCall" || block0["name"] != "Bash" {
-		t.Fatalf("agent_end assistant content not a mapped toolCall: %v", block0)
-	}
-	if _, bad := block0["input"]; bad {
-		t.Fatalf("toolCall must use arguments not input: %v", block0)
-	}
+	ck.False(block0["type"] != "toolCall" || block0["name"] != "Bash", "agent_end assistant content not a mapped toolCall: %v", block0)
+	_, bad := block0["input"]
+	ck.False(bad, "toolCall must use arguments not input: %v", block0)
 	// The toolResult message must be pi-shaped.
 	tr := msgs[2].(map[string]any)
-	if tr["toolCallId"] != "toolu_X" || tr["toolName"] != "Bash" {
-		t.Fatalf("toolResult message not paired: %v", tr)
-	}
+	ck.False(tr["toolCallId"] != "toolu_X" || tr["toolName"] != "Bash", "toolResult message not paired: %v", tr)
 
 	// The RING must still hold the RAW claude frames (forensic fidelity).
 	rawFrames := ch.RingSnapshot()
@@ -270,9 +245,7 @@ loop:
 	if !sawRawAssistant || !sawRawResult {
 		t.Fatalf("ring lost raw claude frames: assistant=%v result=%v (ring=%d frames)", sawRawAssistant, sawRawResult, len(rawFrames))
 	}
-	if !sawRawToolUse {
-		t.Fatal("ring must preserve the raw claude tool_use block (not the mapped toolCall)")
-	}
+	ck.True(sawRawToolUse, "ring must preserve the raw claude tool_use block (not the mapped toolCall)")
 }
 
 // writeFakeClaudeSilentUntilInput mimics the REAL claude un-prompted behavior:
@@ -295,9 +268,7 @@ while IFS= read -r line; do
   printf '%s\n' '{"type":"result","subtype":"success","session_id":"sess-real"}'
 done
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake claude")
 	return script
 }
 
@@ -311,6 +282,7 @@ done
 //     surfacing the session id — proving an un-prompted claude child is usable
 //     without a steer workaround, and that resume metadata is still captured.
 func TestClaudeChild_IdleOnSpawnWhenSilent(t *testing.T) {
+	c := assert.NewAborting(t)
 	bin := writeFakeClaudeSilentUntilInput(t)
 	cwd, _ := os.Getwd()
 	ch, err := Spawn(context.Background(), SpawnSpec{
@@ -319,9 +291,7 @@ func TestClaudeChild_IdleOnSpawnWhenSilent(t *testing.T) {
 		PiBinary: bin,
 		Provider: ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = ch.Shutdown(time.Second, time.Second) })
 
 	// Core of the fix: a claude child emitting NOTHING on stdout must still reach
@@ -331,12 +301,8 @@ func TestClaudeChild_IdleOnSpawnWhenSilent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("silent claude child never became idle (stuck spawning)")
 	}
-	if st := ch.Status(); st != protocol.StatusIdle {
-		t.Fatalf("status on spawn = %q, want idle", st)
-	}
-	if sid := ch.Metadata().SessionID; sid != "" {
-		t.Fatalf("session id should be empty before the first turn, got %q", sid)
-	}
+	c.Eq(protocol.StatusIdle, ch.Status(), "status on spawn")
+	c.Eq("", ch.Metadata().SessionID, "session id should be empty before the first turn, got")
 
 	// Subscribe before sending so we capture the whole turn, then prove the send
 	// is processed: the deferred init + assistant + result must drive a turn that
@@ -344,28 +310,20 @@ func TestClaudeChild_IdleOnSpawnWhenSilent(t *testing.T) {
 	busCh, cancel := ch.Bus().Subscribe()
 	defer cancel()
 
-	if err := ch.Send([]byte(`{"type":"prompt","message":"reply OK"}`)); err != nil {
-		t.Fatalf("send: %v", err)
-	}
+	c.NoError(ch.Send([]byte(`{"type":"prompt","message":"reply OK"}`)), "send")
 
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
 		case raw, ok := <-busCh:
-			if !ok {
-				t.Fatal("bus closed before agent_end")
-			}
+			c.True(ok, "bus closed before agent_end")
 			var m map[string]any
 			if err := json.Unmarshal(raw, &m); err != nil {
 				t.Fatalf("bus frame not JSON: %v (%s)", err, raw)
 			}
 			if m["type"] == "agent_end" {
-				if st := ch.Status(); st != protocol.StatusIdle {
-					t.Fatalf("status after turn = %q, want idle", st)
-				}
-				if sid := ch.Metadata().SessionID; sid != "sess-real" {
-					t.Fatalf("session id after turn = %q, want sess-real", sid)
-				}
+				c.Eq(protocol.StatusIdle, ch.Status(), "status after turn")
+				c.Eq("sess-real", ch.Metadata().SessionID, "session id after turn")
 				return
 			}
 		case <-deadline:

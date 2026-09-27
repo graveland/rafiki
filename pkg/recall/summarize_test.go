@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type summarizerCompleteCall struct {
@@ -268,49 +270,36 @@ func summarizerWith(o SummarizerOptions) *Summarizer {
 }
 
 func TestSummarizerFirstPassOnlyRecordsEnabledAt(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := &summarizerFakeStore{eligible: []ConversationMeta{summarizerConv("c1")}}
 	comp := summarizerCompleter("m", "TITLE: t\n\nbody")
 	s := summarizerWith(SummarizerOptions{Store: store, Completer: comp, Now: func() time.Time { return utcDate(2026, 3, 4) }})
-	if err := s.Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
+	c.NoError(s.Pass(context.Background()), "Pass")
 	want := utcDate(2026, 3, 4).UTC().Format(time.RFC3339)
-	if got := store.state["summaries_enabled_at"]; got != want {
-		t.Fatalf("summaries_enabled_at = %q, want %q", got, want)
-	}
-	if len(comp.calls) != 0 {
-		t.Fatalf("Complete calls = %d, want 0", len(comp.calls))
-	}
-	if len(store.upserts) != 0 {
-		t.Fatalf("upserts = %d, want 0", len(store.upserts))
-	}
+	c.Eq(want, store.state["summaries_enabled_at"], "summaries_enabled_at")
+	c.Empty(comp.calls, "Complete calls = %d, want 0", len(comp.calls))
+	c.Empty(store.upserts, "upserts = %d, want 0", len(store.upserts))
 }
 
 func TestSummarizerSegmentBudgetDerivedFromContextWindow(t *testing.T) {
+	c := assert.NewAborting(t)
 	window, fallback := 1_000_000, UnknownContextTokens
 	s := summarizerWith(SummarizerOptions{Completer: &summarizerFakeCompleter{model: "m", window: window, windowOK: true, failAt: -1}})
 	want := int(float64(window-SummaryPromptOverheadTokens-SummaryMaxOutputTokens) * 0.9)
-	if got := s.SegmentBudgetTokens(); got != want {
-		t.Fatalf("budget = %d, want %d", got, want)
-	}
+	c.Eq(want, s.SegmentBudgetTokens(), "budget")
 	s = summarizerWith(SummarizerOptions{
 		Completer:        &summarizerFakeCompleter{model: "m", window: 1_000_000, windowOK: true, failAt: -1},
 		MaxSegmentTokens: 200_000,
 	})
-	if got := s.SegmentBudgetTokens(); got != 200_000 {
-		t.Fatalf("capped budget = %d, want 200000", got)
-	}
+	c.Eq(200_000, s.SegmentBudgetTokens(), "capped budget")
 	s = summarizerWith(SummarizerOptions{Completer: &summarizerFakeCompleter{model: "m", failAt: -1}})
-	if got := s.SegmentBudgetTokens(); got != int(float64(fallback-SummaryPromptOverheadTokens-SummaryMaxOutputTokens)*0.9) {
-		t.Fatalf("unknown-window budget = %d", got)
-	}
+	c.Eq(int(float64(fallback-SummaryPromptOverheadTokens-SummaryMaxOutputTokens)*0.9), s.SegmentBudgetTokens(), "unknown-window budget =")
 	s = summarizerWith(SummarizerOptions{Completer: &summarizerFakeCompleter{model: "m", window: 5000, windowOK: true, failAt: -1}})
-	if got := s.SegmentBudgetTokens(); got != 4000 {
-		t.Fatalf("floored budget = %d, want 4000", got)
-	}
+	c.Eq(4000, s.SegmentBudgetTokens(), "floored budget")
 }
 
 func TestSummarizerSingleSegmentCopiesToConversationLevel(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.msgs = map[string][]Message{"c1": {
@@ -318,37 +307,20 @@ func TestSummarizerSingleSegmentCopiesToConversationLevel(t *testing.T) {
 		summarizerMsg("c1", 1, "assistant", "resetting the OAuth gate fixed the login flow"),
 	}}
 	comp := summarizerCompleter("m", "TITLE: Login fix\n\nFixed the login flow by resetting the OAuth gate.")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1", len(comp.calls))
-	}
-	if len(store.upserts) != 2 {
-		t.Fatalf("upserts = %d, want 2", len(store.upserts))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1", len(comp.calls))
+	c.Len(store.upserts, 2, "upserts = %d, want 2", len(store.upserts))
 	seg, conv := store.upserts[0], store.upserts[1]
-	if seg.Level != "segment" || seg.Seq != 0 || seg.OrdinalFrom != 0 || seg.OrdinalTo != 1 {
-		t.Fatalf("segment row = %+v", seg)
-	}
-	if seg.Title != "Login fix" || seg.Summary != "Fixed the login flow by resetting the OAuth gate." {
-		t.Fatalf("segment text = %q / %q", seg.Title, seg.Summary)
-	}
-	if seg.Model != "m" || seg.PromptVersion != SummaryPromptVersion || seg.CostUSD != 0.05 {
-		t.Fatalf("segment meta = model %q version %d cost %v", seg.Model, seg.PromptVersion, seg.CostUSD)
-	}
-	if seg.InputTokens != 100 || seg.OutputTokens != 50 {
-		t.Fatalf("segment tokens = %d/%d", seg.InputTokens, seg.OutputTokens)
-	}
-	if conv.Level != "conversation" || conv.Seq != 0 || conv.CostUSD != 0 {
-		t.Fatalf("conversation row = %+v", conv)
-	}
-	if conv.Title != seg.Title || conv.Summary != seg.Summary || conv.OrdinalFrom != 0 || conv.OrdinalTo != 1 {
-		t.Fatalf("conversation row not a copy: %+v", conv)
-	}
+	c.False(seg.Level != "segment" || seg.Seq != 0 || seg.OrdinalFrom != 0 || seg.OrdinalTo != 1, "segment row = %+v", seg)
+	c.False(seg.Title != "Login fix" || seg.Summary != "Fixed the login flow by resetting the OAuth gate.", "segment text = %q / %q", seg.Title, seg.Summary)
+	c.False(seg.Model != "m" || seg.PromptVersion != SummaryPromptVersion || seg.CostUSD != 0.05, "segment meta = model %q version %d cost %v", seg.Model, seg.PromptVersion, seg.CostUSD)
+	c.False(seg.InputTokens != 100 || seg.OutputTokens != 50, "segment tokens = %d/%d", seg.InputTokens, seg.OutputTokens)
+	c.False(conv.Level != "conversation" || conv.Seq != 0 || conv.CostUSD != 0, "conversation row = %+v", conv)
+	c.False(conv.Title != seg.Title || conv.Summary != seg.Summary || conv.OrdinalFrom != 0 || conv.OrdinalTo != 1, "conversation row not a copy: %+v", conv)
 }
 
 func TestSummarizerRollingPassesStorySoFar(t *testing.T) {
+	ck := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.msgs = map[string][]Message{"c1": {
@@ -365,44 +337,24 @@ func TestSummarizerRollingPassesStorySoFar(t *testing.T) {
 	// MaxSegmentTokens 4100 -> budget 16400 chars (over the 4000 floor); each
 	// ~9000-char message fills a segment, so three segments roll plus one reduce.
 	s := summarizerWith(SummarizerOptions{Store: store, Completer: comp, MaxSegmentTokens: 4100})
-	if err := s.Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 4 {
-		t.Fatalf("Complete calls = %d, want 4 (3 rolling + reduce)", len(comp.calls))
-	}
+	ck.NoError(s.Pass(context.Background()), "Pass")
+	ck.Len(comp.calls, 4, "Complete calls = %d, want 4 (3 rolling + reduce)", len(comp.calls))
 	for _, c := range comp.calls {
-		if c.system != summarySegmentPrompt && c != comp.calls[3] {
-			t.Fatalf("rolling call used the wrong system prompt: %q", c.system)
-		}
-		if c.maxTokens != SummaryMaxOutputTokens || c.owner != "u1" {
-			t.Fatalf("call meta = %+v", c)
-		}
+		ck.False(c.system != summarySegmentPrompt && c != comp.calls[3], "rolling call used the wrong system prompt: %q", c.system)
+		ck.False(c.maxTokens != SummaryMaxOutputTokens || c.owner != "u1", "call meta = %+v", c)
 	}
-	if comp.calls[3].system != summaryReducePrompt {
-		t.Fatalf("reduce system prompt = %q", comp.calls[3].system)
-	}
+	ck.Eq(summaryReducePrompt, comp.calls[3].system, "reduce system prompt =")
 	seg0 := "user: " + strings.Repeat("a", 9000)
-	if comp.calls[0].user != "Next part of the conversation:\n"+seg0 {
-		t.Fatalf("first segment prompt = %q", comp.calls[0].user)
-	}
+	ck.Eq("Next part of the conversation:\n"+seg0, comp.calls[0].user, "first segment prompt =")
 	want2 := "Story so far:\none body\n\n---\n\nNext part of the conversation:\nassistant: " + strings.Repeat("b", 9000)
-	if comp.calls[1].user != want2 {
-		t.Fatalf("second segment prompt = %q", comp.calls[1].user)
-	}
-	if !strings.Contains(comp.calls[1].user, "one body") {
-		t.Fatalf("story so far missing: %q", comp.calls[1].user)
-	}
+	ck.Eq(want2, comp.calls[1].user, "second segment prompt =")
+	ck.StrContains(comp.calls[1].user, "one body", "story so far missing")
 	if !strings.Contains(comp.calls[3].user, "Part 1: one body") || !strings.Contains(comp.calls[3].user, "Part 3: three body") {
 		t.Fatalf("reduce prompt missing parts: %q", comp.calls[3].user)
 	}
-	if len(store.upserts) != 4 {
-		t.Fatalf("upserts = %d, want 4", len(store.upserts))
-	}
+	ck.Len(store.upserts, 4, "upserts = %d, want 4", len(store.upserts))
 	for i, up := range store.upserts[:3] {
-		if up.Level != "segment" || up.Seq != i || up.OrdinalFrom != i || up.OrdinalTo != i {
-			t.Fatalf("segment %d row = %+v", i, up)
-		}
+		ck.False(up.Level != "segment" || up.Seq != i || up.OrdinalFrom != i || up.OrdinalTo != i, "segment %d row = %+v", i, up)
 	}
 	if conv := store.upserts[3]; conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 2 {
 		t.Fatalf("conversation row = %+v", conv)
@@ -410,6 +362,7 @@ func TestSummarizerRollingPassesStorySoFar(t *testing.T) {
 }
 
 func TestSummarizerCutsAtCompactionBoundary(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.msgs = map[string][]Message{"c1": {
@@ -423,25 +376,13 @@ func TestSummarizerCutsAtCompactionBoundary(t *testing.T) {
 		"TITLE: all\n\ncombined",
 	)
 	s := summarizerWith(SummarizerOptions{Store: store, Completer: comp})
-	if err := s.Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 3 {
-		t.Fatalf("Complete calls = %d, want 3 (2 segments + reduce)", len(comp.calls))
-	}
-	if strings.Contains(comp.calls[0].user, "compaction") || strings.Contains(comp.calls[1].user, "compaction") {
-		t.Fatal("compaction summary text leaked into a prompt")
-	}
-	if comp.calls[0].user != "Next part of the conversation:\nuser: first half of the work" {
-		t.Fatalf("first segment prompt = %q", comp.calls[0].user)
-	}
+	c.NoError(s.Pass(context.Background()), "Pass")
+	c.Len(comp.calls, 3, "Complete calls = %d, want 3 (2 segments + reduce)", len(comp.calls))
+	c.False(strings.Contains(comp.calls[0].user, "compaction") || strings.Contains(comp.calls[1].user, "compaction"), "compaction summary text leaked into a prompt")
+	c.Eq("Next part of the conversation:\nuser: first half of the work", comp.calls[0].user, "first segment prompt =")
 	want := "Story so far:\nfirst body\n\n---\n\nNext part of the conversation:\nassistant: resumed the work afterwards"
-	if comp.calls[1].user != want {
-		t.Fatalf("second segment prompt = %q, want %q", comp.calls[1].user, want)
-	}
-	if len(store.upserts) != 3 {
-		t.Fatalf("upserts = %d, want 3", len(store.upserts))
-	}
+	c.Eq(want, comp.calls[1].user, "second segment prompt")
+	c.Len(store.upserts, 3, "upserts = %d, want 3", len(store.upserts))
 	if up := store.upserts[0]; up.OrdinalFrom != 0 || up.OrdinalTo != 0 {
 		t.Fatalf("first segment spans %d-%d, want 0-0", up.OrdinalFrom, up.OrdinalTo)
 	}
@@ -454,6 +395,7 @@ func TestSummarizerCutsAtCompactionBoundary(t *testing.T) {
 }
 
 func TestSummarizerIncrementalOnlyNewTail(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.summaries = map[string][]Summary{"c1": {{
@@ -462,35 +404,24 @@ func TestSummarizerIncrementalOnlyNewTail(t *testing.T) {
 	}}}
 	store.msgs = map[string][]Message{"c1": {summarizerMsg("c1", 51, "user", "the new tail message")}}
 	comp := summarizerCompleter("m", "TITLE: new\n\nnew tail body", "TITLE: all\n\nwhole story")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
 	if len(store.msgsFrom) != 1 || store.msgsFrom[0].from != 51 || store.msgsFrom[0].conversationID != "c1" {
 		t.Fatalf("MessagesFrom calls = %+v, want [c1 51]", store.msgsFrom)
 	}
-	if len(comp.calls) != 2 {
-		t.Fatalf("Complete calls = %d, want 2 (new segment + reduce)", len(comp.calls))
-	}
-	if len(store.upserts) != 2 {
-		t.Fatalf("upserts = %d, want 2", len(store.upserts))
-	}
+	c.Len(comp.calls, 2, "Complete calls = %d, want 2 (new segment + reduce)", len(comp.calls))
+	c.Len(store.upserts, 2, "upserts = %d, want 2", len(store.upserts))
 	seg := store.upserts[0]
-	if seg.Level != "segment" || seg.Seq != 1 || seg.OrdinalFrom != 51 || seg.OrdinalTo != 51 {
-		t.Fatalf("new segment row = %+v", seg)
-	}
+	c.False(seg.Level != "segment" || seg.Seq != 1 || seg.OrdinalFrom != 51 || seg.OrdinalTo != 51, "new segment row = %+v", seg)
 	conv := store.upserts[1]
-	if conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 51 {
-		t.Fatalf("conversation row = %+v", conv)
-	}
-	if !strings.Contains(comp.calls[0].user, "old tail body") {
-		t.Fatalf("rolling prompt missing kept story: %q", comp.calls[0].user)
-	}
+	c.False(conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 51, "conversation row = %+v", conv)
+	c.StrContains(comp.calls[0].user, "old tail body", "rolling prompt missing kept story")
 	if !strings.Contains(comp.calls[1].user, "Part 1: old tail body") || !strings.Contains(comp.calls[1].user, "Part 2: new tail body") {
 		t.Fatalf("reduce prompt missing parts: %q", comp.calls[1].user)
 	}
 }
 
 func TestSummarizerSkipsReduceWhenConversationRowCurrent(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.summaries = map[string][]Summary{"c1": {
@@ -506,18 +437,13 @@ func TestSummarizerSkipsReduceWhenConversationRowCurrent(t *testing.T) {
 	// chain, so this pass must cost nothing.
 	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
 	comp := summarizerCompleter("m")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 0 {
-		t.Fatalf("Complete calls = %d, want 0", len(comp.calls))
-	}
-	if len(store.upserts) != 0 {
-		t.Fatalf("upserts = %d, want 0", len(store.upserts))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Empty(comp.calls, "Complete calls = %d, want 0", len(comp.calls))
+	c.Empty(store.upserts, "upserts = %d, want 0", len(store.upserts))
 }
 
 func TestSummarizerReducesWhenConversationRowMissing(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	// Same shape as the skip case, but no conversation-level row: crash
@@ -530,25 +456,16 @@ func TestSummarizerReducesWhenConversationRowMissing(t *testing.T) {
 	}}
 	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
 	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
-	}
-	if comp.calls[0].system != summaryReducePrompt {
-		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
-	}
-	if len(store.upserts) != 1 {
-		t.Fatalf("upserts = %d, want 1", len(store.upserts))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	c.Eq(summaryReducePrompt, comp.calls[0].system, "reduce system prompt =")
+	c.Len(store.upserts, 1, "upserts = %d, want 1", len(store.upserts))
 	conv := store.upserts[0]
-	if conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90 {
-		t.Fatalf("conversation row = %+v", conv)
-	}
+	c.False(conv.Level != "conversation" || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90, "conversation row = %+v", conv)
 }
 
 func TestSummarizerReducesWhenConversationRowStaleVersion(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	// Segments are current but the conversation-level row was written by an
@@ -564,25 +481,16 @@ func TestSummarizerReducesWhenConversationRowStaleVersion(t *testing.T) {
 	}}
 	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
 	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
-	}
-	if comp.calls[0].system != summaryReducePrompt {
-		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
-	}
-	if len(store.upserts) != 1 {
-		t.Fatalf("upserts = %d, want 1", len(store.upserts))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	c.Eq(summaryReducePrompt, comp.calls[0].system, "reduce system prompt =")
+	c.Len(store.upserts, 1, "upserts = %d, want 1", len(store.upserts))
 	conv := store.upserts[0]
-	if conv.Level != "conversation" || conv.PromptVersion != SummaryPromptVersion || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90 {
-		t.Fatalf("conversation row = %+v", conv)
-	}
+	c.False(conv.Level != "conversation" || conv.PromptVersion != SummaryPromptVersion || conv.OrdinalFrom != 0 || conv.OrdinalTo != 90, "conversation row = %+v", conv)
 }
 
 func TestSummarizerReducesWhenConversationRowShort(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	// Crash between the two upserts: the conversation-level row is
@@ -598,25 +506,16 @@ func TestSummarizerReducesWhenConversationRowShort(t *testing.T) {
 	}}
 	store.msgs = map[string][]Message{"c1": {summarizerToolResult("c1", 91)}}
 	comp := summarizerCompleter("m", "TITLE: all\n\nwhole story")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(comp.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1 (reduce)", len(comp.calls))
-	}
-	if comp.calls[0].system != summaryReducePrompt {
-		t.Fatalf("reduce system prompt = %q", comp.calls[0].system)
-	}
-	if len(store.upserts) != 1 {
-		t.Fatalf("upserts = %d, want 1", len(store.upserts))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1 (reduce)", len(comp.calls))
+	c.Eq(summaryReducePrompt, comp.calls[0].system, "reduce system prompt =")
+	c.Len(store.upserts, 1, "upserts = %d, want 1", len(store.upserts))
 	conv := store.upserts[0]
-	if conv.Level != "conversation" || conv.OrdinalTo != 90 {
-		t.Fatalf("conversation row = %+v", conv)
-	}
+	c.False(conv.Level != "conversation" || conv.OrdinalTo != 90, "conversation row = %+v", conv)
 }
 
 func TestSummarizerBackfillBudgetMissingWarns(t *testing.T) {
+	c := assert.NewAborting(t)
 	// backfill_since armed with no budget key: the Warn must fire and
 	// backfill_since must be cleared (budget reads as 0, spend 0 >= 0).
 	for _, budget := range []struct{ name, value string }{{"missing", ""}, {"unparseable", "not-a-float"}} {
@@ -628,15 +527,10 @@ func TestSummarizerBackfillBudgetMissingWarns(t *testing.T) {
 		var buf bytes.Buffer
 		s := summarizerWith(SummarizerOptions{Store: store, Completer: summarizerCompleter("m")})
 		s.logger = slog.New(slog.NewTextHandler(&buf, nil))
-		if err := s.Pass(context.Background()); err != nil {
-			t.Fatalf("%s: Pass: %v", budget.name, err)
-		}
-		if got := store.state["backfill_since"]; got != "" {
-			t.Fatalf("%s: backfill_since = %q, want cleared", budget.name, got)
-		}
-		if !strings.Contains(buf.String(), "backfill active without backfill_budget_usd") {
-			t.Fatalf("%s: warn not logged: %q", budget.name, buf.String())
-		}
+		c.NoError(s.Pass(context.Background()), "%s: Pass", budget.name)
+		got := store.state["backfill_since"]
+		c.Eq("", got, "%s: backfill_since = %q, want cleared", budget.name, got)
+		c.StrContains(buf.String(), "backfill active without backfill_budget_usd", "%s: warn not logged", budget.name)
 	}
 
 	// A set, parseable budget with spend under it: no warning, and
@@ -648,18 +542,13 @@ func TestSummarizerBackfillBudgetMissingWarns(t *testing.T) {
 	var buf bytes.Buffer
 	s := summarizerWith(SummarizerOptions{Store: store, Completer: summarizerCompleter("m")})
 	s.logger = slog.New(slog.NewTextHandler(&buf, nil))
-	if err := s.Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if got := store.state["backfill_since"]; got != summarizerEnabledAt.Format(time.RFC3339) {
-		t.Fatalf("backfill_since = %q, want unchanged", got)
-	}
-	if buf.String() != "" {
-		t.Fatalf("unexpected log output: %q", buf.String())
-	}
+	c.NoError(s.Pass(context.Background()), "Pass")
+	c.Eq(summarizerEnabledAt.Format(time.RFC3339), store.state["backfill_since"], "backfill_since")
+	c.Eq("", buf.String(), "unexpected log output")
 }
 
 func TestSummarizerPromptVersionBumpRestarts(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.summaries = map[string][]Summary{"c1": {{
@@ -671,34 +560,27 @@ func TestSummarizerPromptVersionBumpRestarts(t *testing.T) {
 		summarizerMsg("c1", 1, "assistant", "starting over"),
 	}}
 	comp := summarizerCompleter("m", "TITLE: fresh\n\nrestarted body")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
 	if len(store.deleted) != 1 || store.deleted[0].conversationID != "c1" || store.deleted[0].fromSeq != 0 {
 		t.Fatalf("DeleteSegmentsFrom calls = %+v, want [c1 0]", store.deleted)
 	}
 	if len(store.msgsFrom) != 1 || store.msgsFrom[0].from != 0 {
 		t.Fatalf("MessagesFrom = %+v, want from 0", store.msgsFrom)
 	}
-	if len(comp.calls) != 1 {
-		t.Fatalf("Complete calls = %d, want 1", len(comp.calls))
-	}
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1", len(comp.calls))
 	if !strings.HasPrefix(comp.calls[0].user, "Next part of the conversation:\n") {
 		t.Fatalf("restart must not roll a stale story so far: %q", comp.calls[0].user)
 	}
-	if len(store.upserts) != 2 {
-		t.Fatalf("upserts = %d, want 2", len(store.upserts))
-	}
+	c.Len(store.upserts, 2, "upserts = %d, want 2", len(store.upserts))
 	seg := store.upserts[0]
-	if seg.Level != "segment" || seg.Seq != 0 || seg.OrdinalFrom != 0 || seg.OrdinalTo != 1 {
-		t.Fatalf("restarted segment row = %+v", seg)
-	}
+	c.False(seg.Level != "segment" || seg.Seq != 0 || seg.OrdinalFrom != 0 || seg.OrdinalTo != 1, "restarted segment row = %+v", seg)
 	if up := store.upserts[1]; up.Level != "conversation" || up.OrdinalFrom != 0 || up.OrdinalTo != 1 {
 		t.Fatalf("conversation row = %+v", up)
 	}
 }
 
 func TestSummarizerFailureRecorded(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.eligible = []ConversationMeta{summarizerConv("c1"), summarizerConv("c2")}
 	store.msgs = map[string][]Message{
@@ -707,27 +589,18 @@ func TestSummarizerFailureRecorded(t *testing.T) {
 	}
 	comp := summarizerCompleter("m", "TITLE: ok\n\nbody")
 	comp.failAt = 0
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if len(store.failures) != 1 {
-		t.Fatalf("failures = %d, want 1", len(store.failures))
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Len(store.failures, 1, "failures = %d, want 1", len(store.failures))
 	f := store.failures[0]
-	if f.conversationID != "c1" || f.promptVersion != SummaryPromptVersion || f.model != "m" || !strings.Contains(f.errText, "completer exploded") {
-		t.Fatalf("failure record = %+v", f)
-	}
-	if len(store.upserts) < 2 {
-		t.Fatalf("c2 not processed: upserts = %+v", store.upserts)
-	}
+	c.False(f.conversationID != "c1" || f.promptVersion != SummaryPromptVersion || f.model != "m" || !strings.Contains(f.errText, "completer exploded"), "failure record = %+v", f)
+	c.GreaterOrEqual(2, len(store.upserts), "c2 not processed: upserts = %+v", store.upserts)
 	for _, up := range store.upserts {
-		if up.ConversationID != "c2" {
-			t.Fatalf("c1 was not skipped: upsert %+v", up)
-		}
+		c.Eq("c2", up.ConversationID, "c1 was not skipped: upsert %+v", up)
 	}
 }
 
 func TestSummarizerBackfillBudgetStops(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := summarizerStore()
 	store.state["backfill_since"] = summarizerEnabledAt.Format(time.RFC3339)
 	store.state["backfill_budget_usd"] = "5"
@@ -735,12 +608,8 @@ func TestSummarizerBackfillBudgetStops(t *testing.T) {
 	store.eligible = []ConversationMeta{summarizerConv("c1")}
 	store.msgs = map[string][]Message{"c1": {summarizerMsg("c1", 0, "user", "some text")}}
 	comp := summarizerCompleter("m", "TITLE: t\n\nbody", "TITLE: all\n\nall")
-	if err := summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if got := store.state["backfill_since"]; got != "" {
-		t.Fatalf("backfill_since = %q, want cleared", got)
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	c.Eq("", store.state["backfill_since"], "backfill_since")
 
 	// Under budget: backfill_since stays, and a conversation whose last
 	// activity predates summaries_enabled_at has its spend accounted.
@@ -751,32 +620,21 @@ func TestSummarizerBackfillBudgetStops(t *testing.T) {
 	store2.eligible = []ConversationMeta{summarizerConvAt("c1", utcDate(2025, 12, 31))}
 	store2.msgs = map[string][]Message{"c1": {summarizerMsg("c1", 0, "user", "backfill text")}}
 	comp2 := summarizerCompleter("m", "TITLE: t\n\nbody")
-	if err := summarizerWith(SummarizerOptions{Store: store2, Completer: comp2}).Pass(context.Background()); err != nil {
-		t.Fatalf("Pass: %v", err)
-	}
-	if got := store2.state["backfill_since"]; got != summarizerEnabledAt.Format(time.RFC3339) {
-		t.Fatalf("backfill_since = %q, want unchanged", got)
-	}
+	c.NoError(summarizerWith(SummarizerOptions{Store: store2, Completer: comp2}).Pass(context.Background()), "Pass")
+	c.Eq(summarizerEnabledAt.Format(time.RFC3339), store2.state["backfill_since"], "backfill_since")
 	spent, err := strconv.ParseFloat(store2.state["backfill_spent_usd"], 64)
-	if err != nil || math.Abs(spent-4.05) > 1e-9 {
-		t.Fatalf("backfill_spent_usd = %v (err %v), want 4.05", spent, err)
-	}
+	c.False(err != nil || math.Abs(spent-4.05) > 1e-9, "backfill_spent_usd = %v (err %v), want 4.05", spent, err)
 }
 
 func TestSummarizerParsesTitle(t *testing.T) {
+	c := assert.NewAborting(t)
 	title, body := parseSummaryOutput("TITLE: Login fix\n\nFixed the login flow by resetting the OAuth gate.")
-	if title != "Login fix" || body != "Fixed the login flow by resetting the OAuth gate." {
-		t.Fatalf("titled parse = %q / %q", title, body)
-	}
+	c.False(title != "Login fix" || body != "Fixed the login flow by resetting the OAuth gate.", "titled parse = %q / %q", title, body)
 	title, body = parseSummaryOutput("TITLE:   spaced title \n\nbody")
-	if title != "spaced title" || body != "body" {
-		t.Fatalf("trimmed parse = %q / %q", title, body)
-	}
+	c.False(title != "spaced title" || body != "body", "trimmed parse = %q / %q", title, body)
 	long := strings.Repeat("x", 100)
 	title, body = parseSummaryOutput(long)
-	if title != strings.Repeat("x", 80) || body != long {
-		t.Fatalf("untitled parse = %q / %q", title, body)
-	}
+	c.False(title != strings.Repeat("x", 80) || body != long, "untitled parse = %q / %q", title, body)
 	if title, body = parseSummaryOutput(""); title != "" || body != "" {
 		t.Fatalf("empty parse = %q / %q", title, body)
 	}

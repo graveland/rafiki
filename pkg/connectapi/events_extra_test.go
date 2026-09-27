@@ -15,6 +15,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeRawChildIO records what each handler passes and answers with injected
@@ -61,9 +63,7 @@ func TestGetStreamsPassesChildAndWhichThrough(t *testing.T) {
 	}}
 	resp, err := newRawChildIOServer(f).GetStreams(context.Background(),
 		connect.NewRequest(&rafikiv1.GetStreamsRequest{ChildId: "c_1", Which: "in"}))
-	if err != nil {
-		t.Fatalf("GetStreams: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "GetStreams")
 	if f.streamsChildID != "c_1" || f.streamsWhich != "in" {
 		t.Errorf("seam got childID=%q which=%q, want c_1/in", f.streamsChildID, f.streamsWhich)
 	}
@@ -73,27 +73,20 @@ func TestGetStreamsPassesChildAndWhichThrough(t *testing.T) {
 }
 
 func TestGetStreamsEmptyWhichMeansAll(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeRawChildIO{streamsOut: &rafikiv1.GetStreamsResponse{Alive: false}}
 	resp, err := newRawChildIOServer(f).GetStreams(context.Background(),
 		connect.NewRequest(&rafikiv1.GetStreamsRequest{ChildId: "c_1"}))
-	if err != nil {
-		t.Fatalf("GetStreams: %v", err)
-	}
-	if f.streamsWhich != "" {
-		t.Errorf("seam got which=%q, want the empty value passed through", f.streamsWhich)
-	}
-	if resp.Msg.GetAlive() {
-		t.Error("resp alive = true, want the seam's alive=false (fall back to the on-disk dump)")
-	}
+	c.Require().NoError(err, "GetStreams")
+	c.Eq("", f.streamsWhich, "seam got which")
+	c.False(resp.Msg.GetAlive(), "resp alive = true, want the seam's alive=false (fall back to the on-disk dump)")
 }
 
 func TestSendFramePassesChildAndFrameThrough(t *testing.T) {
 	f := &fakeRawChildIO{}
 	_, err := newRawChildIOServer(f).SendFrame(context.Background(),
 		connect.NewRequest(&rafikiv1.SendFrameRequest{ChildId: "c_1", FrameJson: `{"type":"get_state"}`}))
-	if err != nil {
-		t.Fatalf("SendFrame: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "SendFrame")
 	if f.sendChildID != "c_1" || string(f.sendFrame) != `{"type":"get_state"}` {
 		t.Errorf("seam got childID=%q frame=%s, want c_1 with the frame verbatim", f.sendChildID, f.sendFrame)
 	}
@@ -104,25 +97,19 @@ func TestSendFramePassesChildAndFrameThrough(t *testing.T) {
 func TestGetStreamsRequiresChildID(t *testing.T) {
 	_, err := newRawChildIOServer(&fakeRawChildIO{}).GetStreams(context.Background(),
 		connect.NewRequest(&rafikiv1.GetStreamsRequest{Which: "all"}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestGetStreamsRefusesUnknownWhich(t *testing.T) {
 	_, err := newRawChildIOServer(&fakeRawChildIO{}).GetStreams(context.Background(),
 		connect.NewRequest(&rafikiv1.GetStreamsRequest{ChildId: "c_1", Which: "bogus"}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestSendFrameRequiresChildID(t *testing.T) {
 	_, err := newRawChildIOServer(&fakeRawChildIO{}).SendFrame(context.Background(),
 		connect.NewRequest(&rafikiv1.SendFrameRequest{FrameJson: `{}`}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // frame_json must parse as a JSON OBJECT before the seam is touched: a JSON
@@ -131,18 +118,13 @@ func TestSendFrameRequiresChildID(t *testing.T) {
 func TestSendFrameRefusesNonObjectFrameJson(t *testing.T) {
 	for _, frame := range []string{"[1]", "nope", `"just a string"`, "42"} {
 		t.Run(frame, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			f := &fakeRawChildIO{}
 			_, err := newRawChildIOServer(f).SendFrame(context.Background(),
 				connect.NewRequest(&rafikiv1.SendFrameRequest{ChildId: "c_1", FrameJson: frame}))
-			if connect.CodeOf(err) != connect.CodeInvalidArgument {
-				t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-			}
-			if err == nil || !strings.Contains(err.Error(), "frame_json is not a JSON object") {
-				t.Errorf("message = %v, want the brief's exact refusal", err)
-			}
-			if f.sendChildID != "" {
-				t.Error("the seam was called; a non-object frame must be refused before it")
-			}
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+			c.False(err == nil || !strings.Contains(err.Error(), "frame_json is not a JSON object"), "message = %v, want the brief's exact refusal", err)
+			c.Eq("", f.sendChildID, "the seam was called; a non-object frame must be refused before it")
 		})
 	}
 }
@@ -153,9 +135,7 @@ func TestSendFrameArrayAndGarbageAreInvalidArgument(t *testing.T) {
 	for _, frame := range []string{"[1]", "nope"} {
 		_, err := s.SendFrame(context.Background(),
 			connect.NewRequest(&rafikiv1.SendFrameRequest{ChildId: "c_1", FrameJson: frame}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("frame %q: code = %v, want InvalidArgument", frame, connect.CodeOf(err))
-		}
+		assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "frame %q: code = %v, want InvalidArgument", frame, connect.CodeOf(err))
 	}
 }
 
@@ -165,51 +145,40 @@ func TestSendFrameArrayAndGarbageAreInvalidArgument(t *testing.T) {
 // Controller.GetStreams' ErrChildNotFound reads as NotFound with the precise
 // reason riding the detail.
 func TestGetStreamsUnknownChildIsNotFound(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeRawChildIO{streamsErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildNotFound,
 		Message: "child not found: c_missing",
 	}}
 	_, err := newRawChildIOServer(f).GetStreams(context.Background(),
 		connect.NewRequest(&rafikiv1.GetStreamsRequest{ChildId: "c_missing"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != "child_not_found" {
-		t.Errorf("reason = %q, want child_not_found", got)
-	}
-	if err == nil || !strings.Contains(err.Error(), "child not found: c_missing") {
-		t.Errorf("message = %v, want the daemon's authored text", err)
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	c.Eq("child_not_found", rpcreason.Reason(err), "reason")
+	c.False(err == nil || !strings.Contains(err.Error(), "child not found: c_missing"), "message = %v, want the daemon's authored text", err)
 }
 
 // Send's unknown-child refusal maps the same way.
 func TestSendFrameUnknownChildIsNotFound(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeRawChildIO{sendErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildNotFound,
 		Message: "child not found: c_missing",
 	}}
 	_, err := newRawChildIOServer(f).SendFrame(context.Background(),
 		connect.NewRequest(&rafikiv1.SendFrameRequest{ChildId: "c_missing", FrameJson: `{"type":"get_state"}`}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("code = %v, want NotFound", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != "child_not_found" {
-		t.Errorf("reason = %q, want child_not_found", got)
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	c.Eq("child_not_found", rpcreason.Reason(err), "reason")
 }
 
 // A generic error — not a connectapi.ControllerError — keeps the blanket Internal, with
 // the raw cause redacted and logged (ConnectErr never logs; the handler does).
 func TestRawChildIOUncodedErrorIsRedactedInternal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeRawChildIO{sendErr: errors.New("pq: relation does not exist")}
 	_, err := newRawChildIOServer(f).SendFrame(context.Background(),
 		connect.NewRequest(&rafikiv1.SendFrameRequest{ChildId: "c_1", FrameJson: `{"type":"get_state"}`}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
-	if err == nil || strings.Contains(err.Error(), "relation does not exist") {
-		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+	c.False(err == nil || strings.Contains(err.Error(), "relation does not exist"), "err.Error() = %v, want the raw cause redacted", err)
 }
 
 // ─── Unwired fails closed ─────────────────────────────────────────────────────
@@ -236,9 +205,7 @@ func TestRawChildIOUnwiredFailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call(s)
-			if connect.CodeOf(err) != connect.CodeUnavailable {
-				t.Errorf("code = %v, want Unavailable (err = %v)", connect.CodeOf(err), err)
-			}
+			assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code = %v, want Unavailable (err = %v)", connect.CodeOf(err), err)
 		})
 	}
 }

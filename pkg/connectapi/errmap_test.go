@@ -17,6 +17,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // errCodeByName lists every protocol.Err* constant in pkg/protocol/types.go by
@@ -43,6 +45,7 @@ var errCodeByName = map[string]connect.Code{
 }
 
 func TestConnectErrCoversEveryErrConstant(t *testing.T) {
+	c := assert.NewCollecting(t)
 	errValues := parseProtocolErrConsts(t)
 	for name, value := range errValues {
 		wantCode, listed := errCodeByName[name]
@@ -55,9 +58,7 @@ func TestConnectErrCoversEveryErrConstant(t *testing.T) {
 			t.Errorf("protocol.%s = %q is missing from errCodeTable (want %v)", name, value, wantCode)
 			continue
 		}
-		if gotCode != wantCode {
-			t.Errorf("errCodeTable[%q] = %v, want %v (protocol.%s)", value, gotCode, wantCode, name)
-		}
+		c.Eq(wantCode, gotCode, "errCodeTable[%q] = %v, want %v (protocol.%s)", value, gotCode, wantCode, name)
 	}
 
 	// The other direction: a table key that no longer names any Err* constant
@@ -67,9 +68,7 @@ func TestConnectErrCoversEveryErrConstant(t *testing.T) {
 		byValue[value] = true
 	}
 	for value := range errCodeTable {
-		if !byValue[value] {
-			t.Errorf("errCodeTable key %q does not name any Err* constant in pkg/protocol/types.go", value)
-		}
+		c.False(!byValue[value], "errCodeTable key %q does not name any Err* constant in pkg/protocol/types.go", value)
 	}
 }
 
@@ -80,15 +79,12 @@ func TestConnectErrCoversEveryErrConstant(t *testing.T) {
 // carries one.
 func parseProtocolErrConsts(t *testing.T) map[string]string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller could not locate this test file")
-	}
+	c.True(ok, "runtime.Caller could not locate this test file")
 	typesPath := filepath.Join(filepath.Dir(thisFile), "..", "protocol", "types.go")
 	file, err := parser.ParseFile(token.NewFileSet(), typesPath, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatalf("parse %s: %v", typesPath, err)
-	}
+	c.NoError(err, "parse %s", typesPath)
 	out := map[string]string{}
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
@@ -112,32 +108,23 @@ func parseProtocolErrConsts(t *testing.T) map[string]string {
 					t.Fatalf("protocol const %s is not a string literal; extend parseProtocolErrConsts", name.Name)
 				}
 				value, uerr := strconv.Unquote(lit.Value)
-				if uerr != nil {
-					t.Fatalf("protocol const %s: unquote %s: %v", name.Name, lit.Value, uerr)
-				}
+				c.NoError(uerr, "protocol const %s: unquote %s", name.Name, lit.Value)
 				out[name.Name] = value
 			}
 		}
 	}
-	if len(out) == 0 {
-		t.Fatal("no Err* constants found in pkg/protocol/types.go — the parser sweep is broken")
-	}
+	c.NotEmpty(out, "no Err* constants found in pkg/protocol/types.go — the parser sweep is broken")
 	return out
 }
 
 func TestConnectErrRoundTripsReason(t *testing.T) {
-	if got := rpcreason.Reason(ConnectErr(&ControllerError{Code: protocol.ErrChildExited})); got != "child_exited" {
-		t.Errorf("Reason(ConnectErr(ErrChildExited)) = %q, want child_exited", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("child_exited", rpcreason.Reason(ConnectErr(&ControllerError{Code: protocol.ErrChildExited})), "Reason(ConnectErr(ErrChildExited))")
 	// The authored message is forwarded alongside the classification.
 	authored := "child c_1 already exited"
 	err := ConnectErr(&ControllerError{Code: protocol.ErrChildExited, Message: authored})
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
-	if err == nil || !strings.Contains(err.Error(), authored) {
-		t.Errorf("err.Error() = %v, want containing the authored message", err)
-	}
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.False(err == nil || !strings.Contains(err.Error(), authored), "err.Error() = %v, want containing the authored message", err)
 }
 
 // A non-ControllerError is infrastructure text this codebase did not author:
@@ -145,38 +132,25 @@ func TestConnectErrRoundTripsReason(t *testing.T) {
 // a pgx failure cannot name the database through this surface. The cause is
 // the caller's to log, never the peer's to read.
 func TestConnectErrPlainErrorIsInternalNoReason(t *testing.T) {
+	c := assert.NewCollecting(t)
 	raw := "pgx: failed to connect to host=db.internal user=rafiki database=rafiki: connection refused"
 	err := ConnectErr(errors.New(raw))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != "" {
-		t.Errorf("Reason = %q, want \"\"", got)
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+	got := rpcreason.Reason(err)
+	c.Eq("", got, "Reason = %q, want \"\"", got)
 	var ce *connect.Error
-	if !errors.As(err, &ce) || len(ce.Details()) != 0 {
-		t.Errorf("want a *connect.Error with no details, got %v", err)
-	}
-	if err == nil || !strings.Contains(err.Error(), internalErrText) {
-		t.Errorf("err.Error() = %v, want containing the fixed text %q", err, internalErrText)
-	}
-	if strings.Contains(err.Error(), "db.internal") {
-		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-	}
+	c.False(!errors.As(err, &ce) || len(ce.Details()) != 0, "want a *connect.Error with no details, got %v", err)
+	c.False(err == nil || !strings.Contains(err.Error(), internalErrText), "err.Error() = %v, want containing the fixed text %q", err, internalErrText)
+	c.NotStrContains(err.Error(), "db.internal", "err.Error() = %v, want the raw cause redacted", err)
 }
 
 func TestConnectErrNilIsNil(t *testing.T) {
-	if err := ConnectErr(nil); err != nil {
-		t.Errorf("ConnectErr(nil) = %v, want nil", err)
-	}
+	assert.NewCollecting(t).NoError(ConnectErr(nil), "ConnectErr(nil)")
 }
 
 func TestConnectErrUnknownReasonStillAttached(t *testing.T) {
+	c := assert.NewCollecting(t)
 	err := ConnectErr(&ControllerError{Code: "some_future_code", Message: "explain"})
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != "some_future_code" {
-		t.Errorf("Reason = %q, want some_future_code", got)
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+	c.Eq("some_future_code", rpcreason.Reason(err), "Reason")
 }

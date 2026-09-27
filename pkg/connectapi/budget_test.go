@@ -5,7 +5,6 @@ package connectapi_test
 import (
 	"context"
 	"math"
-	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -13,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSetBudgetPassesFieldsThrough(t *testing.T) {
@@ -24,9 +25,7 @@ func TestSetBudgetPassesFieldsThrough(t *testing.T) {
 		ChildId: "c_target",
 		MaxCost: 12.50,
 	}))
-	if err != nil {
-		t.Fatalf("SetBudget: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "SetBudget")
 	if f.budgetChildID != "c_target" || f.budgetMaxCost != 12.50 {
 		t.Fatalf("lifecycle got childID=%q maxCost=%v, want c_target/12.50", f.budgetChildID, f.budgetMaxCost)
 	}
@@ -44,9 +43,7 @@ func TestSetBudgetZeroAccepted(t *testing.T) {
 		ChildId: "c_target",
 		MaxCost: 0,
 	}))
-	if err != nil {
-		t.Fatalf("SetBudget(0): %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "SetBudget(0)")
 	if f.budgetChildID != "c_target" || f.budgetMaxCost != 0 {
 		t.Fatalf("lifecycle got childID=%q maxCost=%v, want c_target/0", f.budgetChildID, f.budgetMaxCost)
 	}
@@ -61,17 +58,13 @@ func TestSetBudgetRequiresChildID(t *testing.T) {
 	s.SetChildLifecycle(f)
 
 	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{MaxCost: 5}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestSetBudgetWithoutLifecycleFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestSetBudgetNegativeBecomesInvalidArgument(t *testing.T) {
@@ -81,40 +74,32 @@ func TestSetBudgetNegativeBecomesInvalidArgument(t *testing.T) {
 
 	for _, badCost := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: badCost}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Fatalf("badCost %v: code = %v, want InvalidArgument", badCost, connect.CodeOf(err))
-		}
+		assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "badCost %v: code = %v, want InvalidArgument", badCost, connect.CodeOf(err))
 	}
 }
 
 func TestSetBudgetNotFoundBecomesNotFound(t *testing.T) {
+	c := assert.NewAborting(t)
 	authoredMsg := "agent c_x is not registered"
 	f := &fakeLifecycle{budgetErr: &connectapi.ControllerError{Code: protocol.ErrNotFound, Message: authoredMsg}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
 	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("code = %v, want NotFound", connect.CodeOf(err))
-	}
-	if !strings.Contains(err.Error(), authoredMsg) {
-		t.Fatalf("err.Error() = %q, want containing authored message %q", err.Error(), authoredMsg)
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), authoredMsg, "err.Error()")
 }
 
 func TestSetBudgetInvalidArgumentFromLifecycleBecomesInvalidArgument(t *testing.T) {
+	c := assert.NewAborting(t)
 	authoredMsg := "limit exceeded or invalid"
 	f := &fakeLifecycle{budgetErr: &connectapi.ControllerError{Code: protocol.ErrInvalidArgs, Message: authoredMsg}}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
 	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if !strings.Contains(err.Error(), authoredMsg) {
-		t.Fatalf("err.Error() = %q, want containing authored message %q", err.Error(), authoredMsg)
-	}
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.StrContains(err.Error(), authoredMsg, "err.Error()")
 }
 
 func TestSetBudgetErrorBecomesInternal(t *testing.T) {
@@ -123,7 +108,5 @@ func TestSetBudgetErrorBecomesInternal(t *testing.T) {
 	s.SetChildLifecycle(f)
 
 	_, err := s.SetBudget(context.Background(), connect.NewRequest(&rafikiv1.SetBudgetRequest{ChildId: "c_x", MaxCost: 5}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Fatalf("code = %v, want Internal", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeInternal, connect.CodeOf(err), "code")
 }

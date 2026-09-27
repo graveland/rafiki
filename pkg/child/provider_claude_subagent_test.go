@@ -1,21 +1,20 @@
 package child
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestSubagentFrameReportsTheSpawningToolCall(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := newClaudeProvider()
 	subagent := []byte(`{"type":"assistant","message":{"id":"msg_sub1","role":"assistant",` +
 		`"content":[{"type":"text","text":"working"}]},"parent_tool_use_id":"toolu_ABC"}`)
 	got, ok := p.SubagentFrame(subagent)
-	if !ok {
-		t.Fatal("a frame with parent_tool_use_id must be reported")
-	}
-	if got.MessageID != "msg_sub1" {
-		t.Errorf("MessageID = %q, want %q", got.MessageID, "msg_sub1")
-	}
-	if got.ParentToolUseID != "toolu_ABC" {
-		t.Errorf("ParentToolUseID = %q, want %q", got.ParentToolUseID, "toolu_ABC")
-	}
+	c.Require().True(ok, "a frame with parent_tool_use_id must be reported")
+	c.Eq("msg_sub1", got.MessageID, "MessageID")
+	c.Eq("toolu_ABC", got.ParentToolUseID, "ParentToolUseID")
 }
 
 func TestMainThreadFramesAreNotReported(t *testing.T) {
@@ -31,7 +30,6 @@ func TestMainThreadFramesAreNotReported(t *testing.T) {
 		t.Error("malformed input must not be reported")
 	}
 	noID := []byte(`{"type":"assistant","message":{"role":"assistant"},"parent_tool_use_id":"toolu_X"}`)
-	if _, ok := p.SubagentFrame(noID); ok {
-		t.Error("a frame with no message id cannot be joined and must not be reported")
-	}
+	_, ok := p.SubagentFrame(noID)
+	assert.NewCollecting(t).False(ok, "a frame with no message id cannot be joined and must not be reported")
 }

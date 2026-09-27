@@ -9,6 +9,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The base flags are what makes claude speak the stream-json protocol daraja
@@ -22,18 +24,14 @@ func TestBuildAlwaysCarriesTheStreamJSONContract(t *testing.T) {
 		"--output-format", "stream-json",
 		"--verbose",
 	} {
-		if !slices.Contains(got, want) {
-			t.Errorf("Build() = %v, missing %q", got, want)
-		}
+		assert.NewCollecting(t).Contains(got, want, "Build()")
 	}
 }
 
 func TestBuildOmitsEmptyOptionalFlags(t *testing.T) {
 	got := strings.Join(Build(Params{}), " ")
 	for _, unwanted := range []string{"--model", "--resume", "--permission-mode"} {
-		if strings.Contains(got, unwanted) {
-			t.Errorf("Build(zero) = %q, should not carry %q", got, unwanted)
-		}
+		assert.NewCollecting(t).NotStrContains(got, unwanted, "Build(zero)")
 	}
 }
 
@@ -47,13 +45,10 @@ func TestBuildCarriesModelAndResume(t *testing.T) {
 // a --permission-mode value; claude rejects `--permission-mode
 // bypassPermissions`.
 func TestBuildMapsBypassToItsOwnFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := Build(Params{PermissionMode: "bypassPermissions"})
-	if !slices.Contains(got, "--dangerously-skip-permissions") {
-		t.Errorf("Build(bypassPermissions) = %v, want --dangerously-skip-permissions", got)
-	}
-	if slices.Contains(got, "--permission-mode") {
-		t.Errorf("Build(bypassPermissions) = %v, should not also pass --permission-mode", got)
-	}
+	c.Contains(got, "--dangerously-skip-permissions", "Build(bypassPermissions)")
+	c.NotContains(got, "--permission-mode", "Build(bypassPermissions)")
 }
 
 func TestBuildPassesOtherPermissionModesThrough(t *testing.T) {
@@ -63,15 +58,12 @@ func TestBuildPassesOtherPermissionModesThrough(t *testing.T) {
 // Build must not hand its caller a slice that aliases package state; a caller
 // appending to the result would corrupt the next build.
 func TestBuildReturnsAFreshSlice(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := Build(Params{Model: "m1"})
 	b := Build(Params{Model: "m2"})
-	if slices.Equal(a, b) {
-		t.Fatal("two builds with different models returned equal argv")
-	}
+	c.Require().False(slices.Equal(a, b), "two builds with different models returned equal argv")
 	_ = append(a, "--sentinel")
-	if slices.Contains(Build(Params{Model: "m1"}), "--sentinel") {
-		t.Error("appending to a returned slice leaked into a later build")
-	}
+	c.NotContains(Build(Params{Model: "m1"}), "--sentinel", "appending to a returned slice leaked into a later build")
 }
 
 // AskUserQuestion has no headless renderer and burns a turn if left callable
@@ -85,16 +77,12 @@ func TestBuildAlwaysDisallowsAskUserQuestion(t *testing.T) {
 // prompt, so the empty (unset) PermissionMode must default to bypass, not to
 // "ask and hang forever".
 func TestBuildDefaultsToBypassPermissions(t *testing.T) {
-	if !slices.Contains(Build(Params{}), "--dangerously-skip-permissions") {
-		t.Fatalf("Build(zero) = %v, want --dangerously-skip-permissions by default", Build(Params{}))
-	}
+	assert.NewAborting(t).Contains(Build(Params{}), "--dangerously-skip-permissions", "Build(zero)")
 }
 
 func TestBuildAppendsExtraArgsLast(t *testing.T) {
 	argv := Build(Params{Model: "claude-sonnet-5", ExtraArgs: []string{"--foo", "bar"}})
-	if len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar" {
-		t.Fatalf("want ExtraArgs last, got %v", argv)
-	}
+	assert.NewAborting(t).False(len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar", "want ExtraArgs last, got %v", argv)
 }
 
 // The additive wave's pin: a Params that sets only Model must produce argv
@@ -111,15 +99,14 @@ func TestBuildHeadlessUnchanged(t *testing.T) {
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion",
 	}
-	if !slices.Equal(got, want) {
-		t.Errorf("Build(Params{Model: %q}) = %v, want %v", "x", got, want)
-	}
+	assert.NewCollecting(t).EqDiff(want, got, "Build(Params{Model: %q}) = %v, want", "x", got)
 }
 
 // ModelArgs REPLACES the plain --model pair, never adds a second one — a
 // duplicated --model would depend on claude's last-flag-wins tie-break instead
 // of being unambiguous.
 func TestBuildModelArgsSuppressesPlainModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := Build(Params{Model: "x", ModelArgs: []string{"--model", "y"}})
 	n := 0
 	for i, a := range got {
@@ -127,18 +114,15 @@ func TestBuildModelArgsSuppressesPlainModel(t *testing.T) {
 			continue
 		}
 		n++
-		if i+1 >= len(got) || got[i+1] != "y" {
-			t.Errorf("argv %v: --model is not followed by %q", got, "y")
-		}
+		c.False(i+1 >= len(got) || got[i+1] != "y", "argv %v: --model is not followed by %q", got, "y")
 	}
-	if n != 1 {
-		t.Errorf("Build(Model: x, ModelArgs: [--model y]) = %v, want exactly one --model, got %d", got, n)
-	}
+	c.Eq(1, n, "Build(Model: x, ModelArgs: [--model y]) = %v, want exactly one --model, got", got)
 }
 
 // --mcp-config is variadic, so the value must ride the SAME argv element via
 // '=' — a two-element pair would swallow whatever flag follows it.
 func TestBuildMCPConfigIsSingleElement(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := Build(Params{MCPConfig: `{"a":1}`})
 	n := 0
 	for _, a := range got {
@@ -146,13 +130,9 @@ func TestBuildMCPConfigIsSingleElement(t *testing.T) {
 			continue
 		}
 		n++
-		if a != `--mcp-config={"a":1}` {
-			t.Errorf("Build(MCPConfig) = %v, want one element --mcp-config={\"a\":1}, got %q", got, a)
-		}
+		c.Eq(`--mcp-config={"a":1}`, a, "Build(MCPConfig) = %v, want one element --mcp-config={\"a\":1}, got", got)
 	}
-	if n != 1 {
-		t.Errorf("Build(MCPConfig) = %v, want exactly one --mcp-config element, got %d", got, n)
-	}
+	c.Eq(1, n, "Build(MCPConfig) = %v, want exactly one --mcp-config element, got", got)
 }
 
 // The coordination prompt rides a proxied child's argv, keyed on the MCP
@@ -161,30 +141,21 @@ func TestBuildMCPConfigIsSingleElement(t *testing.T) {
 // half of the gate; the daraja half is pinned by test/integration's
 // TestClaudeArgvIdenticalAcrossPaths, which drives both mappings.
 func TestParamsFromSpawnRequestInjectsTheCoordinationPrompt(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, proxied := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
-	if proxied.MCPConfig == "" {
-		t.Fatal("fixture: ClaudeEnv produced no MCP config for a proxied session")
-	}
+	c.Require().NotEq("", proxied.MCPConfig, "fixture: ClaudeEnv produced no MCP config for a proxied session")
 
 	got := ParamsFromSpawnRequest(protocol.SpawnRequest{}, proxied)
-	if got.AppendSystemPrompt != CoordinationPrompt {
-		t.Errorf("proxied, no caller prompt: AppendSystemPrompt = %q, want the coordination prompt", got.AppendSystemPrompt)
-	}
+	c.Eq(CoordinationPrompt, got.AppendSystemPrompt, "proxied, no caller prompt: AppendSystemPrompt")
 
 	got = ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, proxied)
 	want := CoordinationPrompt + "\n\nbe terse"
-	if got.AppendSystemPrompt != want {
-		t.Errorf("proxied, caller prompt: AppendSystemPrompt = %q, want %q", got.AppendSystemPrompt, want)
-	}
+	c.Eq(want, got.AppendSystemPrompt, "proxied, caller prompt: AppendSystemPrompt")
 
 	got = ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, proxyenv.Values{})
-	if got.AppendSystemPrompt != "be terse" {
-		t.Errorf("unproxied: AppendSystemPrompt = %q, want the caller's text untouched", got.AppendSystemPrompt)
-	}
+	c.Eq("be terse", got.AppendSystemPrompt, "unproxied: AppendSystemPrompt")
 	got = ParamsFromSpawnRequest(protocol.SpawnRequest{}, proxyenv.Values{})
-	if got.AppendSystemPrompt != "" {
-		t.Errorf("unproxied, no caller prompt: AppendSystemPrompt = %q, want empty", got.AppendSystemPrompt)
-	}
+	c.Eq("", got.AppendSystemPrompt, "unproxied, no caller prompt: AppendSystemPrompt")
 }
 
 // TestCoordinationPromptMentionsPresets pins the preset sentence: the prompt
@@ -194,9 +165,7 @@ func TestParamsFromSpawnRequestInjectsTheCoordinationPrompt(t *testing.T) {
 // paragraph), per CoordinationPrompt's doc comment.
 func TestCoordinationPromptMentionsPresets(t *testing.T) {
 	for _, want := range []string{"preset_list", "agent_spawn's preset", "preset_*"} {
-		if !strings.Contains(CoordinationPrompt, want) {
-			t.Errorf("CoordinationPrompt %q missing %q; the preset preference no longer reaches claude children", CoordinationPrompt, want)
-		}
+		assert.NewCollecting(t).StrContains(CoordinationPrompt, want, "CoordinationPrompt")
 	}
 }
 
@@ -204,6 +173,7 @@ func TestCoordinationPromptMentionsPresets(t *testing.T) {
 // element carrying both texts — a second element would silently drop whichever
 // text came first.
 func TestBuildRendersOneAppendSystemPromptElement(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
 	argv := Build(ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, vals))
 	n := 0
@@ -212,19 +182,13 @@ func TestBuildRendersOneAppendSystemPromptElement(t *testing.T) {
 			continue
 		}
 		n++
-		if i+1 >= len(argv) {
-			t.Fatalf("argv %v: --append-system-prompt has no value", argv)
-		}
+		c.Require().Less(len(argv), i+1, "argv %v: --append-system-prompt has no value", argv)
 		v := argv[i+1]
 		for _, want := range []string{CoordinationPrompt, "be terse"} {
-			if !strings.Contains(v, want) {
-				t.Errorf("--append-system-prompt value %q missing %q", v, want)
-			}
+			c.StrContains(v, want, "--append-system-prompt value")
 		}
 	}
-	if n != 1 {
-		t.Errorf("argv %v: want exactly one --append-system-prompt element, got %d", argv, n)
-	}
+	c.Eq(1, n, "argv %v: want exactly one --append-system-prompt element, got", argv)
 }
 
 // ModeInteractive keeps the TTY: a human answers permission prompts, so none
@@ -240,9 +204,7 @@ func TestBuildInteractiveOmitsHeadlessFlags(t *testing.T) {
 		"--dangerously-skip-permissions",
 		"--disallowedTools",
 	} {
-		if slices.Contains(got, unwanted) {
-			t.Errorf("Build(interactive) = %v, should not carry %q", got, unwanted)
-		}
+		assert.NewCollecting(t).NotContains(got, unwanted, "Build(interactive)")
 	}
 }
 
@@ -250,9 +212,7 @@ func assertPair(t *testing.T, argv []string, flag, value string) {
 	t.Helper()
 	for i, a := range argv {
 		if a == flag {
-			if i+1 >= len(argv) || argv[i+1] != value {
-				t.Errorf("argv %v: %s is not followed by %q", argv, flag, value)
-			}
+			assert.NewCollecting(t).False(i+1 >= len(argv) || argv[i+1] != value, "argv %v: %s is not followed by %q", argv, flag, value)
 			return
 		}
 	}

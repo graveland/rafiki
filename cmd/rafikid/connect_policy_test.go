@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +22,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Test fixtures for the Connect provenance gate: every credential the proxy
@@ -181,10 +182,7 @@ func TestProxyFaceConnectRefusesChildCredentials(t *testing.T) {
 		for _, verb := range childUsableVerbs(client) {
 			t.Run(cred.name+"/"+verb.name, func(t *testing.T) {
 				err := verb.invoke(ctx, cred.set)
-				if connect.CodeOf(err) != connect.CodePermissionDenied {
-					t.Fatalf("%s with a %s credential = %v, want %v",
-						verb.name, cred.name, err, connect.CodePermissionDenied)
-				}
+				assert.NewAborting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential = %v, want", verb.name, cred.name, err)
 			})
 		}
 	}
@@ -205,10 +203,7 @@ func TestProxyFaceConnectAdmitsUserAndAnyCaller(t *testing.T) {
 	for _, verb := range childUsableVerbs(client) {
 		t.Run("user/"+verb.name, func(t *testing.T) {
 			err := verb.invoke(ctx, user)
-			if connect.CodeOf(err) != connect.CodeUnavailable {
-				t.Fatalf("%s with a user credential = %v, want %v (the handler ran)",
-					verb.name, err, connect.CodeUnavailable)
-			}
+			assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "%s with a user credential = %v, want %v (the handler ran)", verb.name, err, connect.CodeUnavailable)
 		})
 	}
 
@@ -226,9 +221,8 @@ func TestProxyFaceConnectAdmitsUserAndAnyCaller(t *testing.T) {
 	// No credential at all never reaches the Control service on this face:
 	// the proxy middleware answers 401 before Connect runs, which the client
 	// surfaces as Unauthenticated.
-	if _, err := client.ListModels(ctx, connect.NewRequest(&rafikiv1.ListModelsRequest{})); connect.CodeOf(err) != connect.CodeUnauthenticated {
-		t.Fatalf("ListModels with no credential = %v, want %v", err, connect.CodeUnauthenticated)
-	}
+	_, err := client.ListModels(ctx, connect.NewRequest(&rafikiv1.ListModelsRequest{}))
+	assert.NewAborting(t).Eq(connect.CodeUnauthenticated, connect.CodeOf(err), "ListModels with no credential = %v, want", err)
 }
 
 // TestProxyFaceConnectSpawnRefusesOperatorOnlyFieldToAChildToken and
@@ -242,6 +236,7 @@ func TestProxyFaceConnectAdmitsUserAndAnyCaller(t *testing.T) {
 // connect_childscope_test.go, verbs_test.go's per-field matrix); these two
 // are the proof the chain agrees end to end (W2A MINOR 3).
 func TestProxyFaceConnectSpawnRefusesOperatorOnlyFieldToAChildToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	client := proxyFaceConnectRoute(t)
 	req := connect.NewRequest(&rafikiv1.SpawnRequest{
 		Cwd: "/tmp",
@@ -250,12 +245,8 @@ func TestProxyFaceConnectSpawnRefusesOperatorOnlyFieldToAChildToken(t *testing.T
 	req.Header().Set("Authorization", "Bearer "+proxyChildToken)
 
 	_, err := client.Spawn(context.Background(), req)
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("Spawn with env set (per-child token) = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if !strings.Contains(err.Error(), "env") {
-		t.Errorf("refusal %q does not name env", err.Error())
-	}
+	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn with env set (per-child token) = %v, want", err)
+	c.StrContains(err.Error(), "env", "refusal")
 }
 
 func TestProxyFaceConnectSpawnAdmitsAUserTokenWithEveryOperatorOnlyFieldSet(t *testing.T) {
@@ -286,10 +277,7 @@ func TestProxyFaceConnectSpawnAdmitsAUserTokenWithEveryOperatorOnlyFieldSet(t *t
 	// TestProxyFaceConnectAdmitsUserAndAnyCaller uses for the other operator
 	// verbs. What this test refuses to accept is PermissionDenied.
 	_, err := client.Spawn(context.Background(), req)
-	if connect.CodeOf(err) == connect.CodePermissionDenied {
-		t.Fatalf("Spawn with every operator-only field set (user token) = %v, want anything but %v",
-			err, connect.CodePermissionDenied)
-	}
+	assert.NewAborting(t).NotEq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn with every operator-only field set (user token) = %v, want anything but", err)
 }
 
 // TestControlPolicyTableCoversEveryProcedure is the completeness gate: every
@@ -299,10 +287,9 @@ func TestProxyFaceConnectSpawnAdmitsAUserTokenWithEveryOperatorOnlyFieldSet(t *t
 // UnimplementedControlHandler embed, caught here at test time instead of in
 // production as a fail-open default.
 func TestControlPolicyTableCoversEveryProcedure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	svc := rafikiv1.File_rafiki_v1_control_proto.Services().ByName("Control")
-	if svc == nil {
-		t.Fatal("no Control service in the generated descriptor")
-	}
+	c.Require().NotNil(svc, "no Control service in the generated descriptor")
 	methods := svc.Methods()
 	classified := make(map[string]bool, methods.Len())
 	for i := 0; i < methods.Len(); i++ {
@@ -320,9 +307,7 @@ func TestControlPolicyTableCoversEveryProcedure(t *testing.T) {
 		}
 	}
 	for name := range controlPolicyTable {
-		if !classified[name] {
-			t.Errorf("controlPolicyTable names %q, which is not a Control service procedure; drop the stale entry", name)
-		}
+		c.False(!classified[name], "controlPolicyTable names %q, which is not a Control service procedure; drop the stale entry", name)
 	}
 }
 
@@ -338,9 +323,8 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 		"/other.v1.Service/Do":                 policyUserOnly,
 		"not-a-procedure":                      policyUserOnly,
 	} {
-		if got := policyFor(procedure); got != want {
-			t.Errorf("policyFor(%q) = %v, want %v", procedure, got, want)
-		}
+		got := policyFor(procedure)
+		assert.NewCollecting(t).Eq(want, got, "policyFor(%q) = %v, want", procedure, got)
 	}
 }
 
@@ -361,6 +345,7 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 // without the wired source must never serve a child caller the operator path,
 // which the wiring test and the per-verb matrix both pin.
 func TestAuthorizeControlProcedure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const (
 		userOnly   = controlProcedurePrefix + "SetBudget"
 		anyCaller  = controlProcedurePrefix + "ListModels"
@@ -400,17 +385,11 @@ func TestAuthorizeControlProcedure(t *testing.T) {
 		} {
 			err := authorizeControlProcedure(ctx, tc.procedure)
 			if tc.wantAdmit {
-				if err != nil {
-					t.Errorf("%s, %s: %v, want admitted", id.name, tc.procedure, err)
-				}
+				c.NoError(err, "%s, %s: %v, want admitted", id.name, tc.procedure, err)
 				continue
 			}
-			if connect.CodeOf(err) != connect.CodePermissionDenied {
-				t.Errorf("%s, %s: %v, want %v", id.name, tc.procedure, err, connect.CodePermissionDenied)
-			}
-			if !strings.Contains(err.Error(), tc.procedure) {
-				t.Errorf("%s, %s: refusal %q does not name the procedure", id.name, tc.procedure, err)
-			}
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s, %s: %v, want", id.name, tc.procedure, err)
+			c.StrContains(err.Error(), tc.procedure, "%s, %s: refusal %q does not name the procedure", id.name, tc.procedure, err)
 		}
 	}
 }
@@ -427,6 +406,7 @@ func TestAuthorizeControlProcedure(t *testing.T) {
 // that refuses a child credential and one that serves it would answer the
 // same operator differently depending on which route the request took.
 func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -453,9 +433,7 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 	srv.SetChildScopeSource(ctrl.childScopeFor)
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.Require().NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
@@ -470,10 +448,7 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 	// resolve from headers.
 	for _, cred := range childCredentials() {
 		err := kill(cred.set)
-		if connect.CodeOf(err) != connect.CodePermissionDenied {
-			t.Errorf("Kill over UDS with a %s credential = %v, want %v",
-				cred.name, err, connect.CodePermissionDenied)
-		}
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Kill over UDS with a %s credential = %v, want", cred.name, err)
 	}
 
 	// No credential: the socket decided admission, and the call reaches the
@@ -510,6 +485,7 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 func TestScopeForNilIsUnreachableOnTheRealProxyFace(t *testing.T) {
 	t.Setenv("RAFIKI_PROXY_LISTEN", "127.0.0.1:0")
 	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	c := assert.NewAborting(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -518,17 +494,13 @@ func TestScopeForNilIsUnreachableOnTheRealProxyFace(t *testing.T) {
 		Logger:   slog.New(slog.DiscardHandler),
 		Registry: prometheus.NewRegistry(),
 	})
-	if err != nil {
-		t.Fatalf("startProxyFace: %v", err)
-	}
+	c.NoError(err, "startProxyFace")
 	defer face.Close(ctx)
 
 	client := rafikiv1connect.NewControlClient(http.DefaultClient, face.URL)
 	_, err = client.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if err == nil {
-		t.Fatal("ConversationSearch with no credential on the real proxy face succeeded, want a refusal")
-	}
+	c.Error(err, "ConversationSearch with no credential on the real proxy face succeeded, want a refusal")
 	switch code := connect.CodeOf(err); code {
 	case connect.CodeUnauthenticated, connect.CodePermissionDenied:
 	default:

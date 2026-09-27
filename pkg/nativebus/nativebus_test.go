@@ -9,6 +9,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/nativebus"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func statusEvent(state string) *rafikiv1.Event {
@@ -26,9 +28,7 @@ func TestSubscribeReceivesPublishedEvent(t *testing.T) {
 
 	select {
 	case ev := <-ch:
-		if ev.GetAgentStatus().GetState() != "idle" {
-			t.Errorf("state = %q, want idle", ev.GetAgentStatus().GetState())
-		}
+		assert.NewCollecting(t).Eq("idle", ev.GetAgentStatus().GetState(), "state")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the published event")
 	}
@@ -46,9 +46,7 @@ func TestPublishIsScopedToOneChild(t *testing.T) {
 
 	select {
 	case ev := <-ch:
-		if ev.GetAgentStatus().GetState() != "idle" {
-			t.Errorf("received another child's event: %q", ev.GetAgentStatus().GetState())
-		}
+		assert.NewCollecting(t).Eq("idle", ev.GetAgentStatus().GetState(), "received another child's event")
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out")
 	}
@@ -86,9 +84,7 @@ func TestCancelStopsDelivery(t *testing.T) {
 
 	select {
 	case _, open := <-ch:
-		if open {
-			t.Error("received an event after cancel")
-		}
+		assert.NewCollecting(t).False(open, "received an event after cancel")
 	case <-time.After(200 * time.Millisecond):
 		// Nothing delivered, which is what cancel must guarantee.
 	}

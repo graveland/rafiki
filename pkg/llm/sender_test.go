@@ -10,23 +10,21 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSdkSenderImplementsStreamingSender(t *testing.T) {
+	c := assert.NewAborting(t)
 	s1, err := llm.SenderFor(providers.Provider{Name: "a", Kind: providers.KindAnthropic}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor(anthropic): %v", err)
-	}
+	c.NoError(err, "SenderFor(anthropic)")
 	if _, ok := s1.(llm.StreamingSender); !ok {
 		t.Fatal("SenderFor(anthropic) must also satisfy StreamingSender")
 	}
 	s2, err := llm.SenderFor(providers.Provider{Name: "a", Kind: providers.KindAnthropicOpenRouter}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor(openrouter): %v", err)
-	}
-	if _, ok := s2.(llm.StreamingSender); !ok {
-		t.Fatal("SenderFor(openrouter) must also satisfy StreamingSender")
-	}
+	c.NoError(err, "SenderFor(openrouter)")
+	_, ok := s2.(llm.StreamingSender)
+	c.True(ok, "SenderFor(openrouter) must also satisfy StreamingSender")
 }
 
 // A Sender that does NOT stream must still satisfy Sender, so existing fakes

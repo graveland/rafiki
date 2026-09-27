@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/usersdb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testStore gives each test its own scratch database, migrated fresh —
@@ -22,19 +24,16 @@ import (
 // developer's real database.
 func testStore(t *testing.T) (presets.Store, *pgxpool.Pool) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
+	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_presets_%d", time.Now().UnixNano())
@@ -46,19 +45,13 @@ func testStore(t *testing.T) (presets.Store, *pgxpool.Pool) {
 	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
+	c.NoError(err, "parse dsn")
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect scratch db: %v", err)
-	}
+	c.NoError(err, "connect scratch db")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate")
 	return NewPostgresStore(pool), pool
 }
 
@@ -68,9 +61,7 @@ func testStore(t *testing.T) (presets.Store, *pgxpool.Pool) {
 func newOwner(t *testing.T, pool *pgxpool.Pool, username string) string {
 	t.Helper()
 	u, _, err := usersdb.NewPostgresStore(pool).Create(context.Background(), username, false)
-	if err != nil {
-		t.Fatalf("create user %s: %v", username, err)
-	}
+	assert.NewAborting(t).NoError(err, "create user %s", username)
 	return u.ID
 }
 
@@ -82,6 +73,7 @@ func newOwner(t *testing.T, pool *pgxpool.Pool, username string) string {
 // collapsed value would also pass. Also covers ContextFiles nil/false/true
 // and MaxCost nil vs 0.
 func TestPresetStoreTriStateRoundTrip(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	st, _ := testStore(t)
 	ctx := context.Background()
 
@@ -97,21 +89,16 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 		{"tri-some", []string{"a", "b"}},
 	}
 	for _, s := range slices {
-		if _, err := st.Put(ctx, "", presets.Record{
+		_, err := st.Put(ctx, "", presets.Record{
 			Name: s.name, Kind: presets.KindFundi,
 			Tools: s.want, Skills: s.want, MCPServers: s.want,
-		}); err != nil {
-			t.Fatalf("put %s: %v", s.name, err)
-		}
+		})
+		ck.Require().NoError(err, "put %s", s.name)
 	}
 	for _, s := range slices {
 		got, err := st.Get(ctx, "", s.name)
-		if err != nil {
-			t.Fatalf("get %s: %v", s.name, err)
-		}
-		if got.Labels == nil {
-			t.Errorf("%s: Labels = nil, want a non-nil map (never nil after a read)", s.name)
-		}
+		ck.Require().NoError(err, "get %s", s.name)
+		ck.NotNil(got.Labels, "%s: Labels = nil, want a non-nil map (never nil after a read)", s.name)
 		for _, field := range []struct {
 			label string
 			slice []string
@@ -122,17 +109,11 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 		} {
 			switch {
 			case s.want == nil:
-				if field.slice != nil {
-					t.Errorf("%s.%s = %#v, want nil (the kind default)", s.name, field.label, field.slice)
-				}
+				ck.Nil(field.slice, "%s.%s = %#v, want nil (the kind default)", s.name, field.label, field.slice)
 			case len(s.want) == 0:
-				if field.slice == nil || len(field.slice) != 0 {
-					t.Errorf("%s.%s = %#v, want NON-NIL and empty (\"none\")", s.name, field.label, field.slice)
-				}
+				ck.False(field.slice == nil || len(field.slice) != 0, "%s.%s = %#v, want NON-NIL and empty (\"none\")", s.name, field.label, field.slice)
 			default:
-				if field.slice == nil || len(field.slice) != len(s.want) || field.slice[0] != s.want[0] || field.slice[1] != s.want[1] {
-					t.Errorf("%s.%s = %#v, want exactly %#v", s.name, field.label, field.slice, s.want)
-				}
+				ck.False(field.slice == nil || len(field.slice) != len(s.want) || field.slice[0] != s.want[0] || field.slice[1] != s.want[1], "%s.%s = %#v, want exactly %#v", s.name, field.label, field.slice, s.want)
 			}
 		}
 	}
@@ -150,12 +131,8 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 			t.Fatalf("put %s: %v", c.name, err)
 		}
 		got, err := st.Get(ctx, "", c.name)
-		if err != nil {
-			t.Fatalf("get %s: %v", c.name, err)
-		}
-		if (got.ContextFiles == nil) != (c.want == nil) {
-			t.Errorf("%s: ContextFiles nil-ness = %v, want %v", c.name, got.ContextFiles == nil, c.want == nil)
-		}
+		ck.Require().NoError(err, "get %s", c.name)
+		ck.Eq((c.want == nil), (got.ContextFiles == nil), "%s: ContextFiles nil-ness = %v, want %v", c.name, got.ContextFiles == nil, c.want == nil)
 		if c.want != nil && (*got.ContextFiles != *c.want) {
 			t.Errorf("%s: ContextFiles = %v, want %v", c.name, *got.ContextFiles, *c.want)
 		}
@@ -173,12 +150,8 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 			t.Fatalf("put %s: %v", c.name, err)
 		}
 		got, err := st.Get(ctx, "", c.name)
-		if err != nil {
-			t.Fatalf("get %s: %v", c.name, err)
-		}
-		if (got.MaxCost == nil) != (c.want == nil) {
-			t.Errorf("%s: MaxCost nil-ness = %v, want %v", c.name, got.MaxCost == nil, c.want == nil)
-		}
+		ck.Require().NoError(err, "get %s", c.name)
+		ck.Eq((c.want == nil), (got.MaxCost == nil), "%s: MaxCost nil-ness = %v, want %v", c.name, got.MaxCost == nil, c.want == nil)
 		if c.want != nil && (*got.MaxCost != *c.want) {
 			t.Errorf("%s: MaxCost = %v, want %v", c.name, *got.MaxCost, *c.want)
 		}
@@ -192,6 +165,7 @@ func TestPresetStoreTriStateRoundTrip(t *testing.T) {
 // -- COALESCE hides a dropped NULLIF behind a read-back "" -- so the unset
 // case also asserts the RAW columns are NULL through the pool.
 func TestPresetStoreTextColumnsRoundTrip(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	st, pool := testStore(t)
 	ctx := context.Background()
 
@@ -229,24 +203,17 @@ func TestPresetStoreTextColumnsRoundTrip(t *testing.T) {
 		t.Fatalf("put text-unset: %v", err)
 	}
 	got, err := st.Get(ctx, "", "text-unset")
-	if err != nil {
-		t.Fatalf("get text-unset: %v", err)
-	}
+	ck.Require().NoError(err, "get text-unset")
 	for _, c := range cols {
-		if v := c.get(got); v != "" {
-			t.Errorf("text-unset.%s = %q, want \"\" (unset round-trips)", c.column, v)
-		}
+		v := c.get(got)
+		ck.Eq("", v, "text-unset.%s = %q, want \"\" (unset round-trips)", c.column, v)
 	}
 	var unsetIsNull bool
-	if err := pool.QueryRow(ctx, `SELECT
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT
 			provider IS NULL AND model IS NULL AND thinking IS NULL AND executor IS NULL
 			AND system_prompt IS NULL AND append_system_prompt IS NULL AND written_by_child IS NULL
-			FROM conversations.presets WHERE name = 'text-unset'`).Scan(&unsetIsNull); err != nil {
-		t.Fatalf("read raw unset row: %v", err)
-	}
-	if !unsetIsNull {
-		t.Error("unset text columns must be stored as SQL NULL, not '' -- a NULLIF is missing from Put")
-	}
+			FROM conversations.presets WHERE name = 'text-unset'`).Scan(&unsetIsNull), "read raw unset row")
+	ck.True(unsetIsNull, "unset text columns must be stored as SQL NULL, not '' -- a NULLIF is missing from Put")
 
 	// Non-empty: every column set at once (distinct values would also expose
 	// a swapped NULLIF placeholder); each must come back exactly.
@@ -258,62 +225,45 @@ func TestPresetStoreTextColumnsRoundTrip(t *testing.T) {
 		t.Fatalf("put text-full: %v", err)
 	}
 	got, err = st.Get(ctx, "", "text-full")
-	if err != nil {
-		t.Fatalf("get text-full: %v", err)
-	}
+	ck.Require().NoError(err, "get text-full")
 	for _, c := range cols {
-		if v := c.get(got); v != c.value {
-			t.Errorf("text-full.%s = %q, want exactly %q", c.column, v, c.value)
-		}
+		v := c.get(got)
+		ck.Eq(c.value, v, "text-full.%s = %q, want exactly", c.column, v)
 	}
 }
 
 // Put is append-only: two Puts under one name leave two rows, Get serves the
 // second (higher id), and History returns both, newest first.
 func TestPresetStoreAppendOnlyLatest(t *testing.T) {
+	c := assert.NewCollecting(t)
 	st, pool := testStore(t)
 	ctx := context.Background()
 	owner := newOwner(t, pool, "preset-append")
 
 	first, err := st.Put(ctx, owner, presets.Record{Name: "review", Kind: presets.KindFundi, Description: "v1"})
-	if err != nil {
-		t.Fatalf("put first: %v", err)
-	}
+	c.Require().NoError(err, "put first")
 	second, err := st.Put(ctx, owner, presets.Record{Name: "review", Kind: presets.KindFundi, Description: "v2"})
-	if err != nil {
-		t.Fatalf("put second: %v", err)
-	}
-	if first.ID == second.ID {
-		t.Fatalf("second Put returned id %d — an UPDATE happened, not an insert", first.ID)
-	}
+	c.Require().NoError(err, "put second")
+	c.Require().NotEq(second.ID, first.ID, "second Put returned id")
 
 	got, err := st.Get(ctx, owner, "review")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.ID != second.ID || got.Description != "v2" {
-		t.Fatalf("get = %+v, want the second Put's row (id %d, description v2)", got, second.ID)
-	}
+	c.Require().NoError(err, "get")
+	c.Require().False(got.ID != second.ID || got.Description != "v2", "get = %+v, want the second Put's row (id %d, description v2)", got, second.ID)
 
 	hist, err := st.History(ctx, owner, "review")
-	if err != nil {
-		t.Fatalf("history: %v", err)
-	}
-	if len(hist) != 2 {
-		t.Fatalf("history = %d rows, want 2: %+v", len(hist), hist)
-	}
+	c.Require().NoError(err, "history")
+	c.Require().Len(hist, 2, "history = %d rows, want 2", len(hist))
 	if hist[0].ID != second.ID || hist[1].ID != first.ID {
 		t.Fatalf("history ids = [%d %d], want newest first [%d %d]", hist[0].ID, hist[1].ID, second.ID, first.ID)
 	}
-	if hist[0].DeletedAt != nil || hist[1].DeletedAt != nil {
-		t.Errorf("live history rows must have nil DeletedAt: %+v", hist)
-	}
+	c.False(hist[0].DeletedAt != nil || hist[1].DeletedAt != nil, "live history rows must have nil DeletedAt: %+v", hist)
 }
 
 // Delete stamps every live version in place: Get and List then find nothing,
 // History still returns both rows (now with non-nil DeletedAt), and a fresh
 // Put revives the name. A delete of an unknown name is ErrNotFound.
 func TestPresetStoreDeleteHidesAndPutRevives(t *testing.T) {
+	c := assert.NewCollecting(t)
 	st, pool := testStore(t)
 	ctx := context.Background()
 	owner := newOwner(t, pool, "preset-del-revive")
@@ -324,86 +274,53 @@ func TestPresetStoreDeleteHidesAndPutRevives(t *testing.T) {
 	if _, err := st.Put(ctx, owner, presets.Record{Name: "seat", Kind: presets.KindFundi, Description: "v2"}); err != nil {
 		t.Fatalf("put v2: %v", err)
 	}
-	if err := st.Delete(ctx, owner, "seat"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	c.Require().NoError(st.Delete(ctx, owner, "seat"), "delete")
 	if _, err := st.Get(ctx, owner, "seat"); !errors.Is(err, presets.ErrNotFound) {
 		t.Fatalf("get after delete = %v, want ErrNotFound", err)
 	}
 	rows, err := st.List(ctx, owner, "")
-	if err != nil {
-		t.Fatalf("list after delete: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("list after delete = %+v, want 0 rows", rows)
-	}
+	c.Require().NoError(err, "list after delete")
+	c.Require().Empty(rows, "list after delete")
 	hist, err := st.History(ctx, owner, "seat")
-	if err != nil {
-		t.Fatalf("history after delete: %v", err)
-	}
-	if len(hist) != 2 {
-		t.Fatalf("history after delete = %d rows, want both versions: %+v", len(hist), hist)
-	}
+	c.Require().NoError(err, "history after delete")
+	c.Require().Len(hist, 2, "history after delete = %d rows, want both versions", len(hist))
 	for _, h := range hist {
-		if h.DeletedAt == nil {
-			t.Errorf("history row id %d has nil DeletedAt after delete", h.ID)
-		}
+		c.NotNil(h.DeletedAt, "history row id %d has nil DeletedAt after delete", h.ID)
 	}
 
 	third, err := st.Put(ctx, owner, presets.Record{Name: "seat", Kind: presets.KindFundi, Description: "v3"})
-	if err != nil {
-		t.Fatalf("re-put: %v", err)
-	}
+	c.Require().NoError(err, "re-put")
 	got, err := st.Get(ctx, owner, "seat")
-	if err != nil {
-		t.Fatalf("get after re-put: %v", err)
-	}
-	if got.ID != third.ID || got.Description != "v3" {
-		t.Fatalf("get after re-put = %+v, want the fresh row (id %d, v3)", got, third.ID)
-	}
+	c.Require().NoError(err, "get after re-put")
+	c.Require().False(got.ID != third.ID || got.Description != "v3", "get after re-put = %+v, want the fresh row (id %d, v3)", got, third.ID)
 
-	if err := st.Delete(ctx, owner, "ghost"); !errors.Is(err, presets.ErrNotFound) {
-		t.Fatalf("delete of unknown name = %v, want ErrNotFound", err)
-	}
+	c.Require().ErrorIs(st.Delete(ctx, owner, "ghost"), presets.ErrNotFound, "delete of unknown name")
 }
 
 // Owner scoping is absolute: owner B and the unattributed bucket must never
 // see owner A's preset, and "" sees only "" rows.
 func TestPresetStoreOwnerScoping(t *testing.T) {
+	c := assert.NewAborting(t)
 	st, pool := testStore(t)
 	ctx := context.Background()
 	ownerA := newOwner(t, pool, "preset-owner-a")
 	ownerB := newOwner(t, pool, "preset-owner-b")
 
 	a, err := st.Put(ctx, ownerA, presets.Record{Name: "shared", Kind: presets.KindFundi, Description: "a's"})
-	if err != nil {
-		t.Fatalf("put a: %v", err)
-	}
+	c.NoError(err, "put a")
 	b, err := st.Put(ctx, ownerB, presets.Record{Name: "shared", Kind: presets.KindFundi, Description: "b's"})
-	if err != nil {
-		t.Fatalf("put b: %v", err)
-	}
+	c.NoError(err, "put b")
 	unattr, err := st.Put(ctx, "", presets.Record{Name: "shared", Kind: presets.KindFundi, Description: "unattributed"})
-	if err != nil {
-		t.Fatalf("put unattributed: %v", err)
-	}
+	c.NoError(err, "put unattributed")
 
 	want := map[string]presets.Record{ownerA: a, ownerB: b, "": unattr}
 	for owner, rec := range want {
 		got, err := st.Get(ctx, owner, "shared")
-		if err != nil {
-			t.Fatalf("get %q: %v", owner, err)
-		}
-		if got.ID != rec.ID || got.OwnerUserID != owner || got.Description != rec.Description {
-			t.Fatalf("get %q = %+v, want own row id %d: another owner's row must not leak", owner, got, rec.ID)
-		}
+		c.NoError(err, "get %q", owner)
+		c.False(got.ID != rec.ID || got.OwnerUserID != owner || got.Description != rec.Description, "get %q = %+v, want own row id %d: another owner's row must not leak", owner, got, rec.ID)
 		rows, err := st.List(ctx, owner, "")
-		if err != nil {
-			t.Fatalf("list %q: %v", owner, err)
-		}
-		if len(rows) != 1 || rows[0].ID != rec.ID {
-			t.Fatalf("list %q = %+v, want exactly own row id %d", owner, rows, rec.ID)
-		}
+		c.NoError(err, "list %q", owner)
+		c.False(len(rows) != 1 || rows[0].ID != rec.ID, "list %q = %+v, want exactly own row id %d", owner, rows, rec.ID)
 	}
 }
 
@@ -411,6 +328,7 @@ func TestPresetStoreOwnerScoping(t *testing.T) {
 // local:b, default:a and local_x filtered by "local:" return exactly the two
 // local: names -- local_x's underscore must not act as a wildcard.
 func TestPresetStoreListPrefix(t *testing.T) {
+	c := assert.NewAborting(t)
 	st, pool := testStore(t)
 	ctx := context.Background()
 	owner := newOwner(t, pool, "preset-prefix")
@@ -421,24 +339,16 @@ func TestPresetStoreListPrefix(t *testing.T) {
 		}
 	}
 	rows, err := st.List(ctx, owner, "local:")
-	if err != nil {
-		t.Fatalf("list prefix: %v", err)
-	}
+	c.NoError(err, "list prefix")
 	var names []string
 	for _, r := range rows {
 		names = append(names, r.Name)
 	}
-	if len(names) != 2 || names[0] != "local:a" || names[1] != "local:b" {
-		t.Fatalf("list prefix %q = %v, want exactly [local:a local:b] ordered by name", "local:", names)
-	}
+	c.False(len(names) != 2 || names[0] != "local:a" || names[1] != "local:b", "list prefix %q = %v, want exactly [local:a local:b] ordered by name", "local:", names)
 
 	all, err := st.List(ctx, owner, "")
-	if err != nil {
-		t.Fatalf("list all: %v", err)
-	}
-	if len(all) != 4 {
-		t.Fatalf("list with empty prefix = %d rows, want all 4: %+v", len(all), all)
-	}
+	c.NoError(err, "list all")
+	c.Len(all, 4, "list with empty prefix = %d rows, want all 4", len(all))
 }
 
 // A raw INSERT bypasses Validate entirely: the table's own CHECK must refuse
@@ -446,10 +356,9 @@ func TestPresetStoreListPrefix(t *testing.T) {
 func TestPresetStoreCheckRejectsClaudeTools(t *testing.T) {
 	_, pool := testStore(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO conversations.presets (name, kind, tools) VALUES ('x', 'claude', '{}')`); err == nil {
-		t.Fatal("raw INSERT of a claude preset with tools = nil error, want the CHECK constraint to reject it")
-	}
+	_, err := pool.Exec(ctx,
+		`INSERT INTO conversations.presets (name, kind, tools) VALUES ('x', 'claude', '{}')`)
+	assert.NewAborting(t).Error(err, "raw INSERT of a claude preset with tools = nil error, want the CHECK constraint to reject it")
 }
 
 // TestPresetStoreScriptKindRoundTrip pins the script-kind preset: a clean
@@ -458,6 +367,7 @@ func TestPresetStoreCheckRejectsClaudeTools(t *testing.T) {
 // pkg/presets.Validate — the DB is the last gate Validate might be bypassed
 // by.
 func TestPresetStoreScriptKindRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	st, _ := testStore(t)
 	ctx := context.Background()
 
@@ -467,12 +377,8 @@ func TestPresetStoreScriptKindRoundTrip(t *testing.T) {
 		t.Fatalf("put a clean script preset: %v", err)
 	}
 	got, err := st.Get(ctx, "", "script-roundtrip")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if got.Kind != presets.KindScript {
-		t.Fatalf("kind = %q, want %q", got.Kind, presets.KindScript)
-	}
+	c.NoError(err, "get")
+	c.Eq(presets.KindScript, got.Kind, "kind")
 
 	for _, bad := range []struct {
 		field string

@@ -3,8 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Every registered blueprint must appear in the tier table, and the table must
@@ -14,20 +15,18 @@ import (
 // daemon's process against the daemon's filesystem. A hand-written slice
 // cannot notice a tool it was never told about.
 func TestEveryBlueprintHasATier(t *testing.T) {
+	c := assert.NewCollecting(t)
 	registered := map[string]bool{}
 	for _, bp := range DefaultBlueprint.All() {
 		registered[bp.Name()] = true
 	}
 
 	for name := range registered {
-		if _, ok := TierOf(name); !ok {
-			t.Errorf("tool %q is registered but has no tier — add it to tierByTool in executor_routing.go", name)
-		}
+		_, ok := TierOf(name)
+		c.True(ok, "tool %q is registered but has no tier — add it to tierByTool in executor_routing.go", name)
 	}
 	for name := range tierByTool {
-		if !registered[name] {
-			t.Errorf("tierByTool names %q, which no blueprint registers — stale entry", name)
-		}
+		c.False(!registered[name], "tierByTool names %q, which no blueprint registers — stale entry", name)
 	}
 }
 
@@ -43,9 +42,7 @@ func TestWorkspaceTierMembership(t *testing.T) {
 		"pymodule_run", "read", "write",
 	}
 	got := WorkspaceTools()
-	if !slices.Equal(got, want) {
-		t.Errorf("WorkspaceTools() = %v\nwant %v", got, want)
-	}
+	assert.NewCollecting(t).EqDiff(want, got, "WorkspaceTools()")
 }
 
 // ls and the lsp_* family are workspace tools the executor can serve today:
@@ -53,15 +50,14 @@ func TestWorkspaceTierMembership(t *testing.T) {
 // need only the manager newLSPManager builds from the executor's own lsp.json
 // or PATH, both of which the executor's toolOptsFor supplies.
 func TestRoutingLists(t *testing.T) {
+	c := assert.NewCollecting(t)
 	wantLocal := []string{
 		"bash", "edit", "glob", "grep", "ls",
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
 		"pymodule_run", "read", "write",
 	}
-	if got := ExecutorLocalTools(); !slices.Equal(got, wantLocal) {
-		t.Errorf("ExecutorLocalTools() = %v, want %v", got, wantLocal)
-	}
+	c.EqDiff(wantLocal, ExecutorLocalTools(), "ExecutorLocalTools()")
 
 	wantRouted := []string{
 		"bash", "bash_kill", "bash_output", "bash_start",
@@ -70,9 +66,7 @@ func TestRoutingLists(t *testing.T) {
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
 		"pymodule_run", "read", "write",
 	}
-	if got := RoutedToExecutor(); !slices.Equal(got, wantRouted) {
-		t.Errorf("RoutedToExecutor() = %v, want %v", got, wantRouted)
-	}
+	c.EqDiff(wantRouted, RoutedToExecutor(), "RoutedToExecutor()")
 }
 
 // registryNames reads the set of tool names a Registry advertises. Registry has
@@ -101,9 +95,7 @@ func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 	}
 	got := registryNames(DefaultBlueprint.MaterializeOnly(opts, ExecutorLocalTools()))
 	for _, name := range ExecutorLocalTools() {
-		if !got[name] {
-			t.Errorf("%q is in ExecutorLocalTools but declined to materialize under an executor's ToolOpts", name)
-		}
+		assert.NewCollecting(t).False(!got[name], "%q is in ExecutorLocalTools but declined to materialize under an executor's ToolOpts", name)
 	}
 }
 
@@ -111,6 +103,7 @@ func TestExecutorLocalToolsAllMaterializeUnderExecutorOpts(t *testing.T) {
 // to the executor, which runs the language servers against the files it holds.
 // They decline only when there is neither a local LSP client nor an executor.
 func TestLSPToolsMaterializeWithAnExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
 	lspNames := []string{
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
@@ -119,17 +112,13 @@ func TestLSPToolsMaterializeWithAnExecutor(t *testing.T) {
 	withExecutorOnly := ToolOpts{Cwd: t.TempDir(), Executor: stubExecutorClient{}}
 	got := registryNames(DefaultBlueprint.MaterializeOnly(withExecutorOnly, lspNames))
 	for _, name := range lspNames {
-		if !got[name] {
-			t.Errorf("%q declined with an executor configured; it should be proxied to it", name)
-		}
+		c.False(!got[name], "%q declined with an executor configured; it should be proxied to it", name)
 	}
 
 	neither := ToolOpts{Cwd: t.TempDir()}
 	got2 := registryNames(DefaultBlueprint.MaterializeOnly(neither, lspNames))
 	for _, name := range lspNames {
-		if got2[name] {
-			t.Errorf("%q materialized with no LSP client and no executor", name)
-		}
+		c.False(got2[name], "%q materialized with no LSP client and no executor", name)
 	}
 }
 
@@ -137,6 +126,7 @@ func TestLSPToolsMaterializeWithAnExecutor(t *testing.T) {
 // reach the child's envelope: proxying it would dispatch to a registry that
 // answers "unknown tool". The file tools the executor always serves stay.
 func TestRoutedToolsAreFilteredByTheExecutorsDescribe(t *testing.T) {
+	c := assert.NewCollecting(t)
 	served := map[string]bool{
 		"read": true, "write": true, "edit": true, "glob": true,
 		"grep": true, "ls": true, "bash": true,
@@ -148,17 +138,13 @@ func TestRoutedToolsAreFilteredByTheExecutorsDescribe(t *testing.T) {
 	}))
 
 	for name := range served {
-		if !got[name] {
-			t.Errorf("%q declined though the executor's Describe serves it", name)
-		}
+		c.False(!got[name], "%q declined though the executor's Describe serves it", name)
 	}
 	for _, name := range []string{
 		"lsp_call_hierarchy", "lsp_definition", "lsp_diagnostics",
 		"lsp_references", "lsp_rename", "lsp_restart", "lsp_symbols",
 	} {
-		if got[name] {
-			t.Errorf("%q materialized though the executor's Describe omits it", name)
-		}
+		c.False(got[name], "%q materialized though the executor's Describe omits it", name)
 	}
 }
 
@@ -187,9 +173,7 @@ func (stubExecutorClient) Ping(context.Context) error            { return nil }
 // there is nothing to enumerate, and an unused tier is invisible.
 func TestEveryDeclaredTierIsCarried(t *testing.T) {
 	for tier := Tier(0); tier < tierCount; tier++ {
-		if len(namesInTier(tier)) == 0 {
-			t.Errorf("tier %d is declared but no tool carries it — classify a tool into it or delete it", tier)
-		}
+		assert.NewCollecting(t).NotEmpty(namesInTier(tier), "tier %d is declared but no tool carries it — classify a tool into it or delete it", tier)
 	}
 }
 
@@ -199,7 +183,5 @@ func TestEveryDeclaredTierIsCarried(t *testing.T) {
 // not" would be silently wrong about those tools.
 func TestTiersPartitionEveryTool(t *testing.T) {
 	got := len(namesInTier(TierDaemon)) + len(namesInTier(TierWorkspace))
-	if want := len(tierByTool); got != want {
-		t.Errorf("TierDaemon + TierWorkspace cover %d tools; tierByTool holds %d", got, want)
-	}
+	assert.NewCollecting(t).Eq(len(tierByTool), got, "TierDaemon + TierWorkspace cover")
 }

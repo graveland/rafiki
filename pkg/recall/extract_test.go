@@ -5,18 +5,19 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testBlocks(t *testing.T, bs ...map[string]any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(bs)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return b
 }
 
 func TestExtractDropsToolResultsKeepsArgs(t *testing.T) {
+	c := assert.NewAborting(t)
 	text := "running the build now"
 	m := Message{
 		ConversationID: "c1",
@@ -29,29 +30,20 @@ func TestExtractDropsToolResultsKeepsArgs(t *testing.T) {
 		),
 	}
 	out := Extract(m)
-	if !strings.Contains(out, text) {
-		t.Fatalf("text missing from %q", out)
-	}
-	if !strings.Contains(out, "[tool bash]") {
-		t.Fatalf("tool args missing from %q", out)
-	}
-	if strings.Contains(out, strings.Repeat("y", 100)) {
-		t.Fatalf("tool_result content leaked: %q", out)
-	}
+	c.StrContains(out, text, "text missing from")
+	c.StrContains(out, "[tool bash]", "tool args missing from")
+	c.NotStrContains(out, strings.Repeat("y", 100), "tool_result content leaked")
 	bound := len(text) + ToolArgMaxChars + 50
-	if len(out) > bound {
-		t.Fatalf("output %d bytes exceeds bound %d", len(out), bound)
-	}
+	c.LessOrEqual(bound, len(out), "output")
 }
 
 func TestExtractSkipsCompactionAndThinking(t *testing.T) {
+	c := assert.NewAborting(t)
 	comp := Message{
 		ConversationID: "c", Ordinal: 0, Role: "user", Kind: "compaction_summary",
 		Content: testBlocks(t, map[string]any{"type": "text", "text": "earlier turns compacted away"}),
 	}
-	if got := Extract(comp); got != "" {
-		t.Fatalf("compaction extract = %q, want empty", got)
-	}
+	c.Eq("", Extract(comp), "compaction extract")
 	all := ExtractAll([]Message{comp})
 	if !all[0].Skip || all[0].Text != "" || all[0].Ordinal != 0 {
 		t.Fatalf("compaction not skipped: %+v", all[0])
@@ -66,21 +58,15 @@ func TestExtractSkipsCompactionAndThinking(t *testing.T) {
 		),
 	}
 	out := Extract(m)
-	if !strings.Contains(out, "visible answer") {
-		t.Fatalf("text missing from %q", out)
-	}
-	if strings.Contains(out, "secret reasoning") {
-		t.Fatalf("thinking leaked: %q", out)
-	}
+	c.StrContains(out, "visible answer", "text missing from")
+	c.NotStrContains(out, "secret reasoning", "thinking leaked")
 
 	toolsOnly := Message{
 		ConversationID: "c", Ordinal: 2, Role: "user",
 		Content: testBlocks(t, map[string]any{"type": "tool_result", "content": "big result body"}),
 	}
 	for _, em := range ExtractAll([]Message{toolsOnly}) {
-		if !em.Skip {
-			t.Fatalf("tool-result-only message not skipped: %+v", em)
-		}
+		c.True(em.Skip, "tool-result-only message not skipped: %+v", em)
 	}
 }
 
@@ -89,9 +75,7 @@ func TestExtractStringContent(t *testing.T) {
 		ConversationID: "c", Ordinal: 3, Role: "user",
 		Content: json.RawMessage(`"plain string content"`),
 	}
-	if got := Extract(m); got != "user: plain string content" {
-		t.Fatalf("got %q", got)
-	}
+	assert.NewAborting(t).Eq("user: plain string content", Extract(m), "got")
 	all := ExtractAll([]Message{m})
 	if all[0].Skip || all[0].Text != "user: plain string content" {
 		t.Fatalf("ExtractAll = %+v", all[0])
@@ -99,6 +83,7 @@ func TestExtractStringContent(t *testing.T) {
 }
 
 func TestRenderContextShowsResultSize(t *testing.T) {
+	c := assert.NewAborting(t)
 	m := Message{
 		ConversationID: "c", Ordinal: 4, Role: "assistant",
 		Content: testBlocks(t,
@@ -107,16 +92,8 @@ func TestRenderContextShowsResultSize(t *testing.T) {
 		),
 	}
 	out := RenderContext([]Message{m})
-	if !strings.Contains(out, "→ result (3.2KB)") {
-		t.Fatalf("missing size marker in %q", out)
-	}
-	if !strings.Contains(out, "#4 assistant: looked it up") {
-		t.Fatalf("missing ordinal prefix in %q", out)
-	}
-	if strings.Contains(out, strings.Repeat("y", 100)) {
-		t.Fatalf("result content leaked: %q", out)
-	}
-	if utf8.RuneCountInString(out) == 0 {
-		t.Fatal("empty render")
-	}
+	c.StrContains(out, "→ result (3.2KB)", "missing size marker in")
+	c.StrContains(out, "#4 assistant: looked it up", "missing ordinal prefix in")
+	c.NotStrContains(out, strings.Repeat("y", 100), "result content leaked")
+	c.NotEq(0, utf8.RuneCountInString(out), "empty render")
 }

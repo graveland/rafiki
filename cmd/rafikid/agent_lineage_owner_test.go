@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The owner USER id is stamped at spawn with the subtree's owner: a user
@@ -59,10 +61,7 @@ func TestOwnerUserIDForChildWalksTheAgentLineage(t *testing.T) {
 		{"c_unknown", "", false},  // not registered at all
 	} {
 		uid, ok := c.OwnerUserIDForChild(tc.childID)
-		if ok != tc.wantOK || uid != tc.wantUID {
-			t.Errorf("OwnerUserIDForChild(%s) = (%q, %v), want (%q, %v)",
-				tc.childID, uid, ok, tc.wantUID, tc.wantOK)
-		}
+		assert.NewCollecting(t).False(ok != tc.wantOK || uid != tc.wantUID, "OwnerUserIDForChild(%s) = (%q, %v), want (%q, %v)", tc.childID, uid, ok, tc.wantUID, tc.wantOK)
 	}
 
 	// A lineage with NO owner anywhere — the anonymous local-socket spawn
@@ -93,6 +92,7 @@ func TestOwnerUserIDForChildWalksTheAgentLineage(t *testing.T) {
 // The spawner carries no PiBinary (the wire's agent_spawn schema has none),
 // so the daemon resolves the binary from the env exactly as production does.
 func TestAgentSpawnedGrandchildMCPTokenResolves(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	// The proxy face must be wired for a claude child to be routed at all —
 	// proxyChildEnv is the mint site (see TestChildMCPTokenIsPerChildAndForgotten).
@@ -109,9 +109,7 @@ func TestAgentSpawnedGrandchildMCPTokenResolves(t *testing.T) {
 		NoSession: true,
 	}
 	top, err := c.Spawn(ctx, req, users.Identity{UserID: "u_top", Username: "brent"})
-	if err != nil {
-		t.Fatalf("top-level Spawn: %v", err)
-	}
+	ck.NoError(err, "top-level Spawn")
 
 	// The grandchild goes through the controllerSpawner bound to the top
 	// child — the exact shape an agent's agent_spawn takes.
@@ -121,33 +119,21 @@ func TestAgentSpawnedGrandchildMCPTokenResolves(t *testing.T) {
 		Name: "inherited-owner",
 		Cwd:  t.TempDir(),
 	})
-	if err != nil {
-		t.Fatalf("controllerSpawner Spawn: %v", err)
-	}
+	ck.NoError(err, "controllerSpawner Spawn")
 
 	snap, ok := c.st.Get(info.ChildID)
-	if !ok {
-		t.Fatal("the grandchild has no store row")
-	}
+	ck.True(ok, "the grandchild has no store row")
 	// The inheritance is the point: the grandchild's row carries the
 	// subtree's owner id, read from its spawner's own row — so its MCP secret
 	// resolves on its own row, and a fundi descendant's conversation
 	// attributes to the top user.
-	if snap.OwnerUserID != "u_top" {
-		t.Fatalf("agent-spawned grandchild's row carries OwnerUserID %q, want the spawner's own %q — the inheritance did not stamp", snap.OwnerUserID, "u_top")
-	}
-	if snap.Labels["owner"] != "brent" {
-		t.Fatalf("agent-spawned grandchild's owner label = %q, want the parent's propagated %q", snap.Labels["owner"], "brent")
-	}
+	ck.Eq("u_top", snap.OwnerUserID, "agent-spawned grandchild's row carries OwnerUserID")
+	ck.Eq("brent", snap.Labels["owner"], "agent-spawned grandchild's owner label")
 
 	// The mint-or-reuse contract returns the same secret proxyChildEnv minted
 	// during the spawn.
 	tok := c.mintMCPToken(info.ChildID)
-	if tok == "" {
-		t.Fatal("the agent-spawned grandchild minted no MCP secret")
-	}
+	ck.NotEq("", tok, "the agent-spawned grandchild minted no MCP secret")
 	cid, uid, ok := c.ChildForMCPToken(tok)
-	if !ok || cid != info.ChildID || uid != "u_top" {
-		t.Fatalf("ChildForMCPToken(grandchild secret) = (%q, %q, %v), want (%q, u_top, true) — the grandchild's own MCP calls would 401", cid, uid, ok, info.ChildID)
-	}
+	ck.False(!ok || cid != info.ChildID || uid != "u_top", "ChildForMCPToken(grandchild secret) = (%q, %q, %v), want (%q, u_top, true) — the grandchild's own MCP calls would 401", cid, uid, ok, info.ChildID)
 }

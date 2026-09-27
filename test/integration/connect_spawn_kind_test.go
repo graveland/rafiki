@@ -26,10 +26,13 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestConnectSpawnDefaultsEmptyKindToFundi(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemonDB(t, nextDaemonID(), noRealProviderEnv()...)
 	t.Cleanup(func() { os.RemoveAll(d.homeDir) })
 
@@ -41,9 +44,7 @@ func TestConnectSpawnDefaultsEmptyKindToFundi(t *testing.T) {
 	defer cancel()
 	req := emptyKindSpawn(configDir)
 	resp, err := client.Spawn(ctx, connect.NewRequest(&req))
-	if err != nil {
-		t.Fatalf("spawn with an empty kind: %v", err)
-	}
+	c.NoError(err, "spawn with an empty kind")
 	childID := resp.Msg.GetChildId()
 
 	pool := openPool(t, os.Getenv("RAFIKI_TEST_DSN"))
@@ -51,28 +52,20 @@ func TestConnectSpawnDefaultsEmptyKindToFundi(t *testing.T) {
 
 	// The childstore row carries the RESOLVED kind, not the raw "".
 	var kind string
-	if err := pool.QueryRow(context.Background(),
-		`SELECT kind FROM conversations.child WHERE child_id = $1`, childID).Scan(&kind); err != nil {
-		t.Fatalf("read child row: %v", err)
-	}
-	if kind != "fundi" {
-		t.Fatalf("conversations.child.kind = %q, want fundi: an empty Connect kind must resolve, not fall through to the subprocess path", kind)
-	}
+	c.NoError(pool.QueryRow(context.Background(),
+		`SELECT kind FROM conversations.child WHERE child_id = $1`, childID).Scan(&kind), "read child row")
+	c.Eq("fundi", kind, "conversations.child.kind")
 
 	// The conversation the engine created is attributed to the SAME owner
 	// the childstore row carries — the two writers must agree, and the
 	// unattributed conversation is exactly what the subprocess path produced.
 	var sameOwner bool
-	if err := pool.QueryRow(context.Background(),
+	c.NoError(pool.QueryRow(context.Background(),
 		`SELECT cc.owner_user_id IS NOT NULL AND cc.owner_user_id = c2.owner_user_id
 		 FROM conversations.conversation cc
 		 JOIN conversations.child c2 ON c2.child_id = cc.external_ref
-		 WHERE cc.external_ref = $1`, childID).Scan(&sameOwner); err != nil {
-		t.Fatalf("read conversation owner: %v", err)
-	}
-	if !sameOwner {
-		t.Fatal("the spawned child's conversation is unattributed (owner_user_id NULL or a different owner): the engine ran on the subprocess path")
-	}
+		 WHERE cc.external_ref = $1`, childID).Scan(&sameOwner), "read conversation owner")
+	c.True(sameOwner, "the spawned child's conversation is unattributed (owner_user_id NULL or a different owner): the engine ran on the subprocess path")
 }
 
 // emptyKindSpawn is a SpawnRequest with every kind-dependent field unset:

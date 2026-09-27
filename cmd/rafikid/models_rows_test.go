@@ -13,47 +13,40 @@ import (
 	"go.graveland.dev/rafiki/pkg/models"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSourcesForKindClaudeExcludesOpenRouter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := sourcesForKind(protocol.KindClaude)
-	if got[models.SourceOpenRouter] {
-		t.Error("claude kind admits OpenRouter ids; Claude Code cannot resolve them")
-	}
-	if !got[models.SourceBuiltin] {
-		t.Error("claude kind must admit the curated Anthropic ids")
-	}
+	c.False(got[models.SourceOpenRouter], "claude kind admits OpenRouter ids; Claude Code cannot resolve them")
+	c.False(!got[models.SourceBuiltin], "claude kind must admit the curated Anthropic ids")
 }
 
 func TestSourcesForKindDefaultsToFundi(t *testing.T) {
 	// An unset kind is the not-yet-typed completion case and must behave as
 	// fundi, the default kind — not as "everything".
 	got := sourcesForKind("")
-	if !got[models.SourceOpenRouter] || !got[models.SourceBuiltin] {
-		t.Errorf("empty kind = %v, want the fundi source set", got)
-	}
+	assert.NewCollecting(t).False(!got[models.SourceOpenRouter] || !got[models.SourceBuiltin], "empty kind = %v, want the fundi source set", got)
 }
 
 func TestDecorateLeavesUnknownModelsBare(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spine := []models.Model{{
 		ID: "ollama/llama3", Provider: "ollama", Model: "llama3", Source: models.SourceLocal,
 	}}
 	rows := decorateRows(spine, nil)
-	if len(rows) != 1 {
-		t.Fatalf("len(rows) = %d, want 1", len(rows))
-	}
+	c.Require().Len(rows, 1, "len(rows) = %d, want 1", len(rows))
 	if rows[0].ContextWindow != nil || rows[0].PromptUSD != nil {
 		t.Errorf("row = %+v, want no catalog fields for a model with no entry", rows[0])
 	}
-	if rows[0].InputModalities != nil {
-		t.Errorf("InputModalities = %v, want nil (unknown)", rows[0].InputModalities)
-	}
-	if rows[0].Source != "local" {
-		t.Errorf("Source = %q, want %q", rows[0].Source, "local")
-	}
+	c.Nil(rows[0].InputModalities, "InputModalities")
+	c.Eq("local", rows[0].Source, "Source")
 }
 
 func TestDecorateJoinsCatalogFactsByID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx, max := 128000, 16384
 	spine := []models.Model{{
 		ID: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o",
@@ -67,12 +60,8 @@ func TestDecorateJoinsCatalogFactsByID(t *testing.T) {
 	if rows[0].ContextWindow == nil || *rows[0].ContextWindow != 128000 {
 		t.Errorf("ContextWindow = %v, want 128000", rows[0].ContextWindow)
 	}
-	if rows[0].Name != "GPT-4o" {
-		t.Errorf("Name = %q, want GPT-4o", rows[0].Name)
-	}
-	if len(rows[0].InputModalities) != 2 {
-		t.Errorf("InputModalities = %v, want 2", rows[0].InputModalities)
-	}
+	c.Eq("GPT-4o", rows[0].Name, "Name")
+	c.Len(rows[0].InputModalities, 2, "InputModalities")
 }
 
 // The spine decides which rows exist. A catalog entry with no spine row must
@@ -81,9 +70,8 @@ func TestDecorateJoinsCatalogFactsByID(t *testing.T) {
 func TestDecorateNeverInventsRows(t *testing.T) {
 	ctx := 128000
 	cat := map[string]catalogFacts{"openai/gpt-4o": {contextLength: &ctx}}
-	if rows := decorateRows(nil, cat); len(rows) != 0 {
-		t.Errorf("len(rows) = %d, want 0 — the catalog must not invent rows", len(rows))
-	}
+	rows := decorateRows(nil, cat)
+	assert.NewCollecting(t).Empty(rows, "len(rows) = %d, want 0 — the catalog must not invent rows", len(rows))
 }
 
 func TestDecorateFiltersByProvider(t *testing.T) {
@@ -92,9 +80,7 @@ func TestDecorateFiltersByProvider(t *testing.T) {
 		{ID: "anthropic/claude-opus-5", Provider: "anthropic", Source: models.SourceBuiltin},
 	}
 	rows := filterByProvider(decorateRows(spine, nil), "anthropic")
-	if len(rows) != 1 || rows[0].Provider != "anthropic" {
-		t.Errorf("rows = %+v, want only the anthropic row", rows)
-	}
+	assert.NewCollecting(t).False(len(rows) != 1 || rows[0].Provider != "anthropic", "rows = %+v, want only the anthropic row", rows)
 }
 
 // A model OpenRouter prices normally but whose pricing object carries NO cache
@@ -104,21 +90,18 @@ func TestDecorateFiltersByProvider(t *testing.T) {
 // The fixture seeds the way every existing fixture does: zero cache fields on
 // CatalogEntry.Pricing seed ABSENT raw strings.
 func TestListModelRowsPreservesCachePriceAbsence(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := &Controller{catalog: seedCatalogWithPricing(t, "openai/gpt-x",
 		&models2Pricing{prompt: 5e-6, completion: 1.5e-5})}
 	rows, err := c.ListModelRows(context.Background(), "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	var row *connectapi.ModelRow
 	for i := range rows {
 		if rows[i].ID == "openrouter/openai/gpt-x" {
 			row = &rows[i]
 		}
 	}
-	if row == nil {
-		t.Fatalf("seeded model missing from rows (%d rows)", len(rows))
-	}
+	ck.NotNil(row, "seeded model missing from rows (%d rows)", len(rows))
 	if row.PromptUSD == nil || *row.PromptUSD != 5e-6 {
 		t.Errorf("PromptUSD = %v, want 5e-06 (base prices must survive)", row.PromptUSD)
 	}
@@ -162,6 +145,7 @@ func f64ptr(v float64) *float64 { return &v }
 // into the claude kind. The kind's contract is served at the ROW layer; pin it
 // there, where the plan's original source-set test was too coarse to see it.
 func TestFilterRowsForKindClaudeKeepsOnlyAnthropic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []connectapi.ModelRow{
 		{ID: "anthropic/claude-opus-5", Provider: "anthropic", Source: "builtin"},
 		{ID: "anthropic/opus-latest", Provider: "anthropic", Source: "builtin"},
@@ -171,13 +155,9 @@ func TestFilterRowsForKindClaudeKeepsOnlyAnthropic(t *testing.T) {
 	}
 
 	got := filterRowsForKind(rows, protocol.KindClaude)
-	if len(got) != 2 {
-		t.Fatalf("claude rows = %+v, want only the two provider==anthropic rows", got)
-	}
+	c.Require().Len(got, 2, "claude rows")
 	for _, r := range got {
-		if r.Provider != "anthropic" {
-			t.Errorf("claude row %q has provider %q, want anthropic", r.ID, r.Provider)
-		}
+		c.Eq("anthropic", r.Provider, "claude row %q has provider %q, want anthropic", r.ID, r.Provider)
 	}
 
 	// Only claude narrows rows. fundi, the empty not-yet-typed case, and any
@@ -195,18 +175,13 @@ func TestFilterRowsForKindClaudeKeepsOnlyAnthropic(t *testing.T) {
 // Hermetic: the claude source set enables no network-backed source and the
 // default provider set is in-memory.
 func TestListModelRowsClaudeKindAdmitsOnlyAnthropic(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{} // catalog nil, providers default: builtin-only spine for claude
 	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("no rows for the claude kind; the builtin spine came back empty")
-	}
+	ck.Require().NoError(err)
+	ck.Require().NotEmpty(rows, "no rows for the claude kind; the builtin spine came back empty")
 	for _, r := range rows {
-		if r.Provider != "anthropic" {
-			t.Errorf("claude-kind row %q has provider %q; the builtin curation's non-Anthropic ids leak", r.ID, r.Provider)
-		}
+		ck.Eq("anthropic", r.Provider, "claude-kind row %q has provider %q; the builtin curation's non-Anthropic ids leak", r.ID, r.Provider)
 	}
 }
 
@@ -222,6 +197,7 @@ func (s *byteSnapshotStore) Save(b []byte) error   { s.data = b; return nil }
 // ListModels handler serves. Present-zero must survive as present-zero and
 // absent as absent — the review's end-to-end table, at the layer clients see.
 func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	snapshot := `{"fetched":"2099-01-01T00:00:00Z","models":[
 	 {"id":"openai/zeroed","name":"Zeroed","created":1,
 	  "context_length":0,
@@ -238,9 +214,7 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 	c := &Controller{catalog: cat}
 
 	rows, err := c.ListModelRows(context.Background(), "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	byID := map[string]connectapi.ModelRow{}
 	for _, r := range rows {
 		byID[r.ID] = r
@@ -254,9 +228,7 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 		"ContextWindow":       zeroed.ContextWindow,
 		"MaxCompletionTokens": zeroed.MaxCompletionTokens,
 	} {
-		if got == nil || *got != 0 {
-			t.Errorf("zeroed %s = %v, want a pointer to 0 — a reported zero is a fact, not an absence", name, got)
-		}
+		ck.False(got == nil || *got != 0, "zeroed %s = %v, want a pointer to 0 — a reported zero is a fact, not an absence", name, got)
 	}
 	for name, got := range map[string]*float64{
 		"PromptUSD":     zeroed.PromptUSD,
@@ -264,18 +236,14 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 		"CacheReadUSD":  zeroed.CacheReadUSD,
 		"CacheWriteUSD": zeroed.CacheWriteUSD,
 	} {
-		if got == nil || *got != 0 {
-			t.Errorf("zeroed %s = %v, want a pointer to 0", name, got)
-		}
+		ck.False(got == nil || *got != 0, "zeroed %s = %v, want a pointer to 0", name, got)
 	}
 
 	priced, ok := byID["openrouter/openai/priced"]
 	if !ok {
 		t.Fatalf("priced model missing from rows (%d rows)", len(rows))
 	}
-	if priced.ContextWindow == nil || *priced.ContextWindow != 128000 {
-		t.Errorf("priced ContextWindow = %v, want 128000", priced.ContextWindow)
-	}
+	ck.False(priced.ContextWindow == nil || *priced.ContextWindow != 128000, "priced ContextWindow = %v, want 128000", priced.ContextWindow)
 	if priced.CacheReadUSD != nil {
 		t.Errorf("priced CacheReadUSD = %v, want ABSENT", *priced.CacheReadUSD)
 	}
@@ -316,6 +284,7 @@ func TestListModelRowsPreservePresenceEndToEnd(t *testing.T) {
 // price, a <family>-latest alias its resolved entry's, and no ":batch" twin
 // may surface as a row.
 func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	cat := routing.NewModelCatalog(nil, time.Minute, slog.New(slog.DiscardHandler))
 	price := func(p float64) *routing.ModelPricing {
 		return &routing.ModelPricing{PromptUSD: p, CompletionUSD: 5 * p}
@@ -328,15 +297,11 @@ func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
 	})
 	c := &Controller{catalog: cat}
 	rows, err := c.ListModelRows(context.Background(), "", protocol.KindClaude)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	byID := make(map[string]connectapi.ModelRow, len(rows))
 	for _, r := range rows {
 		byID[r.ID] = r
-		if r.Provider != "anthropic" || strings.Contains(r.ID, ":") {
-			t.Errorf("claude-kind row %q (provider %q) must not be offered", r.ID, r.Provider)
-		}
+		ck.False(r.Provider != "anthropic" || strings.Contains(r.ID, ":"), "claude-kind row %q (provider %q) must not be offered", r.ID, r.Provider)
 	}
 	for id, want := range map[string]float64{
 		"anthropic/claude-opus-5-5":  5e-6, // catalog-only: not in the curated list
@@ -348,8 +313,6 @@ func TestListModelRowsClaudeKindFollowsCatalog(t *testing.T) {
 			t.Errorf("row %q missing", id)
 			continue
 		}
-		if r.PromptUSD == nil || *r.PromptUSD != want {
-			t.Errorf("%s: PromptUSD = %v, want %v", id, r.PromptUSD, want)
-		}
+		ck.False(r.PromptUSD == nil || *r.PromptUSD != want, "%s: PromptUSD = %v, want %v", id, r.PromptUSD, want)
 	}
 }

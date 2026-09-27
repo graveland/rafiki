@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestEffortCacheClamp(t *testing.T) {
@@ -34,9 +36,7 @@ func TestEffortCacheClamp(t *testing.T) {
 	}
 	for _, c2 := range cases {
 		gotE, gotA := c.Clamp(c2.model, c2.req)
-		if gotE != c2.wantEffort || gotA != c2.wantAction {
-			t.Errorf("Clamp(%q,%q) = (%q,%q), want (%q,%q)", c2.model, c2.req, gotE, gotA, c2.wantEffort, c2.wantAction)
-		}
+		assert.NewCollecting(t).False(gotE != c2.wantEffort || gotA != c2.wantAction, "Clamp(%q,%q) = (%q,%q), want (%q,%q)", c2.model, c2.req, gotE, gotA, c2.wantEffort, c2.wantAction)
 	}
 }
 
@@ -51,15 +51,14 @@ func TestEffortCacheClampUnknownRequested(t *testing.T) {
 }
 
 func TestEffortCacheLearnOverwrites(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewEffortCache()
 	c.Learn("m", []string{"low"})
-	if eff, _ := c.Clamp("m", "high"); eff != "low" {
-		t.Fatalf("first learn: got %q, want low", eff)
-	}
+	eff, _ := c.Clamp("m", "high")
+	ck.Require().Eq("low", eff, "first learn: got")
 	c.Learn("m", []string{"medium", "high"})
-	if _, act := c.Clamp("m", "high"); act != "keep" {
-		t.Errorf("after re-learn high is allowed -> want keep, got %q", act)
-	}
+	_, act := c.Clamp("m", "high")
+	ck.Eq("keep", act, "after re-learn high is allowed -> want keep, got")
 }
 
 func TestParseSupportedEfforts(t *testing.T) {
@@ -84,8 +83,6 @@ func TestParseSupportedEfforts(t *testing.T) {
 	}
 	for _, c := range cases {
 		got, ok := ParseSupportedEfforts(c.body)
-		if ok != c.wantOK || (ok && !reflect.DeepEqual(got, c.want)) {
-			t.Errorf("%s: ParseSupportedEfforts = (%v,%v), want (%v,%v)", c.name, got, ok, c.want, c.wantOK)
-		}
+		assert.NewCollecting(t).False(ok != c.wantOK || (ok && !reflect.DeepEqual(got, c.want)), "%s: ParseSupportedEfforts = (%v,%v), want (%v,%v)", c.name, got, ok, c.want, c.wantOK)
 	}
 }

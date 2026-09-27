@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testPymoduleRunTool returns a materialized pymodule_run tool whose cwd is
@@ -23,9 +25,7 @@ import (
 func testPymoduleRunTool(t *testing.T, cwd string) Tool {
 	t.Helper()
 	tool, err := (&PyModuleRunBlueprint{}).Materialize(ToolOpts{Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return tool
 }
 
@@ -36,13 +36,10 @@ func testPymoduleRunTool(t *testing.T, cwd string) Tool {
 // PYTHONPATH logic.
 func seedPymoduleCache(t *testing.T, name, code string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := filepath.Join(paths.CacheDir(), "pymodules", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name+".py"), []byte(code), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(dir, 0o755))
+	c.NoError(os.WriteFile(filepath.Join(dir, name+".py"), []byte(code), 0o644))
 }
 
 // seedGitPymoduleRepo writes <cache>/pymodule-repos/<name>/ directly, in the
@@ -55,24 +52,17 @@ func seedPymoduleCache(t *testing.T, name, code string) {
 // interpreter logic.
 func seedGitPymoduleRepo(t *testing.T, name string, scripts, packages map[string]string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	repoDir := filepath.Join(paths.CacheDir(), "pymodule-repos", name)
 	for script, code := range scripts {
 		dir := filepath.Join(repoDir, "scripts")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, script+".py"), []byte(code), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(os.MkdirAll(dir, 0o755))
+		c.NoError(os.WriteFile(filepath.Join(dir, script+".py"), []byte(code), 0o644))
 	}
 	for pkg, code := range packages {
 		dir := filepath.Join(repoDir, pkg)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "__init__.py"), []byte(code), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(os.MkdirAll(dir, 0o755))
+		c.NoError(os.WriteFile(filepath.Join(dir, "__init__.py"), []byte(code), 0o644))
 	}
 }
 
@@ -89,53 +79,42 @@ func gitRepoDirOf(t *testing.T, name string) string {
 // file-with-extension habit (`analyze.py`), since `.` is not an identifier
 // character.
 func TestPymoduleRunRejectsPathLikeScriptNames(t *testing.T) {
+	c := assert.NewAborting(t)
 	parent := t.TempDir()
 	sibling := filepath.Join(parent, "sibling")
-	if err := os.MkdirAll(sibling, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(sibling, 0o755))
 	// evil.py writes a marker only if it is actually executed, so the test
 	// proves the guard stopped the call rather than the file merely missing.
 	marker := filepath.Join(sibling, "marker.txt")
 	evil := fmt.Sprintf("open(%q, \"w\").write(\"ran\")\n", marker)
-	if err := os.WriteFile(filepath.Join(sibling, "evil.py"), []byte(evil), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(sibling, "evil.py"), []byte(evil), 0o644))
 
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	tool := testPymoduleRunTool(t, t.TempDir())
 	for _, bad := range []string{"../sibling/evil.py", "sub/evil", "./evil", "analyze.py"} {
 		_, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"repo": "local", "script": %q}`, bad)))
-		if err == nil {
-			t.Fatalf("want an error for the path-like script %q, got nil", bad)
-		}
-		if !strings.Contains(err.Error(), "Python identifier") {
-			t.Fatalf("error for %q should say script must be a bare Python identifier, got: %v", bad, err)
-		}
+		c.Error(err, "want an error for the path-like script %q, got nil", bad)
+		c.StrContains(err.Error(), "Python identifier", "error for %q should say script must be a bare Python identifier, got: %v", bad, err)
 	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatal("evil.py was executed: the name validation failed")
-	}
+	_, statErr := os.Stat(marker)
+	c.True(os.IsNotExist(statErr), "evil.py was executed: the name validation failed")
 }
 
 func TestPymoduleRunRejectsPathInModuleName(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main", "modules": ["../etc"]}`))
-	if err == nil {
-		t.Fatal("want an error for a path in a module name, got nil")
-	}
-	if !strings.Contains(err.Error(), "../etc") {
-		t.Fatalf("error should name the offending module, got: %v", err)
-	}
+	c.Error(err, "want an error for a path in a module name, got nil")
+	c.StrContains(err.Error(), "../etc", "error should name the offending module, got: %v", err)
 	// Names are all validated before anything runs: the managed cache root
 	// must not have been created because of it.
-	if _, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodules", "etc")); !os.IsNotExist(statErr) {
-		t.Fatal("something was written despite the invalid module name")
-	}
+	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodules", "etc"))
+	c.True(os.IsNotExist(statErr), "something was written despite the invalid module name")
 }
 
 func TestPymoduleRunMakesModuleImportable(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -146,39 +125,27 @@ func TestPymoduleRunMakesModuleImportable(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, workspace)
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "42") {
-		t.Fatalf("result should contain the module's printed value 42, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "42", "result should contain the module's printed value 42, got")
 
 	// The workspace stays untouched: modules are consumed in place from the
 	// cache, never copied, and cwd is not on sys.path.
 	entries, err := os.ReadDir(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("the workspace should gain nothing from a run, got %v", entries)
-	}
+	c.NoError(err)
+	c.Empty(entries, "the workspace should gain nothing from a run, got")
 
 	// Bytecode from imports lands INSIDE the module's own cache dir -- the
 	// point of running from the cache: it survives between runs, and the
 	// sync prune sweeps at root level only, so it is left alone.
 	stale, err := os.ReadDir(filepath.Join(paths.CacheDir(), "pymodules", "mymod"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var sawBytecode bool
 	for _, e := range stale {
 		if e.Name() == "__pycache__" {
 			sawBytecode = true
 		}
 	}
-	if !sawBytecode {
-		t.Fatal("__pycache__ did not land inside the imported module's cache dir")
-	}
+	c.True(sawBytecode, "__pycache__ did not land inside the imported module's cache dir")
 }
 
 // The entry script executes from the synced cache, never from a workspace
@@ -186,6 +153,7 @@ func TestPymoduleRunMakesModuleImportable(t *testing.T) {
 // ignored and left untouched -- the cwd picks the process's view of the
 // world, never which copy of the script runs.
 func TestPymoduleRunExecutesCacheCopy(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -194,27 +162,20 @@ func TestPymoduleRunExecutesCacheCopy(t *testing.T) {
 	decoyDir := t.TempDir()
 	decoy := filepath.Join(decoyDir, "runme.py")
 	decoyCode := "print(7)\n"
-	if err := os.WriteFile(decoy, []byte(decoyCode), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(decoy, []byte(decoyCode), 0o644))
 
 	tool := testPymoduleRunTool(t, decoyDir)
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "42") {
-		t.Fatalf("the cache copy should run (42, not the decoy's 7), got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "42", "the cache copy should run (42, not the decoy's 7), got")
 	got, err := os.ReadFile(decoy)
-	if err != nil || string(got) != decoyCode {
-		t.Fatalf("decoy runme.py was touched: content=%q err=%v", got, err)
-	}
+	c.False(err != nil || string(got) != decoyCode, "decoy runme.py was touched: content=%q err=%v", got, err)
 }
 
 // The subprocess runs with the calling agent's workspace as its cwd -- the
 // same relative world a bash call would see -- not the script's cache dir.
 func TestPymoduleRunRunsInAgentWorkspace(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -223,137 +184,98 @@ func TestPymoduleRunRunsInAgentWorkspace(t *testing.T) {
 	// EvalSymlinks: t.TempDir() may hand out a /var path whose /private/var
 	// resolution is what os.getcwd() reports.
 	workspace, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	tool := testPymoduleRunTool(t, workspace)
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "where"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, workspace) {
-		t.Fatalf("the script should run in the agent's workspace (%s), got: %q", workspace, res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, workspace, "the script should run in the agent's workspace (")
 }
 
 // An optional cwd input moves the process -- resolved by the same rules as
 // the file tools (~-expanded, relative against the agent's workspace) --
 // without ever changing which copy of the script runs.
 func TestPymoduleRunOptionalCwd(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	seedPymoduleCache(t, "where", "import os\nprint(os.getcwd())\n")
 	workspace, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	sub := filepath.Join(workspace, "sub")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(sub, 0o755))
 
 	tool := testPymoduleRunTool(t, workspace)
 
 	// Relative: resolved against the agent's workspace.
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "where", "cwd": "sub"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, sub) {
-		t.Fatalf("a relative cwd should resolve against the workspace (%s), got: %q", sub, res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, sub, "a relative cwd should resolve against the workspace (")
 
 	// Absolute: taken as-is.
 	absCwd, err := json.Marshal(sub)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err = tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"repo": "local", "script": "where", "cwd": %s}`, absCwd)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, sub) {
-		t.Fatalf("an absolute cwd should be taken as-is (%s), got: %q", sub, res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, sub, "an absolute cwd should be taken as-is (")
 
 	// Tilde: expanded to the home directory.
 	res, err = tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "where", "cwd": "~"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	homeReal, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, homeReal) {
-		t.Fatalf("~ should expand to the home directory (%s), got: %q", homeReal, res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, homeReal, "~ should expand to the home directory (")
 }
 
 // A cwd that does not exist fails as a clear tool error naming the
 // directory, not as an opaque subprocess failure.
 func TestPymoduleRunBadCwdFailsClearly(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "main", "pass\n")
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main", "cwd": "no/such/dir"}`))
-	if err == nil {
-		t.Fatal("want an error for a nonexistent cwd, got nil")
-	}
-	if !strings.Contains(err.Error(), "no/such/dir") {
-		t.Fatalf("error should name the offending directory, got: %v", err)
-	}
+	c.Error(err, "want an error for a nonexistent cwd, got nil")
+	c.StrContains(err.Error(), "no/such/dir", "error should name the offending directory, got: %v", err)
 }
 
 func TestPymoduleRunReportsMissingScriptClearly(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // an empty cache: nothing synced
+	c := assert.NewAborting(t)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "analyze"}`))
-	if err == nil {
-		t.Fatal("want an error for a script missing from the cache, got nil")
-	}
-	if !strings.Contains(err.Error(), "analyze") || !strings.Contains(err.Error(), "synced") {
-		t.Fatalf("error should name the script and say it is not synced (not a bare os.ErrNotExist), got: %v", err)
-	}
+	c.Error(err, "want an error for a script missing from the cache, got nil")
+	c.False(!strings.Contains(err.Error(), "analyze") || !strings.Contains(err.Error(), "synced"), "error should name the script and say it is not synced (not a bare os.ErrNotExist), got: %v", err)
 }
 
 func TestPymoduleRunReportsMissingModuleClearly(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // an empty cache: nothing synced
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "main", "pass\n")
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main", "modules": ["nonexistent"]}`))
-	if err == nil {
-		t.Fatal("want an error for a module missing from the cache, got nil")
-	}
-	if !strings.Contains(err.Error(), "nonexistent") || !strings.Contains(err.Error(), "synced") {
-		t.Fatalf("error should name the module and say it is not synced (not a bare os.ErrNotExist), got: %v", err)
-	}
+	c.Error(err, "want an error for a module missing from the cache, got nil")
+	c.False(!strings.Contains(err.Error(), "nonexistent") || !strings.Contains(err.Error(), "synced"), "error should name the module and say it is not synced (not a bare os.ErrNotExist), got: %v", err)
 }
 
 func TestPymoduleRunInterpreterEnvOverride(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("RAFIKI_PYMODULE_PYTHON", "/nonexistent/interpreter")
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "main", "pass\n")
 
 	// Materialized AFTER the env var is set: Materialize is where the
 	// interpreter is resolved, so this proves the override is actually read.
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main"}`))
-	if err != nil {
-		t.Fatalf("a failed run is reported in the result text, not as a tool error: %v", err)
-	}
-	if !strings.Contains(res.Text, "/nonexistent/interpreter") {
-		t.Fatalf("output should reference the overridden interpreter path, got: %q", res.Text)
-	}
+	c.NoError(err, "a failed run is reported in the result text, not as a tool error")
+	c.StrContains(res.Text, "/nonexistent/interpreter", "output should reference the overridden interpreter path, got")
 }
 
 // fakeVenv fabricates a minimal per-module dependency venv inside dir: an
@@ -364,21 +286,16 @@ func TestPymoduleRunInterpreterEnvOverride(t *testing.T) {
 // PYTHONPATH glob to find.
 func fakeVenv(t *testing.T, dir, interpreterBody string, withSitePackages bool) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	bin := filepath.Join(dir, ".venv", "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(bin, 0o755))
 	py := filepath.Join(bin, "python3")
-	if err := os.WriteFile(py, []byte("#!/bin/sh\n"+interpreterBody), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(py, []byte("#!/bin/sh\n"+interpreterBody), 0o755))
 	if !withSitePackages {
 		return
 	}
 	site := filepath.Join(dir, ".venv", "lib", "python3.11", "site-packages")
-	if err := os.MkdirAll(site, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(site, 0o755))
 }
 
 // requirementsCode is a module body declaring one dependency: the marker
@@ -404,9 +321,7 @@ func scriptDirOf(t *testing.T, name string) string {
 func pythonPathLine(t *testing.T, out string) string {
 	t.Helper()
 	_, rest, ok := strings.Cut(out, "pp:")
-	if !ok {
-		t.Fatalf("output has no pp: line, got: %q", out)
-	}
+	assert.NewAborting(t).True(ok, "output has no pp: line, got: %q", out)
 	line, _, _ := strings.Cut(rest, "\n")
 	return line
 }
@@ -417,29 +332,25 @@ func pythonPathLine(t *testing.T, out string) string {
 func TestPymoduleRunScriptVenvInterpreterAndSitePackages(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "") // keep the echoed PYTHONPATH exactly assertable
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "runme", "pass\n")
 	scriptDir := scriptDirOf(t, "runme")
 	fakeVenv(t, scriptDir, echoInterpreter, true)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	venvPython := filepath.Join(scriptDir, ".venv", "bin", "python3")
-	if !strings.Contains(res.Text, "interp:"+venvPython) {
-		t.Fatalf("the script's own venv python should run the process, got: %q", res.Text)
-	}
+	c.StrContains(res.Text, "interp:"+venvPython, "the script's own venv python should run the process, got")
 	site := filepath.Join(scriptDir, ".venv", "lib", "python3.11", "site-packages")
-	if got := pythonPathLine(t, res.Text); got != site {
-		t.Fatalf("PYTHONPATH = %q, want exactly the script's site-packages %q (its code dir is sys.path[0], not PYTHONPATH)", got, site)
-	}
+	c.Eq(site, pythonPathLine(t, res.Text), "PYTHONPATH")
 }
 
 // A module's venv never runs the process -- the fallback interpreter does --
 // but its code dir AND its site-packages both join PYTHONPATH, code dir
 // first.
 func TestPymoduleRunModuleVenvSitePackagesOnPath(t *testing.T) {
+	c := assert.NewAborting(t)
 	python3, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skipf("python3 not found: %v", err)
@@ -455,30 +366,23 @@ func TestPymoduleRunModuleVenvSitePackagesOnPath(t *testing.T) {
 	// PYTHONPATH.
 	fallback := filepath.Join(t.TempDir(), "fake-python")
 	fallbackBody := "#!/bin/sh\necho \"interp:$0\"\nexec " + python3 + " \"$@\"\n"
-	if err := os.WriteFile(fallback, []byte(fallbackBody), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(fallback, []byte(fallbackBody), 0o755))
 	t.Setenv("RAFIKI_PYMODULE_PYTHON", fallback) // must precede Materialize
 	seedPymoduleCache(t, "runme", "import os\nprint(\"pp:\" + os.environ.get(\"PYTHONPATH\", \"\"))\n")
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "interp:"+fallback) {
-		t.Fatalf("the fallback interpreter should run a script without a venv, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "interp:"+fallback, "the fallback interpreter should run a script without a venv, got")
 	codeDir := modDir
 	site := filepath.Join(modDir, ".venv", "lib", "python3.11", "site-packages")
-	if got := pythonPathLine(t, res.Text); got != codeDir+":"+site {
-		t.Fatalf("PYTHONPATH = %q, want %q (module code dir, then its site-packages)", got, codeDir+":"+site)
-	}
+	c.Eq(codeDir+":"+site, pythonPathLine(t, res.Text), "PYTHONPATH")
 }
 
 // The no-regression pin: requirements-free code with no .venv runs exactly
 // as before -- no error, and PYTHONPATH is exactly the module's code dir.
 func TestPymoduleRunNoVenvAddsCodeDirOnly(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -490,15 +394,9 @@ func TestPymoduleRunNoVenvAddsCodeDirOnly(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := pythonPathLine(t, res.Text); got != modDir {
-		t.Fatalf("PYTHONPATH = %q, want exactly the module's code dir %q (no venv, so no site-packages entry)", got, modDir)
-	}
-	if !strings.Contains(res.Text, "42") {
-		t.Fatalf("the module should still be importable, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.Eq(modDir, pythonPathLine(t, res.Text), "PYTHONPATH")
+	c.StrContains(res.Text, "42", "the module should still be importable, got")
 }
 
 // An entry that declares dependencies but has no usable venv refuses the
@@ -506,6 +404,7 @@ func TestPymoduleRunNoVenvAddsCodeDirOnly(t *testing.T) {
 // or half-installed packages.
 func TestPymoduleRunNotReadyRefusesWhenVenvMissing(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	// The entry script writes a marker only if executed, so the test proves
 	// the refusal happened before any process ran.
 	marker := filepath.Join(t.TempDir(), "marker.txt")
@@ -514,15 +413,10 @@ func TestPymoduleRunNotReadyRefusesWhenVenvMissing(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err == nil {
-		t.Fatal("want an error for a module that declares dependencies with no venv, got nil")
-	}
-	if !strings.Contains(err.Error(), "dependencies not ready") || !strings.Contains(err.Error(), "module mymod") {
-		t.Fatalf("error should name the module and say dependencies are not ready, got: %v", err)
-	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatal("the entry script was executed despite the dependencies-not-ready refusal")
-	}
+	c.Error(err, "want an error for a module that declares dependencies with no venv, got nil")
+	c.False(!strings.Contains(err.Error(), "dependencies not ready") || !strings.Contains(err.Error(), "module mymod"), "error should name the module and say dependencies are not ready, got: %v", err)
+	_, statErr := os.Stat(marker)
+	c.True(os.IsNotExist(statErr), "the entry script was executed despite the dependencies-not-ready refusal")
 }
 
 // The readiness refusal covers the entry script too: a script that itself
@@ -530,6 +424,7 @@ func TestPymoduleRunNotReadyRefusesWhenVenvMissing(t *testing.T) {
 // "script" -- and nothing executes, exactly as for a module.
 func TestPymoduleRunNotReadyRefusesWhenScriptVenvMissing(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	// The entry script writes a marker only if executed, so the test proves
 	// the refusal happened before any process ran.
 	marker := filepath.Join(t.TempDir(), "marker.txt")
@@ -537,15 +432,10 @@ func TestPymoduleRunNotReadyRefusesWhenScriptVenvMissing(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme"}`))
-	if err == nil {
-		t.Fatal("want an error for a script that declares dependencies with no venv, got nil")
-	}
-	if !strings.Contains(err.Error(), "dependencies not ready") || !strings.Contains(err.Error(), "script runme") {
-		t.Fatalf("error should name the script and say dependencies are not ready, got: %v", err)
-	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatal("the entry script was executed despite the dependencies-not-ready refusal")
-	}
+	c.Error(err, "want an error for a script that declares dependencies with no venv, got nil")
+	c.False(!strings.Contains(err.Error(), "dependencies not ready") || !strings.Contains(err.Error(), "script runme"), "error should name the script and say dependencies are not ready, got: %v", err)
+	_, statErr := os.Stat(marker)
+	c.True(os.IsNotExist(statErr), "the entry script was executed despite the dependencies-not-ready refusal")
 }
 
 // A staging directory beside the code means a venv build is still in
@@ -553,20 +443,15 @@ func TestPymoduleRunNotReadyRefusesWhenScriptVenvMissing(t *testing.T) {
 // conclude the build failed.
 func TestPymoduleRunNotReadyReportsBuildInProgress(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "runme", "pass\n")
 	seedPymoduleCache(t, "mymod", requirementsCode)
-	if err := os.MkdirAll(filepath.Join(scriptDirOf(t, "mymod"), ".rafiki-venv-staging-abc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(filepath.Join(scriptDirOf(t, "mymod"), ".rafiki-venv-staging-abc"), 0o755))
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err == nil {
-		t.Fatal("want an error for a module whose venv build is in progress, got nil")
-	}
-	if !strings.Contains(err.Error(), "build is in progress") || !strings.Contains(err.Error(), "module mymod") {
-		t.Fatalf("error should name the module and report the build as in progress, got: %v", err)
-	}
+	c.Error(err, "want an error for a module whose venv build is in progress, got nil")
+	c.False(!strings.Contains(err.Error(), "build is in progress") || !strings.Contains(err.Error(), "module mymod"), "error should name the module and report the build as in progress, got: %v", err)
 }
 
 // Interpreter selection and PYTHONPATH composition are independent: a
@@ -577,6 +462,7 @@ func TestPymoduleRunNotReadyReportsBuildInProgress(t *testing.T) {
 func TestPymoduleRunScriptVenvUsedEvenWhenModulesPlain(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "")
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "runme", "pass\n") // the fake venv interpreter echoes; the body never runs
 	scriptDir := scriptDirOf(t, "runme")
 	fakeVenv(t, scriptDir, echoInterpreter, true)
@@ -585,17 +471,11 @@ func TestPymoduleRunScriptVenvUsedEvenWhenModulesPlain(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	venvPython := filepath.Join(scriptDir, ".venv", "bin", "python3")
-	if !strings.Contains(res.Text, "interp:"+venvPython) {
-		t.Fatalf("the script's venv python should be the interpreter even with plain modules, got: %q", res.Text)
-	}
+	c.StrContains(res.Text, "interp:"+venvPython, "the script's venv python should be the interpreter even with plain modules, got")
 	site := filepath.Join(scriptDir, ".venv", "lib", "python3.11", "site-packages")
-	if got := pythonPathLine(t, res.Text); got != site+":"+modDir {
-		t.Fatalf("PYTHONPATH = %q, want %q (script site-packages leads, module code dir follows)", got, site+":"+modDir)
-	}
+	c.Eq(site+":"+modDir, pythonPathLine(t, res.Text), "PYTHONPATH")
 }
 
 // A venv whose lib layout matches no python3.* (malformed or partially
@@ -604,29 +484,22 @@ func TestPymoduleRunScriptVenvUsedEvenWhenModulesPlain(t *testing.T) {
 func TestPymoduleRunVenvSitePackagesGlobMissStillRuns(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "")
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "mymod", "VALUE = 42\n")
 	modDir := scriptDirOf(t, "mymod")
 	// bin/python3 exists, so the venv counts as present, but lib holds no
 	// python3.*/site-packages the glob could resolve.
 	fakeVenv(t, modDir, "pass\n", false)
-	if err := os.MkdirAll(filepath.Join(modDir, ".venv", "lib", "python2.7"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(filepath.Join(modDir, ".venv", "lib", "python2.7"), 0o755))
 	fallback := filepath.Join(t.TempDir(), "fake-python")
-	if err := os.WriteFile(fallback, []byte("#!/bin/sh\necho \"pp:$PYTHONPATH\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(fallback, []byte("#!/bin/sh\necho \"pp:$PYTHONPATH\"\n"), 0o755))
 	t.Setenv("RAFIKI_PYMODULE_PYTHON", fallback) // must precede Materialize
 	seedPymoduleCache(t, "runme", "pass\n")
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatalf("a venv with no resolvable site-packages should not fail the run: %v", err)
-	}
-	if got := pythonPathLine(t, res.Text); got != modDir {
-		t.Fatalf("PYTHONPATH = %q, want exactly the module's code dir %q (glob miss: no site-packages entry, no error)", got, modDir)
-	}
+	c.NoError(err, "a venv with no resolvable site-packages should not fail the run")
+	c.Eq(modDir, pythonPathLine(t, res.Text), "PYTHONPATH")
 }
 
 // lineAfter extracts the text between the first marker occurrence and the
@@ -634,9 +507,7 @@ func TestPymoduleRunVenvSitePackagesGlobMissStillRuns(t *testing.T) {
 func lineAfter(t *testing.T, out, marker string) string {
 	t.Helper()
 	_, rest, ok := strings.Cut(out, marker)
-	if !ok {
-		t.Fatalf("output has no %q line, got: %q", marker, out)
-	}
+	assert.NewAborting(t).True(ok, "output has no %q line, got: %q", marker, out)
 	line, _, _ := strings.Cut(rest, "\n")
 	return line
 }
@@ -648,6 +519,7 @@ func lineAfter(t *testing.T, out, marker string) string {
 // containing ONLY PYTHONPATH, which broke shelling out and any library
 // reading HOME.)
 func TestPymoduleRunKeepsProcessEnvWithModules(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -661,23 +533,17 @@ func TestPymoduleRunKeepsProcessEnvWithModules(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "runme", "modules": ["mymod"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "42") {
-		t.Fatalf("the module should still be importable, got: %q", res.Text)
-	}
-	if lineAfter(t, res.Text, "path:") == "" {
-		t.Fatalf("the script should see PATH, got: %q", res.Text)
-	}
-	if got := lineAfter(t, res.Text, "marker:"); got != "present" {
-		t.Fatalf("the script should see the caller's marker, got marker %q in: %q", got, res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "42", "the module should still be importable, got")
+	c.NotEq("", lineAfter(t, res.Text, "path:"), "the script should see PATH, got: %q", res.Text)
+	got := lineAfter(t, res.Text, "marker:")
+	c.Eq("present", got, "the script should see the caller's marker, got marker %q in: %q", got, res.Text)
 }
 
 // The same environment guarantee on the git-repo path: a checkout run also
 // keeps the full process environment alongside its computed PYTHONPATH.
 func TestPymoduleRunRepoKeepsProcessEnvWithModules(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -691,15 +557,10 @@ func TestPymoduleRunRepoKeepsProcessEnvWithModules(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lineAfter(t, res.Text, "path:") == "" {
-		t.Fatalf("the script should see PATH, got: %q", res.Text)
-	}
-	if got := lineAfter(t, res.Text, "marker:"); got != "present" {
-		t.Fatalf("the script should see the caller's marker, got marker %q in: %q", got, res.Text)
-	}
+	c.NoError(err)
+	c.NotEq("", lineAfter(t, res.Text, "path:"), "the script should see PATH, got: %q", res.Text)
+	got := lineAfter(t, res.Text, "marker:")
+	c.Eq("present", got, "the script should see the caller's marker, got marker %q in: %q", got, res.Text)
 }
 
 // envWithPythonPath must hand back the full process environment with
@@ -708,6 +569,7 @@ func TestPymoduleRunRepoKeepsProcessEnvWithModules(t *testing.T) {
 func TestEnvWithPythonPath(t *testing.T) {
 	t.Setenv("PYTHONPATH", "stale/entry")
 	t.Setenv("RAFIKI_TEST_PYMODULE_KEPT", "preserved")
+	c := assert.NewAborting(t)
 	env := envWithPythonPath("computed/dir")
 
 	var pp []string
@@ -716,27 +578,21 @@ func TestEnvWithPythonPath(t *testing.T) {
 			pp = append(pp, e)
 		}
 	}
-	if len(pp) != 1 || pp[0] != "PYTHONPATH=computed/dir" {
-		t.Fatalf("PYTHONPATH should appear exactly once as the computed value, got %v in: %v", pp, env)
-	}
+	c.False(len(pp) != 1 || pp[0] != "PYTHONPATH=computed/dir", "PYTHONPATH should appear exactly once as the computed value, got %v in: %v", pp, env)
 	kept := false
 	for _, e := range env {
 		if e == "RAFIKI_TEST_PYMODULE_KEPT=preserved" {
 			kept = true
 		}
 	}
-	if !kept {
-		t.Fatalf("the rest of the process environment must be kept, got: %v", env)
-	}
+	c.True(kept, "the rest of the process environment must be kept, got: %v", env)
 }
 
 // The run description must tell an agent what a requirements block does at
 // run time, on every face the tool is served from.
 func TestPymoduleRunDescriptionMentionsRequirementsBehavior(t *testing.T) {
 	for _, want := range []string{pymodules.RequirementsMarker, "PYTHONPATH", "venv interpreter"} {
-		if !strings.Contains(pymoduleRunDescription, want) {
-			t.Errorf("pymodule_run description should mention %q, got: %q", want, pymoduleRunDescription)
-		}
+		assert.NewCollecting(t).StrContains(pymoduleRunDescription, want, "pymodule_run description should mention")
 	}
 }
 
@@ -745,6 +601,7 @@ func TestPymoduleRunDescriptionMentionsRequirementsBehavior(t *testing.T) {
 // module still runs from <cache>/pymodules/, and a same-named git checkout
 // is irrelevant to a local call.
 func TestPymoduleRunRepoLocalUnchanged(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -754,12 +611,8 @@ func TestPymoduleRunRepoLocalUnchanged(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "local", "script": "main"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "ok-local") || strings.Contains(res.Text, "ok-repo") {
-		t.Fatalf("repo=local should run the blob-sourced cache copy, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.False(!strings.Contains(res.Text, "ok-local") || strings.Contains(res.Text, "ok-repo"), "repo=local should run the blob-sourced cache copy, got: %q", res.Text)
 }
 
 // TestPymoduleRunRepoMissingFieldErrors: repo is required -- omitting it (or
@@ -767,23 +620,21 @@ func TestPymoduleRunRepoLocalUnchanged(t *testing.T) {
 // default to the blob store.
 func TestPymoduleRunRepoMissingFieldErrors(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	seedPymoduleCache(t, "main", "pass\n")
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	for _, input := range []string{"{\"script\": \"main\"}", `{"repo": "", "script": "main"}`} {
 		_, err := tool.Execute(context.Background(), ToolInput(input))
-		if err == nil {
-			t.Fatalf("want an error for a missing repo field (%s), got nil", input)
-		}
-		if !strings.Contains(err.Error(), "repo is required") {
-			t.Fatalf("error for %s should say repo is required, got: %v", input, err)
-		}
+		c.Error(err, "want an error for a missing repo field (%s), got nil", input)
+		c.StrContains(err.Error(), "repo is required", "error for %s should say repo is required, got: %v", input, err)
 	}
 }
 
 // TestPymoduleRunRepoRunsScriptFromRepo: a git-sourced call runs the
 // checkout's scripts/<script>.py, not a blob-sourced copy.
 func TestPymoduleRunRepoRunsScriptFromRepo(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -792,12 +643,8 @@ func TestPymoduleRunRepoRunsScriptFromRepo(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "rotate"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "rotated") {
-		t.Fatalf("the repo's script should run, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "rotated", "the repo's script should run, got")
 }
 
 // TestPymoduleRunRepoAutoJoinsOwnPackages proves the auto-PYTHONPATH
@@ -805,6 +652,7 @@ func TestPymoduleRunRepoRunsScriptFromRepo(t *testing.T) {
 // script's own intra-repo import resolves with NO modules argument at all --
 // the caller never has to know or name which packages the repo contains.
 func TestPymoduleRunRepoAutoJoinsOwnPackages(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -815,12 +663,8 @@ func TestPymoduleRunRepoAutoJoinsOwnPackages(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "got 99") {
-		t.Fatalf("the repo's own package should be importable without modules (got 99), got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "got 99", "the repo's own package should be importable without modules (got 99), got")
 }
 
 // TestPymoduleRunRepoMissingScriptNamesRepoAndScript: the not-synced error
@@ -828,16 +672,13 @@ func TestPymoduleRunRepoAutoJoinsOwnPackages(t *testing.T) {
 // in another source (names are scoped per repo).
 func TestPymoduleRunRepoMissingScriptNamesRepoAndScript(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	seedGitPymoduleRepo(t, "ops_tools", map[string]string{"rotate": "pass\n"}, nil)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	_, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "nonexistent"}`))
-	if err == nil {
-		t.Fatal("want an error for a script missing from the repo, got nil")
-	}
-	if !strings.Contains(err.Error(), "nonexistent") || !strings.Contains(err.Error(), "ops_tools") || !strings.Contains(err.Error(), "synced") {
-		t.Fatalf("error should name the script and the repo and say it is not synced, got: %v", err)
-	}
+	c.Error(err, "want an error for a script missing from the repo, got nil")
+	c.False(!strings.Contains(err.Error(), "nonexistent") || !strings.Contains(err.Error(), "ops_tools") || !strings.Contains(err.Error(), "synced"), "error should name the script and the repo and say it is not synced, got: %v", err)
 }
 
 // TestPymoduleRunRepoVenvInterpreterAndRootOnPath pins the interpreter and
@@ -848,22 +689,17 @@ func TestPymoduleRunRepoMissingScriptNamesRepoAndScript(t *testing.T) {
 func TestPymoduleRunRepoVenvInterpreterAndRootOnPath(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("PYTHONPATH", "") // keep the echoed PYTHONPATH exactly assertable
+	c := assert.NewAborting(t)
 	seedGitPymoduleRepo(t, "ops_tools", map[string]string{"main": "pass\n"}, nil)
 	repoDir := gitRepoDirOf(t, "ops_tools")
 	fakeVenv(t, repoDir, echoInterpreter, true)
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	venvPython := filepath.Join(repoDir, ".venv", "bin", "python3")
-	if !strings.Contains(res.Text, "interp:"+venvPython) {
-		t.Fatalf("the repo's own venv python should run the process, got: %q", res.Text)
-	}
-	if got := pythonPathLine(t, res.Text); got != repoDir {
-		t.Fatalf("PYTHONPATH = %q, want exactly the checkout root %q (the venv python brings its own site-packages)", got, repoDir)
-	}
+	c.StrContains(res.Text, "interp:"+venvPython, "the repo's own venv python should run the process, got")
+	c.Eq(repoDir, pythonPathLine(t, res.Text), "PYTHONPATH")
 }
 
 // TestPymoduleRunRepoModulesResolveWithinRepo: a modules entry resolves
@@ -871,6 +707,7 @@ func TestPymoduleRunRepoVenvInterpreterAndRootOnPath(t *testing.T) {
 // joins PYTHONPATH after the checkout root; there is no way to name another
 // source's package. Also pins the missing-module error shape.
 func TestPymoduleRunRepoModulesResolveWithinRepo(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -882,27 +719,17 @@ func TestPymoduleRunRepoModulesResolveWithinRepo(t *testing.T) {
 
 	tool := testPymoduleRunTool(t, t.TempDir())
 	res, err := tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main", "modules": ["ops_tools"]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	repoDir := gitRepoDirOf(t, "ops_tools")
 	wantPP := repoDir + string(filepath.ListSeparator) + filepath.Join(repoDir, "ops_tools")
-	if got := pythonPathLine(t, res.Text); got != wantPP {
-		t.Fatalf("PYTHONPATH = %q, want %q (checkout root first, then the named module dir)", got, wantPP)
-	}
-	if !strings.Contains(res.Text, "got 7") {
-		t.Fatalf("the named module should still be importable, got: %q", res.Text)
-	}
+	c.Eq(wantPP, pythonPathLine(t, res.Text), "PYTHONPATH")
+	c.StrContains(res.Text, "got 7", "the named module should still be importable, got")
 
 	// A module name the checkout does not contain fails with the same
 	// not-synced shape, naming the module and the repo.
 	_, err = tool.Execute(context.Background(), ToolInput(`{"repo": "ops_tools", "script": "main", "modules": ["nope"]}`))
-	if err == nil {
-		t.Fatal("want an error for a module missing from the repo, got nil")
-	}
-	if !strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "ops_tools") || !strings.Contains(err.Error(), "synced") {
-		t.Fatalf("error should name the module and the repo and say it is not synced, got: %v", err)
-	}
+	c.Error(err, "want an error for a module missing from the repo, got nil")
+	c.False(!strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "ops_tools") || !strings.Contains(err.Error(), "synced"), "error should name the module and the repo and say it is not synced, got: %v", err)
 }
 
 // TestPymoduleRunRepoRejectsPathLikeRepoNames pins the repo-name guard: a
@@ -912,18 +739,14 @@ func TestPymoduleRunRepoModulesResolveWithinRepo(t *testing.T) {
 // anything on disk is touched.
 func TestPymoduleRunRepoRejectsPathLikeRepoNames(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	c := assert.NewAborting(t)
 	tool := testPymoduleRunTool(t, t.TempDir())
 	for _, bad := range []string{"../sibling/evil", "sub/evil", "./evil", "evil.py"} {
 		_, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"repo": %q, "script": "main"}`, bad)))
-		if err == nil {
-			t.Fatalf("want an error for the path-like repo %q, got nil", bad)
-		}
-		if !strings.Contains(err.Error(), "Python identifier") || !strings.Contains(err.Error(), "repo") {
-			t.Fatalf("error for %q should say the repo must be a bare Python identifier, got: %v", bad, err)
-		}
+		c.Error(err, "want an error for the path-like repo %q, got nil", bad)
+		c.False(!strings.Contains(err.Error(), "Python identifier") || !strings.Contains(err.Error(), "repo"), "error for %q should say the repo must be a bare Python identifier, got: %v", bad, err)
 	}
 	// Nothing escaped the guard into the managed cache root.
-	if _, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodule-repos", "sibling")); !os.IsNotExist(statErr) {
-		t.Fatal("something was written despite the invalid repo name")
-	}
+	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodule-repos", "sibling"))
+	c.True(os.IsNotExist(statErr), "something was written despite the invalid repo name")
 }

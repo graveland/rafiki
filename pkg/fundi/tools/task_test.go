@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/tasks"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func newTaskTools(t *testing.T) (*Registry, context.Context) {
@@ -21,21 +23,17 @@ func newTaskTools(t *testing.T) (*Registry, context.Context) {
 }
 
 func TestTaskAddReturnsHandles(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg, ctx := newTaskTools(t)
 	out, err := reg.Execute(ctx, "task_add", json.RawMessage(
 		`{"items":[{"content":"one","active_form":"doing one"},{"content":"two","active_form":"doing two"}]}`))
-	if err != nil {
-		t.Fatalf("task_add: %v", err)
-	}
-	if !strings.Contains(out, "1 ") || !strings.Contains(out, "2 ") {
-		t.Fatalf("result must echo handles; got:\n%s", out)
-	}
-	if !strings.Contains(out, "one") || !strings.Contains(out, "two") {
-		t.Fatalf("result must echo the full list; got:\n%s", out)
-	}
+	c.NoError(err, "task_add")
+	c.False(!strings.Contains(out, "1 ") || !strings.Contains(out, "2 "), "result must echo handles; got:\n%s", out)
+	c.False(!strings.Contains(out, "one") || !strings.Contains(out, "two"), "result must echo the full list; got:\n%s", out)
 }
 
 func TestTaskUpdateTouchesOnlyNamedRows(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg, ctx := newTaskTools(t)
 	if _, err := reg.Execute(ctx, "task_add", json.RawMessage(
 		`{"items":[{"content":"one"},{"content":"two"}]}`)); err != nil {
@@ -43,30 +41,21 @@ func TestTaskUpdateTouchesOnlyNamedRows(t *testing.T) {
 	}
 	out, err := reg.Execute(ctx, "task_update", json.RawMessage(
 		`{"changes":[{"handle":"1","status":"completed"}]}`))
-	if err != nil {
-		t.Fatalf("task_update: %v", err)
-	}
-	if !strings.Contains(out, "☑ one") {
-		t.Errorf("task 1 should be completed; got:\n%s", out)
-	}
-	if !strings.Contains(out, "☐ two") {
-		t.Errorf("task 2 must be untouched; got:\n%s", out)
-	}
+	c.Require().NoError(err, "task_update")
+	c.StrContains(out, "☑ one", "task 1 should be completed; got:\n")
+	c.StrContains(out, "☐ two", "task 2 must be untouched; got:\n")
 }
 
 func TestTaskUpdateRejectsBadStatus(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg, ctx := newTaskTools(t)
 	if _, err := reg.Execute(ctx, "task_add", json.RawMessage(`{"items":[{"content":"one"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := reg.Execute(ctx, "task_update", json.RawMessage(
 		`{"changes":[{"handle":"1","status":"almost_done"}]}`))
-	if err == nil {
-		t.Fatal("an invalid status must be an error the model can see")
-	}
-	if !strings.Contains(err.Error(), "almost_done") {
-		t.Errorf("error must name the offending value; got %v", err)
-	}
+	c.Require().Error(err, "an invalid status must be an error the model can see")
+	c.StrContains(err.Error(), "almost_done", "error must name the offending value; got %v", err)
 }
 
 func TestTaskDropRequiresReason(t *testing.T) {
@@ -74,20 +63,16 @@ func TestTaskDropRequiresReason(t *testing.T) {
 	if _, err := reg.Execute(ctx, "task_add", json.RawMessage(`{"items":[{"content":"one"}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.Execute(ctx, "task_drop", json.RawMessage(`{"handle":"1"}`)); err == nil {
-		t.Fatal("task_drop without a reason must fail")
-	}
+	_, err := reg.Execute(ctx, "task_drop", json.RawMessage(`{"handle":"1"}`))
+	assert.NewAborting(t).Error(err, "task_drop without a reason must fail")
 }
 
 func TestTaskListEmptyIsNotAnError(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg, ctx := newTaskTools(t)
 	out, err := reg.Execute(ctx, "task_list", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("task_list on an empty ledger must succeed: %v", err)
-	}
-	if !strings.Contains(out, "0 task(s)") {
-		t.Fatalf("got:\n%s", out)
-	}
+	c.NoError(err, "task_list on an empty ledger must succeed")
+	c.StrContains(out, "0 task(s)", "got:\n")
 }
 
 // Isolation: two materialized registries must not share state. todo.go's
@@ -95,16 +80,13 @@ func TestTaskListEmptyIsNotAnError(t *testing.T) {
 // could not fail, because the tool echoed its own input instead of reading
 // stored state. Read through the store.
 func TestTaskToolsAreIsolatedPerAgent(t *testing.T) {
+	c := assert.NewAborting(t)
 	regA, ctxA := newTaskTools(t)
 	regB, ctxB := newTaskTools(t)
 	if _, err := regA.Execute(ctxA, "task_add", json.RawMessage(`{"items":[{"content":"only-A"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	out, err := regB.Execute(ctxB, "task_list", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out, "only-A") {
-		t.Fatal("agent B can see agent A's tasks")
-	}
+	c.NoError(err)
+	c.NotStrContains(out, "only-A", "agent B can see agent A's tasks")
 }

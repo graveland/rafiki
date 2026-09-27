@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newTestRoot builds a root command carrying the same persistent flags the
@@ -22,77 +24,51 @@ func newTestRoot() *cobra.Command {
 }
 
 func TestConnectEndpointFollowsTheProfileToARemote(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"personal": {Name: "personal", URL: "https://rafiki.example.net"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.WriteToken("personal", "sk-personal"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if err := profile.SavePointer("personal"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.WriteToken("personal", "sk-personal"), "WriteToken")
+	c.NoError(profile.SavePointer("personal"), "SavePointer")
 
 	ep, err := newConnectEndpoint(newTestRoot())
-	if err != nil {
-		t.Fatalf("newConnectEndpoint: %v", err)
-	}
-	if ep.baseURL != "https://rafiki.example.net" {
-		t.Fatalf("baseURL = %q", ep.baseURL)
-	}
-	if ep.identity != "https://rafiki.example.net" {
-		t.Fatalf("identity = %q; the completion cache keys on it", ep.identity)
-	}
+	c.NoError(err, "newConnectEndpoint")
+	c.Eq("https://rafiki.example.net", ep.baseURL, "baseURL =")
+	c.Eq("https://rafiki.example.net", ep.identity, "identity")
 }
 
 func TestConnectEndpointFollowsTheProfileToASocket(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"work": {Name: "work", Socket: "/tmp/work/controller.sock"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("work"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("work"), "SavePointer")
 
 	ep, err := newConnectEndpoint(newTestRoot())
-	if err != nil {
-		t.Fatalf("newConnectEndpoint: %v", err)
-	}
-	if ep.baseURL != connectUDSBaseURL {
-		t.Fatalf("baseURL = %q, want the UDS sentinel", ep.baseURL)
-	}
-	if !strings.HasSuffix(ep.describe, "/tmp/work/controller.sock") {
-		t.Fatalf("describe = %q, want the profile's own socket", ep.describe)
-	}
-	if ep.identity != "unix:/tmp/work/controller.sock" {
-		t.Fatalf("identity = %q", ep.identity)
-	}
+	c.NoError(err, "newConnectEndpoint")
+	c.Eq(connectUDSBaseURL, ep.baseURL, "baseURL")
+	c.True(strings.HasSuffix(ep.describe, "/tmp/work/controller.sock"), "describe = %q, want the profile's own socket", ep.describe)
+	c.Eq("unix:/tmp/work/controller.sock", ep.identity, "identity =")
 }
 
 func TestConnectEndpointRefusesARemoteWithNoToken(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"personal": {Name: "personal", URL: "https://rafiki.example.net"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("personal"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("personal"), "SavePointer")
 
-	if _, err := newConnectEndpoint(newTestRoot()); err == nil {
-		t.Fatal("newConnectEndpoint with a tokenless remote = nil error")
-	}
+	_, err := newConnectEndpoint(newTestRoot())
+	c.Error(err, "newConnectEndpoint with a tokenless remote = nil error")
 }
 
 // The credential rides the TRANSPORT, not the call site. The cockpit's client
@@ -107,6 +83,7 @@ func TestConnectEndpointRefusesARemoteWithNoToken(t *testing.T) {
 // The assertion is unchanged — it's still ep.httpClient, the exact value
 // handed to tui.Options.HTTPClient, that must carry the bearer.
 func TestTheCredentialRidesEveryRequestIncludingTheTUIs(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
@@ -117,61 +94,42 @@ func TestTheCredentialRidesEveryRequestIncludingTheTUIs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"personal": {Name: "personal", URL: "https://rafiki.example.dev"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.WriteToken("personal", "s3cret"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if err := profile.SavePointer("personal"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.WriteToken("personal", "s3cret"), "WriteToken")
+	c.NoError(profile.SavePointer("personal"), "SavePointer")
 
 	ep, err := newConnectEndpoint(newTestRoot())
-	if err != nil {
-		t.Fatalf("newConnectEndpoint: %v", err)
-	}
+	c.NoError(err, "newConnectEndpoint")
 
 	// ep.httpClient is the exact value handed to tui.Options.HTTPClient.
 	resp, err := ep.httpClient.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	c.NoError(err, "get")
 	defer resp.Body.Close()
-	if got != "Bearer s3cret" {
-		t.Fatalf("Authorization = %q, want the bearer token", got)
-	}
+	c.Eq("Bearer s3cret", got, "Authorization")
 }
 
 // A RoundTripper must not mutate the caller's request. Untouched by the
 // profile migration — bearerTransport is constructed directly here, with no
 // env vars or profile setup at all.
 func TestBearerTransportDoesNotMutateTheCallersRequest(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	rt := &bearerTransport{base: http.DefaultTransport, token: "s3cret"}
 	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("roundtrip: %v", err)
-	}
+	c.NoError(err, "roundtrip")
 	defer resp.Body.Close()
-	if h := req.Header.Get("Authorization"); h != "" {
-		t.Fatalf("the caller's request was mutated: Authorization = %q", h)
-	}
+	c.Eq("", req.Header.Get("Authorization"), "the caller's request was mutated: Authorization =")
 }
 
 func TestSocketFlagIsGone(t *testing.T) {
 	root := newRootCmd()
-	if f := root.PersistentFlags().Lookup("socket"); f != nil {
-		t.Fatal("--socket is still registered; everything it expressed is a profile field now")
-	}
+	assert.NewAborting(t).Nil(root.PersistentFlags().Lookup("socket"), "--socket is still registered; everything it expressed is a profile field now")
 }

@@ -17,15 +17,15 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testBashTool returns a materialized bash tool for tests.
 func testBashTool(t *testing.T, p OutputPolicy, cwd string) Tool {
 	t.Helper()
 	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{OutputPolicy: p, Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return tool
 }
 
@@ -41,12 +41,11 @@ func uniqueSleepArg() string {
 // contains needle.
 func pidsMatching(t *testing.T, needle string) []int {
 	t.Helper()
+	c := assert.NewAborting(t)
 	// POSIX form, identical on macOS/BSD and Linux. Trailing "=" suppresses
 	// the header so every line is a record.
 	out, err := exec.Command("ps", "-eo", "pid=,args=").Output()
-	if err != nil {
-		t.Fatalf("ps: %v", err)
-	}
+	c.NoError(err, "ps")
 	var pids []int
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.Contains(line, needle) {
@@ -57,9 +56,7 @@ func pidsMatching(t *testing.T, needle string) []int {
 			continue
 		}
 		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			t.Fatalf("ps: unparsable pid in %q: %v", line, err)
-		}
+		c.NoError(err, "ps: unparsable pid in %q", line)
 		pids = append(pids, pid)
 	}
 	return pids
@@ -142,17 +139,14 @@ func killSurvivors(t *testing.T, needle string) {
 // stderr land in one merged result, and a non-zero exit is a RESULT (err ==
 // nil from Execute), not a tool error — the model sees it in the text.
 func TestBashMergesStderrAndReportsExit(t *testing.T) {
+	c := assert.NewAborting(t)
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo out; echo err >&2; exit 3"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	for _, want := range []string{"out", "err", "exit status 3"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("missing %q in %q", want, out)
-		}
+		c.StrContains(out, want, "missing")
 	}
 }
 
@@ -160,41 +154,29 @@ func TestBashMergesStderrAndReportsExit(t *testing.T) {
 // requirement: a clean (zero) exit must not grow a spurious "exit status 0"
 // trailer.
 func TestBashSuccessHasNoExitNote(t *testing.T) {
+	c := assert.NewAborting(t)
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
 	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "hi") {
-		t.Fatalf("missing output, got %q", out)
-	}
-	if strings.Contains(out, "exit status") {
-		t.Fatalf("unexpected exit note on success: %q", out)
-	}
+	c.NoError(err)
+	c.StrContains(out, "hi", "missing output, got")
+	c.NotStrContains(out, "exit status", "unexpected exit note on success")
 }
 
 // TestBashHonorsCwd checks cmd.Dir is actually wired to the cwd RegisterBash
 // was given, not the process's own working directory.
 func TestBashHonorsCwd(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, dir))
 	out, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"pwd"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	resolvedOut, err := filepath.EvalSymlinks(strings.TrimSpace(out))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolvedOut != resolvedDir {
-		t.Fatalf("pwd = %q, want %q", resolvedOut, resolvedDir)
-	}
+	c.NoError(err)
+	c.Eq(resolvedDir, resolvedOut, "pwd")
 }
 
 // TestBashMissingCommandIsToolError checks input validation happens before
@@ -202,9 +184,8 @@ func TestBashHonorsCwd(t *testing.T) {
 func TestBashMissingCommandIsToolError(t *testing.T) {
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 30000, SpillDir: t.TempDir()}, t.TempDir()))
-	if _, err := r.Execute(context.Background(), "bash", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("expected error for missing command")
-	}
+	_, err := r.Execute(context.Background(), "bash", json.RawMessage(`{}`))
+	assert.NewAborting(t).Error(err, "expected error for missing command")
 }
 
 // TestBashTimeoutClamping pins the default (120s) and max (600s) timeout
@@ -230,9 +211,8 @@ func TestBashTimeoutClamping(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := bashTimeout(c.timeoutMs); got != c.want {
-				t.Errorf("bashTimeout(%d) = %v, want %v", c.timeoutMs, got, c.want)
-			}
+			got := bashTimeout(c.timeoutMs)
+			assert.NewCollecting(t).Eq(c.want, got, "bashTimeout(%d) = %v, want", c.timeoutMs, got)
 		})
 	}
 }
@@ -247,6 +227,7 @@ func TestBashTimeoutClamping(t *testing.T) {
 // output pipes — makes Wait ride out the full WaitDelay. Hence both
 // assertions: the call returns fast AND the process is really dead.
 func TestBashTimeoutFires(t *testing.T) {
+	c := assert.NewAborting(t)
 	sleepArg := uniqueSleepArg()
 	needle := "sleep " + sleepArg
 	t.Cleanup(func() { killSurvivors(t, needle) })
@@ -257,18 +238,10 @@ func TestBashTimeoutFires(t *testing.T) {
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"sleep `+sleepArg+` && echo never","timeout_ms":200}`))
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("timeout took %v to fire; anything near bashWaitDelay (%v) means Wait sat on pipes held by an orphaned grandchild instead of the process group being killed", elapsed, bashWaitDelay)
-	}
-	if !strings.Contains(out, "timed out") {
-		t.Fatalf("expected a timeout note in output, got %q", out)
-	}
-	if strings.Contains(out, "never") {
-		t.Fatalf("command continued past the timeout, got %q", out)
-	}
+	c.NoError(err)
+	c.LessOrEqual(2*time.Second, elapsed, "timeout took %v to fire; anything near bashWaitDelay (%v) means Wait sat on pipes held by an orphaned grandchild instead of the process group being killed", elapsed, bashWaitDelay)
+	c.StrContains(out, "timed out", "expected a timeout note in output, got")
+	c.NotStrContains(out, "never", "command continued past the timeout, got")
 	requireNoSurvivors(t, needle)
 }
 
@@ -312,9 +285,8 @@ func TestBashCtxCancellationKillsProcessTree(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("bash tool did not return within 2s of ctx cancellation (bashWaitDelay is %v): abort left the real work running and blocked on its inherited pipes", bashWaitDelay)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("abort took %v to return, want well under bashWaitDelay (%v)", elapsed, bashWaitDelay)
-	}
+	elapsed := time.Since(start)
+	assert.NewAborting(t).LessOrEqual(2*time.Second, elapsed, "abort took %v to return, want well under bashWaitDelay (%v)", elapsed, bashWaitDelay)
 
 	requireNoSurvivors(t, needle)
 
@@ -335,6 +307,7 @@ func TestBashCtxCancellationKillsProcessTree(t *testing.T) {
 // This test necessarily takes bashWaitDelay to run; that delay is the
 // behavior under test.
 func TestBashBackgroundProcessKeepsOutput(t *testing.T) {
+	c := assert.NewAborting(t)
 	sleepArg := uniqueSleepArg()
 	needle := "sleep " + sleepArg
 	// The backgrounded process is SUPPOSED to outlive the command, so this
@@ -347,54 +320,33 @@ func TestBashBackgroundProcessKeepsOutput(t *testing.T) {
 
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"echo hi; sleep `+sleepArg+` &"}`))
-	if err != nil {
-		t.Fatalf("a successful command that backgrounded a process was reported as a tool error: %v", err)
-	}
-	if !strings.Contains(out, "hi") {
-		t.Fatalf("collected output was destroyed, got %q", out)
-	}
-	if !strings.Contains(out, "background processes") {
-		t.Fatalf("expected a note explaining the held pipes, got %q", out)
-	}
+	c.NoError(err, "a successful command that backgrounded a process was reported as a tool error")
+	c.StrContains(out, "hi", "collected output was destroyed, got")
+	c.StrContains(out, "background processes", "expected a note explaining the held pipes, got")
 	// The condition is degraded output, so it must be logged, not swallowed.
-	if !strings.Contains(logged.String(), "wait delay expired") {
-		t.Fatalf("expected the truncated read to be logged, got %q", logged.String())
-	}
+	c.StrContains(logged.String(), "wait delay expired", "expected the truncated read to be logged, got")
 }
 
 // TestBashOutputGoesThroughSpillPolicy checks bash wires its result through
 // OutputPolicy.Clip: an over-budget command output must be clipped, with
 // the full output spilled to SpillDir.
 func TestBashOutputGoesThroughSpillPolicy(t *testing.T) {
+	c := assert.NewAborting(t)
 	spillDir := t.TempDir()
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 200, SpillDir: spillDir}, t.TempDir()))
 
 	out, err := r.Execute(context.Background(), "bash",
 		json.RawMessage(`{"command":"printf 'x%.0s' {1..2000}"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(out) > 400 {
-		t.Fatalf("expected clipped output, got %d bytes", len(out))
-	}
-	if !strings.Contains(out, "elided") {
-		t.Fatalf("expected elision marker, got %q", out)
-	}
+	c.NoError(err)
+	c.LessOrEqual(400, len(out), "expected clipped output, got")
+	c.StrContains(out, "elided", "expected elision marker, got")
 	entries, err := os.ReadDir(spillDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected exactly one spill file, got %d", len(entries))
-	}
+	c.NoError(err)
+	c.Len(entries, 1, "expected exactly one spill file, got %d", len(entries))
 	full, err := os.ReadFile(filepath.Join(spillDir, entries[0].Name()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(full) < 2000 {
-		t.Fatalf("spilled file is missing output: %d bytes", len(full))
-	}
+	c.NoError(err)
+	c.GreaterOrEqual(2000, len(full), "spilled file is missing output")
 }
 
 // TestBashSpillNameFallbackIsRaceSafe drives many concurrent bash calls
@@ -403,6 +355,7 @@ func TestBashOutputGoesThroughSpillPolicy(t *testing.T) {
 // file — the load-bearing race-safety requirement on that fallback counter.
 // Run with -race.
 func TestBashSpillNameFallbackIsRaceSafe(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spillDir := t.TempDir()
 	r := NewRegistry()
 	r.Register(testBashTool(t, OutputPolicy{Budget: 100, SpillDir: spillDir}, t.TempDir()))
@@ -415,26 +368,21 @@ func TestBashSpillNameFallbackIsRaceSafe(t *testing.T) {
 			defer wg.Done()
 			_, err := r.Execute(context.Background(), "bash",
 				json.RawMessage(`{"command":"printf 'y%.0s' {1..500}"}`))
-			if err != nil {
-				t.Error(err)
-			}
+			c.NoError(err)
 		}()
 	}
 	wg.Wait()
 
 	entries, err := os.ReadDir(spillDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != n {
-		t.Fatalf("expected %d distinct spill files, got %d", n, len(entries))
-	}
+	c.Require().NoError(err)
+	c.Require().Len(entries, n, "expected %d distinct spill files, got %d", n, len(entries))
 }
 
 // TestBashRtkRewired verifies that a mapped command (git status) is executed
 // through rtk rather than bash -c, and an unmapped command (echo hello) still
 // goes through bash -c.
 func TestBashRtkRewired(t *testing.T) {
+	c := assert.NewAborting(t)
 	cleanup := fakeRTK(t)
 	defer cleanup()
 
@@ -444,39 +392,30 @@ func TestBashRtkRewired(t *testing.T) {
 		Cwd:          t.TempDir(),
 		RTK:          RTKAuto,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	// A mapped command (git status) should be rewritten to rtk git status.
 	// Our fake rtk echoes its arguments, so we can detect it.
 	result, err := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"git status"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	// The fake rtk writes "git status" (the args after rtk git) to stdout.
 	// The original command "git status" after rewrite becomes ["rtk", "git", "status"],
 	// and the fake rtk echoes "git status".
-	if !strings.Contains(result.Text, "git") || !strings.Contains(result.Text, "status") {
-		t.Fatalf("expected rtk output containing 'git' and 'status', got %q", result.Text)
-	}
+	c.False(!strings.Contains(result.Text, "git") || !strings.Contains(result.Text, "status"), "expected rtk output containing 'git' and 'status', got %q", result.Text)
 	// The output should NOT contain "bash" since we bypassed bash -c entirely.
 
 	// An unmapped command should still go through bash -c (NO rewrite).
 	result2, err2 := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"echo hello"}`)))
-	if err2 != nil {
-		t.Fatal(err2)
-	}
-	if !strings.Contains(result2.Text, "hello") {
-		t.Fatalf("expected 'hello' in output, got %q", result2.Text)
-	}
+	c.NoError(err2)
+	c.StrContains(result2.Text, "hello", "expected 'hello' in output, got")
 }
 
 // TestBashRtkOffNeverRewrites verifies that RTKOff mode never invokes rtk,
 // even with a mapped command.
 func TestBashRtkOffNeverRewrites(t *testing.T) {
+	c := assert.NewAborting(t)
 	cleanup := fakeRTK(t)
 	defer cleanup()
 
@@ -485,26 +424,21 @@ func TestBashRtkOffNeverRewrites(t *testing.T) {
 		Cwd:          t.TempDir(),
 		RTK:          RTKOff,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	// With RTKOff, even a mapped command should go through bash -c.
 	// Our fake rtk echoes "rtk 0.45.0 git status" — but that should NOT appear
 	// because rtk should never be called.
 	result, err := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"echo foundme"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Text, "foundme") {
-		t.Fatalf("expected 'foundme' in output, got %q", result.Text)
-	}
+	c.NoError(err)
+	c.StrContains(result.Text, "foundme", "expected 'foundme' in output, got")
 }
 
 // TestBashChainedCommandNotRewired verifies that a command with shell chaining
 // is NOT rewritten by rtk, even in RTKAuto mode with rtk available.
 func TestBashChainedCommandNotRewired(t *testing.T) {
+	c := assert.NewAborting(t)
 	cleanup := fakeRTK(t)
 	defer cleanup()
 
@@ -513,22 +447,14 @@ func TestBashChainedCommandNotRewired(t *testing.T) {
 		Cwd:          t.TempDir(),
 		RTK:          RTKAuto,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	// A chained command should NOT be rewritten — it must still go through bash -c.
 	result, err := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"echo yes && echo also"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Text, "yes") {
-		t.Fatalf("expected 'yes' in output, got %q", result.Text)
-	}
-	if !strings.Contains(result.Text, "also") {
-		t.Fatalf("expected 'also' in output, got %q", result.Text)
-	}
+	c.NoError(err)
+	c.StrContains(result.Text, "yes", "expected 'yes' in output, got")
+	c.StrContains(result.Text, "also", "expected 'also' in output, got")
 }
 
 // installFakeRTK writes a fake rtk binary that answers --version normally
@@ -538,11 +464,10 @@ func TestBashChainedCommandNotRewired(t *testing.T) {
 // simulate refusal vs. underlying-tool-failure.
 func installFakeRTK(t *testing.T, otherwiseScript string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	f, err := os.Create(filepath.Join(dir, "rtk"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	script := "#!/bin/bash\n" +
 		"if [ \"$1\" = \"--version\" ]; then\n" +
 		"  echo \"rtk 0.45.0\"\n" +
@@ -553,9 +478,7 @@ func installFakeRTK(t *testing.T, otherwiseScript string) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if err := os.Chmod(f.Name(), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Chmod(f.Name(), 0o755))
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	resetRTKCache(func() rtkCache {
 		p, err := exec.LookPath("rtk")
@@ -574,35 +497,26 @@ func installFakeRTK(t *testing.T, otherwiseScript string) {
 // re-run the ORIGINAL command under plain bash rather than surfacing rtk's
 // limitation to the model as an opaque failure.
 func TestBashRtkRefusalFallsBackToBash(t *testing.T) {
+	c := assert.NewAborting(t)
 	installFakeRTK(t, `echo "rtk: rtk find does not support compound predicates or actions (e.g. -not, -exec). Use find directly." >&2
 exit 1
 `)
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644))
 
 	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
 		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
 		Cwd:          dir,
 		RTK:          RTKAuto,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	result, err := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"find . -name '*.go'"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(result.Text, "does not support") {
-		t.Fatalf("rtk's refusal message leaked through instead of falling back to bash: %q", result.Text)
-	}
-	if !strings.Contains(result.Text, "needle.go") {
-		t.Fatalf("expected the bash fallback to actually find needle.go, got %q", result.Text)
-	}
+	c.NoError(err)
+	c.NotStrContains(result.Text, "does not support", "rtk's refusal message leaked through instead of falling back to bash")
+	c.StrContains(result.Text, "needle.go", "expected the bash fallback to actually find needle.go, got")
 }
 
 // TestBashUnderlyingToolFailureDoesNotFallBack is the flip side of finding
@@ -611,33 +525,24 @@ exit 1
 // nonzero exit would silently re-execute something like a rejected
 // `git push` a second time.
 func TestBashUnderlyingToolFailureDoesNotFallBack(t *testing.T) {
+	c := assert.NewAborting(t)
 	installFakeRTK(t, `echo "TOOLFAIL: pathspec did not match any files" >&2
 exit 1
 `)
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(dir, "needle.go"), []byte("package x"), 0o644))
 
 	tool, err := (&BashBlueprint{}).Materialize(ToolOpts{
 		OutputPolicy: OutputPolicy{Budget: 30000, SpillDir: t.TempDir()},
 		Cwd:          dir,
 		RTK:          RTKAuto,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	result, err := tool.Execute(context.Background(),
 		ToolInput(json.RawMessage(`{"command":"find . -name '*.go'"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(result.Text, "TOOLFAIL") {
-		t.Fatalf("expected the underlying tool's own failure to surface, got %q", result.Text)
-	}
-	if strings.Contains(result.Text, "needle.go") {
-		t.Fatalf("an underlying-tool failure incorrectly triggered a bash fallback (real find output leaked through): %q", result.Text)
-	}
+	c.NoError(err)
+	c.StrContains(result.Text, "TOOLFAIL", "expected the underlying tool's own failure to surface, got")
+	c.NotStrContains(result.Text, "needle.go", "an underlying-tool failure incorrectly triggered a bash fallback (real find output leaked through)")
 }

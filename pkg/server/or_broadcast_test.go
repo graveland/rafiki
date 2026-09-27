@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // otlpAttr is a convenience constructor for otlpSpan.Attributes elements
@@ -65,9 +67,7 @@ func otlpBody(t *testing.T, spans ...otlpSpan) []byte {
 		},
 	}
 	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal payload")
 	return body
 }
 
@@ -76,7 +76,7 @@ func otlpBody(t *testing.T, spans ...otlpSpan) []byte {
 // test just needs the one table to exist) and registers cleanup.
 func setupBroadcastTable(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `
+	_, err := pool.Exec(context.Background(), `
 		CREATE SCHEMA IF NOT EXISTS openrouter;
 		CREATE TABLE IF NOT EXISTS openrouter.broadcast (
 			id               BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -101,9 +101,8 @@ func setupBroadcastTable(t *testing.T, pool *pgxpool.Pool) {
 			output_cost_usd  DOUBLE PRECISION,
 			PRIMARY KEY (id, created_at)
 		)
-	`); err != nil {
-		t.Fatalf("create broadcast table: %v", err)
-	}
+	`)
+	assert.NewAborting(t).NoError(err, "create broadcast table")
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DROP TABLE IF EXISTS openrouter.broadcast`)
 	})
@@ -112,6 +111,7 @@ func setupBroadcastTable(t *testing.T, pool *pgxpool.Pool) {
 // TestHandleOTLP_RoundTrip sends an OTLP payload with known attributes and
 // verifies the row lands in openrouter.broadcast correctly.
 func TestHandleOTLP_RoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testBroadcastPool(t)
 	if pool == nil {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -222,9 +222,7 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 	}
 
 	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
+	c.Require().NoError(err, "marshal payload")
 
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -232,9 +230,7 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
+	c.Eq(http.StatusOK, rec.Code, "status")
 
 	// Verify the row was inserted correctly.
 	var (
@@ -264,59 +260,25 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 		&sessionID, &generationID, &traceID, &spanID, &model, &provider,
 		&inputTokens, &outputTokens, &cacheReadTokens, &costUSD, &latency, &finishReason,
 		&totalTokens, &reasoningTokens, &inputCostUSD, &outputCostUSD)
-	if err != nil {
-		t.Fatalf("query inserted row: %v", err)
-	}
+	c.Require().NoError(err, "query inserted row")
 
-	if sessionID != "conv-uuid-123" {
-		t.Errorf("session_id = %q, want conv-uuid-123", sessionID)
-	}
-	if generationID != "gen-test-999" {
-		t.Errorf("generation_id = %q, want gen-test-999", generationID)
-	}
-	if traceID != "abc123trace" {
-		t.Errorf("trace_id = %q, want abc123trace", traceID)
-	}
-	if spanID != "def456span" {
-		t.Errorf("span_id = %q, want def456span", spanID)
-	}
-	if model != "deepseek/deepseek-v4-pro" {
-		t.Errorf("model = %q, want deepseek/deepseek-v4-pro", model)
-	}
-	if provider != "DeepInfra" {
-		t.Errorf("provider = %q, want DeepInfra", provider)
-	}
-	if inputTokens != 150 {
-		t.Errorf("input_tokens = %d, want 150", inputTokens)
-	}
-	if outputTokens != 50 {
-		t.Errorf("output_tokens = %d, want 50", outputTokens)
-	}
-	if cacheReadTokens != 100 {
-		t.Errorf("cache_read_tokens = %d, want 100", cacheReadTokens)
-	}
-	if costUSD != 0.00042 {
-		t.Errorf("cost_usd = %f, want 0.00042", costUSD)
-	}
-	if totalTokens != 200 {
-		t.Errorf("total_tokens = %d, want 200", totalTokens)
-	}
-	if reasoningTokens != 30 {
-		t.Errorf("reasoning_tokens = %d, want 30", reasoningTokens)
-	}
-	if inputCostUSD != 0.00036 {
-		t.Errorf("input_cost_usd = %f, want 0.00036", inputCostUSD)
-	}
-	if outputCostUSD != 0.00006 {
-		t.Errorf("output_cost_usd = %f, want 0.00006", outputCostUSD)
-	}
+	c.Eq("conv-uuid-123", sessionID, "session_id")
+	c.Eq("gen-test-999", generationID, "generation_id")
+	c.Eq("abc123trace", traceID, "trace_id")
+	c.Eq("def456span", spanID, "span_id")
+	c.Eq("deepseek/deepseek-v4-pro", model, "model")
+	c.Eq("DeepInfra", provider, "provider")
+	c.Eq(150, inputTokens, "input_tokens")
+	c.Eq(50, outputTokens, "output_tokens")
+	c.Eq(100, cacheReadTokens, "cache_read_tokens")
+	c.Eq(0.00042, costUSD, "cost_usd")
+	c.Eq(200, totalTokens, "total_tokens")
+	c.Eq(30, reasoningTokens, "reasoning_tokens")
+	c.Eq(0.00036, inputCostUSD, "input_cost_usd")
+	c.Eq(0.00006, outputCostUSD, "output_cost_usd")
 	// 1.5 seconds in nanoseconds = 1500ms
-	if latency != 1500 {
-		t.Errorf("latency_ms = %d, want 1500", latency)
-	}
-	if finishReason != "stop" {
-		t.Errorf("finish_reason = %q, want stop", finishReason)
-	}
+	c.Eq(1500, latency, "latency_ms")
+	c.Eq("stop", finishReason, "finish_reason")
 }
 
 // TestHandleOTLP_MissingTimestampFallsBackToNow verifies that a span missing
@@ -324,6 +286,7 @@ func TestHandleOTLP_RoundTrip(t *testing.T) {
 // time.Time (0001-01-01), which would poison the hypertable's time
 // partitioning and retention policy.
 func TestHandleOTLP_MissingTimestampFallsBackToNow(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testBroadcastPool(t)
 	if pool == nil {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -354,23 +317,15 @@ func TestHandleOTLP_MissingTimestampFallsBackToNow(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	after := time.Now().Add(5 * time.Second)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
 
 	var createdAt time.Time
-	if err := pool.QueryRow(context.Background(),
+	c.Require().NoError(pool.QueryRow(context.Background(),
 		`SELECT created_at FROM openrouter.broadcast WHERE span_id = 'ts-fallback-span'`,
-	).Scan(&createdAt); err != nil {
-		t.Fatalf("query inserted row: %v", err)
-	}
+	).Scan(&createdAt), "query inserted row")
 
-	if createdAt.Before(before) || createdAt.After(after) {
-		t.Errorf("created_at = %v, want between %v and %v (fallback to now, not zero time)", createdAt, before, after)
-	}
-	if createdAt.Year() < 2000 {
-		t.Errorf("created_at = %v, looks like the zero time.Time, not a fallback to now", createdAt)
-	}
+	c.False(createdAt.Before(before) || createdAt.After(after), "created_at = %v, want between %v and %v (fallback to now, not zero time)", createdAt, before, after)
+	c.GreaterOrEqual(2000, createdAt.Year(), "created_at = %v, looks like the zero time.Time, not a fallback to now", createdAt)
 }
 
 // TestHandleOTLP_RawPayloadIsPerSpanNotWholeBatch verifies that raw_payload
@@ -378,6 +333,7 @@ func TestHandleOTLP_MissingTimestampFallsBackToNow(t *testing.T) {
 // a batch of N spans must not store N duplicate copies of the same
 // multi-span blob.
 func TestHandleOTLP_RawPayloadIsPerSpanNotWholeBatch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := testBroadcastPool(t)
 	if pool == nil {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -412,29 +368,20 @@ func TestHandleOTLP_RawPayloadIsPerSpanNotWholeBatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
 
 	checkRow := func(spanID, wantSessionID, otherSpanID string) {
 		t.Helper()
 		var rawPayload string
-		if err := pool.QueryRow(context.Background(),
+		c.Require().NoError(pool.QueryRow(context.Background(),
 			`SELECT raw_payload::text FROM openrouter.broadcast WHERE span_id = $1`, spanID,
-		).Scan(&rawPayload); err != nil {
-			t.Fatalf("query raw_payload for %s: %v", spanID, err)
-		}
+		).Scan(&rawPayload), "query raw_payload for %s", spanID)
 
 		var decoded otlpSpan
-		if err := json.Unmarshal([]byte(rawPayload), &decoded); err != nil {
-			t.Fatalf("raw_payload for %s is not a single otlpSpan: %v (payload: %s)", spanID, err, rawPayload)
-		}
-		if decoded.SpanID != spanID {
-			t.Errorf("raw_payload spanId = %q, want %q", decoded.SpanID, spanID)
-		}
-		if strings.Contains(rawPayload, otherSpanID) {
-			t.Errorf("raw_payload for %s contains %s — storing the whole batch body, not the individual span", spanID, otherSpanID)
-		}
+		err := json.Unmarshal([]byte(rawPayload), &decoded)
+		c.Require().NoError(err, "raw_payload for %s is not a single otlpSpan: %v (payload: %s)", spanID, err, rawPayload)
+		c.Eq(spanID, decoded.SpanID, "raw_payload spanId")
+		c.NotStrContains(rawPayload, otherSpanID, "raw_payload for %s contains %s — storing the whole batch body, not the individual span", spanID, otherSpanID)
 	}
 
 	checkRow("batch-span-a", "batch-conv-a", "batch-span-b")
@@ -450,9 +397,7 @@ func TestHandleOTLP_EmptyBody(t *testing.T) {
 
 	// Must not panic, must return 200.
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusOK, rec.Code, "status")
 }
 
 // TestHandleOTLP_NoSpans verifies no-op on valid OTLP with zero spans.
@@ -464,9 +409,7 @@ func TestHandleOTLP_NoSpans(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusOK, rec.Code, "status")
 }
 
 // testBroadcastPool returns a pgxpool from RAFIKI_TEST_DSN, or nil if not set.
@@ -479,9 +422,7 @@ func testBroadcastPool(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pgxpool: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "pgxpool")
 	t.Cleanup(pool.Close)
 	return pool
 }
@@ -498,6 +439,7 @@ func testBroadcastLogger() *slog.Logger {
 // flushes an expired one. No database — the counter is pure, and its clock
 // is caller-supplied so the test never sleeps.
 func TestSpanLogCounterCoalescesPerWindow(t *testing.T) {
+	ck := assert.NewAborting(t)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	base := time.Unix(1_700_000_000, 0)
@@ -505,9 +447,7 @@ func TestSpanLogCounterCoalescesPerWindow(t *testing.T) {
 
 	c.record(3, base, logger)
 	c.record(4, base.Add(30*time.Second), logger)
-	if buf.Len() != 0 {
-		t.Fatalf("records inside one window logged %q; want silence", buf.String())
-	}
+	ck.Eq(0, buf.Len(), "records inside one window logged %q; want silence", buf.String())
 
 	c.record(5, base.Add(broadcastLogWindow+time.Second), logger)
 	if out := buf.String(); !strings.Contains(out, "or_broadcast: stored spans") || !strings.Contains(out, "count=7") {
@@ -518,13 +458,9 @@ func TestSpanLogCounterCoalescesPerWindow(t *testing.T) {
 	// next record joins it, and both flush together when that window closes.
 	buf.Reset()
 	c.record(1, base.Add(broadcastLogWindow+2*time.Second), logger)
-	if buf.Len() != 0 {
-		t.Fatalf("record into the reopened window logged %q; want silence", buf.String())
-	}
+	ck.Eq(0, buf.Len(), "record into the reopened window logged %q; want silence", buf.String())
 	c.record(1, base.Add(2*broadcastLogWindow+2*time.Second), logger)
-	if out := buf.String(); !strings.Contains(out, "count=6") {
-		t.Fatalf("second flush = %q; want count=6 (the reopened window's 5+1)", out)
-	}
+	ck.StrContains(buf.String(), "count=6", "second flush")
 
 	// A zero-count record must not open a window (a no-op request would
 	// otherwise start the clock for spans it never stored), but must still
@@ -533,11 +469,7 @@ func TestSpanLogCounterCoalescesPerWindow(t *testing.T) {
 	c2 := &spanLogCounter{}
 	c2.record(0, base, logger)
 	c2.record(2, base.Add(90*time.Second), logger)
-	if buf.Len() != 0 {
-		t.Fatalf("records after a zero-count opener logged %q; want silence", buf.String())
-	}
+	ck.Eq(0, buf.Len(), "records after a zero-count opener logged %q; want silence", buf.String())
 	c2.record(0, base.Add(150*time.Second), logger)
-	if out := buf.String(); !strings.Contains(out, "count=2") {
-		t.Fatalf("zero-record flush = %q; want stored spans with count=2", out)
-	}
+	ck.StrContains(buf.String(), "count=2", "zero-record flush")
 }

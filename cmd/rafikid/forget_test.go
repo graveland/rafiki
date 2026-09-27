@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestOwnsChildRow guards the cross-daemon case. Child rows are shared now, so
@@ -24,9 +26,7 @@ func TestOwnsChildRow(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := c.ownsChildRow(childstore.Snapshot{Labels: tc.labels})
-			if got != tc.want {
-				t.Errorf("ownsChildRow = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, got, "ownsChildRow")
 		})
 	}
 }
@@ -37,7 +37,5 @@ func TestOwnsChildRow(t *testing.T) {
 func TestOwnsChildRowWithoutDaemonID(t *testing.T) {
 	c := &Controller{daemonID: ""}
 	got := c.ownsChildRow(childstore.Snapshot{Labels: map[string]string{"rafiki/daemon": "daemon-b"}})
-	if !got {
-		t.Error("a daemon with no id must still own every row")
-	}
+	assert.NewCollecting(t).True(got, "a daemon with no id must still own every row")
 }

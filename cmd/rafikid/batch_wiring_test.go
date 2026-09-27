@@ -14,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // openrouterSet returns a provider registry whose openrouter entry carries the
@@ -38,9 +40,7 @@ func openrouterSet(kind providers.Kind, keyEnv string) *providers.Set {
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), "postgres://batch:test@127.0.0.1:1/batch_wiring_test")
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "pgxpool.New")
 	t.Cleanup(pool.Close)
 	return pool
 }
@@ -49,9 +49,7 @@ func TestNewBatcherNeedsOpenRouterKey(t *testing.T) {
 	t.Run("nil pool refuses even with a perfect provider", func(t *testing.T) {
 		t.Setenv("BATCH_TEST_OPENROUTER_KEY", "sk-batch-test")
 		b, ok := newBatcher(openrouterSet(providers.KindAnthropicOpenRouter, "BATCH_TEST_OPENROUTER_KEY"), nil)
-		if ok || b != nil {
-			t.Errorf("newBatcher(nil pool) = (%v, %v), want (nil, false)", b, ok)
-		}
+		assert.NewCollecting(t).False(ok || b != nil, "newBatcher(nil pool) = (%v, %v), want (nil, false)", b, ok)
 	})
 
 	t.Run("no openrouter provider", func(t *testing.T) {
@@ -62,34 +60,26 @@ func TestNewBatcherNeedsOpenRouterKey(t *testing.T) {
 			},
 		}
 		b, ok := newBatcher(set, testPool(t))
-		if ok || b != nil {
-			t.Errorf("newBatcher(no openrouter) = (%v, %v), want (nil, false)", b, ok)
-		}
+		assert.NewCollecting(t).False(ok || b != nil, "newBatcher(no openrouter) = (%v, %v), want (nil, false)", b, ok)
 	})
 
 	t.Run("wrong kind", func(t *testing.T) {
 		t.Setenv("BATCH_TEST_OPENROUTER_KEY", "sk-batch-test")
 		b, ok := newBatcher(openrouterSet(providers.KindAnthropic, "BATCH_TEST_OPENROUTER_KEY"), testPool(t))
-		if ok || b != nil {
-			t.Errorf("newBatcher(wrong kind) = (%v, %v), want (nil, false)", b, ok)
-		}
+		assert.NewCollecting(t).False(ok || b != nil, "newBatcher(wrong kind) = (%v, %v), want (nil, false)", b, ok)
 	})
 
 	t.Run("empty key", func(t *testing.T) {
 		// Deliberately NOT set: the refusal case.
 		set := openrouterSet(providers.KindAnthropicOpenRouter, "BATCH_TEST_OPENROUTER_KEY_UNSET")
 		b, ok := newBatcher(set, testPool(t))
-		if ok || b != nil {
-			t.Errorf("newBatcher(empty key) = (%v, %v), want (nil, false)", b, ok)
-		}
+		assert.NewCollecting(t).False(ok || b != nil, "newBatcher(empty key) = (%v, %v), want (nil, false)", b, ok)
 	})
 
 	t.Run("fully-qualified provider builds a batcher", func(t *testing.T) {
 		t.Setenv("BATCH_TEST_OPENROUTER_KEY", "sk-batch-test")
 		b, ok := newBatcher(openrouterSet(providers.KindAnthropicOpenRouter, "BATCH_TEST_OPENROUTER_KEY"), testPool(t))
-		if !ok || b == nil {
-			t.Fatalf("newBatcher(qualified provider, pool) = (%v, %v), want non-nil, true", b, ok)
-		}
+		assert.NewAborting(t).False(!ok || b == nil, "newBatcher(qualified provider, pool) = (%v, %v), want non-nil, true", b, ok)
 	})
 }
 
@@ -99,29 +89,25 @@ func TestNewBatcherNeedsOpenRouterKey(t *testing.T) {
 // typed nil would widen it into a NON-nil interface value and make pkg/llm
 // nil-panic on the first :batch send.
 func TestSetBatcherNilIsRefused(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 
 	c.SetBatcher(nil)
-	if c.batcher != nil {
-		t.Fatalf("SetBatcher(nil) stored a non-nil batcher: %#v", c.batcher)
-	}
+	ck.Require().Nil(c.batcher, "SetBatcher(nil) stored a non-nil batcher")
 
 	ro, err := c.agentRuntimeOptions(protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_batch_nil", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Batcher != nil {
-		t.Errorf("ro.Batcher = %#v, want a true nil llm.Batcher after SetBatcher(nil)", ro.Batcher)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Nil(ro.Batcher, "ro.Batcher")
 }
 
 // TestSetBatcherReachesRuntimeOptions proves the happy wiring end to end at
 // the unit level: SetBatcher(b) → agentRuntimeOptions → ro.Batcher != nil.
 func TestSetBatcherReachesRuntimeOptions(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	b := batch.New(nil, nil, batch.Options{}) // store-less batcher: nothing Parks in a unit test
 	c.SetBatcher(b)
@@ -131,12 +117,8 @@ func TestSetBatcherReachesRuntimeOptions(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_batch_ok", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Batcher == nil {
-		t.Fatal("ro.Batcher = nil, want the SetBatcher'd batcher")
-	}
+	ck.NoError(err, "agentRuntimeOptions")
+	ck.NotNil(ro.Batcher, "ro.Batcher = nil, want the SetBatcher'd batcher")
 }
 
 // newBatchSpawnController is a Controller with temp dirs and no children —
@@ -156,6 +138,7 @@ func newBatchSpawnController(t *testing.T) *Controller {
 // model is submitted with the daemon's OpenRouter key, so a spawn carrying its
 // own per-spawn key must be refused before anything is minted.
 func TestSpawnRefusesBatchModelWithAPIKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newBatchSpawnController(t)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -169,13 +152,9 @@ func TestSpawnRefusesBatchModelWithAPIKey(t *testing.T) {
 		Model:  "openrouter/z-ai/glm-5.3-flash:batch",
 		APIKey: "sk-caller",
 	}, users.Identity{})
-	if err == nil {
-		t.Fatal("Spawn(:batch model with APIKey) succeeded, want refusal")
-	}
+	c.Require().Error(err, "Spawn(:batch model with APIKey) succeeded, want refusal")
 	want := ":batch models are submitted with the daemon's OpenRouter key"
-	if got := err.Error(); !strings.Contains(got, want) {
-		t.Errorf("error = %q, want it to contain %q", got, want)
-	}
+	c.StrContains(err.Error(), want, "error")
 }
 
 // TestSpawnAllowsBatchModelWithoutAPIKey proves the refusal is keyed on
@@ -195,7 +174,5 @@ func TestSpawnAllowsBatchModelWithoutAPIKey(t *testing.T) {
 		Kind:  protocol.KindFundi,
 		Model: "openrouter/z-ai/glm-5.3-flash:batch",
 	}, users.Identity{})
-	if err != nil && strings.Contains(err.Error(), ":batch models are submitted") {
-		t.Errorf("Spawn(:batch model without APIKey) refused with the API-key message: %v", err)
-	}
+	assert.NewCollecting(t).False(err != nil && strings.Contains(err.Error(), ":batch models are submitted"), "Spawn(:batch model without APIKey) refused with the API-key message: %v", err)
 }

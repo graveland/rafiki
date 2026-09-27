@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stopRunner drives one exit through Child.Shutdown with a controllable
@@ -90,24 +92,16 @@ func (s *stopStdin) StopsOnClose() bool { return true }
 // signal), and ExitResult must say the shutdown drove the death — not that a
 // foreign crash landed.
 func TestShutdownRecordsByShutdownForAnActiveStdinStop(t *testing.T) {
+	ck := assert.NewAborting(t)
 	r := newStopRunner(true, 143, "")
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_byshut", Cwd: t.TempDir(), Runner: r})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.NoError(err, "Spawn")
 	res, err := c.Shutdown(time.Second, time.Second)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if res.ExitCode != 143 || res.Signal != "" {
-		t.Fatalf("Shutdown = %+v, want the (143, \"\") shape", res)
-	}
-	if !res.ByShutdown {
-		t.Fatal("an active stdin stop must record ByShutdown — its death is the shutdown's own doing")
-	}
-	if got := c.ExitResult(); !got.ByShutdown {
-		t.Fatalf("ExitResult() = %+v, want ByShutdown on the stored record", got)
-	}
+	ck.NoError(err, "Shutdown")
+	ck.False(res.ExitCode != 143 || res.Signal != "", "Shutdown = %+v, want the (143, \"\") shape", res)
+	ck.True(res.ByShutdown, "an active stdin stop must record ByShutdown — its death is the shutdown's own doing")
+	got := c.ExitResult()
+	ck.True(got.ByShutdown, "ExitResult() = %+v, want ByShutdown on the stored record", got)
 }
 
 // TestShutdownLeavesByShutdownOffForAPassiveCrash is the other half: a child
@@ -115,25 +109,17 @@ func TestShutdownRecordsByShutdownForAnActiveStdinStop(t *testing.T) {
 // close's wait must NOT read as the shutdown's doing — that is the
 // news-worthier death the suppression must keep notifying about.
 func TestShutdownLeavesByShutdownOffForAPassiveCrash(t *testing.T) {
+	ck := assert.NewAborting(t)
 	r := newStopRunner(false, 1, "")
 	go time.AfterFunc(50*time.Millisecond, r.releaseExit)
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_crash", Cwd: t.TempDir(), Runner: r})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.NoError(err, "Spawn")
 	res, err := c.Shutdown(time.Second, time.Second)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if res.ExitCode != 1 || res.Signal != "" {
-		t.Fatalf("Shutdown = %+v, want the crash shape", res)
-	}
-	if res.ByShutdown {
-		t.Fatal("a spontaneous crash during the passive wait must not be attributed to the shutdown")
-	}
-	if got := c.ExitResult(); got.ByShutdown {
-		t.Fatalf("ExitResult() = %+v, want ByShutdown clear", got)
-	}
+	ck.NoError(err, "Shutdown")
+	ck.False(res.ExitCode != 1 || res.Signal != "", "Shutdown = %+v, want the crash shape", res)
+	ck.False(res.ByShutdown, "a spontaneous crash during the passive wait must not be attributed to the shutdown")
+	got := c.ExitResult()
+	ck.False(got.ByShutdown, "ExitResult() = %+v, want ByShutdown clear", got)
 }
 
 // TestShutdownRecordsByShutdownForAnEscalation pins the rung attribution: a
@@ -141,19 +127,12 @@ func TestShutdownLeavesByShutdownOffForAPassiveCrash(t *testing.T) {
 // the death the rung produces — here the (0, "terminated") shape of a process
 // dying by signal — is the shutdown's own doing.
 func TestShutdownRecordsByShutdownForAnEscalation(t *testing.T) {
+	ck := assert.NewAborting(t)
 	r := newStopRunner(false, 0, "terminated")
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_esc", Cwd: t.TempDir(), Runner: r})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.NoError(err, "Spawn")
 	res, err := c.Shutdown(10*time.Millisecond, time.Second)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if !res.Escalated || res.Signal != "terminated" {
-		t.Fatalf("Shutdown = %+v, want the escalated (0, \"terminated\") shape", res)
-	}
-	if !res.ByShutdown {
-		t.Fatal("an escalated rung's death must record ByShutdown")
-	}
+	ck.NoError(err, "Shutdown")
+	ck.False(!res.Escalated || res.Signal != "terminated", "Shutdown = %+v, want the escalated (0, \"terminated\") shape", res)
+	ck.True(res.ByShutdown, "an escalated rung's death must record ByShutdown")
 }

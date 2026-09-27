@@ -17,20 +17,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestWithTokenAdvice pins the central advice text: it names the profile's
 // token file and the recovery, fires on the Unauthenticated refusal only, and
 // passes an unrelated failure through untouched.
 func TestWithTokenAdvice(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
 	dir := t.TempDir()
 	writeTokenedProfile(t, filepath.Join(dir, "unused.sock"), "rfk_tok")
-	if _, err := resolveProfile(&cobra.Command{}); err != nil {
-		t.Fatalf("resolve profile: %v", err)
-	}
+	_, err := resolveProfile(&cobra.Command{})
+	c.NoError(err, "resolve profile")
 
 	authErr := connect.NewError(connect.CodeUnauthenticated, errors.New("invalid auth token"))
 	got := withTokenAdvice(authErr)
@@ -42,21 +44,15 @@ func TestWithTokenAdvice(t *testing.T) {
 		"recover on the daemon host with: rafikid user create <name>",
 		"invalid auth token", // the original reason stays visible
 	} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("advice message %q is missing %q", msg, want)
-		}
+		c.StrContains(msg, want, "advice message")
 	}
-	if !errors.Is(got, authErr) {
-		t.Fatal("the original error is no longer wrapped")
-	}
+	c.ErrorIs(got, authErr, "the original error is no longer wrapped")
 
 	// An unrelated failure passes through untouched — including the Connect
 	// codes that merely look like auth (a store outage is Unavailable, a dead
 	// daemon is Unavailable, permission is Denied).
 	plain := errors.New("boom")
-	if withTokenAdvice(plain).Error() != "boom" {
-		t.Fatalf("unrelated error was rewritten: %v", withTokenAdvice(plain))
-	}
+	c.Eq("boom", withTokenAdvice(plain).Error(), "unrelated error was rewritten: %v", withTokenAdvice(plain))
 	for _, code := range []connect.Code{connect.CodeUnavailable, connect.CodePermissionDenied, connect.CodeInternal} {
 		if got := withTokenAdvice(connect.NewError(code, errors.New("x"))); !strings.HasSuffix(got.Error(), "x") {
 			t.Fatalf("code %v was rewritten: %v", code, got)

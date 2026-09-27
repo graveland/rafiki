@@ -3,6 +3,8 @@ package child
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // decodeFrames unmarshals raw bus frames to maps for inspection.
@@ -11,9 +13,8 @@ func decodeFrames(t *testing.T, raws [][]byte) []map[string]any {
 	out := make([]map[string]any, 0, len(raws))
 	for _, raw := range raws {
 		var m map[string]any
-		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("frame not valid JSON: %v (%s)", err, raw)
-		}
+		err := json.Unmarshal(raw, &m)
+		assert.NewAborting(t).NoError(err, "frame not valid JSON: %v (%s)", err, raw)
 		out = append(out, m)
 	}
 	return out
@@ -24,21 +25,18 @@ func decodeFrames(t *testing.T, raws [][]byte) []map[string]any {
 // otherwise the TUI (which renders a user bubble only from message_start
 // role:user) shows nothing. This pins that contract.
 func TestClaudeOutboundEchoEmitsUserMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	prov := (ClaudeProvider{}).Fresh()
 
 	frames := decodeFrames(t, prov.OutboundEcho([]byte(`{"type":"prompt","message":"read /etc/hostname"}`), 990))
-	if len(frames) != 2 {
-		t.Fatalf("want 2 echo frames (message_start, message_end), got %d: %v", len(frames), frames)
-	}
+	c.Len(frames, 2, "want 2 echo frames (message_start, message_end), got %d", len(frames))
 
 	if frames[0]["type"] != "message_start" || frames[1]["type"] != "message_end" {
 		t.Fatalf("want [message_start, message_end], got [%v, %v]", frames[0]["type"], frames[1]["type"])
 	}
 	for _, f := range frames {
 		msg, ok := f["message"].(map[string]any)
-		if !ok {
-			t.Fatalf("frame missing message object: %v", f)
-		}
+		c.True(ok, "frame missing message object: %v", f)
 		if msg["role"] != "user" {
 			t.Fatalf("echo message role = %v, want user", msg["role"])
 		}
@@ -54,17 +52,13 @@ func TestClaudeOutboundEchoEmitsUserMessage(t *testing.T) {
 	// post-turn cache rebuild (which replaces _messages with agent_end.messages)
 	// does not drop the user turn. The turn closes agent_end + agent_settled.
 	end := decodeFrames(t, prov.BusFrames([]byte(`{"type":"result"}`), 1100))
-	if len(end) != 2 || end[0]["type"] != "agent_end" || end[1]["type"] != "agent_settled" {
-		t.Fatalf("want [agent_end, agent_settled], got %v", end)
-	}
+	c.False(len(end) != 2 || end[0]["type"] != "agent_end" || end[1]["type"] != "agent_settled", "want [agent_end, agent_settled], got %v", end)
 	msgs, ok := end[0]["messages"].([]any)
 	if !ok || len(msgs) == 0 {
 		t.Fatalf("agent_end.messages missing or empty: %v", end[0]["messages"])
 	}
 	first := msgs[0].(map[string]any)
-	if first["role"] != "user" || first["content"] != "read /etc/hostname" {
-		t.Fatalf("agent_end.messages[0] should be the echoed user turn, got %v", first)
-	}
+	c.False(first["role"] != "user" || first["content"] != "read /etc/hostname", "agent_end.messages[0] should be the echoed user turn, got %v", first)
 }
 
 func TestClaudeOutboundEchoIgnoresNonPromptFrames(t *testing.T) {
@@ -75,16 +69,13 @@ func TestClaudeOutboundEchoIgnoresNonPromptFrames(t *testing.T) {
 		`{"type":"prompt","message":""}`,
 		`not json`,
 	} {
-		if got := prov.OutboundEcho([]byte(frame), 1); got != nil {
-			t.Fatalf("OutboundEcho(%s) = %v, want nil", frame, got)
-		}
+		got := prov.OutboundEcho([]byte(frame), 1)
+		assert.NewAborting(t).Nil(got, "OutboundEcho(%s) = %v, want nil", frame, got)
 	}
 }
 
 func TestPiOutboundEchoIsNil(t *testing.T) {
 	// pi echoes the user message_start on its own stdout, so synthesizing one
 	// would double-render.
-	if got := (IdentityProvider{}).OutboundEcho([]byte(`{"type":"prompt","message":"hi"}`), 1); got != nil {
-		t.Fatalf("identityProvider.OutboundEcho = %v, want nil", got)
-	}
+	assert.NewAborting(t).Nil((IdentityProvider{}).OutboundEcho([]byte(`{"type":"prompt","message":"hi"}`), 1), "identityProvider.OutboundEcho")
 }

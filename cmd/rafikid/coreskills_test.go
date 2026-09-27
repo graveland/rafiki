@@ -4,12 +4,12 @@ package main
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/skills"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // blockOnCtxStore models a database that accepted the connection and then
@@ -35,6 +35,7 @@ func (blockOnCtxStore) ReplaceNamespaceSource(ctx context.Context, _, _ string, 
 // stalls hangs the whole startup. The timeout is the never-fatal contract:
 // the corpus keeps last-good-wins rows and the daemon serves children.
 func TestSyncCoreSkillsIsBoundedByATimeout(t *testing.T) {
+	c := assert.NewAborting(t)
 	old := coreSyncTimeout
 	coreSyncTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { coreSyncTimeout = old })
@@ -45,61 +46,39 @@ func TestSyncCoreSkillsIsBoundedByATimeout(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("sync against a stuck store: got %v, want DeadlineExceeded", err)
-		}
-		if elapsed := time.Since(start); elapsed > 10*time.Second {
-			t.Fatalf("sync took %v; the deadline did not bound it", elapsed)
-		}
+		c.ErrorIs(err, context.DeadlineExceeded, "sync against a stuck store: got")
+		c.LessOrEqual(10*time.Second, time.Since(start), "sync took")
 	case <-time.After(10 * time.Second):
 		t.Fatal("sync did not return; the stuck store holds startup forever")
 	}
 }
 
 func TestLoadCoreSkillsParsesTheEmbeddedCorpus(t *testing.T) {
+	c := assert.NewCollecting(t)
 	recs, err := loadCoreSkills()
-	if err != nil {
-		t.Fatalf("loadCoreSkills: %v", err)
-	}
-	if len(recs) == 0 {
-		t.Fatal("no core skills embedded; the corpus under skills/ is empty or unreadable")
-	}
+	c.Require().NoError(err, "loadCoreSkills")
+	c.Require().NotEmpty(recs, "no core skills embedded; the corpus under skills/ is empty or unreadable")
 	for _, r := range recs {
-		if r.Namespace != skills.DefaultNamespace {
-			t.Errorf("%s: namespace %q, want %q", r.Name, r.Namespace, skills.DefaultNamespace)
-		}
-		if r.Source != skills.CoreSource {
-			t.Errorf("%s: source %q, want %q", r.Name, r.Source, skills.CoreSource)
-		}
-		if r.Description == "" {
-			t.Errorf("%s: empty description; it is the only thing the model sees in the inventory", r.Name)
-		}
-		if r.Body == "" {
-			t.Errorf("%s: empty body", r.Name)
-		}
+		c.Eq(skills.DefaultNamespace, r.Namespace, "%s: namespace %q, want", r.Name, r.Namespace)
+		c.Eq(skills.CoreSource, r.Source, "%s: source %q, want", r.Name, r.Source)
+		c.NotEq("", r.Description, "%s: empty description; it is the only thing the model sees in the inventory", r.Name)
+		c.NotEq("", r.Body, "%s: empty body", r.Name)
 		// The frontmatter must have been stripped: a body that still opens
 		// with the delimiter would put YAML into the model's context.
-		if len(r.Body) >= 3 && r.Body[:3] == "---" {
-			t.Errorf("%s: body still carries its frontmatter block", r.Name)
-		}
+		c.False(len(r.Body) >= 3 && r.Body[:3] == "---", "%s: body still carries its frontmatter block", r.Name)
 	}
 }
 
 func TestCoreSkillNamesAreStableSlugs(t *testing.T) {
+	c := assert.NewCollecting(t)
 	recs, err := loadCoreSkills()
-	if err != nil {
-		t.Fatalf("loadCoreSkills: %v", err)
-	}
+	c.Require().NoError(err, "loadCoreSkills")
 	seen := map[string]bool{}
 	for _, r := range recs {
-		if seen[r.Name] {
-			t.Errorf("duplicate core skill name %q", r.Name)
-		}
+		c.False(seen[r.Name], "duplicate core skill name %q", r.Name)
 		seen[r.Name] = true
 		for _, bad := range []string{" ", ":", "/", "\t"} {
-			if strings.Contains(r.Name, bad) {
-				t.Errorf("core skill name %q contains %q; names are directory names and tool arguments", r.Name, bad)
-			}
+			c.NotStrContains(r.Name, bad, "core skill name")
 		}
 	}
 }

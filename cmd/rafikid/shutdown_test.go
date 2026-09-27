@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testSocketDir returns a temp directory with a short path (macOS UDS paths
@@ -19,9 +21,7 @@ import (
 func testSocketDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rafiki")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mkdirtemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
@@ -32,9 +32,8 @@ func fakePiBin(t *testing.T) string {
 	_, here, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(here), "..", "..")
 	p := filepath.Join(repoRoot, "test", "integration", "fake-pi.sh")
-	if _, err := os.Stat(p); err != nil {
-		t.Fatalf("fake-pi.sh not found at %s: %v", p, err)
-	}
+	_, err := os.Stat(p)
+	assert.NewAborting(t).NoError(err, "fake-pi.sh not found at %s", p)
 	return p
 }
 
@@ -46,9 +45,7 @@ func newTestController(t *testing.T) *Controller {
 	stateDir := filepath.Join(dir, "state")
 	logsDir := filepath.Join(dir, "logs")
 	for _, d := range []string{stateDir, logsDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatalf("mkdirall %s: %v", d, err)
-		}
+		assert.NewAborting(t).NoError(os.MkdirAll(d, 0o700), "mkdirall %s", d)
 	}
 	st := childstore.New()
 	ctrl := NewController(st, stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, nil, nil, false, t.Context(), nil, nil, nil, nil)
@@ -81,9 +78,7 @@ func spawnTestChild(t *testing.T, ctrl *Controller, env map[string]string) strin
 	defer cancel()
 
 	res, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn")
 	return res.ChildID
 }
 
@@ -91,6 +86,7 @@ func spawnTestChild(t *testing.T, ctrl *Controller, env map[string]string) strin
 // that ShutdownAllChildren drives them both to StatusExited cleanly.
 func TestController_ShutdownAllChildren_Basic(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 
@@ -99,17 +95,14 @@ func TestController_ShutdownAllChildren_Basic(t *testing.T) {
 
 	// Both should be in the child manager as live children.
 	for _, id := range []string{id1, id2} {
-		if _, ok := ctrl.cm.Get(id); !ok {
-			t.Fatalf("child %s not live before shutdown", id)
-		}
+		_, ok := ctrl.cm.Get(id)
+		c.True(ok, "child %s not live before shutdown", id)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := ctrl.ShutdownAllChildren(shutdownCtx, 5*time.Second, 2*time.Second); err != nil {
-		t.Fatalf("ShutdownAllChildren: %v", err)
-	}
+	c.NoError(ctrl.ShutdownAllChildren(shutdownCtx, 5*time.Second, 2*time.Second), "ShutdownAllChildren")
 
 	// monitorChild (running in a goroutine) calls handleChildExit asynchronously
 	// after the process exits. Poll for StatusExited in the store.
@@ -126,9 +119,7 @@ func TestController_ShutdownAllChildren_Empty(t *testing.T) {
 	ctrl := newTestController(t)
 
 	ctx := context.Background()
-	if err := ctrl.ShutdownAllChildren(ctx, time.Second, time.Second); err != nil {
-		t.Fatalf("unexpected error with no children: %v", err)
-	}
+	assert.NewAborting(t).NoError(ctrl.ShutdownAllChildren(ctx, time.Second, time.Second), "unexpected error with no children")
 }
 
 // TestController_ShutdownAllChildren_CtxExpires verifies that ShutdownAllChildren
@@ -139,6 +130,7 @@ func TestController_ShutdownAllChildren_Empty(t *testing.T) {
 // the context (10ms), so the goroutines haven't sent a result when ctx fires.
 func TestController_ShutdownAllChildren_CtxExpires(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 
@@ -152,12 +144,8 @@ func TestController_ShutdownAllChildren_CtxExpires(t *testing.T) {
 	defer cancel()
 
 	err := ctrl.ShutdownAllChildren(shutdownCtx, 50*time.Millisecond, 200*time.Millisecond)
-	if err == nil {
-		t.Fatal("expected ctx error, got nil")
-	}
-	if err != context.DeadlineExceeded {
-		t.Fatalf("expected DeadlineExceeded, got: %v", err)
-	}
+	c.Error(err, "expected ctx error, got nil")
+	c.False(err != context.DeadlineExceeded, "expected DeadlineExceeded, got: %v", err)
 
 	// The background goroutine will SIGTERM the child shortly after (within the
 	// perChildShutdown window). Allow it to finish to avoid leaving orphaned
@@ -265,6 +253,7 @@ func waitForRemoval(t *testing.T, cm *ChildManager, childID string, timeout time
 // resumed every agent that had ever finished.
 func TestKillPersistsExitedRow(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	ctrl := newTestController(t)
 	rec := &recordingChildStore{}
@@ -274,22 +263,15 @@ func TestKillPersistsExitedRow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := ctrl.Kill(ctx, id, 5_000, 2_000); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	_, err := ctrl.Kill(ctx, id, 5_000, 2_000)
+	c.Require().NoError(err, "Kill")
 	// Kill already waits on cm.Remove; this is belt and braces for the reader.
 	waitForRemoval(t, ctrl.cm, id, 5*time.Second)
 
 	last, ok := rec.lastUpsertFor(id)
-	if !ok {
-		t.Fatalf("no row was ever persisted for %s", id)
-	}
-	if last.Status != string(protocol.StatusExited) {
-		t.Errorf("persisted status = %q, want %q — a daemon restart must see this child as terminal", last.Status, protocol.StatusExited)
-	}
-	if last.LastStatus != string(protocol.StatusIdle) {
-		t.Errorf("persisted last_status = %q, want %q (the pre-exit state)", last.LastStatus, protocol.StatusIdle)
-	}
+	c.Require().True(ok, "no row was ever persisted for %s", id)
+	c.Eq(string(protocol.StatusExited), last.Status, "persisted status = %q, want %q — a daemon restart must see this child as terminal", last.Status, protocol.StatusExited)
+	c.Eq(string(protocol.StatusIdle), last.LastStatus, "persisted last_status = %q, want %q (the pre-exit state)", last.LastStatus, protocol.StatusIdle)
 }
 
 // TestDaemonShutdownDoesNotPersistExitRows pins the other half of the write
@@ -299,6 +281,7 @@ func TestKillPersistsExitedRow(t *testing.T) {
 // Persisting exits here is what turned every redeploy into mass terminal exit.
 func TestDaemonShutdownDoesNotPersistExitRows(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 
 	ctrl := newTestController(t)
 	rec := &recordingChildStore{}
@@ -309,16 +292,12 @@ func TestDaemonShutdownDoesNotPersistExitRows(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := ctrl.ShutdownAllChildren(shutdownCtx, 5*time.Second, 2*time.Second); err != nil {
-		t.Fatalf("ShutdownAllChildren: %v", err)
-	}
+	c.Require().NoError(ctrl.ShutdownAllChildren(shutdownCtx, 5*time.Second, 2*time.Second), "ShutdownAllChildren")
 
 	// The children DID end — in memory. The rows must not say so.
 	for _, id := range []string{id1, id2} {
 		waitForExited(t, ctrl.st, id, 5*time.Second)
 		waitForRemoval(t, ctrl.cm, id, 5*time.Second)
-		if rec.hasUpsertWithStatus(id, string(protocol.StatusExited)) {
-			t.Errorf("child %s: an exited row was persisted during daemon shutdown; recovery would never resume it", id)
-		}
+		c.False(rec.hasUpsertWithStatus(id, string(protocol.StatusExited)), "child %s: an exited row was persisted during daemon shutdown; recovery would never resume it", id)
 	}
 }

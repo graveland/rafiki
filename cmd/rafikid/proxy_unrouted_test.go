@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // An unrouted request must leave a trace. The face serves four paths and a real
@@ -15,6 +17,7 @@ import (
 // silently, which made "what does this client actually need?" unanswerable
 // without reading its binary.
 func TestUnroutedRequestsAreLoggedOnceEach(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
 	var mu sync.Mutex
 	logger := slog.New(slog.NewTextHandler(&syncWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -26,16 +29,12 @@ func TestUnroutedRequestsAreLoggedOnceEach(t *testing.T) {
 	for range 3 {
 		rec := httptest.NewRecorder()
 		h(rec, httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil))
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("unrouted path returned %d, want 404", rec.Code)
-		}
+		c.Require().Eq(http.StatusNotFound, rec.Code, "unrouted path returned")
 	}
 	// A different one.
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodGet, "/api/hello", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unrouted path returned %d, want 404", rec.Code)
-	}
+	c.Require().Eq(http.StatusNotFound, rec.Code, "unrouted path returned")
 
 	mu.Lock()
 	out := buf.String()
@@ -43,16 +42,10 @@ func TestUnroutedRequestsAreLoggedOnceEach(t *testing.T) {
 
 	// The dedup key is method+path; count the logged `path=` attribute rather than
 	// the bare substring, which now also appears in the "serves" list.
-	if n := strings.Count(out, "path=/v1/messages/count_tokens"); n != 1 {
-		t.Errorf("count_tokens logged %d times, want exactly 1 — a path hit every turn must not flood the log", n)
-	}
-	if !strings.Contains(out, "/api/hello") {
-		t.Errorf("a second distinct path was not logged:\n%s", out)
-	}
+	c.Eq(1, strings.Count(out, "path=/v1/messages/count_tokens"), "count_tokens logged")
+	c.StrContains(out, "/api/hello", "a second distinct path was not logged:\n")
 	// The point of the line is to be actionable.
-	if !strings.Contains(out, "/v1/messages") {
-		t.Errorf("the warning should name what IS served:\n%s", out)
-	}
+	c.StrContains(out, "/v1/messages", "the warning should name what IS served:\n")
 }
 
 // syncWriter guards the buffer: slog writes from the request goroutine and the

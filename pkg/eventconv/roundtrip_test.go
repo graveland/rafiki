@@ -7,36 +7,30 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A zero cache_write must survive as "reported zero", distinct from absent.
 // Collapsing the two is the failure mode spec §3.3 constraint 2 guards against.
 func TestUsageDistinguishesZeroFromAbsent(t *testing.T) {
+	c := assert.NewAborting(t)
 	reportedZero := &rafikiv1.Usage{CacheWriteTokens: proto.Int64(0)}
 	absent := &rafikiv1.Usage{}
 
-	if reportedZero.CacheWriteTokens == nil {
-		t.Fatal("explicit zero was lost")
-	}
-	if absent.CacheWriteTokens != nil {
-		t.Fatal("absent field materialized")
-	}
+	c.NotNil(reportedZero.CacheWriteTokens, "explicit zero was lost")
+	c.Nil(absent.CacheWriteTokens, "absent field materialized")
 
 	b, err := protojson.Marshal(reportedZero)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	c.NoError(err, "marshal")
 	var back rafikiv1.Usage
-	if err := protojson.Unmarshal(b, &back); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if back.CacheWriteTokens == nil {
-		t.Fatalf("explicit zero lost through protojson: %s", b)
-	}
+	c.NoError(protojson.Unmarshal(b, &back), "unmarshal")
+	c.NotNil(back.CacheWriteTokens, "explicit zero lost through protojson: %s", b)
 }
 
 // Tool results must be able to carry an image, not just text.
 func TestToolResultCarriesImageBlock(t *testing.T) {
+	c := assert.NewAborting(t)
 	tr := &rafikiv1.ToolResultBlock{
 		ToolUseId: "tu_1",
 		Content: []*rafikiv1.ContentBlock{{
@@ -48,18 +42,10 @@ func TestToolResultCarriesImageBlock(t *testing.T) {
 		}},
 	}
 	b, err := protojson.Marshal(tr)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	c.NoError(err, "marshal")
 	var back rafikiv1.ToolResultBlock
-	if err := protojson.Unmarshal(b, &back); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	c.NoError(protojson.Unmarshal(b, &back), "unmarshal")
 	img := back.Content[0].GetImage()
-	if img == nil {
-		t.Fatal("image block lost")
-	}
-	if img.MediaType != "image/png" {
-		t.Fatalf("media type = %q, want image/png", img.MediaType)
-	}
+	c.NotNil(img, "image block lost")
+	c.Eq("image/png", img.MediaType, "media type")
 }

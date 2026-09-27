@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeAccepter is the narrow inbox seam the Server holds: it records what Send
@@ -38,6 +40,7 @@ func textBlocks(s string) []*rafikiv1.ContentBlock {
 }
 
 func TestSendRoutesPromptThroughInbox(t *testing.T) {
+	c := assert.NewCollecting(t)
 	acc := &fakeAccepter{}
 	s := connectapi.NewServer(nil)
 	s.SetInbox(acc)
@@ -47,18 +50,15 @@ func TestSendRoutesPromptThroughInbox(t *testing.T) {
 		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
 		Blocks:  textBlocks("hello"),
 	}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if resp.Msg.GetMessageId() == "" {
-		t.Error("SendResponse.MessageId is empty")
-	}
+	c.Require().NoError(err, "Send")
+	c.NotEq("", resp.Msg.GetMessageId(), "SendResponse.MessageId is empty")
 	if acc.got.ChildID != "c_1" || acc.got.Mode != inbox.ModePrompt || acc.got.Text != "hello" {
 		t.Errorf("inbound = %+v, want child=c_1 mode=prompt text=hello", acc.got)
 	}
 }
 
 func TestSendMapsSteerAndAbort(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cases := []struct {
 		wire rafikiv1.SendMode
 		want inbox.Mode
@@ -70,14 +70,11 @@ func TestSendMapsSteerAndAbort(t *testing.T) {
 		acc := &fakeAccepter{}
 		s := connectapi.NewServer(nil)
 		s.SetInbox(acc)
-		if _, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 			ChildId: "c_1", Mode: tc.wire, Blocks: textBlocks("x"),
-		})); err != nil {
-			t.Fatalf("Send(%v): %v", tc.wire, err)
-		}
-		if acc.got.Mode != tc.want {
-			t.Errorf("mode for %v = %v, want %v", tc.wire, acc.got.Mode, tc.want)
-		}
+		}))
+		c.Require().NoError(err, "Send(%v)", tc.wire)
+		c.Eq(tc.want, acc.got.Mode, "mode for %v = %v, want", tc.wire, acc.got.Mode)
 	}
 }
 
@@ -86,9 +83,7 @@ func TestSendWithoutInboxFailsClosed(t *testing.T) {
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
 	}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestSendRejectsEmptyChildID(t *testing.T) {
@@ -97,9 +92,7 @@ func TestSendRejectsEmptyChildID(t *testing.T) {
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
 	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestSendRejectsUnspecifiedMode(t *testing.T) {
@@ -108,9 +101,7 @@ func TestSendRejectsUnspecifiedMode(t *testing.T) {
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Blocks: textBlocks("x"),
 	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // TestSendRejectsNonTextBlocks proves an image is refused rather than silently
@@ -120,6 +111,7 @@ func TestSendRejectsUnspecifiedMode(t *testing.T) {
 // not changed is that a block type with nowhere to go is refused rather than
 // skipped: silently dropping a payload looks to the sender like delivering it.
 func TestSendCarriesAnImageBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	acc := &fakeAccepter{}
 	s.SetInbox(acc)
@@ -133,21 +125,11 @@ func TestSendCarriesAnImageBlock(t *testing.T) {
 			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Send with an image: %v", err)
-	}
-	if got := acc.got.Text; got != "what is this?" {
-		t.Errorf("text = %q, want the prompt", got)
-	}
-	if n := len(acc.got.Attachments); n != 1 {
-		t.Fatalf("got %d attachments, want 1", n)
-	}
-	if got := acc.got.Attachments[0].MediaType; got != "image/png" {
-		t.Errorf("media type = %q", got)
-	}
-	if string(acc.got.Attachments[0].Data) != "\x89PNGfake" {
-		t.Errorf("image bytes did not survive: %q", acc.got.Attachments[0].Data)
-	}
+	c.Require().NoError(err, "Send with an image")
+	c.Eq("what is this?", acc.got.Text, "text")
+	c.Require().Eq(1, len(acc.got.Attachments), "got")
+	c.Eq("image/png", acc.got.Attachments[0].MediaType, "media type =")
+	c.Eq("\x89PNGfake", string(acc.got.Attachments[0].Data), "image bytes did not survive: %q", acc.got.Attachments[0].Data)
 }
 
 // An image block with no bytes is a caller error, not something to pass on as
@@ -162,9 +144,7 @@ func TestSendRejectsAnEmptyImage(t *testing.T) {
 			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: "image/png"}},
 		}},
 	}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // A block type Send cannot carry is still refused rather than skipped.
@@ -178,18 +158,15 @@ func TestSendRefusesABlockItCannotCarry(t *testing.T) {
 			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{Id: "tu_1"}},
 		}},
 	}))
-	if connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Errorf("code = %v, want Unimplemented", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnimplemented, connect.CodeOf(err), "code")
 }
 
 // TestSendAbortNeedsNoBlocks: an abort carries no content.
 func TestSendAbortNeedsNoBlocks(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetInbox(&fakeAccepter{})
-	if _, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_ABORT,
-	})); err != nil {
-		t.Errorf("Send(ABORT) with no blocks: %v", err)
-	}
+	}))
+	assert.NewCollecting(t).NoError(err, "Send(ABORT) with no blocks")
 }

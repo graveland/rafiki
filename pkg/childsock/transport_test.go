@@ -8,9 +8,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestServeTransportUsesTheCallerRoundTripper pins the executor-hosted shape:
@@ -21,6 +22,7 @@ import (
 // with its own marker must be the one the request reaches, whatever the
 // target URL claims.
 func TestServeTransportUsesTheCallerRoundTripper(t *testing.T) {
+	c := assert.NewAborting(t)
 	seen := make(chan *http.Request, 4)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen <- r
@@ -41,22 +43,16 @@ func TestServeTransportUsesTheCallerRoundTripper(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := ServeTransport(ctx, dir, target, "child-secret", rt)
-	if err != nil {
-		t.Fatalf("ServeTransport: %v", err)
-	}
+	c.NoError(err, "ServeTransport")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	resp := dial(t, SocketPath(dir), nil, "/rafiki.v1.Control/GetPreset")
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if !strings.Contains(string(body), "via-custom-rt") {
-		t.Fatalf("response %q did not come through the caller's transport", body)
-	}
+	c.StrContains(string(body), "via-custom-rt", "response %q did not come through the caller's transport", body)
 	select {
 	case r := <-seen:
-		if got := r.Header.Get("Authorization"); got != "Bearer child-secret" {
-			t.Fatalf("Authorization = %q, want the injected child secret", got)
-		}
+		c.Eq("Bearer child-secret", r.Header.Get("Authorization"), "Authorization")
 	default:
 		t.Fatal("the backend saw no request")
 	}
@@ -66,11 +62,10 @@ func TestServeTransportUsesTheCallerRoundTripper(t *testing.T) {
 // transport dials the named unix socket and ignores the URL's host, which is
 // the only way to reach a daemon whose Connect plane has no TCP address.
 func TestUnixTransportDialsTheSocket(t *testing.T) {
+	c := assert.NewAborting(t)
 	sock := filepath.Join(tempSocketDir(t), "face.sock")
 	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	c.NoError(err, "listen")
 	t.Cleanup(func() { _ = ln.Close() })
 	got := make(chan *http.Request, 4)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,14 +77,10 @@ func TestUnixTransportDialsTheSocket(t *testing.T) {
 
 	cli := &http.Client{Transport: UnixTransport(sock), Timeout: 5 * time.Second}
 	resp, err := cli.Get("http://connect.rafiki.invalid/anything")
-	if err != nil {
-		t.Fatalf("through UnixTransport: %v", err)
-	}
+	c.NoError(err, "through UnixTransport")
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if string(body) != "over-unix" {
-		t.Fatalf("body = %q, want the unix face's answer", body)
-	}
+	c.Eq("over-unix", string(body), "body = %q, want the unix face's answer", body)
 	select {
 	case <-got:
 	default:
@@ -102,6 +93,7 @@ func TestUnixTransportDialsTheSocket(t *testing.T) {
 // the SDK's bounded-backoff retry can recognise it, and the body must never
 // carry credentials (it carries only the transport failure).
 func TestProxyErrorSurfacesUnavailable(t *testing.T) {
+	c := assert.NewAborting(t)
 	// A transport that always fails, like a dial into a dead daemon.
 	rt := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -113,23 +105,15 @@ func TestProxyErrorSurfacesUnavailable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := ServeTransport(ctx, dir, target, "secret", rt)
-	if err != nil {
-		t.Fatalf("ServeTransport: %v", err)
-	}
+	c.NoError(err, "ServeTransport")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	resp := dial(t, SocketPath(dir), nil, "/rafiki.v1.Control/GetPreset")
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 ServiceUnavailable (a Connect client maps it to Unavailable)", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), `"code":"unavailable"`) {
-		t.Fatalf("body %q does not name code unavailable", body)
-	}
-	if strings.Contains(string(body), "secret") {
-		t.Fatalf("the error body carries the child secret: %q", body)
-	}
+	c.Eq(http.StatusServiceUnavailable, resp.StatusCode, "status")
+	c.StrContains(string(body), `"code":"unavailable"`, "body %q does not name code unavailable", body)
+	c.NotStrContains(string(body), "secret", "the error body carries the child secret: %q", body)
 }
 
 type errDaemonDown struct{}

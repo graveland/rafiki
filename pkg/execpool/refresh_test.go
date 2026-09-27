@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A relabel must reach a LIVE connection.
@@ -17,6 +19,7 @@ import (
 // cache through Live(). Executor connections are deliberately long-lived, so in
 // practice the labels were frozen at enrollment.
 func TestRelabellingReachesALiveConnection(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := newFakeStore("exec-1")
 	store.update(func(e *executors.Executor) { e.Labels = map[string]string{"env": "home"} })
 
@@ -24,14 +27,10 @@ func TestRelabellingReachesALiveConnection(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-1"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-1"}))
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
-	if got := p.Live()[0].Executor.Labels["env"]; got != "home" {
-		t.Fatalf("joined with env=%q, want home", got)
-	}
+	c.Eq("home", p.Live()[0].Executor.Labels["env"], "joined with env")
 
 	// The operator relabels. The executor process is untouched and still
 	// connected.
@@ -54,9 +53,7 @@ func TestDisablingAnExecutorRemovesItFromTheLivePool(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-2"}); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-2"}))
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
@@ -75,14 +72,13 @@ func TestDisablingAnExecutorRemovesItFromTheLivePool(t *testing.T) {
 // evicting itself at the same moment. An unreadable row keeps the last known one
 // and tries again on the next tick.
 func TestAnUnreadableRowDoesNotEvictAHealthyExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := newFakeStore("exec-3")
 	p := New(store)
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-3"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-3"}))
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
 	// Get now fails for this id — the fake returns an error for any id it does
@@ -93,10 +89,8 @@ func TestAnUnreadableRowDoesNotEvictAHealthyExecutor(t *testing.T) {
 	// Give the health loop several ticks to do the wrong thing.
 	time.Sleep(200 * time.Millisecond)
 
-	if len(p.Live()) != 1 {
-		t.Fatal("a healthy executor was evicted because its row could not be read; " +
-			"'could not check' is not 'revoked'")
-	}
+	c.Len(p.Live(), 1, "a healthy executor was evicted because its row could not be read; "+
+		"'could not check' is not 'revoked'")
 }
 
 // A DELETED row is a terminal answer, not a read failure — the distinction
@@ -111,9 +105,7 @@ func TestADeletedRowEvictsALiveExecutor(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-deleted"}); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-deleted"}))
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
 	store.delete()
@@ -132,34 +124,27 @@ func TestADeletedRowEvictsALiveExecutor(t *testing.T) {
 // executor off its own daemon, and the two would flap indefinitely with every
 // displacement looking like an ordinary reconnect in the log.
 func TestASecondConnectionIsRefusedWhileTheFirstIsAlive(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := newFakeStore("exec-dup")
 	p := New(store)
 	p.healthInterval = time.Hour // no health loop interference
 	p.healthTimeout = 2 * time.Second
 
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"}))
 	waitFor(t, 5*time.Second, "the first executor to join", func() bool { return len(p.Live()) == 1 })
 	first := p.Live()[0]
 
 	// A second, healthy connection presenting the same credential. It is
 	// refused at the HTTP layer, before the hijack.
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"}); err == nil {
-		t.Fatal("a second live connection must be refused at the upgrade, not served")
-	}
+	c.Error(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"}), "a second live connection must be refused at the upgrade, not served")
 
 	// Give it long enough to have displaced the incumbent if it were going to.
 	time.Sleep(500 * time.Millisecond)
 
 	live := p.Live()
-	if len(live) != 1 {
-		t.Fatalf("expected exactly one live connection, got %d", len(live))
-	}
-	if live[0].Describe != first.Describe {
-		t.Fatal("the second connection displaced a live incumbent; a stolen credential " +
-			"must not be able to evict the executor it was stolen from")
-	}
+	c.Len(live, 1, "expected exactly one live connection, got %d", len(live))
+	c.Eq(first.Describe, live[0].Describe, "the second connection displaced a live incumbent; a stolen credential "+
+		"must not be able to evict the executor it was stolen from")
 }
 
 // The other half, and the reason this is a liveness probe rather than
@@ -167,6 +152,7 @@ func TestASecondConnectionIsRefusedWhileTheFirstIsAlive(t *testing.T) {
 // NO FIN or RST behind, so the daemon still holds a connection that is dead.
 // Refusing the real executor until a health tick noticed would strand it.
 func TestAConnectionThatNoLongerAnswersIsReplaced(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := newFakeStore("exec-stale")
 	p := New(store)
 	p.healthInterval = time.Hour
@@ -174,15 +160,11 @@ func TestAConnectionThatNoLongerAnswersIsReplaced(t *testing.T) {
 
 	// The incumbent accepts and then answers nothing — a black hole, which is
 	// what a slept laptop looks like from here.
-	if err := joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-stale"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-stale"}))
 	waitFor(t, 5*time.Second, "the black hole to join", func() bool { return len(p.Live()) == 1 })
 
 	// The real executor comes back.
-	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-stale"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &stubHandler{executorID: "exec-stale"}))
 
 	waitFor(t, 10*time.Second, "the answering connection to take over", func() bool {
 		live := p.Live()

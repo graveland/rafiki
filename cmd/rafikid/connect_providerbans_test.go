@@ -14,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestProviderBanAuthority pins who may ban: the anonymous local socket and an
@@ -32,19 +34,16 @@ func TestProviderBanAuthority(t *testing.T) {
 		{"child token", &server.Identity{UserID: "u1", Via: server.ProvenanceChildToken, ChildID: "c1", IsAdmin: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			ctx := context.Background()
 			if tc.id != nil {
 				ctx = server.WithIdentity(ctx, tc.id)
 			}
 			m := connectProviderBans{g: routing.NewProviderGuard(0, slog.New(slog.DiscardHandler))}
 			_, _, err := m.BanProvider(ctx, "openinference", 0, "")
-			if tc.allow && err != nil {
-				t.Fatalf("BanProvider refused: %v", err)
-			}
+			c.False(tc.allow && err != nil, "BanProvider refused: %v", err)
 			if !tc.allow {
-				if connect.CodeOf(err) != connect.CodePermissionDenied {
-					t.Fatalf("BanProvider code %v, want PermissionDenied", connect.CodeOf(err))
-				}
+				c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "BanProvider code")
 				if err := m.UnbanProvider(ctx, "openinference"); connect.CodeOf(err) != connect.CodePermissionDenied {
 					t.Fatalf("UnbanProvider code %v, want PermissionDenied", connect.CodeOf(err))
 				}
@@ -56,28 +55,19 @@ func TestProviderBanAuthority(t *testing.T) {
 // TestProviderBanAdapterRoundTrip proves a ban lists with reason operator and
 // no expiry, and that the routing sentinels translate to connectapi's.
 func TestProviderBanAdapterRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	m := connectProviderBans{g: routing.NewProviderGuard(0, slog.New(slog.DiscardHandler))}
 	if _, _, err := m.BanProvider(ctx, "Open Inference", 0, "spinning"); err != nil {
 		t.Fatal(err)
 	}
 	rows, persistent, err := m.ListProviderBans(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if persistent {
-		t.Error("a sink-less guard reported persistent bans")
-	}
-	if len(rows) != 1 || rows[0].Provider != "open-inference" || rows[0].Reason != "operator" ||
-		!rows[0].ExpiresAt.IsZero() || rows[0].Note != "spinning" || rows[0].CreatedAt.IsZero() {
-		t.Fatalf("rows = %+v", rows)
-	}
-	if err := m.UnbanProvider(ctx, "open-inference"); err != nil {
-		t.Fatal(err)
-	}
-	if err := m.UnbanProvider(ctx, "open-inference"); !errors.Is(err, connectapi.ErrProviderNotBanned) {
-		t.Errorf("second unban = %v, want ErrProviderNotBanned", err)
-	}
+	c.Require().NoError(err)
+	c.False(persistent, "a sink-less guard reported persistent bans")
+	c.Require().False(len(rows) != 1 || rows[0].Provider != "open-inference" || rows[0].Reason != "operator" ||
+		!rows[0].ExpiresAt.IsZero() || rows[0].Note != "spinning" || rows[0].CreatedAt.IsZero(), "rows = %+v", rows)
+	c.Require().NoError(m.UnbanProvider(ctx, "open-inference"))
+	c.ErrorIs(m.UnbanProvider(ctx, "open-inference"), connectapi.ErrProviderNotBanned, "second unban")
 	if _, _, err := m.BanProvider(ctx, "x", -time.Hour, ""); !errors.Is(err, connectapi.ErrInvalidProviderBan) {
 		t.Errorf("negative ban = %v, want ErrInvalidProviderBan", err)
 	}

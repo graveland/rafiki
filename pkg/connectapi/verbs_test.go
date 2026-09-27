@@ -17,6 +17,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // namedChildScope is a ChildScope whose ChildID is fixed and non-empty -- the
@@ -103,26 +105,21 @@ func TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller(t *testing.T) {
 		}
 		exercised++
 		t.Run(string(fd.Name()), func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			f := &fakeLifecycle{}
 			s := childScopedServer(f)
 			req := &rafikiv1.SpawnRequest{Cwd: "/tmp"}
 			setOperatorOnlyField(t, req, fd)
 
 			_, err := s.Spawn(context.Background(), connect.NewRequest(req))
-			if connect.CodeOf(err) != connect.CodePermissionDenied {
-				t.Fatalf("Spawn with %s set (child caller) err = %v, want PermissionDenied", fd.Name(), err)
-			}
+			c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn with %s set (child caller) err = %v, want PermissionDenied", fd.Name(), err)
 			if !strings.Contains(err.Error(), string(fd.Name())) || !strings.Contains(err.Error(), "operator-only") {
 				t.Errorf("error %q does not name %s as operator-only", err.Error(), fd.Name())
 			}
-			if f.got.Cwd != "" {
-				t.Errorf("Spawn reached the lifecycle despite the refusal: %+v", f.got)
-			}
+			c.Eq("", f.got.Cwd, "Spawn reached the lifecycle despite the refusal: %+v", f.got)
 		})
 	}
-	if exercised == 0 {
-		t.Fatal("exercised zero operator-only fields -- the range or the descriptor moved, and this test now proves nothing")
-	}
+	assert.NewAborting(t).NotEq(0, exercised, "exercised zero operator-only fields -- the range or the descriptor moved, and this test now proves nothing")
 }
 
 // TestSpawnRequestFieldsAreClassified walks every field number SpawnRequest's
@@ -135,10 +132,9 @@ func TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller(t *testing.T) {
 // until someone puts it in one of the two buckets on purpose, on both sides
 // (this file's classification and verbs.go's childAllowedSpawnFields).
 func TestSpawnRequestFieldsAreClassified(t *testing.T) {
+	c := assert.NewAborting(t)
 	fields := (&rafikiv1.SpawnRequest{}).ProtoReflect().Descriptor().Fields()
-	if fields.Len() == 0 {
-		t.Fatal("SpawnRequest descriptor reports zero fields -- nothing was classified")
-	}
+	c.NotEq(0, fields.Len(), "SpawnRequest descriptor reports zero fields -- nothing was classified")
 	classified := 0
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
@@ -154,9 +150,7 @@ func TestSpawnRequestFieldsAreClassified(t *testing.T) {
 				"childAllowedSpawnFields in verbs.go if it should be child-reachable", n, fd.Name())
 		}
 	}
-	if classified != fields.Len() {
-		t.Fatalf("classified %d of %d SpawnRequest fields", classified, fields.Len())
-	}
+	c.Eq(fields.Len(), classified, "classified")
 }
 
 // TestSpawnAdmitsAUserCallerWithEveryOperatorOnlyFieldSet is the positive
@@ -186,9 +180,8 @@ func TestSpawnAdmitsAUserCallerWithEveryOperatorOnlyFieldSet(t *testing.T) {
 		RecordRequests:     true,
 		PassthroughAuth:    "on",
 	}
-	if _, err := s.Spawn(context.Background(), connect.NewRequest(req)); err != nil {
-		t.Fatalf("Spawn (operator, every operator-only field set) err = %v, want nil", err)
-	}
+	_, err := s.Spawn(context.Background(), connect.NewRequest(req))
+	assert.NewAborting(t).NoError(err, "Spawn (operator, every operator-only field set) err")
 	if f.got.ConfigDir != "/cfg" || f.got.AppendSystemPrompt != "be nice" || f.got.Thinking != "high" ||
 		!f.got.NoSession || f.got.ResumeSession != "sess-1" || f.got.ForkSession != "sess-0" ||
 		len(f.got.Extensions) != 1 || f.got.Extensions[0] != "ext" || !f.got.NoExtensions || !f.got.Verbose ||
@@ -245,6 +238,7 @@ func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			want := make(map[string]bool, len(tc.want))
 			for _, id := range tc.want {
 				want[id] = true
@@ -253,9 +247,7 @@ func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 			opServer := connectapi.NewServer(nil)
 			opServer.SetChildLister(&fakeLister{all: all})
 			opResp, err := opServer.ListChildren(context.Background(), connect.NewRequest(tc.req))
-			if err != nil {
-				t.Fatalf("ListChildren (operator): %v", err)
-			}
+			c.Require().NoError(err, "ListChildren (operator)")
 			if got := childIDsOf(opResp.Msg.GetChildren()); !mapsEqualBool(got, want) {
 				t.Errorf("operator path child ids = %v, want %v", got, want)
 			}
@@ -269,12 +261,9 @@ func TestListChildrenFiltersMatchListFilterSemantics(t *testing.T) {
 				return subtreeChildScope{all: all}
 			})
 			scopedResp, err := scopedServer.ListChildren(context.Background(), connect.NewRequest(tc.req))
-			if err != nil {
-				t.Fatalf("ListChildren (childScoped): %v", err)
-			}
-			if got := childIDsOf(scopedResp.Msg.GetChildren()); !mapsEqualBool(got, want) {
-				t.Errorf("childScoped path child ids = %v, want %v", got, want)
-			}
+			c.Require().NoError(err, "ListChildren (childScoped)")
+			got := childIDsOf(scopedResp.Msg.GetChildren())
+			c.True(mapsEqualBool(got, want), "childScoped path child ids = %v, want %v", got, want)
 		})
 	}
 }
@@ -311,6 +300,7 @@ func captureSlog(t *testing.T, run func() error) (string, error) {
 // The raw-Internal wrap this replaces told every client the daemon was broken
 // and carried no branchable reason.
 func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{killErr: &connectapi.ControllerError{
 		Code:    protocol.ErrChildExited,
 		Message: "child has already exited",
@@ -320,15 +310,9 @@ func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
 
 	_, err := s.Kill(context.Background(),
 		connect.NewRequest(&rafikiv1.KillRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != protocol.ErrChildExited {
-		t.Errorf("Reason = %q, want %q", got, protocol.ErrChildExited)
-	}
-	if err == nil || !strings.Contains(err.Error(), "child has already exited") {
-		t.Errorf("err = %v, want the daemon's authored message", err)
-	}
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.Eq(protocol.ErrChildExited, rpcreason.Reason(err), "Reason")
+	c.False(err == nil || !strings.Contains(err.Error(), "child has already exited"), "err = %v, want the daemon's authored message", err)
 }
 
 // TestSendChildExitedMapsToFailedPrecondition pins the same classification on
@@ -336,6 +320,7 @@ func TestKillChildExitedKeepsCodeAndReason(t *testing.T) {
 // exited or shutting-down child with an authored connectapi.ControllerError, which the
 // raw-Internal wrap flattened into a code-less Internal.
 func TestSendChildExitedMapsToFailedPrecondition(t *testing.T) {
+	c := assert.NewCollecting(t)
 	acc := &fakeAccepter{err: &connectapi.ControllerError{
 		Code:    protocol.ErrChildExited,
 		Message: "child has exited",
@@ -346,17 +331,14 @@ func TestSendChildExitedMapsToFailedPrecondition(t *testing.T) {
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1", Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, Blocks: textBlocks("x"),
 	}))
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != protocol.ErrChildExited {
-		t.Errorf("Reason = %q, want %q", got, protocol.ErrChildExited)
-	}
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.Eq(protocol.ErrChildExited, rpcreason.Reason(err), "Reason")
 }
 
 // TestSpawnControllerErrorKeepsItsCode pins the Spawn side: a budget refusal
 // arrives as InvalidArgument with its reason, not Internal.
 func TestSpawnControllerErrorKeepsItsCode(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(&fakeLifecycle{spawnErr: &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
@@ -365,12 +347,8 @@ func TestSpawnControllerErrorKeepsItsCode(t *testing.T) {
 
 	_, err := s.Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != protocol.ErrInvalidArgs {
-		t.Errorf("Reason = %q, want %q", got, protocol.ErrInvalidArgs)
-	}
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.Eq(protocol.ErrInvalidArgs, rpcreason.Reason(err), "Reason")
 }
 
 // TestSendSpawnKillUncodedErrorsAreRedactedAndLogged walks Send, Spawn and Kill's
@@ -422,23 +400,14 @@ func TestSendSpawnKillUncodedErrorsAreRedactedAndLogged(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			logs, err := captureSlog(t, func() error { return tc.call(t) })
-			if connect.CodeOf(err) != connect.CodeInternal {
-				t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-			}
-			if err == nil || !strings.Contains(err.Error(), "internal error") {
-				t.Errorf("err = %v, want the fixed internal text", err)
-			}
-			if strings.Contains(err.Error(), "db.internal") {
-				t.Errorf("err = %v, want the raw cause redacted", err)
-			}
-			if got := rpcreason.Reason(err); got != "" {
-				t.Errorf("Reason = %q, want none", got)
-			}
+			c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+			c.False(err == nil || !strings.Contains(err.Error(), "internal error"), "err = %v, want the fixed internal text", err)
+			c.NotStrContains(err.Error(), "db.internal", "err = %v, want the raw cause redacted", err)
+			c.Eq("", rpcreason.Reason(err), "Reason")
 			for _, want := range tc.wantInLog {
-				if !strings.Contains(logs, want) {
-					t.Errorf("log %q missing %q", logs, want)
-				}
+				c.StrContains(logs, want, "log")
 			}
 		})
 	}

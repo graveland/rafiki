@@ -8,25 +8,23 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestConversationSummary_JSONTags(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b, err := json.Marshal(ConversationSummary{ID: "x", DrivenBy: "client", InputTokens: 42, CacheHitRatio: 0.75, TotalCostUSD: 1.23})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	c.Require().NoError(err, "marshal")
 	got := string(b)
 	for _, want := range []string{`"driven_by"`, `"input_tokens"`, `"cache_read_tokens"`, `"first_message"`, `"cache_hit_ratio"`, `"total_cost_usd"`} {
-		if !strings.Contains(got, want) {
-			t.Errorf("marshaled summary %s missing %s", got, want)
-		}
+		c.StrContains(got, want, "marshaled summary")
 	}
-	if strings.Contains(got, `"DrivenBy"`) || strings.Contains(got, `"InputTokens"`) || strings.Contains(got, `"TotalCostUSD"`) || strings.Contains(got, `"CacheHitRatio"`) {
-		t.Errorf("marshaled summary %s still has CamelCase keys", got)
-	}
+	c.False(strings.Contains(got, `"DrivenBy"`) || strings.Contains(got, `"InputTokens"`) || strings.Contains(got, `"TotalCostUSD"`) || strings.Contains(got, `"CacheHitRatio"`), "marshaled summary %s still has CamelCase keys", got)
 }
 
 func TestSearch_FiltersByPath(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedConversation(t, pool, "client", "alice") // proxy
@@ -34,50 +32,27 @@ func TestSearch_FiltersByPath(t *testing.T) {
 	ins := New(pool)
 
 	proxyOnly, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: PathProxy, Limit: 10})
-	if err != nil {
-		t.Fatalf("search proxy: %v", err)
-	}
-	if len(proxyOnly) != 1 {
-		t.Fatalf("proxy results = %d, want 1", len(proxyOnly))
-	}
-	if proxyOnly[0].DrivenBy != "client" {
-		t.Errorf("driven_by = %q, want client", proxyOnly[0].DrivenBy)
-	}
-	if proxyOnly[0].Turns <= 0 {
-		t.Errorf("turns = %d, want > 0", proxyOnly[0].Turns)
-	}
-	if proxyOnly[0].Owner != "alice" {
-		t.Errorf("owner = %q, want alice", proxyOnly[0].Owner)
-	}
+	c.Require().NoError(err, "search proxy")
+	c.Require().Len(proxyOnly, 1, "proxy results = %d, want 1", len(proxyOnly))
+	c.Eq("client", proxyOnly[0].DrivenBy, "driven_by")
+	c.Greater(0, proxyOnly[0].Turns, "turns")
+	c.Eq("alice", proxyOnly[0].Owner, "owner")
 	// The aggregate must sum both turns (100+120 in, 0+80 cache_read).
-	if proxyOnly[0].InputTokens != 220 {
-		t.Errorf("input_tokens = %d, want 220", proxyOnly[0].InputTokens)
-	}
-	if proxyOnly[0].CacheReadTokens != 80 {
-		t.Errorf("cache_read_tokens = %d, want 80", proxyOnly[0].CacheReadTokens)
-	}
-	if proxyOnly[0].FirstMessage == "" {
-		t.Error("first message snippet is empty, want the seeded user text")
-	}
+	c.Eq(220, proxyOnly[0].InputTokens, "input_tokens")
+	c.Eq(80, proxyOnly[0].CacheReadTokens, "cache_read_tokens")
+	c.NotEq("", proxyOnly[0].FirstMessage, "first message snippet is empty, want the seeded user text")
 
 	directOnly, err := ins.Search(ctx, ScopeAll(), SearchFilter{Path: PathDirect, Limit: 10})
-	if err != nil {
-		t.Fatalf("search direct: %v", err)
-	}
-	if len(directOnly) != 1 || directOnly[0].DrivenBy != "server" {
-		t.Fatalf("direct results = %+v, want one server conversation", directOnly)
-	}
+	c.Require().NoError(err, "search direct")
+	c.Require().False(len(directOnly) != 1 || directOnly[0].DrivenBy != "server", "direct results = %+v, want one server conversation", directOnly)
 
 	all, err := ins.Search(ctx, ScopeAll(), SearchFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("search all: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("unfiltered results = %d, want 2", len(all))
-	}
+	c.Require().NoError(err, "search all")
+	c.Require().Len(all, 2, "unfiltered results = %d, want 2", len(all))
 }
 
 func TestSearch_FiltersByOwnerAndText(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedConversation(t, pool, "client", "alice")
@@ -85,39 +60,24 @@ func TestSearch_FiltersByOwnerAndText(t *testing.T) {
 	ins := New(pool)
 
 	byOwner, err := ins.Search(ctx, ScopeAll(), SearchFilter{Owner: "bob"})
-	if err != nil {
-		t.Fatalf("search owner: %v", err)
-	}
-	if len(byOwner) != 1 || byOwner[0].Owner != "bob" {
-		t.Fatalf("owner filter = %+v, want one bob conversation", byOwner)
-	}
+	c.Require().NoError(err, "search owner")
+	c.Require().False(len(byOwner) != 1 || byOwner[0].Owner != "bob", "owner filter = %+v, want one bob conversation", byOwner)
 
 	byText, err := ins.Search(ctx, ScopeAll(), SearchFilter{Text: "hello"})
-	if err != nil {
-		t.Fatalf("search text: %v", err)
-	}
-	if len(byText) != 2 {
-		t.Errorf("text 'hello' matched %d, want 2", len(byText))
-	}
+	c.Require().NoError(err, "search text")
+	c.Len(byText, 2, "text 'hello' matched %d, want 2", len(byText))
 
 	noText, err := ins.Search(ctx, ScopeAll(), SearchFilter{Text: "nonexistent-substring"})
-	if err != nil {
-		t.Fatalf("search text miss: %v", err)
-	}
-	if len(noText) != 0 {
-		t.Errorf("text miss matched %d, want 0", len(noText))
-	}
+	c.Require().NoError(err, "search text miss")
+	c.Empty(noText, "text miss matched %d, want 0", len(noText))
 
 	byMinTokens, err := ins.Search(ctx, ScopeAll(), SearchFilter{MinTokens: 1000})
-	if err != nil {
-		t.Fatalf("search min tokens: %v", err)
-	}
-	if len(byMinTokens) != 0 {
-		t.Errorf("min tokens 1000 matched %d, want 0 (seeded totals are lower)", len(byMinTokens))
-	}
+	c.Require().NoError(err, "search min tokens")
+	c.Empty(byMinTokens, "min tokens 1000 matched %d, want 0 (seeded totals are lower)", len(byMinTokens))
 }
 
 func TestSearch_TextMatchesExtractedTextNotJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedConversation(t, pool, "client", "alice") // user msg: [{"type":"text","text":"hello there"}]
@@ -125,27 +85,18 @@ func TestSearch_TextMatchesExtractedTextNotJSON(t *testing.T) {
 
 	// "type" appears in the JSON structure but not in the message text.
 	byStruct, err := ins.Search(ctx, ScopeAll(), SearchFilter{Text: "type"})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(byStruct) != 0 {
-		t.Errorf("text 'type' matched %d, want 0 (must match text, not JSON keys)", len(byStruct))
-	}
+	c.Require().NoError(err, "search")
+	c.Empty(byStruct, "text 'type' matched %d, want 0 (must match text, not JSON keys)", len(byStruct))
 
 	// The snippet is the extracted text, not raw JSONB.
 	got, err := ins.Search(ctx, ScopeAll(), SearchFilter{Text: "hello"})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("text 'hello' matched %d, want 1", len(got))
-	}
-	if got[0].FirstMessage != "hello there" {
-		t.Errorf("first_message = %q, want %q", got[0].FirstMessage, "hello there")
-	}
+	c.Require().NoError(err, "search")
+	c.Require().Len(got, 1, "text 'hello' matched %d, want 1", len(got))
+	c.Eq("hello there", got[0].FirstMessage, "first_message")
 }
 
 func TestSearch_PlainStringContent(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := insertConversation(t, pool, "client", "bob")
@@ -154,15 +105,12 @@ func TestSearch_PlainStringContent(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Search(ctx, ScopeAll(), SearchFilter{Text: "plain"})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(got) != 1 || got[0].FirstMessage != "just a plain string" {
-		t.Fatalf("plain-string content search = %+v, want one row with the string text", got)
-	}
+	c.NoError(err, "search")
+	c.False(len(got) != 1 || got[0].FirstMessage != "just a plain string", "plain-string content search = %+v, want one row with the string text", got)
 }
 
 func TestSearch_ModelAndSourceMatchStatsPopulation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	// conversation.model differs from the per-turn served model.
@@ -174,33 +122,22 @@ func TestSearch_ModelAndSourceMatchStatsPopulation(t *testing.T) {
 	// Search by served model finds it, and Stats over the same model filter
 	// selects the same single conversation (aligned population).
 	found, err := ins.Search(ctx, ScopeAll(), SearchFilter{Model: "served-model-x"})
-	if err != nil {
-		t.Fatalf("search model: %v", err)
-	}
-	if len(found) != 1 {
-		t.Fatalf("search by served model = %d, want 1", len(found))
-	}
+	c.Require().NoError(err, "search model")
+	c.Require().Len(found, 1, "search by served model = %d, want 1", len(found))
 	s, err := ins.GlobalStats(ctx, ScopeAll(), StatsFilter{Model: "served-model-x"})
-	if err != nil {
-		t.Fatalf("stats model: %v", err)
-	}
-	if s.Volume.Conversations != 1 {
-		t.Errorf("stats conversations for served model = %d, want 1 (must match search)", s.Volume.Conversations)
-	}
+	c.Require().NoError(err, "stats model")
+	c.Eq(1, s.Volume.Conversations, "stats conversations for served model")
 
 	// A mixed-source conversation is found by search for BOTH of its sources.
 	for _, src := range []string{"claude", "slack"} {
 		got, err := ins.Search(ctx, ScopeAll(), SearchFilter{Source: src})
-		if err != nil {
-			t.Fatalf("search source %s: %v", src, err)
-		}
-		if len(got) != 1 {
-			t.Errorf("search source %s = %d, want 1", src, len(got))
-		}
+		c.Require().NoError(err, "search source %s", src)
+		c.Len(got, 1, "search source %s = %d, want 1", src, len(got))
 	}
 }
 
 func TestSearch_SinceMatchesTurnActivityLikeStats(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	// An old conversation with a recent turn, and a recent conversation whose
@@ -222,24 +159,19 @@ func TestSearch_SinceMatchesTurnActivityLikeStats(t *testing.T) {
 
 	since := time.Now().Add(-time.Hour)
 	rows, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Since: &since})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(rows) != 1 || rows[0].ID != oldConv {
-		t.Fatalf("search since = %+v, want exactly the old conversation with the recent turn", rows)
-	}
+	c.NoError(err, "search")
+	c.False(len(rows) != 1 || rows[0].ID != oldConv, "search since = %+v, want exactly the old conversation with the recent turn", rows)
 
 	// The stats population over the same filter agrees.
 	s, err := New(pool).GlobalStats(ctx, ScopeAll(), StatsFilter{Since: &since})
-	if err != nil {
-		t.Fatalf("stats: %v", err)
-	}
+	c.NoError(err, "stats")
 	if s.Volume.Conversations != 1 || s.Volume.Turns != 1 {
 		t.Errorf("stats volume = %d/%d, want 1/1", s.Volume.Conversations, s.Volume.Turns)
 	}
 }
 
 func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	// model=X and source=Y on DIFFERENT turns must not match a combined
@@ -252,12 +184,8 @@ func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
 	insertTurn(t, pool, both, seedTurn{ordinal: 0, model: "model-x", source: "claude", inTok: 10})
 
 	rows, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Model: "model-x", Source: "claude"})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(rows) != 1 || rows[0].ID != both {
-		t.Fatalf("search model+source = %+v, want only the conversation with both on one turn", rows)
-	}
+	c.NoError(err, "search")
+	c.False(len(rows) != 1 || rows[0].ID != both, "search model+source = %+v, want only the conversation with both on one turn", rows)
 }
 
 // TestSearch_ZeroTokenConversationHasZeroCacheHitRatio covers a conversation
@@ -267,23 +195,19 @@ func TestSearch_TurnFiltersRequireOneMatchingTurn(t *testing.T) {
 // into the bare float64 CacheHitRatio field and Search fails outright — not
 // just for that row, for the whole call.
 func TestSearch_ZeroTokenConversationHasZeroCacheHitRatio(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	insertConversation(t, pool, "client", "alice") // no turns: in_tok=cache_read=0
 
 	rows, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("results = %d, want 1", len(rows))
-	}
-	if rows[0].CacheHitRatio != 0 {
-		t.Errorf("cache_hit_ratio = %v, want 0", rows[0].CacheHitRatio)
-	}
+	c.Require().NoError(err, "search")
+	c.Require().Len(rows, 1, "results = %d, want 1", len(rows))
+	c.Eq(0, rows[0].CacheHitRatio, "cache_hit_ratio")
 }
 
 func TestSearch_FiltersByEntrypoint(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 
@@ -302,30 +226,18 @@ func TestSearch_FiltersByEntrypoint(t *testing.T) {
 
 	// Filter by Entrypoint='analyze' should return only analyzeConv
 	byEntrypoint, err := ins.Search(ctx, ScopeAll(), SearchFilter{Entrypoint: "analyze"})
-	if err != nil {
-		t.Fatalf("search by entrypoint: %v", err)
-	}
-	if len(byEntrypoint) != 1 || byEntrypoint[0].ID != analyzeConv {
-		t.Fatalf("entrypoint filter = %+v, want one analyze conversation", byEntrypoint)
-	}
+	c.NoError(err, "search by entrypoint")
+	c.False(len(byEntrypoint) != 1 || byEntrypoint[0].ID != analyzeConv, "entrypoint filter = %+v, want one analyze conversation", byEntrypoint)
 
 	// ExcludeEntrypoint='analyze' should return only testConv
 	exclude, err := ins.Search(ctx, ScopeAll(), SearchFilter{ExcludeEntrypoint: "analyze"})
-	if err != nil {
-		t.Fatalf("search exclude entrypoint: %v", err)
-	}
-	if len(exclude) != 1 || exclude[0].ID != testConv {
-		t.Fatalf("exclude entrypoint filter = %+v, want one test conversation", exclude)
-	}
+	c.NoError(err, "search exclude entrypoint")
+	c.False(len(exclude) != 1 || exclude[0].ID != testConv, "exclude entrypoint filter = %+v, want one test conversation", exclude)
 
 	// Zero-value filter returns both
 	all, err := ins.Search(ctx, ScopeAll(), SearchFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("search all: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("unfiltered results = %d, want 2", len(all))
-	}
+	c.NoError(err, "search all")
+	c.Len(all, 2, "unfiltered results = %d, want 2", len(all))
 }
 
 // `user rm` tombstones instead of deleting and the username uniqueness index
@@ -334,6 +246,7 @@ func TestSearch_FiltersByEntrypoint(t *testing.T) {
 // ACTIVE-or-not row; a bare `username = ...` subquery would fail the whole
 // query with "more than one row returned by a subquery used as an expression".
 func TestSearch_OwnerFilterSurvivesAReusedUsername(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 
@@ -345,42 +258,31 @@ func TestSearch_OwnerFilterSurvivesAReusedUsername(t *testing.T) {
 	}
 	// A second, live carol: ensureUser only ever finds the active row.
 	newID := ensureUser(t, pool, "carol")
-	if newID == oldID {
-		t.Fatal("recreating a tombstoned username reused the same row")
-	}
+	c.Require().NotEq(oldID, newID, "recreating a tombstoned username reused the same row")
 	newConv := seedConversation(t, pool, "client", "carol")
 
 	got, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Owner: "carol"})
-	if err != nil {
-		t.Fatalf("search by a reused owner name: %v", err)
-	}
+	c.Require().NoError(err, "search by a reused owner name")
 	// The subselect picks the newest row, so only the live carol's
 	// conversation matches — the tombstoned one keeps its own id.
-	if len(got) != 1 || got[0].ID != newConv {
-		t.Fatalf("owner filter returned %+v, want only the live carol's conversation %s", got, newConv)
-	}
-	if got[0].Owner != "carol" {
-		t.Errorf("owner = %q, want carol", got[0].Owner)
-	}
+	c.Require().False(len(got) != 1 || got[0].ID != newConv, "owner filter returned %+v, want only the live carol's conversation %s", got, newConv)
+	c.Eq("carol", got[0].Owner, "owner")
 
 	// The tombstoned user's own conversation still renders their name: the
 	// display join is unfiltered by deleted_at even though the filter is not.
 	var name string
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT coalesce(u.username,'') FROM conversations.conversation c
 		   LEFT JOIN conversations.users u ON u.id = c.owner_user_id
-		  WHERE c.id = $1::uuid`, oldConv).Scan(&name); err != nil {
-		t.Fatalf("read tombstoned owner name: %v", err)
-	}
-	if name != "carol" {
-		t.Errorf("tombstoned owner resolves to %q, want carol", name)
-	}
+		  WHERE c.id = $1::uuid`, oldConv).Scan(&name), "read tombstoned owner name")
+	c.Eq("carol", name, "tombstoned owner resolves to")
 }
 
 // TestSearchScopeOwnerExcludesOtherOwners pins that scope ANDs with the query
 // rather than being replaced by it: a ScopeOwner(bob) search over conversations
 // owned by bob and carol yields exactly bob's, and the owner column reports him.
 func TestSearchScopeOwnerExcludesOtherOwners(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedConversation(t, pool, "client", "bob")
@@ -388,15 +290,9 @@ func TestSearchScopeOwnerExcludesOtherOwners(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Search(ctx, ScopeOwner(ensureUser(t, pool, "bob")), SearchFilter{})
-	if err != nil {
-		t.Fatalf("search scoped to bob: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("scoped search returned %d rows, want 1 (bob's only)", len(got))
-	}
-	if got[0].Owner != "bob" {
-		t.Errorf("owner = %q, want bob", got[0].Owner)
-	}
+	c.Require().NoError(err, "search scoped to bob")
+	c.Require().Len(got, 1, "scoped search returned %d rows, want 1 (bob's only)", len(got))
+	c.Eq("bob", got[0].Owner, "owner")
 }
 
 // TestSearchScopeAndOwnerFilterCompose pins that the caller's own Owner filter
@@ -404,6 +300,7 @@ func TestSearchScopeOwnerExcludesOtherOwners(t *testing.T) {
 // scoped to bob composes two owner conditions that cannot both be true, so the
 // answer is zero rows — never carol's conversation.
 func TestSearchScopeAndOwnerFilterCompose(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	bobID := ensureUser(t, pool, "bob")
@@ -412,28 +309,21 @@ func TestSearchScopeAndOwnerFilterCompose(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Search(ctx, ScopeOwner(bobID), SearchFilter{Owner: "carol"})
-	if err != nil {
-		t.Fatalf("search scoped to bob, filtered by owner carol: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("scope + other-owner filter returned %d rows, want 0 (a narrow scope must never return another owner's rows)", len(got))
-	}
+	c.NoError(err, "search scoped to bob, filtered by owner carol")
+	c.Empty(got, "scope + other-owner filter returned %d rows, want 0 (a narrow scope must never return another owner's rows)", len(got))
 }
 
 // TestSearchScopeZeroValueReturnsNoRows proves the zero-value-denies rule
 // end-to-end through the real query builder, not just cond()'s unit level: a
 // Scope{} that reached Search must return no rows at all.
 func TestSearchScopeZeroValueReturnsNoRows(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedConversation(t, pool, "client", "bob")
 	ins := New(pool)
 
 	got, err := ins.Search(ctx, Scope{}, SearchFilter{})
-	if err != nil {
-		t.Fatalf("search with zero-value scope: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("zero-value scope returned %d rows, want 0 (the zero value denies)", len(got))
-	}
+	c.NoError(err, "search with zero-value scope")
+	c.Empty(got, "zero-value scope returned %d rows, want 0 (the zero value denies)", len(got))
 }

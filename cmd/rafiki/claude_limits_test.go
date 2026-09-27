@@ -8,9 +8,12 @@ import (
 	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRenderRateLimitStatus(t *testing.T) {
+	c := assert.NewCollecting(t)
 	util5 := 0.42
 	reset5 := time.Now().Add(2 * time.Hour).Unix()
 	st := &rafikiv1.GetRateLimitStatusResponse{
@@ -26,14 +29,10 @@ func TestRenderRateLimitStatus(t *testing.T) {
 	out := sb.String()
 
 	for _, want := range []string{"org_123", "42%", "allowed_warning", "5h ", "7d "} {
-		if !strings.Contains(out, want) {
-			t.Errorf("render output missing %q; got:\n%s", want, out)
-		}
+		c.StrContains(out, want, "render output missing")
 	}
 	// 7d has no utilization reported -- must show the unknown marker, not "0%".
-	if strings.Contains(out, "0% used") {
-		t.Errorf("rendered a false 0%% for an unreported utilization; got:\n%s", out)
-	}
+	c.NotStrContains(out, "0% used", "rendered a false 0%% for an unreported utilization; got:\n")
 }
 
 func TestRenderRateLimitStatusAllUnknown(t *testing.T) {
@@ -44,7 +43,5 @@ func TestRenderRateLimitStatusAllUnknown(t *testing.T) {
 	var sb strings.Builder
 	renderRateLimitStatus(&sb, st)
 	out := sb.String()
-	if !strings.Contains(out, "—") {
-		t.Errorf("expected the unknown marker for absent fields; got:\n%s", out)
-	}
+	assert.NewCollecting(t).StrContains(out, "—", "expected the unknown marker for absent fields; got:\n")
 }

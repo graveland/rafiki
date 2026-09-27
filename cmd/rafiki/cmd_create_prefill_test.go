@@ -5,13 +5,14 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newPrefillTestCmd returns a create-shaped command with the two flags
@@ -30,6 +31,7 @@ func newPrefillTestCmd() *cobra.Command {
 // without a daemon.
 func TestCreatePrefillFlag(t *testing.T) {
 	t.Run("file becomes entries", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		dir := t.TempDir()
 		list := filepath.Join(dir, "prefill.txt")
 		content := "# context for the task\n" +
@@ -37,67 +39,46 @@ func TestCreatePrefillFlag(t *testing.T) {
 			"\n" +
 			"  src/**/*.rs  \n" +
 			"docs/design.md:200-\n"
-		if err := os.WriteFile(list, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(os.WriteFile(list, []byte(content), 0o644))
 		cmd := newPrefillTestCmd()
-		if err := cmd.Flags().Set("prefill-files", list); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set("prefill-files", list))
 
 		got, err := resolvePrefillFiles(cmd)
-		if err != nil {
-			t.Fatalf("resolvePrefillFiles: %v", err)
-		}
+		c.Require().NoError(err, "resolvePrefillFiles")
 		want := []protocol.PrefillRead{
 			{Path: "CLAUDE.md", Start: 10, End: 40},
 			{Path: "src/**/*.rs"},
 			{Path: "docs/design.md", Start: 200},
 		}
-		if !slices.Equal(got, want) {
-			t.Errorf("entries = %+v, want %+v", got, want)
-		}
+		c.EqDiff(want, got, "entries")
 	})
 
 	t.Run("unset flag is nil", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		cmd := newPrefillTestCmd()
 		got, err := resolvePrefillFiles(cmd)
-		if err != nil {
-			t.Fatalf("resolvePrefillFiles: %v", err)
-		}
-		if got != nil {
-			t.Errorf("entries = %+v, want nil", got)
-		}
+		c.Require().NoError(err, "resolvePrefillFiles")
+		c.Nil(got, "entries")
 	})
 
 	t.Run("stdin without detached errors", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		cmd := newPrefillTestCmd()
-		if err := cmd.Flags().Set("prefill-files", "-"); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set("prefill-files", "-"))
 
 		_, err := resolvePrefillFiles(cmd)
-		if err == nil {
-			t.Fatal("want an error for '-' without --detached, got none")
-		}
-		if got := err.Error(); got != "--prefill-files -: stdin is only available with --detached" {
-			t.Errorf("error = %q, want the exact refused-stdin message", got)
-		}
+		c.Require().Error(err, "want an error for '-' without --detached, got none")
+		c.Eq("--prefill-files -: stdin is only available with --detached", err.Error(), "error")
 	})
 
 	t.Run("stdin with detached reads stdin", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		cmd := newPrefillTestCmd()
-		if err := cmd.Flags().Set("prefill-files", "-"); err != nil {
-			t.Fatal(err)
-		}
-		if err := cmd.Flags().Set("detached", "true"); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set("prefill-files", "-"))
+		c.Require().NoError(cmd.Flags().Set("detached", "true"))
 
 		r, w, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(err)
 		if _, err := w.WriteString("README.md:1-20\n"); err != nil {
 			t.Fatal(err)
 		}
@@ -107,45 +88,31 @@ func TestCreatePrefillFlag(t *testing.T) {
 		defer func() { os.Stdin = oldStdin }()
 
 		got, err := resolvePrefillFiles(cmd)
-		if err != nil {
-			t.Fatalf("resolvePrefillFiles: %v", err)
-		}
+		c.Require().NoError(err, "resolvePrefillFiles")
 		want := []protocol.PrefillRead{{Path: "README.md", Start: 1, End: 20}}
-		if !slices.Equal(got, want) {
-			t.Errorf("entries = %+v, want %+v", got, want)
-		}
+		c.EqDiff(want, got, "entries")
 	})
 
 	t.Run("parse error surfaces", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		dir := t.TempDir()
 		list := filepath.Join(dir, "bad.txt")
-		if err := os.WriteFile(list, []byte("notes.txt:5-2\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(os.WriteFile(list, []byte("notes.txt:5-2\n"), 0o644))
 		cmd := newPrefillTestCmd()
-		if err := cmd.Flags().Set("prefill-files", list); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(cmd.Flags().Set("prefill-files", list))
 
 		_, err := resolvePrefillFiles(cmd)
-		if err == nil {
-			t.Fatal("want a parse error for a reversed range, got none")
-		}
-		if !strings.Contains(err.Error(), "prefill: line 1") {
-			t.Errorf("error = %q, want the parser's line-1 diagnostic", err)
-		}
+		c.Require().Error(err, "want a parse error for a reversed range, got none")
+		c.StrContains(err.Error(), "prefill: line 1", "error = %q, want the parser's line-1 diagnostic", err)
 	})
 
 	t.Run("missing file names the flag", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		cmd := newPrefillTestCmd()
-		if err := cmd.Flags().Set("prefill-files", filepath.Join(t.TempDir(), "absent.txt")); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(cmd.Flags().Set("prefill-files", filepath.Join(t.TempDir(), "absent.txt")))
 
 		_, err := resolvePrefillFiles(cmd)
-		if err == nil {
-			t.Fatal("want an error for a missing list file, got none")
-		}
+		c.Error(err, "want an error for a missing list file, got none")
 		if !strings.HasPrefix(err.Error(), "--prefill-files ") {
 			t.Errorf("error = %q, want it to name the flag", err)
 		}
@@ -156,19 +123,12 @@ func TestCreatePrefillFlag(t *testing.T) {
 // SpawnRequest has no such field) — so the combination used to parse the list
 // and then silently drop it. The flags are mutually exclusive at parse time.
 func TestPrefillFilesInteractiveExclusive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newCreateCmd()
-	if err := cmd.Flags().Set("interactive", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("prefill-files", "list.txt"); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.Flags().Set("interactive", "true"))
+	c.Require().NoError(cmd.Flags().Set("prefill-files", "list.txt"))
 
 	err := cmd.ValidateFlagGroups()
-	if err == nil {
-		t.Fatal("want -i and --prefill-files to be rejected together, got none")
-	}
-	if !strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "prefill-files") {
-		t.Errorf("error = %q, want it to name both flags", err)
-	}
+	c.Require().Error(err, "want -i and --prefill-files to be rejected together, got none")
+	c.False(!strings.Contains(err.Error(), "interactive") || !strings.Contains(err.Error(), "prefill-files"), "error = %q, want it to name both flags", err)
 }

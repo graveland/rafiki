@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestPresetProtoRoundTripTriState pins the tri-state through the wire:
@@ -14,6 +16,7 @@ import (
 // non-nil empty = "none". It also pins the optional scalars (ContextFiles,
 // MaxCost nil vs 0, MaxDepth, MaxChildren), Labels, and the RFC3339 times.
 func TestPresetProtoRoundTripTriState(t *testing.T) {
+	c := assert.NewCollecting(t)
 	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	deleted := created.Add(30 * time.Minute)
 
@@ -61,9 +64,8 @@ func TestPresetProtoRoundTripTriState(t *testing.T) {
 			{"skills", tc.record.Skills, got.Skills},
 			{"mcp_servers", tc.record.MCPServers, got.MCPServers},
 		} {
-			if msg := triStateDiff(f.want, f.gotF); msg != "" {
-				t.Errorf("%s: %s tri-state broken (%s): want %#v, got %#v", tc.name, f.name, msg, f.want, f.gotF)
-			}
+			msg := triStateDiff(f.want, f.gotF)
+			c.Eq("", msg, "%s: %s tri-state broken (%s): want %#v, got %#v", tc.name, f.name, msg, f.want, f.gotF)
 		}
 
 		assertPtrEqual(t, tc.name+"/context_files", tc.record.ContextFiles, got.ContextFiles)
@@ -77,9 +79,7 @@ func TestPresetProtoRoundTripTriState(t *testing.T) {
 			t.Errorf("%s: labels = %v, want %v", tc.name, got.Labels, tc.record.Labels)
 		} else {
 			for k, v := range tc.record.Labels {
-				if got.Labels[k] != v {
-					t.Errorf("%s: labels[%q] = %q, want %q", tc.name, k, got.Labels[k], v)
-				}
+				c.Eq(v, got.Labels[k], "%s: labels[%q] = %q, want", tc.name, k, got.Labels[k])
 			}
 		}
 
@@ -98,17 +98,11 @@ func TestPresetProtoRoundTripTriState(t *testing.T) {
 			{"append_system_prompt", tc.record.AppendSystemPrompt, got.AppendSystemPrompt},
 			{"written_by_child", tc.record.WrittenByChild, got.WrittenByChild},
 		} {
-			if f.want != f.gotF {
-				t.Errorf("%s: %s = %q, want %q", tc.name, f.name, f.gotF, f.want)
-			}
+			c.Eq(f.want, f.gotF, "%s: %s = %q, want", tc.name, f.name, f.gotF)
 		}
 
-		if got.ID != tc.record.ID {
-			t.Errorf("%s: version = %d, want %d", tc.name, got.ID, tc.record.ID)
-		}
-		if !got.CreatedAt.Equal(tc.record.CreatedAt) {
-			t.Errorf("%s: created_at = %v, want %v", tc.name, got.CreatedAt, tc.record.CreatedAt)
-		}
+		c.Eq(tc.record.ID, got.ID, "%s: version = %d, want", tc.name, got.ID)
+		c.True(got.CreatedAt.Equal(tc.record.CreatedAt), "%s: created_at = %v, want %v", tc.name, got.CreatedAt, tc.record.CreatedAt)
 		if (tc.record.DeletedAt == nil) != (got.DeletedAt == nil) {
 			t.Errorf("%s: deleted_at nil-ness changed", tc.name)
 		} else if tc.record.DeletedAt != nil && !got.DeletedAt.Equal(*tc.record.DeletedAt) {

@@ -54,6 +54,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/persist"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scriptExecutorDriverCode is the executor-hosted driver. Order matters: the
@@ -101,6 +103,7 @@ except Exception:
 // the cache root its subprocess resolves pymodules from.
 func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName string) (executorID, cacheRoot string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	marker := fmt.Sprintf("t%d", time.Now().UnixNano())
 	labels := map[string]string{
@@ -114,18 +117,14 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName string) (execu
 		WorkspaceMode: "pinned",
 		ExpiresAt:     time.Now().Add(time.Hour),
 	})
-	if err != nil {
-		t.Fatalf("mint token: %v", err)
-	}
+	c.NoError(err, "mint token")
 
 	base := ""
 	if runtime.GOOS == "darwin" {
 		base = "/tmp"
 	}
 	cache, err := os.MkdirTemp(base, "rafiki-excache-")
-	if err != nil {
-		t.Fatalf("mkdirtemp cache: %v", err)
-	}
+	c.NoError(err, "mkdirtemp cache")
 	t.Cleanup(func() { os.RemoveAll(cache) })
 
 	root := t.TempDir()
@@ -147,9 +146,7 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName string) (execu
 		"XDG_STATE_HOME="+filepath.Join(cache, "state"),
 		"XDG_DATA_HOME="+filepath.Join(cache, "data"),
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start script executor: %v", err)
-	}
+	c.NoError(cmd.Start(), "start script executor")
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(os.Kill)
 		_ = cmd.Wait()
@@ -189,6 +186,7 @@ func waitExecutorCache(t *testing.T, cacheRoot, name string) {
 // TestScriptChildOnExecutor is wave 4's end to end.
 func TestScriptChildOnExecutor(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	if _, err := lookPython3(); err != nil {
 		t.Skip("python3 not available: script children need an interpreter")
 	}
@@ -206,14 +204,10 @@ func TestScriptChildOnExecutor(t *testing.T) {
 	var userStderr strings.Builder
 	userCmd.Stderr = &userStderr
 	userOut, err := userCmd.Output()
-	if err != nil {
-		t.Fatalf("user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
-	}
+	c.NoError(err, "user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
 	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
 	tokenBytes, err := os.ReadFile(tokenPath)
-	if err != nil || len(strings.TrimSpace(string(tokenBytes))) == 0 {
-		t.Fatalf("user create did not leave a token at %s: %v", tokenPath, err)
-	}
+	c.False(err != nil || len(strings.TrimSpace(string(tokenBytes))) == 0, "user create did not leave a token at %s: %v", tokenPath, err)
 	token := strings.TrimSpace(string(tokenBytes))
 	opClient := faceClient(t, d, token)
 
@@ -237,9 +231,7 @@ func TestScriptChildOnExecutor(t *testing.T) {
 		},
 	}))
 	scancel()
-	if err != nil {
-		t.Fatalf("spawn script child on executor: %v", err)
-	}
+	c.NoError(err, "spawn script child on executor")
 	childID := sresp.Msg.GetChildId()
 
 	// The child is hosted ON the enrolled executor: the launch stamped the
@@ -252,9 +244,7 @@ func TestScriptChildOnExecutor(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			resp, err := opClient.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 			cancel()
-			if err != nil {
-				t.Fatalf("GetChild(%s): %v", childID, err)
-			}
+			c.NoError(err, "GetChild(%s)", childID)
 			if resp.Msg.GetChild().GetStatus() == "exited" {
 				return resp.Msg.GetChild()
 			}
@@ -282,9 +272,7 @@ func TestScriptChildOnExecutor(t *testing.T) {
 		t.Fatalf("script child exited with %d (result %q); its log:\n%.4000s",
 			safeCode(sum.ExitCode), sum.GetResult(), probeData)
 	}
-	if placed := g.executorOf(t, childID); placed != executorID {
-		t.Fatalf("script child landed on executor %q, want the enrolled script host %q", placed, executorID)
-	}
+	c.Eq(executorID, g.executorOf(t, childID), "script child landed on executor")
 
 	// 4.3's leg, asserted from the INSIDE: the driver's Report and SetResult
 	// both travelled the executor's per-child socket — TLS with the pinned
@@ -318,15 +306,11 @@ func TestScriptChildOnExecutor(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	lines, err := persist.ReadGzLines(dumpPath)
-	if err != nil {
-		t.Fatalf("read the child's out dump %s: %v", dumpPath, err)
-	}
+	c.NoError(err, "read the child's out dump %s", dumpPath)
 	var outAll strings.Builder
 	for _, l := range lines {
 		outAll.Write(l)
 		outAll.WriteByte('\n')
 	}
-	if !strings.Contains(outAll.String(), "executor-hosted-script-ok") {
-		t.Fatalf("the script's stdout never reached the daemon:\n%.2000s", outAll.String())
-	}
+	c.StrContains(outAll.String(), "executor-hosted-script-ok", "the script's stdout never reached the daemon:\n")
 }

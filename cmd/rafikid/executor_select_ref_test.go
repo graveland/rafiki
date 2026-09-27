@@ -5,6 +5,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestMatchExecutorRefByMachineLabel(t *testing.T) {
@@ -13,9 +15,7 @@ func TestMatchExecutorRefByMachineLabel(t *testing.T) {
 		{ID: "exec-2", Labels: map[string]string{"machine": "silvershift"}},
 	}
 	got, ok := matchExecutorRef("greyshift", candidates)
-	if !ok || got.ID != "exec-1" {
-		t.Fatalf("want exec-1, got %+v ok=%v", got, ok)
-	}
+	assert.NewAborting(t).False(!ok || got.ID != "exec-1", "want exec-1, got %+v ok=%v", got, ok)
 }
 
 func TestMatchExecutorRefByID(t *testing.T) {
@@ -23,9 +23,7 @@ func TestMatchExecutorRefByID(t *testing.T) {
 		{ID: "exec-1", Labels: map[string]string{"machine": "greyshift"}},
 	}
 	got, ok := matchExecutorRef("exec-1", candidates)
-	if !ok || got.ID != "exec-1" {
-		t.Fatalf("want exec-1, got %+v ok=%v", got, ok)
-	}
+	assert.NewAborting(t).False(!ok || got.ID != "exec-1", "want exec-1, got %+v ok=%v", got, ok)
 }
 
 func TestMatchExecutorRefMachineLabelWinsOverIDLookingLikeAnotherMachine(t *testing.T) {
@@ -37,30 +35,23 @@ func TestMatchExecutorRefMachineLabelWinsOverIDLookingLikeAnotherMachine(t *test
 		{ID: "exec-2", Labels: map[string]string{"machine": "greyshift"}},
 	}
 	got, ok := matchExecutorRef("greyshift", candidates)
-	if !ok || got.ID != "exec-2" {
-		t.Fatalf("want exec-2 (machine label match), got %+v ok=%v", got, ok)
-	}
+	assert.NewAborting(t).False(!ok || got.ID != "exec-2", "want exec-2 (machine label match), got %+v ok=%v", got, ok)
 }
 
 func TestMatchExecutorRefNoMatch(t *testing.T) {
 	_, ok := matchExecutorRef("nonexistent", []executors.Executor{{ID: "exec-1"}})
-	if ok {
-		t.Fatal("want no match")
-	}
+	assert.NewAborting(t).False(ok, "want no match")
 }
 
 func TestChooseExecutorHonoursExecutorRef(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "",
 		ex("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, ""),
 		ex("exec-2", map[string]string{"machine": "silvershift", "env": "home"}, ""),
 	)
 	exec, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exec.ID != "exec-1" {
-		t.Fatalf("want exec-1, got %s", exec.ID)
-	}
+	ck.NoError(err)
+	ck.Eq("exec-1", exec.ID, "want exec-1, got")
 }
 
 func TestChooseExecutorExecutorRefStillConfinementChecked(t *testing.T) {
@@ -70,20 +61,17 @@ func TestChooseExecutorExecutorRefStillConfinementChecked(t *testing.T) {
 		ex("exec-1", map[string]string{"machine": "greyshift"}, "owner=someone-else"),
 	)
 	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "brent")
-	if err == nil {
-		t.Fatal("want a refusal — the named executor exists but does not admit this child")
-	}
+	assert.NewAborting(t).Error(err, "want a refusal — the named executor exists but does not admit this child")
 }
 
 func TestChooseExecutorExecutorRefNotFound(t *testing.T) {
 	c := selectFixture(t, "", ex("exec-1", map[string]string{"machine": "greyshift"}, ""))
 	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "nonexistent"}, "")
-	if err == nil {
-		t.Fatal("want a refusal naming the unknown ref")
-	}
+	assert.NewAborting(t).Error(err, "want a refusal naming the unknown ref")
 }
 
 func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "",
 		exWithLaunch("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, "", "claude"),
 		ex("exec-2", map[string]string{"machine": "silvershift", "env": "home"}, ""), // no launch support
@@ -91,16 +79,10 @@ func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.
 	// Pinning to the one WITHOUT launch support must fail even though the ref
 	// matches — an explicit pin still has to clear every other check.
 	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "silvershift"}, "", "claude")
-	if err == nil {
-		t.Fatal("want a refusal — silvershift does not support launching claude")
-	}
+	ck.Error(err, "want a refusal — silvershift does not support launching claude")
 	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if exec.ID != "exec-1" {
-		t.Fatalf("want exec-1, got %s", exec.ID)
-	}
+	ck.NoError(err)
+	ck.Eq("exec-1", exec.ID, "want exec-1, got")
 }
 
 // TestExecutorReasonLaunchBranchDetectsLineageExclusion is a regression test
@@ -123,6 +105,7 @@ func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.
 // regression must be asserted directly against executorReason's return
 // value, not inferred from chooseLaunchExecutor's error/success outcome.
 func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		exWithLaunch("work", map[string]string{"env": "work"}, "", "claude"),
 	)
@@ -138,15 +121,9 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 	// excluded. Before the fix this returns "" (claims eligible) because the
 	// launch branch never checks parentSet membership.
 	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("want zero post-selector candidates (lineage already excluded work), got %v", candidates)
-	}
-	if len(parentSet) != 0 {
-		t.Fatalf("want work excluded from parentSet by the lineage narrowing, got %v", parentSet)
-	}
+	ck.NoError(err)
+	ck.Empty(candidates, "want zero post-selector candidates (lineage already excluded work), got")
+	ck.Empty(parentSet, "want work excluded from parentSet by the lineage narrowing, got")
 	launchable := launchKindSet(c.execPool.Live(), "claude")
 	var work executors.Executor
 	for _, le := range c.execPool.Live() {
@@ -155,7 +132,5 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 		}
 	}
 	reason := executorReason(work, req, launchable, "claude", sel, childLabels, parentSet)
-	if reason == "" {
-		t.Fatal("executorReason claims work is eligible, but it is excluded by the parent's lineage selector")
-	}
+	ck.NotEq("", reason, "executorReason claims work is eligible, but it is excluded by the parent's lineage selector")
 }

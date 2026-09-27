@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seedSizesWorker seeds a worker/other-shaped conversation for owner (a
@@ -37,9 +39,7 @@ func seedSizesWorker(t *testing.T, pool *pgxpool.Pool, owner string, turns int) 
 // conversations), failing the test on a shape mismatch rather than panicking.
 func sizesCells(t *testing.T, row []Entry) (string, string, int64) {
 	t.Helper()
-	if len(row) != 3 {
-		t.Fatalf("sizes row width = %d, want 3 columns", len(row))
-	}
+	assert.NewAborting(t).Len(row, 3, "sizes row width = %d, want 3 columns", len(row))
 	class, ok := row[0].(StringEntry)
 	if !ok {
 		t.Fatalf("sizes row[0] = %T, want StringEntry", row[0])
@@ -61,6 +61,7 @@ func sizesCells(t *testing.T, row []Entry) (string, string, int64) {
 // alphabetical and, within a class, in sizeBucketOrder -- the exact sequence
 // asserted here.
 func TestQuerySizesBucketsByTurnCount(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedSizesWorker(t, pool, "hank-sizes", 10)
@@ -68,9 +69,7 @@ func TestQuerySizesBucketsByTurnCount(t *testing.T) {
 	seedSizesWorker(t, pool, "june-sizes", 300)
 
 	res, err := New(pool).Query(ctx, ScopeAll(), "sizes", StatsFilter{})
-	if err != nil {
-		t.Fatalf("sizes query: %v", err)
-	}
+	c.Require().NoError(err, "sizes query")
 	want := []struct {
 		class, bucket string
 		n             int64
@@ -79,14 +78,10 @@ func TestQuerySizesBucketsByTurnCount(t *testing.T) {
 		{"worker/other", "25-100", 1},
 		{"worker/other", "250-500", 1},
 	}
-	if len(res.Rows) != len(want) {
-		t.Fatalf("sizes rows = %d (%+v), want %d -- one bucket row per conversation", len(res.Rows), res.Rows, len(want))
-	}
+	c.Require().Len(res.Rows, len(want), "sizes rows = %d (%+v), want %d -- one bucket row per conversation", len(res.Rows), res.Rows, len(want))
 	for i, w := range want {
 		class, bucket, n := sizesCells(t, res.Rows[i])
-		if class != w.class || bucket != w.bucket || n != w.n {
-			t.Errorf("sizes row %d = (%q, %q, %d), want (%q, %q, %d)", i, class, bucket, n, w.class, w.bucket, w.n)
-		}
+		c.False(class != w.class || bucket != w.bucket || n != w.n, "sizes row %d = (%q, %q, %d), want (%q, %q, %d)", i, class, bucket, n, w.class, w.bucket, w.n)
 	}
 }
 
@@ -94,6 +89,7 @@ func TestQuerySizesBucketsByTurnCount(t *testing.T) {
 // scope test: one sized worker conversation each for bob and carol, queried as
 // bob, answering one row only -- carol's is invisible.
 func TestQuerySizesScopeOwnerExcludesOtherOwners(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	seedSizesWorker(t, pool, "bob", 30)
@@ -101,20 +97,10 @@ func TestQuerySizesScopeOwnerExcludesOtherOwners(t *testing.T) {
 	bobID := ensureUser(t, pool, "bob")
 
 	res, err := New(pool).Query(ctx, ScopeOwner(bobID), "sizes", StatsFilter{})
-	if err != nil {
-		t.Fatalf("sizes query scoped to bob: %v", err)
-	}
-	if len(res.Rows) != 1 {
-		t.Fatalf("sizes rows = %d (%+v), want 1 -- carol's conversation must be excluded", len(res.Rows), res.Rows)
-	}
+	c.Require().NoError(err, "sizes query scoped to bob")
+	c.Require().Len(res.Rows, 1, "sizes rows = %d (%+v), want 1 -- carol's conversation must be excluded", len(res.Rows), res.Rows)
 	class, bucket, n := sizesCells(t, res.Rows[0])
-	if class != "worker/other" {
-		t.Errorf("class = %q, want worker/other", class)
-	}
-	if bucket != "25-100" {
-		t.Errorf("bucket = %q, want 25-100 (30 turns)", bucket)
-	}
-	if n != 1 {
-		t.Errorf("conversations = %d, want 1 (both conversations leak if this is 2)", n)
-	}
+	c.Eq("worker/other", class, "class")
+	c.Eq("25-100", bucket, "bucket")
+	c.Eq(1, n, "conversations")
 }

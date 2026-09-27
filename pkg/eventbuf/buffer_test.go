@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/inbox"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // quietLogs silences the default logger for a test that deliberately provokes
@@ -85,9 +87,7 @@ func newTestBuffer(t *testing.T) (*Buffer, *FakeClock, *flushRecorder, *inbox.Me
 func pendingRows(t *testing.T, st *inbox.Memory, childID string) []inbox.Inbound {
 	t.Helper()
 	rows, err := st.Pending(context.Background(), childID)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Pending")
 	return rows
 }
 
@@ -95,31 +95,25 @@ func pendingRows(t *testing.T, st *inbox.Memory, childID string) []inbox.Inbound
 // is IN that flush is the inbox's business now; that it happens once is this
 // package's.
 func TestFiveEventsInWindowProduceOneFlush(t *testing.T) {
+	c := assert.NewAborting(t)
 	b, clk, rec, st := newTestBuffer(t)
 	for i := range 5 {
 		b.Push("c_coord", "subagents", "", fmt.Sprintf("worker %d finished", i))
 		clk.Advance(500 * time.Millisecond)
 	}
-	if rec.n() != 0 {
-		t.Fatalf("flushed %d times before the debounce elapsed; want 0", rec.n())
-	}
+	c.Eq(0, rec.n(), "flushed")
 	clk.Advance(5 * time.Second)
-	if rec.n() != 1 {
-		t.Fatalf("flushed %d times; want exactly 1", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushed")
 	got := rec.call(0)
-	if got.childID != "c_coord" || got.source != "subagents" {
-		t.Fatalf("flush target = (%q, %q); want (c_coord, subagents)", got.childID, got.source)
-	}
-	if n := len(pendingRows(t, st, "c_coord")); n != 5 {
-		t.Fatalf("persisted rows = %d; want 5 — the rows ARE the batch", n)
-	}
+	c.False(got.childID != "c_coord" || got.source != "subagents", "flush target = (%q, %q); want (c_coord, subagents)", got.childID, got.source)
+	c.Eq(5, len(pendingRows(t, st, "c_coord")), "persisted rows")
 }
 
 // The durable write happens BEFORE the timer is armed. This is the exact
 // window the lost-batch bug lived in: a daemon that died inside the quiet
 // window used to lose the batch outright.
 func TestPushPersistsBeforeArming(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	var flushes atomic.Int32
@@ -130,16 +124,10 @@ func TestPushPersistsBeforeArming(t *testing.T) {
 
 	b.Push("c_1", "subagents", "c_2", "agent c_2 settled")
 
-	if flushes.Load() != 0 {
-		t.Fatalf("flushes = %d; want 0 — the debounce has not elapsed", flushes.Load())
-	}
+	c.Eq(0, flushes.Load(), "flushes")
 	rows := pendingRows(t, st, "c_1")
-	if len(rows) != 1 || rows[0].Source != "subagents" || rows[0].Key != "c_2" {
-		t.Fatalf("rows = %+v, want one persisted fragment before the debounce elapsed", rows)
-	}
-	if rows[0].Mode != inbox.ModePrompt {
-		t.Fatalf("mode = %v; want prompt", rows[0].Mode)
-	}
+	c.False(len(rows) != 1 || rows[0].Source != "subagents" || rows[0].Key != "c_2", "rows = %+v, want one persisted fragment before the debounce elapsed", rows)
+	c.Eq(inbox.ModePrompt, rows[0].Mode, "mode")
 }
 
 // Max-wait: a steady drip faster than the debounce must still flush.
@@ -150,15 +138,14 @@ func TestMaxWaitCeilingPreventsStarvation(t *testing.T) {
 		b.Push("c_coord", "subagents", "", "tick")
 		clk.Advance(4 * time.Second)
 	}
-	if rec.n() == 0 {
-		t.Fatal("a steady drip starved the flush; the max-wait ceiling is not enforced")
-	}
+	assert.NewAborting(t).NotEq(0, rec.n(), "a steady drip starved the flush; the max-wait ceiling is not enforced")
 }
 
 // Deferral: a flush landing mid-turn must wait for the idle transition, NOT
 // for a timeout. Asserting this specifically is what proves there is no
 // hidden poller doing the work.
 func TestFlushDefersWhileBusyAndReleasesOnIdle(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -171,39 +158,28 @@ func TestFlushDefersWhileBusyAndReleasesOnIdle(t *testing.T) {
 
 	b.Push("c_coord", "subagents", "", "worker done")
 	clk.Advance(10 * time.Second)
-	if rec.n() != 0 {
-		t.Fatal("flushed while the child was mid-turn")
-	}
+	c.Eq(0, rec.n(), "flushed while the child was mid-turn")
 	// A long wait must NOT release it — only the idle transition does.
 	clk.Advance(10 * time.Minute)
-	if rec.n() != 0 {
-		t.Fatal("a deferred batch escaped on a timer; it must wait for idle")
-	}
+	c.Eq(0, rec.n(), "a deferred batch escaped on a timer; it must wait for idle")
 	busy.Store(false)
 	b.DrainIdle("c_coord")
-	if rec.n() != 1 {
-		t.Fatalf("flushes after idle = %d; want 1", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes after idle")
 	// The row waited in the store the whole time, not in the buffer.
-	if n := len(rec.call(0).pending); n != 1 {
-		t.Fatalf("pending rows at flush = %d; want 1", n)
-	}
+	c.Eq(1, len(rec.call(0).pending), "pending rows at flush")
 }
 
 // PushNow skips the debounce, and the fragment already queued rides along.
 // Ordering is a property of the ROWS now, not of an assembled slice the
 // buffer hands over.
 func TestPushNowBypassesDebounceAndDrainsPendingFirst(t *testing.T) {
+	c := assert.NewAborting(t)
 	b, _, rec, _ := newTestBuffer(t)
 	b.Push("c_w", "executor", "", "queued note")
 	b.PushNow("c_w", "executor", "EXECUTOR LOST")
-	if rec.n() != 1 {
-		t.Fatalf("flushes = %d; want 1 — PushNow must flush immediately, once", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes")
 	rows := rec.call(0).pending
-	if len(rows) != 2 {
-		t.Fatalf("pending rows at flush = %d (%+v); want 2", len(rows), rows)
-	}
+	c.Len(rows, 2, "pending rows at flush = %d (%+v); want 2", len(rows), rows)
 	if rows[0].Text != "queued note" || rows[1].Text != "EXECUTOR LOST" {
 		t.Fatalf("row order = %q, %q; the queued fragment must precede the urgent one",
 			rows[0].Text, rows[1].Text)
@@ -214,6 +190,7 @@ func TestPushNowBypassesDebounceAndDrainsPendingFirst(t *testing.T) {
 // row is persisted, so the visible marker must be in the ROW. (The batch-level
 // caps moved to inbox.Coalesce and are tested there.)
 func TestPerFragmentTruncationIsVisibleInThePersistedRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	b := New(Config{Debounce: time.Second, MaxBytesPerFrag: 20}, clk)
@@ -225,13 +202,8 @@ func TestPerFragmentTruncationIsVisibleInThePersistedRow(t *testing.T) {
 	b.Push("c", "src", "", long)
 
 	rows := pendingRows(t, st, "c")
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d; want 1", len(rows))
-	}
-	if len(rows[0].Text) > 20 {
-		t.Fatalf("persisted text is %d bytes (%q); want <= MaxBytesPerFrag (20)",
-			len(rows[0].Text), rows[0].Text)
-	}
+	c.Len(rows, 1, "rows = %d; want 1", len(rows))
+	c.LessOrEqual(20, len(rows[0].Text), "persisted text is %d bytes (%q); want <= MaxBytesPerFrag (20)", len(rows[0].Text), rows[0].Text)
 	if !strings.HasSuffix(rows[0].Text, "…(truncated)") {
 		t.Fatalf("persisted text = %q; truncation must be VISIBLE — an event the "+
 			"agent never sees and never learns it missed is the worst outcome available",
@@ -240,22 +212,20 @@ func TestPerFragmentTruncationIsVisibleInThePersistedRow(t *testing.T) {
 }
 
 func TestSourceWithDoubleColonIsRejected(t *testing.T) {
+	c := assert.NewAborting(t)
 	quietLogs(t)
 	b, clk, rec, st := newTestBuffer(t)
 	b.Push("c", "bad::source", "", "x")
 	clk.Advance(10 * time.Second)
-	if rec.n() != 0 {
-		t.Fatal("a source containing :: must be rejected, not routed")
-	}
-	if n := len(pendingRows(t, st, "c")); n != 0 {
-		t.Fatalf("persisted rows = %d; a rejected source must not reach the store", n)
-	}
+	c.Eq(0, rec.n(), "a source containing :: must be rejected, not routed")
+	c.Eq(0, len(pendingRows(t, st, "c")), "persisted rows")
 }
 
 // PushNow skips the DEBOUNCE. It does not skip the BUSY GATE — those are two
 // independent bypasses and conflating them injects a steer into every urgent
 // event, whether or not the turn it lands in is invalidated by it.
 func TestPushNowDefersWhileBusy(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -267,22 +237,14 @@ func TestPushNowDefersWhileBusy(t *testing.T) {
 	b.SetBusy(func(string) bool { return busy.Load() })
 
 	b.PushNow("c_w", "budget", "BUDGET EXHAUSTED")
-	if rec.n() != 0 {
-		t.Fatalf("PushNow delivered %d batches while the child was mid-turn; want 0", rec.n())
-	}
+	c.Eq(0, rec.n(), "PushNow delivered")
 
 	busy.Store(false)
 	b.DrainIdle("c_w")
-	if rec.n() != 1 {
-		t.Fatalf("flushes after idle = %d; want 1", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes after idle")
 	rows := pendingRows(t, st, "c_w")
-	if len(rows) != 1 || rows[0].Text != "BUDGET EXHAUSTED" {
-		t.Fatalf("rows = %+v; want the one urgent fragment", rows)
-	}
-	if rows[0].Mode != inbox.ModePrompt {
-		t.Fatalf("mode = %v; PushNow must accept as a prompt, not a steer", rows[0].Mode)
-	}
+	c.False(len(rows) != 1 || rows[0].Text != "BUDGET EXHAUSTED", "rows = %+v; want the one urgent fragment", rows)
+	c.Eq(inbox.ModePrompt, rows[0].Mode, "mode")
 }
 
 // PushSteer skips the IDLE GATE: an executor-loss event must reach a worker
@@ -290,6 +252,7 @@ func TestPushNowDefersWhileBusy(t *testing.T) {
 // steer itself is DATA — the row's Mode — because inbox.Coalesce makes any
 // group containing a steer deliver as a steer.
 func TestPushSteerBypassesTheBusyGate(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -299,22 +262,17 @@ func TestPushSteerBypassesTheBusyGate(t *testing.T) {
 	b.SetBusy(func(string) bool { return true })
 
 	b.PushSteer("c_w", "executor", "EXECUTOR LOST")
-	if rec.n() != 1 {
-		t.Fatalf("PushSteer delivered %d batches; want 1 even though the child is busy", rec.n())
-	}
+	c.Eq(1, rec.n(), "PushSteer delivered")
 	rows := pendingRows(t, st, "c_w")
-	if len(rows) != 1 {
-		t.Fatalf("rows = %+v; want 1", rows)
-	}
-	if rows[0].Mode != inbox.ModeSteer {
-		t.Fatalf("mode = %v; want steer — stickiness is carried by the row now", rows[0].Mode)
-	}
+	c.Len(rows, 1, "rows")
+	c.Eq(inbox.ModeSteer, rows[0].Mode, "mode")
 }
 
 // A batch still inside its debounce window must NOT ride out on someone
 // else's idle transition — that turns every turn-end into an extra turn,
 // which is the cost this package exists to remove.
 func TestDrainIdleReleasesOnlyDeferredBatches(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -325,14 +283,10 @@ func TestDrainIdleReleasesOnlyDeferredBatches(t *testing.T) {
 
 	b.Push("c_w", "subagents", "", "worker 1 finished")
 	b.DrainIdle("c_w")
-	if rec.n() != 0 {
-		t.Fatalf("DrainIdle flushed a batch still inside its debounce window")
-	}
+	c.Eq(0, rec.n(), "DrainIdle flushed a batch still inside its debounce window")
 
 	clk.Advance(5 * time.Second)
-	if rec.n() != 1 {
-		t.Fatalf("the batch never flushed on its own timer; flushes = %d", rec.n())
-	}
+	c.Eq(1, rec.n(), "the batch never flushed on its own timer; flushes =")
 }
 
 // flush must never run under b.mu: it is the owner's delivery path, a blocking
@@ -373,6 +327,7 @@ func TestFlushRunsWithoutHoldingTheLock(t *testing.T) {
 // fire's critical section runs (nothing to do yet) or strictly after it
 // completes (the batch freshly deferred) — never the torn state in between.
 func TestFireBusyCheckAndDeferralAreAtomicWithDrainIdle(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -430,13 +385,9 @@ func TestFireBusyCheckAndDeferralAreAtomicWithDrainIdle(t *testing.T) {
 	waitFor("PushNow", pushDone)
 	waitFor("DrainIdle", drainDone)
 
-	if rec.n() != 1 {
-		t.Fatalf("flushes = %d; want 1 — the batch must not be stranded by the race", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes")
 	rows := pendingRows(t, st, "c_w")
-	if len(rows) != 1 || rows[0].Mode != inbox.ModePrompt {
-		t.Fatalf("rows = %+v; want one prompt row", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].Mode != inbox.ModePrompt, "rows = %+v; want one prompt row", rows)
 }
 
 // Forget discards SCHEDULING state only. The rows outlive the buffer: an
@@ -444,6 +395,7 @@ func TestFireBusyCheckAndDeferralAreAtomicWithDrainIdle(t *testing.T) {
 // run, so what happens to those rows is the controller's decision (Reset on
 // exit, Drop when the child is forgotten for good) — not this package's.
 func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	st := inbox.NewMemory()
 	rec := &flushRecorder{st: st}
@@ -459,13 +411,9 @@ func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
 
 	b.SetBusy(func(string) bool { return false })
 	b.DrainIdle("c_dead")
-	if rec.n() != 0 {
-		t.Fatalf("delivered %d batches to a forgotten child; want 0", rec.n())
-	}
+	c.Eq(0, rec.n(), "delivered")
 	clk.Advance(time.Hour)
-	if rec.n() != 0 {
-		t.Fatalf("a forgotten child's timer still fired")
-	}
+	c.Eq(0, rec.n(), "a forgotten child's timer still fired")
 
 	rows := pendingRows(t, st, "c_dead")
 	if len(rows) != 1 || rows[0].Text != "worker finished" {
@@ -482,6 +430,7 @@ func TestForgetStopsTimersButLeavesMessagesForTheController(t *testing.T) {
 // after a database blip lost exactly the fragments the orphan path exists to
 // save, silently and without error.
 func TestForgetFlushesOrphansRatherThanDroppingThem(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	st := failingStore{inbox.NewMemory()}
@@ -493,22 +442,14 @@ func TestForgetFlushesOrphansRatherThanDroppingThem(t *testing.T) {
 	b.Push("c_dead", "subagents", "", "worker finished")
 	clk.Advance(10 * time.Second) // timer fires, defers on busy -- orphan stays in pk.orphans
 
-	if rec.n() != 0 {
-		t.Fatalf("flush ran before Forget (n=%d); test setup did not defer as expected", rec.n())
-	}
+	c.Eq(0, rec.n(), "flush ran before Forget (n")
 
 	b.Forget("c_dead")
 
-	if rec.n() != 1 {
-		t.Fatalf("flushes after Forget = %d; want 1 -- the orphan must be handed to the owner", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes after Forget")
 	got := rec.call(0)
-	if got.childID != "c_dead" || got.source != "subagents" {
-		t.Fatalf("flush call = %+v", got)
-	}
-	if len(got.orphans) != 1 || got.orphans[0].Text != "worker finished" {
-		t.Fatalf("orphans = %+v; want the one undurable message Forget must not drop", got.orphans)
-	}
+	c.False(got.childID != "c_dead" || got.source != "subagents", "flush call = %+v", got)
+	c.False(len(got.orphans) != 1 || got.orphans[0].Text != "worker finished", "orphans = %+v; want the one undurable message Forget must not drop", got.orphans)
 }
 
 // failingStore is a real store whose Accept always fails. Wrapping it in a
@@ -529,6 +470,7 @@ var _ inbox.Store = failingStore{}
 // kept in memory and handed to flush, delivered without durability rather than
 // dropped. Losing durability is bad; losing the notification is worse.
 func TestAcceptFailureDeliversTheFragmentAsAnOrphan(t *testing.T) {
+	c := assert.NewAborting(t)
 	quietLogs(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
@@ -541,25 +483,18 @@ func TestAcceptFailureDeliversTheFragmentAsAnOrphan(t *testing.T) {
 	b.Push("c_w", "subagents", "", "worker done")
 	clk.Advance(time.Second)
 
-	if rec.n() != 1 {
-		t.Fatalf("flushes = %d; want 1 — a store failure must not swallow the notification", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes")
 	got := rec.call(0)
-	if len(got.orphans) != 1 {
-		t.Fatalf("orphans = %+v; want the one undurable message", got.orphans)
-	}
+	c.Len(got.orphans, 1, "orphans")
 	o := got.orphans[0]
-	if o.Text != "worker done" || o.ChildID != "c_w" || o.Source != "subagents" {
-		t.Fatalf("orphan = %+v; the whole Inbound must survive, not just its text", o)
-	}
-	if o.ID != "" {
-		t.Fatalf("orphan carries ID %q; it was never stored, so the store assigned none", o.ID)
-	}
+	c.False(o.Text != "worker done" || o.ChildID != "c_w" || o.Source != "subagents", "orphan = %+v; the whole Inbound must survive, not just its text", o)
+	c.Eq("", o.ID, "orphan carries ID")
 }
 
 // With no accepter at all — a unit test, or the pre-inbox daemon — every push
 // is an orphan: still delivered, never persisted.
 func TestNoAccepterMakesEveryPushAnOrphan(t *testing.T) {
+	c := assert.NewAborting(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
 	b := New(Config{Debounce: time.Second}, clk)
@@ -570,13 +505,9 @@ func TestNoAccepterMakesEveryPushAnOrphan(t *testing.T) {
 	b.Push("c_w", "subagents", "", "b")
 	clk.Advance(time.Second)
 
-	if rec.n() != 1 {
-		t.Fatalf("flushes = %d; want 1", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes")
 	got := rec.call(0).orphans
-	if len(got) != 2 || got[0].Text != "a" || got[1].Text != "b" {
-		t.Fatalf("orphans = %+v; want [a b] in push order", got)
-	}
+	c.False(len(got) != 2 || got[0].Text != "a" || got[1].Text != "b", "orphans = %+v; want [a b] in push order", got)
 }
 
 // The degraded path must not silently downgrade a steer. An orphan is the
@@ -586,6 +517,7 @@ func TestNoAccepterMakesEveryPushAnOrphan(t *testing.T) {
 // and loses it during a database blip — when "executor lost" is most likely to
 // be the news in flight.
 func TestSteerSurvivesTheOrphanPath(t *testing.T) {
+	c := assert.NewAborting(t)
 	quietLogs(t)
 	clk := NewFakeClock(time.Unix(0, 0))
 	rec := &flushRecorder{}
@@ -597,23 +529,15 @@ func TestSteerSurvivesTheOrphanPath(t *testing.T) {
 
 	b.PushSteer("c_w", "executor", "EXECUTOR LOST")
 
-	if rec.n() != 1 {
-		t.Fatalf("flushes = %d; want 1 — a store failure must not swallow a steer", rec.n())
-	}
+	c.Eq(1, rec.n(), "flushes")
 	got := rec.call(0).orphans
-	if len(got) != 1 {
-		t.Fatalf("orphans = %+v; want the one undurable message", got)
-	}
-	if got[0].Mode != inbox.ModeSteer {
-		t.Fatalf("orphan mode = %v; want steer — a steer that arrives as a prompt "+
-			"interrupts nothing, and the worker spends another turn believing it "+
-			"still has an executor", got[0].Mode)
-	}
+	c.Len(got, 1, "orphans")
+	c.Eq(inbox.ModeSteer, got[0].Mode, "orphan mode = %v; want steer — a steer that arrives as a prompt "+
+		"interrupts nothing, and the worker spends another turn believing it "+
+		"still has an executor", got[0].Mode)
 	if got[0].Text != "EXECUTOR LOST" || got[0].Source != "executor" {
 		t.Fatalf("orphan = %+v; the whole Inbound must survive", got[0])
 	}
 	// It really is the degraded path: nothing reached the store.
-	if rows := pendingRows(t, st.Memory, "c_w"); len(rows) != 0 {
-		t.Fatalf("persisted rows = %+v; want none — Accept failed", rows)
-	}
+	c.Empty(pendingRows(t, st.Memory, "c_w"), "persisted rows")
 }

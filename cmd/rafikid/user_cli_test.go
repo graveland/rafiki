@@ -9,40 +9,33 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/usersdb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestUserCreateCLIAdminFlag pins --admin: explicit only, never inferred from
 // an empty database. The second create (no --admin, on the same now
 // non-empty database) proves there is no zero-users inference either.
 func TestUserCreateCLIAdminFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := scratchPool(t)
 	store := usersdb.NewPostgresStore(pool)
 	ctx := context.Background()
 
 	var out bytes.Buffer
-	if err := runUserCreateCLI(ctx, &out, store, "root", true); err != nil {
-		t.Fatalf("create --admin: %v", err)
-	}
+	c.Require().NoError(runUserCreateCLI(ctx, &out, store, "root", true), "create --admin")
 	if !strings.Contains(out.String(), "username: root") || !strings.Contains(out.String(), "token: ") {
 		t.Fatalf("output = %q, want username and token lines", out.String())
 	}
 
 	rows, err := store.List(ctx, false, 0)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(rows) != 1 || rows[0].Username != "root" || !rows[0].IsAdmin {
-		t.Fatalf("rows = %+v, want one admin user named root", rows)
-	}
+	c.Require().NoError(err, "list")
+	c.Require().False(len(rows) != 1 || rows[0].Username != "root" || !rows[0].IsAdmin, "rows = %+v, want one admin user named root", rows)
 
 	out.Reset()
-	if err := runUserCreateCLI(ctx, &out, store, "alice", false); err != nil {
-		t.Fatalf("create (no --admin): %v", err)
-	}
+	c.Require().NoError(runUserCreateCLI(ctx, &out, store, "alice", false), "create (no --admin)")
 	rows, err = store.List(ctx, true, 0)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	c.Require().NoError(err, "list")
 	var alice *bool
 	for _, r := range rows {
 		if r.Username == "alice" {
@@ -50,12 +43,8 @@ func TestUserCreateCLIAdminFlag(t *testing.T) {
 			alice = &v
 		}
 	}
-	if alice == nil {
-		t.Fatal("alice was not created")
-	}
-	if *alice {
-		t.Error("alice was created admin without --admin; admin must never be inferred")
-	}
+	c.Require().NotNil(alice, "alice was not created")
+	c.False(*alice, "alice was created admin without --admin; admin must never be inferred")
 }
 
 // TestUserCreateCLIDuplicate proves a repeated name surfaces as a clear
@@ -63,24 +52,17 @@ func TestUserCreateCLIAdminFlag(t *testing.T) {
 // that the failed second attempt never touched the token printed by the
 // first.
 func TestUserCreateCLIDuplicate(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := scratchPool(t)
 	store := usersdb.NewPostgresStore(pool)
 	ctx := context.Background()
 
 	var out bytes.Buffer
-	if err := runUserCreateCLI(ctx, &out, store, "dup", false); err != nil {
-		t.Fatalf("first create: %v", err)
-	}
+	c.Require().NoError(runUserCreateCLI(ctx, &out, store, "dup", false), "first create")
 
 	out.Reset()
 	err := runUserCreateCLI(ctx, &out, store, "dup", false)
-	if err == nil {
-		t.Fatal("second create with the same name succeeded")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("err = %v, want an \"already exists\" message", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("output on failure = %q, want nothing written", out.String())
-	}
+	c.Require().Error(err, "second create with the same name succeeded")
+	c.StrContains(err.Error(), "already exists", "err = %v, want an \"already exists\" message", err)
+	c.Eq(0, out.Len(), "output on failure = %q, want nothing written", out.String())
 }

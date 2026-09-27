@@ -8,6 +8,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // THE confinement escape. A confined parent spawning a child that names no
@@ -19,6 +21,7 @@ import (
 // stored "" as its own selector, so lineageChain skipped it and the entire
 // subtree beneath inherited the way out.
 func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-home", map[string]string{"env": "home"}, ""),
 		ex("exec-work", map[string]string{"env": "work"}, ""),
@@ -26,21 +29,13 @@ func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
 
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_parent"})
 
-	if req.ExecutorSelector == "" {
-		t.Fatal("the child inherited no selector; it and its whole subtree are unconfined")
-	}
-	if req.ExecutorSelector != "env=home" {
-		t.Fatalf("selector = %q, want the parent's env=home", req.ExecutorSelector)
-	}
+	ck.NotEq("", req.ExecutorSelector, "the child inherited no selector; it and its whole subtree are unconfined")
+	ck.Eq("env=home", req.ExecutorSelector, "selector")
 
 	// And the inherited selector must actually CONFINE, not merely be stored.
 	chosen, err := c.chooseExecutor(req, "")
-	if err != nil {
-		t.Fatalf("the child was not placed on an executor at all: %v", err)
-	}
-	if chosen.ID != "exec-home" {
-		t.Fatalf("child placed on %s; the parent could only reach exec-home", chosen.ID)
-	}
+	ck.NoError(err, "the child was not placed on an executor at all")
+	ck.Eq("exec-home", chosen.ID, "child placed on")
 }
 
 // The escape driven through Controller.Spawn itself, so that removing the
@@ -50,6 +45,7 @@ func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
 // refusal. This test verifies the inherited selector IS applied — the spawn
 // proceeds rather than failing, which is the new behaviour.
 func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 	)
@@ -62,17 +58,11 @@ func TestSpawnAppliesTheInheritedSelector(t *testing.T) {
 		ParentChildID: "c_parent",
 		// No ExecutorSelector.
 	}, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn must not fail: a child starts unbound when no executor matches: %v", err)
-	}
+	ck.NoError(err, "spawn must not fail: a child starts unbound when no executor matches")
 	// The child received the inherited selector.
 	snap, ok := c.st.Get(got.ChildID)
-	if !ok {
-		t.Fatal("child not found in store after spawn")
-	}
-	if snap.ExecutorSelector != "env=home" {
-		t.Fatalf("the spawn did not apply the inherited selector; got %q", snap.ExecutorSelector)
-	}
+	ck.True(ok, "child not found in store after spawn")
+	ck.Eq("env=home", snap.ExecutorSelector, "the spawn did not apply the inherited selector; got")
 }
 
 // Today's correct default, which the fix must not disturb: a top-level agent
@@ -81,9 +71,7 @@ func TestTopLevelSpawnWithNoSelectorStaysLocal(t *testing.T) {
 	c := selectFixture(t, "env=home", ex("exec-home", map[string]string{"env": "home"}, ""))
 
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{}) // no ParentChildID
-	if req.ExecutorSelector != "" {
-		t.Fatalf("a top-level spawn has nothing to inherit; got %q", req.ExecutorSelector)
-	}
+	assert.NewAborting(t).Eq("", req.ExecutorSelector, "a top-level spawn has nothing to inherit; got")
 
 	// With no selector and no pool, agentRuntimeOptions leaves exec nil.
 	// The old resolveExecutor returned (nil, nil) for this case; the new
@@ -95,6 +83,7 @@ func TestTopLevelSpawnWithNoSelectorStaysLocal(t *testing.T) {
 // keeps it — and is still intersected with its parent's set, which is what
 // stops the named selector from being a widening.
 func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-home", map[string]string{"env": "home", "gpu": "yes"}, ""),
 	)
@@ -102,19 +91,16 @@ func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "gpu=yes",
 	})
-	if req.ExecutorSelector != "gpu=yes" {
-		t.Fatalf("selector = %q, want the child's own gpu=yes", req.ExecutorSelector)
-	}
+	ck.Eq("gpu=yes", req.ExecutorSelector, "selector")
 
 	// Still narrowed by the parent's stored selector, via effectiveExecutorSet.
 	c2 := selectFixture(t, "env=home",
 		ex("exec-other", map[string]string{"env": "work", "gpu": "yes"}, ""),
 	)
-	if _, err := c2.chooseExecutor(protocol.SpawnRequest{
+	_, err := c2.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "gpu=yes",
-	}, ""); err == nil {
-		t.Fatal("naming a selector must not escape the parent's set")
-	}
+	}, "")
+	ck.Error(err, "naming a selector must not escape the parent's set")
 }
 
 // The two halves of the grant are independent. A parent confined to ephemeral
@@ -122,36 +108,32 @@ func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
 // "pinned" has been handed a wider grant than its parent's through the back
 // door.
 func TestWorkspaceModeIsInheritedIndependentlyOfTheSelector(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := selectFixture(t, "env=home", ex("exec-home", map[string]string{"env": "home"}, ""))
 	_ = c.st.Update("c_parent", func(s *childstore.Session) { s.WorkspaceMode = "ephemeral" })
 
 	// Silent on both.
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_parent"})
-	if req.WorkspaceMode != "ephemeral" {
-		t.Errorf("workspace mode = %q; a half-inherited grant is a widened grant", req.WorkspaceMode)
-	}
+	ck.Eq("ephemeral", req.WorkspaceMode, "workspace mode")
 
 	// Names a selector, silent on the mode: the mode must still be inherited.
 	req = c.inheritExecutorGrant(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=home",
 	})
-	if req.WorkspaceMode != "ephemeral" {
-		t.Errorf("workspace mode = %q; naming a selector must not silently widen the mode", req.WorkspaceMode)
-	}
+	ck.Eq("ephemeral", req.WorkspaceMode, "workspace mode")
 
 	// Names its own mode: kept.
 	req = c.inheritExecutorGrant(protocol.SpawnRequest{
 		ParentChildID: "c_parent", WorkspaceMode: "pinned",
 	})
-	if req.WorkspaceMode != "pinned" {
-		t.Errorf("an explicit mode must be kept, got %q", req.WorkspaceMode)
-	}
+	ck.Eq("pinned", req.WorkspaceMode, "an explicit mode must be kept, got")
 }
 
 // The grant is read from the STORE, never from the request — the same rule
 // the limits checks follow. A caller that could name its own parent's grant
 // could widen it.
 func TestInheritanceReadsTheStoreNotTheRequest(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-home", map[string]string{"env": "home"}, ""),
 		ex("exec-work", map[string]string{"env": "work"}, ""),
@@ -166,14 +148,8 @@ func TestInheritanceReadsTheStoreNotTheRequest(t *testing.T) {
 	})
 
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_grand"})
-	if req.ExecutorSelector != "env=home" {
-		t.Fatalf("selector = %q, want the stored env=home", req.ExecutorSelector)
-	}
+	ck.Eq("env=home", req.ExecutorSelector, "selector")
 	chosen, err := c.chooseExecutor(req, "")
-	if err != nil {
-		t.Fatalf("chooseExecutor: %v", err)
-	}
-	if chosen.ID != "exec-home" {
-		t.Fatalf("a third-generation child reached %s, outside its lineage's set", chosen.ID)
-	}
+	ck.NoError(err, "chooseExecutor")
+	ck.Eq("exec-home", chosen.ID, "a third-generation child reached")
 }

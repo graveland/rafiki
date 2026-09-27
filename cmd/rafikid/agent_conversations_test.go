@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The two conversationReader constructors are the binding story for the
@@ -47,6 +49,7 @@ func TestNewMCPConversationReaderScopePerIdentity(t *testing.T) {
 // ctrl is the concrete *Controller -- there is no fake to bind, and the two
 // scope-construction tests above are the level the nil-ctrl readers support.
 func TestRunQueryMapsCatalogueEntriesAndColumns(t *testing.T) {
+	c := assert.NewCollecting(t)
 	res, err := catalogueResult(insights.QueryResult{
 		Columns: []insights.Column{
 			{Name: "tool", Kind: insights.ColString},
@@ -57,27 +60,15 @@ func TestRunQueryMapsCatalogueEntriesAndColumns(t *testing.T) {
 			{insights.StringEntry("bash"), insights.IntEntry(3), insights.FloatEntry(0.75)},
 		},
 	})
-	if err != nil {
-		t.Fatalf("catalogueResult: %v", err)
-	}
-	if len(res.Columns) != 3 ||
+	c.Require().NoError(err, "catalogueResult")
+	c.False(len(res.Columns) != 3 ||
 		res.Columns[0].Kind != "string" || res.Columns[1].Kind != "int" ||
-		res.Columns[2].Kind != "float" || res.Columns[2].Format != "pct" {
-		t.Errorf("columns = %+v, want the three kinds mapped and Format carried", res.Columns)
-	}
-	if len(res.Rows) != 1 || len(res.Rows[0]) != 3 {
-		t.Fatalf("rows = %+v, want one row of three cells", res.Rows)
-	}
+		res.Columns[2].Kind != "float" || res.Columns[2].Format != "pct", "columns = %+v, want the three kinds mapped and Format carried", res.Columns)
+	c.Require().False(len(res.Rows) != 1 || len(res.Rows[0]) != 3, "rows = %+v, want one row of three cells", res.Rows)
 	str, i, fl := res.Rows[0][0], res.Rows[0][1], res.Rows[0][2]
-	if str.Str != "bash" || str.IsInt || str.IsFloat {
-		t.Errorf("cell 0 = %+v, want Str only", str)
-	}
-	if !i.IsInt || i.Int != 3 || i.IsFloat {
-		t.Errorf("cell 1 = %+v, want Int only", i)
-	}
-	if !fl.IsFloat || fl.Float != 0.75 || fl.IsInt {
-		t.Errorf("cell 2 = %+v, want Float only", fl)
-	}
+	c.False(str.Str != "bash" || str.IsInt || str.IsFloat, "cell 0 = %+v, want Str only", str)
+	c.False(!i.IsInt || i.Int != 3 || i.IsFloat, "cell 1 = %+v, want Int only", i)
+	c.False(!fl.IsFloat || fl.Float != 0.75 || fl.IsInt, "cell 2 = %+v, want Float only", fl)
 
 	// An Entry outside the three concrete types cannot be built outside
 	// pkg/insights (isEntry is unexported), but a nil cell reaches the same
@@ -96,14 +87,13 @@ func TestRunQueryMapsCatalogueEntriesAndColumns(t *testing.T) {
 // invalid scope answers not-found), while an owner scope -- whatever it
 // owns, here nothing -- runs and returns the query's declared columns.
 func TestConversationReaderRunQueryMapsScope(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := openTestPool(t)
 	dir := testSocketDir(t)
 	stateDir := filepath.Join(dir, "state")
 	logsDir := filepath.Join(dir, "logs")
 	for _, d := range []string{stateDir, logsDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatalf("mkdirall %s: %v", d, err)
-		}
+		c.Require().NoError(os.MkdirAll(d, 0o700), "mkdirall %s", d)
 	}
 	ctrl := NewController(childstore.New(), stateDir, logsDir, filepath.Join(dir, "c.sock"), nil, pool, nil, false, t.Context(), nil, nil, nil, nil)
 	t.Cleanup(func() {
@@ -129,17 +119,11 @@ func TestConversationReaderRunQueryMapsScope(t *testing.T) {
 	// which is what proves the query executed rather than erroring.
 	owned := newControllerConversationReader(ctrl, "00000000-0000-0000-0000-0000000000aa")
 	res, err := owned.RunQuery(ctx, "tools", tools.CatalogueFilter{})
-	if err != nil {
-		t.Fatalf("RunQuery with an owner scope: %v", err)
-	}
-	if len(res.Columns) != 6 || res.Columns[0].Name != "tool" || res.Columns[1].Name != "calls" ||
+	c.Require().NoError(err, "RunQuery with an owner scope")
+	c.False(len(res.Columns) != 6 || res.Columns[0].Name != "tool" || res.Columns[1].Name != "calls" ||
 		res.Columns[2].Name != "ok" || res.Columns[3].Name != "errors" ||
-		res.Columns[4].Name != "unmatched" || res.Columns[5].Name != "conversations" {
-		t.Errorf("columns = %+v, want the tools query's declared schema", res.Columns)
-	}
-	if len(res.Rows) != 0 {
-		t.Errorf("rows = %+v, want none for an owner that owns nothing", res.Rows)
-	}
+		res.Columns[4].Name != "unmatched" || res.Columns[5].Name != "conversations", "columns = %+v, want the tools query's declared schema", res.Columns)
+	c.Empty(res.Rows, "rows")
 
 	// An unknown name is refused even under a valid scope.
 	if _, err := owned.RunQuery(ctx, "no-such-query", tools.CatalogueFilter{}); err == nil {

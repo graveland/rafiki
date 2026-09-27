@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // setXDG points every base directory at t.TempDir() so path tests assert
@@ -36,21 +38,16 @@ func TestPathsAreProfileScoped(t *testing.T) {
 		{"state", StateFile("work"), filepath.Join(root, "state", "rafiki", "profiles", "work", "client-state.json")},
 	}
 	for _, tc := range cases {
-		if tc.got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, tc.got, "%s = %q, want", tc.name, tc.got)
 	}
 }
 
 func TestTwoProfilesNeverShareAPath(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
 	for _, fn := range []func(string) string{Dir, TokenFile, AppendSystemPromptFile, ActiveFile, StateFile} {
 		a, b := fn("work"), fn("personal")
-		if a == b {
-			t.Fatalf("two profiles share a path: %q", a)
-		}
-		if !strings.Contains(a, "work") || !strings.Contains(b, "personal") {
-			t.Fatalf("path does not name its profile: %q / %q", a, b)
-		}
+		c.NotEq(b, a, "two profiles share a path")
+		c.False(!strings.Contains(a, "work") || !strings.Contains(b, "personal"), "path does not name its profile: %q / %q", a, b)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // respondDraftToolUse returns a script step that replies with a single
@@ -47,6 +49,7 @@ const editDraftInput = `{
 }`
 
 func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondDraftToolUse(t, editDraftInput),
 	}}
@@ -60,25 +63,15 @@ func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 	f := fixtureRankedFinding()
 
 	edit, err := Draft(context.Background(), c, f, current, p, "brent", nil)
-	if err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if edit.FindingTitle != f.Title {
-		t.Errorf("FindingTitle = %q, want %q", edit.FindingTitle, f.Title)
-	}
+	ck.Require().NoError(err, "Draft")
+	ck.Eq(f.Title, edit.FindingTitle, "FindingTitle")
 	if len(edit.Files) != 1 || edit.Files[0].Path != current[0].Path {
 		t.Fatalf("Files = %+v, want one file at %q", edit.Files, current[0].Path)
 	}
-	if edit.Files[0].Content == current[0].Content {
-		t.Error("Files[0].Content unchanged, want modified content from the response")
-	}
-	if edit.Rationale == "" {
-		t.Error("Rationale empty")
-	}
+	ck.NotEq(current[0].Content, edit.Files[0].Content, "Files[0].Content unchanged, want modified content from the response")
+	ck.NotEq("", edit.Rationale, "Rationale empty")
 
-	if len(sender.lastReq) != 1 {
-		t.Fatalf("requests sent = %d, want 1", len(sender.lastReq))
-	}
+	ck.Require().Len(sender.lastReq, 1, "requests sent = %d, want 1", len(sender.lastReq))
 	if sender.lastReq[0].ToolChoice.OfTool == nil || sender.lastReq[0].ToolChoice.OfTool.Name != "propose_skill_edit" {
 		t.Errorf("request did not force propose_skill_edit tool choice: %+v", sender.lastReq[0].ToolChoice)
 	}
@@ -92,9 +85,7 @@ func TestDraftEditPathCarriesSamePathAndFindingTitle(t *testing.T) {
 			sawCurrentContent = true
 		}
 	}
-	if !sawCurrentContent {
-		t.Error("request did not include the current file's content")
-	}
+	ck.True(sawCurrentContent, "request did not include the current file's content")
 }
 
 const newSkillDraftInput = `{
@@ -103,6 +94,7 @@ const newSkillDraftInput = `{
 }`
 
 func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondDraftToolUse(t, newSkillDraftInput),
 	}}
@@ -111,15 +103,9 @@ func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 
 	f := fixtureRankedFinding()
 	edit, err := Draft(context.Background(), c, f, nil, p, "brent", nil)
-	if err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if edit.FindingTitle != f.Title {
-		t.Errorf("FindingTitle = %q, want %q", edit.FindingTitle, f.Title)
-	}
-	if len(edit.Files) != 1 {
-		t.Fatalf("Files = %+v, want one file", edit.Files)
-	}
+	ck.Require().NoError(err, "Draft")
+	ck.Eq(f.Title, edit.FindingTitle, "FindingTitle")
+	ck.Require().Len(edit.Files, 1, "Files")
 	if !strings.HasPrefix(edit.Files[0].Path, "skills/") || !strings.HasSuffix(edit.Files[0].Path, "SKILL.md") {
 		t.Errorf("Files[0].Path = %q, want under skills/<name>/SKILL.md", edit.Files[0].Path)
 	}
@@ -132,12 +118,11 @@ func TestDraftNewSkillPathInstructsSkillsDirLayout(t *testing.T) {
 			sawNewSkillInstruction = true
 		}
 	}
-	if !sawNewSkillInstruction {
-		t.Error("request did not instruct the new-skill skills/<name>/SKILL.md layout")
-	}
+	ck.True(sawNewSkillInstruction, "request did not instruct the new-skill skills/<name>/SKILL.md layout")
 }
 
 func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondTextOnly("forgot to call the tool"),
 		respondDraftToolUse(t, editDraftInput),
@@ -146,34 +131,25 @@ func TestDraftRetriesOnceOnMalformedResponse(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if len(edit.Files) == 0 {
-		t.Error("Files empty after retry")
-	}
+	ck.Require().NoError(err, "Draft")
+	ck.NotEmpty(edit.Files, "Files empty after retry")
 
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (one retry)", len(sender.lastReq))
-	}
+	ck.Require().Len(sender.lastReq, 2, "requests sent = %d, want 2 (one retry)", len(sender.lastReq))
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	if lastMsg.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("last message in retry request is role %q, want user", lastMsg.Role)
-	}
+	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
 	var found bool
 	for _, block := range lastMsg.Content {
 		if block.OfText != nil && strings.Contains(block.OfText.Text, "no propose_skill_edit tool_use block") {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("retry request's last user turn did not contain the parse error; content=%+v", lastMsg.Content)
-	}
+	ck.True(found, "retry request's last user turn did not contain the parse error; content=%+v", lastMsg.Content)
 }
 
 func TestDraftFailsAfterTwoMalformedResponses(t *testing.T) {
+	ck := assert.NewAborting(t)
 	sender := &fakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondTextOnly("first malformed reply"),
 		respondTextOnly("second malformed reply"),
@@ -182,15 +158,12 @@ func TestDraftFailsAfterTwoMalformedResponses(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err == nil {
-		t.Fatal("Draft: want error after two malformed responses, got nil")
-	}
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (initial + one retry, no third attempt)", len(sender.lastReq))
-	}
+	ck.Error(err, "Draft: want error after two malformed responses, got nil")
+	ck.Len(sender.lastReq, 2, "requests sent = %d, want 2 (initial + one retry, no third attempt)", len(sender.lastReq))
 }
 
 func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	invalidInput := `{
 		"files": [{"path": "/etc/skills/SKILL.md", "content": "some content"}],
 		"rationale": "oops"
@@ -203,34 +176,20 @@ func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if len(edit.Files) == 0 {
-		t.Error("Files empty after retry")
-	}
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (one retry after invalid path)", len(sender.lastReq))
-	}
+	ck.Require().NoError(err, "Draft")
+	ck.NotEmpty(edit.Files, "Files empty after retry")
+	ck.Require().Len(sender.lastReq, 2, "requests sent = %d, want 2 (one retry after invalid path)", len(sender.lastReq))
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	if lastMsg.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("last message in retry request is role %q, want user", lastMsg.Role)
-	}
+	ck.Require().Eq(anthropic.MessageParamRoleUser, lastMsg.Role, "last message in retry request is role")
 	// The first response DID call propose_skill_edit (with invalid input),
 	// so the retry must answer that dangling tool_use with a tool_result —
 	// a plain user-text turn here is what the real Anthropic API rejects.
-	if len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil {
-		t.Fatalf("retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
-	}
+	ck.Require().False(len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
 	tr := lastMsg.Content[0].OfToolResult
-	if tr.ToolUseID != "tu_1" {
-		t.Errorf("tool_result.tool_use_id = %q, want tu_1 (the first response's tool_use id)", tr.ToolUseID)
-	}
-	if !tr.IsError.Value {
-		t.Error("tool_result.is_error = false, want true")
-	}
+	ck.Eq("tu_1", tr.ToolUseID, "tool_result.tool_use_id")
+	ck.True(tr.IsError.Value, "tool_result.is_error = false, want true")
 	var found bool
 	for _, sub := range tr.Content {
 		if sub.OfText != nil && strings.Contains(sub.OfText.Text, "must be relative") {
@@ -243,6 +202,7 @@ func TestDraftRejectsAbsolutePathAndRetries(t *testing.T) {
 }
 
 func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	invalidInput := `{
 		"files": [{"path": "..\\\\..\\\\etc\\\\passwd", "content": "some content"}],
 		"rationale": "oops"
@@ -255,21 +215,13 @@ func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	edit, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err != nil {
-		t.Fatalf("Draft: %v", err)
-	}
-	if len(edit.Files) == 0 {
-		t.Error("Files empty after retry")
-	}
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (one retry after backslash path)", len(sender.lastReq))
-	}
+	ck.Require().NoError(err, "Draft")
+	ck.NotEmpty(edit.Files, "Files empty after retry")
+	ck.Require().Len(sender.lastReq, 2, "requests sent = %d, want 2 (one retry after backslash path)", len(sender.lastReq))
 
 	retryReq := sender.lastReq[1]
 	lastMsg := retryReq.Messages[len(retryReq.Messages)-1]
-	if len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil {
-		t.Fatalf("retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
-	}
+	ck.Require().False(len(lastMsg.Content) != 1 || lastMsg.Content[0].OfToolResult == nil, "retry request's last user turn = %+v, want a single tool_result block", lastMsg.Content)
 	tr := lastMsg.Content[0].OfToolResult
 	var found bool
 	for _, sub := range tr.Content {
@@ -283,6 +235,7 @@ func TestDraftRejectsBackslashPathAndRetries(t *testing.T) {
 }
 
 func TestDraftRejectsNormalizedTraversalPathAndFailsAfterRetry(t *testing.T) {
+	ck := assert.NewAborting(t)
 	// "a/../../b" contains two literal ".." segments; the segment scan
 	// rejects it outright regardless of what it would normalize to.
 	invalidInput := `{
@@ -297,15 +250,12 @@ func TestDraftRejectsNormalizedTraversalPathAndFailsAfterRetry(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err == nil {
-		t.Fatal("Draft: want error, got nil")
-	}
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (initial + one retry)", len(sender.lastReq))
-	}
+	ck.Error(err, "Draft: want error, got nil")
+	ck.Len(sender.lastReq, 2, "requests sent = %d, want 2 (initial + one retry)", len(sender.lastReq))
 }
 
 func TestDraftRejectsDotDotPathAndFailsAfterRetry(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	invalidInput := `{
 		"files": [{"path": "skills/../../etc/passwd", "content": "some content"}],
 		"rationale": "oops"
@@ -318,13 +268,7 @@ func TestDraftRejectsDotDotPathAndFailsAfterRetry(t *testing.T) {
 	p := &Profile{DraftModel: "claude-haiku-4-5"}
 
 	_, err := Draft(context.Background(), c, fixtureRankedFinding(), nil, p, "brent", nil)
-	if err == nil {
-		t.Fatal("Draft: want error, got nil")
-	}
-	if !strings.Contains(err.Error(), "..") {
-		t.Errorf("error = %v, want mention of \"..\" segment rejection", err)
-	}
-	if len(sender.lastReq) != 2 {
-		t.Fatalf("requests sent = %d, want 2 (initial + one retry)", len(sender.lastReq))
-	}
+	ck.Require().Error(err, "Draft: want error, got nil")
+	ck.StrContains(err.Error(), "..", "error = %v, want mention of \"..\" segment rejection", err)
+	ck.Require().Len(sender.lastReq, 2, "requests sent = %d, want 2 (initial + one retry)", len(sender.lastReq))
 }

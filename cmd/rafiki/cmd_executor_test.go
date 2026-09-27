@@ -17,6 +17,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Two rows minted in the same window: UUIDv7s share their leading timestamp
@@ -29,16 +31,13 @@ const (
 )
 
 func TestShortExecutorIDKeepsTheTail(t *testing.T) {
+	c := assert.NewAborting(t)
 	full := fixturePrefix + fixtureTailA
 	if got := shortExecutorID(full); got != fixtureTailA {
 		t.Fatalf("shortExecutorID(%s) = %s, want the tail %s", full, got, fixtureTailA)
 	}
-	if got := shortExecutorID(fixtureTailA); got != fixtureTailA {
-		t.Fatalf("short ids must pass through unchanged, got %s", got)
-	}
-	if got := shortExecutorID("exactly12ch"); got != "exactly12ch" {
-		t.Fatalf("ids of exactly %d chars must not be mangled, got %q", executorShortIDLen, got)
-	}
+	c.Eq(fixtureTailA, shortExecutorID(fixtureTailA), "short ids must pass through unchanged, got")
+	c.Eq("exactly12ch", shortExecutorID("exactly12ch"), "ids of exactly %d chars must not be mangled, got", executorShortIDLen)
 }
 
 func TestFilterExecutorsForDelete(t *testing.T) {
@@ -60,36 +59,29 @@ func TestFilterExecutorsForDelete(t *testing.T) {
 	t.Run("all-disabled selects Enabled==false regardless of connection", func(t *testing.T) {
 		got := ids(filterExecutorsForDelete(execs, true, false))
 		want := []string{"disabled-online", "disabled-offline"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("got %v, want %v", got, want)
-		}
+		assert.NewAborting(t).EqDiff(want, got, "got")
 	})
 
 	t.Run("all-offline selects Connected==false regardless of enabled", func(t *testing.T) {
 		got := ids(filterExecutorsForDelete(execs, false, true))
 		want := []string{"enabled-offline", "disabled-offline"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("got %v, want %v", got, want)
-		}
+		assert.NewAborting(t).EqDiff(want, got, "got")
 	})
 
 	t.Run("both flags union rather than intersect", func(t *testing.T) {
 		got := ids(filterExecutorsForDelete(execs, true, true))
 		want := []string{"disabled-online", "enabled-offline", "disabled-offline"}
-		if !slices.Equal(got, want) {
-			t.Fatalf("got %v, want %v", got, want)
-		}
+		assert.NewAborting(t).EqDiff(want, got, "got")
 	})
 
 	t.Run("neither flag selects nothing", func(t *testing.T) {
 		got := filterExecutorsForDelete(execs, false, false)
-		if len(got) != 0 {
-			t.Fatalf("got %v, want empty", got)
-		}
+		assert.NewAborting(t).Empty(got, "got")
 	})
 }
 
 func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
+	c := assert.NewCollecting(t)
 	execs := []*rafikiv1.ExecutorRow{
 		{Id: fixturePrefix + fixtureTailA,
 			Enabled: true, Connected: true,
@@ -99,26 +91,16 @@ func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderExecutorTable(&buf, execs, false); err != nil {
-		t.Fatalf("renderExecutorTable: %v", err)
-	}
+	c.Require().NoError(renderExecutorTable(&buf, execs, false), "renderExecutorTable")
 	out := buf.String()
 
 	for _, want := range []string{fixtureTailA, fixtureTailB, "laptop", "rack", "live", "disabled", "a=1,b=2"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "output missing")
 	}
-	if strings.Contains(out, fixturePrefix) {
-		t.Errorf("the shared timestamp prefix must not be displayed:\n%s", out)
-	}
-	if strings.Contains(out, "\x1b") {
-		t.Errorf("useColor=false must emit no ANSI escapes:\n%s", out)
-	}
+	c.NotStrContains(out, fixturePrefix, "the shared timestamp prefix must not be displayed:\n")
+	c.NotStrContains(out, "\x1b", "useColor=false must emit no ANSI escapes:\n")
 	for _, header := range []string{"ID", "MACHINE", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN"} {
-		if !strings.Contains(out, header) {
-			t.Errorf("missing header %q:\n%s", header, out)
-		}
+		c.StrContains(out, header, "missing header")
 	}
 }
 
@@ -126,51 +108,35 @@ func TestRenderExecutorTableShowsTailIDs(t *testing.T) {
 // client wants to know how long the CURRENT connection has held, separate
 // from whether the row is enabled or when it was last seen at all.
 func TestRenderExecutorTableShowsConnectedSince(t *testing.T) {
+	c := assert.NewCollecting(t)
 	connectedMs := time.Now().Add(-90 * time.Second).UnixMilli()
 	execs := []*rafikiv1.ExecutorRow{
 		{Id: fixtureTailA, Enabled: true, Connected: true, ConnectedAtMs: connectedMs},
 		{Id: fixtureTailB, Enabled: true}, // not connected: connected_at_ms 0
 	}
 	var buf bytes.Buffer
-	if err := renderExecutorTable(&buf, execs, false); err != nil {
-		t.Fatalf("renderExecutorTable: %v", err)
-	}
+	c.Require().NoError(renderExecutorTable(&buf, execs, false), "renderExecutorTable")
 	out := buf.String()
-	if !strings.Contains(out, "CONNECTED") {
-		t.Errorf("output missing the CONNECTED column header:\n%s", out)
-	}
-	if !strings.Contains(out, "ago") {
-		t.Errorf("expected a relative connected-since time for the live executor:\n%s", out)
-	}
+	c.StrContains(out, "CONNECTED", "output missing the CONNECTED column header:\n")
+	c.StrContains(out, "ago", "expected a relative connected-since time for the live executor:\n")
 }
 
 func TestRenderExecutorTableEmptyAndLastSeen(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
-	if err := renderExecutorTable(&buf, nil, false); err != nil {
-		t.Fatalf("renderExecutorTable: %v", err)
-	}
-	if got := buf.String(); got != "No enrolled executors.\n" {
-		t.Fatalf("empty pool renders %q, want the friendly line", got)
-	}
+	c.NoError(renderExecutorTable(&buf, nil, false), "renderExecutorTable")
+	c.Eq("No enrolled executors.\n", buf.String(), "empty pool renders")
 
 	// last_seen_ms 0 is "never seen": a dash, not a relative time.
 	buf.Reset()
-	if err := renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailA, Enabled: true}}, false); err != nil {
-		t.Fatalf("renderExecutorTable: %v", err)
-	}
-	if strings.Contains(buf.String(), "ago") {
-		t.Fatalf("a zero last-seen must render as '-', not a relative time:\n%s", buf.String())
-	}
+	c.NoError(renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailA, Enabled: true}}, false), "renderExecutorTable")
+	c.NotStrContains(buf.String(), "ago", "a zero last-seen must render as '-', not a relative time:\n")
 
 	// A real sighting renders under LAST SEEN.
 	buf.Reset()
 	seenMs := time.Now().Add(-time.Hour).UnixMilli()
-	if err := renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailB, Enabled: true, LastSeenMs: seenMs}}, false); err != nil {
-		t.Fatalf("renderExecutorTable: %v", err)
-	}
-	if !strings.Contains(buf.String(), "ago") {
-		t.Fatalf("a sighted row must render a relative last-seen time:\n%s", buf.String())
-	}
+	c.NoError(renderExecutorTable(&buf, []*rafikiv1.ExecutorRow{{Id: fixtureTailB, Enabled: true, LastSeenMs: seenMs}}, false), "renderExecutorTable")
+	c.StrContains(buf.String(), "ago", "a sighted row must render a relative last-seen time:\n")
 }
 
 // ─── the Connect round trips ─────────────────────────────────────────────────
@@ -266,6 +232,7 @@ func (s *executorStubControl) DeleteExecutor(
 // uses — so a CLI verb dials THAT daemon and no other.
 func executorTestDaemon(t *testing.T, ctl *executorStubControl) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
@@ -273,23 +240,17 @@ func executorTestDaemon(t *testing.T, ctl *executorStubControl) {
 	// ~104 bytes (sizeof sun_path on darwin), and t.TempDir() nests under the
 	// full test name, which alone can exceed that.
 	dir, err := os.MkdirTemp("", "raf-ex")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	c.NoError(err, "MkdirTemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(ctl)
 	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"scratch": {Name: "scratch", Socket: sock},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("scratch"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("scratch"), "SavePointer")
 }
 
 // runExecutorCLI executes one `rafiki executor …` argv through the real root
@@ -300,9 +261,7 @@ func runExecutorCLI(t *testing.T, args ...string) string {
 	root := newRootCmd()
 	root.SetArgs(append([]string{"executor"}, args...))
 	out := captureStdout(t, func() {
-		if err := root.Execute(); err != nil {
-			t.Fatalf("rafiki executor %v: %v", args, err)
-		}
+		assert.NewAborting(t).NoError(root.Execute(), "rafiki executor %v", args)
 	})
 	return out
 }
@@ -324,6 +283,7 @@ func TestExecutorListOnConnect(t *testing.T) {
 	executorTestDaemon(t, srv)
 
 	t.Run("table keeps the seven columns and renders the proto rows", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		out := runExecutorCLI(t, "list")
 		for _, want := range []string{
 			fixtureTailA, fixtureTailB, // ID column: the tails, not the heads
@@ -331,28 +291,19 @@ func TestExecutorListOnConnect(t *testing.T) {
 			"live", "disabled", // STATUS
 			"env=prod,machine=laptop", // LABELS sorted
 		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("output missing %q:\n%s", want, out)
-			}
+			c.StrContains(out, want, "output missing")
 		}
 		for _, header := range []string{"ID", "MACHINE", "STATUS", "LABELS", "ADMITS", "CONNECTED", "LAST SEEN"} {
-			if !strings.Contains(out, header) {
-				t.Errorf("missing header %q:\n%s", header, out)
-			}
+			c.StrContains(out, header, "missing header")
 		}
-		if !strings.Contains(out, "ago") {
-			t.Errorf("the connected/sighted timestamps must render as relative times:\n%s", out)
-		}
-		if strings.Contains(out, "\x1b") {
-			t.Errorf("plain stdout must carry no ANSI escapes:\n%s", out)
-		}
+		c.StrContains(out, "ago", "the connected/sighted timestamps must render as relative times:\n")
+		c.NotStrContains(out, "\x1b", "plain stdout must carry no ANSI escapes:\n")
 	})
 
 	t.Run("json is protojson ExecutorRow rows under the rows envelope", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		out := runExecutorCLI(t, "list", "-j")
-		if !strings.Contains(out, "\"rows\"") {
-			t.Errorf("json output must use the canonical rows envelope:\n%s", out)
-		}
+		c.StrContains(out, "\"rows\"", "json output must use the canonical rows envelope:\n")
 		for _, want := range []string{
 			"\"id\": \"" + fullA + "\"",
 			"\"machine\": \"laptop\"",
@@ -361,51 +312,36 @@ func TestExecutorListOnConnect(t *testing.T) {
 			"\"connectedAtMs\": \"1700000000000\"", // int64 rides as a JSON string
 			"\"lastSeenMs\": \"1700000005000\"",
 		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("protojson output missing %q:\n%s", want, out)
-			}
+			c.StrContains(out, want, "protojson output missing")
 		}
 		// The framed full-executor shape is retired with its transport.
 		for _, gone := range []string{"\"executors\"", "\"connected_at\"", "\"last_seen_at\"", "\"enrolled_at\"", "\"self_reported\""} {
-			if strings.Contains(out, gone) {
-				t.Errorf("retired framed key %q must not appear:\n%s", gone, out)
-			}
+			c.NotStrContains(out, gone, "retired framed key")
 		}
 	})
 
 	t.Run("jsonl is one compact row per line with no envelope", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		out := runExecutorCLI(t, "list", "-J")
 		lines := nonEmptyLines(out)
-		if len(lines) != 2 {
-			t.Fatalf("got %d lines, want one row per line:\n%s", len(lines), out)
-		}
-		if strings.Contains(out, "\"rows\"") {
-			t.Errorf("jsonl must not wrap rows in an envelope:\n%s", out)
-		}
-		if !strings.Contains(lines[0], "\"id\":\""+fullA+"\"") ||
-			!strings.Contains(lines[1], "\"id\":\""+fullB+"\"") {
-			t.Errorf("rows must land in daemon order:\n%s", out)
-		}
+		c.Require().Len(lines, 2, "got %d lines, want one row per line:\n%s", len(lines), out)
+		c.NotStrContains(out, "\"rows\"", "jsonl must not wrap rows in an envelope:\n")
+		c.False(!strings.Contains(lines[0], "\"id\":\""+fullA+"\"") ||
+			!strings.Contains(lines[1], "\"id\":\""+fullB+"\""), "rows must land in daemon order:\n%s", out)
 	})
 
 	t.Run("selector and limit ride the request, kind stays empty", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		runExecutorCLI(t, "list", "--selector", "env=prod", "--limit", "7")
-		if srv.sawList == nil {
-			t.Fatal("the CLI sent no ListExecutors request")
-		}
-		if got := srv.sawList.GetKind(); got != "" {
-			t.Errorf("kind = %q, want empty: the plain listing is the empty-kind path", got)
-		}
-		if got := srv.sawList.GetSelector(); got != "env=prod" {
-			t.Errorf("selector = %q, want env=prod", got)
-		}
-		if got := srv.sawList.GetLimit(); got != 7 {
-			t.Errorf("limit = %d, want 7", got)
-		}
+		c.Require().NotNil(srv.sawList, "the CLI sent no ListExecutors request")
+		c.Eq("", srv.sawList.GetKind(), "kind")
+		c.Eq("env=prod", srv.sawList.GetSelector(), "selector")
+		c.Eq(7, srv.sawList.GetLimit(), "limit")
 	})
 }
 
 func TestExecutorLabelOnConnect(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := &executorStubControl{labelRow: &rafikiv1.ExecutorRow{
 		Id: "exec-full-1", Machine: "laptop", Enabled: true, Admits: "env=prod",
 		Labels: map[string]string{"machine": "laptop"},
@@ -414,77 +350,52 @@ func TestExecutorLabelOnConnect(t *testing.T) {
 
 	out := runExecutorCLI(t, "label", "exec-full-1", "env=prod", "--remove", "stale")
 
-	if got := srv.sawLabel.GetExecutorId(); got != "exec-full-1" {
-		t.Errorf("executor_id = %q, want exec-full-1", got)
-	}
-	if got := srv.sawLabel.GetSet()["env"]; got != "prod" {
-		t.Errorf("set[env] = %q, want prod", got)
-	}
-	if got := srv.sawLabel.GetRemove(); !slices.Equal(got, []string{"stale"}) {
-		t.Errorf("remove = %v, want [stale]", got)
-	}
+	c.Eq("exec-full-1", srv.sawLabel.GetExecutorId(), "executor_id")
+	c.Eq("prod", srv.sawLabel.GetSet()["env"], "set[env]")
+	c.EqDiff([]string{"stale"}, srv.sawLabel.GetRemove(), "remove")
 
 	// The echo is the response's updated row as canonical protojson.
 	for _, want := range []string{"\"id\": \"exec-full-1\"", "\"machine\": \"laptop\"", "\"admits\": \"env=prod\""} {
-		if !strings.Contains(out, want) {
-			t.Errorf("label echo missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "label echo missing")
 	}
 }
 
 func TestExecutorEnrollTokenToStdoutOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := &executorStubControl{token: "tok-secret-1"}
 	executorTestDaemon(t, srv)
 
 	readErr := captureStderr(t)
 	out := runExecutorCLI(t, "enroll", "--name", "lab", "--ttl", "30m")
 
-	if out != "tok-secret-1\n" {
-		t.Errorf("stdout = %q, want exactly the token (it pipes)", out)
-	}
-	if got := readErr(); !strings.Contains(got, "Token minted") {
-		t.Errorf("the one-time notice must go to stderr, got:\n%s", got)
-	}
-	if got := srv.sawEnroll.GetName(); got != "lab" {
-		t.Errorf("name = %q, want lab", got)
-	}
-	if got := srv.sawEnroll.GetTtlSeconds(); got != 1800 {
-		t.Errorf("ttl_seconds = %d, want 1800", got)
-	}
+	c.Eq("tok-secret-1\n", out, "stdout")
+	c.StrContains(readErr(), "Token minted", "the one-time notice must go to stderr, got:\n")
+	c.Eq("lab", srv.sawEnroll.GetName(), "name")
+	c.Eq(1800, srv.sawEnroll.GetTtlSeconds(), "ttl_seconds")
 }
 
 func TestExecutorCreateEchoesProtojson(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := &executorStubControl{createdID: "exec-42", credential: "cred-once"}
 	executorTestDaemon(t, srv)
 
 	out := runExecutorCLI(t, "create", "--name", "lab")
 
-	if got := srv.sawCreate.GetName(); got != "lab" {
-		t.Errorf("name = %q, want lab", got)
-	}
+	c.Eq("lab", srv.sawCreate.GetName(), "name")
 	for _, want := range []string{"\"executorId\": \"exec-42\"", "\"credential\": \"cred-once\""} {
-		if !strings.Contains(out, want) {
-			t.Errorf("create echo missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "create echo missing")
 	}
 }
 
 func TestExecutorDisableEnableOnConnect(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := &executorStubControl{}
 	executorTestDaemon(t, srv)
 
-	if out := runExecutorCLI(t, "disable", "abc123"); !strings.Contains(out, "Executor abc123 disabled.") {
-		t.Errorf("disable output = %q", out)
-	}
-	if got := srv.sawDisable; !slices.Equal(got, []string{"abc123"}) {
-		t.Errorf("disable sent %v, want [abc123]", got)
-	}
-	if out := runExecutorCLI(t, "enable", "abc123"); !strings.Contains(out, "Executor abc123 enabled.") {
-		t.Errorf("enable output = %q", out)
-	}
-	if got := srv.sawEnable; !slices.Equal(got, []string{"abc123"}) {
-		t.Errorf("enable sent %v, want [abc123]", got)
-	}
+	c.StrContains(runExecutorCLI(t, "disable", "abc123"), "Executor abc123 disabled.", "disable output =")
+	c.EqDiff([]string{"abc123"}, srv.sawDisable, "disable sent")
+	c.StrContains(runExecutorCLI(t, "enable", "abc123"), "Executor abc123 enabled.", "enable output =")
+	c.EqDiff([]string{"abc123"}, srv.sawEnable, "enable sent")
 }
 
 func TestExecutorBulkDeleteOnConnect(t *testing.T) {
@@ -493,6 +404,7 @@ func TestExecutorBulkDeleteOnConnect(t *testing.T) {
 	fullC := fixturePrefix + "aabbccddeeff"
 
 	t.Run("union of the two criteria, live rows spared", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		srv := &executorStubControl{rows: []*rafikiv1.ExecutorRow{
 			{Id: fullA, Enabled: true, Connected: true}, // live: neither flag wants it
 			{Id: fullB, Enabled: false},                 // disabled
@@ -503,30 +415,23 @@ func TestExecutorBulkDeleteOnConnect(t *testing.T) {
 		out := runExecutorCLI(t, "delete", "--all-disabled", "--all-offline", "-y")
 
 		// What is about to be deleted is listed first, then deleted.
-		if !strings.Contains(out, fixtureTailB) || !strings.Contains(out, "aabbccddeeff") {
-			t.Errorf("the listing must show the rows being deleted:\n%s", out)
-		}
+		c.False(!strings.Contains(out, fixtureTailB) || !strings.Contains(out, "aabbccddeeff"), "the listing must show the rows being deleted:\n%s", out)
 		got := srv.sawDelete
 		slices.Sort(got)
 		want := []string{fullB, fullC}
-		if !slices.Equal(got, want) {
-			t.Errorf("deleted %v, want %v", got, want)
-		}
+		c.EqDiff(want, got, "deleted")
 	})
 
 	t.Run("no match prints the friendly line and deletes nothing", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		srv := &executorStubControl{rows: []*rafikiv1.ExecutorRow{
 			{Id: fullA, Enabled: true, Connected: true},
 		}}
 		executorTestDaemon(t, srv)
 
 		out := runExecutorCLI(t, "delete", "--all-offline", "-y")
-		if !strings.Contains(out, "No executors match.") {
-			t.Errorf("output = %q, want the no-match line", out)
-		}
-		if len(srv.sawDelete) != 0 {
-			t.Errorf("deletes sent: %v, want none", srv.sawDelete)
-		}
+		c.StrContains(out, "No executors match.", "output")
+		c.Empty(srv.sawDelete, "deletes sent")
 	})
 }
 
@@ -557,21 +462,19 @@ func TestExecutorVerbErrRendersReasonAndInfraAdvice(t *testing.T) {
 	}
 
 	t.Run("reason-carrying refusal renders reason and message", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		executorTestDaemon(t, denied())
 		root := newRootCmd()
 		root.SetArgs([]string{"executor", "disable", "abc123"})
 		var errOut bytes.Buffer
 		root.SetErr(&errOut)
 		err := root.Execute()
-		if err == nil {
-			t.Fatal("disable against a refusing daemon succeeded")
-		}
-		if got := err.Error(); !strings.Contains(got, "executor_disabled: nope") {
-			t.Errorf("error = %q, want `<reason>: <message>` shape", got)
-		}
+		c.Require().Error(err, "disable against a refusing daemon succeeded")
+		c.StrContains(err.Error(), "executor_disabled: nope", "error")
 	})
 
 	t.Run("infra failure renders the advice", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		srv := &executorStubControl{}
 		srv.disableErr = connect.NewError(connect.CodeUnavailable, errors.New("socket gone"))
 		executorTestDaemon(t, srv)
@@ -581,11 +484,7 @@ func TestExecutorVerbErrRendersReasonAndInfraAdvice(t *testing.T) {
 		var errOut bytes.Buffer
 		root.SetErr(&errOut)
 		err := root.Execute()
-		if err == nil {
-			t.Fatal("disable against a down daemon succeeded")
-		}
-		if got := err.Error(); !strings.Contains(got, "is rafikid running?") {
-			t.Errorf("error = %q, want diagnoseConnectError's advice", got)
-		}
+		c.Require().Error(err, "disable against a down daemon succeeded")
+		c.StrContains(err.Error(), "is rafikid running?", "error")
 	})
 }

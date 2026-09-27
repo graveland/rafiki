@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeReviewReads stands in for *insights.Insights on the review verbs'
@@ -64,16 +66,14 @@ func reviewTestController(t *testing.T, reads reviewReads) *Controller {
 }
 
 func TestReviewQueueTryAcceptEnqueuesOncePerConversation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	q := newReviewQueue(nil, nil, nil)
 	for i := 0; i < 8; i++ {
 		id := string(rune('a' + i))
-		if st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"}); st != "enqueued" {
-			t.Fatalf("tryAccept(%q) = %q, want enqueued", id, st)
-		}
+		st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
+		c.Require().Eq("enqueued", st, "tryAccept(%q) = %q, want enqueued", id, st)
 	}
-	if len(q.jobs) != 8 {
-		t.Fatalf("queue holds %d jobs, want 8", len(q.jobs))
-	}
+	c.Require().Len(q.jobs, 8, "queue holds %d jobs, want 8", len(q.jobs))
 	// Once per conversation: each id appears exactly once in the channel.
 	seen := map[string]int{}
 	for i := 0; i < 8; i++ {
@@ -81,9 +81,7 @@ func TestReviewQueueTryAcceptEnqueuesOncePerConversation(t *testing.T) {
 		seen[job.conversationID]++
 	}
 	for id, n := range seen {
-		if n != 1 {
-			t.Errorf("conversation %q enqueued %d times, want 1", id, n)
-		}
+		c.Eq(1, n, "conversation %q enqueued %d times, want 1", id, n)
 	}
 }
 
@@ -91,17 +89,12 @@ func TestReviewQueueTryAcceptEnqueuesOncePerConversation(t *testing.T) {
 // visible "already happening", never a second job. The first job must still
 // be the only one in the channel — the guard rejects without enqueueing.
 func TestReviewQueueSecondRequestForSameConversationGetsAlreadyRunning(t *testing.T) {
+	c := assert.NewAborting(t)
 	q := newReviewQueue(nil, nil, nil)
-	if st := q.tryAccept(reviewJob{conversationID: "conv-1", stage: "detect"}); st != "enqueued" {
-		t.Fatalf("first tryAccept = %q, want enqueued", st)
-	}
+	c.Eq("enqueued", q.tryAccept(reviewJob{conversationID: "conv-1", stage: "detect"}), "first tryAccept")
 	st := q.tryAccept(reviewJob{conversationID: "conv-1", stage: "detect"})
-	if st != "already_running" {
-		t.Fatalf("second tryAccept = %q, want already_running", st)
-	}
-	if len(q.jobs) != 1 {
-		t.Fatalf("queue holds %d jobs after a rejected duplicate, want 1", len(q.jobs))
-	}
+	c.Eq("already_running", st, "second tryAccept")
+	c.Len(q.jobs, 1, "queue holds %d jobs after a rejected duplicate, want 1", len(q.jobs))
 }
 
 // A full queue must refuse without blocking: no worker is draining it, so a
@@ -109,20 +102,18 @@ func TestReviewQueueSecondRequestForSameConversationGetsAlreadyRunning(t *testin
 // regardless of outcome). The timeout is the assertion — no sleep-based
 // "probably returned in time" check.
 func TestReviewQueueFullReturnsQueueFullWithoutBlocking(t *testing.T) {
+	c := assert.NewAborting(t)
 	q := newReviewQueue(nil, nil, nil)
 	for i := 0; i < reviewQueueCapacity; i++ {
 		id := string(rune('a' + i))
-		if st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"}); st != "enqueued" {
-			t.Fatalf("tryAccept(%q) = %q, want enqueued", id, st)
-		}
+		st := q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
+		c.Eq("enqueued", st, "tryAccept(%q) = %q, want enqueued", id, st)
 	}
 	done := make(chan string, 1)
 	go func() { done <- q.tryAccept(reviewJob{conversationID: "ninth", stage: "detect"}) }()
 	select {
 	case st := <-done:
-		if st != "queue_full" {
-			t.Fatalf("9th tryAccept = %q, want queue_full", st)
-		}
+		c.Eq("queue_full", st, "9th tryAccept")
 	case <-time.After(2 * time.Second):
 		t.Fatal("tryAccept blocked on a full queue")
 	}
@@ -133,18 +124,15 @@ func TestReviewQueueFullReturnsQueueFullWithoutBlocking(t *testing.T) {
 // a false already_running forever (nothing running to clear it). Drain one
 // slot to make room and prove the id is still admissible.
 func TestReviewQueueFullDoesNotLeaveTheIDMarkedInFlight(t *testing.T) {
+	c := assert.NewAborting(t)
 	q := newReviewQueue(nil, nil, nil)
 	for i := 0; i < reviewQueueCapacity; i++ {
 		id := string(rune('a' + i))
 		q.tryAccept(reviewJob{conversationID: id, stage: "detect"})
 	}
-	if st := q.tryAccept(reviewJob{conversationID: "X", stage: "detect"}); st != "queue_full" {
-		t.Fatalf("tryAccept(X) = %q, want queue_full", st)
-	}
+	c.Eq("queue_full", q.tryAccept(reviewJob{conversationID: "X", stage: "detect"}), "tryAccept(X)")
 	<-q.jobs // make room
-	if st := q.tryAccept(reviewJob{conversationID: "X", stage: "detect"}); st != "enqueued" {
-		t.Fatalf("tryAccept(X) after a drain = %q, want enqueued (not already_running)", st)
-	}
+	c.Eq("enqueued", q.tryAccept(reviewJob{conversationID: "X", stage: "detect"}), "tryAccept(X) after a drain")
 }
 
 // The single-flight entry leaves when the job completes — success or
@@ -158,26 +146,22 @@ func TestReviewQueueInFlightClearsOnJobCompletion(t *testing.T) {
 	// also keeps resolveProfile's auto-seed path from writing into the
 	// developer's real profile directory.
 	t.Setenv("RAFIKI_ANALYZER_DIR", filepath.Join(t.TempDir(), "absent"))
+	c := assert.NewAborting(t)
 	q := newReviewQueue(nil, nil, nil)
 	job := reviewJob{conversationID: "conv-9", stage: "detect"}
-	if st := q.tryAccept(job); st != "enqueued" {
-		t.Fatalf("tryAccept = %q, want enqueued", st)
-	}
+	c.Eq("enqueued", q.tryAccept(job), "tryAccept")
 	q.runJob(context.Background(), job)
 	q.mu.Lock()
 	stillIn := q.inFlight["conv-9"]
 	q.mu.Unlock()
-	if stillIn {
-		t.Fatal("inFlight still holds the id after the job completed (failed)")
-	}
-	if st := q.tryAccept(job); st != "enqueued" {
-		t.Fatalf("tryAccept after completion = %q, want enqueued (not already_running)", st)
-	}
+	c.False(stillIn, "inFlight still holds the id after the job completed (failed)")
+	c.Eq("enqueued", q.tryAccept(job), "tryAccept after completion")
 }
 
 func TestConversationReviewClampsBudgetToMaxEnv(t *testing.T) {
 	conv := "00000000-0000-0000-0000-0000000000aa"
 	t.Run("request above max clamps down", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		// After the helper: it blanks every RAFIKI_REVIEW_* var first, so a
 		// value set before it would be erased.
@@ -186,44 +170,34 @@ func TestConversationReviewClampsBudgetToMaxEnv(t *testing.T) {
 			ConversationIDs: []string{conv}, Stage: "detect",
 			BudgetUSD: 5, HasBudgetUSD: true,
 		})
-		if err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
-		if len(acc) != 1 || acc[0].Status != "enqueued" {
-			t.Fatalf("accepts = %+v, want one enqueued", acc)
-		}
+		ck.NoError(err, "ConversationReview")
+		ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
 		job := <-c.reviewQ.jobs
-		if job.budgetUSD != 1.5 {
-			t.Fatalf("job.budgetUSD = %v, want the clamp 1.5", job.budgetUSD)
-		}
+		ck.Eq(1.5, job.budgetUSD, "job.budgetUSD")
 	})
 	t.Run("unset budget takes the max", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		t.Setenv("RAFIKI_REVIEW_MAX_BUDGET_USD", "0.25")
-		if _, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+		_, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
-		}); err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
+		})
+		ck.NoError(err, "ConversationReview")
 		job := <-c.reviewQ.jobs
-		if job.budgetUSD != 0.25 {
-			t.Fatalf("job.budgetUSD = %v, want 0.25 (no request ceiling + max set)", job.budgetUSD)
-		}
+		ck.Eq(0.25, job.budgetUSD, "job.budgetUSD")
 	})
 	t.Run("request below max is untouched", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		// Downward only: the clamp must never raise a request's own ceiling.
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		t.Setenv("RAFIKI_REVIEW_MAX_BUDGET_USD", "1.5")
-		if _, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+		_, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			BudgetUSD: 0.1, HasBudgetUSD: true,
-		}); err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
+		})
+		ck.NoError(err, "ConversationReview")
 		job := <-c.reviewQ.jobs
-		if job.budgetUSD != 0.1 {
-			t.Fatalf("job.budgetUSD = %v, want the request's own 0.1", job.budgetUSD)
-		}
+		ck.Eq(0.1, job.budgetUSD, "job.budgetUSD")
 	})
 }
 
@@ -233,31 +207,25 @@ func TestConversationReviewClampsBudgetToMaxEnv(t *testing.T) {
 // conversation row (a child id would query nothing), and the caller sees its
 // own spelling back.
 func TestConversationReviewQueuesCanonicalEchoesCallerSpelling(t *testing.T) {
+	ck := assert.NewAborting(t)
 	conv := "00000000-0000-0000-0000-0000000000dd"
 	child := "c_reviewchild"
 	c := reviewTestController(t, fakeReviewReads{ids: []string{child}, canonical: []string{conv}})
 	acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 		ConversationIDs: []string{child}, Stage: "detect",
 	})
-	if err != nil {
-		t.Fatalf("ConversationReview: %v", err)
-	}
-	if len(acc) != 1 || acc[0].Status != "enqueued" {
-		t.Fatalf("accepts = %+v, want one enqueued", acc)
-	}
-	if acc[0].ConversationID != child {
-		t.Fatalf("accept echoes %q, want the CALLER's spelling %q", acc[0].ConversationID, child)
-	}
+	ck.NoError(err, "ConversationReview")
+	ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
+	ck.Eq(child, acc[0].ConversationID, "accept echoes")
 	job := <-c.reviewQ.jobs
-	if job.conversationID != conv {
-		t.Fatalf("job.conversationID = %q, want the canonical %q", job.conversationID, conv)
-	}
+	ck.Eq(conv, job.conversationID, "job.conversationID")
 }
 
 // Two spellings of one conversation -- its child id and its uuid --
 // canonicalize to the same value, so the second spelling collides in the
 // single-flight map: already_running, never a second job.
 func TestConversationReviewTwoSpellingsCollideInFlight(t *testing.T) {
+	ck := assert.NewAborting(t)
 	conv := "00000000-0000-0000-0000-0000000000ee"
 	child := "c_reviewchild2"
 	c := reviewTestController(t, fakeReviewReads{
@@ -267,21 +235,15 @@ func TestConversationReviewTwoSpellingsCollideInFlight(t *testing.T) {
 	acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 		ConversationIDs: []string{child, conv}, Stage: "detect",
 	})
-	if err != nil {
-		t.Fatalf("ConversationReview: %v", err)
-	}
-	if len(acc) != 2 {
-		t.Fatalf("accepts = %+v, want two", acc)
-	}
+	ck.NoError(err, "ConversationReview")
+	ck.Len(acc, 2, "accepts")
 	if acc[0].ConversationID != child || acc[0].Status != "enqueued" {
 		t.Fatalf("accept[0] = %+v, want %q enqueued", acc[0], child)
 	}
 	if acc[1].ConversationID != conv || acc[1].Status != "already_running" {
 		t.Fatalf("accept[1] = %+v, want %q already_running", acc[1], conv)
 	}
-	if len(c.reviewQ.jobs) != 1 {
-		t.Fatalf("queue holds %d jobs, want 1 (the canonical key collided)", len(c.reviewQ.jobs))
-	}
+	ck.Len(c.reviewQ.jobs, 1, "queue holds %d jobs, want 1 (the canonical key collided)", len(c.reviewQ.jobs))
 }
 
 // A negative budget_usd is malformed, not "spend nothing": 0 is the
@@ -291,17 +253,14 @@ func TestConversationReviewTwoSpellingsCollideInFlight(t *testing.T) {
 func TestConversationReviewNegativeBudgetIsNoCeiling(t *testing.T) {
 	conv := "00000000-0000-0000-0000-0000000000ff"
 	t.Run("without max env stays 0", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			BudgetUSD: -0.5, HasBudgetUSD: true,
 		})
-		if err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
-		if len(acc) != 1 || acc[0].Status != "enqueued" {
-			t.Fatalf("accepts = %+v, want one enqueued", acc)
-		}
+		ck.NoError(err, "ConversationReview")
+		ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
 		if job := <-c.reviewQ.jobs; job.budgetUSD != 0 {
 			t.Fatalf("job.budgetUSD = %v, want 0 (negative folded to no ceiling)", job.budgetUSD)
 		}
@@ -309,12 +268,11 @@ func TestConversationReviewNegativeBudgetIsNoCeiling(t *testing.T) {
 	t.Run("with max env takes the max", func(t *testing.T) {
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		t.Setenv("RAFIKI_REVIEW_MAX_BUDGET_USD", "0.25")
-		if _, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
+		_, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			BudgetUSD: -0.5, HasBudgetUSD: true,
-		}); err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
+		})
+		assert.NewAborting(t).NoError(err, "ConversationReview")
 		if job := <-c.reviewQ.jobs; job.budgetUSD != 0.25 {
 			t.Fatalf("job.budgetUSD = %v, want 0.25 (folded to 0, then the max)", job.budgetUSD)
 		}
@@ -325,6 +283,7 @@ func TestConversationReviewNegativeBudgetIsNoCeiling(t *testing.T) {
 // never a distinct status naming it (constraints: a scope miss reads exactly
 // like not-found, and a status would leak that the id exists).
 func TestConversationReviewDropsOutOfScopeIDSilently(t *testing.T) {
+	ck := assert.NewAborting(t)
 	inScope := "00000000-0000-0000-0000-000000000001"
 	outScope := "00000000-0000-0000-0000-000000000002"
 	c := reviewTestController(t, fakeReviewReads{ids: []string{inScope}})
@@ -332,12 +291,8 @@ func TestConversationReviewDropsOutOfScopeIDSilently(t *testing.T) {
 		ConversationIDs: []string{outScope, inScope},
 		Stage:           "detect",
 	})
-	if err != nil {
-		t.Fatalf("ConversationReview: %v", err)
-	}
-	if len(acc) != 1 {
-		t.Fatalf("accepts = %+v, want exactly one", acc)
-	}
+	ck.NoError(err, "ConversationReview")
+	ck.Len(acc, 1, "accepts")
 	if acc[0].ConversationID != inScope || acc[0].Status != "enqueued" {
 		t.Fatalf("accept[0] = %+v, want %q enqueued", acc[0], inScope)
 	}
@@ -349,6 +304,7 @@ func TestConversationReviewDropsOutOfScopeIDSilently(t *testing.T) {
 // default registry) and an empty catalog: "openrouter/…" splits fine but
 // resolves to no catalog entry.
 func TestConversationReviewUnknownModelFailsWholeRequest(t *testing.T) {
+	ck := assert.NewAborting(t)
 	conv := "00000000-0000-0000-0000-0000000000bb"
 	c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 	c.SetCatalog(seedTestCatalog(t, nil))
@@ -356,12 +312,8 @@ func TestConversationReviewUnknownModelFailsWholeRequest(t *testing.T) {
 		ConversationIDs: []string{conv}, Stage: "detect",
 		Model: "openrouter/definitely/not-a-model",
 	})
-	if err == nil {
-		t.Fatalf("ConversationReview accepted an unresolvable model; accepts = %+v", acc)
-	}
-	if len(c.reviewQ.jobs) != 0 {
-		t.Fatalf("a whole-request failure must enqueue nothing; queue holds %d", len(c.reviewQ.jobs))
-	}
+	ck.Error(err, "ConversationReview accepted an unresolvable model; accepts = %+v", acc)
+	ck.Empty(c.reviewQ.jobs, "a whole-request failure must enqueue nothing; queue holds %d", len(c.reviewQ.jobs))
 }
 
 // The positive control for reviewModelResolves. Real catalog keys are bare
@@ -382,32 +334,26 @@ func TestConversationReviewKnownModelPassesValidation(t *testing.T) {
 		})
 	}
 	t.Run("catalogued id, qualified spelling", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		c.SetCatalog(catalog(t))
 		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			Model: "openrouter/z-ai/glm-5.3-flash",
 		})
-		if err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
-		if len(acc) != 1 || acc[0].Status != "enqueued" {
-			t.Fatalf("accepts = %+v, want one enqueued", acc)
-		}
+		ck.NoError(err, "ConversationReview")
+		ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
 	})
 	t.Run("bare anthropic id", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		c.SetCatalog(catalog(t))
 		acc, err := c.ConversationReview(context.Background(), insights.ScopeAll(), connectapi.ReviewRequest{
 			ConversationIDs: []string{conv}, Stage: "detect",
 			Model: "claude-sonnet-5",
 		})
-		if err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
-		if len(acc) != 1 || acc[0].Status != "enqueued" {
-			t.Fatalf("accepts = %+v, want one enqueued", acc)
-		}
+		ck.NoError(err, "ConversationReview")
+		ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
 	})
 	t.Run("bare openrouter id is refused", func(t *testing.T) {
 		// The addressing rule: a first segment that names no configured
@@ -419,11 +365,10 @@ func TestConversationReviewKnownModelPassesValidation(t *testing.T) {
 			ConversationIDs: []string{conv}, Stage: "detect",
 			Model: "z-ai/glm-5.3-flash",
 		})
-		if err == nil {
-			t.Fatal("an unqualified openrouter id must fail the whole request")
-		}
+		assert.NewAborting(t).Error(err, "an unqualified openrouter id must fail the whole request")
 	})
 	t.Run("registry alias without a catalog", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := reviewTestController(t, fakeReviewReads{ids: []string{conv}})
 		c.providers = mustParseProviders(t, `
 default_provider = "anthropic"
@@ -443,12 +388,8 @@ context_window = 16384
 			ConversationIDs: []string{conv}, Stage: "detect",
 			Model: "vmlx/qwen",
 		})
-		if err != nil {
-			t.Fatalf("ConversationReview: %v", err)
-		}
-		if len(acc) != 1 || acc[0].Status != "enqueued" {
-			t.Fatalf("accepts = %+v, want one enqueued", acc)
-		}
+		ck.NoError(err, "ConversationReview")
+		ck.False(len(acc) != 1 || acc[0].Status != "enqueued", "accepts = %+v, want one enqueued", acc)
 	})
 }
 

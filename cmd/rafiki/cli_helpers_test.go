@@ -2,60 +2,49 @@ package main
 
 import (
 	"os"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestDecideKillOnExit_Flags covers the non-interactive paths: flag overrides
 // and non-TTY stdin. The interactive prompt path requires a real terminal and
 // is exercised manually.
 func TestDecideKillOnExit_KillFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// --kill-on-exit → true, regardless of other state.
 	got, err := decideKillOnExit(true, false, "my-session")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got {
-		t.Error("killOnExit=true: expected true, got false")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.True(got, "killOnExit=true: expected true, got false")
 }
 
 func TestDecideKillOnExit_KeepFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// --keep-on-exit → false.
 	got, err := decideKillOnExit(false, true, "my-session")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got {
-		t.Error("keepOnExit=true: expected false, got true")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.False(got, "keepOnExit=true: expected false, got true")
 }
 
 func TestDecideKillOnExit_NonTTY_DefaultsToKeep(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// When neither flag is set and stdin is not a TTY (as in a test runner),
 	// decideKillOnExit should default to keep without prompting.
 	if isStdinTTY() {
 		t.Skip("stdin is a TTY; skipping non-TTY default test")
 	}
 	got, err := decideKillOnExit(false, false, "my-session")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got {
-		t.Error("non-TTY stdin: expected false (keep), got true (kill)")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.False(got, "non-TTY stdin: expected false (keep), got true (kill)")
 }
 
 func TestDecideKillOnExit_KillFlagBeatsKeep(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Cobra enforces mutual exclusivity, but the function itself is pure —
 	// verify that killOnExit wins the short-circuit when both are accidentally true.
 	got, err := decideKillOnExit(true, true, "my-session")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got {
-		t.Error("killOnExit=true,keepOnExit=true: expected true (kill wins), got false")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.True(got, "killOnExit=true,keepOnExit=true: expected true (kill wins), got false")
 }
 
 // TestParseKillAnswer exercises the y/N prompt answer parser.
@@ -89,13 +78,10 @@ func TestParseKillAnswer(t *testing.T) {
 	for _, tc := range tests {
 		input := tc.input
 		t.Run(input, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			gotKill, gotWarn := parseKillAnswer(input)
-			if gotKill != tc.wantKill {
-				t.Errorf("parseKillAnswer(%q) kill=%v, want %v", input, gotKill, tc.wantKill)
-			}
-			if gotWarn != tc.wantWarn {
-				t.Errorf("parseKillAnswer(%q) warned=%v, want %v", input, gotWarn, tc.wantWarn)
-			}
+			c.Eq(tc.wantKill, gotKill, "parseKillAnswer(%q) kill=%v, want", input, gotKill)
+			c.Eq(tc.wantWarn, gotWarn, "parseKillAnswer(%q) warned=%v, want", input, gotWarn)
 		})
 	}
 }
@@ -109,13 +95,10 @@ func TestParseKillAnswer(t *testing.T) {
 // shelled out to it must go with it, or a non-detached `rafiki create` fails
 // at runtime telling the user to run a make target that no longer exists.
 func TestRafikiAttachSubprocessHelpersAreGone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	src, err := os.ReadFile("cli_helpers.go")
-	if err != nil {
-		t.Fatalf("read cli_helpers.go: %v", err)
-	}
+	c.Require().NoError(err, "read cli_helpers.go")
 	for _, gone := range []string{"findRafikiAttach", "execRafikiAttach", "attachEnv"} {
-		if strings.Contains(string(src), gone) {
-			t.Errorf("%s still exists; it shells out to the deleted rafiki-attach binary", gone)
-		}
+		c.NotStrContains(string(src), gone, "%s still exists; it shells out to the deleted rafiki-attach binary", gone)
 	}
 }

@@ -43,6 +43,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── fixtures: fake LLM + drivers ────────────────────────────────────────────
@@ -92,9 +94,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 kind = "anthropic"
 base_url = %q
 `, baseURL)
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write providers fixture: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(body), 0o600), "write providers fixture")
 	return path
 }
 
@@ -144,19 +144,16 @@ func bootScriptDaemon(t *testing.T) *scriptDaemon {
 // run as this one identity.
 func scriptUser(t *testing.T, d *daemon) (token, configDir string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	configDir = t.TempDir()
 	userCmd := cliCmdIn(t, d, configDir, "--output", "json", "user", "create", operatorName())
 	var userStderr strings.Builder
 	userCmd.Stderr = &userStderr
 	userOut, err := userCmd.Output()
-	if err != nil {
-		t.Fatalf("user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
-	}
+	c.NoError(err, "user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
 	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
 	b, err := os.ReadFile(tokenPath)
-	if err != nil || len(strings.TrimSpace(string(b))) == 0 {
-		t.Fatalf("user create did not leave a token at %s: %v", tokenPath, err)
-	}
+	c.False(err != nil || len(strings.TrimSpace(string(b))) == 0, "user create did not leave a token at %s: %v", tokenPath, err)
 	return strings.TrimSpace(string(b)), configDir
 }
 
@@ -165,20 +162,15 @@ func scriptUser(t *testing.T, d *daemon) (token, configDir string) {
 // spawns the script child (the materializer reads the OWNER's modules).
 func putPymodule(t *testing.T, d *daemon, configDir, name, code string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	fixture := filepath.Join(t.TempDir(), name+".py")
-	if err := os.WriteFile(fixture, []byte(code), 0o600); err != nil {
-		t.Fatalf("write %s fixture: %v", name, err)
-	}
+	c.NoError(os.WriteFile(fixture, []byte(code), 0o600), "write %s fixture", name)
 	var stderr strings.Builder
 	cmd := cliCmdIn(t, d, configDir, "py", "put", name, "--file", fixture)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("py put %s: %v\nstderr: %s", name, err, stderr.String())
-	}
-	if !strings.Contains(string(out), "saved") {
-		t.Fatalf("py put %s output %q does not announce the save", name, out)
-	}
+	c.NoError(err, "py put %s: %v\nstderr: %s", name, err, stderr.String())
+	c.StrContains(string(out), "saved", "py put %s output %q does not announce the save", name, out)
 }
 
 // bearerTransport injects the profile's token on every request — the same
@@ -200,9 +192,7 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // including for the server-streaming verbs.
 func faceClient(t *testing.T, d *daemon, token string) rafikiv1connect.ControlClient {
 	t.Helper()
-	if d.proxyURL == "" {
-		t.Fatal("the daemon never announced its proxy face; nothing here can dial it")
-	}
+	assert.NewAborting(t).NotEq("", d.proxyURL, "the daemon never announced its proxy face; nothing here can dial it")
 	return rafikiv1connect.NewControlClient(
 		&http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}},
 		d.proxyURL)
@@ -239,9 +229,7 @@ func (d *daemon) scriptChildSpawn(t *testing.T, client rafikiv1connect.ControlCl
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := client.Spawn(ctx, connect.NewRequest(req))
-	if err != nil {
-		t.Fatalf("spawn script child: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn script child")
 	return resp.Msg.GetChildId()
 }
 
@@ -254,9 +242,7 @@ func waitChildExited(t *testing.T, client rafikiv1connect.ControlClient, childID
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		resp, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 		cancel()
-		if err != nil {
-			t.Fatalf("GetChild(%s): %v", childID, err)
-		}
+		assert.NewAborting(t).NoError(err, "GetChild(%s)", childID)
 		if resp.Msg.GetChild().GetStatus() == "exited" {
 			return resp.Msg.GetChild()
 		}
@@ -275,9 +261,7 @@ func waitHistoryContains(t *testing.T, client rafikiv1connect.ControlClient, chi
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		resp, err := client.GetHistory(ctx, connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: childID}))
 		cancel()
-		if err != nil {
-			t.Fatalf("GetHistory(%s): %v", childID, err)
-		}
+		assert.NewAborting(t).NoError(err, "GetHistory(%s)", childID)
 		b, _ := json.Marshal(resp.Msg)
 		last = string(b)
 		if strings.Contains(last, substr) {
@@ -474,6 +458,7 @@ time.sleep(120)
 // event log (script_report), where StreamEvents can observe it.
 func TestConnectScriptVerbsOnTheConnectPlane(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	if _, err := lookPython3(); err != nil {
 		t.Skip("python3 not available: script children need an interpreter")
 	}
@@ -521,12 +506,8 @@ func TestConnectScriptVerbsOnTheConnectPlane(t *testing.T) {
 	gctx, gcancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer gcancel()
 	got, err := opClient.GetChild(gctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: scriptID}))
-	if err != nil {
-		t.Fatalf("GetChild: %v", err)
-	}
-	if got.Msg.GetChild().GetResult() != `{"ok": true, "verbs": 3}` {
-		t.Fatalf("GetChild().result = %q, want the stored JSON", got.Msg.GetChild().GetResult())
-	}
+	c.NoError(err, "GetChild")
+	c.Eq(`{"ok": true, "verbs": 3}`, got.Msg.GetChild().GetResult(), "GetChild().result")
 
 	// Report through the socket: a top-level script's report is appended to
 	// its OWN durable event log as a script_report event — observable on
@@ -548,9 +529,7 @@ func TestConnectScriptVerbsOnTheConnectPlane(t *testing.T) {
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: scriptID}},
 		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{scriptID: 0}},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	c.NoError(err, "StreamEvents")
 	defer func() { _ = evStream.Close() }()
 	deadline2 := time.After(15 * time.Second)
 	sawReport := false
@@ -586,9 +565,7 @@ func TestConnectScriptVerbsOnTheConnectPlane(t *testing.T) {
 	sctx, scancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer scancel()
 	recvStream, err := childClient.Receive(sctx, connect.NewRequest(&rafikiv1.ReceiveRequest{}))
-	if err != nil {
-		t.Fatalf("Receive through the per-child socket: %v", err)
-	}
+	c.NoError(err, "Receive through the per-child socket")
 	msgDeadline := time.After(15 * time.Second)
 	gotMsg := false
 	for !gotMsg {
@@ -652,6 +629,7 @@ func lookPython3() (string, error) { return exec.LookPath("python3") }
 // turn, and the script child reads exited (never running-with-no-process).
 func TestScriptChildRestartSettlesFailed(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	if _, err := lookPython3(); err != nil {
 		t.Skip("python3 not available: script children need an interpreter")
 	}
@@ -666,9 +644,7 @@ func TestScriptChildRestartSettlesFailed(t *testing.T) {
 		Cwd: "/tmp", Kind: "fundi", Model: "fakellm/mini", Name: "restart-parent",
 	}))
 	pcancel()
-	if err != nil {
-		t.Fatalf("spawn parent: %v", err)
-	}
+	c.NoError(err, "spawn parent")
 	parent := presp.Msg.GetChildId()
 
 	putPymodule(t, d1.daemon, configDir, "restart_sleeper_it", scriptSleeperCode)
@@ -681,9 +657,7 @@ func TestScriptChildRestartSettlesFailed(t *testing.T) {
 		Script:        &rafikiv1.SpawnRequest_ScriptSpec{Repo: "local", Script: "restart_sleeper_it"},
 	}))
 	scancel()
-	if err != nil {
-		t.Fatalf("spawn script child: %v", err)
-	}
+	c.NoError(err, "spawn script child")
 	victim := sresp.Msg.GetChildId()
 
 	// The socket's existence is the proof the process started; the crash
@@ -702,9 +676,7 @@ func TestScriptChildRestartSettlesFailed(t *testing.T) {
 
 	// Crash, not shutdown: SIGKILL writes nothing, so the row keeps its live
 	// status — the shape recovery classifies as "died with the daemon".
-	if err := d1.proc.Process.Kill(); err != nil {
-		t.Fatalf("kill daemon: %v", err)
-	}
+	c.NoError(d1.proc.Process.Kill(), "kill daemon")
 	_ = d1.proc.Wait()
 
 	// Daemon 2 takes the same daemon id (reclaiming its own rows) and the
@@ -739,6 +711,7 @@ func TestScriptChildRestartSettlesFailed(t *testing.T) {
 // survives.
 func TestScriptChildEndToEnd(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	if _, err := lookPython3(); err != nil {
 		t.Skip("python3 not available: script children need an interpreter")
 	}
@@ -760,9 +733,7 @@ func TestScriptChildEndToEnd(t *testing.T) {
 		Name:  "e2e-parent",
 	}))
 	pcancel()
-	if err != nil {
-		t.Fatalf("spawn parent: %v", err)
-	}
+	c.NoError(err, "spawn parent")
 	parent := presp.Msg.GetChildId()
 
 	// An outsider tree the second script must not reach.
@@ -774,9 +745,7 @@ func TestScriptChildEndToEnd(t *testing.T) {
 		Name:  "e2e-outsider",
 	}))
 	ocancel()
-	if err != nil {
-		t.Fatalf("spawn outsider: %v", err)
-	}
+	c.NoError(err, "spawn outsider")
 	outsider := oresp.Msg.GetChildId()
 
 	cwd := t.TempDir()
@@ -808,9 +777,7 @@ func TestScriptChildEndToEnd(t *testing.T) {
 		},
 	}))
 	dcancel()
-	if err != nil {
-		t.Fatalf("spawn denier: %v", err)
-	}
+	c.NoError(err, "spawn denier")
 	denier := dresp.Msg.GetChildId()
 
 	// 3. The denier settles fast: the kill is refused by the childScoped
@@ -831,12 +798,8 @@ func TestScriptChildEndToEnd(t *testing.T) {
 	octx2, ocancel2 := context.WithTimeout(context.Background(), 15*time.Second)
 	osum, err := opClient.GetChild(octx2, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: outsider}))
 	ocancel2()
-	if err != nil {
-		t.Fatalf("GetChild(outsider): %v", err)
-	}
-	if osum.Msg.GetChild().GetStatus() == "exited" {
-		t.Fatal("the sibling tree was killed by the denied call; it must survive")
-	}
+	c.NoError(err, "GetChild(outsider)")
+	c.NotEq("exited", osum.Msg.GetChild().GetStatus(), "the sibling tree was killed by the denied call; it must survive")
 
 	// 4. The driver settles done, with its result stored.
 	drvSum := waitChildExited(t, opClient, driverID, 120*time.Second)
@@ -886,6 +849,7 @@ with open(probe, "w") as f:
 // gone the daemon refuses the whole create on `field "model" does not apply`.
 func TestScriptChildFromTheCLI(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	if _, err := lookPython3(); err != nil {
 		t.Skip("python3 not available: script children need an interpreter")
 	}
@@ -909,16 +873,12 @@ func TestScriptChildFromTheCLI(t *testing.T) {
 	// one.
 	manifest := fmt.Sprintf("[profile.it]\nsocket = %q\nmodel = %q\n",
 		d.socketPath, "anthropic/claude-sonnet-4")
-	if err := os.WriteFile(filepath.Join(configDir, "rafiki", "profiles.toml"),
-		[]byte(manifest), 0o600); err != nil {
-		t.Fatalf("rewrite profiles.toml with a default model: %v", err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(configDir, "rafiki", "profiles.toml"),
+		[]byte(manifest), 0o600), "rewrite profiles.toml with a default model")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("create --kind script: %v\nstderr: %s", err, stderr.String())
-	}
+	c.Require().NoError(err, "create --kind script: %v\nstderr: %s", err, stderr.String())
 	var created struct {
 		ChildID string `json:"childId"`
 	}
@@ -935,26 +895,16 @@ func TestScriptChildFromTheCLI(t *testing.T) {
 		}
 		t.Fatalf("script child exited %v; its log/probe:\n%.4000s", sum.ExitCode, probe)
 	}
-	if sum.GetKind() != "script" {
-		t.Errorf("GetChild kind = %q, want script", sum.GetKind())
-	}
+	c.Eq("script", sum.GetKind(), "GetChild kind")
 	// The name defaults to the script's name — the same default the
 	// pymodule_start tool applies, so both entry points read the same way.
-	if sum.GetName() != "script_cli_it" {
-		t.Errorf("GetChild name = %q, want the script's name", sum.GetName())
-	}
+	c.Eq("script_cli_it", sum.GetName(), "GetChild name")
 	probeRaw, err := os.ReadFile(probePath)
-	if err != nil {
-		t.Fatalf("probe file never written: %v", err)
-	}
+	c.Require().NoError(err, "probe file never written")
 	var probe struct {
 		Argv []string `json:"argv"`
 	}
-	if err := json.Unmarshal(probeRaw, &probe); err != nil {
-		t.Fatalf("probe %s does not parse: %v", probeRaw, err)
-	}
+	c.Require().NoError(json.Unmarshal(probeRaw, &probe), "probe %s does not parse", probeRaw)
 	want := []string{"--probe-out", probePath}
-	if len(probe.Argv) != len(want) || probe.Argv[0] != want[0] || probe.Argv[1] != want[1] {
-		t.Errorf("script argv = %v, want %v (the after-`--` tail must reach the process verbatim)", probe.Argv, want)
-	}
+	c.False(len(probe.Argv) != len(want) || probe.Argv[0] != want[0] || probe.Argv[1] != want[1], "script argv = %v, want %v (the after-`--` tail must reach the process verbatim)", probe.Argv, want)
 }

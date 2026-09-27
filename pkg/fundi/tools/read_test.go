@@ -13,34 +13,29 @@ import (
 	"unicode/utf8"
 
 	"go.graveland.dev/rafiki/pkg/toolmeta"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestReadTool(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 
 	small := filepath.Join(dir, "small.txt")
-	if err := os.WriteFile(small, []byte("line1\nline2\nline3\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(small, []byte("line1\nline2\nline3\n"), 0o644))
 
 	empty := filepath.Join(dir, "empty.txt")
-	if err := os.WriteFile(empty, []byte(""), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(empty, []byte(""), 0o644))
 
 	subdir := filepath.Join(dir, "adir")
-	if err := os.Mkdir(subdir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Mkdir(subdir, 0o755))
 
 	var bigLines []string
 	for i := 1; i <= 2500; i++ {
 		bigLines = append(bigLines, "L"+strconv.Itoa(i))
 	}
 	big := filepath.Join(dir, "big.txt")
-	if err := os.WriteFile(big, []byte(strings.Join(bigLines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(big, []byte(strings.Join(bigLines, "\n")+"\n"), 0o644))
 
 	tests := []struct {
 		name      string
@@ -54,9 +49,7 @@ func TestReadTool(t *testing.T) {
 			input: fmt.Sprintf(`{"path":%q}`, small),
 			checkOut: func(t *testing.T, out string) {
 				want := fmt.Sprintf("%6d\t%s\n%6d\t%s\n%6d\t%s\n", 1, "line1", 2, "line2", 3, "line3")
-				if out != want {
-					t.Fatalf("got:\n%q\nwant:\n%q", out, want)
-				}
+				assert.NewAborting(t).Eq(want, out, "got:\n")
 			},
 		},
 		{
@@ -81,9 +74,7 @@ func TestReadTool(t *testing.T) {
 			name:  "empty file reads as empty marker",
 			input: fmt.Sprintf(`{"path":%q}`, empty),
 			checkOut: func(t *testing.T, out string) {
-				if !strings.Contains(out, "empty") {
-					t.Fatalf("expected an empty-file marker, got %q", out)
-				}
+				assert.NewAborting(t).StrContains(out, "empty", "expected an empty-file marker, got")
 			},
 		},
 		{
@@ -95,9 +86,7 @@ func TestReadTool(t *testing.T) {
 				if !strings.HasPrefix(out, fmt.Sprintf("%6d\t%s\n", 2, "line2")) {
 					t.Fatalf("got:\n%q", out)
 				}
-				if !strings.Contains(out, "offset=3") {
-					t.Fatalf("expected a paging hint pointing at offset=3, got:\n%q", out)
-				}
+				assert.NewAborting(t).StrContains(out, "offset=3", "expected a paging hint pointing at offset=3, got:\n")
 			},
 		},
 		{
@@ -105,58 +94,46 @@ func TestReadTool(t *testing.T) {
 			input: fmt.Sprintf(`{"path":%q,"offset":2,"limit":2}`, small),
 			checkOut: func(t *testing.T, out string) {
 				want := fmt.Sprintf("%6d\t%s\n%6d\t%s\n", 2, "line2", 3, "line3")
-				if out != want {
-					t.Fatalf("got:\n%q\nwant:\n%q", out, want)
-				}
+				assert.NewAborting(t).Eq(want, out, "got:\n")
 			},
 		},
 		{
 			name:  "default cap is 2000 lines with a paging hint",
 			input: fmt.Sprintf(`{"path":%q}`, big),
 			checkOut: func(t *testing.T, out string) {
+				c := assert.NewAborting(t)
 				if !strings.Contains(out, "offset") {
 					t.Fatalf("expected a paging hint mentioning offset, got tail: %q", out[len(out)-200:])
 				}
-				if !strings.Contains(out, fmt.Sprintf("%6d\t%s", 2000, "L2000")) {
-					t.Fatalf("expected line 2000 to be the last shown line")
-				}
-				if strings.Contains(out, fmt.Sprintf("%6d\t%s", 2001, "L2001")) {
-					t.Fatalf("did not expect line 2001 to be shown")
-				}
+				c.StrContains(out, fmt.Sprintf("%6d\t%s", 2000, "L2000"), "expected line 2000 to be the last shown line")
+				c.NotStrContains(out, fmt.Sprintf("%6d\t%s", 2001, "L2001"), "did not expect line 2001 to be shown")
 			},
 		},
 		{
 			name:  "explicit limit beyond the default cap is honored",
 			input: fmt.Sprintf(`{"path":%q,"limit":2200}`, big),
 			checkOut: func(t *testing.T, out string) {
-				if !strings.Contains(out, fmt.Sprintf("%6d\t%s", 2200, "L2200")) {
-					t.Fatalf("expected line 2200 to be shown when limit=2200")
-				}
+				assert.NewAborting(t).StrContains(out, fmt.Sprintf("%6d\t%s", 2200, "L2200"), "expected line 2200 to be shown when limit=2200")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			tr := NewFileTracker()
 			rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-			if matErr != nil {
-				t.Fatal(matErr)
-			}
+			c.NoError(matErr)
 			outResult, err := rt.Execute(context.Background(), ToolInput(tc.input))
 			out := outResult.Text
 			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got output %q", out)
-				}
+				c.Error(err, "expected error, got output %q", out)
 				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Fatalf("error %q does not contain %q", err.Error(), tc.errSubstr)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			c.NoError(err, "unexpected error")
 			if tc.checkOut != nil {
 				tc.checkOut(t, out)
 			}
@@ -165,22 +142,17 @@ func TestReadTool(t *testing.T) {
 }
 
 func TestReadToolRecordsTrackerState(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("hi\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte("hi\n"), 0o644))
 	tr := NewFileTracker()
 	rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if matErr != nil {
-		t.Fatal(matErr)
-	}
+	c.NoError(matErr)
 	if _, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p))); err != nil {
 		t.Fatal(err)
 	}
-	if err := tr.Verify(p); err != nil {
-		t.Fatalf("expected read to satisfy the tracker, got %v", err)
-	}
+	c.NoError(tr.Verify(p), "expected read to satisfy the tracker, got")
 }
 
 // TestReadToolTakesPerPathLock: read shares the FileTracker with write and
@@ -190,16 +162,13 @@ func TestReadToolRecordsTrackerState(t *testing.T) {
 // Asserting on the lock itself is deterministic; racing an actual torn read
 // would not be.
 func TestReadToolTakesPerPathLock(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte("hello\n"), 0o644))
 	tr := NewFileTracker()
 	rt, matErr := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if matErr != nil {
-		t.Fatal(matErr)
-	}
+	c.NoError(matErr)
 
 	unlock := tr.Lock(p)
 
@@ -218,53 +187,39 @@ func TestReadToolTakesPerPathLock(t *testing.T) {
 	unlock()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("read failed once the lock was released: %v", err)
-		}
+		c.NoError(err, "read failed once the lock was released")
 	case <-time.After(5 * time.Second):
 		t.Fatal("read never completed after the lock was released")
 	}
 }
 
 func TestReadToolLineTruncation(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	// One 10 KB line, then two normal lines.
 	longLine := strings.Repeat("x", 10*1024)
 	content := longLine + "\nline2\nline3\n"
 	p := filepath.Join(dir, "long.txt")
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(content), 0o644))
 
 	tr := NewFileTracker()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := res.Text
 
 	// The long line must be truncated with the suffix.
-	if !strings.Contains(out, "… (line truncated)") {
-		t.Fatalf("expected line truncation suffix, got:\n%q", out)
-	}
+	c.StrContains(out, "… (line truncated)", "expected line truncation suffix, got:\n")
 	// The suffix must appear on line 1.
-	if !strings.Contains(out, fmt.Sprintf("%6d\t", 1)) {
-		t.Fatalf("expected line 1 to be present, got:\n%q", out)
-	}
+	c.StrContains(out, fmt.Sprintf("%6d\t", 1), "expected line 1 to be present, got:\n")
 	// Lines 2 and 3 must be intact.
-	if !strings.Contains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 2, "line2")) {
-		t.Fatalf("expected line 2 intact, got:\n%q", out)
-	}
-	if !strings.Contains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 3, "line3")) {
-		t.Fatalf("expected line 3 intact, got:\n%q", out)
-	}
+	c.StrContains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 2, "line2"), "expected line 2 intact, got:\n")
+	c.StrContains(out, "\n"+fmt.Sprintf("%6d\t%s\n", 3, "line3"), "expected line 3 intact, got:\n")
 }
 
 func TestReadToolByteBudget(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	// Build a file large enough to exceed 50 KB.
 	var lines []string
@@ -272,27 +227,19 @@ func TestReadToolByteBudget(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
 	}
 	p := filepath.Join(dir, "big.txt")
-	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
 
 	tr := NewFileTracker()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := res.Text
 
 	// The whole result, trailer included, must fit under the budget. The
 	// old assertion allowed a 2 KB overshoot of a 50 KB contract, and that
 	// slack is exactly what hid the trailer being clipped by toolmeta.
-	if len(out) > maxReadBytes+readTrailerReserve {
-		t.Fatalf("output too large: %d bytes (budget %d + reserve %d)", len(out), maxReadBytes, readTrailerReserve)
-	}
+	c.LessOrEqual(maxReadBytes+readTrailerReserve, len(out), "output too large: %d bytes (budget %d + reserve %d)", len(out), maxReadBytes, readTrailerReserve)
 
 	// A continuation hint must be present.
 	if !strings.Contains(out, "offset=") {
@@ -305,65 +252,49 @@ func TestReadToolByteBudget(t *testing.T) {
 	lastLine := linesOut[len(linesOut)-1]
 	// Parse the offset from "... offset=N ..."
 	var offset int
-	if _, scanErr := fmt.Sscanf(lastLine, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &offset); scanErr != nil {
-		t.Fatalf("could not parse offset from %q: %v", lastLine, scanErr)
-	}
+	_, scanErr := fmt.Sscanf(lastLine, "[showing lines %d-%d; more lines remain — pass offset=%d to continue]", new(int), new(int), &offset)
+	c.NoError(scanErr, "could not parse offset from %q", lastLine)
 	// The offset must be > 0 and correspond to the next line.
-	if offset <= 1 {
-		t.Fatalf("expected offset > 1, got %d", offset)
-	}
+	c.Greater(1, offset, "expected offset > 1, got")
 }
 
 func TestReadToolBinaryDetection(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "binary.bin")
 	// File with a NUL byte early.
 	data := []byte("hello\x00world\n")
-	if err := os.WriteFile(p, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, data, 0o644))
 
 	tr := NewFileTracker()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	_, err = rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err == nil {
-		t.Fatal("expected an error for binary file")
-	}
-	if !strings.Contains(err.Error(), "binary") && !strings.Contains(err.Error(), "Binary") {
-		t.Fatalf("expected error to mention binary, got %v", err)
-	}
+	c.Error(err, "expected an error for binary file")
+	c.False(!strings.Contains(err.Error(), "binary") && !strings.Contains(err.Error(), "Binary"), "expected error to mention binary, got %v", err)
 }
 
 func TestReadToolUnderBudgetsUnchanged(t *testing.T) {
+	c := assert.NewAborting(t)
 	// A small file under all budgets must produce byte-identical output to
 	// the existing behaviour.
 	dir := t.TempDir()
 	p := filepath.Join(dir, "small.txt")
 	content := "line1\nline2\nline3\n"
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(content), 0o644))
 
 	tr := NewFileTracker()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := res.Text
 	want := fmt.Sprintf("%6d\t%s\n%6d\t%s\n%6d\t%s\n", 1, "line1", 2, "line2", 3, "line3")
-	if out != want {
-		t.Fatalf("got:\n%q\nwant:\n%q", out, want)
-	}
+	c.Eq(want, out, "got:\n")
 }
 
 func TestReadToolRoundTripContinueOffset(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	// Build a file larger than 50 KB so the first read is byte-capped.
 	var lines []string
@@ -371,15 +302,11 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("L%06d:%s", i, strings.Repeat("y", 80)))
 	}
 	p := filepath.Join(dir, "big.txt")
-	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
 
 	tr := NewFileTracker()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	var seenLines []string
 	offset := 0
@@ -390,9 +317,7 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 			input = fmt.Sprintf(`{"path":%q,"offset":%d}`, p, offset)
 		}
 		res, err := rt.Execute(context.Background(), ToolInput(input))
-		if err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(err)
 		out := res.Text
 
 		// Parse emitted lines (skip the continuation trailer).
@@ -419,16 +344,12 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 	// No line should appear twice.
 	seen := make(map[string]bool)
 	for _, l := range seenLines {
-		if seen[l] {
-			t.Fatalf("duplicate line: %q", l)
-		}
+		c.False(seen[l], "duplicate line: %q", l)
 		seen[l] = true
 	}
 
 	// We should have seen many lines.
-	if len(seenLines) < 100 {
-		t.Fatalf("expected at least 100 unique lines from round-trip, got %d", len(seenLines))
-	}
+	c.GreaterOrEqual(100, len(seenLines), "expected at least 100 unique lines from round-trip, got")
 
 	// Verify no gap: the first line should be L000001.
 	if !strings.HasPrefix(seenLines[0], "L000001:") {
@@ -452,11 +373,9 @@ func TestReadToolRoundTripContinueOffset(t *testing.T) {
 // to resume from: the exact defect per-tool budgets were introduced to fix,
 // invisible to every test that called Execute directly.
 func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
-	if maxReadBytes >= toolmeta.MaxToolResultSize {
-		t.Fatalf("maxReadBytes (%d) must be strictly below toolmeta.MaxToolResultSize (%d), "+
-			"or the continuation trailer is clipped off by the outer cap",
-			maxReadBytes, toolmeta.MaxToolResultSize)
-	}
+	c := assert.NewAborting(t)
+	c.Less(toolmeta.MaxToolResultSize, maxReadBytes, "maxReadBytes (%d) must be strictly below toolmeta.MaxToolResultSize (%d), "+
+		"or the continuation trailer is clipped off by the outer cap", maxReadBytes, toolmeta.MaxToolResultSize)
 
 	dir := t.TempDir()
 	var lines []string
@@ -464,28 +383,17 @@ func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
 	}
 	p := filepath.Join(dir, "big.txt")
-	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
 
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	// The property that matters: the complete result, trailer included, is
 	// under the outer cap, so truncateToolResult never fires on a read.
-	if len(res.Text) > toolmeta.MaxToolResultSize {
-		t.Fatalf("read result is %d bytes, over agentloop's %d cap: the trailer will be clipped",
-			len(res.Text), toolmeta.MaxToolResultSize)
-	}
-	if !strings.Contains(res.Text, "offset=") {
-		t.Fatal("byte-capped read must carry a continuation offset")
-	}
+	c.LessOrEqual(toolmeta.MaxToolResultSize, len(res.Text), "read result is")
+	c.StrContains(res.Text, "offset=", "byte-capped read must carry a continuation offset")
 }
 
 // TestReadTruncatesLongLineOnRuneBoundary guards against slicing a
@@ -493,30 +401,19 @@ func TestReadBudgetLeavesRoomForTrailer(t *testing.T) {
 // during JSON encoding, so the model would receive replacement characters
 // rather than an honestly truncated line.
 func TestReadTruncatesLongLineOnRuneBoundary(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cjk.txt")
 	// Each rune is 3 bytes, so a byte-slice at maxLineChars lands mid-rune.
-	if err := os.WriteFile(p, []byte(strings.Repeat("界", maxLineChars+500)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte(strings.Repeat("界", maxLineChars+500)+"\n"), 0o644))
 
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, p)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !utf8.ValidString(res.Text) {
-		t.Fatal("read produced invalid UTF-8: a rune was split by line truncation")
-	}
-	if strings.ContainsRune(res.Text, utf8.RuneError) {
-		t.Fatal("read output contains U+FFFD: a rune was split by line truncation")
-	}
-	if !strings.Contains(res.Text, lineTruncSuffix) {
-		t.Fatal("an over-long line must be marked as truncated")
-	}
+	c.NoError(err)
+	c.True(utf8.ValidString(res.Text), "read produced invalid UTF-8: a rune was split by line truncation")
+	c.False(strings.ContainsRune(res.Text, utf8.RuneError), "read output contains U+FFFD: a rune was split by line truncation")
+	c.StrContains(res.Text, lineTruncSuffix, "an over-long line must be marked as truncated")
 }
 
 // TestReadContinuationRoundTrip pins ReadContinuation against the trailer
@@ -524,6 +421,7 @@ func TestReadTruncatesLongLineOnRuneBoundary(t *testing.T) {
 // a trailer whose resume offset is lastShown+1, and a complete result parses
 // as done. The pre-fill (pkg/fundi) relies on both directions.
 func TestReadContinuationRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 
 	var lines []string
@@ -531,45 +429,26 @@ func TestReadContinuationRoundTrip(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("line-%04d-%s", i, strings.Repeat("x", 100)))
 	}
 	big := filepath.Join(dir, "big.txt")
-	if err := os.WriteFile(big, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(big, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
 
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: NewFileTracker(), Cwd: ""})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	res, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, big)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	next, ok := ReadContinuation(res.Text)
-	if !ok {
-		t.Fatal("a byte-capped read must report a continuation offset")
-	}
+	c.True(ok, "a byte-capped read must report a continuation offset")
 	// lastShown is the end of the range the trailer itself names; the resume
 	// offset must be exactly one past it.
 	m := regexp.MustCompile(`\[showing lines (\d+)-(\d+); more lines remain`).FindStringSubmatch(res.Text)
-	if m == nil {
-		t.Fatalf("expected a showing-lines trailer in %q", res.Text[max(0, len(res.Text)-200):])
-	}
+	c.NotNil(m, "expected a showing-lines trailer in %q", res.Text[max(0, len(res.Text)-200):])
 	lastShown, convErr := strconv.Atoi(m[2])
-	if convErr != nil {
-		t.Fatalf("parse trailer end %q: %v", m[2], convErr)
-	}
-	if next != lastShown+1 {
-		t.Fatalf("ReadContinuation = %d, want lastShown+1 = %d", next, lastShown+1)
-	}
+	c.NoError(convErr, "parse trailer end %q", m[2])
+	c.Eq(lastShown+1, next, "ReadContinuation")
 
 	small := filepath.Join(dir, "small.txt")
-	if err := os.WriteFile(small, []byte("a\nb\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(small, []byte("a\nb\n"), 0o644))
 	res2, err := rt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"path":%q}`, small)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next2, ok2 := ReadContinuation(res2.Text); ok2 {
-		t.Fatalf("a complete result must not report a continuation, got %d", next2)
-	}
+	c.NoError(err)
+	next2, ok2 := ReadContinuation(res2.Text)
+	c.False(ok2, "a complete result must not report a continuation, got %d", next2)
 }

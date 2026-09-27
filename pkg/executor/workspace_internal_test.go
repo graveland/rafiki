@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Concurrent map read+write is a Go FATAL ERROR, not a recoverable panic: it
@@ -42,9 +44,7 @@ func TestTheExecutorsRTKModeIsAChoiceAndNotAZeroValue(t *testing.T) {
 			got, tools.RTKMode(""))
 	}
 	off := NewServer(Options{Root: "/x", RTK: tools.RTKOff}).opts
-	if got := toolOptsFor(off, "/x").RTK; got != tools.RTKOff {
-		t.Errorf("RTK = %q; an operator who turned rtk off must actually get it off", got)
-	}
+	assert.NewCollecting(t).Eq(tools.RTKOff, toolOptsFor(off, "/x").RTK, "RTK")
 }
 
 // Oversized foreground results and background job output land in the same
@@ -52,15 +52,10 @@ func TestTheExecutorsRTKModeIsAChoiceAndNotAZeroValue(t *testing.T) {
 // spills went to os.TempDir() by default rather than by decision — harmless
 // until an operator needs them somewhere else.
 func TestSpillDirIsResolvedAndShared(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	s := NewServer(Options{Root: "/x", SpillDir: dir})
-	if got := toolOptsFor(s.opts, "/x").OutputPolicy.SpillDir; got != dir {
-		t.Errorf("foreground spill dir = %q, want %q", got, dir)
-	}
-	if s.jobs.spillDir != dir {
-		t.Errorf("background job spill dir = %q, want %q", s.jobs.spillDir, dir)
-	}
-	if NewServer(Options{Root: "/x"}).opts.SpillDir == "" {
-		t.Error("an unset spill dir must resolve to a real directory, not stay empty")
-	}
+	c.Eq(dir, toolOptsFor(s.opts, "/x").OutputPolicy.SpillDir, "foreground spill dir")
+	c.Eq(dir, s.jobs.spillDir, "background job spill dir")
+	c.NotEq("", NewServer(Options{Root: "/x"}).opts.SpillDir, "an unset spill dir must resolve to a real directory, not stay empty")
 }

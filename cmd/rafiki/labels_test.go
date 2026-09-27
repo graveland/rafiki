@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── validateCLILabelKey ──────────────────────────────────────────────────────
@@ -15,9 +17,7 @@ func TestValidateCLILabelKey_Valid(t *testing.T) {
 		"0", "123abc",
 	}
 	for _, k := range valid {
-		if err := validateCLILabelKey(k); err != nil {
-			t.Errorf("validateCLILabelKey(%q): unexpected error: %v", k, err)
-		}
+		assert.NewCollecting(t).NoError(validateCLILabelKey(k), "validateCLILabelKey(%q): unexpected error", k)
 	}
 }
 
@@ -38,9 +38,7 @@ func TestValidateCLILabelKey_Invalid(t *testing.T) {
 			t.Errorf("validateCLILabelKey(%q): expected error, got nil", tc.key)
 			continue
 		}
-		if !strings.Contains(err.Error(), tc.wantSub) {
-			t.Errorf("validateCLILabelKey(%q): error %q does not contain %q", tc.key, err.Error(), tc.wantSub)
-		}
+		assert.NewCollecting(t).StrContains(err.Error(), tc.wantSub, "validateCLILabelKey(%q): error %q does not contain", tc.key, err.Error())
 	}
 }
 
@@ -52,90 +50,67 @@ func TestValidateCLILabelKey_ReservedPrefix(t *testing.T) {
 			t.Errorf("validateCLILabelKey(%q): expected reserved-prefix error, got nil", k)
 			continue
 		}
-		if !strings.Contains(err.Error(), "rafiki/") {
-			t.Errorf("validateCLILabelKey(%q): error %q should mention rafiki/", k, err.Error())
-		}
+		assert.NewCollecting(t).StrContains(err.Error(), "rafiki/", "validateCLILabelKey(%q): error %q should mention rafiki/", k, err.Error())
 	}
 }
 
 // ─── parseLabelPairs ──────────────────────────────────────────────────────────
 
 func TestParseLabelPairs_Basic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pairs := []string{"env=prod", "tier=fast", "owner=brent"}
 	got, err := parseLabelPairs(pairs)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got["env"] != "prod" || got["tier"] != "fast" || got["owner"] != "brent" {
-		t.Errorf("got %v", got)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.False(got["env"] != "prod" || got["tier"] != "fast" || got["owner"] != "brent", "got %v", got)
 }
 
 func TestParseLabelPairs_ValueWithEquals(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Value itself contains '=' — only first = splits.
 	got, err := parseLabelPairs([]string{"url=http://x?a=b"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got["url"] != "http://x?a=b" {
-		t.Errorf("got %q, want %q", got["url"], "http://x?a=b")
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Eq("http://x?a=b", got["url"], "got")
 }
 
 func TestParseLabelPairs_Empty(t *testing.T) {
 	got, err := parseLabelPairs(nil)
-	if err != nil || got != nil {
-		t.Errorf("nil input: got (%v, %v), want (nil, nil)", got, err)
-	}
+	assert.NewCollecting(t).False(err != nil || got != nil, "nil input: got (%v, %v), want (nil, nil)", got, err)
 }
 
 func TestParseLabelPairs_MissingEquals(t *testing.T) {
 	_, err := parseLabelPairs([]string{"noequals"})
-	if err == nil {
-		t.Fatal("expected error for missing =")
-	}
+	assert.NewAborting(t).Error(err, "expected error for missing =")
 }
 
 func TestParseLabelPairs_BadKey(t *testing.T) {
 	_, err := parseLabelPairs([]string{"bad key=v"})
-	if err == nil {
-		t.Fatal("expected error for key with space")
-	}
+	assert.NewAborting(t).Error(err, "expected error for key with space")
 }
 
 func TestParseLabelPairs_ReservedKey(t *testing.T) {
 	_, err := parseLabelPairs([]string{"rafiki/model=evil"})
-	if err == nil {
-		t.Fatal("expected error for rafiki/ prefix")
-	}
+	assert.NewAborting(t).Error(err, "expected error for rafiki/ prefix")
 }
 
 // ─── mergeLabels ─────────────────────────────────────────────────────────────
 
 func TestMergeLabels_LaterWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := map[string]string{"k": "a", "only-in-a": "yes"}
 	b := map[string]string{"k": "b", "only-in-b": "yes"}
 	got := mergeLabels(a, b)
-	if got["k"] != "b" {
-		t.Errorf("expected b to win, got %q", got["k"])
-	}
-	if got["only-in-a"] != "yes" || got["only-in-b"] != "yes" {
-		t.Errorf("missing keys: %v", got)
-	}
+	c.Eq("b", got["k"], "expected b to win, got")
+	c.False(got["only-in-a"] != "yes" || got["only-in-b"] != "yes", "missing keys: %v", got)
 }
 
 func TestMergeLabels_AllNil(t *testing.T) {
-	if got := mergeLabels(nil, nil); got != nil {
-		t.Errorf("expected nil, got %v", got)
-	}
+	assert.NewCollecting(t).Nil(mergeLabels(nil, nil), "expected nil, got")
 }
 
 // ─── formatLabels ────────────────────────────────────────────────────────────
 
 func TestFormatLabels_Empty(t *testing.T) {
-	if got := formatLabels(nil, 0, false); got != "-" {
-		t.Errorf("got %q, want -", got)
-	}
+	assert.NewCollecting(t).Eq("-", formatLabels(nil, 0, false), "got")
 }
 
 func TestFormatLabels_Sorted(t *testing.T) {
@@ -147,14 +122,11 @@ func TestFormatLabels_Sorted(t *testing.T) {
 }
 
 func TestFormatLabels_Truncation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	labels := map[string]string{"longkey": "longvalue"}
 	got := formatLabels(labels, 10, false)
-	if !strings.HasSuffix(got, "\u2026") {
-		t.Errorf("expected truncation marker, got %q", got)
-	}
-	if len(got) >= len("longkey=longvalue") {
-		t.Errorf("got %q, should be shorter than untruncated", got)
-	}
+	c.True(strings.HasSuffix(got, "\u2026"), "expected truncation marker, got %q", got)
+	c.Less(len("longkey=longvalue"), len(got), "got %q, should be shorter than untruncated", got)
 }
 
 func TestFormatLabels_HidesAutoLabelPrefixByDefault(t *testing.T) {
@@ -164,23 +136,18 @@ func TestFormatLabels_HidesAutoLabelPrefixByDefault(t *testing.T) {
 		"context":      "work",
 	}
 	got := formatLabels(labels, 0, false)
-	if got != "context=work" {
-		t.Errorf("got %q, want only user labels (rafiki/* hidden)", got)
-	}
+	assert.NewCollecting(t).Eq("context=work", got, "got")
 }
 
 func TestFormatLabels_IncludesAutoLabelPrefixWhenRequested(t *testing.T) {
+	c := assert.NewCollecting(t)
 	labels := map[string]string{
 		"rafiki/cwd": "/home/foo",
 		"context":    "work",
 	}
 	got := formatLabels(labels, 0, true)
-	if !strings.Contains(got, "rafiki/cwd=/home/foo") {
-		t.Errorf("got %q, expected rafiki/cwd to be included", got)
-	}
-	if !strings.Contains(got, "context=work") {
-		t.Errorf("got %q, expected context=work to be included", got)
-	}
+	c.StrContains(got, "rafiki/cwd=/home/foo", "got")
+	c.StrContains(got, "context=work", "got")
 }
 
 func TestFormatLabels_AllAutoLabelsHiddenReturnsDash(t *testing.T) {
@@ -188,7 +155,5 @@ func TestFormatLabels_AllAutoLabelsHiddenReturnsDash(t *testing.T) {
 		"rafiki/cwd":   "/home/foo",
 		"rafiki/model": "claude",
 	}
-	if got := formatLabels(labels, 0, false); got != "-" {
-		t.Errorf("got %q, want - when only rafiki/* labels present", got)
-	}
+	assert.NewCollecting(t).Eq("-", formatLabels(labels, 0, false), "got")
 }

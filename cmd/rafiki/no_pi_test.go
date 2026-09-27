@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // B4 retired --kind pi. These are the references it left behind; each one is
@@ -14,6 +16,7 @@ import (
 // false — it tells the caller pi is "the default when kind is omitted", which
 // has not been true since B4's last commit.
 func TestNoPiReferencesRemain(t *testing.T) {
+	c := assert.NewAborting(t)
 	roots := []string{"../../cmd", "../../pkg"}
 	var offenders []string
 	for _, root := range roots {
@@ -33,11 +36,7 @@ func TestNoPiReferencesRemain(t *testing.T) {
 			}
 			return nil
 		})
-		if err != nil {
-			t.Fatalf("walk %s: %v", root, err)
-		}
+		c.NoError(err, "walk %s", root)
 	}
-	if len(offenders) > 0 {
-		t.Fatalf("KindPi still referenced in: %s", strings.Join(offenders, ", "))
-	}
+	c.LessOrEqual(0, len(offenders), "KindPi still referenced in: %s", strings.Join(offenders, ", "))
 }

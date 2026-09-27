@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The caller's environment travels to the daemon in a SpawnRequest, so anything
@@ -14,15 +16,13 @@ func TestCollectCallerEnvStripsReservedKeys(t *testing.T) {
 	t.Setenv("FUNDI_MODEL", "stale")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-caller")
 	t.Setenv("PATH", "/usr/bin")
+	c := assert.NewCollecting(t)
 
 	env := collectCallerEnv()
 
 	for _, k := range []string{paths.URL, "FUNDI_MODEL", "ANTHROPIC_API_KEY"} {
-		if v, ok := env[k]; ok {
-			t.Errorf("%s reached the SpawnRequest with value %q", k, v)
-		}
+		v, ok := env[k]
+		c.False(ok, "%s reached the SpawnRequest with value %q", k, v)
 	}
-	if env["PATH"] != "/usr/bin" {
-		t.Errorf("PATH = %q, want it forwarded", env["PATH"])
-	}
+	c.Eq("/usr/bin", env["PATH"], "PATH")
 }

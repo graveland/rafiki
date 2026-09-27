@@ -21,6 +21,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ── the stub daemon ──────────────────────────────────────────────────────────
@@ -124,6 +126,7 @@ func (s *stubControl) ListChildren(
 // newConnectEndpoint's real dial path.
 func serveStubControl(t *testing.T, stub *stubControl) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
@@ -131,23 +134,17 @@ func serveStubControl(t *testing.T, stub *stubControl) {
 	// ~104 bytes (sizeof sun_path on darwin), and t.TempDir() nests under the
 	// full test name, which alone can exceed that.
 	dir, err := os.MkdirTemp("", "e4")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	c.NoError(err, "MkdirTemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
 	serveConnectOnUnixSocket(t, sock, routePath, handler)
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"scratch": {Name: "scratch", Socket: sock},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("scratch"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("scratch"), "SavePointer")
 }
 
 // serveConnectOnUnixSocket serves a Connect handler over an h2c unix socket at
@@ -156,9 +153,7 @@ func serveStubControl(t *testing.T, stub *stubControl) {
 func serveConnectOnUnixSocket(t *testing.T, path string, handlerPath string, handler http.Handler) {
 	t.Helper()
 	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("listen %s: %v", path, err)
-	}
+	assert.NewAborting(t).NoError(err, "listen %s", path)
 	mux := http.NewServeMux()
 	mux.Handle(handlerPath, handler)
 	protos := &http.Protocols{}
@@ -200,11 +195,10 @@ func userMessageEvent(id string, ordinal int32, text string) *rafikiv1.Event {
 // ── logs ─────────────────────────────────────────────────────────────────────
 
 func TestLogsFlagDefaults(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newLogsCmd()
 	n, err := cmd.Flags().GetInt("tail")
-	if err != nil || n != -1 {
-		t.Fatalf("logs tail default = %d (err %v), want -1 (all)", n, err)
-	}
+	c.Require().False(err != nil || n != -1, "logs tail default = %d (err %v), want -1 (all)", n, err)
 	if f, err := cmd.Flags().GetBool("follow"); err != nil || f {
 		t.Fatalf("logs follow default = %v (err %v), want false", f, err)
 	}
@@ -212,9 +206,7 @@ func TestLogsFlagDefaults(t *testing.T) {
 		t.Fatalf("logs raw default = %v (err %v), want false", raw, err)
 	}
 	for _, flag := range []string{"stdin", "stderr", "all", "path", "types", "all-types"} {
-		if cmd.Flags().Lookup(flag) == nil {
-			t.Errorf("logs is missing the %q flag", flag)
-		}
+		c.NotNil(cmd.Flags().Lookup(flag), "logs is missing the %q flag", flag)
 	}
 	if !containsAlias(cmd.Aliases, "log") {
 		t.Errorf("logs lost its 'log' alias: %v", cmd.Aliases)
@@ -223,17 +215,14 @@ func TestLogsFlagDefaults(t *testing.T) {
 
 // The flags the framed plane needed are gone, not merely defaulted.
 func TestLogsRemovedFlagsAreGone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newLogsCmd()
 	for _, flag := range []string{"profile", "include", "exclude", "no-deltas", "verbose"} {
-		if cmd.Flags().Lookup(flag) != nil {
-			t.Errorf("logs still declares the retired %q flag", flag)
-		}
+		c.Nil(cmd.Flags().Lookup(flag), "logs still declares the retired %q flag", flag)
 	}
 	cmd = newTailCmd()
 	for _, flag := range []string{"profile", "include", "exclude", "no-deltas", "verbose"} {
-		if cmd.Flags().Lookup(flag) != nil {
-			t.Errorf("tail still declares the retired %q flag", flag)
-		}
+		c.Nil(cmd.Flags().Lookup(flag), "tail still declares the retired %q flag", flag)
 	}
 }
 
@@ -244,9 +233,7 @@ func TestLogsSnapshotFlagsAreMutuallyExclusive(t *testing.T) {
 	resetProfileCache()
 	cmd := newLogsCmd()
 	_, _, err := runCmd(t, cmd, "--stdin", "--stderr", "c_1")
-	if err == nil || !strings.Contains(err.Error(), "stdin") {
-		t.Fatalf("logs --stdin --stderr = %v, want cobra's mutually-exclusive error naming the group", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "stdin"), "logs --stdin --stderr = %v, want cobra's mutually-exclusive error naming the group", err)
 }
 
 // --types is validated against the native vocabulary before anything dials:
@@ -256,15 +243,14 @@ func TestLogsRejectsAnUnknownEventType(t *testing.T) {
 	resetProfileCache()
 	cmd := newLogsCmd()
 	_, _, err := runCmd(t, cmd, "--types", "message_end", "c_1")
-	if err == nil || !strings.Contains(err.Error(), "unknown event type") {
-		t.Fatalf("logs --types message_end = %v, want an unknown-type error", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "unknown event type"), "logs --types message_end = %v, want an unknown-type error", err)
 }
 
 // logs prints the history served by the profile's OWN socket — the pin
 // that used to hold for `history` holds for its replacement: a socket
 // profile's logs must not query whatever daemon happens to listen elsewhere.
 func TestLogsReachesTheSocketProfilesOwnDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &stubControl{events: []*rafikiv1.Event{
 		userMessageEvent("c_1", 0, "served by the profile's own socket"),
 	}}
@@ -272,23 +258,16 @@ func TestLogsReachesTheSocketProfilesOwnDaemon(t *testing.T) {
 
 	cmd := newLogsCmd()
 	out, _, err := runCmd(t, cmd, "c_1")
-	if err != nil {
-		t.Fatalf("rafiki logs: %v", err)
-	}
-	if stub.historyCalls != 1 {
-		t.Fatalf("GetHistory called %d times, want 1", stub.historyCalls)
-	}
-	if !strings.Contains(out, "served by the profile's own socket") {
-		t.Fatalf("logs output does not show the event served by the profile's OWN socket:\n%s", out)
-	}
-	if !strings.Contains(out, "user_message") {
-		t.Fatalf("logs output lost the event's type column:\n%s", out)
-	}
+	c.NoError(err, "rafiki logs")
+	c.Eq(1, stub.historyCalls, "GetHistory called")
+	c.StrContains(out, "served by the profile's own socket", "logs output does not show the event served by the profile's OWN socket:\n")
+	c.StrContains(out, "user_message", "logs output lost the event's type column:\n")
 }
 
 // logs -f prints the history and then follows with a cursor just after the
 // last history ordinal — the resume point the brief pins.
 func TestLogsFollowResumesFromTheLastHistoryOrdinal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	stub := &stubControl{
 		getChildOK: true,
 		events: []*rafikiv1.Event{
@@ -302,51 +281,36 @@ func TestLogsFollowResumesFromTheLastHistoryOrdinal(t *testing.T) {
 
 	cmd := newLogsCmd()
 	out, notes, err := runCmd(t, cmd, "-f", "c_1")
-	if err != nil {
-		t.Fatalf("rafiki logs -f: %v", err)
-	}
+	c.Require().NoError(err, "rafiki logs -f")
 	if stub.historyCalls != 1 || stub.streamCalls != 1 {
 		t.Fatalf("calls = history %d, stream %d; want 1 and 1", stub.historyCalls, stub.streamCalls)
 	}
 
 	req := stub.streamReqs[0]
-	if got := req.GetCursor().GetOrdinals()["c_1"]; got != 2 {
-		t.Errorf("cursor ordinal for c_1 = %d, want 2 (the last history ordinal)", got)
-	}
+	c.Eq(2, req.GetCursor().GetOrdinals()["c_1"], "cursor ordinal for c_1")
 	// Single-child subject, conversation+lifecycle types, durable tier.
-	if req.GetSubject().GetChild() != "c_1" {
-		t.Errorf("subject = %+v, want child c_1", req.GetSubject().GetScope())
-	}
+	c.Eq("c_1", req.GetSubject().GetChild(), "subject = %+v, want child c_1", req.GetSubject().GetScope())
 	for _, want := range []string{"agent_status", "user_message", "compaction_boundary", "child_exited"} {
-		if !strings.Contains(strings.Join(req.GetTypes(), ","), want) {
-			t.Errorf("default single-child types missing %q: %v", want, req.GetTypes())
-		}
+		c.StrContains(strings.Join(req.GetTypes(), ","), want, "default single-child types missing %q: %v", want, req.GetTypes())
 	}
 	for _, banned := range []string{"content_block_delta", "message_update"} {
 		for _, got := range req.GetTypes() {
-			if got == banned {
-				t.Errorf("default types include %q", banned)
-			}
+			c.NotEq(banned, got, "default types include")
 		}
 	}
-	if req.GetTier() != rafikiv1.EventTier_EVENT_TIER_DURABLE {
-		t.Errorf("tier = %v, want DURABLE", req.GetTier())
-	}
+	c.Eq(rafikiv1.EventTier_EVENT_TIER_DURABLE, req.GetTier(), "tier")
 
 	// The backfill printed all three history events, then the live event.
 	for _, want := range []string{"first", "second", "third", "idle"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "output missing")
 	}
-	if strings.Contains(notes, "unavailable") {
-		t.Errorf("unexpected notes: %q", notes)
-	}
+	c.NotStrContains(notes, "unavailable", "unexpected notes")
 }
 
 // A child with no conversation is empty history, not an error: logs -f must
 // still follow, with no cursor (there is no history to resume from).
 func TestLogsFollowSurvivesAMissingConversation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	stub := &stubControl{
 		historyNotFound: true,
 		streamEvents:    []*rafikiv1.Event{statusFor("c_1", "streaming")},
@@ -355,12 +319,8 @@ func TestLogsFollowSurvivesAMissingConversation(t *testing.T) {
 
 	cmd := newLogsCmd()
 	out, _, err := runCmd(t, cmd, "-f", "c_1")
-	if err != nil {
-		t.Fatalf("rafiki logs -f on a child with no conversation: %v", err)
-	}
-	if !strings.Contains(out, "streaming") {
-		t.Errorf("follow output missing the live event:\n%s", out)
-	}
+	c.Require().NoError(err, "rafiki logs -f on a child with no conversation")
+	c.StrContains(out, "streaming", "follow output missing the live event:\n")
 	if req := stub.streamReqs[0]; req.GetCursor() != nil {
 		t.Errorf("empty history must not carry a cursor, got %+v", req.GetCursor())
 	}
@@ -369,6 +329,7 @@ func TestLogsFollowSurvivesAMissingConversation(t *testing.T) {
 // The single-child tail backfills 20 by default and exits on the child's own
 // child_exited event.
 func TestTailChildBackfillsAndExitsOnChildExited(t *testing.T) {
+	c := assert.NewCollecting(t)
 	stub := &stubControl{
 		events: []*rafikiv1.Event{
 			userMessageEvent("c_1", 0, "hello"),
@@ -380,20 +341,14 @@ func TestTailChildBackfillsAndExitsOnChildExited(t *testing.T) {
 
 	cmd := newTailCmd()
 	out, _, err := runCmd(t, cmd, "c_1")
-	if err != nil {
-		t.Fatalf("rafiki tail c_1: %v", err)
-	}
+	c.Require().NoError(err, "rafiki tail c_1")
 	if stub.historyCalls != 1 || stub.streamCalls != 1 {
 		t.Fatalf("calls = history %d, stream %d; want 1 and 1", stub.historyCalls, stub.streamCalls)
 	}
 	req := stub.streamReqs[0]
-	if got := req.GetCursor().GetOrdinals()["c_1"]; got != 1 {
-		t.Errorf("cursor ordinal = %d, want 1 (the last history ordinal)", got)
-	}
+	c.Eq(1, req.GetCursor().GetOrdinals()["c_1"], "cursor ordinal")
 	for _, want := range []string{"hello", "again", "exit"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "output missing")
 	}
 }
 
@@ -402,21 +357,16 @@ func TestTailChildBackfillsAndExitsOnChildExited(t *testing.T) {
 // Child completion on logs — the coverage TestCompleteHistoryOffersChildren
 // held for the folded-in history verb, which now lives here.
 func TestCompleteLogsOffersChildren(t *testing.T) {
+	c := assert.NewCollecting(t)
 	seedRemoteProfile(t, "personal", "https://example.invalid", "t")
 	seedChildrenCompletionCache(t)
 
 	cmd := newLogsCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set — `rafiki logs <TAB>` completes nothing")
-	}
+	c.Require().NotNil(cmd.ValidArgsFunction, "ValidArgsFunction not set — `rafiki logs <TAB>` completes nothing")
 	got, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
 	for _, want := range []string{"c_01HXABC", "alpha", "beta"} {
-		if !containsCandidate(got, want) {
-			t.Errorf("candidates %v missing %q (ids and names both target logs)", got, want)
-		}
+		c.True(containsCandidate(got, want), "candidates %v missing %q (ids and names both target logs)", got, want)
 	}
 	// One target is all the verb takes; past it there is nothing to offer.
 	if got, _ := cmd.ValidArgsFunction(cmd, []string{"c_01HXABC"}, ""); len(got) != 0 {
@@ -429,18 +379,13 @@ func TestCompleteLogsOffersChildren(t *testing.T) {
 // candidates are asserted through it directly (cobra keeps its completion
 // registry private).
 func TestCompleteTypesOffersNativeNames(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	for _, newCmd := range []func() *cobra.Command{newLogsCmd, newTailCmd} {
-		if newCmd().Flags().Lookup("types") == nil {
-			t.Fatal("--types flag missing")
-		}
+		ck.Require().NotNil(newCmd().Flags().Lookup("types"), "--types flag missing")
 	}
 	got := prefixCompletions(allNativeTypes(), "agent_")
-	if !containsCandidate(got, "agent_status") {
-		t.Errorf("--types candidates %v missing agent_status", got)
-	}
+	ck.True(containsCandidate(got, "agent_status"), "--types candidates %v missing agent_status", got)
 	for _, c := range allNativeTypes() {
-		if strings.HasPrefix(c, "message_") {
-			t.Errorf("--types candidate %q is framed-era vocabulary", c)
-		}
+		ck.False(strings.HasPrefix(c, "message_"), "--types candidate %q is framed-era vocabulary", c)
 	}
 }

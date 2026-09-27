@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // userSpawnerFixture builds a Controller with a hand-populated childstore, on
@@ -45,17 +47,14 @@ func userSpawnerFixture(t *testing.T) *Controller {
 // which is exactly the shape of the SetBudget hole the interface contract
 // warns about.
 func TestUserSpawnerSetBudgetRefusesEveryParentedChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := userSpawnerFixture(t)
 	sp := newUserSpawner(c, users.Identity{UserID: "u_1", Username: "op"})
 	ctx := context.Background()
 
-	if err := sp.SetBudget(ctx, "a_top", 25.00); err != nil {
-		t.Fatalf("SetBudget on the top-level agent must succeed: %v", err)
-	}
+	ck.Require().NoError(sp.SetBudget(ctx, "a_top", 25.00), "SetBudget on the top-level agent must succeed")
 	snap, _ := c.st.Get("a_top")
-	if snap.MaxCost != 25.00 {
-		t.Fatalf("a_top.MaxCost = %v, want 25.00", snap.MaxCost)
-	}
+	ck.Require().Eq(25.00, snap.MaxCost, "a_top.MaxCost")
 
 	for _, tc := range []struct{ target, parent string }{
 		{"b_mid", "a_top"},
@@ -66,9 +65,7 @@ func TestUserSpawnerSetBudgetRefusesEveryParentedChild(t *testing.T) {
 			t.Errorf("SetBudget(%s) must refuse — it was spawned by %s", tc.target, tc.parent)
 			continue
 		}
-		if !strings.Contains(err.Error(), tc.parent) {
-			t.Errorf("SetBudget(%s) refusal must name the parent %s; got %v", tc.target, tc.parent, err)
-		}
+		ck.StrContains(err.Error(), tc.parent, "SetBudget(%s) refusal must name the parent %s; got %v", tc.target, tc.parent, err)
 	}
 }
 
@@ -78,6 +75,7 @@ func TestUserSpawnerSetBudgetRefusesEveryParentedChild(t *testing.T) {
 // show a fabricated number. The display clamps it to the root level; the
 // legitimate nodes around it keep their real depths.
 func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{st: childstore.New(), cm: newChildManager()}
 	prev := ""
 	for i := 0; i < 66; i++ {
@@ -102,9 +100,7 @@ func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
 
 	sp := newUserSpawner(c, users.Identity{UserID: "u_1", Username: "op"})
 	kids, err := sp.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	var deep, shallow *tools.AgentInfo
 	for i := range kids {
 		switch kids[i].ChildID {
@@ -114,40 +110,27 @@ func TestUserSpawnerListToleratesIndeterminateDepth(t *testing.T) {
 			shallow = &kids[i]
 		}
 	}
-	if deep == nil || shallow == nil {
-		t.Fatalf("listing must contain the deep and shallow children, got %+v", kids)
-	}
-	if deep.Depth != 0 {
-		t.Errorf("an indeterminate depth must display as 0 (root level), got %d", deep.Depth)
-	}
-	if shallow.Depth != 1 {
-		t.Errorf("the clamp must not touch a resolvable chain: x_01.Depth = %d, want 1", shallow.Depth)
-	}
+	ck.Require().False(deep == nil || shallow == nil, "listing must contain the deep and shallow children, got %+v", kids)
+	ck.Eq(0, deep.Depth, "an indeterminate depth must display as 0 (root level), got")
+	ck.Eq(1, shallow.Depth, "the clamp must not touch a resolvable chain: x_01.Depth")
 	// RenderAgents indents by Depth; this must not panic on the clamped row.
 	_ = tools.RenderAgents(kids)
 }
 
 func TestUserSpawnerListReportsAbsoluteDepth(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := newUserSpawner(userSpawnerFixture(t), users.Identity{UserID: "u_1", Username: "op"})
 	kids, err := sp.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kids) != 3 {
-		t.Fatalf("want all three children, got %+v", kids)
-	}
+	c.Require().NoError(err)
+	c.Require().Len(kids, 3, "want all three children, got")
 	for i, want := range []struct {
 		id    string
 		depth int
 	}{
 		{"a_top", 0}, {"b_mid", 1}, {"c_leaf", 2},
 	} {
-		if kids[i].ChildID != want.id {
-			t.Errorf("kids[%d].ChildID = %s, want %s", i, kids[i].ChildID, want.id)
-		}
-		if kids[i].Depth != want.depth {
-			t.Errorf("kids[%d] (%s).Depth = %d, want %d", i, kids[i].ChildID, kids[i].Depth, want.depth)
-		}
+		c.Eq(want.id, kids[i].ChildID, "kids[%d].ChildID = %s, want", i, kids[i].ChildID)
+		c.Eq(want.depth, kids[i].Depth, "kids[%d] (%s).Depth = %d, want", i, kids[i].ChildID, kids[i].Depth)
 	}
 }
 
@@ -166,27 +149,20 @@ func TestUserSpawnerSpawnRefusesRelativeAndEmptyCwd(t *testing.T) {
 			t.Errorf("Spawn with cwd %q must refuse for absoluteness; got %v", cwd, err)
 		}
 	}
-	if got := len(c.st.List()); got != 3 {
-		t.Fatalf("a refused spawn must not be attempted; store holds %d children, want 3", got)
-	}
+	assert.NewAborting(t).Eq(3, len(c.st.List()), "a refused spawn must not be attempted; store holds")
 }
 
 func TestUserSpawnerSpawnRefusesTaskAtSpawn(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := userSpawnerFixture(t)
 	sp := newUserSpawner(c, users.Identity{UserID: "u_1", Username: "op"})
 
 	// A valid absolute cwd, so the ONLY refusal this spec can trigger is the
 	// task one — the assertion would otherwise pass for the wrong reason.
 	_, err := sp.Spawn(context.Background(), tools.SpawnSpec{Cwd: "/tmp", Task: "T-1"})
-	if err == nil {
-		t.Fatal("task assignment at spawn must refuse")
-	}
-	if !strings.Contains(err.Error(), "task") {
-		t.Errorf("refusal must name the reason; got %v", err)
-	}
-	if got := len(c.st.List()); got != 3 {
-		t.Fatalf("the refusal must fire before the controller is reached; store holds %d children, want 3", got)
-	}
+	ck.Require().Error(err, "task assignment at spawn must refuse")
+	ck.StrContains(err.Error(), "task", "refusal must name the reason; got %v", err)
+	ck.Require().Eq(3, len(c.st.List()), "the refusal must fire before the controller is reached; store holds")
 }
 
 func TestUserSpawnerViewSendKillRejectUnknownChild(t *testing.T) {

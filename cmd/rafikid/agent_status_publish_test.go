@@ -9,6 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // handleStatusChange is the ONLY place that transitions a stored status, for
@@ -18,6 +20,7 @@ import (
 // -- the working spinner and glyph were frozen at whatever ListChildren
 // reported at the last (re)seed, for every kind, not just fundi.
 func TestHandleStatusChangePublishesAgentStatus(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{st: childstore.New(), cm: newChildManager(), native: nativebus.New()}
 	c.st.Insert(&childstore.Session{ChildID: "c_1", Status: protocol.StatusIdle, StartedAt: time.Now()})
 
@@ -29,15 +32,9 @@ func TestHandleStatusChangePublishesAgentStatus(t *testing.T) {
 	select {
 	case ev := <-ch:
 		as := ev.GetAgentStatus()
-		if as == nil {
-			t.Fatalf("published event has no AgentStatus payload: %+v", ev)
-		}
-		if as.GetState() != "streaming" {
-			t.Errorf("AgentStatus.State = %q, want streaming", as.GetState())
-		}
-		if ev.GetChildId() != "c_1" {
-			t.Errorf("ChildId = %q, want c_1", ev.GetChildId())
-		}
+		ck.Require().NotNil(as, "published event has no AgentStatus payload: %+v", ev)
+		ck.Eq("streaming", as.GetState(), "AgentStatus.State")
+		ck.Eq("c_1", ev.GetChildId(), "ChildId")
 	default:
 		t.Fatal("no event published on the child's native bus")
 	}

@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestBuildEngineAttributesTheConversationToItsOwner pins the pipe this plan
@@ -26,6 +28,7 @@ import (
 // conversations.users, so a synthetic id would fail the INSERT and read as a
 // wiring failure when it is a fixture problem.
 func TestBuildEngineAttributesTheConversationToItsOwner(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -43,34 +46,24 @@ func TestBuildEngineAttributesTheConversationToItsOwner(t *testing.T) {
 	}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	c.NoError(err, "BuildEngine")
 	defer shutdown()
 	defer eng.Close()
 
 	var owner *string
-	if err := pool.QueryRow(ctx,
+	c.NoError(pool.QueryRow(ctx,
 		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`,
-		eng.conv.ID).Scan(&owner); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if owner == nil || *owner != userID {
-		t.Fatalf("conversation owner_user_id = %v, want %s — the owner never reached the row", owner, userID)
-	}
+		eng.conv.ID).Scan(&owner), "read conversation")
+	c.False(owner == nil || *owner != userID, "conversation owner_user_id = %v, want %s — the owner never reached the row", owner, userID)
 
 	// The NewConversation swap must not have cost the entrypoint: it is
 	// required (Conversation errors without one) and the fundi child is the
 	// "agent" origin.
 	var entrypoint string
-	if err := pool.QueryRow(ctx,
+	c.NoError(pool.QueryRow(ctx,
 		`SELECT origin_entrypoint FROM conversations.conversation WHERE id = $1`,
-		eng.conv.ID).Scan(&entrypoint); err != nil {
-		t.Fatalf("read origin_entrypoint: %v", err)
-	}
-	if entrypoint != "agent" {
-		t.Fatalf("origin_entrypoint = %q, want %q — NewConversation replaced Entrypoint and lost it", entrypoint, "agent")
-	}
+		eng.conv.ID).Scan(&entrypoint), "read origin_entrypoint")
+	c.Eq("agent", entrypoint, "origin_entrypoint")
 }
 
 // Empty stays valid and means unattributed, exactly as before: an anonymous
@@ -79,6 +72,7 @@ func TestBuildEngineAttributesTheConversationToItsOwner(t *testing.T) {
 // regression that makes an empty owner an error or a guessed owner would show
 // up here.
 func TestBuildEngineLeavesAnEmptyOwnerUnattributed(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -93,18 +87,14 @@ func TestBuildEngineLeavesAnEmptyOwnerUnattributed(t *testing.T) {
 	}
 	fe := NewFrontend(strings.NewReader(""), &syncBuffer{}, nil)
 	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	c.NoError(err, "BuildEngine")
 	defer shutdown()
 	defer eng.Close()
 
 	var owner *string
-	if err := pool.QueryRow(ctx,
+	c.NoError(pool.QueryRow(ctx,
 		`SELECT owner_user_id::text FROM conversations.conversation WHERE id = $1`,
-		eng.conv.ID).Scan(&owner); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
+		eng.conv.ID).Scan(&owner), "read conversation")
 	if owner != nil {
 		t.Fatalf("owner_user_id = %q for an empty OwnerUserID, want NULL", *owner)
 	}
@@ -120,10 +110,8 @@ func seedUser(t *testing.T, pool *pgxpool.Pool, username string) string {
 	}
 	digest := hex.EncodeToString(raw[:])
 	var id string
-	if err := pool.QueryRow(context.Background(),
+	assert.NewAborting(t).NoError(pool.QueryRow(context.Background(),
 		`INSERT INTO conversations.users (username, token_sha256) VALUES ($1,$2) RETURNING id::text`,
-		username, digest).Scan(&id); err != nil {
-		t.Fatalf("seed user %s: %v", username, err)
-	}
+		username, digest).Scan(&id), "seed user %s", username)
 	return id
 }

@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seedLedgerUser inserts a fresh users row and returns its identity. The
@@ -28,9 +30,7 @@ func seedLedgerUser(t *testing.T, pool *pgxpool.Pool) users.Identity {
 		`INSERT INTO conversations.users (username, token_sha256)
 		 VALUES ($1, $1 || ':' || gen_random_uuid()::text) RETURNING id::text`,
 		username).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert user %q: %v", username, err)
-	}
+	assert.NewAborting(t).NoError(err, "insert user %q", username)
 	t.Cleanup(func() {
 		// Ledger conversations FK the user row; remove them first. t.Context()
 		// is already canceled by cleanup time, hence the background context.
@@ -51,66 +51,46 @@ func seedLedgerUser(t *testing.T, pool *pgxpool.Pool) users.Identity {
 // identity resolves to one UUID across repeated calls and across ledgers with
 // a cold cache, because the key lives in the database, not in the process.
 func TestMCPLedgerKeyIsStableForOneUser(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := openTestPool(t)
 	owner := seedLedgerUser(t, pool)
 	l := newMCPLedger(capture.NewCaptureStore(pool))
 
 	id1, err := l.ConversationID(t.Context(), owner)
-	if err != nil {
-		t.Fatalf("first resolve: %v", err)
-	}
+	c.Require().NoError(err, "first resolve")
 
 	// The row's persisted key values are pinned against literals here, not
 	// through mcpLedgerExternalRef or the ledger's own DrivenBy field — those
 	// share the values under test, so a drift in either would pass green while
 	// silently splitting every existing deployment's ledger into a second row.
 	var gotDrivenBy, gotExternalRef string
-	if err := pool.QueryRow(t.Context(),
+	c.Require().NoError(pool.QueryRow(t.Context(),
 		`SELECT driven_by, external_ref FROM conversations.conversation WHERE id = $1::uuid`,
-		id1).Scan(&gotDrivenBy, &gotExternalRef); err != nil {
-		t.Fatalf("read back ledger row: %v", err)
-	}
-	if gotDrivenBy != "client" {
-		t.Errorf("persisted driven_by = %q, want the literal \"client\"", gotDrivenBy)
-	}
-	if gotExternalRef != "mcp:user:"+owner.UserID {
-		t.Errorf("persisted external_ref = %q, want the literal \"mcp:user:\" prefix + %q", gotExternalRef, owner.UserID)
-	}
+		id1).Scan(&gotDrivenBy, &gotExternalRef), "read back ledger row")
+	c.Eq("client", gotDrivenBy, "persisted driven_by = %q, want the literal \"client\"", gotDrivenBy)
+	c.Eq("mcp:user:"+owner.UserID, gotExternalRef, "persisted external_ref = %q, want the literal \"mcp:user:\" prefix + %q", gotExternalRef, owner.UserID)
 
 	id2, err := l.ConversationID(t.Context(), owner)
-	if err != nil {
-		t.Fatalf("second resolve: %v", err)
-	}
-	if id1 != id2 {
-		t.Fatalf("same user must resolve to one id: %q != %q", id1, id2)
-	}
+	c.Require().NoError(err, "second resolve")
+	c.Require().Eq(id2, id1, "same user must resolve to one id")
 
 	id3, err := newMCPLedger(capture.NewCaptureStore(pool)).ConversationID(t.Context(), owner)
-	if err != nil {
-		t.Fatalf("cold-cache resolve: %v", err)
-	}
-	if id3 != id1 {
-		t.Fatalf("a cold ledger must resolve the durable row: %q != %q", id3, id1)
-	}
+	c.Require().NoError(err, "cold-cache resolve")
+	c.Require().Eq(id1, id3, "a cold ledger must resolve the durable row")
 }
 
 func TestMCPLedgerKeysAreDistinctBetweenUsers(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	alice := seedLedgerUser(t, pool)
 	bob := seedLedgerUser(t, pool)
 	l := newMCPLedger(capture.NewCaptureStore(pool))
 
 	idA, err := l.ConversationID(t.Context(), alice)
-	if err != nil {
-		t.Fatalf("resolve alice: %v", err)
-	}
+	c.NoError(err, "resolve alice")
 	idB, err := l.ConversationID(t.Context(), bob)
-	if err != nil {
-		t.Fatalf("resolve bob: %v", err)
-	}
-	if idA == idB {
-		t.Fatalf("distinct users must get distinct ledgers, both got %q", idA)
-	}
+	c.NoError(err, "resolve bob")
+	c.NotEq(idB, idA, "distinct users must get distinct ledgers, both got")
 }
 
 // TestMCPLedgerKeyIsAValidUUID guards the failure mode this task exists to
@@ -120,9 +100,7 @@ func TestMCPLedgerKeyIsAValidUUID(t *testing.T) {
 	pool := openTestPool(t)
 	owner := seedLedgerUser(t, pool)
 	id, err := newMCPLedger(capture.NewCaptureStore(pool)).ConversationID(t.Context(), owner)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "resolve")
 	if _, err := uuid.Parse(id); err != nil {
 		t.Fatalf("ledger key %q is not a UUID: %v", id, err)
 	}
@@ -132,6 +110,7 @@ func TestMCPLedgerKeyIsAValidUUID(t *testing.T) {
 // fresh user. The separate mcpLedger values bypass the in-process cache, so
 // the partial unique index is what actually enforces one row.
 func TestMCPLedgerConcurrentResolveYieldsOneRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := openTestPool(t)
 	owner := seedLedgerUser(t, pool)
 
@@ -153,34 +132,23 @@ func TestMCPLedgerConcurrentResolveYieldsOneRow(t *testing.T) {
 	wg.Wait()
 
 	for i, id := range ids {
-		if id == "" {
-			t.Fatalf("resolve %d produced no id", i)
-		}
-		if id != ids[0] {
-			t.Fatalf("concurrent resolves disagreed: goroutine %d got %q, first got %q", i, id, ids[0])
-		}
+		c.NotEq("", id, "resolve %d produced no id", i)
+		c.Eq(ids[0], id, "concurrent resolves disagreed: goroutine %d got %q, first got", i, id)
 	}
 
 	var count int
-	if err := pool.QueryRow(t.Context(),
+	c.NoError(pool.QueryRow(t.Context(),
 		`SELECT count(*) FROM conversations.conversation WHERE external_ref = $1`,
-		mcpLedgerExternalRef(owner.UserID)).Scan(&count); err != nil {
-		t.Fatalf("count ledger rows: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected exactly one ledger row for %q, got %d", mcpLedgerExternalRef(owner.UserID), count)
-	}
+		mcpLedgerExternalRef(owner.UserID)).Scan(&count), "count ledger rows")
+	c.Eq(1, count, "expected exactly one ledger row for %q, got", mcpLedgerExternalRef(owner.UserID))
 }
 
 func TestMCPLedgerWithoutStoreFallsBackToMemoryKey(t *testing.T) {
+	c := assert.NewAborting(t)
 	owner := users.Identity{UserID: "00000000-0000-0000-0000-000000000042", Username: "dbless"}
 	id, err := newMCPLedger(nil).ConversationID(t.Context(), owner)
-	if err != nil {
-		t.Fatalf("DB-less resolve: %v", err)
-	}
-	if id != "user:"+owner.UserID {
-		t.Fatalf("DB-less daemon must fall back to the memory key: got %q, want %q", id, "user:"+owner.UserID)
-	}
+	c.NoError(err, "DB-less resolve")
+	c.Eq("user:"+owner.UserID, id, "DB-less daemon must fall back to the memory key: got")
 }
 
 func TestMCPLedgerRefusesAnonymous(t *testing.T) {
@@ -188,7 +156,6 @@ func TestMCPLedgerRefusesAnonymous(t *testing.T) {
 		t.Fatal("the zero identity must error on a DB-less ledger")
 	}
 	pool := openTestPool(t)
-	if _, err := newMCPLedger(capture.NewCaptureStore(pool)).ConversationID(t.Context(), users.Identity{}); err == nil {
-		t.Fatal("the zero identity must error before the store is consulted")
-	}
+	_, err := newMCPLedger(capture.NewCaptureStore(pool)).ConversationID(t.Context(), users.Identity{})
+	assert.NewAborting(t).Error(err, "the zero identity must error before the store is consulted")
 }

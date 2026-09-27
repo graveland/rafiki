@@ -16,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestListChildrenSeedsCostFromTheCatalogPricedCoster pins the attach/startup
@@ -87,9 +89,7 @@ func TestListChildrenSeedsCostFromTheCatalogPricedCoster(t *testing.T) {
 	for _, s := range sums {
 		byID[s.ChildID] = s
 	}
-	if len(byID) != 3 {
-		t.Fatalf("ListChildren returned %d rows, want 3", len(byID))
-	}
+	assert.NewAborting(t).Len(byID, 3, "ListChildren returned %d rows, want 3", len(byID))
 
 	if got := byID["c_fundi"].CostUSD; got == nil {
 		t.Error("c_fundi: CostUSD is nil — the catalog-priced coster never seeded it")
@@ -128,9 +128,7 @@ func insertConvForCost(t *testing.T, pool *pgxpool.Pool, extRef string) string {
 		`INSERT INTO conversations.conversation (persona, model, origin_entrypoint, driven_by, external_ref)
 		 VALUES ('test', 'test/model', 'test', 'server', NULLIF($1, '')) RETURNING id::text`,
 		extRef).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert conversation")
 	return id
 }
 
@@ -144,7 +142,5 @@ func insertTurnForCost(t *testing.T, pool *pgxpool.Pool, convID, model string, i
 		 VALUES ($1, 0, 'complete', $2, '{}'::jsonb, NULL, 'end_turn',
 		         $3, $4, 0, 0, 'openrouter', 100, 'test', now())`,
 		convID, model, inTok, outTok)
-	if err != nil {
-		t.Fatalf("insert turn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert turn")
 }

@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/nativebus"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakePool stands in for *execpool.Pool so selection is testable without a
@@ -88,6 +90,7 @@ func selectFixture(t *testing.T, parentSelector string, live ...execpool.LiveExe
 // a logic puzzle the moment notin appears, and it fails OPEN), but because the
 // sets are intersected.
 func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 		ex("exec-home", map[string]string{"env": "home"}, ""),
@@ -95,30 +98,24 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
 	}, "")
-	if err == nil {
-		t.Fatal("a child reached outside its parent's effective set")
-	}
-	if !strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT") {
-		t.Errorf("the refusal must say the parent's set is why: %v", err)
-	}
+	ck.Require().Error(err, "a child reached outside its parent's effective set")
+	ck.False(!strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT"), "the refusal must say the parent's set is why: %v", err)
 }
 
 func TestChildInheritsTheParentsSetWhenItNamesNoSelector(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("exec-work", map[string]string{"env": "work"}, ""),
 		ex("exec-home", map[string]string{"env": "home"}, ""),
 	)
 	set, err := c.effectiveExecutorSet("c_child")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(set) != 1 || set[0].ID != "exec-home" {
-		t.Fatalf("want only exec-home, got %+v", set)
-	}
+	ck.NoError(err)
+	ck.False(len(set) != 1 || set[0].ID != "exec-home", "want only exec-home, got %+v", set)
 }
 
 // Narrowing is transitive: a grandchild is bounded by its grandparent.
 func TestNarrowingIsTransitiveUpTheWholeChain(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "env=home",
 		ex("a", map[string]string{"env": "home", "os": "linux"}, ""),
 		ex("b", map[string]string{"env": "home", "os": "darwin"}, ""),
@@ -133,27 +130,20 @@ func TestNarrowingIsTransitiveUpTheWholeChain(t *testing.T) {
 	})
 
 	set, err := c.effectiveExecutorSet("c_grandchild")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(set) != 1 || set[0].ID != "a" {
-		t.Fatalf("grandchild must be bounded by env=home AND os=linux; got %+v", set)
-	}
+	ck.NoError(err)
+	ck.False(len(set) != 1 || set[0].ID != "a", "grandchild must be bounded by env=home AND os=linux; got %+v", set)
 }
 
 // A top-level agent's set is everything live, subject to executor admission.
 func TestTopLevelAgentSeesEveryAdmittingExecutor(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "",
 		ex("a", map[string]string{"env": "home"}, ""),
 		ex("b", map[string]string{"env": "work"}, ""),
 	)
 	set, err := c.effectiveExecutorSet("c_parent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(set) != 2 {
-		t.Fatalf("want both, got %+v", set)
-	}
+	ck.NoError(err)
+	ck.Len(set, 2, "want both, got")
 }
 
 // Scheduling failure is fast and legible. The current message says "labels do
@@ -161,6 +151,7 @@ func TestTopLevelAgentSeesEveryAdmittingExecutor(t *testing.T) {
 // is a diagnostic that cannot distinguish a typo from a missing label from an
 // executor that refused the child.
 func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := selectFixture(t, "",
 		ex("exec-home", map[string]string{"env": "home", "os": "linux"}, ""),
 		ex("exec-mac", map[string]string{"env": "work", "os": "darwin"}, ""),
@@ -169,9 +160,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work,os=linux",
 	}, "")
-	if err == nil {
-		t.Fatal("want a refusal")
-	}
+	ck.Require().Error(err, "want a refusal")
 	msg := err.Error()
 	for _, want := range []string{
 		"env=work,os=linux",     // what was required
@@ -179,23 +168,19 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 		"exec-mac", "os=darwin",
 		"exec-picky", "admission", "rafiki/kind", // the executor refused the child
 	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("refusal missing %q:\n%s", want, msg)
-		}
+		ck.StrContains(msg, want, "refusal missing")
 	}
 }
 
 // Queueing is opt-in only. A spawn that matches nothing fails NOW — silent
 // queueing turns a structural mistake into a hang nobody can diagnose.
 func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "")
 	start := time.Now()
-	if _, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, ""); err == nil {
-		t.Fatal("want a refusal")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("selection took %s — it must fail immediately, not wait for an executor", elapsed)
-	}
+	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, "")
+	ck.Error(err, "want a refusal")
+	ck.LessOrEqual(time.Second, time.Since(start), "selection took")
 }
 
 func TestSortCandidatesPrefersDurableThenID(t *testing.T) {
@@ -209,9 +194,7 @@ func TestSortCandidatesPrefersDurableThenID(t *testing.T) {
 
 	want := []string{"aaa-durable", "zzz-durable", "aaa-session", "bbb-session"}
 	for i, w := range want {
-		if in[i].ID != w {
-			t.Fatalf("position %d: want %s, got %s (full order: %v)", i, w, in[i].ID, ids(in))
-		}
+		assert.NewAborting(t).Eq(w, in[i].ID, "position %d: want %s, got %s (full order: %v)", i, w, in[i].ID, ids(in))
 	}
 }
 
@@ -224,9 +207,7 @@ func TestSortCandidatesIsStableAcrossCalls(t *testing.T) {
 	sortCandidates(first)
 	sortCandidates(second)
 	for i := range first {
-		if first[i].ID != second[i].ID {
-			t.Fatalf("ordering is not deterministic: %v vs %v", ids(first), ids(second))
-		}
+		assert.NewAborting(t).Eq(second[i].ID, first[i].ID, "ordering is not deterministic: %v vs %v", ids(first), ids(second))
 	}
 }
 
@@ -242,6 +223,7 @@ func ids(in []executors.Executor) []string {
 // whole point of the daemon-attested owner label. Before it existed, every
 // spawn was refused because children carried no owner label at all.
 func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client"}, "owner=brent"))
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_owned", Status: protocol.StatusIdle, StartedAt: time.Now(),
@@ -249,12 +231,8 @@ func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
 		Labels: map[string]string{"owner": "brent", "rafiki/kind": "fundi"},
 	})
 	set, err := c.effectiveExecutorSet("c_owned")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(set) != 1 || set[0].ID != "laptop" {
-		t.Fatalf("owner=brent admitted the wrong set: %+v", set)
-	}
+	ck.NoError(err)
+	ck.False(len(set) != 1 || set[0].ID != "laptop", "owner=brent admitted the wrong set: %+v", set)
 }
 
 // The actual spawn path, not just an already-stored child: a TOP-LEVEL spawn
@@ -266,16 +244,13 @@ func TestAdmissionMatchesDaemonAttestedOwner(t *testing.T) {
 // ExecutorSession), so getting this wrong means `rafiki create` can never
 // place a single top-level agent on the operator's own machine.
 func TestTopLevelSpawnIsAdmittedByItsAttestedOwner(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client", "owner": "brent"}, "owner=brent"))
 	req := protocol.SpawnRequest{ExecutorSelector: "owner=brent,kind=client"}
 
 	chosen, err := c.chooseExecutor(req, "brent")
-	if err != nil {
-		t.Fatalf("a top-level spawn with its owner attested must reach the laptop executor: %v", err)
-	}
-	if chosen.ID != "laptop" {
-		t.Fatalf("chose %s, want laptop", chosen.ID)
-	}
+	ck.NoError(err, "a top-level spawn with its owner attested must reach the laptop executor")
+	ck.Eq("laptop", chosen.ID, "chose")
 
 	// And the failure mode this guards against: an unattested (or wrong)
 	// owner must still be refused, not silently admitted some other way —

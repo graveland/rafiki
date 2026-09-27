@@ -3,10 +3,11 @@ package protocol_test
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSpawnRequest_RoundTrip(t *testing.T) {
@@ -47,44 +48,32 @@ func TestSpawnRequest_RoundTrip(t *testing.T) {
 }
 
 func TestSpawnRequestNewFieldsUseCamelCaseAndRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		SkillsDirs: []string{"/a", "/b"},
 		MCPConfig:  "/c/.mcp.json",
 	}
 	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	got := string(b)
 	for _, want := range []string{`"skillsDirs"`, `"mcpConfig"`} {
-		if !strings.Contains(got, want) {
-			t.Errorf("marshalled SpawnRequest missing %s; protocol is camelCase and the wire spec documents it that way: %s", want, got)
-		}
+		c.StrContains(got, want, "marshalled SpawnRequest missing")
 	}
 	for _, bad := range []string{`"skills_dirs"`, `"mcp_config"`} {
-		if strings.Contains(got, bad) {
-			t.Errorf("marshalled SpawnRequest still contains snake_case %s", bad)
-		}
+		c.NotStrContains(got, bad, "marshalled SpawnRequest still contains snake_case")
 	}
 
 	var back protocol.SpawnRequest
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(back.SkillsDirs, req.SkillsDirs) || back.MCPConfig != req.MCPConfig {
-		t.Errorf("round-trip lost data: %+v", back)
-	}
+	c.Require().NoError(json.Unmarshal(b, &back))
+	c.False(!reflect.DeepEqual(back.SkillsDirs, req.SkillsDirs) || back.MCPConfig != req.MCPConfig, "round-trip lost data: %+v", back)
 }
 
 func TestSpawnRequestNewFieldsOmitWhenEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b, err := json.Marshal(protocol.SpawnRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	for _, absent := range []string{"skillsDirs", "mcpConfig"} {
-		if strings.Contains(string(b), absent) {
-			t.Errorf("%s must be omitempty so older daemons ignore it: %s", absent, b)
-		}
+		c.NotStrContains(string(b), absent, "%s must be omitempty so older daemons ignore it: %s", absent, b)
 	}
 }
 
@@ -104,9 +93,7 @@ func TestStatusConstants(t *testing.T) {
 		{"StatusExited", string(protocol.StatusExited), "exited"},
 	}
 	for _, tc := range cases {
-		if tc.val != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, tc.val, "%s = %q, want", tc.name, tc.val)
 	}
 }
 
@@ -132,20 +119,17 @@ func TestErrorCodeConstants(t *testing.T) {
 		{"ErrInternal", protocol.ErrInternal, "internal"},
 	}
 	for _, tc := range cases {
-		if tc.val != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.val, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, tc.val, "%s = %q, want", tc.name, tc.val)
 	}
 }
 
 func TestSpawnRequest_OmitEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Cwd: "/tmp",
 	}
 	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	raw := string(b)
 	for _, absent := range []string{
 		`"id"`, `"name"`, `"provider"`, `"model"`, `"thinking"`, `"apiKey"`,
@@ -156,59 +140,42 @@ func TestSpawnRequest_OmitEmpty(t *testing.T) {
 		`"systemPrompt"`, `"appendSystemPrompt"`, `"verbose"`,
 		`"piBinary"`, `"env"`, `"envOverride"`, `"extraArgs"`,
 	} {
-		if strings.Contains(raw, absent) {
-			t.Errorf("field %s should be absent from %s", absent, raw)
-		}
+		c.NotStrContains(raw, absent, "field")
 	}
 }
 
 func TestSpawnRequestParentChildID(t *testing.T) {
+	c := assert.NewAborting(t)
 	req := protocol.SpawnRequest{
 		Cwd:           "/tmp",
 		ParentChildID: "c_parent",
 	}
 	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if !strings.Contains(string(b), `"parentChildId":"c_parent"`) {
-		t.Fatalf("ParentChildID missing or misspelled in JSON: %s", b)
-	}
+	c.NoError(err, "marshal")
+	c.StrContains(string(b), `"parentChildId":"c_parent"`, "ParentChildID missing or misspelled in JSON: %s", b)
 
 	// Omitted when empty — an absent parent must not appear as a null or "".
 	b2, err := json.Marshal(protocol.SpawnRequest{Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("marshal empty: %v", err)
-	}
-	if strings.Contains(string(b2), "parentChildId") {
-		t.Fatalf("empty ParentChildID should be omitted, got: %s", b2)
-	}
+	c.NoError(err, "marshal empty")
+	c.NotStrContains(string(b2), "parentChildId", "empty ParentChildID should be omitted, got: %s", b2)
 
 	var back protocol.SpawnRequest
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if back.ParentChildID != "c_parent" {
-		t.Fatalf("round-trip lost ParentChildID: got %q", back.ParentChildID)
-	}
+	c.NoError(json.Unmarshal(b, &back), "unmarshal")
+	c.Eq("c_parent", back.ParentChildID, "round-trip lost ParentChildID: got")
 }
 
 func TestSpawnRequestExecutorRefRoundTrips(t *testing.T) {
+	c := assert.NewAborting(t)
 	req := protocol.SpawnRequest{ExecutorRef: "greyshift"}
 	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var got protocol.SpawnRequest
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.ExecutorRef != "greyshift" {
-		t.Fatalf("want ExecutorRef=greyshift, got %q", got.ExecutorRef)
-	}
+	c.NoError(json.Unmarshal(b, &got))
+	c.Eq("greyshift", got.ExecutorRef, "want ExecutorRef=greyshift, got")
 }
 
 func TestChildSummary_NullPID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cs := protocol.ChildSummary{
 		ChildID:      "c_01HX...",
 		PID:          nil,
@@ -218,30 +185,19 @@ func TestChildSummary_NullPID(t *testing.T) {
 		LastActivity: 1716636890,
 	}
 	b, err := json.Marshal(cs)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	raw := string(b)
-	if !strings.Contains(raw, `"pid":null`) {
-		t.Errorf("expected pid:null in %s", raw)
-	}
-	if !strings.Contains(raw, `"exitCode":null`) {
-		t.Errorf("expected exitCode:null in %s", raw)
-	}
+	c.StrContains(raw, `"pid":null`, "expected pid:null in")
+	c.StrContains(raw, `"exitCode":null`, "expected exitCode:null in")
 }
 
 // roundTrip marshals v and unmarshals it back into a fresh value, failing
 // when the data does not survive.
 func roundTrip[T any](t *testing.T, src T, dst *T) {
 	t.Helper()
+	c := assert.NewCollecting(t)
 	b, err := json.Marshal(src)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if err := json.Unmarshal(b, dst); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !reflect.DeepEqual(src, *dst) {
-		t.Errorf("round-trip lost data:\n sent: %+v\n  got: %+v", src, *dst)
-	}
+	c.Require().NoError(err, "marshal")
+	c.Require().NoError(json.Unmarshal(b, dst), "unmarshal")
+	c.EqDeep(*dst, src, "round-trip lost data:\n sent")
 }

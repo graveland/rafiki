@@ -5,12 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type stubStore struct {
@@ -59,6 +60,7 @@ func serve(a *UserTokenAuth, req *http.Request) (*httptest.ResponseRecorder, *Id
 // leaves the bit false, which is what makes "admin regardless of provenance"
 // unexpressable — a child-attributed identity is never treated as admin.
 func TestUserTokenAuthResolvesAdminFlag(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{
 		"rfk_admin": {UserID: "u1", Username: "root", IsAdmin: true},
 	}}
@@ -68,12 +70,8 @@ func TestUserTokenAuthResolvesAdminFlag(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer rfk_admin")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	if id == nil || id.UserID != "u1" || !id.IsAdmin {
-		t.Fatalf("identity = %+v, want IsAdmin true", id)
-	}
+	c.Eq(200, rec.Code, "status = %d, want 200: %s", rec.Code, rec.Body.String())
+	c.False(id == nil || id.UserID != "u1" || !id.IsAdmin, "identity = %+v, want IsAdmin true", id)
 
 	// The ordinary-user token in the same store resolves with the bit false,
 	// so the assertion above cannot be passing on a shared struct.
@@ -81,15 +79,12 @@ func TestUserTokenAuthResolvesAdminFlag(t *testing.T) {
 	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	req2.Header.Set("Authorization", "Bearer rfk_peat")
 	rec2, id2 := serve(a, req2)
-	if rec2.Code != 200 {
-		t.Fatalf("plain user: status = %d, want 200", rec2.Code)
-	}
-	if id2 == nil || id2.IsAdmin {
-		t.Fatalf("plain identity = %+v, want IsAdmin false", id2)
-	}
+	c.Eq(200, rec2.Code, "plain user: status")
+	c.False(id2 == nil || id2.IsAdmin, "plain identity = %+v, want IsAdmin false", id2)
 }
 
 func TestUserTokenAuthResolvesIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
@@ -97,12 +92,8 @@ func TestUserTokenAuthResolvesIdentity(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer rfk_good")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "u1" || id.Username != "brent" {
-		t.Fatalf("identity = %+v", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "u1" || id.Username != "brent", "identity = %+v", id)
 }
 
 func TestUnknownTokenIs401(t *testing.T) {
@@ -113,14 +104,13 @@ func TestUnknownTokenIs401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer rfk_nope")
 	rec, _ := serve(a, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	assert.NewAborting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // The distinction that matters: a client told 401 discards its token and
 // re-prompts. A database outage must not do that to every user at once.
 func TestStoreOutageIs503Not401(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{err: errors.New("connection refused")}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
@@ -128,17 +118,14 @@ func TestStoreOutageIs503Not401(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer rfk_good")
 	rec, _ := serve(a, req)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "connection refused") {
-		t.Fatalf("store error text leaked to an unauthenticated caller: %q", rec.Body.String())
-	}
+	c.Eq(http.StatusServiceUnavailable, rec.Code, "status")
+	c.NotStrContains(rec.Body.String(), "connection refused", "store error text leaked to an unauthenticated caller")
 }
 
 // The per-boot child token is a daemon-internal credential, not a user. It
 // works even in bootstrap mode, and never touches the store.
 func TestChildTokenIsAcceptedWithoutTouchingTheStore(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
@@ -146,15 +133,9 @@ func TestChildTokenIsAcceptedWithoutTouchingTheStore(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer childsecret")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "" {
-		t.Fatalf("child identity must not carry a UserID: %+v", id)
-	}
-	if st.calls.Load() != 0 {
-		t.Fatalf("child token hit the store %d times, want 0", st.calls.Load())
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "", "child identity must not carry a UserID: %+v", id)
+	c.Eq(0, st.calls.Load(), "child token hit the store")
 }
 
 // This is the whole reason the digest scheme replaced bcrypt: the face
@@ -162,6 +143,7 @@ func TestChildTokenIsAcceptedWithoutTouchingTheStore(t *testing.T) {
 // The child secret plus a session header naming a child this daemon knows
 // about must resolve to that child's real owner, not the anonymous identity.
 func TestChildTokenWithKnownSessionResolvesToOwner(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 	a.SetChildOwnerLookup(func(childID string) (string, bool) {
@@ -176,17 +158,14 @@ func TestChildTokenWithKnownSessionResolvesToOwner(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_known")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "u_owner1" {
-		t.Fatalf("identity = %+v, want UserID u_owner1", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "u_owner1", "identity = %+v, want UserID u_owner1", id)
 }
 
 // An unknown/foreign child (or a missing header) must fall back to the
 // anonymous identity — never a hard failure.
 func TestChildTokenWithUnknownSessionFallsBackToAnonymous(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 	a.SetChildOwnerLookup(func(childID string) (string, bool) { return "", false })
@@ -196,17 +175,14 @@ func TestChildTokenWithUnknownSessionFallsBackToAnonymous(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_unknown_to_this_daemon")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "" {
-		t.Fatalf("identity = %+v, want anonymous (empty UserID)", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "", "identity = %+v, want anonymous (empty UserID)", id)
 }
 
 // With no lookup wired at all (the zero value), the child token must behave
 // exactly as before this feature existed: anonymous, no panic.
 func TestChildTokenWithNoLookupWiredStaysAnonymous(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
@@ -215,12 +191,8 @@ func TestChildTokenWithNoLookupWiredStaysAnonymous(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_known")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "" {
-		t.Fatalf("identity = %+v, want anonymous (empty UserID)", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "", "identity = %+v, want anonymous (empty UserID)", id)
 }
 
 func TestRepeatedRequestsHitTheStoreOnce(t *testing.T) {
@@ -234,9 +206,7 @@ func TestRepeatedRequestsHitTheStoreOnce(t *testing.T) {
 			t.Fatalf("request %d: status %d", i, rec.Code)
 		}
 	}
-	if n := st.calls.Load(); n != 1 {
-		t.Fatalf("store calls = %d, want 1 (the cache is not working)", n)
-	}
+	assert.NewAborting(t).Eq(1, st.calls.Load(), "store calls")
 }
 
 func TestRevocationTakesEffectAfterTheTTL(t *testing.T) {
@@ -261,6 +231,7 @@ func TestRevocationTakesEffectAfterTheTTL(t *testing.T) {
 
 // A cache keyed by plaintext puts every live token in the daemon's heap.
 func TestCacheIsKeyedByDigestNotPlaintext(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Minute)
 
@@ -270,12 +241,10 @@ func TestCacheIsKeyedByDigestNotPlaintext(t *testing.T) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, bad := a.cache["rfk_good"]; bad {
-		t.Fatal("cache is keyed by the plaintext token")
-	}
-	if _, ok := a.cache[users.HashToken("rfk_good")]; !ok {
-		t.Fatal("cache is not keyed by the digest")
-	}
+	_, bad := a.cache["rfk_good"]
+	c.False(bad, "cache is keyed by the plaintext token")
+	_, ok := a.cache[users.HashToken("rfk_good")]
+	c.True(ok, "cache is not keyed by the digest")
 }
 
 // Ported from the retired StaticTokenAuth's test coverage: the face must
@@ -297,15 +266,12 @@ func TestHeaderVariantsAllAuthenticate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			req := httptest.NewRequest("POST", "/v1/messages", nil)
 			tc.header(req)
 			rec, id := serve(a, req)
-			if rec.Code != 200 {
-				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-			}
-			if id == nil || id.UserID != "u1" {
-				t.Fatalf("identity = %+v", id)
-			}
+			c.Eq(200, rec.Code, "status = %d, want 200: %s", rec.Code, rec.Body.String())
+			c.False(id == nil || id.UserID != "u1", "identity = %+v", id)
 		})
 	}
 }
@@ -320,9 +286,7 @@ func TestPassthroughWithoutAuthorizationFailsClosed(t *testing.T) {
 	req.Header.Set("X-Rafiki-Token", "rfk_good")
 	rec, _ := serve(a, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	assert.NewAborting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // Ported: a caller that puts its OWN rafiki token in the Authorization header
@@ -337,9 +301,7 @@ func TestPassthroughRejectsOwnTokenInAuthorization(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer rfk_good")
 	rec, _ := serve(a, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	assert.NewAborting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // Ported: missing credentials entirely is 401, not a panic or 500.
@@ -350,32 +312,25 @@ func TestMissingCredentialsIs401(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	rec, _ := serve(a, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	assert.NewAborting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // A nil store is a supported configuration (RAFIKI_DB unset): every user
 // token is unknown, but the child token must still work.
 func TestNilStoreRejectsUserTokensButAcceptsChildToken(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := NewUserTokenAuth(nil, "childsecret", time.Minute)
 
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer rfk_good")
 	rec, _ := serve(a, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 for a user token against a nil store", rec.Code)
-	}
+	c.Eq(http.StatusUnauthorized, rec.Code, "status")
 
 	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	req2.Header.Set("Authorization", "Bearer childsecret")
 	rec2, id := serve(a, req2)
-	if rec2.Code != 200 {
-		t.Fatalf("status = %d, want 200 for the child token against a nil store", rec2.Code)
-	}
-	if id == nil || id.UserID != "" {
-		t.Fatalf("child identity must not carry a UserID: %+v", id)
-	}
+	c.Eq(200, rec2.Code, "status")
+	c.False(id == nil || id.UserID != "", "child identity must not carry a UserID: %+v", id)
 }
 
 // The anti-self-forward guard must fail CLOSED when the store cannot answer.
@@ -387,6 +342,7 @@ func TestNilStoreRejectsUserTokensButAcceptsChildToken(t *testing.T) {
 // database blip was enough to ship rafiki's own token to a third-party
 // provider in exchange for an opaque 401.
 func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{err: errors.New("host=db.internal user=rafiki: connection refused")}
 	a := NewUserTokenAuth(st, "childsecret", time.Minute)
 
@@ -395,15 +351,9 @@ func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer some-cred") // vetted against the down store
 	rec, _ := serve(a, req)
 
-	if rec.Code == 200 {
-		t.Fatal("request proceeded while the self-forward guard could not be evaluated; it must fail closed")
-	}
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "db.internal") {
-		t.Fatalf("store error text leaked to the caller: %q", rec.Body.String())
-	}
+	c.NotEq(200, rec.Code, "request proceeded while the self-forward guard could not be evaluated; it must fail closed")
+	c.Eq(http.StatusServiceUnavailable, rec.Code, "status")
+	c.NotStrContains(rec.Body.String(), "db.internal", "store error text leaked to the caller")
 }
 
 // IdentifyStrict backs the Connect UDS mount's identity resolution, which must
@@ -413,58 +363,44 @@ func TestPassthroughSelfForwardGuardFailsClosedOnStoreOutage(t *testing.T) {
 // store outage → ErrAuthUnavailable (an outage, never a bad-credential
 // answer). The distinction between the last two is the whole point.
 func TestIdentifyStrictResolvesAPresentedCredential(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1", Username: "brent"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
 	id, err := a.IdentifyStrict(context.Background(), http.Header{"Authorization": []string{"Bearer rfk_good"}})
-	if err != nil {
-		t.Fatalf("IdentifyStrict: %v", err)
-	}
-	if id == nil || id.UserID != "u1" || id.Username != "brent" {
-		t.Fatalf("IdentifyStrict = %+v, want the resolved identity", id)
-	}
+	c.NoError(err, "IdentifyStrict")
+	c.False(id == nil || id.UserID != "u1" || id.Username != "brent", "IdentifyStrict = %+v, want the resolved identity", id)
 }
 
 func TestIdentifyStrictNilWithNoCredential(t *testing.T) {
+	c := assert.NewCollecting(t)
 	st := &stubStore{tokens: map[string]users.Identity{"rfk_good": {UserID: "u1"}}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
 	id, err := a.IdentifyStrict(context.Background(), http.Header{})
-	if err != nil {
-		t.Fatalf("IdentifyStrict with no credential: %v", err)
-	}
-	if id != nil {
-		t.Fatalf("IdentifyStrict with no credential = %+v, want nil (anonymous)", id)
-	}
-	if st.calls.Load() != 0 {
-		t.Errorf("store was consulted for a request with no credential at all")
-	}
+	c.Require().NoError(err, "IdentifyStrict with no credential")
+	c.Require().Nil(id, "IdentifyStrict with no credential")
+	c.Eq(0, st.calls.Load(), "store was consulted for a request with no credential at all")
 }
 
 func TestIdentifyStrictUnknownCredentialIsARefusal(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
 	id, err := a.IdentifyStrict(context.Background(), http.Header{"Authorization": []string{"Bearer rfk_stale_or_wrong_daemon"}})
-	if id != nil {
-		t.Fatalf("IdentifyStrict with an unrecognized token = %+v, want nil", id)
-	}
-	if !errors.Is(err, users.ErrNotFound) {
-		t.Fatalf("err = %v, want users.ErrNotFound — the mount refuses, never downgrades", err)
-	}
+	c.Nil(id, "IdentifyStrict with an unrecognized token")
+	c.ErrorIs(err, users.ErrNotFound, "err")
 }
 
 func TestIdentifyStrictStoreOutageIsUnavailableNotInvalid(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{err: errors.New("connection refused")}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 
 	id, err := a.IdentifyStrict(context.Background(), http.Header{"Authorization": []string{"Bearer rfk_good"}})
-	if id != nil {
-		t.Fatalf("IdentifyStrict during a store outage = %+v, want nil", id)
-	}
-	if !errors.Is(err, ErrAuthUnavailable) {
-		t.Fatalf("err = %v, want ErrAuthUnavailable — an outage is never an invalid credential", err)
-	}
+	c.Nil(id, "IdentifyStrict during a store outage")
+	c.ErrorIs(err, ErrAuthUnavailable, "err")
 }
 
 // S1: provenance is a property of the credential, stamped by resolve(). The
@@ -496,18 +432,15 @@ func TestProvenanceFollowsTheCredential(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			req := httptest.NewRequest("POST", "/v1/messages", nil)
 			req.Header.Set("Authorization", "Bearer "+tc.token)
 			if tc.session != "" {
 				req.Header.Set("X-Rafiki-Session", tc.session)
 			}
 			rec, id := serve(a, req)
-			if rec.Code != 200 {
-				t.Fatalf("status = %d, want 200", rec.Code)
-			}
-			if id == nil || id.Via != tc.wantVia || id.UserID != tc.wantID {
-				t.Fatalf("identity = %+v, want Via %v with UserID %q", id, tc.wantVia, tc.wantID)
-			}
+			c.Eq(200, rec.Code, "status")
+			c.False(id == nil || id.Via != tc.wantVia || id.UserID != tc.wantID, "identity = %+v, want Via %v with UserID %q", id, tc.wantVia, tc.wantID)
 		})
 	}
 }
@@ -516,6 +449,7 @@ func TestProvenanceFollowsTheCredential(t *testing.T) {
 // naming exactly one child — no X-Rafiki-Session header involved, unlike the
 // per-boot attribution path.
 func TestChildTokenResolvesToChildProvenance(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 	a.SetChildTokenLookup(func(token string) (string, string, bool) {
@@ -529,12 +463,8 @@ func TestChildTokenResolvesToChildProvenance(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer child-c-secret-1")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	if id == nil || id.ChildID != "c_1" || id.UserID != "u_owner1" || id.Via != ProvenanceChildToken {
-		t.Fatalf("identity = %+v, want Via ProvenanceChildToken with ChildID c_1 and UserID u_owner1", id)
-	}
+	c.Eq(200, rec.Code, "status = %d, want 200: %s", rec.Code, rec.Body.String())
+	c.False(id == nil || id.ChildID != "c_1" || id.UserID != "u_owner1" || id.Via != ProvenanceChildToken, "identity = %+v, want Via ProvenanceChildToken with ChildID c_1 and UserID u_owner1", id)
 }
 
 // ChildID is reserved for ProvenanceChildToken — the credential that names
@@ -544,6 +474,7 @@ func TestChildTokenResolvesToChildProvenance(t *testing.T) {
 // ChildID on an attributed identity would blur the provenance the
 // agent-control gates read.
 func TestChildIDEmptyForUserAndChildAttributedIdentities(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{
 		"rfk_good": {UserID: "u_user1", Username: "brent"},
 	}}
@@ -559,24 +490,16 @@ func TestChildIDEmptyForUserAndChildAttributedIdentities(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer rfk_good")
 	rec, id := serve(a, req)
-	if rec.Code != 200 {
-		t.Fatalf("user credential: status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.Via != ProvenanceUser || id.ChildID != "" {
-		t.Fatalf("user credential resolve = %+v, want ProvenanceUser with ChildID == \"\"", id)
-	}
+	c.Eq(200, rec.Code, "user credential: status")
+	c.False(id == nil || id.Via != ProvenanceUser || id.ChildID != "", "user credential resolve = %+v, want ProvenanceUser with ChildID == \"\"", id)
 
 	// The per-boot child secret with a session header: attributed, not bound.
 	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	req2.Header.Set("Authorization", "Bearer childsecret")
 	req2.Header.Set("X-Rafiki-Session", "c_known")
 	rec2, id2 := serve(a, req2)
-	if rec2.Code != 200 {
-		t.Fatalf("child-attributed resolve: status = %d, want 200: %s", rec2.Code, rec2.Body.String())
-	}
-	if id2 == nil || id2.Via != ProvenanceChildAttributed || id2.ChildID != "" {
-		t.Fatalf("child-attributed resolve = %+v, want ProvenanceChildAttributed with ChildID == \"\"", id2)
-	}
+	c.Eq(200, rec2.Code, "child-attributed resolve: status = %d, want 200: %s", rec2.Code, rec2.Body.String())
+	c.False(id2 == nil || id2.Via != ProvenanceChildAttributed || id2.ChildID != "", "child-attributed resolve = %+v, want ProvenanceChildAttributed with ChildID == \"\"", id2)
 }
 
 // The per-child secret must NEVER reach the TTL cache: a cached entry
@@ -584,6 +507,7 @@ func TestChildIDEmptyForUserAndChildAttributedIdentities(t *testing.T) {
 // consulted on every resolve, so a secret that stops resolving — child
 // closed, secret expired — stops resolving on the very next request.
 func TestChildTokenNotCached(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Minute)
 	var calls atomic.Int64
@@ -600,30 +524,21 @@ func TestChildTokenNotCached(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	req.Header.Set("Authorization", "Bearer child-c-secret-1")
 	rec, id := serve(a, req)
-	if rec.Code != 200 {
-		t.Fatalf("first request: status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.Via != ProvenanceChildToken || id.ChildID != "c_1" {
-		t.Fatalf("first request: identity = %+v, want the child identity", id)
-	}
+	c.Eq(200, rec.Code, "first request: status")
+	c.False(id == nil || id.Via != ProvenanceChildToken || id.ChildID != "c_1", "first request: identity = %+v, want the child identity", id)
 
 	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
 	req2.Header.Set("Authorization", "Bearer child-c-secret-1")
 	rec2, id2 := serve(a, req2)
-	if rec2.Code != http.StatusUnauthorized {
-		t.Fatalf("second request: status = %d, want 401 — a cached child identity would still answer here", rec2.Code)
-	}
-	if id2 != nil && id2.Via == ProvenanceChildToken {
-		t.Fatalf("second request: identity = %+v, the child secret was served from cache", id2)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("lookup calls = %d, want 2 (both resolves must consult it)", calls.Load())
-	}
+	c.Eq(http.StatusUnauthorized, rec2.Code, "second request: status")
+	c.False(id2 != nil && id2.Via == ProvenanceChildToken, "second request: identity = %+v, the child secret was served from cache", id2)
+	c.Eq(2, calls.Load(), "lookup calls")
 }
 
 // ProvenanceChildToken is a child credential, not a user one: it must fail
 // the same IsUserCredential gate every other child path fails.
 func TestChildTokenIsNotUserCredential(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 	a.SetChildTokenLookup(func(token string) (string, string, bool) {
@@ -637,12 +552,8 @@ func TestChildTokenIsNotUserCredential(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer child-c-secret-1")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.IsUserCredential() {
-		t.Fatalf("identity = %+v, IsUserCredential must be false for ProvenanceChildToken", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.IsUserCredential(), "identity = %+v, IsUserCredential must be false for ProvenanceChildToken", id)
 }
 
 // The new lookup sits BEFORE the per-boot comparison, so it must not shadow
@@ -650,6 +561,7 @@ func TestChildTokenIsNotUserCredential(t *testing.T) {
 // resolves to ProvenanceChildAttributed, with the child-token lookup wired
 // and answering false for the boot secret.
 func TestPerBootSecretStillChildAttributed(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &stubStore{tokens: map[string]users.Identity{}}
 	a := NewUserTokenAuth(st, "childsecret", time.Second)
 	a.SetChildOwnerLookup(func(childID string) (string, bool) {
@@ -667,10 +579,6 @@ func TestPerBootSecretStillChildAttributed(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_known")
 	rec, id := serve(a, req)
 
-	if rec.Code != 200 {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if id == nil || id.UserID != "u_owner1" || id.Via != ProvenanceChildAttributed {
-		t.Fatalf("identity = %+v, want Via ProvenanceChildAttributed with UserID u_owner1", id)
-	}
+	c.Eq(200, rec.Code, "status")
+	c.False(id == nil || id.UserID != "u_owner1" || id.Via != ProvenanceChildAttributed, "identity = %+v, want Via ProvenanceChildAttributed with UserID u_owner1", id)
 }

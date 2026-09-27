@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // nativeTypeNames reduces an event slice to its payload type names, which is
@@ -38,13 +40,10 @@ func nativeTypeNames(evs []*rafikiv1.Event) []string {
 
 func assertTypes(t *testing.T, got []string, want []string) {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("event types = %v, want %v", got, want)
-	}
+	c := assert.NewAborting(t)
+	c.Len(got, len(want), "event types = %v, want %v", got, want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("event types = %v, want %v", got, want)
-		}
+		c.Eq(want[i], got[i], "event types = %v, want %v", got, want)
 	}
 }
 
@@ -54,6 +53,7 @@ func assertTypes(t *testing.T, got []string, want []string) {
 // frames are complete messages, so a delta would duplicate the message and, on
 // a later turn, append its text to the PREVIOUS turn's finalized block).
 func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"assistant","message":{"model":"claude-opus-5","content":[{"type":"text","text":"hello"}]}}`)
 
@@ -62,15 +62,9 @@ func TestNativeAssistantTextEmitsMessageOnly(t *testing.T) {
 	assertTypes(t, nativeTypeNames(evs), []string{"assistant_message"})
 
 	am := evs[0].GetAssistantMessage()
-	if am == nil {
-		t.Fatal("first event is not an AssistantMessage")
-	}
-	if len(am.GetContent()) != 1 {
-		t.Fatalf("content blocks = %d, want 1", len(am.GetContent()))
-	}
-	if got := am.GetContent()[0].GetText().GetText(); got != "hello" {
-		t.Fatalf("text = %q, want %q", got, "hello")
-	}
+	c.NotNil(am, "first event is not an AssistantMessage")
+	c.Len(am.GetContent(), 1, "content blocks = %d, want 1", len(am.GetContent()))
+	c.Eq("hello", am.GetContent()[0].GetText().GetText(), "text")
 }
 
 // A tool_use frame emits the assistant message FIRST, then the execution start.
@@ -85,9 +79,7 @@ func TestNativeAssistantEmitsMessageBeforeToolStart(t *testing.T) {
 
 	assertTypes(t, nativeTypeNames(evs), []string{"assistant_message", "tool_execution_start"})
 
-	if got := evs[1].GetToolExecutionStart().GetToolUseId(); got != "tu_1" {
-		t.Fatalf("tool_use_id = %q, want %q", got, "tu_1")
-	}
+	assert.NewAborting(t).Eq("tu_1", evs[1].GetToolExecutionStart().GetToolUseId(), "tool_use_id")
 }
 
 // A user frame carries only tool_result blocks and must not open a turn. Each
@@ -96,6 +88,7 @@ func TestNativeAssistantEmitsMessageBeforeToolStart(t *testing.T) {
 // second event the cockpit's reducer never sets HasResult and a claude child
 // renders "⋯ no result" forever.
 func TestNativeUserEmitsToolEndAndResultMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ok"}]}}`)
 
@@ -104,39 +97,24 @@ func TestNativeUserEmitsToolEndAndResultMessage(t *testing.T) {
 	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
 
 	end := evs[0].GetToolExecutionEnd()
-	if end == nil {
-		t.Fatal("first event is not a ToolExecutionEnd")
-	}
-	if got := end.GetToolUseId(); got != "tu_1" {
-		t.Fatalf("tool_use_id = %q, want %q", got, "tu_1")
-	}
+	c.NotNil(end, "first event is not a ToolExecutionEnd")
+	c.Eq("tu_1", end.GetToolUseId(), "tool_use_id")
 
 	um := evs[1].GetUserMessage()
-	if um == nil {
-		t.Fatal("second event is not a UserMessage")
-	}
-	if len(um.GetContent()) != 1 {
-		t.Fatalf("content blocks = %d, want 1", len(um.GetContent()))
-	}
+	c.NotNil(um, "second event is not a UserMessage")
+	c.Len(um.GetContent(), 1, "content blocks = %d, want 1", len(um.GetContent()))
 	tr := um.GetContent()[0].GetToolResult()
-	if tr == nil {
-		t.Fatal("UserMessage block is not a ToolResult")
-	}
-	if got := tr.GetToolUseId(); got != "tu_1" {
-		t.Fatalf("tool_result tool_use_id = %q, want %q", got, "tu_1")
-	}
-	if got := tr.GetIsError(); got {
-		t.Fatalf("tool_result is_error = %v, want false", got)
-	}
-	if got := tr.GetContent()[0].GetText().GetText(); got != "ok" {
-		t.Fatalf("tool_result text = %q, want %q", got, "ok")
-	}
+	c.NotNil(tr, "UserMessage block is not a ToolResult")
+	c.Eq("tu_1", tr.GetToolUseId(), "tool_result tool_use_id")
+	c.False(tr.GetIsError(), "tool_result is_error")
+	c.Eq("ok", tr.GetContent()[0].GetText().GetText(), "tool_result text")
 }
 
 // Two tool_result blocks in one frame pair each end with its own result
 // message, in per-block order: End, then the UserMessage (fundi's ToolEnd
 // order). ToolUseIds must not cross.
 func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"user","message":{"role":"user","content":[` +
 		`{"type":"tool_result","tool_use_id":"tu_1","content":"first output"},` +
@@ -161,12 +139,9 @@ func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
 		if tr == nil || tr.GetToolUseId() != w.id {
 			t.Fatalf("event %d: result message not paired with %q", i*2+1, w.id)
 		}
-		if tr.GetIsError() != w.isError {
-			t.Fatalf("event %d: is_error = %v, want %v", i*2+1, tr.GetIsError(), w.isError)
-		}
-		if got := tr.GetContent()[0].GetText().GetText(); got != w.text {
-			t.Fatalf("event %d: text = %q, want %q", i*2+1, got, w.text)
-		}
+		c.Eq(w.isError, tr.GetIsError(), "event %d: is_error = %v, want", i*2+1, tr.GetIsError())
+		got := tr.GetContent()[0].GetText().GetText()
+		c.Eq(w.text, got, "event %d: text = %q, want", i*2+1, got)
 	}
 }
 
@@ -174,6 +149,7 @@ func TestNativeUserPairsEachResultWithItsOwnMessage(t *testing.T) {
 // text block: a call that ran and returned nothing is a completed call, and the
 // reducer's HasResult must be true rather than "⋯ no result".
 func TestNativeUserEmitsResultMessageForEmptyContent(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":""}]}}`)
 
@@ -182,15 +158,9 @@ func TestNativeUserEmitsResultMessageForEmptyContent(t *testing.T) {
 	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
 
 	tr := evs[1].GetUserMessage().GetContent()[0].GetToolResult()
-	if tr == nil {
-		t.Fatal("UserMessage block is not a ToolResult")
-	}
-	if len(tr.GetContent()) != 1 {
-		t.Fatalf("tool_result content blocks = %d, want 1", len(tr.GetContent()))
-	}
-	if got := tr.GetContent()[0].GetText().GetText(); got != "" {
-		t.Fatalf("tool_result text = %q, want empty", got)
-	}
+	c.NotNil(tr, "UserMessage block is not a ToolResult")
+	c.Len(tr.GetContent(), 1, "tool_result content blocks = %d, want 1", len(tr.GetContent()))
+	c.Eq("", tr.GetContent()[0].GetText().GetText(), "tool_result text")
 }
 
 // Guard the whole rule in one place: the native claude vocabulary is fundi's
@@ -205,9 +175,7 @@ func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
 	p := newClaudeProvider()
 	for _, line := range lines {
 		for _, name := range nativeTypeNames(p.BusFramesNative(line, 1000)) {
-			if name == "turn_start" || name == "content_block_delta" {
-				t.Fatalf("native path emitted %q; the claude vocabulary must match fundi's", name)
-			}
+			assert.NewAborting(t).False(name == "turn_start" || name == "content_block_delta", "native path emitted %q; the claude vocabulary must match fundi's", name)
 		}
 	}
 }
@@ -215,6 +183,7 @@ func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
 // The user's prompt must reach the native stream. claude never echoes it on
 // stdout, so without this the cockpit shows replies with no prompts.
 func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	frame := []byte(`{"type":"prompt","message":"do the thing"}`)
 
@@ -223,15 +192,9 @@ func TestOutboundEchoNativeEmitsUserMessage(t *testing.T) {
 	assertTypes(t, nativeTypeNames(evs), []string{"user_message"})
 
 	um := evs[0].GetUserMessage()
-	if um == nil {
-		t.Fatal("event is not a UserMessage")
-	}
-	if len(um.GetContent()) != 1 {
-		t.Fatalf("content blocks = %d, want 1", len(um.GetContent()))
-	}
-	if got := um.GetContent()[0].GetText().GetText(); got != "do the thing" {
-		t.Fatalf("text = %q, want %q", got, "do the thing")
-	}
+	c.NotNil(um, "event is not a UserMessage")
+	c.Len(um.GetContent(), 1, "content blocks = %d, want 1", len(um.GetContent()))
+	c.Eq("do the thing", um.GetContent()[0].GetText().GetText(), "text")
 }
 
 // Frames carrying no user-authored text produce nothing. claudeUserEcho already
@@ -245,9 +208,8 @@ func TestOutboundEchoNativeIgnoresNonPromptFrames(t *testing.T) {
 		`{"type":"prompt","message":""}`,
 		`not json at all`,
 	} {
-		if evs := p.OutboundEchoNative([]byte(frame), 1000); len(evs) != 0 {
-			t.Fatalf("frame %s produced %d events, want 0", frame, len(evs))
-		}
+		evs := p.OutboundEchoNative([]byte(frame), 1000)
+		assert.NewAborting(t).Empty(evs, "frame %s produced %d events, want 0", frame, len(evs))
 	}
 }
 
@@ -260,9 +222,7 @@ func TestOutboundEchoNativeIgnoresNonPromptFrames(t *testing.T) {
 // the change lands and every claude prompt silently stops reaching the cockpit.
 func TestClaudeUserEchoContentIsAString(t *testing.T) {
 	msg, _, ok := claudeUserEcho([]byte(`{"type":"prompt","message":"hi"}`), 1000)
-	if !ok {
-		t.Fatal("claudeUserEcho rejected a valid prompt frame")
-	}
+	assert.NewAborting(t).True(ok, "claudeUserEcho rejected a valid prompt frame")
 	if _, isString := msg.Content.(string); !isString {
 		t.Fatalf("PiUserMessage.Content is %T, want string — OutboundEchoNative's "+
 			"type assertion now drops every prompt silently; teach it the new shape",
@@ -275,6 +235,7 @@ func TestClaudeUserEchoContentIsAString(t *testing.T) {
 // path, so this frame is the only live signal rafiki gets that the context was
 // rewritten; without the branch the boundary is visible only on reattach.
 func TestBusFramesNativeEmitsCompactionBoundary(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":182000,"post_tokens":45000}}`)
 
@@ -282,23 +243,13 @@ func TestBusFramesNativeEmitsCompactionBoundary(t *testing.T) {
 
 	assertTypes(t, nativeTypeNames(evs), []string{"compaction_boundary"})
 	cb := evs[0].GetCompactionBoundary()
-	if cb == nil {
-		t.Fatal("event is not a CompactionBoundary")
-	}
-	if got := cb.GetTrigger(); got != "auto" {
-		t.Fatalf("trigger = %q, want %q", got, "auto")
-	}
+	c.NotNil(cb, "event is not a CompactionBoundary")
+	c.Eq("auto", cb.GetTrigger(), "trigger")
 	// GetPreTokens/GetPostTokens return 0 on a nil pointer, so these assert
 	// both presence and value — the pointers must be set, not bare zeroes.
-	if got := cb.GetPreTokens(); got != 182000 {
-		t.Fatalf("pre_tokens = %d, want 182000", got)
-	}
-	if got := cb.GetPostTokens(); got != 45000 {
-		t.Fatalf("post_tokens = %d, want 45000", got)
-	}
-	if got := evs[0].TsUnixMs; got != 1000 {
-		t.Fatalf("TsUnixMs = %d, want 1000", got)
-	}
+	c.Eq(182000, cb.GetPreTokens(), "pre_tokens")
+	c.Eq(45000, cb.GetPostTokens(), "post_tokens")
+	c.Eq(1000, evs[0].TsUnixMs, "TsUnixMs")
 }
 
 // microcompact_boundary is a different subtype string entirely: it matches
@@ -308,9 +259,8 @@ func TestBusFramesNativeIgnoresMicrocompactBoundary(t *testing.T) {
 	p := newClaudeProvider()
 	line := []byte(`{"type":"system","subtype":"microcompact_boundary"}`)
 
-	if evs := p.BusFramesNative(line, 1000); len(evs) != 0 {
-		t.Fatalf("microcompact_boundary produced %d events, want 0", len(evs))
-	}
+	evs := p.BusFramesNative(line, 1000)
+	assert.NewAborting(t).Empty(evs, "microcompact_boundary produced %d events, want 0", len(evs))
 }
 
 // The system/init frame carries the model into provider state and emits no
@@ -318,13 +268,11 @@ func TestBusFramesNativeIgnoresMicrocompactBoundary(t *testing.T) {
 // frame into an event, and the early return must not have broken the model
 // capture.
 func TestBusFramesNativeSystemInitEmitsNothing(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := newClaudeProvider()
 	line := []byte(`{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-5","cwd":"/tmp"}`)
 
-	if evs := p.BusFramesNative(line, 1000); len(evs) != 0 {
-		t.Fatalf("system/init produced %d events, want 0", len(evs))
-	}
-	if p.st.model != "claude-opus-5" {
-		t.Fatalf("st.model = %q, want %q", p.st.model, "claude-opus-5")
-	}
+	evs := p.BusFramesNative(line, 1000)
+	c.Empty(evs, "system/init produced %d events, want 0", len(evs))
+	c.Eq("claude-opus-5", p.st.model, "st.model")
 }

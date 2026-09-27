@@ -3,6 +3,8 @@ package tools
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func envMap(kv []string) map[string]string {
@@ -25,17 +27,15 @@ func TestMCPServerEnvStripsWhatRafikiOwns(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-secret")
 	t.Setenv("PATH", "/usr/bin")
+	c := assert.NewCollecting(t)
 
 	got := envMap(mcpServerEnv(nil))
 
 	for _, k := range []string{"RAFIKI_DB", "RAFIKI_TOKEN", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
-		if v, ok := got[k]; ok {
-			t.Errorf("%s reached the MCP server with value %q", k, v)
-		}
+		v, ok := got[k]
+		c.False(ok, "%s reached the MCP server with value %q", k, v)
 	}
-	if got["PATH"] != "/usr/bin" {
-		t.Errorf("PATH = %q, want it passed through — an MCP server needs it to exec anything", got["PATH"])
-	}
+	c.Eq("/usr/bin", got["PATH"], "PATH")
 }
 
 // The original bug's exact shape: cmd.Env was only set when the config happened
@@ -47,17 +47,14 @@ func TestMCPServerEnvFiltersEvenWithNoConfiguredEnv(t *testing.T) {
 	if _, leaked := envMap(mcpServerEnv(nil))["RAFIKI_DB"]; leaked {
 		t.Error("RAFIKI_DB leaked when the server config set no env of its own")
 	}
-	if _, leaked := envMap(mcpServerEnv(map[string]string{}))["RAFIKI_DB"]; leaked {
-		t.Error("RAFIKI_DB leaked for an empty (non-nil) env map")
-	}
+	_, leaked := envMap(mcpServerEnv(map[string]string{}))["RAFIKI_DB"]
+	assert.NewCollecting(t).False(leaked, "RAFIKI_DB leaked for an empty (non-nil) env map")
 }
 
 // The server's own configured credentials must still arrive.
 func TestMCPServerEnvCarriesConfiguredValues(t *testing.T) {
 	got := envMap(mcpServerEnv(map[string]string{"GITHUB_TOKEN": "ghp_x"}))
-	if got["GITHUB_TOKEN"] != "ghp_x" {
-		t.Errorf("GITHUB_TOKEN = %q, want the configured value", got["GITHUB_TOKEN"])
-	}
+	assert.NewCollecting(t).Eq("ghp_x", got["GITHUB_TOKEN"], "GITHUB_TOKEN")
 }
 
 // A configured value wins over the daemon's own, so an operator can point one
@@ -66,7 +63,5 @@ func TestMCPServerEnvConfiguredValueWins(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_daemon")
 
 	kv := mcpServerEnv(map[string]string{"GITHUB_TOKEN": "ghp_configured"})
-	if envMap(kv)["GITHUB_TOKEN"] != "ghp_configured" {
-		t.Errorf("GITHUB_TOKEN = %q, want the configured value to win", envMap(kv)["GITHUB_TOKEN"])
-	}
+	assert.NewCollecting(t).Eq("ghp_configured", envMap(kv)["GITHUB_TOKEN"], "GITHUB_TOKEN")
 }

@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // addArgs is the input type for the in-memory test server's "add" tool.
@@ -100,9 +102,7 @@ func inMemoryRef(t *testing.T, server *mcp.Server) *mcpServerSession {
 		return client.Connect(ctx, clientTransport, nil)
 	}}
 	sess, err := ref.dial(ctx)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "dial")
 	ref.sess = sess
 	t.Cleanup(ref.close)
 	return ref
@@ -113,12 +113,11 @@ func inMemoryRef(t *testing.T, server *mcp.Server) *mcpServerSession {
 // mcp__<server>__<tool> and Execute round-trips a real call through the
 // protocol.
 func TestRegisterMCPServerTools(t *testing.T) {
+	c := assert.NewCollecting(t)
 	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "my-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.Require().NoError(registerMCPServerTools(context.Background(), r, "my-server", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	names := map[string]bool{}
 	for _, def := range r.Definitions() {
@@ -127,18 +126,12 @@ func TestRegisterMCPServerTools(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"mcp__my_server__add", "mcp__my_server__list_items", "mcp__my_server__fail"} {
-		if !names[want] {
-			t.Errorf("expected tool %q to be registered, got %v", want, names)
-		}
+		c.False(!names[want], "expected tool %q to be registered, got %v", want, names)
 	}
 
 	out, err := r.Execute(context.Background(), "mcp__my_server__add", json.RawMessage(`{"a":2,"b":3}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "5" {
-		t.Fatalf("expected \"5\", got %q", out)
-	}
+	c.Require().NoError(err, "unexpected error")
+	c.Require().Eq("5", out, "expected \"5\", got")
 }
 
 // TestRegisterMCPServerToolsNormalizesHyphens covers the stated requirement
@@ -147,12 +140,11 @@ func TestRegisterMCPServerTools(t *testing.T) {
 // the point here, this project's dispatch logic pattern-matches on the
 // underscore form).
 func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
+	c := assert.NewAborting(t)
 	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "my-cool-server", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "my-cool-server", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	found := false
 	for _, def := range r.Definitions() {
@@ -160,9 +152,7 @@ func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("expected hyphens in server and tool name to be normalized to underscores")
-	}
+	c.True(found, "expected hyphens in server and tool name to be normalized to underscores")
 }
 
 // TestRegisterMCPServerToolsIsErrorBecomesGoError covers the stated
@@ -170,56 +160,45 @@ func TestRegisterMCPServerToolsNormalizesHyphens(t *testing.T) {
 // error (so agentloop marks it an is_error tool result the model can react
 // to), not swallowed or returned as ordinary success text.
 func TestRegisterMCPServerToolsIsErrorBecomesGoError(t *testing.T) {
+	c := assert.NewAborting(t)
 	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	_, err := r.Execute(context.Background(), "mcp__srv__fail", json.RawMessage(`{}`))
-	if err == nil {
-		t.Fatal("expected an error for a tool result with IsError set")
-	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected error to mention the tool's failure text, got %v", err)
-	}
+	c.Error(err, "expected an error for a tool result with IsError set")
+	c.StrContains(err.Error(), "boom", "expected error to mention the tool's failure text, got %v", err)
 }
 
 // TestRegisterMCPServerToolsInputSchemaPassedThrough covers the requirement
 // that ListTools input schemas pass through verbatim into
 // anthropic.ToolInputSchemaParam, rather than being narrowed or dropped.
 func TestRegisterMCPServerToolsInputSchemaPassedThrough(t *testing.T) {
+	c := assert.NewAborting(t)
 	session := inMemoryRef(t, newTestMCPServer("test-server"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	var propsJSON []byte
 	for _, def := range r.Definitions() {
 		if def.OfTool != nil && def.OfTool.Name == "mcp__srv__add" {
 			b, err := json.Marshal(def.OfTool.InputSchema.Properties)
-			if err != nil {
-				t.Fatalf("marshal properties: %v", err)
-			}
+			c.NoError(err, "marshal properties")
 			propsJSON = b
 		}
 	}
-	if propsJSON == nil {
-		t.Fatal("mcp__srv__add not found")
-	}
+	c.NotNil(propsJSON, "mcp__srv__add not found")
 	for _, want := range []string{`"a"`, `"b"`} {
-		if !strings.Contains(string(propsJSON), want) {
-			t.Fatalf("expected input schema properties to contain %s, got %s", want, propsJSON)
-		}
+		c.StrContains(string(propsJSON), want, "expected input schema properties to contain %s, got %s", want, propsJSON)
 	}
 }
 
 // TestLoadMCPConfig covers parsing both server shapes .mcp.json supports:
 // stdio (command/args/env) and HTTP (url/headers).
 func TestLoadMCPConfig(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".mcp.json")
 	content := `{
@@ -228,62 +207,43 @@ func TestLoadMCPConfig(t *testing.T) {
 			"http-server": {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer xyz"}}
 		}
 	}`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(path, []byte(content), 0o644))
 
 	cfg, err := LoadMCPConfig(path)
-	if err != nil {
-		t.Fatalf("LoadMCPConfig: %v", err)
-	}
-	if len(cfg.MCPServers) != 2 {
-		t.Fatalf("expected 2 servers, got %d: %+v", len(cfg.MCPServers), cfg.MCPServers)
-	}
+	c.NoError(err, "LoadMCPConfig")
+	c.Len(cfg.MCPServers, 2, "expected 2 servers, got %d", len(cfg.MCPServers))
 
 	stdio, ok := cfg.MCPServers["stdio-server"]
-	if !ok {
-		t.Fatal("expected stdio-server in config")
-	}
-	if stdio.Command != "myserver" || len(stdio.Args) != 1 || stdio.Args[0] != "--flag" || stdio.Env["FOO"] != "bar" {
-		t.Fatalf("unexpected stdio server config: %+v", stdio)
-	}
+	c.True(ok, "expected stdio-server in config")
+	c.False(stdio.Command != "myserver" || len(stdio.Args) != 1 || stdio.Args[0] != "--flag" || stdio.Env["FOO"] != "bar", "unexpected stdio server config: %+v", stdio)
 
 	httpSrv, ok := cfg.MCPServers["http-server"]
-	if !ok {
-		t.Fatal("expected http-server in config")
-	}
-	if httpSrv.URL != "https://example.com/mcp" || httpSrv.Headers["Authorization"] != "Bearer xyz" {
-		t.Fatalf("unexpected http server config: %+v", httpSrv)
-	}
+	c.True(ok, "expected http-server in config")
+	c.False(httpSrv.URL != "https://example.com/mcp" || httpSrv.Headers["Authorization"] != "Bearer xyz", "unexpected http server config: %+v", httpSrv)
 }
 
 // TestLoadMCPConfigMissingFile covers the returned-error path for a config
 // file that doesn't exist.
 func TestLoadMCPConfigMissingFile(t *testing.T) {
 	_, err := LoadMCPConfig(filepath.Join(t.TempDir(), "nope.json"))
-	if err == nil {
-		t.Fatal("expected an error for a missing config file")
-	}
+	assert.NewAborting(t).Error(err, "expected an error for a missing config file")
 }
 
 // TestConnectMCPSkipsServerThatFailsToConnect covers the stated resilience
 // requirement: a server that fails to connect (here, a nonexistent command)
 // is logged and skipped rather than making ConnectMCP fail outright.
 func TestConnectMCPSkipsServerThatFailsToConnect(t *testing.T) {
+	c := assert.NewAborting(t)
 	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{
 		"bad": {Command: "definitely-not-a-real-command-xyz-fundi-test"},
 	}}
 
 	r := NewRegistry()
 	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{})
-	if err != nil {
-		t.Fatalf("ConnectMCP: %v", err)
-	}
+	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 
-	if defs := r.Definitions(); len(defs) != 0 {
-		t.Fatalf("expected no tools registered from a failing server, got %v", defs)
-	}
+	c.Empty(r.Definitions(), "expected no tools registered from a failing server, got")
 }
 
 // TestConnectMCPSkipsServerWithNoCommandOrURL covers a malformed config
@@ -291,18 +251,15 @@ func TestConnectMCPSkipsServerThatFailsToConnect(t *testing.T) {
 // connection failure is, rather than panicking or propagating an error that
 // would take down every other configured server.
 func TestConnectMCPSkipsServerWithNoCommandOrURL(t *testing.T) {
+	c := assert.NewAborting(t)
 	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{"empty": {}}}
 
 	r := NewRegistry()
 	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{})
-	if err != nil {
-		t.Fatalf("ConnectMCP: %v", err)
-	}
+	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 
-	if defs := r.Definitions(); len(defs) != 0 {
-		t.Fatalf("expected no tools registered, got %v", defs)
-	}
+	c.Empty(r.Definitions(), "expected no tools registered, got")
 }
 
 // anthropicToolNameRETest mirrors the exact grammar the Anthropic API
@@ -319,13 +276,12 @@ var anthropicToolNameRETest = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // hyphens, so a dotted name produced an INVALID tool name that would 400
 // the entire tools array on the next turn.
 func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
+	c := assert.NewAborting(t)
 	const oddName = "github.create issue"
 	session := inMemoryRef(t, newCustomMCPServer("test-server", oddName))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	const want = "mcp__srv__github_create_issue"
 	var found bool
@@ -337,17 +293,11 @@ func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 	if !found {
 		t.Fatalf("expected tool registered as %q, got %v", want, r.Definitions())
 	}
-	if !anthropicToolNameRETest.MatchString(want) {
-		t.Fatalf("registered name %q does not match Anthropic's tool name grammar", want)
-	}
+	c.True(anthropicToolNameRETest.MatchString(want), "registered name %q does not match Anthropic's tool name grammar", want)
 
 	out, err := r.Execute(context.Background(), want, json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("unexpected error calling %q: %v", want, err)
-	}
-	if out != "ok:"+oddName {
-		t.Fatalf("expected %q, got %q", "ok:"+oddName, out)
-	}
+	c.NoError(err, "unexpected error calling %q", want)
+	c.Eq("ok:"+oddName, out, "expected")
 }
 
 // TestRegisterMCPServerToolsSkipsOverlongName covers the requirement that a
@@ -356,13 +306,12 @@ func TestRegisterMCPServerToolsNormalizesDotsAndOtherSeparators(t *testing.T) {
 // registered invalid - and that the rest of the same server's tools are
 // unaffected.
 func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
+	c := assert.NewAborting(t)
 	longName := strings.Repeat("a", 130)
 	session := inMemoryRef(t, newCustomMCPServer("test-server", longName, "short"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	names := map[string]bool{}
 	for _, def := range r.Definitions() {
@@ -371,16 +320,10 @@ func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
 		}
 	}
 	for name := range names {
-		if len(name) > 128 {
-			t.Fatalf("expected no registered name over 128 characters, got %q (%d chars)", name, len(name))
-		}
+		c.LessOrEqual(128, len(name), "expected no registered name over 128 characters, got %q (%d chars)", name, len(name))
 	}
-	if !names["mcp__srv__short"] {
-		t.Fatalf("expected the other tool on the same server to still be registered, got %v", names)
-	}
-	if len(names) != 1 {
-		t.Fatalf("expected exactly one registered tool (the overlong one skipped), got %v", names)
-	}
+	c.False(!names["mcp__srv__short"], "expected the other tool on the same server to still be registered, got %v", names)
+	c.Len(names, 1, "expected exactly one registered tool (the overlong one skipped), got")
 }
 
 // TestRegisterMCPServerToolsSkipsCollidingNormalizedNames covers the
@@ -390,12 +333,11 @@ func TestRegisterMCPServerToolsSkipsOverlongName(t *testing.T) {
 // Registry.Register's overwrite semantics. Only one registration must
 // result, and neither call may panic.
 func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
+	c := assert.NewAborting(t)
 	session := inMemoryRef(t, newCustomMCPServer("test-server", "list-items", "list_items"))
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	count := 0
 	for _, def := range r.Definitions() {
@@ -403,9 +345,7 @@ func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Fatalf("expected exactly one registration of the colliding name, got %d (defs: %v)", count, r.Definitions())
-	}
+	c.Eq(1, count, "expected exactly one registration of the colliding name, got %d (defs: %v)", count, r.Definitions())
 }
 
 // TestRegisterMCPServerToolsClipsOversizedOutput covers the requirement
@@ -414,41 +354,26 @@ func TestRegisterMCPServerToolsSkipsCollidingNormalizedNames(t *testing.T) {
 // with the FULL result spilled to SpillDir (mirrors bash_test.go's
 // TestBashOutputGoesThroughSpillPolicy).
 func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
+	c := assert.NewAborting(t)
 	spillDir := t.TempDir()
 	full := strings.Repeat("x", 2000)
 	session := inMemoryRef(t, newBigOutputMCPServer("test-server", "big", full))
 
 	r := NewRegistry()
 	p := OutputPolicy{Budget: 200, SpillDir: spillDir}
-	if err := registerMCPServerTools(context.Background(), r, "srv", session, p, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(context.Background(), r, "srv", session, p, make(map[string]string)), "registerMCPServerTools")
 
 	out, err := r.Execute(context.Background(), "mcp__srv__big", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(out) > 400 {
-		t.Fatalf("expected clipped output, got %d bytes", len(out))
-	}
-	if !strings.Contains(out, "elided") {
-		t.Fatalf("expected elision marker, got %q", out)
-	}
+	c.NoError(err, "unexpected error")
+	c.LessOrEqual(400, len(out), "expected clipped output, got")
+	c.StrContains(out, "elided", "expected elision marker, got")
 
 	entries, err := os.ReadDir(spillDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected exactly one spill file, got %d", len(entries))
-	}
+	c.NoError(err)
+	c.Len(entries, 1, "expected exactly one spill file, got %d", len(entries))
 	spilled, err := os.ReadFile(filepath.Join(spillDir, entries[0].Name()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(spilled) != full {
-		t.Fatalf("spilled file does not hold the full output: got %d bytes, want %d", len(spilled), len(full))
-	}
+	c.NoError(err)
+	c.Eq(full, string(spilled), "spilled file does not hold the full output: got %d bytes, want %d", len(spilled), len(full))
 }
 
 // TestMCPSessionRecoversAfterServerSideDeath covers the resilience contract
@@ -459,6 +384,7 @@ func TestRegisterMCPServerToolsClipsOversizedOutput(t *testing.T) {
 // death must redial through the same config and succeed, with tool
 // registration untouched.
 func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
+	c := assert.NewAborting(t)
 	server := newTestMCPServer("test-server")
 	ctx := context.Background()
 
@@ -483,39 +409,25 @@ func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
 		return client.Connect(ctx, clientTransport, nil)
 	}
 	sess, err := ref.dial(ctx)
-	if err != nil {
-		t.Fatalf("initial dial: %v", err)
-	}
+	c.NoError(err, "initial dial")
 	ref.sess = sess
 	t.Cleanup(ref.close)
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(ctx, r, "srv", ref, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	out, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":2,"b":3}`))
-	if err != nil || out != "5" {
-		t.Fatalf("pre-kill call: err=%v out=%q", err, out)
-	}
+	c.False(err != nil || out != "5", "pre-kill call: err=%v out=%q", err, out)
 
 	mu.Lock()
 	ss := last
 	mu.Unlock()
-	if ss == nil {
-		t.Fatal("no server-side session was recorded")
-	}
-	if err := ss.Close(); err != nil {
-		t.Fatalf("server-side close: %v", err)
-	}
+	c.NotNil(ss, "no server-side session was recorded")
+	c.NoError(ss.Close(), "server-side close")
 
 	out, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":20,"b":22}`))
-	if err != nil {
-		t.Fatalf("post-kill call should recover via redial: %v", err)
-	}
-	if out != "42" {
-		t.Fatalf("post-kill call: expected %q, got %q", "42", out)
-	}
+	c.NoError(err, "post-kill call should recover via redial")
+	c.Eq("42", out, "post-kill call: expected")
 }
 
 // TestMCPSessionRedialFailureIsReported covers the failure side: when the
@@ -523,13 +435,12 @@ func TestMCPSessionRecoversAfterServerSideDeath(t *testing.T) {
 // the dial error rather than hanging or panicking, and a call inside the
 // cooldown window fails fast without re-attempting the dial.
 func TestMCPSessionRedialFailureIsReported(t *testing.T) {
+	c := assert.NewAborting(t)
 	session := inMemoryRef(t, newTestMCPServer("test-server"))
 	ctx := context.Background()
 
 	r := NewRegistry()
-	if err := registerMCPServerTools(ctx, r, "srv", session, OutputPolicy{}, make(map[string]string)); err != nil {
-		t.Fatalf("registerMCPServerTools: %v", err)
-	}
+	c.NoError(registerMCPServerTools(ctx, r, "srv", session, OutputPolicy{}, make(map[string]string)), "registerMCPServerTools")
 
 	session.dial = func(_ context.Context) (*mcp.ClientSession, error) {
 		return nil, errors.New("dial boom")
@@ -537,12 +448,8 @@ func TestMCPSessionRedialFailureIsReported(t *testing.T) {
 	session.close() // drop the live session: the next call must redial
 
 	_, err := r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
-	if err == nil || !strings.Contains(err.Error(), "dial boom") {
-		t.Fatalf("expected the redial failure to surface, got %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "dial boom"), "expected the redial failure to surface, got %v", err)
 
 	_, err = r.Execute(ctx, "mcp__srv__add", json.RawMessage(`{"a":1,"b":2}`))
-	if err == nil || !strings.Contains(err.Error(), "unreachable") {
-		t.Fatalf("expected a cooldown-throttled failure, got %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "unreachable"), "expected a cooldown-throttled failure, got %v", err)
 }

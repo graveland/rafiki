@@ -4,36 +4,32 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A remote cockpit's spawn must be attributed to the caller the proxy face
 // authenticated. The owner is matched by executor admission selectors, so an
 // unowned child is not merely untidy.
 func TestSpawnOwnerComesFromTheAuthenticatedFace(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
 	got := spawnOwner(ctx)
-	if got.UserID != "u1" || got.Username != "brent" {
-		t.Fatalf("owner = %+v, want the authenticated caller", got)
-	}
-	if !got.IsUser() {
-		t.Fatal("want IsUser: only a user identity is persisted as owner_user_id")
-	}
+	c.False(got.UserID != "u1" || got.Username != "brent", "owner = %+v, want the authenticated caller", got)
+	c.True(got.IsUser(), "want IsUser: only a user identity is persisted as owner_user_id")
 }
 
 // The unix socket authenticates nobody — the socket is the credential — so an
 // absent identity must be the zero value rather than a panic.
 func TestSpawnOwnerIsZeroOnTheUnixSocket(t *testing.T) {
 	got := spawnOwner(context.Background())
-	if got.IsUser() {
-		t.Fatalf("owner = %+v, want the zero identity for an unauthenticated local call", got)
-	}
+	assert.NewAborting(t).False(got.IsUser(), "owner = %+v, want the zero identity for an unauthenticated local call", got)
 }
 
 // S1: Connect's agent-control verbs refuse a credential that is not a user
@@ -42,6 +38,7 @@ func TestSpawnOwnerIsZeroOnTheUnixSocket(t *testing.T) {
 // level: Spawn and ListExecutors are userOnly, and both refusals name the
 // procedure so an operator can tell what was refused.
 func TestControlPolicyRefusesANonUserCredentialOnAgentControl(t *testing.T) {
+	c := assert.NewCollecting(t)
 	childAttributed := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
 	unknown := server.WithIdentity(context.Background(), &server.Identity{})
@@ -55,13 +52,8 @@ func TestControlPolicyRefusesANonUserCredentialOnAgentControl(t *testing.T) {
 			"zero identity":    unknown,
 		} {
 			err := authorizeControlProcedure(ctx, procedure)
-			if connect.CodeOf(err) != connect.CodePermissionDenied {
-				t.Errorf("%s with a %s credential = %v, want %v",
-					procedure, name, err, connect.CodePermissionDenied)
-			}
-			if !strings.Contains(err.Error(), procedure) {
-				t.Errorf("refusal %q does not name the procedure", err)
-			}
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential = %v, want", procedure, name, err)
+			c.StrContains(err.Error(), procedure, "refusal %q does not name the procedure", err)
 		}
 	}
 }
@@ -79,9 +71,7 @@ func TestControlPolicyAdmitsAnonymousAndUser(t *testing.T) {
 			controlProcedurePrefix + "ListExecutors",
 			controlProcedurePrefix + "ListModels",
 		} {
-			if err := authorizeControlProcedure(ctx, procedure); err != nil {
-				t.Errorf("%s refused: %v", procedure, err)
-			}
+			assert.NewCollecting(t).NoError(authorizeControlProcedure(ctx, procedure), "%s refused", procedure)
 		}
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // sdkStreamErr builds the error exactly as ssestream v1.37.0 does for an
@@ -135,19 +137,12 @@ func TestParseStreamError_IsTransient(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			se, ok := ParseStreamError(tt.err)
-			if ok != tt.wantParse {
-				t.Fatalf("ParseStreamError ok = %v, want %v", ok, tt.wantParse)
-			}
-			if se != tt.want {
-				t.Errorf("parsed = %+v, want %+v", se, tt.want)
-			}
-			if got := IsTransientStreamError(tt.err); got != tt.wantTrans {
-				t.Errorf("IsTransientStreamError = %v, want %v", got, tt.wantTrans)
-			}
-			if got := IsRateLimitStreamError(tt.err); got != tt.wantRL {
-				t.Errorf("IsRateLimitStreamError = %v, want %v", got, tt.wantRL)
-			}
+			c.Require().Eq(tt.wantParse, ok, "ParseStreamError ok")
+			c.Eq(tt.want, se, "parsed")
+			c.Eq(tt.wantTrans, IsTransientStreamError(tt.err), "IsTransientStreamError")
+			c.Eq(tt.wantRL, IsRateLimitStreamError(tt.err), "IsRateLimitStreamError")
 		})
 	}
 }
@@ -158,9 +153,7 @@ func TestParseStreamError_IsTransient(t *testing.T) {
 // behavior.
 func TestIsTransientStreamError_OtherErrors(t *testing.T) {
 	apiErr := &anthropic.Error{StatusCode: http.StatusBadGateway}
-	if err := apiErr.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"api_error","message":"x"}}`)); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(apiErr.UnmarshalJSON([]byte(`{"type":"error","error":{"type":"api_error","message":"x"}}`)))
 	tests := []struct {
 		name string
 		err  error
@@ -176,15 +169,11 @@ func TestIsTransientStreamError_OtherErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, ok := ParseStreamError(tt.err); ok {
-				t.Errorf("ParseStreamError reported ok for %v", tt.err)
-			}
-			if IsTransientStreamError(tt.err) {
-				t.Errorf("IsTransientStreamError(%v) = true, want false", tt.err)
-			}
-			if IsRateLimitStreamError(tt.err) {
-				t.Errorf("IsRateLimitStreamError(%v) = true, want false", tt.err)
-			}
+			_, ok := ParseStreamError(tt.err)
+			c := assert.NewCollecting(t)
+			c.False(ok, "ParseStreamError reported ok for %v", tt.err)
+			c.False(IsTransientStreamError(tt.err), "IsTransientStreamError(%v) = true, want false", tt.err)
+			c.False(IsRateLimitStreamError(tt.err), "IsRateLimitStreamError(%v) = true, want false", tt.err)
 		})
 	}
 }

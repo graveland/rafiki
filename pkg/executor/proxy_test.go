@@ -7,19 +7,18 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/executor"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestParseProxyFlags(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := executor.ParseProxyFlags([]string{
 		"vmlx=http://localhost:8005",
 		"ollama=http://localhost:11434",
 	})
-	if err != nil {
-		t.Fatalf("ParseProxyFlags: %v", err)
-	}
-	if got["vmlx"] != "http://localhost:8005" || got["ollama"] != "http://localhost:11434" {
-		t.Errorf("got %v", got)
-	}
+	c.Require().NoError(err, "ParseProxyFlags")
+	c.False(got["vmlx"] != "http://localhost:8005" || got["ollama"] != "http://localhost:11434", "got %v", got)
 }
 
 func TestParseProxyFlagsRejects(t *testing.T) {
@@ -32,20 +31,15 @@ func TestParseProxyFlagsRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			_, err := executor.ParseProxyFlags([]string{tc.in})
-			if err == nil {
-				t.Fatalf("accepted %q", tc.in)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %q, want %q", err.Error(), tc.want)
-			}
+			c.Require().Error(err, "accepted %q", tc.in)
+			c.StrContains(err.Error(), tc.want, "error")
 		})
 	}
 }
 
 func TestParseProxyFlagsRejectsDuplicate(t *testing.T) {
 	_, err := executor.ParseProxyFlags([]string{"a=http://1", "a=http://2"})
-	if err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("err = %v, want a duplicate-name error", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "duplicate"), "err = %v, want a duplicate-name error", err)
 }

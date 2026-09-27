@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestCmdRecallContextIsSubcommand pins cobra's resolution of
@@ -19,30 +21,24 @@ import (
 // the hit id never reads as a query word, while any other first word stays
 // with recall itself as the query.
 func TestCmdRecallContextIsSubcommand(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
 	root := newRootCmd()
 	cmd, _, err := root.Find([]string{"recall", "context", "w:abc"})
-	if err != nil {
-		t.Fatalf("find recall context: %v", err)
-	}
-	if cmd.Name() != "context" {
-		t.Fatalf("cobra resolved %q, want the context subcommand", cmd.Name())
-	}
+	c.NoError(err, "find recall context")
+	c.Eq("context", cmd.Name(), "cobra resolved")
 
 	// A query that merely contains "context" later in its words is unaffected.
 	cmd, _, err = root.Find([]string{"recall", "big", "context", "window"})
-	if err != nil {
-		t.Fatalf("find multi-word query: %v", err)
-	}
-	if cmd.Name() != "recall" {
-		t.Fatalf("cobra resolved %q, want recall itself for a multi-word query", cmd.Name())
-	}
+	c.NoError(err, "find multi-word query")
+	c.Eq("recall", cmd.Name(), "cobra resolved")
 }
 
 // TestCmdRecallSinceParsesDuration pins the --since parser: day durations
 // (which Go's ParseDuration has no unit for), hour durations, and RFC3339.
 func TestCmdRecallSinceParsesDuration(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct {
 		name string
 		in   string
@@ -54,9 +50,7 @@ func TestCmdRecallSinceParsesDuration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseSinceArg(tc.in)
-			if err != nil {
-				t.Fatalf("parseSinceArg(%q): %v", tc.in, err)
-			}
+			assert.NewAborting(t).NoError(err, "parseSinceArg(%q)", tc.in)
 			if d := got.Sub(tc.want); d > tc.tol || d < -tc.tol {
 				t.Errorf("parseSinceArg(%q) = %v, want %v (±%v)", tc.in, got, tc.want, tc.tol)
 			}
@@ -64,12 +58,8 @@ func TestCmdRecallSinceParsesDuration(t *testing.T) {
 	}
 
 	got, err := parseSinceArg("2026-01-02T03:04:05Z")
-	if err != nil {
-		t.Fatalf("parseSinceArg(RFC3339): %v", err)
-	}
-	if !got.Equal(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)) {
-		t.Errorf("RFC3339 = %v, want the exact UTC timestamp", got)
-	}
+	c.Require().NoError(err, "parseSinceArg(RFC3339)")
+	c.True(got.Equal(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), "RFC3339 = %v, want the exact UTC timestamp", got)
 
 	if t2, err := parseSinceArg(""); err != nil || t2 != nil {
 		t.Errorf("parseSinceArg(\"\") = %v, %v, want nil, nil", t2, err)
@@ -83,6 +73,7 @@ func TestCmdRecallSinceParsesDuration(t *testing.T) {
 // nor --file the body is read from stdin, --body wins over stdin, --file - is
 // stdin too, and an empty resolved body is refused.
 func TestCmdMemoryPutReadsStdin(t *testing.T) {
+	c := assert.NewCollecting(t)
 	put := func(body, file string) (*rafikiv1.PutMemoryRequest, error) {
 		cmd := &cobra.Command{}
 		cmd.SetIn(strings.NewReader("piped body\n"))
@@ -90,31 +81,19 @@ func TestCmdMemoryPutReadsStdin(t *testing.T) {
 	}
 
 	req, err := put("", "")
-	if err != nil {
-		t.Fatalf("put from stdin: %v", err)
-	}
-	if req.GetBody() != "piped body\n" {
-		t.Errorf("stdin body = %q, want the piped text", req.GetBody())
-	}
+	c.Require().NoError(err, "put from stdin")
+	c.Eq("piped body\n", req.GetBody(), "stdin body")
 	if req.GetPath() != "proj/notes" || req.GetName() != "note1" {
 		t.Errorf("path/name = %q/%q, want the arguments", req.GetPath(), req.GetName())
 	}
 
 	req, err = put("explicit body", "")
-	if err != nil {
-		t.Fatalf("put --body: %v", err)
-	}
-	if req.GetBody() != "explicit body" {
-		t.Errorf("--body must win over stdin; got %q", req.GetBody())
-	}
+	c.Require().NoError(err, "put --body")
+	c.Eq("explicit body", req.GetBody(), "--body must win over stdin; got")
 
 	req, err = put("", "-")
-	if err != nil {
-		t.Fatalf("put --file -: %v", err)
-	}
-	if req.GetBody() != "piped body\n" {
-		t.Errorf("--file - body = %q, want the piped text", req.GetBody())
-	}
+	c.Require().NoError(err, "put --file -")
+	c.Eq("piped body\n", req.GetBody(), "--file - body")
 
 	// An empty piped body is refused rather than saved silently.
 	cmd := &cobra.Command{}
@@ -130,48 +109,32 @@ func TestCmdMemoryPutReadsStdin(t *testing.T) {
 		t.Error("invalid --meta accepted")
 	}
 	req, err = memoryPutRequest(cmd, "p", "n", "b", "", `{"k":1}`)
-	if err != nil {
-		t.Fatalf("put --meta: %v", err)
-	}
-	if req.GetMetaJson() != `{"k":1}` {
-		t.Errorf("meta_json = %q, want passthrough", req.GetMetaJson())
-	}
+	c.Require().NoError(err, "put --meta")
+	c.Eq(`{"k":1}`, req.GetMetaJson(), "meta_json")
 }
 
 // TestCmdRecallTableRendersHits pins the brief's exact table columns and the
 // WHERE cell's two shapes (path/name for memories, repo·conversation name for
 // conversation sources), plus the JSON arm printing the hit array.
 func TestCmdRecallTableRendersHits(t *testing.T) {
+	c := assert.NewCollecting(t)
 	hits := []*rafikiv1.RecallHit{
 		{Id: "m:1", Source: "memory", When: "2026-01-02T03:04:05Z", Path: "proj/notes", Name: "pin"},
 		{Id: "w:2", Source: "window", When: "2026-01-03T03:04:05Z", Repo: "rafiki", ConversationName: "fix bug", Snippet: "needle"},
 	}
 	var buf bytes.Buffer
-	if err := emitRecallHits(&buf, hits, outputTable, false); err != nil {
-		t.Fatalf("table: %v", err)
-	}
+	c.Require().NoError(emitRecallHits(&buf, hits, outputTable, false), "table")
 	out := buf.String()
 	for _, col := range []string{"ID", "SOURCE", "WHEN", "WHERE", "SNIPPET"} {
-		if !strings.Contains(out, col) {
-			t.Errorf("table missing column %s:\n%s", col, out)
-		}
+		c.StrContains(out, col, "table missing column")
 	}
-	if !strings.Contains(out, "proj/notes/pin") {
-		t.Errorf("memory WHERE = %q, want proj/notes/pin", out)
-	}
-	if !strings.Contains(out, "rafiki·fix bug") {
-		t.Errorf("conversation WHERE = %q, want rafiki·fix bug", out)
-	}
+	c.StrContains(out, "proj/notes/pin", "memory WHERE")
+	c.StrContains(out, "rafiki·fix bug", "conversation WHERE")
 
 	buf.Reset()
-	if err := emitRecallHits(&buf, hits, outputJSON, false); err != nil {
-		t.Fatalf("json: %v", err)
-	}
+	c.Require().NoError(emitRecallHits(&buf, hits, outputJSON, false), "json")
 	var arr []map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &arr); err != nil {
-		t.Fatalf("-o json did not print a hit array: %v\n%s", err, buf.String())
-	}
-	if len(arr) != 2 || arr[0]["id"] != "m:1" {
-		t.Errorf("json array = %v", arr)
-	}
+	err := json.Unmarshal(buf.Bytes(), &arr)
+	c.Require().NoError(err, "-o json did not print a hit array: %v\n%s", err, buf.String())
+	c.False(len(arr) != 2 || arr[0]["id"] != "m:1", "json array = %v", arr)
 }

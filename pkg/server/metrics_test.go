@@ -10,6 +10,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestWatchProviderGuardCountsEjections proves an ejection increments the
@@ -30,9 +32,7 @@ func TestWatchProviderGuardCountsEjections(t *testing.T) {
 	}
 
 	got := testutil.ToFloat64(m.ejections.WithLabelValues("coreweave", "deepseek/deepseek-v4-pro", "no_cache"))
-	if got != 1 {
-		t.Errorf("ejections counter = %v, want 1", got)
-	}
+	assert.NewCollecting(t).Eq(1, got, "ejections counter")
 }
 
 // TestWatchProviderGuardNilSafe proves the watcher is a no-op with a nil

@@ -11,6 +11,8 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scriptedDaraja is a DarajaServiceHandler whose Relay sends whatever is
@@ -69,15 +71,14 @@ func restarted(pid int32) *darajapb.RelayResponse {
 }
 
 func TestRunnerRelaysStdoutFromWatchEvents(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
 	r := NewRunner(pool, childID)
 	_, stdoutR, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(err, "Start")
 
 	stub.send <- stdout([]byte("hello "))
 	stub.send <- stdout([]byte("world"))
@@ -86,9 +87,7 @@ func TestRunnerRelaysStdoutFromWatchEvents(t *testing.T) {
 	if _, err := io.ReadFull(stdoutR, got); err != nil {
 		t.Fatalf("read stdout: %v", err)
 	}
-	if string(got) != "hello world" {
-		t.Fatalf("got %q, want %q", got, "hello world")
-	}
+	c.Eq("hello world", string(got), "got %q, want", got)
 }
 
 // TestRunnerMarksResetPendingOnRestartedEvent proves the wiring
@@ -98,19 +97,16 @@ func TestRunnerRelaysStdoutFromWatchEvents(t *testing.T) {
 // that would silently reopen the "translator state not reset" gap — the
 // flag stays false absent any restart, and false again after being taken.
 func TestRunnerMarksResetPendingOnRestartedEvent(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
 	r := NewRunner(pool, childID)
 	_, stdoutR, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(err, "Start")
 
-	if r.TakeResetPending() {
-		t.Fatal("reset pending before any Restarted event")
-	}
+	c.False(r.TakeResetPending(), "reset pending before any Restarted event")
 
 	stub.send <- restarted(4242)
 	// Stdout after the marker proves the pump kept relaying rather than
@@ -122,23 +118,19 @@ func TestRunnerMarksResetPendingOnRestartedEvent(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 
-	if !r.TakeResetPending() {
-		t.Fatal("want reset pending true after a Restarted event")
-	}
-	if r.TakeResetPending() {
-		t.Fatal("TakeResetPending must clear the flag, not just read it")
-	}
+	c.True(r.TakeResetPending(), "want reset pending true after a Restarted event")
+	c.False(r.TakeResetPending(), "TakeResetPending must clear the flag, not just read it")
 }
 
 func TestRunnerWaitReturnsOnExitedEvent(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
 	r := NewRunner(pool, childID)
-	if _, _, _, err := r.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	_, _, _, err := r.Start()
+	c.NoError(err, "Start")
 
 	stub.send <- exited(3, "")
 
@@ -155,9 +147,7 @@ func TestRunnerWaitReturnsOnExitedEvent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait() did not return after an Exited event")
 	}
-	if code != 3 || signal != "" {
-		t.Fatalf("got (%d, %q), want (3, \"\")", code, signal)
-	}
+	c.False(code != 3 || signal != "", "got (%d, %q), want (3, \"\")", code, signal)
 }
 
 func TestRunnerSurvivesADisconnectWithoutReportingExit(t *testing.T) {
@@ -167,9 +157,7 @@ func TestRunnerSurvivesADisconnectWithoutReportingExit(t *testing.T) {
 
 	r := NewRunner(pool, childID)
 	_, stdoutR, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Start")
 
 	// Simulate a disconnect: close the daraja's send side, which ends the
 	// scriptedDaraja.Relay call and tears down the relay holder from the
@@ -206,6 +194,7 @@ func TestRunnerSurvivesADisconnectWithoutReportingExit(t *testing.T) {
 }
 
 func TestRunnerTerminateCallsShutdownAndUnblocksWait(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
@@ -215,9 +204,7 @@ func TestRunnerTerminateCallsShutdownAndUnblocksWait(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if err := r.Terminate(); err != nil {
-		t.Fatalf("Terminate: %v", err)
-	}
+	c.NoError(r.Terminate(), "Terminate")
 
 	waitDone := make(chan struct{})
 	var code int
@@ -231,9 +218,7 @@ func TestRunnerTerminateCallsShutdownAndUnblocksWait(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait() did not return after Terminate")
 	}
-	if code != 7 || signal != "TERM" {
-		t.Fatalf("got (%d, %q), want (7, \"TERM\") from scriptedDaraja.Shutdown's response", code, signal)
-	}
+	c.False(code != 7 || signal != "TERM", "got (%d, %q), want (7, \"TERM\") from scriptedDaraja.Shutdown's response", code, signal)
 }
 
 // TestClosingStdinTriggersShutdownAndUnblocksWait is the regression test for
@@ -243,19 +228,16 @@ func TestRunnerTerminateCallsShutdownAndUnblocksWait(t *testing.T) {
 // no-op Close left every kill of a daraja-hosted claude child silently idle
 // for that whole window before anything actually happened.
 func TestClosingStdinTriggersShutdownAndUnblocksWait(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
 	r := NewRunner(pool, childID)
 	stdin, _, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(err, "Start")
 
-	if err := stdin.Close(); err != nil {
-		t.Fatalf("stdin.Close: %v", err)
-	}
+	c.NoError(stdin.Close(), "stdin.Close")
 
 	waitDone := make(chan struct{})
 	var code int
@@ -269,9 +251,7 @@ func TestClosingStdinTriggersShutdownAndUnblocksWait(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait() did not return after closing stdin — a real kill would have sat idle for the full shutdownTimeout")
 	}
-	if code != 7 || signal != "TERM" {
-		t.Fatalf("got (%d, %q), want (7, \"TERM\") from scriptedDaraja.Shutdown's response", code, signal)
-	}
+	c.False(code != 7 || signal != "TERM", "got (%d, %q), want (7, \"TERM\") from scriptedDaraja.Shutdown's response", code, signal)
 }
 
 func TestRunnerInterruptReturnsErrInterruptNotSupported(t *testing.T) {
@@ -280,9 +260,8 @@ func TestRunnerInterruptReturnsErrInterruptNotSupported(t *testing.T) {
 	defer teardown()
 
 	r := NewRunner(pool, childID)
-	if err := r.Interrupt(); err != ErrInterruptNotSupported {
-		t.Fatalf("got %v, want ErrInterruptNotSupported", err)
-	}
+	err := r.Interrupt()
+	assert.NewAborting(t).False(err != ErrInterruptNotSupported, "got %v, want ErrInterruptNotSupported", err)
 }
 
 // stderrEvent builds a stderr relay response — a script's stderr reaches the
@@ -296,15 +275,14 @@ func stderrEvent(b []byte) *darajapb.RelayResponse {
 // events arrive on the runner's stderr reader, interleaved with stdout on
 // their own channel, and neither one's bytes appear on the other's pipe.
 func TestRunnerRelaysScriptStderr(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := newScriptedDaraja()
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
 	r := NewRunner(pool, childID)
 	_, stdoutR, stderrR, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(err, "Start")
 
 	stub.send <- stdout([]byte("out-1"))
 	stub.send <- stderrEvent([]byte("err-1"))
@@ -331,16 +309,12 @@ func TestRunnerRelaysScriptStderr(t *testing.T) {
 	for range 2 {
 		select {
 		case res := <-results:
-			if res.err != nil {
-				t.Fatalf("read %s: %v", res.name, res.err)
-			}
+			c.NoError(res.err, "read %s", res.name)
 			want := "out-1out-2"
 			if res.name == "stderr" {
 				want = "err-1"
 			}
-			if res.data != want {
-				t.Fatalf("%s = %q, want %q", res.name, res.data, want)
-			}
+			c.Eq(want, res.data, "%s = %q, want", res.name, res.data)
 		case <-time.After(5 * time.Second):
 			t.Fatal("timeout reading the relayed streams")
 		}

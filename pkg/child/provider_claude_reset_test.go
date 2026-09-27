@@ -3,6 +3,8 @@ package child
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestClaudeProviderResetStateClearsAccumulators proves ResetState actually
@@ -11,6 +13,7 @@ import (
 // wiring correct: without it, a daraja Restart's boundary marker would fire
 // but land on a provider that forgets nothing.
 func TestClaudeProviderResetStateClearsAccumulators(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := newClaudeProvider()
 
 	init := []byte(`{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-4-8"}`)
@@ -18,33 +21,17 @@ func TestClaudeProviderResetStateClearsAccumulators(t *testing.T) {
 	assistant := []byte(`{"type":"assistant","session_id":"sess-1","message":{"content":[{"type":"text","text":"hi"}]}}`)
 	p.BusFrames(assistant, 2)
 
-	if p.st.model == "" {
-		t.Fatal("setup: model should be captured before reset")
-	}
-	if !p.st.turnActive {
-		t.Fatal("setup: turnActive should be true mid-turn before reset")
-	}
-	if len(p.snapshotMessages()) == 0 {
-		t.Fatal("setup: messages should be non-empty before reset")
-	}
+	c.Require().NotEq("", p.st.model, "setup: model should be captured before reset")
+	c.Require().True(p.st.turnActive, "setup: turnActive should be true mid-turn before reset")
+	c.Require().NotEmpty(p.snapshotMessages(), "setup: messages should be non-empty before reset")
 
 	p.ResetState()
 
-	if p.st.model != "" {
-		t.Errorf("model = %q after ResetState, want empty", p.st.model)
-	}
-	if p.st.provider != "" {
-		t.Errorf("provider = %q after ResetState, want empty", p.st.provider)
-	}
-	if p.st.api != "" {
-		t.Errorf("api = %q after ResetState, want empty", p.st.api)
-	}
-	if p.st.turnActive {
-		t.Error("turnActive still true after ResetState")
-	}
-	if msgs := p.snapshotMessages(); len(msgs) != 0 {
-		t.Errorf("messages = %v after ResetState, want empty", msgs)
-	}
+	c.Eq("", p.st.model, "model")
+	c.Eq("", p.st.provider, "provider")
+	c.Eq("", p.st.api, "api")
+	c.False(p.st.turnActive, "turnActive still true after ResetState")
+	c.Empty(p.snapshotMessages(), "messages")
 }
 
 // TestClaudeProviderResetStateThenFreshInit proves a reset provider behaves
@@ -53,6 +40,7 @@ func TestClaudeProviderResetStateClearsAccumulators(t *testing.T) {
 // reset, openTurn's guard sees turnActive already true and never opens a new
 // turn for the replacement process's first assistant frame.
 func TestClaudeProviderResetStateThenFreshInit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := newClaudeProvider()
 	p.BusFrames([]byte(`{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-4-8"}`), 1)
 	p.BusFrames([]byte(`{"type":"assistant","session_id":"sess-1","message":{"content":[{"type":"text","text":"hi"}]}}`), 2)
@@ -65,25 +53,17 @@ func TestClaudeProviderResetStateThenFreshInit(t *testing.T) {
 	p.BusFrames([]byte(`{"type":"system","subtype":"init","session_id":"sess-2","model":"claude-sonnet-5"}`), 3)
 	frames := p.BusFrames([]byte(`{"type":"assistant","session_id":"sess-2","message":{"content":[{"type":"text","text":"hi again"}]}}`), 4)
 
-	if len(frames) == 0 {
-		t.Fatal("no bus frames from the replacement process's first assistant message")
-	}
+	c.Require().NotEmpty(frames, "no bus frames from the replacement process's first assistant message")
 	var sawAgentStart bool
 	for _, f := range frames {
 		var hdr struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(f, &hdr); err != nil {
-			t.Fatalf("frame not valid JSON: %v", err)
-		}
+		c.Require().NoError(json.Unmarshal(f, &hdr), "frame not valid JSON")
 		if hdr.Type == "agent_start" {
 			sawAgentStart = true
 		}
 	}
-	if !sawAgentStart {
-		t.Fatal("no agent_start after reset — turnActive likely survived and the guard suppressed it")
-	}
-	if p.st.model != "claude-sonnet-5" {
-		t.Errorf("model = %q, want the replacement process's own model", p.st.model)
-	}
+	c.Require().True(sawAgentStart, "no agent_start after reset — turnActive likely survived and the guard suppressed it")
+	c.Eq("claude-sonnet-5", p.st.model, "model")
 }

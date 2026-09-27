@@ -5,9 +5,12 @@ package rawtrace
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestNilJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Valid JSON passes through unchanged (the common case: headers, JSON bodies).
 	valid := json.RawMessage(`{"model":"claude-sonnet-5"}`)
 	got := nilJSON(valid)
@@ -19,9 +22,7 @@ func TestNilJSON(t *testing.T) {
 			t.Fatalf("expected []byte/json.RawMessage passthrough, got %T", got)
 		}
 	}
-	if string(b) != string(valid) {
-		t.Errorf("valid JSON was altered: got %q, want %q", b, valid)
-	}
+	c.Eq(string(valid), string(b), "valid JSON was altered: got %q, want %q", b, valid)
 
 	// Non-JSON (e.g. an accumulated text/event-stream SSE body, or an HTML error
 	// page from a load balancer) must be wrapped as a JSON string so the INSERT
@@ -29,25 +30,13 @@ func TestNilJSON(t *testing.T) {
 	sse := json.RawMessage("event: message_start\ndata: {\"type\":\"message_start\"}\n\n")
 	wrapped := nilJSON(sse)
 	wb, ok := wrapped.([]byte)
-	if !ok {
-		t.Fatalf("expected []byte for wrapped non-JSON payload, got %T", wrapped)
-	}
-	if !json.Valid(wb) {
-		t.Fatalf("wrapped payload is not valid JSON: %s", wb)
-	}
+	c.Require().True(ok, "expected []byte for wrapped non-JSON payload, got %T", wrapped)
+	c.Require().True(json.Valid(wb), "wrapped payload is not valid JSON: %s", wb)
 	var s string
-	if err := json.Unmarshal(wb, &s); err != nil {
-		t.Fatalf("wrapped payload did not unmarshal as a JSON string: %v", err)
-	}
-	if s != string(sse) {
-		t.Errorf("wrapped payload lost data: got %q, want %q", s, sse)
-	}
+	c.Require().NoError(json.Unmarshal(wb, &s), "wrapped payload did not unmarshal as a JSON string")
+	c.Eq(string(sse), s, "wrapped payload lost data: got %q, want %q", s, sse)
 
 	// Empty input maps to SQL NULL.
-	if got := nilJSON(nil); got != nil {
-		t.Errorf("expected nil for empty input, got %v", got)
-	}
-	if got := nilJSON(json.RawMessage{}); got != nil {
-		t.Errorf("expected nil for empty input, got %v", got)
-	}
+	c.Nil(nilJSON(nil), "expected nil for empty input, got")
+	c.Nil(nilJSON(json.RawMessage{}), "expected nil for empty input, got")
 }

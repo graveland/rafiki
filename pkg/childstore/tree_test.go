@@ -7,6 +7,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // insert adds a session with the given lineage labels.
@@ -50,22 +52,16 @@ func TestParentOf(t *testing.T) {
 	if _, ok := s.ParentOf("a"); ok {
 		t.Fatal("ParentOf(a) should report false for a top-level child")
 	}
-	if _, ok := s.ParentOf("nope"); ok {
-		t.Fatal("ParentOf on an unknown child should report false")
-	}
+	_, ok := s.ParentOf("nope")
+	assert.NewAborting(t).False(ok, "ParentOf on an unknown child should report false")
 }
 
 func TestRootOf(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := tree(t)
-	if got := s.RootOf("c"); got != "a" {
-		t.Fatalf("RootOf(c) = %q; want a", got)
-	}
-	if got := s.RootOf("a"); got != "a" {
-		t.Fatalf("RootOf(a) = %q; want a (a top-level child is its own root)", got)
-	}
-	if got := s.RootOf("nope"); got != "" {
-		t.Fatalf("RootOf(unknown) = %q; want empty", got)
-	}
+	c.Eq("a", s.RootOf("c"), "RootOf(c)")
+	c.Eq("a", s.RootOf("a"), "RootOf(a)")
+	c.Eq("", s.RootOf("nope"), "RootOf(unknown)")
 }
 
 func TestIsDescendant(t *testing.T) {
@@ -86,9 +82,8 @@ func TestIsDescendant(t *testing.T) {
 		{"a", "nope", false},
 	}
 	for _, tc := range cases {
-		if got := s.IsDescendant(tc.ancestor, tc.candidate); got != tc.want {
-			t.Errorf("IsDescendant(%q,%q) = %v; want %v", tc.ancestor, tc.candidate, got, tc.want)
-		}
+		got := s.IsDescendant(tc.ancestor, tc.candidate)
+		assert.NewCollecting(t).Eq(tc.want, got, "IsDescendant(%q,%q) = %v; want", tc.ancestor, tc.candidate, got)
 	}
 }
 
@@ -112,14 +107,14 @@ func TestDescendantDepth(t *testing.T) {
 		{"empty ids", "", "", -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := s.DescendantDepth(tc.ancestor, tc.cand); got != tc.want {
-				t.Errorf("DescendantDepth(%q,%q) = %d, want %d", tc.ancestor, tc.cand, got, tc.want)
-			}
+			got := s.DescendantDepth(tc.ancestor, tc.cand)
+			assert.NewCollecting(t).Eq(tc.want, got, "DescendantDepth(%q,%q) = %d, want", tc.ancestor, tc.cand, got)
 		})
 	}
 }
 
 func TestDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
 
 	s := tree(t)
 	got := map[string]bool{}
@@ -127,17 +122,11 @@ func TestDescendants(t *testing.T) {
 		got[snap.ChildID] = true
 	}
 	want := map[string]bool{"b": true, "c": true, "d": true}
-	if len(got) != len(want) {
-		t.Fatalf("Descendants(a) = %v; want %v", got, want)
-	}
+	c.Require().Len(got, len(want), "Descendants(a) = %v; want %v", got, want)
 	for id := range want {
-		if !got[id] {
-			t.Errorf("Descendants(a) missing %q", id)
-		}
+		c.False(!got[id], "Descendants(a) missing %q", id)
 	}
-	if len(s.Descendants("z")) != 0 {
-		t.Error("Descendants(z) should be empty")
-	}
+	c.Empty(s.Descendants("z"), "Descendants(z) should be empty")
 }
 
 func TestLegacyFundiPrefixTolerated(t *testing.T) {
@@ -152,9 +141,7 @@ func TestLegacyFundiPrefixTolerated(t *testing.T) {
 	if p, ok := s.ParentOf("old"); !ok || p != "a" {
 		t.Fatalf("ParentOf on a legacy fundi/ record = %q,%v; want a,true", p, ok)
 	}
-	if !s.IsDescendant("a", "old") {
-		t.Fatal("a legacy fundi/-labelled child should still be found as a descendant")
-	}
+	assert.NewAborting(t).True(s.IsDescendant("a", "old"), "a legacy fundi/-labelled child should still be found as a descendant")
 }
 
 func TestCycleTerminates(t *testing.T) {
@@ -185,21 +172,17 @@ func absoluteChain(t *testing.T, s *childstore.Store, n int) string {
 }
 
 func TestAbsoluteDepth(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := tree(t)
 	cases := map[string]int{
 		"a": 0, "b": 1, "c": 2, "d": 1, "z": 0,
 	}
 	for id, want := range cases {
-		if got := s.AbsoluteDepth(id); got != want {
-			t.Errorf("AbsoluteDepth(%s) = %d, want %d", id, got, want)
-		}
+		got := s.AbsoluteDepth(id)
+		c.Eq(want, got, "AbsoluteDepth(%s) = %d, want", id, got)
 	}
-	if got := s.AbsoluteDepth("nope"); got != -1 {
-		t.Errorf("AbsoluteDepth(unknown) = %d, want -1", got)
-	}
-	if got := s.AbsoluteDepth(""); got != -1 {
-		t.Errorf("AbsoluteDepth(empty) = %d, want -1", got)
-	}
+	c.Eq(-1, s.AbsoluteDepth("nope"), "AbsoluteDepth(unknown)")
+	c.Eq(-1, s.AbsoluteDepth(""), "AbsoluteDepth(empty)")
 }
 
 // A chain exactly as long as the walk bound still resolves, so 64 is a REAL
@@ -208,9 +191,7 @@ func TestAbsoluteDepth(t *testing.T) {
 func TestAbsoluteDepthResolvesChainAtWalkBound(t *testing.T) {
 	s := childstore.New()
 	deepest := absoluteChain(t, s, 65)
-	if got := s.AbsoluteDepth(deepest); got != 64 {
-		t.Errorf("AbsoluteDepth(64-deep chain) = %d, want 64", got)
-	}
+	assert.NewCollecting(t).Eq(64, s.AbsoluteDepth(deepest), "AbsoluteDepth(64-deep chain)")
 }
 
 // One hop past the walk bound the walk can no longer confirm a root, and the
@@ -220,9 +201,7 @@ func TestAbsoluteDepthResolvesChainAtWalkBound(t *testing.T) {
 func TestAbsoluteDepthRefusesChainPastWalkBound(t *testing.T) {
 	s := childstore.New()
 	deepest := absoluteChain(t, s, 66) // nodes c_00..c_65, depth 65
-	if got := s.AbsoluteDepth(deepest); got != -1 {
-		t.Errorf("AbsoluteDepth(65-deep chain) = %d, want -1 (indeterminate), got a real-looking number", got)
-	}
+	assert.NewCollecting(t).Eq(-1, s.AbsoluteDepth(deepest), "AbsoluteDepth(65-deep chain)")
 }
 
 func TestLiveDescendantCount(t *testing.T) {
@@ -236,7 +215,5 @@ func TestLiveDescendantCount(t *testing.T) {
 		ChildID: "c_dead", Status: protocol.StatusExited, StartedAt: time.Now(),
 		Labels: map[string]string{childstore.LabelParent: "root", childstore.LabelRoot: "root"},
 	})
-	if got := s.LiveDescendantCount("root"); got != 3 {
-		t.Fatalf("LiveDescendantCount(root) = %d, want 3", got)
-	}
+	assert.NewAborting(t).Eq(3, s.LiveDescendantCount("root"), "LiveDescendantCount(root)")
 }

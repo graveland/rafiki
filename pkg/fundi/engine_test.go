@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +19,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // sampleEndTurn is the plain end_turn companion to emit_test.go's sampleResp:
@@ -54,22 +55,17 @@ func (b *syncBuffer) String() string {
 // replay seam is exercised by every engine test.
 func scriptedSender(t *testing.T, bodies ...string) llm.Sender {
 	t.Helper()
+	c := assert.NewAborting(t)
 	var lines []string
 	for _, b := range bodies {
 		var compact bytes.Buffer
-		if err := json.Compact(&compact, []byte(b)); err != nil {
-			t.Fatalf("compact scripted body: %v", err)
-		}
+		c.NoError(json.Compact(&compact, []byte(b)), "compact scripted body")
 		lines = append(lines, compact.String())
 	}
 	path := filepath.Join(t.TempDir(), "turns.ndjson")
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("write scripted turns: %v", err)
-	}
+	c.NoError(os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600), "write scripted turns")
 	s, err := LoadFakeSender(path)
-	if err != nil {
-		t.Fatalf("LoadFakeSender: %v", err)
-	}
+	c.NoError(err, "LoadFakeSender")
 	return s
 }
 
@@ -112,9 +108,7 @@ func frameTypes(t *testing.T, out string) []string {
 		var f struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal([]byte(l), &f), "bad frame %q", l)
 		types = append(types, f.Type)
 	}
 	return types
@@ -123,9 +117,7 @@ func frameTypes(t *testing.T, out string) []string {
 func assertFrameTypes(t *testing.T, out string, want []string) {
 	t.Helper()
 	got := frameTypes(t, out)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("frame sequence:\n got %v\nwant %v", got, want)
-	}
+	assert.NewAborting(t).Eq(strings.Join(want, ","), strings.Join(got, ","), "frame sequence:\n got %v\nwant %v", got, want)
 }
 
 // newTestEngine builds an engine over a store-less (in-memory) rafiki
@@ -141,13 +133,12 @@ func newTestEngine(t *testing.T, ts fakeToolSet, bodies ...string) (*Engine, *sy
 // control deterministically.
 func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*Engine, *syncBuffer) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	silenceSlog(t) // the engine logs turn lifecycle at info; keep test output pristine
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	eng, err := NewEngine(EngineConfig{
@@ -158,9 +149,7 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 		Name:     "w1",
 		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
@@ -172,13 +161,12 @@ func newTestEngineWithSender(t *testing.T, ts fakeToolSet, sender llm.Sender) (*
 // other field is set, so it can only add, never has to fight a default.
 func newTestEngineWithConfig(t *testing.T, ts fakeToolSet, sender llm.Sender, extra func(*EngineConfig)) (*Engine, *syncBuffer) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	cfg := EngineConfig{
@@ -193,9 +181,7 @@ func newTestEngineWithConfig(t *testing.T, ts fakeToolSet, sender llm.Sender, ex
 		extra(&cfg)
 	}
 	eng, err := NewEngine(cfg, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
@@ -213,9 +199,7 @@ func TestOnTurnEndedReportsCleanCompletion(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	if len(got) != 1 {
-		t.Fatalf("OnTurnEnded fired %d times, want 1: %+v", len(got), got)
-	}
+	assert.NewAborting(t).Len(got, 1, "OnTurnEnded fired %d times, want 1", len(got))
 	if !got[0].Clean || got[0].LimitReason != "" || got[0].Err != nil {
 		t.Errorf("outcome = %+v, want Clean with nothing else set", got[0])
 	}
@@ -238,9 +222,7 @@ func TestOnTurnEndedReportsGuardrailReason(t *testing.T) {
 	// MaxCost cannot fire here — this only confirms the field survives
 	// construction and a clean turn still reports Clean. The actual
 	// threshold decision is TestCostGuardrailFiresAtOrOverBudget, below.
-	if len(got) != 1 || !got[0].Clean {
-		t.Fatalf("outcome = %+v, want a clean completion (fake client prices at zero)", got)
-	}
+	assert.NewAborting(t).False(len(got) != 1 || !got[0].Clean, "outcome = %+v, want a clean completion (fake client prices at zero)", got)
 }
 
 func TestCostGuardrailFiresAtOrOverBudget(t *testing.T) {
@@ -257,31 +239,26 @@ func TestCostGuardrailFiresAtOrOverBudget(t *testing.T) {
 		{"unlimited (negative)", 1000.0, -1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			stop, reason := costGuardrail(tc.runningTotal, tc.maxCost)
-			if stop != tc.wantStop {
-				t.Errorf("costGuardrail(%v, %v) stop = %v, want %v", tc.runningTotal, tc.maxCost, stop, tc.wantStop)
-			}
-			if stop && !strings.Contains(reason, "cost budget") {
-				t.Errorf("reason = %q, want it to name the cost budget", reason)
-			}
+			c.Eq(tc.wantStop, stop, "costGuardrail(%v, %v) stop = %v, want", tc.runningTotal, tc.maxCost, stop)
+			c.False(stop && !strings.Contains(reason, "cost budget"), "reason = %q, want it to name the cost budget", reason)
 		})
 	}
 }
 
 func TestEventsShouldStopIsWiredFromMaxCost(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ts := fakeToolSet{}
 	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleEndTurn), func(cfg *EngineConfig) {
 		cfg.MaxCost = 5.0
 	})
 	ev, sendOpts := eng.events()
 	_ = sendOpts
-	if ev.ShouldStop == nil {
-		t.Fatal("ShouldStop is nil; MaxCost can never be enforced")
-	}
+	c.Require().NotNil(ev.ShouldStop, "ShouldStop is nil; MaxCost can never be enforced")
 	// No OnTurn has fired yet, so the running total is 0 — under any positive budget.
-	if stop, reason := ev.ShouldStop(); stop {
-		t.Errorf("ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
-	}
+	stop, reason := ev.ShouldStop()
+	c.False(stop, "ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
 }
 
 func TestOnTurnEndedReportsRealError(t *testing.T) {
@@ -300,9 +277,7 @@ func TestOnTurnEndedReportsRealError(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	if len(got) != 1 || got[0].Clean {
-		t.Fatalf("outcome = %+v, want a non-clean error outcome", got)
-	}
+	assert.NewAborting(t).False(len(got) != 1 || got[0].Clean, "outcome = %+v, want a non-clean error outcome", got)
 	if got[0].Err == nil || !strings.Contains(got[0].Err.Error(), "scripted turns exhausted") {
 		t.Errorf("Err = %v, want it to wrap the fake sender's exhaustion error", got[0].Err)
 	}
@@ -343,6 +318,7 @@ func (s *blockingSender) New(ctx context.Context, params anthropic.MessageNewPar
 // message_start frame — the prompts/steers a run actually echoed to the TUI.
 func userMessageTexts(t *testing.T, out string) []string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	var texts []string
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		if l == "" {
@@ -355,22 +331,19 @@ func userMessageTexts(t *testing.T, out string) []string {
 				Content json.RawMessage `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		c.NoError(json.Unmarshal([]byte(l), &f), "bad frame %q", l)
 		if f.Type != "message_start" || f.Message.Role != "user" {
 			continue
 		}
 		var text string
-		if err := json.Unmarshal(f.Message.Content, &text); err != nil {
-			t.Fatalf("user message_start content not a string: %q: %v", l, err)
-		}
+		c.NoError(json.Unmarshal(f.Message.Content, &text), "user message_start content not a string: %q", l)
 		texts = append(texts, text)
 	}
 	return texts
 }
 
 func TestEngineRunsScriptedTurn(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
 	}}
@@ -387,18 +360,10 @@ func TestEngineRunsScriptedTurn(t *testing.T) {
 		"message_start", "message_update", "message_end", // assistant turn 2 (end_turn)
 		"agent_end", "agent_settled"})
 
-	if got := eng.State().SessionID; got == "" {
-		t.Fatal("State().SessionID is empty; the daemon sniffs it from get_state")
-	}
-	if got := eng.State().ModelID; got != "claude-x" {
-		t.Fatalf("State().ModelID = %q, want claude-x", got)
-	}
-	if got := eng.State().Provider; got != "anthropic" {
-		t.Fatalf("State().Provider = %q, want anthropic", got)
-	}
-	if got := eng.State().SessionName; got != "w1" {
-		t.Fatalf("State().SessionName = %q, want w1", got)
-	}
+	c.NotEq("", eng.State().SessionID, "State().SessionID is empty; the daemon sniffs it from get_state")
+	c.Eq("claude-x", eng.State().ModelID, "State().ModelID")
+	c.Eq("anthropic", eng.State().Provider, "State().Provider")
+	c.Eq("w1", eng.State().SessionName, "State().SessionName")
 }
 
 // TestHandlePromptReturnsWhileTurnInFlight guards the single most important
@@ -406,6 +371,7 @@ func TestEngineRunsScriptedTurn(t *testing.T) {
 // synchronously in its reader loop, so a HandlePrompt that blocked for the
 // duration of a turn would stop the loop from ever reading an "abort" frame.
 func TestHandlePromptReturnsWhileTurnInFlight(t *testing.T) {
+	c := assert.NewAborting(t)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
@@ -443,12 +409,8 @@ func TestHandlePromptReturnsWhileTurnInFlight(t *testing.T) {
 			starts++
 		}
 	}
-	if starts != 2 || settled != 2 {
-		t.Fatalf("got %d agent_start / %d agent_settled, want 2/2: %v", starts, settled, types)
-	}
-	if types[len(types)-1] != "agent_settled" {
-		t.Fatalf("last frame = %q, want agent_settled: %v", types[len(types)-1], types)
-	}
+	c.False(starts != 2 || settled != 2, "got %d agent_start / %d agent_settled, want 2/2: %v", starts, settled, types)
+	c.Eq("agent_settled", types[len(types)-1], "last frame = %q, want agent_settled: %v", types[len(types)-1], types)
 }
 
 // TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn covers the
@@ -507,10 +469,9 @@ func TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn(t *testing.T
 	})
 
 	texts := userMessageTexts(t, out.String())
-	if want := []string{"go", "line one", "line two"}; !slices.Equal(texts, want) {
-		t.Fatalf("user messages = %v, want %v -- both steers echoed inside the one turn, "+
-			"not requeued as a separate one", texts, want)
-	}
+	want := []string{"go", "line one", "line two"}
+	assert.NewAborting(t).EqDiff(want, texts, "user messages = %v, want %v -- both steers echoed inside the one turn, "+
+		"not requeued as a separate one", texts, want)
 }
 
 // TestEngineEmitsAgentErrorOnLoopFailure covers the brief-mandated
@@ -518,6 +479,7 @@ func TestEngineFoldsSteersArrivingDuringTheFinalCallIntoTheSameTurn(t *testing.T
 // the engine must emit an agent_error frame between the turn's last frame
 // and agent_end rather than silently dropping the failure.
 func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
 	}}
@@ -542,15 +504,9 @@ func TestEngineEmitsAgentErrorOnLoopFailure(t *testing.T) {
 		Error string `json:"error"`
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if err := json.Unmarshal([]byte(lines[len(lines)-3]), &errFrame); err != nil {
-		t.Fatalf("parse agent_error frame: %v", err)
-	}
-	if errFrame.Type != "agent_error" {
-		t.Fatalf("frame type = %q, want agent_error", errFrame.Type)
-	}
-	if !strings.Contains(errFrame.Error, "scripted turns exhausted") {
-		t.Fatalf("agent_error.error = %q, want it to mention the exhausted fake sender", errFrame.Error)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[len(lines)-3]), &errFrame), "parse agent_error frame")
+	c.Eq("agent_error", errFrame.Type, "frame type")
+	c.StrContains(errFrame.Error, "scripted turns exhausted", "agent_error.error")
 }
 
 // recordingSink captures the native events an engine publishes, so a test can
@@ -570,6 +526,7 @@ func (s *recordingSink) Publish(ev *rafikiv1.Event) { s.events = append(s.events
 // only the child's stdout. The event must precede the turn_end AgentEnd
 // publishes, mirroring the framed plane's agent_error-before-agent_end order.
 func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
 	}}
@@ -593,60 +550,38 @@ func TestEnginePublishesNativeErrorEventOnLoopFailure(t *testing.T) {
 			turnEndAt = i
 		}
 	}
-	if errAt < 0 {
-		t.Fatalf("no native error event published for the failed turn; events:\n%+v", sink.events)
-	}
-	if errCount != 1 {
-		t.Fatalf("published %d native error events for the one failed turn, want exactly 1; events:\n%+v", errCount, sink.events)
-	}
-	if turnEndAt < 0 {
-		t.Fatal("no turn_end published alongside the failure; AgentEnd must still close the turn")
-	}
-	if errAt > turnEndAt {
-		t.Fatalf("error event (idx %d) published after turn_end (idx %d); the failure must precede the turn boundary",
-			errAt, turnEndAt)
-	}
+	c.GreaterOrEqual(0, errAt, "no native error event published for the failed turn; events:\n%+v", sink.events)
+	c.Eq(1, errCount, "published %d native error events for the one failed turn, want exactly 1; events:\n%+v", errCount, sink.events)
+	c.GreaterOrEqual(0, turnEndAt, "no turn_end published alongside the failure; AgentEnd must still close the turn")
+	c.LessOrEqual(turnEndAt, errAt, "error event (idx")
 	got := sink.events[errAt].GetError()
-	if got.GetCode() == "" {
-		t.Fatal("error.code is empty; a subscriber routes on it")
-	}
-	if !strings.Contains(got.GetMessage(), "scripted turns exhausted") {
-		t.Fatalf("error.message = %q, want it to mention the exhausted fake sender", got.GetMessage())
-	}
+	c.NotEq("", got.GetCode(), "error.code is empty; a subscriber routes on it")
+	c.StrContains(got.GetMessage(), "scripted turns exhausted", "error.message")
 }
 
 func TestLoadFakeSenderReplaysInOrderThenErrors(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := scriptedSender(t, sampleResp, sampleEndTurn)
 	first, err := s.New(context.Background(), anthropic.MessageNewParams{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.ID != "msg_1" {
-		t.Fatalf("first replayed message id = %q, want msg_1", first.ID)
-	}
+	c.NoError(err)
+	c.Eq("msg_1", first.ID, "first replayed message id")
 	second, err := s.New(context.Background(), anthropic.MessageNewParams{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.ID != "msg_2" {
-		t.Fatalf("second replayed message id = %q, want msg_2", second.ID)
-	}
+	c.NoError(err)
+	c.Eq("msg_2", second.ID, "second replayed message id")
 	if _, err := s.New(context.Background(), anthropic.MessageNewParams{}); err == nil {
 		t.Fatal("exhausted scripted sender returned no error")
 	}
 }
 
 func TestLoadFakeSenderRejectsBadFile(t *testing.T) {
+	c := assert.NewAborting(t)
 	if _, err := LoadFakeSender(filepath.Join(t.TempDir(), "nope.ndjson")); err == nil {
 		t.Fatal("missing file returned no error")
 	}
 	path := filepath.Join(t.TempDir(), "bad.ndjson")
-	if err := os.WriteFile(path, []byte("{not json}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadFakeSender(path); err == nil {
-		t.Fatal("malformed body returned no error")
-	}
+	c.NoError(os.WriteFile(path, []byte("{not json}\n"), 0o600))
+	_, err := LoadFakeSender(path)
+	c.Error(err, "malformed body returned no error")
 }
 
 // blockOnCtxTool returns a fake tool function that signals started, then
@@ -686,6 +621,7 @@ func (s ctxCheckingSender) New(ctx context.Context, params anthropic.MessageNewP
 // engine fully usable for the very next prompt — the entire point of
 // in-band abort over Claude Code's SIGINT-and-respawn.
 func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
+	c := assert.NewAborting(t)
 	started := make(chan struct{})
 	ts := fakeToolSet{"bash": blockOnCtxTool(started)}
 	sender := ctxCheckingSender{inner: scriptedSender(t, sampleResp, sampleEndTurn)}
@@ -709,12 +645,8 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 		Type    string `json:"type"`
 		IsError bool   `json:"isError"`
 	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-3]), &endFrame); err != nil {
-		t.Fatalf("parse tool_execution_end frame: %v", err)
-	}
-	if endFrame.Type != "tool_execution_end" || !endFrame.IsError {
-		t.Fatalf("tool_execution_end frame = %+v, want isError true", endFrame)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[len(lines)-3]), &endFrame), "parse tool_execution_end frame")
+	c.False(endFrame.Type != "tool_execution_end" || !endFrame.IsError, "tool_execution_end frame = %+v, want isError true", endFrame)
 
 	// The abort must not have poisoned the sender's replay position: the
 	// second turn's Continue call reaches the still-unconsumed sampleEndTurn
@@ -730,9 +662,7 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 		"message_start", "message_update", "message_end", // assistant turn (end_turn)
 		"agent_end", "agent_settled",
 	}
-	if strings.Join(secondTurn, ",") != strings.Join(want, ",") {
-		t.Fatalf("second turn's frames:\n got %v\nwant %v (a clean run, no agent_error)", secondTurn, want)
-	}
+	c.Eq(strings.Join(want, ","), strings.Join(secondTurn, ","), "second turn's frames:\n got %v\nwant %v (a clean run, no agent_error)", secondTurn, want)
 }
 
 // TestEngineAbortRepairsOrphanedToolUse is the wiring test the review found
@@ -753,6 +683,7 @@ func TestEngineAbortMidTurnEndsCleanlyAndStaysReusable(t *testing.T) {
 // effect — a synthetic tool_result row — is asserted directly off
 // conv.History, not via a call-counting spy.
 func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{} // never invoked: the turn's Continue call fails on
 	// the cancelled ctx before drive() reaches a tool_use batch.
 	sender := &blockingSender{
@@ -767,14 +698,12 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 	eng, _ := newTestEngineWithSender(t, ts, sender)
 
 	ctx := context.Background()
-	if err := eng.conv.SeedHistory(ctx, []llm.Message{
+	c.NoError(eng.conv.SeedHistory(ctx, []llm.Message{
 		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("seed")},
 		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
 		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	}))
 
 	eng.HandlePrompt("go")
 	<-sender.started // the turn's only Continue call is now blocked — abort
@@ -785,23 +714,15 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 	eng.Wait()
 
 	history, err := eng.conv.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	last := history[len(history)-1]
-	if last.Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("trailing history row role = %v, want user (RepairOrphans' synthesized row)", last.Param.Role)
-	}
-	if len(last.Param.Content) != 1 {
-		t.Fatalf("trailing row has %d blocks, want 1 synthesized tool_result", len(last.Param.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "trailing history row role")
+	c.Len(last.Param.Content, 1, "trailing row has %d blocks, want 1 synthesized tool_result", len(last.Param.Content))
 	tr := last.Param.Content[0].OfToolResult
 	if tr == nil || tr.ToolUseID != "tu_1" {
 		t.Fatalf("trailing block = %+v, want a tool_result for tu_1", last.Param.Content[0])
 	}
-	if !tr.IsError.Value {
-		t.Fatal("synthesized tool_result is not marked IsError")
-	}
+	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
 	if len(tr.Content) != 1 || tr.Content[0].OfText == nil ||
 		tr.Content[0].OfText.Text != "Tool execution aborted by user." {
 		t.Fatalf("synthesized tool_result content = %+v, want the standard abort text", tr.Content)
@@ -812,10 +733,9 @@ func TestEngineAbortRepairsOrphanedToolUse(t *testing.T) {
 // timeout so a stuck reader loop fails the test instead of hanging it.
 func writeFrame(t *testing.T, w io.Writer, v any) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	b = append(b, '\n')
 	done := make(chan error, 1)
 	go func() {
@@ -824,9 +744,7 @@ func writeFrame(t *testing.T, w io.Writer, v any) {
 	}()
 	select {
 	case werr := <-done:
-		if werr != nil {
-			t.Fatalf("write frame %s: %v", v, werr)
-		}
+		c.NoError(werr, "write frame %s", v)
 	case <-time.After(5 * time.Second):
 		t.Fatal("write frame timed out; Frontend.Run's reader loop appears stuck")
 	}
@@ -841,15 +759,14 @@ func writeFrame(t *testing.T, w io.Writer, v any) {
 // loop actually read and dispatched it — the only real evidence that in-band
 // abort works over the wire, not just inside the Engine's own API.
 func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	started := make(chan struct{})
 	ts := fakeToolSet{"bash": blockOnCtxTool(started)}
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", scriptedSender(t, sampleResp)),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	inR, inW := io.Pipe()
 	out := &syncBuffer{}
@@ -862,9 +779,7 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 		Name:     "w1",
 		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 
@@ -890,14 +805,10 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 			"Frontend.Run's reader loop did not dispatch it")
 	}
 
-	if err := inW.Close(); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(inW.Close())
 	select {
 	case err := <-runDone:
-		if err != nil {
-			t.Fatalf("Frontend.Run returned an error: %v", err)
-		}
+		c.NoError(err, "Frontend.Run returned an error")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Frontend.Run did not return after stdin closed")
 	}
@@ -912,27 +823,23 @@ func TestFrontendDispatchesAbortFrameToInFlightTurn(t *testing.T) {
 }
 
 func TestEffectiveMaxCostPrefersTheLiveAccessorOverTheCapturedValue(t *testing.T) {
+	c := assert.NewAborting(t)
 	e := &Engine{maxCost: 5.0}
-	if got := e.effectiveMaxCost(); got != 5.0 {
-		t.Fatalf("with no accessor configured, want the captured value 5.0, got %v", got)
-	}
+	c.Eq(5.0, e.effectiveMaxCost(), "with no accessor configured, want the captured value 5.0, got")
 
 	live := 500.0
 	e.currentMaxCost = func() float64 { return live }
-	if got := e.effectiveMaxCost(); got != 500.0 {
-		t.Fatalf("with an accessor configured, want the LIVE value 500.0, got %v", got)
-	}
+	c.Eq(500.0, e.effectiveMaxCost(), "with an accessor configured, want the LIVE value 500.0, got")
 
 	// The whole point: a value the accessor returns AFTER construction must
 	// be visible immediately, since Controller.SetChildBudget writes to
 	// childstore between calls with nothing rebuilding the Engine.
 	live = 1000.0
-	if got := e.effectiveMaxCost(); got != 1000.0 {
-		t.Fatalf("accessor must be called fresh each time, got %v (stale)", got)
-	}
+	c.Eq(1000.0, e.effectiveMaxCost(), "accessor must be called fresh each time, got")
 }
 
 func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ts := fakeToolSet{}
 	eng, _ := newTestEngineWithConfig(t, ts, scriptedSender(t, sampleEndTurn), func(cfg *EngineConfig) {
 		// Deliberately leave MaxCost at its zero value — only CurrentMaxCost
@@ -944,13 +851,10 @@ func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
 	})
 	ev, sendOpts := eng.events()
 	_ = sendOpts
-	if ev.ShouldStop == nil {
-		t.Fatal("ShouldStop is nil; a CurrentMaxCost-only config can never be enforced")
-	}
+	c.Require().NotNil(ev.ShouldStop, "ShouldStop is nil; a CurrentMaxCost-only config can never be enforced")
 	// No OnTurn has fired yet, so the running total is 0 — under any positive budget.
-	if stop, reason := ev.ShouldStop(); stop {
-		t.Errorf("ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
-	}
+	stop, reason := ev.ShouldStop()
+	c.False(stop, "ShouldStop fired with no usage recorded yet: stop=%v reason=%q", stop, reason)
 }
 
 // TestWorkerWaitsForStart pins the start gate. Between NewEngine and Start()
@@ -965,14 +869,13 @@ func TestEventsShouldStopIsWiredFromCurrentMaxCostAlone(t *testing.T) {
 // which call Start() themselves — with a pre-fill configured so an ungated
 // worker has immediate, observable work to do.
 func TestWorkerWaitsForStart(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	sender := newCapturingSender(t, sampleEndTurn)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 
@@ -995,9 +898,7 @@ func TestWorkerWaitsForStart(t *testing.T) {
 		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		Prefill:  []protocol.PrefillRead{{Path: "/tmp/a.txt"}},
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(eng.Close)
 
 	// No Start() yet: the worker is parked on the gate. The pre-fill must not
@@ -1031,16 +932,10 @@ func TestWorkerWaitsForStart(t *testing.T) {
 	}
 	mu.Unlock()
 	// Exactly one LLM call: the prompt turn. The pre-fill executes tools only.
-	if got := sender.callCount(); got != 1 {
-		t.Fatalf("the LLM was called %d times, want 1 (the prompt turn only)", got)
-	}
+	c.Eq(1, sender.callCount(), "the LLM was called")
 	hist, err := eng.conv.History(context.Background())
-	if err != nil {
-		t.Fatalf("history after Start(): %v", err)
-	}
-	if len(hist) != 5 {
-		t.Fatalf("history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
-	}
+	c.NoError(err, "history after Start()")
+	c.Len(hist, 5, "history has %d rows, want 5 (r0, r1, r2, task, reply)", len(hist))
 	if hist[0].Param.Content[0].OfText == nil || hist[0].Param.Content[0].OfText.Text != PrefillPreamble {
 		t.Fatalf("r0 = %+v, want the pre-fill preamble", hist[0].Param.Content)
 	}
@@ -1051,7 +946,5 @@ func TestWorkerWaitsForStart(t *testing.T) {
 		tr.Content[0].OfText == nil || tr.Content[0].OfText.Text != "/tmp/a.txt body" {
 		t.Fatalf("r2 block = %+v, want the pre-fill's real tool_result", hist[2].Param.Content[0])
 	}
-	if msg := out.String(); strings.Contains(msg, "agent_error") {
-		t.Fatalf("unexpected agent_error frames: %s", msg)
-	}
+	c.NotStrContains(out.String(), "agent_error", "unexpected agent_error frames")
 }

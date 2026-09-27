@@ -13,6 +13,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── loadBuiltins ──────────────────────────────────────────────────────────────
@@ -20,10 +22,7 @@ import (
 func TestLoadBuiltins_Count(t *testing.T) {
 	got := loadBuiltins()
 	want := len(knownModels) + len(routing.LatestFamilies())
-	if len(got) != want {
-		t.Errorf("loadBuiltins returned %d entries, want %d (%d curated + %d family aliases)",
-			len(got), want, len(knownModels), len(routing.LatestFamilies()))
-	}
+	assert.NewCollecting(t).Len(got, want, "loadBuiltins returned %d entries, want %d (%d curated + %d family aliases)", len(got), want, len(knownModels), len(routing.LatestFamilies()))
 }
 
 // The "<family>-latest" aliases are what keeps completion current across a
@@ -37,31 +36,20 @@ func TestLoadBuiltins_ContainsFamilyAliases(t *testing.T) {
 	}
 	for _, fam := range routing.LatestFamilies() {
 		id := "anthropic/" + fam
-		if !have[id] {
-			t.Errorf("loadBuiltins is missing the family alias %s", id)
-		}
+		assert.NewCollecting(t).False(!have[id], "loadBuiltins is missing the family alias %s", id)
 	}
 }
 
 func TestLoadBuiltins_Fields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := loadBuiltins()
 	// Every entry must have non-empty ID, Provider, Model, Source==builtin, no Name.
 	for _, m := range got {
-		if m.ID == "" {
-			t.Errorf("empty ID for %+v", m)
-		}
-		if m.Provider == "" {
-			t.Errorf("empty Provider for ID=%s", m.ID)
-		}
-		if m.Model == "" {
-			t.Errorf("empty Model for ID=%s", m.ID)
-		}
-		if m.Source != SourceBuiltin {
-			t.Errorf("wrong Source for ID=%s: got %s", m.ID, m.Source)
-		}
-		if m.Name != "" {
-			t.Errorf("unexpected Name for builtin ID=%s: %s", m.ID, m.Name)
-		}
+		c.NotEq("", m.ID, "empty ID for %+v", m)
+		c.NotEq("", m.Provider, "empty Provider for ID=%s", m.ID)
+		c.NotEq("", m.Model, "empty Model for ID=%s", m.ID)
+		c.Eq(SourceBuiltin, m.Source, "wrong Source for ID=%s: got", m.ID)
+		c.Eq("", m.Name, "unexpected Name for builtin ID=%s", m.ID)
 	}
 }
 
@@ -81,33 +69,25 @@ func TestLoadUserConfig_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	got := loadUserConfig()
-	if got != nil {
-		t.Errorf("expected nil for missing file, got %v", got)
-	}
+	assert.NewCollecting(t).Nil(got, "expected nil for missing file, got")
 }
 
 func TestLoadUserConfig_MalformedJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(agentDir, 0o700))
+	c.Require().NoError(os.WriteFile(filepath.Join(agentDir, "models.json"), []byte("{not json"), 0o600))
 	t.Setenv("HOME", dir)
 	got := loadUserConfig()
-	if got != nil {
-		t.Errorf("expected nil for malformed JSON, got %v", got)
-	}
+	c.Nil(got, "expected nil for malformed JSON, got")
 }
 
 func TestLoadUserConfig_ValidFile(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(agentDir, 0o700))
 	content := map[string]any{
 		"providers": map[string]any{
 			"anthropic-work": map[string]any{
@@ -119,15 +99,11 @@ func TestLoadUserConfig_ValidFile(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600))
 	t.Setenv("HOME", dir)
 
 	got := loadUserConfig()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(got))
-	}
+	c.Require().Len(got, 2, "expected 2 entries, got %d", len(got))
 
 	// Find the entry with a Name.
 	var withName, withoutName *Model
@@ -138,39 +114,22 @@ func TestLoadUserConfig_ValidFile(t *testing.T) {
 			withoutName = &got[i]
 		}
 	}
-	if withName == nil {
-		t.Fatal("expected one entry with Name set")
-	}
-	if withName.ID != "anthropic-work/claude-sonnet-4-5" {
-		t.Errorf("ID = %q", withName.ID)
-	}
-	if withName.Provider != "anthropic-work" {
-		t.Errorf("Provider = %q", withName.Provider)
-	}
-	if withName.Model != "claude-sonnet-4-5" {
-		t.Errorf("Model = %q", withName.Model)
-	}
-	if withName.Name != "Work Sonnet" {
-		t.Errorf("Name = %q", withName.Name)
-	}
-	if withName.Source != SourceUserConfig {
-		t.Errorf("Source = %q", withName.Source)
-	}
+	c.Require().NotNil(withName, "expected one entry with Name set")
+	c.Eq("anthropic-work/claude-sonnet-4-5", withName.ID, "ID =")
+	c.Eq("anthropic-work", withName.Provider, "Provider =")
+	c.Eq("claude-sonnet-4-5", withName.Model, "Model =")
+	c.Eq("Work Sonnet", withName.Name, "Name =")
+	c.Eq(SourceUserConfig, withName.Source, "Source =")
 
-	if withoutName == nil {
-		t.Fatal("expected one entry without Name")
-	}
-	if withoutName.ID != "anthropic-work/claude-opus-4-7" {
-		t.Errorf("no-name entry ID = %q", withoutName.ID)
-	}
+	c.Require().NotNil(withoutName, "expected one entry without Name")
+	c.Eq("anthropic-work/claude-opus-4-7", withoutName.ID, "no-name entry ID =")
 }
 
 func TestLoadUserConfig_Inherit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(agentDir, 0o700))
 	content := map[string]any{
 		"providers": map[string]any{
 			"anthropic-work": map[string]any{
@@ -185,9 +144,7 @@ func TestLoadUserConfig_Inherit(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600))
 	t.Setenv("HOME", dir)
 
 	got := loadUserConfig()
@@ -203,31 +160,24 @@ func TestLoadUserConfig_Inherit(t *testing.T) {
 		"anthropic-work/claude-sonnet-4-5",
 		"anthropic-work/claude-haiku-4-5",
 	} {
-		if !ids[want] {
-			t.Errorf("missing inherited entry %q", want)
-		}
+		c.False(!ids[want], "missing inherited entry %q", want)
 	}
 
 	// Explicit models still emit alongside inherited ones.
-	if !ids["anthropic-work/claude-custom"] {
-		t.Errorf("missing explicit entry anthropic-work/claude-custom")
-	}
+	c.False(!ids["anthropic-work/claude-custom"], "missing explicit entry anthropic-work/claude-custom")
 
 	// Inheriting from an unknown provider silently produces nothing for that
 	// provider (no bogus-inherit/* entries).
 	for id := range ids {
-		if strings.HasPrefix(id, "bogus-inherit/") {
-			t.Errorf("unexpected entry from unknown inherit target: %q", id)
-		}
+		c.False(strings.HasPrefix(id, "bogus-inherit/"), "unexpected entry from unknown inherit target: %q", id)
 	}
 }
 
 func TestLoadUserConfig_SkipsEmptyID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(agentDir, 0o700))
 	content := map[string]any{
 		"providers": map[string]any{
 			"test": map[string]any{
@@ -239,20 +189,17 @@ func TestLoadUserConfig_SkipsEmptyID(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600))
 	t.Setenv("HOME", dir)
 
 	got := loadUserConfig()
-	if len(got) != 1 {
-		t.Errorf("expected 1 entry (empty id skipped), got %d", len(got))
-	}
+	c.Len(got, 1, "expected 1 entry (empty id skipped), got %d", len(got))
 }
 
 // ─── loadAliases ───────────────────────────────────────────────────────────────
 
 func TestLoadAliases_Fields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte(`
 default_provider = "anthropic"
 
@@ -267,40 +214,24 @@ base_url = "http://localhost:8005"
 id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 context_window = 16384
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 
 	got := loadAliases(set)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 alias, got %d: %+v", len(got), got)
-	}
+	c.Require().Len(got, 1, "expected 1 alias, got %d", len(got))
 	m := got[0]
-	if m.ID != "vmlx/qwen" {
-		t.Errorf("ID = %q, want vmlx/qwen", m.ID)
-	}
-	if m.Provider != "vmlx" {
-		t.Errorf("Provider = %q", m.Provider)
-	}
-	if m.Model != "models/Qwen3.8-27B-Abliterated-MLX-4bit" {
-		t.Errorf("Model = %q, want the alias's real id", m.Model)
-	}
-	if m.Source != SourceAlias {
-		t.Errorf("Source = %q, want alias", m.Source)
-	}
+	c.Eq("vmlx/qwen", m.ID, "ID")
+	c.Eq("vmlx", m.Provider, "Provider =")
+	c.Eq("models/Qwen3.8-27B-Abliterated-MLX-4bit", m.Model, "Model")
+	c.Eq(SourceAlias, m.Source, "Source")
 }
 
 func TestLoadAliases_NoAliasesDeclared(t *testing.T) {
 	got := loadAliases(providers.Default())
-	if got != nil {
-		t.Errorf("expected nil with no aliases declared, got %v", got)
-	}
+	assert.NewCollecting(t).Nil(got, "expected nil with no aliases declared, got")
 }
 
 func TestLoadAliases_NilSet(t *testing.T) {
-	if got := loadAliases(nil); got != nil {
-		t.Errorf("expected nil for a nil set, got %v", got)
-	}
+	assert.NewCollecting(t).Nil(loadAliases(nil), "expected nil for a nil set, got")
 }
 
 // A declared alias must reach both ListModels and --model completion —
@@ -322,9 +253,7 @@ kind = "anthropic"
 id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 context_window = 16384
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 
 	got := List(context.Background(), set)
 	for _, m := range got {
@@ -338,6 +267,7 @@ context_window = 16384
 // ─── loadLocal ─────────────────────────────────────────────────────────────────
 
 func TestLoadLocal_Success(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.Header().Set("Content-Type", "application/json")
@@ -349,60 +279,43 @@ func TestLoadLocal_Success(t *testing.T) {
 	defer srv.Close()
 
 	set, err := providers.Parse([]byte("default_provider = \"workstation\"\n\n[providers.workstation]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	got := loadLocal(context.Background(), set)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 local model, got %d", len(got))
-	}
-	if got[0].ID != "workstation/llama3.1:8b" {
-		t.Errorf("ID = %q", got[0].ID)
-	}
-	if got[0].Provider != "workstation" {
-		t.Errorf("Provider = %q", got[0].Provider)
-	}
-	if got[0].Source != SourceLocal {
-		t.Errorf("Source = %q", got[0].Source)
-	}
+	c.Require().Len(got, 1, "expected 1 local model, got %d", len(got))
+	c.Eq("workstation/llama3.1:8b", got[0].ID, "ID =")
+	c.Eq("workstation", got[0].Provider, "Provider =")
+	c.Eq(SourceLocal, got[0].Source, "Source =")
 }
 
 func TestLoadLocal_Unreachable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte("default_provider = \"dead\"\n\n[providers.dead]\nkind = \"anthropic\"\nbase_url = \"http://127.0.0.1:19999\"\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	got := loadLocal(context.Background(), set)
-	if got != nil {
-		t.Errorf("expected nil for unreachable server, got %v", got)
-	}
+	c.Nil(got, "expected nil for unreachable server, got")
 }
 
 func TestLoadLocal_NonOKStatus(t *testing.T) {
+	c := assert.NewCollecting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 	set, err := providers.Parse([]byte("default_provider = \"bad\"\n\n[providers.bad]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	got := loadLocal(context.Background(), set)
-	if got != nil {
-		t.Errorf("expected nil for non-200 status, got %v", got)
-	}
+	c.Nil(got, "expected nil for non-200 status, got")
 }
 
 // ─── List (deduplication) ─────────────────────────────────────────────────────
 
 func TestList_DedupesByID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Set up a user-config file that contains "anthropic/claude-sonnet-4-5"
 	// (also present in builtins).  The user-config version should win.
 	dir := t.TempDir()
 	agentDir := filepath.Join(dir, ".pi", "agent")
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(agentDir, 0o700))
 	content := map[string]any{
 		"providers": map[string]any{
 			"anthropic": map[string]any{
@@ -416,9 +329,7 @@ func TestList_DedupesByID(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(content)
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(agentDir, "models.json"), b, 0o600))
 	// Ensure ollama / lmstudio don't accidentally connect to anything real.
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:19993")
 	t.Setenv("LM_STUDIO_HOST", "http://127.0.0.1:19994")
@@ -435,19 +346,11 @@ func TestList_DedupesByID(t *testing.T) {
 			found = &got[i]
 		}
 	}
-	if count != 1 {
-		t.Errorf("expected exactly 1 entry for anthropic/claude-sonnet-4-5, got %d", count)
-	}
-	if found == nil {
-		t.Fatal("anthropic/claude-sonnet-4-5 not found at all")
-	}
+	c.Eq(1, count, "expected exactly 1 entry for anthropic/claude-sonnet-4-5, got")
+	c.Require().NotNil(found, "anthropic/claude-sonnet-4-5 not found at all")
 	// User-config wins: Name should be set and Source should be user-config.
-	if found.Name != "My Sonnet" {
-		t.Errorf("Name = %q, want user-config name (user-config wins)", found.Name)
-	}
-	if found.Source != SourceUserConfig {
-		t.Errorf("Source = %q, want user-config", found.Source)
-	}
+	c.Eq("My Sonnet", found.Name, "Name")
+	c.Eq(SourceUserConfig, found.Source, "Source")
 }
 
 func TestList_NoDuplicatesInBuiltins(t *testing.T) {
@@ -458,9 +361,7 @@ func TestList_NoDuplicatesInBuiltins(t *testing.T) {
 		seen[m.ID]++
 	}
 	for id, n := range seen {
-		if n > 1 {
-			t.Errorf("builtin ID %q appears %d times", id, n)
-		}
+		assert.NewCollecting(t).LessOrEqual(1, n, "builtin ID %q appears %d times", id, n)
 	}
 }
 
@@ -472,6 +373,7 @@ func TestList_NoDuplicatesInBuiltins(t *testing.T) {
 // ("claude-opus-4.7") — so an imported id would complete cleanly and then fail
 // at call time, which is the worst of both. See the package doc.
 func TestOpenRouterModels_ExcludesAnthropic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := openRouterModels([]string{
 		"anthropic/claude-opus-4.7",
 		"anthropic/claude-sonnet-5",
@@ -479,24 +381,17 @@ func TestOpenRouterModels_ExcludesAnthropic(t *testing.T) {
 		"moonshotai/kimi-k3",
 	})
 	for _, m := range got {
-		if strings.HasPrefix(m.ID, "anthropic/") {
-			t.Errorf("anthropic id leaked from the OpenRouter catalog: %s", m.ID)
-		}
+		c.False(strings.HasPrefix(m.ID, "anthropic/"), "anthropic id leaked from the OpenRouter catalog: %s", m.ID)
 	}
-	if len(got) != 2 {
-		t.Errorf("got %d entries, want 2 (the non-anthropic ids)", len(got))
-	}
+	c.Len(got, 2, "got %d entries, want 2 (the non-anthropic ids)", len(got))
 }
 
 func TestOpenRouterModels_Fields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := openRouterModels([]string{"moonshotai/kimi-k3"})
-	if len(got) != 1 {
-		t.Fatalf("got %d entries, want 1", len(got))
-	}
+	c.Require().Len(got, 1, "got %d entries, want 1", len(got))
 	want := Model{ID: "openrouter/moonshotai/kimi-k3", Provider: "openrouter", Model: "moonshotai/kimi-k3", Source: SourceOpenRouter}
-	if got[0] != want {
-		t.Errorf("got %+v, want %+v", got[0], want)
-	}
+	c.Eq(want, got[0], "got")
 }
 
 // fundi requires a provider-qualified id (pkg/agent/config.go's splitModel
@@ -504,9 +399,7 @@ func TestOpenRouterModels_Fields(t *testing.T) {
 // in the catalog must not be offered as a completion.
 func TestOpenRouterModels_SkipsUnqualified(t *testing.T) {
 	got := openRouterModels([]string{"gpt-4o", "", "/leading", "trailing/", "openai/gpt-4o"})
-	if len(got) != 1 || got[0].ID != "openrouter/openai/gpt-4o" {
-		t.Errorf("got %+v, want only openrouter/openai/gpt-4o", got)
-	}
+	assert.NewCollecting(t).False(len(got) != 1 || got[0].ID != "openrouter/openai/gpt-4o", "got %+v, want only openrouter/openai/gpt-4o", got)
 }
 
 // A cancelled context must abandon the catalog rather than block: completion
@@ -514,9 +407,8 @@ func TestOpenRouterModels_SkipsUnqualified(t *testing.T) {
 func TestLoadOpenRouter_RespectsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := loadOpenRouter(ctx); got != nil {
-		t.Errorf("got %d entries on a cancelled context, want none", len(got))
-	}
+	got := loadOpenRouter(ctx)
+	assert.NewCollecting(t).Nil(got, "got %d entries on a cancelled context, want none", len(got))
 }
 
 // ─── ListSources ───────────────────────────────────────────────────────────────
@@ -525,6 +417,7 @@ func TestLoadOpenRouter_RespectsCancelledContext(t *testing.T) {
 // never be consulted, or a pi-kind completion still pays OpenRouter's network
 // round trip and the local-server probes to discard them.
 func TestListSources_ConsultsOnlyRequestedSources(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Point a local provider at a server that records whether it was contacted.
 	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -534,31 +427,20 @@ func TestListSources_ConsultsOnlyRequestedSources(t *testing.T) {
 	defer srv.Close()
 
 	set, err := providers.Parse([]byte("default_provider = \"local\"\n\n[providers.local]\nkind = \"anthropic\"\nbase_url = \"" + srv.URL + "\"\n"))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 
 	got := ListSources(context.Background(), set, map[Source]bool{SourceBuiltin: true})
-	if hit.Load() {
-		t.Error("Local provider was probed despite not being requested")
-	}
+	c.False(hit.Load(), "Local provider was probed despite not being requested")
 	for _, m := range got {
-		if m.Source != SourceBuiltin {
-			t.Errorf("unrequested source in result: %s (%s)", m.Source, m.ID)
-		}
+		c.Eq(SourceBuiltin, m.Source, "unrequested source in result: %s (%s)", m.Source, m.ID)
 	}
-	if len(got) == 0 {
-		t.Error("builtin source produced nothing")
-	}
+	c.NotEmpty(got, "builtin source produced nothing")
 }
 
 func TestListSources_NilMeansAll(t *testing.T) {
+	c := assert.NewCollecting(t)
 	all := ListSources(context.Background(), providers.Default(), nil)
 	viaList := List(context.Background(), providers.Default())
-	if len(all) != len(viaList) {
-		t.Errorf("ListSources(nil) returned %d, List returned %d — they must agree", len(all), len(viaList))
-	}
-	if len(all) == 0 {
-		t.Fatal("no models at all")
-	}
+	c.Len(all, len(viaList), "ListSources(nil) returned %d, List returned %d — they must agree", len(all), len(viaList))
+	c.Require().NotEmpty(all, "no models at all")
 }

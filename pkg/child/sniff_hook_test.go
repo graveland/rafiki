@@ -3,12 +3,15 @@ package child
 import (
 	"sync"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The sniff hook must fire for a frame that carries metadata, so a caller can
 // persist the session id without waiting for a bus frame the child may never
 // emit. claude's system/init is exactly that case.
 func TestOnMetaFiresWhenMetadataIsSniffed(t *testing.T) {
+	ck := assert.NewAborting(t)
 	var mu sync.Mutex
 	var got []SnifferMetadata
 
@@ -28,12 +31,8 @@ func TestOnMetaFiresWhenMetadataIsSniffed(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 1 {
-		t.Fatalf("onMeta fired %d times, want 1", len(got))
-	}
-	if got[0].SessionID != "sess-abc" {
-		t.Fatalf("SessionID = %q, want %q", got[0].SessionID, "sess-abc")
-	}
+	ck.Len(got, 1, "onMeta fired %d times, want 1", len(got))
+	ck.Eq("sess-abc", got[0].SessionID, "SessionID")
 }
 
 // A frame with no metadata must not fire the hook: a caller that persists on
@@ -50,9 +49,7 @@ func TestOnMetaSilentWithoutMetadata(t *testing.T) {
 
 	c.handleFrame([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`))
 
-	if fired != 0 {
-		t.Fatalf("onMeta fired %d times, want 0", fired)
-	}
+	assert.NewAborting(t).Eq(0, fired, "onMeta fired")
 }
 
 // A nil hook is the normal case for pi and fundi children and must not panic.

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // hangingRunner is the runner an in-process child can genuinely become: Kill()
@@ -92,11 +94,10 @@ func (h *hangingRunner) Kill() error {
 // every stream it could write to is closed, its context is cancelled, it is
 // recorded as exited, and nothing is left waiting on it.
 func TestShutdownAbandonsAnUnreapableChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	h := newHangingRunner()
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_hang", Cwd: t.TempDir(), Runner: h})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.Require().NoError(err, "Spawn")
 	// Shrink only the terminal bound; the mechanism is what is under test, not
 	// the ten seconds. Written before Shutdown is called, which is its only
 	// reader.
@@ -110,45 +111,30 @@ func TestShutdownAbandonsAnUnreapableChild(t *testing.T) {
 	start := time.Now()
 	res, err := c.Shutdown(10*time.Millisecond, 10*time.Millisecond)
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("Shutdown took %v; the terminal wait after Kill() is not bounded", elapsed)
-	}
+	ck.Require().NoError(err, "Shutdown")
+	ck.Require().LessOrEqual(5*time.Second, elapsed, "Shutdown took")
 
 	// Reported honestly: a caller must be able to tell reaped from abandoned.
-	if !res.Abandoned {
-		t.Error("ShutdownResult.Abandoned is false; an unreaped child must not be reported as reaped")
-	}
-	if !res.Escalated {
-		t.Error("ShutdownResult.Escalated is false; this shutdown went all the way to Kill()")
-	}
+	ck.True(res.Abandoned, "ShutdownResult.Abandoned is false; an unreaped child must not be reported as reaped")
+	ck.True(res.Escalated, "ShutdownResult.Escalated is false; this shutdown went all the way to Kill()")
 	// Same wire shape a reaped forced stop produces (see processRunner.Wait and
 	// inproc's killedSignal), so `fundi kill` answers the same question the
 	// same way either way.
-	if res.Signal != "killed" || res.ExitCode != 0 {
-		t.Errorf("exit shape = code %d signal %q, want code 0 signal \"killed\"", res.ExitCode, res.Signal)
-	}
+	ck.False(res.Signal != "killed" || res.ExitCode != 0, "exit shape = code %d signal %q, want code 0 signal \"killed\"", res.ExitCode, res.Signal)
 
 	// (1) Every stream the leaked goroutine could write to is closed. This is
 	// the assertion that matters: a write from the abandoned child must FAIL
 	// rather than succeed into a daemon that has moved on. stdoutW is the
 	// engine's Frontend.Emit target.
-	if _, werr := h.stdoutW.Write([]byte("late frame\n")); werr == nil {
-		t.Error("a write to the abandoned child's stdout succeeded; a late Frontend.Emit must fail")
-	}
+	_, werr := h.stdoutW.Write([]byte("late frame\n"))
+	ck.Error(werr, "a write to the abandoned child's stdout succeeded; a late Frontend.Emit must fail")
 	// The daemon-side stderr handle is normally released by supervise's cleanup
 	// block, which a leaked supervise (parked in wg.Wait()) never reaches.
-	if got := h.stderr.count(); got != 1 {
-		t.Errorf("stderr closed %d times, want exactly 1; abandon must release the handles supervise no longer will", got)
-	}
+	ck.Eq(1, h.stderr.count(), "stderr closed")
 
 	// (2) The context is cancelled, so no NEW work can start when the syscall
 	// returns.
-	if h.ctx.Err() == nil {
-		t.Error("the child's context is not cancelled; abandoning it would let it start new work")
-	}
+	ck.Error(h.ctx.Err(), "the child's context is not cancelled; abandoning it would let it start new work")
 
 	// (3) Recorded as exited: the daemon must stop treating it as live.
 	select {
@@ -156,9 +142,7 @@ func TestShutdownAbandonsAnUnreapableChild(t *testing.T) {
 	default:
 		t.Error("Done() is not closed; monitorChild would never run handleChildExit for this child")
 	}
-	if serr := c.Send([]byte(`{"type":"prompt","message":"hi"}`)); serr == nil {
-		t.Error("Send accepted a frame for an abandoned child; it must be rejected as shutting down")
-	}
+	ck.Error(c.Send([]byte(`{"type":"prompt","message":"hi"}`)), "Send accepted a frame for an abandoned child; it must be rejected as shutting down")
 	if got := c.ExitResult(); !got.Abandoned || got.Signal != "killed" {
 		t.Errorf("ExitResult() = %+v, want the abandoned/killed record", got)
 	}
@@ -173,9 +157,7 @@ func TestShutdownAbandonsAnUnreapableChild(t *testing.T) {
 	}()
 	select {
 	case r2 := <-second:
-		if !r2.Abandoned {
-			t.Errorf("second Shutdown reported %+v; the abandoned record must be sticky", r2)
-		}
+		ck.True(r2.Abandoned, "second Shutdown reported %+v; the abandoned record must be sticky", r2)
 	case <-time.After(5 * time.Second):
 		t.Fatal("a second Shutdown blocked; something still waits on the leaked goroutine")
 	}
@@ -188,21 +170,16 @@ func TestShutdownAbandonsAnUnreapableChild(t *testing.T) {
 // and supervise's own `close(c.done)` must not panic on the already-closed
 // channel — which is why both closers go through closeDone.
 func TestAbandonedRecordSurvivesALateReap(t *testing.T) {
+	ck := assert.NewAborting(t)
 	h := newHangingRunner()
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_late", Cwd: t.TempDir(), Runner: h})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.NoError(err, "Spawn")
 	c.abandonAfter = 200 * time.Millisecond
 	<-c.Ready()
 
 	res, err := c.Shutdown(10*time.Millisecond, 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if !res.Abandoned {
-		t.Fatalf("child was not abandoned (%+v); this test no longer covers the late-reap path", res)
-	}
+	ck.NoError(err, "Shutdown")
+	ck.True(res.Abandoned, "child was not abandoned (%+v); this test no longer covers the late-reap path", res)
 
 	// The straggler lands: Wait() returns, readStdout records, supervise runs
 	// its cleanup and its deferred done-close.
@@ -229,18 +206,13 @@ func TestAbandonedRecordSurvivesALateReap(t *testing.T) {
 // more than a real post-Kill reap needs, and 120+30+10 = 160s keeps the whole
 // per-child ladder inside cmd/rafikid's 180s global shutdown bound.
 func TestAbandonTimeoutDefault(t *testing.T) {
-	if abandonTimeout != 10*time.Second {
-		t.Errorf("abandonTimeout = %v, want 10s (see its doc comment for the derivation)", abandonTimeout)
-	}
+	ck := assert.NewCollecting(t)
+	ck.Eq(10*time.Second, abandonTimeout, "abandonTimeout")
 	c, err := Spawn(t.Context(), SpawnSpec{
 		ChildID: "c_default", Cwd: t.TempDir(),
 		Runner: &stubRunner{stdoutFrames: `{"type":"agent_end"}` + "\n"},
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if c.abandonAfter != abandonTimeout {
-		t.Errorf("Spawn set abandonAfter = %v, want abandonTimeout (%v)", c.abandonAfter, abandonTimeout)
-	}
+	ck.Require().NoError(err, "Spawn")
+	ck.Eq(abandonTimeout, c.abandonAfter, "Spawn set abandonAfter")
 	<-c.Done()
 }

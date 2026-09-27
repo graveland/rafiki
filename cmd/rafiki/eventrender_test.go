@@ -12,6 +12,8 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -55,6 +57,7 @@ func atClock(h, m int, sec float64) time.Time {
 // The events carry their own ts_unix_ms: replayed history renders with the
 // original event times, which is what makes the durations here real.
 func TestEventRendererGoldenStatusAndTurnLines(t *testing.T) {
+	c := assert.NewCollecting(t)
 	id := "c_01M3F2M6AMA3W09HD7R6Z58Q8B"
 	const name = "1.2-review-r2"
 
@@ -67,18 +70,14 @@ func TestEventRendererGoldenStatusAndTurnLines(t *testing.T) {
 
 	got := r.observe(withTS(statusFor(id, "tool_running"), atClock(8, 44, 58.0)), atClock(8, 44, 58.0))
 	want := "08:44:58  status c_01M3F2M6AMA3W09HD7R6Z58Q8B  1.2-review-r2 streaming → tool_running (23.7s)"
-	if got != want {
-		t.Errorf("status line:\n got  %q\n want %q", got, want)
-	}
+	c.Eq(want, got, "status line:\n got")
 
 	// A status back to streaming at 08:44:58.6, then the turn ends at
 	// 08:45:07: the working duration is the 8.4s between them.
 	_ = r.observe(withTS(statusFor(id, "streaming"), atClock(8, 44, 58.6)), atClock(8, 44, 58.6))
 	got = r.observe(withTS(turnEndForCost(id, 0.0122), atClock(8, 45, 7.0)), atClock(8, 45, 7.0))
 	want = "08:45:07  turn   c_01M3F2M6AMA3W09HD7R6Z58Q8B  1.2-review-r2 cost=$0.0122 stop=END_TURN (8.4s)"
-	if got != want {
-		t.Errorf("turn line:\n got  %q\n want %q", got, want)
-	}
+	c.Eq(want, got, "turn line:\n got")
 }
 
 // Every other event type gets the same prefix shape — HH:MM:SS, the type
@@ -122,9 +121,7 @@ func TestEventRendererPrefixIsStableAcrossTypes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := r.observe(tc.ev, atClock(9, 0, 59.0)); got != tc.want {
-				t.Errorf("line:\n got  %q\n want %q", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, r.observe(tc.ev, atClock(9, 0, 59.0)), "line:\n got")
 		})
 	}
 }
@@ -134,29 +131,23 @@ func TestEventRendererPrefixIsStableAcrossTypes(t *testing.T) {
 func TestEventRendererToolEndWithoutStart(t *testing.T) {
 	r := newEventRenderer()
 	got := r.observe(withTS(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_late", DurationMs: 2500}}}, atClock(9, 1, 0.0)), atClock(9, 1, 0.0))
-	if !strings.Contains(got, "2.5s") || strings.Contains(got, "bash") {
-		t.Errorf("late tool end = %q, want a duration and no invented name", got)
-	}
+	assert.NewCollecting(t).False(!strings.Contains(got, "2.5s") || strings.Contains(got, "bash"), "late tool end = %q, want a duration and no invented name", got)
 }
 
 // A summary longer than the column cap is truncated, never wrapped.
 func TestEventRendererSummaryClampsToOneLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
 	long := strings.Repeat("x", 300)
 	got := r.observe(withTS(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
 		Content: []*rafikiv1.ContentBlock{{Index: 0, Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: long}}}},
 	}}}, atClock(9, 2, 0.0)), atClock(9, 2, 0.0))
-	if strings.Contains(got, "\n") {
-		t.Errorf("summary wrapped: %q", got)
-	}
+	c.NotStrContains(got, "\n", "summary wrapped")
 	// Prefix (8+2+12+1+3+2+9+1) + the capped summary (99 ASCII chars + the
 	// 3-byte ellipsis, 100 columns wide).
-	if n, want := len(got), 8+2+12+1+3+2+9+1+99+3; n != want {
-		t.Errorf("summary length = %d, want %d: %q", n, want, got)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("clamped summary lost its ellipsis: %q", got)
-	}
+	n, want := len(got), 8+2+12+1+3+2+9+1+99+3
+	c.Eq(want, n, "summary length = %d, want %d: %q", n, want, got)
+	c.True(strings.HasSuffix(got, "…"), "clamped summary lost its ellipsis: %q", got)
 }
 
 // ── the tracker, carried over from watch ─────────────────────────────────────
@@ -164,39 +155,28 @@ func TestEventRendererSummaryClampsToOneLine(t *testing.T) {
 // A full lifecycle in five lines, with the durations that make the status
 // lines worth reading: how long each state lasted, and the child's lifetime.
 func TestEventRendererFullLifecycle(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
 	t0 := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 
 	got := r.observe(spawnedFor("c_1", "impl-auth", "c_root"), t0)
 	for _, want := range []string{"spawn", "impl-auth", "parent=c_root"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("spawn line %q missing %q", got, want)
-		}
+		c.StrContains(got, want, "spawn line")
 	}
 
 	got = r.observe(statusFor("c_1", "streaming"), t0.Add(2*time.Second))
-	if !strings.Contains(got, "spawning → streaming") {
-		t.Errorf("first status line should show spawning→streaming, got %q", got)
-	}
+	c.StrContains(got, "spawning → streaming", "first status line should show spawning→streaming, got")
 
 	got = r.observe(statusFor("c_1", "idle"), t0.Add(6*time.Second))
-	if !strings.Contains(got, "streaming → idle (4.0s)") {
-		t.Errorf("idle transition should carry the working duration, got %q", got)
-	}
+	c.StrContains(got, "streaming → idle (4.0s)", "idle transition should carry the working duration, got")
 
 	got = r.observe(turnEndForCost("c_1", 0.0142), t0.Add(7*time.Second))
-	if !strings.Contains(got, "cost=$0.0142") || !strings.Contains(got, "stop=END_TURN") {
-		t.Errorf("turn line = %q", got)
-	}
+	c.False(!strings.Contains(got, "cost=$0.0142") || !strings.Contains(got, "stop=END_TURN"), "turn line = %q", got)
 	// idle is not Working, so no duration is invented on the turn line.
-	if strings.Contains(got, "(7.0s)") {
-		t.Errorf("turn line after idle invented a duration: %q", got)
-	}
+	c.NotStrContains(got, "(7.0s)", "turn line after idle invented a duration")
 
 	got = r.observe(exitedFor("c_1", proto32(0), ""), t0.Add(3*time.Minute))
-	if !strings.Contains(got, "code=0") || !strings.Contains(got, "(lifetime 3m00s)") {
-		t.Errorf("exit line = %q", got)
-	}
+	c.False(!strings.Contains(got, "code=0") || !strings.Contains(got, "(lifetime 3m00s)"), "exit line = %q", got)
 }
 
 // A child whose exit carried no code was signalled; the line must say so
@@ -207,45 +187,37 @@ func TestEventRendererSignalledExit(t *testing.T) {
 	_ = r.observe(spawnedFor("c_1", "impl-auth", ""), t0)
 
 	got := r.observe(exitedFor("c_1", nil, "SIGKILL"), t0.Add(time.Second))
-	if !strings.Contains(got, "signal=SIGKILL") || strings.Contains(got, "code=") {
-		t.Errorf("signalled exit line = %q", got)
-	}
+	assert.NewCollecting(t).False(!strings.Contains(got, "signal=SIGKILL") || strings.Contains(got, "code="), "signalled exit line = %q", got)
 }
 
 // An event for a child the renderer has never met reads [unnamed].
 func TestEventRendererNamesAnUnmetChild(t *testing.T) {
 	r := newEventRenderer()
 	got := r.observe(statusFor("c_stranger", "idle"), time.Now())
-	if !strings.Contains(got, "[unnamed]") || !strings.Contains(got, "c_stranger") {
-		t.Errorf("unknown-child line = %q", got)
-	}
+	assert.NewCollecting(t).False(!strings.Contains(got, "[unnamed]") || !strings.Contains(got, "c_stranger"), "unknown-child line = %q", got)
 }
 
 // A duplicate status event (same state twice) must not render a phantom "x →
 // x" transition, and a turn_end that arrives while the child is already idle
 // carries no duration rather than a bogus one. A zero cost still prints.
 func TestEventRendererKeepsDuplicateStatusAndTurnSane(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
 	t0 := time.Now()
 	_ = r.observe(statusFor("c_1", "idle"), t0)
 
 	got := r.observe(statusFor("c_1", "idle"), t0.Add(time.Second))
-	if strings.Contains(got, "→") {
-		t.Errorf("duplicate status rendered a transition: %q", got)
-	}
+	c.NotStrContains(got, "→", "duplicate status rendered a transition")
 
 	got = r.observe(turnEndForCost("c_1", 0), t0.Add(2*time.Second))
-	if strings.Contains(got, "(") {
-		t.Errorf("turn_end after idle invented a duration: %q", got)
-	}
-	if !strings.Contains(got, "cost=$0.0000") {
-		t.Errorf("zero cost dropped: %q", got)
-	}
+	c.NotStrContains(got, "(", "turn_end after idle invented a duration")
+	c.StrContains(got, "cost=$0.0000", "zero cost dropped")
 }
 
 // The roster seed names children the stream never announced — the reconnect
 // case, where child_spawned is in the past and will not replay.
 func TestEventRendererSeedSuppliesNamesAfterReconnect(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
 	var notes bytes.Buffer
 	client := stubbedRosterSource{listChildren: func(ctx context.Context, req *connect.Request[rafikiv1.ListChildrenRequest]) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
@@ -255,12 +227,8 @@ func TestEventRendererSeedSuppliesNamesAfterReconnect(t *testing.T) {
 	}}
 
 	r.seed(context.Background(), &notes, client, "test")
-	if got := r.observe(statusFor("c_1", "idle"), time.Now()); !strings.Contains(got, "coordinator") {
-		t.Errorf("seeded name missing from line: %q", got)
-	}
-	if notes.Len() != 0 {
-		t.Errorf("successful seed wrote notes: %q", notes.String())
-	}
+	c.StrContains(r.observe(statusFor("c_1", "idle"), time.Now()), "coordinator", "seeded name missing from line")
+	c.Eq(0, notes.Len(), "successful seed wrote notes: %q", notes.String())
 }
 
 // A failed roster fetch is a note, not an error: the stream still works.
@@ -272,14 +240,13 @@ func TestEventRendererSeedFailureIsANote(t *testing.T) {
 	}}
 
 	r.seed(context.Background(), &notes, client, "describe-here")
-	if !strings.Contains(notes.String(), "# roster unavailable at describe-here") {
-		t.Errorf("seed failure not noted: %q", notes.String())
-	}
+	assert.NewCollecting(t).StrContains(notes.String(), "# roster unavailable at describe-here", "seed failure not noted")
 }
 
 // The single-child seed names the one child from GetChild and takes its
 // lifetime from started_at, so a later exit reports a real lifetime.
 func TestEventRendererSeedChildNamesAndTimes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
 	var notes bytes.Buffer
 	born := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
@@ -290,23 +257,16 @@ func TestEventRendererSeedChildNamesAndTimes(t *testing.T) {
 	}}
 
 	r.seedChild(context.Background(), &notes, client, "c_1", "test")
-	if notes.Len() != 0 {
-		t.Fatalf("successful seed wrote notes: %q", notes.String())
-	}
+	c.Require().Eq(0, notes.Len(), "successful seed wrote notes: %q", notes.String())
 	got := r.observe(exitedFor("c_1", proto32(0), ""), born.Add(90*time.Second))
-	if !strings.Contains(got, "solo") || !strings.Contains(got, "(lifetime 1m30s)") {
-		t.Errorf("exit after child seed = %q", got)
-	}
+	c.False(!strings.Contains(got, "solo") || !strings.Contains(got, "(lifetime 1m30s)"), "exit after child seed = %q", got)
 }
 
 func TestEventRendererIgnoresEmptyAndNilEvents(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newEventRenderer()
-	if got := r.observe(nil, time.Now()); got != "" {
-		t.Errorf("nil event rendered %q", got)
-	}
-	if got := r.observe(&rafikiv1.Event{}, time.Now()); got != "" {
-		t.Errorf("child-less event rendered %q", got)
-	}
+	c.Eq("", r.observe(nil, time.Now()), "nil event rendered")
+	c.Eq("", r.observe(&rafikiv1.Event{}, time.Now()), "child-less event rendered")
 }
 
 func TestFmtDur(t *testing.T) {
@@ -320,9 +280,8 @@ func TestFmtDur(t *testing.T) {
 		{62 * time.Minute, "1h02m"},
 	}
 	for _, tc := range cases {
-		if got := fmtDur(tc.d); got != tc.want {
-			t.Errorf("fmtDur(%v) = %q, want %q", tc.d, got, tc.want)
-		}
+		got := fmtDur(tc.d)
+		assert.NewCollecting(t).Eq(tc.want, got, "fmtDur(%v) = %q, want", tc.d, got)
 	}
 }
 

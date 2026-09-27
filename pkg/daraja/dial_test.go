@@ -12,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/daraja"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubUpgrade records what one upgrade request presented.
@@ -34,9 +36,7 @@ func stubDaemon(t *testing.T, cb func(scheme upgradeconn.Scheme, secret, childID
 	_ = os.Remove(path) // clean stale socket from previous test run
 
 	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "listen")
 	t.Cleanup(func() { ln.Close() })
 
 	go func() {
@@ -71,6 +71,7 @@ func stubDaemon(t *testing.T, cb func(scheme upgradeconn.Scheme, secret, childID
 // every reconnect. A terminal refusal ends the loop (so the test can
 // complete), but a retriable refusal would keep it going.
 func TestReconnectPresentsTheCredentialNotTheTicket(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var got []stubUpgrade
 
@@ -93,21 +94,15 @@ func TestReconnectPresentsTheCredentialNotTheTicket(t *testing.T) {
 		SocketPath: srv, ChildID: "c1", Ticket: "tk-1",
 		Handler: http.NewServeMux(),
 	})
-	if !errors.Is(err, daraja.ErrRejected) {
-		t.Fatalf("Connect = %v, want ErrRejected (the second dial is refused)", err)
-	}
+	c.Require().ErrorIs(err, daraja.ErrRejected, "Connect")
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) < 2 {
-		t.Fatalf("saw %d upgrades, want at least 2 (initial + reconnect)", len(got))
-	}
+	c.Require().GreaterOrEqual(2, len(got), "saw")
 	if got[0].Scheme != upgradeconn.SchemeTicket || got[0].Secret != "tk-1" {
 		t.Errorf("first upgrade = %+v, want the ticket scheme carrying tk-1", got[0])
 	}
-	if got[0].ChildID != "c1" {
-		t.Errorf("first upgrade child id = %q, want c1", got[0].ChildID)
-	}
+	c.Eq("c1", got[0].ChildID, "first upgrade child id")
 	if got[1].Scheme != upgradeconn.SchemeBearer || got[1].Secret != "reconnect-me" {
 		t.Errorf("second upgrade = %+v, want the bearer scheme carrying the credential", got[1])
 	}
@@ -117,6 +112,7 @@ func TestReconnectPresentsTheCredentialNotTheTicket(t *testing.T) {
 // request ends Connect immediately rather than retrying — daraja must exit
 // over a definitive answer about its credential.
 func TestTerminalHelloRejectionStopsTheLoop(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	dials := 0
 
@@ -137,15 +133,11 @@ func TestTerminalHelloRejectionStopsTheLoop(t *testing.T) {
 		Handler: http.NewServeMux(),
 	})
 
-	if !errors.Is(err, daraja.ErrRejected) {
-		t.Fatalf("want ErrRejected, got %v", err)
-	}
+	c.Require().ErrorIs(err, daraja.ErrRejected, "want ErrRejected, got")
 	// Should have tried exactly once — no retries on terminal rejection.
 	mu.Lock()
 	defer mu.Unlock()
-	if dials != 1 {
-		t.Errorf("dial count = %d, want 1", dials)
-	}
+	c.Eq(1, dials, "dial count")
 }
 
 // TestConnectionFailureDoesNotHang verifies that when the daemon's socket
@@ -153,6 +145,7 @@ func TestTerminalHelloRejectionStopsTheLoop(t *testing.T) {
 // This is what happens when AdminService.Launch builds a valid argv but
 // the target UDS path doesn't exist (e.g. wrong --connect-socket value).
 func TestConnectionFailureDoesNotHang(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -164,13 +157,9 @@ func TestConnectionFailureDoesNotHang(t *testing.T) {
 	})
 
 	// Should NOT be ErrRejected (no connection was made)
-	if errors.Is(err, daraja.ErrRejected) {
-		t.Fatal("connection failure should not produce ErrRejected")
-	}
+	c.Require().False(errors.Is(err, daraja.ErrRejected), "connection failure should not produce ErrRejected")
 	// Context timeout is expected since the socket doesn't exist.
-	if ctx.Err() == nil {
-		t.Error("expected context deadline exceeded, got nil")
-	}
+	c.Error(ctx.Err(), "expected context deadline exceeded, got nil")
 }
 
 // TestNoTicketOrCredentialReturnsErrorEarly verifies that when daraja has
@@ -178,6 +167,7 @@ func TestConnectionFailureDoesNotHang(t *testing.T) {
 // for one to appear. Without either, daraja cannot authenticate and retries
 // its connection indefinitely (or until context cancellation).
 func TestNoTicketOrCredentialReturnsErrorEarly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	upgrades := 0
 
@@ -198,18 +188,12 @@ func TestNoTicketOrCredentialReturnsErrorEarly(t *testing.T) {
 	})
 
 	// Should get context timeout, not ErrRejected (no auth happened yet).
-	if errors.Is(err, daraja.ErrRejected) {
-		t.Fatal("connection failure should not produce ErrRejected")
-	}
-	if ctx.Err() == nil {
-		t.Error("expected context deadline exceeded, got nil")
-	}
+	c.Require().False(errors.Is(err, daraja.ErrRejected), "connection failure should not produce ErrRejected")
+	c.Error(ctx.Err(), "expected context deadline exceeded, got nil")
 	// The missing-credential error must fire before any upgrade is sent.
 	mu.Lock()
 	defer mu.Unlock()
-	if upgrades > 0 {
-		t.Errorf("upgrade count = %d, want 0 (nothing to authenticate with)", upgrades)
-	}
+	c.LessOrEqual(0, upgrades, "upgrade count")
 }
 
 // TestUpgrade503IsRetriedNotTerminal verifies that a non-auth status on the
@@ -217,6 +201,7 @@ func TestNoTicketOrCredentialReturnsErrorEarly(t *testing.T) {
 // The stub refuses the first dial with 503 and grants the second, so a 503
 // that ended the loop would leave daraja with no credential and no retry.
 func TestUpgrade503IsRetriedNotTerminal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var got []stubUpgrade
 
@@ -243,18 +228,12 @@ func TestUpgrade503IsRetriedNotTerminal(t *testing.T) {
 	})
 	// ErrRejected is EXPECTED here — it comes from the stub's deliberate
 	// terminal refusal on the third dial, after the loop survived the 503.
-	if !errors.Is(err, daraja.ErrRejected) {
-		t.Fatalf("Connect = %v, want ErrRejected from the stub's final refusal", err)
-	}
+	c.Require().ErrorIs(err, daraja.ErrRejected, "Connect")
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) < 3 {
-		t.Fatalf("saw %d upgrades, want at least 3 (503 refusal, grant, terminal refusal)", len(got))
-	}
-	if got[1].Scheme != upgradeconn.SchemeTicket {
-		t.Errorf("second upgrade scheme = %q, want the ticket retried after the 503", got[1].Scheme)
-	}
+	c.Require().GreaterOrEqual(3, len(got), "saw")
+	c.Eq(upgradeconn.SchemeTicket, got[1].Scheme, "second upgrade scheme")
 	if got[2].Scheme != upgradeconn.SchemeBearer || got[2].Secret != "reconnect-me" {
 		t.Errorf("third upgrade = %+v, want the credential from the granted 101", got[2])
 	}

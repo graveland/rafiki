@@ -20,6 +20,8 @@ import (
 
 	batch "go.graveland.dev/rafiki/pkg/batch"
 	"go.graveland.dev/rafiki/pkg/batch/batchtest"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // This file is the EXTERNAL test package (batch_test) because it runs the
@@ -356,6 +358,7 @@ func (h *harness) waitInState(t *testing.T, st batch.State, n int, d time.Durati
 // process died between MarkSubmitting and MarkSubmitted.
 func (h *harness) seedSubmitting(t *testing.T, customID, model string) batch.Row {
 	t.Helper()
+	c := assert.NewAborting(t)
 	row, err := h.ms.Insert(context.Background(), batch.Row{
 		CustomID:  customID,
 		Model:     model,
@@ -364,12 +367,8 @@ func (h *harness) seedSubmitting(t *testing.T, customID, model string) batch.Row
 		CreatedAt: h.clock.Now(),
 		UpdatedAt: h.clock.Now(),
 	})
-	if err != nil {
-		t.Fatalf("seed Insert: %v", err)
-	}
-	if err := h.ms.MarkSubmitting(context.Background(), []int64{row.ID}); err != nil {
-		t.Fatalf("seed MarkSubmitting: %v", err)
-	}
+	c.NoError(err, "seed Insert")
+	c.NoError(h.ms.MarkSubmitting(context.Background(), []int64{row.ID}), "seed MarkSubmitting")
 	return row
 }
 
@@ -377,9 +376,7 @@ func (h *harness) seedSubmitting(t *testing.T, customID, model string) batch.Row
 func (h *harness) seedSubmitted(t *testing.T, customID, model, batchID string) batch.Row {
 	t.Helper()
 	row := h.seedSubmitting(t, customID, model)
-	if err := h.ms.MarkSubmitted(context.Background(), []int64{row.ID}, batchID); err != nil {
-		t.Fatalf("seed MarkSubmitted: %v", err)
-	}
+	assert.NewAborting(t).NoError(h.ms.MarkSubmitted(context.Background(), []int64{row.ID}, batchID), "seed MarkSubmitted")
 	return row
 }
 
@@ -412,6 +409,7 @@ func TestMemStoreConformance(t *testing.T) {
 }
 
 func TestBatchCoalescesPerModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	const (
 		modelA = "vendor/a:batch"
@@ -425,19 +423,13 @@ func TestBatchCoalescesPerModel(t *testing.T) {
 	h.waitInState(t, batch.StateQueued, 3, 5*time.Second)
 	h.start()
 	submits := h.waitSubmits(t, 2, 5*time.Second)
-	if len(submits) != 2 {
-		t.Fatalf("submits = %d, want 2 (one per model)", len(submits))
-	}
+	c.Require().Len(submits, 2, "submits = %d, want 2 (one per model)", len(submits))
 	perModel := map[string]int{}
 	for _, s := range submits {
-		if s.endpoint != "/v1/messages" {
-			t.Errorf("submit endpoint = %q, want %q", s.endpoint, "/v1/messages")
-		}
+		c.Eq("/v1/messages", s.endpoint, "submit endpoint")
 		perModel[s.model] += len(s.requests)
 	}
-	if perModel[modelA] != 2 || perModel[modelB] != 1 {
-		t.Fatalf("requests per model = %v, want %s:2 %s:1", perModel, modelA, modelB)
-	}
+	c.Require().False(perModel[modelA] != 2 || perModel[modelB] != 1, "requests per model = %v, want %s:2 %s:1", perModel, modelA, modelB)
 }
 
 func TestBatchSubmittingBeforePost(t *testing.T) {
@@ -462,9 +454,7 @@ func TestBatchSubmittingBeforePost(t *testing.T) {
 				t.Errorf("live(%s): ok=%v err=%v", req.CustomID, ok, err)
 				continue
 			}
-			if row.State != batch.StateSubmitting {
-				t.Errorf("row %s state = %q at POST time, want submitting", req.CustomID, row.State)
-			}
+			assert.NewCollecting(t).Eq(batch.StateSubmitting, row.State, "row %s state = %q at POST time, want submitting", req.CustomID, row.State)
 		}
 	}
 	h.mu.Unlock()
@@ -473,6 +463,7 @@ func TestBatchSubmittingBeforePost(t *testing.T) {
 }
 
 func TestBatchBodyShape(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	const model = "vendor/m:batch"
 	_ = h.parkParams("conv-1", model, testParamsWithExtras(model))
@@ -487,35 +478,24 @@ func TestBatchBodyShape(t *testing.T) {
 			Body     json.RawMessage `json:"body"`
 		} `json:"requests"`
 	}
-	if err := json.Unmarshal(submits[0].raw, &body); err != nil {
-		t.Fatalf("decode submit body: %v", err)
-	}
-	if body.Endpoint != "/v1/messages" {
-		t.Errorf("endpoint = %q, want /v1/messages", body.Endpoint)
-	}
-	if body.Model != model {
-		t.Errorf("batch model = %q, want the :batch id %q", body.Model, model)
-	}
-	if len(body.Requests) != 1 || body.Requests[0].CustomID != "conv-1" {
-		t.Fatalf("requests = %+v", body.Requests)
-	}
+	c.Require().NoError(json.Unmarshal(submits[0].raw, &body), "decode submit body")
+	c.Eq("/v1/messages", body.Endpoint, "endpoint")
+	c.Eq(model, body.Model, "batch model")
+	c.Require().False(len(body.Requests) != 1 || body.Requests[0].CustomID != "conv-1", "requests = %+v", body.Requests)
 	var callBody map[string]any
-	if err := json.Unmarshal(body.Requests[0].Body, &callBody); err != nil {
-		t.Fatalf("decode call body: %v", err)
-	}
+	c.Require().NoError(json.Unmarshal(body.Requests[0].Body, &callBody), "decode call body")
 	for _, banned := range []string{"model", "stream", "provider"} {
-		if _, ok := callBody[banned]; ok {
-			t.Errorf("call body contains %q", banned)
-		}
+		_, ok := callBody[banned]
+		c.False(ok, "call body contains %q", banned)
 	}
 	for _, kept := range []string{"max_tokens", "messages"} {
-		if _, ok := callBody[kept]; !ok {
-			t.Errorf("call body lost %q", kept)
-		}
+		_, ok := callBody[kept]
+		c.True(ok, "call body lost %q", kept)
 	}
 }
 
 func TestBatchResultsOutOfOrder(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	ch1 := h.park("conv-1", "vendor/m:batch")
 	ch2 := h.park("conv-2", "vendor/m:batch")
@@ -530,15 +510,12 @@ func TestBatchResultsOutOfOrder(t *testing.T) {
 	)
 	res1 := h.await(t, ch1, 5*time.Second)
 	res2 := h.await(t, ch2, 5*time.Second)
-	if res1.err != nil || res1.msg == nil || res1.msg.ID != "msg_1" {
-		t.Errorf("conv-1: msg=%+v err=%v", res1.msg, res1.err)
-	}
-	if res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2" {
-		t.Errorf("conv-2: msg=%+v err=%v", res2.msg, res2.err)
-	}
+	c.False(res1.err != nil || res1.msg == nil || res1.msg.ID != "msg_1", "conv-1: msg=%+v err=%v", res1.msg, res1.err)
+	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v", res2.msg, res2.err)
 }
 
 func TestBatchWholeBatchFailureFansOut(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	ch1 := h.park("conv-1", "vendor/m:batch")
 	ch2 := h.park("conv-2", "vendor/m:batch")
@@ -549,16 +526,13 @@ func TestBatchWholeBatchFailureFansOut(t *testing.T) {
 	for i, ch := range []<-chan parkRes{ch1, ch2} {
 		res := h.await(t, ch, 5*time.Second)
 		var be *batch.Error
-		if !errors.As(res.err, &be) {
-			t.Fatalf("waiter %d: err %v (%T) is not *batch.Error", i, res.err, res.err)
-		}
-		if !strings.Contains(res.err.Error(), "upstream exploded") {
-			t.Errorf("waiter %d: error = %q, want the batch error message", i, res.err.Error())
-		}
+		c.Require().True(errors.As(res.err, &be), "waiter %d: err %v (%T) is not *batch.Error", i, res.err, res.err)
+		c.StrContains(res.err.Error(), "upstream exploded", "waiter %d: error = %q, want the batch error message", i, res.err.Error())
 	}
 }
 
 func TestBatchPerRequestErrorIsolated(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	ch1 := h.park("conv-1", "vendor/m:batch")
 	ch2 := h.park("conv-2", "vendor/m:batch")
@@ -572,15 +546,12 @@ func TestBatchPerRequestErrorIsolated(t *testing.T) {
 	res1 := h.await(t, ch1, 5*time.Second)
 	res2 := h.await(t, ch2, 5*time.Second)
 	var be *batch.Error
-	if !errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "quota exceeded") {
-		t.Errorf("conv-1: err = %v, want *batch.Error with the item's error", res1.err)
-	}
-	if res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2" {
-		t.Errorf("conv-2: msg=%+v err=%v, want the successful result", res2.msg, res2.err)
-	}
+	c.False(!errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "quota exceeded"), "conv-1: err = %v, want *batch.Error with the item's error", res1.err)
+	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v, want the successful result", res2.msg, res2.err)
 }
 
 func TestBatchAdoptSubmitted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	h.seedSubmitted(t, "conv-1", "vendor/m:batch", "batch-9")
 	h.completeBatch("batch-9",
@@ -589,34 +560,24 @@ func TestBatchAdoptSubmitted(t *testing.T) {
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.start()
 	res := h.await(t, ch, 5*time.Second)
-	if res.err != nil || res.msg == nil || res.msg.ID != "msg_9" {
-		t.Fatalf("park: msg=%+v err=%v", res.msg, res.err)
-	}
-	if got := h.submitCount(); got != 0 {
-		t.Errorf("submits = %d, want 0 (adoption must not POST)", got)
-	}
+	c.Require().False(res.err != nil || res.msg == nil || res.msg.ID != "msg_9", "park: msg=%+v err=%v", res.msg, res.err)
+	c.Eq(0, h.submitCount(), "submits")
 }
 
 func TestBatchAdoptCompleted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	row := h.seedSubmitted(t, "conv-1", "vendor/m:batch", "batch-9")
-	if err := h.ms.Complete(context.Background(), row.ID, msgBody("msg_9")); err != nil {
-		t.Fatalf("seed Complete: %v", err)
-	}
+	c.Require().NoError(h.ms.Complete(context.Background(), row.ID, msgBody("msg_9")), "seed Complete")
 	h.start()
 	msg, err := h.b.Park(h.ctx, "conv-1", "vendor/m:batch", testParams("vendor/m:batch"))
-	if err != nil {
-		t.Fatalf("Park: %v", err)
-	}
-	if msg == nil || msg.ID != "msg_9" {
-		t.Errorf("Park returned %+v, want the stored message", msg)
-	}
-	if got := h.submitCount(); got != 0 {
-		t.Errorf("submits = %d, want 0 (completed rows return without a POST)", got)
-	}
+	c.Require().NoError(err, "Park")
+	c.False(msg == nil || msg.ID != "msg_9", "Park returned %+v, want the stored message", msg)
+	c.Eq(0, h.submitCount(), "submits")
 }
 
 func TestBatchFailedRowRetries(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	row, err := h.ms.Insert(context.Background(), batch.Row{
 		CustomID:  "conv-1",
@@ -626,40 +587,27 @@ func TestBatchFailedRowRetries(t *testing.T) {
 		CreatedAt: h.clock.Now(),
 		UpdatedAt: h.clock.Now(),
 	})
-	if err != nil {
-		t.Fatalf("seed Insert: %v", err)
-	}
-	if err := h.ms.MarkSubmitting(context.Background(), []int64{row.ID}); err != nil {
-		t.Fatalf("seed MarkSubmitting: %v", err)
-	}
-	if err := h.ms.Fail(context.Background(), row.ID, "boom"); err != nil {
-		t.Fatalf("seed Fail: %v", err)
-	}
+	c.Require().NoError(err, "seed Insert")
+	c.Require().NoError(h.ms.MarkSubmitting(context.Background(), []int64{row.ID}), "seed MarkSubmitting")
+	c.Require().NoError(h.ms.Fail(context.Background(), row.ID, "boom"), "seed Fail")
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.start()
 	submits := h.waitSubmits(t, 1, 5*time.Second)
-	if got := h.submitCount(); got != 1 {
-		t.Errorf("submits = %d, want exactly one POST for the fresh row", got)
-	}
+	c.Eq(1, h.submitCount(), "submits")
 	h.waitInState(t, batch.StateSubmitted, 1, 5*time.Second)
 	failed, _ := h.ms.InState(context.Background(), batch.StateFailed)
-	if len(failed) != 0 {
-		t.Errorf("InState(failed) = %+v, want empty (old row tombstoned)", failed)
-	}
+	c.Empty(failed, "InState(failed)")
 	submitted, _ := h.ms.InState(context.Background(), batch.StateSubmitted)
-	if len(submitted) != 1 || submitted[0].CustomID != "conv-1" || submitted[0].ID == row.ID {
-		t.Errorf("InState(submitted) = %+v, want one fresh row for conv-1", submitted)
-	}
+	c.False(len(submitted) != 1 || submitted[0].CustomID != "conv-1" || submitted[0].ID == row.ID, "InState(submitted) = %+v, want one fresh row for conv-1", submitted)
 	h.completeBatch(submits[0].batchID,
 		batch.BatchResult{CustomID: "conv-1", Response: &batch.BatchResponse{StatusCode: 200, Body: msgBody("msg_new")}},
 	)
 	res := h.await(t, ch, 5*time.Second)
-	if res.err != nil || res.msg == nil || res.msg.ID != "msg_new" {
-		t.Errorf("park: msg=%+v err=%v", res.msg, res.err)
-	}
+	c.False(res.err != nil || res.msg == nil || res.msg.ID != "msg_new", "park: msg=%+v err=%v", res.msg, res.err)
 }
 
 func TestBatchRecoverySubmittingMatched(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	h.seedSubmitting(t, "conv-1", "vendor/m:batch")
 	h.setListJSON([]batch.Batch{{
@@ -675,19 +623,14 @@ func TestBatchRecoverySubmittingMatched(t *testing.T) {
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.start()
 	res := h.await(t, ch, 5*time.Second)
-	if res.err != nil || res.msg == nil || res.msg.ID != "msg_7" {
-		t.Fatalf("park: msg=%+v err=%v", res.msg, res.err)
-	}
+	c.Require().False(res.err != nil || res.msg == nil || res.msg.ID != "msg_7", "park: msg=%+v err=%v", res.msg, res.err)
 	rows, _ := h.ms.InState(context.Background(), batch.StateCompleted)
-	if len(rows) != 1 || rows[0].ProviderBatchID != "batch-7" {
-		t.Errorf("InState(completed) = %+v, want the row adopted onto batch-7", rows)
-	}
-	if got := h.submitCount(); got != 0 {
-		t.Errorf("submits = %d, want 0 (recovery must not resubmit)", got)
-	}
+	c.False(len(rows) != 1 || rows[0].ProviderBatchID != "batch-7", "InState(completed) = %+v, want the row adopted onto batch-7", rows)
+	c.Eq(0, h.submitCount(), "submits")
 }
 
 func TestBatchRecoverySubmittingNeverLanded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	h.seedSubmitting(t, "conv-1", "vendor/m:batch")
 	// Past the grace window with an empty listing: the POST never landed.
@@ -696,17 +639,14 @@ func TestBatchRecoverySubmittingNeverLanded(t *testing.T) {
 	h.start()
 	submits := h.waitSubmits(t, 1, 5*time.Second)
 	rows := h.waitInState(t, batch.StateSubmitted, 1, 5*time.Second)
-	if len(rows) != 1 || rows[0].ProviderBatchID != submits[0].batchID {
-		t.Errorf("InState(submitted) = %+v, want the requeued row submitted once", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].ProviderBatchID != submits[0].batchID, "InState(submitted) = %+v, want the requeued row submitted once", rows)
 	// One POST only: the requeue must not have resubmitted a phantom batch.
 	time.Sleep(60 * time.Millisecond)
-	if got := h.submitCount(); got != 1 {
-		t.Errorf("submits = %d after several windows, want 1", got)
-	}
+	c.Eq(1, h.submitCount(), "submits")
 }
 
 func TestBatchRecoverySubmittingWaitsOnNonTerminal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	h.seedSubmitting(t, "conv-1", "vendor/m:batch")
 	h.setListJSON([]batch.Batch{{
@@ -723,15 +663,9 @@ func TestBatchRecoverySubmittingWaitsOnNonTerminal(t *testing.T) {
 	h.start()
 	time.Sleep(80 * time.Millisecond) // several poll+recovery cycles
 	rows, _ := h.ms.InState(context.Background(), batch.StateSubmitting)
-	if len(rows) != 1 || rows[0].CustomID != "conv-1" {
-		t.Errorf("InState(submitting) = %+v, want the row still waiting", rows)
-	}
-	if got := h.listCount(); got < 1 {
-		t.Errorf("list calls = %d, want the sweep to have listed", got)
-	}
-	if got := h.submitCount(); got != 0 {
-		t.Errorf("submits = %d, want 0", got)
-	}
+	c.False(len(rows) != 1 || rows[0].CustomID != "conv-1", "InState(submitting) = %+v, want the row still waiting", rows)
+	c.GreaterOrEqual(1, h.listCount(), "list calls")
+	c.Eq(0, h.submitCount(), "submits")
 }
 
 func TestBatchPost429Requeues(t *testing.T) {
@@ -748,12 +682,11 @@ func TestBatchPost429Requeues(t *testing.T) {
 	h.start()
 	submits := h.waitSubmits(t, 2, 5*time.Second)
 	rows := h.waitInState(t, batch.StateSubmitted, 1, 5*time.Second)
-	if len(rows) != 1 || rows[0].ProviderBatchID != submits[1].batchID {
-		t.Errorf("InState(submitted) = %+v, want the row on the second POST's batch", rows)
-	}
+	assert.NewCollecting(t).False(len(rows) != 1 || rows[0].ProviderBatchID != submits[1].batchID, "InState(submitted) = %+v, want the row on the second POST's batch", rows)
 }
 
 func TestBatchPost4xxFailsRows(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	ch1 := h.park("conv-1", "vendor/m:batch")
 	ch2 := h.park("conv-2", "vendor/m:batch")
@@ -766,21 +699,16 @@ func TestBatchPost4xxFailsRows(t *testing.T) {
 	res2 := h.await(t, ch2, 5*time.Second)
 	for i, res := range []parkRes{res1, res2} {
 		var be *batch.Error
-		if !errors.As(res.err, &be) || !strings.Contains(res.err.Error(), "bad custom_id") {
-			t.Errorf("waiter %d: err = %v, want *batch.Error with the response body text", i, res.err)
-		}
+		c.False(!errors.As(res.err, &be) || !strings.Contains(res.err.Error(), "bad custom_id"), "waiter %d: err = %v, want *batch.Error with the response body text", i, res.err)
 	}
 	time.Sleep(60 * time.Millisecond)
-	if got := h.submitCount(); got != 1 {
-		t.Errorf("submits = %d, want 1 (a 422 must not be retried)", got)
-	}
+	c.Eq(1, h.submitCount(), "submits")
 	failed, _ := h.ms.InState(context.Background(), batch.StateFailed)
-	if len(failed) != 2 {
-		t.Errorf("InState(failed) = %+v, want both rows failed", failed)
-	}
+	c.Len(failed, 2, "InState(failed)")
 }
 
 func TestBatchPost5xxLeavesSubmitting(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	_ = h.park("conv-1", "vendor/m:batch")
 	_ = h.park("conv-2", "vendor/m:batch")
@@ -791,16 +719,13 @@ func TestBatchPost5xxLeavesSubmitting(t *testing.T) {
 	h.start()
 	h.waitSubmits(t, 1, 5*time.Second)
 	time.Sleep(60 * time.Millisecond) // several windows
-	if got := h.submitCount(); got != 1 {
-		t.Errorf("submits = %d, want 1 (a 5xx leaves the rows submitting)", got)
-	}
+	c.Eq(1, h.submitCount(), "submits")
 	rows, _ := h.ms.InState(context.Background(), batch.StateSubmitting)
-	if len(rows) != 2 {
-		t.Errorf("InState(submitting) = %+v, want both rows left for recovery", rows)
-	}
+	c.Len(rows, 2, "InState(submitting)")
 }
 
 func TestBatchCtxCancelKeepsRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := newHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -808,16 +733,13 @@ func TestBatchCtxCancelKeepsRow(t *testing.T) {
 	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
 	cancel()
 	res := h.await(t, ch, 5*time.Second)
-	if !errors.Is(res.err, context.Canceled) {
-		t.Fatalf("Park err = %v, want context.Canceled", res.err)
-	}
+	c.ErrorIs(res.err, context.Canceled, "Park err")
 	rows, _ := h.ms.InState(context.Background(), batch.StateQueued)
-	if len(rows) != 1 || rows[0].CustomID != "conv-1" {
-		t.Fatalf("InState(queued) = %+v, want the row kept for a resumed child", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].CustomID != "conv-1", "InState(queued) = %+v, want the row kept for a resumed child", rows)
 }
 
 func TestBatchErrorIsPlain(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := newHarness(t)
 	ch := h.park("conv-1", "vendor/m:batch")
 	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
@@ -826,19 +748,14 @@ func TestBatchErrorIsPlain(t *testing.T) {
 	h.failBatch(submits[0].batchID, "failed", "upstream exploded")
 	res := h.await(t, ch, 5*time.Second)
 	var be *batch.Error
-	if !errors.As(res.err, &be) {
-		t.Fatalf("delivered error %v (%T) does not satisfy errors.As(*batch.Error)", res.err, res.err)
-	}
+	c.True(errors.As(res.err, &be), "delivered error %v (%T) does not satisfy errors.As(*batch.Error)", res.err, res.err)
 	var ae *anthropic.Error
-	if errors.As(res.err, &ae) {
-		t.Fatalf("delivered error masquerades as *anthropic.Error: %v", res.err)
-	}
-	if errors.Is(res.err, context.DeadlineExceeded) || errors.Is(res.err, context.Canceled) {
-		t.Fatalf("delivered error wraps a context error: %v", res.err)
-	}
+	c.False(errors.As(res.err, &ae), "delivered error masquerades as *anthropic.Error: %v", res.err)
+	c.False(errors.Is(res.err, context.DeadlineExceeded) || errors.Is(res.err, context.Canceled), "delivered error wraps a context error: %v", res.err)
 }
 
 func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	invalid := []string{
 		"",                      // empty
@@ -853,19 +770,11 @@ func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
 		// Park returns before any store interaction, so the call is
 		// synchronous and must fail fast with a plain *batch.Error.
 		msg, err := h.b.Park(h.ctx, id, "vendor/m:batch", testParams("vendor/m:batch"))
-		if err == nil {
-			t.Fatalf("Park(%q): expected a rejection, got msg=%v", id, msg)
-		}
+		c.Require().Error(err, "Park(%q): expected a rejection, got msg=%v", id, msg)
 		var be *batch.Error
-		if !errors.As(err, &be) {
-			t.Errorf("Park(%q): err %v (%T) is not *batch.Error", id, err, err)
-		}
-		if !strings.Contains(err.Error(), "custom_id") {
-			t.Errorf("Park(%q): err = %q, want it to name custom_id", id, err.Error())
-		}
-		if msg != nil {
-			t.Errorf("Park(%q): returned a message with the error", id)
-		}
+		c.True(errors.As(err, &be), "Park(%q): err %v (%T) is not *batch.Error", id, err, err)
+		c.StrContains(err.Error(), "custom_id", "Park(%q): err = %q, want it to name custom_id", id, err.Error())
+		c.Nil(msg, "Park(%q): returned a message with the error", id)
 	}
 	// Nothing durable, nothing sent.
 	for _, st := range []batch.State{
@@ -873,22 +782,17 @@ func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
 		batch.StateCompleted, batch.StateFailed,
 	} {
 		rows, _ := h.ms.InState(context.Background(), st)
-		if len(rows) != 0 {
-			t.Errorf("InState(%q) = %+v, want none for rejected ids", st, rows)
-		}
+		c.Empty(rows, "InState(%q) = %+v, want none for rejected ids", st, rows)
 	}
-	if got := h.submitCount(); got != 0 {
-		t.Errorf("submits = %d, want 0", got)
-	}
-	if got := h.listCount(); got != 0 {
-		t.Errorf("list calls = %d, want 0", got)
-	}
+	c.Eq(0, h.submitCount(), "submits")
+	c.Eq(0, h.listCount(), "list calls")
 	// Boundary: exactly 64 valid characters IS accepted and lands a row.
 	_ = h.park(strings.Repeat("a", 64), "vendor/m:batch")
 	h.waitInState(t, batch.StateQueued, 1, 5*time.Second)
 }
 
 func TestBatchContradictoryResultFails(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := newHarness(t)
 	ch1 := h.park("conv-1", "vendor/m:batch")
 	ch2 := h.park("conv-2", "vendor/m:batch")
@@ -912,21 +816,11 @@ func TestBatchContradictoryResultFails(t *testing.T) {
 	res1 := h.await(t, ch1, 5*time.Second)
 	res2 := h.await(t, ch2, 5*time.Second)
 	var be *batch.Error
-	if !errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "upstream said error") {
-		t.Errorf("conv-1: err = %v, want *batch.Error with the item's error", res1.err)
-	}
-	if res1.msg != nil {
-		t.Errorf("conv-1: completed despite the contradictory error item: %+v", res1.msg)
-	}
-	if res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2" {
-		t.Errorf("conv-2: msg=%+v err=%v, want the clean sibling unaffected", res2.msg, res2.err)
-	}
+	c.False(!errors.As(res1.err, &be) || !strings.Contains(res1.err.Error(), "upstream said error"), "conv-1: err = %v, want *batch.Error with the item's error", res1.err)
+	c.Nil(res1.msg, "conv-1: completed despite the contradictory error item")
+	c.False(res2.err != nil || res2.msg == nil || res2.msg.ID != "msg_2", "conv-2: msg=%+v err=%v, want the clean sibling unaffected", res2.msg, res2.err)
 	rows, _ := h.ms.InState(context.Background(), batch.StateFailed)
-	if len(rows) != 1 || rows[0].CustomID != "conv-1" {
-		t.Errorf("InState(failed) = %+v, want conv-1 failed", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].CustomID != "conv-1", "InState(failed) = %+v, want conv-1 failed", rows)
 	completed, _ := h.ms.InState(context.Background(), batch.StateCompleted)
-	if len(completed) != 1 || completed[0].CustomID != "conv-2" {
-		t.Errorf("InState(completed) = %+v, want conv-2 completed", completed)
-	}
+	c.False(len(completed) != 1 || completed[0].CustomID != "conv-2", "InState(completed) = %+v, want conv-2 completed", completed)
 }

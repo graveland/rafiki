@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +9,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // spawnerFixture builds a Controller with a hand-populated childstore, which
@@ -43,20 +44,16 @@ func spawnerFixture(t *testing.T) *Controller {
 }
 
 func TestSpawnerListReturnsOnlyDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := newControllerSpawner(spawnerFixture(t), "c_mine")
 	kids, err := sp.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kids) != 1 || kids[0].ChildID != "c_grandchild" {
-		t.Fatalf("want only c_grandchild, got %+v", kids)
-	}
-	if kids[0].Depth != 1 {
-		t.Errorf("want depth 1, got %d", kids[0].Depth)
-	}
+	c.Require().NoError(err)
+	c.Require().False(len(kids) != 1 || kids[0].ChildID != "c_grandchild", "want only c_grandchild, got %+v", kids)
+	c.Eq(1, kids[0].Depth, "want depth 1, got")
 }
 
 func TestSpawnerRefusesNonDescendantOnEveryVerb(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := newControllerSpawner(spawnerFixture(t), "c_mine")
 	ctx := context.Background()
 
@@ -67,29 +64,20 @@ func TestSpawnerRefusesNonDescendantOnEveryVerb(t *testing.T) {
 		if _, err := sp.View(ctx, target, 0); err == nil {
 			t.Errorf("View(%s) must refuse", target)
 		}
-		if err := sp.Send(ctx, target, "hi"); err == nil {
-			t.Errorf("Send(%s) must refuse", target)
-		}
-		if err := sp.Kill(ctx, target); err == nil {
-			t.Errorf("Kill(%s) must refuse", target)
-		}
+		c.Error(sp.Send(ctx, target, "hi"), "Send(%s) must refuse", target)
+		c.Error(sp.Kill(ctx, target), "Kill(%s) must refuse", target)
 	}
 }
 
 func TestSpawnerRefusalNamesTheTarget(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := newControllerSpawner(spawnerFixture(t), "c_mine")
 	err := sp.Send(context.Background(), "c_stranger", "hi")
-	if err == nil {
-		t.Fatal("want a refusal")
-	}
+	c.Require().Error(err, "want a refusal")
 	// An error message is a prompt that is only paid when it is needed
 	// (prompting.md). It must say which id was rejected and why.
-	if !strings.Contains(err.Error(), "c_stranger") {
-		t.Errorf("refusal must name the target; got %v", err)
-	}
-	if !strings.Contains(err.Error(), "descendant") {
-		t.Errorf("refusal must say why; got %v", err)
-	}
+	c.StrContains(err.Error(), "c_stranger", "refusal must name the target; got %v", err)
+	c.StrContains(err.Error(), "descendant", "refusal must say why; got %v", err)
 }
 
 // The phase's ledger invariant, tested where it lives. A spawn that the
@@ -98,6 +86,7 @@ func TestSpawnerRefusalNamesTheTarget(t *testing.T) {
 // spawn, so it holds for whatever refuses it: bad cwd today, a depth or cost
 // ceiling once phase 05 lands.
 func TestRefusedSpawnAssignsNothing(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := spawnerFixture(t)
 	store := tasks.NewMemoryStore()
 	c.tasks = store
@@ -117,32 +106,21 @@ func TestRefusedSpawnAssignsNothing(t *testing.T) {
 	// disk, so its cwd is never stat-checked here; pin Kind explicitly so
 	// this test keeps exercising the refusal it names.
 	_, err := sp.Spawn(ctx, tools.SpawnSpec{Kind: protocol.KindClaude, Prompt: "x", Cwd: "/definitely/not/a/directory", Task: "1"})
-	if err == nil {
-		t.Fatal("want a refusal")
-	}
+	ck.Error(err, "want a refusal")
 
 	rows, err := store.List(ctx, tasks.ListFilter{ConversationID: "conv-mine"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(rows))
-	}
-	if rows[0].Assignee != "" {
-		t.Fatalf("a refused spawn left task 1 assigned to %q", rows[0].Assignee)
-	}
+	ck.NoError(err)
+	ck.Len(rows, 1, "want 1 row, got %d", len(rows))
+	ck.Eq("", rows[0].Assignee, "a refused spawn left task 1 assigned to")
 }
 
 func TestSpawnerSetBudgetAllowsADirectChild(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := spawnerFixture(t)
 	sp := newControllerSpawner(c, "c_root") // c_mine is c_root's direct child
-	if err := sp.SetBudget(context.Background(), "c_mine", 25.00); err != nil {
-		t.Fatalf("SetBudget on a direct child must succeed: %v", err)
-	}
+	ck.NoError(sp.SetBudget(context.Background(), "c_mine", 25.00), "SetBudget on a direct child must succeed")
 	snap, _ := c.st.Get("c_mine")
-	if snap.MaxCost != 25.00 {
-		t.Fatalf("c_mine.MaxCost = %v, want 25.00", snap.MaxCost)
-	}
+	ck.Eq(25.00, snap.MaxCost, "c_mine.MaxCost")
 }
 
 // IMPORTANT: spawnerFixture's tree is c_root -> c_mine -> c_grandchild, plus
@@ -154,16 +132,12 @@ func TestSpawnerSetBudgetRefusesAGrandchildAndAStrangerAndSelf(t *testing.T) {
 	c := spawnerFixture(t)
 	sp := newControllerSpawner(c, "c_root")
 	for _, target := range []string{"c_grandchild", "c_stranger", "c_root", "c_nonexistent"} {
-		if err := sp.SetBudget(context.Background(), target, 5.00); err == nil {
-			t.Errorf("SetBudget(%s) must refuse — none of these are c_root's DIRECT child", target)
-		}
+		assert.NewCollecting(t).Error(sp.SetBudget(context.Background(), target, 5.00), "SetBudget(%s) must refuse — none of these are c_root's DIRECT child", target)
 	}
 }
 
 func TestSpawnerSetBudgetRequiresAnAgentID(t *testing.T) {
 	c := spawnerFixture(t)
 	sp := newControllerSpawner(c, "c_mine")
-	if err := sp.SetBudget(context.Background(), "", 5.00); err == nil {
-		t.Fatal("an empty agent id must be refused")
-	}
+	assert.NewAborting(t).Error(sp.SetBudget(context.Background(), "", 5.00), "an empty agent id must be refused")
 }

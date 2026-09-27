@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/inbox"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestPullRetiresAndReturnsPending pins Queue.Pull's contract for the Receive
@@ -15,6 +17,7 @@ import (
 // pull sees none of them again. A deliver fn that would consume the same rows
 // is deliberately NOT configured, so the pull is the only consumer.
 func TestPullRetiresAndReturnsPending(t *testing.T) {
+	c := assert.NewAborting(t)
 	q := inbox.NewQueue(inbox.QueueConfig{Store: inbox.NewMemory()})
 	ctx := context.Background()
 
@@ -24,19 +27,11 @@ func TestPullRetiresAndReturnsPending(t *testing.T) {
 		}
 	}
 	rows, err := q.Pull(ctx, "c_w")
-	if err != nil {
-		t.Fatalf("pull: %v", err)
-	}
-	if len(rows) != 2 || rows[0].Text != "first" || rows[1].Text != "second" {
-		t.Fatalf("pull = %+v", rows)
-	}
+	c.NoError(err, "pull")
+	c.False(len(rows) != 2 || rows[0].Text != "first" || rows[1].Text != "second", "pull = %+v", rows)
 	again, err := q.Pull(ctx, "c_w")
-	if err != nil {
-		t.Fatalf("second pull: %v", err)
-	}
-	if len(again) != 0 {
-		t.Fatalf("second pull = %+v, want none", again)
-	}
+	c.NoError(err, "second pull")
+	c.Empty(again, "second pull")
 }
 
 // TestPullOnAnEmptyChildIsANoOp, and a queue with no store answers nothing
@@ -44,9 +39,7 @@ func TestPullRetiresAndReturnsPending(t *testing.T) {
 func TestPullOnAnEmptyChildIsANoOp(t *testing.T) {
 	q := inbox.NewQueue(inbox.QueueConfig{Store: inbox.NewMemory()})
 	rows, err := q.Pull(context.Background(), "c_nobody")
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("pull on unknown child = %+v / %v, want empty", rows, err)
-	}
+	assert.NewAborting(t).False(err != nil || len(rows) != 0, "pull on unknown child = %+v / %v, want empty", rows, err)
 
 	var bare inbox.Queue
 	if rows, err := bare.Pull(context.Background(), "c_w"); err != nil || len(rows) != 0 {

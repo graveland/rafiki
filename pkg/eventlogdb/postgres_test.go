@@ -17,22 +17,21 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventlogdb"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	c.NoError(err, "connect")
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(context.Background(), pool), "migrate")
 	return pool
 }
 
@@ -63,6 +62,7 @@ func TestPostgresConformance(t *testing.T) {
 // before per-child serialization the losers retried immediately against the
 // rest of the storm, exhausted maxAppendAttempts, and DROPPED the event.
 func TestAppendManyConcurrentPublishersOneChild(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	ctx := context.Background()
 	child := "c_" + ulid.Make().String()
@@ -93,33 +93,23 @@ func TestAppendManyConcurrentPublishersOneChild(t *testing.T) {
 	wg.Wait()
 
 	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("publisher %d: %v", i, err)
-		}
+		c.NoError(err, "publisher %d", i)
 	}
 
 	got := make([]int32, 0, total)
 	for _, o := range ords {
 		got = append(got, o...)
 	}
-	if len(got) != total {
-		t.Fatalf("collected %d ordinals, want %d", len(got), total)
-	}
+	c.Len(got, total, "collected %d ordinals, want", len(got))
 	sort.Slice(got, func(a, b int) bool { return got[a] < got[b] })
 	for want := range int32(total) {
-		if got[want] != want {
-			t.Fatalf("sorted ordinal[%d] = %d — the sequence has a gap or a duplicate", want, got[want])
-		}
+		c.Eq(want, got[want], "sorted ordinal[")
 	}
 
 	var count int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != total {
-		t.Fatalf("row count = %d, want %d — %d events were dropped", count, total, total-count)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count), "count")
+	c.Eq(total, count, "row count = %d, want %d — %d events were dropped", count, total, total-count)
 }
 
 // TestConcurrentAppendDoesNotDuplicateAnOrdinal is the test the shared
@@ -128,6 +118,7 @@ func TestAppendManyConcurrentPublishersOneChild(t *testing.T) {
 // Postgres. Two explicit transactions make the race deterministic where a
 // sleep would not.
 func TestConcurrentAppendDoesNotDuplicateAnOrdinal(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	ctx := context.Background()
 	child := "c_" + ulid.Make().String()
@@ -153,9 +144,7 @@ func TestConcurrentAppendDoesNotDuplicateAnOrdinal(t *testing.T) {
 
 	seen := map[int32]bool{}
 	for i := range n {
-		if errs[i] != nil {
-			t.Fatalf("append %d: %v", i, errs[i])
-		}
+		c.NoError(errs[i], "append %d", i)
 		if seen[ords[i]] {
 			t.Fatalf("ordinal %d issued twice", ords[i])
 		}
@@ -164,16 +153,10 @@ func TestConcurrentAppendDoesNotDuplicateAnOrdinal(t *testing.T) {
 
 	// Gap-free: seeded 0 plus n more means 0..n with nothing missing.
 	var count int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != n+1 {
-		t.Fatalf("row count = %d, want %d", count, n+1)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.event_log WHERE child_id = $1`, child).Scan(&count), "count")
+	c.Eq(n+1, count, "row count")
 	for want := range int32(n + 1) {
-		if !seen[want] && want != 0 {
-			t.Fatalf("ordinal %d missing; the sequence has a gap", want)
-		}
+		c.False(!seen[want] && want != 0, "ordinal %d missing; the sequence has a gap", want)
 	}
 }

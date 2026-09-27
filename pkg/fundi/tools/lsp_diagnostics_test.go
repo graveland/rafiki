@@ -3,8 +3,9 @@ package tools
 import (
 	"context"
 	"os/exec"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeLSPClient implements LSPClient for testing.
@@ -69,6 +70,7 @@ func (f *fakeLSPClient) Restart(context.Context, string) error { return nil }
 // agree with the implementation: path is required, and no omit/"." mode is
 // advertised.
 func TestLSPDiagnostics_SchemaRequiresPath(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bp := LSPDiagnosticsBlueprint{}
 
 	schema := bp.InputSchema()
@@ -78,41 +80,32 @@ func TestLSPDiagnostics_SchemaRequiresPath(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("schema.Required = %v, want it to include %q", schema.Required, "path")
-	}
+	c.Require().True(found, "schema.Required = %v, want it to include %q", schema.Required, "path")
 
 	desc := bp.Description()
 	for _, promise := range []string{"omit", "\".\"", "all open files", "all currently-open files"} {
-		if strings.Contains(desc, promise) {
-			t.Errorf("description still promises an omit/all-open-files mode (%q), which resolveToolPath and DidOpen both reject: %s", promise, desc)
-		}
+		c.NotStrContains(desc, promise, "description still promises an omit/all-open-files mode (")
 	}
 }
 
 func TestLSPDiagnostics_Materialize_DeclinesWhenNoLSP(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bp := LSPDiagnosticsBlueprint{}
 	tool, err := bp.Materialize(ToolOpts{LSP: nil, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool != nil {
-		t.Error("expected nil tool when LSP is nil")
-	}
+	c.Require().NoError(err, "Materialize")
+	c.Nil(tool, "expected nil tool when LSP is nil")
 }
 
 func TestLSPDiagnostics_Materialize_SucceedsWhenLSP(t *testing.T) {
+	c := assert.NewAborting(t)
 	bp := LSPDiagnosticsBlueprint{}
 	tool, err := bp.Materialize(ToolOpts{LSP: &fakeLSPClient{}, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool == nil {
-		t.Fatal("expected non-nil tool when LSP is set")
-	}
+	c.NoError(err, "Materialize")
+	c.NotNil(tool, "expected non-nil tool when LSP is set")
 }
 
 func TestLSPDiagnostics_Execute_ReturnsDiagnostics(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPClient{
 		diags: map[string][]LSPDiagnostic{
 			"/tmp/main.go": {
@@ -123,33 +116,22 @@ func TestLSPDiagnostics_Execute_ReturnsDiagnostics(t *testing.T) {
 	}
 
 	tool, err := LSPDiagnosticsBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(map[string]any{"path": "main.go"})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 
 	text := result.Text
 	t.Logf("output:\n%s", text)
 
-	if !strings.Contains(text, "undefined: foo") {
-		t.Error("expected output to contain diagnostic message")
-	}
-	if !strings.Contains(text, "unused variable") {
-		t.Error("expected output to contain second diagnostic")
-	}
-	if !strings.Contains(text, "error") {
-		t.Error("expected output to contain severity 'error'")
-	}
-	if !strings.Contains(text, "warning") {
-		t.Error("expected output to contain severity 'warning'")
-	}
+	c.StrContains(text, "undefined: foo", "expected output to contain diagnostic message")
+	c.StrContains(text, "unused variable", "expected output to contain second diagnostic")
+	c.StrContains(text, "error", "expected output to contain severity 'error'")
+	c.StrContains(text, "warning", "expected output to contain severity 'warning'")
 }
 
 func TestLSPDiagnostics_Execute_NoDiagnostics(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPClient{
 		diags: map[string][]LSPDiagnostic{
 			"/tmp/clean.go": {},
@@ -157,21 +139,15 @@ func TestLSPDiagnostics_Execute_NoDiagnostics(t *testing.T) {
 	}
 
 	tool, err := LSPDiagnosticsBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(map[string]any{"path": "clean.go"})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 
 	text := result.Text
 	t.Logf("output:\n%s", text)
 
-	if !strings.Contains(text, "no diagnostics") {
-		t.Error("expected 'no diagnostics' message")
-	}
+	c.StrContains(text, "no diagnostics", "expected 'no diagnostics' message")
 }
 
 // TestLSPDiagnostics_Integration_Gopls tests against real gopls.

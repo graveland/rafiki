@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestBuildClaudeArgv_Defaults(t *testing.T) {
@@ -24,9 +25,7 @@ func TestBuildClaudeArgv_Defaults(t *testing.T) {
 		"--dangerously-skip-permissions",
 		"--disallowedTools", "AskUserQuestion",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("argv = %v\nwant %v", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "argv")
 }
 
 // Order matches pkg/claudeargv.Build's canonical order — buildClaudeArgv is
@@ -62,9 +61,7 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 		"--disallowedTools", "AskUserQuestion",
 		"--foo",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("argv = %v\nwant %v", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "argv")
 }
 
 // TestBuildClaudeArgvCarriesMCPConfig pins the proxied child's argv against
@@ -75,6 +72,7 @@ func TestBuildClaudeArgv_ModelResumeAndAppend(t *testing.T) {
 // would come out doubled).
 func TestBuildClaudeArgvCarriesMCPConfig(t *testing.T) {
 	t.Setenv(paths.URL, "")
+	c := assert.NewCollecting(t)
 	ctl := &Controller{proxyURL: "http://localhost:8035", proxyToken: "tok"}
 	req := protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "glm-5.2"}
 	_, vals := ctl.proxyChildEnv(req, "c_abc")
@@ -83,29 +81,21 @@ func TestBuildClaudeArgvCarriesMCPConfig(t *testing.T) {
 	for _, a := range argv {
 		if strings.HasPrefix(a, "--mcp-config=") {
 			count++
-			if !json.Valid([]byte(strings.TrimPrefix(a, "--mcp-config="))) {
-				t.Errorf("--mcp-config value is not valid JSON: %q", a)
-			}
+			c.True(json.Valid([]byte(strings.TrimPrefix(a, "--mcp-config="))), "--mcp-config value is not valid JSON: %q", a)
 		}
 	}
-	if count != 1 {
-		t.Fatalf("argv = %v, want exactly one --mcp-config= element, got %d", argv, count)
-	}
+	c.Require().Eq(1, count, "argv = %v, want exactly one --mcp-config= element, got", argv)
 }
 
 func TestResolveClaudeBinary_Override(t *testing.T) {
 	got, err := resolveClaudeBinary("/custom/claude")
-	if err != nil || got != "/custom/claude" {
-		t.Fatalf("got %q err %v, want /custom/claude", got, err)
-	}
+	assert.NewAborting(t).False(err != nil || got != "/custom/claude", "got %q err %v, want /custom/claude", got, err)
 }
 
 func TestResolveClaudeBinary_EnvVar(t *testing.T) {
 	t.Setenv("CLAUDE_BINARY", "/env/claude")
 	got, err := resolveClaudeBinary("")
-	if err != nil || got != "/env/claude" {
-		t.Fatalf("got %q err %v, want /env/claude", got, err)
-	}
+	assert.NewAborting(t).False(err != nil || got != "/env/claude", "got %q err %v, want /env/claude", got, err)
 }
 
 // nopRunner is a minimal child.Runner stand-in — only its non-nilness
@@ -133,15 +123,12 @@ func (nopRunner) Interrupt() error    { return nil }
 func TestResolveClaudeBinaryIfNeeded_SkipsLookupWhenDarajaRouted(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // guarantees "claude" cannot be found on PATH
 	t.Setenv("CLAUDE_BINARY", "")
+	c := assert.NewCollecting(t)
 
 	got, err := resolveClaudeBinaryIfNeeded(
 		protocol.SpawnRequest{Kind: protocol.KindClaude}, nopRunner{})
-	if err != nil {
-		t.Fatalf("resolveClaudeBinaryIfNeeded with a daraja-backed runner: %v", err)
-	}
-	if got != "" {
-		t.Errorf("bin = %q, want empty (unused once a Runner is provided)", got)
-	}
+	c.Require().NoError(err, "resolveClaudeBinaryIfNeeded with a daraja-backed runner")
+	c.Eq("", got, "bin")
 }
 
 // TestResolveClaudeBinaryIfNeeded_ResolvesForLocalSubprocessFallback is the
@@ -152,17 +139,13 @@ func TestResolveClaudeBinaryIfNeeded_SkipsLookupWhenDarajaRouted(t *testing.T) {
 func TestResolveClaudeBinaryIfNeeded_ResolvesForLocalSubprocessFallback(t *testing.T) {
 	got, err := resolveClaudeBinaryIfNeeded(
 		protocol.SpawnRequest{Kind: protocol.KindClaude, PiBinary: "/custom/claude"}, nil)
-	if err != nil || got != "/custom/claude" {
-		t.Fatalf("got %q err %v, want /custom/claude", got, err)
-	}
+	assert.NewAborting(t).False(err != nil || got != "/custom/claude", "got %q err %v, want /custom/claude", got, err)
 }
 
 // A non-claude kind never needs the claude binary at all, runner or not.
 func TestResolveClaudeBinaryIfNeeded_NoopForOtherKinds(t *testing.T) {
 	got, err := resolveClaudeBinaryIfNeeded(protocol.SpawnRequest{Kind: protocol.KindFundi}, nil)
-	if err != nil || got != "" {
-		t.Fatalf("got %q err %v, want empty/nil for kind=fundi", got, err)
-	}
+	assert.NewAborting(t).False(err != nil || got != "", "got %q err %v, want empty/nil for kind=fundi", got, err)
 }
 
 // TestResolveSpawnPlan_ClaudeNeverFailsOnMissingBinary pins the actual bug:
@@ -173,15 +156,11 @@ func TestResolveClaudeBinaryIfNeeded_NoopForOtherKinds(t *testing.T) {
 func TestResolveSpawnPlan_ClaudeNeverFailsOnMissingBinary(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("CLAUDE_BINARY", "")
+	c := assert.NewCollecting(t)
 
 	bin, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c1", t.TempDir(), proxyenv.Values{})
-	if err != nil {
-		t.Fatalf("resolveSpawnPlan(claude) with no claude on PATH: %v", err)
-	}
-	if bin != "" {
-		t.Errorf("bin = %q, want empty — resolution is deferred", bin)
-	}
-	if _, ok := prov.(child.ClaudeProvider); !ok {
-		t.Errorf("provider = %T, want child.ClaudeProvider", prov)
-	}
+	c.Require().NoError(err, "resolveSpawnPlan(claude) with no claude on PATH")
+	c.Eq("", bin, "bin")
+	_, ok := prov.(child.ClaudeProvider)
+	c.True(ok, "provider = %T, want child.ClaudeProvider", prov)
 }

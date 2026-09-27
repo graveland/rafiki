@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestInlineSkillBodyServesTheEnabledRow pins the C1 seam end to end: a
@@ -23,6 +25,7 @@ import (
 // spawned with lists that row, so a body from the disabled core row would be
 // a different skill than the one the model asked for.
 func TestInlineSkillBodyServesTheEnabledRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	pool := openTestPool(t)
 	c := newTestController(t)
 	c.skillStore = skillsdb.NewPostgresStore(pool)
@@ -42,9 +45,7 @@ func TestInlineSkillBodyServesTheEnabledRow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed core: %v", err)
 	}
-	if err := c.skillStore.SetEnabled(ctx, "rafiki", name, false); err != nil {
-		t.Fatalf("disable core: %v", err)
-	}
+	ck.Require().NoError(c.skillStore.SetEnabled(ctx, "rafiki", name, false), "disable core")
 	if _, err := c.skillStore.Upsert(ctx, skills.Record{
 		Namespace: "rafiki", Name: name,
 		Description: "ours", Body: "operator body", Source: "manual", Enabled: true,
@@ -57,9 +58,7 @@ func TestInlineSkillBodyServesTheEnabledRow(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}, "c_skill_seam", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
 
 	// The spawn-time inventory carries the enabled row. The shared test DB
 	// also holds the embedded core corpus, so the assertion is by name, not
@@ -68,24 +67,14 @@ func TestInlineSkillBodyServesTheEnabledRow(t *testing.T) {
 	for _, m := range ro.InlineSkills {
 		if m.Name == name {
 			seen++
-			if m.Namespace != "rafiki" || m.Description != "ours" {
-				t.Errorf("inventory entry for %q = %+v, want the enabled override row", name, m)
-			}
+			ck.False(m.Namespace != "rafiki" || m.Description != "ours", "inventory entry for %q = %+v, want the enabled override row", name, m)
 		}
 	}
-	if seen != 1 {
-		t.Fatalf("inventory carries %d entries for %q, want exactly the enabled one", seen, name)
-	}
-	if ro.InlineSkillBody == nil {
-		t.Fatal("InlineSkillBody was not wired")
-	}
+	ck.Require().Eq(1, seen, "inventory carries %d entries for %q, want exactly the enabled one", seen, name)
+	ck.Require().NotNil(ro.InlineSkillBody, "InlineSkillBody was not wired")
 	body, err := ro.InlineSkillBody(ctx, "rafiki", name)
-	if err != nil {
-		t.Fatalf("inline body: %v", err)
-	}
-	if body != "operator body" {
-		t.Fatalf("inline body = %q, want the ENABLED override row's body", body)
-	}
+	ck.Require().NoError(err, "inline body")
+	ck.Require().Eq("operator body", body, "inline body")
 }
 
 // fakeSkillStore records what UpsertSkill's adapter sends and answers Get
@@ -135,6 +124,7 @@ func TestUpsertSkillStampsVersionWhenOverridingACoreRow(t *testing.T) {
 		{"a client's claim is overridden", "0.0.1-made-up"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
 			f := &fakeSkillStore{getRow: skills.Record{
 				Namespace: "rafiki", Name: "model-selection",
 				Source: skills.CoreSource, Enabled: false,
@@ -145,15 +135,9 @@ func TestUpsertSkillStampsVersionWhenOverridingACoreRow(t *testing.T) {
 				Namespace: "rafiki", Name: "model-selection",
 				Body: "ours", Source: "manual", ShadowedCoreVersion: tc.claimed,
 			})
-			if err != nil {
-				t.Fatalf("upsert: %v", err)
-			}
-			if f.sawUpsert == nil {
-				t.Fatal("store saw no upsert")
-			}
-			if got := f.sawUpsert.ShadowedCoreVersion; got != "v9.9.9-test" {
-				t.Fatalf("shadowed_core_version = %q, want the daemon's version stamped", got)
-			}
+			ck.NoError(err, "upsert")
+			ck.NotNil(f.sawUpsert, "store saw no upsert")
+			ck.Eq("v9.9.9-test", f.sawUpsert.ShadowedCoreVersion, "shadowed_core_version")
 		})
 	}
 }
@@ -173,18 +157,15 @@ func TestUpsertSkillStampsNothingForOrdinarySkills(t *testing.T) {
 		{"store unreadable", skills.Record{}, errors.New("db is gone")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
 			f := &fakeSkillStore{getRow: tc.getRow, getErr: tc.getErr}
 			c := connectSkills{st: f, version: "v9.9.9-test"}
 
 			out, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
 				Namespace: "rafiki", Name: "fresh", Body: "b", Source: "manual",
 			})
-			if err != nil {
-				t.Fatalf("upsert: %v", err)
-			}
-			if got := out.ShadowedCoreVersion; got != "" {
-				t.Fatalf("shadowed_core_version = %q, want empty", got)
-			}
+			ck.NoError(err, "upsert")
+			ck.Eq("", out.ShadowedCoreVersion, "shadowed_core_version")
 		})
 	}
 }
@@ -199,7 +180,5 @@ func TestUpsertSkillTranslatesSourceConflict(t *testing.T) {
 	_, err := c.UpsertSkill(context.Background(), connectapi.SkillRow{
 		Namespace: "rafiki", Name: "taken", Body: "b", Source: "manual",
 	})
-	if !errors.Is(err, connectapi.ErrSkillSourceConflict) {
-		t.Fatalf("got %v, want connectapi.ErrSkillSourceConflict", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, connectapi.ErrSkillSourceConflict, "got")
 }

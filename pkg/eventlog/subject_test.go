@@ -7,6 +7,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeLineage is a map-backed Lineage. depth[ancestor][candidate] = hops.
@@ -71,9 +73,7 @@ func TestSubjectMatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := eventlog.Filter{Subject: tc.subj, Tier: eventlog.TierAll}
-			if got := f.Match(tc.ev, ln); got != tc.want {
-				t.Errorf("Match = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, f.Match(tc.ev, ln), "Match")
 		})
 	}
 }
@@ -82,33 +82,27 @@ func TestSubjectMatch(t *testing.T) {
 // not exist when the subscription started is in scope the moment lineage says
 // it is. This is the property stream.go:32 gets wrong today.
 func TestSubtreeAdmitsAChildThatAppearsLater(t *testing.T) {
+	c := assert.NewAborting(t)
 	ln := fakeLineage{depth: map[string]map[string]int{"c_root": {}}, labels: map[string]map[string]string{}}
 	f := eventlog.Filter{
 		Subject: eventlog.Subject{Scope: eventlog.ScopeSubtree, ChildID: "c_root"},
 		Tier:    eventlog.TierAll,
 	}
 	ev := statusEvent("c_new", "spawning")
-	if f.Match(ev, ln) {
-		t.Fatal("c_new matched before lineage knew about it")
-	}
+	c.False(f.Match(ev, ln), "c_new matched before lineage knew about it")
 	ln.depth["c_root"]["c_new"] = 1
-	if !f.Match(ev, ln) {
-		t.Fatal("c_new did not match after lineage learned about it; the subject was resolved at construction")
-	}
+	c.True(f.Match(ev, ln), "c_new did not match after lineage learned about it; the subject was resolved at construction")
 }
 
 func TestTypeFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ln := fakeLineage{}
 	f := eventlog.Filter{
 		Subject: eventlog.Subject{Scope: eventlog.ScopeAll},
 		Tier:    eventlog.TierAll,
 		Types:   []string{"agent_status"},
 	}
-	if !f.Match(statusEvent("c_1", "idle"), ln) {
-		t.Error("agent_status excluded by a filter that names it")
-	}
+	c.True(f.Match(statusEvent("c_1", "idle"), ln), "agent_status excluded by a filter that names it")
 	turn := &rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_TurnStart{TurnStart: &rafikiv1.TurnStart{}}}
-	if f.Match(turn, ln) {
-		t.Error("turn_start admitted by a filter that names only agent_status")
-	}
+	c.False(f.Match(turn, ln), "turn_start admitted by a filter that names only agent_status")
 }

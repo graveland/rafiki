@@ -1,11 +1,12 @@
 package main
 
 import (
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // daraja is a SUBCOMMAND of rafiki, not a third binary: this repo ships exactly
@@ -21,6 +22,7 @@ func TestDarajaIsRegisteredOnRoot(t *testing.T) {
 }
 
 func TestDarajaServeRequiresConnectAndBinary(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	cmd := newDarajaCmd()
 	var serve *cobra.Command
 	for _, c := range cmd.Commands() {
@@ -29,18 +31,12 @@ func TestDarajaServeRequiresConnectAndBinary(t *testing.T) {
 			break
 		}
 	}
-	if serve == nil {
-		t.Fatal("darja has no `serve` subcommand")
-	}
+	ck.Require().NotNil(serve, "darja has no `serve` subcommand")
 	for _, flag := range []string{"connect-socket", "binary", "child-id", "append-system-prompt"} {
-		if serve.Flags().Lookup(flag) == nil {
-			t.Errorf("daraja serve is missing the --%s flag", flag)
-		}
+		ck.NotNil(serve.Flags().Lookup(flag), "daraja serve is missing the --%s flag", flag)
 	}
 	// The old --socket flag must be gone.
-	if serve.Flags().Lookup("socket") != nil {
-		t.Error("daraja serve still has the deprecated --socket flag")
-	}
+	ck.Nil(serve.Flags().Lookup("socket"), "daraja serve still has the deprecated --socket flag")
 }
 
 // The executor's Launch appends a bare "--" before the spec's ExtraArgs (see
@@ -51,12 +47,9 @@ func TestDarajaServeRequiresConnectAndBinary(t *testing.T) {
 // prevent. pflag (v1.0.9) drops the separator itself, so Flags().Args() is
 // exactly the positionals.
 func TestDarajaServeDropsTheSeparatorAndKeepsThePositionals(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newDarajaServeCmd()
-	if err := cmd.ParseFlags([]string{"--", "--foo", "bar"}); err != nil {
-		t.Fatalf("ParseFlags: %v", err)
-	}
+	c.NoError(cmd.ParseFlags([]string{"--", "--foo", "bar"}), "ParseFlags")
 	got := cmd.Flags().Args()
-	if !slices.Equal(got, []string{"--foo", "bar"}) {
-		t.Fatalf("Flags().Args() = %v, want exactly [--foo bar]", got)
-	}
+	c.EqDiff([]string{"--foo", "bar"}, got, "Flags().Args()")
 }

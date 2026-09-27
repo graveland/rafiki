@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // servePoolOnTCP serves pool.UpgradeHandler on a fresh 127.0.0.1 listener and
@@ -23,9 +24,7 @@ import (
 func servePoolOnTCP(t *testing.T, pool *Pool) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "listen")
 	srv := &http.Server{Handler: pool.UpgradeHandler()}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { srv.Close() })
@@ -37,9 +36,7 @@ func servePoolOnTCP(t *testing.T, pool *Pool) string {
 func dialUpgrade(t *testing.T, addr string, hdr http.Header) (*upgradeconn.Conn, http.Header, error) {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "dial")
 	t.Cleanup(func() { conn.Close() })
 	return upgradeconn.Dial(conn, upgradeconn.Daraja, addr, hdr)
 }
@@ -117,21 +114,16 @@ func serveTestDaraja(t *testing.T, upConn *upgradeconn.Conn) {
 // Relay stream; idle connections closed immediately. This test proves
 // the connection stays up long enough for these checks.
 func TestPoolConnectionStaysUp(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	tpk, err := reg.MintTicket("c1")
-	if err != nil {
-		t.Fatalf("mint ticket: %v", err)
-	}
+	c.NoError(err, "mint ticket")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
-	if err != nil {
-		t.Fatalf("upgrade dial: %v", err)
-	}
-	if cred := resp.Get(upgradeconn.HeaderCredential); cred == "" {
-		t.Fatal("expected a credential on the 101 response")
-	}
+	c.NoError(err, "upgrade dial")
+	c.NotEq("", resp.Get(upgradeconn.HeaderCredential), "expected a credential on the 101 response")
 
 	serveTestDaraja(t, upConn)
 	waitLive(t, pool, "c1")
@@ -145,21 +137,16 @@ func TestPoolConnectionStaysUp(t *testing.T) {
 // TestTicketAdmitsAndShowsInLive verifies that a daraja connecting with a valid
 // ticket gets admitted and appears in Live().
 func TestTicketAdmitsAndShowsInLive(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	tk, err := reg.MintTicket("c1")
-	if err != nil {
-		t.Fatalf("mint ticket: %v", err)
-	}
+	c.NoError(err, "mint ticket")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tk))
-	if err != nil {
-		t.Fatalf("upgrade dial: %v", err)
-	}
-	if cred := resp.Get(upgradeconn.HeaderCredential); cred == "" {
-		t.Fatal("expected a credential on the 101 response for first dial")
-	}
+	c.NoError(err, "upgrade dial")
+	c.NotEq("", resp.Get(upgradeconn.HeaderCredential), "expected a credential on the 101 response for first dial")
 
 	serveTestDaraja(t, upConn)
 	waitLive(t, pool, "c1")
@@ -167,135 +154,101 @@ func TestTicketAdmitsAndShowsInLive(t *testing.T) {
 
 // Unknown ticket is refused terminally: 401 on the upgrade request, no 101.
 func TestUnknownTicketIsRefusedTerminally(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	_, _, err := dialUpgrade(t, addr, ticketHeader("c999", "bogus-ticket"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
-	}
-	if ref.Status != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ref.Status)
-	}
-	if !strings.Contains(ref.Reason, "ticket is unknown") {
-		t.Errorf("reason = %q, want it to name the unknown ticket", ref.Reason)
-	}
+	c.Require().True(errors.As(err, &ref), "expected *upgradeconn.Refused, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "status")
+	c.StrContains(ref.Reason, "ticket is unknown", "reason")
 }
 
 // Wrong child credential is refused: a credential bound to c1 must not admit
 // a daraja claiming to be c2.
 func TestWrongChildCredentialIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	cred, err := reg.IssueCredential("c1")
-	if err != nil {
-		t.Fatalf("issue credential: %v", err)
-	}
+	c.Require().NoError(err, "issue credential")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	_, _, err = dialUpgrade(t, addr, bearerHeader("c2", cred))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
-	}
-	if ref.Status != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ref.Status)
-	}
-	if !strings.Contains(ref.Reason, "credential does not match this child") {
-		t.Errorf("reason = %q, want the child mismatch", ref.Reason)
-	}
+	c.Require().True(errors.As(err, &ref), "expected *upgradeconn.Refused, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "status")
+	c.StrContains(ref.Reason, "credential does not match this child", "reason")
 }
 
 // Rotating the credential on every upgrade is what makes a displaced (older)
 // connection unable to reclaim the child: each admission mints a fresh
 // credential, so a credential presented twice only works once.
 func TestUpgradeRotatedCredentialInvalidatesThePrevious(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	tk, err := reg.MintTicket("c1")
-	if err != nil {
-		t.Fatalf("mint ticket: %v", err)
-	}
+	c.Require().NoError(err, "mint ticket")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	// Ticket admits and mints cred1.
 	upConn1, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tk))
-	if err != nil {
-		t.Fatalf("ticket upgrade: %v", err)
-	}
+	c.Require().NoError(err, "ticket upgrade")
 	cred1 := resp.Get(upgradeconn.HeaderCredential)
-	if cred1 == "" {
-		t.Fatal("no credential on the ticket 101")
-	}
+	c.Require().NotEq("", cred1, "no credential on the ticket 101")
 	serveTestDaraja(t, upConn1) // keep conn 1 in place
 
 	// Bearer cred1 admits and mints cred2, invalidating cred1.
 	upConn2, resp2, err := dialUpgrade(t, addr, bearerHeader("c1", cred1))
-	if err != nil {
-		t.Fatalf("bearer upgrade with cred1: %v", err)
-	}
+	c.Require().NoError(err, "bearer upgrade with cred1")
 	cred2 := resp2.Get(upgradeconn.HeaderCredential)
-	if cred2 == "" || cred2 == cred1 {
-		t.Fatalf("credential not rotated: cred1=%q cred2=%q", cred1, cred2)
-	}
+	c.Require().False(cred2 == "" || cred2 == cred1, "credential not rotated: cred1=%q cred2=%q", cred1, cred2)
 	serveTestDaraja(t, upConn2)
 
 	// Bearer cred1 again: refused, because cred2 replaced it.
 	_, _, err = dialUpgrade(t, addr, bearerHeader("c1", cred1))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("expected *upgradeconn.Refused for the spent credential, got %v", err)
-	}
-	if ref.Status != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ref.Status)
-	}
+	c.Require().True(errors.As(err, &ref), "expected *upgradeconn.Refused for the spent credential, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "status")
 }
 
 // A Bearer credential without its child id cannot be checked — the registry
 // keys credentials by child — so the upgrade is refused 401.
 func TestUpgradeBearerWithoutChildIdIs401(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	cred, err := reg.IssueCredential("c1")
-	if err != nil {
-		t.Fatalf("issue credential: %v", err)
-	}
+	c.Require().NoError(err, "issue credential")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	_, _, err = dialUpgrade(t, addr, bearerHeader("", cred))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
-	}
-	if ref.Status != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ref.Status)
-	}
+	c.Require().True(errors.As(err, &ref), "expected *upgradeconn.Refused, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "status")
 }
 
 // Enroll is the executor's enrollment scheme; daraja never enrolls. The
 // upgrade must be refused 401 with a reason that names the valid schemes.
 func TestUpgradeEnrollSchemeIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	_, _, err := dialUpgrade(t, addr, schemeHeader(upgradeconn.SchemeEnroll, "enroll-token", "c1"))
 	var ref *upgradeconn.Refused
-	if !errors.As(err, &ref) {
-		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
-	}
-	if ref.Status != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", ref.Status)
-	}
-	if !strings.Contains(ref.Reason, "daraja does not enroll") {
-		t.Errorf("reason = %q, want the no-enroll notice", ref.Reason)
-	}
+	c.Require().True(errors.As(err, &ref), "expected *upgradeconn.Refused, got %v", err)
+	c.Eq(http.StatusUnauthorized, ref.Status, "status")
+	c.StrContains(ref.Reason, "daraja does not enroll", "reason")
 }
 
 // Evict removes a connection immediately.
 func TestEvictRemovesConnection(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	_ = New(reg) // pool created but we test removeLive directly
 
@@ -306,19 +259,16 @@ func TestEvictRemovesConnection(t *testing.T) {
 	p.conns["c1"] = lc
 
 	evicted := p.removeLive("c1", lc)
-	if !evicted {
-		t.Fatal("removeLive should have succeeded")
-	}
+	c.Require().True(evicted, "removeLive should have succeeded")
 	_, ok := p.conns["c1"]
-	if ok {
-		t.Error("connection still in map after eviction")
-	}
+	c.False(ok, "connection still in map after eviction")
 }
 
 // The disconnect callback is what sets the unreachable label, so it must fire
 // exactly once — and must NOT fire when a newer connection displaced this one,
 // or a reconnect would mark the child unreachable moments after it came back.
 func TestDisplacedConnectionDoesNotReportDisconnect(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 
@@ -335,27 +285,19 @@ func TestDisplacedConnectionDoesNotReportDisconnect(t *testing.T) {
 	pool.installLive("c1", newConn)
 
 	// Verify newConn is live
-	if pool.conns["c1"] != newConn {
-		t.Fatal("expected newConn to be live after displacement")
-	}
+	c.Require().Eq(newConn, pool.conns["c1"], "expected newConn to be live after displacement")
 
 	// The old connection's handleConn now returns. It calls removeLive for itself.
 	// Since dispConn != current mapping, this must return false — preventing
 	// OnDisconnect from firing on the displaced connection.
 	gone := pool.removeLive("c1", dispConn)
-	if gone {
-		t.Error("removeLive returned true for a displaced connection — OnDisconnect would fire erroneously")
-	}
+	c.False(gone, "removeLive returned true for a displaced connection — OnDisconnect would fire erroneously")
 
 	// The new connection also exits normally. This SHOULD succeed.
 	gone = pool.removeLive("c1", newConn)
-	if !gone {
-		t.Error("removeLive returned false for the actual live connection")
-	}
+	c.True(gone, "removeLive returned false for the actual live connection")
 	_, ok := pool.conns["c1"]
-	if ok {
-		t.Error("entry still present after removing live connection")
-	}
+	c.False(ok, "entry still present after removing live connection")
 }
 
 // ─── Relay holder tests ────────────────────────────────────────────────────────
@@ -417,9 +359,7 @@ func TestRelayHolderBroadcastToMultipleSubscribers(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("subscriber 2 did not receive")
 	}
-	if got1.Response().GetStdout() == nil || got2.Response().GetStdout() == nil {
-		t.Error("both subscribers should have received the stdout response")
-	}
+	assert.NewCollecting(t).False(got1.Response().GetStdout() == nil || got2.Response().GetStdout() == nil, "both subscribers should have received the stdout response")
 }
 
 // TestRelayHolderClosedRejectsNewSubscribers verifies that after shutdown,
@@ -436,9 +376,7 @@ func TestRelayHolderClosedRejectsNewSubscribers(t *testing.T) {
 	holder.mu.Lock()
 	n := len(holder.fanOut)
 	holder.mu.Unlock()
-	if n != 0 {
-		t.Errorf("fanOut should be empty after shutdown, got %d entries", n)
-	}
+	assert.NewCollecting(t).Eq(0, n, "fanOut should be empty after shutdown, got")
 }
 
 // TestPoolEvictCleansUpRelayHolder verifies Evict tears down the relay holder too.
@@ -456,7 +394,6 @@ func TestPoolEvictCleansUpRelayHolder(t *testing.T) {
 	if _, ok := pool.conns["c1"]; ok {
 		t.Error("conns entry not removed by Evict")
 	}
-	if _, ok := pool.relayHolders["c1"]; ok {
-		t.Error("relayHolders entry not removed by Evict")
-	}
+	_, ok := pool.relayHolders["c1"]
+	assert.NewCollecting(t).False(ok, "relayHolders entry not removed by Evict")
 }

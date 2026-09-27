@@ -1,8 +1,13 @@
 package executors
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestSelectorSyntax(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	cases := []struct {
 		sel    string
 		labels map[string]string
@@ -22,20 +27,16 @@ func TestSelectorSyntax(t *testing.T) {
 	}
 	for _, c := range cases {
 		s, err := ParseSelector(c.sel)
-		if err != nil {
-			t.Fatalf("ParseSelector(%q): %v", c.sel, err)
-		}
-		if got := s.Matches(c.labels); got != c.want {
-			t.Errorf("%q against %v = %v, want %v", c.sel, c.labels, got, c.want)
-		}
+		ck.Require().NoError(err, "ParseSelector(%q)", c.sel)
+		got := s.Matches(c.labels)
+		ck.Eq(c.want, got, "%q against %v = %v, want", c.sel, c.labels, got)
 	}
 }
 
 func TestParseSelectorRejectsGarbage(t *testing.T) {
 	for _, s := range []string{"os=", "=linux", "os in linux", "os in (", "os!!=x", ","} {
-		if _, err := ParseSelector(s); err == nil {
-			t.Errorf("ParseSelector(%q) must fail — a selector that silently parses to 'match everything' is a confinement hole", s)
-		}
+		_, err := ParseSelector(s)
+		assert.NewCollecting(t).Error(err, "ParseSelector(%q) must fail — a selector that silently parses to 'match everything' is a confinement hole", s)
 	}
 }
 
@@ -59,9 +60,7 @@ func TestNarrowIsIntersectionNotImplication(t *testing.T) {
 		}
 	}
 	got := Narrow(parentSet, child)
-	if len(got) != 1 || got[0].ID != "b" {
-		t.Fatalf("want only b, got %+v", got)
-	}
+	assert.NewAborting(t).False(len(got) != 1 || got[0].ID != "b", "want only b, got %+v", got)
 }
 
 // The property that makes annotations safe: a child can never reach an
@@ -69,7 +68,5 @@ func TestNarrowIsIntersectionNotImplication(t *testing.T) {
 func TestChildCannotEscapeItsParentsSet(t *testing.T) {
 	parentSet := []Executor{{ID: "b", Labels: map[string]string{"env": "home"}}}
 	child, _ := ParseSelector("env=work") // asking for something outside the set
-	if got := Narrow(parentSet, child); len(got) != 0 {
-		t.Fatalf("a child reached outside its parent's set: %+v", got)
-	}
+	assert.NewAborting(t).Empty(Narrow(parentSet, child), "a child reached outside its parent's set")
 }

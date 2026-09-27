@@ -16,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 const (
@@ -63,23 +65,18 @@ func (stubDaraja) Health(context.Context, *connect.Request[darajapb.HealthReques
 // machine, so a net.Pipe-based test cannot exercise concurrent-read or
 // stream-lifetime bugs on the hijacked connection the way a real hijack can.
 func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	tpk, err := reg.MintTicket("c1")
-	if err != nil {
-		t.Fatalf("mint ticket: %v", err)
-	}
+	c.NoError(err, "mint ticket")
 	pool := New(reg)
 	addr := servePoolOnTCP(t, pool)
 
 	// The upgrade request itself carries the ticket; the fresh reconnect
 	// credential rides back on the 101.
 	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
-	if err != nil {
-		t.Fatalf("upgrade dial: %v", err)
-	}
-	if resp.Get(upgradeconn.HeaderCredential) == "" {
-		t.Fatal("no credential on the 101 response")
-	}
+	c.NoError(err, "upgrade dial")
+	c.NotEq("", resp.Get(upgradeconn.HeaderCredential), "no credential on the 101 response")
 
 	// Wait for installLive; the relay holder is registered synchronously
 	// right alongside it, before its startIn goroutine actually runs.
@@ -99,9 +96,7 @@ func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
 	// Subscribe BEFORE any traffic is produced, so nothing is missed to the
 	// fan-out's drop-if-slow behaviour.
 	events, unsub, err := pool.Watch("c1")
-	if err != nil {
-		t.Fatalf("watch: %v", err)
-	}
+	c.NoError(err, "watch")
 	defer unsub()
 
 	received := make(chan [][]byte, 1)
@@ -142,9 +137,7 @@ func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
 	}()
 
 	got := <-received
-	if len(got) != stubMessageCount {
-		t.Fatalf("got %d stdout events, want %d (corrupted/dropped traffic over the hijacked connection)", len(got), stubMessageCount)
-	}
+	c.Len(got, stubMessageCount, "got %d stdout events, want %d (corrupted/dropped traffic over the hijacked connection)", len(got), stubMessageCount)
 	for i, b := range got {
 		want := stubLine(i)
 		if !bytes.Equal(b, want) {

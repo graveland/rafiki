@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/bus"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestBus_SubscribeAndPublish(t *testing.T) {
@@ -27,9 +29,7 @@ func TestBus_SubscribeAndPublish(t *testing.T) {
 			t.Fatalf("timeout waiting for event %d", i)
 		}
 	}
-	if got[0] != 1 || got[1] != 2 {
-		t.Fatalf("got %v, want [1 2]", got)
-	}
+	assert.NewAborting(t).False(got[0] != 1 || got[1] != 2, "got %v, want [1 2]", got)
 }
 
 func TestBus_MultipleSubscribers_IndependentChannels(t *testing.T) {
@@ -45,9 +45,7 @@ func TestBus_MultipleSubscribers_IndependentChannels(t *testing.T) {
 	for _, ch := range []<-chan int{ch1, ch2} {
 		select {
 		case v := <-ch:
-			if v != 42 {
-				t.Fatalf("got %d", v)
-			}
+			assert.NewAborting(t).Eq(42, v, "got")
 		case <-time.After(time.Second):
 			t.Fatal("subscriber missed event")
 		}
@@ -55,6 +53,7 @@ func TestBus_MultipleSubscribers_IndependentChannels(t *testing.T) {
 }
 
 func TestBus_DropsOnFullChannel_DoesNotBlock(t *testing.T) {
+	c := assert.NewAborting(t)
 	b := bus.New[int](bus.Options{PerSubBuffer: 2})
 	defer b.Close()
 
@@ -77,15 +76,12 @@ func TestBus_DropsOnFullChannel_DoesNotBlock(t *testing.T) {
 
 	// Subscriber's drop counter must show at least 8 drops.
 	stats := b.Stats()
-	if stats.SubscriberCount != 1 {
-		t.Fatalf("expected 1 subscriber, got %d", stats.SubscriberCount)
-	}
-	if stats.TotalDrops < 8 {
-		t.Fatalf("expected at least 8 drops, got %d", stats.TotalDrops)
-	}
+	c.Eq(1, stats.SubscriberCount, "expected 1 subscriber, got")
+	c.GreaterOrEqual(8, stats.TotalDrops, "expected at least 8 drops, got")
 }
 
 func TestBus_CancelRemovesSubscriber(t *testing.T) {
+	c := assert.NewAborting(t)
 	b := bus.New[int](bus.Options{PerSubBuffer: 1})
 	defer b.Close()
 
@@ -95,15 +91,11 @@ func TestBus_CancelRemovesSubscriber(t *testing.T) {
 	// After cancel, the channel must close eventually.
 	select {
 	case _, ok := <-ch:
-		if ok {
-			t.Fatal("expected channel to close")
-		}
+		c.False(ok, "expected channel to close")
 	case <-time.After(time.Second):
 		t.Fatal("channel did not close after cancel")
 	}
-	if b.Stats().SubscriberCount != 0 {
-		t.Fatal("subscriber not removed")
-	}
+	c.Eq(0, b.Stats().SubscriberCount, "subscriber not removed")
 }
 
 func TestBus_CloseClosesAllSubscriberChannels(t *testing.T) {

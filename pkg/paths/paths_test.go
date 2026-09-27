@@ -5,10 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The XDG env vars must win when set — that is the whole point of the spec, and
@@ -29,9 +30,7 @@ func TestXDGEnvOverrides(t *testing.T) {
 		{"StateDir", StateDir(), "/tmp/xs/rafiki"},
 		{"RuntimeDir", RuntimeDir(), "/tmp/xr/rafiki"},
 	} {
-		if tc.got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, tc.got, "%s = %q, want", tc.name, tc.got)
 	}
 }
 
@@ -56,9 +55,7 @@ func TestDefaultsFollowXDGSpec(t *testing.T) {
 		// dir rather than inventing a path outside the spec's directories.
 		{"RuntimeDir", RuntimeDir(), "/home/tester/.local/state/rafiki"},
 	} {
-		if tc.got != tc.want {
-			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, tc.got, "%s = %q, want", tc.name, tc.got)
 	}
 }
 
@@ -81,9 +78,7 @@ func TestNoPathLandsUnderDotPi(t *testing.T) {
 		"LogsDir":        LogsDir(),
 		"ServiceLogPath": ServiceLogPath(),
 	} {
-		if strings.Contains(p, "/.pi/") || strings.HasSuffix(p, "/.pi") {
-			t.Errorf("%s = %q, must not live under ~/.pi", name, p)
-		}
+		assert.NewCollecting(t).False(strings.Contains(p, "/.pi/") || strings.HasSuffix(p, "/.pi"), "%s = %q, must not live under ~/.pi", name, p)
 	}
 }
 
@@ -95,9 +90,8 @@ func TestSocketPathFitsSunPath(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HOME", "/Users/a-reasonably-long-username")
 
-	if got := len(SocketPath()); got > 104 {
-		t.Errorf("SocketPath() is %d bytes (%q), exceeds sun_path", got, SocketPath())
-	}
+	got := len(SocketPath())
+	assert.NewCollecting(t).LessOrEqual(104, got, "SocketPath() is %d bytes (%q), exceeds sun_path", got, SocketPath())
 }
 
 // The derived paths must sit under their respective base dirs, so a caller that
@@ -116,9 +110,8 @@ func TestDerivedPathsNestUnderBases(t *testing.T) {
 	if got, want := SocketPath(), filepath.Join("/tmp/r/rafiki", "controller.sock"); got != want {
 		t.Errorf("SocketPath = %q, want %q", got, want)
 	}
-	if got, want := ServiceLogPath(), filepath.Join("/tmp/s/rafiki", "controller.log"); got != want {
-		t.Errorf("ServiceLogPath = %q, want %q", got, want)
-	}
+	got, want := ServiceLogPath(), filepath.Join("/tmp/s/rafiki", "controller.log")
+	assert.NewCollecting(t).Eq(want, got, "ServiceLogPath")
 }
 
 func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
@@ -126,18 +119,14 @@ func TestSkillsDirs_DefaultIsConfigDir(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	got := SkillsDirs()
 	want := []string{"/tmp/cfg/rafiki/skills"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "SkillsDirs()")
 }
 
 func TestSkillsDirs_SplitsPathList(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "/a"+string(os.PathListSeparator)+"/b")
 	got := SkillsDirs()
 	want := []string{"/a", "/b"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "SkillsDirs()")
 }
 
 func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
@@ -145,9 +134,7 @@ func TestSkillsDirs_DropsEmptySegments(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", sep+"/a"+sep+sep+"/b"+sep)
 	got := SkillsDirs()
 	want := []string{"/a", "/b"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SkillsDirs() = %v, want %v", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "SkillsDirs()")
 }
 
 func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
@@ -157,16 +144,12 @@ func TestSkillsDirs_AllEmptySegmentsFallsBackToDefault(t *testing.T) {
 
 	got := SkillsDirs()
 	want := []string{"/tmp/cfg/rafiki/skills"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SkillsDirs() = %v, want %v — a variable of only separators must fall back to the default, not yield an empty slice", got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "SkillsDirs()")
 }
 
 func TestInstructionsFile_EnvWins(t *testing.T) {
 	t.Setenv("RAFIKI_INSTRUCTIONS", "/custom/inst.md")
-	if got := InstructionsFile(); got != "/custom/inst.md" {
-		t.Fatalf("InstructionsFile() = %q, want /custom/inst.md", got)
-	}
+	assert.NewAborting(t).Eq("/custom/inst.md", InstructionsFile(), "InstructionsFile()")
 }
 
 func TestNoClaudeOrPiPathsLeak(t *testing.T) {
@@ -177,9 +160,7 @@ func TestNoClaudeOrPiPathsLeak(t *testing.T) {
 	all := append(SkillsDirs(),
 		InstructionsFile(), GlobalMCPConfig())
 	for _, p := range all {
-		if strings.Contains(p, "/.claude") || strings.Contains(p, "/.pi/") {
-			t.Errorf("fundi config path leaks into a foreign tool's directory: %s", p)
-		}
+		assert.NewCollecting(t).False(strings.Contains(p, "/.claude") || strings.Contains(p, "/.pi/"), "fundi config path leaks into a foreign tool's directory: %s", p)
 	}
 }
 
@@ -189,18 +170,15 @@ func TestNoClaudeOrPiPathsLeak(t *testing.T) {
 // deterministically: os.UserHomeDir on Unix reads only $HOME (no getpwuid
 // fallback), so this never touches the real HOME outside the test.
 func TestBase_HomeDirUnresolvable_FallsBackToRelativePath(t *testing.T) {
+	c := assert.NewAborting(t)
 	homeDirWarnOnce = sync.Once{}
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 
 	got := ConfigDir()
 	want := filepath.Join(".config", "rafiki")
-	if got != want {
-		t.Fatalf("ConfigDir() = %q, want %q", got, want)
-	}
-	if filepath.IsAbs(got) {
-		t.Fatalf("ConfigDir() = %q, must be relative to the caller's cwd when home cannot be resolved — that is the pre-existing fallback behaviour this task makes observable, not a new one", got)
-	}
+	c.Eq(want, got, "ConfigDir()")
+	c.False(filepath.IsAbs(got), "ConfigDir() = %q, must be relative to the caller's cwd when home cannot be resolved — that is the pre-existing fallback behaviour this task makes observable, not a new one", got)
 }
 
 // The invariant is two-sided: the failure must be observable in the log, and
@@ -225,9 +203,8 @@ func TestBase_HomeDirUnresolvable_WarnsExactlyOnceAcrossRepeatedCalls(t *testing
 	_ = DataDir()
 	_ = StateDir()
 
-	if got := strings.Count(buf.String(), "cannot determine home directory"); got != 1 {
-		t.Fatalf("warning logged %d times across 3 calls, want exactly 1 (sync.Once must guard the whole process, not fire per call or per envVar)\nlog output:\n%s", got, buf.String())
-	}
+	got := strings.Count(buf.String(), "cannot determine home directory")
+	assert.NewAborting(t).Eq(1, got, "warning logged %d times across 3 calls, want exactly 1 (sync.Once must guard the whole process, not fire per call or per envVar)\nlog output:\n%s", got, buf.String())
 }
 
 func TestProvidersFile(t *testing.T) {
@@ -237,7 +214,6 @@ func TestProvidersFile(t *testing.T) {
 		t.Errorf("ProvidersFile() = %q, want %q", got, want)
 	}
 	t.Setenv(Providers, "/etc/rafiki/p.toml")
-	if got, want := ProvidersFile(), "/etc/rafiki/p.toml"; got != want {
-		t.Errorf("ProvidersFile() with RAFIKI_PROVIDERS = %q, want %q", got, want)
-	}
+	got, want := ProvidersFile(), "/etc/rafiki/p.toml"
+	assert.NewCollecting(t).Eq(want, got, "ProvidersFile() with RAFIKI_PROVIDERS")
 }

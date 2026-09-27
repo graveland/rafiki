@@ -2,7 +2,11 @@
 
 package insightstypes
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestCompactTokens(t *testing.T) {
 	for _, tc := range []struct {
@@ -23,8 +27,7 @@ func TestCompactTokens(t *testing.T) {
 		{1234567890123, "1.2T"},
 		{-1500, "-1.5K"},
 	} {
-		if got := CompactTokens(tc.in); got != tc.want {
-			t.Errorf("CompactTokens(%d) = %q, want %q", tc.in, got, tc.want)
-		}
+		got := CompactTokens(tc.in)
+		assert.NewCollecting(t).Eq(tc.want, got, "CompactTokens(%d) = %q, want", tc.in, got)
 	}
 }

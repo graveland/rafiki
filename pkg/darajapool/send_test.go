@@ -10,6 +10,8 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // recordingDaraja is a DarajaServiceHandler whose Relay reads every RelayRequest
@@ -50,16 +52,13 @@ func (d *recordingDaraja) Health(context.Context, *connect.Request[darajapb.Heal
 // (every turn after the first on a daraja-hosted claude child) needs many
 // sends across the child's whole life.
 func TestSendCanBeCalledMoreThanOnce(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &recordingDaraja{received: make(chan []byte, 8)}
 	pool, childID, teardown := connectFakeDaraja(t, stub)
 	defer teardown()
 
-	if err := pool.Send(childID, []byte("first\n")); err != nil {
-		t.Fatalf("first send: %v", err)
-	}
-	if err := pool.Send(childID, []byte("second\n")); err != nil {
-		t.Fatalf("second send: %v", err)
-	}
+	c.NoError(pool.Send(childID, []byte("first\n")), "first send")
+	c.NoError(pool.Send(childID, []byte("second\n")), "second send")
 
 	deadline := time.After(3 * time.Second)
 	var got [][]byte

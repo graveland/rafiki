@@ -5,14 +5,16 @@ package agentcli
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/insights"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRenderStats(t *testing.T) {
+	c := assert.NewCollecting(t)
 	st := &insights.Stats{
 		Volume:   insights.VolumeStats{Conversations: 2, Turns: 40},
 		Tokens:   insights.TokenStats{InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 9000, CacheHitRatio: 0.9},
@@ -21,45 +23,36 @@ func TestRenderStats(t *testing.T) {
 		ByPath:   map[string]insights.TokenStats{"proxy": {InputTokens: 1000, CacheHitRatio: 0.9}},
 	}
 	var b bytes.Buffer
-	if err := RenderStats(&b, st); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderStats(&b, st))
 	out := b.String()
 	for _, want := range []string{"Conversations: 2", "alice", "claude-haiku-4-5", "TOTAL", "90.0%", "Latency"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("stats output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "stats output missing")
 	}
 }
 
 func TestRenderStatsEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
-	if err := RenderStats(&b, &insights.Stats{}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(b.String(), "no captured turns") {
-		t.Errorf("empty stats should say so, got: %q", b.String())
-	}
+	c.Require().NoError(RenderStats(&b, &insights.Stats{}))
+	c.StrContains(b.String(), "no captured turns", "empty stats should say so, got")
 }
 
 func TestRenderSearch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []insights.ConversationSummary{{
 		ID: "019f-aaaa", Owner: "bob", Source: "claude", Model: "m", Status: "active",
 		DrivenBy: "client", CreatedAt: time.Now(), Turns: 5, InputTokens: 100, CacheReadTokens: 50,
 		CacheHitRatio: 0.33, TotalCostUSD: 0.42, FirstMessage: "hello there",
 	}}
 	var b bytes.Buffer
-	if err := RenderSearch(&b, rows); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderSearch(&b, rows))
 	for _, want := range []string{"019f-aaaa", "bob", "hello there"} {
-		if !strings.Contains(b.String(), want) {
-			t.Errorf("search output missing %q:\n%s", want, b.String())
-		}
+		c.StrContains(b.String(), want, "search output missing")
 	}
 }
 
 func TestRenderTranscriptMD(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tr := &insights.Transcript{
 		ConversationID: "c1", Owner: "alice", AvailableSkills: []string{"sc-diagnose-service"},
 		Turns: []insights.TranscriptTurn{{
@@ -72,18 +65,15 @@ func TestRenderTranscriptMD(t *testing.T) {
 		}},
 	}
 	var b bytes.Buffer
-	if err := RenderTranscriptMD(&b, tr); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderTranscriptMD(&b, tr))
 	out := b.String()
 	for _, want := range []string{"c1", "alice", "sc-diagnose-service", "check the replica", "service_status"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("transcript output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "transcript output missing")
 	}
 }
 
 func TestRenderTranscriptMDPlainStringContent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tr := &insights.Transcript{
 		ConversationID: "c1",
 		Turns: []insights.TranscriptTurn{{
@@ -92,46 +82,31 @@ func TestRenderTranscriptMDPlainStringContent(t *testing.T) {
 		}},
 	}
 	var b bytes.Buffer
-	if err := RenderTranscriptMD(&b, tr); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(RenderTranscriptMD(&b, tr))
 	out := b.String()
-	if !strings.Contains(out, "just a plain string") {
-		t.Errorf("transcript output missing plain string content:\n%s", out)
-	}
-	if strings.Contains(out, `"just a plain string"`) {
-		t.Errorf("plain string content should render bare, not quoted:\n%s", out)
-	}
+	c.StrContains(out, "just a plain string", "transcript output missing plain string content:\n")
+	c.NotStrContains(out, `"just a plain string"`, "plain string content should render bare, not quoted:\n")
 }
 
 func TestRenderStatsNil(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
-	if err := RenderStats(&b, nil); err != nil {
-		t.Fatal(err)
-	}
-	if b.Len() == 0 {
-		t.Error("nil stats should render a one-line message, not nothing")
-	}
+	c.Require().NoError(RenderStats(&b, nil))
+	c.NotEq(0, b.Len(), "nil stats should render a one-line message, not nothing")
 }
 
 func TestRenderTranscriptMDNil(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
-	if err := RenderTranscriptMD(&b, nil); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(b.String(), "no transcript") {
-		t.Errorf("nil transcript should say so, got: %q", b.String())
-	}
+	c.Require().NoError(RenderTranscriptMD(&b, nil))
+	c.StrContains(b.String(), "no transcript", "nil transcript should say so, got")
 }
 
 func TestRenderJSONIndent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
-	if err := RenderJSON(&b, map[string]int{"a": 1}, true); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(b.String(), "\n  \"a\"") {
-		t.Errorf("indent mode should pretty-print, got %q", b.String())
-	}
+	c.Require().NoError(RenderJSON(&b, map[string]int{"a": 1}, true))
+	c.StrContains(b.String(), "\n  \"a\"", "indent mode should pretty-print, got")
 }
 
 func i64(v int64) *int64 { return &v }

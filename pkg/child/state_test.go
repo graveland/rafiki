@@ -6,15 +6,15 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestStateMachine_BasicLifecycle(t *testing.T) {
 	sm := child.NewStateMachine()
 	// Initial state assumed by callers: post-construction the SM sits in
 	// "spawning". The supervise loop transitions to idle on first response.
-	if sm.Current() != protocol.StatusSpawning {
-		t.Fatalf("initial: %v", sm.Current())
-	}
+	assert.NewAborting(t).Eq(protocol.StatusSpawning, sm.Current(), "initial")
 
 	// First response → idle.
 	changed, prev := sm.OnFirstResponse()
@@ -50,27 +50,22 @@ func TestStateMachine_BasicLifecycle(t *testing.T) {
 }
 
 func TestStateMachine_ParallelTools(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
 
 	// Three tools start: state goes streaming→tool_running on first only.
 	sm.OnPiEvent("tool_execution_start", nil)
-	if sm.Current() != protocol.StatusToolRunning {
-		t.Fatalf("first tool: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusToolRunning, sm.Current(), "first tool")
 	sm.OnPiEvent("tool_execution_start", nil)
 	sm.OnPiEvent("tool_execution_start", nil)
-	if sm.Current() != protocol.StatusToolRunning {
-		t.Fatalf("3rd tool started: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusToolRunning, sm.Current(), "3rd tool started")
 
 	// First two end: still tool_running.
 	sm.OnPiEvent("tool_execution_end", nil)
 	sm.OnPiEvent("tool_execution_end", nil)
-	if sm.Current() != protocol.StatusToolRunning {
-		t.Fatalf("2 of 3 ended: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusToolRunning, sm.Current(), "2 of 3 ended")
 
 	// Last end: back to streaming.
 	changed, prev := sm.OnPiEvent("tool_execution_end", nil)
@@ -80,18 +75,15 @@ func TestStateMachine_ParallelTools(t *testing.T) {
 }
 
 func TestStateMachine_ModalStack_Compaction(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
 	// streaming → compacting (push), then compaction_end → streaming (pop)
 	sm.OnPiEvent("compaction_start", nil)
-	if sm.Current() != protocol.StatusCompacting {
-		t.Fatalf("compaction_start: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusCompacting, sm.Current(), "compaction_start")
 	sm.OnPiEvent("compaction_end", nil)
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("compaction_end did not restore: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "compaction_end did not restore")
 }
 
 // TestStateMachineBatchWaitPushPop pins the batch_wait modal pair: the
@@ -115,6 +107,7 @@ func TestStateMachineBatchWaitPushPop(t *testing.T) {
 }
 
 func TestStateMachine_DialogUI_Push_OnlyForDialogMethods(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
@@ -123,37 +116,28 @@ func TestStateMachine_DialogUI_Push_OnlyForDialogMethods(t *testing.T) {
 	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
 		ID: "u1", Method: "notify",
 	})
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("notify must not block: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "notify must not block")
 
 	// dialog: push.
 	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
 		ID: "u2", Method: "confirm",
 	})
-	if sm.Current() != protocol.StatusBlockedUI {
-		t.Fatalf("confirm must block: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusBlockedUI, sm.Current(), "confirm must block")
 
 	// Response: pop.
 	sm.OnExtensionUIResponse("u2")
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("response did not pop: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "response did not pop")
 }
 
 func TestStateMachine_ExtensionError_Counter_NoTransition(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
 	before := sm.Current()
 	sm.OnPiEvent("extension_error", nil)
-	if sm.Current() != before {
-		t.Fatalf("extension_error changed state: %v→%v", before, sm.Current())
-	}
-	if sm.Counters().ExtensionErrors != 1 {
-		t.Fatalf("counter not incremented")
-	}
+	c.Eq(before, sm.Current(), "extension_error changed state")
+	c.Eq(1, sm.Counters().ExtensionErrors, "counter not incremented")
 }
 
 func TestStateMachine_ShuttingDown(t *testing.T) {
@@ -171,6 +155,7 @@ func TestStateMachine_ShuttingDown(t *testing.T) {
 }
 
 func TestStateMachine_AutoRetryStart_SetsCountersAndError(t *testing.T) {
+	ck := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
@@ -178,19 +163,14 @@ func TestStateMachine_AutoRetryStart_SetsCountersAndError(t *testing.T) {
 
 	sm.OnAutoRetryStart("529 overloaded_error: Overloaded")
 
-	if sm.Current() != before {
-		t.Fatalf("auto_retry_start changed state: %v → %v", before, sm.Current())
-	}
+	ck.Eq(before, sm.Current(), "auto_retry_start changed state")
 	c := sm.Counters()
-	if c.AutoRetries != 1 {
-		t.Fatalf("AutoRetries: got %d, want 1", c.AutoRetries)
-	}
-	if c.LastRetryError != "529 overloaded_error: Overloaded" {
-		t.Fatalf("LastRetryError: got %q", c.LastRetryError)
-	}
+	ck.Eq(1, c.AutoRetries, "AutoRetries: got")
+	ck.Eq("529 overloaded_error: Overloaded", c.LastRetryError, "LastRetryError: got")
 }
 
 func TestStateMachine_MultipleConcurrentDialogs_ResolveCleanly(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
@@ -199,31 +179,24 @@ func TestStateMachine_MultipleConcurrentDialogs_ResolveCleanly(t *testing.T) {
 	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
 		ID: "u1", Method: "confirm",
 	})
-	if sm.Current() != protocol.StatusBlockedUI {
-		t.Fatalf("after u1: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u1")
 
 	// Second concurrent dialog while still in blocked_ui.
 	sm.OnPiEvent("extension_ui_request", &child.PiUIRequestMeta{
 		ID: "u2", Method: "confirm",
 	})
-	if sm.Current() != protocol.StatusBlockedUI {
-		t.Fatalf("after u2: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u2")
 
 	// Resolve in arbitrary order.
 	sm.OnExtensionUIResponse("u2")
-	if sm.Current() != protocol.StatusBlockedUI {
-		t.Fatalf("after u2 resp (u1 still pending): %v", sm.Current())
-	}
+	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after u2 resp (u1 still pending)")
 	sm.OnExtensionUIResponse("u1")
 	// Now both resolved; should be back to streaming.
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("after all resolved: %v, want streaming", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "after all resolved")
 }
 
 func TestStateMachine_DialogOverCap_SilentlyDropped(t *testing.T) {
+	c := assert.NewAborting(t)
 	sm := child.NewStateMachine()
 	sm.OnFirstResponse()
 	sm.OnPiEvent("agent_start", nil)
@@ -235,9 +208,7 @@ func TestStateMachine_DialogOverCap_SilentlyDropped(t *testing.T) {
 			Method: "confirm",
 		})
 	}
-	if sm.Current() != protocol.StatusBlockedUI {
-		t.Fatalf("after 64 dialogs: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusBlockedUI, sm.Current(), "after 64 dialogs")
 
 	// The 65th request — over cap. Should NOT push.
 	// We can't directly observe "didn't push", but we can verify by
@@ -252,15 +223,11 @@ func TestStateMachine_DialogOverCap_SilentlyDropped(t *testing.T) {
 	}
 	// After resolving all 64 tracked, should be back to streaming.
 	// If the overflow had pushed, we'd be stuck in blocked_ui.
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("after resolving all tracked: %v, want streaming (overflow dialog must not have pushed)", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "after resolving all tracked")
 
 	// The overflow response should be a no-op.
 	sm.OnExtensionUIResponse("overflow")
-	if sm.Current() != protocol.StatusStreaming {
-		t.Fatalf("overflow response changed state: %v", sm.Current())
-	}
+	c.Eq(protocol.StatusStreaming, sm.Current(), "overflow response changed state")
 }
 
 func TestStateMachine_DefensivePopOnEmptyStack(t *testing.T) {
@@ -269,7 +236,5 @@ func TestStateMachine_DefensivePopOnEmptyStack(t *testing.T) {
 	sm.OnFirstResponse()
 	before := sm.Current()
 	sm.OnPiEvent("compaction_end", nil)
-	if sm.Current() != before {
-		t.Fatalf("defensive pop changed state")
-	}
+	assert.NewAborting(t).Eq(before, sm.Current(), "defensive pop changed state")
 }

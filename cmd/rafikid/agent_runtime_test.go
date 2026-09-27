@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty proves the
@@ -24,15 +25,12 @@ import (
 // degrades to exactly the pre-Phase-2 ClaudeParams: no proxy fields set, so
 // daraja's env stays untouched, matching before these fields existed.
 func TestDarajaClaudeParams_NoProxyConfiguredLeavesFieldsEmpty(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	// c.proxyURL is "" by default in newTestController — no proxy face wired.
 	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, Model: "claude-sonnet-5"}, "c_noproxy")
-	if p.ProxyUrl != "" || p.ProxyToken != "" || p.PassthroughAuth {
-		t.Errorf("darajaClaudeParams with no proxy configured = %+v, want no proxy fields set", p)
-	}
-	if p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions" {
-		t.Errorf("darajaClaudeParams = %+v, want Model/PermissionMode preserved unchanged", p)
-	}
+	ck.False(p.ProxyUrl != "" || p.ProxyToken != "" || p.PassthroughAuth, "darajaClaudeParams with no proxy configured = %+v, want no proxy fields set", p)
+	ck.False(p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions", "darajaClaudeParams = %+v, want Model/PermissionMode preserved unchanged", p)
 }
 
 // TestDarajaClaudeParams_PassthroughTriState proves the auto/on/off resolution
@@ -58,9 +56,7 @@ func TestDarajaClaudeParams_PassthroughTriState(t *testing.T) {
 			p := c.darajaClaudeParams(protocol.SpawnRequest{
 				Kind: protocol.KindClaude, Model: tc.model, PassthroughAuth: tc.passthroughAuth,
 			}, "c_passthrough")
-			if p.PassthroughAuth != tc.want {
-				t.Errorf("PassthroughAuth = %v, want %v", p.PassthroughAuth, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, p.PassthroughAuth, "PassthroughAuth")
 			if p.ProxyUrl != c.proxyURL || p.ProxyToken != c.proxyToken {
 				t.Errorf("ProxyUrl/ProxyToken = %q/%q, want %q/%q", p.ProxyUrl, p.ProxyToken, c.proxyURL, c.proxyToken)
 			}
@@ -76,9 +72,7 @@ func TestDarajaClaudeParams_RecordRequestsThreadsThrough(t *testing.T) {
 	c := newTestController(t)
 	c.proxyURL = "http://127.0.0.1:1/"
 	p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude, RecordRequests: true}, "c_record")
-	if !p.RecordRequests {
-		t.Error("RecordRequests did not thread through darajaClaudeParams")
-	}
+	assert.NewCollecting(t).True(p.RecordRequests, "RecordRequests did not thread through darajaClaudeParams")
 }
 
 // TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs pins the
@@ -87,6 +81,7 @@ func TestDarajaClaudeParams_RecordRequestsThreadsThrough(t *testing.T) {
 // child spawned through an executor pool lost its custom system prompt and
 // operator escape-hatch flags with no error anywhere.
 func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	p := c.darajaClaudeParams(protocol.SpawnRequest{
 		Kind:               protocol.KindClaude,
@@ -94,12 +89,8 @@ func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing
 		AppendSystemPrompt: "be brief",
 		ExtraArgs:          []string{"--foo"},
 	}, "c_argv")
-	if p.AppendSystemPrompt != "be brief" {
-		t.Errorf("AppendSystemPrompt = %q, want threaded through", p.AppendSystemPrompt)
-	}
-	if !slices.Equal(p.ExtraArgs, []string{"--foo"}) {
-		t.Errorf("ExtraArgs = %v, want [--foo]", p.ExtraArgs)
-	}
+	ck.Eq("be brief", p.AppendSystemPrompt, "AppendSystemPrompt")
+	ck.EqDiff([]string{"--foo"}, p.ExtraArgs, "ExtraArgs")
 	// Unproxied child (no proxy face in newTestController): only the two
 	// launch-only flags above are new; everything else stays as before.
 	if p.Model != "claude-sonnet-5" || p.PermissionMode != "bypassPermissions" {
@@ -115,6 +106,7 @@ func TestDarajaClaudeParams_ThreadsWithAppendSystemPromptAndExtraArgs(t *testing
 // the shared proxy bearer, and is absent on the unproxied path where daraja
 // leaves the environment alone.
 func TestDarajaClaudeParams_CarriesPerChildMCPToken(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 
 	if p := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_unproxied"); p.McpToken != "" {
@@ -127,12 +119,8 @@ func TestDarajaClaudeParams_CarriesPerChildMCPToken(t *testing.T) {
 	if pA.McpToken == "" || pB.McpToken == "" {
 		t.Fatalf("proxied params must carry an MCP secret, got %q and %q", pA.McpToken, pB.McpToken)
 	}
-	if pA.McpToken == pB.McpToken {
-		t.Fatal("two children must carry different MCP secrets")
-	}
-	if pA.McpToken == c.proxyToken {
-		t.Fatal("the per-child MCP secret must never be the shared proxy bearer")
-	}
+	ck.NotEq(pB.McpToken, pA.McpToken, "two children must carry different MCP secrets")
+	ck.NotEq(c.proxyToken, pA.McpToken, "the per-child MCP secret must never be the shared proxy bearer")
 	if again := c.darajaClaudeParams(protocol.SpawnRequest{Kind: protocol.KindClaude}, "c_a"); again.McpToken != pA.McpToken {
 		t.Fatalf("rebuilt params for the same child = %q, want %q (resume must reuse the minted secret)", again.McpToken, pA.McpToken)
 	}
@@ -142,26 +130,19 @@ func TestDarajaClaudeParams_CarriesPerChildMCPToken(t *testing.T) {
 // Kind: "fundi" and leaves every other kind on the subprocess path (nil
 // Runner, nil error) unchanged.
 func TestAgentRunnerKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	for _, kind := range []string{protocol.KindClaude} {
 		req := protocol.SpawnRequest{Kind: kind, Cwd: t.TempDir()}
 		runner, err := c.agentRunner(req, "c_"+kind, false, "", "", nil)
-		if err != nil {
-			t.Fatalf("agentRunner(kind=%s): %v", kind, err)
-		}
-		if runner != nil {
-			t.Errorf("agentRunner(kind=%s) returned a non-nil Runner, want nil", kind)
-		}
+		ck.Require().NoError(err, "agentRunner(kind=%s)", kind)
+		ck.Nil(runner, "agentRunner(kind=%s) returned a non-nil Runner, want nil", kind)
 	}
 
 	req := protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: t.TempDir(), Model: "anthropic/claude-sonnet-4-5"}
 	runner, err := c.agentRunner(req, "c_agent", false, "", "", nil)
-	if err != nil {
-		t.Fatalf("agentRunner(kind=agent): %v", err)
-	}
-	if runner == nil {
-		t.Error("agentRunner(kind=agent) returned a nil Runner, want non-nil")
-	}
+	ck.Require().NoError(err, "agentRunner(kind=agent)")
+	ck.NotNil(runner, "agentRunner(kind=agent) returned a nil Runner, want non-nil")
 }
 
 // TestAgentRunnerRefWinsOverExtraArgs is the agentRunner-level counterpart to
@@ -172,6 +153,7 @@ func TestAgentRunnerKind(t *testing.T) {
 // appendDaemonRef directly and would keep passing even if agentRunner forgot
 // to call it.
 func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
 		Kind:      protocol.KindFundi,
@@ -180,12 +162,8 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 		ExtraArgs: []string{"--ref", "spoofed-child-id"},
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_authoritative", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Ref != "c_authoritative" {
-		t.Errorf("Ref = %q, want the daemon's child id to win over a competing ExtraArgs --ref", ro.Ref)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq("c_authoritative", ro.Ref, "Ref")
 }
 
 // TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon guards against the classic Go
@@ -195,6 +173,7 @@ func TestAgentRunnerRefWinsOverExtraArgs(t *testing.T) {
 // answer "no data captured" instead of declining outright, per its
 // Materialize doc comment.
 func TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t) // pool == nil
 	req := protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
@@ -202,12 +181,8 @@ func TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_no_db", false, "brent", "user-id-123")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Quota != nil {
-		t.Errorf("Quota = %#v, want nil on a DB-less daemon", ro.Quota)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Nil(ro.Quota, "Quota")
 }
 
 // TestAgentRunnerAPIKeyOverlay proves req.APIKey reaches RuntimeOptions
@@ -216,6 +191,7 @@ func TestAgentRuntimeOptionsQuotaNilOnDBLessDaemon(t *testing.T) {
 func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "")
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 
 	anthropicReq := protocol.SpawnRequest{
@@ -225,12 +201,8 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		APIKey: "sk-ant-test-key",
 	}
 	ro, err := c.agentRuntimeOptions(anthropicReq, "c_key_anthropic", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.APIKeyOverride != anthropicReq.APIKey {
-		t.Errorf("APIKeyOverride = %q, want %q", ro.APIKeyOverride, anthropicReq.APIKey)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(anthropicReq.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 
 	openrouterReq := protocol.SpawnRequest{
 		Kind:   protocol.KindFundi,
@@ -239,12 +211,8 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 		APIKey: "sk-or-test-key",
 	}
 	ro, err = c.agentRuntimeOptions(openrouterReq, "c_key_openrouter", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.APIKeyOverride != openrouterReq.APIKey {
-		t.Errorf("APIKeyOverride = %q, want %q", ro.APIKeyOverride, openrouterReq.APIKey)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(openrouterReq.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 }
 
 // TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel verifies that the
@@ -252,6 +220,7 @@ func TestAgentRunnerAPIKeyOverlay(t *testing.T) {
 func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("OPENROUTER_API_KEY", "")
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 
 	req := protocol.SpawnRequest{
@@ -262,12 +231,8 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 		APIKey:    "sk-test-key",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_model_override_key", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.APIKeyOverride != req.APIKey {
-		t.Errorf("APIKeyOverride = %q, want %q (the per-spawn key should always be forwarded)", ro.APIKeyOverride, req.APIKey)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(req.APIKey, ro.APIKeyOverride, "APIKeyOverride")
 }
 
 // TestAgentRunnerEnvOverlay proves that forwarded env vars reach
@@ -277,6 +242,7 @@ func TestAgentRunnerAPIKeyOverlayWinsOverExtraArgsModel(t *testing.T) {
 func TestAgentRunnerEnvOverlay(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "ambient-anthropic")
 	t.Setenv("OPENROUTER_API_KEY", "ambient-openrouter")
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 
 	req := protocol.SpawnRequest{
@@ -289,29 +255,20 @@ func TestAgentRunnerEnvOverlay(t *testing.T) {
 		},
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_env_overlay", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
 	// API key env vars are NOT forwarded to Env
 	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
-		if _, ok := ro.Env[key]; ok {
-			t.Errorf("Env[%q] should be absent (API keys must not reach os.Setenv)", key)
-		}
+		_, ok := ro.Env[key]
+		ck.False(ok, "Env[%q] should be absent (API keys must not reach os.Setenv)", key)
 	}
 	// Non-API env vars must reach Env.
-	if got := ro.Env["http_proxy"]; got != "http://example.invalid:8080" {
-		t.Errorf("Env[http_proxy] = %q, want http://example.invalid:8080", got)
-	}
+	ck.Eq("http://example.invalid:8080", ro.Env["http_proxy"], "Env[http_proxy]")
 
 	// An explicit req.APIKey must be forwarded as APIKeyOverride.
 	req.APIKey = "explicit-key"
 	ro, err = c.agentRuntimeOptions(req, "c_env_overlay_explicit_wins", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.APIKeyOverride != "explicit-key" {
-		t.Errorf("APIKeyOverride = %q, want the explicit req.APIKey to win", ro.APIKeyOverride)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq("explicit-key", ro.APIKeyOverride, "APIKeyOverride")
 }
 
 // TestAgentSpawnHasExplicitDBSingleDash proves the single-dash spellings
@@ -325,9 +282,7 @@ func TestAgentSpawnHasExplicitDBSingleDash(t *testing.T) {
 		{"-db", "postgres://caller-supplied"},
 		{"-db=postgres://caller-supplied"},
 	} {
-		if !agentSpawnHasExplicitDB(extraArgs) {
-			t.Errorf("agentSpawnHasExplicitDB(%v) = false, want true", extraArgs)
-		}
+		assert.NewCollecting(t).True(agentSpawnHasExplicitDB(extraArgs), "agentSpawnHasExplicitDB(%v) = false, want true", extraArgs)
 	}
 }
 
@@ -347,9 +302,8 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 			Model:     "anthropic/claude-sonnet-4-5",
 			ExtraArgs: extraArgs,
 		}
-		if _, err := c.agentRuntimeOptions(req, "c_explicit_db", false, "", ""); err == nil {
-			t.Errorf("agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
-		}
+		_, err := c.agentRuntimeOptions(req, "c_explicit_db", false, "", "")
+		assert.NewCollecting(t).Error(err, "agentRuntimeOptions(ExtraArgs=%v): want an error rejecting explicit --db, got nil", extraArgs)
 	}
 }
 
@@ -360,6 +314,7 @@ func TestAgentRunnerRejectsExplicitDB(t *testing.T) {
 // fetches and hundreds of MB. agentRuntimeOptions covers spawn, resume and
 // startup recovery, so one assertion here pins all three paths.
 func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	cat := routing.NewModelCatalog(nil, time.Hour, nil)
 	c.SetCatalog(cat)
@@ -370,12 +325,8 @@ func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_shared_catalog", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.Catalog != cat {
-		t.Errorf("ro.Catalog = %p, want the controller's shared catalog instance %p", ro.Catalog, cat)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(cat, ro.Catalog, "ro.Catalog")
 }
 
 // TestAgentRunnerIgnoresEnvDefaultedDB proves the daemon's own
@@ -392,9 +343,8 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 		Cwd:   t.TempDir(),
 		Model: "anthropic/claude-sonnet-4-5",
 	}
-	if _, err := c.agentRuntimeOptions(req, "c_env_default_db", false, "", ""); err != nil {
-		t.Errorf("agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error %v, want nil", err)
-	}
+	_, err := c.agentRuntimeOptions(req, "c_env_default_db", false, "", "")
+	assert.NewCollecting(t).NoError(err, "agentRuntimeOptions with only $RAFIKI_DB set (no explicit --db): got error")
 }
 
 // TestArgvRoundTripsIntoRuntimeOptions is the anti-drop guard for this task.
@@ -403,6 +353,7 @@ func TestAgentRunnerIgnoresEnvDefaultedDB(t *testing.T) {
 // toRuntimeOptions ignores is silently lost for every in-process child, which
 // is precisely how Resume lost SkillsDirs and MCPConfig while all tests passed.
 func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
+	c := assert.NewCollecting(t)
 	mcp := t.TempDir() + "/mcp.json"
 	req := protocol.SpawnRequest{
 		Kind:               protocol.KindFundi,
@@ -418,51 +369,27 @@ func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 	}
 
 	argv := buildAgentArgv(req, "c_round", t.TempDir())
-	if argv[0] != protocol.KindFundi {
-		t.Fatalf("argv[0] = %q, want %q", argv[0], protocol.KindFundi)
-	}
+	c.Require().Eq(protocol.KindFundi, argv[0], "argv[0]")
 
 	f, err := parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags(%q): %v", argv[1:], err)
-	}
+	c.Require().NoError(err, "parseAgentFlags(%q)", argv[1:])
 
 	got, err := f.toRuntimeOptions(req.Cwd, nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
 
-	if got.Model != req.Model {
-		t.Errorf("Model = %q, want %q", got.Model, req.Model)
-	}
-	if got.SystemPromptOverride != req.SystemPrompt {
-		t.Errorf("SystemPromptOverride = %q, want %q", got.SystemPromptOverride, req.SystemPrompt)
-	}
-	if got.AppendSystemPrompt != req.AppendSystemPrompt {
-		t.Errorf("AppendSystemPrompt = %q, want %q", got.AppendSystemPrompt, req.AppendSystemPrompt)
-	}
-	if got.Skills != "alpha,beta" {
-		t.Errorf("Skills = %q, want \"alpha,beta\"", got.Skills)
-	}
-	if got.Name != req.Name {
-		t.Errorf("Name = %q, want %q", got.Name, req.Name)
-	}
-	if got.MCPConfig != mcp {
-		t.Errorf("MCPConfig = %q, want %q", got.MCPConfig, mcp)
-	}
-	if got.SpillDir == "" {
-		t.Error("SpillDir is empty; buildAgentArgv always passes --spill-dir")
-	}
-	if got.ThinkingBudget == 0 {
-		t.Error("ThinkingBudget = 0 for --thinking high; the conversion was skipped")
-	}
+	c.Eq(req.Model, got.Model, "Model")
+	c.Eq(req.SystemPrompt, got.SystemPromptOverride, "SystemPromptOverride")
+	c.Eq(req.AppendSystemPrompt, got.AppendSystemPrompt, "AppendSystemPrompt")
+	c.Eq("alpha,beta", got.Skills, "Skills = %q, want \"alpha,beta\"", got.Skills)
+	c.Eq(req.Name, got.Name, "Name")
+	c.Eq(mcp, got.MCPConfig, "MCPConfig")
+	c.NotEq("", got.SpillDir, "SpillDir is empty; buildAgentArgv always passes --spill-dir")
+	c.NotEq(0, got.ThinkingBudget, "ThinkingBudget = 0 for --thinking high; the conversion was skipped")
 	// SkillsDirs must include both --skills-dir values. assembleSkillDirs
 	// prepends the configured and per-project dirs, so assert containment.
 	joined := strings.Join(got.SkillsDirs, ":")
 	for _, want := range req.SkillsDirs {
-		if !strings.Contains(joined, want) {
-			t.Errorf("SkillsDirs %v missing %q", got.SkillsDirs, want)
-		}
+		c.StrContains(joined, want, "SkillsDirs %v missing", got.SkillsDirs)
 	}
 }
 
@@ -471,6 +398,7 @@ func TestArgvRoundTripsIntoRuntimeOptions(t *testing.T) {
 // last precisely so a caller can override, and an in-process child that ignored
 // them would diverge from a subprocess one.
 func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
@@ -479,16 +407,10 @@ func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 	}
 	argv := buildAgentArgv(req, "c_extra", t.TempDir())
 	f, err := parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
 	got, err := f.toRuntimeOptions(req.Cwd, nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if got.Model != "deepseek/deepseek-chat" {
-		t.Errorf("Model = %q, want the ExtraArgs override to win", got.Model)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.Eq("deepseek/deepseek-chat", got.Model, "Model")
 }
 
 // TestAgentRefIsDaemonControlled proves the child id reaches the engine. It
@@ -496,6 +418,7 @@ func TestExtraArgsOverrideEarlierFlags(t *testing.T) {
 // child never inherits, so it must be appended to argv after ExtraArgs — a
 // caller must not be able to point one child at another's conversation.
 func TestAgentRefIsDaemonControlled(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{
 		Kind:      protocol.KindFundi,
 		Cwd:       t.TempDir(),
@@ -504,16 +427,10 @@ func TestAgentRefIsDaemonControlled(t *testing.T) {
 	}
 	argv := appendDaemonRef(buildAgentArgv(req, "c_authoritative", t.TempDir()), "c_authoritative")
 	f, err := parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
 	got, err := f.toRuntimeOptions(req.Cwd, nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if got.Ref != "c_authoritative" {
-		t.Errorf("Ref = %q, want the daemon's child id to win over ExtraArgs", got.Ref)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.Eq("c_authoritative", got.Ref, "Ref")
 }
 
 // TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution is the behavioral
@@ -529,9 +446,7 @@ func TestAgentRefIsDaemonControlled(t *testing.T) {
 // copy drifted.
 func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 	cwdWithLSP := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwdWithLSP, ".lsp.json"), []byte(`{}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(filepath.Join(cwdWithLSP, ".lsp.json"), []byte(`{}`), 0o644))
 	cwdWithoutLSP := t.TempDir()
 
 	cases := []struct {
@@ -552,6 +467,7 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("RAFIKI_TOOLS_WEB", tc.envWeb)
+			c := assert.NewCollecting(t)
 
 			f := agentFlags{
 				model:       "anthropic/claude-sonnet-4-5",
@@ -560,78 +476,49 @@ func TestToRuntimeOptionsUsesSharedLSPAndToolsWebResolution(t *testing.T) {
 				toolsWebSet: tc.toolsWebSet,
 			}
 			ro, err := f.toRuntimeOptions(tc.cwd, nil, false, nil)
-			if err != nil {
-				t.Fatalf("toRuntimeOptions: %v", err)
-			}
+			c.Require().NoError(err, "toRuntimeOptions")
 
 			wantLSP := effectiveLSPConfig(tc.lspConfig, tc.cwd)
-			if ro.LSPConfig != wantLSP {
-				t.Errorf("toRuntimeOptions LSPConfig = %q, want %q (effectiveLSPConfig directly)", ro.LSPConfig, wantLSP)
-			}
+			c.Eq(wantLSP, ro.LSPConfig, "toRuntimeOptions LSPConfig")
 
 			wantWeb := toolsWebValue(tc.toolsWeb, tc.toolsWebSet)
-			if ro.ToolsWeb != wantWeb {
-				t.Errorf("toRuntimeOptions ToolsWeb = %v, want %v (toolsWebValue directly)", ro.ToolsWeb, wantWeb)
-			}
+			c.Eq(wantWeb, ro.ToolsWeb, "toRuntimeOptions ToolsWeb")
 		})
 	}
 }
 
 func TestToRuntimeOptions_ModelDefaultAppliesWhenCallerSpecifiesNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
 	prov, err := providers.Parse([]byte(modelDefaultsTOML)) // reuses the fixture from Task 2's model_defaults_test.go
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	f := agentFlags{model: "vmlx/qwen"}
 	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if !ro.NoSkills {
-		t.Error("expected NoSkills=true: vmlx/qwen declares skills=\"\"")
-	}
-	if ro.MCPServers != "codescan" || ro.NoMCP {
-		t.Errorf("MCPServers=%q NoMCP=%v, want MCPServers=\"codescan\" NoMCP=false", ro.MCPServers, ro.NoMCP)
-	}
-	if ro.ContextFilesBudget != 3276 {
-		t.Errorf("ContextFilesBudget = %d, want 3276", ro.ContextFilesBudget)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.True(ro.NoSkills, "expected NoSkills=true: vmlx/qwen declares skills=\"\"")
+	c.False(ro.MCPServers != "codescan" || ro.NoMCP, "MCPServers=%q NoMCP=%v, want MCPServers=\"codescan\" NoMCP=false", ro.MCPServers, ro.NoMCP)
+	c.Eq(3276, ro.ContextFilesBudget, "ContextFilesBudget")
 }
 
 func TestToRuntimeOptions_ExplicitCallerValueWinsOverModelDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	prov, err := providers.Parse([]byte(modelDefaultsTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	f := agentFlags{model: "vmlx/qwen", skills: "*", mcpServers: "other-only"}
 	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if ro.Skills != "*" || ro.NoSkills {
-		t.Errorf("Skills=%q NoSkills=%v, want Skills=\"*\" NoSkills=false (caller override must win over the model's skills=\"\" default)", ro.Skills, ro.NoSkills)
-	}
-	if ro.MCPServers != "other-only" {
-		t.Errorf("MCPServers = %q, want the caller's explicit \"other-only\"", ro.MCPServers)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.False(ro.Skills != "*" || ro.NoSkills, "Skills=%q NoSkills=%v, want Skills=\"*\" NoSkills=false (caller override must win over the model's skills=\"\" default)", ro.Skills, ro.NoSkills)
+	c.Eq("other-only", ro.MCPServers, "MCPServers = %q, want the caller's explicit \"other-only\"", ro.MCPServers)
 }
 
 func TestToRuntimeOptions_NoAliasLeavesEverythingAtCallerValue(t *testing.T) {
+	c := assert.NewCollecting(t)
 	prov, err := providers.Parse([]byte(modelDefaultsTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	f := agentFlags{model: "anthropic/claude-sonnet-5"} // no alias declared for this model
 	ro, err := f.toRuntimeOptions(t.TempDir(), nil, false, prov)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if ro.NoSkills || ro.Skills != "" {
-		t.Errorf("Skills=%q NoSkills=%v, want the untouched zero value", ro.Skills, ro.NoSkills)
-	}
-	if ro.ContextFilesBudget != 0 {
-		t.Errorf("ContextFilesBudget = %d, want 0 (no alias, no formula input)", ro.ContextFilesBudget)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.False(ro.NoSkills || ro.Skills != "", "Skills=%q NoSkills=%v, want the untouched zero value", ro.Skills, ro.NoSkills)
+	c.Eq(0, ro.ContextFilesBudget, "ContextFilesBudget")
 }
 
 func baseRequest() protocol.SpawnRequest {
@@ -646,24 +533,22 @@ func baseRequest() protocol.SpawnRequest {
 // diagnostic immediately. Downgrading this to a slog.Warn produced a running,
 // billing agent whose every workspace tool errored, with nothing surfaced.
 func TestTopLevelSpawnWithAnUnmatchedSelectorIsRefused(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
 	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
-	if err == nil {
-		t.Fatal("a top-level spawn whose selector matches nothing must be refused")
-	}
-	if !strings.Contains(err.Error(), "env=nowhere") {
-		t.Fatalf("the refusal must carry explainNoMatch's diagnostic, got: %v", err)
-	}
+	ck.Error(err, "a top-level spawn whose selector matches nothing must be refused")
+	ck.StrContains(err.Error(), "env=nowhere", "the refusal must carry explainNoMatch's diagnostic, got: %v", err)
 }
 
 // A child spawned by an agent may start unbound: an executor restart parks its
 // connection for up to a full health tick, and surviving that window is what
 // lazy binding is for.
 func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
@@ -672,37 +557,31 @@ func TestParentedSpawnWithNoLiveExecutorStartsUnbound(t *testing.T) {
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
 	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
-	if err != nil {
-		t.Fatalf("a parented spawn must be allowed to start unbound: %v", err)
-	}
-	if ro.Executor == nil {
-		t.Fatal("Executor must still be non-nil, or MaterializeAll drops the " +
-			"whole workspace tier and the child silently runs tools in the daemon")
-	}
+	ck.NoError(err, "a parented spawn must be allowed to start unbound")
+	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
+		"whole workspace tier and the child silently runs tools in the daemon")
 }
 
 // An auto-resumed child (e.g. recovering on daemon restart before executors
 // reconnect) is allowed to start unbound: its workspace tools will lazy-bind
 // once the matching executor connects.
 func TestAutoResumeWithNoLiveExecutorStartsUnbound(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
 	req := baseRequest()
 	req.ExecutorSelector = "env=nowhere"
 	ro, err := c.agentRuntimeOptions(req, "c1", true, "brent", "")
-	if err != nil {
-		t.Fatalf("an auto-resumed spawn must be allowed to start unbound: %v", err)
-	}
-	if ro.Executor == nil {
-		t.Fatal("Executor must still be non-nil, or MaterializeAll drops the " +
-			"whole workspace tier and the child silently runs tools in the daemon")
-	}
+	ck.NoError(err, "an auto-resumed spawn must be allowed to start unbound")
+	ck.NotNil(ro.Executor, "Executor must still be non-nil, or MaterializeAll drops the "+
+		"whole workspace tier and the child silently runs tools in the daemon")
 }
 
 // markUnbound writes "unbound" through the store-then-stash path so Spawn
 // picks it up and stores it on initialization labels.
 func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
@@ -711,21 +590,16 @@ func TestAnUnboundChildSaysSoInItsLabels(t *testing.T) {
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
 	_, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	wl, ok := c.takeWorkspaceLabels("c1")
-	if !ok {
-		t.Fatal("markUnbound must stash the 'unbound' state for Spawn to pick up")
-	}
-	if wl.executorState != "unbound" {
-		t.Fatalf("executorState = %q, want %q", wl.executorState, "unbound")
-	}
+	ck.True(ok, "markUnbound must stash the 'unbound' state for Spawn to pick up")
+	ck.Eq("unbound", wl.executorState, "executorState")
 }
 
 // When a live executor admits the child's selector, the workspace block is
 // built from the bound executor's row.
 func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{
 		live: []execpool.LiveExecutor{{
@@ -746,22 +620,17 @@ func TestABoundChildGetsTheWorkspaceBlock(t *testing.T) {
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=home"
 	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ro.Workspace == nil {
-		t.Fatal("a child that binds at spawn must get the workspace block; the " +
-			"system prompt is fixed for its lifetime")
-	}
-	if ro.Workspace.Roots == nil || ro.Workspace.Roots[0] != "/tmp" {
-		t.Fatalf("workspace block must carry the executor's roots, got %+v", ro.Workspace)
-	}
+	ck.NoError(err)
+	ck.NotNil(ro.Workspace, "a child that binds at spawn must get the workspace block; the "+
+		"system prompt is fixed for its lifetime")
+	ck.False(ro.Workspace.Roots == nil || ro.Workspace.Roots[0] != "/tmp", "workspace block must carry the executor's roots, got %+v", ro.Workspace)
 }
 
 // When no executor matches (not even as a candidate), the workspace block
 // is nil. This is acceptable per the design: naming the wrong machine is
 // worse than none.
 func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.execPool = &fakePool{}
 	c.execStore = &fakeExecStore{execs: map[string]executors.Executor{}}
@@ -770,13 +639,9 @@ func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
 	req.ParentChildID = "c_parent"
 	req.ExecutorSelector = "env=nowhere"
 	ro, err := c.agentRuntimeOptions(req, "c1", false, "brent", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ro.Workspace != nil {
-		t.Fatal("with no live candidate, workspace block must be nil; a block " +
-			"naming the wrong machine is worse than none")
-	}
+	ck.NoError(err)
+	ck.Nil(ro.Workspace, "with no live candidate, workspace block must be nil; a block "+
+		"naming the wrong machine is worse than none")
 }
 
 // TestAgentRuntimeOptionsWiresOnConsumed proves ro.OnConsumed is not merely
@@ -790,27 +655,20 @@ func TestUnboundChildWithNoCandidatesGetsNilWorkspace(t *testing.T) {
 // asserts the row became terminal (no longer pending) and the frame's
 // bookkeeping was forgotten.
 func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	mem := inbox.NewMemory()
 	c.inbox = c.newInboxQueue(mem)
 
 	req := baseRequest()
 	ro, err := c.agentRuntimeOptions(req, "c_1", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.OnConsumed == nil {
-		t.Fatal("OnConsumed must be wired: without it every delivered message stays 'sent' forever")
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Require().NotNil(ro.OnConsumed, "OnConsumed must be wired: without it every delivered message stays 'sent' forever")
 
 	ctx := context.Background()
 	rec, err := mem.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := mem.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.Require().NoError(err, "Accept")
+	ck.Require().NoError(mem.MarkSent(ctx, []string{rec.ID}), "MarkSent")
 	c.sentMu.Lock()
 	c.sentFrames["F1"] = sentFrame{childID: "c_1", rowIDs: []string{rec.ID}}
 	c.sentMu.Unlock()
@@ -823,12 +681,11 @@ func TestAgentRuntimeOptionsWiresOnConsumed(t *testing.T) {
 	c.sentMu.Lock()
 	_, still := c.sentFrames["F1"]
 	c.sentMu.Unlock()
-	if still {
-		t.Error("an acked frame must be forgotten")
-	}
+	ck.False(still, "an acked frame must be forgotten")
 }
 
 func TestAgentRunnerGrantsMaxCostToTheEngine(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	budget := 12.50
 	req := protocol.SpawnRequest{
@@ -838,15 +695,12 @@ func TestAgentRunnerGrantsMaxCostToTheEngine(t *testing.T) {
 		MaxCost: &budget,
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_budgeted", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.MaxCost != 12.50 {
-		t.Errorf("ro.MaxCost = %v, want 12.50", ro.MaxCost)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(12.50, ro.MaxCost, "ro.MaxCost")
 }
 
 func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	req := protocol.SpawnRequest{
 		Kind:  protocol.KindFundi,
@@ -854,12 +708,8 @@ func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_unbudgeted", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.MaxCost != 0 {
-		t.Errorf("ro.MaxCost = %v, want 0 (unlimited)", ro.MaxCost)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Eq(0, ro.MaxCost, "ro.MaxCost")
 }
 
 // TestAgentRunnerCurrentMaxCostReadsLiveStoreValue proves the runtime options'
@@ -867,6 +717,7 @@ func TestAgentRunnerUnsetMaxCostIsUnlimited(t *testing.T) {
 // of grantedCost: a Controller.SetChildBudget mutation on the row reaches a
 // running child's own cost guardrail with nothing rebuilt.
 func TestAgentRunnerCurrentMaxCostReadsLiveStoreValue(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_live_budget", Status: protocol.StatusIdle,
@@ -878,22 +729,12 @@ func TestAgentRunnerCurrentMaxCostReadsLiveStoreValue(t *testing.T) {
 		Model: "anthropic/claude-sonnet-4-5",
 	}
 	ro, err := c.agentRuntimeOptions(req, "c_live_budget", false, "", "")
-	if err != nil {
-		t.Fatalf("agentRuntimeOptions: %v", err)
-	}
-	if ro.CurrentMaxCost == nil {
-		t.Fatal("CurrentMaxCost accessor is nil; a live budget raise can never reach the engine")
-	}
-	if got := ro.CurrentMaxCost(); got != 5.00 {
-		t.Errorf("CurrentMaxCost() = %v, want the stored 5.00", got)
-	}
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.Require().NotNil(ro.CurrentMaxCost, "CurrentMaxCost accessor is nil; a live budget raise can never reach the engine")
+	ck.Eq(5.00, ro.CurrentMaxCost(), "CurrentMaxCost()")
 
 	// Mutate the store directly, the way Controller.SetChildBudget does —
 	// the accessor must see it immediately, with nothing rebuilt.
-	if err := c.st.SetMaxCost("c_live_budget", 500.00); err != nil {
-		t.Fatal(err)
-	}
-	if got := ro.CurrentMaxCost(); got != 500.00 {
-		t.Errorf("CurrentMaxCost() after a store update = %v, want 500.00 (live)", got)
-	}
+	ck.Require().NoError(c.st.SetMaxCost("c_live_budget", 500.00))
+	ck.Eq(500.00, ro.CurrentMaxCost(), "CurrentMaxCost() after a store update")
 }

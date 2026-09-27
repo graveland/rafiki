@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"syscall"
 	"testing"
@@ -13,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func fakePiPath(t *testing.T) string {
@@ -23,6 +24,7 @@ func fakePiPath(t *testing.T) string {
 }
 
 func TestChild_SpawnAndCleanShutdown(t *testing.T) {
+	ck := assert.NewAborting(t)
 	spec := child.SpawnSpec{
 		ChildID:  "c_test",
 		Cwd:      t.TempDir(),
@@ -30,9 +32,7 @@ func TestChild_SpawnAndCleanShutdown(t *testing.T) {
 	}
 
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -46,18 +46,13 @@ func TestChild_SpawnAndCleanShutdown(t *testing.T) {
 
 	// Graceful shutdown should exit cleanly without escalation.
 	res, err := c.Shutdown(time.Second*5, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Escalated {
-		t.Fatal("clean exit should not need SIGTERM")
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("exit code: %d", res.ExitCode)
-	}
+	ck.NoError(err)
+	ck.False(res.Escalated, "clean exit should not need SIGTERM")
+	ck.Eq(0, res.ExitCode, "exit code")
 }
 
 func TestChild_StuckProcess_Escalates(t *testing.T) {
+	ck := assert.NewAborting(t)
 	spec := child.SpawnSpec{
 		ChildID:  "c_test",
 		Cwd:      t.TempDir(),
@@ -66,9 +61,7 @@ func TestChild_StuckProcess_Escalates(t *testing.T) {
 	}
 
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -81,12 +74,8 @@ func TestChild_StuckProcess_Escalates(t *testing.T) {
 
 	// Short shutdown timeout; expect escalation to SIGTERM.
 	res, err := c.Shutdown(100*time.Millisecond, 500*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Escalated {
-		t.Fatal("expected escalation")
-	}
+	ck.NoError(err)
+	ck.True(res.Escalated, "expected escalation")
 }
 
 // TestChild_StuckProcess_SignalExitCodeIsZero pins the pre-Runner-seam
@@ -99,6 +88,7 @@ func TestChild_StuckProcess_Escalates(t *testing.T) {
 // case and silently changed the ExitCode the wire API reports for every
 // escalated Shutdown/Interrupt.
 func TestChild_StuckProcess_SignalExitCodeIsZero(t *testing.T) {
+	ck := assert.NewAborting(t)
 	spec := child.SpawnSpec{
 		ChildID:  "c_test",
 		Cwd:      t.TempDir(),
@@ -107,9 +97,7 @@ func TestChild_StuckProcess_SignalExitCodeIsZero(t *testing.T) {
 	}
 
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -122,18 +110,10 @@ func TestChild_StuckProcess_SignalExitCodeIsZero(t *testing.T) {
 
 	// Short shutdown timeout; expect escalation to SIGTERM (or SIGKILL).
 	res, err := c.Shutdown(100*time.Millisecond, 500*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Escalated {
-		t.Fatal("expected escalation")
-	}
-	if res.Signal == "" {
-		t.Fatal("expected a recorded signal name")
-	}
-	if res.ExitCode != 0 {
-		t.Fatalf("ExitCode = %d, want 0 (signal-terminated, see Signal=%q); -1 is reserved for an indeterminate Wait() error", res.ExitCode, res.Signal)
-	}
+	ck.NoError(err)
+	ck.True(res.Escalated, "expected escalation")
+	ck.NotEq("", res.Signal, "expected a recorded signal name")
+	ck.Eq(0, res.ExitCode, "ExitCode = %d, want 0 (signal-terminated, see Signal=%q); -1 is reserved for an indeterminate Wait() error", res.ExitCode, res.Signal)
 }
 
 func TestChild_BinaryMissing_SpawnFails(t *testing.T) {
@@ -143,12 +123,11 @@ func TestChild_BinaryMissing_SpawnFails(t *testing.T) {
 		PiBinary: "/this/path/does/not/exist",
 	}
 	_, err := child.Spawn(context.Background(), spec)
-	if err == nil {
-		t.Fatal("expected spawn failure")
-	}
+	assert.NewAborting(t).Error(err, "expected spawn failure")
 }
 
 func TestChild_KickstartAndMetadata(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	spec := child.SpawnSpec{
 		ChildID:  "c_test",
 		Cwd:      t.TempDir(),
@@ -157,9 +136,7 @@ func TestChild_KickstartAndMetadata(t *testing.T) {
 	}
 
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -171,26 +148,17 @@ func TestChild_KickstartAndMetadata(t *testing.T) {
 		t.Fatalf("did not transition to idle: %v", c.Status())
 	}
 
-	if c.Status() != protocol.StatusIdle {
-		t.Fatalf("status after idle: %v", c.Status())
-	}
+	ck.Require().Eq(protocol.StatusIdle, c.Status(), "status after idle")
 
 	md := c.Metadata()
-	if md.SessionID != "test-sid" {
-		t.Fatalf("sessionId: got %q, want %q", md.SessionID, "test-sid")
-	}
-	if md.SessionName != "initial" {
-		t.Fatalf("sessionName: got %q, want %q", md.SessionName, "initial")
-	}
-	if md.SessionFile == "" {
-		t.Errorf("SessionFile not extracted")
-	}
-	if md.Model == "" {
-		t.Errorf("Model not extracted")
-	}
+	ck.Require().Eq("test-sid", md.SessionID, "sessionId: got")
+	ck.Require().Eq("initial", md.SessionName, "sessionName: got")
+	ck.NotEq("", md.SessionFile, "SessionFile not extracted")
+	ck.NotEq("", md.Model, "Model not extracted")
 }
 
 func TestChild_BeginShutdown(t *testing.T) {
+	ck := assert.NewAborting(t)
 	// BeginShutdown should drive the SM from idle to shutting_down and report
 	// the previous status correctly.
 	spec := child.SpawnSpec{
@@ -200,9 +168,7 @@ func TestChild_BeginShutdown(t *testing.T) {
 	}
 
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -214,27 +180,17 @@ func TestChild_BeginShutdown(t *testing.T) {
 		t.Fatal("child did not reach idle")
 	}
 
-	if c.Status() != protocol.StatusIdle {
-		t.Fatalf("pre-shutdown status: %v", c.Status())
-	}
+	ck.Eq(protocol.StatusIdle, c.Status(), "pre-shutdown status")
 
 	// First call: should transition idle → shutting_down.
 	changed, prev := c.BeginShutdown()
-	if !changed {
-		t.Fatal("BeginShutdown: expected transition to occur")
-	}
-	if prev != protocol.StatusIdle {
-		t.Fatalf("BeginShutdown: prev=%v, want idle", prev)
-	}
-	if c.Status() != protocol.StatusShuttingDown {
-		t.Fatalf("status after BeginShutdown: %v", c.Status())
-	}
+	ck.True(changed, "BeginShutdown: expected transition to occur")
+	ck.Eq(protocol.StatusIdle, prev, "BeginShutdown: prev")
+	ck.Eq(protocol.StatusShuttingDown, c.Status(), "status after BeginShutdown")
 
 	// Second call: already shutting_down, should be a no-op.
 	changed2, _ := c.BeginShutdown()
-	if changed2 {
-		t.Fatal("BeginShutdown: second call should not report a transition")
-	}
+	ck.False(changed2, "BeginShutdown: second call should not report a transition")
 }
 
 func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
@@ -247,9 +203,7 @@ func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
 		ExtraArgs: []string{"-c", "exit 0"},
 	}
 	c, err := child.Spawn(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() {
 		_, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond)
 	})
@@ -262,6 +216,7 @@ func TestChild_ProcessExits_ReadyStillFires(t *testing.T) {
 }
 
 func TestChild_InterruptSendsSIGINT(t *testing.T) {
+	c := assert.NewAborting(t)
 	// The fake child installs NO signal trap, so a default-disposition SIGINT
 	// terminates it and is recorded as exit signal "interrupt". Asserting on the
 	// recorded exit signal proves Interrupt() delivers SIGINT specifically,
@@ -275,9 +230,7 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 	body := "#!/bin/bash\n" +
 		"printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n" +
 		"while true; do sleep 0.05; done\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	c.NoError(os.WriteFile(script, []byte(body), 0o755), "write script")
 	cwd, _ := os.Getwd()
 	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
 		ChildID:  "c_int",
@@ -285,9 +238,7 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 		PiBinary: script,
 		Provider: child.ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = ch.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
 
 	select {
@@ -297,16 +248,12 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond) // ensure the process is fully running
 
-	if err := ch.Interrupt(); err != nil {
-		t.Fatalf("interrupt: %v", err)
-	}
+	c.NoError(ch.Interrupt(), "interrupt")
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if sig := ch.ExitResult().Signal; sig != "" {
-			if sig != syscall.SIGINT.String() {
-				t.Fatalf("child exit signal = %q, want %q", sig, syscall.SIGINT.String())
-			}
+			c.Eq(syscall.SIGINT.String(), sig, "child exit signal")
 			return // exited via SIGINT — Interrupt() delivered the right signal
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -315,13 +262,12 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 }
 
 func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Interrupt() on an already-exited child must be a no-op returning nil.
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake.sh")
 	body := "#!/bin/bash\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}'\nexit 0\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	c.NoError(os.WriteFile(script, []byte(body), 0o755), "write script")
 	cwd, _ := os.Getwd()
 	ch, err := child.Spawn(context.Background(), child.SpawnSpec{
 		ChildID:  "c_int2",
@@ -329,9 +275,7 @@ func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
 		PiBinary: script,
 		Provider: child.ClaudeProvider{},
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	// Wait for the process to exit and be reaped (Done closes after the supervise
 	// loop sets closed), so Interrupt hits the already-closed branch.
 	select {
@@ -339,9 +283,7 @@ func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("child never exited")
 	}
-	if err := ch.Interrupt(); err != nil {
-		t.Fatalf("Interrupt() on exited child = %v, want nil", err)
-	}
+	c.NoError(ch.Interrupt(), "Interrupt() on exited child")
 }
 
 // message_update frames are redundant with the message_end that follows them,
@@ -351,6 +293,7 @@ func TestChild_InterruptAfterExitIsNoOp(t *testing.T) {
 // directly, so it proves the filter that's wired into production, not just a
 // helper function in isolation.
 func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
+	ck := assert.NewAborting(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake.sh")
 	body := "#!/bin/bash\n" +
@@ -359,9 +302,7 @@ func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
 		"printf '%s\\n' '{\"type\":\"message_update\",\"message\":{\"role\":\"assistant\"}}'\n" +
 		"printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}'\n" +
 		"printf '%s\\n' '{\"type\":\"tool_execution_start\",\"toolCallId\":\"t1\"}'\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	ck.NoError(os.WriteFile(script, []byte(body), 0o755), "write script")
 
 	// No Provider set: defaults to IdentityProvider, the identity provider, so the
 	// raw stdout lines above land in the ring exactly as printed.
@@ -370,9 +311,7 @@ func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
 		Cwd:      dir,
 		PiBinary: script,
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	ck.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
 
 	// The script never reads stdin and exits after emitting its frames, so
@@ -385,9 +324,7 @@ func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
 
 	got := typesOf(c.RingSnapshot())
 	want := []string{"message_start", "message_end", "tool_execution_start"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ring contents = %v, want %v — message_update must not consume ring capacity", got, want)
-	}
+	ck.EqDiff(want, got, "ring contents")
 }
 
 // A frame the type-sniffing json.Unmarshal can't parse must still land in the
@@ -395,23 +332,20 @@ func TestRingSkipsMessageUpdateButKeepsEverythingElse(t *testing.T) {
 // output. Exercises the isMessageUpdate false-on-error path through the real
 // readStdout path, not by calling it directly.
 func TestRingKeepsUnparseableFrame(t *testing.T) {
+	ck := assert.NewAborting(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake.sh")
 	body := "#!/bin/bash\n" +
 		"printf '%s\\n' 'this is not json'\n" +
 		"printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\"}}'\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
+	ck.NoError(os.WriteFile(script, []byte(body), 0o755), "write script")
 
 	c, err := child.Spawn(context.Background(), child.SpawnSpec{
 		ChildID:  "c_ring_unparseable",
 		Cwd:      dir,
 		PiBinary: script,
 	})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	ck.NoError(err, "spawn")
 	t.Cleanup(func() { _, _ = c.Shutdown(100*time.Millisecond, 100*time.Millisecond) })
 
 	select {
@@ -421,12 +355,8 @@ func TestRingKeepsUnparseableFrame(t *testing.T) {
 	}
 
 	frames := c.RingSnapshot()
-	if len(frames) != 2 {
-		t.Fatalf("ring has %d frames, want 2 (unparseable frame must not be dropped): %v", len(frames), typesOf(frames))
-	}
-	if string(frames[0]) != "this is not json" {
-		t.Fatalf("frames[0] = %q, want the unparseable line preserved verbatim", frames[0])
-	}
+	ck.Len(frames, 2, "ring has %d frames, want 2 (unparseable frame must not be dropped): %v", len(frames), typesOf(frames))
+	ck.Eq("this is not json", string(frames[0]), "frames[0] = %q, want the unparseable line preserved verbatim", frames[0])
 }
 
 // typesOf extracts the top-level "type" field from each ring frame, in order.

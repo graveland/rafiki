@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,18 +17,17 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A provider with no via_executor dials directly: nil transport, no error.
 func TestRelayTransportNilWithoutViaExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := providers.Provider{Name: "anthropic", Kind: providers.KindAnthropic}
 	rt, err := relayTransport(p, nil)
-	if err != nil {
-		t.Fatalf("relayTransport: %v", err)
-	}
-	if rt != nil {
-		t.Fatalf("rt = %v, want nil (direct dial)", rt)
-	}
+	c.NoError(err, "relayTransport")
+	c.Nil(rt, "rt")
 }
 
 // A via_executor provider whose selector matches no live executor advertising
@@ -38,6 +36,7 @@ func TestRelayTransportNilWithoutViaExecutor(t *testing.T) {
 // quietly dialed base_url from the SERVER, which either refuses or reaches
 // something unrelated.
 func TestRelayTransportNoMatchingExecutorErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := execpool.New(relayFakeStore{})
 	p := providers.Provider{
 		Name:    "vmlx",
@@ -50,24 +49,17 @@ func TestRelayTransportNoMatchingExecutorErrors(t *testing.T) {
 	}
 
 	rt, err := relayTransport(p, pool)
-	if err == nil {
-		t.Fatal("relayTransport succeeded against an empty pool")
-	}
-	if rt != nil {
-		t.Fatalf("rt = %v, want nil on error", rt)
-	}
-	if !strings.Contains(err.Error(), "vmlx") {
-		t.Errorf("error = %q, want it to name the provider %q", err.Error(), "vmlx")
-	}
-	if !strings.Contains(err.Error(), "role=workstation") {
-		t.Errorf("error = %q, want it to name the selector %q", err.Error(), "role=workstation")
-	}
+	c.Require().Error(err, "relayTransport succeeded against an empty pool")
+	c.Require().Nil(rt, "rt")
+	c.StrContains(err.Error(), "vmlx", "error")
+	c.StrContains(err.Error(), "role=workstation", "error")
 }
 
 // A live executor matching the selector but advertising NO proxies must still
 // refuse — the fix here is a --proxy flag, not a label, and the error should
 // say so.
 func TestRelayTransportErrorNamesTheProxy(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pool := joinLiveRelayExecutor(t, executors.Executor{
 		ID: "exec-1", Enabled: true,
 		Labels: map[string]string{"role": "workstation"},
@@ -83,15 +75,9 @@ func TestRelayTransportErrorNamesTheProxy(t *testing.T) {
 	}
 
 	rt, err := relayTransport(p, pool)
-	if err == nil {
-		t.Fatal("relayTransport succeeded against an executor advertising no proxies")
-	}
-	if rt != nil {
-		t.Fatalf("rt = %v, want nil on error", rt)
-	}
-	if !strings.Contains(err.Error(), "vmlx") {
-		t.Errorf("error = %q, want it to mention the proxy name %q", err.Error(), "vmlx")
-	}
+	c.Require().Error(err, "relayTransport succeeded against an executor advertising no proxies")
+	c.Require().Nil(rt, "rt")
+	c.StrContains(err.Error(), "vmlx", "error")
 }
 
 // A live executor matching the selector AND advertising the proxy: relayTransport
@@ -99,6 +85,7 @@ func TestRelayTransportErrorNamesTheProxy(t *testing.T) {
 // stream until the first RoundTrip — so this assertion never touches the
 // network.
 func TestRelayTransportSucceedsWhenExecutorAdvertisesProxy(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := joinLiveRelayExecutor(t, executors.Executor{
 		ID: "exec-1", Enabled: true,
 		Labels: map[string]string{"role": "workstation"},
@@ -114,12 +101,8 @@ func TestRelayTransportSucceedsWhenExecutorAdvertisesProxy(t *testing.T) {
 	}
 
 	rt, err := relayTransport(p, pool)
-	if err != nil {
-		t.Fatalf("relayTransport: %v", err)
-	}
-	if rt == nil {
-		t.Fatal("rt = nil, want a relay transport")
-	}
+	c.NoError(err, "relayTransport")
+	c.NotNil(rt, "rt = nil, want a relay transport")
 }
 
 // providerSenders must resolve only the providers this spawn's MODEL can
@@ -128,6 +111,7 @@ func TestRelayTransportSucceedsWhenExecutorAdvertisesProxy(t *testing.T) {
 // outside that reachable set with no live executor must not fail a spawn for
 // an unrelated model.
 func TestProviderSendersSkipsUnreachableViaExecutorProvider(t *testing.T) {
+	c := assert.NewCollecting(t)
 	set := &providers.Set{
 		DefaultProvider: "openrouter",
 		Providers: map[string]providers.Provider{
@@ -145,12 +129,9 @@ func TestProviderSendersSkipsUnreachableViaExecutorProvider(t *testing.T) {
 	pool := execpool.New(relayFakeStore{}) // empty: vmlx advertises no live executor
 
 	senders, err := providerSenders(set, pool, "openrouter/deepseek-v4-pro")
-	if err != nil {
-		t.Fatalf("providerSenders: %v, want success (vmlx is unrelated to this model)", err)
-	}
-	if _, ok := senders["vmlx"]; ok {
-		t.Error(`senders contains "vmlx", want it omitted (no live executor, and unreachable by this model)`)
-	}
+	c.Require().NoError(err, "providerSenders")
+	_, ok := senders["vmlx"]
+	c.False(ok, `senders contains "vmlx", want it omitted (no live executor, and unreachable by this model)`)
 }
 
 // A via_executor provider that IS in the reachable set (the model's own
@@ -172,9 +153,8 @@ func TestProviderSendersFailsWhenModelsOwnProviderUnavailable(t *testing.T) {
 	}
 	pool := execpool.New(relayFakeStore{})
 
-	if _, err := providerSenders(set, pool, "vmlx/qwen"); err == nil {
-		t.Fatal("providerSenders succeeded for a model whose own provider has no live executor")
-	}
+	_, err := providerSenders(set, pool, "vmlx/qwen")
+	assert.NewAborting(t).Error(err, "providerSenders succeeded for a model whose own provider has no live executor")
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -253,20 +233,17 @@ func (h *relayDescribeHandler) Health(
 // matches against; proxies is what the fake executor self-reports in Describe.
 func joinLiveRelayExecutor(t *testing.T, exec executors.Executor, proxies []string) *execpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	// macOS TempDir paths often exceed the unix-socket path length limit;
 	// /tmp directly with a short name avoids it.
 	dir, err := os.MkdirTemp("/tmp", "relay-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s")
 
 	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = ln.Close() })
 
 	pool := execpool.New(enrollingStore{exec: exec})

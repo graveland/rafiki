@@ -21,6 +21,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // captureSlog redirects the default slog logger into a buffer.
@@ -36,6 +38,7 @@ func captureSlog(t *testing.T, buf *bytes.Buffer) {
 // server is shut down when the test completes.
 func startStubServer(t *testing.T, handler http.Handler) executorpbconnect.ExecutorServiceClient {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	sockPath := fmt.Sprintf("/tmp/rafiki-interceptor-%s.sock", strings.ReplaceAll(t.Name(), "/", "_"))
 	os.Remove(sockPath)
@@ -49,12 +52,8 @@ func startStubServer(t *testing.T, handler http.Handler) executorpbconnect.Execu
 	srv := &http.Server{Handler: mux, Protocols: protos}
 
 	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
+	c.NoError(err, "listen")
+	c.NoError(os.Chmod(sockPath, 0o600), "chmod")
 	t.Cleanup(func() { srv.Close() })
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -71,6 +70,7 @@ func startStubServer(t *testing.T, handler http.Handler) executorpbconnect.Execu
 }
 
 func TestRPCLogInterceptorUnary(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
 	captureSlog(t, &buf)
 
@@ -80,9 +80,7 @@ func TestRPCLogInterceptorUnary(t *testing.T) {
 	client := startStubServer(t, h)
 
 	_, err := client.Describe(context.Background(), connect.NewRequest(&executorpb.DescribeRequest{}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	m := parseLogLine(t, buf.String())
 	if m["rpc"] != "/rafiki.executor.v1.ExecutorService/Describe" {
@@ -91,9 +89,8 @@ func TestRPCLogInterceptorUnary(t *testing.T) {
 	if m["result"] != "ok" {
 		t.Errorf("want result=ok, got %v", m["result"])
 	}
-	if _, ok := m["duration"]; !ok {
-		t.Error("missing duration")
-	}
+	_, ok := m["duration"]
+	c.True(ok, "missing duration")
 }
 
 func TestRPCLogInterceptorUnaryError(t *testing.T) {
@@ -106,9 +103,7 @@ func TestRPCLogInterceptorUnaryError(t *testing.T) {
 	client := startStubServer(t, h)
 
 	_, err := client.Health(context.Background(), connect.NewRequest(&executorpb.HealthRequest{}))
-	if err == nil {
-		t.Fatal("expected error")
-	}
+	assert.NewAborting(t).Error(err, "expected error")
 
 	m := parseLogLine(t, buf.String())
 	if m["result"] != "error" {
@@ -120,6 +115,7 @@ func TestRPCLogInterceptorUnaryError(t *testing.T) {
 }
 
 func TestRPCLogInterceptorStreamingExecute(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
 	captureSlog(t, &buf)
 
@@ -140,15 +136,11 @@ func TestRPCLogInterceptorStreamingExecute(t *testing.T) {
 		Tool:      "read",
 		InputJson: []byte(`{}`),
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	defer stream.Close()
 	for stream.Receive() {
 	}
-	if stream.Err() != nil {
-		t.Fatal(stream.Err())
-	}
+	c.NoError(stream.Err())
 
 	m := parseLogLine(t, buf.String())
 	if m["rpc"] != "/rafiki.executor.v1.ExecutorService/Execute" {
@@ -163,6 +155,7 @@ func TestRPCLogInterceptorStreamingExecute(t *testing.T) {
 }
 
 func TestRPCLogInterceptorStreamingError(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
 	captureSlog(t, &buf)
 
@@ -177,15 +170,11 @@ func TestRPCLogInterceptorStreamingError(t *testing.T) {
 		Tool:      "read",
 		InputJson: []byte(`{}`),
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	defer stream.Close()
 	for stream.Receive() {
 	}
-	if stream.Err() == nil {
-		t.Fatal("expected error from stream")
-	}
+	c.Error(stream.Err(), "expected error from stream")
 
 	m := parseLogLine(t, buf.String())
 	if m["result"] != "error" {
@@ -197,6 +186,7 @@ func TestRPCLogInterceptorStreamingError(t *testing.T) {
 }
 
 func TestRPCLogInterceptorStreamingBidiDoesNotCrash(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
 	captureSlog(t, &buf)
 
@@ -217,22 +207,17 @@ func TestRPCLogInterceptorStreamingBidiDoesNotCrash(t *testing.T) {
 	}
 	// Read error from stream.
 	_, rcvErr := proxyStream.Receive()
-	if rcvErr == nil {
-		t.Fatal("expected error from bidi stream")
-	}
+	c.Require().Error(rcvErr, "expected error from bidi stream")
 
-	if strings.Contains(buf.String(), `"tool"`) {
-		t.Errorf("unexpected tool in log for bidi stream: %s", buf.String())
-	}
+	c.NotStrContains(buf.String(), `"tool"`, "unexpected tool in log for bidi stream")
 }
 
 // parseLogLine unmarshals the first JSON line from raw.
 func parseLogLine(t *testing.T, raw string) map[string]any {
 	t.Helper()
 	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("invalid JSON log line: %v\n%s", err, raw)
-	}
+	err := json.Unmarshal([]byte(raw), &m)
+	assert.NewAborting(t).NoError(err, "invalid JSON log line: %v\n%s", err, raw)
 	return m
 }
 

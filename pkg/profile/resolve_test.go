@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // seed writes a two-profile manifest and returns nothing; every resolution
@@ -18,17 +20,13 @@ func seed(t *testing.T) {
 		"work":     {Name: "work", Socket: "/tmp/work.sock"},
 		"personal": {Name: "personal", URL: "https://rafiki.example.net"},
 	}})
-	if err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "seed")
 }
 
 func TestResolvePrefersFlagThenEnvThenPointer(t *testing.T) {
 	setXDG(t)
 	seed(t)
-	if err := SavePointer("work"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	assert.NewAborting(t).NoError(SavePointer("work"), "SavePointer")
 
 	cases := []struct {
 		name string
@@ -42,99 +40,68 @@ func TestResolvePrefersFlagThenEnvThenPointer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			got, err := Resolve(tc.sel)
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-			if got.Name != tc.want {
-				t.Fatalf("resolved %q, want %q", got.Name, tc.want)
-			}
+			c.NoError(err, "Resolve")
+			c.Eq(tc.want, got.Name, "resolved")
 		})
 	}
 }
 
 func TestResolveCarriesTheProfilesOwnToken(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
 	seed(t)
-	if err := WriteToken("personal", "sk-personal"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if err := WriteToken("work", "sk-work"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
+	c.NoError(WriteToken("personal", "sk-personal"), "WriteToken")
+	c.NoError(WriteToken("work", "sk-work"), "WriteToken")
 
 	p, err := Resolve(Selection{Flag: "personal"})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if p.Token != "sk-personal" {
-		t.Fatalf("token = %q, want sk-personal — the whole point is that the credential travels with the endpoint", p.Token)
-	}
+	c.NoError(err, "Resolve")
+	c.Eq("sk-personal", p.Token, "token")
 }
 
 func TestResolveRejectsAnUnknownName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	setXDG(t)
 	seed(t)
 	_, err := Resolve(Selection{Flag: "nope"})
-	if err == nil {
-		t.Fatal("Resolve(nope) = nil error")
-	}
+	c.Require().Error(err, "Resolve(nope) = nil error")
 	for _, want := range []string{"nope", "work", "personal"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
+		c.StrContains(err.Error(), want, "error %q does not mention", err)
 	}
 }
 
 func TestResolveWithAManifestButNothingSelectedIsAnError(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
 	seed(t)
 	// No pointer file written.
 	_, err := Resolve(Selection{})
-	if err == nil {
-		t.Fatal("Resolve with no selection = nil error; it must not silently pick one")
-	}
-	if !strings.Contains(err.Error(), "rafiki profile use") {
-		t.Fatalf("error %q does not tell the user how to fix it", err)
-	}
+	c.Error(err, "Resolve with no selection = nil error; it must not silently pick one")
+	c.StrContains(err.Error(), "rafiki profile use", "error %q does not tell the user how to fix it", err)
 }
 
 func TestResolveBootstrapsWhenThereIsNoManifestAtAll(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
 
 	got, err := Resolve(Selection{})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if !got.Bootstrapped {
-		t.Fatal("Bootstrapped = false; the caller needs this to print its notice")
-	}
-	if got.Name != DefaultName {
-		t.Fatalf("bootstrapped profile = %q, want %q", got.Name, DefaultName)
-	}
-	if got.Socket != paths.SocketPath() {
-		t.Fatalf("bootstrapped socket = %q, want the XDG default %q", got.Socket, paths.SocketPath())
-	}
-	if got.Proxy == "" {
-		t.Fatal("bootstrapped profile has no proxy; `rafiki claude` would have no default URL")
-	}
+	c.NoError(err, "Resolve")
+	c.True(got.Bootstrapped, "Bootstrapped = false; the caller needs this to print its notice")
+	c.Eq(DefaultName, got.Name, "bootstrapped profile")
+	c.Eq(paths.SocketPath(), got.Socket, "bootstrapped socket")
+	c.NotEq("", got.Proxy, "bootstrapped profile has no proxy; `rafiki claude` would have no default URL")
 
 	// It must be durable, not computed fresh each time.
 	if _, err := os.Stat(ProfilesFile()); err != nil {
 		t.Fatalf("bootstrap did not write %s: %v", ProfilesFile(), err)
 	}
-	if LoadPointer() != DefaultName {
-		t.Fatalf("bootstrap did not write the pointer (got %q)", LoadPointer())
-	}
+	c.Eq(DefaultName, LoadPointer(), "bootstrap did not write the pointer (got")
 
 	// A second call must NOT re-report a bootstrap.
 	again, err := Resolve(Selection{})
-	if err != nil {
-		t.Fatalf("second Resolve: %v", err)
-	}
-	if again.Bootstrapped {
-		t.Fatal("Bootstrapped = true on the second call; the notice would print forever")
-	}
+	c.NoError(err, "second Resolve")
+	c.False(again.Bootstrapped, "Bootstrapped = true on the second call; the notice would print forever")
 }
 
 func TestResolveWithAnExplicitSelectionOnABareMachineErrorsRatherThanBootstrapping(t *testing.T) {
@@ -150,19 +117,14 @@ func TestResolveWithAnExplicitSelectionOnABareMachineErrorsRatherThanBootstrappi
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			// Clear any leftover manifest.
 			os.Remove(ProfilesFile())
 
 			_, err := Resolve(tc.sel)
-			if err == nil {
-				t.Fatal("Resolve with explicit selection on a bare machine = nil error; it must refuse to bootstrap")
-			}
-			if !strings.Contains(err.Error(), "somename") {
-				t.Errorf("error %q does not name the requested profile", err)
-			}
-			if !strings.Contains(err.Error(), "rafiki profile add") {
-				t.Errorf("error %q does not point at the fix", err)
-			}
+			c.Require().Error(err, "Resolve with explicit selection on a bare machine = nil error; it must refuse to bootstrap")
+			c.StrContains(err.Error(), "somename", "error %q does not name the requested profile", err)
+			c.StrContains(err.Error(), "rafiki profile add", "error %q does not point at the fix", err)
 
 			// Verify bootstrap did NOT run as a side effect.
 			if _, err := os.Stat(ProfilesFile()); err == nil {
@@ -173,6 +135,7 @@ func TestResolveWithAnExplicitSelectionOnABareMachineErrorsRatherThanBootstrappi
 }
 
 func TestResolveErrorMessageUsesCorrectPrecedence(t *testing.T) {
+	c := assert.NewCollecting(t)
 	setXDG(t)
 	// No manifest at all; no pointer file.
 	// When both Flag and Env are set on a bare machine, the error should
@@ -180,19 +143,11 @@ func TestResolveErrorMessageUsesCorrectPrecedence(t *testing.T) {
 
 	os.Remove(ProfilesFile())
 	_, err := Resolve(Selection{Flag: "foo", Env: "bar", EnvSet: true})
-	if err == nil {
-		t.Fatal("Resolve with both Flag and Env on a bare machine = nil error")
-	}
-	if !strings.Contains(err.Error(), "foo") {
-		t.Errorf("error %q does not name the Flag value", err)
-	}
+	c.Require().Error(err, "Resolve with both Flag and Env on a bare machine = nil error")
+	c.StrContains(err.Error(), "foo", "error %q does not name the Flag value", err)
 	// Verify it does NOT say "foobar" or "foo" + "bar" concatenated.
-	if strings.Contains(err.Error(), "foobar") {
-		t.Errorf("error %q incorrectly concatenates Flag and Env", err)
-	}
-	if strings.Contains(err.Error(), "bar") {
-		t.Errorf("error %q should not mention the Env value when Flag is set", err)
-	}
+	c.NotStrContains(err.Error(), "foobar", "error %q incorrectly concatenates Flag and Env", err)
+	c.NotStrContains(err.Error(), "bar", "error %q should not mention the Env value when Flag is set", err)
 }
 
 func TestCheckRetiredEnvNamesTheVariableAndTheFix(t *testing.T) {
@@ -202,16 +157,11 @@ func TestCheckRetiredEnvNamesTheVariableAndTheFix(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(name, "something")
+			c := assert.NewCollecting(t)
 			err := CheckRetiredEnv()
-			if err == nil {
-				t.Fatalf("CheckRetiredEnv with %s set = nil error", name)
-			}
-			if !strings.Contains(err.Error(), name) {
-				t.Errorf("error %q does not name %s", err, name)
-			}
-			if !strings.Contains(err.Error(), "rafiki profile") {
-				t.Errorf("error %q does not point at the replacement", err)
-			}
+			c.Require().Error(err, "CheckRetiredEnv with %s set = nil error", name)
+			c.StrContains(err.Error(), name, "error %q does not name", err)
+			c.StrContains(err.Error(), "rafiki profile", "error %q does not point at the replacement", err)
 		})
 	}
 }
@@ -224,9 +174,7 @@ func TestCheckRetiredEnvIsQuietWhenNoneAreSet(t *testing.T) {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
 	}
-	if err := CheckRetiredEnv(); err != nil {
-		t.Fatalf("CheckRetiredEnv = %v, want nil", err)
-	}
+	assert.NewAborting(t).NoError(CheckRetiredEnv(), "CheckRetiredEnv")
 }
 
 // TestCheckRetiredEnvTreatsPresentButEmptyAsUnset pins the distinction the
@@ -252,9 +200,7 @@ func TestCheckRetiredEnvTreatsPresentButEmptyAsUnset(t *testing.T) {
 	for _, name := range names {
 		t.Setenv(name, "")
 	}
-	if err := CheckRetiredEnv(); err != nil {
-		t.Fatalf("CheckRetiredEnv with every retired var present-but-empty (via t.Setenv, not os.Unsetenv) = %v, want nil", err)
-	}
+	assert.NewAborting(t).NoError(CheckRetiredEnv(), "CheckRetiredEnv with every retired var present-but-empty (via t.Setenv, not os.Unsetenv)")
 }
 
 // TestResolveDerivesProxyFromURL pins Fix 5 (design spec: "For a url profile
@@ -264,59 +210,44 @@ func TestCheckRetiredEnvTreatsPresentButEmptyAsUnset(t *testing.T) {
 // URL" even though docs/MIGRATING.md's worked example for a remote profile
 // never passes --proxy.
 func TestResolveDerivesProxyFromURL(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if err := Save(Set{Profiles: map[string]Profile{
+	c.NoError(Save(Set{Profiles: map[string]Profile{
 		"personal": {Name: "personal", URL: "https://rafiki.example.net"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	}}), "Save")
 
 	got, err := Resolve(Selection{Flag: "personal"})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if got.Proxy != "https://rafiki.example.net" {
-		t.Fatalf("Proxy = %q, want the derived url", got.Proxy)
-	}
+	c.NoError(err, "Resolve")
+	c.Eq("https://rafiki.example.net", got.Proxy, "Proxy")
 }
 
 // TestResolveExplicitProxyWinsOverDerivation checks that a genuine --proxy
 // choice is never overridden by the url-derivation default.
 func TestResolveExplicitProxyWinsOverDerivation(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if err := Save(Set{Profiles: map[string]Profile{
+	c.NoError(Save(Set{Profiles: map[string]Profile{
 		"personal": {Name: "personal", URL: "https://rafiki.example.net", Proxy: "https://proxy.example.net"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	}}), "Save")
 
 	got, err := Resolve(Selection{Flag: "personal"})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if got.Proxy != "https://proxy.example.net" {
-		t.Fatalf("Proxy = %q, want the explicit proxy unchanged", got.Proxy)
-	}
+	c.NoError(err, "Resolve")
+	c.Eq("https://proxy.example.net", got.Proxy, "Proxy")
 }
 
 // TestResolveDoesNotDeriveProxyForASocketProfile checks that a local daemon
 // with no `proxy` set stays proxy-less: there is no url to derive one from,
 // and deriving from the socket path would be nonsense.
 func TestResolveDoesNotDeriveProxyForASocketProfile(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if err := Save(Set{Profiles: map[string]Profile{
+	c.NoError(Save(Set{Profiles: map[string]Profile{
 		"work": {Name: "work", Socket: "/tmp/work.sock"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	}}), "Save")
 
 	got, err := Resolve(Selection{Flag: "work"})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if got.Proxy != "" {
-		t.Fatalf("Proxy = %q, want empty for a socket profile with none set", got.Proxy)
-	}
+	c.NoError(err, "Resolve")
+	c.Eq("", got.Proxy, "Proxy")
 }
 
 func TestDescribeNamesTheEndpoint(t *testing.T) {

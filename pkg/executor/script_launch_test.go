@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scriptCacheFixture lays out a synced blob cache the way SyncPyModules does:
@@ -23,6 +25,7 @@ import (
 // temp dir and the caller restores nothing (t.Setenv does).
 func scriptCacheFixture(t *testing.T, modules map[string]moduleFixture) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	cache := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cache)
 	// Re-derive: base() prefers the env var; with XDG_CACHE_HOME set the cache
@@ -30,24 +33,14 @@ func scriptCacheFixture(t *testing.T, modules map[string]moduleFixture) {
 	root := filepath.Join(cache, "rafiki", "pymodules")
 	for name, m := range modules {
 		dir := filepath.Join(root, name)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name+".py"), []byte(m.code), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(os.MkdirAll(dir, 0o755))
+		c.NoError(os.WriteFile(filepath.Join(dir, name+".py"), []byte(m.code), 0o644))
 		if m.venv {
-			if err := os.MkdirAll(filepath.Join(dir, ".venv", "bin"), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			c.NoError(os.MkdirAll(filepath.Join(dir, ".venv", "bin"), 0o755))
 			py := filepath.Join(dir, ".venv", "bin", "python3")
-			if err := os.WriteFile(py, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			c.NoError(os.WriteFile(py, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 			site := filepath.Join(dir, ".venv", "lib", "python3.12", "site-packages")
-			if err := os.MkdirAll(site, 0o755); err != nil {
-				t.Fatal(err)
-			}
+			c.NoError(os.MkdirAll(site, 0o755))
 		}
 	}
 }
@@ -58,6 +51,7 @@ type moduleFixture struct {
 }
 
 func TestResolveScriptLaunchFromBlobCache(t *testing.T) {
+	c := assert.NewCollecting(t)
 	scriptCacheFixture(t, map[string]moduleFixture{
 		"driver": {code: "print('hi')\n", venv: false},
 		"helper": {code: "x=1\n# pymodule-requirements: requests\n", venv: true},
@@ -68,21 +62,13 @@ func TestResolveScriptLaunchFromBlobCache(t *testing.T) {
 		Modules: []string{"helper"},
 		Args:    []string{"--flag", "value"},
 	})
-	if err != nil {
-		t.Fatalf("resolveScriptLaunch: %v", err)
-	}
+	c.Require().NoError(err, "resolveScriptLaunch")
 	// The venv python wins the interpreter slot for a script that has one...
-	if res.interpreter != "python3" {
-		t.Fatalf("interpreter = %q; the SCRIPT's venv wins, not a module's (driver has none)", res.interpreter)
-	}
+	c.Require().Eq("python3", res.interpreter, "interpreter")
 	// ...the script path leads argv, args follow verbatim.
 	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "rafiki", "pymodules")
-	if want := filepath.Join(cache, "driver", "driver.py"); res.argv[0] != want {
-		t.Errorf("argv[0] = %q, want %q", res.argv[0], want)
-	}
-	if len(res.argv) != 3 || res.argv[1] != "--flag" || res.argv[2] != "value" {
-		t.Errorf("argv = %v, want script path then the spec's args", res.argv)
-	}
+	c.Eq(filepath.Join(cache, "driver", "driver.py"), res.argv[0], "argv[0]")
+	c.False(len(res.argv) != 3 || res.argv[1] != "--flag" || res.argv[2] != "value", "argv = %v, want script path then the spec's args", res.argv)
 	// PYTHONPATH: the module's code dir then its site-packages (the script has
 	// no venv, so no script site-packages entry), exactly two entries — the
 	// script's own dir stays off (it is sys.path[0]).
@@ -91,13 +77,9 @@ func TestResolveScriptLaunchFromBlobCache(t *testing.T) {
 		filepath.Join(cache, "helper"),
 		filepath.Join(cache, "helper", ".venv", "lib", "python3.12", "site-packages"),
 	}
-	if len(entries) != len(want) {
-		t.Fatalf("PYTHONPATH = %q (%d entries), want %v", res.pythonPath, len(entries), want)
-	}
+	c.Require().Len(entries, len(want), "PYTHONPATH = %q (%d entries), want %v", res.pythonPath, len(entries), want)
 	for i := range want {
-		if entries[i] != want[i] {
-			t.Errorf("PYTHONPATH entry %d = %q, want %q", i, entries[i], want[i])
-		}
+		c.Eq(want[i], entries[i], "PYTHONPATH entry %d = %q, want", i, entries[i])
 	}
 }
 
@@ -105,18 +87,15 @@ func TestResolveScriptLaunchFromBlobCache(t *testing.T) {
 // fallback — so a changed RAFIKI_PYMODULE_PYTHON cannot re-point or rebuild a
 // venv that was already built.
 func TestResolveScriptLaunchVenvInterpreterWins(t *testing.T) {
+	c := assert.NewAborting(t)
 	scriptCacheFixture(t, map[string]moduleFixture{
 		"venved": {code: "print('v')\n", venv: true},
 	})
 	t.Setenv("RAFIKI_PYMODULE_PYTHON", "/custom/python3")
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "local", Script: "venved"})
-	if err != nil {
-		t.Fatalf("resolveScriptLaunch: %v", err)
-	}
+	c.NoError(err, "resolveScriptLaunch")
 	want := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "rafiki", "pymodules", "venved", ".venv", "bin", "python3")
-	if res.interpreter != want {
-		t.Fatalf("interpreter = %q, want the script's own venv python %q", res.interpreter, want)
-	}
+	c.Eq(want, res.interpreter, "interpreter")
 }
 
 // Requirements without a built venv are refused before anything is launched,
@@ -124,25 +103,20 @@ func TestResolveScriptLaunchVenvInterpreterWins(t *testing.T) {
 // build-in-progress retry case, where a staging directory means the venv is
 // still being built.
 func TestResolveScriptLaunchRefusesMissingVenv(t *testing.T) {
+	c := assert.NewAborting(t)
 	// The requirements block is a marker line followed by #-commented lines,
 	// exactly ParseRequirements' shape.
 	scriptCacheFixture(t, map[string]moduleFixture{
 		"needy": {code: "# pymodule-requirements:\n# requests\nprint('n')\n", venv: false},
 	})
 	_, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "local", Script: "needy"})
-	if err == nil || !strings.Contains(err.Error(), "dependencies not ready") {
-		t.Fatalf("want the venv readiness refusal, got %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "dependencies not ready"), "want the venv readiness refusal, got %v", err)
 
 	// A staging directory is a build in flight: retryable, worded as such.
 	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "rafiki", "pymodules", "needy")
-	if err := os.MkdirAll(filepath.Join(cache, ".rafiki-venv-staging-1"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(filepath.Join(cache, ".rafiki-venv-staging-1"), 0o755))
 	_, err = resolveScriptLaunch(&darajapb.ScriptParams{Repo: "local", Script: "needy"})
-	if err == nil || !strings.Contains(err.Error(), "build is in progress") {
-		t.Fatalf("want the in-progress wording, got %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "build is in progress"), "want the in-progress wording, got %v", err)
 }
 
 // An unsynced name is a Launch refusal with pymodule_run's wording, never a
@@ -150,9 +124,7 @@ func TestResolveScriptLaunchRefusesMissingVenv(t *testing.T) {
 func TestResolveScriptLaunchRefusesUnsynced(t *testing.T) {
 	scriptCacheFixture(t, nil)
 	_, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "local", Script: "ghost"})
-	if err == nil || !strings.Contains(err.Error(), "not synced to this executor") {
-		t.Fatalf("want the unsynced refusal, got %v", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "not synced to this executor"), "want the unsynced refusal, got %v", err)
 }
 
 // scriptGitFixture lays out a synced git checkout the way SyncPyModuleGitSource
@@ -160,33 +132,23 @@ func TestResolveScriptLaunchRefusesUnsynced(t *testing.T) {
 // importable, one repo-wide venv.
 func scriptGitFixture(t *testing.T, repo string, venv bool) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	base := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", base)
 	root := filepath.Join(base, "rafiki", "pymodule-repos", repo)
-	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "scripts", "deploy.py"), []byte("print('d')\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "ops_tools"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "ops_tools", "__init__.py"), []byte(""), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(filepath.Join(root, "scripts"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(root, "scripts", "deploy.py"), []byte("print('d')\n"), 0o644))
+	c.NoError(os.MkdirAll(filepath.Join(root, "ops_tools"), 0o755))
+	c.NoError(os.WriteFile(filepath.Join(root, "ops_tools", "__init__.py"), []byte(""), 0o644))
 	if venv {
-		if err := os.MkdirAll(filepath.Join(root, ".venv", "bin"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, ".venv", "bin", "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(os.MkdirAll(filepath.Join(root, ".venv", "bin"), 0o755))
+		c.NoError(os.WriteFile(filepath.Join(root, ".venv", "bin", "python3"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	}
 	return root
 }
 
 func TestResolveScriptLaunchFromGitCheckout(t *testing.T) {
+	c := assert.NewCollecting(t)
 	repo := scriptGitFixture(t, "ops", false)
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{
 		Repo:    "ops",
@@ -194,15 +156,9 @@ func TestResolveScriptLaunchFromGitCheckout(t *testing.T) {
 		Modules: []string{"ops_tools"},
 		Args:    []string{"--plan"},
 	})
-	if err != nil {
-		t.Fatalf("resolveScriptLaunch: %v", err)
-	}
-	if res.interpreter != "python3" {
-		t.Errorf("interpreter = %q; the repo venv is the only alternative and was not built", res.interpreter)
-	}
-	if want := filepath.Join(repo, "scripts", "deploy.py"); res.argv[0] != want {
-		t.Errorf("argv[0] = %q, want %q", res.argv[0], want)
-	}
+	c.Require().NoError(err, "resolveScriptLaunch")
+	c.Eq("python3", res.interpreter, "interpreter")
+	c.Eq(filepath.Join(repo, "scripts", "deploy.py"), res.argv[0], "argv[0]")
 	// The checkout root joins PYTHONPATH once (intra-repo imports), then the
 	// named module's directory.
 	if got := strings.SplitN(res.pythonPath, string(os.PathListSeparator), 2); len(got) != 2 ||
@@ -212,33 +168,27 @@ func TestResolveScriptLaunchFromGitCheckout(t *testing.T) {
 }
 
 func TestResolveScriptLaunchGitVenvInterpreter(t *testing.T) {
+	c := assert.NewAborting(t)
 	repo := scriptGitFixture(t, "venvops", true)
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "venvops", Script: "deploy"})
-	if err != nil {
-		t.Fatalf("resolveScriptLaunch: %v", err)
-	}
-	if want := filepath.Join(repo, ".venv", "bin", "python3"); res.interpreter != want {
-		t.Fatalf("interpreter = %q, want the repo venv python %q", res.interpreter, want)
-	}
+	c.NoError(err, "resolveScriptLaunch")
+	c.Eq(filepath.Join(repo, ".venv", "bin", "python3"), res.interpreter, "interpreter")
 }
 
 // The executor's pre-existing PYTHONPATH trails the computed entries — the
 // computed ones win, the inherited ones trail, exactly like pymodule_run.
 func TestResolveScriptLaunchFoldsInheritedPythonPath(t *testing.T) {
+	c := assert.NewAborting(t)
 	scriptCacheFixture(t, map[string]moduleFixture{"plain": {code: "print(1)\n", venv: false}})
 	t.Setenv("PYTHONPATH", "/pre/existing")
 	res, err := resolveScriptLaunch(&darajapb.ScriptParams{Repo: "local", Script: "plain"})
-	if err != nil {
-		t.Fatalf("resolveScriptLaunch: %v", err)
-	}
+	c.NoError(err, "resolveScriptLaunch")
 	// No computed entries: no PYTHONPATH is set on the launch, so the value
 	// the executor process carries rides daraja's inherited environment
 	// through to the script unchanged (the daraja env build only strips the
 	// credential prefixes). That is the pass-through half of pymodule_run's
 	// fold — the computed-entries half is pinned by the blob-cache test above.
-	if res.pythonPath != "" {
-		t.Fatalf("PYTHONPATH = %q; a script with no computed entries sets none", res.pythonPath)
-	}
+	c.Eq("", res.pythonPath, "PYTHONPATH")
 }
 
 // ─── AdminService.Launch, script kind ────────────────────────────────────────
@@ -249,9 +199,10 @@ func TestResolveScriptLaunchFoldsInheritedPythonPath(t *testing.T) {
 // slice Launch built, but by reading back what the launched process SAW.
 func buildEnvDumperStub(t *testing.T) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(src, []byte(`package main
+	c.NoError(os.WriteFile(src, []byte(`package main
 
 import (
 	"fmt"
@@ -274,14 +225,11 @@ func main() {
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
 }
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+`), 0o600))
 	bin := filepath.Join(dir, "stub")
 	cmd := exec.Command("go", "build", "-o", bin, src)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build stub: %v\n%s", err, out)
-	}
+	out, err := cmd.CombinedOutput()
+	c.NoError(err, "build stub: %v\n%s", err, out)
 	return bin
 }
 
@@ -318,6 +266,7 @@ func dumpFiles(t *testing.T, dir string) (argv []string, env map[string]string) 
 // A ticket-shaped duplicate (the claude path's own test covers the ticket)
 // plus the env read-back closes the ps gap on the script launch too.
 func TestLaunchScriptKeepsTheChildSecretOutOfArgv(t *testing.T) {
+	c := assert.NewAborting(t)
 	dump := t.TempDir()
 	t.Setenv("RAFIKI_DUMP_DIR", dump)
 	a := NewAdminServer(AdminOptions{
@@ -344,27 +293,19 @@ func TestLaunchScriptKeepsTheChildSecretOutOfArgv(t *testing.T) {
 			},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
-	if strings.Contains(string(out), secret) {
-		t.Fatalf("the child secret is readable in the kernel cmdline:\n%s", out)
-	}
+	c.NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
+	c.NotStrContains(string(out), secret, "the child secret is readable in the kernel cmdline:\n%s", out)
 
 	_, env := dumpFiles(t, dump)
-	if got := env["RAFIKI_CHILD_SECRET"]; got != secret {
-		t.Fatalf("RAFIKI_CHILD_SECRET = %q in the launched env, want the secret; env=%v", got, redact(env))
-	}
+	got := env["RAFIKI_CHILD_SECRET"]
+	c.Eq(secret, got, "RAFIKI_CHILD_SECRET = %q in the launched env, want the secret; env=%v", got, redact(env))
 	// The script-facing channel is the socket path, not the token.
-	if v, ok := env["RAFIKI_CHILD_CONNECT"]; ok {
-		t.Fatalf("RAFIKI_CHILD_CONNECT must not leak into the daraja process env, got %q", v)
-	}
+	v, ok := env["RAFIKI_CHILD_CONNECT"]
+	c.False(ok, "RAFIKI_CHILD_CONNECT must not leak into the daraja process env, got %q", v)
 }
 
 // redact hides every value the test dump contains except structure — the dump
@@ -382,6 +323,7 @@ func redact(env map[string]string) map[string]string {
 // by pflag; PYTHONPATH and forwarded names arrive once each; the credential
 // prefixes are stripped from the forwarded environment.
 func TestLaunchScriptCarriesResolvedArgvAndEnv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dump := t.TempDir()
 	t.Setenv("RAFIKI_DUMP_DIR", dump)
 	a := NewAdminServer(AdminOptions{
@@ -413,9 +355,7 @@ func TestLaunchScriptCarriesResolvedArgvAndEnv(t *testing.T) {
 			},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	argv, env := dumpFiles(t, dump)
 	// Flags: kind, binary (the resolved interpreter), the pin ride-through.
@@ -445,19 +385,13 @@ func TestLaunchScriptCarriesResolvedArgvAndEnv(t *testing.T) {
 			break
 		}
 	}
-	if sep < 0 {
-		t.Fatalf("argv %v has no -- separator", argv)
-	}
+	c.Require().GreaterOrEqual(0, sep, "argv %v has no -- separator", argv)
 	positional := argv[sep+1:]
 	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "rafiki", "pymodules")
-	if len(positional) != 3 || positional[0] != filepath.Join(cache, "driver", "driver.py") ||
-		positional[1] != "--flag-like" || positional[2] != "value" {
-		t.Errorf("positionals = %v, want the resolved script path then the args", positional)
-	}
+	c.False(len(positional) != 3 || positional[0] != filepath.Join(cache, "driver", "driver.py") ||
+		positional[1] != "--flag-like" || positional[2] != "value", "positionals = %v, want the resolved script path then the args", positional)
 	// Forwarded env: functional names arrive, credential prefixes do not.
-	if env["FORWARDED_OK"] != "yes" {
-		t.Errorf("FORWARDED_OK = %q, want it forwarded", env["FORWARDED_OK"])
-	}
+	c.Eq("yes", env["FORWARDED_OK"], "FORWARDED_OK")
 	if _, ok := env["ANTHROPIC_API_KEY"]; ok {
 		t.Errorf("a forwarded ANTHROPIC_API_KEY reached the daraja env; the strip must hold on the launch payload too")
 	}
@@ -466,14 +400,14 @@ func TestLaunchScriptCarriesResolvedArgvAndEnv(t *testing.T) {
 	}
 	// PYTHONPATH: exactly one entry (the script's dir stays off it — it is
 	// sys.path[0]; a plain script has no modules, so only the inherited value).
-	if pp, ok := env["PYTHONPATH"]; ok {
-		t.Errorf("PYTHONPATH = %q in the daraja env; a module-less script resolves none", pp)
-	}
+	pp, ok := env["PYTHONPATH"]
+	c.False(ok, "PYTHONPATH = %q in the daraja env; a module-less script resolves none", pp)
 }
 
 // An undeclared kind stays refused, and a script launch against a cache
 // without the name fails with nothing started and no claim left behind.
 func TestLaunchScriptRefusesUnsyncedScript(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		LaunchKinds: []string{"script"},
@@ -490,14 +424,10 @@ func TestLaunchScriptRefusesUnsyncedScript(t *testing.T) {
 			Script: &darajapb.ScriptParams{Repo: "local", Script: "ghost"},
 		},
 	}))
-	if err == nil || connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Fatalf("want a FailedPrecondition refusal for an unsynced script, got %v", err)
-	}
+	c.False(err == nil || connect.CodeOf(err) != connect.CodeFailedPrecondition, "want a FailedPrecondition refusal for an unsynced script, got %v", err)
 
 	a.mu.Lock()
 	_, claimed := a.m["c-ghost"]
 	a.mu.Unlock()
-	if claimed {
-		t.Fatal("a refused launch left its claim in the table")
-	}
+	c.False(claimed, "a refused launch left its claim in the table")
 }

@@ -20,19 +20,18 @@ import (
 	"go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/executorpb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestDescribeAdvertisesLaunchKinds(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(Options{Root: t.TempDir(), LaunchKinds: []string{"claude"}})
 	defer func() { _ = s.Close() }()
 
 	resp, err := s.Describe(context.Background(), connect.NewRequest(&executorpb.DescribeRequest{}))
-	if err != nil {
-		t.Fatalf("Describe: %v", err)
-	}
-	if !slices.Contains(resp.Msg.GetLaunchKinds(), "claude") {
-		t.Errorf("launch_kinds = %v, want claude", resp.Msg.GetLaunchKinds())
-	}
+	c.Require().NoError(err, "Describe")
+	c.Contains(resp.Msg.GetLaunchKinds(), "claude", "launch_kinds")
 }
 
 // An executor with no --launch flag hosts nothing. The default must be empty
@@ -40,16 +39,13 @@ func TestDescribeAdvertisesLaunchKinds(t *testing.T) {
 // because someone forgot a flag is the self-report-gates-placement shape the
 // isolation and workspace_mode rules exist to forbid.
 func TestDescribeAdvertisesNoLaunchKindsByDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(Options{Root: t.TempDir()})
 	defer func() { _ = s.Close() }()
 
 	resp, err := s.Describe(context.Background(), connect.NewRequest(&executorpb.DescribeRequest{}))
-	if err != nil {
-		t.Fatalf("Describe: %v", err)
-	}
-	if got := resp.Msg.GetLaunchKinds(); len(got) != 0 {
-		t.Errorf("launch_kinds = %v, want empty", got)
-	}
+	c.Require().NoError(err, "Describe")
+	c.Empty(resp.Msg.GetLaunchKinds(), "launch_kinds")
 }
 
 // The launched daraja must lead its own process group, because that group is
@@ -57,6 +53,7 @@ func TestDescribeAdvertisesNoLaunchKindsByDefault(t *testing.T) {
 // it. An executor that forgets Setpgid leaves daraja in the EXECUTOR's group,
 // where a reap would signal the executor itself.
 func TestLaunchGivesDarajaItsOwnGroup(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -70,36 +67,24 @@ func TestLaunchGivesDarajaItsOwnGroup(t *testing.T) {
 		Cwd:     t.TempDir(),
 		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 	pid, pgid := int(resp.Msg.GetPid()), int(resp.Msg.GetPgid())
-	if pgid != pid {
-		t.Errorf("pgid = %d, want it to equal daraja's own pid %d", pgid, pid)
-	}
-	if pgid == syscall.Getpgrp() {
-		t.Fatal("daraja was left in the executor's process group; a reap would signal us")
-	}
+	c.Eq(pid, pgid, "pgid")
+	c.Require().NotEq(syscall.Getpgrp(), pgid, "daraja was left in the executor's process group; a reap would signal us")
 
 	// The response arithmetic is hardcoded (Pgid: int32(pid)), so the two
 	// checks above pass even with Setpgid missing. Ask the kernel what group
 	// daraja actually leads: that is the assertion a missing Setpgid fails.
 	kernelPgid, err := syscall.Getpgid(pid)
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", pid, err)
-	}
-	if kernelPgid != pid {
-		t.Errorf("kernel pgid of daraja (pid %d) = %d, want %d; Setpgid was not applied",
-			pid, kernelPgid, pid)
-	}
-	if kernelPgid == syscall.Getpgrp() {
-		t.Fatal("daraja sits in the executor's real process group; a reap would signal us")
-	}
+	c.Require().NoError(err, "Getpgid(%d)", pid)
+	c.Eq(pid, kernelPgid, "kernel pgid of daraja (pid")
+	c.Require().NotEq(syscall.Getpgrp(), kernelPgid, "daraja sits in the executor's real process group; a reap would signal us")
 }
 
 // An undeclared kind must be refused. The flag is the operator's declaration
 // and the RPC is a peer's request; the declaration wins.
 func TestLaunchRefusesAnUndeclaredKind(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -112,17 +97,14 @@ func TestLaunchRefusesAnUndeclaredKind(t *testing.T) {
 		ChildId: "c1",
 		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err == nil {
-		t.Fatal("Launch admitted a kind this executor never declared")
-	}
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
+	c.Require().Error(err, "Launch admitted a kind this executor never declared")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 }
 
 // Reap must end daraja AND the child that joined its group. The stub sleeps
 // until signalled, so a surviving process is an observable failure.
 func TestReapEndsTheWholeGroup(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -136,20 +118,14 @@ func TestReapEndsTheWholeGroup(t *testing.T) {
 		Cwd:     t.TempDir(),
 		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 	pgid := int(resp.Msg.GetPgid())
 
 	rr, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{
 		ChildId: "c1", GraceMs: 500,
 	}))
-	if err != nil {
-		t.Fatalf("Reap: %v", err)
-	}
-	if !rr.Msg.GetReaped() {
-		t.Error("Reap reported nothing reaped for a live launch")
-	}
+	c.Require().NoError(err, "Reap")
+	c.True(rr.Msg.GetReaped(), "Reap reported nothing reaped for a live launch")
 
 	// The group must be gone. ESRCH from a zero-signal probe is the proof.
 	deadline := time.Now().Add(5 * time.Second)
@@ -165,16 +141,13 @@ func TestReapEndsTheWholeGroup(t *testing.T) {
 // Reaping something already gone is the normal case — the daemon reaps on kill
 // without knowing whether the machine already cleaned up — and must not error.
 func TestReapIsIdempotent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{SocketDir: t.TempDir()})
 	defer a.Close()
 
 	resp, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{ChildId: "ghost"}))
-	if err != nil {
-		t.Fatalf("Reap of an unknown child errored: %v", err)
-	}
-	if resp.Msg.GetReaped() {
-		t.Error("Reap claimed to reap a child it never launched")
-	}
+	c.Require().NoError(err, "Reap of an unknown child errored")
+	c.False(resp.Msg.GetReaped(), "Reap claimed to reap a child it never launched")
 }
 
 // A launch claim still in flight must never be signalled: its pgid field is
@@ -182,6 +155,7 @@ func TestReapIsIdempotent(t *testing.T) {
 // group — the exact suicide the pgid resolution exists to prevent. With the
 // guard missing, this test does not merely fail, the test binary dies.
 func TestReapOfAnInFlightClaimSignalsNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{SocketDir: t.TempDir()})
 	defer a.Close()
 
@@ -190,17 +164,14 @@ func TestReapOfAnInFlightClaimSignalsNothing(t *testing.T) {
 	a.mu.Unlock()
 
 	resp, err := a.Reap(context.Background(), connect.NewRequest(&adminpb.ReapRequest{ChildId: "c1"}))
-	if err != nil {
-		t.Fatalf("Reap of an in-flight claim errored: %v", err)
-	}
-	if resp.Msg.GetReaped() {
-		t.Error("Reap claimed to signal a launch that had not started")
-	}
+	c.Require().NoError(err, "Reap of an in-flight claim errored")
+	c.False(resp.Msg.GetReaped(), "Reap claimed to signal a launch that had not started")
 }
 
 // A claim must not outlive a failed start, or every later Launch of that child
 // is refused with AlreadyExists forever — a poisoned slot no launch can clear.
 func TestFailedStartReleasesItsClaim(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  filepath.Join(t.TempDir(), "does-not-exist"), // Start fails
 		ChildBinary: "/usr/bin/true",
@@ -214,16 +185,12 @@ func TestFailedStartReleasesItsClaim(t *testing.T) {
 		Cwd:     t.TempDir(),
 		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err == nil || connect.CodeOf(err) != connect.CodeInternal {
-		t.Fatalf("Launch with a missing binary: err = %v, want Internal", err)
-	}
+	c.Require().False(err == nil || connect.CodeOf(err) != connect.CodeInternal, "Launch with a missing binary: err = %v, want Internal", err)
 
 	a.mu.Lock()
 	slotTaken := a.m["c1"] != nil
 	a.mu.Unlock()
-	if slotTaken {
-		t.Fatal("a failed start left its claim in the launch table")
-	}
+	c.Require().False(slotTaken, "a failed start left its claim in the launch table")
 
 	// The slot is free again: a retry with a working binary must launch.
 	a.opts.SelfBinary = buildSelfStub(t)
@@ -232,12 +199,8 @@ func TestFailedStartReleasesItsClaim(t *testing.T) {
 		Cwd:     t.TempDir(),
 		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err != nil {
-		t.Fatalf("retry Launch after a failed start: %v", err)
-	}
-	if resp.Msg.GetPid() == 0 {
-		t.Error("retry Launch returned no pid")
-	}
+	c.Require().NoError(err, "retry Launch after a failed start")
+	c.NotEq(0, resp.Msg.GetPid(), "retry Launch returned no pid")
 }
 
 // buildSelfStub compiles a stand-in for the `rafiki` binary that sleeps until
@@ -245,23 +208,21 @@ func TestFailedStartReleasesItsClaim(t *testing.T) {
 // needing a working daraja or claude.
 func buildSelfStub(t *testing.T) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(src, []byte(`package main
+	c.NoError(os.WriteFile(src, []byte(`package main
 import ("os";"os/signal";"syscall")
 func main() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
 }
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+`), 0o600))
 	bin := filepath.Join(dir, "stub")
 	cmd := exec.Command("go", "build", "-o", bin, src)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build stub: %v\n%s", err, out)
-	}
+	out, err := cmd.CombinedOutput()
+	c.NoError(err, "build stub: %v\n%s", err, out)
 	return bin
 }
 
@@ -270,6 +231,7 @@ func main() {
 // because an assertion against the argv slice we built would pass even if
 // something later appended it.
 func TestLaunchKeepsTheTicketOutOfArgv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ticket := "one-shot-tk-abc123"
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
@@ -286,26 +248,18 @@ func TestLaunchKeepsTheTicketOutOfArgv(t *testing.T) {
 		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 		Ticket:   ticket,
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 
 	// Ask the kernel for this process's command line (argv only, no env).
 	// The `-o command=` format gives just the command and its arguments.
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
 
-	if strings.Contains(cmdline, ticket) {
-		t.Errorf("ticket %q found in kernel cmdline:\n%s", ticket, cmdline)
-	}
-	if strings.Contains(cmdline, "RAFIKI_DARAJA_TICKET") {
-		t.Errorf("env var name RAFIKI_DARAJA_TICKET found in kernel cmdline:\n%s", cmdline)
-	}
+	c.NotStrContains(cmdline, ticket, "ticket")
+	c.NotStrContains(cmdline, "RAFIKI_DARAJA_TICKET", "env var name RAFIKI_DARAJA_TICKET found in kernel cmdline:\n")
 
 	// Verify the ticket arrives via environment instead. Read /proc/<pid>/environ
 	// (Linux) or rely on the fact that daraja itself would see it:
@@ -327,6 +281,7 @@ func TestLaunchKeepsTheTicketOutOfArgv(t *testing.T) {
 // prefer that over whatever the request claims, not merely accept it as one
 // valid option among several.
 func TestLaunchPrefersItsOwnConnectAddrOverDialAddr(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -344,29 +299,22 @@ func TestLaunchPrefersItsOwnConnectAddrOverDialAddr(t *testing.T) {
 		DialAddr: ":8036",
 		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
 
-	if !strings.Contains(cmdline, "--connect rafiki.example.dev:443") {
-		t.Errorf("cmdline %q missing the executor's own --connect target", cmdline)
-	}
-	if strings.Contains(cmdline, ":8036") {
-		t.Errorf("cmdline %q used the request's wrong dial_addr instead of the executor's own", cmdline)
-	}
+	c.StrContains(cmdline, "--connect rafiki.example.dev:443", "cmdline")
+	c.NotStrContains(cmdline, ":8036", "cmdline")
 }
 
 // TestLaunchFallsBackToDialAddrWithNoConnectInfo covers an executor built
 // before ConnectAddr/ConnectSocket existed: with neither set, the request's
 // dial_addr is still honoured, unchanged from before this fix.
 func TestLaunchFallsBackToDialAddrWithNoConnectInfo(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -381,24 +329,19 @@ func TestLaunchFallsBackToDialAddrWithNoConnectInfo(t *testing.T) {
 		DialAddr: "127.0.0.1:9999",
 		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
-	if !strings.Contains(string(out), "--connect 127.0.0.1:9999") {
-		t.Errorf("cmdline %q missing the fallback dial_addr", out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
+	c.StrContains(string(out), "--connect 127.0.0.1:9999", "cmdline %q missing the fallback dial_addr", out)
 }
 
 // TestLaunchPrefersItsOwnProxyURLOverTheRequests: when this executor has its
 // own ProxyURL set, it overrides the request's proxy_url (which is typically
 // the daemon's loopback — unreachable from another machine).
 func TestLaunchPrefersItsOwnProxyURLOverTheRequests(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -420,28 +363,21 @@ func TestLaunchPrefersItsOwnProxyURLOverTheRequests(t *testing.T) {
 			},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
 
-	if !strings.Contains(cmdline, "--proxy-url https://executor-profile.example/v1") {
-		t.Errorf("cmdline %q missing the executor's own proxy URL", cmdline)
-	}
-	if strings.Contains(cmdline, "127.0.0.1:8035") {
-		t.Errorf("cmdline %q used the daemon's loopback proxy_url instead of the executor's own", cmdline)
-	}
+	c.StrContains(cmdline, "--proxy-url https://executor-profile.example/v1", "cmdline")
+	c.NotStrContains(cmdline, "127.0.0.1:8035", "cmdline")
 }
 
 // TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured: with no ProxyURL
 // set, the request's proxy_url is honoured, unchanged from before this fix.
 func TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -458,18 +394,12 @@ func TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured(t *testing.T) {
 			Claude: &darajapb.ClaudeParams{ProxyUrl: "http://127.0.0.1:8035"},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
-	if !strings.Contains(string(out), "--proxy-url http://127.0.0.1:8035") {
-		t.Errorf("cmdline %q missing the fallback proxy_url", out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
+	c.StrContains(string(out), "--proxy-url http://127.0.0.1:8035", "cmdline %q missing the fallback proxy_url", out)
 }
 
 // TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt proves Phase 2's
@@ -479,6 +409,7 @@ func TestLaunchFallsBackToRequestsProxyURLWithNoneConfigured(t *testing.T) {
 // kernel's ps can see, because it authenticates this child's traffic to
 // rafiki's proxy and ps is world-readable.
 func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
+	c := assert.NewCollecting(t)
 	token := "proxy-token-should-not-leak"
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
@@ -504,32 +435,22 @@ func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
 		},
 		Ticket: "tk-irrelevant-here",
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
 
-	if strings.Contains(cmdline, token) {
-		t.Errorf("proxy token %q found in kernel cmdline:\n%s", token, cmdline)
-	}
-	if strings.Contains(cmdline, "RAFIKI_DARAJA_PROXY_TOKEN") {
-		t.Errorf("env var name RAFIKI_DARAJA_PROXY_TOKEN found in kernel cmdline:\n%s", cmdline)
-	}
+	c.NotStrContains(cmdline, token, "proxy token")
+	c.NotStrContains(cmdline, "RAFIKI_DARAJA_PROXY_TOKEN", "env var name RAFIKI_DARAJA_PROXY_TOKEN found in kernel cmdline:\n")
 	for _, want := range []string{
 		"--proxy-url https://proxy.example/v1",
 		"--passthrough",
 		"--auto-compact-window 128000",
 		"--record-requests",
 	} {
-		if !strings.Contains(cmdline, want) {
-			t.Errorf("cmdline %q missing %q", cmdline, want)
-		}
+		c.StrContains(cmdline, want, "cmdline")
 	}
 }
 
@@ -541,6 +462,7 @@ func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
 // a SERVE flag (mangling a mapped flag or dying on an unknown one). A spec
 // carrying neither must build neither.
 func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -561,15 +483,11 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 			},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 
 	pid := int(resp.Msg.GetPid())
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
 	for _, want := range []string{
 		"--append-system-prompt be terse",
@@ -577,9 +495,7 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 		// "--", not be parsed as serve flags.
 		" -- --foo bar",
 	} {
-		if !strings.Contains(cmdline, want) {
-			t.Errorf("cmdline %q missing %q", cmdline, want)
-		}
+		c.StrContains(cmdline, want, "cmdline")
 	}
 
 	// The empty case: neither field may appear when the spec does not set it.
@@ -592,19 +508,13 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 			Claude: &darajapb.ClaudeParams{},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("Launch (empty): %v", err)
-	}
+	c.Require().NoError(err, "Launch (empty)")
 	pid = int(resp.Msg.GetPid())
 	out, err = exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline = string(out)
 	for _, unwanted := range []string{"--append-system-prompt", " -- "} {
-		if strings.Contains(cmdline, unwanted) {
-			t.Errorf("empty spec: cmdline %q carries %q", cmdline, unwanted)
-		}
+		c.NotStrContains(cmdline, unwanted, "empty spec: cmdline")
 	}
 }
 
@@ -617,11 +527,12 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 // Launch passes through to the stub unchanged.
 func buildEnvDumpStub(t *testing.T) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
 	dump := filepath.Join(dir, "environ.txt")
 	t.Setenv("RAFIKI_TEST_ENV_DUMP", dump)
-	if err := os.WriteFile(src, []byte(`package main
+	c.NoError(os.WriteFile(src, []byte(`package main
 
 import (
 	"os"
@@ -636,13 +547,10 @@ func main() {
 	signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 	<-ch
 }
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+`), 0o600))
 	bin := filepath.Join(dir, "stub")
-	if out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput(); err != nil {
-		t.Fatalf("build stub: %v (output: %s)", err, out)
-	}
+	out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput()
+	c.NoError(err, "build stub: %v (output: %s)", err, out)
 	return bin
 }
 
@@ -652,6 +560,7 @@ func main() {
 // the launched process itself: the kernel's command line for the absence, the
 // stub's own environ dump for the presence.
 func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	token := "per-child-mcp-secret-must-not-reach-argv"
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildEnvDumpStub(t),
@@ -671,21 +580,13 @@ func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
 		},
 		Ticket: "tk-irrelevant-here",
 	}))
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	c.Require().NoError(err, "Launch")
 	pid := int(resp.Msg.GetPid())
 
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ps -p %d: %v (output: %s)", pid, err, out)
-	}
-	if strings.Contains(string(out), token) {
-		t.Errorf("mcp_token %q found in kernel cmdline:\n%s", token, out)
-	}
-	if strings.Contains(string(out), "RAFIKI_MCP_TOKEN") {
-		t.Errorf("env var name RAFIKI_MCP_TOKEN found in kernel cmdline:\n%s", out)
-	}
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
+	c.NotStrContains(string(out), token, "mcp_token %q found in kernel cmdline:\n%s", token, out)
+	c.NotStrContains(string(out), "RAFIKI_MCP_TOKEN", "env var name RAFIKI_MCP_TOKEN found in kernel cmdline:\n%s", out)
 
 	// The positive half: the stub's environ dump must carry the variable.
 	// Line-based, because the token is the LAST entry Launch appends and the
@@ -698,9 +599,7 @@ func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
 		if err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stub environ dump never appeared at %s: %v", dumpPath, err)
-		}
+		c.Require().False(time.Now().After(deadline), "stub environ dump never appeared at %s: %v", dumpPath, err)
 		time.Sleep(10 * time.Millisecond)
 	}
 	want := "RAFIKI_MCP_TOKEN=" + token
@@ -711,15 +610,14 @@ func TestLaunchCarriesTheMCPTokenByEnvNotArgv(t *testing.T) {
 			break
 		}
 	}
-	if !found {
-		t.Errorf("launched process environment missing RAFIKI_MCP_TOKEN=%s; got:\n%s", token, envDump)
-	}
+	c.True(found, "launched process environment missing RAFIKI_MCP_TOKEN=%s; got:\n%s", token, envDump)
 }
 
 // A spec with no mcp_token must set nothing: the env var's absence is what
 // tells runDarajaServe no per-child secret was minted (ClaudeEnv then falls
 // back to the proxy bearer).
 func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildEnvDumpStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -728,15 +626,14 @@ func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
 	})
 	defer a.Close()
 
-	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
 		ChildId:  "c-no-mcp-token",
 		Cwd:      t.TempDir(),
 		DialAddr: "127.0.0.1:9999",
 		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 		Ticket:   "tk-irrelevant-here",
-	})); err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	}))
+	c.Require().NoError(err, "Launch")
 
 	deadline := time.Now().Add(5 * time.Second)
 	var envDump []byte
@@ -746,15 +643,11 @@ func TestLaunchOmitsTheMCPTokenEnvVarWhenTheSpecHasNone(t *testing.T) {
 		if readErr == nil {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stub environ dump never appeared: %v", readErr)
-		}
+		c.Require().False(time.Now().After(deadline), "stub environ dump never appeared: %v", readErr)
 		time.Sleep(10 * time.Millisecond)
 	}
 	for _, line := range strings.Split(string(envDump), "\n") {
-		if strings.HasPrefix(line, "RAFIKI_MCP_TOKEN=") {
-			t.Errorf("spec carried no mcp_token, but the environment has %q", line)
-		}
+		c.False(strings.HasPrefix(line, "RAFIKI_MCP_TOKEN="), "spec carried no mcp_token, but the environment has %q", line)
 	}
 }
 
@@ -772,9 +665,7 @@ func waitForStubEnvDump(t *testing.T) []byte {
 		if err == nil {
 			return envDump
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stub environ dump never appeared at %s: %v", dumpPath, err)
-		}
+		assert.NewAborting(t).False(time.Now().After(deadline), "stub environ dump never appeared at %s: %v", dumpPath, err)
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -815,6 +706,7 @@ func countEnvLines(t *testing.T, envDump []byte, name string) []string {
 // load-bearing half of the fresh-wins pin; the process-level test above
 // cannot fail pre-scrub because exec.Cmd dedups keeping the last entry.
 func TestScrubbedEnvCompositionFreshValuesWinBelow(t *testing.T) {
+	c := assert.NewAborting(t)
 	inherited := []string{
 		"PATH=/usr/bin",
 		"RAFIKI_MCP_TOKEN=stale",
@@ -841,17 +733,14 @@ func TestScrubbedEnvCompositionFreshValuesWinBelow(t *testing.T) {
 				hits = append(hits, v)
 			}
 		}
-		if len(hits) != 1 || hits[0] != wantVal {
-			t.Fatalf("%s carries %v, want exactly [%s] — the stale copy must be dropped and the fresh value must win", name, hits, wantVal)
-		}
+		c.False(len(hits) != 1 || hits[0] != wantVal, "%s carries %v, want exactly [%s] — the stale copy must be dropped and the fresh value must win", name, hits, wantVal)
 	}
-	if !slices.Contains(got, "PATH=/usr/bin") || !slices.Contains(got, "HOME=/home/executor") {
-		t.Fatalf("the scrub dropped non-credential entries: %v", got)
-	}
+	c.False(!slices.Contains(got, "PATH=/usr/bin") || !slices.Contains(got, "HOME=/home/executor"), "the scrub dropped non-credential entries: %v", got)
 }
 
 // TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken.
 func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) {
+	c := assert.NewCollecting(t)
 	staleMCP := "stale-inherited-mcp"
 	staleTicket := "stale-inherited-ticket"
 	staleProxy := "stale-inherited-proxy-token"
@@ -870,7 +759,7 @@ func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) 
 	})
 	defer a.Close()
 
-	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
 		ChildId:  "c-scrub-fresh-wins",
 		Cwd:      t.TempDir(),
 		DialAddr: "127.0.0.1:9999",
@@ -883,9 +772,8 @@ func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) 
 			},
 		},
 		Ticket: freshTicket,
-	})); err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	}))
+	c.Require().NoError(err, "Launch")
 
 	envDump := waitForStubEnvDump(t)
 	for _, tc := range []struct{ name, want string }{
@@ -899,10 +787,7 @@ func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) 
 				tc.name, len(got), envDump)
 			continue
 		}
-		if got[0] != tc.want {
-			t.Errorf("%s entry is %q, want the fresh %q (stale inherited copies must not shadow it)",
-				tc.name, got[0], tc.want)
-		}
+		c.Eq(tc.want, got[0], "%s entry is %q, want the fresh %q (stale inherited copies must not shadow it)", tc.name, got[0], tc.want)
 	}
 }
 
@@ -913,6 +798,7 @@ func TestLaunchDropsStaleInheritedCredentialsAndTheFreshValuesWin(t *testing.T) 
 // because its test process carried no such variable. The launched daraja
 // environ must carry NO RAFIKI_MCP_TOKEN at all.
 func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	staleMCP := "stale-inherited-mcp"
 	staleProxy := "stale-inherited-proxy-token"
 	t.Setenv("RAFIKI_MCP_TOKEN", staleMCP)
@@ -926,31 +812,22 @@ func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T)
 	})
 	defer a.Close()
 
-	if _, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
 		ChildId:  "c-scrub-no-token",
 		Cwd:      t.TempDir(),
 		DialAddr: "127.0.0.1:9999",
 		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 		Ticket:   "tk-irrelevant-here",
-	})); err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
+	}))
+	c.Require().NoError(err, "Launch")
 
 	envDump := waitForStubEnvDump(t)
-	if got := countEnvLines(t, envDump, "RAFIKI_MCP_TOKEN"); len(got) != 0 {
-		t.Errorf("spec carried no mcp_token, but the launched environ has %v — the stale inherited copy leaked through", got)
-	}
+	c.Empty(countEnvLines(t, envDump, "RAFIKI_MCP_TOKEN"), "spec carried no mcp_token, but the launched environ has")
 	// Finding 5: the same no-entry assertion for the second name the brief's
 	// fixture seeds — the scrub + unconditional-append interplay for
 	// RAFIKI_DARAJA_PROXY_TOKEN (one empty-valued entry, never the stale one).
 	proxyLines := countEnvLines(t, envDump, "RAFIKI_DARAJA_PROXY_TOKEN")
-	if len(proxyLines) != 1 {
-		t.Fatalf("RAFIKI_DARAJA_PROXY_TOKEN carried %v, want exactly one entry (appended unconditionally)", proxyLines)
-	}
-	if strings.Contains(string(envDump), staleMCP) {
-		t.Errorf("stale inherited mcp token %q found anywhere in the launched environ:\n%s", staleMCP, envDump)
-	}
-	if strings.Contains(string(envDump), staleProxy) {
-		t.Errorf("stale inherited proxy token %q found anywhere in the launched environ:\n%s", staleProxy, envDump)
-	}
+	c.Require().Len(proxyLines, 1, "RAFIKI_DARAJA_PROXY_TOKEN carried")
+	c.NotStrContains(string(envDump), staleMCP, "stale inherited mcp token %q found anywhere in the launched environ:\n%s", staleMCP, envDump)
+	c.NotStrContains(string(envDump), staleProxy, "stale inherited proxy token %q found anywhere in the launched environ:\n%s", staleProxy, envDump)
 }

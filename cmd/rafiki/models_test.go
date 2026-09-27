@@ -3,13 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/modelquery"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestModelCompletionServesFromCache(t *testing.T) {
@@ -21,9 +22,7 @@ func TestModelCompletionServesFromCache(t *testing.T) {
 		[]string{"anthropic/claude-opus-5", "openai/gpt-4o"})
 
 	got := completeModel(nil, "fundi", "anthropic/")
-	if len(got) != 1 || got[0] != "anthropic/claude-opus-5" {
-		t.Errorf("got %v, want the one anthropic id", got)
-	}
+	assert.NewCollecting(t).False(len(got) != 1 || got[0] != "anthropic/claude-opus-5", "got %v, want the one anthropic id", got)
 }
 
 // The two kinds have different model universes, so their caches must not share
@@ -36,9 +35,7 @@ func TestModelCompletionCacheIsKeyedByKind(t *testing.T) {
 
 	cacheWrite("models-fundi", completionEndpointKey(nil), []string{"openai/gpt-4o"})
 
-	if got := completeModel(nil, "claude", ""); len(got) != 0 {
-		t.Errorf("claude completion read the fundi cache: %v", got)
-	}
+	assert.NewCollecting(t).Empty(completeModel(nil, "claude", ""), "claude completion read the fundi cache")
 }
 
 func TestModelCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
@@ -46,9 +43,7 @@ func TestModelCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://127.0.0.1:1")
 	t.Setenv("RAFIKI_TOKEN", "t")
 
-	if got := completeModel(nil, "fundi", ""); len(got) != 0 {
-		t.Errorf("got %v, want none", got)
-	}
+	assert.NewCollecting(t).Empty(completeModel(nil, "fundi", ""), "got")
 }
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
@@ -76,9 +71,7 @@ func modelTestRows() []*rafikiv1.ModelRow {
 func renderedHeaders(t *testing.T, out string) []string {
 	t.Helper()
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) < 2 {
-		t.Fatalf("table too short to carry a header row:\n%s", out)
-	}
+	assert.NewAborting(t).GreaterOrEqual(2, len(lines), "table too short to carry a header row:\n%s", out)
 	var names []string
 	for i, c := range strings.Split(lines[1], "│") {
 		c = strings.TrimSpace(c)
@@ -95,20 +88,16 @@ func renderedHeaders(t *testing.T, out string) []string {
 // sort every local model to the top of a cheapest-first filter, and a zero
 // price reads as free.
 func TestRenderModelRowsJSONOmitsUnreportedOptionals(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := renderModelRows(&buf, modelTestRows(), modelsQuery{}, outputJSON, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
+	c.Require().NoError(renderModelRows(&buf, modelTestRows(), modelsQuery{}, outputJSON, false), "renderModelRows")
 
 	var out struct {
 		Models []map[string]any `json:"models"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
-		t.Fatalf("decode JSON output: %v\nraw:\n%s", err, buf.String())
-	}
-	if len(out.Models) != 3 {
-		t.Fatalf("got %d rows, want 3; output:\n%s", len(out.Models), buf.String())
-	}
+	err := json.Unmarshal(buf.Bytes(), &out)
+	c.Require().NoError(err, "decode JSON output: %v\nraw:\n%s", err, buf.String())
+	c.Require().Len(out.Models, 3, "got %d rows, want 3; output:\n%s", len(out.Models), buf.String())
 
 	byID := make(map[string]map[string]any, len(out.Models))
 	for _, m := range out.Models {
@@ -121,77 +110,53 @@ func TestRenderModelRowsJSONOmitsUnreportedOptionals(t *testing.T) {
 	}
 	// Unreported optionals must be absent, not zero.
 	for _, key := range []string{"context_window", "prompt_usd", "completion_usd", "input_modalities"} {
-		if _, present := byID["vmlx/qwen"][key]; present {
-			t.Errorf("local model vmlx/qwen carries %s; an unreported optional must be absent, not zero", key)
-		}
+		_, present := byID["vmlx/qwen"][key]
+		c.False(present, "local model vmlx/qwen carries %s; an unreported optional must be absent, not zero", key)
 	}
 }
 
 // The --source filter is a display filter and must apply in the JSON arm too —
 // a jq pipeline filtering on source gets no help from the table renderer.
 func TestRenderModelRowsJSONAppliesSourceFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := renderModelRows(&buf, modelTestRows(), modelsQuery{source: "builtin"}, outputJSON, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
-	if strings.Contains(buf.String(), "openrouter/openai/gpt-4o") {
-		t.Errorf("--source builtin leaked a non-builtin row; output:\n%s", buf.String())
-	}
-	if !strings.Contains(buf.String(), "anthropic/claude-opus-5") {
-		t.Errorf("--source builtin dropped the builtin row; output:\n%s", buf.String())
-	}
+	c.Require().NoError(renderModelRows(&buf, modelTestRows(), modelsQuery{source: "builtin"}, outputJSON, false), "renderModelRows")
+	c.NotStrContains(buf.String(), "openrouter/openai/gpt-4o", "--source builtin leaked a non-builtin row; output:\n")
+	c.StrContains(buf.String(), "anthropic/claude-opus-5", "--source builtin dropped the builtin row; output:\n")
 }
 
 func TestRenderModelRowsTable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := renderModelRows(&buf, modelTestRows(), modelsQuery{}, outputTable, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
+	c.Require().NoError(renderModelRows(&buf, modelTestRows(), modelsQuery{}, outputTable, false), "renderModelRows")
 	out := buf.String()
 
 	// Every default column, in order.
 	want := []string{"MODEL", "SOURCE", "CTX", "IN $", "OUT $", "CODE", "AGENTIC", "V"}
-	if got := renderedHeaders(t, out); !slices.Equal(got, want) {
-		t.Errorf("headers = %v, want %v; output:\n%s", got, want, out)
-	}
+	got := renderedHeaders(t, out)
+	c.EqDiff(want, got, "headers = %v, want %v; output:\n%s", got, want, out)
 	// MODEL falls back to the full id when the row carries no display model,
 	// and shows the bare model part when it does — killing the
 	// triple-openrouter label.
-	if !strings.Contains(out, "anthropic/claude-opus-5") {
-		t.Errorf("table missing the fallback id; output:\n%s", out)
-	}
-	if !strings.Contains(out, "openai/gpt-4o") {
-		t.Errorf("table missing the bare model cell; output:\n%s", out)
-	}
-	if strings.Contains(out, "openrouter/openai/gpt-4o") {
-		t.Errorf("MODEL cell leaked the full id although Model is set; output:\n%s", out)
-	}
+	c.StrContains(out, "anthropic/claude-opus-5", "table missing the fallback id; output:\n")
+	c.StrContains(out, "openai/gpt-4o", "table missing the bare model cell; output:\n")
+	c.NotStrContains(out, "openrouter/openai/gpt-4o", "MODEL cell leaked the full id although Model is set; output:\n")
 }
 
 // TestModelsJSONLUnwrapped: -J is one compact ModelRow per line, no envelope.
 func TestModelsJSONLUnwrapped(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
 	rows := modelTestRows()
-	if err := renderModelRows(&buf, rows, modelsQuery{}, outputJSONL, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
-	if strings.Contains(buf.String(), `"models"`) {
-		t.Errorf("JSONL must be unwrapped, no envelope; output:\n%s", buf.String())
-	}
-	if strings.Contains(buf.String(), ": ") {
-		t.Errorf("JSONL must be compact (one object per line); output:\n%s", buf.String())
-	}
+	c.Require().NoError(renderModelRows(&buf, rows, modelsQuery{}, outputJSONL, false), "renderModelRows")
+	c.NotStrContains(buf.String(), `"models"`, "JSONL must be unwrapped, no envelope; output:\n")
+	c.NotStrContains(buf.String(), ": ", "JSONL must be compact (one object per line); output:\n")
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if len(lines) != len(rows) {
-		t.Fatalf("got %d lines for %d rows:\n%s", len(lines), len(rows), buf.String())
-	}
+	c.Require().Len(lines, len(rows), "got %d lines for %d rows:\n%s", len(lines), len(rows), buf.String())
 	var first rafikiv1.ModelRow
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatalf("decode first line: %v\nline:\n%s", err, lines[0])
-	}
-	if first.GetId() != rows[0].GetId() {
-		t.Errorf("first line id = %q, want %q", first.GetId(), rows[0].GetId())
-	}
+	err := json.Unmarshal([]byte(lines[0]), &first)
+	c.Require().NoError(err, "decode first line: %v\nline:\n%s", err, lines[0])
+	c.Eq(rows[0].GetId(), first.GetId(), "first line id")
 }
 
 // ─── filters: flags → modelquery ───────────────────────────────────────────
@@ -273,16 +238,13 @@ func TestModelsFlagsMapToModelquery(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			cmd := newModelsCmd()
 			for i := 0; i+1 < len(tc.flags); i += 2 {
-				if err := cmd.Flags().Set(tc.flags[i], tc.flags[i+1]); err != nil {
-					t.Fatalf("set --%s=%s: %v", tc.flags[i], tc.flags[i+1], err)
-				}
+				c.Require().NoError(cmd.Flags().Set(tc.flags[i], tc.flags[i+1]), "set --%s=%s", tc.flags[i], tc.flags[i+1])
 			}
 			q, err := modelsQueryFromFlags(cmd)
-			if err != nil {
-				t.Fatalf("modelsQueryFromFlags: %v", err)
-			}
+			c.Require().NoError(err, "modelsQueryFromFlags")
 			got := filterModelRows(all, q)
 			var ids, want []string
 			for _, r := range got {
@@ -291,14 +253,13 @@ func TestModelsFlagsMapToModelquery(t *testing.T) {
 			for _, r := range tc.admit {
 				want = append(want, r.GetId())
 			}
-			if !slices.Equal(ids, want) {
-				t.Errorf("survivors = %v, want %v", ids, want)
-			}
+			c.EqDiff(want, ids, "survivors")
 		})
 	}
 }
 
 func TestParseModelSortKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cases := []struct {
 		in   string
 		want modelquery.SortKey
@@ -321,15 +282,11 @@ func TestParseModelSortKey(t *testing.T) {
 			t.Errorf("parseModelSortKey(%q): %v", tc.in, err)
 			continue
 		}
-		if got != tc.want {
-			t.Errorf("parseModelSortKey(%q) = %+v, want %+v", tc.in, got, tc.want)
-		}
+		c.Eq(tc.want, got, "parseModelSortKey(%q) = %+v, want", tc.in, got)
 	}
 	_, err := parseModelSortKey("bogus")
-	if err == nil || !strings.Contains(err.Error(), `unknown sort field "bogus"`) ||
-		!strings.Contains(err.Error(), "try ctx, in, out, cache, max out, age, intel, code, agentic") {
-		t.Errorf("unknown field error = %v, want the named-fields diagnostic", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), `unknown sort field "bogus"`) ||
+		!strings.Contains(err.Error(), "try ctx, in, out, cache, max out, age, intel, code, agentic"), "unknown field error = %v, want the named-fields diagnostic", err)
 	if _, err := parseModelSortKey("ctx:sideways"); err == nil ||
 		!strings.Contains(err.Error(), "unknown sort direction") {
 		t.Errorf("unknown direction error = %v", err)
@@ -360,9 +317,7 @@ func TestModelsQFiltersCaseInsensitive(t *testing.T) {
 		for _, r := range got {
 			ids = append(ids, r.GetId())
 		}
-		if !slices.Equal(ids, tc.want) {
-			t.Errorf("q=%q: got %v, want %v", tc.q, ids, tc.want)
-		}
+		assert.NewCollecting(t).EqDiff(tc.want, ids, "q=%q: got %v, want", tc.q, ids)
 	}
 }
 
@@ -370,6 +325,7 @@ func TestModelsQFiltersCaseInsensitive(t *testing.T) {
 // intel:desc, and the unscored rows land LAST despite the descending keys —
 // the presence rule (an absent value is no answer, never "the largest").
 func TestModelsDefaultSortAgenticThenIntel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []*rafikiv1.ModelRow{
 		{Id: "a/agentic-10-intel-90", AgenticIndex: fp64(10), IntelligenceIndex: fp64(90)},
 		{Id: "c/agentic-50-intel-10", AgenticIndex: fp64(50), IntelligenceIndex: fp64(10)},
@@ -377,20 +333,14 @@ func TestModelsDefaultSortAgenticThenIntel(t *testing.T) {
 		{Id: "b/unscored"},
 	}
 	var buf bytes.Buffer
-	if err := renderModelRows(&buf, rows, modelsQuery{}, outputTable, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
+	c.Require().NoError(renderModelRows(&buf, rows, modelsQuery{}, outputTable, false), "renderModelRows")
 	out := buf.String()
 	want := []string{"c/agentic-50-intel-10", "a/agentic-10-intel-90", "b/unscored", "z/unscored"}
 	last := -1
 	for _, id := range want {
 		i := strings.Index(out, id)
-		if i < 0 {
-			t.Fatalf("row %q missing from output:\n%s", id, out)
-		}
-		if i < last {
-			t.Errorf("row %q rendered out of order (agentic desc, unscored last):\n%s", id, out)
-		}
+		c.Require().GreaterOrEqual(0, i, "row %q missing from output:\n%s", id, out)
+		c.GreaterOrEqual(last, i, "row %q rendered out of order (agentic desc, unscored last):\n%s", id, out)
 		last = i
 	}
 }
@@ -401,13 +351,12 @@ func TestModelsDefaultSortAgenticThenIntel(t *testing.T) {
 // columns disappear exactly in the declared Drop order — CODE, then AGENTIC,
 // then SOURCE, then V, CTX and the prices — with MODEL never dropping.
 func TestModelsColumnsDropInDeclaredOrder(t *testing.T) {
+	c := assert.NewAborting(t)
 	rows := modelTestRows()
 	dropOrder := []string{"CODE", "AGENTIC", "SOURCE", "V", "CTX", "IN $", "OUT $"}
 
 	var full bytes.Buffer
-	if err := renderModelRowsWidth(&full, rows, modelsQuery{}, false, 0); err != nil {
-		t.Fatalf("uncapped render: %v", err)
-	}
+	c.NoError(renderModelRowsWidth(&full, rows, modelsQuery{}, false, 0), "uncapped render")
 	// The uncapped render's top border bounds the natural width. Byte length
 	// over-measures the box runes (3 bytes each), which only widens the scan.
 	natural := len(strings.Split(strings.TrimRight(full.String(), "\n"), "\n")[0])
@@ -416,16 +365,12 @@ func TestModelsColumnsDropInDeclaredOrder(t *testing.T) {
 	for _, h := range renderedHeaders(t, full.String()) {
 		present[h] = true
 	}
-	if len(present) != len(dropOrder)+1 {
-		t.Fatalf("uncapped render lost columns: got %v", present)
-	}
+	c.Len(present, len(dropOrder)+1, "uncapped render lost columns: got")
 
 	next := 0
 	for w := natural; w >= 40; w-- {
 		var buf bytes.Buffer
-		if err := renderModelRowsWidth(&buf, rows, modelsQuery{}, false, w); err != nil {
-			t.Fatalf("render at width %d: %v", w, err)
-		}
+		c.NoError(renderModelRowsWidth(&buf, rows, modelsQuery{}, false, w), "render at width %d", w)
 		now := map[string]bool{}
 		for _, h := range renderedHeaders(t, buf.String()) {
 			now[h] = true
@@ -448,15 +393,14 @@ func TestModelsColumnsDropInDeclaredOrder(t *testing.T) {
 		}
 		present = now
 	}
-	if next < 3 {
-		t.Fatalf("expected at least CODE, AGENTIC and SOURCE to drop across the scan, got %d", next)
-	}
+	c.GreaterOrEqual(3, next, "expected at least CODE, AGENTIC and SOURCE to drop across the scan, got")
 }
 
 // TestModelsVerboseColumns: --verbose adds the eight sparse columns, the ID
 // cell keeps the full id while MODEL shows the bare model part, and the
 // tri-state TOOLS column says ? when the catalog has no entry.
 func TestModelsVerboseColumns(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []*rafikiv1.ModelRow{
 		{
 			Id: "openrouter/anthropic/claude-opus-5", Model: "anthropic/claude-opus-5",
@@ -472,14 +416,10 @@ func TestModelsVerboseColumns(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderModelRows(&buf, rows, modelsQuery{verbose: true}, outputTable, false); err != nil {
-		t.Fatalf("renderModelRows: %v", err)
-	}
+	c.Require().NoError(renderModelRows(&buf, rows, modelsQuery{verbose: true}, outputTable, false), "renderModelRows")
 	out := buf.String()
 	for _, h := range []string{"MODEL", "ID", "CACHE", "MAX OUT", "INTEL", "TOOLS", "CREATED", "CUTOFF", "EXPIRES"} {
-		if !strings.Contains(out, h) {
-			t.Errorf("verbose table missing column %q; output:\n%s", h, out)
-		}
+		c.StrContains(out, h, "verbose table missing column")
 	}
 
 	var row string
@@ -489,17 +429,11 @@ func TestModelsVerboseColumns(t *testing.T) {
 			break
 		}
 	}
-	if row == "" {
-		t.Fatalf("cataloged row missing from output:\n%s", out)
-	}
+	c.Require().NotEq("", row, "cataloged row missing from output:\n%s", out)
 	for _, want := range []string{"0.70", "64000", "59.5", "yes", "2025-01-01", "2025-03-01", "2098-12-31"} {
-		if !strings.Contains(row, want) {
-			t.Errorf("verbose row missing %q; row:\n%s", want, row)
-		}
+		c.StrContains(row, want, "verbose row missing")
 	}
-	if strings.Contains(row, "unknown") {
-		t.Errorf("TOOLS cell must render the tri-state as yes/no/?; row:\n%s", row)
-	}
+	c.NotStrContains(row, "unknown", "TOOLS cell must render the tri-state as yes/no/?; row:\n")
 
 	// The uncataloged row's sparse cells are all absent markers, and its
 	// TOOLS cell says ? — never "no".
@@ -511,7 +445,5 @@ func TestModelsVerboseColumns(t *testing.T) {
 				!strings.Contains(line, "yes") && !strings.Contains(line, "no")
 		}
 	}
-	if !bare {
-		t.Errorf("uncataloged row's sparse cells must all read absent (? and —):\n%s", out)
-	}
+	c.True(bare, "uncataloged row's sparse cells must all read absent (? and —):\n%s", out)
 }

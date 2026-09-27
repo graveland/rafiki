@@ -7,6 +7,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestSpawnerPrefillShaping pins that applySpawnSpecShaping copies the
@@ -21,19 +23,15 @@ func TestSpawnerPrefillShaping(t *testing.T) {
 				{Path: "pkg/prefill/prefill.go", Start: 10, End: 40},
 			},
 		})
-		if len(req.Prefill) != 2 ||
+		assert.NewCollecting(t).False(len(req.Prefill) != 2 ||
 			req.Prefill[0].Path != "CLAUDE.md" ||
 			req.Prefill[1].Path != "pkg/prefill/prefill.go" ||
-			req.Prefill[1].Start != 10 || req.Prefill[1].End != 40 {
-			t.Errorf("req.Prefill = %#v, want the two spec entries verbatim", req.Prefill)
-		}
+			req.Prefill[1].Start != 10 || req.Prefill[1].End != 40, "req.Prefill = %#v, want the two spec entries verbatim", req.Prefill)
 	})
 
 	t.Run("nil stays nil", func(t *testing.T) {
 		var req protocol.SpawnRequest
 		applySpawnSpecShaping(&req, tools.SpawnSpec{})
-		if req.Prefill != nil {
-			t.Errorf("req.Prefill = %#v, want nil", req.Prefill)
-		}
+		assert.NewCollecting(t).Nil(req.Prefill, "req.Prefill")
 	})
 }

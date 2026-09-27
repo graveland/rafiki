@@ -12,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestResume_ConcurrentCallsSpawnExactlyOneChild proves the fix for the
@@ -35,6 +37,7 @@ import (
 // still show 2 forked processes here and fail, which is the "a guard that
 // only wraps the status check fixes nothing" case called out in the task.
 func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	id := spawnTestChild(t, ctrl, nil)
@@ -79,32 +82,20 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	for i, r := range results {
 		if r.err == nil {
 			successes++
-			if r.res.ChildID != id {
-				t.Errorf("result %d: ChildID = %q, want %q", i, r.res.ChildID, id)
-			}
+			c.Eq(id, r.res.ChildID, "result %d: ChildID = %q, want", i, r.res.ChildID)
 			continue
 		}
 		var ce *connectapi.ControllerError
-		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *connectapi.ControllerError: %v", i, r.err)
-		}
-		if ce.Code != protocol.ErrNotResumable {
-			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
-		}
+		c.Require().True(errors.As(r.err, &ce), "result %d: error is not *connectapi.ControllerError: %v", i, r.err)
+		c.Eq(protocol.ErrNotResumable, ce.Code, "result %d: error code = %q, want", i, ce.Code)
 		rejections++
 	}
 
-	if successes != 1 {
-		t.Errorf("successes = %d, want exactly 1 (both concurrent Resume calls must not both spawn)", successes)
-	}
-	if rejections != 1 {
-		t.Errorf("rejections = %d, want exactly 1", rejections)
-	}
+	c.Eq(1, successes, "successes")
+	c.Eq(1, rejections, "rejections")
 
 	lines := readNonEmptyLines(t, spawnLog)
-	if len(lines) != 1 {
-		t.Errorf("processes actually forked = %d (log: %v), want exactly 1 — a second live agent process sharing this childID's ref is the harm this guard exists to prevent", len(lines), lines)
-	}
+	c.Len(lines, 1, "processes actually forked = %d (log: %v), want exactly 1 — a second live agent process sharing this childID's ref is the harm this guard exists to prevent", len(lines), lines)
 }
 
 // TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild is RespawnChild's
@@ -121,6 +112,7 @@ func TestResume_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 // the record, so both would return success and the spawn log would show 2
 // processes.
 func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	id := spawnTestChild(t, ctrl, nil)
@@ -160,32 +152,20 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 	for i, r := range results {
 		if r.err == nil {
 			successes++
-			if r.res.ChildID != id {
-				t.Errorf("result %d: ChildID = %q, want %q", i, r.res.ChildID, id)
-			}
+			c.Eq(id, r.res.ChildID, "result %d: ChildID = %q, want", i, r.res.ChildID)
 			continue
 		}
 		var ce *connectapi.ControllerError
-		if !errors.As(r.err, &ce) {
-			t.Fatalf("result %d: error is not *connectapi.ControllerError: %v", i, r.err)
-		}
-		if ce.Code != protocol.ErrNotResumable {
-			t.Errorf("result %d: error code = %q, want %q", i, ce.Code, protocol.ErrNotResumable)
-		}
+		c.Require().True(errors.As(r.err, &ce), "result %d: error is not *connectapi.ControllerError: %v", i, r.err)
+		c.Eq(protocol.ErrNotResumable, ce.Code, "result %d: error code = %q, want", i, ce.Code)
 		rejections++
 	}
 
-	if successes != 1 {
-		t.Errorf("successes = %d, want exactly 1 (both concurrent RespawnChild calls must not both spawn)", successes)
-	}
-	if rejections != 1 {
-		t.Errorf("rejections = %d, want exactly 1", rejections)
-	}
+	c.Eq(1, successes, "successes")
+	c.Eq(1, rejections, "rejections")
 
 	lines := readNonEmptyLines(t, spawnLog)
-	if len(lines) != 1 {
-		t.Errorf("processes actually forked = %d (log: %v), want exactly 1", len(lines), lines)
-	}
+	c.Len(lines, 1, "processes actually forked = %d (log: %v), want exactly 1", len(lines), lines)
 }
 
 // TestResumeRespawn_CrossPathClaimIsShared proves the cross-function half of
@@ -195,6 +175,7 @@ func TestRespawnChild_ConcurrentCallsSpawnExactlyOneChild(t *testing.T) {
 // still race (each guard only sees calls to its own function) — this test
 // fails unless both share Controller.spawnClaims.
 func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	id := spawnTestChild(t, ctrl, nil)
@@ -240,22 +221,13 @@ func TestResumeRespawn_CrossPathClaimIsShared(t *testing.T) {
 			continue
 		}
 		var ce *connectapi.ControllerError
-		if !errors.As(err, &ce) {
-			t.Fatalf("error is not *connectapi.ControllerError: %v", err)
-		}
-		if ce.Code != protocol.ErrNotResumable {
-			t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrNotResumable)
-		}
+		c.Require().True(errors.As(err, &ce), "error is not *connectapi.ControllerError: %v", err)
+		c.Eq(protocol.ErrNotResumable, ce.Code, "error code")
 	}
-	if successes != 1 {
-		t.Errorf("successes = %d, want exactly 1 across Resume+RespawnChild for the same childID (resumeErr=%v respawnErr=%v, resumeRes=%+v respawnRes=%+v)",
-			successes, resumeErr, respawnErr, resumeRes, respawnRes)
-	}
+	c.Eq(1, successes, "successes = %d, want exactly 1 across Resume+RespawnChild for the same childID (resumeErr=%v respawnErr=%v, resumeRes=%+v respawnRes=%+v)", successes, resumeErr, respawnErr, resumeRes, respawnRes)
 
 	lines := readNonEmptyLines(t, spawnLog)
-	if len(lines) != 1 {
-		t.Errorf("processes actually forked = %d (log: %v), want exactly 1", len(lines), lines)
-	}
+	c.Len(lines, 1, "processes actually forked = %d (log: %v), want exactly 1", len(lines), lines)
 }
 
 func readNonEmptyLines(t *testing.T, path string) []string {
@@ -290,8 +262,6 @@ func readNonEmptyLinesNow(t *testing.T, path string) []string {
 			lines = append(lines, line)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan %s: %v", path, err)
-	}
+	assert.NewAborting(t).NoError(sc.Err(), "scan %s", path)
 	return lines
 }

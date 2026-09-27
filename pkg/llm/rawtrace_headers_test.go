@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeRawTraceRecorder captures Insert calls without a database, so
@@ -52,13 +54,12 @@ func (f *fakeRawTraceRecorder) awaitOne(t *testing.T) rawtrace.RawHTTPRequest {
 // (present, not dropped) and the upstream's own response header, neither of
 // which the old stub could ever produce.
 func TestRecordRawTraceCapturesRealHeaders(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	const testKeyEnv = "RAFIKI_TEST_RAWTRACE_KEY"
 	t.Setenv(testKeyEnv, "sk-secret-value")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("x-api-key"); got != "sk-secret-value" {
-			t.Errorf("upstream saw x-api-key = %q, want the real key (redaction must happen at capture, not on the wire)", got)
-		}
+		ck.Eq("sk-secret-value", r.Header.Get("x-api-key"), "upstream saw x-api-key")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Test-Upstream-Marker", "seen-it")
 		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
@@ -72,9 +73,7 @@ func TestRecordRawTraceCapturesRealHeaders(t *testing.T) {
 		},
 	}
 	c, err := NewClient(WithProviders(set), WithLogger(testLogger(t)))
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	ck.Require().NoError(err, "NewClient")
 	rec := newFakeRawTraceRecorder()
 	c.rawTrace = rec
 
@@ -82,9 +81,7 @@ func TestRecordRawTraceCapturesRealHeaders(t *testing.T) {
 		Model: "test-model", MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if err != nil {
-		t.Fatalf("SendParams: %v", err)
-	}
+	ck.Require().NoError(err, "SendParams")
 
 	got := rec.awaitOne(t)
 
@@ -92,15 +89,11 @@ func TestRecordRawTraceCapturesRealHeaders(t *testing.T) {
 	if err := json.Unmarshal(got.ReqHeaders, &reqHeaders); err != nil {
 		t.Fatalf("ReqHeaders not valid JSON: %v (%s)", err, got.ReqHeaders)
 	}
-	if reqHeaders["X-Api-Key"] != "<redacted>" {
-		t.Errorf("req X-Api-Key = %q, want <redacted> (present, not the real key, not dropped)", reqHeaders["X-Api-Key"])
-	}
+	ck.Eq("<redacted>", reqHeaders["X-Api-Key"], "req X-Api-Key")
 
 	var respHeaders map[string]string
 	if err := json.Unmarshal(got.RespHeaders, &respHeaders); err != nil {
 		t.Fatalf("RespHeaders not valid JSON: %v (%s)", err, got.RespHeaders)
 	}
-	if respHeaders["X-Test-Upstream-Marker"] != "seen-it" {
-		t.Errorf("resp X-Test-Upstream-Marker = %q, want seen-it (the old stub could never carry an arbitrary upstream header)", respHeaders["X-Test-Upstream-Marker"])
-	}
+	ck.Eq("seen-it", respHeaders["X-Test-Upstream-Marker"], "resp X-Test-Upstream-Marker")
 }

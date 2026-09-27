@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeLSPMutClient provides canned mutation responses.
@@ -47,11 +49,10 @@ func (f *fakeLSPMutClient) Restart(_ context.Context, _ string) error {
 }
 
 func TestLSPRename_Execute(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	// Create a test file so Rename can stat it for FileTracker refresh.
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644))
 
 	fake := &fakeLSPMutClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
@@ -63,56 +64,38 @@ func TestLSPRename_Execute(t *testing.T) {
 		Cwd:         dir,
 		FileTracker: NewFileTracker(),
 	})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(lspRenameInput{
 		Path: "main.go", Line: 1, Col: 7, NewName: "renamedFunc",
 	})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	// Assert on the output. This previously only logged the result, so it
 	// passed no matter what rename did — including doing nothing at all,
 	// which is exactly what rename did against real gopls.
-	if !strings.Contains(result.Text, "main.go") || !strings.Contains(result.Text, "other.go") {
-		t.Errorf("rename must report every modified file, got:\n%s", result.Text)
-	}
-	if strings.Contains(result.Text, "no files were modified") {
-		t.Errorf("rename reported success while modifying nothing:\n%s", result.Text)
-	}
+	c.False(!strings.Contains(result.Text, "main.go") || !strings.Contains(result.Text, "other.go"), "rename must report every modified file, got:\n%s", result.Text)
+	c.NotStrContains(result.Text, "no files were modified", "rename reported success while modifying nothing:\n")
 }
 
 func TestLSPRename_Materialize_Declines(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bp := LSPRenameBlueprint{}
 	tool, err := bp.Materialize(ToolOpts{LSP: nil, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool != nil {
-		t.Error("expected nil tool when LSP is nil")
-	}
+	c.Require().NoError(err, "Materialize")
+	c.Nil(tool, "expected nil tool when LSP is nil")
 }
 
 func TestLSPRestart_Execute(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeLSPMutClient{
 		fakeLSPClient: fakeLSPClient{diags: map[string][]LSPDiagnostic{}},
 	}
 
 	tool, err := LSPRestartBlueprint{}.Materialize(ToolOpts{LSP: fake, Cwd: "/tmp"})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	result, err := tool.Execute(context.Background(), ToolInput(mustJSON(lspRestartInput{Path: "main.go"})))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !fake.restarted {
-		t.Error("lsp_restart did not reach the client's Restart method")
-	}
-	if result.Text == "" {
-		t.Error("lsp_restart must report what it did")
-	}
+	c.Require().NoError(err, "Execute")
+	c.True(fake.restarted, "lsp_restart did not reach the client's Restart method")
+	c.NotEq("", result.Text, "lsp_restart must report what it did")
 }

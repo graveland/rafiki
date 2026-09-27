@@ -13,6 +13,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeExecutorAdmin records what each handler handed it, so the tests pin both
@@ -124,9 +126,8 @@ func TestExecutorAdminUnwiredIsUnavailable(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); connect.CodeOf(err) != connect.CodeUnavailable {
-				t.Fatalf("%s unwired: got %v, want CodeUnavailable", tc.name, err)
-			}
+			err := tc.call()
+			assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "%s unwired: got %v, want CodeUnavailable", tc.name, err)
 		})
 	}
 }
@@ -135,25 +136,23 @@ func TestExecutorAdminUnwiredIsUnavailable(t *testing.T) {
 // a non-positive ttl_seconds is refused before the seam is touched, rather
 // than silently minting the Controller's 72h default.
 func TestExecutorAdminEnrollRefusesNonPositiveTTL(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{}
 	s.SetExecutorAdmin(f)
 	for _, ttl := range []int64{0, -1} {
 		_, err := s.EnrollExecutor(context.Background(),
 			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: ttl}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("ttl %d: got %v, want CodeInvalidArgument", ttl, err)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ttl %d: got %v, want CodeInvalidArgument", ttl, err)
 	}
-	if f.calls != 0 {
-		t.Errorf("seam was called %d times on a refused request", f.calls)
-	}
+	c.Eq(0, f.calls, "seam was called")
 }
 
 // TestExecutorAdminEnrollDelegatesToSeam pins the request/response pass-through:
 // the wire request reaches the seam unchanged and the seam's response is what
 // goes back out.
 func TestExecutorAdminEnrollDelegatesToSeam(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{enrollResp: &rafikiv1.EnrollExecutorResponse{Token: "tok-1"}}
 	s.SetExecutorAdmin(f)
@@ -162,24 +161,19 @@ func TestExecutorAdminEnrollDelegatesToSeam(t *testing.T) {
 		Roots: []string{"/home/brent"}, Isolation: "container",
 		WorkspaceMode: "workspace", Admits: "kind=claude", TtlSeconds: 3600,
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Msg.GetToken() != "tok-1" {
-		t.Errorf("token = %q, want the seam's", resp.Msg.GetToken())
-	}
+	c.Require().NoError(err)
+	c.Eq("tok-1", resp.Msg.GetToken(), "token")
 	got := f.sawEnroll
-	if got.GetName() != "laptop" || got.GetLabels()["env"] != "work" ||
+	c.False(got.GetName() != "laptop" || got.GetLabels()["env"] != "work" ||
 		got.GetRoots()[0] != "/home/brent" || got.GetIsolation() != "container" ||
 		got.GetWorkspaceMode() != "workspace" || got.GetAdmits() != "kind=claude" ||
-		got.GetTtlSeconds() != 3600 {
-		t.Errorf("seam saw %+v, want the request's fields", got)
-	}
+		got.GetTtlSeconds() != 3600, "seam saw %+v, want the request's fields", got)
 }
 
 // TestExecutorAdminCreateDelegatesToSeam is Enroll's pin on the stateless path:
 // row id and the shown-once credential ride out.
 func TestExecutorAdminCreateDelegatesToSeam(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{createResp: &rafikiv1.CreateExecutorResponse{
 		ExecutorId: "exec-created", Credential: "credential",
@@ -188,21 +182,18 @@ func TestExecutorAdminCreateDelegatesToSeam(t *testing.T) {
 	resp, err := s.CreateExecutor(context.Background(), connect.NewRequest(&rafikiv1.CreateExecutorRequest{
 		Name: "laptop", Labels: map[string]string{"env": "work"}, Roots: []string{"/home/brent"},
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	if resp.Msg.GetExecutorId() != "exec-created" || resp.Msg.GetCredential() != "credential" {
 		t.Errorf("response = %+v, want the seam's row id and credential", resp.Msg)
 	}
 	got := f.sawCreate
-	if got.GetName() != "laptop" || got.GetLabels()["env"] != "work" || got.GetRoots()[0] != "/home/brent" {
-		t.Errorf("seam saw %+v, want the request's fields", got)
-	}
+	c.False(got.GetName() != "laptop" || got.GetLabels()["env"] != "work" || got.GetRoots()[0] != "/home/brent", "seam saw %+v, want the request's fields", got)
 }
 
 // TestExecutorAdminLabelDelegatesToSeam pins the field pass-through and the row
 // mapping: the updated row the seam returns becomes the response's executor.
 func TestExecutorAdminLabelDelegatesToSeam(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{labelRow: ExecutorRow{ID: "exec-1", Machine: "laptop", Enabled: true}}
 	s.SetExecutorAdmin(f)
@@ -211,22 +202,19 @@ func TestExecutorAdminLabelDelegatesToSeam(t *testing.T) {
 		Set:        map[string]string{"rack": "r1"},
 		Remove:     []string{"env"},
 	}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	if row := resp.Msg.GetExecutor(); row.GetId() != "exec-1" || row.GetMachine() != "laptop" || !row.GetEnabled() {
 		t.Errorf("row = %+v, want the seam's row", row)
 	}
 	got := f.sawLabel
-	if got.GetExecutorId() != "exec-1" || got.GetSet()["rack"] != "r1" || got.GetRemove()[0] != "env" {
-		t.Errorf("seam saw %+v, want the request's fields", got)
-	}
+	c.False(got.GetExecutorId() != "exec-1" || got.GetSet()["rack"] != "r1" || got.GetRemove()[0] != "env", "seam saw %+v, want the request's fields", got)
 }
 
 // TestExecutorAdminLabelRequiresExecutorIDAndAChange mirrors the framed
 // dispatcher's refusals: an empty id, and a change-less label call, are
 // invalid arguments the seam never sees.
 func TestExecutorAdminLabelRequiresExecutorIDAndAChange(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	f := &fakeExecutorAdmin{}
 	s.SetExecutorAdmin(f)
@@ -239,13 +227,9 @@ func TestExecutorAdminLabelRequiresExecutorIDAndAChange(t *testing.T) {
 		{"id with both empty", &rafikiv1.LabelExecutorRequest{ExecutorId: "exec-1", Set: map[string]string{}, Remove: nil}},
 	} {
 		_, err := s.LabelExecutor(context.Background(), connect.NewRequest(tc.req))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("%s: got %v, want CodeInvalidArgument", tc.name, err)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: got %v, want CodeInvalidArgument", tc.name, err)
 	}
-	if f.calls != 0 {
-		t.Errorf("seam was called %d times on refused requests", f.calls)
-	}
+	c.Eq(0, f.calls, "seam was called")
 }
 
 // TestExecutorAdminDisableEnableDeleteDelegateToSeam pins the three one-field
@@ -254,6 +238,7 @@ func TestExecutorAdminDisableEnableDeleteDelegateToSeam(t *testing.T) {
 	// The three verbs differ only in request type, so each is spelled out: the
 	// seam's ref, and the empty-ref refusal per verb.
 	t.Run("disable", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := NewServer(nil)
 		f := &fakeExecutorAdmin{}
 		s.SetExecutorAdmin(f)
@@ -261,18 +246,13 @@ func TestExecutorAdminDisableEnableDeleteDelegateToSeam(t *testing.T) {
 			connect.NewRequest(&rafikiv1.DisableExecutorRequest{ExecutorId: "exec-1"})); err != nil {
 			t.Fatal(err)
 		}
-		if f.sawRefs[len(f.sawRefs)-1] != "exec-1" {
-			t.Errorf("seam saw %q, want exec-1", f.sawRefs[len(f.sawRefs)-1])
-		}
+		c.Eq("exec-1", f.sawRefs[len(f.sawRefs)-1], "seam saw")
 		_, err := s.DisableExecutor(context.Background(), connect.NewRequest(&rafikiv1.DisableExecutorRequest{}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("empty id: got %v, want CodeInvalidArgument", err)
-		}
-		if f.calls != 1 {
-			t.Errorf("seam was called %d times, want 1", f.calls)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "empty id: got %v, want CodeInvalidArgument", err)
+		c.Eq(1, f.calls, "seam was called")
 	})
 	t.Run("enable", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := NewServer(nil)
 		f := &fakeExecutorAdmin{}
 		s.SetExecutorAdmin(f)
@@ -280,18 +260,13 @@ func TestExecutorAdminDisableEnableDeleteDelegateToSeam(t *testing.T) {
 			connect.NewRequest(&rafikiv1.EnableExecutorRequest{ExecutorId: "exec-2"})); err != nil {
 			t.Fatal(err)
 		}
-		if f.sawRefs[len(f.sawRefs)-1] != "exec-2" {
-			t.Errorf("seam saw %q, want exec-2", f.sawRefs[len(f.sawRefs)-1])
-		}
+		c.Eq("exec-2", f.sawRefs[len(f.sawRefs)-1], "seam saw")
 		_, err := s.EnableExecutor(context.Background(), connect.NewRequest(&rafikiv1.EnableExecutorRequest{}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("empty id: got %v, want CodeInvalidArgument", err)
-		}
-		if f.calls != 1 {
-			t.Errorf("seam was called %d times, want 1", f.calls)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "empty id: got %v, want CodeInvalidArgument", err)
+		c.Eq(1, f.calls, "seam was called")
 	})
 	t.Run("delete", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := NewServer(nil)
 		f := &fakeExecutorAdmin{}
 		s.SetExecutorAdmin(f)
@@ -299,16 +274,10 @@ func TestExecutorAdminDisableEnableDeleteDelegateToSeam(t *testing.T) {
 			connect.NewRequest(&rafikiv1.DeleteExecutorRequest{ExecutorId: "exec-3"})); err != nil {
 			t.Fatal(err)
 		}
-		if f.sawRefs[len(f.sawRefs)-1] != "exec-3" {
-			t.Errorf("seam saw %q, want exec-3", f.sawRefs[len(f.sawRefs)-1])
-		}
+		c.Eq("exec-3", f.sawRefs[len(f.sawRefs)-1], "seam saw")
 		_, err := s.DeleteExecutor(context.Background(), connect.NewRequest(&rafikiv1.DeleteExecutorRequest{}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("empty id: got %v, want CodeInvalidArgument", err)
-		}
-		if f.calls != 1 {
-			t.Errorf("seam was called %d times, want 1", f.calls)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "empty id: got %v, want CodeInvalidArgument", err)
+		c.Eq(1, f.calls, "seam was called")
 	})
 }
 
@@ -320,23 +289,19 @@ func TestExecutorAdminDisableEnableDeleteDelegateToSeam(t *testing.T) {
 // with ConnectErr.
 func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 	t.Run("uncoded is internal and redacted", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := NewServer(nil)
 		s.SetExecutorAdmin(&fakeExecutorAdmin{
 			enrollErr: errors.New("pgx: conn to db.internal:5432 refused"),
 		})
 		_, err := s.EnrollExecutor(context.Background(),
 			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
-		if connect.CodeOf(err) != connect.CodeInternal {
-			t.Fatalf("got %v, want CodeInternal", err)
-		}
-		if err == nil || !strings.Contains(err.Error(), internalErrText) {
-			t.Errorf("err.Error() = %v, want the fixed redacted text", err)
-		}
-		if strings.Contains(err.Error(), "db.internal") {
-			t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-		}
+		c.Require().Eq(connect.CodeInternal, connect.CodeOf(err), "got %v, want CodeInternal", err)
+		c.False(err == nil || !strings.Contains(err.Error(), internalErrText), "err.Error() = %v, want the fixed redacted text", err)
+		c.NotStrContains(err.Error(), "db.internal", "err.Error() = %v, want the raw cause redacted", err)
 	})
 	t.Run("controller error keeps code and message", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := NewServer(nil)
 		s.SetExecutorAdmin(&fakeExecutorAdmin{enrollErr: &ControllerError{
 			Code:    protocol.ErrInvalidArgs,
@@ -344,12 +309,8 @@ func TestExecutorAdminUncodedErrorIsRedactedAndCodedPasses(t *testing.T) {
 		}})
 		_, err := s.EnrollExecutor(context.Background(),
 			connect.NewRequest(&rafikiv1.EnrollExecutorRequest{Name: "laptop", TtlSeconds: 3600}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Fatalf("got %v, want CodeInvalidArgument", err)
-		}
-		if !strings.Contains(err.Error(), "that executor name is already taken for this owner") {
-			t.Errorf("err.Error() = %v, want the authored message", err)
-		}
+		c.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got %v, want CodeInvalidArgument", err)
+		c.StrContains(err.Error(), "that executor name is already taken for this owner", "err.Error() = %v, want the authored message", err)
 	})
 }
 
@@ -372,6 +333,7 @@ func (h logRecorder) WithGroup(string) slog.Handler      { return h }
 // mapper never logs it, because a coded error is a classification, not an
 // infrastructure failure to investigate.
 func TestExecutorAdminCodedErrorPassesThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var msgs []string
 	prev := slog.Default()
 	slog.SetDefault(slog.New(logRecorder{msgs: &msgs}))
@@ -384,13 +346,7 @@ func TestExecutorAdminCodedErrorPassesThrough(t *testing.T) {
 	})
 	_, err := s.EnrollExecutor(context.Background(),
 		connect.NewRequest(&rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("got %v, want PermissionDenied", err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "require a user credential") {
-		t.Errorf("err.Error() = %v, want the authored text, not redaction", err)
-	}
-	if len(msgs) != 0 {
-		t.Errorf("mapper logged %d record(s) for a coded error: %q", len(msgs), msgs)
-	}
+	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "got %v, want PermissionDenied", err)
+	c.False(err == nil || !strings.Contains(err.Error(), "require a user credential"), "err.Error() = %v, want the authored text, not redaction", err)
+	c.Empty(msgs, "mapper logged %d record(s) for a coded error", len(msgs))
 }

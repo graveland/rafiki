@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeFakeLintUV writes an executable fake `uv` whose `tool run ruff check
@@ -29,9 +31,7 @@ echo "fake uv: unexpected invocation: $*" >&2
 exit 64
 `
 	path := filepath.Join(dir, "uv")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(script), 0o755))
 	return dir
 }
 
@@ -54,9 +54,7 @@ func TestPymoduleChecksSyntaxErrorReported(t *testing.T) {
 		t.Skipf("python3 not found: %v", err)
 	}
 	got := pymoduleSyntaxCheck("def f(:\n    pass\n")
-	if got == "" {
-		t.Error(`pymoduleSyntaxCheck(bad code) = "", want the non-empty SyntaxError text`)
-	}
+	assert.NewCollecting(t).NotEq("", got, `pymoduleSyntaxCheck(bad code) = "", want the non-empty SyntaxError text`)
 }
 
 // Clean code reports no syntax error: "" is the pass-through for "nothing to
@@ -65,9 +63,8 @@ func TestPymoduleChecksCleanCodeReportsNoError(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
-	if got := pymoduleSyntaxCheck("def f():\n    pass\n"); got != "" {
-		t.Errorf("pymoduleSyntaxCheck(clean code) = %q, want \"\"", got)
-	}
+	got := pymoduleSyntaxCheck("def f():\n    pass\n")
+	assert.NewCollecting(t).Eq("", got, "pymoduleSyntaxCheck(clean code) = %q, want \"\"", got)
 }
 
 // With python3 absent from PATH the check is fully best-effort: "" for ANY
@@ -80,9 +77,8 @@ func TestPymoduleChecksSkipsSilentlyWithoutPython3(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // a PATH with nothing on it
 	for _, code := range []string{"def f():\n    pass\n", "def f(:\n    pass\n"} {
-		if got := pymoduleSyntaxCheck(code); got != "" {
-			t.Errorf("pymoduleSyntaxCheck(%q) = %q with no python3 on PATH, want \"\"", code, got)
-		}
+		got := pymoduleSyntaxCheck(code)
+		assert.NewCollecting(t).Eq("", got, "pymoduleSyntaxCheck(%q) = %q with no python3 on PATH, want \"\"", code, got)
 	}
 }
 
@@ -91,9 +87,8 @@ func TestPymoduleChecksSkipsSilentlyWithoutPython3(t *testing.T) {
 // never blocks a save.
 func TestPymoduleChecksLintSkipsSilentlyWithoutUv(t *testing.T) {
 	t.Setenv("RAFIKI_PYMODULE_UV", "/nonexistent/uv")
-	if got := pymoduleLintCheck("import os\n"); got != "" {
-		t.Errorf("pymoduleLintCheck with a missing uv = %q, want \"\"", got)
-	}
+	got := pymoduleLintCheck("import os\n")
+	assert.NewCollecting(t).Eq("", got, "pymoduleLintCheck with a missing uv = %q, want \"\"", got)
 }
 
 // The lint check reports exactly what the (fake) ruff printed, hermetically:
@@ -103,7 +98,5 @@ func TestPymoduleChecksLintReturnsRuffFindings(t *testing.T) {
 	uvDir := writeFakeLintUV(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	got := pymoduleLintCheck("import os\n")
-	if got != fakeRuffFinding {
-		t.Errorf("pymoduleLintCheck = %q, want the fake ruff finding %q", got, fakeRuffFinding)
-	}
+	assert.NewCollecting(t).Eq(fakeRuffFinding, got, "pymoduleLintCheck")
 }

@@ -30,6 +30,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── TestMain: build binary once for all tests ────────────────────────────────
@@ -128,9 +130,7 @@ func bootDaemon(t *testing.T) *daemon {
 		base = "/tmp"
 	}
 	homeDir, err := os.MkdirTemp(base, "rafiki-it")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mkdirtemp")
 
 	// The daemon resolves every location through internal/paths, which is XDG —
 	// deliberately NOT ~/.pi, which belongs to pi itself. Pin all three XDG bases
@@ -248,6 +248,7 @@ func (d *daemon) control(t *testing.T) rafikiv1connect.ControlClient {
 // only exercise the daemon's spawn/kill/stream/close lifecycle.
 func (d *daemon) spawnChild(t *testing.T) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	resp, err := d.control(t).Spawn(ctx, connect.NewRequest(&rafikiv1.SpawnRequest{
@@ -256,12 +257,8 @@ func (d *daemon) spawnChild(t *testing.T) string {
 		Kind:      protocol.KindFundi,
 		Model:     "anthropic/sonnet-latest",
 	}))
-	if err != nil {
-		t.Fatalf("spawn failed: %v", err)
-	}
-	if resp.Msg.GetChildId() == "" {
-		t.Fatal("spawn returned empty childId")
-	}
+	c.NoError(err, "spawn failed")
+	c.NotEq("", resp.Msg.GetChildId(), "spawn returned empty childId")
 	return resp.Msg.GetChildId()
 }
 
@@ -274,9 +271,7 @@ func getChild(t *testing.T, client rafikiv1connect.ControlClient, childID string
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	resp, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
-	if err != nil {
-		t.Fatalf("GetChild(%s): %v", childID, err)
-	}
+	assert.NewAborting(t).NoError(err, "GetChild(%s)", childID)
 	return resp.Msg.GetChild()
 }
 
@@ -286,9 +281,7 @@ func listChildren(t *testing.T, client rafikiv1connect.ControlClient) []*rafikiv
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	resp, err := client.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "ListChildren")
 	return resp.Msg.GetChildren()
 }
 
@@ -313,9 +306,7 @@ func allEventsSubject() *rafikiv1.EventSubject {
 func eventWatermark(t *testing.T, client rafikiv1connect.ControlClient, childID string) int32 {
 	t.Helper()
 	latest := getChild(t, client, childID).LatestOrdinal
-	if latest == nil {
-		t.Fatalf("child %s carries no event-log ordinal; nothing to replay from", childID)
-	}
+	assert.NewAborting(t).NotNil(latest, "child %s carries no event-log ordinal; nothing to replay from", childID)
 	return *latest
 }
 
@@ -463,6 +454,7 @@ func agentStatusEvent(childID, state string) func(*rafikiv1.Event) bool {
 // spawn → send frame → kill → confirm exited → close (forget).
 func TestIntegration_FullLifecycle(t *testing.T) {
 	t.Parallel()
+	ck := assert.NewCollecting(t)
 	d := bootDaemon(t)
 	client := d.control(t)
 
@@ -492,25 +484,18 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 			found = c
 		}
 	}
-	if found == nil {
-		t.Fatal("child not found in ListChildren after kill")
-	}
-	if found.GetStatus() != string(protocol.StatusExited) {
-		t.Errorf("want status=%s, got %s", protocol.StatusExited, found.GetStatus())
-	}
+	ck.Require().NotNil(found, "child not found in ListChildren after kill")
+	ck.Eq(string(protocol.StatusExited), found.GetStatus(), "want status=%s, got", protocol.StatusExited)
 
 	// Close (forget).
 	cctx, ccancel := context.WithTimeout(context.Background(), 15*time.Second)
-	if _, err := client.Close(cctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID})); err != nil {
-		t.Fatalf("Close failed: %v", err)
-	}
+	_, err := client.Close(cctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
+	ck.Require().NoError(err, "Close failed")
 	ccancel()
 
 	// Verify the child is gone from ListChildren.
 	for _, c := range listChildren(t, client) {
-		if c.GetChildId() == childID {
-			t.Error("child still present in ListChildren after Close")
-		}
+		ck.NotEq(childID, c.GetChildId(), "child still present in ListChildren after Close")
 	}
 }
 
@@ -518,6 +503,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 // spawn → kill → confirm exited → resume → same childId.
 func TestIntegration_KillResume(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d := bootDaemon(t)
 	client := d.control(t)
 
@@ -525,9 +511,7 @@ func TestIntegration_KillResume(t *testing.T) {
 
 	// Capture the initial state via GetChild.
 	child1 := getChild(t, client, childID)
-	if child1.GetStatus() == string(protocol.StatusExited) {
-		t.Fatal("child should be alive after spawn")
-	}
+	c.Require().NotEq(string(protocol.StatusExited), child1.GetStatus(), "child should be alive after spawn")
 
 	// Kill.
 	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -538,32 +522,22 @@ func TestIntegration_KillResume(t *testing.T) {
 
 	// Confirm exited.
 	exitedChild := getChild(t, client, childID)
-	if exitedChild.GetStatus() != string(protocol.StatusExited) {
-		t.Fatalf("want status=exited after kill, got %s", exitedChild.GetStatus())
-	}
+	c.Require().Eq(string(protocol.StatusExited), exitedChild.GetStatus(), "want status=exited after kill, got")
 
 	// Resume — should re-spawn with the same childId.
 	rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
 	resp, err := client.Resume(rctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID}))
 	rcancel()
-	if err != nil {
-		t.Fatalf("Resume failed: %v", err)
-	}
-	if got := resp.Msg.GetChildId(); got != childID {
-		t.Errorf("resume: want childId=%s, got %s", childID, got)
-	}
+	c.Require().NoError(err, "Resume failed")
+	c.Eq(childID, resp.Msg.GetChildId(), "resume: want childId")
 
 	// The resumed child must be alive and, for a kind with a real OS process
 	// (claude), have a different PID. An in-process fundi child has PID 0 and
 	// never forks, so the "different PID" assertion is only meaningful when the
 	// original child had a real PID.
 	child2 := getChild(t, client, childID)
-	if child2.GetStatus() == string(protocol.StatusExited) {
-		t.Fatal("resumed child should be alive, not exited")
-	}
-	if child1.Pid != nil && child2.Pid != nil && child1.GetPid() != 0 && child1.GetPid() == child2.GetPid() {
-		t.Error("resumed child should have a different PID from the original")
-	}
+	c.Require().NotEq(string(protocol.StatusExited), child2.GetStatus(), "resumed child should be alive, not exited")
+	c.False(child1.Pid != nil && child2.Pid != nil && child1.GetPid() != 0 && child1.GetPid() == child2.GetPid(), "resumed child should have a different PID from the original")
 }
 
 // TestIntegration_LogDumpOnExit verifies that all four log files are written
@@ -599,9 +573,8 @@ func TestIntegration_LogDumpOnExit(t *testing.T) {
 
 	for _, name := range []string{"meta.json", "in.jsonl.gz", "out.jsonl.gz", "err.log.gz"} {
 		path := filepath.Join(childLogDir, name)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("log file missing: %s (%v)", name, err)
-		}
+		_, err := os.Stat(path)
+		assert.NewCollecting(t).NoError(err, "log file missing: %s (%v)", name, err)
 	}
 }
 
@@ -633,9 +606,8 @@ func TestIntegration_ResumeEmitsSpawned(t *testing.T) {
 
 	// Resume.
 	rctx, rcancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if _, err := client.Resume(rctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID})); err != nil {
-		t.Fatalf("Resume failed: %v", err)
-	}
+	_, err := client.Resume(rctx, connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: childID}))
+	assert.NewAborting(t).NoError(err, "Resume failed")
 	rcancel()
 
 	// The global subscription must receive child_spawned for the resumed child.

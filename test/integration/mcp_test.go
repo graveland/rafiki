@@ -32,6 +32,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // mcpToolNames is the exact surface the MCP face must expose: the
@@ -118,16 +120,13 @@ func bootMCPDaemon(t *testing.T) *daemon {
 // face authenticates with.
 func (d *daemon) createMCPUser(t *testing.T) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	username := fmt.Sprintf("mcp-it-%d", time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	resp, err := d.control(t).CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: username}))
-	if err != nil {
-		t.Fatalf("CreateUser failed: %v", err)
-	}
-	if resp.Msg.GetToken() == "" {
-		t.Fatal("CreateUser returned no token")
-	}
+	c.NoError(err, "CreateUser failed")
+	c.NotEq("", resp.Msg.GetToken(), "CreateUser returned no token")
 	// The token is shown exactly once by design, so there is nothing to
 	// re-derive later; remove the user on cleanup so the shared test database
 	// does not accumulate active test identities.
@@ -168,9 +167,7 @@ func mcpConnect(t *testing.T, proxyURL, token string) *mcp.ClientSession {
 		HTTPClient: &http.Client{Transport: mcpBearerTransport{token: token}},
 	}
 	sess, err := mcp.NewClient(&mcp.Implementation{Name: "mcp-it", Version: "0.0.1"}, nil).Connect(ctx, transport, nil)
-	if err != nil {
-		t.Fatalf("mcp connect: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mcp connect")
 	t.Cleanup(func() { _ = sess.Close() })
 	return sess
 }
@@ -180,15 +177,12 @@ func mcpConnect(t *testing.T, proxyURL, token string) *mcp.ClientSession {
 // a tool failure a result with IsError, never a transport error).
 func mcpCallTool(t *testing.T, sess *mcp.ClientSession, name string, args map[string]any) (*mcp.CallToolResult, string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		t.Fatalf("%s: transport error: %v", name, err)
-	}
-	if res == nil {
-		t.Fatalf("%s: nil result", name)
-	}
+	c.NoError(err, "%s: transport error", name)
+	c.NotNil(res, "%s: nil result", name)
 	return res, mcpResultText(res)
 }
 
@@ -197,9 +191,7 @@ func mcpCallTool(t *testing.T, sess *mcp.ClientSession, name string, args map[st
 func mcpOK(t *testing.T, sess *mcp.ClientSession, name string, args map[string]any) string {
 	t.Helper()
 	res, text := mcpCallTool(t, sess, name, args)
-	if res.IsError {
-		t.Fatalf("%s: tool error: %s", name, text)
-	}
+	assert.NewAborting(t).False(res.IsError, "%s: tool error: %s", name, text)
 	return text
 }
 
@@ -223,15 +215,14 @@ func mcpResultText(res *mcp.CallToolResult) string {
 // finish with a kill that reaches exited.
 func TestMCPSurfaceEndToEnd(t *testing.T) {
 	t.Parallel()
+	ck := assert.NewAborting(t)
 	d := bootMCPDaemon(t)
 	token := d.createMCPUser(t)
 	sess := mcpConnect(t, d.proxyURL, token)
 
 	// 3. ListTools must be the exact mcpToolNames pins.
 	list, err := sess.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
+	ck.NoError(err, "ListTools")
 	got := make([]string, 0, len(list.Tools))
 	for _, tl := range list.Tools {
 		got = append(got, tl.Name)
@@ -239,9 +230,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 	slices.Sort(got)
 	want := slices.Clone(mcpToolNames)
 	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Fatalf("ListTools = %v, want exactly %v", got, want)
-	}
+	ck.EqDiff(want, got, "ListTools")
 
 	// 4. agent_spawn with an explicit absolute cwd. The model is the rest of
 	// this suite's throwaway string: the daemon requires a resolvable provider
@@ -255,9 +244,7 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 		"kind":   "fundi",
 	})
 	childID := mcpFirstAgentID(t, spawnText)
-	if childID == "" {
-		t.Fatalf("agent_spawn returned no agent id; output:\n%s", spawnText)
-	}
+	ck.NotEq("", childID, "agent_spawn returned no agent id; output:\n%s", spawnText)
 
 	// Cross-check through the EXISTING Connect control plane over the UDS.
 	confirmChild := func(wantStatus string) {
@@ -265,16 +252,12 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		resp, err := d.connectClient().ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-		if err != nil {
-			t.Fatalf("ListChildren: %v", err)
-		}
+		ck.NoError(err, "ListChildren")
 		for _, c := range resp.Msg.GetChildren() {
 			if c.GetChildId() != childID {
 				continue
 			}
-			if wantStatus == "" && c.GetStatus() == "exited" {
-				t.Fatalf("child %s unexpectedly exited before the kill step", childID)
-			}
+			ck.False(wantStatus == "" && c.GetStatus() == "exited", "child %s unexpectedly exited before the kill step", childID)
 			if wantStatus != "" && c.GetStatus() != wantStatus {
 				t.Fatalf("child %s status = %q, want %q", childID, c.GetStatus(), wantStatus)
 			}
@@ -289,19 +272,13 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 
 	// 5. Every read/steer verb and the task ledger, in order.
 	listText := mcpOK(t, sess, "agent_list", nil)
-	if !strings.Contains(listText, childID) {
-		t.Fatalf("agent_list missing child %s; output:\n%s", childID, listText)
-	}
+	ck.StrContains(listText, childID, "agent_list missing child")
 
 	viewText := mcpOK(t, sess, "agent_view", map[string]any{"agent": childID})
-	if strings.TrimSpace(viewText) == "" {
-		t.Fatal("agent_view returned an empty transcript")
-	}
+	ck.NotEq("", strings.TrimSpace(viewText), "agent_view returned an empty transcript")
 
 	sendText := mcpOK(t, sess, "agent_send", map[string]any{"agent": childID, "message": "integration-test steer"})
-	if !strings.Contains(sendText, "delivered") {
-		t.Fatalf("agent_send: unexpected output %q", sendText)
-	}
+	ck.StrContains(sendText, "delivered", "agent_send: unexpected output")
 
 	mcpOK(t, sess, "agent_models", nil)
 	mcpOK(t, sess, "quota_status", nil)
@@ -310,50 +287,34 @@ func TestMCPSurfaceEndToEnd(t *testing.T) {
 		"items": []map[string]any{{"content": "Exercise the MCP surface", "active_form": "Exercising the MCP surface"}},
 	})
 	handle := mcpFirstTaskHandle(t, addText)
-	if handle == "" {
-		t.Fatalf("task_add returned no task handle; output:\n%s", addText)
-	}
+	ck.NotEq("", handle, "task_add returned no task handle; output:\n%s", addText)
 	listTasks := mcpOK(t, sess, "task_list", nil)
-	if !strings.Contains(listTasks, handle) {
-		t.Fatalf("task_list missing handle %s; output:\n%s", handle, listTasks)
-	}
+	ck.StrContains(listTasks, handle, "task_list missing handle")
 	updText := mcpOK(t, sess, "task_update", map[string]any{
 		"changes": []map[string]any{{"handle": handle, "status": "completed"}},
 	})
-	if !strings.Contains(updText, handle) {
-		t.Fatalf("task_update output missing handle %s; output:\n%s", handle, updText)
-	}
+	ck.StrContains(updText, handle, "task_update output missing handle")
 	dropText := mcpOK(t, sess, "task_drop", map[string]any{
 		"handle": handle,
 		"reason": "integration test finished with it",
 	})
-	if !strings.Contains(dropText, "dropped") {
-		t.Fatalf("task_drop output does not show a dropped task; output:\n%s", dropText)
-	}
+	ck.StrContains(dropText, "dropped", "task_drop output does not show a dropped task; output:\n")
 
 	// 6. Budgets: a top-level child's budget is the MCP caller's to change; a
 	// parented child's belongs to the agent that spawned it, and the refusal
 	// must name that parent.
 	budgetText := mcpOK(t, sess, "agent_set_budget", map[string]any{"agent": childID, "max_cost": 5.0})
-	if !strings.Contains(budgetText, "5.00") {
-		t.Fatalf("agent_set_budget: unexpected output %q", budgetText)
-	}
+	ck.StrContains(budgetText, "5.00", "agent_set_budget: unexpected output")
 
 	kidID := d.spawnChildUnder(t, childID)
 	res, kidText := mcpCallTool(t, sess, "agent_set_budget", map[string]any{"agent": kidID, "max_cost": 5.0})
-	if !res.IsError {
-		t.Fatalf("agent_set_budget on parented child %s succeeded; want IsError; output:\n%s", kidID, kidText)
-	}
-	if !strings.Contains(kidText, "was spawned by agent "+childID) {
-		t.Fatalf("agent_set_budget refusal does not name the parent %s; output:\n%s", childID, kidText)
-	}
+	ck.True(res.IsError, "agent_set_budget on parented child %s succeeded; want IsError; output:\n%s", kidID, kidText)
+	ck.StrContains(kidText, "was spawned by agent "+childID, "agent_set_budget refusal does not name the parent %s; output:\n", childID)
 
 	// 7. agent_kill waits for the shutdown to be recorded; the exit is then
 	// confirmed through the Connect plane, not through MCP.
 	killText := mcpOK(t, sess, "agent_kill", map[string]any{"agent": childID})
-	if !strings.Contains(killText, childID) {
-		t.Fatalf("agent_kill: unexpected output %q", killText)
-	}
+	ck.StrContains(killText, childID, "agent_kill: unexpected output")
 	confirmChild("exited")
 }
 
@@ -394,20 +355,16 @@ func mcpFirstTaskHandle(t *testing.T, text string) string {
 // JSON-RPC payload — so no server object was ever built and no tool ran.
 func TestMCPSurfaceRejectsAMissingToken(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d := bootMCPDaemon(t)
 
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-it","version":"0"}}}`
 	for name, token := range map[string]string{"no credential": "", "garbage credential": "mcp-it-not-a-real-token"} {
 		resp, body := mcpRawBody(t, d.proxyURL, token, "", initBody)
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s: initialize status = %d, want 401 (body: %.200s)", name, resp.StatusCode, body)
-		}
-		if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/event-stream") {
-			t.Errorf("%s: rejected request answered with %q; an unauthenticated caller must never get a stream", name, ct)
-		}
-		if strings.Contains(body, `"result"`) {
-			t.Errorf("%s: 401 body carries a JSON-RPC result; no tool may run without a credential (body: %.200s)", name, body)
-		}
+		c.Eq(http.StatusUnauthorized, resp.StatusCode, "%s: initialize status = %d, want 401 (body: %.200s)", name, resp.StatusCode, body)
+		ct := resp.Header.Get("Content-Type")
+		c.False(strings.HasPrefix(ct, "text/event-stream"), "%s: rejected request answered with %q; an unauthenticated caller must never get a stream", name, ct)
+		c.NotStrContains(body, `"result"`, "%s: 401 body carries a JSON-RPC result; no tool may run without a credential (body: %.200s)", name, body)
 	}
 
 	// The go-sdk client on the same credentials must fail to establish a
@@ -420,9 +377,7 @@ func TestMCPSurfaceRejectsAMissingToken(t *testing.T) {
 		}
 		_, err := mcp.NewClient(&mcp.Implementation{Name: "mcp-it", Version: "0.0.1"}, nil).Connect(ctx, transport, nil)
 		cancel()
-		if err == nil {
-			t.Errorf("%s: mcp client established a session without a valid credential", name)
-		}
+		c.Error(err, "%s: mcp client established a session without a valid credential", name)
 	}
 }
 
@@ -446,6 +401,7 @@ const sseLegTimeout = 15 * time.Second
 // demand, so the POST response stream is the leg that can be exercised.
 func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootMCPDaemon(t)
 	token := d.createMCPUser(t)
 
@@ -453,16 +409,12 @@ func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 	// flushed SSE data frame.
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcp-it-raw","version":"0"}}}`
 	resp := mcpRawPost(t, d.proxyURL, token, "", initBody)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("initialize status = %d, want 200", resp.StatusCode)
-	}
+	c.Eq(http.StatusOK, resp.StatusCode, "initialize status")
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("initialize Content-Type = %q, want text/event-stream", ct)
 	}
 	sid := resp.Header.Get("Mcp-Session-Id")
-	if sid == "" {
-		t.Fatal("initialize response carried no Mcp-Session-Id")
-	}
+	c.NotEq("", sid, "initialize response carried no Mcp-Session-Id")
 	mcpReadSSEData(t, resp, 1)
 
 	// The client's initialized notification (no call in it) is accepted
@@ -470,27 +422,20 @@ func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 	notifResp := mcpRawPost(t, d.proxyURL, token, sid, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	_, _ = io.Copy(io.Discard, notifResp.Body)
 	_ = notifResp.Body.Close()
-	if notifResp.StatusCode != http.StatusAccepted {
-		t.Fatalf("notifications/initialized status = %d, want 202", notifResp.StatusCode)
-	}
+	c.Eq(http.StatusAccepted, notifResp.StatusCode, "notifications/initialized status")
 
 	// tools/list — its response must arrive over the stream within the bound.
 	resp = mcpRawPost(t, d.proxyURL, token, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("tools/list status = %d, want 200", resp.StatusCode)
-	}
+	c.Eq(http.StatusOK, resp.StatusCode, "tools/list status")
 	data := mcpReadSSEData(t, resp, 2)
 	var payload struct {
 		Result struct {
 			Tools []json.RawMessage `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		t.Fatalf("decode tools/list SSE frame: %v\ndata: %s", err, data)
-	}
-	if len(payload.Result.Tools) != len(mcpToolNames) {
-		t.Fatalf("tools/list over the SSE leg returned %d tools, want %d", len(payload.Result.Tools), len(mcpToolNames))
-	}
+	err := json.Unmarshal(data, &payload)
+	c.NoError(err, "decode tools/list SSE frame: %v\ndata: %s", err, data)
+	c.Len(payload.Result.Tools, len(mcpToolNames), "tools/list over the SSE leg returned %d tools, want", len(payload.Result.Tools))
 }
 
 // mcpRawPost issues one raw streamable-HTTP POST against the /mcp mount and
@@ -498,12 +443,11 @@ func TestMCPSurfaceFlushesTheSSELeg(t *testing.T) {
 // an SSE stream as it arrives. The caller closes the body.
 func mcpRawPost(t *testing.T, proxyURL, token, sessionID, body string) *http.Response {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), sseLegTimeout)
 	t.Cleanup(cancel)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/mcp", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
+	c.NoError(err, "build request")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if token != "" {
@@ -513,9 +457,7 @@ func mcpRawPost(t *testing.T, proxyURL, token, sessionID, body string) *http.Res
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /mcp: %v", err)
-	}
+	c.NoError(err, "POST /mcp")
 	return resp
 }
 
@@ -526,9 +468,7 @@ func mcpRawBody(t *testing.T, proxyURL, token, sessionID, body string) (*http.Re
 	resp := mcpRawPost(t, proxyURL, token, sessionID, body)
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "read response body")
 	return resp, string(raw)
 }
 

@@ -6,6 +6,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/modelquery"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestEveryToolSortKeyResolves closes the one drift seam between the tool's
@@ -14,14 +16,12 @@ import (
 // modelquery. A key accepted there and unknown here would order on nothing,
 // with no error anywhere.
 func TestEveryToolSortKeyResolves(t *testing.T) {
+	c := assert.NewCollecting(t)
 	keys := tools.ModelSortKeys()
-	if len(keys) == 0 {
-		t.Fatal("tool advertises no sort keys")
-	}
+	c.Require().NotEmpty(keys, "tool advertises no sort keys")
 	for _, k := range keys {
-		if _, ok := modelquery.ParseField(k); !ok {
-			t.Errorf("agent_models accepts sort %q but modelquery cannot resolve it", k)
-		}
+		_, ok := modelquery.ParseField(k)
+		c.True(ok, "agent_models accepts sort %q but modelquery cannot resolve it", k)
 	}
 }
 
@@ -29,44 +29,32 @@ func TestEveryToolSortKeyResolves(t *testing.T) {
 // locally-served model has no catalog entry, so a needs filter that read
 // unknown as "no" would hide the whole local fleet.
 func TestNeedsKeepsUnknownCapability(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unknown := &rafikiv1.ModelRow{Id: "ollama/qwen3"} // no supported_parameters
 	no := &rafikiv1.ModelRow{Id: "or/plain", SupportedParameters: []string{"temperature"}}
 	yes := &rafikiv1.ModelRow{Id: "or/agent", SupportedParameters: []string{"tools"}}
 
-	if !admitsNeeds(unknown, []string{"tools"}) {
-		t.Error("needs=tools dropped a model the catalog cannot answer for")
-	}
-	if admitsNeeds(no, []string{"tools"}) {
-		t.Error("needs=tools kept a model that reports no tool support")
-	}
-	if !admitsNeeds(yes, []string{"tools"}) {
-		t.Error("needs=tools dropped a model that reports tool support")
-	}
-	if admitsNeeds(yes, []string{"nonsense"}) {
-		t.Error("an unrecognised capability was ignored rather than refused")
-	}
+	c.True(admitsNeeds(unknown, []string{"tools"}), "needs=tools dropped a model the catalog cannot answer for")
+	c.False(admitsNeeds(no, []string{"tools"}), "needs=tools kept a model that reports no tool support")
+	c.True(admitsNeeds(yes, []string{"tools"}), "needs=tools dropped a model that reports tool support")
+	c.False(admitsNeeds(yes, []string{"nonsense"}), "an unrecognised capability was ignored rather than refused")
 }
 
 // TestModelBoundsAdmitUnpriced pins that a price ceiling keeps rows the
 // catalog has no price for.
 func TestModelBoundsAdmitUnpriced(t *testing.T) {
+	c := assert.NewCollecting(t)
 	max := 1.0
 	q := tools.ModelQuery{MaxInUSD: &max}
 	bounds := modelBounds(q)
 
 	unpriced := &rafikiv1.ModelRow{Id: "ollama/qwen3"}
-	if !modelquery.AdmitsAll(bounds, unpriced) {
-		t.Error("max_in_usd dropped an unpriced model")
-	}
+	c.True(modelquery.AdmitsAll(bounds, unpriced), "max_in_usd dropped an unpriced model")
 
 	cheap := 0.0000004 // $0.40/M
 	dear := 0.000015   // $15/M
-	if !modelquery.AdmitsAll(bounds, &rafikiv1.ModelRow{Id: "or/cheap", PromptUsd: &cheap}) {
-		t.Error("max_in_usd=1.0 rejected a $0.40/M model")
-	}
-	if modelquery.AdmitsAll(bounds, &rafikiv1.ModelRow{Id: "or/dear", PromptUsd: &dear}) {
-		t.Error("max_in_usd=1.0 admitted a $15/M model")
-	}
+	c.True(modelquery.AdmitsAll(bounds, &rafikiv1.ModelRow{Id: "or/cheap", PromptUsd: &cheap}), "max_in_usd=1.0 rejected a $0.40/M model")
+	c.False(modelquery.AdmitsAll(bounds, &rafikiv1.ModelRow{Id: "or/dear", PromptUsd: &dear}), "max_in_usd=1.0 admitted a $15/M model")
 }
 
 // TestToolModelInfoPreservesAbsence guards the pointer copy. A > 0 guard here
@@ -83,9 +71,7 @@ func TestToolModelInfoPreservesAbsence(t *testing.T) {
 	} else if *got.PromptUSD != 0 {
 		t.Errorf("price = %v, want 0", *got.PromptUSD)
 	}
-	if got.ContextWindow == nil {
-		t.Error("a reported context window of zero became absent")
-	}
+	assert.NewCollecting(t).NotNil(got.ContextWindow, "a reported context window of zero became absent")
 
 	checkBareRow(t)
 }
@@ -106,18 +92,15 @@ func TestSortDirectionWordMatchesBiggerIsBetter(t *testing.T) {
 		if modelquery.BiggerIsBetter(f) {
 			want = "highest"
 		}
-		if got := tools.SortDirectionWord(k); got != want {
-			t.Errorf("sort %q: tool says %q first, modelquery orders %q first", k, got, want)
-		}
+		got := tools.SortDirectionWord(k)
+		assert.NewCollecting(t).Eq(want, got, "sort %q: tool says %q first, modelquery orders %q first", k, got, want)
 	}
 }
 
 func checkBareRow(t *testing.T) {
 	t.Helper()
 	bare := toolModelInfo(&rafikiv1.ModelRow{Id: "ollama/qwen3"})
-	if bare.PromptUSD != nil || bare.ContextWindow != nil || bare.AgenticIndex != nil {
-		t.Error("an absent field became present")
-	}
+	assert.NewCollecting(t).False(bare.PromptUSD != nil || bare.ContextWindow != nil || bare.AgenticIndex != nil, "an absent field became present")
 	if bare.Tools != "unknown" || bare.Vision != "unknown" {
 		t.Errorf("capability tri-states = (%q, %q), want unknown; "+
 			"reading them as \"no\" hides every locally-served model",

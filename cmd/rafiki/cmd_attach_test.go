@@ -5,69 +5,55 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestAttachCmdShape(t *testing.T) {
+	c := assert.NewAborting(t)
 	cmd := newAttachCmd()
-	if cmd.Use != "attach [id|name]" {
-		t.Fatalf("Use = %q, want %q", cmd.Use, "attach [id|name]")
-	}
+	c.Eq("attach [id|name]", cmd.Use, "Use")
 	// The exit-behaviour flags TestCLI_AttachHelp asserts on.
 	for _, flag := range []string{"kill-on-exit", "keep-on-exit"} {
-		if cmd.Flags().Lookup(flag) == nil {
-			t.Fatalf("attach is missing the --%s flag", flag)
-		}
+		c.NotNil(cmd.Flags().Lookup(flag), "attach is missing the --%s flag", flag)
 	}
 	// Declaring them is not enough. Before C1b, attach declared both and read
 	// neither -- create read them, attach did not -- and this test asserted only
 	// that they existed, which is how a flag that did nothing survived review.
-	if !attachReadsExitFlags {
-		t.Fatal("attach must READ --kill-on-exit/--keep-on-exit, not merely declare them")
-	}
+	c.False(!attachReadsExitFlags, "attach must READ --kill-on-exit/--keep-on-exit, not merely declare them")
 }
 
 // C1b makes bare `rafiki attach` the cockpit entry point: it opens over every
 // child the caller can see, with nothing focused.
 func TestAttachAcceptsZeroArgs(t *testing.T) {
 	cmd := newAttachCmd()
-	if err := cmd.Args(cmd, []string{}); err != nil {
-		t.Fatalf("bare `rafiki attach` must be accepted: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Args(cmd, []string{}), "bare `rafiki attach` must be accepted")
 }
 
 func TestAttachRejectsTwoArgs(t *testing.T) {
 	cmd := newAttachCmd()
-	if err := cmd.Args(cmd, []string{"c_1", "c_2"}); err == nil {
-		t.Fatal("want an error for two arguments")
-	}
+	assert.NewAborting(t).Error(cmd.Args(cmd, []string{"c_1", "c_2"}), "want an error for two arguments")
 }
 
 func TestSubjectForBareAttachIsAll(t *testing.T) {
-	if s := subjectFor(""); !s.GetAll() {
-		t.Fatalf("bare attach subject = %+v, want all", s)
-	}
+	s := subjectFor("")
+	assert.NewAborting(t).True(s.GetAll(), "bare attach subject = %+v, want all", s)
 }
 
 func TestSubjectForAChildIsSubtreePlusSelf(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := subjectFor("c_1")
-	if s.GetSubtree() != "c_1" {
-		t.Fatalf("subject = %+v, want subtree c_1", s)
-	}
+	c.Require().Eq("c_1", s.GetSubtree(), "subject = %+v, want subtree c_1", s)
 	if !s.GetIncludeSelf() {
 		t.Fatal("attach <id> must set include_self: ScopeSubtree never includes the root, " +
 			"so without it the attached child's own rail row freezes the moment you hop off")
 	}
-	if s.GetMaxDepth() != 0 {
-		t.Errorf("max_depth = %d, want 0 (UNLIMITED) -- a watcher wants a complete model",
-			s.GetMaxDepth())
-	}
+	c.Eq(0, s.GetMaxDepth(), "max_depth")
 }
 
 func TestAttachAcceptsOneArg(t *testing.T) {
 	cmd := newAttachCmd()
-	if err := cmd.Args(cmd, []string{"c_01ABC"}); err != nil {
-		t.Fatalf("want one argument accepted, got: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Args(cmd, []string{"c_01ABC"}), "want one argument accepted, got")
 }
 
 func TestAttachIsRegistered(t *testing.T) {
@@ -78,9 +64,7 @@ func TestAttachIsRegistered(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("attach is not registered on the root command")
-	}
+	assert.NewAborting(t).True(found, "attach is not registered on the root command")
 }
 
 // `tui` was a B2 placeholder. The verbs are create and attach; no alias.
@@ -91,9 +75,7 @@ func TestTUIVerbIsGone(t *testing.T) {
 			t.Fatalf("the tui verb is still registered: %q", c.Use)
 		}
 		for _, a := range c.Aliases {
-			if a == "tui" {
-				t.Fatalf("%q still aliases tui", c.Use)
-			}
+			assert.NewAborting(t).NotEq("tui", a, "%q still aliases tui", c.Use)
 		}
 	}
 }

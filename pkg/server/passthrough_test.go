@@ -10,11 +10,14 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A caller that puts rafiki's token in X-Rafiki-Token is declaring that its
 // Authorization header holds its own upstream credential.
 func TestUserTokenAuth_XRafikiTokenMarksPassthrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	var gotIdentity, gotCred string
 	h := auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -30,21 +33,16 @@ func TestUserTokenAuth_XRafikiTokenMarksPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if gotIdentity != "cli" {
-		t.Errorf("identity = %q, want %q", gotIdentity, "cli")
-	}
-	if gotCred != "Bearer sk-ant-oat01-client" {
-		t.Errorf("passthrough credential = %q, want the client's Authorization verbatim", gotCred)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq("cli", gotIdentity, "identity")
+	c.Eq("Bearer sk-ant-oat01-client", gotCred, "passthrough credential")
 }
 
 // The ordinary path must be untouched: an Authorization-authenticated request
 // has no passthrough credential, or every existing caller would start leaking
 // its bearer upstream.
 func TestUserTokenAuth_BearerIsNotPassthrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	auth := newTestUserAuth(map[string]string{"rafiki-token": "cli"})
 	var gotCred string
 	h := auth.Middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -56,12 +54,8 @@ func TestUserTokenAuth_BearerIsNotPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if gotCred != "" {
-		t.Errorf("passthrough credential = %q, want empty", gotCred)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq("", gotCred, "passthrough credential")
 }
 
 // X-Rafiki-Token is a credential like any other: an unknown value is a 401,
@@ -78,9 +72,7 @@ func TestUserTokenAuth_XRafikiTokenUnknownRejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // X-Rafiki-Token declares "Authorization is mine"; arriving without one means
@@ -99,9 +91,7 @@ func TestUserTokenAuth_XRafikiTokenWithoutAuthorizationIsRejected(t *testing.T) 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // A client that puts rafiki's own token in BOTH headers must not have that
@@ -119,9 +109,7 @@ func TestUserTokenAuth_RefusesToForwardOwnToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusUnauthorized, rec.Code, "status")
 }
 
 // The whole point of the feature: the client's own credential reaches
@@ -129,6 +117,7 @@ func TestUserTokenAuth_RefusesToForwardOwnToken(t *testing.T) {
 // and x-api-key is a 400 upstream, so the daemon key must be absent, not just
 // unused.
 func TestMessagesProxy_PassthroughForwardsClientCredential(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var gotAuth, gotAPIKey, gotBeta string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -151,24 +140,17 @@ func TestMessagesProxy_PassthroughForwardsClientCredential(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
-	}
-	if gotAuth != "Bearer sk-ant-oat01-client" {
-		t.Errorf("upstream Authorization = %q, want the client's credential", gotAuth)
-	}
-	if gotAPIKey != "" {
-		t.Errorf("daemon key leaked as x-api-key = %q, want absent", gotAPIKey)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	c.Eq("Bearer sk-ant-oat01-client", gotAuth, "upstream Authorization")
+	c.Eq("", gotAPIKey, "daemon key leaked as x-api-key")
 	// Dropping oauth-2025-04-20 makes Anthropic reject an OAuth bearer.
-	if gotBeta != "oauth-2025-04-20,claude-code-20250219" {
-		t.Errorf("anthropic-beta = %q, want it forwarded intact", gotBeta)
-	}
+	c.Eq("oauth-2025-04-20,claude-code-20250219", gotBeta, "anthropic-beta")
 }
 
 // The inverse of the above, pinning the pre-existing invariant: an ordinary
 // request still bills the daemon key and never leaks the caller's bearer.
 func TestMessagesProxy_OrdinaryRequestStillUsesDaemonKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var gotAuth, gotAPIKey string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -188,21 +170,16 @@ func TestMessagesProxy_OrdinaryRequestStillUsesDaemonKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
-	}
-	if gotAPIKey != "daemon-key" {
-		t.Errorf("upstream x-api-key = %q, want the daemon key", gotAPIKey)
-	}
-	if gotAuth != "" {
-		t.Errorf("client Authorization leaked upstream: %q", gotAuth)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	c.Eq("daemon-key", gotAPIKey, "upstream x-api-key")
+	c.Eq("", gotAuth, "client Authorization leaked upstream")
 }
 
 // An OAuth subscription credential cannot buy an OpenRouter model. Failing
 // over would silently bill the daemon's key instead, which is exactly what the
 // user asked not to happen — so this is a clean 400, not a fallback.
 func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
@@ -221,12 +198,8 @@ func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
-	}
-	if called {
-		t.Error("upstream was called; the request must be refused before any forward")
-	}
+	c.Eq(http.StatusBadRequest, rec.Code, "status")
+	c.False(called, "upstream was called; the request must be refused before any forward")
 }
 
 // The OpenAI face is wrapped by the same auth middleware, so it can receive a
@@ -234,6 +207,7 @@ func TestMessagesProxy_PassthroughRejectsSlashModel(t *testing.T) {
 // upstream with that upstream's own key. Silently serving the request would
 // bill the daemon while the caller believed otherwise.
 func TestChatCompletionsProxy_RejectsPassthrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
@@ -253,10 +227,6 @@ func TestChatCompletionsProxy_RejectsPassthrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
-	}
-	if called {
-		t.Error("upstream was called; the request must be refused before any forward")
-	}
+	c.Eq(http.StatusBadRequest, rec.Code, "status")
+	c.False(called, "upstream was called; the request must be refused before any forward")
 }

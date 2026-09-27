@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestMain isolates the client state directory for the whole package.
@@ -53,15 +55,12 @@ func TestMain(m *testing.M) {
 
 // A bare `rafiki` (no subcommand) is `rafiki attach` with nothing to focus.
 func TestRootRunEIsAttach(t *testing.T) {
+	c := assert.NewAborting(t)
 	root := newRootCmd()
 	got := reflect.ValueOf(root.RunE).Pointer()
 	want := reflect.ValueOf(runAttach).Pointer()
-	if got != want {
-		t.Fatal("root's RunE is not runAttach; a bare `rafiki` would no longer behave like `rafiki attach`")
-	}
-	if err := root.Args(root, nil); err != nil {
-		t.Fatalf("bare `rafiki` must be accepted: %v", err)
-	}
+	c.Eq(want, got, "root's RunE is not runAttach; a bare `rafiki` would no longer behave like `rafiki attach`")
+	c.NoError(root.Args(root, nil), "bare `rafiki` must be accepted")
 }
 
 // Args has to be set for RunE to ever see zero args (cobra defaults to
@@ -70,14 +69,11 @@ func TestRootRunEIsAttach(t *testing.T) {
 // attach to a child literally named after the typo. It must still read as a
 // typo, exactly as it did when cobra's own unmatched-subcommand check ran.
 func TestRootArgsRejectsUnknownCommand(t *testing.T) {
+	c := assert.NewAborting(t)
 	root := newRootCmd()
 	err := root.Args(root, []string{"bogus"})
-	if err == nil {
-		t.Fatal("want an error for an unrecognised subcommand")
-	}
-	if !strings.Contains(err.Error(), `unknown command "bogus"`) {
-		t.Fatalf("error = %q, want it to name the bad command", err.Error())
-	}
+	c.Error(err, "want an error for an unrecognised subcommand")
+	c.StrContains(err.Error(), `unknown command "bogus"`, "error")
 }
 
 // A near-miss should still get the "Did you mean" nudge cobra's own
@@ -87,7 +83,5 @@ func TestRootArgsRejectsUnknownCommand(t *testing.T) {
 func TestRootArgsSuggestsCloseMatches(t *testing.T) {
 	root := newRootCmd()
 	err := root.Args(root, []string{"lsit"})
-	if err == nil || !strings.Contains(err.Error(), "list") {
-		t.Fatalf("error = %v, want a suggestion naming `list`", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "list"), "error = %v, want a suggestion naming `list`", err)
 }

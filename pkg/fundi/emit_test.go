@@ -13,6 +13,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"go.graveland.dev/rafiki/pkg/child"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // silenceSlog swaps the default slog logger for a discard handler for the
@@ -62,15 +64,12 @@ func accumulateToolUseEvents(toolID, name string, jsonParts ...string) []ssestre
 // &nxt)) -- so this is the real accumulation path, not a simplified stand-in.
 func accumulateSDKEvents(t *testing.T, evs []ssestream.Event) *anthropic.Message {
 	t.Helper()
+	c := assert.NewAborting(t)
 	var acc anthropic.Message
 	for _, ev := range evs {
 		var u anthropic.MessageStreamEventUnion
-		if err := json.Unmarshal(ev.Data, &u); err != nil {
-			t.Fatalf("unmarshal stream event %s: %v", ev.Type, err)
-		}
-		if err := acc.Accumulate(u); err != nil {
-			t.Fatalf("accumulate stream event %s: %v", ev.Type, err)
-		}
+		c.NoError(json.Unmarshal(ev.Data, &u), "unmarshal stream event %s", ev.Type)
+		c.NoError(acc.Accumulate(u), "accumulate stream event %s", ev.Type)
 	}
 	return &acc
 }
@@ -84,14 +83,11 @@ func accumulateSDKEvents(t *testing.T, evs []ssestream.Event) *anthropic.Message
 // while hasContent (which reads the field directly) correctly saw text and
 // flushed: 23 empty frames per turn, and the full reply only in message_end.
 func TestMapAssistantMessage_MapsAccumulatedTextBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
 	acc := accumulateSDKEvents(t, accumulateTextEvents("Hel", "lo"))
 	got := MapAssistantMessage(acc, "anthropic", nil)
-	if len(got.Content) != 1 {
-		t.Fatalf("content = %+v, want one text block -- an accumulated (not API-parsed) message must still map", got.Content)
-	}
-	if got.Content[0].Text != "Hello" {
-		t.Errorf("text = %q, want %q", got.Content[0].Text, "Hello")
-	}
+	c.Require().Len(got.Content, 1, "content")
+	c.Eq("Hello", got.Content[0].Text, "text")
 }
 
 // TestMapAssistantMessage_MapsAccumulatedToolUseBlock is
@@ -99,17 +95,12 @@ func TestMapAssistantMessage_MapsAccumulatedTextBlock(t *testing.T) {
 // As*() reads JSON.raw identically, so a still-accumulating tool_use block
 // vanished from message_update the same way a text block did.
 func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
+	c := assert.NewAborting(t)
 	acc := accumulateSDKEvents(t, accumulateToolUseEvents("call-1", "bash", `{"command":"ls"}`))
 	got := MapAssistantMessage(acc, "anthropic", nil)
-	if len(got.Content) != 1 {
-		t.Fatalf("content = %+v, want one tool_use block", got.Content)
-	}
-	if got.Content[0].Type != "toolCall" {
-		t.Fatalf("content[0].type = %q, want toolCall", got.Content[0].Type)
-	}
-	if got.Content[0].Arguments == nil {
-		t.Fatal("arguments is nil")
-	}
+	c.Len(got.Content, 1, "content")
+	c.Eq("toolCall", got.Content[0].Type, "content[0].type")
+	c.NotNil(got.Content[0].Arguments, "arguments is nil")
 	if cmd := (*got.Content[0].Arguments)["command"]; cmd != "ls" {
 		t.Fatalf("arguments = %+v, want command=ls", *got.Content[0].Arguments)
 	}
@@ -135,6 +126,7 @@ func TestMapAssistantMessage_MapsAccumulatedToolUseBlock(t *testing.T) {
 // -- a genuine SDK-accumulated prefix, not a hand-typed guess at what one
 // looks like.
 func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing.T) {
+	c := assert.NewAborting(t)
 	logs := &syncBuffer{}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
@@ -152,23 +144,14 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 
 	got := MapAssistantMessage(acc, "anthropic", nil)
 
-	if logs.String() != "" {
-		t.Fatalf("logged a warning for input that is merely still streaming: %s", logs.String())
-	}
-	if len(got.Content) != 1 || got.Content[0].Type != "toolCall" {
-		t.Fatalf("content = %+v, want one toolCall block (never dropped mid-stream, to avoid TUI flicker)",
-			got.Content)
-	}
+	c.Eq("", logs.String(), "logged a warning for input that is merely still streaming")
+	c.False(len(got.Content) != 1 || got.Content[0].Type != "toolCall", "content = %+v, want one toolCall block (never dropped mid-stream, to avoid TUI flicker)", got.Content)
 	args := got.Content[0].Arguments
-	if args == nil {
-		t.Fatal("arguments is nil")
-	}
+	c.NotNil(args, "arguments is nil")
 	if _, isRaw := (*args)["_raw"]; isRaw {
 		t.Fatalf("arguments leaked the truncated fragment as _raw: %+v", *args)
 	}
-	if len(*args) != 0 {
-		t.Fatalf("arguments = %+v, want empty {} while input is still streaming", *args)
-	}
+	c.Empty(*args, "arguments")
 
 	// The second delta completes the JSON. The next flush (the real shape of
 	// engine.go's stream handler: MapAssistantMessage is called again against
@@ -176,25 +159,17 @@ func TestMapAssistantMessage_ToolUsePartialInputDoesNotWarnOrTruncate(t *testing
 	// correct arguments and still log nothing.
 	var u anthropic.MessageStreamEventUnion
 	ev2 := streamInputJSONDelta(0, `rent/project"}`)
-	if err := json.Unmarshal(ev2.Data, &u); err != nil {
-		t.Fatalf("unmarshal second delta: %v", err)
-	}
-	if err := acc.Accumulate(u); err != nil {
-		t.Fatalf("accumulate second delta: %v", err)
-	}
+	c.NoError(json.Unmarshal(ev2.Data, &u), "unmarshal second delta")
+	c.NoError(acc.Accumulate(u), "accumulate second delta")
 	if !json.Valid(acc.Content[0].Input) {
 		t.Fatalf("test fixture bug: b.Input = %q must be complete valid JSON after the second delta",
 			acc.Content[0].Input)
 	}
 
 	got2 := MapAssistantMessage(acc, "anthropic", nil)
-	if logs.String() != "" {
-		t.Fatalf("logged a warning after the second delta completed valid JSON: %s", logs.String())
-	}
+	c.Eq("", logs.String(), "logged a warning after the second delta completed valid JSON")
 	args2 := got2.Content[0].Arguments
-	if args2 == nil || (*args2)["file_path"] != "/Users/brent/project" {
-		t.Fatalf("arguments after completion = %+v, want file_path=/Users/brent/project", args2)
-	}
+	c.False(args2 == nil || (*args2)["file_path"] != "/Users/brent/project", "arguments after completion = %+v, want file_path=/Users/brent/project", args2)
 }
 
 const sampleResp = `{
@@ -205,10 +180,9 @@ const sampleResp = `{
  "usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":0}}`
 
 func TestAssistantTurnEmitsPiFrames(t *testing.T) {
+	c := assert.NewAborting(t)
 	var resp anthropic.Message
-	if err := json.Unmarshal([]byte(sampleResp), &resp); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(json.Unmarshal([]byte(sampleResp), &resp))
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	em := NewEmitter(fe, "anthropic", nil)
@@ -224,18 +198,14 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 		var f struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		c.NoError(json.Unmarshal([]byte(l), &f), "bad frame %q", l)
 		types = append(types, f.Type)
 	}
 	want := []string{"agent_start", "message_start", "message_end", // user echo
 		"message_start", "message_update", "message_end", // assistant
 		"tool_execution_start", "tool_execution_end",
 		"agent_end", "agent_settled"}
-	if strings.Join(types, ",") != strings.Join(want, ",") {
-		t.Fatalf("frame sequence:\n got %v\nwant %v", types, want)
-	}
+	c.Eq(strings.Join(want, ","), strings.Join(types, ","), "frame sequence:\n got %v\nwant %v", types, want)
 	// spot-check mapping on the assistant message_end frame
 	var me struct {
 		Message struct {
@@ -245,28 +215,18 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 		} `json:"message"`
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if err := json.Unmarshal([]byte(lines[5]), &me); err != nil {
-		t.Fatalf("unmarshal message_end frame: %v", err)
-	}
-	if me.Message.StopReason != "toolUse" {
-		t.Fatalf("stopReason: %s", me.Message.StopReason)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[5]), &me), "unmarshal message_end frame")
+	c.Eq("toolUse", me.Message.StopReason, "stopReason")
 	if me.Message.Content[1]["type"] != "toolCall" {
 		t.Fatalf("content[1]: %v", me.Message.Content[1])
 	}
-	if me.Message.Usage.Input != 10 || me.Message.Usage.Output != 5 {
-		t.Fatalf("usage: %+v", me.Message.Usage)
-	}
+	c.False(me.Message.Usage.Input != 10 || me.Message.Usage.Output != 5, "usage: %+v", me.Message.Usage)
 	// agent_end carries the 3 accumulated messages: user echo, assistant, toolResult
 	var ae struct {
 		Messages []json.RawMessage `json:"messages"`
 	}
-	if err := json.Unmarshal([]byte(lines[8]), &ae); err != nil {
-		t.Fatalf("unmarshal agent_end frame: %v", err)
-	}
-	if len(ae.Messages) != 3 {
-		t.Fatalf("agent_end messages: %d", len(ae.Messages))
-	}
+	c.NoError(json.Unmarshal([]byte(lines[8]), &ae), "unmarshal agent_end frame")
+	c.Len(ae.Messages, 3, "agent_end messages: %d", len(ae.Messages))
 }
 
 // TestMapAssistantMessageEmptyContentIsEmptyArray guards against a nil
@@ -274,30 +234,21 @@ func TestAssistantTurnEmitsPiFrames(t *testing.T) {
 // always be an array, even when a response yields no mappable blocks (e.g.
 // only block types this mapper doesn't handle yet).
 func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
+	c := assert.NewAborting(t)
 	const resp = `{
  "id":"msg_2","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
  "content":[],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 	var msg anthropic.Message
-	if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(json.Unmarshal([]byte(resp), &msg))
 	mapped := MapAssistantMessage(&msg, "anthropic", nil)
 	b, err := json.Marshal(mapped)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatal(err)
-	}
-	if string(raw["content"]) != "[]" {
-		t.Fatalf("content = %s, want []", raw["content"])
-	}
-	if mapped.StopReason != "stop" {
-		t.Fatalf("stopReason = %q, want stop (default for end_turn)", mapped.StopReason)
-	}
+	c.NoError(json.Unmarshal(b, &raw))
+	c.Eq("[]", string(raw["content"]), "content = %s, want []", raw["content"])
+	c.Eq("stop", mapped.StopReason, "stopReason")
 }
 
 // TestUserMessageAssignsUniqueID guards the pi consumer's message_end dedup
@@ -306,6 +257,7 @@ func TestMapAssistantMessageEmptyContentIsEmptyArray(t *testing.T) {
 // ("user-%d", ts) precedent). An always-empty ID would collide every user
 // turn in the cache.
 func TestUserMessageAssignsUniqueID(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	em := NewEmitter(fe, "anthropic", nil)
@@ -324,29 +276,17 @@ func TestUserMessageAssignsUniqueID(t *testing.T) {
 				ID string `json:"id"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		c.NoError(json.Unmarshal([]byte(l), &f), "bad frame %q", l)
 		ids = append(ids, f.Message.ID)
 	}
 	// message_start + message_end for each of 2 UserMessage calls = 4 frames.
-	if len(ids) != 4 {
-		t.Fatalf("got %d frames, want 4: %v", len(ids), ids)
-	}
+	c.Len(ids, 4, "got %d frames, want 4", len(ids))
 	for _, id := range ids {
-		if id == "" {
-			t.Fatalf("frame has empty message id: %v", ids)
-		}
+		c.NotEq("", id, "frame has empty message id: %v", ids)
 	}
-	if ids[0] != ids[1] {
-		t.Fatalf("message_start/message_end id mismatch for first UserMessage: %q vs %q", ids[0], ids[1])
-	}
-	if ids[2] != ids[3] {
-		t.Fatalf("message_start/message_end id mismatch for second UserMessage: %q vs %q", ids[2], ids[3])
-	}
-	if ids[0] == ids[2] {
-		t.Fatalf("two distinct UserMessage calls produced the same id %q; cache dedup would collapse them", ids[0])
-	}
+	c.Eq(ids[1], ids[0], "message_start/message_end id mismatch for first UserMessage")
+	c.Eq(ids[3], ids[2], "message_start/message_end id mismatch for second UserMessage")
+	c.NotEq(ids[2], ids[0], "two distinct UserMessage calls produced the same id")
 }
 
 // TestMapAssistantMessage_MappingRules exercises the mapping rules the Task 6
@@ -354,117 +294,86 @@ func TestUserMessageAssignsUniqueID(t *testing.T) {
 // mapping fails with a precise message.
 func TestMapAssistantMessage_MappingRules(t *testing.T) {
 	t.Run("thinking block maps to PiThinkingBlock", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_t","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
  "content":[{"type":"thinking","thinking":"pondering the mysteries"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
-		if len(mapped.Content) != 1 {
-			t.Fatalf("content = %+v, want 1 block", mapped.Content)
-		}
-		if mapped.Content[0].Type != "thinking" {
-			t.Fatalf("content[0].type = %q, want thinking", mapped.Content[0].Type)
-		}
-		if mapped.Content[0].Thinking != "pondering the mysteries" {
-			t.Fatalf("content[0].thinking = %q", mapped.Content[0].Thinking)
-		}
+		c.Len(mapped.Content, 1, "content")
+		c.Eq("thinking", mapped.Content[0].Type, "content[0].type")
+		c.Eq("pondering the mysteries", mapped.Content[0].Thinking, "content[0].thinking =")
 		b, err := json.Marshal(mapped.Content[0])
-		if err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(err)
 		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(b, &raw); err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := raw["thinking"]; !ok {
-			t.Fatalf("marshaled thinking block missing thinking key: %s", b)
-		}
+		c.NoError(json.Unmarshal(b, &raw))
+		_, ok := raw["thinking"]
+		c.True(ok, "marshaled thinking block missing thinking key: %s", b)
 	})
 
 	t.Run("max_tokens stop reason maps to length", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_m","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"max_tokens",
  "content":[{"type":"text","text":"cut off"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
-		if mapped.StopReason != "length" {
-			t.Fatalf("stopReason = %q, want length", mapped.StopReason)
-		}
+		c.Eq("length", mapped.StopReason, "stopReason")
 	})
 
 	t.Run("cache read/write values and total token sum", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_u","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
-		if mapped.Usage.Input != 7 || mapped.Usage.Output != 11 {
-			t.Fatalf("input/output = %d/%d, want 7/11", mapped.Usage.Input, mapped.Usage.Output)
-		}
-		if mapped.Usage.CacheRead != 13 {
-			t.Fatalf("cacheRead = %d, want 13", mapped.Usage.CacheRead)
-		}
-		if mapped.Usage.CacheWrite != 17 {
-			t.Fatalf("cacheWrite = %d, want 17", mapped.Usage.CacheWrite)
-		}
+		c.False(mapped.Usage.Input != 7 || mapped.Usage.Output != 11, "input/output = %d/%d, want 7/11", mapped.Usage.Input, mapped.Usage.Output)
+		c.Eq(13, mapped.Usage.CacheRead, "cacheRead")
+		c.Eq(17, mapped.Usage.CacheWrite, "cacheWrite")
 		wantTotal := 7 + 11 + 13 + 17
-		if mapped.Usage.TotalTokens != wantTotal {
-			t.Fatalf("totalTokens = %d, want %d", mapped.Usage.TotalTokens, wantTotal)
-		}
+		c.Eq(wantTotal, mapped.Usage.TotalTokens, "totalTokens")
 	})
 
 	t.Run("API and Provider are set from constant and argument", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_p","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "some-custom-provider", nil)
-		if mapped.API != "anthropic-messages" {
-			t.Fatalf("API = %q, want anthropic-messages", mapped.API)
-		}
-		if mapped.Provider != "some-custom-provider" {
-			t.Fatalf("Provider = %q, want some-custom-provider", mapped.Provider)
-		}
+		c.Eq("anthropic-messages", mapped.API, "API")
+		c.Eq("some-custom-provider", mapped.Provider, "Provider")
 	})
 
 	t.Run("cost stays zero", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_c","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
  "content":[{"type":"text","text":"ok"}],
  "usage":{"input_tokens":42,"output_tokens":99,"cache_read_input_tokens":5,"cache_creation_input_tokens":6}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		ck.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
 		c := mapped.Usage.Cost
-		if c.Input != 0 || c.Output != 0 || c.CacheRead != 0 || c.CacheWrite != 0 || c.Total != 0 {
-			t.Fatalf("cost = %+v, want all-zero (unknown at this layer)", c)
-		}
+		ck.False(c.Input != 0 || c.Output != 0 || c.CacheRead != 0 || c.CacheWrite != 0 || c.Total != 0, "cost = %+v, want all-zero (unknown at this layer)", c)
 	})
 
 	t.Run("tool_use raw fallback on unmarshal failure", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		silenceSlog(t)
 		const resp = `{
  "id":"msg_r","type":"message","role":"assistant","model":"claude-x",
@@ -472,27 +381,20 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
  "content":[{"type":"tool_use","id":"tu_9","name":"weird","input":[1,2,3]}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
-		if len(mapped.Content) != 1 || mapped.Content[0].Type != "toolCall" {
-			t.Fatalf("content = %+v, want one toolCall block", mapped.Content)
-		}
+		c.False(len(mapped.Content) != 1 || mapped.Content[0].Type != "toolCall", "content = %+v, want one toolCall block", mapped.Content)
 		args := mapped.Content[0].Arguments
-		if args == nil {
-			t.Fatal("arguments is nil")
-		}
+		c.NotNil(args, "arguments is nil")
 		raw, ok := (*args)["_raw"]
 		if !ok {
 			t.Fatalf("arguments missing _raw fallback key: %+v", *args)
 		}
-		if raw != "[1,2,3]" {
-			t.Fatalf("_raw = %v, want the literal unparsed input %q", raw, "[1,2,3]")
-		}
+		c.False(raw != "[1,2,3]", "_raw = %v, want the literal unparsed input %q", raw, "[1,2,3]")
 	})
 
 	t.Run("skips empty text and thinking blocks", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		const resp = `{
  "id":"msg_e","type":"message","role":"assistant","model":"claude-x",
  "stop_reason":"end_turn",
@@ -501,13 +403,9 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
             {"type":"text","text":""}],
  "usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}`
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(resp), &msg); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(json.Unmarshal([]byte(resp), &msg))
 		mapped := MapAssistantMessage(&msg, "anthropic", nil)
-		if len(mapped.Content) != 1 {
-			t.Fatalf("content = %+v, want exactly the 1 non-empty text block", mapped.Content)
-		}
+		c.Len(mapped.Content, 1, "content")
 		if mapped.Content[0].Type != "text" || mapped.Content[0].Text != "hi" {
 			t.Fatalf("content[0] = %+v, want text %q", mapped.Content[0], "hi")
 		}
@@ -518,6 +416,7 @@ func TestMapAssistantMessage_MappingRules(t *testing.T) {
 // when input can't be unmarshaled into map[string]any, the raw bytes must be
 // preserved under an "_raw" key rather than silently dropped.
 func TestToolStart_RawFallback(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
@@ -529,19 +428,11 @@ func TestToolStart_RawFallback(t *testing.T) {
 		Type string         `json:"type"`
 		Args map[string]any `json:"args"`
 	}
-	if err := json.Unmarshal([]byte(line), &frame); err != nil {
-		t.Fatalf("bad frame %q: %v", line, err)
-	}
-	if frame.Type != "tool_execution_start" {
-		t.Fatalf("type = %q, want tool_execution_start", frame.Type)
-	}
+	c.NoError(json.Unmarshal([]byte(line), &frame), "bad frame %q", line)
+	c.Eq("tool_execution_start", frame.Type, "type")
 	raw, ok := frame.Args["_raw"]
-	if !ok {
-		t.Fatalf("args missing _raw fallback key: %+v", frame.Args)
-	}
-	if raw != "not-json" {
-		t.Fatalf("_raw = %v, want %q", raw, "not-json")
-	}
+	c.True(ok, "args missing _raw fallback key: %+v", frame.Args)
+	c.False(raw != "not-json", "_raw = %v, want %q", raw, "not-json")
 }
 
 // countOfType counts how many entries in types equal want. types is produced
@@ -572,9 +463,8 @@ func TestStreamStart_EmitsOnlyOnce(t *testing.T) {
 	e.StreamStart(msg)
 
 	types := frameTypes(t, out.String())
-	if n := countOfType(types, "message_start"); n != 1 {
-		t.Fatalf("message_start emitted %d times, want 1: %v", n, types)
-	}
+	n := countOfType(types, "message_start")
+	assert.NewAborting(t).Eq(1, n, "message_start emitted %d times, want 1: %v", n, types)
 }
 
 // TestStreamEnd_ResetsSoNextTurnStartsAgain locks down that StreamEnd resets
@@ -592,9 +482,8 @@ func TestStreamEnd_ResetsSoNextTurnStartsAgain(t *testing.T) {
 	e.StreamStart(msg)
 
 	types := frameTypes(t, out.String())
-	if n := countOfType(types, "message_start"); n != 2 {
-		t.Fatalf("message_start emitted %d times across two turns, want 2: %v", n, types)
-	}
+	n := countOfType(types, "message_start")
+	assert.NewAborting(t).Eq(2, n, "message_start emitted %d times across two turns, want 2: %v", n, types)
 }
 
 // TestAgentEndResetsStartedSoNextTurnEmitsMessageStart locks down that
@@ -620,9 +509,7 @@ func TestAgentEndResetsStartedSoNextTurnEmitsMessageStart(t *testing.T) {
 	e.StreamStart(msg)
 
 	types := frameTypes(t, out.String())
-	if n := countOfType(types, "message_start"); n != 2 {
-		t.Fatalf("message_start emitted %d times across two turns, want 2 — `started` leaked past AgentEnd", n)
-	}
+	assert.NewAborting(t).Eq(2, countOfType(types, "message_start"), "message_start emitted")
 }
 
 // TestStreamSequence_OrdersStartUpdatesEnd locks down frame ordering: a
@@ -658,6 +545,7 @@ func TestStreamSequence_OrdersStartUpdatesEnd(t *testing.T) {
 // with no command text in pi's attach TUI, though tool_execution_start/end
 // and the persisted transcript were both fine).
 func TestStreamEnd_FinalUpdateCarriesCompleteArgsEvenWithNoInterveningDelta(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	e := NewEmitter(fe, "anthropic", nil)
@@ -673,17 +561,14 @@ func TestStreamEnd_FinalUpdateCarriesCompleteArgsEvenWithNoInterveningDelta(t *t
 	e.StreamEnd(final)   // NO StreamDelta in between — the bug's exact shape
 
 	types := frameTypes(t, out.String())
-	if want := []string{"message_start", "message_update", "message_end"}; strings.Join(types, ",") != strings.Join(want, ",") {
-		t.Fatalf("frame sequence = %v, want %v", types, want)
-	}
+	want := []string{"message_start", "message_update", "message_end"}
+	c.Eq(strings.Join(want, ","), strings.Join(types, ","), "frame sequence = %v, want %v", types, want)
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	var update struct {
 		Message child.PiAssistantMessage `json:"message"`
 	}
-	if err := json.Unmarshal([]byte(lines[1]), &update); err != nil { // message_update is frame index 1
-		t.Fatalf("unmarshal message_update: %v", err)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[1]), &update), "unmarshal message_update") // message_update is frame index 1
 	args := update.Message.Content[0].Arguments
 	if args == nil || (*args)["command"] != "date +%s" {
 		t.Fatalf("message_update args = %+v, want command=%q — the client's only source for a live tool call's "+
@@ -696,6 +581,7 @@ func TestStreamEnd_FinalUpdateCarriesCompleteArgsEvenWithNoInterveningDelta(t *t
 // agent_end's messages[] and usage total, or a multi-delta turn would
 // over-count both.
 func TestStreamDelta_DoesNotAccumulateOrFoldUsage(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	e := NewEmitter(fe, "anthropic", nil)
@@ -714,15 +600,9 @@ func TestStreamDelta_DoesNotAccumulateOrFoldUsage(t *testing.T) {
 		Messages []json.RawMessage `json:"messages"`
 		Usage    child.PiUsage     `json:"usage"`
 	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-2]), &ae); err != nil {
-		t.Fatalf("unmarshal agent_end frame: %v", err)
-	}
-	if len(ae.Messages) != 1 {
-		t.Fatalf("agent_end messages = %d, want 1 (only StreamEnd's message)", len(ae.Messages))
-	}
-	if ae.Usage.TotalTokens != 15 {
-		t.Fatalf("agent_end totalTokens = %d, want 15 (folded once, not once per delta)", ae.Usage.TotalTokens)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[len(lines)-2]), &ae), "unmarshal agent_end frame")
+	c.Len(ae.Messages, 1, "agent_end messages = %d, want 1 (only StreamEnd's message)", len(ae.Messages))
+	c.Eq(15, ae.Usage.TotalTokens, "agent_end totalTokens")
 }
 
 // TestEmitterBatchWaitFrames pins the batch_wait frame pair: each method
@@ -730,6 +610,7 @@ func TestStreamDelta_DoesNotAccumulateOrFoldUsage(t *testing.T) {
 // uses, so pkg/child's state machine sees a bare batch_wait_start/
 // batch_wait_end event and nothing else (task 3.1 wires the callers).
 func TestEmitterBatchWaitFrames(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
 	e := NewEmitter(fe, "anthropic", nil)
@@ -740,18 +621,12 @@ func TestEmitterBatchWaitFrames(t *testing.T) {
 
 	types := frameTypes(t, out.String())
 	want := []string{"agent_start", "batch_wait_start", "batch_wait_end"}
-	if strings.Join(types, ",") != strings.Join(want, ",") {
-		t.Fatalf("frame sequence = %v, want %v", types, want)
-	}
+	c.Eq(strings.Join(want, ","), strings.Join(types, ","), "frame sequence = %v, want %v", types, want)
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	for i, wantType := range want[1:] {
 		var raw map[string]any
-		if err := json.Unmarshal([]byte(lines[i+1]), &raw); err != nil {
-			t.Fatalf("unmarshal frame %q: %v", lines[i+1], err)
-		}
-		if len(raw) != 1 {
-			t.Fatalf("%s frame = %v, want only the type key", wantType, raw)
-		}
+		c.NoError(json.Unmarshal([]byte(lines[i+1]), &raw), "unmarshal frame %q", lines[i+1])
+		c.Len(raw, 1, "%s frame = %v, want only the type key", wantType, raw)
 	}
 }

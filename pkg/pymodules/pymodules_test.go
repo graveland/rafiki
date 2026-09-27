@@ -5,6 +5,8 @@ package pymodules
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestValidName(t *testing.T) {
@@ -32,16 +34,13 @@ func TestValidName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			err := ValidName(tt.input)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("ValidName(%q) = nil, want error", tt.input)
-				}
+				c.Error(err, "ValidName(%q) = nil, want error", tt.input)
 				return
 			}
-			if err != nil {
-				t.Fatalf("ValidName(%q) = %v, want nil", tt.input, err)
-			}
+			c.NoError(err, "ValidName(%q) = %v, want nil", tt.input, err)
 		})
 	}
 }

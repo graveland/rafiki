@@ -11,6 +11,8 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestRecoveryScopingLeavesAnotherDaemonsChildAlone is the live proof for
@@ -36,6 +38,7 @@ import (
 // TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild in
 // cmd/rafikid — see its doc comment.
 func TestRecoveryScopingLeavesAnotherDaemonsChildAlone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -72,24 +75,16 @@ func TestRecoveryScopingLeavesAnotherDaemonsChildAlone(t *testing.T) {
 	waitUntilKnown(t, dB, childID)
 
 	var state string
-	if err := pool.QueryRow(ctx,
-		`SELECT state FROM conversations.agent_inbox WHERE id = $1`, inboxID).Scan(&state); err != nil {
-		t.Fatalf("read inbox state: %v", err)
-	}
-	if state != "sent" {
-		t.Fatalf("daemon B reset another daemon's in-flight inbox row to %q; want %q", state, "sent")
-	}
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT state FROM conversations.agent_inbox WHERE id = $1`, inboxID).Scan(&state), "read inbox state")
+	c.Require().Eq("sent", state, "daemon B reset another daemon's in-flight inbox row to")
 
 	// The row still belongs to A. B must not have stamped itself onto it.
 	var owner string
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT coalesce(daemon_id,'') FROM conversations.child WHERE child_id = $1`,
-		childID).Scan(&owner); err != nil {
-		t.Fatalf("read daemon_id: %v", err)
-	}
-	if owner != idA {
-		t.Errorf("child %s changed owner to %q; want it left with %q", childID, owner, idA)
-	}
+		childID).Scan(&owner), "read daemon_id")
+	c.Eq(idA, owner, "child %s changed owner to %q; want it left with", childID, owner)
 }
 
 // TestRecoveryScopingSurfacesTheOwningDaemon pins design §4.4's claim that
@@ -111,10 +106,9 @@ func TestRecoveryScopingSurfacesTheOwningDaemon(t *testing.T) {
 	waitUntilKnown(t, dB, childID)
 
 	summary := getChildSummary(t, dB, childID)
-	if got := summary.GetLabels()["rafiki/daemon"]; got != idA {
-		t.Errorf("rafiki/daemon label = %q, want %q — ownership must be visible "+
-			"through daemon B with no new wire field", got, idA)
-	}
+	got := summary.GetLabels()["rafiki/daemon"]
+	assert.NewCollecting(t).Eq(idA, got, "rafiki/daemon label = %q, want %q — ownership must be visible "+
+		"through daemon B with no new wire field", got, idA)
 }
 
 // waitUntilKnown blocks until d answers GetChild for childID, proving d's

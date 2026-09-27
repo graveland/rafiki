@@ -15,6 +15,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstoredb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scratchPool gives the test its own database, migrated fresh from the
@@ -24,6 +26,7 @@ import (
 // colliding with the shared test database other packages run against.
 func scratchPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
@@ -31,9 +34,7 @@ func scratchPool(t *testing.T) *pgxpool.Pool {
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
+	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_close_stamp_%d", time.Now().UnixNano())
@@ -45,19 +46,13 @@ func scratchPool(t *testing.T) *pgxpool.Pool {
 	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
+	c.NoError(err, "parse dsn")
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect scratch db: %v", err)
-	}
+	c.NoError(err, "connect scratch db")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate")
 	return pool
 }
 
@@ -69,17 +64,16 @@ func scratchPool(t *testing.T) *pgxpool.Pool {
 // UNescaped LIKE: '_"' is a single-character wildcard, so 'c_1:%' matches
 // cX1:t1 unless the pattern escapes the underscore. E is unrelated.
 func TestCloseStampLinksFundiClaudeAndThreads(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	pool := scratchPool(t)
 	ctx := context.Background()
 
 	insertConversation := func(externalRef string) string {
 		t.Helper()
 		var id string
-		if err := pool.QueryRow(ctx,
+		ck.Require().NoError(pool.QueryRow(ctx,
 			`INSERT INTO conversations.conversation (origin_entrypoint, driven_by, external_ref)
-			 VALUES ('test','server', NULLIF($1,'')) RETURNING id::text`, externalRef).Scan(&id); err != nil {
-			t.Fatalf("insert conversation %q: %v", externalRef, err)
-		}
+			 VALUES ('test','server', NULLIF($1,'')) RETURNING id::text`, externalRef).Scan(&id), "insert conversation %q", externalRef)
 		return id
 	}
 
@@ -90,50 +84,37 @@ func TestCloseStampLinksFundiClaudeAndThreads(t *testing.T) {
 	convE := insertConversation("unrelated")
 
 	s := childstoredb.New(pool)
-	if err := s.Upsert(ctx, childstore.ChildRecord{
+	ck.Require().NoError(s.Upsert(ctx, childstore.ChildRecord{
 		ChildID:        "c_1",
 		ConversationID: convA,
 		Kind:           protocol.KindFundi,
 		Status:         string(protocol.StatusExited),
 		SpawnedAt:      time.Now(),
-	}); err != nil {
-		t.Fatalf("upsert child: %v", err)
-	}
+	}), "upsert child")
 
 	c := &Controller{pool: pool}
-	if err := c.stampConversationsClosed(ctx, "c_1"); err != nil {
-		t.Fatalf("stampConversationsClosed: %v", err)
-	}
+	ck.Require().NoError(c.stampConversationsClosed(ctx, "c_1"), "stampConversationsClosed")
 
 	closedAt := func(id string) *time.Time {
 		t.Helper()
 		var ts *time.Time
-		if err := pool.QueryRow(ctx,
-			`SELECT closed_at FROM conversations.conversation WHERE id = $1::uuid`, id).Scan(&ts); err != nil {
-			t.Fatalf("read closed_at for %s: %v", id, err)
-		}
+		ck.Require().NoError(pool.QueryRow(ctx,
+			`SELECT closed_at FROM conversations.conversation WHERE id = $1::uuid`, id).Scan(&ts), "read closed_at for %s", id)
 		return ts
 	}
 
 	for id, label := range map[string]string{convA: "A (child.conversation_id)", convB: "B (external_ref = child)", convC: "C (external_ref = child:thread)"} {
-		if closedAt(id) == nil {
-			t.Errorf("conversation %s (%s) was not stamped closed", label, id)
-		}
+		ck.NotNil(closedAt(id), "conversation %s (%s) was not stamped closed", label, id)
 	}
 	for id, label := range map[string]string{convD: "D (look-alike ref, needs the escaped LIKE)", convE: "E (unrelated)"} {
-		if closedAt(id) != nil {
-			t.Errorf("conversation %s (%s) must not be stamped closed", label, id)
-		}
+		ck.Nil(closedAt(id), "conversation %s (%s) must not be stamped closed", label, id)
 	}
 
 	// Idempotent by construction: a second stamp leaves the first close time
 	// in place rather than overwriting it.
 	first := closedAt(convB)
 	time.Sleep(2 * time.Millisecond)
-	if err := c.stampConversationsClosed(ctx, "c_1"); err != nil {
-		t.Fatalf("second stampConversationsClosed: %v", err)
-	}
-	if second := closedAt(convB); !second.Equal(*first) {
-		t.Errorf("closed_at moved on re-stamp: %v -> %v", first, second)
-	}
+	ck.Require().NoError(c.stampConversationsClosed(ctx, "c_1"), "second stampConversationsClosed")
+	second := closedAt(convB)
+	ck.True(second.Equal(*first), "closed_at moved on re-stamp: %v -> %v", first, second)
 }

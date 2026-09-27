@@ -12,6 +12,8 @@ import (
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // syncServer builds a Server whose skills reconcile targets a temp dir, by
@@ -28,13 +30,12 @@ func syncServer(t *testing.T) (*Server, string) {
 func syncOnce(t *testing.T, s *Server, req *executorpb.SyncSkillsRequest) *executorpb.SyncSkillsResponse {
 	t.Helper()
 	resp, err := s.SyncSkills(context.Background(), connect.NewRequest(req))
-	if err != nil {
-		t.Fatalf("SyncSkills: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "SyncSkills")
 	return resp.Msg
 }
 
 func TestSyncWritesASkillsDirPlugin(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s, skillsDir := syncServer(t)
 
 	syncOnce(t, s, &executorpb.SyncSkillsRequest{
@@ -54,9 +55,7 @@ func TestSyncWritesASkillsDirPlugin(t *testing.T) {
 	}
 
 	body, err := os.ReadFile(filepath.Join(skillsDir, "rafiki", "skills", "coordinating", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("SKILL.md missing: %v", err)
-	}
+	c.Require().NoError(err, "SKILL.md missing")
 	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki", "coordinating")); !os.IsNotExist(err) {
 		t.Errorf("bare skill dir at the plugin root; Claude Code would not discover it (err=%v)", err)
 	}
@@ -64,12 +63,8 @@ func TestSyncWritesASkillsDirPlugin(t *testing.T) {
 	if !strings.HasPrefix(got, "---\n") {
 		t.Errorf("SKILL.md has no frontmatter block:\n%s", got)
 	}
-	if !strings.Contains(got, "name: coordinating") {
-		t.Errorf("frontmatter missing name:\n%s", got)
-	}
-	if !strings.Contains(got, "the body") {
-		t.Errorf("body missing:\n%s", got)
-	}
+	c.StrContains(got, "name: coordinating", "frontmatter missing name:\n")
+	c.StrContains(got, "the body", "body missing:\n")
 }
 
 // A namespace that leaves the corpus takes its whole directory with it.
@@ -91,23 +86,19 @@ func TestSyncPrunesANamespaceThatLeftTheCorpus(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(skillsDir, "pg")); !os.IsNotExist(err) {
 		t.Errorf("pg namespace survived a sync that omitted it (err=%v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki", "skills", "a", "SKILL.md")); err != nil {
-		t.Errorf("rafiki namespace was collaterally damaged: %v", err)
-	}
+	_, err := os.Stat(filepath.Join(skillsDir, "rafiki", "skills", "a", "SKILL.md"))
+	assert.NewCollecting(t).NoError(err, "rafiki namespace was collaterally damaged")
 }
 
 // THE safety test. A directory rafiki never wrote is the operator's, and no
 // sync may touch it — not to replace it, not to prune it.
 func TestSyncNeverTouchesAnUnmanagedDirectory(t *testing.T) {
+	c := assert.NewAborting(t)
 	s, skillsDir := syncServer(t)
 
 	operator := filepath.Join(skillsDir, "my-own-skill")
-	if err := os.MkdirAll(operator, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(operator, "SKILL.md"), []byte("mine"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(operator, 0o755))
+	c.NoError(os.WriteFile(filepath.Join(operator, "SKILL.md"), []byte("mine"), 0o644))
 
 	syncOnce(t, s, &executorpb.SyncSkillsRequest{
 		Namespaces: []*executorpb.SkillNamespace{
@@ -116,9 +107,7 @@ func TestSyncNeverTouchesAnUnmanagedDirectory(t *testing.T) {
 	})
 
 	got, err := os.ReadFile(filepath.Join(operator, "SKILL.md"))
-	if err != nil || string(got) != "mine" {
-		t.Fatalf("the operator's own skill was damaged: content=%q err=%v", got, err)
-	}
+	c.False(err != nil || string(got) != "mine", "the operator's own skill was damaged: content=%q err=%v", got, err)
 }
 
 // A name is a directory name. Anything that could escape the skills dir must be
@@ -142,14 +131,11 @@ func TestSyncRejectsPathEscapingNames(t *testing.T) {
 				Skills: []*executorpb.SyncSkill{{Name: "a", Body: "x"}}}}}},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			s, _ := syncServer(t)
 			_, err := s.SyncSkills(context.Background(), connect.NewRequest(tc.req))
-			if err == nil {
-				t.Fatal("accepted a name that can escape the skills directory")
-			}
-			if connect.CodeOf(err) != connect.CodeInvalidArgument {
-				t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
-			}
+			c.Require().Error(err, "accepted a name that can escape the skills directory")
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got code")
 		})
 	}
 }
@@ -157,6 +143,7 @@ func TestSyncRejectsPathEscapingNames(t *testing.T) {
 // Byte-stability: re-syncing identical content must not rewrite files, or a
 // converged fleet churns Claude Code's file watching forever.
 func TestResyncingIdenticalContentDoesNotRewrite(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s, skillsDir := syncServer(t)
 	req := &executorpb.SyncSkillsRequest{
 		Namespaces: []*executorpb.SkillNamespace{{
@@ -168,26 +155,19 @@ func TestResyncingIdenticalContentDoesNotRewrite(t *testing.T) {
 	syncOnce(t, s, req)
 	p := filepath.Join(skillsDir, "rafiki", "skills", "a", "SKILL.md")
 	first, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	resp := syncOnce(t, s, req)
 	second, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !first.ModTime().Equal(second.ModTime()) {
-		t.Error("identical corpus rewrote SKILL.md; the sync is not byte-stable")
-	}
-	if resp.GetWritten() != 0 {
-		t.Errorf("written=%d, want 0 for an unchanged corpus", resp.GetWritten())
-	}
+	c.Require().NoError(err)
+	c.True(first.ModTime().Equal(second.ModTime()), "identical corpus rewrote SKILL.md; the sync is not byte-stable")
+	c.Eq(0, resp.GetWritten(), "written")
 }
 
 // An empty namespace list is a full removal, which is a legitimate but
 // destructive instruction — it must still only remove rafiki-managed trees.
 func TestEmptyNamespaceListRemovesOnlyManagedTrees(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s, skillsDir := syncServer(t)
 	syncOnce(t, s, &executorpb.SyncSkillsRequest{
 		Namespaces: []*executorpb.SkillNamespace{
@@ -195,25 +175,20 @@ func TestEmptyNamespaceListRemovesOnlyManagedTrees(t *testing.T) {
 		},
 	})
 	operator := filepath.Join(skillsDir, "hand-written")
-	if err := os.MkdirAll(operator, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(operator, 0o755))
 
 	syncOnce(t, s, &executorpb.SyncSkillsRequest{})
 
 	if _, err := os.Stat(filepath.Join(skillsDir, "rafiki")); !os.IsNotExist(err) {
 		t.Error("managed tree survived an empty sync")
 	}
-	if _, err := os.Stat(operator); err != nil {
-		t.Errorf("unmanaged dir removed by an empty sync: %v", err)
-	}
+	_, err := os.Stat(operator)
+	c.NoError(err, "unmanaged dir removed by an empty sync")
 }
 
 func TestSyncRefusedWhenNotEnabled(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	s := &Server{opts: Options{}}
 	_, err := s.SyncSkills(context.Background(), connect.NewRequest(&executorpb.SyncSkillsRequest{}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Errorf("got %v, want PermissionDenied", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodePermissionDenied, connect.CodeOf(err), "got")
 }

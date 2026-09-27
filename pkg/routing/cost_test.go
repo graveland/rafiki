@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // pricing with a distinct rate per component, so a formula that cross-wires two
@@ -19,6 +21,7 @@ var testPricing = ModelPricing{
 }
 
 func TestModelPricingCostComponents(t *testing.T) {
+	c := assert.NewCollecting(t)
 	usage := anthropic.Usage{
 		InputTokens:              1000,
 		OutputTokens:             200,
@@ -36,36 +39,29 @@ func TestModelPricingCostComponents(t *testing.T) {
 	}
 	want.Total = want.Input + want.Output + want.CacheRead + want.CacheWrite
 
-	if got != want {
-		t.Fatalf("Cost() = %+v, want %+v", got, want)
-	}
+	c.Require().Eq(want, got, "Cost()")
 	// Total must be the sum of the parts, not an independently computed value.
-	if sum := got.Input + got.Output + got.CacheRead + got.CacheWrite; got.Total != sum {
-		t.Errorf("Total = %v, want sum of components %v", got.Total, sum)
-	}
+	c.Eq(got.Input+got.Output+got.CacheRead+got.CacheWrite, got.Total, "Total")
 }
 
 // A zero-value ModelPricing (an unpriced model) must cost nothing rather than
 // producing NaN or panicking — callers treat 0 as "unpriced".
 func TestModelPricingCostZeroPricingIsFree(t *testing.T) {
 	usage := anthropic.Usage{InputTokens: 1000, OutputTokens: 200}
-	if got := (ModelPricing{}).Cost(usage); got != (CostBreakdown{}) {
-		t.Fatalf("Cost() = %+v, want zero", got)
-	}
+	assert.NewAborting(t).Eq((CostBreakdown{}), (ModelPricing{}).Cost(usage), "Cost()")
 }
 
 // Negative control: zero usage against real pricing is also free. Guards
 // against a formula that adds a per-turn constant.
 func TestModelPricingCostZeroUsageIsFree(t *testing.T) {
-	if got := testPricing.Cost(anthropic.Usage{}); got != (CostBreakdown{}) {
-		t.Fatalf("Cost() = %+v, want zero", got)
-	}
+	assert.NewAborting(t).Eq((CostBreakdown{}), testPricing.Cost(anthropic.Usage{}), "Cost()")
 }
 
 // Cost(usage) must be exactly CostOf over the same counts — the SDK-shaped
 // entry point is an adapter, not a second formula. A SQL rollup (which has
 // int64 counts and no anthropic.Usage) prices through CostOf and must agree.
 func TestModelPricingCostOfMatchesCost(t *testing.T) {
+	c := assert.NewAborting(t)
 	usage := anthropic.Usage{
 		InputTokens:              1000,
 		OutputTokens:             200,
@@ -76,23 +72,16 @@ func TestModelPricingCostOfMatchesCost(t *testing.T) {
 	fromUsage := testPricing.Cost(usage)
 	fromCounts := testPricing.CostOf(1000, 200, 5000, 400)
 
-	if fromUsage != fromCounts {
-		t.Fatalf("Cost() = %+v, CostOf() = %+v; must agree", fromUsage, fromCounts)
-	}
-	if fromCounts.Total == 0 {
-		t.Fatal("CostOf returned a zero total for priced, non-zero usage")
-	}
+	c.Eq(fromCounts, fromUsage, "Cost()")
+	c.NotEq(0, fromCounts.Total, "CostOf returned a zero total for priced, non-zero usage")
 }
 
 // CostOf must not silently swap its parameters — each count is asserted through
 // a distinct rate, so a transposed argument list changes the result.
 func TestModelPricingCostOfArgumentOrder(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := testPricing.CostOf(1, 0, 0, 0)
-	if got.Input != testPricing.PromptUSD || got.Output != 0 || got.CacheRead != 0 || got.CacheWrite != 0 {
-		t.Errorf("CostOf(1,0,0,0) = %+v, want only Input charged at the prompt rate", got)
-	}
+	c.False(got.Input != testPricing.PromptUSD || got.Output != 0 || got.CacheRead != 0 || got.CacheWrite != 0, "CostOf(1,0,0,0) = %+v, want only Input charged at the prompt rate", got)
 	got = testPricing.CostOf(0, 0, 0, 1)
-	if got.CacheWrite != testPricing.CacheWriteUSD || got.Input != 0 {
-		t.Errorf("CostOf(0,0,0,1) = %+v, want only CacheWrite charged", got)
-	}
+	c.False(got.CacheWrite != testPricing.CacheWriteUSD || got.Input != 0, "CostOf(0,0,0,1) = %+v, want only CacheWrite charged", got)
 }

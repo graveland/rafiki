@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestKindConstants(t *testing.T) {
 	cases := map[string]string{
@@ -8,8 +12,6 @@ func TestKindConstants(t *testing.T) {
 		KindClaude: "claude",
 	}
 	for got, want := range cases {
-		if got != want {
-			t.Errorf("kind constant = %q, want %q", got, want)
-		}
+		assert.NewCollecting(t).Eq(want, got, "kind constant")
 	}
 }

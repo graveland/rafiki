@@ -3,8 +3,9 @@ package executors
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The assertion that actually stops the loop.
@@ -33,17 +34,13 @@ func TestMachineNameTakenIsTerminal(t *testing.T) {
 func TestMachineNameTakenReadsAsOperatorAdvice(t *testing.T) {
 	msg := ErrMachineNameTaken.Error()
 	for _, want := range []string{"--name", "relabel"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("the message reaches the operator verbatim and must say what "+
-				"to do; %q is missing from %q", want, msg)
-		}
+		assert.NewCollecting(t).StrContains(msg, want, "the message reaches the operator verbatim and must say what "+
+			"to do; %q is missing from %q", want, msg)
 	}
 }
 
 // An error nobody classified stays retryable: the cost of retrying a dead
 // credential is a log line, the cost of quitting on a transient one is a fleet.
 func TestUnclassifiedErrorsStayRetryable(t *testing.T) {
-	if IsTerminalAuthError(errors.New("dial tcp: connection refused")) {
-		t.Fatal("IsTerminalAuthError must fail toward RETRY")
-	}
+	assert.NewAborting(t).False(IsTerminalAuthError(errors.New("dial tcp: connection refused")), "IsTerminalAuthError must fail toward RETRY")
 }

@@ -14,6 +14,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func i32p(v int32) *int32   { return &v }
@@ -53,60 +55,47 @@ func loadedPicker(t *testing.T) (*Cockpit, *modelPicker) {
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
-	if c.picker == nil {
-		t.Fatal("^F on the model row did not open the picker")
-	}
+	assert.NewAborting(t).NotNil(c.picker, "^F on the model row did not open the picker")
 	return c, c.picker
 }
 
 func TestCtrlFOpensTheFullBrowser(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	focusModelRow(c)
 
 	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 
-	if c.picker == nil {
-		t.Fatal("no picker opened")
-	}
-	if c.form == nil {
-		t.Error("the form was dismissed; the picker stacks on top of it")
-	}
+	ck.Require().NotNil(c.picker, "no picker opened")
+	ck.NotNil(c.form, "the form was dismissed; the picker stacks on top of it")
 }
 
 // A cached catalog means the browser opens with rows already in it -- no
 // second round trip for what the typeahead already fetched.
 func TestPickerOpensFromTheCacheWithoutRefetching(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
 	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 
-	if c.picker.loading {
-		t.Error("picker opened in a loading state despite a warm cache")
-	}
-	if len(c.picker.rows) != 3 {
-		t.Errorf("rows = %d, want the cached 3", len(c.picker.rows))
-	}
+	ck.False(c.picker.loading, "picker opened in a loading state despite a warm cache")
+	ck.Len(c.picker.rows, 3, "rows = %d, want the cached 3", len(c.picker.rows))
 	// The guard is on fetchModelsCmd itself, so callers can issue it on every
 	// event that might need models without tracking state.
-	if cmd := c.fetchModelsCmd(c.form.kind()); cmd != nil {
-		t.Error("a refetch was issued for a kind already in the cache")
-	}
+	ck.Nil(c.fetchModelsCmd(c.form.kind()), "a refetch was issued for a kind already in the cache")
 }
 
 // An in-flight fetch must not be started twice: the form opening and the model
 // row being reached are two events for the same catalog.
 func TestFetchIsNotIssuedTwiceForOneKind(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	// A bare cockpit, not formCockpit: opening the form already prefetches,
 	// which is itself the guard working.
 	c := newTestCockpit("")
-	if first := c.fetchModelsCmd("fundi"); first == nil {
-		t.Fatal("no fetch issued for a cold cache")
-	}
-	if second := c.fetchModelsCmd("fundi"); second != nil {
-		t.Error("a second fetch was issued while the first was in flight")
-	}
+	ck.Require().NotNil(c.fetchModelsCmd("fundi"), "no fetch issued for a cold cache")
+	ck.Nil(c.fetchModelsCmd("fundi"), "a second fetch was issued while the first was in flight")
 }
 
 // Typed text is a head start, not discarded work.
@@ -116,16 +105,12 @@ func TestTypedModelTextSeedsTheFilter(t *testing.T) {
 	c.form.inputs[fieldModel].SetValue("gpt")
 	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 
-	if got := c.picker.filter.Value(); got != "gpt" {
-		t.Errorf("filter = %q, want the typed text carried in", got)
-	}
+	assert.NewCollecting(t).Eq("gpt", c.picker.filter.Value(), "filter")
 }
 
 func TestFilterNarrowsTheRows(t *testing.T) {
 	c, p := loadedPicker(t)
-	if len(p.rows) != 3 {
-		t.Fatalf("rows = %d, want all 3 before filtering", len(p.rows))
-	}
+	assert.NewAborting(t).Len(p.rows, 3, "rows = %d, want all 3 before filtering", len(p.rows))
 	p.filter.SetValue("deep")
 	p.apply(c.modelView)
 
@@ -137,16 +122,13 @@ func TestFilterNarrowsTheRows(t *testing.T) {
 // Changing the filter must reset the cursor: leaving it where it was selects
 // whatever happens to land under it.
 func TestFilterResetsTheCursor(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	p.move(+2, 10)
-	if p.cursor == 0 {
-		t.Fatal("cursor did not move")
-	}
+	ck.Require().NotEq(0, p.cursor, "cursor did not move")
 	c.handleKey(tea.KeyPressMsg{Code: 'o', Text: "o"})
 
-	if p.cursor != 0 {
-		t.Errorf("cursor = %d after typing in the filter, want 0", p.cursor)
-	}
+	ck.Eq(0, p.cursor, "cursor")
 }
 
 // ── the presence rules ───────────────────────────────────────────────────────
@@ -154,35 +136,30 @@ func TestFilterResetsTheCursor(t *testing.T) {
 // An unpriced model is not the cheapest thing available. Sorting an absent
 // price as zero is exactly what the optional wire fields exist to prevent.
 func TestCheapestSortPutsUnpricedModelsLast(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	c.modelView.keys = []sortKey{{field: colIn}}
 	p.apply(c.modelView)
 
-	if got := p.rows[0].GetId(); got != "deepseek/chat" {
-		t.Errorf("first row = %q, want the genuinely cheapest", got)
-	}
-	if got := p.rows[len(p.rows)-1].GetId(); got != "ollama/llama3" {
-		t.Errorf("last row = %q, want the unpriced model sorted last", got)
-	}
+	ck.Eq("deepseek/chat", p.rows[0].GetId(), "first row")
+	ck.Eq("ollama/llama3", p.rows[len(p.rows)-1].GetId(), "last row")
 }
 
 func TestBiggestContextSortPutsUnknownContextLast(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	c.modelView.keys = []sortKey{{field: colCtx, desc: true}}
 	p.apply(c.modelView)
 
-	if got := p.rows[0].GetId(); got != "openai/gpt-4o" {
-		t.Errorf("first row = %q, want the biggest context", got)
-	}
-	if got := p.rows[len(p.rows)-1].GetId(); got != "ollama/llama3" {
-		t.Errorf("last row = %q, want the unknown context sorted last", got)
-	}
+	ck.Eq("openai/gpt-4o", p.rows[0].GetId(), "first row")
+	ck.Eq("ollama/llama3", p.rows[len(p.rows)-1].GetId(), "last row")
 }
 
 // The trap the whole design warns about: empty modalities means the daemon has
 // NO catalog entry, not "no vision". A filter that dropped them would hide
 // every locally-served model.
 func TestVisionFilterKeepsUnknownsAndDropsOnlyKnownTextOnly(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	c.modelView.visionOnly = true
 	p.apply(c.modelView)
@@ -191,78 +168,55 @@ func TestVisionFilterKeepsUnknownsAndDropsOnlyKnownTextOnly(t *testing.T) {
 	for _, r := range p.rows {
 		ids[r.GetId()] = true
 	}
-	if !ids["openai/gpt-4o"] {
-		t.Error("vision filter dropped a model that HAS vision")
-	}
-	if ids["deepseek/chat"] {
-		t.Error("vision filter kept a model known to be text-only")
-	}
-	if !ids["ollama/llama3"] {
-		t.Fatal("vision filter dropped an UNKNOWN model; that hides the whole local fleet")
-	}
+	ck.False(!ids["openai/gpt-4o"], "vision filter dropped a model that HAS vision")
+	ck.False(ids["deepseek/chat"], "vision filter kept a model known to be text-only")
+	ck.Require().False(!ids["ollama/llama3"], "vision filter dropped an UNKNOWN model; that hides the whole local fleet")
 }
 
 // Keeping unknowns is only honest if the user is told. The count is the thing
 // that says the ◉ column is not the whole answer.
 func TestFooterCountsUnknownCapability(t *testing.T) {
 	c, p := loadedPicker(t)
-	if !strings.Contains(p.footer(c.modelView), "1 unknown") {
-		t.Errorf("footer = %q, want the unknown-capability count", p.footer(c.modelView))
-	}
+	assert.NewCollecting(t).StrContains(p.footer(c.modelView), "1 unknown", "footer")
 }
 
 func TestAbsentFactsRenderAsDashesNotZeros(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bare := &rafikiv1.ModelRow{Id: "ollama/llama3"}
-	if got := ctxCell(bare); got != "—" {
-		t.Errorf("ctxCell = %q, want an em dash", got)
-	}
-	if got := priceCell(bare.PromptUsd); got != "—" {
-		t.Errorf("priceCell = %q, want an em dash", got)
-	}
-	if got := visionCellGlyph(bare); got != "?" {
-		t.Errorf("visionCellGlyph = %q, want ?", got)
-	}
+	c.Eq("—", ctxCell(bare), "ctxCell")
+	c.Eq("—", priceCell(bare.PromptUsd), "priceCell")
+	c.Eq("?", visionCellGlyph(bare), "visionCellGlyph")
 }
 
 // A model priced at zero is genuinely free and must not render as unknown.
 func TestZeroPriceRendersAsZeroNotUnknown(t *testing.T) {
-	if got := priceCell(fp(0)); got != "0.00" {
-		t.Errorf("priceCell(0) = %q, want 0.00", got)
-	}
+	assert.NewCollecting(t).Eq("0.00", priceCell(fp(0)), "priceCell(0)")
 }
 
 // ── selection ────────────────────────────────────────────────────────────────
 
 func TestPickingFillsTheFieldAndReturnsToTheForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	p.filter.SetValue("gpt")
 	p.apply(c.modelView)
 
 	c.handleKey(keyMsg("enter"))
 
-	if c.picker != nil {
-		t.Error("picker stayed open after a pick")
-	}
-	if got := c.form.inputs[fieldModel].Value(); got != "openai/gpt-4o" {
-		t.Errorf("model field = %q, want the picked id", got)
-	}
+	ck.Nil(c.picker, "picker stayed open after a pick")
+	ck.Eq("openai/gpt-4o", c.form.inputs[fieldModel].Value(), "model field")
 	// Focus advances so the next ⏎ submits rather than reopening the picker.
-	if c.form.focus == fieldModel {
-		t.Error("focus stayed on the model row; ⏎ would reopen the picker")
-	}
+	ck.NotEq(fieldModel, c.form.focus, "focus stayed on the model row; ⏎ would reopen the picker")
 }
 
 // esc returns to the FORM, not out of both: the other fields are half filled.
 func TestEscapeReturnsToTheForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, _ := loadedPicker(t)
 	c.handleKey(keyMsg("esc"))
 
-	if c.picker != nil {
-		t.Error("esc did not close the picker")
-	}
-	if c.form == nil {
-		t.Fatal("esc dismissed the form too; the half-filled fields are gone")
-	}
+	ck.Nil(c.picker, "esc did not close the picker")
+	ck.Require().NotNil(c.form, "esc dismissed the form too; the half-filled fields are gone")
 }
 
 func TestPickingNothingLeavesTheFieldAlone(t *testing.T) {
@@ -273,9 +227,7 @@ func TestPickingNothingLeavesTheFieldAlone(t *testing.T) {
 
 	c.handleKey(keyMsg("enter"))
 
-	if got := c.form.inputs[fieldModel].Value(); got != "typed/by-hand" {
-		t.Errorf("model field = %q, want the hand-typed value untouched", got)
-	}
+	assert.NewCollecting(t).Eq("typed/by-hand", c.form.inputs[fieldModel].Value(), "model field")
 }
 
 // ── failure ──────────────────────────────────────────────────────────────────
@@ -283,6 +235,7 @@ func TestPickingNothingLeavesTheFieldAlone(t *testing.T) {
 // A daemon that cannot answer must not trap the user: the field still accepts
 // a hand-typed id.
 func TestFetchFailureIsReportedAndRecoverable(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.applyModelsLoaded(modelsLoadedMsg{kind: c.form.kind(),
 		err: errors.New("unavailable: model lister not yet wired")})
@@ -291,17 +244,11 @@ func TestFetchFailureIsReportedAndRecoverable(t *testing.T) {
 
 	c.width, c.height, c.ready = 100, 30, true
 	out := ansi.Strip(c.View().Content)
-	if !strings.Contains(out, "not yet wired") {
-		t.Errorf("view did not report the failure:\n%s", out)
-	}
-	if !strings.Contains(out, "by hand") {
-		t.Error("view did not say the id can still be typed by hand")
-	}
+	ck.StrContains(out, "not yet wired", "view did not report the failure:\n")
+	ck.StrContains(out, "by hand", "view did not say the id can still be typed by hand")
 
 	c.handleKey(keyMsg("esc"))
-	if c.form == nil {
-		t.Fatal("esc after a failure dismissed the form")
-	}
+	ck.Require().NotNil(c.form, "esc after a failure dismissed the form")
 }
 
 // A late answer for a kind the form no longer has must be dropped, not shown.
@@ -311,51 +258,41 @@ func TestStaleFetchIsIgnored(t *testing.T) {
 		rows: []*rafikiv1.ModelRow{{Id: "wrong/model"}}})
 
 	for _, r := range c.picker.rows {
-		if r.GetId() == "wrong/model" {
-			t.Fatal("a stale fetch for another kind was applied")
-		}
+		assert.NewAborting(t).NotEq("wrong/model", r.GetId(), "a stale fetch for another kind was applied")
 	}
 }
 
 func TestPickerOwnsTheBodyPaneAboveTheForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, _ := loadedPicker(t)
 	c.width, c.height, c.ready = 100, 30, true
 
 	out := ansi.Strip(c.View().Content)
-	if !strings.Contains(out, "openai/gpt-4o") {
-		t.Error("the picker did not render")
-	}
-	if strings.Contains(out, "new agent") {
-		t.Error("the form rendered over the picker")
-	}
+	ck.StrContains(out, "openai/gpt-4o", "the picker did not render")
+	ck.NotStrContains(out, "new agent", "the form rendered over the picker")
 }
 
 // ^R still cycles the primary key; ^S now opens the dialog instead.
 func TestCtrlRCyclesThePrimarySortAndWraps(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, _ := loadedPicker(t)
 	first := c.modelView.keys[0].field
 	seen := map[modelField]bool{first: true}
 	for i := 0; i < int(modelFieldCount)-1; i++ {
 		c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
 		got := c.modelView.keys[0].field
-		if seen[got] {
-			t.Fatalf("^R revisited %v before covering every field", got)
-		}
+		ck.Require().False(seen[got], "^R revisited %v before covering every field", got)
 		seen[got] = true
 	}
 	c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
-	if c.modelView.keys[0].field != first {
-		t.Errorf("field = %v after a full cycle, want it to wrap", c.modelView.keys[0].field)
-	}
+	ck.Eq(first, c.modelView.keys[0].field, "field")
 }
 
 // Every field must have a label: an unnamed one renders "?" in the dialog,
 // which is the only place the ordering is visible.
 func TestEveryFieldIsNamed(t *testing.T) {
 	for f := modelField(0); f < modelFieldCount; f++ {
-		if f.String() == "?" {
-			t.Errorf("field %d has no label", f)
-		}
+		assert.NewCollecting(t).NotEq("?", f.String(), "field %d has no label", f)
 	}
 }
 
@@ -381,9 +318,7 @@ func TestOpeningTheFormPrefetchesTheCatalog(t *testing.T) {
 	c := railWith(t, "c_1")
 	c.handleKey(keyMsg("n"))
 
-	if !c.modelsBusy["fundi"] {
-		t.Error("no catalog fetch was started when the form opened")
-	}
+	assert.NewCollecting(t).False(!c.modelsBusy["fundi"], "no catalog fetch was started when the form opened")
 }
 
 // An empty model field still lists, so ↓ browses. An empty box that answers
@@ -393,46 +328,39 @@ func TestEmptyModelFieldStillSuggests(t *testing.T) {
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
-	if !c.form.showSuggestions() {
-		t.Error("no suggestions for an empty field; ↓ would have nothing to browse")
-	}
+	assert.NewCollecting(t).True(c.form.showSuggestions(), "no suggestions for an empty field; ↓ would have nothing to browse")
 }
 
 // The list follows FOCUS: tabbing away must not leave it floating under a
 // field nobody is editing.
 func TestSuggestionsHideWhenTheModelRowLosesFocus(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	if !c.form.showSuggestions() {
-		t.Fatal("no suggestions to begin with")
-	}
+	ck.Require().True(c.form.showSuggestions(), "no suggestions to begin with")
 
 	c.handleKey(keyMsg("tab"))
 
-	if c.form.showSuggestions() {
-		t.Error("suggestions still showing after the model row lost focus")
-	}
+	ck.False(c.form.showSuggestions(), "suggestions still showing after the model row lost focus")
 }
 
 // ↓ on the model row walks INTO the list rather than to the next field.
 func TestDownEntersTheSuggestionList(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
 	c.handleKey(keyMsg("down"))
 
-	if c.form.focus != fieldModel {
-		t.Fatal("↓ left the model row instead of entering the list")
-	}
-	if c.form.suggestCur != 0 {
-		t.Errorf("suggestCur = %d, want 0", c.form.suggestCur)
-	}
+	ck.Require().Eq(fieldModel, c.form.focus, "↓ left the model row instead of entering the list")
+	ck.Eq(0, c.form.suggestCur, "suggestCur")
 }
 
 // ↑ off the top of the list returns to the text, not to the previous field.
 func TestUpOffTheListReturnsToTheText(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -440,36 +368,30 @@ func TestUpOffTheListReturnsToTheText(t *testing.T) {
 
 	c.handleKey(keyMsg("up"))
 
-	if c.form.suggestCur != -1 {
-		t.Errorf("suggestCur = %d, want -1", c.form.suggestCur)
-	}
-	if c.form.focus != fieldModel {
-		t.Error("↑ left the model row; the way out of a typeahead is back to the text")
-	}
+	ck.Eq(-1, c.form.suggestCur, "suggestCur")
+	ck.Eq(fieldModel, c.form.focus, "↑ left the model row; the way out of a typeahead is back to the text")
 }
 
 // ↑ from the SECOND row lands on the first, not back in the text. Clamping
 // the decrement at 0 and then treating 0 as "leave the list" skips the top row
 // entirely, which makes the first suggestion unreachable with the keyboard.
 func TestUpFromTheSecondRowLandsOnTheFirst(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 	c.handleKey(keyMsg("down"))
 	c.handleKey(keyMsg("down"))
-	if c.form.suggestCur != 1 {
-		t.Fatalf("suggestCur = %d, want 1 before the ↑", c.form.suggestCur)
-	}
+	ck.Require().Eq(1, c.form.suggestCur, "suggestCur")
 
 	c.handleKey(keyMsg("up"))
 
-	if c.form.suggestCur != 0 {
-		t.Errorf("suggestCur = %d, want 0 — the top row must be reachable", c.form.suggestCur)
-	}
+	ck.Eq(0, c.form.suggestCur, "suggestCur")
 }
 
 // ⏎ takes the highlighted suggestion.
 func TestEnterTakesTheHighlightedSuggestion(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -477,52 +399,43 @@ func TestEnterTakesTheHighlightedSuggestion(t *testing.T) {
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if got := c.form.inputs[fieldModel].Value(); got == "" {
-		t.Fatal("⏎ on a highlighted suggestion filled nothing")
-	}
-	if cmd != nil {
-		t.Error("⏎ on a suggestion also submitted the form")
-	}
+	ck.Require().NotEq("", c.form.inputs[fieldModel].Value(), "⏎ on a highlighted suggestion filled nothing")
+	ck.Nil(cmd, "⏎ on a suggestion also submitted the form")
 }
 
 // ...and with NOTHING highlighted it submits, exactly as on every other row.
 // This is what stops ⏎ meaning two things at the same moment.
 func TestEnterWithNoHighlightSubmits(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	if c.form.suggestCur != -1 {
-		t.Fatal("something was highlighted before any ↓")
-	}
+	ck.Require().Eq(-1, c.form.suggestCur, "something was highlighted before any ↓")
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd == nil {
-		t.Error("⏎ with no highlight did not submit")
-	}
+	ck.NotNil(cmd, "⏎ with no highlight did not submit")
 }
 
 // Retyping must drop the highlight: a cursor left on row 3 of the OLD list
 // selects whatever now happens to sit there.
 func TestTypingClearsTheHighlight(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 	c.handleKey(keyMsg("down"))
-	if c.form.suggestCur != 0 {
-		t.Fatal("nothing highlighted to begin with")
-	}
+	ck.Require().Eq(0, c.form.suggestCur, "nothing highlighted to begin with")
 
 	c.handleKey(tea.KeyPressMsg{Code: 'o', Text: "o"})
 
-	if c.form.suggestCur != -1 {
-		t.Errorf("suggestCur = %d after typing, want -1", c.form.suggestCur)
-	}
+	ck.Eq(-1, c.form.suggestCur, "suggestCur")
 }
 
 // The two kinds have different model universes, so cycling kind must rebuild
 // the list from the other catalog rather than leave the old one showing.
 func TestCyclingKindRebuildsTheSuggestions(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := formCockpit(t)
 	seedModels(c, protocol.KindFundi, modelRows())
 	seedModels(c, protocol.KindClaude, []*rafikiv1.ModelRow{
@@ -530,16 +443,12 @@ func TestCyclingKindRebuildsTheSuggestions(t *testing.T) {
 	})
 	focusModelRow(c)
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
-	if len(c.form.suggest) != 3 {
-		t.Fatalf("suggest = %d, want the 3 fundi rows", len(c.form.suggest))
-	}
+	ck.Len(c.form.suggest, 3, "suggest = %d, want the 3 fundi rows", len(c.form.suggest))
 
 	c.form.focus = fieldKind
 	c.handleKey(keyMsg("right"))
 
-	if c.form.kind() != protocol.KindClaude {
-		t.Fatalf("kind = %q, want claude", c.form.kind())
-	}
+	ck.Eq(protocol.KindClaude, c.form.kind(), "kind")
 	if len(c.form.suggest) != 1 || c.form.suggest[0].GetId() != "anthropic/claude-opus-5" {
 		t.Errorf("suggest = %v, want the claude catalog", c.form.suggest)
 	}
@@ -548,6 +457,7 @@ func TestCyclingKindRebuildsTheSuggestions(t *testing.T) {
 // The list fills the panel rather than a fixed handful, and holds EVERY match
 // so a filter hitting 40 models is navigable instead of silently truncated.
 func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	many := make([]*rafikiv1.ModelRow, 0, 40)
 	for i := 0; i < 40; i++ {
@@ -556,23 +466,19 @@ func TestSuggestionsFillThePanelAndKeepEveryMatch(t *testing.T) {
 	seedModels(c, c.form.kind(), many)
 	focusModelRow(c)
 
-	if len(c.form.suggest) != 40 {
-		t.Errorf("suggest = %d, want every match retained", len(c.form.suggest))
-	}
+	ck.Len(c.form.suggest, 40, "suggest = %d, want every match retained", len(c.form.suggest))
 	// A tall pane shows more rows than a short one; that is the whole request.
 	tall := c.form.suggestWindow(40, nil)
 	short := c.form.suggestWindow(14, nil)
-	if tall <= short {
-		t.Errorf("window: tall=%d short=%d, want the taller pane to show more", tall, short)
-	}
+	ck.Greater(short, tall, "window: tall")
 	// The view renders the window PLUS the fixed-height detail block.
-	if got, want := strings.Count(c.form.suggestView(90, tall, c.modelView), "\n"), tall+detailHeight; got != want {
-		t.Errorf("rendered %d rows, want %d (window %d + detail %d)", got, want, tall, detailHeight)
-	}
+	got, want := strings.Count(c.form.suggestView(90, tall, c.modelView), "\n"), tall+detailHeight
+	ck.Eq(want, got, "rendered %d rows, want %d (window %d + detail %d)", got, want, tall, detailHeight)
 }
 
 // Walking past the bottom of the window scrolls rather than stopping.
 func TestSuggestionListScrolls(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	many := make([]*rafikiv1.ModelRow, 0, 40)
 	for i := 0; i < 40; i++ {
@@ -585,12 +491,8 @@ func TestSuggestionListScrolls(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		c.form.moveSuggest(+1, window)
 	}
-	if c.form.suggestCur != 11 {
-		t.Fatalf("suggestCur = %d, want 11", c.form.suggestCur)
-	}
-	if c.form.suggestOff == 0 {
-		t.Error("the window never scrolled; rows past the first screenful are unreachable")
-	}
+	ck.Require().Eq(11, c.form.suggestCur, "suggestCur")
+	ck.NotEq(0, c.form.suggestOff, "the window never scrolled; rows past the first screenful are unreachable")
 	if c.form.suggestCur < c.form.suggestOff ||
 		c.form.suggestCur >= c.form.suggestOff+window {
 		t.Errorf("cursor %d outside the drawn window [%d,%d)",
@@ -601,6 +503,7 @@ func TestSuggestionListScrolls(t *testing.T) {
 // A new filter restarts the window, not just the highlight: scrolled deep into
 // the old list, the new one would otherwise open somewhere arbitrary.
 func TestFilteringResetsTheScrollWindow(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	many := make([]*rafikiv1.ModelRow, 0, 40)
 	for i := 0; i < 40; i++ {
@@ -611,59 +514,46 @@ func TestFilteringResetsTheScrollWindow(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		c.form.moveSuggest(+1, 5)
 	}
-	if c.form.suggestOff == 0 {
-		t.Fatal("did not scroll")
-	}
+	ck.Require().NotEq(0, c.form.suggestOff, "did not scroll")
 
 	c.handleKey(tea.KeyPressMsg{Code: '3', Text: "3"})
 
-	if c.form.suggestOff != 0 {
-		t.Errorf("suggestOff = %d after retyping, want 0", c.form.suggestOff)
-	}
+	ck.Eq(0, c.form.suggestOff, "suggestOff")
 }
 
 // Each suggestion carries the facts that decide the choice; the id alone does
 // not answer "which of these three opus ids".
 func TestSuggestionsShowTheDecidingFacts(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 
 	out := ansi.Strip(c.form.suggestView(90, 10, c.modelView))
-	if !strings.Contains(out, "128k") {
-		t.Error("no context column in the typeahead")
-	}
-	if !strings.Contains(out, "5.00") {
-		t.Error("no price column in the typeahead")
-	}
-	if !strings.Contains(out, "?") {
-		t.Error("the unknown-capability model does not render as unknown")
-	}
+	ck.StrContains(out, "128k", "no context column in the typeahead")
+	ck.StrContains(out, "5.00", "no price column in the typeahead")
+	ck.StrContains(out, "?", "the unknown-capability model does not render as unknown")
 }
 
 // ── sort and vision, shared by both views ────────────────────────────────────
 
 // Sorting reaches the inline typeahead, not only the full browser.
 func TestSortReachesTheInlineTypeahead(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
-	if got := c.form.suggest[0].GetId(); got != "deepseek/chat" {
-		t.Fatalf("first suggestion = %q, want alphabetical order to start", got)
-	}
+	ck.Require().Eq("deepseek/chat", c.form.suggest[0].GetId(), "first suggestion")
 
 	c.modelView.keys = []sortKey{{field: colIn}}
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 
-	if got := c.form.suggest[0].GetId(); got != "deepseek/chat" {
-		t.Errorf("first suggestion = %q, want the cheapest", got)
-	}
-	if got := c.form.suggest[len(c.form.suggest)-1].GetId(); got != "ollama/llama3" {
-		t.Errorf("last suggestion = %q, want the unpriced model last", got)
-	}
+	ck.Eq("deepseek/chat", c.form.suggest[0].GetId(), "first suggestion")
+	ck.Eq("ollama/llama3", c.form.suggest[len(c.form.suggest)-1].GetId(), "last suggestion")
 }
 
 func TestCtrlVFiltersVisionInTheInlineTypeahead(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -674,17 +564,14 @@ func TestCtrlVFiltersVisionInTheInlineTypeahead(t *testing.T) {
 	for _, r := range c.form.suggest {
 		ids[r.GetId()] = true
 	}
-	if ids["deepseek/chat"] {
-		t.Error("a model known to be text-only survived the vision filter")
-	}
-	if !ids["ollama/llama3"] {
-		t.Error("an UNKNOWN-capability model was dropped; that hides the local fleet")
-	}
+	ck.False(ids["deepseek/chat"], "a model known to be text-only survived the vision filter")
+	ck.False(!ids["ollama/llama3"], "an UNKNOWN-capability model was dropped; that hides the local fleet")
 }
 
 // One setting, two windows: sorting inline then opening the browser must not
 // silently reorder under you.
 func TestSortCarriesFromTheTypeaheadIntoTheBrowser(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -693,12 +580,8 @@ func TestSortCarriesFromTheTypeaheadIntoTheBrowser(t *testing.T) {
 
 	c.handleKey(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 
-	if c.picker == nil {
-		t.Fatal("browser did not open")
-	}
-	if c.picker.rows[len(c.picker.rows)-1].GetId() != "ollama/llama3" {
-		t.Error("the browser opened in a different order than the typeahead")
-	}
+	ck.Require().NotNil(c.picker, "browser did not open")
+	ck.Eq("ollama/llama3", c.picker.rows[len(c.picker.rows)-1].GetId(), "the browser opened in a different order than the typeahead")
 }
 
 func TestSortCarriesFromTheBrowserBackToTheTypeahead(t *testing.T) {
@@ -709,14 +592,12 @@ func TestSortCarriesFromTheBrowserBackToTheTypeahead(t *testing.T) {
 	c.handleKey(keyMsg("esc")) // back to the form
 	c.form.refreshSuggestions(c.models[c.form.kind()], c.modelView)
 
-	if c.modelView.keys[0].field != want {
-		t.Errorf("field = %v after returning to the form, want %v",
-			c.modelView.keys[0].field, want)
-	}
+	assert.NewCollecting(t).Eq(want, c.modelView.keys[0].field, "field")
 }
 
 // The two views must never disagree about what matches.
 func TestBothViewsSelectIdenticallyForTheSameQuery(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
@@ -728,47 +609,37 @@ func TestBothViewsSelectIdenticallyForTheSameQuery(t *testing.T) {
 
 	p := newModelPicker(c.form.kind(), "a", c.models[c.form.kind()], true, "", c.modelView)
 
-	if len(inline) != len(p.rows) {
-		t.Fatalf("typeahead %d rows, browser %d — the two disagree", len(inline), len(p.rows))
-	}
+	ck.Require().Len(inline, len(p.rows), "typeahead %d rows, browser %d — the two disagree", len(inline), len(p.rows))
 	for i := range inline {
-		if inline[i].GetId() != p.rows[i].GetId() {
-			t.Errorf("row %d: typeahead %q, browser %q", i, inline[i].GetId(), p.rows[i].GetId())
-		}
+		ck.Eq(p.rows[i].GetId(), inline[i].GetId(), "row %d: typeahead %q, browser", i, inline[i].GetId())
 	}
 }
 
 func TestHintLineNamesTheActiveView(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 	c.modelView = modelView{keys: []sortKey{{field: colIn}}, visionOnly: true}
 
 	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
-	if !strings.Contains(out, "in$") {
-		t.Errorf("hint line does not name the sort:\n%s", out)
-	}
-	if !strings.Contains(out, "vision required") {
-		t.Errorf("hint line does not say the vision filter is on:\n%s", out)
-	}
+	ck.StrContains(out, "in$", "hint line does not name the sort:\n")
+	ck.StrContains(out, "vision required", "hint line does not say the vision filter is on:\n")
 }
 
 // Changing the query must drop the highlight: it names a row in the OLD
 // order, and keeping it selects whatever now sits there.
 func TestChangingTheViewClearsTheHighlight(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), modelRows())
 	focusModelRow(c)
 	c.handleKey(keyMsg("down"))
-	if c.form.suggestCur != 0 {
-		t.Fatal("nothing highlighted to begin with")
-	}
+	ck.Require().Eq(0, c.form.suggestCur, "nothing highlighted to begin with")
 
 	c.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
 
-	if c.form.suggestCur != -1 {
-		t.Errorf("suggestCur = %d after a re-sort, want -1", c.form.suggestCur)
-	}
+	ck.Eq(-1, c.form.suggestCur, "suggestCur")
 }
 
 func toolRows() []*rafikiv1.ModelRow {
@@ -786,10 +657,9 @@ func toolRows() []*rafikiv1.ModelRow {
 // The default: a model that cannot tool-call is not a candidate for an agent,
 // so it is hidden without being asked.
 func TestToolsFilterIsOnByDefault(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
-	if !c.modelView.toolsOnly {
-		t.Fatal("toolsOnly defaults off; a non-agentic model would be offered")
-	}
+	ck.Require().True(c.modelView.toolsOnly, "toolsOnly defaults off; a non-agentic model would be offered")
 	seedModels(c, c.form.kind(), toolRows())
 	focusModelRow(c)
 
@@ -797,79 +667,61 @@ func TestToolsFilterIsOnByDefault(t *testing.T) {
 	for _, r := range c.form.suggest {
 		ids[r.GetId()] = true
 	}
-	if ids["b/chat-only"] {
-		t.Error("a model known not to support tools was offered by default")
-	}
-	if !ids["a/agentic"] {
-		t.Error("a tool-capable model was hidden")
-	}
+	ck.False(ids["b/chat-only"], "a model known not to support tools was offered by default")
+	ck.False(!ids["a/agentic"], "a tool-capable model was hidden")
 	// The same trap as vision: nil means no catalog entry, which is every
 	// locally-served model. Reading it as "no tools" hides the local fleet.
-	if !ids["c/unknown"] {
-		t.Fatal("an UNKNOWN-capability model was hidden by the default filter")
-	}
+	ck.Require().False(!ids["c/unknown"], "an UNKNOWN-capability model was hidden by the default filter")
 }
 
 func TestCtrlTRevealsNonToolModels(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	seedModels(c, c.form.kind(), toolRows())
 	focusModelRow(c)
 
 	c.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
 
-	if c.modelView.toolsOnly {
-		t.Fatal("^T did not toggle the filter")
-	}
+	ck.Require().False(c.modelView.toolsOnly, "^T did not toggle the filter")
 	found := false
 	for _, r := range c.form.suggest {
 		if r.GetId() == "b/chat-only" {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("^T did not reveal the non-tool model")
-	}
+	ck.True(found, "^T did not reveal the non-tool model")
 }
 
 // Off is the notable state, because on is the default: a list silently
 // including models that cannot be agents is the surprising one.
 func TestHintLineFlagsWhenNonToolModelsAreIncluded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	v := defaultModelView()
-	if strings.Contains(v.summary(), "tools any") {
-		t.Error("the default view advertises a filter that is simply on")
-	}
+	c.NotStrContains(v.summary(), "tools any", "the default view advertises a filter that is simply on")
 	v.toggleTools()
-	if !strings.Contains(v.summary(), "tools any") {
-		t.Errorf("summary = %q, want it to flag that non-tool models are included", v.summary())
-	}
+	c.StrContains(v.summary(), "tools any", "summary")
 }
 
 func TestNewestSortOrdersByListingDateAndPutsUnknownLast(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	c.modelView = modelView{keys: []sortKey{{field: colAge, desc: true}}}
 	p.all = toolRows()
 	p.apply(c.modelView)
 
-	if got := p.rows[0].GetId(); got != "a/agentic" {
-		t.Errorf("first row = %q, want the newest", got)
-	}
-	if got := p.rows[len(p.rows)-1].GetId(); got != "c/unknown" {
-		t.Errorf("last row = %q, want the undated model last", got)
-	}
+	ck.Eq("a/agentic", p.rows[0].GetId(), "first row")
+	ck.Eq("c/unknown", p.rows[len(p.rows)-1].GetId(), "last row")
 }
 
 // Sorting by something invisible is a list that reorders for no visible
 // reason, so an unpinned sort field brings its own column.
 func TestOnlyUnpinnedFieldsAddAColumn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, f := range []modelField{colModel, colCtx, colIn, colOut} {
-		if got := extraColumns([]sortKey{{field: f}}); len(got) != 0 {
-			t.Errorf("sorting by %v added a column; it is already pinned", f)
-		}
+		c.Empty(extraColumns([]sortKey{{field: f}}), "sorting by %v added a column; it is already pinned", f)
 	}
 	got := extraColumns([]sortKey{{field: colAge, desc: true}})
-	if len(got) != 1 || got[0] != colAge {
-		t.Errorf("extraColumns = %v, want [age]", got)
-	}
+	c.False(len(got) != 1 || got[0] != colAge, "extraColumns = %v, want [age]", got)
 	if title, w := headerFor(colAge); title != "AGE" || w <= 0 {
 		t.Errorf("headerFor(colAge) = (%q,%d), want an AGE column", title, w)
 	}
@@ -879,12 +731,11 @@ func TestOnlyUnpinnedFieldsAddAColumn(t *testing.T) {
 // model id off the row.
 func TestExtraColumnsAreCappedAtTwo(t *testing.T) {
 	keys := []sortKey{{field: colAge}, {field: colIntel}, {field: colCode}, {field: colAgentic}}
-	if got := extraColumns(keys); len(got) != 2 {
-		t.Errorf("extraColumns = %v, want it capped at 2", got)
-	}
+	assert.NewCollecting(t).Len(extraColumns(keys), 2, "extraColumns")
 }
 
 func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
+	c := assert.NewCollecting(t)
 	now := time.Now()
 	day := int64(24 * 60 * 60)
 	mk := func(off int64) *rafikiv1.ModelRow {
@@ -897,17 +748,15 @@ func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
 	}{
 		{0, "today"}, {5 * day, "5d"}, {90 * day, "3mo"}, {800 * day, "2.2y"},
 	} {
-		if got := ageCell(mk(tc.off), now); got != tc.want {
-			t.Errorf("ageCell(%dd) = %q, want %q", tc.off/day, got, tc.want)
-		}
+		got := ageCell(mk(tc.off), now)
+		c.Eq(tc.want, got, "ageCell(%dd) = %q, want", tc.off/day, got)
 	}
-	if got := ageCell(&rafikiv1.ModelRow{}, now); got != "—" {
-		t.Errorf("ageCell(absent) = %q, want an em dash", got)
-	}
+	c.Eq("—", ageCell(&rafikiv1.ModelRow{}, now), "ageCell(absent)")
 }
 
 // Expiry is a forward warning, and the far-future sentinel is not one.
 func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
+	c := assert.NewCollecting(t)
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	soon := &rafikiv1.ModelRow{ExpiresAt: "2026-09-08"}
 	if got := expiryWarning(soon, now); !strings.Contains(got, "6d") ||
@@ -917,15 +766,9 @@ func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
 	// "2098-12-31" means "no planned removal"; warning on it would put a
 	// notice next to models in no danger at all.
 	sentinel := &rafikiv1.ModelRow{ExpiresAt: "2098-12-31"}
-	if got := expiryWarning(sentinel, now); got != "" {
-		t.Errorf("expiryWarning(sentinel) = %q, want silence", got)
-	}
-	if got := expiryWarning(&rafikiv1.ModelRow{}, now); got != "" {
-		t.Errorf("expiryWarning(none) = %q, want empty", got)
-	}
-	if got := expiryWarning(&rafikiv1.ModelRow{ExpiresAt: "not-a-date"}, now); got != "" {
-		t.Errorf("expiryWarning(garbage) = %q, want empty", got)
-	}
+	c.Eq("", expiryWarning(sentinel, now), "expiryWarning(sentinel)")
+	c.Eq("", expiryWarning(&rafikiv1.ModelRow{}, now), "expiryWarning(none)")
+	c.Eq("", expiryWarning(&rafikiv1.ModelRow{ExpiresAt: "not-a-date"}, now), "expiryWarning(garbage)")
 }
 
 // The detail block is where the sparse facts live, so they cost width on one
@@ -938,67 +781,51 @@ func TestDetailBlockDescribesTheHighlightedRow(t *testing.T) {
 	c.handleKey(keyMsg("down"))
 
 	out := ansi.Strip(c.form.suggestView(100, 6, c.modelView))
-	if !strings.Contains(out, "thinking yes") {
-		t.Errorf("detail does not report reasoning support:\n%s", out)
-	}
+	assert.NewCollecting(t).StrContains(out, "thinking yes", "detail does not report reasoning support:\n")
 }
 
 // Fixed position is the whole point: every label is present whether or not it
 // has a value, so the eye returns to the same column for the same fact.
 func TestDetailBlockLabelsEveryFieldEvenWhenAbsent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bare := &rafikiv1.ModelRow{Id: "ollama/llama3"}
 	lines := modelDetail(bare, time.Now(), 140)
-	if len(lines) != detailHeight {
-		t.Fatalf("detail is %d lines, want a fixed %d", len(lines), detailHeight)
-	}
+	c.Require().Len(lines, detailHeight, "detail is %d lines, want a fixed", len(lines))
 	body := ansi.Strip(lines[1] + " " + lines[2])
 	for _, label := range []string{"source", "age", "ctx", "max out", "in/out",
 		"cache", "tools", "vision", "thinking"} {
-		if !strings.Contains(body, label) {
-			t.Errorf("label %q missing for a model with no facts:\n%s", label, body)
-		}
+		c.StrContains(body, label, "label")
 	}
-	if strings.Count(body, "—") < 4 {
-		t.Errorf("absent values should read as em dashes:\n%s", body)
-	}
+	c.GreaterOrEqual(4, strings.Count(body, "—"), "absent values should read as em dashes:\n%s", body)
 }
 
 // The block keeps its height with nothing highlighted, so the list above it
 // does not grow and shrink as the cursor moves.
 func TestDetailBlockKeepsItsHeightWhenEmpty(t *testing.T) {
-	if got := len(modelDetail(nil, time.Now(), 80)); got != detailHeight {
-		t.Errorf("empty detail is %d lines, want %d", got, detailHeight)
-	}
+	assert.NewCollecting(t).Eq(detailHeight, len(modelDetail(nil, time.Now(), 80)), "empty detail is")
 }
 
 // A rule separates the block from the list; without it the two read as one.
 func TestDetailBlockIsSeparatedFromTheList(t *testing.T) {
 	lines := modelDetail(&rafikiv1.ModelRow{Id: "a/b"}, time.Now(), 40)
-	if !strings.Contains(ansi.Strip(lines[0]), "───") {
-		t.Errorf("no rule above the detail block: %q", ansi.Strip(lines[0]))
-	}
+	assert.NewCollecting(t).StrContains(ansi.Strip(lines[0]), "───", "no rule above the detail block")
 }
 
 // "unknown" is a real answer and must never render as "no": the daemon has no
 // catalog entry for any locally-served model.
 func TestDetailBlockSpellsUnknownRatherThanNo(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bare := &rafikiv1.ModelRow{Id: "ollama/llama3"}
 	body := ansi.Strip(strings.Join(modelDetail(bare, time.Now(), 140), " "))
-	if !strings.Contains(body, "tools unknown") {
-		t.Errorf("tools rendered as something other than unknown:\n%s", body)
-	}
-	if !strings.Contains(body, "vision unknown") {
-		t.Errorf("vision rendered as something other than unknown:\n%s", body)
-	}
+	c.StrContains(body, "tools unknown", "tools rendered as something other than unknown:\n")
+	c.StrContains(body, "vision unknown", "vision rendered as something other than unknown:\n")
 }
 
 // A no-tools model reachable only via ^T must be labelled where it is picked.
 func TestDetailBlockFlagsANoToolsModel(t *testing.T) {
 	row := &rafikiv1.ModelRow{Id: "b/chat-only", SupportedParameters: []string{"temperature"}}
 	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
-	if !strings.Contains(body, "tools NO") {
-		t.Errorf("a model that cannot tool-call is not flagged:\n%s", body)
-	}
+	assert.NewCollecting(t).StrContains(body, "tools NO", "a model that cannot tool-call is not flagged:\n")
 }
 
 // The expiry warning rides the block rather than a column of its own.
@@ -1006,15 +833,14 @@ func TestDetailBlockCarriesTheExpiryWarning(t *testing.T) {
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	row := &rafikiv1.ModelRow{Id: "a/b", ExpiresAt: "2026-09-08"}
 	body := ansi.Strip(strings.Join(modelDetail(row, now, 140), " "))
-	if !strings.Contains(body, "removed 2026-09-08 (6d)") {
-		t.Errorf("no expiry warning in the detail block:\n%s", body)
-	}
+	assert.NewCollecting(t).StrContains(body, "removed 2026-09-08 (6d)", "no expiry warning in the detail block:\n")
 }
 
 // Every value must FIT its cell. A width that clips "unknown" to "unkno…" is
 // worse than the free-form line this block replaced, and only a rendered
 // check catches it -- the fields are all present either way.
 func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	i32 := func(v int32) *int32 { return &v }
 	f := func(v float64) *float64 { return &v }
 	worst := &rafikiv1.ModelRow{
@@ -1028,16 +854,12 @@ func TestDetailBlockCellsAreWideEnoughForTheirValues(t *testing.T) {
 		// which are the longest values these cells ever hold.
 	}
 	body := ansi.Strip(strings.Join(modelDetail(worst, time.Now(), 130), " "))
-	if strings.Contains(body, "…") {
-		t.Errorf("a detail cell clipped its own value:\n%s", body)
-	}
+	c.NotStrContains(body, "…", "a detail cell clipped its own value:\n")
 	for _, want := range []string{"tools unknown", "vision unknown",
 		"source openrouter", "ctx 1.0M", "max out 128k", "in/out 10.00/100.00",
 		"cutoff 2026-02-16", "agentic 100.0", "thinking no",
 		"intel 100.0", "code 100.0"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("%q missing or clipped:\n%s", want, body)
-		}
+		c.StrContains(body, want, "%q missing or clipped:\n", want)
 	}
 }
 
@@ -1053,78 +875,59 @@ func scoredRows() []*rafikiv1.ModelRow {
 }
 
 func TestAgenticSortIsHighestFirstAndUnscoredLast(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, p := loadedPicker(t)
 	c.modelView = modelView{keys: []sortKey{{field: colAgentic, desc: true}}}
 	p.all = scoredRows()
 	p.apply(c.modelView)
 
-	if got := p.rows[0].GetId(); got != "b/best" {
-		t.Errorf("first row = %q, want the highest score", got)
-	}
+	ck.Eq("b/best", p.rows[0].GetId(), "first row")
 	// Absent is UNSCORED, never zero, and DESCENDING must not flip that: an
 	// unscored model at the top of "smartest" is the failure this guards.
-	if got := p.rows[len(p.rows)-1].GetId(); got != "c/unscored" {
-		t.Errorf("last row = %q, want the unscored model last", got)
-	}
+	ck.Eq("c/unscored", p.rows[len(p.rows)-1].GetId(), "last row")
 }
 
 func TestAgenticSortShowsItsOwnColumn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := extraColumns([]sortKey{{field: colAgentic, desc: true}})
-	if len(got) != 1 || got[0] != colAgentic {
-		t.Fatalf("extraColumns = %v, want [agentic]", got)
-	}
+	c.Require().False(len(got) != 1 || got[0] != colAgentic, "extraColumns = %v, want [agentic]", got)
 	if title, w := headerFor(colAgentic); title != "AGENTIC" || w <= 0 {
 		t.Errorf("headerFor(colAgentic) = (%q,%d), want an AGENTIC column", title, w)
 	}
 	f := 59.2
 	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f}
-	if got := cellFor(row, colAgentic, time.Now()); got != "59.2" {
-		t.Errorf("cellFor = %q, want the score", got)
-	}
-	if got := cellFor(row, colAge, time.Now()); got != "—" {
-		t.Errorf("cellFor(age) = %q, want an em dash", got)
-	}
+	c.Eq("59.2", cellFor(row, colAgentic, time.Now()), "cellFor")
+	c.Eq("—", cellFor(row, colAge, time.Now()), "cellFor(age)")
 }
 
 func TestUnscoredAndUncutModelsReadAsAbsentNotZero(t *testing.T) {
+	c := assert.NewCollecting(t)
 	bare := &rafikiv1.ModelRow{Id: "c/unscored"}
-	if got := agenticCell(bare); got != "—" {
-		t.Errorf("agenticCell = %q, want an em dash, never 0.0", got)
-	}
-	if got := cutoffCell(bare); got != "—" {
-		t.Errorf("cutoffCell = %q, want an em dash", got)
-	}
+	c.Eq("—", agenticCell(bare), "agenticCell")
+	c.Eq("—", cutoffCell(bare), "cutoffCell")
 	// A genuinely low score is a real value and must not read as absent.
 	low := 0.3
-	if got := agenticCell(&rafikiv1.ModelRow{AgenticIndex: &low}); got != "0.3" {
-		t.Errorf("agenticCell(0.3) = %q, want 0.3", got)
-	}
+	c.Eq("0.3", agenticCell(&rafikiv1.ModelRow{AgenticIndex: &low}), "agenticCell(0.3)")
 }
 
 func TestDetailBlockCarriesCutoffAndAgenticScore(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := 59.2
 	row := &rafikiv1.ModelRow{Id: "b/best", AgenticIndex: &f, KnowledgeCutoff: "2026-02-16"}
 	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
-	if !strings.Contains(body, "agentic 59.2") {
-		t.Errorf("no agentic score in the detail block:\n%s", body)
-	}
-	if !strings.Contains(body, "cutoff 2026-02-16") {
-		t.Errorf("no knowledge cutoff in the detail block:\n%s", body)
-	}
+	c.StrContains(body, "agentic 59.2", "no agentic score in the detail block:\n")
+	c.StrContains(body, "cutoff 2026-02-16", "no knowledge cutoff in the detail block:\n")
 }
 
 // Cutoff and age are different axes and both earn a slot: a model listed last
 // week can have a cutoff from a year before that.
 func TestCutoffAndAgeAreSeparateFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	created := time.Now().AddDate(0, 0, -7).Unix()
 	row := &rafikiv1.ModelRow{Id: "x/y", Created: &created, KnowledgeCutoff: "2025-01-31"}
 	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
-	if !strings.Contains(body, "age 7d") {
-		t.Errorf("age missing or wrong:\n%s", body)
-	}
-	if !strings.Contains(body, "cutoff 2025-01-31") {
-		t.Errorf("cutoff missing:\n%s", body)
-	}
+	c.StrContains(body, "age 7d", "age missing or wrong:\n")
+	c.StrContains(body, "cutoff 2025-01-31", "cutoff missing:\n")
 }
 
 // All three artificial_analysis scores are shown, because they are only
@@ -1136,9 +939,7 @@ func TestDetailBlockShowsAllThreeBenchmarkScores(t *testing.T) {
 		IntelligenceIndex: f(65.7), CodingIndex: f(81.6), AgenticIndex: f(59.2)}
 	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 160), " "))
 	for _, want := range []string{"intel 65.7", "code 81.6", "agentic 59.2"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("%q missing from the detail block:\n%s", want, body)
-		}
+		assert.NewCollecting(t).StrContains(body, want, "%q missing from the detail block:\n", want)
 	}
 }
 
@@ -1148,18 +949,13 @@ func TestUnbenchmarkedModelShowsThreeDashes(t *testing.T) {
 	body := ansi.Strip(strings.Join(
 		modelDetail(&rafikiv1.ModelRow{Id: "ollama/llama3"}, time.Now(), 160), " "))
 	for _, want := range []string{"intel —", "code —", "agentic —"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("%q missing; an unscored model must not read as 0.0:\n%s", want, body)
-		}
+		assert.NewCollecting(t).StrContains(body, want, "%q missing; an unscored model must not read as 0.0:\n", want)
 	}
 }
 
 func TestScoreCellDistinguishesZeroFromAbsent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	zero := 0.0
-	if got := scoreCell(&zero); got != "0.0" {
-		t.Errorf("scoreCell(0) = %q, want 0.0 — a real score", got)
-	}
-	if got := scoreCell(nil); got != "—" {
-		t.Errorf("scoreCell(nil) = %q, want an em dash", got)
-	}
+	c.Eq("0.0", scoreCell(&zero), "scoreCell(0)")
+	c.Eq("—", scoreCell(nil), "scoreCell(nil)")
 }

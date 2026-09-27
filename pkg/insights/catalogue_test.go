@@ -4,21 +4,20 @@ package insights
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/insightstypes"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestQueryUnknownNameReturnsNotFound(t *testing.T) {
 	ins := &Insights{}
 	_, err := ins.Query(context.Background(), ScopeAll(), "no-such-query", StatsFilter{})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrNotFound, "want ErrNotFound, got")
 }
 
 // The registry is the truth for what Query accepts; insightstypes.QueryNames
@@ -29,6 +28,7 @@ func TestQueryUnknownNameReturnsNotFound(t *testing.T) {
 // than at a terminal. Names beginning with "__" are test registrations (see
 // the tests above) and are excluded.
 func TestCatalogueMatchesSharedQueryNames(t *testing.T) {
+	c := assert.NewAborting(t)
 	var got []string
 	for name := range catalogue {
 		if len(name) >= 2 && name[:2] == "__" {
@@ -39,13 +39,9 @@ func TestCatalogueMatchesSharedQueryNames(t *testing.T) {
 	sort.Strings(got)
 	want := append([]string(nil), insightstypes.QueryNames...)
 	sort.Strings(want)
-	if len(got) != len(want) {
-		t.Fatalf("registered queries = %v, shared QueryNames = %v", got, want)
-	}
+	c.Len(got, len(want), "registered queries = %v, shared QueryNames = %v", got, want)
 	for i := range got {
-		if got[i] != want[i] {
-			t.Fatalf("registered queries = %v, shared QueryNames = %v", got, want)
-		}
+		c.Eq(want[i], got[i], "registered queries = %v, shared QueryNames = %v", got, want)
 	}
 }
 
@@ -58,9 +54,7 @@ func TestQueryClassUnsetRefusesEvenIfRegistered(t *testing.T) {
 
 	ins := &Insights{}
 	_, err := ins.Query(context.Background(), ScopeAll(), "__test_unset", StatsFilter{})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrNotFound, "want ErrNotFound, got")
 }
 
 // Class(99) is the admission switch's default arm -- the fail-closed property
@@ -77,12 +71,11 @@ func TestQueryUnknownClassRefuses(t *testing.T) {
 
 	ins := &Insights{}
 	_, err := ins.Query(context.Background(), ScopeAll(), "__test_unknown_class", StatsFilter{})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrNotFound, "want ErrNotFound, got")
 }
 
 func TestQueryOwnerScopedRefusesZeroValueScope(t *testing.T) {
+	c := assert.NewAborting(t)
 	called := false
 	catalogue["__test_owner_scoped"] = catalogQuery{class: ClassOwnerScoped, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		called = true
@@ -92,15 +85,12 @@ func TestQueryOwnerScopedRefusesZeroValueScope(t *testing.T) {
 
 	ins := &Insights{}
 	_, err := ins.Query(context.Background(), Scope{}, "__test_owner_scoped", StatsFilter{})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-	if called {
-		t.Fatal("run must not be called when scope is invalid")
-	}
+	c.ErrorIs(err, ErrNotFound, "want ErrNotFound, got")
+	c.False(called, "run must not be called when scope is invalid")
 }
 
 func TestQueryOwnerScopedRunsUnderValidScope(t *testing.T) {
+	c := assert.NewAborting(t)
 	want := QueryResult{Columns: []Column{{Name: "x", Kind: ColInt}}, Rows: [][]Entry{{IntEntry(1)}}}
 	catalogue["__test_owner_scoped_ok"] = catalogQuery{class: ClassOwnerScoped, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		return want, nil
@@ -109,15 +99,12 @@ func TestQueryOwnerScopedRunsUnderValidScope(t *testing.T) {
 
 	ins := &Insights{}
 	got, err := ins.Query(context.Background(), ScopeOwner("someone"), "__test_owner_scoped_ok", StatsFilter{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got.Rows) != 1 || got.Rows[0][0] != IntEntry(1) {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
+	c.NoError(err, "unexpected error")
+	c.False(len(got.Rows) != 1 || got.Rows[0][0] != IntEntry(1), "got %+v, want %+v", got, want)
 }
 
 func TestQueryAdminOnlyRefusesNonAllScope(t *testing.T) {
+	c := assert.NewAborting(t)
 	called := false
 	catalogue["__test_admin_only"] = catalogQuery{class: ClassAdminOnly, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		called = true
@@ -127,12 +114,8 @@ func TestQueryAdminOnlyRefusesNonAllScope(t *testing.T) {
 
 	ins := &Insights{}
 	_, err := ins.Query(context.Background(), ScopeOwner("bob"), "__test_admin_only", StatsFilter{})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-	if called {
-		t.Fatal("run must not be called under a non-all scope")
-	}
+	c.ErrorIs(err, ErrNotFound, "want ErrNotFound, got")
+	c.False(called, "run must not be called under a non-all scope")
 }
 
 func TestQueryAdminOnlyRunsUnderScopeAll(t *testing.T) {
@@ -142,12 +125,12 @@ func TestQueryAdminOnlyRunsUnderScopeAll(t *testing.T) {
 	defer delete(catalogue, "__test_admin_only_ok")
 
 	ins := &Insights{}
-	if _, err := ins.Query(context.Background(), ScopeAll(), "__test_admin_only_ok", StatsFilter{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, err := ins.Query(context.Background(), ScopeAll(), "__test_admin_only_ok", StatsFilter{})
+	assert.NewAborting(t).NoError(err, "unexpected error")
 }
 
 func TestQueryOwnerScopedRunsUnderScopeAll(t *testing.T) {
+	c := assert.NewAborting(t)
 	called := false
 	catalogue["__test_owner_scoped_all"] = catalogQuery{class: ClassOwnerScoped, run: func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		called = true
@@ -156,15 +139,13 @@ func TestQueryOwnerScopedRunsUnderScopeAll(t *testing.T) {
 	defer delete(catalogue, "__test_owner_scoped_all")
 
 	ins := &Insights{}
-	if _, err := ins.Query(context.Background(), ScopeAll(), "__test_owner_scoped_all", StatsFilter{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !called {
-		t.Fatal("run must be called under ScopeAll: the predicate is dropped, never refused")
-	}
+	_, err := ins.Query(context.Background(), ScopeAll(), "__test_owner_scoped_all", StatsFilter{})
+	c.NoError(err, "unexpected error")
+	c.True(called, "run must be called under ScopeAll: the predicate is dropped, never refused")
 }
 
 func TestQueryPassesTheCallersScopeToRun(t *testing.T) {
+	c := assert.NewAborting(t)
 	captured := Scope{}
 	catalogue["__test_scope_passthrough"] = catalogQuery{class: ClassOwnerScoped, run: func(_ context.Context, _ *pgxpool.Pool, scope Scope, _ StatsFilter) (QueryResult, error) {
 		captured = scope
@@ -174,12 +155,9 @@ func TestQueryPassesTheCallersScopeToRun(t *testing.T) {
 
 	ins := &Insights{}
 	want := ScopeOwner("someone")
-	if _, err := ins.Query(context.Background(), want, "__test_scope_passthrough", StatsFilter{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if captured != want {
-		t.Fatalf("run saw scope %+v, want the caller's %+v", captured, want)
-	}
+	_, err := ins.Query(context.Background(), want, "__test_scope_passthrough", StatsFilter{})
+	c.NoError(err, "unexpected error")
+	c.Eq(want, captured, "run saw scope")
 }
 
 func TestQueryGlobalFactRunsUnderZeroValueScope(t *testing.T) {
@@ -189,9 +167,8 @@ func TestQueryGlobalFactRunsUnderZeroValueScope(t *testing.T) {
 	defer delete(catalogue, "__test_global_fact")
 
 	ins := &Insights{}
-	if _, err := ins.Query(context.Background(), Scope{}, "__test_global_fact", StatsFilter{}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	_, err := ins.Query(context.Background(), Scope{}, "__test_global_fact", StatsFilter{})
+	assert.NewAborting(t).NoError(err, "unexpected error")
 }
 
 func TestRegisterQueryPanicsOnDuplicateName(t *testing.T) {
@@ -201,9 +178,7 @@ func TestRegisterQueryPanicsOnDuplicateName(t *testing.T) {
 	defer delete(catalogue, "__test_dup")
 
 	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic on duplicate registration")
-		}
+		assert.NewAborting(t).NotNil(recover(), "want panic on duplicate registration")
 	}()
 	registerQuery("__test_dup", ClassOwnerScoped, func(context.Context, *pgxpool.Pool, Scope, StatsFilter) (QueryResult, error) {
 		return QueryResult{}, nil

@@ -2,7 +2,11 @@
 
 package connectapi
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 // The Wave-2 seams (ChildOps, ExecutorAdmin, UserAdmin, RawChildIO,
 // ExecutorSessions): Set*(nil) must be REFUSED, not stored — the same rule
@@ -18,39 +22,29 @@ import "testing"
 func TestSetChildOpsNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetChildOps(nil)
-	if s.childOps.Load() != nil {
-		t.Fatal("SetChildOps(nil) stored a pointer")
-	}
+	assert.NewAborting(t).Nil(s.childOps.Load(), "SetChildOps(nil) stored a pointer")
 }
 
 func TestSetExecutorAdminNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetExecutorAdmin(nil)
-	if s.execAdmin.Load() != nil {
-		t.Fatal("SetExecutorAdmin(nil) stored a pointer")
-	}
+	assert.NewAborting(t).Nil(s.execAdmin.Load(), "SetExecutorAdmin(nil) stored a pointer")
 }
 
 func TestSetUserAdminNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetUserAdmin(nil)
-	if s.userAdmin.Load() != nil {
-		t.Fatal("SetUserAdmin(nil) stored a pointer")
-	}
+	assert.NewAborting(t).Nil(s.userAdmin.Load(), "SetUserAdmin(nil) stored a pointer")
 }
 
 func TestSetRawChildIONilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetRawChildIO(nil)
-	if s.rawIO.Load() != nil {
-		t.Fatal("SetRawChildIO(nil) stored a pointer")
-	}
+	assert.NewAborting(t).Nil(s.rawIO.Load(), "SetRawChildIO(nil) stored a pointer")
 }
 
 func TestSetExecutorSessionsNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetExecutorSessions(nil)
-	if s.execSessions.Load() != nil {
-		t.Fatal("SetExecutorSessions(nil) stored a pointer")
-	}
+	assert.NewAborting(t).Nil(s.execSessions.Load(), "SetExecutorSessions(nil) stored a pointer")
 }

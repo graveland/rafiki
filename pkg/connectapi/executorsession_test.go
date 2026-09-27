@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +16,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeExecSessions is a connectapi.ExecutorSessions fake. When ctxDone is set,
@@ -66,6 +67,7 @@ func setupExecSessionServer(t *testing.T, seam connectapi.ExecutorSessions) rafi
 // cancelling — is what the backend sees as ctx.Done(), which is the eviction
 // trigger.
 func TestExecutorSessionSendsReadyThenBlocksUntilStreamEnds(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctxDone := make(chan struct{})
 	seam := &fakeExecSessions{
 		ready: &rafikiv1.ExecutorSessionReady{
@@ -82,18 +84,14 @@ func TestExecutorSessionSendsReadyThenBlocksUntilStreamEnds(t *testing.T) {
 	defer cancel()
 
 	stream, err := client.ExecutorSession(ctx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "m1"}))
-	if err != nil {
-		t.Fatalf("ExecutorSession: %v", err)
-	}
+	c.NoError(err, "ExecutorSession")
 
 	if !stream.Receive() {
 		t.Fatalf("expected the ready message, got err: %v", stream.Err())
 	}
 	ready := stream.Msg().GetReady()
-	if ready.GetExecutorId() != "sess-1" || !ready.GetRunLocal() ||
-		ready.GetTicket() != "tk-1" || ready.GetSelector() != "owner=brent,machine=m1" {
-		t.Fatalf("got %+v, want the seam's ready message forwarded unchanged", ready)
-	}
+	c.False(ready.GetExecutorId() != "sess-1" || !ready.GetRunLocal() ||
+		ready.GetTicket() != "tk-1" || ready.GetSelector() != "owner=brent,machine=m1", "got %+v, want the seam's ready message forwarded unchanged", ready)
 
 	select {
 	case <-ctxDone:
@@ -118,6 +116,7 @@ func TestExecutorSessionSendsReadyThenBlocksUntilStreamEnds(t *testing.T) {
 // request's context once the handler returns, which is what the backend
 // watches.
 func TestExecutorSessionStreamEndsWhenServerStops(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctxDone := make(chan struct{})
 	seam := &fakeExecSessions{
 		ready: &rafikiv1.ExecutorSessionReady{
@@ -146,9 +145,7 @@ func TestExecutorSessionStreamEndsWhenServerStops(t *testing.T) {
 	defer cancelStream()
 
 	stream, err := client.ExecutorSession(streamCtx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "m1"}))
-	if err != nil {
-		t.Fatalf("ExecutorSession: %v", err)
-	}
+	c.NoError(err, "ExecutorSession")
 	if !stream.Receive() {
 		t.Fatalf("expected the ready message, got err: %v", stream.Err())
 	}
@@ -170,9 +167,7 @@ func TestExecutorSessionStreamEndsWhenServerStops(t *testing.T) {
 		t.Fatal("the ExecutorSession stream did not end after Server.Stop(); " +
 			"a live stream holds daemon shutdown")
 	}
-	if err := stream.Err(); err != nil {
-		t.Fatalf("expected a clean stream end after Stop(), got %v", err)
-	}
+	c.NoError(stream.Err(), "expected a clean stream end after Stop(), got")
 
 	// The eviction trigger still fires: the handler returned, so net/http
 	// cancels the request ctx and the backend releases the executor.
@@ -185,21 +180,16 @@ func TestExecutorSessionStreamEndsWhenServerStops(t *testing.T) {
 }
 
 func TestExecutorSessionUnavailableWhenNotWired(t *testing.T) {
+	c := assert.NewAborting(t)
 	client := setupExecSessionServer(t, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	stream, err := client.ExecutorSession(ctx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "m1"}))
-	if err != nil {
-		t.Fatalf("ExecutorSession: %v", err)
-	}
-	if stream.Receive() {
-		t.Fatal("expected no message with no seam wired")
-	}
-	if connect.CodeOf(stream.Err()) != connect.CodeUnavailable {
-		t.Fatalf("code = %v, want Unavailable", connect.CodeOf(stream.Err()))
-	}
+	c.NoError(err, "ExecutorSession")
+	c.False(stream.Receive(), "expected no message with no seam wired")
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(stream.Err()), "code")
 }
 
 // TestExecutorSessionOpenControllerErrorKeepsItsCode mirrors Close's
@@ -207,6 +197,7 @@ func TestExecutorSessionUnavailableWhenNotWired(t *testing.T) {
 // the classification, so a missing-name refusal reads as InvalidArgument with
 // its authored text, not Internal.
 func TestExecutorSessionOpenControllerErrorKeepsItsCode(t *testing.T) {
+	c := assert.NewAborting(t)
 	seam := &fakeExecSessions{err: &connectapi.ControllerError{
 		Code:    protocol.ErrInvalidArgs,
 		Message: "this machine has no executor name",
@@ -217,24 +208,17 @@ func TestExecutorSessionOpenControllerErrorKeepsItsCode(t *testing.T) {
 	defer cancel()
 
 	stream, err := client.ExecutorSession(ctx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{}))
-	if err != nil {
-		t.Fatalf("ExecutorSession: %v", err)
-	}
-	if stream.Receive() {
-		t.Fatal("expected no message on error")
-	}
-	if connect.CodeOf(stream.Err()) != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(stream.Err()))
-	}
-	if !strings.Contains(stream.Err().Error(), "this machine has no executor name") {
-		t.Fatalf("err = %v, want the daemon's authored text", stream.Err())
-	}
+	c.NoError(err, "ExecutorSession")
+	c.False(stream.Receive(), "expected no message on error")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(stream.Err()), "code")
+	c.StrContains(stream.Err().Error(), "this machine has no executor name", "err = %v, want the daemon's authored text", stream.Err())
 }
 
 // TestExecutorSessionOpenGenericErrorBecomesInternal is the redaction half of
 // the same discipline: an error the daemon did not author (not a
 // connectapi.ControllerError) is infrastructure text and must not reach the caller.
 func TestExecutorSessionOpenGenericErrorBecomesInternal(t *testing.T) {
+	c := assert.NewAborting(t)
 	seam := &fakeExecSessions{err: errors.New("dial postgres: connection refused")}
 	client := setupExecSessionServer(t, seam)
 
@@ -242,16 +226,8 @@ func TestExecutorSessionOpenGenericErrorBecomesInternal(t *testing.T) {
 	defer cancel()
 
 	stream, err := client.ExecutorSession(ctx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "m1"}))
-	if err != nil {
-		t.Fatalf("ExecutorSession: %v", err)
-	}
-	if stream.Receive() {
-		t.Fatal("expected no message on error")
-	}
-	if connect.CodeOf(stream.Err()) != connect.CodeInternal {
-		t.Fatalf("code = %v, want Internal", connect.CodeOf(stream.Err()))
-	}
-	if strings.Contains(stream.Err().Error(), "postgres") {
-		t.Fatalf("err = %v, want the raw cause redacted", stream.Err())
-	}
+	c.NoError(err, "ExecutorSession")
+	c.False(stream.Receive(), "expected no message on error")
+	c.Eq(connect.CodeInternal, connect.CodeOf(stream.Err()), "code")
+	c.NotStrContains(stream.Err().Error(), "postgres", "err = %v, want the raw cause redacted", stream.Err())
 }

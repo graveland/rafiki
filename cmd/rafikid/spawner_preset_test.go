@@ -8,6 +8,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // presetBool avoids a package-wide helper name a future test might also want;
@@ -27,9 +29,7 @@ func TestPresetWiringShapingTriState(t *testing.T) {
 			Thinking:           "high",
 			AppendSystemPrompt: "be terse",
 		})
-		if req.Preset != "review" || req.Thinking != "high" || req.AppendSystemPrompt != "be terse" {
-			t.Fatalf("scalar fields not copied: %+v", req)
-		}
+		assert.NewAborting(t).False(req.Preset != "review" || req.Thinking != "high" || req.AppendSystemPrompt != "be terse", "scalar fields not copied: %+v", req)
 	})
 
 	for _, tc := range []struct {
@@ -55,16 +55,13 @@ func TestPresetWiringShapingTriState(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Run("nil means no request", func(t *testing.T) {
+				c := assert.NewCollecting(t)
 				var spec tools.SpawnSpec
 				tc.set(&spec, nil)
 				var req protocol.SpawnRequest
 				applySpawnSpecShaping(&req, spec)
-				if tc.off(&req) {
-					t.Errorf("%s: off flag set for a nil request", tc.name)
-				}
-				if got := tc.got(&req); len(got) != 0 {
-					t.Errorf("%s: list set for a nil request: %v", tc.name, got)
-				}
+				c.False(tc.off(&req), "%s: off flag set for a nil request", tc.name)
+				c.Empty(tc.got(&req), "%s: list set for a nil request", tc.name)
 			})
 			t.Run("empty means none", func(t *testing.T) {
 				empty := []string{}
@@ -72,23 +69,18 @@ func TestPresetWiringShapingTriState(t *testing.T) {
 				tc.set(&spec, &empty)
 				var req protocol.SpawnRequest
 				applySpawnSpecShaping(&req, spec)
-				if !tc.off(&req) {
-					t.Errorf("%s: off flag not set for a non-nil empty list", tc.name)
-				}
+				assert.NewCollecting(t).True(tc.off(&req), "%s: off flag not set for a non-nil empty list", tc.name)
 			})
 			t.Run("list means exactly those", func(t *testing.T) {
+				c := assert.NewCollecting(t)
 				list := []string{"alpha", "beta"}
 				var spec tools.SpawnSpec
 				tc.set(&spec, &list)
 				var req protocol.SpawnRequest
 				applySpawnSpecShaping(&req, spec)
-				if tc.off(&req) {
-					t.Errorf("%s: off flag set for a non-empty list", tc.name)
-				}
+				c.False(tc.off(&req), "%s: off flag set for a non-empty list", tc.name)
 				got := tc.got(&req)
-				if len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
-					t.Errorf("%s: got %v, want [alpha beta]", tc.name, got)
-				}
+				c.False(len(got) != 2 || got[0] != "alpha" || got[1] != "beta", "%s: got %v, want [alpha beta]", tc.name, got)
 			})
 		})
 	}
@@ -106,9 +98,7 @@ func TestPresetWiringShapingTriState(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				var req protocol.SpawnRequest
 				applySpawnSpecShaping(&req, tools.SpawnSpec{ContextFiles: tc.in})
-				if req.NoContextFiles != tc.want {
-					t.Errorf("NoContextFiles = %v, want %v", req.NoContextFiles, tc.want)
-				}
+				assert.NewCollecting(t).Eq(tc.want, req.NoContextFiles, "NoContextFiles")
 			})
 		}
 	})
@@ -130,9 +120,8 @@ func TestPresetWiringSpawnersLeaveKindEmptyWithPreset(t *testing.T) {
 		{"a preset with an explicit kind keeps it", tools.SpawnSpec{Kind: "claude", Preset: "x"}, "claude"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := spawnKind(tc.spec); got != tc.want {
-				t.Fatalf("spawnKind(%+v) = %q, want %q", tc.spec, got, tc.want)
-			}
+			got := spawnKind(tc.spec)
+			assert.NewAborting(t).Eq(tc.want, got, "spawnKind(%+v) = %q, want", tc.spec, got)
 		})
 	}
 }

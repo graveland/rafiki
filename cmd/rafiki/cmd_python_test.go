@@ -12,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The tree contract: `python` sits under the root with the alias `py`, and
@@ -19,10 +21,9 @@ import (
 // sources. Aliases are guarded the same way aliases_test.go guards the rest
 // of the CLI — presence is a test failure away from silent regression.
 func TestPythonCommandTree(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd, _, err := newRootCmd().Find([]string{"python"})
-	if err != nil {
-		t.Fatalf("find python: %v", err)
-	}
+	c.Require().NoError(err, "find python")
 	if !cmd.HasAlias("py") {
 		t.Errorf("python aliases = %v, want \"py\" present", cmd.Aliases)
 	}
@@ -31,20 +32,14 @@ func TestPythonCommandTree(t *testing.T) {
 		got[sub.Name()] = true
 	}
 	for _, want := range []string{"list", "get", "put", "delete", "repo"} {
-		if !got[want] {
-			t.Errorf("python subcommands missing %q (have %v)", want, got)
-		}
+		c.False(!got[want], "python subcommands missing %q (have %v)", want, got)
 	}
-	if len(got) != 5 {
-		t.Errorf("python subcommands = %v, want exactly list/get/put/delete/repo", got)
-	}
+	c.Len(got, 5, "python subcommands")
 
 	// The alias resolves to the same command: `rafiki py list` must be
 	// `rafiki python list`, not a second registration of it.
 	aliased, _, err := newRootCmd().Find([]string{"py", "list"})
-	if err != nil {
-		t.Fatalf("find py list: %v", err)
-	}
+	c.Require().NoError(err, "find py list")
 	if aliased.Name() != "list" || aliased.Parent().Name() != "python" {
 		t.Errorf("py list resolved to %q under %q, want list under python",
 			aliased.Name(), aliased.Parent().Name())
@@ -56,14 +51,13 @@ func TestPythonCommandTree(t *testing.T) {
 // completePyModuleNames. Arg validation runs before RunE, so every Execute
 // here fails without dialing anything.
 func TestPythonArgAndCompletionContracts(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	get := newPythonGetCmd()
 	del := newPythonDeleteCmd()
 	put := newPythonPutCmd()
 
 	for _, c := range []*cobra.Command{get, del, put} {
-		if c.ValidArgsFunction == nil {
-			t.Errorf("%s: ValidArgsFunction is nil, want completePyModuleNames", c.Name())
-		}
+		ck.NotNil(c.ValidArgsFunction, "%s: ValidArgsFunction is nil, want completePyModuleNames", c.Name())
 	}
 
 	// Exactly-one-name, exercised through the parser the user hits.
@@ -79,9 +73,7 @@ func TestPythonArgAndCompletionContracts(t *testing.T) {
 		tc.cmd.SetOut(buf)
 		tc.cmd.SetErr(buf)
 		tc.cmd.SetArgs(tc.args)
-		if err := tc.cmd.Execute(); err == nil {
-			t.Errorf("%s %v: executed without error, want an arg-count refusal", tc.cmd.Name(), tc.args)
-		}
+		ck.Error(tc.cmd.Execute(), "%s %v: executed without error, want an arg-count refusal", tc.cmd.Name(), tc.args)
 	}
 
 	// list takes no arguments at all.
@@ -89,9 +81,7 @@ func TestPythonArgAndCompletionContracts(t *testing.T) {
 	list.SetOut(&bytes.Buffer{})
 	list.SetErr(&bytes.Buffer{})
 	list.SetArgs([]string{"extra"})
-	if err := list.Execute(); err == nil {
-		t.Error("list extra: executed without error, want a NoArgs refusal")
-	}
+	ck.Error(list.Execute(), "list extra: executed without error, want a NoArgs refusal")
 
 	// Past the one name a verb takes, completion offers nothing — and this
 	// branch returns before it touches a profile, so it is safe to call bare.
@@ -115,22 +105,19 @@ func TestPythonArgAndCompletionContracts(t *testing.T) {
 // check runs before newConnectEndpoint, so the string can only come from it,
 // never from whatever profile an ambient environment points at.
 func TestPythonPutRequiresFileAndValidName(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	put := newPythonPutCmd()
 	put.SetOut(&bytes.Buffer{})
 	put.SetErr(&bytes.Buffer{})
 	put.SetArgs([]string{"helper"})
 	err := put.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--file is required") {
-		t.Fatalf("put helper (no --file) = %v, want \"--file is required\"", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "--file is required"), "put helper (no --file) = %v, want \"--file is required\"", err)
 
 	// With a file present, the client-side ValidName pre-check fires — the
 	// same check the daemon re-runs, but here it costs no round trip.
 	src := t.TempDir() + "/helper.py"
-	if err := writeFileForTest(src, "x = 1\n"); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(writeFileForTest(src, "x = 1\n"))
 	put = newPythonPutCmd()
 	put.SetOut(&bytes.Buffer{})
 	put.SetErr(&bytes.Buffer{})
@@ -148,6 +135,7 @@ func writeFileForTest(path, content string) error {
 // "2006-01-02 15:04", and "-" for an absent description — the fallbacks an
 // inventory row must render rather than blanks.
 func TestPythonListCells(t *testing.T) {
+	c := assert.NewCollecting(t)
 	row := func(name, repo string, version int64, createdAt, description string) *rafikiv1.PymoduleRow {
 		return &rafikiv1.PymoduleRow{
 			Name:        name,
@@ -159,45 +147,33 @@ func TestPythonListCells(t *testing.T) {
 	}
 	name, repo, version, saved, description := pymoduleCells(
 		row("helper", "local", 7, "2026-09-18T12:34:56Z", ""))
-	if name != "helper" || repo != "local" || version != "7" || saved != "2026-09-18 12:34" || description != "-" {
-		t.Errorf("pymoduleCells = (%q,%q,%q,%q,%q), want (helper,local,7,2026-09-18 12:34,-)",
-			name, repo, version, saved, description)
-	}
+	c.False(name != "helper" || repo != "local" || version != "7" || saved != "2026-09-18 12:34" || description != "-", "pymoduleCells = (%q,%q,%q,%q,%q), want (helper,local,7,2026-09-18 12:34,-)", name, repo, version, saved, description)
 
 	if got := formatSavedAt(""); got != "-" {
 		t.Errorf("formatSavedAt(\"\") = %q, want \"-\"", got)
 	}
 	// A timestamp that does not parse is displayed, not blanked: a daemon
 	// clock this daemon wrote must stay visible even when malformed.
-	if got := formatSavedAt("not-a-timestamp"); got != "not-a-timestamp" {
-		t.Errorf("formatSavedAt(unparseable) = %q, want the raw string", got)
-	}
+	c.Eq("not-a-timestamp", formatSavedAt("not-a-timestamp"), "formatSavedAt(unparseable)")
 
 	// The version's absent marker mirrors the timestamp's: a git-sourced row
 	// has no version, and 0 is the wire's way of saying "none".
 	if got := formatVersion(0); got != "-" {
 		t.Errorf("formatVersion(0) = %q, want \"-\"", got)
 	}
-	if got := formatVersion(7); got != "7" {
-		t.Errorf("formatVersion(7) = %q, want \"7\"", got)
-	}
+	got := formatVersion(7)
+	c.Eq("7", got, "formatVersion(7) = %q, want \"7\"", got)
 
 	// The rendered table names the five columns and never prints CODE.
 	var buf bytes.Buffer
-	if err := renderPymoduleList(&buf, []*rafikiv1.PymoduleRow{
+	c.Require().NoError(renderPymoduleList(&buf, []*rafikiv1.PymoduleRow{
 		row("helper", "local", 7, "2026-09-18T12:34:56Z", "reusable helpers"),
-	}, false); err != nil {
-		t.Fatal(err)
-	}
+	}, false))
 	out := buf.String()
 	for _, want := range []string{"NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION", "helper", "local", "7", "2026-09-18 12:34", "reusable helpers"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("renderPymoduleList output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "renderPymoduleList output missing")
 	}
-	if strings.Contains(out, "CODE") {
-		t.Errorf("renderPymoduleList prints a CODE column:\n%s", out)
-	}
+	c.NotStrContains(out, "CODE", "renderPymoduleList prints a CODE column:\n")
 }
 
 // TestPythonListRepoColumnRendersLocalAndGitRows pins the REPO column: a
@@ -206,21 +182,18 @@ func TestPythonListCells(t *testing.T) {
 // neither a version nor a save time, its source of truth being the repo's own
 // history.
 func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []*rafikiv1.PymoduleRow{
 		{Name: "helper", Repo: "local", Version: 7, CreatedAt: "2026-09-18T12:34:56Z", Description: "saved here"},
 		{Name: "rotate_keys", Repo: "ops_tools", Description: "rotates keys"},
 	}
 	var buf bytes.Buffer
-	if err := renderPymoduleList(&buf, rows, false); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(renderPymoduleList(&buf, rows, false))
 	out := buf.String()
 	for _, want := range []string{"NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION",
 		"helper", "local", "7", "2026-09-18 12:34", "saved here",
 		"rotate_keys", "ops_tools", "rotates keys"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("renderPymoduleList output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "renderPymoduleList output missing")
 	}
 
 	var gitLine string
@@ -230,15 +203,10 @@ func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
 			break
 		}
 	}
-	if gitLine == "" {
-		t.Fatalf("rotate_keys row not rendered:\n%s", out)
-	}
-	if n := strings.Count(gitLine, "-"); n < 2 {
-		t.Errorf("git-sourced row %q: only %d \"-\" cell(s), want the absent VERSION and SAVED both rendered \"-\"", gitLine, n)
-	}
-	if strings.Contains(gitLine, "0") {
-		t.Errorf("git-sourced row rendered a zero version: %q", gitLine)
-	}
+	c.Require().NotEq("", gitLine, "rotate_keys row not rendered:\n%s", out)
+	n := strings.Count(gitLine, "-")
+	c.GreaterOrEqual(2, n, "git-sourced row %q: only %d \"-\" cell(s), want the absent VERSION and SAVED both rendered \"-\"", gitLine, n)
+	c.NotStrContains(gitLine, "0", "git-sourced row rendered a zero version")
 }
 
 // The JSON shapes: list -j wraps the rows in the {"rows": …} envelope, list
@@ -247,6 +215,7 @@ func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
 // the likeliest silent-drift point in the emit helpers — so they are pinned
 // here rather than only end-to-end.
 func TestPythonJSONShapes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	wireRow := func() *rafikiv1.PymoduleRow {
 		// Mirrors the wire: list rows arrive codeless, get/put rows arrive
 		// with the code. omitempty must keep the empty code out of list's
@@ -261,63 +230,43 @@ func TestPythonJSONShapes(t *testing.T) {
 	var listBuf bytes.Buffer
 	codeless := wireRow()
 	codeless.Code = ""
-	if err := emitPymoduleList(&listBuf, []*rafikiv1.PymoduleRow{codeless}, outputJSON, false); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(emitPymoduleList(&listBuf, []*rafikiv1.PymoduleRow{codeless}, outputJSON, false))
 	var listEnv struct {
 		Rows []*rafikiv1.PymoduleRow `json:"rows"`
 	}
 	if err := json.Unmarshal(listBuf.Bytes(), &listEnv); err != nil {
 		t.Fatalf("list -j: not a {\"rows\": …} envelope: %v\n%s", err, listBuf.String())
 	}
-	if len(listEnv.Rows) != 1 || listEnv.Rows[0].Name != "helper" {
-		t.Errorf("list -j rows = %+v, want [helper]", listEnv.Rows)
-	}
+	c.False(len(listEnv.Rows) != 1 || listEnv.Rows[0].Name != "helper", "list -j rows = %+v, want [helper]", listEnv.Rows)
 	if bytes.Contains(listBuf.Bytes(), []byte(`"code"`)) {
 		t.Errorf("list -j carries a code key:\n%s", listBuf.String())
 	}
 
 	// list -J: one compact row per line, no envelope.
 	var jsonlBuf bytes.Buffer
-	if err := emitPymoduleList(&jsonlBuf, []*rafikiv1.PymoduleRow{codeless, codeless}, outputJSONL, false); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(emitPymoduleList(&jsonlBuf, []*rafikiv1.PymoduleRow{codeless, codeless}, outputJSONL, false))
 	lines := strings.Split(strings.TrimRight(jsonlBuf.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("list -J emitted %d lines, want 2:\n%s", len(lines), jsonlBuf.String())
-	}
+	c.Require().Len(lines, 2, "list -J emitted %d lines, want 2:\n%s", len(lines), jsonlBuf.String())
 	for i, line := range lines {
 		var row rafikiv1.PymoduleRow
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			t.Errorf("list -J line %d: not a bare row: %v\n%s", i, err, line)
-		}
-		if row.Name != "helper" {
-			t.Errorf("list -J line %d: name %q, want helper", i, row.Name)
-		}
+		err := json.Unmarshal([]byte(line), &row)
+		c.NoError(err, "list -J line %d: not a bare row: %v\n%s", i, err, line)
+		c.Eq("helper", row.Name, "list -J line %d: name %q, want helper", i, row.Name)
 	}
 
 	// get/put -j: the full row including code, with no envelope around it.
 	for _, mode := range []outputMode{outputJSON, outputJSONL} {
 		var buf bytes.Buffer
-		if err := emitPymoduleCode(&buf, wireRow(), mode); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(emitPymoduleCode(&buf, wireRow(), mode))
 		var row rafikiv1.PymoduleRow
-		if err := json.Unmarshal(buf.Bytes(), &row); err != nil {
-			t.Fatalf("emitPymoduleCode mode %v: not a bare row: %v\n%s", mode, err, buf.String())
-		}
-		if row.Code != "x = 1" || row.Version != 7 || row.Name != "helper" {
-			t.Errorf("emitPymoduleCode mode %v: got name=%q version=%d code=%q, want helper/7/\"x = 1\"", mode, row.Name, row.Version, row.Code)
-		}
+		err := json.Unmarshal(buf.Bytes(), &row)
+		c.Require().NoError(err, "emitPymoduleCode mode %v: not a bare row: %v\n%s", mode, err, buf.String())
+		c.False(row.Code != "x = 1" || row.Version != 7 || row.Name != "helper", "emitPymoduleCode mode %v: got name=%q version=%d code=%q, want helper/7/\"x = 1\"", mode, row.Name, row.Version, row.Code)
 	}
 
 	// get in table mode writes the code raw to w — byte-for-byte, no
 	// decoration — so it can feed a file or an editor unchanged.
 	var rawBuf bytes.Buffer
-	if err := emitPymoduleCode(&rawBuf, wireRow(), outputAuto); err != nil {
-		t.Fatal(err)
-	}
-	if got := rawBuf.String(); got != "x = 1\n" {
-		t.Errorf("emitPymoduleCode table mode = %q, want %q", got, "x = 1\n")
-	}
+	c.Require().NoError(emitPymoduleCode(&rawBuf, wireRow(), outputAuto))
+	c.Eq("x = 1\n", rawBuf.String(), "emitPymoduleCode table mode")
 }

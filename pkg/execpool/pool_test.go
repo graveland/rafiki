@@ -8,6 +8,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The bug, reproduced: healthLoop holds p.mu and calls Park, which takes p.mu
@@ -19,6 +21,7 @@ import (
 // a deadlocked test does not fail, it hangs — and a hang in CI reads as
 // infrastructure trouble rather than as this.
 func TestHealthFailureParksWithoutWedgingThePool(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := New(nil)
 	lc := &liveConn{done: make(chan struct{})}
 	p.live["exec-1"] = lc
@@ -47,12 +50,9 @@ func TestHealthFailureParksWithoutWedgingThePool(t *testing.T) {
 		t.Fatal("Live() blocked after a health failure — the lock was never released")
 	}
 
-	if !p.Parked("exec-1") {
-		t.Fatal("a failed health check must park the executor")
-	}
-	if _, err := p.ClientFor("exec-1"); err == nil {
-		t.Fatal("a parked executor must not hand out a client")
-	}
+	c.True(p.Parked("exec-1"), "a failed health check must park the executor")
+	_, err := p.ClientFor("exec-1")
+	c.Error(err, "a parked executor must not hand out a client")
 }
 
 // An executor restart installs a NEW liveConn under the same ID, and the old
@@ -62,6 +62,7 @@ func TestHealthFailureParksWithoutWedgingThePool(t *testing.T) {
 // its own replacement, parked a healthy executor, and (once the park expired)
 // fired onLost against children that were running fine.
 func TestStaleHealthLoopCannotEvictItsReplacement(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := New(nil)
 	lc1 := &liveConn{done: make(chan struct{})}
 	lc2 := &liveConn{done: make(chan struct{})}
@@ -72,18 +73,13 @@ func TestStaleHealthLoopCannotEvictItsReplacement(t *testing.T) {
 	// The OLD loop now notices its dead socket.
 	p.onHealthFailure("exec-1", lc1)
 
-	if p.Parked("exec-1") {
-		t.Fatal("a stale health loop parked a live executor")
-	}
+	c.False(p.Parked("exec-1"), "a stale health loop parked a live executor")
 	p.mu.RLock()
 	got := p.live["exec-1"]
 	p.mu.RUnlock()
-	if got != lc2 {
-		t.Fatal("the stale loop evicted its own replacement")
-	}
-	if _, err := p.ClientFor("exec-1"); err != nil {
-		t.Fatalf("the replacement must still serve clients: %v", err)
-	}
+	c.Eq(lc2, got, "the stale loop evicted its own replacement")
+	_, err := p.ClientFor("exec-1")
+	c.NoError(err, "the replacement must still serve clients")
 }
 
 // The same identity check on handleConn's exit path. This one is reached by
@@ -102,9 +98,7 @@ func TestHandleConnExitDoesNotEvictAReplacement(t *testing.T) {
 	p.mu.RLock()
 	got, ok := p.live["exec-1"]
 	p.mu.RUnlock()
-	if !ok || got != lc2 {
-		t.Fatal("a departing connection removed the entry belonging to its replacement")
-	}
+	assert.NewAborting(t).False(!ok || got != lc2, "a departing connection removed the entry belonging to its replacement")
 }
 
 // Displacing a connection must TEAR IT DOWN. Its handleConn is parked on
@@ -154,9 +148,7 @@ func TestParkIsANoopWhenTheExecutorIsAlreadyBack(t *testing.T) {
 	p := New(nil)
 	p.live["exec-1"] = &liveConn{done: make(chan struct{})}
 	p.Park("exec-1", time.Minute)
-	if p.Parked("exec-1") {
-		t.Fatal("parked an executor that is live")
-	}
+	assert.NewAborting(t).False(p.Parked("exec-1"), "parked an executor that is live")
 }
 
 // The three errors exist to be RETURNED. Today nothing returns any of them:
@@ -171,14 +163,14 @@ func TestClientForReturnsTypedDepartureErrors(t *testing.T) {
 	}
 
 	p.Park("napping", time.Minute)
-	if _, err := p.ClientFor("napping"); !errors.Is(err, ErrParked) {
-		t.Errorf("a parked executor must report ErrParked so the caller knows to WAIT, got %v", err)
-	}
+	_, err := p.ClientFor("napping")
+	assert.NewCollecting(t).ErrorIs(err, ErrParked, "a parked executor must report ErrParked so the caller knows to WAIT, got")
 }
 
 // The park timeout is what converts "may return" into "gone". Until it fires
 // the children wait; after it fires they must be TOLD.
 func TestExpiredParkNotifiesRatherThanOnlyLogging(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := New(nil)
 	var lost []string
 	var mu sync.Mutex
@@ -192,15 +184,10 @@ func TestExpiredParkNotifiesRatherThanOnlyLogging(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(lost) != 1 || lost[0] != "gone" {
-		t.Fatalf("an expired park must notify; got %v", lost)
-	}
-	if p.Parked("gone") {
-		t.Fatal("an expired entry must be removed")
-	}
-	if _, err := p.ClientFor("gone"); !errors.Is(err, ErrExecutorLost) {
-		t.Fatalf("after the timeout it is lost, not parked: %v", err)
-	}
+	c.False(len(lost) != 1 || lost[0] != "gone", "an expired park must notify; got %v", lost)
+	c.False(p.Parked("gone"), "an expired entry must be removed")
+	_, err := p.ClientFor("gone")
+	c.ErrorIs(err, ErrExecutorLost, "after the timeout it is lost, not parked")
 }
 
 // Reconnecting with the same identity reattaches. This is the sleeping-laptop
@@ -209,9 +196,7 @@ func TestReconnectBeforeTheTimeoutClearsThePark(t *testing.T) {
 	p := New(nil)
 	p.Park("napping", time.Minute)
 	p.reattach("napping")
-	if p.Parked("napping") {
-		t.Fatal("a reconnect must clear the park")
-	}
+	assert.NewAborting(t).False(p.Parked("napping"), "a reconnect must clear the park")
 }
 
 // Draining is learned at DISPATCH, not after a polling interval. That is the
@@ -220,9 +205,8 @@ func TestDrainingIsLearnedOnTheNextCall(t *testing.T) {
 	p := New(nil)
 	lc := &liveConn{done: make(chan struct{}), draining: true}
 	p.live["exec-1"] = lc
-	if _, err := p.ClientFor("exec-1"); !errors.Is(err, ErrDraining) {
-		t.Fatalf("a draining executor must report ErrDraining so the caller can pick another; got %v", err)
-	}
+	_, err := p.ClientFor("exec-1")
+	assert.NewAborting(t).ErrorIs(err, ErrDraining, "a draining executor must report ErrDraining so the caller can pick another; got")
 }
 
 // Live() must report when a connection was established, not just that it
@@ -240,9 +224,7 @@ func TestLiveReportsConnectedAt(t *testing.T) {
 	p.live["exec-1"] = lc
 
 	live := p.Live()
-	if len(live) != 1 {
-		t.Fatalf("Live() = %d entries, want 1", len(live))
-	}
+	assert.NewAborting(t).Len(live, 1, "Live() = %d entries, want 1", len(live))
 	if !live[0].ConnectedAt.Equal(want) {
 		t.Errorf("ConnectedAt = %v, want %v", live[0].ConnectedAt, want)
 	}

@@ -6,8 +6,9 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type modeVal struct {
@@ -21,44 +22,31 @@ func tableVal(w io.Writer, v modeVal) error {
 }
 
 func TestRenderModeTableDelegates(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := Render(&buf, modeVal{Name: "x", Count: 1}, ModeTable, tableVal); err != nil {
-		t.Fatal(err)
-	}
-	if got := buf.String(); got != "TABLE:x" {
-		t.Errorf("got %q, want %q", got, "TABLE:x")
-	}
+	c.Require().NoError(Render(&buf, modeVal{Name: "x", Count: 1}, ModeTable, tableVal))
+	c.Eq("TABLE:x", buf.String(), "got")
 }
 
 func TestRenderModeJSONIndented(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := Render(&buf, modeVal{Name: "x", Count: 1}, ModeJSON, tableVal); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(Render(&buf, modeVal{Name: "x", Count: 1}, ModeJSON, tableVal))
 	got := buf.String()
-	if strings.Contains(got, "TABLE:") {
-		t.Errorf("table renderer ran in ModeJSON: %q", got)
-	}
-	if !strings.Contains(got, "\n  \"name\": \"x\"") {
-		t.Errorf("not indented: %q", got)
-	}
+	c.NotStrContains(got, "TABLE:", "table renderer ran in ModeJSON")
+	c.StrContains(got, "\n  \"name\": \"x\"", "not indented")
 }
 
 func TestRenderModeJSONCompactIsOneLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var buf bytes.Buffer
-	if err := Render(&buf, modeVal{Name: "x", Count: 1}, ModeJSONCompact, tableVal); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(Render(&buf, modeVal{Name: "x", Count: 1}, ModeJSONCompact, tableVal))
 	got := buf.String()
-	if want := `{"name":"x","count":1}` + "\n"; got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
+	c.Eq(`{"name":"x","count":1}`+"\n", got, "got")
 }
 
 func TestRenderModePropagatesTableError(t *testing.T) {
 	boom := errors.New("boom")
 	err := Render(io.Discard, modeVal{}, ModeTable, func(io.Writer, modeVal) error { return boom })
-	if !errors.Is(err, boom) {
-		t.Errorf("got %v, want %v", err, boom)
-	}
+	assert.NewCollecting(t).ErrorIs(err, boom, "got")
 }

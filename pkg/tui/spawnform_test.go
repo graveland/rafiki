@@ -12,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func keyMsg(s string) tea.KeyPressMsg {
@@ -42,9 +44,7 @@ func formCockpit(t *testing.T) *Cockpit {
 	t.Helper()
 	c := railWith(t, "c_1")
 	c.handleKey(keyMsg("n"))
-	if c.form == nil {
-		t.Fatal("n on the agents pane did not open the create form")
-	}
+	assert.NewAborting(t).NotNil(c.form, "n on the agents pane did not open the create form")
 	return c
 }
 
@@ -53,29 +53,25 @@ func formCockpit(t *testing.T) *Cockpit {
 // (added with this test) sits beside kind because both decide where/how a
 // child runs while the model only decides what it runs.
 func TestModelIsTheLastFormField(t *testing.T) {
-	if fieldModel != spawnFieldCount-1 {
-		t.Fatalf("fieldModel must be the last field (index %d), got index %d", spawnFieldCount-1, fieldModel)
-	}
+	assert.NewAborting(t).Eq(spawnFieldCount-1, fieldModel, "fieldModel must be the last field (index")
 }
 
 // The executor row feeds SpawnRequest.ExecutorRef: a machine name or id naming
 // one specific executor, blank meaning the kind-aware auto-resolve.
 func TestSpawnParamsCarriesExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
 	f := newSpawnForm()
 	f.inputs[fieldExecutor].SetValue("greyshift")
 	f.inputs[fieldCwd].SetValue("/tmp")
 	p, problem := f.params(nil)
-	if problem != "" {
-		t.Fatal(problem)
-	}
-	if p.executor != "greyshift" {
-		t.Fatalf("want executor=greyshift, got %q", p.executor)
-	}
+	c.Eq("", problem)
+	c.Eq("greyshift", p.executor, "want executor=greyshift, got")
 }
 
 // A spawn's defaults carry an executor the same way they carry a model, so
 // `rafiki create -i --executor greyshift` shows what it is about to target.
 func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewCockpit(Options{
 		BaseURL:    "http://127.0.0.1:1",
 		OpenCreate: true,
@@ -83,18 +79,15 @@ func TestOpenCreatePrefillsTheExecutor(t *testing.T) {
 			Name: "reviewer", Kind: "claude", Executor: "greyshift", Cwd: "/tmp/x",
 		},
 	})
-	if c.form == nil {
-		t.Fatal("OpenCreate did not open the form")
-	}
-	if got := c.form.inputs[fieldExecutor].Value(); got != "greyshift" {
-		t.Errorf("executor = %q, want greyshift", got)
-	}
+	ck.Require().NotNil(c.form, "OpenCreate did not open the form")
+	ck.Eq("greyshift", c.form.inputs[fieldExecutor].Value(), "executor")
 }
 
 // A preset named by the caller rides every spawn the form issues — it is not
 // an editable field, so nothing is shown and nothing the user types can drop
 // it; buildSpawnRequest is what puts it on the wire.
 func TestPresetDefaultsRideTheFormWithoutBeingAField(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewCockpit(Options{
 		BaseURL:    "http://127.0.0.1:1",
 		OpenCreate: true,
@@ -102,22 +95,14 @@ func TestPresetDefaultsRideTheFormWithoutBeingAField(t *testing.T) {
 			Name: "reviewer", Kind: "claude", Preset: "reviewer", Cwd: "/tmp/x",
 		},
 	})
-	if c.form == nil {
-		t.Fatal("OpenCreate did not open the form")
-	}
+	ck.Require().NotNil(c.form, "OpenCreate did not open the form")
 	sp, errMsg := c.form.params(nil)
-	if errMsg != "" {
-		t.Fatalf("form params: %s", errMsg)
-	}
+	ck.Require().Eq("", errMsg, "form params")
 	req := c.buildSpawnRequest(sp)
-	if got := req.GetPreset(); got != "reviewer" {
-		t.Errorf("Preset = %q, want reviewer on the wire request", got)
-	}
+	ck.Eq("reviewer", req.GetPreset(), "Preset")
 	// The established contract: with a preset the model prefill stays empty —
 	// the daemon resolves the preset's model.
-	if got := c.form.inputs[fieldModel].Value(); got != "" {
-		t.Errorf("model prefill = %q, want empty under a preset", got)
-	}
+	ck.Eq("", c.form.inputs[fieldModel].Value(), "model prefill")
 }
 
 func TestNOpensTheCreateForm(t *testing.T) {
@@ -127,59 +112,47 @@ func TestNOpensTheCreateForm(t *testing.T) {
 // n must do nothing from the input pane: it is a letter, and typing "now" into
 // a prompt must not spawn an agent.
 func TestNInTheInputPaneIsJustALetter(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.focus = focusInput
 	c.handleKey(keyMsg("n"))
 
-	if c.form != nil {
-		t.Fatal("n opened the create form while typing")
-	}
-	if !strings.Contains(c.ta.Value(), "n") {
-		t.Errorf("textarea = %q, want the letter to have been typed", c.ta.Value())
-	}
+	ck.Require().Nil(c.form, "n opened the create form while typing")
+	ck.StrContains(c.ta.Value(), "n", "textarea")
 }
 
 // The modal is checked BEFORE the globals, so tab must move between fields
 // rather than reaching cyclePane.
 func TestTabCyclesFieldsRatherThanPanes(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	before := c.focus
 
 	c.handleKey(keyMsg("tab"))
 
-	if c.form.focus != fieldKind {
-		t.Errorf("form focus = %v, want fieldKind", c.form.focus)
-	}
-	if c.focus != before {
-		t.Error("tab reached the pane ring; a modal must own that key")
-	}
+	ck.Eq(fieldKind, c.form.focus, "form focus")
+	ck.Eq(before, c.focus, "tab reached the pane ring; a modal must own that key")
 }
 
 func TestFieldFocusWrapsBothWays(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.handleKey(keyMsg("shift+tab"))
-	if c.form.focus != spawnFieldCount-1 {
-		t.Errorf("focus = %v, want the last field after wrapping back", c.form.focus)
-	}
+	ck.Eq(spawnFieldCount-1, c.form.focus, "focus")
 	c.handleKey(keyMsg("tab"))
-	if c.form.focus != fieldName {
-		t.Errorf("focus = %v, want fieldName after wrapping forward", c.form.focus)
-	}
+	ck.Eq(fieldName, c.form.focus, "focus")
 }
 
 func TestKindCyclesAndIsNeverFreeText(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.focus = fieldKind
 
 	first := c.form.kind()
 	c.handleKey(keyMsg("right"))
-	if c.form.kind() == first {
-		t.Fatal("→ did not change the kind")
-	}
+	ck.Require().NotEq(first, c.form.kind(), "→ did not change the kind")
 	c.handleKey(keyMsg("left"))
-	if c.form.kind() != first {
-		t.Error("← did not restore the kind; the cycle must be symmetric")
-	}
+	ck.Eq(first, c.form.kind(), "← did not restore the kind; the cycle must be symmetric")
 
 	// A letter on the kind row must be swallowed, not typed anywhere.
 	c.handleKey(keyMsg("z"))
@@ -201,79 +174,58 @@ func TestSpaceCyclesTheKindRow(t *testing.T) {
 
 	c.handleKey(keyMsg("space"))
 
-	if c.form.kind() == first {
-		t.Errorf("space did not cycle the kind; still %q", first)
-	}
+	assert.NewCollecting(t).NotEq(first, c.form.kind(), "space did not cycle the kind; still")
 }
 
 func TestEscapeCancelsTheForm(t *testing.T) {
 	c := formCockpit(t)
 	c.handleKey(keyMsg("esc"))
-	if c.form != nil {
-		t.Error("esc did not close the form")
-	}
+	assert.NewCollecting(t).Nil(c.form, "esc did not close the form")
 }
 
 // ^C in a modal cancels the modal. It must NOT arm the cockpit's quit.
 func TestCtrlCCancelsTheFormWithoutArmingQuit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.handleKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 
-	if c.form != nil {
-		t.Error("^C did not close the form")
-	}
-	if !c.quitArmed.IsZero() {
-		t.Error("^C armed quit from inside a modal")
-	}
+	ck.Nil(c.form, "^C did not close the form")
+	ck.True(c.quitArmed.IsZero(), "^C armed quit from inside a modal")
 }
 
 // cwd is required by the server. Catching it here keeps the values on screen
 // instead of spending a round trip to be told.
 func TestEmptyCwdIsRefusedLocally(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.inputs[fieldCwd].SetValue("")
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd != nil {
-		t.Error("submitted with no cwd; the server would refuse it")
-	}
-	if c.form == nil {
-		t.Fatal("form closed on a validation failure")
-	}
-	if !strings.Contains(c.form.err, "cwd") {
-		t.Errorf("err = %q, want it to name cwd", c.form.err)
-	}
+	ck.Nil(cmd, "submitted with no cwd; the server would refuse it")
+	ck.Require().NotNil(c.form, "form closed on a validation failure")
+	ck.StrContains(c.form.err, "cwd", "err")
 }
 
 func TestCwdIsPrefilled(t *testing.T) {
 	c := formCockpit(t)
-	if c.form.inputs[fieldCwd].Value() == "" {
-		t.Error("cwd was not prefilled; every create would need it typed by hand")
-	}
+	assert.NewCollecting(t).NotEq("", c.form.inputs[fieldCwd].Value(), "cwd was not prefilled; every create would need it typed by hand")
 }
 
 // A refused spawn keeps the form and its values: the daemon's complaint is
 // usually about one field, and dismissing throws away what needs correcting.
 func TestSpawnFailureKeepsTheFormAndItsValues(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.inputs[fieldName].SetValue("scout")
 	c.form.busy = true
 
 	c.applySpawned(spawnedMsg{err: errors.New("internal: no such directory")})
 
-	if c.form == nil {
-		t.Fatal("a failed spawn dismissed the form")
-	}
-	if c.form.inputs[fieldName].Value() != "scout" {
-		t.Error("the typed name was lost")
-	}
-	if c.form.busy {
-		t.Error("form still busy after a failure; a retry would be impossible")
-	}
-	if !strings.Contains(c.form.err, "no such directory") {
-		t.Errorf("err = %q, want the daemon's reason", c.form.err)
-	}
+	ck.Require().NotNil(c.form, "a failed spawn dismissed the form")
+	ck.Eq("scout", c.form.inputs[fieldName].Value(), "the typed name was lost")
+	ck.False(c.form.busy, "form still busy after a failure; a retry would be impossible")
+	ck.StrContains(c.form.err, "no such directory", "err")
 }
 
 func TestSpawnSuccessClosesTheForm(t *testing.T) {
@@ -282,9 +234,7 @@ func TestSpawnSuccessClosesTheForm(t *testing.T) {
 
 	c.applySpawned(spawnedMsg{childID: "c_new"})
 
-	if c.form != nil {
-		t.Error("form stayed open after a successful create")
-	}
+	assert.NewCollecting(t).Nil(c.form, "form stayed open after a successful create")
 }
 
 // A second Enter while the first is in flight must not create two agents.
@@ -292,40 +242,33 @@ func TestBusyFormRefusesASecondSubmit(t *testing.T) {
 	c := formCockpit(t)
 	c.form.busy = true
 
-	if _, cmd := c.handleKey(keyMsg("enter")); cmd != nil {
-		t.Error("a busy form submitted again")
-	}
+	_, cmd := c.handleKey(keyMsg("enter"))
+	assert.NewCollecting(t).Nil(cmd, "a busy form submitted again")
 }
 
 // The modal must render instead of the transcript, and ahead of the help sheet.
 func TestFormOwnsTheBodyPane(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.showHelp = true
 	c.width, c.height, c.ready = 100, 30, true
 
 	out := ansi.Strip(c.View().Content)
-	if !strings.Contains(out, "new agent") {
-		t.Error("the form did not render")
-	}
-	if strings.Contains(out, "closes this") {
-		t.Error("the help sheet rendered over the modal")
-	}
+	ck.StrContains(out, "new agent", "the form did not render")
+	ck.NotStrContains(out, "closes this", "the help sheet rendered over the modal")
 }
 
 func TestFormShowsEveryFieldAndBothKinds(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	out := c.form.view(80, 24, c.modelView, nil, nil)
 	for _, want := range []string{"name", "kind", "model", "cwd"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("form view is missing the %q row", want)
-		}
+		ck.StrContains(out, want, "form view is missing the")
 	}
 	// Both kinds are shown, not just the selected one: a single value gives no
 	// hint that the row can change.
 	for _, k := range spawnKinds {
-		if !strings.Contains(out, k) {
-			t.Errorf("form view does not offer kind %q", k)
-		}
+		ck.StrContains(out, k, "form view does not offer kind")
 	}
 }
 
@@ -341,15 +284,14 @@ func TestTypingReachesTheFocusedFormField(t *testing.T) {
 		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 
-	if got := c.form.inputs[fieldName].Value(); got != "scout" {
-		t.Fatalf("name field = %q, want scout — the input is not focused", got)
-	}
+	assert.NewAborting(t).Eq("scout", c.form.inputs[fieldName].Value(), "name field")
 }
 
 // Focus must MOVE with the tab order, not stay on the first field. Blurring the
 // old row and focusing the new one are two separate calls, and getting only the
 // first right yields a form where every row after the first is dead.
 func TestTypingFollowsTheFocusedField(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	// Walk by the named constant, not a tab count: the tab order changed when
 	// the executor row joined (model moved last), and a count silently became
@@ -362,46 +304,34 @@ func TestTypingFollowsTheFocusedField(t *testing.T) {
 		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 
-	if got := c.form.inputs[fieldModel].Value(); got != "opus" {
-		t.Errorf("model field = %q, want opus", got)
-	}
-	if got := c.form.inputs[fieldName].Value(); got != "" {
-		t.Errorf("name field = %q, want empty — the old row kept focus", got)
-	}
+	ck.Eq("opus", c.form.inputs[fieldModel].Value(), "model field")
+	ck.Eq("", c.form.inputs[fieldName].Value(), "name field")
 }
 
 // A modal takes the WHOLE panel: a rail behind the create form is a list you
 // cannot act on, costing width from a table that needs it.
 func TestModalsHideTheRail(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1", "c_2")
 	c.width, c.height, c.ready = 100, 30, true
-	if c.railCols() == 0 {
-		t.Fatal("no rail to begin with")
-	}
+	ck.Require().NotEq(0, c.railCols(), "no rail to begin with")
 	before := c.convWidth()
 
 	c.handleKey(keyMsg("n"))
 
-	if c.railCols() != 0 {
-		t.Error("the rail is still drawn behind the create form")
-	}
-	if c.convWidth() <= before {
-		t.Error("the form did not get the width the rail gave up")
-	}
-	if strings.Contains(ansi.Strip(c.View().Content), "c_2") {
-		t.Error("a rail row rendered behind the modal")
-	}
+	ck.Eq(0, c.railCols(), "the rail is still drawn behind the create form")
+	ck.Greater(before, c.convWidth(), "the form did not get the width the rail gave up")
+	ck.NotStrContains(ansi.Strip(c.View().Content), "c_2", "a rail row rendered behind the modal")
 
 	c.handleKey(keyMsg("esc"))
-	if c.railCols() == 0 {
-		t.Error("the rail did not come back when the modal closed")
-	}
+	ck.NotEq(0, c.railCols(), "the rail did not come back when the modal closed")
 }
 
 // `rafiki create` with nothing to go on opens straight into the form, prefilled
 // with what a bare create would have spawned — so the default case costs one ⏎
 // and shows what it is about to do.
 func TestOpenCreatePrefillsTheForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewCockpit(Options{
 		BaseURL:    "http://127.0.0.1:1",
 		OpenCreate: true,
@@ -409,21 +339,11 @@ func TestOpenCreatePrefillsTheForm(t *testing.T) {
 			Name: "reviewer", Kind: "claude", Model: "anthropic/claude-opus-5", Cwd: "/tmp/x",
 		},
 	})
-	if c.form == nil {
-		t.Fatal("OpenCreate did not open the form")
-	}
-	if got := c.form.inputs[fieldName].Value(); got != "reviewer" {
-		t.Errorf("name = %q", got)
-	}
-	if got := c.form.kind(); got != "claude" {
-		t.Errorf("kind = %q, want claude", got)
-	}
-	if got := c.form.inputs[fieldModel].Value(); got != "anthropic/claude-opus-5" {
-		t.Errorf("model = %q", got)
-	}
-	if got := c.form.inputs[fieldCwd].Value(); got != "/tmp/x" {
-		t.Errorf("cwd = %q", got)
-	}
+	ck.Require().NotNil(c.form, "OpenCreate did not open the form")
+	ck.Eq("reviewer", c.form.inputs[fieldName].Value(), "name =")
+	ck.Eq("claude", c.form.kind(), "kind")
+	ck.Eq("anthropic/claude-opus-5", c.form.inputs[fieldModel].Value(), "model =")
+	ck.Eq("/tmp/x", c.form.inputs[fieldCwd].Value(), "cwd =")
 }
 
 // ExecutorSelector is not a form field (spawnForm deliberately stays five
@@ -435,20 +355,15 @@ func TestOpenCreateCarriesTheExecutorSelector(t *testing.T) {
 		OpenCreate:       true,
 		ExecutorSelector: "owner=brent",
 	})
-	if c.executorSelector != "owner=brent" {
-		t.Errorf("executorSelector = %q, want owner=brent", c.executorSelector)
-	}
+	assert.NewCollecting(t).Eq("owner=brent", c.executorSelector, "executorSelector")
 }
 
 // Empty defaults keep the form's own, rather than blanking the prefilled cwd.
 func TestOpenCreateWithNoDefaultsKeepsTheFormsOwn(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", OpenCreate: true})
-	if c.form == nil {
-		t.Fatal("OpenCreate did not open the form")
-	}
-	if c.form.inputs[fieldCwd].Value() == "" {
-		t.Error("cwd prefill was cleared by an empty default")
-	}
+	ck.Require().NotNil(c.form, "OpenCreate did not open the form")
+	ck.NotEq("", c.form.inputs[fieldCwd].Value(), "cwd prefill was cleared by an empty default")
 }
 
 // A form opened at CONSTRUCTION never saw the `n` keypress that normally starts
@@ -456,9 +371,7 @@ func TestOpenCreateWithNoDefaultsKeepsTheFormsOwn(t *testing.T) {
 func TestOpenCreateFetchesTheCatalog(t *testing.T) {
 	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", OpenCreate: true})
 	_ = c.Init()
-	if !c.modelsBusy[c.form.kind()] {
-		t.Error("no catalog fetch was started for a form opened at construction")
-	}
+	assert.NewCollecting(t).False(!c.modelsBusy[c.form.kind()], "no catalog fetch was started for a form opened at construction")
 }
 
 // bubbles renders a ONE-character placeholder when Width is unset:
@@ -469,9 +382,7 @@ func TestPlaceholdersRenderInFull(t *testing.T) {
 	c := formCockpit(t)
 	out := ansi.Strip(c.form.view(90, 24, c.modelView, nil, nil))
 	for _, want := range []string{"(auto)", "(daemon default)"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("placeholder %q is missing or truncated:\n%s", want, out)
-		}
+		assert.NewCollecting(t).StrContains(out, want, "placeholder")
 	}
 }
 
@@ -479,9 +390,7 @@ func TestPickerFilterPlaceholderRendersInFull(t *testing.T) {
 	c, p := loadedPicker(t)
 	p.filter.SetValue("")
 	out := ansi.Strip(p.view(90, 20, c.modelView, nil))
-	if !strings.Contains(out, "filter…") {
-		t.Errorf("the filter placeholder is truncated:\n%s", out)
-	}
+	assert.NewCollecting(t).StrContains(out, "filter…", "the filter placeholder is truncated:\n")
 }
 
 // A field the user has typed into must show what they typed, not a placeholder
@@ -493,44 +402,35 @@ func TestTypedValueSurvivesTheWidthChange(t *testing.T) {
 		c.handleKey(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	out := ansi.Strip(c.form.view(120, 24, c.modelView, nil, nil))
-	if !strings.Contains(out, "anthropic/claude-opus-5") {
-		t.Errorf("the typed model id is not shown in full:\n%s", out)
-	}
+	assert.NewCollecting(t).StrContains(out, "anthropic/claude-opus-5", "the typed model id is not shown in full:\n")
 }
 
 func TestFormShowsEveryFieldAndBothKindsIncludingMaxCost(t *testing.T) {
 	c := formCockpit(t)
 	out := c.form.view(80, 24, c.modelView, nil, nil)
 	for _, want := range []string{"name", "kind", "model", "cwd", "max-cost"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("form view is missing the %q row", want)
-		}
+		assert.NewCollecting(t).StrContains(out, want, "form view is missing the")
 	}
 }
 
 func TestMaxCostFieldEmptyMeansUnlimited(t *testing.T) {
 	c := formCockpit(t)
 	p, problem := c.form.params(nil)
-	if problem != "" {
-		t.Fatalf("params: %v", problem)
-	}
+	assert.NewAborting(t).Eq("", problem, "params")
 	if p.maxCost != nil {
 		t.Errorf("maxCost = %v, want nil (empty field = unlimited)", *p.maxCost)
 	}
 }
 
 func TestMaxCostFieldConvertsThroughCurrency(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := formCockpit(t)
 	c.form.inputs[fieldMaxCost].SetValue("13.80")
 	cur := &clientstate.Currency{Code: "CAD", Rate: 1.38}
 
 	p, problem := c.form.params(cur)
-	if problem != "" {
-		t.Fatalf("params: %v", problem)
-	}
-	if p.maxCost == nil {
-		t.Fatal("maxCost is nil, want a converted USD value")
-	}
+	ck.Eq("", problem, "params")
+	ck.NotNil(p.maxCost, "maxCost is nil, want a converted USD value")
 	if diff := *p.maxCost - 10.0; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("maxCost = %v, want ~10.0", *p.maxCost)
 	}
@@ -541,25 +441,20 @@ func TestMaxCostFieldRejectsGarbage(t *testing.T) {
 	c.form.inputs[fieldMaxCost].SetValue("not-a-number")
 
 	_, problem := c.form.params(nil)
-	if !strings.Contains(problem, "max-cost") {
-		t.Errorf("problem = %q, want it to name max-cost", problem)
-	}
+	assert.NewCollecting(t).StrContains(problem, "max-cost", "problem")
 }
 
 // grantedCost (cmd/rafikid/limits.go) treats a zero MaxCost as UNLIMITED, so
 // typing "0" into this field must be rejected rather than silently granting
 // unlimited spend — the opposite of what someone typing a budget means.
 func TestMaxCostFieldRejectsZero(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.inputs[fieldMaxCost].SetValue("0")
 
 	p, problem := c.form.params(nil)
-	if problem == "" {
-		t.Fatalf("params accepted 0 as a max-cost: %+v", p)
-	}
-	if !strings.Contains(problem, "max-cost") || !strings.Contains(problem, "0") {
-		t.Errorf("problem = %q, want it to name max-cost and explain 0 means unlimited", problem)
-	}
+	ck.Require().NotEq("", problem, "params accepted 0 as a max-cost: %+v", p)
+	ck.False(!strings.Contains(problem, "max-cost") || !strings.Contains(problem, "0"), "problem = %q, want it to name max-cost and explain 0 means unlimited", problem)
 	if p.maxCost != nil {
 		t.Errorf("maxCost = %v, want nil on a rejected value", *p.maxCost)
 	}
@@ -570,6 +465,7 @@ func TestMaxCostFieldRejectsZero(t *testing.T) {
 // cached eligible rows and the form stays open, un-busy, ready to submit after
 // a pick.
 func TestSubmitWithAmbiguousExecutorOpensThePicker(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.kindIx = 1 // claude — see spawnKinds
 	c.executors = map[string][]*rafikiv1.ExecutorRow{
@@ -581,23 +477,16 @@ func TestSubmitWithAmbiguousExecutorOpensThePicker(t *testing.T) {
 
 	c.handleKey(keyMsg("enter"))
 
-	if c.execPicker == nil {
-		t.Fatal("want the picker to auto-open on ambiguity")
-	}
-	if len(c.execPicker.rows) != 2 {
-		t.Fatalf("want both eligible rows offered, got %d", len(c.execPicker.rows))
-	}
-	if c.form.busy {
-		t.Error("the form went busy on a submit it intercepted")
-	}
-	if c.form.err != "" {
-		t.Errorf("unexpected form error %q", c.form.err)
-	}
+	ck.Require().NotNil(c.execPicker, "want the picker to auto-open on ambiguity")
+	ck.Require().Len(c.execPicker.rows, 2, "want both eligible rows offered, got %d", len(c.execPicker.rows))
+	ck.False(c.form.busy, "the form went busy on a submit it intercepted")
+	ck.Eq("", c.form.err, "unexpected form error")
 }
 
 // One eligible executor is not ambiguous: no picker, straight through to the
 // spawn.
 func TestSubmitWithOneEligibleExecutorSubmitsDirectly(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.form.kindIx = 1
 	c.executors = map[string][]*rafikiv1.ExecutorRow{
@@ -606,20 +495,15 @@ func TestSubmitWithOneEligibleExecutorSubmitsDirectly(t *testing.T) {
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd == nil {
-		t.Fatal("a unambiguous submit did not spawn")
-	}
-	if c.execPicker != nil {
-		t.Fatal("the picker opened for a single eligible executor")
-	}
-	if !c.form.busy {
-		t.Error("the form is not busy on an in-flight spawn")
-	}
+	ck.Require().NotNil(cmd, "a unambiguous submit did not spawn")
+	ck.Require().Nil(c.execPicker, "the picker opened for a single eligible executor")
+	ck.True(c.form.busy, "the form is not busy on an in-flight spawn")
 }
 
 // An explicit executor choice is never second-guessed, even with several
 // eligible rows cached.
 func TestSubmitWithExplicitExecutorSkipsTheAmbiguityCheck(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := formCockpit(t)
 	c.form.kindIx = 1
 	c.form.inputs[fieldExecutor].SetValue("greyshift")
@@ -632,17 +516,14 @@ func TestSubmitWithExplicitExecutorSkipsTheAmbiguityCheck(t *testing.T) {
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd == nil {
-		t.Fatal("an explicit executor did not spawn")
-	}
-	if c.execPicker != nil {
-		t.Fatal("the picker opened over an explicit choice")
-	}
+	ck.NotNil(cmd, "an explicit executor did not spawn")
+	ck.Nil(c.execPicker, "the picker opened over an explicit choice")
 }
 
 // fundi never gets the check: its historical default is the session executor,
 // which the daemon-side narrowing handles.
 func TestSubmitFundiSkipsTheAmbiguityCheck(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := formCockpit(t)
 	c.executors = map[string][]*rafikiv1.ExecutorRow{
 		"fundi": {
@@ -653,18 +534,15 @@ func TestSubmitFundiSkipsTheAmbiguityCheck(t *testing.T) {
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd == nil {
-		t.Fatal("a fundi submit did not spawn")
-	}
-	if c.execPicker != nil {
-		t.Fatal("the picker opened for fundi")
-	}
+	ck.NotNil(cmd, "a fundi submit did not spawn")
+	ck.Nil(c.execPicker, "the picker opened for fundi")
 }
 
 // A kind change swaps in that kind's remembered executor and warms both
 // caches -- the ambiguity check reads only cached rows, so the kind change is
 // its proactive fetch.
 func TestKindChangeSwapsTheRememberedExecutor(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := formCockpit(t)
 	c.profileName = "work"
 	clientstate.RememberExecutor("work", "claude", "greyshift")
@@ -672,20 +550,15 @@ func TestKindChangeSwapsTheRememberedExecutor(t *testing.T) {
 
 	c.kindChanged()
 
-	if got := c.form.inputs[fieldExecutor].Value(); got != "greyshift" {
-		t.Fatalf("executor field = %q, want the remembered greyshift", got)
-	}
-	if !c.executorsBusy["claude"] {
-		t.Error("no executor fetch was issued for the new kind")
-	}
-	if !c.modelsBusy["claude"] {
-		t.Error("no model fetch was issued for the new kind")
-	}
+	ck.Require().Eq("greyshift", c.form.inputs[fieldExecutor].Value(), "executor field")
+	ck.False(!c.executorsBusy["claude"], "no executor fetch was issued for the new kind")
+	ck.False(!c.modelsBusy["claude"], "no model fetch was issued for the new kind")
 }
 
 // A declared --executor-selector is already a decision; the daemon resolves it
 // silently (documented first-match), and re-asking over it is noise.
 func TestSubmitWithFlagSelectorSkipsTheAmbiguityCheck(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := formCockpit(t)
 	c.form.kindIx = 1
 	c.executorSelector = "owner=brent,env=prod"
@@ -699,10 +572,6 @@ func TestSubmitWithFlagSelectorSkipsTheAmbiguityCheck(t *testing.T) {
 
 	_, cmd := c.handleKey(keyMsg("enter"))
 
-	if cmd == nil {
-		t.Fatal("a declared selector did not spawn")
-	}
-	if c.execPicker != nil {
-		t.Fatal("the picker opened over a declared selector policy")
-	}
+	ck.NotNil(cmd, "a declared selector did not spawn")
+	ck.Nil(c.execPicker, "the picker opened over a declared selector policy")
 }

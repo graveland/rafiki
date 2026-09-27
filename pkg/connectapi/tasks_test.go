@@ -12,6 +12,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/tasks"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeTaskLister struct {
@@ -26,6 +28,7 @@ func (f *fakeTaskLister) TaskList(_ context.Context, r protocol.TaskListRequest)
 }
 
 func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeTaskLister{rows: []tasks.Task{
 		{Handle: "1", Content: "read the design", Status: tasks.StatusCompleted},
 		{Handle: "2.1", Content: "wire the rollup", ActiveForm: "wiring the rollup",
@@ -36,22 +39,14 @@ func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
 
 	resp, err := s.ListTasks(context.Background(),
 		connect.NewRequest(&rafikiv1.ListTasksRequest{ConversationId: "conv-1"}))
-	if err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if f.got.ConversationID != "conv-1" {
-		t.Errorf("conversation id not forwarded: %q", f.got.ConversationID)
-	}
+	c.Require().NoError(err, "ListTasks")
+	c.Eq("conv-1", f.got.ConversationID, "conversation id not forwarded")
 	rows := resp.Msg.GetTasks()
-	if len(rows) != 2 {
-		t.Fatalf("got %d rows, want 2", len(rows))
-	}
+	c.Require().Len(rows, 2, "got %d rows, want 2", len(rows))
 	if rows[1].GetHandle() != "2.1" || rows[1].GetAssignee() != "c9" {
 		t.Errorf("row 1 mapped wrong: %+v", rows[1])
 	}
-	if rows[0].GetStatus() != string(tasks.StatusCompleted) {
-		t.Errorf("status not carried: %q", rows[0].GetStatus())
-	}
+	c.Eq(string(tasks.StatusCompleted), rows[0].GetStatus(), "status not carried")
 }
 
 // TestTaskRowCarriesConversationID pins the framed row's conversation id on
@@ -62,6 +57,7 @@ func TestListTasksMapsRowsOntoTheWire(t *testing.T) {
 // child id (the child working the row is assignee), so it lands under its own
 // name rather than a child-shaped one.
 func TestTaskRowCarriesConversationID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeTaskLister{rows: []tasks.Task{
 		{Handle: "2.1", Content: "wire the rollup", Status: tasks.StatusInProgress,
 			Assignee: "c9", ConversationID: "conv-9"},
@@ -71,47 +67,36 @@ func TestTaskRowCarriesConversationID(t *testing.T) {
 
 	resp, err := s.ListTasks(context.Background(),
 		connect.NewRequest(&rafikiv1.ListTasksRequest{}))
-	if err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
+	c.Require().NoError(err, "ListTasks")
 	rows := resp.Msg.GetTasks()
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
-	}
-	if got := rows[0].GetConversationId(); got != "conv-9" {
-		t.Errorf("ConversationId = %q, want conv-9", got)
-	}
+	c.Require().Len(rows, 1, "got %d rows, want 1", len(rows))
+	c.Eq("conv-9", rows[0].GetConversationId(), "ConversationId")
 }
 
 // No lister configured is not an error the cockpit should render as a failure:
 // a daemon with no database has no ledger and the box simply stays hidden.
 func TestListTasksWithNoListerIsEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(nil)
 	resp, err := s.ListTasks(context.Background(),
 		connect.NewRequest(&rafikiv1.ListTasksRequest{}))
-	if err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if len(resp.Msg.GetTasks()) != 0 {
-		t.Errorf("got rows from a server with no lister")
-	}
+	c.Require().NoError(err, "ListTasks")
+	c.Empty(resp.Msg.GetTasks(), "got rows from a server with no lister")
 }
 
 // tasks.ListFilter.Limit == 0 means UNLIMITED, and conversation_id empty means
 // every conversation -- so an unclamped call can materialise the whole ledger.
 // The frame verb has clamped to 2000 all along.
 func TestListTasksClampsRowCount(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeTaskLister{}
 	s := NewServer(nil)
 	s.SetTaskLister(f)
 
-	if _, err := s.ListTasks(context.Background(),
-		connect.NewRequest(&rafikiv1.ListTasksRequest{})); err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if f.got.Limit != taskListMaxRows {
-		t.Errorf("Limit = %d, want %d", f.got.Limit, taskListMaxRows)
-	}
+	_, err := s.ListTasks(context.Background(),
+		connect.NewRequest(&rafikiv1.ListTasksRequest{}))
+	c.Require().NoError(err, "ListTasks")
+	c.Eq(taskListMaxRows, f.got.Limit, "Limit")
 }
 
 // TestListTasksForwardsChildIDStatusAndLimit pins the framed TaskListRequest
@@ -119,42 +104,34 @@ func TestListTasksClampsRowCount(t *testing.T) {
 // mapping), status forwards verbatim, and an explicit limit under the
 // ceiling survives instead of being replaced by taskListMaxRows.
 func TestListTasksForwardsChildIDStatusAndLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeTaskLister{}
 	s := NewServer(nil)
 	s.SetTaskLister(f)
 
-	if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+	_, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
 		ConversationId: "conv-1", ChildId: "c9", Status: "in_progress", Limit: 5,
-	})); err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if f.got.ChildID != "c9" {
-		t.Errorf("ChildID = %q, want c9", f.got.ChildID)
-	}
-	if f.got.Status != "in_progress" {
-		t.Errorf("Status = %q, want in_progress", f.got.Status)
-	}
-	if f.got.Limit != 5 {
-		t.Errorf("Limit = %d, want 5 (an explicit under-ceiling limit must survive)", f.got.Limit)
-	}
+	}))
+	c.Require().NoError(err, "ListTasks")
+	c.Eq("c9", f.got.ChildID, "ChildID")
+	c.Eq("in_progress", f.got.Status, "Status")
+	c.Eq(5, f.got.Limit, "Limit")
 }
 
 // TestListTasksOverLimitStillClamps mirrors TestListTasksClampsRowCount for an
 // explicit, too-large wire limit: the ceiling applies to a caller-supplied
 // value too, not only to the unset (zero) case.
 func TestListTasksOverLimitStillClamps(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeTaskLister{}
 	s := NewServer(nil)
 	s.SetTaskLister(f)
 
-	if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+	_, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
 		Limit: taskListMaxRows + 500,
-	})); err != nil {
-		t.Fatalf("ListTasks: %v", err)
-	}
-	if f.got.Limit != taskListMaxRows {
-		t.Errorf("Limit = %d, want %d (clamped)", f.got.Limit, taskListMaxRows)
-	}
+	}))
+	c.Require().NoError(err, "ListTasks")
+	c.Eq(taskListMaxRows, f.got.Limit, "Limit")
 }
 
 // TestListTasksAllOrIncludeDroppedBothMeanIncludeDropped pins ruling 3: the
@@ -173,19 +150,17 @@ func TestListTasksAllOrIncludeDroppedBothMeanIncludeDropped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			f := &fakeTaskLister{}
 			s := NewServer(nil)
 			s.SetTaskLister(f)
 
-			if _, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
+			_, err := s.ListTasks(context.Background(), connect.NewRequest(&rafikiv1.ListTasksRequest{
 				IncludeDropped: tc.includeDropped, All: tc.all,
-			})); err != nil {
-				t.Fatalf("ListTasks: %v", err)
-			}
+			}))
+			c.Require().NoError(err, "ListTasks")
 			want := tc.includeDropped || tc.all
-			if f.got.All != want {
-				t.Errorf("All (include-dropped) = %v, want %v", f.got.All, want)
-			}
+			c.Eq(want, f.got.All, "All (include-dropped)")
 		})
 	}
 }
@@ -198,8 +173,7 @@ func TestListTasksSurfacesAStoreError(t *testing.T) {
 	s := NewServer(nil)
 	s.SetTaskLister(f)
 
-	if _, err := s.ListTasks(context.Background(),
-		connect.NewRequest(&rafikiv1.ListTasksRequest{})); err == nil {
-		t.Error("a store error must not be reported as an empty list")
-	}
+	_, err := s.ListTasks(context.Background(),
+		connect.NewRequest(&rafikiv1.ListTasksRequest{}))
+	assert.NewCollecting(t).Error(err, "a store error must not be reported as an empty list")
 }

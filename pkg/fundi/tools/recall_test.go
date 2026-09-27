@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/recall"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeRecallBinding records what the tools hand it and returns canned
@@ -101,9 +103,7 @@ func TestRecallToolsDeclineWithoutBinding(t *testing.T) {
 		MemoryPutBlueprint{}, MemoryGetBlueprint{}, MemoryTreeBlueprint{}, MemoryDeleteBlueprint{},
 	} {
 		tool, err := bp.Materialize(ToolOpts{})
-		if tool != nil || err != nil {
-			t.Errorf("%T.Materialize with nil Recall = (%v, %v), want (nil, nil)", bp, tool, err)
-		}
+		assert.NewCollecting(t).False(tool != nil || err != nil, "%T.Materialize with nil Recall = (%v, %v), want (nil, nil)", bp, tool, err)
 	}
 }
 
@@ -111,21 +111,16 @@ func TestRecallToolsDeclineWithoutBinding(t *testing.T) {
 // normalized: omitted means the recall default (10), anything above the cap
 // clamps to it. An explicit in-range limit passes through untouched.
 func TestRecallToolPassesQuery(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeRecallBinding{recallOut: "m:abc  saved fact"}
 	tool, err := RecallBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 
 	res, err := tool.Execute(context.Background(), ToolInput(
 		`{"query":"dial timeout","sources":["memory","window"],"under":"projects.rafiki",`+
 			`"repo":"rafiki","since_unix":100,"until_unix":200}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if res.Text != "m:abc  saved fact" {
-		t.Errorf("result text = %q, want the binding's formatted hits verbatim", res.Text)
-	}
+	c.Require().NoError(err, "Execute")
+	c.Eq("m:abc  saved fact", res.Text, "result text")
 	want := RecallQuery{
 		Query:     "dial timeout",
 		Sources:   []string{"memory", "window"},
@@ -151,34 +146,27 @@ func TestRecallToolPassesQuery(t *testing.T) {
 		if _, err := tool.Execute(context.Background(), ToolInput(tc.in)); err != nil {
 			t.Fatalf("Execute(%s): %v", tc.in, err)
 		}
-		if fake.recallQ.Limit != tc.limit {
-			t.Errorf("Execute(%s): limit = %d, want %d", tc.in, fake.recallQ.Limit, tc.limit)
-		}
+		c.Eq(tc.limit, fake.recallQ.Limit, "Execute(%s): limit = %d, want", tc.in, fake.recallQ.Limit)
 	}
 }
 
 func TestRecallToolRequiresQuery(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tool, err := RecallBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{}})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	if _, err := tool.Execute(context.Background(), ToolInput(`{}`)); err == nil {
 		t.Fatal("Execute without query returned no error")
 	} else if want := "recall: query is required"; err.Error() != want {
 		t.Errorf("error = %q, want exactly %q", err.Error(), want)
 	}
 	def := tool.InputSchema()
-	if len(def.Required) != 1 || def.Required[0] != "query" {
-		t.Errorf("schema.Required = %v, want [query]", def.Required)
-	}
+	c.False(len(def.Required) != 1 || def.Required[0] != "query", "schema.Required = %v, want [query]", def.Required)
 }
 
 // Each required field of memory_put refuses on its own, naming the field.
 func TestMemoryToolPutRequiresPathNameBody(t *testing.T) {
 	tool, err := MemoryPutBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{}})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	assert.NewAborting(t).False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	for _, tc := range []struct{ in, want string }{
 		{`{}`, "memory_put: path is required"},
 		{`{"name":"x","body":"b"}`, "memory_put: path is required"},
@@ -199,49 +187,34 @@ func TestMemoryToolPutRequiresPathNameBody(t *testing.T) {
 // tool's own sentence -- for memory_get, and for memory_delete, which hits
 // the same sentinel for a memory that is not there.
 func TestMemoryToolGetNotFoundWrapsSentinel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	getTool, err := MemoryGetBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{getErr: recall.ErrNotFound}})
-	if err != nil || getTool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", getTool, err)
-	}
+	c.Require().False(err != nil || getTool == nil, "Materialize: tool=%v err=%v", getTool, err)
 	_, err = getTool.Execute(context.Background(), ToolInput(`{"path":"projects.rafiki","name":"nope"}`))
-	if err == nil || !errors.Is(err, recall.ErrNotFound) {
-		t.Fatalf("Execute(nope) = %v, want an error wrapping recall.ErrNotFound", err)
-	}
-	if want := "memory_get: no memory projects.rafiki/nope"; err.Error() != want {
-		t.Errorf("error = %q, want exactly %q", err.Error(), want)
-	}
+	c.Require().False(err == nil || !errors.Is(err, recall.ErrNotFound), "Execute(nope) = %v, want an error wrapping recall.ErrNotFound", err)
+	c.Eq("memory_get: no memory projects.rafiki/nope", err.Error(), "error")
 
 	delTool, err := MemoryDeleteBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{delErr: recall.ErrNotFound}})
-	if err != nil || delTool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", delTool, err)
-	}
+	c.Require().False(err != nil || delTool == nil, "Materialize: tool=%v err=%v", delTool, err)
 	_, err = delTool.Execute(context.Background(), ToolInput(`{"path":"a.b","name":"nope"}`))
-	if err == nil || !errors.Is(err, recall.ErrNotFound) {
-		t.Fatalf("memory_delete Execute(nope) = %v, want an error wrapping recall.ErrNotFound", err)
-	}
-	if want := "memory_delete: no memory a.b/nope"; err.Error() != want {
-		t.Errorf("error = %q, want exactly %q", err.Error(), want)
-	}
+	c.Require().False(err == nil || !errors.Is(err, recall.ErrNotFound), "memory_delete Execute(nope) = %v, want an error wrapping recall.ErrNotFound", err)
+	c.Eq("memory_delete: no memory a.b/nope", err.Error(), "error")
 }
 
 // An invalid path is the domain's own sentence: it names the offending label
 // and must reach the model without being rewritten into a not-found.
 func TestMemoryToolInvalidPathPassesThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	invalid := fmt.Errorf("x: %w", recall.ErrInvalidPath)
 	tool, err := MemoryPutBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{putErr: invalid}})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	_, err = tool.Execute(context.Background(), ToolInput(`{"path":"projects.a b","name":"x","body":"b"}`))
-	if !errors.Is(err, recall.ErrInvalidPath) || !strings.Contains(err.Error(), "memory_put: ") {
-		t.Fatalf("Execute = %v, want memory_put-prefixed error wrapping recall.ErrInvalidPath", err)
-	}
-	if strings.Contains(err.Error(), recall.ErrNotFound.Error()) {
-		t.Errorf("error = %q, must not leak the not-found sentinel", err.Error())
-	}
+	c.Require().False(!errors.Is(err, recall.ErrInvalidPath) || !strings.Contains(err.Error(), "memory_put: "), "Execute = %v, want memory_put-prefixed error wrapping recall.ErrInvalidPath", err)
+	c.NotStrContains(err.Error(), recall.ErrNotFound.Error(), "error")
 }
 
 func TestMemoryToolPutForwardsAndReports(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fixed := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	rec := recall.Memory{
 		ID: "mem-1", Path: "projects.rafiki", Name: "dial-timeout", Body: "b",
@@ -249,67 +222,42 @@ func TestMemoryToolPutForwardsAndReports(t *testing.T) {
 	}
 	fake := &fakeRecallBinding{putRec: rec, getRec: rec}
 	put, err := MemoryPutBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || put == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", put, err)
-	}
+	c.Require().False(err != nil || put == nil, "Materialize: tool=%v err=%v", put, err)
 	res, err := put.Execute(context.Background(), ToolInput(
 		`{"path":"projects.rafiki","name":"dial-timeout","body":"b","meta":{"k":"v"}}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	if fake.putPath != "projects.rafiki" || fake.putName != "dial-timeout" || fake.putBody != "b" {
 		t.Errorf("put forwarded = %q/%q/%q, want path, name and body intact", fake.putPath, fake.putName, fake.putBody)
 	}
-	if string(fake.putMeta) != `{"k":"v"}` {
-		t.Errorf("meta forwarded = %s, want the raw object", fake.putMeta)
-	}
-	if want := "saved memory projects.rafiki/dial-timeout"; res.Text != want {
-		t.Errorf("result = %q, want %q", res.Text, want)
-	}
+	c.Eq(`{"k":"v"}`, string(fake.putMeta), "meta forwarded = %s, want the raw object", fake.putMeta)
+	c.Eq("saved memory projects.rafiki/dial-timeout", res.Text, "result")
 
 	get, err := MemoryGetBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || get == nil {
-		t.Fatalf("Materialize(get): tool=%v err=%v", get, err)
-	}
+	c.Require().False(err != nil || get == nil, "Materialize(get): tool=%v err=%v", get, err)
 	res, err = get.Execute(context.Background(), ToolInput(`{"path":"projects.rafiki","name":"dial-timeout"}`))
-	if err != nil {
-		t.Fatalf("get Execute: %v", err)
-	}
+	c.Require().NoError(err, "get Execute")
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(res.Text), &obj); err != nil {
 		t.Fatalf("output is not a JSON object: %v\n%s", err, res.Text)
 	}
-	if obj["id"] != "mem-1" || obj["body"] != "b" || obj["created_at"] != fixed.UTC().Format(time.RFC3339) {
-		t.Errorf("memory JSON = %v, want id, body and an RFC3339 created_at", obj)
-	}
-	if _, ok := obj["owner_user_id"]; ok {
-		t.Error("memory JSON must not carry owner_user_id: the binding is owner-scoped already")
-	}
+	c.False(obj["id"] != "mem-1" || obj["body"] != "b" || obj["created_at"] != fixed.UTC().Format(time.RFC3339), "memory JSON = %v, want id, body and an RFC3339 created_at", obj)
+	_, ok := obj["owner_user_id"]
+	c.False(ok, "memory JSON must not carry owner_user_id: the binding is owner-scoped already")
 
 	tree, err := MemoryTreeBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || tree == nil {
-		t.Fatalf("Materialize(tree): tool=%v err=%v", tree, err)
-	}
+	c.Require().False(err != nil || tree == nil, "Materialize(tree): tool=%v err=%v", tree, err)
 	fake.treeOut = "projects.rafiki/dial-timeout"
 	res, err = tree.Execute(context.Background(), ToolInput(`{"path":"projects.rafiki"}`))
-	if err != nil {
-		t.Fatalf("tree Execute: %v", err)
-	}
+	c.Require().NoError(err, "tree Execute")
 	if res.Text != fake.treeOut || fake.treePath != "projects.rafiki" || fake.treeDepth != 0 {
 		t.Errorf("tree forwarded = %q/%d, output = %q, want pass-through", fake.treePath, fake.treeDepth, res.Text)
 	}
 
 	del, err := MemoryDeleteBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || del == nil {
-		t.Fatalf("Materialize(del): tool=%v err=%v", del, err)
-	}
+	c.Require().False(err != nil || del == nil, "Materialize(del): tool=%v err=%v", del, err)
 	res, err = del.Execute(context.Background(), ToolInput(`{"path":"a.b","name":"x"}`))
-	if err != nil {
-		t.Fatalf("delete Execute: %v", err)
-	}
-	if want := "deleted memory a.b/x"; res.Text != want {
-		t.Errorf("delete result = %q, want %q", res.Text, want)
-	}
+	c.Require().NoError(err, "delete Execute")
+	c.Eq("deleted memory a.b/x", res.Text, "delete result")
 	if fake.delPath != "a.b" || fake.delName != "x" {
 		t.Errorf("delete forwarded = %q/%q, want path and name", fake.delPath, fake.delName)
 	}
@@ -317,9 +265,7 @@ func TestMemoryToolPutForwardsAndReports(t *testing.T) {
 
 func TestMemoryToolTreeRequiresPath(t *testing.T) {
 	tool, err := MemoryTreeBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{}})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	assert.NewAborting(t).False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	if _, err := tool.Execute(context.Background(), ToolInput(`{"depth":2}`)); err == nil {
 		t.Fatal("Execute without path returned no error")
 	} else if want := "memory_tree: path is required"; err.Error() != want {
@@ -330,24 +276,17 @@ func TestMemoryToolTreeRequiresPath(t *testing.T) {
 // before/after default to the window span (3) and max_chars to the context
 // budget (8000) when omitted, and explicit values pass through.
 func TestRecallContextDefaults(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeRecallBinding{ctxOut: "...window text..."}
 	tool, err := RecallContextBlueprint{}.Materialize(ToolOpts{Recall: fake})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 
 	if _, err := tool.Execute(context.Background(), ToolInput(`{"id":"w:1"}`)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if fake.ctxHitID != "w:1" {
-		t.Errorf("hit id = %q, want w:1", fake.ctxHitID)
-	}
-	if fake.ctxSpan != [2]int{recallContextDefaultSpan, recallContextDefaultSpan} {
-		t.Errorf("span = %v, want before=3 after=3", fake.ctxSpan)
-	}
-	if fake.ctxMaxChars != recall.ContextDefaultMaxChars {
-		t.Errorf("max_chars = %d, want %d", fake.ctxMaxChars, recall.ContextDefaultMaxChars)
-	}
+	c.Eq("w:1", fake.ctxHitID, "hit id")
+	c.Eq([2]int{recallContextDefaultSpan, recallContextDefaultSpan}, fake.ctxSpan, "span")
+	c.Eq(recall.ContextDefaultMaxChars, fake.ctxMaxChars, "max_chars")
 
 	if _, err := tool.Execute(context.Background(), ToolInput(
 		`{"id":"s:9","before":1,"after":2,"max_chars":500}`)); err != nil {
@@ -360,9 +299,7 @@ func TestRecallContextDefaults(t *testing.T) {
 
 func TestRecallContextRequiresID(t *testing.T) {
 	tool, err := RecallContextBlueprint{}.Materialize(ToolOpts{Recall: &fakeRecallBinding{}})
-	if err != nil || tool == nil {
-		t.Fatalf("Materialize: tool=%v err=%v", tool, err)
-	}
+	assert.NewAborting(t).False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
 	if _, err := tool.Execute(context.Background(), ToolInput(`{}`)); err == nil {
 		t.Fatal("Execute without id returned no error")
 	} else if want := "recall_context: id is required"; err.Error() != want {
@@ -383,9 +320,7 @@ func TestTierRecallToolsAreDaemon(t *testing.T) {
 			t.Errorf("%q has no tier — add it to tierByTool in executor_routing.go", name)
 			continue
 		}
-		if tier != TierDaemon {
-			t.Errorf("%q tier = %v, want TierDaemon", name, tier)
-		}
+		assert.NewCollecting(t).Eq(TierDaemon, tier, "%q tier = %v, want TierDaemon", name, tier)
 	}
 }
 
@@ -394,20 +329,17 @@ func TestTierRecallToolsAreDaemon(t *testing.T) {
 // materialize/decline symmetry the decline test checks blueprint by blueprint,
 // seen end to end through MaterializeAll.
 func TestRecallToolsMaterializeAllOrNone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	want := map[string]bool{
 		"recall": true, "recall_context": true,
 		"memory_put": true, "memory_get": true, "memory_tree": true, "memory_delete": true,
 	}
 	with := registryNames(DefaultBlueprint.MaterializeAll(ToolOpts{Recall: &fakeRecallBinding{}}))
 	for name := range want {
-		if !with[name] {
-			t.Errorf("%q declined with a binding configured", name)
-		}
+		c.False(!with[name], "%q declined with a binding configured", name)
 	}
 	without := registryNames(DefaultBlueprint.MaterializeAll(ToolOpts{}))
 	for name := range want {
-		if without[name] {
-			t.Errorf("%q materialized with no binding", name)
-		}
+		c.False(without[name], "%q materialized with no binding", name)
 	}
 }

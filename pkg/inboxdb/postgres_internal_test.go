@@ -13,6 +13,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // This file is a white-box test (package inboxdb, not inboxdb_test)
@@ -24,18 +26,15 @@ import (
 
 func testPoolInternal(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pgxpool.New: %v", err)
-	}
+	c.NoError(err, "pgxpool.New")
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(context.Background(), pool), "migrate")
 	return pool
 }
 
@@ -56,13 +55,12 @@ func testPoolInternal(t *testing.T) *pgxpool.Pool {
 // and re-running this test demonstrates exactly that (see the fix report for
 // the captured failing output).
 func TestConcurrentMarkSentIsIdempotent(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPoolInternal(t)
 	ctx := context.Background()
 
 	uniq, err := inbox.NewID()
-	if err != nil {
-		t.Fatalf("NewID: %v", err)
-	}
+	c.NoError(err, "NewID")
 	child := "c_race_" + uniq
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), "DELETE FROM conversations.agent_inbox WHERE child_id = $1", child)
@@ -70,14 +68,10 @@ func TestConcurrentMarkSentIsIdempotent(t *testing.T) {
 
 	s := New(pool)
 	rec, err := s.Accept(ctx, inbox.Inbound{ChildID: child, Mode: inbox.ModePrompt, Text: "hi"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	c.NoError(err, "Accept")
 
 	tx1, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
+	c.NoError(err, "Begin")
 	defer func() { _ = tx1.Rollback(ctx) }()
 
 	// tx1 takes the row to 'sent' and holds the row lock uncommitted.
@@ -89,12 +83,8 @@ func TestConcurrentMarkSentIsIdempotent(t *testing.T) {
 	// A separate reader must not see tx1's uncommitted change: the row is
 	// still 'pending' to everyone else until tx1 commits.
 	rows, err := s.Pending(ctx, child)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("before commit the row is still pending to everyone else; got %d rows", len(rows))
-	}
+	c.NoError(err, "Pending")
+	c.Len(rows, 1, "before commit the row is still pending to everyone else; got %d rows", len(rows))
 
 	// Fire the production markSentSQL from a second, independent connection
 	// while tx1 still holds the row locked uncommitted. This call blocks
@@ -115,17 +105,13 @@ func TestConcurrentMarkSentIsIdempotent(t *testing.T) {
 	// to overlap and the barrier proves nothing.
 	time.Sleep(200 * time.Millisecond)
 
-	if err := tx1.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+	c.NoError(tx1.Commit(ctx), "commit")
 
 	select {
 	case err := <-errCh:
 		t.Fatalf("concurrent markSentSQL: %v", err)
 	case tag := <-tagCh:
-		if tag.RowsAffected() != 0 {
-			t.Fatalf("concurrent markSentSQL affected %d rows, want 0 (row was already sent by tx1)", tag.RowsAffected())
-		}
+		c.Eq(0, tag.RowsAffected(), "concurrent markSentSQL affected")
 	case <-time.After(5 * time.Second):
 		t.Fatal("concurrent markSentSQL never returned; it should have unblocked once tx1 committed")
 	}

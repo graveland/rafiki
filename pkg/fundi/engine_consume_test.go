@@ -3,13 +3,14 @@ package fundi
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ackLog records the ids handed to EngineConfig.OnConsumed, in order. The
@@ -44,13 +45,12 @@ func (a *ackLog) joined() string { return strings.Join(a.snapshot(), ",") }
 func newConsumingEngine(t *testing.T, ts fakeToolSet, sender llm.Sender,
 	onConsumed func([]string), onFatal func(error)) (*Engine, *syncBuffer) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	out := &syncBuffer{}
 	fe := NewFrontend(strings.NewReader(""), out, nil)
 	eng, err := NewEngine(EngineConfig{
@@ -63,9 +63,7 @@ func newConsumingEngine(t *testing.T, ts fakeToolSet, sender llm.Sender,
 		OnConsumed: onConsumed,
 		OnFatal:    onFatal,
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	fe.handler = eng
 	return eng, out
@@ -103,9 +101,7 @@ func TestEngineAcksWhenAPromptEntersATurn(t *testing.T) {
 
 	close(bs.release)
 	eng.Wait()
-	if got := acked.joined(); got != "F1,F2" {
-		t.Fatalf("acked %q after both turns ran, want F1,F2", got)
-	}
+	assert.NewAborting(t).Eq("F1,F2", acked.joined(), "acked")
 }
 
 // TestEngineAcksASteerWhenItIsInjected covers the second ack point: a steer is
@@ -134,9 +130,7 @@ func TestEngineAcksASteerWhenItIsInjected(t *testing.T) {
 
 	close(release)
 	eng.Wait()
-	if got := acked.joined(); got != "F1,F2" {
-		t.Fatalf("acked %q, want F1,F2: the steer must be retired when it is injected", got)
-	}
+	assert.NewAborting(t).Eq("F1,F2", acked.joined(), "acked")
 	if texts := userMessageTexts(t, out.String()); len(texts) != 2 || texts[1] != "also this" {
 		t.Fatalf("user messages = %v, want the steer to have been injected into the turn", texts)
 	}
@@ -166,10 +160,9 @@ func TestEngineDoesNotAckWhatFatalDiscards(t *testing.T) {
 	}
 	eng.Wait()
 
-	if got := acked.joined(); got != "F1" {
-		t.Fatalf("acked %q, want only F1: F2 never entered a turn — fatal() discarded it, "+
-			"and acking a discarded message deletes work that was never done", got)
-	}
+	got := acked.joined()
+	assert.NewAborting(t).Eq("F1", got, "acked %q, want only F1: F2 never entered a turn — fatal() discarded it, "+
+		"and acking a discarded message deletes work that was never done", got)
 }
 
 // TestEngineAcksSteersThatArriveDuringTheFinalCall covers the same fix as
@@ -179,6 +172,7 @@ func TestEngineDoesNotAckWhatFatalDiscards(t *testing.T) {
 // called with every buffered id -- inside this SAME turn, not left unacked
 // for a requeue that no longer happens.
 func TestEngineAcksSteersThatArriveDuringTheFinalCall(t *testing.T) {
+	c := assert.NewAborting(t)
 	var acked ackLog
 	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
 		return "file.txt", nil
@@ -199,18 +193,13 @@ func TestEngineAcksSteersThatArriveDuringTheFinalCall(t *testing.T) {
 
 	eng.HandleSteerID("F2", "line one")
 	eng.HandleSteerID("F3", "line two")
-	if got := acked.joined(); got != "F1" {
-		t.Fatalf("acked %q, want only F1: two buffered steers are not yet injected", got)
-	}
+	c.Eq("F1", acked.joined(), "acked")
 	close(bs.release)
 	eng.Wait()
 
-	if got := acked.joined(); got != "F1,F2,F3" {
-		t.Fatalf("acked %q, want F1,F2,F3 -- both steer ids must be retired once "+
-			"drainSteers injects them into the running turn", got)
-	}
+	got := acked.joined()
+	c.Eq("F1,F2,F3", got, "acked %q, want F1,F2,F3 -- both steer ids must be retired once "+
+		"drainSteers injects them into the running turn", got)
 	texts := userMessageTexts(t, out.String())
-	if want := []string{"go", "line one", "line two"}; !slices.Equal(texts, want) {
-		t.Fatalf("user messages = %v, want %v", texts, want)
-	}
+	c.EqDiff([]string{"go", "line one", "line two"}, texts, "user messages")
 }

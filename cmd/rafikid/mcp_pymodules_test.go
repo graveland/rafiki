@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -16,9 +15,12 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestMCPPyModuleStoreAdapter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	ctx := context.Background()
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
@@ -27,15 +29,9 @@ func TestMCPPyModuleStoreAdapter(t *testing.T) {
 	// Test Put with nil pusher
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u-alice"})
 	id, notice, err := mcp.Put(ctx, "local", "helper", "def f(): pass", "a helper")
-	if err != nil {
-		t.Fatalf("Put failed: %v", err)
-	}
-	if id != 1 {
-		t.Errorf("Put returned id %d, want 1", id)
-	}
-	if notice != "" {
-		t.Errorf("Put notice = %q, want empty with nothing to report", notice)
-	}
+	c.Require().NoError(err, "Put failed")
+	c.Eq(1, id, "Put returned id")
+	c.Eq("", notice, "Put notice")
 
 	// Verify record is stored
 	if records := store.rows["u-alice"]; len(records) != 1 {
@@ -60,22 +56,17 @@ func TestMCPPyModuleStoreAdapter(t *testing.T) {
 // The MCP face's Get is bound to its constructed owner: it serves that
 // owner's latest live row and cannot see another owner's same-named module.
 func TestMCPPyModuleStoreGet(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newPymoduleFixture()
 	ctrl := &Controller{pymoduleStore: f.store, pymodulePusher: nil}
 
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
 	r, err := mcp.Get(context.Background(), "local", "alice_chart")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if r.ID != 1 || r.Name != "alice_chart" || r.Code != "def alice_chart(): pass" {
-		t.Errorf("Get = %+v, want alice's row (id 1)", r)
-	}
+	c.Require().NoError(err, "Get")
+	c.False(r.ID != 1 || r.Name != "alice_chart" || r.Code != "def alice_chart(): pass", "Get = %+v, want alice's row (id 1)", r)
 
 	_, err = mcp.Get(context.Background(), "local", "bob_util")
-	if !errors.Is(err, pymodules.ErrNotFound) {
-		t.Errorf("Get of a bob-owned name = %v, want ErrNotFound", err)
-	}
+	c.ErrorIs(err, pymodules.ErrNotFound, "Get of a bob-owned name")
 }
 
 // The MCP face mirrors pymoduleWriter's ordering contract: a definite syntax
@@ -85,6 +76,7 @@ func TestMCPPyModuleStoreGet(t *testing.T) {
 // of its own and the end-to-end text is exactly
 // "pymodule_put: <name> does not parse as Python: <syntax text>".
 func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skipf("python3 not found: %v", err)
 	}
@@ -93,51 +85,34 @@ func TestMCPPyModuleStorePutBlocksOnSyntaxError(t *testing.T) {
 
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
 	_, notice, err := mcp.Put(context.Background(), "local", "alice_bad", "def f(:\n    pass\n", "broken")
-	if err == nil {
-		t.Fatal("Put of syntactically invalid code = nil error, want a syntax-error failure")
-	}
-	if !strings.Contains(err.Error(), "does not parse as Python") {
-		t.Errorf("Put error = %v, want it to name the parse failure", err)
-	}
-	if strings.HasPrefix(err.Error(), "pymodule_put:") {
-		t.Errorf("Put error = %v, want no %q prefix at the adapter layer: the tool wraps store errors with it exactly once", err, "pymodule_put:")
-	}
-	if notice != "" {
-		t.Errorf("Put notice = %q on a blocked save, want empty", notice)
-	}
+	c.Require().Error(err, "Put of syntactically invalid code = nil error, want a syntax-error failure")
+	c.StrContains(err.Error(), "does not parse as Python", "Put error = %v, want it to name the parse failure", err)
+	c.False(strings.HasPrefix(err.Error(), "pymodule_put:"), "Put error = %v, want no %q prefix at the adapter layer: the tool wraps store errors with it exactly once", err, "pymodule_put:")
+	c.Eq("", notice, "Put notice")
 	// The DB write never happened: alice still has exactly her seeded row.
 	rows := f.store.rows["u_alice"]
-	if len(rows) != 1 || rows[0].Name != "alice_chart" {
-		t.Errorf("store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].Name != "alice_chart", "store rows = %+v, want only the seeded alice_chart: a syntax error must block before pymodules.Store.Put", rows)
 
 	// The full text an MCP caller sees: the same save through the real
 	// pymodule_put tool, over this store as its backend.
 	tool, err := tools.PyModulePutBlueprint{}.Materialize(tools.ToolOpts{PyModules: mcp})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	input, err := json.Marshal(map[string]string{"repo": "local", "name": "alice_bad", "code": "def f(:\n    pass\n"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	_, err = tool.Execute(context.Background(), tools.ToolInput(input))
-	if err == nil {
-		t.Fatal("tool Execute of syntactically invalid code = nil error, want the syntax failure")
-	}
+	c.Require().Error(err, "tool Execute of syntactically invalid code = nil error, want the syntax failure")
 	const wantPrefix = "pymodule_put: alice_bad does not parse as Python: "
 	if !strings.HasPrefix(err.Error(), wantPrefix) {
 		t.Errorf("tool error = %q, want the end-to-end prefix %q exactly once", err.Error(), wantPrefix)
 	}
-	if suffix := strings.TrimPrefix(err.Error(), wantPrefix); suffix == "" {
-		t.Errorf("tool error = %q, want the syntax text after %q to be non-empty", err.Error(), wantPrefix)
-	}
+	c.NotEq("", strings.TrimPrefix(err.Error(), wantPrefix), "tool error = %q, want the syntax text after %q to be non-empty", err.Error(), wantPrefix)
 }
 
 // A failed dependency install on one of the owner's executors does NOT block
 // the MCP face's save either: the row is written and the failure rides back
 // as the notice.
 func TestMCPPyModuleStorePutSurfacesVenvFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	disableLint(t) // hermetic: this test does not exercise the lint outcome
 	f := newPymoduleFixture()
 	f.pool.clients = map[string]executorpbconnect.ExecutorServiceClient{
@@ -148,24 +123,17 @@ func TestMCPPyModuleStorePutSurfacesVenvFailure(t *testing.T) {
 
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
 	id, notice, err := mcp.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if id != 2 {
-		t.Errorf("Put id = %d, want 2: the row must be written despite the venv failure", id)
-	}
-	if !strings.Contains(notice, "boom") {
-		t.Errorf("Put notice = %q, want it to contain the venv failure %q", notice, "boom")
-	}
+	c.Require().NoError(err, "Put")
+	c.Eq(2, id, "Put id")
+	c.StrContains(notice, "boom", "Put notice")
 	rows := f.store.rows["u_alice"]
-	if len(rows) != 2 || rows[1].Name != "alice_plot" {
-		t.Errorf("store rows = %+v, want alice_plot saved after the seeded alice_chart", rows)
-	}
+	c.False(len(rows) != 2 || rows[1].Name != "alice_plot", "store rows = %+v, want alice_plot saved after the seeded alice_chart", rows)
 }
 
 // A lint finding is advisory on the MCP face too: the save goes through and
 // the finding comes back in the notice (hermetic fake uv, no real ruff).
 func TestMCPPyModuleStorePutSucceedsDespiteLintFindings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeLintUV(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	f := newPymoduleFixture()
@@ -173,19 +141,11 @@ func TestMCPPyModuleStorePutSucceedsDespiteLintFindings(t *testing.T) {
 
 	mcp := newMCPPyModuleStore(ctrl, users.Identity{UserID: "u_alice"})
 	_, notice, err := mcp.Put(context.Background(), "local", "alice_plot", "def alice_plot(): pass", "plots things")
-	if err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if !strings.Contains(notice, fakeRuffFinding) {
-		t.Errorf("Put notice = %q, want it to contain the fake ruff finding %q", notice, fakeRuffFinding)
-	}
-	if !strings.Contains(notice, "ruff found:") {
-		t.Errorf("Put notice = %q, want it introduced by %q", notice, "ruff found:")
-	}
+	c.Require().NoError(err, "Put")
+	c.StrContains(notice, fakeRuffFinding, "Put notice")
+	c.StrContains(notice, "ruff found:", "Put notice")
 	rows := f.store.rows["u_alice"]
-	if len(rows) != 2 || rows[1].Name != "alice_plot" {
-		t.Errorf("store rows = %+v, want alice_plot saved: a lint finding must not block", rows)
-	}
+	c.False(len(rows) != 2 || rows[1].Name != "alice_plot", "store rows = %+v, want alice_plot saved: a lint finding must not block", rows)
 }
 
 // gitInventoryFixture builds a Controller whose git pusher's cache holds two
@@ -211,93 +171,65 @@ func gitInventoryFixture(store *fakePymoduleStore) *Controller {
 // git source's entries (repo-labeled), the same shape the fundi skill body
 // renders.
 func TestMCPPyModuleListSpansGitSources(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{
 		"u_alice": {{ID: 1, OwnerUserID: "u_alice", Name: "alice_chart", Description: "charts things"}},
 	}}
 	ctrl := gitInventoryFixture(store)
 	lister := newMCPPyModuleLister(ctrl, users.Identity{UserID: "u_alice"})
 	tool, err := mcpPyModuleListBlueprint{}.Materialize(tools.ToolOpts{PyModuleList: lister})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool == nil {
-		t.Fatal("Materialize returned nil tool with a non-nil lister")
-	}
+	c.Require().NoError(err, "Materialize")
+	c.Require().NotNil(tool, "Materialize returned nil tool with a non-nil lister")
 
 	// No arguments at all -- the unfiltered call -- spans both scopes.
 	res, err := tool.Execute(context.Background(), tools.ToolInput{})
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	for _, want := range []string{
 		"alice_chart — charts things",                  // local, bare name
 		"ops-tools/rotate_keys — rotates the API keys", // git script, repo-labeled
 		"ops-tools/opslib — ops helpers",               // git package, repo-labeled
 		"other-src/other_tool — another source's tool", // the second git source
 	} {
-		if !strings.Contains(res.Text, want) {
-			t.Errorf("pymodule_list result = %q, want it to contain %q", res.Text, want)
-		}
+		c.StrContains(res.Text, want, "pymodule_list result")
 	}
 
 	// An explicit empty repo is the same span, so a caller sending "repo": ""
 	// gets everything and not a refusal.
 	res, err = tool.Execute(context.Background(), tools.ToolInput(`{"repo":""}`))
-	if err != nil {
-		t.Fatalf("Execute(empty repo): %v", err)
-	}
-	if !strings.Contains(res.Text, "ops-tools/rotate_keys") || !strings.Contains(res.Text, "alice_chart") {
-		t.Errorf("pymodule_list result with repo %q = %q, want both scopes again", "", res.Text)
-	}
+	c.Require().NoError(err, "Execute(empty repo)")
+	c.False(!strings.Contains(res.Text, "ops-tools/rotate_keys") || !strings.Contains(res.Text, "alice_chart"), "pymodule_list result with repo %q = %q, want both scopes again", "", res.Text)
 }
 
 // TestMCPPyModuleListFiltersByRepo pins the optional repo filter narrowing to
 // one scope: a git source's name returns only that source's entries (no
 // local rows, no other source), "local" returns only the blob store's.
 func TestMCPPyModuleListFiltersByRepo(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePymoduleStore{rows: map[string][]pymodules.Record{
 		"u_alice": {{ID: 1, OwnerUserID: "u_alice", Name: "alice_chart", Description: "charts things"}},
 	}}
 	ctrl := gitInventoryFixture(store)
 	lister := newMCPPyModuleLister(ctrl, users.Identity{UserID: "u_alice"})
 	tool, err := mcpPyModuleListBlueprint{}.Materialize(tools.ToolOpts{PyModuleList: lister})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	res, err := tool.Execute(context.Background(), tools.ToolInput(`{"repo":"ops-tools"}`))
-	if err != nil {
-		t.Fatalf("Execute(ops-tools): %v", err)
-	}
+	c.Require().NoError(err, "Execute(ops-tools)")
 	for _, want := range []string{"ops-tools/rotate_keys", "ops-tools/opslib"} {
-		if !strings.Contains(res.Text, want) {
-			t.Errorf("pymodule_list(ops-tools) = %q, want it to contain %q", res.Text, want)
-		}
+		c.StrContains(res.Text, want, "pymodule_list(ops-tools)")
 	}
 	for _, banned := range []string{"alice_chart", "other-src/", "other_tool"} {
-		if strings.Contains(res.Text, banned) {
-			t.Errorf("pymodule_list(ops-tools) = %q, want no %q: the filter must narrow to one source", res.Text, banned)
-		}
+		c.NotStrContains(res.Text, banned, "pymodule_list(ops-tools)")
 	}
 
 	// "local" is itself one scope: only the blob store's rows, no git entries.
 	res, err = tool.Execute(context.Background(), tools.ToolInput(`{"repo":"local"}`))
-	if err != nil {
-		t.Fatalf("Execute(local): %v", err)
-	}
-	if !strings.Contains(res.Text, "alice_chart — charts things") {
-		t.Errorf("pymodule_list(local) = %q, want the local row", res.Text)
-	}
-	if strings.Contains(res.Text, "ops-tools/") || strings.Contains(res.Text, "other-src/") {
-		t.Errorf("pymodule_list(local) = %q, want no git-sourced entries", res.Text)
-	}
+	c.Require().NoError(err, "Execute(local)")
+	c.StrContains(res.Text, "alice_chart — charts things", "pymodule_list(local)")
+	c.False(strings.Contains(res.Text, "ops-tools/") || strings.Contains(res.Text, "other-src/"), "pymodule_list(local) = %q, want no git-sourced entries", res.Text)
 
 	// An unknown source name is an empty listing, not an error.
 	res, err = tool.Execute(context.Background(), tools.ToolInput(`{"repo":"no-such-source"}`))
-	if err != nil {
-		t.Fatalf("Execute(no-such-source): %v", err)
-	}
-	if !strings.Contains(res.Text, "No pymodules saved yet") {
-		t.Errorf("pymodule_list(no-such-source) = %q, want the empty-listing text", res.Text)
-	}
+	c.Require().NoError(err, "Execute(no-such-source)")
+	c.StrContains(res.Text, "No pymodules saved yet", "pymodule_list(no-such-source)")
 }

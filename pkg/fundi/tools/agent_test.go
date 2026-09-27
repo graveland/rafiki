@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeSpawner is an in-memory AgentSpawner. It records calls so a test can
@@ -116,38 +118,31 @@ func TestAgentToolsDeclineWithoutSpawner(t *testing.T) {
 }
 
 func TestAgentListRendersDescendants(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := &fakeSpawner{children: []AgentInfo{
 		{ChildID: "c_a", Name: "reviewer", Model: "anthropic/claude-opus-4", Status: "idle", Cwd: "/w", Depth: 1},
 		{ChildID: "c_b", Name: "impl", Model: "anthropic/claude-sonnet-4", Status: "streaming", Cwd: "/w", Depth: 1},
 	}}
 	reg, ctx := newAgentTools(t, sp)
 	out, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("agent_list: %v", err)
-	}
+	c.Require().NoError(err, "agent_list")
 	for _, want := range []string{"c_a", "reviewer", "idle", "c_b", "impl", "streaming"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("agent_list output missing %q; got:\n%s", want, out)
-		}
+		c.StrContains(out, want, "agent_list output missing")
 	}
 }
 
 func TestAgentListEmptyIsNotAnError(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg, ctx := newAgentTools(t, &fakeSpawner{})
 	out, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("an empty subtree must not be an error: %v", err)
-	}
-	if !strings.Contains(out, "0 agent(s)") {
-		t.Fatalf("got:\n%s", out)
-	}
+	c.NoError(err, "an empty subtree must not be an error")
+	c.StrContains(out, "0 agent(s)", "got:\n")
 }
 
 func TestAgentListSurfacesStoreErrors(t *testing.T) {
 	reg, ctx := newAgentTools(t, &fakeSpawner{listErr: errors.New("boom")})
-	if _, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("a spawner error must reach the model, not be swallowed")
-	}
+	_, err := reg.Execute(ctx, "agent_list", json.RawMessage(`{}`))
+	assert.NewAborting(t).Error(err, "a spawner error must reach the model, not be swallowed")
 }
 
 // TestAgentModelsRendersCatalog: a NARROWED call renders rows. A bare call
@@ -155,94 +150,75 @@ func TestAgentListSurfacesStoreErrors(t *testing.T) {
 // is several hundred models and dumping it fills the agent's context. See
 // TestNoArgsReturnsASummaryNotAList.
 func TestAgentModelsRendersCatalog(t *testing.T) {
+	c := assert.NewAborting(t)
 	sp := &fakeSpawner{models: []ModelInfo{
 		{ID: "anthropic/claude-opus-4", Provider: "anthropic"},
 		{ID: "openai/gpt-5", Provider: "openai"},
 	}}
 	reg, ctx := newAgentTools(t, sp)
 	out, err := reg.Execute(ctx, "agent_models", json.RawMessage(`{"limit":10}`))
-	if err != nil {
-		t.Fatalf("agent_models: %v", err)
-	}
-	if !strings.Contains(out, "anthropic/claude-opus-4") || !strings.Contains(out, "openai/gpt-5") {
-		t.Fatalf("got:\n%s", out)
-	}
+	c.NoError(err, "agent_models")
+	c.False(!strings.Contains(out, "anthropic/claude-opus-4") || !strings.Contains(out, "openai/gpt-5"), "got:\n%s", out)
 }
 
 func TestAgentSpawnPassesSpecThrough(t *testing.T) {
+	c := assert.NewAborting(t)
 	sp := &fakeSpawner{nextID: "c_worker"}
 	reg, ctx := newAgentTools(t, sp)
 	out, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
 		`{"name":"impl","model":"anthropic/claude-sonnet-4","prompt":"do the thing","cwd":"/w","task":"2.1"}`))
-	if err != nil {
-		t.Fatalf("agent_spawn: %v", err)
-	}
-	if len(sp.spawned) != 1 {
-		t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
-	}
+	c.NoError(err, "agent_spawn")
+	c.Len(sp.spawned, 1, "want 1 spawn, got %d", len(sp.spawned))
 	got := sp.spawned[0]
-	if got.Name != "impl" || got.Model != "anthropic/claude-sonnet-4" ||
-		got.Prompt != "do the thing" || got.Cwd != "/w" || got.Task != "2.1" {
-		t.Fatalf("spec not passed through: %+v", got)
-	}
-	if !strings.Contains(out, "c_worker") {
-		t.Fatalf("result must return the handle; got:\n%s", out)
-	}
+	c.False(got.Name != "impl" || got.Model != "anthropic/claude-sonnet-4" ||
+		got.Prompt != "do the thing" || got.Cwd != "/w" || got.Task != "2.1", "spec not passed through: %+v", got)
+	c.StrContains(out, "c_worker", "result must return the handle; got:\n")
 }
 
 // The tool must not accept a parent: a coordinator that can name its own
 // parent can spawn into a sibling's subtree. The schema has no such property,
 // and an unknown JSON key must not smuggle one in.
 func TestAgentSpawnIgnoresForgedParent(t *testing.T) {
+	c := assert.NewAborting(t)
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
-	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
-		`{"prompt":"x","parent":"c_stranger","parentChildId":"c_stranger"}`)); err != nil {
-		t.Fatal(err)
-	}
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"prompt":"x","parent":"c_stranger","parentChildId":"c_stranger"}`))
+	c.NoError(err)
 	// SpawnSpec has no parent field at all, so this is a compile-time
 	// guarantee reinforced by an observable one: nothing the tool produces
 	// can name a parent.
-	if len(sp.spawned) != 1 {
-		t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
-	}
+	c.Len(sp.spawned, 1, "want 1 spawn, got %d", len(sp.spawned))
 }
 
 func TestAgentSpawnRequiresPrompt(t *testing.T) {
 	reg, ctx := newAgentTools(t, &fakeSpawner{})
-	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"name":"x"}`)); err == nil {
-		t.Fatal("a spawn with nothing to do must be refused")
-	}
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"name":"x"}`))
+	assert.NewAborting(t).Error(err, "a spawn with nothing to do must be refused")
 }
 
 func TestAgentSpawnSurfacesRefusal(t *testing.T) {
 	sp := &fakeSpawner{spawnErr: errors.New("depth limit: absolute depth 3 exceeds RAFIKI_MAX_DEPTH")}
 	reg, ctx := newAgentTools(t, sp)
 	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x"}`))
-	if err == nil || !strings.Contains(err.Error(), "depth limit") {
-		t.Fatalf("a controller refusal must reach the model verbatim; got %v", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "depth limit"), "a controller refusal must reach the model verbatim; got %v", err)
 }
 
 func TestAgentViewReturnsTranscript(t *testing.T) {
+	c := assert.NewAborting(t)
 	sp := &fakeSpawner{view: "user: do the thing\nassistant: done\n"}
 	reg, ctx := newAgentTools(t, sp)
 	out, err := reg.Execute(ctx, "agent_view", json.RawMessage(`{"agent":"c_a"}`))
-	if err != nil {
-		t.Fatalf("agent_view: %v", err)
-	}
-	if !strings.Contains(out, "do the thing") {
-		t.Fatalf("got:\n%s", out)
-	}
+	c.NoError(err, "agent_view")
+	c.StrContains(out, "do the thing", "got:\n")
 }
 
 func TestAgentSendDeliversMessage(t *testing.T) {
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
-	if _, err := reg.Execute(ctx, "agent_send", json.RawMessage(
-		`{"agent":"c_a","message":"also update the docs"}`)); err != nil {
-		t.Fatalf("agent_send: %v", err)
-	}
+	_, err := reg.Execute(ctx, "agent_send", json.RawMessage(
+		`{"agent":"c_a","message":"also update the docs"}`))
+	assert.NewAborting(t).NoError(err, "agent_send")
 	if len(sp.sent) != 1 || sp.sent[0].ChildID != "c_a" || sp.sent[0].Message != "also update the docs" {
 		t.Fatalf("got %+v", sp.sent)
 	}
@@ -251,9 +227,8 @@ func TestAgentSendDeliversMessage(t *testing.T) {
 func TestAgentKillStopsNamedAgent(t *testing.T) {
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
-	if _, err := reg.Execute(ctx, "agent_kill", json.RawMessage(`{"agent":"c_a"}`)); err != nil {
-		t.Fatalf("agent_kill: %v", err)
-	}
+	_, err := reg.Execute(ctx, "agent_kill", json.RawMessage(`{"agent":"c_a"}`))
+	assert.NewAborting(t).NoError(err, "agent_kill")
 	if len(sp.killed) != 1 || sp.killed[0] != "c_a" {
 		t.Fatalf("got %v", sp.killed)
 	}
@@ -274,19 +249,16 @@ func TestSteeringRefusalsReachTheModel(t *testing.T) {
 		"agent_kill": `{"agent":"c_stranger"}`,
 	} {
 		_, err := reg.Execute(ctx, name, json.RawMessage(args))
-		if err == nil || !strings.Contains(err.Error(), "c_stranger") {
-			t.Errorf("%s: want a refusal naming c_stranger, got %v", name, err)
-		}
+		assert.NewCollecting(t).False(err == nil || !strings.Contains(err.Error(), "c_stranger"), "%s: want a refusal naming c_stranger, got %v", name, err)
 	}
 }
 
 func TestAgentSetBudgetPassesArgsThrough(t *testing.T) {
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
-	if _, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(
-		`{"agent":"c_a","max_cost":25.5}`)); err != nil {
-		t.Fatalf("agent_set_budget: %v", err)
-	}
+	_, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(
+		`{"agent":"c_a","max_cost":25.5}`))
+	assert.NewAborting(t).NoError(err, "agent_set_budget")
 	if len(sp.budgetSet) != 1 || sp.budgetSet[0].ChildID != "c_a" || sp.budgetSet[0].MaxCost != 25.5 {
 		t.Fatalf("got %+v", sp.budgetSet)
 	}
@@ -294,18 +266,15 @@ func TestAgentSetBudgetPassesArgsThrough(t *testing.T) {
 
 func TestAgentSetBudgetRequiresAnAgentID(t *testing.T) {
 	reg, ctx := newAgentTools(t, &fakeSpawner{})
-	if _, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(`{"max_cost":5}`)); err == nil {
-		t.Fatal("agent_set_budget with no agent id must fail")
-	}
+	_, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(`{"max_cost":5}`))
+	assert.NewAborting(t).Error(err, "agent_set_budget with no agent id must fail")
 }
 
 func TestAgentSetBudgetSurfacesRefusal(t *testing.T) {
 	sp := &fakeSpawner{setBudgetErr: errors.New("agent c_grandchild is not a child you spawned directly")}
 	reg, ctx := newAgentTools(t, sp)
 	_, err := reg.Execute(ctx, "agent_set_budget", json.RawMessage(`{"agent":"c_grandchild","max_cost":5}`))
-	if err == nil || !strings.Contains(err.Error(), "c_grandchild") {
-		t.Fatalf("want a refusal naming c_grandchild, got %v", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "c_grandchild"), "want a refusal naming c_grandchild, got %v", err)
 }
 
 func TestSteeringVerbsRequireAnAgentID(t *testing.T) {
@@ -315,26 +284,21 @@ func TestSteeringVerbsRequireAnAgentID(t *testing.T) {
 		"agent_send": `{"message":"x"}`,
 		"agent_kill": `{}`,
 	} {
-		if _, err := reg.Execute(ctx, name, json.RawMessage(args)); err == nil {
-			t.Errorf("%s with no agent id must fail", name)
-		}
+		_, err := reg.Execute(ctx, name, json.RawMessage(args))
+		assert.NewCollecting(t).Error(err, "%s with no agent id must fail", name)
 	}
 }
 
 func TestAgentSpawnPassesTheExecutorGrantThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := &fakeSpawner{nextID: "c_worker"}
 	reg, ctx := newAgentTools(t, sp)
-	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
-		`{"prompt":"build it","executor":"env=work,os=linux","workspace":"ephemeral"}`)); err != nil {
-		t.Fatalf("agent_spawn: %v", err)
-	}
+	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
+		`{"prompt":"build it","executor":"env=work,os=linux","workspace":"ephemeral"}`))
+	c.Require().NoError(err, "agent_spawn")
 	got := sp.spawned[0]
-	if got.ExecutorSelector != "env=work,os=linux" {
-		t.Errorf("selector = %q", got.ExecutorSelector)
-	}
-	if got.WorkspaceMode != "ephemeral" {
-		t.Errorf("workspace = %q", got.WorkspaceMode)
-	}
+	c.Eq("env=work,os=linux", got.ExecutorSelector, "selector =")
+	c.Eq("ephemeral", got.WorkspaceMode, "workspace =")
 }
 
 // The entire model-facing grant is a selector and a mode. Nothing path-shaped
@@ -355,15 +319,12 @@ func TestAgentSpawnHasNoPathShapedParameter(t *testing.T) {
 // "ephemeral" and "pinned" mean genuinely different things about whether the
 // worker's uncommitted work can survive a machine going away.
 func TestUnknownWorkspaceModeIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg, ctx := newAgentTools(t, &fakeSpawner{})
 	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(
 		`{"prompt":"x","workspace":"whatever"}`))
-	if err == nil {
-		t.Fatal("an unrecognised workspace mode must be refused")
-	}
-	if !strings.Contains(err.Error(), "ephemeral") || !strings.Contains(err.Error(), "pinned") {
-		t.Errorf("the refusal must name the valid values: %v", err)
-	}
+	c.Require().Error(err, "an unrecognised workspace mode must be refused")
+	c.False(!strings.Contains(err.Error(), "ephemeral") || !strings.Contains(err.Error(), "pinned"), "the refusal must name the valid values: %v", err)
 }
 
 // A malformed selector must fail at spawn with a message about the selector —
@@ -372,20 +333,15 @@ func TestMalformedSelectorIsRefusedWithItsOwnMessage(t *testing.T) {
 	sp := &fakeSpawner{spawnErr: errors.New(`invalid executor selector "os in": ...`)}
 	reg, ctx := newAgentTools(t, sp)
 	_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x","executor":"os in"}`))
-	if err == nil || !strings.Contains(err.Error(), "selector") {
-		t.Fatalf("got %v", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "selector"), "got %v", err)
 }
 
 func TestRenderAgentsIncludesKind(t *testing.T) {
+	c := assert.NewAborting(t)
 	out := RenderAgents([]AgentInfo{
 		{ChildID: "c_claude1", Name: "reviewer", Status: "idle", Kind: "claude"},
 		{ChildID: "c_fundi1", Name: "worker", Status: "idle", Kind: ""},
 	})
-	if !strings.Contains(out, "claude") {
-		t.Fatalf("output missing the claude child's kind:\n%s", out)
-	}
-	if !strings.Contains(out, "fundi") {
-		t.Fatalf("output missing the default \"fundi\" kind for an empty Kind field:\n%s", out)
-	}
+	c.StrContains(out, "claude", "output missing the claude child's kind:\n")
+	c.StrContains(out, "fundi", "output missing the default \"fundi\" kind for an empty Kind field:\n")
 }

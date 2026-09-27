@@ -18,6 +18,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newOpenAISenderForTest builds an openAISender against a fixture server, the
@@ -30,9 +32,7 @@ func newOpenAISenderForTest(t *testing.T, key string, rt http.RoundTripper, hand
 	t.Cleanup(srv.Close)
 	p := providers.Provider{Name: "fixture", Kind: providers.KindOpenAI, BaseURL: srv.URL}
 	s, err := newOpenAISender(p, key, rt)
-	if err != nil {
-		t.Fatalf("newOpenAISender: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "newOpenAISender")
 	return s
 }
 
@@ -95,6 +95,7 @@ func openAIRepresentativeParams() anthropic.MessageNewParams {
 const openAIOK = `{"id":"x","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
 
 func TestOpenAISenderNewBuildsRequest(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var (
 		mu      sync.Mutex
 		gotPath string
@@ -127,21 +128,11 @@ func TestOpenAISenderNewBuildsRequest(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if bodyErr != "" {
-		t.Fatalf("fixture server could not read request body: %s", bodyErr)
-	}
-	if gotPath != "/chat/completions" {
-		t.Errorf("request path = %q, want /chat/completions", gotPath)
-	}
-	if gotMeth != http.MethodPost {
-		t.Errorf("request method = %q, want POST", gotMeth)
-	}
-	if gotCT != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", gotCT)
-	}
-	if gotAuth != "Bearer test-key" {
-		t.Errorf("Authorization = %q, want Bearer test-key", gotAuth)
-	}
+	c.Require().Eq("", bodyErr, "fixture server could not read request body")
+	c.Eq("/chat/completions", gotPath, "request path")
+	c.Eq(http.MethodPost, gotMeth, "request method")
+	c.Eq("application/json", gotCT, "Content-Type")
+	c.Eq("Bearer test-key", gotAuth, "Authorization")
 	if gotBody["model"] != "gpt-4o" {
 		t.Errorf("model = %v, want gpt-4o", gotBody["model"])
 	}
@@ -155,19 +146,14 @@ func TestOpenAISenderNewBuildsRequest(t *testing.T) {
 		t.Errorf("temperature = %v, want 0.2", gotBody["temperature"])
 	}
 	for _, absent := range []string{"top_p", "stop", "top_k", "container", "inference_geo", "metadata", "service_tier", "thinking"} {
-		if _, ok := gotBody[absent]; ok {
-			t.Errorf("body contains %q, want it omitted", absent)
-		}
+		_, ok := gotBody[absent]
+		c.False(ok, "body contains %q, want it omitted", absent)
 	}
 
 	var msgs []map[string]any
-	if err := json.Unmarshal([]byte(mustJSON(gotBody["messages"])), &msgs); err != nil {
-		t.Fatalf("messages not an array: %v (%s)", err, mustJSON(gotBody["messages"]))
-	}
-	if len(msgs) != 5 {
-		t.Fatalf("messages = %d entries, want 5 (system, user, assistant, tool, user); got %s",
-			len(msgs), mustJSON(msgs))
-	}
+	err := json.Unmarshal([]byte(mustJSON(gotBody["messages"])), &msgs)
+	c.Require().NoError(err, "messages not an array: %v (%s)", err, mustJSON(gotBody["messages"]))
+	c.Require().Len(msgs, 5, "messages = %d entries, want 5 (system, user, assistant, tool, user); got %s", len(msgs), mustJSON(msgs))
 	for i, want := range []string{
 		`{"role":"system","content":"You are helpful.Be brief."}`,
 		`{"role":"user","content":"What's the weather in Paris?"}`,
@@ -200,6 +186,7 @@ func TestOpenAISenderNewUserMessageContentBlocks(t *testing.T) {
 	imageBlock := anthropic.NewImageBlockBase64("image/png", "aGVsbG8=")
 
 	t.Run("image_only_is_an_error", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(openAIOK))
 		})
@@ -209,15 +196,12 @@ func TestOpenAISenderNewUserMessageContentBlocks(t *testing.T) {
 			Content: []anthropic.ContentBlockParamUnion{imageBlock},
 		}}
 		_, err := s.New(context.Background(), params)
-		if err == nil {
-			t.Fatal("New: want an error for an image-only user message, got nil — the message silently vanished from the request")
-		}
-		if !strings.Contains(err.Error(), "images") || !strings.Contains(err.Error(), "do not support") {
-			t.Errorf("error = %v, want it to name the limitation (image blocks unsupported by kind=openai providers)", err)
-		}
+		c.Require().Error(err, "New: want an error for an image-only user message, got nil — the message silently vanished from the request")
+		c.False(!strings.Contains(err.Error(), "images") || !strings.Contains(err.Error(), "do not support"), "error = %v, want it to name the limitation (image blocks unsupported by kind=openai providers)", err)
 	})
 
 	t.Run("text_plus_image_keeps_text", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		var (
 			mu      sync.Mutex
 			gotBody map[string]any
@@ -246,12 +230,9 @@ func TestOpenAISenderNewUserMessageContentBlocks(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		var msgs []map[string]any
-		if err := json.Unmarshal([]byte(mustJSON(gotBody["messages"])), &msgs); err != nil {
-			t.Fatalf("messages not an array: %v (%s)", err, mustJSON(gotBody["messages"]))
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("messages = %d entries, want exactly the one user message: %s", len(msgs), mustJSON(msgs))
-		}
+		err := json.Unmarshal([]byte(mustJSON(gotBody["messages"])), &msgs)
+		c.NoError(err, "messages not an array: %v (%s)", err, mustJSON(gotBody["messages"]))
+		c.Len(msgs, 1, "messages = %d entries, want exactly the one user message: %s", len(msgs), mustJSON(msgs))
 		if !jsonEqual(mustJSON(msgs[0]), `{"role":"user","content":"What is in this picture?"}`) {
 			t.Errorf("messages[0] = %s, want the text kept and nothing else on the wire", mustJSON(msgs[0]))
 		}
@@ -262,76 +243,51 @@ func TestOpenAISenderNewUserMessageContentBlocks(t *testing.T) {
 // sender: plain text, tool_calls, and an unrecognized finish_reason.
 func TestOpenAISenderNewParsesResponse(t *testing.T) {
 	t.Run("text", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"Hello there."},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`))
 		})
 		msg, err := s.New(context.Background(), minimalParams())
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		if msg.ID != "chatcmpl-1" {
-			t.Errorf("ID = %q, want chatcmpl-1", msg.ID)
-		}
-		if msg.Model != "gpt-4o" {
-			t.Errorf("Model = %q, want gpt-4o", msg.Model)
-		}
-		if msg.Role != "assistant" {
-			t.Errorf("Role = %q, want assistant (constant.Assistant)", msg.Role)
-		}
-		if msg.Type != "message" {
-			t.Errorf("Type = %q, want message (constant.Message)", msg.Type)
-		}
-		if msg.StopReason != anthropic.StopReasonEndTurn {
-			t.Errorf("StopReason = %q, want end_turn", msg.StopReason)
-		}
+		c.Require().NoError(err, "New")
+		c.Eq("chatcmpl-1", msg.ID, "ID")
+		c.Eq("gpt-4o", msg.Model, "Model")
+		c.Eq("assistant", msg.Role, "Role")
+		c.Eq("message", msg.Type, "Type")
+		c.Eq(anthropic.StopReasonEndTurn, msg.StopReason, "StopReason")
 		if len(msg.Content) != 1 || msg.Content[0].Type != "text" || msg.Content[0].Text != "Hello there." {
 			t.Errorf("Content = %s, want one text block %q", mustJSON(msg.Content), "Hello there.")
 		}
-		if msg.Usage.InputTokens != 11 {
-			t.Errorf("Usage.InputTokens = %d, want 11", msg.Usage.InputTokens)
-		}
-		if msg.Usage.OutputTokens != 7 {
-			t.Errorf("Usage.OutputTokens = %d, want 7", msg.Usage.OutputTokens)
-		}
+		c.Eq(11, msg.Usage.InputTokens, "Usage.InputTokens")
+		c.Eq(7, msg.Usage.OutputTokens, "Usage.OutputTokens")
 	})
 
 	t.Run("tool_calls", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"id":"chatcmpl-2","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":9}}`))
 		})
 		msg, err := s.New(context.Background(), minimalParams())
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		if msg.StopReason != anthropic.StopReasonToolUse {
-			t.Errorf("StopReason = %q, want tool_use", msg.StopReason)
-		}
-		if len(msg.Content) != 1 {
-			t.Fatalf("Content = %d blocks, want 1 tool_use (null content must not add a text block)", len(msg.Content))
-		}
+		c.Require().NoError(err, "New")
+		c.Eq(anthropic.StopReasonToolUse, msg.StopReason, "StopReason")
+		c.Require().Len(msg.Content, 1, "Content = %d blocks, want 1 tool_use (null content must not add a text block)", len(msg.Content))
 		block := msg.Content[0]
 		if block.Type != "tool_use" || block.ID != "call_9" || block.Name != "get_weather" {
 			t.Errorf("tool_use block = %s, want {tool_use, call_9, get_weather}", mustJSON(block))
 		}
-		if string(block.Input) != `{"city":"Paris"}` {
-			t.Errorf("Input = %s, want the raw arguments JSON, not double-encoded", block.Input)
-		}
+		c.Eq(`{"city":"Paris"}`, string(block.Input), "Input = %s, want the raw arguments JSON, not double-encoded", block.Input)
 		if msg.Usage.InputTokens != 20 || msg.Usage.OutputTokens != 9 {
 			t.Errorf("Usage = %d/%d, want 20/9", msg.Usage.InputTokens, msg.Usage.OutputTokens)
 		}
 	})
 
 	t.Run("unrecognized_finish_reason", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"id":"chatcmpl-3","model":"gpt-4o","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"unknown_reason_xyz"}]}`))
 		})
 		msg, err := s.New(context.Background(), minimalParams())
-		if err != nil {
-			t.Fatalf("New returned an error for an unrecognized finish_reason (must fall back, not fail): %v", err)
-		}
-		if msg.StopReason != anthropic.StopReasonEndTurn {
-			t.Errorf("StopReason = %q, want end_turn", msg.StopReason)
-		}
+		c.Require().NoError(err, "New returned an error for an unrecognized finish_reason (must fall back, not fail)")
+		c.Eq(anthropic.StopReasonEndTurn, msg.StopReason, "StopReason")
 	})
 }
 
@@ -358,51 +314,38 @@ func agentloopIsRetryableMirror(err error) bool {
 }
 
 func TestOpenAISenderNewMaps5xxToAnthropicError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream exploded", http.StatusServiceUnavailable)
 	})
 	_, err := s.New(context.Background(), minimalParams())
-	if err == nil {
-		t.Fatal("New: want an error for a 503 response, got nil")
-	}
+	c.Require().Error(err, "New: want an error for a 503 response, got nil")
 	var apiErr *anthropic.Error
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("error type = %T, want *anthropic.Error (isRetryable type-switches on it)", err)
-	}
-	if apiErr.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("StatusCode = %d, want 503", apiErr.StatusCode)
-	}
+	c.Require().True(errors.As(err, &apiErr), "error type = %T, want *anthropic.Error (isRetryable type-switches on it)", err)
+	c.Eq(http.StatusServiceUnavailable, apiErr.StatusCode, "StatusCode")
 	if apiErr.Request == nil || apiErr.Response == nil {
 		t.Errorf("Request/Response = %v/%v, want both set (the SDK error shape)", apiErr.Request, apiErr.Response)
 	}
 	// The classification pkg/agentloop's own isRetryable applies to exactly
 	// this error shape (see agentloopIsRetryableMirror above): a 503 retries.
-	if !agentloopIsRetryableMirror(err) {
-		t.Errorf("isRetryable(503) = false, want true — this provider would silently never retry")
-	}
+	c.True(agentloopIsRetryableMirror(err), "isRetryable(503) = false, want true — this provider would silently never retry")
 }
 
 func TestOpenAISenderNewMaps400ToNonRetryable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := newOpenAISenderForTest(t, "k", nil, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 	})
 	_, err := s.New(context.Background(), minimalParams())
-	if err == nil {
-		t.Fatal("New: want an error for a 400 response, got nil")
-	}
+	c.Require().Error(err, "New: want an error for a 400 response, got nil")
 	var apiErr *anthropic.Error
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("error type = %T, want *anthropic.Error", err)
-	}
-	if apiErr.StatusCode != http.StatusBadRequest {
-		t.Errorf("StatusCode = %d, want 400", apiErr.StatusCode)
-	}
-	if agentloopIsRetryableMirror(err) {
-		t.Errorf("isRetryable(400) = true, want false — retrying a permanent 4xx burns budget")
-	}
+	c.Require().True(errors.As(err, &apiErr), "error type = %T, want *anthropic.Error", err)
+	c.Eq(http.StatusBadRequest, apiErr.StatusCode, "StatusCode")
+	c.False(agentloopIsRetryableMirror(err), "isRetryable(400) = true, want false — retrying a permanent 4xx burns budget")
 }
 
 func TestOpenAISenderNewOmitsAuthHeaderWhenKeyless(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var sawKey bool
 	s := newOpenAISenderForTest(t, "", nil, func(w http.ResponseWriter, r *http.Request) {
@@ -416,14 +359,11 @@ func TestOpenAISenderNewOmitsAuthHeaderWhenKeyless(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(openAIOK))
 	})
-	if _, err := s.New(context.Background(), minimalParams()); err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	_, err := s.New(context.Background(), minimalParams())
+	c.Require().NoError(err, "New")
 	mu.Lock()
 	defer mu.Unlock()
-	if sawKey {
-		t.Error("keyless sender sent an Authorization header (even empty) — want none at all")
-	}
+	c.False(sawKey, "keyless sender sent an Authorization header (even empty) — want none at all")
 }
 
 // recordingRoundTripper records whether it was invoked, so the
@@ -439,16 +379,14 @@ func (rt *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 func TestOpenAISenderNewWrapsRoundTripperForCapture(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rt := &recordingRoundTripper{}
 	s := newOpenAISenderForTest(t, "k", rt, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(openAIOK))
 	})
-	if _, err := s.New(context.Background(), minimalParams()); err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if !rt.called.Load() {
-		t.Error("caller's RoundTripper was never invoked — headerCaptureTransport wrapping is not on the real request path, so raw-trace capture would silently see nothing")
-	}
+	_, err := s.New(context.Background(), minimalParams())
+	c.Require().NoError(err, "New")
+	c.True(rt.called.Load(), "caller's RoundTripper was never invoked — headerCaptureTransport wrapping is not on the real request path, so raw-trace capture would silently see nothing")
 }
 
 // The openai kind builds its own *http.Request rather than going through
@@ -458,6 +396,7 @@ func TestOpenAISenderNewWrapsRoundTripperForCapture(t *testing.T) {
 // default, unlike KindAnthropicOpenRouter): confirmed by the second case
 // below sending no header at all despite a session id being on ctx.
 func TestOpenAISenderNewHonorsConfiguredSessionHeader(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -472,21 +411,18 @@ func TestOpenAISenderNewHonorsConfiguredSessionHeader(t *testing.T) {
 		Name: "fireworks-openai", Kind: providers.KindOpenAI,
 		BaseURL: srv.URL, SessionHeader: "x-session-affinity",
 	}, "", nil)
-	if err != nil {
-		t.Fatalf("newOpenAISender: %v", err)
-	}
+	c.Require().NoError(err, "newOpenAISender")
 	ctx := WithSessionID(context.Background(), "conv-shard-2")
 	if _, err := s.New(ctx, minimalParams()); err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if got != "conv-shard-2" {
-		t.Errorf("x-session-affinity = %q, want conv-shard-2", got)
-	}
+	c.Eq("conv-shard-2", got, "x-session-affinity")
 }
 
 func TestOpenAISenderNewNoSessionHeaderWhenUnconfigured(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var sawAny bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -498,18 +434,14 @@ func TestOpenAISenderNewNoSessionHeaderWhenUnconfigured(t *testing.T) {
 	defer srv.Close()
 
 	s, err := newOpenAISender(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: srv.URL}, "", nil)
-	if err != nil {
-		t.Fatalf("newOpenAISender: %v", err)
-	}
+	c.Require().NoError(err, "newOpenAISender")
 	ctx := WithSessionID(context.Background(), "conv-shard-2")
 	if _, err := s.New(ctx, minimalParams()); err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if sawAny {
-		t.Error("session header present with no session_header configured — the openai kind must stay silent, it has no implicit default")
-	}
+	c.False(sawAny, "session header present with no session_header configured — the openai kind must stay silent, it has no implicit default")
 }
 
 // TestOpenAISenderNewRequiresBaseURL pins the constructor contract Task 2.1's
@@ -522,9 +454,8 @@ func TestOpenAISenderNewRequiresBaseURL(t *testing.T) {
 		t.Fatal("newOpenAISender with empty BaseURL: want a config error, got nil")
 	}
 	p.BaseURL = "http://localhost:11434/v1"
-	if _, err := newOpenAISender(p, "k", nil); err != nil {
-		t.Fatalf("newOpenAISender with a base_url: %v", err)
-	}
+	_, err := newOpenAISender(p, "k", nil)
+	assert.NewAborting(t).NoError(err, "newOpenAISender with a base_url")
 }
 
 // minimalParams is the smallest MessageNewParams the SDK requires.
@@ -626,15 +557,14 @@ func collectStream(t *testing.T, stream interface {
 		ev := stream.Current()
 		events = append(events, ev)
 		types = append(types, ev.Type)
-		if err := acc.Accumulate(ev); err != nil {
-			t.Fatalf("Accumulate(%s): %v", ev.Type, err)
-		}
+		assert.NewAborting(t).NoError(acc.Accumulate(ev), "Accumulate(%s)", ev.Type)
 		backfillDeltaUsage(&acc, ev)
 	}
 	return events, types, acc
 }
 
 func TestOpenAISenderNewStreamingTextOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(
 		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}`,
 		`{"id":"chatcmpl-s1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"lo "},"finish_reason":null}]}`,
@@ -644,15 +574,11 @@ func TestOpenAISenderNewStreamingTextOnly(t *testing.T) {
 	)))
 
 	stream, err := s.NewStreaming(context.Background(), minimalParams())
-	if err != nil {
-		t.Fatalf("NewStreaming: %v", err)
-	}
+	c.Require().NoError(err, "NewStreaming")
 	defer stream.Close()
 	events, types, acc := collectStream(t, stream)
 
-	if err := stream.Err(); err != nil {
-		t.Fatalf("stream.Err() after a healthy stream: %v", err)
-	}
+	c.Require().NoError(stream.Err(), "stream.Err() after a healthy stream")
 	// Cases 1-3-3-3-6-7: message_start, one content_block_start, one delta per
 	// content chunk, one stop, message_delta, message_stop — exactly, nothing
 	// extra.
@@ -666,28 +592,20 @@ func TestOpenAISenderNewStreamingTextOnly(t *testing.T) {
 		"message_delta",
 		"message_stop",
 	}
-	if !slices.Equal(types, wantTypes) {
-		t.Fatalf("event types = %v, want %v", types, wantTypes)
-	}
+	c.Require().EqDiff(wantTypes, types, "event types")
 
 	start := events[0]
 	if start.Message.ID != "chatcmpl-s1" || start.Message.Model != "gpt-4o" {
 		t.Errorf("message_start message = %s, want id chatcmpl-s1 model gpt-4o", mustJSON(start.Message))
 	}
-	if start.Message.Role != "assistant" || start.Message.Type != "message" {
-		t.Errorf("message_start role/type = %q/%q, want assistant/message", start.Message.Role, start.Message.Type)
-	}
-	if len(start.Message.Content) != 0 {
-		t.Errorf("message_start content = %s, want empty", mustJSON(start.Message.Content))
-	}
+	c.False(start.Message.Role != "assistant" || start.Message.Type != "message", "message_start role/type = %q/%q, want assistant/message", start.Message.Role, start.Message.Type)
+	c.Empty(start.Message.Content, "message_start content = %s, want empty", mustJSON(start.Message.Content))
 	if start.Message.Usage.InputTokens != 0 || start.Message.Usage.OutputTokens != 0 {
 		t.Errorf("message_start usage = %s, want zeroed (real numbers are not known yet)", mustJSON(start.Message.Usage))
 	}
 
 	blockStart := events[1]
-	if blockStart.Index != 0 {
-		t.Errorf("content_block_start index = %d, want 0", blockStart.Index)
-	}
+	c.Eq(0, blockStart.Index, "content_block_start index")
 	if blockStart.ContentBlock.Type != "text" || blockStart.ContentBlock.Text != "" {
 		t.Errorf("content_block_start content_block = %s, want {type:text,text:\"\"}", mustJSON(blockStart.ContentBlock))
 	}
@@ -695,43 +613,30 @@ func TestOpenAISenderNewStreamingTextOnly(t *testing.T) {
 	wantTexts := []string{"Hel", "lo ", "world"}
 	for i, want := range wantTexts {
 		ev := events[2+i]
-		if ev.Index != 0 {
-			t.Errorf("content_block_delta[%d] index = %d, want 0", i, ev.Index)
-		}
-		if ev.Delta.Text != want {
-			t.Errorf("content_block_delta[%d] text = %q, want %q", i, ev.Delta.Text, want)
-		}
+		c.Eq(0, ev.Index, "content_block_delta[%d] index = %d, want 0", i, ev.Index)
+		c.Eq(want, ev.Delta.Text, "content_block_delta[%d] text = %q, want", i, ev.Delta.Text)
 	}
 	if events[5].Type != "content_block_stop" || events[5].Index != 0 {
 		t.Errorf("content_block_stop = %s index %d, want index 0", events[5].Type, events[5].Index)
 	}
 
 	delta := events[6]
-	if delta.Delta.StopReason != anthropic.StopReasonEndTurn {
-		t.Errorf("message_delta stop_reason = %q, want end_turn", delta.Delta.StopReason)
-	}
-	if delta.Usage.InputTokens != 11 || delta.Usage.OutputTokens != 7 {
-		t.Errorf("message_delta usage = %d/%d, want 11/7", delta.Usage.InputTokens, delta.Usage.OutputTokens)
-	}
+	c.Eq(anthropic.StopReasonEndTurn, delta.Delta.StopReason, "message_delta stop_reason")
+	c.False(delta.Usage.InputTokens != 11 || delta.Usage.OutputTokens != 7, "message_delta usage = %d/%d, want 11/7", delta.Usage.InputTokens, delta.Usage.OutputTokens)
 
 	// The accumulated message is what the caller actually keeps: text
 	// reassembled across deltas, the mapped stop reason, and usage backfilled
 	// from message_delta (input arrives only there — message_start is zeroed).
-	if acc.ID != "chatcmpl-s1" || acc.Model != "gpt-4o" {
-		t.Errorf("accumulated id/model = %q/%q, want chatcmpl-s1/gpt-4o", acc.ID, acc.Model)
-	}
-	if acc.StopReason != anthropic.StopReasonEndTurn {
-		t.Errorf("accumulated stop_reason = %q, want end_turn", acc.StopReason)
-	}
+	c.False(acc.ID != "chatcmpl-s1" || acc.Model != "gpt-4o", "accumulated id/model = %q/%q, want chatcmpl-s1/gpt-4o", acc.ID, acc.Model)
+	c.Eq(anthropic.StopReasonEndTurn, acc.StopReason, "accumulated stop_reason")
 	if len(acc.Content) != 1 || acc.Content[0].Text != "Hello world" {
 		t.Errorf("accumulated content = %s, want one text block \"Hello world\"", mustJSON(acc.Content))
 	}
-	if acc.Usage.InputTokens != 11 || acc.Usage.OutputTokens != 7 {
-		t.Errorf("accumulated usage = %d/%d, want 11/7", acc.Usage.InputTokens, acc.Usage.OutputTokens)
-	}
+	c.False(acc.Usage.InputTokens != 11 || acc.Usage.OutputTokens != 7, "accumulated usage = %d/%d, want 11/7", acc.Usage.InputTokens, acc.Usage.OutputTokens)
 }
 
 func TestOpenAISenderNewStreamingToolCall(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// The arguments JSON, split across four fragments exactly as OpenAI streams
 	// them: the first chunk carries id+name with empty arguments, then the raw
 	// fragments follow one per chunk. This is the test that dies if the
@@ -755,15 +660,11 @@ func TestOpenAISenderNewStreamingToolCall(t *testing.T) {
 	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(lines...)))
 
 	stream, err := s.NewStreaming(context.Background(), minimalParams())
-	if err != nil {
-		t.Fatalf("NewStreaming: %v", err)
-	}
+	c.Require().NoError(err, "NewStreaming")
 	defer stream.Close()
 	events, types, acc := collectStream(t, stream)
 
-	if err := stream.Err(); err != nil {
-		t.Fatalf("stream.Err() after a healthy stream: %v", err)
-	}
+	c.Require().NoError(stream.Err(), "stream.Err() after a healthy stream")
 	wantTypes := []string{
 		"message_start",
 		"content_block_start",
@@ -775,20 +676,12 @@ func TestOpenAISenderNewStreamingToolCall(t *testing.T) {
 		"message_delta",
 		"message_stop",
 	}
-	if !slices.Equal(types, wantTypes) {
-		t.Fatalf("event types = %v, want %v", types, wantTypes)
-	}
+	c.Require().EqDiff(wantTypes, types, "event types")
 
 	blockStart := events[1]
-	if blockStart.ContentBlock.Type != "tool_use" {
-		t.Errorf("content_block_start type = %q, want tool_use", blockStart.ContentBlock.Type)
-	}
-	if blockStart.ContentBlock.ID != "call_7" || blockStart.ContentBlock.Name != "get_weather" {
-		t.Errorf("content_block_start id/name = %q/%q, want call_7/get_weather (id and name arrive once, on the first chunk)", blockStart.ContentBlock.ID, blockStart.ContentBlock.Name)
-	}
-	if input := mustJSON(blockStart.ContentBlock.Input); input != `{}` {
-		t.Errorf("content_block_start input = %s, want {}", input)
-	}
+	c.Eq("tool_use", blockStart.ContentBlock.Type, "content_block_start type")
+	c.False(blockStart.ContentBlock.ID != "call_7" || blockStart.ContentBlock.Name != "get_weather", "content_block_start id/name = %q/%q, want call_7/get_weather (id and name arrive once, on the first chunk)", blockStart.ContentBlock.ID, blockStart.ContentBlock.Name)
+	c.Eq(`{}`, mustJSON(blockStart.ContentBlock.Input), "content_block_start input")
 
 	// Each partial_json must be the EXACT raw fragment OpenAI sent, in order,
 	// unmodified — not a re-serialized snapshot.
@@ -797,42 +690,26 @@ func TestOpenAISenderNewStreamingToolCall(t *testing.T) {
 		if ev.Type != "content_block_delta" {
 			continue
 		}
-		if ev.Delta.Type != "input_json_delta" {
-			t.Fatalf("delta type = %q, want input_json_delta", ev.Delta.Type)
-		}
+		c.Require().Eq("input_json_delta", ev.Delta.Type, "delta type")
 		gotFragments = append(gotFragments, ev.Delta.PartialJSON)
 	}
-	if !slices.Equal(gotFragments, fragments) {
-		t.Fatalf("partial_json fragments = %q, want the raw fragments %q (forwarded as-is, not accumulated)",
-			gotFragments, fragments)
-	}
+	c.Require().EqDiff(fragments, gotFragments, "partial_json fragments")
 	joined := strings.Join(gotFragments, "")
-	if !json.Valid([]byte(joined)) {
-		t.Fatalf("concatenated fragments = %q, which is not valid JSON", joined)
-	}
+	c.Require().True(json.Valid([]byte(joined)), "concatenated fragments = %q, which is not valid JSON", joined)
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(joined), &parsed); err != nil {
-		t.Fatalf("concatenated fragments %q do not unmarshal: %v", joined, err)
-	}
+	c.Require().NoError(json.Unmarshal([]byte(joined), &parsed), "concatenated fragments %q do not unmarshal", joined)
 	if parsed["city"] != "Paris" || parsed["unit"] != "celsius" {
 		t.Errorf("parsed fragments = %s, want the arguments the fixture sent", mustJSON(parsed))
 	}
 
-	if acc.StopReason != anthropic.StopReasonToolUse {
-		t.Errorf("accumulated stop_reason = %q, want tool_use", acc.StopReason)
-	}
-	if len(acc.Content) != 1 {
-		t.Fatalf("accumulated content = %d blocks, want 1 tool_use", len(acc.Content))
-	}
-	if string(acc.Content[0].Input) != `{"city":"Paris","unit":"celsius"}` {
-		t.Errorf("accumulated input = %s, want the fragments concatenated into the original JSON", acc.Content[0].Input)
-	}
-	if acc.Usage.InputTokens != 20 || acc.Usage.OutputTokens != 9 {
-		t.Errorf("accumulated usage = %d/%d, want 20/9", acc.Usage.InputTokens, acc.Usage.OutputTokens)
-	}
+	c.Eq(anthropic.StopReasonToolUse, acc.StopReason, "accumulated stop_reason")
+	c.Require().Len(acc.Content, 1, "accumulated content = %d blocks, want 1 tool_use", len(acc.Content))
+	c.Eq(`{"city":"Paris","unit":"celsius"}`, string(acc.Content[0].Input), "accumulated input = %s, want the fragments concatenated into the original JSON", acc.Content[0].Input)
+	c.False(acc.Usage.InputTokens != 20 || acc.Usage.OutputTokens != 9, "accumulated usage = %d/%d, want 20/9", acc.Usage.InputTokens, acc.Usage.OutputTokens)
 }
 
 func TestOpenAISenderNewStreamingErrorMidStream(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Two healthy chunks, then a line that is not a chunk (case 8's
 	// "non-[DONE] line that fails to parse as a chunk").
 	s := newOpenAISenderForTest(t, "k", nil, openAIStreamHandler(openAIStreamBody(
@@ -843,22 +720,16 @@ func TestOpenAISenderNewStreamingErrorMidStream(t *testing.T) {
 	)))
 
 	stream, err := s.NewStreaming(context.Background(), minimalParams())
-	if err != nil {
-		t.Fatalf("NewStreaming: %v", err)
-	}
+	c.Require().NoError(err, "NewStreaming")
 	defer stream.Close()
 	events, types, _ := collectStream(t, stream)
 
 	// The healthy prefix is delivered before the failure surfaces.
 	wantPrefix := []string{"message_start", "content_block_start", "content_block_delta", "content_block_delta"}
-	if len(types) < len(wantPrefix) || !slices.Equal(types[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("events before the failure = %v, want the healthy prefix %v first", types, wantPrefix)
-	}
+	c.Require().False(len(types) < len(wantPrefix) || !slices.Equal(types[:len(wantPrefix)], wantPrefix), "events before the failure = %v, want the healthy prefix %v first", types, wantPrefix)
 
 	serr := stream.Err()
-	if serr == nil {
-		t.Fatal("stream.Err() = nil after an unparseable chunk, want the in-band error")
-	}
+	c.Require().Error(serr, "stream.Err() = nil after an unparseable chunk, want the in-band error")
 	// Case 8's contract: the error event must be shaped for ParseStreamError —
 	// the exact string sseStreamErrPrefix expects, carrying a type from
 	// streamerr.go's vocabulary.
@@ -867,31 +738,23 @@ func TestOpenAISenderNewStreamingErrorMidStream(t *testing.T) {
 	} else if se.ErrType != "api_error" {
 		t.Errorf("error.type = %q, want api_error (the safe default for an unparseable chunk)", se.ErrType)
 	}
-	if !IsTransientStreamError(serr) {
-		t.Errorf("IsTransientStreamError = false, want true — a mid-stream failure must classify as transient")
-	}
-	if len(events) < len(wantPrefix) {
-		t.Fatalf("only %d events delivered, want at least the healthy prefix", len(events))
-	}
+	c.True(IsTransientStreamError(serr), "IsTransientStreamError = false, want true — a mid-stream failure must classify as transient")
+	c.Require().GreaterOrEqual(len(wantPrefix), len(events), "only")
 }
 
 func TestSenderForKeyBuildsOpenAISender(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := providers.Provider{Name: "oai", Kind: providers.KindOpenAI, BaseURL: "http://example.invalid", APIKeyEnv: "OPENAI_API_KEY"}
 	s, err := SenderForKey(p, "resolved-key", nil)
-	if err != nil {
-		t.Fatalf("SenderForKey with a base_url: %v", err)
-	}
-	if s == nil {
-		t.Fatal("SenderForKey returned nil Sender with no error")
-	}
+	c.Require().NoError(err, "SenderForKey with a base_url")
+	c.Require().NotNil(s, "SenderForKey returned nil Sender with no error")
 	// The wiring must go through newOpenAISender (not an SDK client), and the
 	// result must carry the streaming capability agentloop type-asserts for.
 	if _, ok := s.(*openAISender); !ok {
 		t.Fatalf("SenderForKey(KindOpenAI) returned %T, want *openAISender", s)
 	}
-	if _, ok := s.(StreamingSender); !ok {
-		t.Fatalf("SenderForKey(KindOpenAI) returned %T, which does not implement StreamingSender — streaming would silently fall back to non-streamed sends", s)
-	}
+	_, ok := s.(StreamingSender)
+	c.Require().True(ok, "SenderForKey(KindOpenAI) returned %T, which does not implement StreamingSender — streaming would silently fall back to non-streamed sends", s)
 
 	// The key threaded through SenderForKey must reach the wire as
 	// "Authorization: Bearer <key>". The assertions above are type/capability
@@ -911,17 +774,13 @@ func TestSenderForKeyBuildsOpenAISender(t *testing.T) {
 	t.Cleanup(srv.Close)
 	p.BaseURL = srv.URL
 	sw, err := SenderForKey(p, "resolved-key", nil)
-	if err != nil {
-		t.Fatalf("SenderForKey against a fixture: %v", err)
-	}
+	c.Require().NoError(err, "SenderForKey against a fixture")
 	if _, err := sw.New(context.Background(), minimalParams()); err != nil {
 		t.Fatalf("New through SenderForKey: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if gotAuth != "Bearer resolved-key" {
-		t.Errorf("Authorization = %q, want Bearer resolved-key — the key did not survive the SenderForKey → newOpenAISender threading", gotAuth)
-	}
+	c.Eq("Bearer resolved-key", gotAuth, "Authorization")
 
 	// No canonical default base URL exists for a generic OpenAI-compatible
 	// endpoint: an empty base_url is a config error, not a silent default.

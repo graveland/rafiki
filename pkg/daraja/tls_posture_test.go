@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // selfSignedListener serves TLS with a self-signed certificate no system root
@@ -34,14 +36,11 @@ import (
 // --pin-cert spelling), and a teardown func.
 func selfSignedListener(t *testing.T) (net.Listener, string, func()) { //nolint:unparam // teardown mirrors the package's listener helpers
 	t.Helper()
+	c := assert.NewAborting(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	c.NoError(err, "generate key")
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generate serial: %v", err)
-	}
+	c.NoError(err, "generate serial")
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "rafiki-test"},
@@ -50,14 +49,10 @@ func selfSignedListener(t *testing.T) (net.Listener, string, func()) { //nolint:
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
+	c.NoError(err, "create certificate")
 	cfg := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	c.NoError(err, "listen")
 	// A minimal HTTP/1.1 responder: a completed RoundTrip is the proof the
 	// handshake was accepted, not merely attempted.
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -75,9 +70,7 @@ func TestTLSTransportUnpinnedRefusesSelfSigned(t *testing.T) {
 	defer teardown()
 
 	_, err := TLSTransport("", "").RoundTrip(probeRequest(t, ln.Addr().String()))
-	if err == nil {
-		t.Fatal("an unpinned transport accepted a self-signed certificate; system-roots verification is not optional")
-	}
+	assert.NewAborting(t).Error(err, "an unpinned transport accepted a self-signed certificate; system-roots verification is not optional")
 }
 
 // A pinned transport accepts the pinned leaf and refuses a DIFFERENT
@@ -90,9 +83,8 @@ func TestTLSTransportPinnedVerifiesTheFingerprint(t *testing.T) {
 	if _, err := TLSTransport("", fp).RoundTrip(probeRequest(t, addr)); err != nil {
 		t.Fatalf("a transport pinned to the serving leaf's fingerprint refused it: %v", err)
 	}
-	if _, err := TLSTransport("", pinnedOtherFingerprint).RoundTrip(probeRequest(t, addr)); err == nil {
-		t.Fatal("a transport pinned to another fingerprint accepted the peer")
-	}
+	_, err := TLSTransport("", pinnedOtherFingerprint).RoundTrip(probeRequest(t, addr))
+	assert.NewAborting(t).Error(err, "a transport pinned to another fingerprint accepted the peer")
 }
 
 // The reverse channel's dial shares the posture: unpinned refuses, pinned to
@@ -106,9 +98,7 @@ func TestDialDaemonVerifiesLikeTheTransport(t *testing.T) {
 		t.Fatal("an unpinned daraja dial accepted a self-signed certificate")
 	}
 	conn, _, err := dialDaemon(context.Background(), ConnectOptions{Addr: addr, PinCert: fp})
-	if err != nil {
-		t.Fatalf("a pinned daraja dial refused the leaf it was pinned to: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "a pinned daraja dial refused the leaf it was pinned to")
 	_ = conn.Close()
 }
 
@@ -120,8 +110,6 @@ const pinnedOtherFingerprint = "000000000000000000000000000000000000000000000000
 func probeRequest(t *testing.T, addr string) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, "https://"+addr+"/probe", nil)
-	if err != nil {
-		t.Fatalf("build probe request: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "build probe request")
 	return req
 }

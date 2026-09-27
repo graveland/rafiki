@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/lsp"
 	"go.graveland.dev/rafiki/pkg/fundi/lspadapter"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestIntegration_RenameAgainstGopls is the end-to-end proof for the two
@@ -28,6 +30,7 @@ import (
 // The fixture deliberately puts a CJK string literal on the same line as the
 // symbol being renamed, so both defects would fail this test.
 func TestIntegration_RenameAgainstGopls(t *testing.T) {
+	c := assert.NewCollecting(t)
 	goplsPath, err := exec.LookPath("gopls")
 	if err != nil {
 		t.Skipf("gopls not found on PATH: %v", err)
@@ -36,9 +39,7 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
 	}
 	write("go.mod", "module example\n\ngo 1.21\n")
 	// Add is defined in main.go and used in both files. The CJK literal sits
@@ -59,43 +60,25 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	defer cancel()
 
 	mainPath := filepath.Join(dir, "main.go")
-	if err := adapter.DidOpen(ctx, mainPath, ""); err != nil {
-		t.Fatalf("DidOpen: %v", err)
-	}
+	c.Require().NoError(adapter.DidOpen(ctx, mainPath, ""), "DidOpen")
 	_ = adapter.WaitForDiagnostics(ctx, mainPath, 15)
 
 	// "func Add" -> Add starts at line 2 (0-based), column 5.
 	modified, err := adapter.Rename(ctx, mainPath, 2, 5, "Sum")
-	if err != nil {
-		t.Fatalf("Rename: %v", err)
-	}
-	if len(modified) == 0 {
-		t.Fatal("rename modified no files: the documentChanges shape is not being decoded")
-	}
+	c.Require().NoError(err, "Rename")
+	c.Require().NotEmpty(modified, "rename modified no files: the documentChanges shape is not being decoded")
 
 	gotMain, err := os.ReadFile(mainPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	gotOther, err := os.ReadFile(filepath.Join(dir, "other.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
-	if strings.Contains(string(gotMain), "Add") || strings.Contains(string(gotOther), "Add") {
-		t.Errorf("old name survived the rename:\nmain.go:\n%s\nother.go:\n%s", gotMain, gotOther)
-	}
-	if !strings.Contains(string(gotMain), "func Sum(") {
-		t.Errorf("definition not renamed:\n%s", gotMain)
-	}
-	if !strings.Contains(string(gotOther), "Sum(3, 4)") {
-		t.Errorf("cross-file reference not renamed:\n%s", gotOther)
-	}
+	c.False(strings.Contains(string(gotMain), "Add") || strings.Contains(string(gotOther), "Add"), "old name survived the rename:\nmain.go:\n%s\nother.go:\n%s", gotMain, gotOther)
+	c.StrContains(string(gotMain), "func Sum(", "definition not renamed:\n%s", gotMain)
+	c.StrContains(string(gotOther), "Sum(3, 4)", "cross-file reference not renamed:\n%s", gotOther)
 	// The CJK literal must survive intact. Byte-indexed UTF-16 columns cut
 	// it mid-rune and produced invalid UTF-8.
-	if !strings.Contains(string(gotMain), `"日本語"`) {
-		t.Errorf("the CJK literal was corrupted by the edit:\n%q", gotMain)
-	}
+	c.StrContains(string(gotMain), `"日本語"`, "the CJK literal was corrupted by the edit:\n%q", gotMain)
 
 	// Regression check for Finding 6: applyWorkspaceEdit wrote the rename to
 	// disk but never told the server, so its OPEN buffer for main.go still
@@ -106,9 +89,7 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 	// missing. If this starts failing, check that Rename in lspadapter/adapter.go
 	// still calls a.mgr.NotifyChange for every modified path.
 	syms, err := adapter.DocumentSymbols(ctx, mainPath)
-	if err != nil {
-		t.Fatalf("DocumentSymbols: %v", err)
-	}
+	c.Require().NoError(err, "DocumentSymbols")
 	var sawOld, sawNew bool
 	for _, s := range syms {
 		switch s.Name {
@@ -118,10 +99,6 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 			sawNew = true
 		}
 	}
-	if sawOld {
-		t.Error("server still reports the pre-rename symbol \"Add\" -- it was never notified of the rename (no didChange sent)")
-	}
-	if !sawNew {
-		t.Error("server does not report the renamed symbol \"Sum\"; expected DocumentSymbols to reflect the rename")
-	}
+	c.False(sawOld, "server still reports the pre-rename symbol \"Add\" -- it was never notified of the rename (no didChange sent)")
+	c.True(sawNew, "server does not report the renamed symbol \"Sum\"; expected DocumentSymbols to reflect the rename")
 }

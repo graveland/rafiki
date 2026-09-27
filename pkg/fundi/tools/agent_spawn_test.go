@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // agent_spawn's new preset/narrowing fields must arrive at the spawner
 // verbatim, with the tri-state intact: "tools": [] is a non-nil empty slice
 // (a request for none), an absent field is nil (no request).
 func TestAgentSpawnCopiesPresetFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sp := &fakeSpawner{}
 	reg, ctx := newAgentTools(t, sp)
 	in := `{"prompt":"do it","preset":"default:implementer","thinking":"high",` +
@@ -19,47 +22,25 @@ func TestAgentSpawnCopiesPresetFields(t *testing.T) {
 	if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in)); err != nil {
 		t.Fatalf("agent_spawn: %v", err)
 	}
-	if len(sp.spawned) != 1 {
-		t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
-	}
+	c.Require().Len(sp.spawned, 1, "want 1 spawn, got %d", len(sp.spawned))
 	spec := sp.spawned[0]
-	if spec.Preset != "default:implementer" {
-		t.Errorf("Preset = %q", spec.Preset)
-	}
-	if spec.Thinking != "high" {
-		t.Errorf("Thinking = %q", spec.Thinking)
-	}
-	if spec.AppendSystemPrompt != "be terse" {
-		t.Errorf("AppendSystemPrompt = %q", spec.AppendSystemPrompt)
-	}
-	if spec.Tools == nil || len(*spec.Tools) != 0 {
-		t.Errorf(`"tools":[] arrived as %#v, want a non-nil pointer to an empty slice`, spec.Tools)
-	}
-	if spec.Skills == nil || len(*spec.Skills) != 1 || (*spec.Skills)[0] != "x" {
-		t.Errorf("Skills arrived as %#v, want [x]", spec.Skills)
-	}
-	if spec.MCPServers != nil {
-		t.Errorf("absent mcp_servers arrived as %#v, want nil", spec.MCPServers)
-	}
-	if spec.ContextFiles == nil || *spec.ContextFiles != false {
-		t.Errorf(`"context_files":false arrived as %#v, want a pointer to false`, spec.ContextFiles)
-	}
+	c.Eq("default:implementer", spec.Preset, "Preset =")
+	c.Eq("high", spec.Thinking, "Thinking =")
+	c.Eq("be terse", spec.AppendSystemPrompt, "AppendSystemPrompt =")
+	c.False(spec.Tools == nil || len(*spec.Tools) != 0, `"tools":[] arrived as %#v, want a non-nil pointer to an empty slice`, spec.Tools)
+	c.False(spec.Skills == nil || len(*spec.Skills) != 1 || (*spec.Skills)[0] != "x", "Skills arrived as %#v, want [x]", spec.Skills)
+	c.Nil(spec.MCPServers, "absent mcp_servers arrived as")
+	c.False(spec.ContextFiles == nil || *spec.ContextFiles != false, `"context_files":false arrived as %#v, want a pointer to false`, spec.ContextFiles)
 
 	// A spawn without any of the fields must arrive with none of them set:
 	// absent means no request, not a default.
 	sp2 := &fakeSpawner{}
 	reg2, ctx2 := newAgentTools(t, sp2)
-	if _, err := reg2.Execute(ctx2, "agent_spawn", json.RawMessage(`{"prompt":"x"}`)); err != nil {
-		t.Fatalf("agent_spawn: %v", err)
-	}
+	_, err := reg2.Execute(ctx2, "agent_spawn", json.RawMessage(`{"prompt":"x"}`))
+	c.Require().NoError(err, "agent_spawn")
 	got := sp2.spawned[0]
-	if got.Preset != "" || got.Thinking != "" || got.AppendSystemPrompt != "" {
-		t.Errorf("absent string fields arrived as %q/%q/%q, want all empty", got.Preset, got.Thinking, got.AppendSystemPrompt)
-	}
-	if got.Tools != nil || got.Skills != nil || got.MCPServers != nil || got.ContextFiles != nil {
-		t.Errorf("absent pointer fields arrived as %#v/%#v/%#v/%#v, want all nil",
-			got.Tools, got.Skills, got.MCPServers, got.ContextFiles)
-	}
+	c.False(got.Preset != "" || got.Thinking != "" || got.AppendSystemPrompt != "", "absent string fields arrived as %q/%q/%q, want all empty", got.Preset, got.Thinking, got.AppendSystemPrompt)
+	c.False(got.Tools != nil || got.Skills != nil || got.MCPServers != nil || got.ContextFiles != nil, "absent pointer fields arrived as %#v/%#v/%#v/%#v, want all nil", got.Tools, got.Skills, got.MCPServers, got.ContextFiles)
 }
 
 // The MCP face excises the span between "You will be notified" and "Keep
@@ -67,15 +48,12 @@ func TestAgentSpawnCopiesPresetFields(t *testing.T) {
 // vanishes, that excision silently slices different text — so their presence
 // and order are pinned.
 func TestAgentSpawnDescriptionKeepsExcisionMarkers(t *testing.T) {
+	c := assert.NewCollecting(t)
 	d := agentSpawnDescription
 	notif := strings.Index(d, "You will be notified")
 	keep := strings.Index(d, "Keep doing your own work")
-	if notif < 0 || keep < 0 {
-		t.Fatalf("agent_spawn description lost an excision marker: \"You will be notified\" at %d, \"Keep doing your own work\" at %d", notif, keep)
-	}
-	if notif > keep {
-		t.Errorf("excision markers out of order: \"You will be notified\" at %d, \"Keep doing your own work\" at %d", notif, keep)
-	}
+	c.Require().False(notif < 0 || keep < 0, "agent_spawn description lost an excision marker: \"You will be notified\" at %d, \"Keep doing your own work\" at %d", notif, keep)
+	c.LessOrEqual(keep, notif, "excision markers out of order: \"You will be notified\" at %d, \"Keep doing your own work\" at", notif)
 }
 
 // TestAgentSpawnPrefillParsed pins that agent_spawn parses its prefill list
@@ -83,15 +61,13 @@ func TestAgentSpawnDescriptionKeepsExcisionMarkers(t *testing.T) {
 // the child) and that the parsed entries reach SpawnSpec.Prefill verbatim.
 func TestAgentSpawnPrefillParsed(t *testing.T) {
 	t.Run("entries reach SpawnSpec", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		sp := &fakeSpawner{}
 		reg, ctx := newAgentTools(t, sp)
 		in := `{"prompt":"do it","prefill":["CLAUDE.md","pkg/prefill/prefill.go:10-40","src/**/*.rs"]}`
-		if _, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in)); err != nil {
-			t.Fatalf("agent_spawn: %v", err)
-		}
-		if len(sp.spawned) != 1 {
-			t.Fatalf("want 1 spawn, got %d", len(sp.spawned))
-		}
+		_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(in))
+		c.NoError(err, "agent_spawn")
+		c.Len(sp.spawned, 1, "want 1 spawn, got %d", len(sp.spawned))
 		spec := sp.spawned[0]
 		want := []struct {
 			path       string
@@ -101,9 +77,7 @@ func TestAgentSpawnPrefillParsed(t *testing.T) {
 			{"pkg/prefill/prefill.go", 10, 40},
 			{"src/**/*.rs", 0, 0},
 		}
-		if len(spec.Prefill) != len(want) {
-			t.Fatalf("Prefill = %#v, want %d entries", spec.Prefill, len(want))
-		}
+		c.Len(spec.Prefill, len(want), "Prefill")
 		for i, w := range want {
 			if spec.Prefill[i].Path != w.path || spec.Prefill[i].Start != w.start || spec.Prefill[i].End != w.end {
 				t.Errorf("Prefill[%d] = %+v, want %s:%d-%d", i, spec.Prefill[i], w.path, w.start, w.end)
@@ -112,17 +86,14 @@ func TestAgentSpawnPrefillParsed(t *testing.T) {
 	})
 
 	t.Run("bad range errors without spawning", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		sp := &fakeSpawner{}
 		reg, ctx := newAgentTools(t, sp)
 		_, err := reg.Execute(ctx, "agent_spawn", json.RawMessage(`{"prompt":"x","prefill":["f.go:40-10"]}`))
-		if err == nil {
-			t.Fatal("want an error for a bad range, got nil")
-		}
+		c.Require().Error(err, "want an error for a bad range, got nil")
 		if !strings.HasPrefix(err.Error(), "agent_spawn: prefill: ") {
 			t.Errorf("error = %q, want it wrapped as agent_spawn: prefill: …", err)
 		}
-		if len(sp.spawned) != 0 {
-			t.Errorf("a failed parse must not spawn, got %d spawns", len(sp.spawned))
-		}
+		c.Empty(sp.spawned, "a failed parse must not spawn, got %d spawns", len(sp.spawned))
 	})
 }

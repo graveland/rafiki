@@ -14,6 +14,8 @@ import (
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // gitSyncServer builds a Server whose git-source sync targets a temp cache
@@ -34,9 +36,7 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s (in %s): %v: %s", strings.Join(args, " "), dir, err, out)
-	}
+	assert.NewAborting(t).NoError(err, "git %s (in %s): %v: %s", strings.Join(args, " "), dir, err, out)
 	return string(out)
 }
 
@@ -58,16 +58,13 @@ func gitFixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	c := assert.NewAborting(t)
 	repo := t.TempDir()
 	gitRun(t, repo, "init", "-b", "main")
 	for name, content := range files {
 		path := filepath.Join(repo, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(os.MkdirAll(filepath.Dir(path), 0o755))
+		c.NoError(os.WriteFile(path, []byte(content), 0o644))
 	}
 	gitRun(t, repo, "add", "-A")
 	gitCommit(t, repo, "fixture")
@@ -80,9 +77,7 @@ func syncGitSource(t *testing.T, s *Server, name, url, ref string) *executorpb.S
 	t.Helper()
 	resp, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{Name: name, Url: url, Ref: ref}))
-	if err != nil {
-		t.Fatalf("SyncPyModuleGitSource: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "SyncPyModuleGitSource")
 	return resp.Msg
 }
 
@@ -90,12 +85,11 @@ func syncGitSource(t *testing.T, s *Server, name, url, ref string) *executorpb.S
 // description), order-insensitively.
 func assertScripts(t *testing.T, got []*executorpb.GitSourceScript, want map[string]string) {
 	t.Helper()
+	c := assert.NewCollecting(t)
 	names := make([]string, 0, len(got))
 	for _, sc := range got {
 		names = append(names, sc.GetName())
-		if sc.GetDescription() != want[sc.GetName()] {
-			t.Errorf("script %q description = %q, want %q", sc.GetName(), sc.GetDescription(), want[sc.GetName()])
-		}
+		c.Eq(want[sc.GetName()], sc.GetDescription(), "script %q description = %q, want", sc.GetName(), sc.GetDescription())
 	}
 	wantNames := make([]string, 0, len(want))
 	for n := range want {
@@ -103,20 +97,17 @@ func assertScripts(t *testing.T, got []*executorpb.GitSourceScript, want map[str
 	}
 	slices.Sort(names)
 	slices.Sort(wantNames)
-	if !slices.Equal(names, wantNames) {
-		t.Errorf("scripts = %v, want %v", names, wantNames)
-	}
+	c.EqDiff(wantNames, names, "scripts")
 }
 
 // assertPackages is assertScripts for the response's packages.
 func assertPackages(t *testing.T, got []*executorpb.GitSourcePackage, want map[string]string) {
 	t.Helper()
+	c := assert.NewCollecting(t)
 	names := make([]string, 0, len(got))
 	for _, p := range got {
 		names = append(names, p.GetName())
-		if p.GetDescription() != want[p.GetName()] {
-			t.Errorf("package %q description = %q, want %q", p.GetName(), p.GetDescription(), want[p.GetName()])
-		}
+		c.Eq(want[p.GetName()], p.GetDescription(), "package %q description = %q, want", p.GetName(), p.GetDescription())
 	}
 	wantNames := make([]string, 0, len(want))
 	for n := range want {
@@ -124,9 +115,7 @@ func assertPackages(t *testing.T, got []*executorpb.GitSourcePackage, want map[s
 	}
 	slices.Sort(names)
 	slices.Sort(wantNames)
-	if !slices.Equal(names, wantNames) {
-		t.Errorf("packages = %v, want %v", names, wantNames)
-	}
+	c.EqDiff(wantNames, names, "packages")
 }
 
 // assertNoStaging asserts the checkout holds no leftover staging temp dir --
@@ -135,9 +124,7 @@ func assertPackages(t *testing.T, got []*executorpb.GitSourcePackage, want map[s
 func assertNoStaging(t *testing.T, checkout string) {
 	t.Helper()
 	entries, err := os.ReadDir(checkout)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".rafiki-venv-staging") {
 			t.Errorf("staging dir %s survived the sync", filepath.Join(checkout, e.Name()))
@@ -146,35 +133,27 @@ func assertNoStaging(t *testing.T, checkout string) {
 }
 
 func TestSyncPyModuleGitSourceRefusesWhenNotOptedIn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, false)
 	_, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{Name: "ops-tools", Url: "/tmp/nowhere", Ref: "main"}))
-	if err == nil {
-		t.Fatal("SyncPyModuleGitSource ran on an executor that never opted in")
-	}
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Errorf("got %v, want PermissionDenied", connect.CodeOf(err))
-	}
-	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
-		t.Errorf("a refused sync created its cache root (err=%v)", derr)
-	}
+	c.Require().Error(err, "SyncPyModuleGitSource ran on an executor that never opted in")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "got")
+	_, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools")))
+	c.True(os.IsNotExist(derr), "a refused sync created its cache root (err=%v)", derr)
 }
 
 // The name is a path segment under the cache root. Anything that could escape
 // it must be refused before a single byte is written.
 func TestSyncPyModuleGitSourceRejectsInvalidName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	_, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{Name: "../evil", Url: "/tmp/nowhere", Ref: "main"}))
-	if err == nil {
-		t.Fatal("accepted a name that can escape the pymodule-repo directory")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
-		t.Errorf("a rejected sync wrote to disk (err=%v)", derr)
-	}
+	c.Require().Error(err, "accepted a name that can escape the pymodule-repo directory")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got code")
+	_, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools")))
+	c.True(os.IsNotExist(derr), "a rejected sync wrote to disk (err=%v)", derr)
 }
 
 // A leading dash makes git parse the argument as an option rather than a
@@ -183,43 +162,31 @@ func TestSyncPyModuleGitSourceRejectsInvalidName(t *testing.T) {
 // before any subprocess runs -- the same shape validSegment applies to the
 // name. One test per field, so a pass line names exactly which gate held.
 func TestSyncPyModuleGitSourceRejectsLeadingDashRef(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	_, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{
 			Name: "ops-tools", Url: "/tmp/nowhere", Ref: "--upload-pack=touch /tmp/pwned",
 		}))
-	if err == nil {
-		t.Fatal("accepted a ref that begins with a dash")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if !strings.Contains(err.Error(), "ref") {
-		t.Errorf("error %q does not name the offending field", err.Error())
-	}
-	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
-		t.Errorf("a rejected sync wrote to disk (err=%v)", derr)
-	}
+	c.Require().Error(err, "accepted a ref that begins with a dash")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got code")
+	c.StrContains(err.Error(), "ref", "error")
+	_, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools")))
+	c.True(os.IsNotExist(derr), "a rejected sync wrote to disk (err=%v)", derr)
 }
 
 func TestSyncPyModuleGitSourceRejectsLeadingDashUrl(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	_, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{
 			Name: "ops-tools", Url: "--upload-pack=touch /tmp/pwned", Ref: "main",
 		}))
-	if err == nil {
-		t.Fatal("accepted a url that begins with a dash")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if !strings.Contains(err.Error(), "url") {
-		t.Errorf("error %q does not name the offending field", err.Error())
-	}
-	if _, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools"))); !os.IsNotExist(derr) {
-		t.Errorf("a rejected sync wrote to disk (err=%v)", derr)
-	}
+	c.Require().Error(err, "accepted a url that begins with a dash")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got code")
+	c.StrContains(err.Error(), "url", "error")
+	_, derr := os.Stat(filepath.Dir(gitPymoduleRepoDir("ops-tools")))
+	c.True(os.IsNotExist(derr), "a rejected sync wrote to disk (err=%v)", derr)
 }
 
 // The pymodule-repos cache root is lazily created by the first sync, and a
@@ -228,37 +195,29 @@ func TestSyncPyModuleGitSourceRejectsLeadingDashUrl(t *testing.T) {
 // clean -fdx run inside it. Same mechanism as the blob path's
 // assertManagedOrAbsent guard, one failure shape earlier in the handler.
 func TestSyncPyModuleGitSourceRefusesUnmanagedRoot(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{
 		"scripts/rotate.py": "# rotate\n",
 	})
 
 	root := filepath.Dir(gitPymoduleRepoDir("ops-tools"))
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(root, 0o755))
 	stray := filepath.Join(root, "operator-notes")
-	if err := os.WriteFile(stray, []byte("not rafiki's"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(stray, []byte("not rafiki's"), 0o644))
 
 	_, err := s.SyncPyModuleGitSource(context.Background(),
 		connect.NewRequest(&executorpb.SyncPyModuleGitSourceRequest{Name: "ops-tools", Url: repo, Ref: "main"}))
-	if err == nil {
-		t.Fatal("synced into an unmanaged pymodule-repos root")
-	}
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("got %v, want FailedPrecondition", connect.CodeOf(err))
-	}
+	c.Require().Error(err, "synced into an unmanaged pymodule-repos root")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "got")
 	if _, serr := os.Stat(gitPymoduleRepoDir("ops-tools")); !os.IsNotExist(serr) {
 		t.Errorf("a refused sync wrote a checkout into the unmanaged root (err=%v)", serr)
 	}
 	if _, serr := os.Stat(filepath.Join(root, managedMarker)); !os.IsNotExist(serr) {
 		t.Errorf("a refused sync marked the unmanaged root as its own (err=%v)", serr)
 	}
-	if _, serr := os.Stat(stray); serr != nil {
-		t.Errorf("the refusal disturbed the root's own contents: %v", serr)
-	}
+	_, serr := os.Stat(stray)
+	c.NoError(serr, "the refusal disturbed the root's own contents")
 }
 
 func TestSyncPyModuleGitSourceClonesAndDiscovers(t *testing.T) {
@@ -288,15 +247,15 @@ func TestSyncPyModuleGitSourceClonesAndDiscovers(t *testing.T) {
 	// The lazily created cache root is marked, so a later sync recognises it
 	// as rafiki's — the same managedMarker mechanism the blob path's
 	// SyncPyModules applies to its own cache dir.
-	if _, err := os.Stat(filepath.Join(filepath.Dir(checkout), managedMarker)); err != nil {
-		t.Errorf("the first sync did not drop the managed marker on the pymodule-repos root: %v", err)
-	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(checkout), managedMarker))
+	assert.NewCollecting(t).NoError(err, "the first sync did not drop the managed marker on the pymodule-repos root")
 }
 
 // A refresh must land the repo's new tip and sweep everything untracked: a
 // leftover file would otherwise be invisible cruft -- or, in scripts/, a
 // callable nobody committed.
 func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{
 		"scripts/a.py": "# first script\n",
@@ -305,9 +264,7 @@ func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
 	assertScripts(t, first.GetScripts(), map[string]string{"a": "first script"})
 
 	// A NEW commit in the fixture repo: the refresh must bring it in.
-	if err := os.WriteFile(filepath.Join(repo, "scripts", "b.py"), []byte("# second script\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(repo, "scripts", "b.py"), []byte("# second script\n"), 0o644))
 	gitRun(t, repo, "add", "-A")
 	gitCommit(t, repo, "add b.py")
 
@@ -316,13 +273,9 @@ func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
 	// and an untracked .py in scripts/ (the dangerous kind -- it would become
 	// callable if git clean did not run).
 	stray := filepath.Join(checkout, "stray.txt")
-	if err := os.WriteFile(stray, []byte("cruft"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(stray, []byte("cruft"), 0o644))
 	strayScript := filepath.Join(checkout, "scripts", "stray.py")
-	if err := os.WriteFile(strayScript, []byte("# never committed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(strayScript, []byte("# never committed\n"), 0o644))
 
 	second := syncGitSource(t, s, "ops-tools", repo, "main")
 
@@ -331,9 +284,8 @@ func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
 		"b": "second script", // the new commit arrived
 	})
 	for _, p := range []string{stray, strayScript} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("untracked %s survived the refresh (err=%v)", p, err)
-		}
+		_, err := os.Stat(p)
+		c.True(os.IsNotExist(err), "untracked %s survived the refresh (err=%v)", p, err)
 	}
 }
 
@@ -343,6 +295,7 @@ func TestSyncPyModuleGitSourceRefreshResetsAndCleans(t *testing.T) {
 // exactly like a failed build -- VenvReady=false, one clear sentence naming
 // the gap -- while the discovered inventory still reports (design §5).
 func TestSyncPyModuleGitSourceRequirementsOnlyRepoReportsNotReady(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{
 		"requirements.txt":  "requests\n",
@@ -351,16 +304,11 @@ func TestSyncPyModuleGitSourceRequirementsOnlyRepoReportsNotReady(t *testing.T) 
 
 	resp := syncGitSource(t, s, "ops-tools", repo, "main")
 
-	if resp.GetVenvReady() {
-		t.Fatal("a requirements.txt-only repo reported VenvReady")
-	}
-	if !strings.Contains(resp.GetVenvError(), "requirements.txt") {
-		t.Errorf("venv error %q does not name requirements.txt", resp.GetVenvError())
-	}
+	c.Require().False(resp.GetVenvReady(), "a requirements.txt-only repo reported VenvReady")
+	c.StrContains(resp.GetVenvError(), "requirements.txt", "venv error")
 	assertScripts(t, resp.GetScripts(), map[string]string{"rotate": "rotate"})
-	if _, err := os.Stat(filepath.Join(gitPymoduleRepoDir("ops-tools"), ".venv")); !os.IsNotExist(err) {
-		t.Errorf("a skipped build published a .venv (err=%v)", err)
-	}
+	_, err := os.Stat(filepath.Join(gitPymoduleRepoDir("ops-tools"), ".venv"))
+	c.True(os.IsNotExist(err), "a skipped build published a .venv (err=%v)", err)
 }
 
 // The fake uv for the git-source sync tests: implements exactly the one
@@ -402,13 +350,12 @@ esac
 exit 0
 `
 	path := filepath.Join(dir, "uv")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(script), 0o755))
 	return dir
 }
 
 func TestSyncPyModuleGitSourceBuildsVenvWithFakeUv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeUVSync(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	log := setFakeUVLog(t)
@@ -425,18 +372,16 @@ func TestSyncPyModuleGitSourceBuildsVenvWithFakeUv(t *testing.T) {
 			resp.GetVenvReady(), resp.GetVenvError())
 	}
 	checkout := gitPymoduleRepoDir("ops-tools")
-	if _, err := os.Stat(filepath.Join(checkout, ".venv", "bin", "python3")); err != nil {
-		t.Errorf("the repo's shared venv was not built into the checkout: %v", err)
-	}
-	if n := fakeUVInvocations(t, log); n != 1 {
-		t.Errorf("uv ran %d times, want 1", n)
-	}
+	_, err := os.Stat(filepath.Join(checkout, ".venv", "bin", "python3"))
+	c.NoError(err, "the repo's shared venv was not built into the checkout")
+	c.Eq(1, fakeUVInvocations(t, log), "uv ran")
 	assertNoStaging(t, checkout)
 }
 
 // A broken dependency build must not hide the inventory (design §5): the
 // discovery still reports, only the venv fails.
 func TestSyncPyModuleGitSourceReportsDiscoveryEvenOnVenvFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeUVSync(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	s := gitSyncServer(t, true)
@@ -449,19 +394,14 @@ func TestSyncPyModuleGitSourceReportsDiscoveryEvenOnVenvFailure(t *testing.T) {
 
 	resp := syncGitSource(t, s, "ops-tools", repo, "main")
 
-	if resp.GetVenvReady() {
-		t.Fatal("a failed uv sync reported VenvReady")
-	}
-	if !strings.Contains(resp.GetVenvError(), "simulated sync failure") {
-		t.Errorf("venv error %q does not name the failure", resp.GetVenvError())
-	}
+	c.Require().False(resp.GetVenvReady(), "a failed uv sync reported VenvReady")
+	c.StrContains(resp.GetVenvError(), "simulated sync failure", "venv error")
 	assertScripts(t, resp.GetScripts(), map[string]string{"rotate": "rotate"})
 	assertPackages(t, resp.GetPackages(), map[string]string{"ops_tools": "operator tooling"})
 
 	checkout := gitPymoduleRepoDir("ops-tools")
-	if _, err := os.Stat(filepath.Join(checkout, ".venv")); !os.IsNotExist(err) {
-		t.Errorf("a failed build published a .venv (err=%v)", err)
-	}
+	_, err := os.Stat(filepath.Join(checkout, ".venv"))
+	c.True(os.IsNotExist(err), "a failed build published a .venv (err=%v)", err)
 	assertNoStaging(t, checkout)
 }
 
@@ -470,6 +410,7 @@ func TestSyncPyModuleGitSourceReportsDiscoveryEvenOnVenvFailure(t *testing.T) {
 // inventory is empty, and nothing panics or hangs. The clone itself succeeds,
 // so the checkout stays in place for a later refresh with a good ref.
 func TestSyncPyModuleGitSourceFailsCleanlyOnBadRef(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := gitSyncServer(t, true)
 	repo := gitFixture(t, map[string]string{
 		"scripts/rotate.py": "# rotate\n",
@@ -477,33 +418,24 @@ func TestSyncPyModuleGitSourceFailsCleanlyOnBadRef(t *testing.T) {
 
 	resp := syncGitSource(t, s, "ops-tools", repo, "no-such-ref")
 
-	if resp.GetVenvReady() {
-		t.Fatal("a failed checkout reported VenvReady")
-	}
-	if resp.GetVenvError() == "" {
-		t.Fatal("VenvError is empty for a failed checkout")
-	}
-	if !strings.Contains(resp.GetVenvError(), "no-such-ref") {
-		t.Errorf("VenvError %q does not name the bad ref", resp.GetVenvError())
-	}
+	c.Require().False(resp.GetVenvReady(), "a failed checkout reported VenvReady")
+	c.Require().NotEq("", resp.GetVenvError(), "VenvError is empty for a failed checkout")
+	c.StrContains(resp.GetVenvError(), "no-such-ref", "VenvError")
 	if len(resp.GetScripts()) != 0 || len(resp.GetPackages()) != 0 {
 		t.Errorf("a failed checkout reported inventory: %v/%v", resp.GetScripts(), resp.GetPackages())
 	}
-	if _, err := os.Stat(filepath.Join(gitPymoduleRepoDir("ops-tools"), ".git")); err != nil {
-		t.Errorf("the failed checkout destroyed the clone: %v", err)
-	}
+	_, err := os.Stat(filepath.Join(gitPymoduleRepoDir("ops-tools"), ".git"))
+	c.NoError(err, "the failed checkout destroyed the clone")
 }
 
 // Describe self-reports the option, mirroring how pymodules_sync is reported.
 func TestDescribeReportsPymoduleGitSync(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct{ optIn, want bool }{{true, true}, {false, false}} {
 		s := NewServer(Options{Root: t.TempDir(), Concurrency: 1, Version: "test", PymoduleGitSync: tc.optIn})
 		resp, err := s.Describe(context.Background(), connect.NewRequest(&executorpb.DescribeRequest{}))
-		if err != nil {
-			t.Fatalf("Describe: %v", err)
-		}
-		if got := resp.Msg.GetPymoduleGitSync(); got != tc.want {
-			t.Errorf("optIn=%v: Describe reported pymodule_git_sync=%v, want %v", tc.optIn, got, tc.want)
-		}
+		c.Require().NoError(err, "Describe")
+		got := resp.Msg.GetPymoduleGitSync()
+		c.Eq(tc.want, got, "optIn=%v: Describe reported pymodule_git_sync=%v, want", tc.optIn, got)
 	}
 }

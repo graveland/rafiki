@@ -5,9 +5,12 @@ package insights
 import (
 	"context"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestQueryToolsMergesCasingUnderTheDominantSpelling(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "bob")
@@ -17,12 +20,8 @@ func TestQueryToolsMergesCasingUnderTheDominantSpelling(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("tools rows = %d (%v), want 1 (casing merged)", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 1, "tools rows = %d (%v), want 1 (casing merged)", len(got.Rows), got.Rows)
 	row := got.Rows[0]
 	// Casing is merged: "Bash" (Claude Code, seen through the proxy) and
 	// "bash" (fundi) are one row, displayed under the spelling that carried
@@ -42,6 +41,7 @@ func TestQueryToolsMergesCasingUnderTheDominantSpelling(t *testing.T) {
 // ('B' sorts before 'b' in byte order). The test pins that determinism so a
 // silent switch to something arbitrary would show up as a flake.
 func TestQueryToolsCasingTieIsDeterministic(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "bob")
@@ -50,12 +50,8 @@ func TestQueryToolsCasingTieIsDeterministic(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("tools rows = %d (%v), want 1", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 1, "tools rows = %d (%v), want 1", len(got.Rows), got.Rows)
 	if tool, ok := got.Rows[0][0].(StringEntry); !ok || string(tool) != "Bash" {
 		t.Fatalf("tool = %v, want Bash (sort-first spelling wins the tie)", got.Rows[0][0])
 	}
@@ -65,6 +61,7 @@ func TestQueryToolsCasingTieIsDeterministic(t *testing.T) {
 // conversations (one call each) while bash fires three calls in one, and
 // bash must come first.
 func TestQueryToolsSortsByCallsNotConversations(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convA := seedConversation(t, pool, "client", "bob")
@@ -76,12 +73,8 @@ func TestQueryToolsSortsByCallsNotConversations(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 2 {
-		t.Fatalf("tools rows = %d (%v), want 2", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 2, "tools rows = %d (%v), want 2", len(got.Rows), got.Rows)
 	first, ok := got.Rows[0][0].(StringEntry)
 	if !ok || string(first) != "bash" {
 		t.Fatalf("first row = %v, want bash (3 calls beats grep's 2 conversations)", got.Rows[0])
@@ -96,6 +89,7 @@ func TestQueryToolsSortsByCallsNotConversations(t *testing.T) {
 // conversation that used both spellings counts once per spelling); the
 // merged answer is 3.
 func TestQueryToolsMergesConversationCounts(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convA := seedConversation(t, pool, "client", "bob")
@@ -108,12 +102,8 @@ func TestQueryToolsMergesConversationCounts(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("tools rows = %d (%v), want 1", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 1, "tools rows = %d (%v), want 1", len(got.Rows), got.Rows)
 	if n, ok := got.Rows[0][1].(IntEntry); !ok || n != 4 {
 		t.Fatalf("calls = %v, want 4", got.Rows[0][1])
 	}
@@ -123,6 +113,7 @@ func TestQueryToolsMergesConversationCounts(t *testing.T) {
 }
 
 func TestQueryToolsScopeOwnerExcludesOtherOwners(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	bobID := ensureUser(t, pool, "bob")
@@ -133,12 +124,8 @@ func TestQueryToolsScopeOwnerExcludesOtherOwners(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeOwner(bobID), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("tools rows for bob = %d (%v), want exactly 1", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 1, "tools rows for bob = %d (%v), want exactly 1", len(got.Rows), got.Rows)
 	row := got.Rows[0]
 	tool, ok := row[0].(StringEntry)
 	if !ok || string(tool) != "bash" {
@@ -157,6 +144,7 @@ func TestQueryToolsScopeOwnerExcludesOtherOwners(t *testing.T) {
 // grep is never answered at all (the conversation died mid-call). calls must
 // stay the honest total: ok + errors + unmatched = calls, per row.
 func TestQueryToolsSplitsOutcomesOkErrorUnmatched(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "bob")
@@ -168,12 +156,8 @@ func TestQueryToolsSplitsOutcomesOkErrorUnmatched(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 2 {
-		t.Fatalf("tools rows = %d (%v), want 2", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 2, "tools rows = %d (%v), want 2", len(got.Rows), got.Rows)
 	byTool := map[string][]IntEntry{}
 	for _, row := range got.Rows {
 		tool, ok := row[0].(StringEntry)
@@ -183,9 +167,7 @@ func TestQueryToolsSplitsOutcomesOkErrorUnmatched(t *testing.T) {
 		cells := make([]IntEntry, 0, 5)
 		for _, cell := range row[1:6] {
 			n, ok := cell.(IntEntry)
-			if !ok {
-				t.Fatalf("%s numeric cell = %v, want an int", tool, cell)
-			}
+			c.True(ok, "%s numeric cell = %v, want an int", tool, cell)
 			cells = append(cells, n)
 		}
 		byTool[string(tool)] = cells
@@ -200,6 +182,7 @@ func TestQueryToolsSplitsOutcomesOkErrorUnmatched(t *testing.T) {
 }
 
 func TestQueryToolsIgnoresBareStringMessages(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool, "client", "bob")
@@ -211,12 +194,8 @@ func TestQueryToolsIgnoresBareStringMessages(t *testing.T) {
 	ins := New(pool)
 
 	got, err := ins.Query(ctx, ScopeAll(), "tools", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query tools: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("tools rows = %d (%v), want exactly 1 (only the array message)", len(got.Rows), got.Rows)
-	}
+	c.NoError(err, "query tools")
+	c.Len(got.Rows, 1, "tools rows = %d (%v), want exactly 1 (only the array message)", len(got.Rows), got.Rows)
 	row := got.Rows[0]
 	if tool, ok := row[0].(StringEntry); !ok || string(tool) != "bash" {
 		t.Fatalf("tool = %v, want bash", row[0])

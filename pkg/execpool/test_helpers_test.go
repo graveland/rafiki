@@ -17,6 +17,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubHandler is a minimal Connect handler for testing the transport layer.
@@ -66,14 +68,11 @@ func clientTLSConfig(t *testing.T) *tls.Config {
 
 func testCert(t *testing.T) tls.Certificate {
 	t.Helper()
+	c := assert.NewAborting(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	c.NoError(err, "generate key")
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("serial: %v", err)
-	}
+	c.NoError(err, "serial")
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "localhost"},
@@ -83,8 +82,6 @@ func testCert(t *testing.T) tls.Certificate {
 		DNSNames:     []string{"localhost"},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
+	c.NoError(err, "create cert")
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

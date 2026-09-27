@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testChildBinary writes a fake child: a shell script with the given body that
@@ -16,9 +18,7 @@ import (
 func testChildBinary(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-child")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755))
 	return path
 }
 
@@ -66,20 +66,15 @@ func assertPair(t *testing.T, argv []string, flag, value string) {
 
 // The host runs a process and relays what it writes.
 func TestHostRelaysStdout(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	collectStdout(t, h, "stream-json", 5*time.Second)
 
-	if h.PID() == 0 {
-		t.Error("PID is 0 after a successful Start")
-	}
-	if !h.Running() {
-		t.Error("Running is false after a successful Start")
-	}
+	c.NotEq(0, h.PID(), "PID is 0 after a successful Start")
+	c.True(h.Running(), "Running is false after a successful Start")
 }
 
 // TestArgvSingleModelWithModelArgs proves the suppression claudeargv.Params
@@ -89,46 +84,37 @@ func TestHostRelaysStdout(t *testing.T) {
 // would risk Claude Code's client-side allowlist rejecting the model before
 // the custom option is even consulted (see HostOptions.ModelArgs).
 func TestArgvSingleModelWithModelArgs(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary:    testEchoBinary(t),
 		Spec:      ChildSpec{Kind: KindClaude, Model: "openai/gpt-4o"},
 		ModelArgs: []string{"--model", "rafiki: openai/gpt-4o"},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
 
-	if got := strings.Count(argv, "--model"); got != 1 {
-		t.Fatalf("argv %q contains %d occurrences of --model, want exactly 1", argv, got)
-	}
-	if !strings.Contains(argv, "rafiki: openai/gpt-4o") {
-		t.Fatalf("argv %q missing the ModelArgs' own --model value", argv)
-	}
-	if strings.Contains(argv, "--model openai/gpt-4o ") || strings.HasSuffix(strings.TrimSpace(argv), "--model openai/gpt-4o") {
-		t.Fatalf("argv %q carries the PLAIN --model claudeargv.Build would add unsuppressed", argv)
-	}
+	got := strings.Count(argv, "--model")
+	c.Eq(1, got, "argv %q contains %d occurrences of --model, want exactly 1", argv, got)
+	c.StrContains(argv, "rafiki: openai/gpt-4o", "argv")
+	c.False(strings.Contains(argv, "--model openai/gpt-4o ") || strings.HasSuffix(strings.TrimSpace(argv), "--model openai/gpt-4o"), "argv %q carries the PLAIN --model claudeargv.Build would add unsuppressed", argv)
 }
 
 // TestNoModelArgsLeavesPlainModelFlagAlone is the control case: with no
 // ModelArgs (every unproxied daraja), Model must still produce
 // claudeargv.Build's ordinary --model.
 func TestNoModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary: testEchoBinary(t),
 		Spec:   ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
-	if !strings.Contains(argv, "--model claude-sonnet-5") {
-		t.Fatalf("argv %q missing the plain --model claude-sonnet-5", argv)
-	}
+	c.StrContains(argv, "--model claude-sonnet-5", "argv")
 }
 
 // TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone is the case Wave 1
@@ -136,25 +122,20 @@ func TestNoModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 // carrying NO --model (just the MCP config JSON), and that must not suppress
 // the plain --model claudeargv.Build would otherwise add.
 func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{
 		Binary:    testEchoBinary(t),
 		Spec:      ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
 		MCPConfig: `{"mcpServers":{}}`,
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
-	if !strings.Contains(argv, "--model claude-sonnet-5") {
-		t.Errorf("argv %q missing the plain --model; MCPConfig without a "+
-			"ModelArgs pair must not suppress it", argv)
-	}
-	if !strings.Contains(argv, "--mcp-config={\"mcpServers\":{}}") {
-		t.Errorf("argv %q missing the --mcp-config pair the MCPConfig value "+
-			"should have produced", argv)
-	}
+	c.StrContains(argv, "--model claude-sonnet-5", "argv %q missing the plain --model; MCPConfig without a "+
+		"ModelArgs pair must not suppress it", argv)
+	c.StrContains(argv, "--mcp-config={\"mcpServers\":{}}", "argv %q missing the --mcp-config pair the MCPConfig value "+
+		"should have produced", argv)
 }
 
 // TestHostMCPConfigYieldsExactlyOneElementNotDoubled pins the standalone
@@ -166,26 +147,20 @@ func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 // a live bug invisible to host-level fixtures that constructed bare JSON
 // directly.
 func TestHostMCPConfigYieldsExactlyOneElementNotDoubled(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary:    testEchoBinary(t),
 		Spec:      ChildSpec{Kind: KindClaude},
 		MCPConfig: `{"mcpServers":{"rafiki":{"type":"http","url":"http://127.0.0.1:8035/mcp"}}}`,
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
-	if got := strings.Count(argv, "--mcp-config="); got != 1 {
-		t.Fatalf("child argv %q carries %d --mcp-config= elements, want exactly 1 (a doubled prefix means the host was fed a rendered element instead of bare JSON)", argv, got)
-	}
-	if strings.Contains(argv, "--mcp-config=--mcp-config=") {
-		t.Fatalf("child argv %q carries the doubled --mcp-config prefix", argv)
-	}
-	if !strings.Contains(argv, `--mcp-config={"mcpServers"`) {
-		t.Fatalf("child argv %q missing the bare-JSON --mcp-config element", argv)
-	}
+	got := strings.Count(argv, "--mcp-config=")
+	c.Eq(1, got, "child argv %q carries %d --mcp-config= elements, want exactly 1 (a doubled prefix means the host was fed a rendered element instead of bare JSON)", argv, got)
+	c.NotStrContains(argv, "--mcp-config=--mcp-config=", "child argv")
+	c.StrContains(argv, `--mcp-config={"mcpServers"`, "child argv")
 }
 
 // A spec's AppendSystemPrompt and ExtraArgs must both reach the built argv:
@@ -197,57 +172,44 @@ func TestArgvCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 		ExtraArgs:          []string{"--foo", "bar"},
 	}.Argv("", nil)
 	assertPair(t, argv, "--append-system-prompt", "be terse")
-	if len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar" {
-		t.Fatalf("want ExtraArgs last, got %v", argv)
-	}
+	assert.NewAborting(t).False(len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar", "want ExtraArgs last, got %v", argv)
 }
 
 // IsZero is the Restart reuse predicate. A struct comparison cannot be used:
 // ChildSpec carries a slice and is no longer comparable.
 func TestChildSpecIsZero(t *testing.T) {
-	if !(ChildSpec{}).IsZero() {
-		t.Error("the zero ChildSpec should report IsZero()")
-	}
-	if (ChildSpec{ExtraArgs: []string{"--foo"}}).IsZero() {
-		t.Error("a ChildSpec with only ExtraArgs set should not report IsZero()")
-	}
+	c := assert.NewCollecting(t)
+	c.True((ChildSpec{}).IsZero(), "the zero ChildSpec should report IsZero()")
+	c.False((ChildSpec{ExtraArgs: []string{"--foo"}}).IsZero(), "a ChildSpec with only ExtraArgs set should not report IsZero()")
 }
 
 // stdin reaches the process.
 func TestHostWritesStdin(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
-	if err := h.WriteStdin([]byte("ping\n")); err != nil {
-		t.Fatalf("WriteStdin: %v", err)
-	}
+	c.NoError(h.WriteStdin([]byte("ping\n")), "WriteStdin")
 	collectStdout(t, h, "ping", 5*time.Second)
 }
 
 // Restart replaces the process and announces the boundary IN the event stream,
 // so a consumer holding per-process state knows exactly where to reset.
 func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary: testEchoBinary(t),
 		Spec:   ChildSpec{Kind: KindClaude, Model: "first"},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 	collectStdout(t, h, "first", 5*time.Second)
 	oldPID := h.PID()
 
 	newPID, err := h.Restart(ChildSpec{Kind: KindClaude, Model: "second"}, time.Second)
-	if err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-	if newPID == oldPID {
-		t.Fatalf("pid unchanged across restart: %d", newPID)
-	}
+	c.NoError(err, "Restart")
+	c.NotEq(oldPID, newPID, "pid unchanged across restart")
 
 	// The marker must arrive, and it must arrive BEFORE the new process's bytes.
 	deadline := time.After(5 * time.Second)
@@ -259,9 +221,7 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 			switch {
 			case ev.Restarted != nil:
 				sawMarker = true
-				if *ev.Restarted != newPID {
-					t.Fatalf("marker pid = %d, want %d", *ev.Restarted, newPID)
-				}
+				c.Eq(newPID, *ev.Restarted, "marker pid")
 			case len(ev.Stdout) > 0:
 				got.Write(ev.Stdout)
 				if strings.Contains(got.String(), "second") {
@@ -283,44 +243,33 @@ func TestHostRestartEmitsBoundaryMarker(t *testing.T) {
 // and no --resume: a running process that emits nothing parseable and has lost
 // the conversation.
 func TestRestartWithNoSpecReusesTheHeldOne(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{
 		Binary: testEchoBinary(t),
 		Spec:   ChildSpec{Kind: KindClaude, Model: "m1", ResumeSession: "s1"},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
-	if _, err := h.Restart(ChildSpec{}, time.Second); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
+	_, err := h.Restart(ChildSpec{}, time.Second)
+	c.Require().NoError(err, "Restart")
 
 	h.mu.Lock()
 	got := h.spec
 	h.mu.Unlock()
-	if got.Model != "m1" || got.ResumeSession != "s1" {
-		t.Errorf("after a spec-less Restart the host holds %+v, want the original", got)
-	}
+	c.False(got.Model != "m1" || got.ResumeSession != "s1", "after a spec-less Restart the host holds %+v, want the original", got)
 }
 
 // Shutdown ends the process and reports how it went.
 func TestHostShutdownReportsOutcome(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 
 	_, sig, err := h.Shutdown(time.Second)
-	if err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if sig == "" {
-		t.Error("signal is empty; a sleeping process must have been signalled")
-	}
-	if h.Running() {
-		t.Error("Running is true after Shutdown")
-	}
+	c.Require().NoError(err, "Shutdown")
+	c.NotEq("", sig, "signal is empty; a sleeping process must have been signalled")
+	c.False(h.Running(), "Running is true after Shutdown")
 }
 
 // Shutdown with a chatty child and no consumer used to panic: Shutdown closed
@@ -328,18 +277,16 @@ func TestHostShutdownReportsOutcome(t *testing.T) {
 // os.Process.Wait returns when the process is reaped, NOT when its pipes drain,
 // so the pump is essentially always still live at that moment.
 func TestShutdownWithBlockedPumpDoesNotPanic(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary: testChildBinary(t, `while :; do echo x; done`),
 		Spec:   ChildSpec{Kind: KindClaude},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	time.Sleep(300 * time.Millisecond) // fill the buffer so the pump blocks
 
-	if _, _, err := h.Shutdown(time.Second); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	_, _, err := h.Shutdown(time.Second)
+	c.NoError(err, "Shutdown")
 	time.Sleep(300 * time.Millisecond) // a surviving pump would panic here
 
 	select {
@@ -356,9 +303,7 @@ func TestRestartDoesNotBlockOtherCallsOnASlowConsumer(t *testing.T) {
 		Binary: testChildBinary(t, `while :; do echo x; done`),
 		Spec:   ChildSpec{Kind: KindClaude},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	assert.NewAborting(t).NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 	time.Sleep(300 * time.Millisecond)
 
@@ -383,10 +328,9 @@ func TestRestartDoesNotBlockOtherCallsOnASlowConsumer(t *testing.T) {
 // A child that dies on its own must say so: nothing else tells the consumer,
 // and Running must stop claiming a process that is gone.
 func TestUnexpectedExitEmitsExitedAndClearsRunning(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "exit 7"), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	deadline := time.After(5 * time.Second)
@@ -396,12 +340,8 @@ func TestUnexpectedExitEmitsExitedAndClearsRunning(t *testing.T) {
 			if ev.Exited == nil {
 				continue
 			}
-			if ev.Exited.ExitCode != 7 {
-				t.Fatalf("exit code = %d, want 7", ev.Exited.ExitCode)
-			}
-			if h.Running() {
-				t.Error("Running is still true after the child exited on its own")
-			}
+			c.Require().Eq(7, ev.Exited.ExitCode, "exit code")
+			c.False(h.Running(), "Running is still true after the child exited on its own")
 			return
 		case <-deadline:
 			t.Fatal("no Exited event for a child that exited on its own")
@@ -412,18 +352,14 @@ func TestUnexpectedExitEmitsExitedAndClearsRunning(t *testing.T) {
 // A deliberate stop reports through Shutdown's return value and must NOT also
 // arrive as an Exited event; the caller that asked does not need telling twice.
 func TestDeliberateShutdownEmitsNoExitedEvent(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if _, _, err := h.Shutdown(time.Second); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
+	_, _, err := h.Shutdown(time.Second)
+	c.NoError(err, "Shutdown")
 	select {
 	case ev := <-h.Events():
-		if ev.Exited != nil {
-			t.Fatal("deliberate Shutdown also emitted an Exited event")
-		}
+		c.Nil(ev.Exited, "deliberate Shutdown also emitted an Exited event")
 	default:
 	}
 }
@@ -439,14 +375,13 @@ func testShortLivedBinary(t *testing.T) string {
 // is also down, nothing else can restart it, and the alternative is a daraja
 // hosting nothing.
 func TestUnexpectedExitRespawnsTheChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{
 		Binary:         testShortLivedBinary(t),
 		Spec:           ChildSpec{Kind: KindClaude},
 		RespawnBackoff: time.Millisecond,
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	// The first exit is reported, then a replacement is announced.
@@ -465,24 +400,21 @@ func TestUnexpectedExitRespawnsTheChild(t *testing.T) {
 			t.Fatalf("timed out; sawExit=%v sawRestart=%v", sawExit, sawRestart)
 		}
 	}
-	if !sawExit {
-		t.Error("a respawn was announced without the exit that caused it")
-	}
+	c.True(sawExit, "a respawn was announced without the exit that caused it")
 }
 
 // A child that dies instantly and forever — a bad --resume, a missing binary —
 // must stop being respawned, or daraja forks at whatever rate the kernel
 // allows for as long as it lives.
 func TestRespawnStopsAtTheLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{
 		Binary:         testShortLivedBinary(t),
 		Spec:           ChildSpec{Kind: KindClaude},
 		RespawnBackoff: time.Millisecond,
 		RespawnLimit:   2,
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	var restarts int
@@ -492,14 +424,10 @@ func TestRespawnStopsAtTheLimit(t *testing.T) {
 		case ev := <-h.Events():
 			if ev.Restarted != nil {
 				restarts++
-				if restarts > 2 {
-					t.Fatalf("respawned %d times, want at most 2", restarts)
-				}
+				c.Require().LessOrEqual(2, restarts, "respawned")
 			}
 		case <-h.Done():
-			if restarts != 2 {
-				t.Errorf("host finished after %d respawns, want 2", restarts)
-			}
+			c.Eq(2, restarts, "host finished after")
 			return
 		case <-deadline:
 			t.Fatalf("host never gave up; restarts=%d", restarts)

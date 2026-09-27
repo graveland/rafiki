@@ -9,23 +9,20 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestModelInfoAnswersFromTheWarmCatalog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{}
 	c.SetCatalog(seedTestCatalog(t, map[string]int{"anthropic/claude-opus-5": 200000}))
 
 	got := c.ModelInfo("anthropic/claude-opus-5")
-	if !got.Known {
-		t.Fatal("a catalogued model must be Known")
-	}
-	if got.ContextWindow != 200000 {
-		t.Errorf("ContextWindow = %d", got.ContextWindow)
-	}
+	ck.Require().True(got.Known, "a catalogued model must be Known")
+	ck.Eq(200000, got.ContextWindow, "ContextWindow =")
 	reserve := got.ContextWindow - got.AutoCompactWindow
-	if reserve < got.ContextWindow/20 || reserve > got.ContextWindow/10 {
-		t.Errorf("AutoCompactWindow %d reserves %d, outside the 5%%-10%% band", got.AutoCompactWindow, reserve)
-	}
+	ck.False(reserve < got.ContextWindow/20 || reserve > got.ContextWindow/10, "AutoCompactWindow %d reserves %d, outside the 5%%-10%% band", got.AutoCompactWindow, reserve)
 }
 
 // An unknown model is Known=false with zeroes — NOT an error. The client's
@@ -35,24 +32,21 @@ func TestModelInfoUnknownModelIsNotAnError(t *testing.T) {
 	c := &Controller{}
 	c.SetCatalog(seedTestCatalog(t, nil))
 	got := c.ModelInfo("who/knows")
-	if got.Known || got.AutoCompactWindow != 0 {
-		t.Fatalf("got %+v", got)
-	}
+	assert.NewAborting(t).False(got.Known || got.AutoCompactWindow != 0, "got %+v", got)
 }
 
 // No catalog configured at all (the proxy is disabled) behaves identically.
 func TestModelInfoWithNoCatalogIsNotAPanic(t *testing.T) {
 	c := &Controller{} // catalog is nil
 	got := c.ModelInfo("anything")
-	if got.Known {
-		t.Fatal("a nil catalog cannot know anything")
-	}
+	assert.NewAborting(t).False(got.Known, "a nil catalog cannot know anything")
 }
 
 // A declared alias answers ModelInfo even with no catalog at all — this is
 // the whole point: a local provider's model is never in the OpenRouter
 // catalog, so the registry must be able to answer on its own.
 func TestModelInfo_AliasDeclaresContextWindow(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{}
 	c.providers = mustParseProviders(t, `
 default_provider = "anthropic"
@@ -70,18 +64,10 @@ context_window = 16384
 `)
 
 	got := c.ModelInfo("vmlx/qwen")
-	if !got.Known {
-		t.Fatal("an aliased model with a declared context window must be Known")
-	}
-	if got.ContextWindow != 16384 {
-		t.Errorf("ContextWindow = %d, want 16384", got.ContextWindow)
-	}
-	if got.ResolvedID != "vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit" {
-		t.Errorf("ResolvedID = %q", got.ResolvedID)
-	}
-	if got.AutoCompactWindow <= 0 || got.AutoCompactWindow >= got.ContextWindow {
-		t.Errorf("AutoCompactWindow = %d, want in (0, %d)", got.AutoCompactWindow, got.ContextWindow)
-	}
+	ck.Require().True(got.Known, "an aliased model with a declared context window must be Known")
+	ck.Eq(16384, got.ContextWindow, "ContextWindow")
+	ck.Eq("vmlx/models/Qwen3.8-27B-Abliterated-MLX-4bit", got.ResolvedID, "ResolvedID =")
+	ck.False(got.AutoCompactWindow <= 0 || got.AutoCompactWindow >= got.ContextWindow, "AutoCompactWindow = %d, want in (0, %d)", got.AutoCompactWindow, got.ContextWindow)
 }
 
 // An alias declared purely for its shorthand (no context_window) must not
@@ -105,15 +91,14 @@ id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 	c.SetCatalog(seedTestCatalog(t, nil))
 
 	got := c.ModelInfo("vmlx/qwen")
-	if got.Known {
-		t.Fatalf("got %+v, want Known=false: no context_window declared and nothing in the catalog", got)
-	}
+	assert.NewAborting(t).False(got.Known, "got %+v, want Known=false: no context_window declared and nothing in the catalog", got)
 }
 
 // The registry's declared context window takes priority even when the
 // catalog also knows the model, since only the registry can be correct for a
 // provider the catalog was never able to observe.
 func TestContextWindow_AliasTakesPriorityOverCatalog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := &Controller{}
 	c.providers = mustParseProviders(t, `
 default_provider = "anthropic"
@@ -132,20 +117,14 @@ context_window = 16384
 	c.SetCatalog(seedTestCatalog(t, map[string]int{"vmlx/qwen": 200000}))
 
 	ctxLen, _, ok := c.ContextWindow("vmlx/qwen")
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if ctxLen != 16384 {
-		t.Errorf("ContextWindow = %d, want the registry's 16384, not the catalog's 200000", ctxLen)
-	}
+	ck.Require().True(ok, "expected ok=true")
+	ck.Eq(16384, ctxLen, "ContextWindow")
 }
 
 func mustParseProviders(t *testing.T, toml string) *providers.Set {
 	t.Helper()
 	set, err := providers.Parse([]byte(toml))
-	if err != nil {
-		t.Fatalf("providers.Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "providers.Parse")
 	return set
 }
 

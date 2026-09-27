@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // emptyChildScope is what a per-child credential whose resolve names the
@@ -68,24 +70,17 @@ func (emptyLifecycle) SetBudget(context.Context, string, float64) error { return
 // spawn — not even top-level, which is what forcing ParentChildID "" would
 // mean.
 func TestSpawnWithEmptyChildIDRefused(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := emptyScopeServer(t)
 	resp, err := s.Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp", Name: "w"}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("Spawn with an empty-ChildID child scope = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if resp != nil {
-		t.Fatal("refused spawn produced a response")
-	}
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn with an empty-ChildID child scope = %v, want", err)
+	c.Nil(resp, "refused spawn produced a response")
 
 	// Even with a parent id on the wire — the child scope overrides it, and
 	// the override of an empty id is the refusal above, never a pass-through.
 	resp, err = s.Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp", Name: "w", ParentChildId: "c_root"}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("Spawn with parent on the wire = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if resp != nil {
-		t.Fatal("refused spawn produced a response")
-	}
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Spawn with parent on the wire = %v, want", err)
+	c.Nil(resp, "refused spawn produced a response")
 }

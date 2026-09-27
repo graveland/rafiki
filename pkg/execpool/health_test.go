@@ -3,7 +3,6 @@ package execpool
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"net"
 	"net/http"
 	"testing"
@@ -15,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // blackHoleHandler answers Describe so the executor is admitted, then never
@@ -48,14 +49,13 @@ func (h *blackHoleHandler) Health(
 // blocks on the first tick forever — the executor is never parked, its
 // children are never told, and the goroutine leaks for the daemon's lifetime.
 func TestUnresponsiveExecutorIsParkedRatherThanHangingForever(t *testing.T) {
+	c := assert.NewAborting(t)
 	store := newFakeStore("exec-blackhole")
 	p := New(store)
 	p.healthInterval = 50 * time.Millisecond
 	p.healthTimeout = 150 * time.Millisecond
 
-	if err := joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-blackhole"}); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-blackhole"}))
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool {
 		return len(p.Live()) == 1
@@ -64,19 +64,17 @@ func TestUnresponsiveExecutorIsParkedRatherThanHangingForever(t *testing.T) {
 		return p.Parked("exec-blackhole")
 	})
 
-	if _, err := p.ClientFor("exec-blackhole"); !errors.Is(err, ErrParked) {
-		t.Fatalf("a parked executor must report ErrParked so children wait rather than fail: %v", err)
-	}
+	_, err := p.ClientFor("exec-blackhole")
+	c.ErrorIs(err, ErrParked, "a parked executor must report ErrParked so children wait rather than fail")
 }
 
 // The join path in isolation. A peer that completes the upgrade handshake and
 // then never speaks HTTP/2 must not hold the accept goroutine open
 // indefinitely: Describe on the join path is bounded by joinTimeout.
 func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	defer ln.Close()
 
 	p := New(newFakeStore("exec-silent"))
@@ -95,13 +93,9 @@ func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	dialed, err := tls.Dial("tcp", ln.Addr().String(), clientTLSConfig(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	defer dialed.Close()
-	if err := dialed.Handshake(); err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(dialed.Handshake())
 	// Upgrade and then go completely silent: never serve HTTP/2, never close.
 	if _, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
 		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " c"}}); err != nil {
@@ -113,9 +107,7 @@ func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve never returned: Describe on the join path is unbounded")
 	}
-	if len(p.Live()) != 0 {
-		t.Fatal("an executor that never answered Describe must not be admitted")
-	}
+	ck.Empty(p.Live(), "an executor that never answered Describe must not be admitted")
 }
 
 // Keepalive is the half of A2 that no request-level timeout can cover: it is
@@ -123,25 +115,20 @@ func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 // polls. Asserted structurally because the alternative is a test that waits
 // out a real TCP retransmission window.
 func TestTransportEnablesHTTP2Keepalive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	c1, c2 := net.Pipe()
 	defer c1.Close()
 	defer c2.Close()
 
 	client, err := ClientForConn(c1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	tr, ok := client.Transport.(*http2.Transport)
 	if !ok {
 		t.Fatalf("transport is %T, want *http2.Transport", client.Transport)
 	}
-	if tr.ReadIdleTimeout <= 0 {
-		t.Error("ReadIdleTimeout unset: a black-holed connection is only detected " +
-			"when TCP retransmission gives up, roughly fifteen minutes later")
-	}
-	if tr.PingTimeout <= 0 {
-		t.Error("PingTimeout unset: a PING that is never answered never fails the connection")
-	}
+	c.Greater(0, tr.ReadIdleTimeout, "ReadIdleTimeout unset: a black-holed connection is only detected "+
+		"when TCP retransmission gives up, roughly fifteen minutes later")
+	c.Greater(0, tr.PingTimeout, "PingTimeout unset: a PING that is never answered never fails the connection")
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -153,10 +140,9 @@ func TestTransportEnablesHTTP2Keepalive(t *testing.T) {
 // upgrade path.
 func joinViaUpgrade(t *testing.T, p *Pool, handler executorpbconnect.ExecutorServiceHandler) error {
 	t.Helper()
+	c := assert.NewAborting(t)
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = ln.Close() })
 
 	mux := http.NewServeMux()
@@ -166,13 +152,9 @@ func joinViaUpgrade(t *testing.T, p *Pool, handler executorpbconnect.ExecutorSer
 	t.Cleanup(func() { _ = srv.Close() })
 
 	dialed, err := tls.Dial("tcp", ln.Addr().String(), clientTLSConfig(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = dialed.Close() })
-	if err := dialed.Handshake(); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(dialed.Handshake())
 
 	upConn, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
 		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " c"}})

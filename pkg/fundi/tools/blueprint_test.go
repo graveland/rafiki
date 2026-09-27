@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testEchoTool is a fully configurable Tool for blueprint and registry tests.
@@ -58,23 +59,20 @@ func TestBlueprintRegistryRegisterAndAll(t *testing.T) {
 	t1 := &testEchoTool{name: "echo", desc: "echoes", schema: Schema{Type: "object"}}
 	br.Register(t1)
 	all := br.All()
-	if len(all) != 1 || all[0].Name() != "echo" {
-		t.Fatalf("expected [echo], got %v", all)
-	}
+	assert.NewAborting(t).False(len(all) != 1 || all[0].Name() != "echo", "expected [echo], got %v", all)
 }
 
 func TestBlueprintRegistryDuplicatePanic(t *testing.T) {
 	br := &BlueprintRegistry{}
 	br.Register(&testEchoTool{name: "echo"})
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for duplicate registration")
-		}
+		assert.NewAborting(t).NotNil(recover(), "expected panic for duplicate registration")
 	}()
 	br.Register(&testEchoTool{name: "echo"})
 }
 
 func TestBuildDefRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	tool := &testEchoTool{
 		name: "echo",
 		desc: "echoes a thing",
@@ -88,12 +86,8 @@ func TestBuildDefRoundTrip(t *testing.T) {
 	}
 
 	def := BuildDef(tool)
-	if def.OfTool == nil {
-		t.Fatal("expected OfTool variant")
-	}
-	if def.OfTool.Name != "echo" {
-		t.Fatalf("name = %q", def.OfTool.Name)
-	}
+	c.NotNil(def.OfTool, "expected OfTool variant")
+	c.Eq("echo", def.OfTool.Name, "name =")
 	if !def.OfTool.Description.Valid() || def.OfTool.Description.Value != "echoes a thing" {
 		t.Fatalf("description = %+v", def.OfTool.Description)
 	}
@@ -103,42 +97,34 @@ func TestBuildDefRoundTrip(t *testing.T) {
 
 	// Round-trip through the SDK's own serialization.
 	b, err := json.Marshal(def)
-	if err != nil {
-		t.Fatalf("marshal def: %v", err)
-	}
+	c.NoError(err, "marshal def")
 	var back anthropic.ToolUnionParam
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatalf("unmarshal def: %v", err)
-	}
-	if back.OfTool == nil || back.OfTool.Name != "echo" {
-		t.Fatal("round-trip lost name")
-	}
+	c.NoError(json.Unmarshal(b, &back), "unmarshal def")
+	c.False(back.OfTool == nil || back.OfTool.Name != "echo", "round-trip lost name")
 }
 
 func TestMaterializeAllStatelessTools(t *testing.T) {
+	c := assert.NewAborting(t)
 	br := &BlueprintRegistry{}
 	br.Register(&testEchoTool{name: "a", result: "a ok"})
 	br.Register(&testEchoTool{name: "b", result: "b ok"})
 
 	r := br.MaterializeAll(ToolOpts{})
 	defs := r.Definitions()
-	if len(defs) != 2 {
-		t.Fatalf("expected 2 definitions, got %d", len(defs))
-	}
+	c.Len(defs, 2, "expected 2 definitions, got %d", len(defs))
 	if defs[0].OfTool.Name != "a" || defs[1].OfTool.Name != "b" {
 		t.Fatalf("expected [a, b], got %v", []string{defs[0].OfTool.Name, defs[1].OfTool.Name})
 	}
 
 	out, err := r.Execute(context.Background(), "a", json.RawMessage(`{}`))
-	if err != nil || out != "a ok" {
-		t.Fatalf("Execute(a) = (%q, %v)", out, err)
-	}
+	c.False(err != nil || out != "a ok", "Execute(a) = (%q, %v)", out, err)
 }
 
 // TestMaterializeAllSkipsDecliningMaterializer pins the (nil, nil) contract:
 // a blueprint that declines is absent from the Registry entirely rather than
 // registered as a nil Tool (which would panic on the next Definitions call).
 func TestMaterializeAllSkipsDecliningMaterializer(t *testing.T) {
+	c := assert.NewAborting(t)
 	br := &BlueprintRegistry{}
 	br.Register(&decliningTestBlueprint{})
 	br.Register(&testEchoTool{name: "kept", result: "kept ok"})
@@ -147,15 +133,12 @@ func TestMaterializeAllSkipsDecliningMaterializer(t *testing.T) {
 	if got := len(declined.Definitions()); got != 1 {
 		t.Fatalf("declining blueprint: got %d definitions, want 1 (only \"kept\")", got)
 	}
-	if _, err := declined.Execute(context.Background(), "declines", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("declined tool is still executable")
-	}
+	_, err := declined.Execute(context.Background(), "declines", json.RawMessage(`{}`))
+	c.Error(err, "declined tool is still executable")
 
 	// Same registry, opts that satisfy it: the tool comes back.
 	accepted := br.MaterializeAll(ToolOpts{Cwd: "/tmp"})
-	if got := len(accepted.Definitions()); got != 2 {
-		t.Fatalf("satisfied blueprint: got %d definitions, want 2", got)
-	}
+	c.Eq(2, len(accepted.Definitions()), "satisfied blueprint: got")
 }
 
 func TestMaterializeAllWithMaterializer(t *testing.T) {
@@ -164,9 +147,7 @@ func TestMaterializeAllWithMaterializer(t *testing.T) {
 	r := br.MaterializeAll(ToolOpts{Cwd: "/tmp"})
 
 	out, err := r.Execute(context.Background(), "mat", json.RawMessage(`{}`))
-	if err != nil || out != "materialized with cwd=/tmp" {
-		t.Fatalf("Execute(mat) = (%q, %v)", out, err)
-	}
+	assert.NewAborting(t).False(err != nil || out != "materialized with cwd=/tmp", "Execute(mat) = (%q, %v)", out, err)
 }
 
 // webAwareBlueprint records whether Materialize received Web=true.
@@ -182,20 +163,17 @@ func (b *webAwareBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 }
 
 func TestToolOptsWebFlowsToMaterialize(t *testing.T) {
+	c := assert.NewAborting(t)
 	var gotWeb bool
 	br := &BlueprintRegistry{}
 	br.Register(&webAwareBlueprint{gotWeb: &gotWeb})
 
 	br.MaterializeAll(ToolOpts{Web: true})
-	if !gotWeb {
-		t.Fatal("Materialize received Web=false when ToolOpts.Web was true")
-	}
+	c.True(gotWeb, "Materialize received Web=false when ToolOpts.Web was true")
 
 	gotWeb = false
 	br.MaterializeAll(ToolOpts{})
-	if gotWeb {
-		t.Fatal("Materialize received Web=true when ToolOpts.Web was false (zero value)")
-	}
+	c.False(gotWeb, "Materialize received Web=true when ToolOpts.Web was false (zero value)")
 }
 
 // A routed tool whose executor call fails must FAIL, not return the failure
@@ -205,20 +183,17 @@ func TestToolOptsWebFlowsToMaterialize(t *testing.T) {
 // diagnostic as output. The TUI drew a ✓ on it, and the model was told the
 // same. An unbindable executor is the common way in: nothing ran at all.
 func TestRoutedToolPropagatesAnExecutorFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	proxy := &executorProxy{
 		tool:   readOnlyProbeTool{},
 		client: failingExecClient{err: errors.New(`spawn refused: no executor satisfies "machine=greyshift"`)},
 	}
 
 	res, err := proxy.Execute(context.Background(), ToolInput(`{}`))
-	if err == nil {
-		t.Fatalf("an executor failure returned success with result %q; "+
-			"agentloop marks is_error from the error, so this renders as a ✓ "+
-			"and tells the model its call worked", res.Text)
-	}
-	if !strings.Contains(err.Error(), "no executor satisfies") {
-		t.Errorf("error = %v, want the executor's own diagnostic", err)
-	}
+	c.Require().Error(err, "an executor failure returned success with result %q; "+
+		"agentloop marks is_error from the error, so this renders as a ✓ "+
+		"and tells the model its call worked", res.Text)
+	c.StrContains(err.Error(), "no executor satisfies", "error = %v, want the executor's own diagnostic", err)
 }
 
 // failingExecClient embeds the existing stub so only Execute has to differ.

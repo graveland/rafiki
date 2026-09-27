@@ -17,6 +17,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The connect target is derived from the resolved PROFILE, not configured: a
@@ -25,29 +27,18 @@ import (
 // backwards points an executor at the wrong machine, which then serves the
 // wrong filesystem.
 func TestSessionExecutorConnectTarget(t *testing.T) {
+	c := assert.NewCollecting(t)
 	remote := profile.Resolved{Profile: profile.Profile{URL: "https://rafiki.example.dev:8443"}}
 	addr, sock, err := sessionConnectTarget(remote)
-	if err != nil {
-		t.Fatalf("sessionConnectTarget: %v", err)
-	}
-	if addr != "rafiki.example.dev:8443" {
-		t.Errorf("addr = %q, want the remote host:port", addr)
-	}
-	if sock != "" {
-		t.Errorf("socket = %q, want empty for a remote daemon", sock)
-	}
+	c.Require().NoError(err, "sessionConnectTarget")
+	c.Eq("rafiki.example.dev:8443", addr, "addr")
+	c.Eq("", sock, "socket")
 
 	local := profile.Resolved{Profile: profile.Profile{Socket: "/some/path"}}
 	addr, sock, err = sessionConnectTarget(local)
-	if err != nil {
-		t.Fatalf("sessionConnectTarget: %v", err)
-	}
-	if addr != "" {
-		t.Errorf("addr = %q, want empty for a local daemon", addr)
-	}
-	if sock == "" {
-		t.Error("socket is empty; a local daemon is reached over the unix socket")
-	}
+	c.Require().NoError(err, "sessionConnectTarget")
+	c.Eq("", addr, "addr")
+	c.NotEq("", sock, "socket is empty; a local daemon is reached over the unix socket")
 }
 
 // A durable executor (`rafiki executor serve --connect` / `service install`)
@@ -57,57 +48,40 @@ func TestSessionExecutorConnectTarget(t *testing.T) {
 // derive and pass host:port by hand.
 func TestResolveExecutorConnectFlags_DerivesFromRAFIKIURL(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev:8443")
+	c := assert.NewCollecting(t)
 	connect, socket, err := resolveExecutorConnectFlags("", "")
-	if err != nil {
-		t.Fatalf("resolveExecutorConnectFlags: %v", err)
-	}
-	if connect != "rafiki.example.dev:8443" {
-		t.Errorf("connect = %q, want the RAFIKI_URL-derived host:port", connect)
-	}
-	if socket != "" {
-		t.Errorf("socket = %q, want empty", socket)
-	}
+	c.Require().NoError(err, "resolveExecutorConnectFlags")
+	c.Eq("rafiki.example.dev:8443", connect, "connect")
+	c.Eq("", socket, "socket")
 }
 
 // An explicit --connect always wins over RAFIKI_URL, even when they disagree —
 // the flag is what the operator typed just now.
 func TestResolveExecutorConnectFlags_ExplicitConnectWinsOverRAFIKIURL(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev:8443")
+	c := assert.NewCollecting(t)
 	connect, socket, err := resolveExecutorConnectFlags("other.example.dev:9000", "")
-	if err != nil {
-		t.Fatalf("resolveExecutorConnectFlags: %v", err)
-	}
-	if connect != "other.example.dev:9000" {
-		t.Errorf("connect = %q, want the explicit flag value untouched", connect)
-	}
-	if socket != "" {
-		t.Errorf("socket = %q, want empty", socket)
-	}
+	c.Require().NoError(err, "resolveExecutorConnectFlags")
+	c.Eq("other.example.dev:9000", connect, "connect")
+	c.Eq("", socket, "socket")
 }
 
 // An explicit --connect-socket must not be overridden by a RAFIKI_URL-derived
 // --connect — naming the local socket transport is itself a deliberate choice.
 func TestResolveExecutorConnectFlags_ExplicitSocketWinsOverRAFIKIURL(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev:8443")
+	c := assert.NewCollecting(t)
 	connect, socket, err := resolveExecutorConnectFlags("", "/tmp/rafiki-executor.sock")
-	if err != nil {
-		t.Fatalf("resolveExecutorConnectFlags: %v", err)
-	}
-	if connect != "" {
-		t.Errorf("connect = %q, want empty: --connect-socket already chose the transport", connect)
-	}
-	if socket != "/tmp/rafiki-executor.sock" {
-		t.Errorf("socket = %q, want the explicit flag value", socket)
-	}
+	c.Require().NoError(err, "resolveExecutorConnectFlags")
+	c.Eq("", connect, "connect")
+	c.Eq("/tmp/rafiki-executor.sock", socket, "socket")
 }
 
 // Both flags given is still an error regardless of RAFIKI_URL.
 func TestResolveExecutorConnectFlags_BothGivenIsAnError(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "https://rafiki.example.dev:8443")
 	_, _, err := resolveExecutorConnectFlags("host:1234", "/tmp/x.sock")
-	if err == nil {
-		t.Fatal("expected an error: --connect and --connect-socket are mutually exclusive")
-	}
+	assert.NewAborting(t).Error(err, "expected an error: --connect and --connect-socket are mutually exclusive")
 }
 
 // No flags and no usable RAFIKI_URL (e.g. the local proxy face's http:// URL,
@@ -115,9 +89,7 @@ func TestResolveExecutorConnectFlags_BothGivenIsAnError(t *testing.T) {
 func TestResolveExecutorConnectFlags_NeitherGivenNorDerivableIsAnError(t *testing.T) {
 	t.Setenv("RAFIKI_URL", "")
 	_, _, err := resolveExecutorConnectFlags("", "")
-	if err == nil {
-		t.Fatal("expected an error: neither flag was given and RAFIKI_URL derives nothing")
-	}
+	assert.NewAborting(t).Error(err, "expected an error: neither flag was given and RAFIKI_URL derives nothing")
 }
 
 // A remote profile with no token must be refused BEFORE the round trip, with
@@ -125,18 +97,15 @@ func TestResolveExecutorConnectFlags_NeitherGivenNorDerivableIsAnError(t *testin
 // silently dropped here, so the session executor sent an empty bearer
 // credential and surfaced a bare Unauthenticated instead).
 func TestSessionExecutorConnectEndpoint_RemoteWithoutTokenIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateSessionExecutorEnv(t)
 
 	_, err := sessionConnectEndpoint(profile.Resolved{Profile: profile.Profile{
 		Name: "remote",
 		URL:  "https://rafiki.example.dev:8443",
 	}})
-	if err == nil {
-		t.Fatal("expected the remote no-token guard to refuse the profile")
-	}
-	if !strings.Contains(err.Error(), "token") {
-		t.Errorf("error should name the missing token, got: %v", err)
-	}
+	c.Require().Error(err, "expected the remote no-token guard to refuse the profile")
+	c.StrContains(err.Error(), "token", "error should name the missing token, got: %v", err)
 
 	// With a token the remote endpoint resolves to the profile's URL.
 	ep, err := sessionConnectEndpoint(profile.Resolved{
@@ -146,12 +115,8 @@ func TestSessionExecutorConnectEndpoint_RemoteWithoutTokenIsRefused(t *testing.T
 		},
 		Token: "tok",
 	})
-	if err != nil {
-		t.Fatalf("sessionConnectEndpoint: %v", err)
-	}
-	if ep.baseURL != "https://rafiki.example.dev:8443" {
-		t.Errorf("baseURL = %q, want the profile's URL", ep.baseURL)
-	}
+	c.Require().NoError(err, "sessionConnectEndpoint")
+	c.Eq("https://rafiki.example.dev:8443", ep.baseURL, "baseURL")
 }
 
 // executorSessionStub serves ExecutorSession: it sends one ready event, then
@@ -223,9 +188,7 @@ func (s *executorSessionStub) ListExecutors(
 func serveExecutorSessionStub(t *testing.T, stub *executorSessionStub) profile.Resolved {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "ses")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "MkdirTemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 	routePath, handler := rafikiv1connect.NewControlHandler(stub)
@@ -266,6 +229,7 @@ func waitUntil(budget time.Duration, cond func() bool) bool {
 // stub's request context actually ended (the server side — cleanup returning
 // alone proves nothing about the stream, W4a).
 func TestStartSessionExecutor_CleanupCancelsStreamAndLeavesNoGoroutine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateSessionExecutorEnv(t)
 
 	stub := &executorSessionStub{
@@ -281,12 +245,8 @@ func TestStartSessionExecutor_CleanupCancelsStreamAndLeavesNoGoroutine(t *testin
 	p := serveExecutorSessionStub(t, stub)
 
 	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
-	if err != nil {
-		t.Fatalf("startSessionExecutor: %v", err)
-	}
-	if selector != stub.ready.Selector {
-		t.Errorf("selector = %q, want %q", selector, stub.ready.Selector)
-	}
+	c.Require().NoError(err, "startSessionExecutor")
+	c.Eq(stub.ready.Selector, selector, "selector")
 
 	done := make(chan struct{})
 	go func() {
@@ -315,6 +275,7 @@ func TestStartSessionExecutor_CleanupCancelsStreamAndLeavesNoGoroutine(t *testin
 // W4a: calling cleanup immediately proves nothing, it passes identically with
 // the watch goroutine's proactive teardown deleted.
 func TestStartSessionExecutor_StreamErrorAfterReadyEndsTheSession(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateSessionExecutorEnv(t)
 
 	ring := newLogRing(64)
@@ -334,12 +295,8 @@ func TestStartSessionExecutor_StreamErrorAfterReadyEndsTheSession(t *testing.T) 
 	p := serveExecutorSessionStub(t, stub)
 
 	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
-	if err != nil {
-		t.Fatalf("startSessionExecutor: %v", err)
-	}
-	if selector == "" {
-		t.Fatal("selector is empty")
-	}
+	c.NoError(err, "startSessionExecutor")
+	c.NotEq("", selector, "selector is empty")
 
 	// The daemon evicts this executor: the stream ends with a genuine error,
 	// not a client-initiated cancellation. The watch goroutine must classify
@@ -381,6 +338,7 @@ func TestStartSessionExecutor_StreamErrorAfterReadyEndsTheSession(t *testing.T) 
 // evictions as "timed out waiting for executor to connect" after the full
 // sessionReadyTimeout).
 func TestStartSessionExecutor_StreamEndsBeforeLiveSurfacesTheStreamError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateSessionExecutorEnv(t)
 
 	stub := &executorSessionStub{
@@ -403,24 +361,17 @@ func TestStartSessionExecutor_StreamEndsBeforeLiveSurfacesTheStreamError(t *test
 
 	start := time.Now()
 	_, _, err := startSessionExecutor(context.Background(), t.TempDir(), p)
-	if err == nil {
-		t.Fatal("expected startSessionExecutor to fail once the stream was evicted")
-	}
-	if !strings.Contains(err.Error(), "evicted") {
-		t.Errorf("error should surface the stream's own error, got: %v", err)
-	}
-	if strings.Contains(err.Error(), "timed out") {
-		t.Errorf("error should not be the ready-timeout message, got: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Errorf("startSessionExecutor took %s; an eviction must end the wait promptly, not burn the ready timeout", elapsed)
-	}
+	c.Require().Error(err, "expected startSessionExecutor to fail once the stream was evicted")
+	c.StrContains(err.Error(), "evicted", "error should surface the stream's own error, got: %v", err)
+	c.NotStrContains(err.Error(), "timed out", "error should not be the ready-timeout message, got: %v", err)
+	c.LessOrEqual(10*time.Second, time.Since(start), "startSessionExecutor took")
 }
 
 // run_local=false means a durable executor already covers this machine:
 // startSessionExecutor must start nothing locally and its cleanup must be an
 // immediate no-op, not a stream left dangling open for nothing.
 func TestStartSessionExecutor_DurableExecutorStartsNothingLocally(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateSessionExecutorEnv(t)
 
 	stub := &executorSessionStub{
@@ -435,12 +386,8 @@ func TestStartSessionExecutor_DurableExecutorStartsNothingLocally(t *testing.T) 
 	p := serveExecutorSessionStub(t, stub)
 
 	selector, cleanup, err := startSessionExecutor(context.Background(), t.TempDir(), p)
-	if err != nil {
-		t.Fatalf("startSessionExecutor: %v", err)
-	}
-	if selector != "machine=laptop" {
-		t.Errorf("selector = %q, want the durable executor's own selector", selector)
-	}
+	c.Require().NoError(err, "startSessionExecutor")
+	c.Eq("machine=laptop", selector, "selector")
 	cleanup() // must not block or panic
 
 	// Even the durable path must have ended the stream: it was opened for

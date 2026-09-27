@@ -7,6 +7,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/modelquery"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func f64q(v float64) *float64 { return &v }
@@ -43,31 +45,25 @@ func TestBoundAdmitsUnknown(t *testing.T) {
 // TestRequirePresentIsTheOneException pins that presence CAN be demanded, but
 // only by asking for it explicitly.
 func TestRequirePresentIsTheOneException(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unscored := &rafikiv1.ModelRow{Id: "ollama/qwen3"}
 	scored := &rafikiv1.ModelRow{Id: "or/glm", AgenticIndex: f64q(41.2)}
 
 	b := modelquery.Bound{RequirePresent: true}
-	if b.Admits(modelquery.FieldAgentic, unscored) {
-		t.Error("RequirePresent admitted an unscored row")
-	}
-	if !b.Admits(modelquery.FieldAgentic, scored) {
-		t.Error("RequirePresent rejected a scored row")
-	}
+	c.False(b.Admits(modelquery.FieldAgentic, unscored), "RequirePresent admitted an unscored row")
+	c.True(b.Admits(modelquery.FieldAgentic, scored), "RequirePresent rejected a scored row")
 }
 
 // TestPaidOnlyRejectsAKnownZero separates "free" from "unpriced". A reported
 // 0 is an answer; a missing price is not.
 func TestPaidOnlyRejectsAKnownZero(t *testing.T) {
+	c := assert.NewCollecting(t)
 	free := &rafikiv1.ModelRow{Id: "or/free", PromptUsd: f64q(0)}
 	unpriced := &rafikiv1.ModelRow{Id: "ollama/local"}
 
 	b := modelquery.Bound{PaidOnly: true}
-	if b.Admits(modelquery.FieldPromptUSD, free) {
-		t.Error("PaidOnly admitted a model whose price is a reported zero")
-	}
-	if !b.Admits(modelquery.FieldPromptUSD, unpriced) {
-		t.Error("PaidOnly rejected an unpriced model; unknown is not free")
-	}
+	c.False(b.Admits(modelquery.FieldPromptUSD, free), "PaidOnly admitted a model whose price is a reported zero")
+	c.True(b.Admits(modelquery.FieldPromptUSD, unpriced), "PaidOnly rejected an unpriced model; unknown is not free")
 }
 
 // --- rule 2: an absent value sorts last in BOTH directions ---
@@ -87,9 +83,7 @@ func TestAbsentSortsLastInBothDirections(t *testing.T) {
 
 		last := []string{rows[2].GetId(), rows[3].GetId()}
 		for _, id := range last {
-			if id != "a/unscored" && id != "c/unscored" {
-				t.Fatalf("desc=%v: tail = %v, want both unscored rows last", desc, last)
-			}
+			assert.NewAborting(t).False(id != "a/unscored" && id != "c/unscored", "desc=%v: tail = %v, want both unscored rows last", desc, last)
 		}
 	}
 }
@@ -104,44 +98,29 @@ func TestTwoAbsentValuesTie(t *testing.T) {
 		{Field: modelquery.FieldAgentic, Desc: true},
 		{Field: modelquery.FieldPromptUSD},
 	})
-	if rows[0].GetId() != "a/first" {
-		t.Errorf("first = %q, want the cheaper of two unscored models", rows[0].GetId())
-	}
+	assert.NewCollecting(t).Eq("a/first", rows[0].GetId(), "first")
 }
 
 // --- rule 3: unknown capability is kept, never treated as "no" ---
 
 func TestUnknownCapabilityIsNotNo(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unknown := &rafikiv1.ModelRow{Id: "ollama/qwen3"} // no catalog entry
 	no := &rafikiv1.ModelRow{Id: "or/plain", SupportedParameters: []string{"temperature"}}
 	yes := &rafikiv1.ModelRow{Id: "or/agent", SupportedParameters: []string{"tools", "reasoning"}}
 
-	if got := modelquery.Tools(unknown); got != modelquery.SupportUnknown {
-		t.Errorf("Tools(no catalog entry) = %v, want unknown", got)
-	}
-	if got := modelquery.Tools(no); got != modelquery.SupportNo {
-		t.Errorf("Tools(params without tools) = %v, want no", got)
-	}
-	if got := modelquery.Tools(yes); got != modelquery.SupportYes {
-		t.Errorf("Tools(params with tools) = %v, want yes", got)
-	}
-	if got := modelquery.Reasoning(unknown); got != modelquery.SupportUnknown {
-		t.Errorf("Reasoning(no catalog entry) = %v, want unknown", got)
-	}
+	c.Eq(modelquery.SupportUnknown, modelquery.Tools(unknown), "Tools(no catalog entry)")
+	c.Eq(modelquery.SupportNo, modelquery.Tools(no), "Tools(params without tools)")
+	c.Eq(modelquery.SupportYes, modelquery.Tools(yes), "Tools(params with tools)")
+	c.Eq(modelquery.SupportUnknown, modelquery.Reasoning(unknown), "Reasoning(no catalog entry)")
 
 	visionUnknown := &rafikiv1.ModelRow{Id: "ollama/qwen3"}
 	visionNo := &rafikiv1.ModelRow{Id: "or/text", InputModalities: []string{"text"}}
 	visionYes := &rafikiv1.ModelRow{Id: "or/vlm", InputModalities: []string{"text", "image"}}
 
-	if got := modelquery.Vision(visionUnknown); got != modelquery.SupportUnknown {
-		t.Errorf("Vision(no modalities) = %v, want unknown", got)
-	}
-	if got := modelquery.Vision(visionNo); got != modelquery.SupportNo {
-		t.Errorf("Vision(text only) = %v, want no", got)
-	}
-	if got := modelquery.Vision(visionYes); got != modelquery.SupportYes {
-		t.Errorf("Vision(text+image) = %v, want yes", got)
-	}
+	c.Eq(modelquery.SupportUnknown, modelquery.Vision(visionUnknown), "Vision(no modalities)")
+	c.Eq(modelquery.SupportNo, modelquery.Vision(visionNo), "Vision(text only)")
+	c.Eq(modelquery.SupportYes, modelquery.Vision(visionYes), "Vision(text+image)")
 }
 
 // --- units and parsing ---
@@ -149,14 +128,11 @@ func TestUnknownCapabilityIsNotNo(t *testing.T) {
 // TestPricesArePerMillion pins the unit conversion every bound and rendering
 // depends on. The catalog reports per token.
 func TestPricesArePerMillion(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := &rafikiv1.ModelRow{Id: "or/x", PromptUsd: f64q(0.0000004)} // $0.40/M
 	v, ok := modelquery.FieldPromptUSD.Value(r)
-	if !ok {
-		t.Fatal("price reported absent")
-	}
-	if v < 0.399 || v > 0.401 {
-		t.Errorf("value = %v, want ~0.40 per million", v)
-	}
+	c.Require().True(ok, "price reported absent")
+	c.False(v < 0.399 || v > 0.401, "value = %v, want ~0.40 per million", v)
 }
 
 // TestValueKeepsAReportedZero guards the difference a > 0 guard would destroy.
@@ -168,6 +144,7 @@ func TestValueKeepsAReportedZero(t *testing.T) {
 }
 
 func TestParseField(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cases := map[string]modelquery.Field{
 		"in$":     modelquery.FieldPromptUSD,
 		"in":      modelquery.FieldPromptUSD,
@@ -181,31 +158,25 @@ func TestParseField(t *testing.T) {
 	}
 	for in, want := range cases {
 		got, ok := modelquery.ParseField(in)
-		if !ok || got != want {
-			t.Errorf("ParseField(%q) = (%v, %v), want (%v, true)", in, got, ok, want)
-		}
+		c.False(!ok || got != want, "ParseField(%q) = (%v, %v), want (%v, true)", in, got, ok, want)
 	}
-	if _, ok := modelquery.ParseField("cheapness"); ok {
-		t.Error("ParseField accepted an unknown key; an unknown sort must be refused by name")
-	}
+	_, ok := modelquery.ParseField("cheapness")
+	c.False(ok, "ParseField accepted an unknown key; an unknown sort must be refused by name")
 }
 
 // TestBiggerIsBetter pins the direction a bare sort key implies.
 func TestBiggerIsBetter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, f := range []modelquery.Field{
 		modelquery.FieldContext, modelquery.FieldAgentic,
 		modelquery.FieldIntelligence, modelquery.FieldCoding,
 	} {
-		if !modelquery.BiggerIsBetter(f) {
-			t.Errorf("BiggerIsBetter(%v) = false, want true", f)
-		}
+		c.True(modelquery.BiggerIsBetter(f), "BiggerIsBetter(%v) = false, want true", f)
 	}
 	for _, f := range []modelquery.Field{
 		modelquery.FieldPromptUSD, modelquery.FieldCompletionUSD, modelquery.FieldModel,
 	} {
-		if modelquery.BiggerIsBetter(f) {
-			t.Errorf("BiggerIsBetter(%v) = true, want false", f)
-		}
+		c.False(modelquery.BiggerIsBetter(f), "BiggerIsBetter(%v) = true, want false", f)
 	}
 }
 
@@ -213,9 +184,7 @@ func TestBiggerIsBetter(t *testing.T) {
 // which would otherwise degrade silently to "?" in both surfaces.
 func TestEveryFieldHasAName(t *testing.T) {
 	for f := modelquery.Field(0); f < modelquery.FieldCount; f++ {
-		if f.String() == "?" {
-			t.Errorf("field %d has no short name", int(f))
-		}
+		assert.NewCollecting(t).NotEq("?", f.String(), "field %d has no short name", int(f))
 		if _, ok := modelquery.ParseField(f.String()); !ok {
 			t.Errorf("field %q does not round-trip through ParseField", f.String())
 		}

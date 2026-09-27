@@ -17,6 +17,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeLineage struct {
@@ -98,6 +100,7 @@ func setupStreamServer(t *testing.T, ln eventlog.Lineage, elog eventlog.Store, s
 }
 
 func TestStreamEventsNoCursorDoesNotReplay(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -114,16 +117,12 @@ func TestStreamEventsNoCursorDoesNotReplay(t *testing.T) {
 	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	c.NoError(err, "StreamEvents")
 
 	if !stream.Receive() {
 		t.Fatalf("expected event, got err: %v", stream.Err())
 	}
-	if stream.Msg().GetAgentStatus().GetState() != "idle" {
-		t.Fatalf("expected live event 'idle', got %q", stream.Msg().GetAgentStatus().GetState())
-	}
+	c.Eq("idle", stream.Msg().GetAgentStatus().GetState(), "expected live event 'idle', got")
 }
 
 func TestStreamEventsSubtreeAdmitsAChildSpawnedAfterOpen(t *testing.T) {
@@ -148,9 +147,7 @@ func TestStreamEventsSubtreeAdmitsAChildSpawnedAfterOpen(t *testing.T) {
 	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Subtree{Subtree: "c_root"}},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "StreamEvents")
 
 	if !stream.Receive() {
 		t.Fatalf("expected event, got err: %v", stream.Err())
@@ -161,6 +158,7 @@ func TestStreamEventsSubtreeAdmitsAChildSpawnedAfterOpen(t *testing.T) {
 }
 
 func TestStreamEventsDurableTierExcludesDeltas(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -182,16 +180,12 @@ func TestStreamEventsDurableTierExcludesDeltas(t *testing.T) {
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	c.NoError(err, "StreamEvents")
 
 	if !stream.Receive() {
 		t.Fatalf("expected event, got err: %v", stream.Err())
 	}
-	if stream.Msg().GetAgentStatus().GetState() != "idle" {
-		t.Fatalf("expected agent_status idle, got %+v", stream.Msg())
-	}
+	c.Eq("idle", stream.Msg().GetAgentStatus().GetState(), "expected agent_status idle, got %+v", stream.Msg())
 }
 
 func TestStreamEventsCursorReplaysPerChild(t *testing.T) {
@@ -217,9 +211,7 @@ func TestStreamEventsCursorReplaysPerChild(t *testing.T) {
 			},
 		},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "StreamEvents")
 
 	if !stream.Receive() {
 		t.Fatalf("expected replay event for c_1, got err: %v", stream.Err())
@@ -230,20 +222,17 @@ func TestStreamEventsCursorReplaysPerChild(t *testing.T) {
 }
 
 func TestStreamEventsRejectsAnEmptySubject(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx := context.Background()
 	ln := &fakeLineage{}
 	client := setupStreamServer(t, ln, eventlog.NewMemory(), &fakeSource{})
 
 	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{}))
 	if err == nil {
-		if stream.Receive() {
-			t.Fatal("expected error on empty subject")
-		}
+		c.False(stream.Receive(), "expected error on empty subject")
 		err = stream.Err()
 	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
@@ -268,12 +257,11 @@ func TestStreamEventsBlockedByHTTPHandlerWrap(t *testing.T) {
 		connect.NewRequest(&rafikiv1.StreamEventsRequest{
 			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		}))
-	if err == nil && stream.Receive() {
-		t.Fatal("deny-all http.Handler wrap did not block StreamEvents")
-	}
+	assert.NewAborting(t).False(err == nil && stream.Receive(), "deny-all http.Handler wrap did not block StreamEvents")
 }
 
 func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -296,18 +284,12 @@ func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	c.NoError(err, "StreamEvents")
 	if !stream.Receive() {
 		t.Fatalf("expected replayed event: %v", stream.Err())
 	}
-	if stream.Receive() {
-		t.Fatal("stream kept going after replay; want closed when no event source wired")
-	}
-	if err := stream.Err(); err != nil {
-		t.Fatalf("stream ended with error: %v", err)
-	}
+	c.False(stream.Receive(), "stream kept going after replay; want closed when no event source wired")
+	c.NoError(stream.Err(), "stream ended with error")
 }
 
 // Dummy use of proto package to avoid unused import if needed
@@ -317,6 +299,7 @@ var _ = proto.Marshal
 // include_self the attached child is the one row the rail never hears about,
 // and the focus stream (ScopeChild) hides that until the user hops away.
 func TestStreamEventsSubtreeIncludeSelfAdmitsTheRoot(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -335,13 +318,9 @@ func TestStreamEventsSubtreeIncludeSelfAdmitsTheRoot(t *testing.T) {
 			IncludeSelf: true,
 		},
 	}))
-	if err != nil {
-		t.Fatalf("StreamEvents: %v", err)
-	}
+	c.NoError(err, "StreamEvents")
 	if !stream.Receive() {
 		t.Fatalf("expected the subtree root's own event, got err: %v", stream.Err())
 	}
-	if got := stream.Msg().GetChildId(); got != "c_root" {
-		t.Fatalf("child id = %q, want c_root", got)
-	}
+	c.Eq("c_root", stream.Msg().GetChildId(), "child id")
 }

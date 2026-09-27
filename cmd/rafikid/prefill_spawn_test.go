@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -11,6 +10,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestPrefillValidateRefusals covers validatePrefill's table: the refusals
@@ -42,26 +43,17 @@ func TestPrefillValidateRefusals(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			err := validatePrefill(tc.req)
 			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("validatePrefill: want nil, got %v", err)
-				}
+				c.Require().NoError(err, "validatePrefill: want nil, got")
 				return
 			}
-			if err == nil {
-				t.Fatalf("validatePrefill: want %q, got nil", tc.want)
-			}
+			c.Require().Error(err, "validatePrefill: want %q, got nil", tc.want)
 			var ce *connectapi.ControllerError
-			if !errors.As(err, &ce) {
-				t.Fatalf("want *connectapi.ControllerError, got %T: %v", err, err)
-			}
-			if ce.Code != protocol.ErrInvalidArgs {
-				t.Errorf("Code = %v, want ErrInvalidArgs", ce.Code)
-			}
-			if ce.Message != tc.want {
-				t.Errorf("Message = %q, want %q", ce.Message, tc.want)
-			}
+			c.Require().True(errors.As(err, &ce), "want *connectapi.ControllerError, got %T: %v", err, err)
+			c.Eq(protocol.ErrInvalidArgs, ce.Code, "Code")
+			c.Eq(tc.want, ce.Message, "Message")
 		})
 	}
 }
@@ -71,6 +63,7 @@ func TestPrefillValidateRefusals(t *testing.T) {
 // must be refused through the real Spawn entry point with ErrInvalidArgs.
 func TestPrefillSpawnCallsValidate(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	req := protocol.SpawnRequest{
@@ -82,25 +75,18 @@ func TestPrefillSpawnCallsValidate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err == nil {
-		t.Fatal("Spawn with a pre-fill on a claude child must be refused")
-	}
+	c.Require().Error(err, "Spawn with a pre-fill on a claude child must be refused")
 	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) {
-		t.Fatalf("want *connectapi.ControllerError, got %T: %v", err, err)
-	}
-	if ce.Code != protocol.ErrInvalidArgs {
-		t.Errorf("Code = %v, want ErrInvalidArgs", ce.Code)
-	}
-	if ce.Message != "prefill: only kind fundi supports a pre-fill" {
-		t.Errorf("Message = %q", ce.Message)
-	}
+	c.Require().True(errors.As(err, &ce), "want *connectapi.ControllerError, got %T: %v", err, err)
+	c.Eq(protocol.ErrInvalidArgs, ce.Code, "Code")
+	c.Eq("prefill: only kind fundi supports a pre-fill", ce.Message, "Message =")
 }
 
 // TestPrefillArgvRoundTrip follows TestArgvRoundTripsIntoRuntimeOptions: a
 // pre-fill must survive buildAgentArgv → parseAgentFlags → toRuntimeOptions
 // unchanged, or the in-process child silently runs without it.
 func TestPrefillArgvRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	want := []protocol.PrefillRead{
 		{Path: "docs/plan.md", Start: 10, End: 40},
 		{Path: "notes/*"},
@@ -115,30 +101,18 @@ func TestPrefillArgvRoundTrip(t *testing.T) {
 
 	argv := buildAgentArgv(req, "c_prefill", t.TempDir())
 	f, err := parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags(%q): %v", argv[1:], err)
-	}
+	c.Require().NoError(err, "parseAgentFlags(%q)", argv[1:])
 	got, err := f.toRuntimeOptions(req.Cwd, nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if !reflect.DeepEqual(got.Prefill, want) {
-		t.Errorf("Prefill = %+v, want %+v", got.Prefill, want)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.EqDiff(want, got.Prefill, "Prefill")
 
 	// The no-prefill default: no --prefill flag, no entries.
 	argv = buildAgentArgv(protocol.SpawnRequest{Kind: protocol.KindFundi, Cwd: req.Cwd, Model: req.Model}, "c_noprefill", t.TempDir())
 	f, err = parseAgentFlags(argv[1:])
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
 	got, err = f.toRuntimeOptions(req.Cwd, nil, false, nil)
-	if err != nil {
-		t.Fatalf("toRuntimeOptions: %v", err)
-	}
-	if got.Prefill != nil {
-		t.Errorf("Prefill = %+v, want nil without --prefill", got.Prefill)
-	}
+	c.Require().NoError(err, "toRuntimeOptions")
+	c.Nil(got.Prefill, "Prefill")
 }
 
 // TestPrefillSurvivesResumeRebuild pins the resume half of the plumbing: the
@@ -154,7 +128,5 @@ func TestPrefillSurvivesResumeRebuild(t *testing.T) {
 		Kind:    protocol.KindFundi,
 		Prefill: want,
 	}, "")
-	if !reflect.DeepEqual(req.Prefill, want) {
-		t.Errorf("resume request Prefill = %+v, want %+v", req.Prefill, want)
-	}
+	assert.NewCollecting(t).EqDiff(want, req.Prefill, "resume request Prefill")
 }

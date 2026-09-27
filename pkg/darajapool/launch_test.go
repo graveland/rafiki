@@ -14,6 +14,8 @@ import (
 	adminpb "go.graveland.dev/rafiki/pkg/adminpb"
 	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeAdminClient is a minimal adminpbconnect.AdminServiceClient. launchFn is
@@ -52,6 +54,7 @@ func validSpec() *darajapb.ChildSpec {
 }
 
 func TestLaunchReturnsPidPgidOnceTheReverseDialArrives(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 
@@ -79,15 +82,12 @@ func TestLaunchReturnsPidPgidOnceTheReverseDialArrives(t *testing.T) {
 		Spec:       validSpec(),
 		Timeout:    2 * time.Second,
 	})
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
-	}
-	if result.Pid != 4242 || result.Pgid != 4242 {
-		t.Fatalf("got %+v, want Pid=4242 Pgid=4242", result)
-	}
+	c.NoError(err, "Launch")
+	c.False(result.Pid != 4242 || result.Pgid != 4242, "got %+v, want Pid=4242 Pgid=4242", result)
 }
 
 func TestLaunchTimesOutAndEvictsIfNoReverseDialArrives(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 
@@ -111,15 +111,9 @@ func TestLaunchTimesOutAndEvictsIfNoReverseDialArrives(t *testing.T) {
 		Timeout:    100 * time.Millisecond,
 	})
 	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("want a timeout error, got nil")
-	}
-	if !strings.Contains(err.Error(), "did not connect within") {
-		t.Fatalf("want a timeout-shaped error, got: %v", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("took %s — Timeout override was not honoured", elapsed)
-	}
+	c.Error(err, "want a timeout error, got nil")
+	c.StrContains(err.Error(), "did not connect within", "want a timeout-shaped error, got: %v", err)
+	c.LessOrEqual(time.Second, elapsed, "took")
 }
 
 // TestLaunchUnregistersItsOnConnectCallback proves Launch's one-shot
@@ -164,9 +158,7 @@ func TestLaunchUnregistersItsOnConnectCallback(t *testing.T) {
 	pool.onConnectMu.Lock()
 	got := len(pool.onConnect)
 	pool.onConnectMu.Unlock()
-	if got != 0 {
-		t.Fatalf("Pool.onConnect holds %d callbacks after 4 Launch calls all returned, want 0", got)
-	}
+	assert.NewAborting(t).Eq(0, got, "Pool.onConnect holds")
 }
 
 func TestLaunchRejectsASpecWithNoClaudeParams(t *testing.T) {
@@ -181,15 +173,14 @@ func TestLaunchRejectsASpecWithNoClaudeParams(t *testing.T) {
 		ChildID:    "c1",
 		Spec:       &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
 	})
-	if err == nil {
-		t.Fatal("want an error for a spec with no Claude params")
-	}
+	assert.NewAborting(t).Error(err, "want an error for a spec with no Claude params")
 }
 
 // A SCRIPT spec is the second valid launch payload: the executor resolves the
 // script from its synced cache and Launch ships the params to it. The empty
 // ScriptParams message (a kind without either variant) stays refused.
 func TestLaunchAcceptsAScriptSpec(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 	_, err := Launch(context.Background(), LaunchParams{
@@ -207,18 +198,14 @@ func TestLaunchAcceptsAScriptSpec(t *testing.T) {
 	// The fake pool refuses every admin client, so Launch fails there — the
 	// assertion is only that the spec VALIDATED: the failure is the fake's,
 	// not Launch's payload check.
-	if err == nil || !strings.Contains(err.Error(), "no admin client") {
-		t.Fatalf("a script spec must pass Launch's payload check (the fake pool refuses next), got: %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "no admin client"), "a script spec must pass Launch's payload check (the fake pool refuses next), got: %v", err)
 
 	_, err = Launch(context.Background(), LaunchParams{
 		ExecPool: &fakeExecPool{}, Pool: pool, Registry: reg,
 		DialAddr: "/tmp/whatever.sock", ExecutorID: "exec-1", ChildID: "c2",
 		Spec: &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_SCRIPT},
 	})
-	if err == nil || !strings.Contains(err.Error(), "requires spec") {
-		t.Fatalf("an empty script spec must still be refused, got: %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "requires spec"), "an empty script spec must still be refused, got: %v", err)
 }
 
 func TestLaunchPropagatesAdminClientForFailure(t *testing.T) {
@@ -234,7 +221,5 @@ func TestLaunchPropagatesAdminClientForFailure(t *testing.T) {
 		ChildID:    "c1",
 		Spec:       validSpec(),
 	})
-	if err == nil || !errors.Is(err, wantErr) {
-		t.Fatalf("want an error wrapping %v, got %v", wantErr, err)
-	}
+	assert.NewAborting(t).False(err == nil || !errors.Is(err, wantErr), "want an error wrapping %v, got %v", wantErr, err)
 }

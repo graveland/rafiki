@@ -16,90 +16,70 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/fundi"
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestParseAgentFlagsRequiresModel covers the redesign's central invariant:
 // --model has no default any more (the caller must state the provider-
 // qualified model explicitly; fundi's core invents nothing).
 func TestParseAgentFlagsRequiresModel(t *testing.T) {
-	if _, err := parseAgentFlags(nil); err == nil {
-		t.Fatal("parseAgentFlags(nil) with no --model: want error, got nil")
-	}
+	_, err := parseAgentFlags(nil)
+	assert.NewAborting(t).Error(err, "parseAgentFlags(nil) with no --model: want error, got nil")
 }
 
 // TestParseAgentFlagsRequiresSlash covers the other half of the invariant: a
 // bare (non-provider-qualified) --model is also rejected, since fundi does
 // not rely on rafiki's bare-id backward-compat resolution.
 func TestParseAgentFlagsRequiresSlash(t *testing.T) {
-	if _, err := parseAgentFlags([]string{"--model", "sonnet-latest"}); err == nil {
-		t.Fatal("parseAgentFlags with a bare (non-provider-qualified) --model: want error, got nil")
-	}
+	_, err := parseAgentFlags([]string{"--model", "sonnet-latest"})
+	assert.NewAborting(t).Error(err, "parseAgentFlags with a bare (non-provider-qualified) --model: want error, got nil")
 }
 
 func TestParseAgentFlagsModelAndThinkingDefault(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.model != "anthropic/sonnet-latest" {
-		t.Errorf("model = %q, want anthropic/sonnet-latest", f.model)
-	}
-	if f.thinking != "off" {
-		t.Errorf("thinking = %q, want off", f.thinking)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("anthropic/sonnet-latest", f.model, "model")
+	c.Eq("off", f.thinking, "thinking")
 }
 
 func TestParseAgentFlagsRefFromEnv(t *testing.T) {
 	t.Setenv("RAFIKI_CHILD_ID", "child-123")
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.ref != "child-123" {
-		t.Errorf("ref = %q, want child-123 (from $RAFIKI_CHILD_ID)", f.ref)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("child-123", f.ref, "ref")
 }
 
 func TestParseAgentFlagsRefExplicitFlagWins(t *testing.T) {
 	t.Setenv("RAFIKI_CHILD_ID", "child-123")
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--ref", "explicit-ref"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.ref != "explicit-ref" {
-		t.Errorf("ref = %q, want explicit-ref (explicit --ref overrides the env default)", f.ref)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("explicit-ref", f.ref, "ref")
 }
 
 func TestParseAgentFlagsDBFromEnv(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "postgres://example/db")
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.db != "postgres://example/db" {
-		t.Errorf("db = %q, want postgres://example/db (from $RAFIKI_DB)", f.db)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("postgres://example/db", f.db, "db")
 }
 
 func TestParseAgentFlagsRepeatableSkillsDir(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--skills-dir", "/a", "--skills-dir", "/b"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if len(f.skillsDir) != 2 || f.skillsDir[0] != "/a" || f.skillsDir[1] != "/b" {
-		t.Errorf("skillsDir = %v, want [/a /b]", f.skillsDir)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.False(len(f.skillsDir) != 2 || f.skillsDir[0] != "/a" || f.skillsDir[1] != "/b", "skillsDir = %v, want [/a /b]", f.skillsDir)
 }
 
 func TestParseAgentFlagsThinkingLevel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--thinking", "xhigh"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.thinking != "xhigh" {
-		t.Errorf("thinking = %q, want xhigh", f.thinking)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("xhigh", f.thinking, "thinking")
 	if _, err := fundi.ThinkingBudgetFor(f.thinking); err != nil {
 		t.Errorf("ThinkingBudgetFor(%q): unexpected error: %v", f.thinking, err)
 	}
@@ -110,50 +90,34 @@ func TestParseAgentFlagsThinkingLevel(t *testing.T) {
 // gates whether opts.RawTrace is populated on this field (and previously did
 // not read it at all — the flag parsed but silently did nothing).
 func TestParseAgentFlagsRecordRequests(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--record-requests"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if !f.recordRequests {
-		t.Error("recordRequests = false, want true")
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.True(f.recordRequests, "recordRequests = false, want true")
 
 	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f2.recordRequests {
-		t.Error("recordRequests = true, want false (flag not passed)")
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.False(f2.recordRequests, "recordRequests = true, want false (flag not passed)")
 }
 
 func TestParseAgentFlagsRejectsUnknownFlag(t *testing.T) {
-	if _, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--not-a-real-flag"}); err == nil {
-		t.Fatal("parseAgentFlags with an unknown flag: want error, got nil")
-	}
+	_, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--not-a-real-flag"})
+	assert.NewAborting(t).Error(err, "parseAgentFlags with an unknown flag: want error, got nil")
 }
 
 func TestParseAgentFlagsNoSkillsAndNoContextFiles(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--no-skills", "--no-context-files"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if !f.noSkills || !f.noContextFiles {
-		t.Errorf("noSkills=%v noContextFiles=%v, want both true", f.noSkills, f.noContextFiles)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.False(!f.noSkills || !f.noContextFiles, "noSkills=%v noContextFiles=%v, want both true", f.noSkills, f.noContextFiles)
 }
 
 func TestParseAgentFlags_MCPServersAndNoMCP(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--model", "anthropic/claude-sonnet-5", "--mcp-servers", "codescan,other", "--no-mcp"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.mcpServers != "codescan,other" {
-		t.Errorf("mcpServers = %q, want %q", f.mcpServers, "codescan,other")
-	}
-	if !f.noMCP {
-		t.Error("noMCP = false, want true")
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("codescan,other", f.mcpServers, "mcpServers")
+	c.True(f.noMCP, "noMCP = false, want true")
 }
 
 // TestAssembleSkillDirs_NoClaudeHomeDir locks down the config-ownership
@@ -171,31 +135,22 @@ func TestAssembleSkillDirs_NoClaudeHomeDir(t *testing.T) {
 	t.Setenv("HOME", "/home/testuser")
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/cfg")
+	c := assert.NewCollecting(t)
 
 	dirs := assembleSkillDirs("/work/repo", nil, false)
 
 	for _, d := range dirs {
-		if strings.HasPrefix(d, "/home/testuser") {
-			t.Errorf("skill dir must not be under the user's home Claude profile: %s", d)
-		}
+		c.False(strings.HasPrefix(d, "/home/testuser"), "skill dir must not be under the user's home Claude profile: %s", d)
 	}
-	if len(dirs) != 2 {
-		t.Fatalf("dirs = %v, want 2 entries (the <ConfigDir>/skills default is opt-in now)", dirs)
-	}
-	if dirs[0] != "/work/repo/.claude/skills" {
-		t.Errorf("dirs[0] = %q, want /work/repo/.claude/skills (existing per-project skills keep working)", dirs[0])
-	}
-	if dirs[1] != "/work/repo/.rafiki/skills" {
-		t.Errorf("dirs[1] = %q, want /work/repo/.rafiki/skills (rafiki's own per-project dir, overrides .claude)", dirs[1])
-	}
+	c.Require().Len(dirs, 2, "dirs")
+	c.Eq("/work/repo/.claude/skills", dirs[0], "dirs[0]")
+	c.Eq("/work/repo/.rafiki/skills", dirs[1], "dirs[1]")
 }
 
 func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "/env/skills")
 	dirs := assembleSkillDirs("/work/repo", []string{"/flag/skills"}, false)
-	if dirs[len(dirs)-1] != "/flag/skills" {
-		t.Errorf("--skills-dir must have highest precedence, got %v", dirs)
-	}
+	assert.NewCollecting(t).Eq("/flag/skills", dirs[len(dirs)-1], "--skills-dir must have highest precedence, got %v", dirs)
 }
 
 // TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision proves the whole
@@ -204,31 +159,22 @@ func TestAssembleSkillDirs_FlagsWinLast(t *testing.T) {
 // This exercises the real merge in skillspkg.DiscoverSkills (later dir wins),
 // not just the ordering of assembleSkillDirs's output slice.
 func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
+	c := assert.NewCollecting(t)
 	repo := t.TempDir()
 	claudeSkillDir := filepath.Join(repo, ".claude", "skills", "demo")
 	rafikiSkillDir := filepath.Join(repo, ".rafiki", "skills", "demo")
-	if err := os.MkdirAll(claudeSkillDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .claude skill: %v", err)
-	}
-	if err := os.MkdirAll(rafikiSkillDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll .rafiki skill: %v", err)
-	}
+	c.Require().NoError(os.MkdirAll(claudeSkillDir, 0o755), "MkdirAll .claude skill")
+	c.Require().NoError(os.MkdirAll(rafikiSkillDir, 0o755), "MkdirAll .rafiki skill")
 	claudeFrontmatter := "---\nname: demo\ndescription: from .claude\n---\n"
 	rafikiFrontmatter := "---\nname: demo\ndescription: from .rafiki\n---\n"
-	if err := os.WriteFile(filepath.Join(claudeSkillDir, "SKILL.md"), []byte(claudeFrontmatter), 0o644); err != nil {
-		t.Fatalf("WriteFile .claude SKILL.md: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rafikiSkillDir, "SKILL.md"), []byte(rafikiFrontmatter), 0o644); err != nil {
-		t.Fatalf("WriteFile .rafiki SKILL.md: %v", err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(claudeSkillDir, "SKILL.md"), []byte(claudeFrontmatter), 0o644), "WriteFile .claude SKILL.md")
+	c.Require().NoError(os.WriteFile(filepath.Join(rafikiSkillDir, "SKILL.md"), []byte(rafikiFrontmatter), 0o644), "WriteFile .rafiki SKILL.md")
 
 	t.Setenv("RAFIKI_SKILLS_DIRS", "") // isolate from the invoking user's real config dir
 
 	dirs := assembleSkillDirs(repo, nil, false)
 	skills, err := skillspkg.DiscoverSkills(dirs, nil)
-	if err != nil {
-		t.Fatalf("DiscoverSkills: %v", err)
-	}
+	c.Require().NoError(err, "DiscoverSkills")
 
 	var demo *skillspkg.SkillMeta
 	for i := range skills {
@@ -236,12 +182,8 @@ func TestAssembleSkillDirs_FundiBeatsClaudeOnNameCollision(t *testing.T) {
 			demo = &skills[i]
 		}
 	}
-	if demo == nil {
-		t.Fatalf("skill %q not found in %v", "demo", skills)
-	}
-	if demo.Description != "from .rafiki" {
-		t.Errorf("demo.Description = %q, want %q (.rafiki/skills must win over .claude/skills on name collision)", demo.Description, "from .rafiki")
-	}
+	c.Require().NotNil(demo, "skill %q not found in %v", "demo", skills)
+	c.Eq("from .rafiki", demo.Description, "demo.Description")
 }
 
 // When hasExecutor is true, the project-tier directories are omitted because
@@ -253,9 +195,7 @@ func TestAssembleSkillDirs_DropsProjectTierWithExecutor(t *testing.T) {
 	dirs := assembleSkillDirs("/work/repo", nil, true)
 
 	for _, d := range dirs {
-		if strings.Contains(d, ".claude/skills") || strings.Contains(d, ".rafiki/skills") {
-			t.Errorf("project-tier dir %q must not appear when hasExecutor is true", d)
-		}
+		assert.NewCollecting(t).False(strings.Contains(d, ".claude/skills") || strings.Contains(d, ".rafiki/skills"), "project-tier dir %q must not appear when hasExecutor is true", d)
 	}
 }
 
@@ -292,6 +232,7 @@ func (c *countingCloser) count() int {
 // The hook's whole job is to unblock Frontend.Run, which is parked reading
 // stdin; closing stdin is the only way to do that.
 func TestStandaloneFatalEndsTheProcess(t *testing.T) {
+	c := assert.NewCollecting(t)
 	silenceStandaloneLogs(t)
 	stdin := &countingCloser{}
 	hook, fired := standaloneFatal(stdin)
@@ -301,22 +242,16 @@ func TestStandaloneFatalEndsTheProcess(t *testing.T) {
 
 	select {
 	case got := <-fired:
-		if !errors.Is(got, want) {
-			t.Errorf("fired error = %v, want %v", got, want)
-		}
+		c.ErrorIs(got, want, "fired error")
 	case <-time.After(5 * time.Second):
 		t.Fatal("standaloneFatal never reported the fatal error; runAgent would exit 0 as if nothing happened")
 	}
-	if got := stdin.count(); got != 1 {
-		t.Errorf("stdin closed %d times, want 1; without it Frontend.Run stays parked on a read and the process never ends", got)
-	}
+	c.Eq(1, stdin.count(), "stdin closed")
 
 	// OnFatal is once-only by contract, but the send is into a size-1 buffer and
 	// the close is on a real file: a second call must be a no-op either way.
 	hook(errors.New("second"))
-	if got := stdin.count(); got != 1 {
-		t.Errorf("stdin closed %d times after a second hook call, want 1", got)
-	}
+	c.Eq(1, stdin.count(), "stdin closed")
 	select {
 	case got := <-fired:
 		t.Errorf("a second hook call reported %v; the hook must fire once", got)
@@ -355,25 +290,22 @@ func TestBashRTKValuePrecedence(t *testing.T) {
 	// Default (no flag, no env) → "auto"
 	t.Run("default", func(t *testing.T) {
 		t.Setenv("RAFIKI_BASH_RTK", "")
-		if got := bashRTKValue(""); got != "auto" {
-			t.Errorf("bashRTKValue(\"\") = %q, want auto", got)
-		}
+		got := bashRTKValue("")
+		assert.NewCollecting(t).Eq("auto", got, "bashRTKValue(\"\") = %q, want auto", got)
 	})
 
 	// Env var only → use env var
 	t.Run("env", func(t *testing.T) {
 		t.Setenv("RAFIKI_BASH_RTK", "off")
-		if got := bashRTKValue(""); got != "off" {
-			t.Errorf("bashRTKValue(\"\") = %q, want off", got)
-		}
+		got := bashRTKValue("")
+		assert.NewCollecting(t).Eq("off", got, "bashRTKValue(\"\") = %q, want off", got)
 	})
 
 	// Explicit flag beats env var
 	t.Run("flag-beats-env", func(t *testing.T) {
 		t.Setenv("RAFIKI_BASH_RTK", "off")
-		if got := bashRTKValue("on"); got != "on" {
-			t.Errorf("bashRTKValue(\"on\") = %q, want on (explicit flag must beat env)", got)
-		}
+		got := bashRTKValue("on")
+		assert.NewCollecting(t).Eq("on", got, "bashRTKValue(\"on\") = %q, want on (explicit flag must beat env)", got)
 	})
 }
 
@@ -381,23 +313,16 @@ func TestBashRTKValuePrecedence(t *testing.T) {
 // by parseAgentFlags. This is the exact check that would have caught
 // --record-requests before it shipped parsed-but-unread.
 func TestParseAgentFlagsBashRTK(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Flag passed → f.bashRTK is set
 	f, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest", "--bash-rtk", "on"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.bashRTK != "on" {
-		t.Errorf("bashRTK = %q, want on", f.bashRTK)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("on", f.bashRTK, "bashRTK")
 
 	// Flag not passed → empty
 	f2, err := parseAgentFlags([]string{"--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f2.bashRTK != "" {
-		t.Errorf("bashRTK = %q, want empty (flag not passed)", f2.bashRTK)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("", f2.bashRTK, "bashRTK")
 }
 
 // TestToolsWebValuePrecedence verifies the --tools-web precedence: an
@@ -422,10 +347,8 @@ func TestToolsWebValuePrecedence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("RAFIKI_TOOLS_WEB", tc.env)
-			if got := toolsWebValue(tc.flagVal, tc.flagPassed); got != tc.want {
-				t.Errorf("toolsWebValue(%v, %v) with $RAFIKI_TOOLS_WEB=%q = %v, want %v",
-					tc.flagVal, tc.flagPassed, tc.env, got, tc.want)
-			}
+			got := toolsWebValue(tc.flagVal, tc.flagPassed)
+			assert.NewCollecting(t).Eq(tc.want, got, "toolsWebValue(%v, %v) with $RAFIKI_TOOLS_WEB=%q = %v, want", tc.flagVal, tc.flagPassed, tc.env, got)
 		})
 	}
 }
@@ -449,14 +372,10 @@ func TestParseAgentFlagsToolsWeb(t *testing.T) {
 		{"absent", nil, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			f, err := parseAgentFlags(append(append([]string{}, base...), tc.args...))
-			if err != nil {
-				t.Fatalf("parseAgentFlags: %v", err)
-			}
-			if f.toolsWeb != tc.wantVal || f.toolsWebSet != tc.wantPassed {
-				t.Errorf("toolsWeb=%v set=%v, want %v/%v",
-					f.toolsWeb, f.toolsWebSet, tc.wantVal, tc.wantPassed)
-			}
+			c.Require().NoError(err, "parseAgentFlags")
+			c.False(f.toolsWeb != tc.wantVal || f.toolsWebSet != tc.wantPassed, "toolsWeb=%v set=%v, want %v/%v", f.toolsWeb, f.toolsWebSet, tc.wantVal, tc.wantPassed)
 		})
 	}
 }
@@ -468,16 +387,11 @@ func TestParseAgentFlagsToolsWeb(t *testing.T) {
 // would have silently produced an empty model. A bool flag cannot consume the
 // following argument, so --model still lands.
 func TestParseAgentFlagsToolsWebDoesNotEatNextFlag(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, err := parseAgentFlags([]string{"--tools-web", "--model", "anthropic/sonnet-latest"})
-	if err != nil {
-		t.Fatalf("parseAgentFlags: %v", err)
-	}
-	if f.model != "anthropic/sonnet-latest" {
-		t.Errorf("model = %q, want anthropic/sonnet-latest; --tools-web swallowed the next flag", f.model)
-	}
-	if !f.toolsWeb || !f.toolsWebSet {
-		t.Errorf("toolsWeb=%v set=%v, want true/true", f.toolsWeb, f.toolsWebSet)
-	}
+	c.Require().NoError(err, "parseAgentFlags")
+	c.Eq("anthropic/sonnet-latest", f.model, "model")
+	c.False(!f.toolsWeb || !f.toolsWebSet, "toolsWeb=%v set=%v, want true/true", f.toolsWeb, f.toolsWebSet)
 }
 
 // TestEffectiveLSPConfigPrecedence covers finding 15's extracted helper: an
@@ -487,9 +401,7 @@ func TestParseAgentFlagsToolsWebDoesNotEatNextFlag(t *testing.T) {
 func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 	t.Run("explicit missing path is preserved", func(t *testing.T) {
 		got := effectiveLSPConfig("/does/not/exist/lsp.json", t.TempDir())
-		if got != "/does/not/exist/lsp.json" {
-			t.Errorf("effectiveLSPConfig = %q, want the explicit path preserved so BuildRuntime raises it", got)
-		}
+		assert.NewCollecting(t).Eq("/does/not/exist/lsp.json", got, "effectiveLSPConfig")
 	})
 
 	t.Run("defaulted missing path is blanked", func(t *testing.T) {
@@ -500,31 +412,26 @@ func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 		// file when the test runner's env carries defaults through rtk.
 		t.Setenv("RAFIKI_LSP_CONFIG", filepath.Join(t.TempDir(), "nonexistent-lsp.json"))
 		t.Setenv("XDG_CONFIG_HOME", cwd)
-		if got := effectiveLSPConfig("", cwd); got != "" {
-			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want empty (defaulted path absent: skip LSP)", cwd, got)
-		}
+		got := effectiveLSPConfig("", cwd)
+		assert.NewCollecting(t).Eq("", got, "effectiveLSPConfig(\"\", %q) = %q, want empty (defaulted path absent: skip LSP)", cwd, got)
 	})
 
 	t.Run("defaulted present path is kept", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		cwd := t.TempDir()
 		cwdCfg := filepath.Join(cwd, ".lsp.json")
-		if err := os.WriteFile(cwdCfg, []byte(`{}`), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := effectiveLSPConfig("", cwd); got != cwdCfg {
-			t.Errorf("effectiveLSPConfig(\"\", %q) = %q, want %q", cwd, got, cwdCfg)
-		}
+		c.Require().NoError(os.WriteFile(cwdCfg, []byte(`{}`), 0o644))
+		got := effectiveLSPConfig("", cwd)
+		c.Eq(cwdCfg, got, "effectiveLSPConfig(\"\", %q) = %q, want", cwd, got)
 	})
 
 	t.Run("explicit existing path is kept", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		cwd := t.TempDir()
 		explicit := filepath.Join(t.TempDir(), "custom-lsp.json")
-		if err := os.WriteFile(explicit, []byte(`{}`), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := effectiveLSPConfig(explicit, cwd); got != explicit {
-			t.Errorf("effectiveLSPConfig(%q, %q) = %q, want %q", explicit, cwd, got, explicit)
-		}
+		c.Require().NoError(os.WriteFile(explicit, []byte(`{}`), 0o644))
+		got := effectiveLSPConfig(explicit, cwd)
+		c.Eq(explicit, got, "effectiveLSPConfig(%q, %q) = %q, want", explicit, cwd, got)
 	})
 }
 
@@ -542,6 +449,7 @@ func TestEffectiveLSPConfigPrecedence(t *testing.T) {
 // call across lines, or on an added argument, none of which reintroduce the
 // duplication this is meant to catch.
 func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// resolveModelDefaults/resolveAllowlistOption were added to this list after
 	// the same class of drift recurred: runAgentWithFlags shipped without the
 	// model-declared skills/MCP/context-files resolution that toRuntimeOptions
@@ -558,9 +466,7 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 		"agent_runtime.go": "toRuntimeOptions",
 	} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
+		c.Require().NoError(err, "parse %s", file)
 
 		var body *ast.FuncDecl
 		for _, decl := range parsed.Decls {
@@ -569,9 +475,7 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 				break
 			}
 		}
-		if body == nil {
-			t.Fatalf("%s: no func %s; this test needs updating alongside the rename", file, fn)
-		}
+		c.Require().NotNil(body, "%s: no func %s; this test needs updating alongside the rename", file, fn)
 
 		called := map[string]bool{}
 		ast.Inspect(body, func(n ast.Node) bool {
@@ -584,10 +488,7 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 		})
 
 		for _, want := range wantCalls {
-			if !called[want] {
-				t.Errorf("%s: %s does not call %s; finding 15's duplicated resolution logic is back",
-					file, fn, want)
-			}
+			c.False(!called[want], "%s: %s does not call %s; finding 15's duplicated resolution logic is back", file, fn, want)
 		}
 	}
 }
@@ -595,15 +496,11 @@ func TestLSPAndToolsWebHelpersSharedAcrossCallSites(t *testing.T) {
 func TestAssembleSkillDirsOmitsTheDefaultConfigDir(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "")
 	got := assembleSkillDirs("/w", nil, true)
-	if len(got) != 0 {
-		t.Errorf("got %v, want no dirs when RAFIKI_SKILLS_DIRS is unset", got)
-	}
+	assert.NewCollecting(t).Empty(got, "got")
 }
 
 func TestAssembleSkillDirsHonoursAnExplicitEnv(t *testing.T) {
 	t.Setenv("RAFIKI_SKILLS_DIRS", "/opt/skills")
 	got := assembleSkillDirs("/w", nil, true)
-	if len(got) != 1 || got[0] != "/opt/skills" {
-		t.Errorf("got %v, want [/opt/skills]", got)
-	}
+	assert.NewCollecting(t).False(len(got) != 1 || got[0] != "/opt/skills", "got %v, want [/opt/skills]", got)
 }

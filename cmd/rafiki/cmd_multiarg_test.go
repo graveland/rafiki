@@ -1,11 +1,12 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── Argument validation tests ───────────────────────────────────────────────
@@ -17,31 +18,24 @@ func TestCloseCmd_MultiArg_AcceptsMultiple(t *testing.T) {
 	// Replace RunE so we don't need a real daemon; just exercise cobra's Args.
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"child-a", "child-b", "child-c"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("expected no error for multiple args, got: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for multiple args, got")
 }
 
 func TestCloseCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newCloseCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{}) // no args, no --all-exited
 	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for zero args without --all-exited, got nil")
-	}
-	if !strings.Contains(err.Error(), "at least one") {
-		t.Errorf("expected 'at least one' in error, got: %v", err)
-	}
+	c.Require().Error(err, "expected error for zero args without --all-exited, got nil")
+	c.StrContains(err.Error(), "at least one", "expected 'at least one' in error, got: %v", err)
 }
 
 func TestCloseCmd_AllExited_ZeroArgsOK(t *testing.T) {
 	cmd := newCloseCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"--all-exited"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("expected no error for --all-exited with no positional args, got: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for --all-exited with no positional args, got")
 }
 
 // TestStopCmd_MultiArg verifies that multiple positional args are accepted and
@@ -50,9 +44,7 @@ func TestStopCmd_MultiArg_AcceptsMultiple(t *testing.T) {
 	cmd := newStopCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"child-a", "child-b"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("expected no error for multiple args, got: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for multiple args, got")
 }
 
 func TestStopCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
@@ -60,9 +52,7 @@ func TestStopCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for zero args, got nil")
-	}
+	assert.NewAborting(t).Error(err, "expected error for zero args, got nil")
 }
 
 // TestGetCmd_MultiArg verifies that multiple positional args are accepted and
@@ -71,9 +61,7 @@ func TestGetCmd_MultiArg_AcceptsMultiple(t *testing.T) {
 	cmd := newGetCmd()
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{"child-a", "child-b"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("expected no error for multiple args, got: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for multiple args, got")
 }
 
 func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
@@ -81,9 +69,7 @@ func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
 	cmd.SetArgs([]string{})
 	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for zero args, got nil")
-	}
+	assert.NewAborting(t).Error(err, "expected error for zero args, got nil")
 }
 
 // ─── State-filtered completion predicate tests ───────────────────────────────
@@ -97,17 +83,14 @@ func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 // close could only ever target something already stopped) hides exactly the
 // targets `rafiki close` is now meant to handle in one step.
 func TestCloseCmd_ValidArgsFunctionUnfiltered(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newCloseCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set")
-	}
+	c.Require().NotNil(cmd.ValidArgsFunction, "ValidArgsFunction not set")
 	// completeChildren (unfiltered) is what newCloseCmd wires up now; this
 	// smoke-checks it doesn't crash without a daemon rather than re-deriving
 	// completeChildren's own behavior, which has its own tests.
 	_, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
 }
 
 func TestCompletionPredicate_KillNotExited(t *testing.T) {
@@ -129,9 +112,7 @@ func TestCompletionPredicate_KillNotExited(t *testing.T) {
 	for _, tc := range cases {
 		ch := protocol.ChildSummary{Status: tc.status}
 		got := notExited(ch)
-		if got != tc.want {
-			t.Errorf("kill predicate(%q) = %v, want %v", tc.status, got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, got, "kill predicate(%q) = %v, want", tc.status, got)
 	}
 }
 
@@ -150,9 +131,7 @@ func TestCompletionPredicate_ResumeExitedOnly(t *testing.T) {
 	for _, tc := range cases {
 		ch := protocol.ChildSummary{Status: tc.status}
 		got := resumable(ch)
-		if got != tc.want {
-			t.Errorf("resume predicate(%q) = %v, want %v", tc.status, got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, got, "resume predicate(%q) = %v, want", tc.status, got)
 	}
 }
 
@@ -178,9 +157,7 @@ func TestCompletionPredicate_AttachAttachableStates(t *testing.T) {
 	for _, tc := range cases {
 		ch := completionChild{Status: tc.status}
 		got := isAttachable(ch)
-		if got != tc.want {
-			t.Errorf("isAttachable(%q) = %v, want %v", tc.status, got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, got, "isAttachable(%q) = %v, want", tc.status, got)
 	}
 }
 
@@ -188,14 +165,11 @@ func TestCompletionPredicate_AttachAttachableStates(t *testing.T) {
 // a ValidArgsFunction — the regression this file's isAttachable test alone
 // could not catch, since it never called through the real command.
 func TestAttachCmd_ValidArgsFunctionWired(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newAttachCmd()
-	if cmd.ValidArgsFunction == nil {
-		t.Fatal("ValidArgsFunction not set — `rafiki attach <TAB>` completes nothing")
-	}
+	c.Require().NotNil(cmd.ValidArgsFunction, "ValidArgsFunction not set — `rafiki attach <TAB>` completes nothing")
 	_, directive := cmd.ValidArgsFunction(cmd, nil, "")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("directive = %v, want ShellCompDirectiveNoFileComp", directive)
-	}
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "directive")
 }
 
 // ─── Aliases ─────────────────────────────────────────────────────────────────

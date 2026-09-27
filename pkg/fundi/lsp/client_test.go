@@ -7,9 +7,12 @@ import (
 	"time"
 
 	"github.com/sourcegraph/jsonrpc2"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestClient_Initialize(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -27,74 +30,55 @@ func TestClient_Initialize(t *testing.T) {
 
 	client.conn.Store(clientConn)
 
-	if err := client.Initialize(ctx, "/fake/root"); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	ck.Require().NoError(client.Initialize(ctx, "/fake/root"), "Initialize")
 
-	if !client.serverCaps.DefinitionProvider {
-		t.Error("expected DefinitionProvider to be true")
-	}
+	ck.True(client.serverCaps.DefinitionProvider, "expected DefinitionProvider to be true")
 }
 
 func TestClient_DidOpen(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	fs := NewFakeServer()
 	connPair(ctx, t, fs, func(client *Client) {
-		if err := client.DidOpen(ctx, "/fake/root/main.go", "package main"); err != nil {
-			t.Fatalf("DidOpen: %v", err)
-		}
+		c.Require().NoError(client.DidOpen(ctx, "/fake/root/main.go", "package main"), "DidOpen")
 
 		// Wait briefly for the notification to be processed.
 		time.Sleep(50 * time.Millisecond)
 
 		// The fake server publishes a diagnostic on didOpen.
 		diags, err := client.Diagnostics(ctx, "/fake/root/main.go")
-		if err != nil {
-			t.Fatalf("Diagnostics: %v", err)
-		}
-		if len(diags) != 1 {
-			t.Fatalf("expected 1 diagnostic, got %d", len(diags))
-		}
-		if diags[0].Severity != SeverityError {
-			t.Errorf("expected error severity, got %v", diags[0].Severity)
-		}
+		c.Require().NoError(err, "Diagnostics")
+		c.Require().Len(diags, 1, "expected 1 diagnostic, got %d", len(diags))
+		c.Eq(SeverityError, diags[0].Severity, "expected error severity, got")
 	})
 }
 
 func TestClient_DidChange(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	fs := NewFakeServer()
 	connPair(ctx, t, fs, func(client *Client) {
 		// Open first to trigger the fake diagnostic.
-		if err := client.DidOpen(ctx, "/fake/root/main.go", "package main"); err != nil {
-			t.Fatalf("DidOpen: %v", err)
-		}
+		c.Require().NoError(client.DidOpen(ctx, "/fake/root/main.go", "package main"), "DidOpen")
 		time.Sleep(50 * time.Millisecond)
 
 		// Change triggers a different diagnostic.
-		if err := client.DidChange(ctx, "/fake/root/main.go", "package main\n// changed"); err != nil {
-			t.Fatalf("DidChange: %v", err)
-		}
+		c.Require().NoError(client.DidChange(ctx, "/fake/root/main.go", "package main\n// changed"), "DidChange")
 		time.Sleep(50 * time.Millisecond)
 
 		diags, err := client.Diagnostics(ctx, "/fake/root/main.go")
-		if err != nil {
-			t.Fatalf("Diagnostics: %v", err)
-		}
-		if len(diags) != 1 {
-			t.Fatalf("expected 1 diagnostic after change, got %d", len(diags))
-		}
-		if diags[0].Severity != SeverityWarning {
-			t.Errorf("expected warning severity, got %v", diags[0].Severity)
-		}
+		c.Require().NoError(err, "Diagnostics")
+		c.Require().Len(diags, 1, "expected 1 diagnostic after change, got %d", len(diags))
+		c.Eq(SeverityWarning, diags[0].Severity, "expected warning severity, got")
 	})
 }
 
 func TestClient_DiagnosticsEmptyVsNotYetPublished(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Diagnostics on a never-opened file must return nil (no diags have
 	// been published for it), but Diagnostics on a file that was opened
 	// and for which the server hasn't published yet must also return nil.
@@ -108,34 +92,25 @@ func TestClient_DiagnosticsEmptyVsNotYetPublished(t *testing.T) {
 	connPair(ctx, t, fs, func(client *Client) {
 		// Never-opened file: diagnostics should be empty.
 		diags, err := client.Diagnostics(ctx, "/fake/root/never_opened.go")
-		if err != nil {
-			t.Fatalf("Diagnostics: %v", err)
-		}
-		if len(diags) != 0 {
-			t.Errorf("expected 0 diagnostics for never-opened file, got %d", len(diags))
-		}
+		c.Require().NoError(err, "Diagnostics")
+		c.Empty(diags, "expected 0 diagnostics for never-opened file, got %d", len(diags))
 
 		// DiagnosticsVersion at start.
 		startVer := client.DiagnosticsVersion()
 
 		// Open a file.
-		if err := client.DidOpen(ctx, "/fake/root/other.go", "package other"); err != nil {
-			t.Fatalf("DidOpen: %v", err)
-		}
+		c.Require().NoError(client.DidOpen(ctx, "/fake/root/other.go", "package other"), "DidOpen")
 
 		// Wait for diagnostics to be published.
-		if err := client.WaitForInitialDiagnostics(ctx, startVer, 2*time.Second); err != nil {
-			t.Fatalf("WaitForInitialDiagnostics: %v", err)
-		}
+		c.Require().NoError(client.WaitForInitialDiagnostics(ctx, startVer, 2*time.Second), "WaitForInitialDiagnostics")
 
 		endVer := client.DiagnosticsVersion()
-		if endVer <= startVer {
-			t.Error("DiagnosticsVersion should have incremented after publish")
-		}
+		c.Greater(startVer, endVer, "DiagnosticsVersion should have incremented after publish")
 	})
 }
 
 func TestClient_Shutdown(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -151,13 +126,9 @@ func TestClient_Shutdown(t *testing.T) {
 
 	client.conn.Store(clientConn)
 
-	if err := client.Initialize(ctx, "/fake/root"); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	ck.Require().NoError(client.Initialize(ctx, "/fake/root"), "Initialize")
 
-	if err := client.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
+	ck.Require().NoError(client.Shutdown(ctx), "Shutdown")
 
 	// Check that the server received shutdown.
 	select {
@@ -169,9 +140,7 @@ func TestClient_Shutdown(t *testing.T) {
 
 	// Operations after shutdown should fail.
 	err := client.DidOpen(ctx, "/x.go", "x")
-	if err == nil {
-		t.Error("expected error after shutdown, got nil")
-	}
+	ck.Error(err, "expected error after shutdown, got nil")
 }
 
 func TestClient_WaitForInitialDiagnostics_Timeout(t *testing.T) {
@@ -185,9 +154,7 @@ func TestClient_WaitForInitialDiagnostics_Timeout(t *testing.T) {
 		defer waitCancel()
 
 		err := client.WaitForInitialDiagnostics(waitCtx, client.DiagnosticsVersion(), 500*time.Millisecond)
-		if err == nil {
-			t.Error("expected timeout error, got nil")
-		}
+		assert.NewCollecting(t).Error(err, "expected timeout error, got nil")
 	})
 }
 
@@ -200,6 +167,7 @@ func TestClient_WaitForInitialDiagnostics_Timeout(t *testing.T) {
 // clientHandler.Handle and gets a well-formed reply, not just that the
 // unmarshal-and-shape helper works in isolation.
 func TestClientHandler_WorkspaceConfiguration(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -221,16 +189,10 @@ func TestClientHandler_WorkspaceConfiguration(t *testing.T) {
 	}{{Section: "gopls"}, {Section: "go"}}}
 
 	var result []any
-	if err := serverConn.Call(ctx, "workspace/configuration", params, &result); err != nil {
-		t.Fatalf("workspace/configuration returned an error, want a result: %v", err)
-	}
-	if len(result) != 2 {
-		t.Fatalf("got %d results, want 2 (one per requested item, in order)", len(result))
-	}
+	ck.Require().NoError(serverConn.Call(ctx, "workspace/configuration", params, &result), "workspace/configuration returned an error, want a result")
+	ck.Require().Len(result, 2, "got %d results, want 2 (one per requested item, in order)", len(result))
 	for i, r := range result {
-		if r != nil {
-			t.Errorf("item %d: got %v, want null (we have no configuration store)", i, r)
-		}
+		ck.Nil(r, "item %d: got %v, want null (we have no configuration store)", i, r)
 	}
 }
 
@@ -251,9 +213,7 @@ func TestClientHandler_RegisterCapability(t *testing.T) {
 
 	for _, method := range []string{"client/registerCapability", "client/unregisterCapability"} {
 		var result any
-		if err := serverConn.Call(ctx, method, struct{}{}, &result); err != nil {
-			t.Errorf("%s returned an error, want an acknowledgement: %v", method, err)
-		}
+		assert.NewCollecting(t).NoError(serverConn.Call(ctx, method, struct{}{}, &result), "%s returned an error, want an acknowledgement", method)
 	}
 }
 
@@ -265,6 +225,7 @@ func TestClientHandler_RegisterCapability(t *testing.T) {
 // proves the method is now routed to HandleShowMessageRequest and gets a
 // decline (null) reply instead of an error.
 func TestClientHandler_ShowMessageRequestIsReachable(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -282,18 +243,15 @@ func TestClientHandler_ShowMessageRequestIsReachable(t *testing.T) {
 	}{Type: 1, Message: "retry?"}
 
 	var result any
-	if err := serverConn.Call(ctx, "window/showMessageRequest", params, &result); err != nil {
-		t.Fatalf("window/showMessageRequest returned an error, want a decline reply: %v", err)
-	}
-	if result != nil {
-		t.Errorf("got %v, want nil (declining the action)", result)
-	}
+	ck.Require().NoError(serverConn.Call(ctx, "window/showMessageRequest", params, &result), "window/showMessageRequest returned an error, want a decline reply")
+	ck.Nil(result, "got")
 }
 
 // TestClientHandler_UnknownRequestIsMethodNotFound pins that a genuinely
 // unsupported server-to-client request still gets MethodNotFound: the fix
 // for Finding 11 must not turn Handle into an always-succeeds stub.
 func TestClientHandler_UnknownRequestIsMethodNotFound(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -307,13 +265,9 @@ func TestClientHandler_UnknownRequestIsMethodNotFound(t *testing.T) {
 
 	var result any
 	err := serverConn.Call(ctx, "workspace/definitelyNotARealMethod", struct{}{}, &result)
-	if err == nil {
-		t.Fatal("expected an error for a genuinely unknown method, got nil")
-	}
+	ck.Error(err, "expected an error for a genuinely unknown method, got nil")
 	var rpcErr *jsonrpc2.Error
-	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc2.CodeMethodNotFound {
-		t.Fatalf("got %v, want a jsonrpc2.Error with code CodeMethodNotFound", err)
-	}
+	ck.False(!errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc2.CodeMethodNotFound, "got %v, want a jsonrpc2.Error with code CodeMethodNotFound", err)
 }
 
 // connPair creates a client and fake server, initializes the client, and
@@ -332,9 +286,7 @@ func connPair(ctx context.Context, t *testing.T, fs *FakeServer, fn func(*Client
 
 	client.conn.Store(clientConn)
 
-	if err := client.Initialize(ctx, "/fake/root"); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
+	assert.NewAborting(t).NoError(client.Initialize(ctx, "/fake/root"), "Initialize")
 
 	fn(client)
 }

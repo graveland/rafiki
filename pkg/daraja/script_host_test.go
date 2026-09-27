@@ -9,6 +9,8 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A script child's exit is its result: no respawn, one Exited event, and the
@@ -17,6 +19,7 @@ import (
 // and must never fire for a script, whose replacement would silently restart
 // work whose outcome the consumer is about to settle.
 func TestScriptExitDoesNotRespawn(t *testing.T) {
+	c := assert.NewAborting(t)
 	// The executor resolves the script and hands daraja the interpreter (the
 	// fake child here) plus the resolved argv (script path + args) positionally,
 	// which arrive in ExtraArgs.
@@ -25,18 +28,14 @@ func TestScriptExitDoesNotRespawn(t *testing.T) {
 		Binary: bin,
 		Spec:   ChildSpec{Kind: KindScript, ExtraArgs: []string{bin}},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 
 	deadline := time.After(10 * time.Second)
 	var sawStdout, sawStderr, sawExited bool
 	for {
 		select {
 		case ev, ok := <-h.Events():
-			if !ok {
-				t.Fatal("event channel closed unexpectedly")
-			}
+			c.True(ok, "event channel closed unexpectedly")
 			if len(ev.Stdout) > 0 && strings.Contains(string(ev.Stdout), "script-ran") {
 				sawStdout = true
 			}
@@ -45,18 +44,11 @@ func TestScriptExitDoesNotRespawn(t *testing.T) {
 			}
 			if ev.Exited != nil {
 				sawExited = true
-				if ev.Exited.ExitCode != 3 || ev.Exited.Signal != "" {
-					t.Fatalf("exit info = %+v, want code 3, no signal", ev.Exited)
-				}
+				c.False(ev.Exited.ExitCode != 3 || ev.Exited.Signal != "", "exit info = %+v, want code 3, no signal", ev.Exited)
 			}
-			if ev.Restarted != nil {
-				t.Fatalf("a script child was restarted: %+v", ev.Restarted)
-			}
+			c.Nil(ev.Restarted, "a script child was restarted")
 		case <-h.Done():
-			if !sawStdout || !sawStderr || !sawExited {
-				t.Fatalf("host finished with missing events: stdout=%v stderr=%v exited=%v",
-					sawStdout, sawStderr, sawExited)
-			}
+			c.False(!sawStdout || !sawStderr || !sawExited, "host finished with missing events: stdout=%v stderr=%v exited=%v", sawStdout, sawStderr, sawExited)
 			return
 		case <-deadline:
 			t.Fatalf("timeout: stdout=%v stderr=%v exited=%v done=%v",
@@ -69,28 +61,23 @@ func TestScriptExitDoesNotRespawn(t *testing.T) {
 // (its protocol is stdout; its engine chatter is noise the consumer cannot
 // use), so a claude event stream must never grow a stderr event.
 func TestClaudeStderrIsStillDiscarded(t *testing.T) {
+	c := assert.NewAborting(t)
 	h := NewHost(HostOptions{
 		Binary: testChildBinary(t, `echo out-first; echo err-line >&2; sleep 30`),
 		Spec:   ChildSpec{Kind: KindClaude},
 	})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
 		case ev, ok := <-h.Events():
-			if !ok {
-				t.Fatal("event channel closed unexpectedly")
-			}
+			c.True(ok, "event channel closed unexpectedly")
 			if len(ev.Stdout) > 0 && strings.Contains(string(ev.Stdout), "out-first") {
 				return // claude's stdout seen; the loop below watches for stderr
 			}
-			if len(ev.Stderr) > 0 {
-				t.Fatalf("claude stderr was relayed: %q", ev.Stderr)
-			}
+			c.LessOrEqual(0, len(ev.Stderr), "claude stderr was relayed: %q", ev.Stderr)
 		case <-deadline:
 			t.Fatal("timeout waiting for the claude child's stdout")
 		}
@@ -101,6 +88,7 @@ func TestClaudeStderrIsStillDiscarded(t *testing.T) {
 // resolved by the EXECUTOR before daraja starts; the wire spec carries names,
 // not paths, and nothing that can call Restart ever calls it for a script.
 func TestSpecFromProtoMapsScriptKindWithoutArgv(t *testing.T) {
+	c := assert.NewAborting(t)
 	got := SpecFromProto(&darajapb.ChildSpec{
 		Kind: darajapb.Kind_KIND_SCRIPT,
 		Script: &darajapb.ScriptParams{
@@ -109,19 +97,13 @@ func TestSpecFromProtoMapsScriptKindWithoutArgv(t *testing.T) {
 			Args:   []string{"--flag"},
 		},
 	})
-	if got.Kind != KindScript {
-		t.Fatalf("kind = %q, want %q", got.Kind, KindScript)
-	}
-	if len(got.ExtraArgs) != 0 {
-		t.Fatalf("script spec mapped to argv %v; the executor resolves the argv, not the wire", got.ExtraArgs)
-	}
+	c.Eq(KindScript, got.Kind, "kind")
+	c.Empty(got.ExtraArgs, "script spec mapped to argv")
 	// Restarting INTO a kind-only script spec must fail rather than re-run the
 	// script blind: a zero-spec Restart reuses the host's own resolved spec,
 	// but an explicit script spec carries no resolved argv, and the empty
 	// command line is startLocked's refusal.
-	if argv := got.Argv("", nil); len(argv) != 0 {
-		t.Fatalf("kind-only script spec produced argv %v; want empty", argv)
-	}
+	c.Empty(got.Argv("", nil), "kind-only script spec produced argv")
 }
 
 // The done-drain guarantee, over a REAL relay stream: a script that exits
@@ -131,11 +113,10 @@ func TestSpecFromProtoMapsScriptKindWithoutArgv(t *testing.T) {
 // ready events case) leaves the daemon-side child streaming forever. This is
 // the integration failure mode the drain-on-done change exists to close.
 func TestRelayDeliversQueuedEventsWhenTheHostIsDone(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	bin := testChildBinary(t, `echo final-line; exit 0`)
 	h := NewHost(HostOptions{Binary: bin, Spec: ChildSpec{Kind: KindScript, ExtraArgs: []string{bin}}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	ck.Require().NoError(h.Start(), "Start")
 	// The script exits long before any relay attaches: everything it emitted
 	// (and its exit) is queued in the host's channel, done is closed.
 	select {
@@ -150,9 +131,7 @@ func TestRelayDeliversQueuedEventsWhenTheHostIsDone(t *testing.T) {
 	// holder opens the same way, with a nil payload): without it the server
 	// handler never starts and Receive blocks on a request that was never
 	// made.
-	if err := stream.Send(&darajapb.RelayRequest{}); err != nil {
-		t.Fatalf("open stream: %v", err)
-	}
+	ck.Require().NoError(stream.Send(&darajapb.RelayRequest{}), "open stream")
 
 	deadline := time.After(10 * time.Second)
 	var sawStdout, sawExited bool
@@ -163,17 +142,13 @@ func TestRelayDeliversQueuedEventsWhenTheHostIsDone(t *testing.T) {
 		default:
 		}
 		resp, err := stream.Receive()
-		if err != nil {
-			t.Fatalf("stream ended before delivering the queue: stdout=%v exited=%v (%v)", sawStdout, sawExited, err)
-		}
+		ck.Require().NoError(err, "stream ended before delivering the queue: stdout=%v exited=%v (%v)", sawStdout, sawExited, err)
 		switch {
 		case strings.Contains(string(resp.GetStdout()), "final-line"):
 			sawStdout = true
 		case resp.GetExited() != nil:
 			sawExited = true
-			if resp.GetExited().GetExitCode() != 0 {
-				t.Errorf("exited code = %d, want 0", resp.GetExited().GetExitCode())
-			}
+			ck.Eq(0, resp.GetExited().GetExitCode(), "exited code")
 		}
 	}
 }
@@ -183,11 +158,10 @@ func TestRelayDeliversQueuedEventsWhenTheHostIsDone(t *testing.T) {
 // matters structurally — "reuse the spec I hold" would otherwise re-run the
 // executor-resolved script whose outcome the consumer is settling.
 func TestRestartRefusesAScriptHost(t *testing.T) {
+	c := assert.NewAborting(t)
 	bin := testChildBinary(t, `sleep 30`)
 	h := NewHost(HostOptions{Binary: bin, Spec: ChildSpec{Kind: KindScript, ExtraArgs: []string{bin}}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.NoError(h.Start(), "Start")
 	t.Cleanup(func() { _, _, _ = h.Shutdown(time.Second) })
 	srv := NewServer(h)
 
@@ -201,13 +175,9 @@ func TestRestartRefusesAScriptHost(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := srv.Restart(context.Background(), connect.NewRequest(&darajapb.RestartRequest{Spec: tc.spec}))
-			if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-				t.Fatalf("Restart err = %v, want FailedPrecondition", err)
-			}
+			assert.NewAborting(t).Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "Restart err = %v, want FailedPrecondition", err)
 		})
 	}
 	// The hosted script was never signalled: it is still running.
-	if !h.Running() {
-		t.Fatal("the refused restart took the hosted script down")
-	}
+	c.True(h.Running(), "the refused restart took the hosted script down")
 }

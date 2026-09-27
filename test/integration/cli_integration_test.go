@@ -15,6 +15,8 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // cliStateDir is a scratch XDG_STATE_HOME shared by every CLI invocation in
@@ -45,17 +47,12 @@ var (
 // — see pkg/profile and cmd/rafiki's newConnectEndpoint).
 func writeCliProfile(t *testing.T, configDir, socketPath string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := filepath.Join(configDir, "rafiki")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
+	c.NoError(os.MkdirAll(dir, 0o700), "mkdir %s", dir)
 	manifest := fmt.Sprintf("[profile.it]\nsocket = %q\n", socketPath)
-	if err := os.WriteFile(filepath.Join(dir, "profiles.toml"), []byte(manifest), 0o600); err != nil {
-		t.Fatalf("write profiles.toml: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "current-profile"), []byte("it\n"), 0o600); err != nil {
-		t.Fatalf("write current-profile: %v", err)
-	}
+	c.NoError(os.WriteFile(filepath.Join(dir, "profiles.toml"), []byte(manifest), 0o600), "write profiles.toml")
+	c.NoError(os.WriteFile(filepath.Join(dir, "current-profile"), []byte("it\n"), 0o600), "write current-profile")
 }
 
 // cliCmd builds a rafiki invocation against d's daemon (nil for a --help-only
@@ -112,16 +109,13 @@ func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.C
 // a "version" field.
 func TestCLI_Status(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	cmd := cliCmd(t, d, "--output", "json", "status")
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("status failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(string(out), `"version"`) {
-		t.Fatalf("status output missing version field: %s", out)
-	}
+	c.NoError(err, "status failed: %v\noutput: %s", err, out)
+	c.StrContains(string(out), `"version"`, "status output missing version field: %s", out)
 }
 
 // TestCLI_CreateListKillForget exercises the core child lifecycle via the CLI:
@@ -130,6 +124,7 @@ func TestCLI_Status(t *testing.T) {
 // composition moved to `close` — so the two steps are asserted separately.
 func TestCLI_CreateListKillForget(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	// create --detached
@@ -146,9 +141,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	)
 	createCmd.Stderr = &createStderr
 	out, err := createCmd.Output() // stdout only
-	if err != nil {
-		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
-	}
+	c.NoError(err, "create --detached failed: %v\nstderr: %s", err, createStderr.String())
 
 	var spawnResp struct {
 		ChildID string `json:"childId"`
@@ -157,26 +150,18 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 		t.Fatalf("decode create response: %v\n%s", err, out)
 	}
 	childID := spawnResp.ChildID
-	if childID == "" {
-		t.Fatalf("create --detached returned empty childId; output: %s", out)
-	}
+	c.NotEq("", childID, "create --detached returned empty childId; output: %s", out)
 
 	// list — child should be present
 	listCmd := cliCmd(t, d, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), childID) {
-		t.Fatalf("list missing childId %s: %s", childID, out)
-	}
+	c.NoError(err, "list failed: %v\n%s", err, out)
+	c.StrContains(string(out), childID, "list missing childId %s: %s", childID, out)
 
 	// stop
 	stopCmd := cliCmd(t, d, "stop", "smoke")
 	out, err = stopCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("stop failed: %v\n%s", err, out)
-	}
+	c.NoError(err, "stop failed: %v\n%s", err, out)
 
 	// poll until status=exited (up to 5 seconds). `get` renders indented
 	// protojson, so the needle carries the space after the colon.
@@ -194,21 +179,15 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	// These gets ask for JSON explicitly, which renders indented — hence the space.
 	getCmd := cliCmd(t, d, "--output", "json", "get", "smoke")
 	out, err = getCmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
-		t.Fatalf("expected smoke to still be listed as exited after stop; get output: %s (err=%v)", out, err)
-	}
+	c.False(err != nil || !strings.Contains(string(out), `"status": "exited"`), "expected smoke to still be listed as exited after stop; get output: %s (err=%v)", out, err)
 
 	// close finalizes it.
 	closeCmd := cliCmd(t, d, "close", "smoke")
 	out, err = closeCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("close failed: %v\n%s", err, out)
-	}
+	c.NoError(err, "close failed: %v\n%s", err, out)
 	getCmd = cliCmd(t, d, "get", "smoke")
 	out, _ = getCmd.CombinedOutput()
-	if !strings.Contains(string(out), "no child matches") {
-		t.Fatalf("expected child to be gone after close; get output: %s", out)
-	}
+	c.StrContains(string(out), "no child matches", "expected child to be gone after close; get output: %s", out)
 
 	// close on a LIVE child: stop-first-then-close in one verb. Whatever state
 	// the child is in by the time close's stop lands (spawning or streaming),
@@ -232,9 +211,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 	}
 	getLive := cliCmd(t, d, "get", "smoke-live")
 	out, _ = getLive.CombinedOutput()
-	if !strings.Contains(string(out), "no child matches") {
-		t.Fatalf("expected live child to be gone after close; get output: %s", out)
-	}
+	c.StrContains(string(out), "no child matches", "expected live child to be gone after close; get output: %s", out)
 }
 
 // MANUAL SMOKE PROCEDURE (not run in CI):
@@ -274,6 +251,7 @@ func TestCLI_CreateListKillForget(t *testing.T) {
 // `rafiki list`. Cleans up via stop + close (stop no longer auto-closes).
 func TestCLI_CreateDetached(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	// create --detached: should spawn the child and print JSON without attaching.
@@ -295,9 +273,7 @@ func TestCLI_CreateDetached(t *testing.T) {
 	var createStderr bytes.Buffer
 	createCmd.Stderr = &createStderr
 	out, err := createCmd.Output() // stdout only
-	if err != nil {
-		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
-	}
+	c.NoError(err, "create --detached failed: %v\nstderr: %s", err, createStderr.String())
 
 	var createResp struct {
 		ChildID string `json:"childId"`
@@ -306,26 +282,18 @@ func TestCLI_CreateDetached(t *testing.T) {
 		t.Fatalf("decode create response: %v\noutput: %s", err, out)
 	}
 	childID := createResp.ChildID
-	if childID == "" {
-		t.Fatalf("create --detached returned empty childId; output: %s", out)
-	}
+	c.NotEq("", childID, "create --detached returned empty childId; output: %s", out)
 
 	// list — child should appear.
 	listCmd := cliCmd(t, d, "--output", "json", "list")
 	out, err = listCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("list failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), childID) {
-		t.Fatalf("list missing childId %s: %s", childID, out)
-	}
+	c.NoError(err, "list failed: %v\n%s", err, out)
+	c.StrContains(string(out), childID, "list missing childId %s: %s", childID, out)
 
 	// stop
 	stopCmd := cliCmd(t, d, "stop", "test-detached")
 	out, err = stopCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("stop failed: %v\n%s", err, out)
-	}
+	c.NoError(err, "stop failed: %v\n%s", err, out)
 
 	// poll until status=exited (up to 5 seconds).
 	deadline := time.Now().Add(5 * time.Second)
@@ -342,62 +310,49 @@ func TestCLI_CreateDetached(t *testing.T) {
 	// These gets ask for JSON explicitly, which renders indented — hence the space.
 	getCmd := cliCmd(t, d, "--output", "json", "get", "test-detached")
 	out, err = getCmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), `"status": "exited"`) {
-		t.Fatalf("expected test-detached to still be listed as exited after stop; get output: %s (err=%v)", out, err)
-	}
+	c.False(err != nil || !strings.Contains(string(out), `"status": "exited"`), "expected test-detached to still be listed as exited after stop; get output: %s (err=%v)", out, err)
 
 	// close finalizes it.
 	closeCmd := cliCmd(t, d, "close", "test-detached")
 	out, err = closeCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("close failed: %v\n%s", err, out)
-	}
+	c.NoError(err, "close failed: %v\n%s", err, out)
 	getCmd = cliCmd(t, d, "get", "test-detached")
 	out, _ = getCmd.CombinedOutput()
-	if !strings.Contains(string(out), "no child matches") {
-		t.Fatalf("expected child to be gone after close; get output: %s", out)
-	}
+	c.StrContains(string(out), "no child matches", "expected child to be gone after close; get output: %s", out)
 }
 
 // TestCLI_AttachHelp verifies that `rafiki attach --help` exits cleanly and
 // documents the --kill-on-exit flag.
 func TestCLI_AttachHelp(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	cmd := cliCmd(t, nil, "attach", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
-	if err != nil {
-		t.Fatalf("attach --help failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(string(out), "--kill-on-exit") {
-		t.Fatalf("attach --help missing --kill-on-exit flag; output: %s", out)
-	}
+	c.NoError(err, "attach --help failed: %v\noutput: %s", err, out)
+	c.StrContains(string(out), "--kill-on-exit", "attach --help missing --kill-on-exit flag; output: %s", out)
 }
 
 // TestCLI_CreateHelp verifies that `rafiki create --help` exits cleanly and
 // documents both --detached and --kill-on-exit flags.
 func TestCLI_CreateHelp(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	cmd := cliCmd(t, nil, "create", "--help")
 	out, err := cmd.CombinedOutput()
 	// cobra exits 0 for --help.
-	if err != nil {
-		t.Fatalf("create --help failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(string(out), "--detached") {
-		t.Fatalf("create --help missing --detached flag; output: %s", out)
-	}
-	if !strings.Contains(string(out), "--kill-on-exit") {
-		t.Fatalf("create --help missing --kill-on-exit flag; output: %s", out)
-	}
+	c.NoError(err, "create --help failed: %v\noutput: %s", err, out)
+	c.StrContains(string(out), "--detached", "create --help missing --detached flag; output: %s", out)
+	c.StrContains(string(out), "--kill-on-exit", "create --help missing --kill-on-exit flag; output: %s", out)
 }
 
 // TestCLI_ResolveByPrefix verifies that a child can be addressed by a prefix
 // of its name (e.g. "afk" resolves "afk-impl").
 func TestCLI_ResolveByPrefix(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	var createStderr bytes.Buffer
@@ -419,12 +374,8 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 	// resolve by prefix "afk"
 	getCmd := cliCmd(t, d, "--output", "json", "get", "afk")
 	out, err := getCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("get with prefix failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "afk-impl") {
-		t.Fatalf("expected afk-impl in get output: %s", out)
-	}
+	c.NoError(err, "get with prefix failed: %v\n%s", err, out)
+	c.StrContains(string(out), "afk-impl", "expected afk-impl in get output: %s", out)
 
 	// cleanup: kill before test exits to avoid leftover processes
 	killCmd := cliCmd(t, d, "kill", "afk-impl")
@@ -437,6 +388,7 @@ func TestCLI_ResolveByPrefix(t *testing.T) {
 // accepted, intentional value on the operator path).
 func TestCLI_BudgetSet(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	// create --detached — no LLM call, just a child row to budget against.
@@ -453,9 +405,7 @@ func TestCLI_BudgetSet(t *testing.T) {
 	)
 	createCmd.Stderr = &createStderr
 	out, err := createCmd.Output() // stdout only
-	if err != nil {
-		t.Fatalf("create --detached failed: %v\nstderr: %s", err, createStderr.String())
-	}
+	c.NoError(err, "create --detached failed: %v\nstderr: %s", err, createStderr.String())
 
 	var createResp struct {
 		ChildID string `json:"childId"`
@@ -464,50 +414,34 @@ func TestCLI_BudgetSet(t *testing.T) {
 		t.Fatalf("decode create response: %v\noutput: %s", err, out)
 	}
 	childID := createResp.ChildID
-	if childID == "" {
-		t.Fatalf("create --detached returned empty childId; output: %s", out)
-	}
+	c.NotEq("", childID, "create --detached returned empty childId; output: %s", out)
 
 	// budget set 5.00
 	var setStderr bytes.Buffer
 	setCmd := cliCmd(t, d, "budget", "set", childID, "5.00")
 	setCmd.Stderr = &setStderr
 	setOut, err := setCmd.Output()
-	if err != nil {
-		t.Fatalf("budget set: %v (stderr: %s)", err, setStderr.String())
-	}
-	if !strings.Contains(string(setOut), "5.00") {
-		t.Fatalf("budget set output %q does not mention the new amount", setOut)
-	}
+	c.NoError(err, "budget set: %v (stderr: %s)", err, setStderr.String())
+	c.StrContains(string(setOut), "5.00", "budget set output %q does not mention the new amount", setOut)
 
 	// read the cap back through get — asked for JSON explicitly, which renders
 	// indented.
 	getCmd := cliCmd(t, d, "--output", "json", "get", childID)
 	getOut, err := getCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("get: %v\n%s", err, getOut)
-	}
+	c.NoError(err, "get: %v\n%s", err, getOut)
 	var got struct {
 		MaxCost *float64 `json:"maxCost"`
 	}
-	if err := json.Unmarshal(getOut, &got); err != nil {
-		t.Fatalf("decode get output %q: %v", getOut, err)
-	}
-	if got.MaxCost == nil || *got.MaxCost != 5.00 {
-		t.Fatalf("get after budget set: max_cost = %v, want 5.00", got.MaxCost)
-	}
+	c.NoError(json.Unmarshal(getOut, &got), "decode get output %q", getOut)
+	c.False(got.MaxCost == nil || *got.MaxCost != 5.00, "get after budget set: max_cost = %v, want 5.00", got.MaxCost)
 
 	// budget set --unlimited clears the cap.
 	var unlimitedStderr bytes.Buffer
 	unlimitedCmd := cliCmd(t, d, "budget", "set", childID, "--unlimited")
 	unlimitedCmd.Stderr = &unlimitedStderr
 	unlimitedOut, err := unlimitedCmd.Output()
-	if err != nil {
-		t.Fatalf("budget set --unlimited: %v (stderr: %s)", err, unlimitedStderr.String())
-	}
-	if !strings.Contains(string(unlimitedOut), "unlimited") {
-		t.Fatalf("budget set --unlimited output %q does not confirm the clear", unlimitedOut)
-	}
+	c.NoError(err, "budget set --unlimited: %v (stderr: %s)", err, unlimitedStderr.String())
+	c.StrContains(string(unlimitedOut), "unlimited", "budget set --unlimited output %q does not confirm the clear", unlimitedOut)
 
 	// cleanup: kill to avoid leftover processes
 	killCmd := cliCmd(t, d, "kill", "budget-smoke")
@@ -548,6 +482,7 @@ func splitJSONLines(t *testing.T, out []byte) []string {
 // it: auto on a pipe must never be assumed machine-readable again.
 func TestCLI_JSONLAndTextModes(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	// Two detached children, both carrying jsonlTestLabel. `--output json` is
@@ -568,18 +503,14 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 		)
 		cmd.Stderr = &stderr
 		out, err := cmd.Output() // stdout only
-		if err != nil {
-			t.Fatalf("create %s failed: %v\nstderr: %s", name, err, stderr.String())
-		}
+		c.NoError(err, "create %s failed: %v\nstderr: %s", name, err, stderr.String())
 		var resp struct {
 			ChildID string `json:"childId"`
 		}
 		if err := json.Unmarshal(out, &resp); err != nil {
 			t.Fatalf("decode create response for %s: %v\noutput: %s", name, err, out)
 		}
-		if resp.ChildID == "" {
-			t.Fatalf("create %s returned empty childId; output: %s", name, out)
-		}
+		c.NotEq("", resp.ChildID, "create %s returned empty childId; output: %s", name, out)
 	}
 	t.Cleanup(func() {
 		for _, name := range names {
@@ -593,45 +524,30 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	// strings), decoded here with protojson — encoding/json would refuse
 	// string-rendered int64s.
 	jsonOut, err := cliCmd(t, d, "--output", "json", "list", "--label", jsonlTestLabel).Output()
-	if err != nil {
-		t.Fatalf("list -o json failed: %v", err)
-	}
+	c.NoError(err, "list -o json failed")
 	var envelope rafikiv1.ListChildrenResponse
 	if err := protojson.Unmarshal(jsonOut, &envelope); err != nil {
 		t.Fatalf("decode list -o json envelope: %v\noutput: %s", err, jsonOut)
 	}
-	if len(envelope.GetChildren()) == 0 {
-		t.Fatalf("list -o json returned no children for label %s", jsonlTestLabel)
-	}
+	c.NotEmpty(envelope.GetChildren(), "list -o json returned no children for label %s", jsonlTestLabel)
 
 	jsonlOut, err := cliCmd(t, d, "-J", "list", "--label", jsonlTestLabel).Output()
-	if err != nil {
-		t.Fatalf("list -J failed: %v", err)
-	}
+	c.NoError(err, "list -J failed")
 	lines := splitJSONLines(t, jsonlOut)
-	if len(lines) != len(envelope.GetChildren()) {
-		t.Fatalf("list -J emitted %d lines for %d children in -o json's envelope; JSONL must carry every row",
-			len(lines), len(envelope.GetChildren()))
-	}
+	c.Len(lines, len(envelope.GetChildren()), "list -J emitted %d lines for %d children in -o json's envelope; JSONL must carry every row", len(lines), len(envelope.GetChildren()))
 	for i, line := range lines {
 		var ch rafikiv1.ChildSummary
 		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
 			t.Fatalf("list -J line %d is not a bare ChildSummary protojson object (JSONL must unwrap the envelope): %v\nline: %s", i, err, line)
 		}
-		if ch.GetChildId() == "" {
-			t.Fatalf("list -J line %d has an empty childId: %s", i, line)
-		}
+		c.NotEq("", ch.GetChildId(), "list -J line %d has an empty childId: %s", i, line)
 	}
 
 	// ── models: -J emits one ModelRow per line, none wrapped ─────────────
 	modelsOut, err := cliCmd(t, d, "-J", "models").Output()
-	if err != nil {
-		t.Fatalf("models -J failed: %v", err)
-	}
+	c.NoError(err, "models -J failed")
 	modelLines := splitJSONLines(t, modelsOut)
-	if len(modelLines) == 0 {
-		t.Fatalf("models -J emitted no rows; the builtin source must always serve at least one model")
-	}
+	c.NotEmpty(modelLines, "models -J emitted no rows; the builtin source must always serve at least one model")
 	for i, line := range modelLines {
 		var row struct {
 			ID string `json:"id"`
@@ -639,28 +555,20 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &row); err != nil {
 			t.Fatalf("models -J line %d is not a ModelRow object: %v\nline: %s", i, err, line)
 		}
-		if row.ID == "" {
-			t.Fatalf("models -J line %d has an empty id: %s", i, line)
-		}
+		c.NotEq("", row.ID, "models -J line %d has an empty id: %s", i, line)
 	}
 
 	// ── get: -J with two targets emits two lines ─────────────────────────
 	getOut, err := cliCmd(t, d, "-J", "get", names[0], names[1]).Output()
-	if err != nil {
-		t.Fatalf("get -J with two targets failed: %v", err)
-	}
+	c.NoError(err, "get -J with two targets failed")
 	getLines := splitJSONLines(t, getOut)
-	if len(getLines) != 2 {
-		t.Fatalf("get -J with two targets emitted %d lines, want 2\noutput: %s", len(getLines), getOut)
-	}
+	c.Len(getLines, 2, "get -J with two targets emitted %d lines, want 2\noutput: %s", len(getLines), getOut)
 	for i, line := range getLines {
 		var ch rafikiv1.ChildSummary
 		if err := protojson.Unmarshal([]byte(line), &ch); err != nil {
 			t.Fatalf("get -J line %d is not a bare ChildSummary protojson object: %v\nline: %s", i, err, line)
 		}
-		if ch.GetChildId() == "" {
-			t.Fatalf("get -J line %d has an empty childId: %s", i, line)
-		}
+		c.NotEq("", ch.GetChildId(), "get -J line %d has an empty childId: %s", i, line)
 	}
 
 	// ── get: a failing target never reaches stdout ───────────────────────
@@ -672,30 +580,20 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	badCmd := cliCmd(t, d, "-J", "get", names[0], "no-such-child-xyz")
 	badCmd.Stdout = &badOut
 	badCmd.Stderr = &badErrBuf
-	if err := badCmd.Run(); err == nil {
-		t.Fatalf("get with a failing target must exit nonzero; stdout: %s", badOut.String())
-	}
+	c.Error(badCmd.Run(), "get with a failing target must exit nonzero; stdout: %s", badOut.String())
 	if badOut.Len() == 0 || !strings.Contains(badOut.String(), names[0]) {
 		t.Fatalf("get -J should still emit the good sibling's row on stdout; got: %q", badOut.String())
 	}
-	if strings.Contains(badOut.String(), "no-such-child-xyz") {
-		t.Fatalf("failing target leaked onto stdout: %s", badOut.String())
-	}
-	if !strings.Contains(badErrBuf.String(), "no-such-child-xyz") {
-		t.Fatalf("failing target's diagnostic missing from stderr: %s", badErrBuf.String())
-	}
+	c.NotStrContains(badOut.String(), "no-such-child-xyz", "failing target leaked onto stdout")
+	c.StrContains(badErrBuf.String(), "no-such-child-xyz", "failing target's diagnostic missing from stderr")
 
 	// ── tasks with NO flags: the default flip, end to end ─────────────────
 	// auto on a pipe used to mean JSON; it now means table. A consumer that
 	// pipes `rafiki tasks` and unmarshals must fail — and read a table border.
 	tasksOut, err := cliCmd(t, d, "tasks").Output()
-	if err != nil {
-		t.Fatalf("tasks failed: %v", err)
-	}
+	c.NoError(err, "tasks failed")
 	var probe any
-	if err := json.Unmarshal(tasksOut, &probe); err == nil {
-		t.Fatalf("rafiki tasks with no flags must NOT parse as JSON after the default flip; output: %s", tasksOut)
-	}
+	c.Error(json.Unmarshal(tasksOut, &probe), "rafiki tasks with no flags must NOT parse as JSON after the default flip; output: %s", tasksOut)
 	firstLine := string(tasksOut)
 	if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
 		firstLine = firstLine[:i]
@@ -708,12 +606,8 @@ func TestCLI_JSONLAndTextModes(t *testing.T) {
 	var bothErrBuf bytes.Buffer
 	bothCmd := cliCmd(t, d, "-j", "-J", "list")
 	bothCmd.Stderr = &bothErrBuf
-	if err := bothCmd.Run(); err == nil {
-		t.Fatalf("combining -j and -J must fail; output: %s", bothErrBuf.String())
-	}
-	if !strings.Contains(bothErrBuf.String(), "cannot combine -j and -J") {
-		t.Fatalf("-j -J error text changed; got: %s", bothErrBuf.String())
-	}
+	c.Error(bothCmd.Run(), "combining -j and -J must fail; output: %s", bothErrBuf.String())
+	c.StrContains(bothErrBuf.String(), "cannot combine -j and -J", "-j -J error text changed; got")
 }
 
 // operatorName mints a unique username per run: the suite shares one
@@ -738,6 +632,7 @@ func operatorName() string {
 // also keeps this run's preset owner-scoped to a user no other run shares.
 func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d := bootDaemon(t)
 
 	// One config dir for the whole flow: the token `user create` writes must
@@ -757,9 +652,7 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	var userStderr bytes.Buffer
 	userCmd.Stderr = &userStderr
 	userOut, err := userCmd.Output()
-	if err != nil {
-		t.Fatalf("user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
-	}
+	c.NoError(err, "user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
 	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
 	if b, err := os.ReadFile(tokenPath); err != nil || len(bytes.TrimSpace(b)) == 0 {
 		t.Fatalf("user create did not leave a token at %s: %v", tokenPath, err)
@@ -769,16 +662,10 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	// control socket, so the preset is owned by the user minted in step 1.
 	presetFile := filepath.Join(t.TempDir(), "review-fixer.json")
 	presetJSON := `{"description":"uds-auth regression fixture","kind":"fundi","model":"anthropic/claude-sonnet-4-5"}`
-	if err := os.WriteFile(presetFile, []byte(presetJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(presetFile, []byte(presetJSON), 0o600))
 	putOut, err := cliCmdIn(t, d, configDir, "preset", "put", "review:fixer", "-f", presetFile).CombinedOutput()
-	if err != nil {
-		t.Fatalf("preset put failed: %v\noutput: %s", err, putOut)
-	}
-	if !strings.Contains(string(putOut), "saved review:fixer") {
-		t.Fatalf("preset put output missing confirmation: %s", putOut)
-	}
+	c.NoError(err, "preset put failed: %v\noutput: %s", err, putOut)
+	c.StrContains(string(putOut), "saved review:fixer", "preset put output missing confirmation: %s", putOut)
 
 	// 3. Create with that preset and NO --model flag on purpose: the preset
 	// supplies the model, so a preset that did not apply would fail the
@@ -796,18 +683,14 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	)
 	createCmd.Stderr = &createStderr
 	createOut, err := createCmd.Output()
-	if err != nil {
-		t.Fatalf("create --preset failed: %v\nstderr: %s", err, createStderr.String())
-	}
+	c.NoError(err, "create --preset failed: %v\nstderr: %s", err, createStderr.String())
 	var spawnResp struct {
 		ChildID string `json:"childId"`
 	}
 	if err := json.Unmarshal(createOut, &spawnResp); err != nil {
 		t.Fatalf("decode create response: %v\n%s", err, createOut)
 	}
-	if spawnResp.ChildID == "" {
-		t.Fatalf("create --preset returned empty childId; output: %s", createOut)
-	}
+	c.NotEq("", spawnResp.ChildID, "create --preset returned empty childId; output: %s", createOut)
 	t.Cleanup(func() {
 		cmd := cliCmdIn(t, d, configDir, "kill", "preset-bug")
 		_, _ = cmd.CombinedOutput()
@@ -816,14 +699,8 @@ func TestCLI_PresetPutThenCreateOnTheSameProfile(t *testing.T) {
 	// 4. The round trip's payoff: the child runs the preset's model — the
 	// preset resolved in the daemon and the model comes back on `get`.
 	getOut, err := cliCmdIn(t, d, configDir, "--output", "json", "get", spawnResp.ChildID).CombinedOutput()
-	if err != nil {
-		t.Fatalf("get after preset create: %v\n%s", err, getOut)
-	}
+	c.NoError(err, "get after preset create: %v\n%s", err, getOut)
 	var child rafikiv1.ChildSummary
-	if err := protojson.Unmarshal(getOut, &child); err != nil {
-		t.Fatalf("decode get output %q: %v", getOut, err)
-	}
-	if child.GetModel() != "anthropic/claude-sonnet-4-5" {
-		t.Fatalf("child created with --preset has model %q, want the preset's anthropic/claude-sonnet-4-5", child.GetModel())
-	}
+	c.NoError(protojson.Unmarshal(getOut, &child), "decode get output %q", getOut)
+	c.Eq("anthropic/claude-sonnet-4-5", child.GetModel(), "child created with --preset has model")
 }

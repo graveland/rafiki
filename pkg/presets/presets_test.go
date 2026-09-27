@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestPresetValidName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tests := []struct {
 		name  string
 		valid bool
@@ -24,29 +27,21 @@ func TestPresetValidName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		err := ValidName(tt.name)
-		if tt.valid && err != nil {
-			t.Errorf("ValidName(%q) = %v, want nil", tt.name, err)
-		}
-		if !tt.valid && err == nil {
-			t.Errorf("ValidName(%q) = nil, want an error", tt.name)
-		}
+		c.False(tt.valid && err != nil, "ValidName(%q) = %v, want nil", tt.name, err)
+		c.False(!tt.valid && err == nil, "ValidName(%q) = nil, want an error", tt.name)
 	}
 	// 64 chars is the inclusive upper bound the 65-char case implies.
-	if err := ValidName(strings.Repeat("a", 64)); err != nil {
-		t.Errorf("ValidName(64 chars) = %v, want nil", err)
-	}
+	c.NoError(ValidName(strings.Repeat("a", 64)), "ValidName(64 chars)")
 }
 
 func TestPresetGroup(t *testing.T) {
-	if got := Group("local:reviewer"); got != "local:" {
-		t.Errorf("Group(local:reviewer) = %q, want %q", got, "local:")
-	}
-	if got := Group("plain"); got != "" {
-		t.Errorf("Group(plain) = %q, want %q", got, "")
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("local:", Group("local:reviewer"), "Group(local:reviewer)")
+	c.Eq("", Group("plain"), "Group(plain)")
 }
 
 func TestPresetValidate(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fundi := func() Record {
 		return Record{Name: "ok", Kind: KindFundi}
 	}
@@ -94,19 +89,14 @@ func TestPresetValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.subtest, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			err := Validate(tt.r)
 			if tt.field == "" {
-				if err != nil {
-					t.Fatalf("Validate(%+v) = %v, want nil", tt.r, err)
-				}
+				c.NoError(err, "Validate(%+v) = %v, want nil", tt.r, err)
 				return
 			}
-			if err == nil {
-				t.Fatalf("Validate(%+v) = nil, want an error mentioning %q", tt.r, tt.field)
-			}
-			if !strings.Contains(err.Error(), tt.field) {
-				t.Fatalf("Validate(%+v) = %v, want the error to mention %q", tt.r, err, tt.field)
-			}
+			c.Error(err, "Validate(%+v) = nil, want an error mentioning %q", tt.r, tt.field)
+			c.StrContains(err.Error(), tt.field, "Validate(%+v) = %v, want the error to mention", tt.r, err)
 		})
 	}
 
@@ -132,9 +122,7 @@ func TestPresetValidate(t *testing.T) {
 	} {
 		t.Run(bad.subtest, func(t *testing.T) {
 			err := Validate(bad.r)
-			if err == nil || !strings.Contains(err.Error(), bad.field) {
-				t.Fatalf("Validate(%+v) = %v, want an error mentioning %q", bad.r, err, bad.field)
-			}
+			assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), bad.field), "Validate(%+v) = %v, want an error mentioning %q", bad.r, err, bad.field)
 		})
 	}
 	// A clean script preset — executor/labels/budgets only — validates.
@@ -143,18 +131,14 @@ func TestPresetValidate(t *testing.T) {
 	okScript.MaxCost = floatPtr(0)
 	okScript.MaxDepth = intPtr(1)
 	okScript.AppendSystemPrompt = "extra"
-	if err := Validate(okScript); err != nil {
-		t.Errorf("Validate(clean script preset) = %v, want nil", err)
-	}
+	c.NoError(Validate(okScript), "Validate(clean script preset)")
 
 	// A claude preset may carry the knobs claude actually honours.
 	ok := claude()
 	ok.Model = "claude-x"
 	ok.AppendSystemPrompt = "extra"
 	ok.MaxCost = floatPtr(0)
-	if err := Validate(ok); err != nil {
-		t.Errorf("Validate(claude with model/append_system_prompt/max_cost=0) = %v, want nil", err)
-	}
+	c.NoError(Validate(ok), "Validate(claude with model/append_system_prompt/max_cost=0)")
 
 	// The five thinking levels Validate accepts are exactly the runtime's
 	// (pkg/fundi's thinkingBudgets); a label key may use the full allowed
@@ -162,15 +146,12 @@ func TestPresetValidate(t *testing.T) {
 	for _, level := range []string{"off", "low", "medium", "high", "xhigh"} {
 		r := fundi()
 		r.Thinking = level
-		if err := Validate(r); err != nil {
-			t.Errorf("Validate(thinking=%q) = %v, want nil", level, err)
-		}
+		err := Validate(r)
+		c.NoError(err, "Validate(thinking=%q) = %v, want nil", level, err)
 	}
 	good := fundi()
 	good.Labels = map[string]string{"env.prod/x_1-y": "v"}
-	if err := Validate(good); err != nil {
-		t.Errorf("Validate(labels with full allowed charset) = %v, want nil", err)
-	}
+	c.NoError(Validate(good), "Validate(labels with full allowed charset)")
 }
 
 func TestPresetSpecRoundTrip(t *testing.T) {
@@ -186,41 +167,27 @@ func TestPresetSpecRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.subtest, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			spec, err := ParseSpec([]byte(tt.json))
-			if err != nil {
-				t.Fatalf("ParseSpec(%s): %v", tt.json, err)
-			}
+			c.NoError(err, "ParseSpec(%s)", tt.json)
 			r := spec.Record()
-			if tt.wantNil && r.Tools != nil {
-				t.Fatalf("Tools = %#v, want nil (the kind default)", r.Tools)
-			}
+			c.False(tt.wantNil && r.Tools != nil, "Tools = %#v, want nil (the kind default)", r.Tools)
 			if !tt.wantNil {
-				if r.Tools == nil {
-					t.Fatal("Tools = nil, want non-nil")
-				}
-				if len(r.Tools) != 0 {
-					t.Fatalf("Tools = %#v, want non-nil and empty", r.Tools)
-				}
+				c.NotNil(r.Tools, "Tools = nil, want non-nil")
+				c.Empty(r.Tools, "Tools")
 			}
 			out, err := json.Marshal(SpecOf(r))
-			if err != nil {
-				t.Fatalf("marshal SpecOf: %v", err)
-			}
+			c.NoError(err, "marshal SpecOf")
 			if tt.wantJSON == "" {
-				if strings.Contains(string(out), `"tools"`) {
-					t.Fatalf("SpecOf re-marshal = %s, want no tools key at all", out)
-				}
+				c.NotStrContains(string(out), `"tools"`, "SpecOf re-marshal = %s, want no tools key at all", out)
 				return
 			}
-			if !strings.Contains(string(out), tt.wantJSON) {
-				t.Fatalf("SpecOf re-marshal = %s, want it to contain %s", out, tt.wantJSON)
-			}
+			c.StrContains(string(out), tt.wantJSON, "SpecOf re-marshal = %s, want it to contain", out)
 		})
 	}
 }
 
 func TestPresetParseSpecRejectsUnknownField(t *testing.T) {
-	if _, err := ParseSpec([]byte(`{"name":"a","tool":["x"]}`)); err == nil {
-		t.Fatal("ParseSpec with unknown field \"tool\" = nil error, want DisallowUnknownFields rejection")
-	}
+	_, err := ParseSpec([]byte(`{"name":"a","tool":["x"]}`))
+	assert.NewAborting(t).Error(err, "ParseSpec with unknown field \"tool\" = nil error, want DisallowUnknownFields rejection")
 }

@@ -2,28 +2,23 @@
 
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestActiveMarkerIsScopedToTheProfile(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 
-	if err := setActive("work", "child-w"); err != nil {
-		t.Fatalf("setActive(work): %v", err)
-	}
-	if err := setActive("personal", "child-p"); err != nil {
-		t.Fatalf("setActive(personal): %v", err)
-	}
-	if got := getActive("work"); got != "child-w" {
-		t.Fatalf("work active = %q, want child-w", got)
-	}
-	if got := getActive("personal"); got != "child-p" {
-		t.Fatalf("personal active = %q, want child-p", got)
-	}
+	c.NoError(setActive("work", "child-w"), "setActive(work)")
+	c.NoError(setActive("personal", "child-p"), "setActive(personal)")
+	c.Eq("child-w", getActive("work"), "work active")
+	c.Eq("child-p", getActive("personal"), "personal active")
 }
 
 func TestActiveMarkerIsEmptyForAProfileThatHasNone(t *testing.T) {
 	isolateProfiles(t)
-	if got := getActive("fresh"); got != "" {
-		t.Fatalf("getActive(fresh) = %q, want empty", got)
-	}
+	assert.NewAborting(t).Eq("", getActive("fresh"), "getActive(fresh)")
 }

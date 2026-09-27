@@ -14,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // aliasProviders returns a registry whose prov entry carries one alias with
@@ -47,31 +49,18 @@ func TestChildOpsModelInfoMatchesFramed(t *testing.T) {
 
 	for _, model := range []string{"prov/alias", "prov/unknown", "unconfigured/model", "bare-id"} {
 		t.Run(model, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			want := ctrl.ModelInfo(model) // the framed payload, verbatim
 			resp, err := s.ModelInfo(context.Background(),
 				connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: model}))
-			if err != nil {
-				t.Fatalf("ModelInfo(%q): %v", model, err)
-			}
+			c.Require().NoError(err, "ModelInfo(%q)", model)
 			got := resp.Msg
-			if got.GetModel() != want.Model {
-				t.Errorf("model = %q, want %q", got.GetModel(), want.Model)
-			}
-			if got.GetResolvedId() != want.ResolvedID {
-				t.Errorf("resolved_id = %q, want %q", got.GetResolvedId(), want.ResolvedID)
-			}
-			if got.GetContextWindow() != int32(want.ContextWindow) {
-				t.Errorf("context_window = %d, want %d", got.GetContextWindow(), want.ContextWindow)
-			}
-			if got.GetMaxCompletionTokens() != int32(want.MaxCompletionTokens) {
-				t.Errorf("max_completion_tokens = %d, want %d", got.GetMaxCompletionTokens(), want.MaxCompletionTokens)
-			}
-			if got.GetAutoCompactWindow() != int32(want.AutoCompactWindow) {
-				t.Errorf("auto_compact_window = %d, want %d", got.GetAutoCompactWindow(), want.AutoCompactWindow)
-			}
-			if got.GetKnown() != want.Known {
-				t.Errorf("known = %v, want %v", got.GetKnown(), want.Known)
-			}
+			c.Eq(want.Model, got.GetModel(), "model")
+			c.Eq(want.ResolvedID, got.GetResolvedId(), "resolved_id")
+			c.Eq(int32(want.ContextWindow), got.GetContextWindow(), "context_window = %d, want %d", got.GetContextWindow(), want.ContextWindow)
+			c.Eq(int32(want.MaxCompletionTokens), got.GetMaxCompletionTokens(), "max_completion_tokens = %d, want %d", got.GetMaxCompletionTokens(), want.MaxCompletionTokens)
+			c.Eq(int32(want.AutoCompactWindow), got.GetAutoCompactWindow(), "auto_compact_window = %d, want %d", got.GetAutoCompactWindow(), want.AutoCompactWindow)
+			c.Eq(want.Known, got.GetKnown(), "known")
 		})
 	}
 
@@ -84,22 +73,20 @@ func TestChildOpsModelInfoMatchesFramed(t *testing.T) {
 }
 
 func TestChildOpsModelInfoRoutingAutoCompactMatchesCatalog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	// The formula lives in one binary by design (the alias path computes it
 	// daemon-side); pin that the adapter's answer is exactly
 	// routing.AutoCompactWindow of the declared windows.
 	ctrl := &Controller{providers: aliasProviders()}
 	got, err := (connectChildOps{c: ctrl}).ModelInfo(context.Background(), "prov/alias")
-	if err != nil {
-		t.Fatalf("ModelInfo: %v", err)
-	}
+	ck.Require().NoError(err, "ModelInfo")
 	want := routing.AutoCompactWindow(200000, 32000)
-	if got.AutoCompactWindow != int32(want) {
-		t.Errorf("auto_compact_window = %d, want routing.AutoCompactWindow = %d", got.AutoCompactWindow, want)
-	}
+	ck.Eq(int32(want), got.AutoCompactWindow, "auto_compact_window = %d, want routing.AutoCompactWindow = %d", got.AutoCompactWindow, want)
 }
 
 func TestChildOpsSearchQueryMapping(t *testing.T) {
 	t.Run("fields pass through", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		q := buildSearchQuery(&rafikiv1.SearchRequest{
 			Query: "needle", Regex: true, Limit: 7, Context: 2,
 			SessionFilter: &rafikiv1.SearchRequest_SearchSessionFilter{
@@ -110,50 +97,38 @@ func TestChildOpsSearchQueryMapping(t *testing.T) {
 				HasLabel:     []string{"urgent"},
 			},
 		})
-		if q.Query != "needle" || !q.Regex || q.Limit != 7 || q.Context != 2 {
-			t.Errorf("scalar fields = %+v, want the request's values", q)
-		}
+		c.False(q.Query != "needle" || !q.Regex || q.Limit != 7 || q.Context != 2, "scalar fields = %+v, want the request's values", q)
 		sf := q.SessionFilter
-		if sf.CwdContains != "/work" || sf.NameContains != "fix" || sf.Since != 123456 ||
-			sf.Labels["team"] != "core" || len(sf.HasLabel) != 1 || sf.HasLabel[0] != "urgent" {
-			t.Errorf("session filter = %+v, want every field mapped", sf)
-		}
+		c.False(sf.CwdContains != "/work" || sf.NameContains != "fix" || sf.Since != 123456 ||
+			sf.Labels["team"] != "core" || len(sf.HasLabel) != 1 || sf.HasLabel[0] != "urgent", "session filter = %+v, want every field mapped", sf)
 	})
 	t.Run("absent session filter means every child", func(t *testing.T) {
 		q := buildSearchQuery(&rafikiv1.SearchRequest{Query: "needle"})
-		if q.SessionFilter.CwdContains != "" || q.SessionFilter.NameContains != "" ||
-			q.SessionFilter.Since != 0 || q.SessionFilter.Labels != nil || q.SessionFilter.HasLabel != nil {
-			t.Errorf("session filter = %+v, want the zero value (nil proto filter)", q.SessionFilter)
-		}
+		assert.NewCollecting(t).False(q.SessionFilter.CwdContains != "" || q.SessionFilter.NameContains != "" ||
+			q.SessionFilter.Since != 0 || q.SessionFilter.Labels != nil || q.SessionFilter.HasLabel != nil, "session filter = %+v, want the zero value (nil proto filter)", q.SessionFilter)
 	})
 }
 
 func TestChildOpsSearchResponseMapping(t *testing.T) {
 	t.Run("hits map field by field", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		resp := searchResponseFrom(controlSearchResult())
-		if len(resp.Hits) != 1 {
-			t.Fatalf("hits = %d, want 1", len(resp.Hits))
-		}
+		c.Require().Len(resp.Hits, 1, "hits = %d, want 1", len(resp.Hits))
 		h, want := resp.Hits[0], controlSearchResult().Hits[0]
-		if h.ChildId != want.ChildID || h.SessionFile != want.SessionFile ||
+		c.False(h.ChildId != want.ChildID || h.SessionFile != want.SessionFile ||
 			h.SessionId != want.SessionID || h.SessionName != want.SessionName ||
 			h.EntryId != want.EntryID || h.Timestamp != want.Timestamp ||
 			h.Role != want.Role || h.Snippet != want.Snippet ||
-			h.MatchStart != int32(want.MatchStart) || h.MatchEnd != int32(want.MatchEnd) {
-			t.Errorf("hit = %+v, want %+v", h, want)
-		}
+			h.MatchStart != int32(want.MatchStart) || h.MatchEnd != int32(want.MatchEnd), "hit = %+v, want %+v", h, want)
 		if resp.TotalHits != 1 || resp.Scanned != 4 || resp.Elapsed != 9 {
 			t.Errorf("totals = %d/%d/%d, want 1/4/9", resp.TotalHits, resp.Scanned, resp.Elapsed)
 		}
 	})
 	t.Run("no hits is an empty array, never null", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		resp := searchResponseFrom(protocol.SearchResponseData{})
-		if resp.Hits == nil {
-			t.Error("hits = nil, want an empty repeated field")
-		}
-		if len(resp.Hits) != 0 {
-			t.Errorf("hits = %d entries, want 0", len(resp.Hits))
-		}
+		c.NotNil(resp.Hits, "hits = nil, want an empty repeated field")
+		c.Empty(resp.Hits, "hits = %d entries, want 0", len(resp.Hits))
 	})
 }
 
@@ -188,30 +163,23 @@ func TestChildOpsStatusMapping(t *testing.T) {
 		Socket:      "/tmp/r.sock",
 		LogsDir:     "/tmp/logs",
 	})
-	if resp.Version != "v1" || resp.StartedAt != 1700000000000 ||
+	assert.NewCollecting(t).False(resp.Version != "v1" || resp.StartedAt != 1700000000000 ||
 		resp.Children.GetLive() != 3 || resp.Children.GetExited() != 2 ||
-		resp.MemoryBytes != 1<<20 || resp.Socket != "/tmp/r.sock" || resp.LogsDir != "/tmp/logs" {
-		t.Errorf("status = %+v, want every field mapped", resp)
-	}
+		resp.MemoryBytes != 1<<20 || resp.Socket != "/tmp/r.sock" || resp.LogsDir != "/tmp/logs", "status = %+v, want every field mapped", resp)
 }
 
 func TestChildOpsStatsFilterMapping(t *testing.T) {
 	t.Run("fields pass through", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		f := buildStatsFilter(&rafikiv1.ConversationStatsRequest{
 			SinceUnix: 1700000000, UntilUnix: 1700003600,
 			Owner: "u1", Persona: "impl", Source: "cli", Model: "m", Path: "proxy",
 		})
-		if f.Since == nil || f.Since.Unix() != 1700000000 || f.Until == nil || f.Until.Unix() != 1700003600 {
-			t.Errorf("since/until = %v/%v, want the unix seconds", f.Since, f.Until)
-		}
-		if f.Owner != "u1" || f.Persona != "impl" || f.Source != "cli" || f.Model != "m" || f.Path != insights.Path("proxy") {
-			t.Errorf("filter = %+v, want every field mapped", f)
-		}
+		c.False(f.Since == nil || f.Since.Unix() != 1700000000 || f.Until == nil || f.Until.Unix() != 1700003600, "since/until = %v/%v, want the unix seconds", f.Since, f.Until)
+		c.False(f.Owner != "u1" || f.Persona != "impl" || f.Source != "cli" || f.Model != "m" || f.Path != insights.Path("proxy"), "filter = %+v, want every field mapped", f)
 	})
 	t.Run("zero unix means unbounded", func(t *testing.T) {
 		f := buildStatsFilter(&rafikiv1.ConversationStatsRequest{})
-		if f.Since != nil || f.Until != nil {
-			t.Errorf("since/until = %v/%v, want nil (unbounded)", f.Since, f.Until)
-		}
+		assert.NewCollecting(t).False(f.Since != nil || f.Until != nil, "since/until = %v/%v, want nil (unbounded)", f.Since, f.Until)
 	})
 }

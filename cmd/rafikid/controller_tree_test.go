@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestComputeLineageLabels(t *testing.T) {
@@ -23,44 +25,34 @@ func TestComputeLineageLabels(t *testing.T) {
 	}})
 
 	t.Run("no parent means no labels", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		parent, root, err := computeLineageLabels(st, "")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if parent != "" || root != "" {
-			t.Fatalf("got parent=%q root=%q; want both empty", parent, root)
-		}
+		c.NoError(err, "unexpected error")
+		c.False(parent != "" || root != "", "got parent=%q root=%q; want both empty", parent, root)
 	})
 
 	t.Run("child of a top-level parent roots at that parent", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		parent, root, err := computeLineageLabels(st, "top")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if parent != "top" || root != "top" {
-			t.Fatalf("got parent=%q root=%q; want top,top", parent, root)
-		}
+		c.NoError(err, "unexpected error")
+		c.False(parent != "top" || root != "top", "got parent=%q root=%q; want top,top", parent, root)
 	})
 
 	t.Run("grandchild inherits the parent's root", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		parent, root, err := computeLineageLabels(st, "mid")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if parent != "mid" || root != "top" {
-			t.Fatalf("got parent=%q root=%q; want mid,top", parent, root)
-		}
+		c.NoError(err, "unexpected error")
+		c.False(parent != "mid" || root != "top", "got parent=%q root=%q; want mid,top", parent, root)
 	})
 
 	t.Run("unknown parent is rejected", func(t *testing.T) {
 		_, _, err := computeLineageLabels(st, "ghost")
-		if err == nil {
-			t.Fatal("expected an error for an unknown parent, got nil")
-		}
+		assert.NewAborting(t).Error(err, "expected an error for an unknown parent, got nil")
 	})
 }
 
 func TestSpawnStampsLineageLabels(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	stateDir := filepath.Join(dir, "state")
@@ -75,33 +67,24 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 		Kind:     protocol.KindClaude,
 		PiBinary: fakePiBin(t),
 	}, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn top-level: %v", err)
-	}
+	c.Require().NoError(err, "spawn top-level")
 	parentID := res.ChildID
 
 	// Verify top-level child has no lineage labels.
 	top, ok := st.Get(parentID)
-	if !ok {
-		t.Fatalf("top-level child not found in store")
-	}
+	c.Require().True(ok, "top-level child not found in store")
 	if _, exists := top.Labels[childstore.LabelParent]; exists {
 		t.Error("top-level child should not have rafiki/parent label")
 	}
-	if _, exists := top.Labels[childstore.LabelRoot]; exists {
-		t.Error("top-level child should not have rafiki/root label")
-	}
+	_, exists := top.Labels[childstore.LabelRoot]
+	c.False(exists, "top-level child should not have rafiki/root label")
 
 	// Kill the top-level child so we can spawn a second one (in-process pi
 	// children don't stack — wait for the first to exit).
 	ch, ok := ctrl.cm.Get(parentID)
-	if !ok {
-		t.Fatalf("could not find child %q in manager", parentID)
-	}
+	c.Require().True(ok, "could not find child %q in manager", parentID)
 	_, _ = ch.Shutdown(5*time.Second, 1*time.Second)
-	if !waitForChildRemoval(ctrl.cm, parentID, 5*time.Second) {
-		t.Fatalf("child %q not removed from manager after shutdown", parentID)
-	}
+	c.Require().True(waitForChildRemoval(ctrl.cm, parentID, 5*time.Second), "child %q not removed from manager after shutdown", parentID)
 
 	// Spawn a child with ParentChildID set.
 	res2, err := ctrl.Spawn(t.Context(), protocol.SpawnRequest{
@@ -110,24 +93,17 @@ func TestSpawnStampsLineageLabels(t *testing.T) {
 		PiBinary:      fakePiBin(t),
 		ParentChildID: parentID,
 	}, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn child: %v", err)
-	}
+	c.Require().NoError(err, "spawn child")
 	childID := res2.ChildID
 
 	snap, ok := st.Get(childID)
-	if !ok {
-		t.Fatalf("child %q not found in store after spawn", childID)
-	}
-	if got := snap.Labels[childstore.LabelParent]; got != parentID {
-		t.Errorf("rafiki/parent = %q, want %q", got, parentID)
-	}
-	if got := snap.Labels[childstore.LabelRoot]; got != parentID {
-		t.Errorf("rafiki/root = %q, want %q", got, parentID)
-	}
+	c.Require().True(ok, "child %q not found in store after spawn", childID)
+	c.Eq(parentID, snap.Labels[childstore.LabelParent], "rafiki/parent")
+	c.Eq(parentID, snap.Labels[childstore.LabelRoot], "rafiki/root")
 }
 
 func TestSpawnRejectsUnknownParent(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := testSocketDir(t)
 	socketPath := filepath.Join(dir, "c.sock")
 	stateDir := filepath.Join(dir, "state")
@@ -142,25 +118,18 @@ func TestSpawnRejectsUnknownParent(t *testing.T) {
 		Cwd:           os.TempDir(),
 		ParentChildID: "c_does_not_exist",
 	}, users.Identity{})
-	if err == nil {
-		t.Fatal("expected an error for unknown parent, got nil")
-	}
+	c.Require().Error(err, "expected an error for unknown parent, got nil")
 
 	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) {
-		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
-	}
-	if ce.Code != protocol.ErrChildNotFound {
-		t.Errorf("error code = %q, want %q", ce.Code, protocol.ErrChildNotFound)
-	}
+	c.Require().True(errors.As(err, &ce), "expected *connectapi.ControllerError, got %T: %v", err, err)
+	c.Eq(protocol.ErrChildNotFound, ce.Code, "error code")
 
 	// No new child should have appeared in the store.
-	if after := len(st.List()); after != before {
-		t.Fatalf("store grew from %d to %d children — rejection must happen before spawn", before, after)
-	}
+	c.Require().Eq(before, len(st.List()), "store grew from")
 }
 
 func TestResumePreservesLineageLabels(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 
 	// 1. Spawn a top-level child A.
@@ -168,12 +137,9 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 
 	// Verify A has no lineage labels.
 	snapA, ok := ctrl.st.Get(parentID)
-	if !ok {
-		t.Fatalf("child A not found")
-	}
-	if _, exists := snapA.Labels[childstore.LabelParent]; exists {
-		t.Error("top-level child A should not have rafiki/parent label")
-	}
+	c.Require().True(ok, "child A not found")
+	_, exists := snapA.Labels[childstore.LabelParent]
+	c.False(exists, "top-level child A should not have rafiki/parent label")
 
 	// 2. Spawn child B with ParentChildID = A.
 	req := protocol.SpawnRequest{
@@ -186,22 +152,14 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn child B: %v", err)
-	}
+	c.Require().NoError(err, "spawn child B")
 	childBID := res.ChildID
 
 	// Verify B got the lineage labels.
 	snapB, ok := ctrl.st.Get(childBID)
-	if !ok {
-		t.Fatalf("child B not found")
-	}
-	if got := snapB.Labels[childstore.LabelParent]; got != parentID {
-		t.Fatalf("B.LabelParent = %q, want %q", got, parentID)
-	}
-	if got := snapB.Labels[childstore.LabelRoot]; got != parentID {
-		t.Fatalf("B.LabelRoot = %q, want %q", got, parentID)
-	}
+	c.Require().True(ok, "child B not found")
+	c.Require().Eq(parentID, snapB.Labels[childstore.LabelParent], "B.LabelParent")
+	c.Require().Eq(parentID, snapB.Labels[childstore.LabelRoot], "B.LabelRoot")
 
 	// 3. Kill B and wait for removal.
 	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -220,15 +178,9 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 
 	// 5. Assert B's labels STILL contain lineage.
 	snapResumed, ok := ctrl.st.Get(childBID)
-	if !ok {
-		t.Fatalf("child B not found after resume")
-	}
-	if got := snapResumed.Labels[childstore.LabelParent]; got != parentID {
-		t.Fatalf("after resume B.LabelParent = %q, want %q — resume dropped the parent label", got, parentID)
-	}
-	if got := snapResumed.Labels[childstore.LabelRoot]; got != parentID {
-		t.Fatalf("after resume B.LabelRoot = %q, want %q — resume dropped the root label", got, parentID)
-	}
+	c.Require().True(ok, "child B not found after resume")
+	c.Require().Eq(parentID, snapResumed.Labels[childstore.LabelParent], "after resume B.LabelParent")
+	c.Require().Eq(parentID, snapResumed.Labels[childstore.LabelRoot], "after resume B.LabelRoot")
 }
 
 // tree.go reads fundi/parent as an authoritative fallback for pre-rename
@@ -236,18 +188,13 @@ func TestResumePreservesLineageLabels(t *testing.T) {
 // the authority predicate for every steering verb — returns a false positive
 // across agents.
 func TestReservedLabelPrefixesRejectBothSpellings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, key := range []string{
 		"rafiki/parent", "rafiki/root", "fundi/parent", "fundi/root", "fundi/anything", "owner",
 	} {
-		if err := validateUserLabelKeys(map[string]string{key: "c_victim"}); err == nil {
-			t.Errorf("validateUserLabelKeys accepted %q; lineage must not be settable by a caller", key)
-		}
-		if err := validateUserRemoveKeys([]string{key}); err == nil {
-			t.Errorf("validateUserRemoveKeys accepted %q", key)
-		}
+		c.Error(validateUserLabelKeys(map[string]string{key: "c_victim"}), "validateUserLabelKeys accepted %q; lineage must not be settable by a caller", key)
+		c.Error(validateUserRemoveKeys([]string{key}), "validateUserRemoveKeys accepted %q", key)
 	}
 	// An ordinary label must still work.
-	if err := validateUserLabelKeys(map[string]string{"team": "infra"}); err != nil {
-		t.Errorf("ordinary label rejected: %v", err)
-	}
+	c.NoError(validateUserLabelKeys(map[string]string{"team": "infra"}), "ordinary label rejected")
 }

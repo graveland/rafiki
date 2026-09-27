@@ -20,6 +20,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Integration tests need a real TimescaleDB (>= 2.22, PostgreSQL 18 for
@@ -33,19 +35,16 @@ var scratchSeq atomic.Uint64
 
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
+	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_agentcli_local_%d_%d", time.Now().UnixNano(), scratchSeq.Add(1))
@@ -57,19 +56,13 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
+	c.NoError(err, "parse dsn")
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect scratch db: %v", err)
-	}
+	c.NoError(err, "connect scratch db")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate scratch db: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate scratch db")
 	return pool
 }
 
@@ -87,9 +80,7 @@ func insertConversation(t *testing.T, pool *pgxpool.Pool, drivenBy, owner string
 		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by)
 		 VALUES ($1::uuid, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
 		ownerArg, drivenBy).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert conversation")
 	return id
 }
 
@@ -107,12 +98,10 @@ func ensureUser(t *testing.T, pool *pgxpool.Pool, username string) string {
 	// token_sha256 is globally unique and tombstones keep their row, so a
 	// recreated username needs a fresh digest — reusing the name would collide
 	// with the removed user's row.
-	if err := pool.QueryRow(ctx,
+	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
 		`INSERT INTO conversations.users (username, token_sha256)
 		 VALUES ($1, $1 || ':' || gen_random_uuid()::text) RETURNING id::text`,
-		username).Scan(&id); err != nil {
-		t.Fatalf("insert user %q: %v", username, err)
-	}
+		username).Scan(&id), "insert user %q", username)
 	return id
 }
 
@@ -126,9 +115,7 @@ func insertTurn(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int, in
 		 VALUES ($1, $2, 'complete', 'claude-fable-5', '{}'::jsonb, NULL, 'end_turn',
 		         $3, $4, 'claude', now())`,
 		convID, ordinal, inTok, outTok)
-	if err != nil {
-		t.Fatalf("insert turn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert turn")
 }
 
 // insertMessage inserts a conversation_message row.
@@ -138,9 +125,7 @@ func insertMessage(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int,
 		`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
 		 VALUES ($1, $2, $3, $4)`,
 		convID, ordinal, role, []byte(contentJSON))
-	if err != nil {
-		t.Fatalf("insert message: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert message")
 }
 
 // seedConversation creates a conversation with two complete turns and a
@@ -156,69 +141,53 @@ func seedConversation(t *testing.T, pool *pgxpool.Pool) string {
 }
 
 func TestBackendReadPaths(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
 	b := New(Options{Pool: pool})
 	ctx := context.Background()
 
 	st, err := b.Stats(ctx, insights.ScopeAll(), insights.StatsFilter{})
-	if err != nil || st.Volume.Turns != 2 {
-		t.Fatalf("stats = %+v, %v; want 2 turns", st, err)
-	}
+	c.False(err != nil || st.Volume.Turns != 2, "stats = %+v, %v; want 2 turns", st, err)
 	one, err := b.ConversationStats(ctx, insights.ScopeAll(), convID)
-	if err != nil || one.Volume.Conversations != 1 {
-		t.Fatalf("conversation stats = %+v, %v", one, err)
-	}
+	c.False(err != nil || one.Volume.Conversations != 1, "conversation stats = %+v, %v", one, err)
 	rows, err := b.Search(ctx, insights.ScopeAll(), insights.SearchFilter{})
-	if err != nil || len(rows) != 1 || rows[0].ID != convID {
-		t.Fatalf("search = %+v, %v", rows, err)
-	}
+	c.False(err != nil || len(rows) != 1 || rows[0].ID != convID, "search = %+v, %v", rows, err)
 	tr, err := b.Export(ctx, insights.ScopeAll(), convID)
-	if err != nil || tr.ConversationID != convID {
-		t.Fatalf("export = %+v, %v", tr, err)
-	}
+	c.False(err != nil || tr.ConversationID != convID, "export = %+v, %v", tr, err)
 }
 
 func TestBackendFindingsRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := newTestPool(t)
 	convID := seedConversation(t, pool)
 	id, _, err := store.UpsertAnalysis(context.Background(), pool, store.AnalysisRow{
 		ConversationID: convID, DetectorVersion: analyze.DetectorVersion, Model: "m", Status: "ok",
 		Analysis: []byte(`{"conversation_id":"` + convID + `"}`),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ReplaceFindings(context.Background(), pool, id, []store.FindingRow{{
+	c.NoError(err)
+	c.NoError(store.ReplaceFindings(context.Background(), pool, id, []store.FindingRow{{
 		Axis: "grind", TopicKey: "loop", Title: "retry loop", ExpectedSavingsTokens: 100,
-	}}, nil); err != nil {
-		t.Fatal(err)
-	}
+	}}, nil))
 	b := New(Options{Pool: pool})
 	got, err := b.Findings(context.Background(), store.FindingFilter{})
-	if err != nil || len(got) != 1 || got[0].Title != "retry loop" {
-		t.Fatalf("findings = %+v, %v", got, err)
-	}
+	c.False(err != nil || len(got) != 1 || got[0].Title != "retry loop", "findings = %+v, %v", got, err)
 	row, err := b.SetFindingStatus(context.Background(), got[0].ID, "dismissed")
-	if err != nil || row.Status != "dismissed" {
-		t.Fatalf("set status = %+v, %v", row, err)
-	}
+	c.False(err != nil || row.Status != "dismissed", "set status = %+v, %v", row, err)
 }
 
 func TestAnalyzeWithoutLLMErrors(t *testing.T) {
 	pool := newTestPool(t)
 	b := New(Options{Pool: pool})
-	if _, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{ConversationIDs: []string{"x"}}); !errors.Is(err, ErrNoLLM) {
-		t.Fatalf("Analyze without an LLM client err = %v, want ErrNoLLM", err)
-	}
+	_, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{ConversationIDs: []string{"x"}})
+	assert.NewAborting(t).ErrorIs(err, ErrNoLLM, "Analyze without an LLM client err")
 }
 
 func TestBackendNilPool(t *testing.T) {
+	c := assert.NewAborting(t)
 	// New() should succeed with nil Pool
 	b := New(Options{Pool: nil})
-	if b.pool != nil {
-		t.Fatal("pool should be nil")
-	}
+	c.Nil(b.pool, "pool should be nil")
 
 	ctx := context.Background()
 	// Read methods should return ErrNoPool
@@ -237,9 +206,8 @@ func TestBackendNilPool(t *testing.T) {
 	if _, err := b.Findings(ctx, store.FindingFilter{}); !errors.Is(err, ErrNoPool) {
 		t.Fatalf("Findings err = %v, want ErrNoPool", err)
 	}
-	if _, err := b.SetFindingStatus(ctx, "x", "dismissed"); !errors.Is(err, ErrNoPool) {
-		t.Fatalf("SetFindingStatus err = %v, want ErrNoPool", err)
-	}
+	_, err := b.SetFindingStatus(ctx, "x", "dismissed")
+	c.ErrorIs(err, ErrNoPool, "SetFindingStatus err")
 }
 
 // TestBackendQueryNoPool mirrors TestBackendNilPool for the catalogue-query
@@ -247,9 +215,8 @@ func TestBackendNilPool(t *testing.T) {
 // Query rather than panic on the nil *insights.Insights.
 func TestBackendQueryNoPool(t *testing.T) {
 	b := New(Options{Pool: nil})
-	if _, err := b.Query(context.Background(), insights.ScopeAll(), "tools", insights.StatsFilter{}); !errors.Is(err, ErrNoPool) {
-		t.Fatalf("Query err = %v, want ErrNoPool", err)
-	}
+	_, err := b.Query(context.Background(), insights.ScopeAll(), "tools", insights.StatsFilter{})
+	assert.NewAborting(t).ErrorIs(err, ErrNoPool, "Query err")
 }
 
 // TestAnalyzeNilPoolByIDsErrors covers the guard added for the nil-pool
@@ -258,31 +225,25 @@ func TestBackendQueryNoPool(t *testing.T) {
 // front, not panic deep inside runAnalyze/storedAnalysesFor on a nil
 // *pgxpool.Pool.
 func TestAnalyzeNilPoolByIDsErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b := New(Options{LLM: testAnalyzeClient(t, &analyzeFakeSender{})})
 	ch, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{
 		ConversationIDs: []string{"11111111-1111-1111-1111-111111111111"},
 	})
-	if !errors.Is(err, ErrNoPool) {
-		t.Fatalf("Analyze by ids on a nil-pool backend err = %v, want ErrNoPool", err)
-	}
-	if ch != nil {
-		t.Error("Analyze: want a nil channel alongside the error")
-	}
+	c.Require().ErrorIs(err, ErrNoPool, "Analyze by ids on a nil-pool backend err")
+	c.Nil(ch, "Analyze: want a nil channel alongside the error")
 }
 
 // TestAnalyzeNilPoolByFilterErrors mirrors TestAnalyzeNilPoolByIDsErrors for
 // the other DB-backed population path: a search Filter.
 func TestAnalyzeNilPoolByFilterErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b := New(Options{LLM: testAnalyzeClient(t, &analyzeFakeSender{})})
 	ch, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{
 		Filter: &insights.SearchFilter{Owner: "brent"},
 	})
-	if !errors.Is(err, ErrNoPool) {
-		t.Fatalf("Analyze by filter on a nil-pool backend err = %v, want ErrNoPool", err)
-	}
-	if ch != nil {
-		t.Error("Analyze: want a nil channel alongside the error")
-	}
+	c.Require().ErrorIs(err, ErrNoPool, "Analyze by filter on a nil-pool backend err")
+	c.Nil(ch, "Analyze: want a nil channel alongside the error")
 }
 
 // TestAnalyzeNilPoolNoSelectorErrors mirrors TestAnalyzeNilPoolByIDsErrors /
@@ -297,20 +258,18 @@ func TestAnalyzeNilPoolByFilterErrors(t *testing.T) {
 // req.CorpusDir == "" (rather than the old len(ConversationIDs)>0 ||
 // Filter != nil) is exactly what closes this gap.
 func TestAnalyzeNilPoolNoSelectorErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	b := New(Options{LLM: testAnalyzeClient(t, &analyzeFakeSender{})})
 	ch, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{})
-	if !errors.Is(err, ErrNoPool) {
-		t.Fatalf("Analyze with no selector on a nil-pool backend err = %v, want ErrNoPool", err)
-	}
-	if ch != nil {
-		t.Error("Analyze: want a nil channel alongside the error")
-	}
+	c.Require().ErrorIs(err, ErrNoPool, "Analyze with no selector on a nil-pool backend err")
+	c.Nil(ch, "Analyze: want a nil channel alongside the error")
 }
 
 // TestAnalyzeNilPoolCorpusStillWorks proves the guard doesn't overreach:
 // a corpus-only backend (nil Pool) must still run a --corpus Analyze —
 // corpus mode never touches the database.
 func TestAnalyzeNilPoolCorpusStillWorks(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	tr := insights.Transcript{
 		ConversationID: "corpus-conv",
@@ -320,12 +279,8 @@ func TestAnalyzeNilPoolCorpusStillWorks(t *testing.T) {
 		},
 	}
 	raw, err := json.Marshal(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "conv.json"), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
+	c.NoError(os.WriteFile(filepath.Join(dir, "conv.json"), raw, 0o644))
 
 	sender := &analyzeFakeSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		analyzeRespondToolUse(t, analyzeWellFormedInput),
@@ -333,17 +288,11 @@ func TestAnalyzeNilPoolCorpusStillWorks(t *testing.T) {
 	b := New(Options{LLM: testAnalyzeClient(t, sender)})
 
 	ch, err := b.Analyze(context.Background(), agentcli.AnalyzeRequest{CorpusDir: dir})
-	if err != nil {
-		t.Fatalf("Analyze (corpus, nil pool): %v", err)
-	}
+	c.NoError(err, "Analyze (corpus, nil pool)")
 	events := drainEvents(ch)
 	for _, ev := range events {
-		if ev.Kind == agentcli.EventError {
-			t.Fatalf("unexpected EventError: %v", ev.Err)
-		}
+		c.NotEq(agentcli.EventError, ev.Kind, "unexpected EventError: %v", ev.Err)
 	}
 	summary := events[len(events)-1].Summary
-	if summary == nil || summary.Analyzed != 1 {
-		t.Fatalf("Summary = %+v, want Analyzed=1", summary)
-	}
+	c.False(summary == nil || summary.Analyzed != 1, "Summary = %+v, want Analyzed=1", summary)
 }

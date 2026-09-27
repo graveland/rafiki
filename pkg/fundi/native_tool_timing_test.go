@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // captureSink records every native event published.
@@ -23,6 +25,7 @@ func newDiscardFrontend() *Frontend {
 }
 
 func TestToolStartPublishesNativeExecutionStart(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sink := &captureSink{}
 	em := NewEmitter(newDiscardFrontend(), "anthropic", nil)
 	em.SetNativeSink(sink)
@@ -35,18 +38,13 @@ func TestToolStartPublishesNativeExecutionStart(t *testing.T) {
 			found = s
 		}
 	}
-	if found == nil {
-		t.Fatal("no ToolExecutionStart event published")
-	}
-	if found.GetToolUseId() != "tu_1" {
-		t.Errorf("ToolUseId = %q, want %q", found.GetToolUseId(), "tu_1")
-	}
-	if found.GetName() != "bash" {
-		t.Errorf("Name = %q, want %q", found.GetName(), "bash")
-	}
+	c.Require().NotNil(found, "no ToolExecutionStart event published")
+	c.Eq("tu_1", found.GetToolUseId(), "ToolUseId")
+	c.Eq("bash", found.GetName(), "Name")
 }
 
 func TestToolEndPublishesNativeExecutionEndWithDuration(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sink := &captureSink{}
 	em := NewEmitter(newDiscardFrontend(), "anthropic", nil)
 	em.SetNativeSink(sink)
@@ -60,25 +58,18 @@ func TestToolEndPublishesNativeExecutionEndWithDuration(t *testing.T) {
 			found = e
 		}
 	}
-	if found == nil {
-		t.Fatal("no ToolExecutionEnd event published")
-	}
-	if found.GetToolUseId() != "tu_1" {
-		t.Errorf("ToolUseId = %q, want %q", found.GetToolUseId(), "tu_1")
-	}
-	if found.GetIsError() {
-		t.Error("IsError = true, want false")
-	}
+	c.Require().NotNil(found, "no ToolExecutionEnd event published")
+	c.Eq("tu_1", found.GetToolUseId(), "ToolUseId")
+	c.False(found.GetIsError(), "IsError = true, want false")
 	// Duration is wall-clock, so assert only that it was measured, never a value.
-	if found.GetDurationMs() < 0 {
-		t.Errorf("DurationMs = %d, want >= 0", found.GetDurationMs())
-	}
+	c.GreaterOrEqual(0, found.GetDurationMs(), "DurationMs")
 }
 
 // TestToolEndWithoutStartStillPublishes guards the case where a turn is resumed
 // mid-tool: ToolEnd can fire with no matching ToolStart in this Emitter's
 // lifetime, and it must still report the end rather than dropping it.
 func TestToolEndWithoutStartStillPublishes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sink := &captureSink{}
 	em := NewEmitter(newDiscardFrontend(), "anthropic", nil)
 	em.SetNativeSink(sink)
@@ -91,15 +82,9 @@ func TestToolEndWithoutStartStillPublishes(t *testing.T) {
 			found = e
 		}
 	}
-	if found == nil {
-		t.Fatal("no ToolExecutionEnd event published for an unstarted tool")
-	}
-	if !found.GetIsError() {
-		t.Error("IsError = false, want true")
-	}
-	if found.GetDurationMs() != 0 {
-		t.Errorf("DurationMs = %d, want 0 for an unstarted tool", found.GetDurationMs())
-	}
+	c.Require().NotNil(found, "no ToolExecutionEnd event published for an unstarted tool")
+	c.True(found.GetIsError(), "IsError = false, want true")
+	c.Eq(0, found.GetDurationMs(), "DurationMs")
 }
 
 // TestNilSinkToolPathIsNoOp proves the additive-only property: an Emitter with

@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"go.graveland.dev/rafiki/pkg/pymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeFakeUV writes an executable fake `uv` into a fresh temp dir and
@@ -61,9 +63,7 @@ esac
 exit 0
 `
 	path := filepath.Join(dir, "uv")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte(script), 0o755))
 	return dir
 }
 
@@ -84,9 +84,7 @@ func fakeUVInvocations(t *testing.T, log string) int {
 	if os.IsNotExist(err) {
 		return 0
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	trimmed := strings.TrimRight(string(data), "\n")
 	if trimmed == "" {
 		return 0
@@ -95,22 +93,18 @@ func fakeUVInvocations(t *testing.T, log string) int {
 }
 
 func TestBuildVenvNoRequirementsIsReadyAndRemovesStaleVenv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	moduleDir := t.TempDir()
 	venv := filepath.Join(moduleDir, ".venv")
-	if err := os.MkdirAll(filepath.Join(venv, "bin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(venv, "bin", "python3"), []byte("stale"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(filepath.Join(venv, "bin"), 0o755))
+	c.Require().NoError(os.WriteFile(filepath.Join(venv, "bin", "python3"), []byte("stale"), 0o755))
 
 	res := buildModuleVenv(moduleDir, nil)
 	if !res.GetReady() || res.GetError() != "" {
 		t.Errorf("got {Ready: %v, Error: %q}, want {Ready: true, Error: \"\"}", res.GetReady(), res.GetError())
 	}
-	if _, err := os.Stat(venv); !os.IsNotExist(err) {
-		t.Errorf("stale .venv survived a no-requirements build (err=%v)", err)
-	}
+	_, err := os.Stat(venv)
+	c.True(os.IsNotExist(err), "stale .venv survived a no-requirements build (err=%v)", err)
 }
 
 // Truncation must be UTF-8-safe: protobuf-go rejects invalid UTF-8 in proto3
@@ -120,21 +114,17 @@ func TestBuildVenvNoRequirementsIsReadyAndRemovesStaleVenv(t *testing.T) {
 // boundary by even parity, so a leading ASCII byte shifts the cut into the
 // middle of a rune.
 func TestUvErrorTruncationIsUTF8Safe(t *testing.T) {
+	c := assert.NewCollecting(t)
 	msg := "x" + strings.Repeat("é", 2500) // 5001 bytes; the cut straddles a rune
 	got := uvError([]byte(msg), errors.New("boom"))
-	if !utf8.ValidString(got) {
-		t.Errorf("uvError output is not valid UTF-8: %q", got)
-	}
+	c.True(utf8.ValidString(got), "uvError output is not valid UTF-8: %q", got)
 	const suffix = "... (truncated)"
-	if !strings.HasSuffix(got, suffix) {
-		t.Errorf("uvError output %q lacks the truncation suffix %q", got, suffix)
-	}
-	if max := maxVenvErrorBytes + len(suffix); len(got) > max {
-		t.Errorf("uvError output is %d bytes, want <= %d", len(got), max)
-	}
+	c.True(strings.HasSuffix(got, suffix), "uvError output %q lacks the truncation suffix %q", got, suffix)
+	c.LessOrEqual(maxVenvErrorBytes+len(suffix), len(got), "uvError output is")
 }
 
 func TestBuildVenvBuildsFromScratch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeUV(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	moduleDir := t.TempDir()
@@ -148,12 +138,8 @@ func TestBuildVenvBuildsFromScratch(t *testing.T) {
 		t.Errorf("built venv has no interpreter: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(moduleDir, ".venv", ".rafiki-requirements-hash"))
-	if err != nil {
-		t.Fatalf("read requirements hash: %v", err)
-	}
-	if want := pymodules.RequirementsHash(reqs); string(got) != want {
-		t.Errorf("hash file = %q, want %q", got, want)
-	}
+	c.Require().NoError(err, "read requirements hash")
+	c.Eq(pymodules.RequirementsHash(reqs), string(got), "hash file = %q, want", got)
 }
 
 func TestBuildVenvSkipsRebuildWhenHashUnchanged(t *testing.T) {
@@ -172,12 +158,11 @@ func TestBuildVenvSkipsRebuildWhenHashUnchanged(t *testing.T) {
 	if !res.GetReady() {
 		t.Fatalf("second build failed: %q", res.GetError())
 	}
-	if got := fakeUVInvocations(t, log); got != first {
-		t.Errorf("unchanged requirements re-invoked uv: log went %d -> %d lines", first, got)
-	}
+	assert.NewCollecting(t).Eq(first, fakeUVInvocations(t, log), "unchanged requirements re-invoked uv: log went")
 }
 
 func TestBuildVenvRebuildsWhenRequirementsChange(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeUV(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	log := setFakeUVLog(t)
@@ -193,19 +178,15 @@ func TestBuildVenvRebuildsWhenRequirementsChange(t *testing.T) {
 	if !res.GetReady() {
 		t.Fatalf("rebuild failed: %q", res.GetError())
 	}
-	if after := fakeUVInvocations(t, log); after <= before {
-		t.Errorf("changed requirements did not rebuild: log stayed at %d lines", after)
-	}
+	c.Greater(before, fakeUVInvocations(t, log), "changed requirements did not rebuild: log stayed at")
 	got, err := os.ReadFile(filepath.Join(moduleDir, ".venv", ".rafiki-requirements-hash"))
-	if err != nil {
-		t.Fatalf("read requirements hash: %v", err)
-	}
-	if want := pymodules.RequirementsHash(newReqs); string(got) != want {
-		t.Errorf("hash file = %q, want %q (the new requirements)", got, want)
-	}
+	c.Require().NoError(err, "read requirements hash")
+	want := pymodules.RequirementsHash(newReqs)
+	c.Eq(want, string(got), "hash file = %q, want %q (the new requirements)", got, want)
 }
 
 func TestBuildVenvReportsInstallFailureWithoutTouchingPriorVenv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	uvDir := writeFakeUV(t)
 	t.Setenv("RAFIKI_PYMODULE_UV", filepath.Join(uvDir, "uv"))
 	moduleDir := t.TempDir()
@@ -215,38 +196,24 @@ func TestBuildVenvReportsInstallFailureWithoutTouchingPriorVenv(t *testing.T) {
 	}
 	py := filepath.Join(moduleDir, ".venv", "bin", "python3")
 	prior, err := os.ReadFile(py)
-	if err != nil {
-		t.Fatalf("prior venv's interpreter missing: %v", err)
-	}
+	c.Require().NoError(err, "prior venv's interpreter missing")
 
 	res := buildModuleVenv(moduleDir, []string{"FAIL_THIS_INSTALL"})
-	if res.GetReady() {
-		t.Fatal("a failed install reported Ready")
-	}
-	if !strings.Contains(res.GetError(), "simulated install failure") {
-		t.Errorf("error %q does not name the install failure", res.GetError())
-	}
+	c.Require().False(res.GetReady(), "a failed install reported Ready")
+	c.StrContains(res.GetError(), "simulated install failure", "error")
 	after, err := os.ReadFile(py)
-	if err != nil {
-		t.Fatalf("prior venv's interpreter vanished on a failed rebuild: %v", err)
-	}
-	if string(after) != string(prior) {
-		t.Error("prior venv was modified by a failed rebuild")
-	}
+	c.Require().NoError(err, "prior venv's interpreter vanished on a failed rebuild")
+	c.Eq(string(prior), string(after), "prior venv was modified by a failed rebuild")
 }
 
 func TestBuildVenvMissingUvFailsLoudly(t *testing.T) {
 	t.Setenv("RAFIKI_PYMODULE_UV", "/nonexistent/uv")
+	c := assert.NewCollecting(t)
 	moduleDir := t.TempDir()
 
 	res := buildModuleVenv(moduleDir, []string{"requests"})
-	if res.GetReady() {
-		t.Fatal("a build without uv reported Ready")
-	}
-	if !strings.Contains(res.GetError(), "uv not found") {
-		t.Errorf("error %q does not name the missing binary", res.GetError())
-	}
-	if _, err := os.Stat(filepath.Join(moduleDir, ".venv")); !os.IsNotExist(err) {
-		t.Errorf("a missing-uv build created a .venv (err=%v)", err)
-	}
+	c.Require().False(res.GetReady(), "a build without uv reported Ready")
+	c.StrContains(res.GetError(), "uv not found", "error")
+	_, err := os.Stat(filepath.Join(moduleDir, ".venv"))
+	c.True(os.IsNotExist(err), "a missing-uv build created a .venv (err=%v)", err)
 }

@@ -1,13 +1,14 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // What a child is told about its machine comes from the ROW.
@@ -19,18 +20,15 @@ import (
 // when Isolation == "none" — so the warning vanished for precisely the workers
 // that needed it, with every test still green.
 func TestTheChildIsToldWhatTheRowSaysNotWhatTheExecutorClaims(t *testing.T) {
+	c := assert.NewCollecting(t)
 	wi := workspaceInfoFromRow(executors.Executor{
 		ID: "exec-1", Labels: map[string]string{"machine": "ci-runner-2"},
 		Isolation: "container", WorkspaceMode: "ephemeral",
 		Roots: []string{"/work", "/repo"},
 	})
 
-	if wi.Isolation != "container" {
-		t.Fatalf("isolation = %q; a container executor's child must be told it is in a container", wi.Isolation)
-	}
-	if wi.WorkspaceMode != "ephemeral" {
-		t.Errorf("workspace mode = %q, want ephemeral", wi.WorkspaceMode)
-	}
+	c.Require().Eq("container", wi.Isolation, "isolation")
+	c.Eq("ephemeral", wi.WorkspaceMode, "workspace mode")
 
 	// The end-to-end property, not just the struct: the block must actually
 	// reach the prompt. This is the assertion that would have failed.
@@ -39,13 +37,9 @@ func TestTheChildIsToldWhatTheRowSaysNotWhatTheExecutorClaims(t *testing.T) {
 	got := fundi.BuildSystemPrompt(fundi.SysPromptConfig{
 		Base: "base.", Cwd: "/work", ModelID: "m", Workspace: wi,
 	})
-	if !strings.Contains(got, "Your machine") {
-		t.Fatalf("a container-isolated child got no workspace block:\n%s", got)
-	}
+	c.Require().StrContains(got, "Your machine", "a container-isolated child got no workspace block:\n")
 	for _, want := range []string{"ci-runner-2", "container", "ephemeral", "/work", "/repo"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("workspace block missing %q:\n%s", want, got)
-		}
+		c.StrContains(got, want, "workspace block missing")
 	}
 }
 
@@ -59,9 +53,7 @@ func TestAnUnsetWorkspaceModeIsPinned(t *testing.T) {
 	if got := workspaceModeOrPinned(""); got != "pinned" {
 		t.Fatalf("workspaceModeOrPinned(%q) = %q; an unknown mode must not be treated as disposable", "", got)
 	}
-	if got := workspaceModeOrPinned("ephemeral"); got != "ephemeral" {
-		t.Fatalf("workspaceModeOrPinned(ephemeral) = %q", got)
-	}
+	assert.NewAborting(t).Eq("ephemeral", workspaceModeOrPinned("ephemeral"), "workspaceModeOrPinned(ephemeral) =")
 }
 
 // The requested workspace mode must EXCLUDE executors whose row does not offer
@@ -69,6 +61,7 @@ func TestAnUnsetWorkspaceModeIsPinned(t *testing.T) {
 // stopped declaring anything about itself and nothing replaced the check, so an
 // inherited "ephemeral" landed happily on a pinned machine.
 func TestWorkspaceModeNarrowsSelection(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	pinned := ex("exec-pinned", map[string]string{"env": "home"}, "")
 	ephemeral := ex("exec-ephemeral", map[string]string{"env": "home"}, "")
 	ephemeral.Executor.WorkspaceMode = "ephemeral"
@@ -78,23 +71,15 @@ func TestWorkspaceModeNarrowsSelection(t *testing.T) {
 
 	req.WorkspaceMode = "ephemeral"
 	chosen, err := c.chooseExecutor(req, "")
-	if err != nil {
-		t.Fatalf("an ephemeral request found no executor though one offers it: %v", err)
-	}
-	if chosen.ID != "exec-ephemeral" {
-		t.Fatalf("placed on %s; only exec-ephemeral offers workspace_mode=ephemeral", chosen.ID)
-	}
+	ck.Require().NoError(err, "an ephemeral request found no executor though one offers it")
+	ck.Require().Eq("exec-ephemeral", chosen.ID, "placed on")
 
 	// And with no ephemeral executor live, the spawn is REFUSED rather than
 	// quietly downgraded to a pinned machine.
 	c = selectFixture(t, "env=home", pinned)
 	_, err = c.chooseExecutor(req, "")
-	if err == nil {
-		t.Fatal("an ephemeral request was satisfied by a pinned executor; the grant widened silently")
-	}
-	if !strings.Contains(err.Error(), "workspace_mode") {
-		t.Errorf("the refusal does not name the mode that excluded every candidate: %v", err)
-	}
+	ck.Require().Error(err, "an ephemeral request was satisfied by a pinned executor; the grant widened silently")
+	ck.StrContains(err.Error(), "workspace_mode", "the refusal does not name the mode that excluded every candidate: %v", err)
 }
 
 // An executor's own Describe must not decide where other people's children run.
@@ -106,9 +91,7 @@ func TestSelectionIgnoresTheSelfReportedWorkspaceMode(t *testing.T) {
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=home", WorkspaceMode: "ephemeral",
 	}, "")
-	if err == nil {
-		t.Fatal("an executor whose ROW says pinned attracted an ephemeral child by claiming ephemeral in Describe")
-	}
+	assert.NewAborting(t).Error(err, "an executor whose ROW says pinned attracted an ephemeral child by claiming ephemeral in Describe")
 }
 
 func describeClaiming(mode string) *executorpb.DescribeResponse {

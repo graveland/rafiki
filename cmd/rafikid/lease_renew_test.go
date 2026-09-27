@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestRenewThenKillOrdersAndParallelises pins both halves of the fix: every
@@ -14,6 +16,7 @@ import (
 // A takeover invalidates leases in bulk, so a serial kill loop can outlast the
 // TTL of the leases it has not renewed yet.
 func TestRenewThenKillOrdersAndParallelises(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var mu sync.Mutex
 	var order []string
 
@@ -43,15 +46,11 @@ func TestRenewThenKillOrdersAndParallelises(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(order) != 6 {
-		t.Fatalf("recorded %d events, want 6: %v", len(order), order)
-	}
+	c.Require().Len(order, 6, "recorded %d events, want 6", len(order))
 	for i, ev := range order[:3] {
 		if !strings.HasPrefix(ev, "renew:") {
 			t.Errorf("event %d = %q, want a renew — every renewal must precede every kill", i, ev)
 		}
 	}
-	if elapsed > 120*time.Millisecond {
-		t.Errorf("took %v; three 50ms kills appear to be serialized", elapsed)
-	}
+	c.LessOrEqual(120*time.Millisecond, elapsed, "took")
 }

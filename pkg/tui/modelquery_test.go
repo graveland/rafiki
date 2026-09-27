@@ -14,6 +14,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/clientstate"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func i32q(v int32) *int32     { return &v }
@@ -71,14 +73,13 @@ func TestConstraintsThenObjective(t *testing.T) {
 	// paid/small fails the context floor; free/big fails ">free";
 	// paid/pricey fails "<=$2". local/unknown is admitted -- see below.
 	want := []string{"paid/big", "local/unknown"}
-	if strings.Join(ids, ",") != strings.Join(want, ",") {
-		t.Fatalf("got %v, want %v", ids, want)
-	}
+	assert.NewAborting(t).Eq(strings.Join(want, ","), strings.Join(ids, ","), "got %v, want %v", ids, want)
 }
 
 // A bare ceiling lets free models through -- 7 of them in the real catalog --
 // which is why price needs both sides and not a single control.
 func TestCeilingAloneAdmitsFreeModels(t *testing.T) {
+	c := assert.NewCollecting(t)
 	v := defaultModelView()
 	v.setBound(colIn, bound{maxIx: stopIndex(t, maxStops(colIn), "$2")})
 
@@ -88,18 +89,14 @@ func TestCeilingAloneAdmitsFreeModels(t *testing.T) {
 			sawFree = true
 		}
 	}
-	if !sawFree {
-		t.Fatal("fixture is wrong: a free model must pass a bare ceiling")
-	}
+	c.Require().True(sawFree, "fixture is wrong: a free model must pass a bare ceiling")
 
 	v.setBound(colIn, bound{
 		minIx: stopIndex(t, minStops(colIn), ">free"),
 		maxIx: stopIndex(t, maxStops(colIn), "$2"),
 	})
 	for _, r := range selectModels(queryFixture(), "", v) {
-		if r.GetId() == "free/big" {
-			t.Error(">free did not exclude the free model")
-		}
+		c.NotEq("free/big", r.GetId(), ">free did not exclude the free model")
 	}
 }
 
@@ -118,9 +115,7 @@ func TestBoundsAdmitModelsTheCatalogCannotAnswerFor(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("a model with no catalog facts was rejected by every bound")
-	}
+	assert.NewAborting(t).True(found, "a model with no catalog facts was rejected by every bound")
 }
 
 // ── direction and presence ───────────────────────────────────────────────────
@@ -128,21 +123,14 @@ func TestBoundsAdmitModelsTheCatalogCannotAnswerFor(t *testing.T) {
 // The bug the tests caught: flipping the comparison for a descending key must
 // not flip the ABSENCE verdict, or unscored models lead "smartest".
 func TestDescendingDoesNotPromoteUnknowns(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := queryFixture()
 	sortModels(rows, []sortKey{{field: colIntel, desc: true}})
-	if rows[0].GetId() == "local/unknown" {
-		t.Fatal("an unscored model leads a descending sort")
-	}
-	if rows[len(rows)-1].GetId() != "local/unknown" {
-		t.Errorf("last = %q, want the unscored model last in BOTH directions",
-			rows[len(rows)-1].GetId())
-	}
+	c.Require().NotEq("local/unknown", rows[0].GetId(), "an unscored model leads a descending sort")
+	c.Eq("local/unknown", rows[len(rows)-1].GetId(), "last")
 
 	sortModels(rows, []sortKey{{field: colIntel}}) // ascending
-	if rows[len(rows)-1].GetId() != "local/unknown" {
-		t.Errorf("last = %q, want the unscored model last ascending too",
-			rows[len(rows)-1].GetId())
-	}
+	c.Eq("local/unknown", rows[len(rows)-1].GetId(), "last")
 }
 
 // A second key breaks ties the first leaves, which is the whole point of
@@ -157,9 +145,7 @@ func TestSecondKeyBreaksTiesLeftByTheFirst(t *testing.T) {
 	}
 	want := []string{"paid/big", "free/big", "paid/pricey"}
 	_ = want
-	if ids[0] != "free/big" {
-		t.Errorf("among the 1M models the cheapest should lead; got %v", ids)
-	}
+	assert.NewCollecting(t).Eq("free/big", ids[0], "among the 1M models the cheapest should lead; got %v", ids)
 }
 
 // Two absent values TIE, so the next key gets to decide rather than the order
@@ -170,9 +156,7 @@ func TestTwoAbsentValuesFallThroughToTheNextKey(t *testing.T) {
 		{Id: "a/first", IntelligenceIndex: nil, PromptUsd: f64q(0.000001)},
 	}
 	sortModels(rows, []sortKey{{field: colIntel, desc: true}, {field: colIn}})
-	if rows[0].GetId() != "a/first" {
-		t.Errorf("first = %q, want the cheaper of two unscored models", rows[0].GetId())
-	}
+	assert.NewCollecting(t).Eq("a/first", rows[0].GetId(), "first")
 }
 
 // ── the dialog ───────────────────────────────────────────────────────────────
@@ -196,29 +180,22 @@ func openQuery(t *testing.T) *Cockpit {
 	seedModels(c, c.form.kind(), queryFixture())
 	focusModelRow(c)
 	c.handleKey(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
-	if c.query == nil {
-		t.Fatal("^S did not open the filter+sort band")
-	}
+	assert.NewAborting(t).NotNil(c.query, "^S did not open the filter+sort band")
 	return c
 }
 
 func TestCtrlSOpensThePanelOverTheList(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
-	if c.form == nil {
-		t.Error("the panel replaced the form; it is meant to sit over it")
-	}
+	ck.NotNil(c.form, "the panel replaced the form; it is meant to sit over it")
 	c.width, c.height, c.ready = 120, 44, true
 	out := ansi.Strip(c.View().Content)
 	for _, want := range []string{"FIELD", "MIN", "MAX", "SORT", "tools", "ctx"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("%q missing from the panel:\n%s", want, out)
-		}
+		ck.StrContains(out, want, "%q missing from the panel:\n", want)
 	}
 	// The list stays visible above it -- that is the point of a panel rather
 	// than a modal: the query's effect is watchable as it is composed.
-	if !strings.Contains(out, "paid/big") {
-		t.Errorf("the list is not visible above the panel:\n%s", out)
-	}
+	ck.StrContains(out, "paid/big", "the list is not visible above the panel:\n")
 }
 
 // The table is one row per field, so it never needs to wrap: the horizontal
@@ -232,23 +209,19 @@ func TestPanelFitsANarrowTerminal(t *testing.T) {
 			// DISPLAY columns, not bytes: the rule is box-drawing runes at
 			// three bytes each, and every width helper in this package
 			// measures with ansi.StringWidth for exactly this reason.
-			if got := ansi.StringWidth(line); got > w {
-				t.Errorf("width %d: line is %d columns: %q", w, got, line)
-			}
+			got := ansi.StringWidth(line)
+			assert.NewCollecting(t).LessOrEqual(w, got, "width %d: line is %d columns: %q", w, got, line)
 		}
 	}
 }
 
 // A short terminal windows the table rather than burying the list.
 func TestPanelLeavesRoomForTheList(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tall := queryWindow(44)
 	short := queryWindow(12)
-	if short >= tall {
-		t.Errorf("window: tall=%d short=%d, want the short pane to show fewer rows", tall, short)
-	}
-	if short < 1 {
-		t.Errorf("window = %d, want at least one row", short)
-	}
+	c.Less(tall, short, "window: tall")
+	c.GreaterOrEqual(1, short, "window")
 }
 
 // ←/→ walks the columns and SKIPS cells that hold nothing, so space never
@@ -260,20 +233,15 @@ func TestArrowsSkipUnavailableCells(t *testing.T) {
 	c.handleKey(keyMsg("right"))
 
 	// agentic has a min and a sort but no max stop, so → must jump the max.
-	if c.query.col != colSortCell {
-		t.Errorf("col = %d, want it to skip the empty max cell to sort", c.query.col)
-	}
+	assert.NewCollecting(t).Eq(colSortCell, c.query.col, "col")
 }
 
 // A capability toggle occupies one column only.
 func TestToggleRowsHaveOneCell(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := queryRow{flag: flagTools}
-	if !r.available(colMinCell) {
-		t.Error("a toggle should live in the first column")
-	}
-	if r.available(colMaxCell) || r.available(colSortCell) {
-		t.Error("a toggle has no max and cannot be sorted by")
-	}
+	c.True(r.available(colMinCell), "a toggle should live in the first column")
+	c.False(r.available(colMaxCell) || r.available(colSortCell), "a toggle has no max and cannot be sorted by")
 }
 
 func TestSpaceCyclesASortCellThroughOffAscDesc(t *testing.T) {
@@ -300,14 +268,14 @@ func TestSpaceCyclesASortCellThroughOffAscDesc(t *testing.T) {
 		t.Errorf("second space should make it DESCENDING; got %+v on=%v", k, on)
 	}
 	c.handleKey(keyMsg("space"))
-	if _, on := find(); on {
-		t.Error("third space should turn it off")
-	}
+	_, on := find()
+	assert.NewCollecting(t).False(on, "third space should turn it off")
 }
 
 // Turning a key on appends it, so it cannot silently displace the ordering
 // already chosen; priority moves deliberately with ⇧↑/⇧↓.
 func TestNewSortKeysAppendAndShiftArrowsReprioritize(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	c.modelView.keys = []sortKey{{field: colCtx, desc: true}}
 	seekCell(t, c, queryRow{field: colIn}, colSortCell)
@@ -318,36 +286,27 @@ func TestNewSortKeysAppendAndShiftArrowsReprioritize(t *testing.T) {
 	}
 
 	c.handleKey(keyMsg("shift+up"))
-	if c.modelView.keys[0].field != colIn {
-		t.Errorf("keys = %+v, want ⇧↑ to promote in$ to primary", c.modelView.keys)
-	}
+	ck.Eq(colIn, c.modelView.keys[0].field, "keys = %+v, want ⇧↑ to promote in$ to primary", c.modelView.keys)
 	c.handleKey(keyMsg("shift+down"))
-	if c.modelView.keys[0].field != colCtx {
-		t.Errorf("keys = %+v, want ⇧↓ to demote it again", c.modelView.keys)
-	}
+	ck.Eq(colCtx, c.modelView.keys[0].field, "keys = %+v, want ⇧↓ to demote it again", c.modelView.keys)
 	// Plain ↑/↓ move the CURSOR, never the priority.
 	before := append([]sortKey(nil), c.modelView.keys...)
 	c.handleKey(keyMsg("up"))
-	if c.modelView.keys[0].field != before[0].field {
-		t.Error("a plain ↑ reordered the keys; it should only move the cursor")
-	}
+	ck.Eq(before[0].field, c.modelView.keys[0].field, "a plain ↑ reordered the keys; it should only move the cursor")
 }
 
 func TestSpaceCyclesAThresholdAndWraps(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	seekCell(t, c, queryRow{field: colCtx}, colMinCell)
 	n := len(minStops(colCtx))
 
 	for i := 1; i < n; i++ {
 		c.handleKey(keyMsg("space"))
-		if got := c.modelView.boundFor(colCtx).minIx; got != i {
-			t.Fatalf("minIx = %d, want %d", got, i)
-		}
+		ck.Require().Eq(i, c.modelView.boundFor(colCtx).minIx, "minIx")
 	}
 	c.handleKey(keyMsg("space"))
-	if got := c.modelView.boundFor(colCtx).minIx; got != 0 {
-		t.Errorf("minIx = %d, want it to wrap back to unset", got)
-	}
+	ck.Eq(0, c.modelView.boundFor(colCtx).minIx, "minIx")
 }
 
 // Min and max are separate cells on the same row, which is what lets ">free"
@@ -360,9 +319,7 @@ func TestMinAndMaxAreIndependentCells(t *testing.T) {
 	c.handleKey(keyMsg("space"))
 
 	b := c.modelView.boundFor(colIn)
-	if b.minIx == 0 || b.maxIx == 0 {
-		t.Errorf("bound = %+v, want both sides set", b)
-	}
+	assert.NewCollecting(t).False(b.minIx == 0 || b.maxIx == 0, "bound = %+v, want both sides set", b)
 }
 
 // Every keystroke re-applies the query, so the rows above track it live.
@@ -375,62 +332,48 @@ func TestPanelReappliesTheQueryLive(t *testing.T) {
 		c.handleKey(keyMsg("space")) // up to the strictest context floor
 	}
 
-	if len(c.form.suggest) >= before {
-		t.Errorf("suggestions %d -> %d, want the floor to narrow the list live",
-			before, len(c.form.suggest))
-	}
+	assert.NewCollecting(t).Less(before, len(c.form.suggest), "suggestions")
 }
 
 func TestEscapeClosesThePanelAndKeepsTheQuery(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	seekCell(t, c, queryRow{field: colIntel}, colSortCell)
 	c.handleKey(keyMsg("space"))
 
 	c.handleKey(keyMsg("esc"))
 
-	if c.query != nil {
-		t.Error("esc did not close the panel")
-	}
-	if c.form == nil {
-		t.Fatal("esc dismissed the form as well")
-	}
+	ck.Nil(c.query, "esc did not close the panel")
+	ck.Require().NotNil(c.form, "esc dismissed the form as well")
 	var found bool
 	for _, k := range c.modelView.keys {
 		if k.field == colIntel {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("the query was discarded when the panel closed")
-	}
+	ck.True(found, "the query was discarded when the panel closed")
 }
 
 // The selected cell and an active cell are different questions -- where the
 // cursor is, and what the query constrains -- and both must be visible.
 func TestDialogMarksSelectionAndActivationSeparately(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	c.modelView.setBound(colCtx, bound{minIx: 1})
 
 	out := ansi.Strip(c.query.view(120, 44, c.modelView))
-	if !strings.Contains(out, "≥128k") {
-		t.Errorf("an active bound is not shown:\n%s", out)
-	}
-	if !strings.Contains(out, "[") {
-		t.Errorf("the selected cell is not marked:\n%s", out)
-	}
+	ck.StrContains(out, "≥128k", "an active bound is not shown:\n")
+	ck.StrContains(out, "[", "the selected cell is not marked:\n")
 }
 
 func TestSortCellsShowDirectionAndPriority(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	c.modelView.keys = []sortKey{{field: colCtx, desc: true}, {field: colIn}}
 
 	out := ansi.Strip(c.query.view(120, 44, c.modelView))
-	if !strings.Contains(out, "↓ 1") {
-		t.Errorf("primary key missing its arrow and priority:\n%s", out)
-	}
-	if !strings.Contains(out, "↑ 2") {
-		t.Errorf("secondary key missing its arrow and priority:\n%s", out)
-	}
+	ck.StrContains(out, "↓ 1", "primary key missing its arrow and priority:\n")
+	ck.StrContains(out, "↑ 2", "secondary key missing its arrow and priority:\n")
 }
 
 func TestPanelCostsTheListItsHeight(t *testing.T) {
@@ -439,34 +382,25 @@ func TestPanelCostsTheListItsHeight(t *testing.T) {
 	focusModelRow(c)
 	open := c.form.suggestWindow(44, nil)
 	closed := c.form.suggestWindow(44, &queryDialog{})
-	if open-closed != queryHeight(&queryDialog{}, 44) {
-		t.Errorf("window %d -> %d, want the panel to cost exactly its height",
-			open, closed)
-	}
+	assert.NewCollecting(t).Eq(queryHeight(&queryDialog{}, 44), open-closed, "window %d -> %d, want the panel to cost exactly its height", open, closed)
 }
 
 func TestPriorityDigitDegradesPastNine(t *testing.T) {
-	if got := priorityDigit(3); got != "3" {
-		t.Errorf("priorityDigit(3) = %q", got)
-	}
-	if got := priorityDigit(12); got != "+" {
-		t.Errorf("priorityDigit(12) = %q, want +", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("3", priorityDigit(3), "priorityDigit(3) =")
+	c.Eq("+", priorityDigit(12), "priorityDigit(12)")
 }
 
 // Navigation only lands on cells that can hold something, so every available
 // cell must have somewhere to cycle to.
 func TestEveryAvailableCellHasSomethingToCycle(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, r := range queryRowsList() {
 		if r.flag != flagNone {
 			continue
 		}
-		if r.available(colMinCell) && len(minStops(r.field)) < 2 {
-			t.Errorf("%v min is navigable but has nothing to cycle", r.field)
-		}
-		if r.available(colMaxCell) && len(maxStops(r.field)) < 2 {
-			t.Errorf("%v max is navigable but has nothing to cycle", r.field)
-		}
+		c.False(r.available(colMinCell) && len(minStops(r.field)) < 2, "%v min is navigable but has nothing to cycle", r.field)
+		c.False(r.available(colMaxCell) && len(maxStops(r.field)) < 2, "%v max is navigable but has nothing to cycle", r.field)
 	}
 }
 
@@ -474,25 +408,21 @@ func TestEveryAvailableCellHasSomethingToCycle(t *testing.T) {
 // applied", which is the one misreading that matters. The words now name what
 // the filter DOES.
 func TestCapabilityCellsSayAnyRatherThanOff(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := openQuery(t)
 	c.modelView.toolsOnly = false
 	c.modelView.visionOnly = true
 
 	out := ansi.Strip(c.query.view(120, 44, c.modelView))
-	if strings.Contains(out, "off") {
-		t.Errorf("a capability cell still reads \"off\":\n%s", out)
-	}
-	if !strings.Contains(out, "any") {
-		t.Errorf("an unapplied filter should read \"any\":\n%s", out)
-	}
-	if !strings.Contains(out, "required") {
-		t.Errorf("an applied filter should read \"required\":\n%s", out)
-	}
+	ck.NotStrContains(out, "off", "a capability cell still reads \"off\":\n")
+	ck.StrContains(out, "any", "an unapplied filter should read \"any\":\n")
+	ck.StrContains(out, "required", "an applied filter should read \"required\":\n")
 }
 
 // "any" must genuinely mean unfiltered: a model KNOWN not to tool-call is
 // admitted, which is the whole difference from "required".
 func TestAnyMeansUnfilteredNotExcluded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rows := []*rafikiv1.ModelRow{
 		{Id: "a/tools", SupportedParameters: []string{"tools"}},
 		{Id: "b/none", SupportedParameters: []string{"temperature"}},
@@ -501,15 +431,11 @@ func TestAnyMeansUnfilteredNotExcluded(t *testing.T) {
 	v := defaultModelView()
 
 	v.toolsOnly = false
-	if got := len(selectModels(rows, "", v)); got != 3 {
-		t.Errorf("with tools=any got %d rows, want all 3", got)
-	}
+	c.Eq(3, len(selectModels(rows, "", v)), "with tools=any got")
 
 	v.toolsOnly = true
 	got := selectModels(rows, "", v)
-	if len(got) != 2 {
-		t.Fatalf("with tools=required got %d rows, want 2", len(got))
-	}
+	c.Require().Len(got, 2, "with tools=required got %d rows, want 2", len(got))
 	// ...and "required" still admits UNKNOWN, or the local fleet disappears.
 	var sawUnknown bool
 	for _, r := range got {
@@ -517,15 +443,14 @@ func TestAnyMeansUnfilteredNotExcluded(t *testing.T) {
 			sawUnknown = true
 		}
 	}
-	if !sawUnknown {
-		t.Error("required excluded a model of unknown capability")
-	}
+	c.True(sawUnknown, "required excluded a model of unknown capability")
 }
 
 // ── remembering the query ────────────────────────────────────────────────────
 
 func TestModelViewRoundTripsThroughDisk(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
 
 	want := defaultModelView()
 	want.keys = []sortKey{{field: colIntel, desc: true}, {field: colIn}}
@@ -539,44 +464,34 @@ func TestModelViewRoundTripsThroughDisk(t *testing.T) {
 	saveModelView("test", want)
 	got := loadModelView("test")
 
-	if len(got.keys) != 2 || got.keys[0].field != colIntel || !got.keys[0].desc {
-		t.Errorf("keys = %+v, want intel↓ then in$↑", got.keys)
-	}
+	c.False(len(got.keys) != 2 || got.keys[0].field != colIntel || !got.keys[0].desc, "keys = %+v, want intel↓ then in$↑", got.keys)
 	if got.keys[1].field != colIn || got.keys[1].desc {
 		t.Errorf("second key = %+v, want in$ ascending", got.keys[1])
 	}
-	if got.boundFor(colCtx) != want.boundFor(colCtx) {
-		t.Errorf("ctx bound = %+v, want %+v", got.boundFor(colCtx), want.boundFor(colCtx))
-	}
-	if got.boundFor(colIn) != want.boundFor(colIn) {
-		t.Errorf("in$ bound = %+v, want %+v", got.boundFor(colIn), want.boundFor(colIn))
-	}
-	if !got.visionOnly || !got.toolsOnly {
-		t.Errorf("flags = vision:%v tools:%v, want both on", got.visionOnly, got.toolsOnly)
-	}
+	c.Eq(want.boundFor(colCtx), got.boundFor(colCtx), "ctx bound")
+	c.Eq(want.boundFor(colIn), got.boundFor(colIn), "in$ bound")
+	c.False(!got.visionOnly || !got.toolsOnly, "flags = vision:%v tools:%v, want both on", got.visionOnly, got.toolsOnly)
 }
 
 // Storing by NAME is what stops a reordered enum silently reinterpreting a
 // saved query -- "sort by intelligence" must not become "sort by code".
 func TestStoredQueryIsKeyedByNameNotOrdinal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	v := defaultModelView()
 	v.keys = []sortKey{{field: colAgentic, desc: true}}
 	v.setBound(colCtx, bound{minIx: 3})
 
 	p := toStored(v)
-	if p.Keys[0].Field != "agentic" {
-		t.Errorf("key stored as %q, want the field NAME", p.Keys[0].Field)
-	}
+	c.Eq("agentic", p.Keys[0].Field, "key stored as")
 	if _, ok := p.Bounds["ctx"]; !ok {
 		t.Errorf("bounds keyed by %v, want the field name", p.Bounds)
 	}
-	if p.Bounds["ctx"].Min != "1M" {
-		t.Errorf("bound stored as %q, want the stop LABEL", p.Bounds["ctx"].Min)
-	}
+	c.Eq("1M", p.Bounds["ctx"].Min, "bound stored as")
 }
 
 // An unrecognised name degrades the query rather than refusing it.
 func TestUnknownFieldsAndStopsAreDropped(t *testing.T) {
+	c := assert.NewCollecting(t)
 	v := fromStored(&clientstate.ModelView{
 		Keys: []clientstate.SortKey{{Field: "no-such-field"}, {Field: "ctx", Desc: true}},
 		Bounds: map[string]clientstate.Bound{
@@ -585,15 +500,10 @@ func TestUnknownFieldsAndStopsAreDropped(t *testing.T) {
 		},
 		ToolsOnly: true,
 	})
-	if len(v.keys) != 1 || v.keys[0].field != colCtx {
-		t.Errorf("keys = %+v, want only the recognised one", v.keys)
-	}
-	if v.boundFor(colCtx).set() {
-		t.Error("an unrecognised stop label produced a bound anyway")
-	}
-	if _, ok := v.bounds[colModel]; ok {
-		t.Error("an unrecognised field produced a bound")
-	}
+	c.False(len(v.keys) != 1 || v.keys[0].field != colCtx, "keys = %+v, want only the recognised one", v.keys)
+	c.False(v.boundFor(colCtx).set(), "an unrecognised stop label produced a bound anyway")
+	_, ok := v.bounds[colModel]
+	c.False(ok, "an unrecognised field produced a bound")
 }
 
 // A document that decodes to nothing orderable still needs a total order, or
@@ -602,13 +512,13 @@ func TestEmptyStoredQueryStillSorts(t *testing.T) {
 	if v := fromStored(&clientstate.ModelView{}); len(v.keys) == 0 {
 		t.Fatal("no sort keys at all")
 	}
-	if v := fromStored(nil); len(v.keys) == 0 {
-		t.Fatal("a nil section produced no sort keys")
-	}
+	v := fromStored(nil)
+	assert.NewAborting(t).NotEmpty(v.keys, "a nil section produced no sort keys")
 }
 
 // Every failure is silent: a UI preference must never stop the cockpit opening.
 func TestCorruptOrMissingStateFallsBackToDefaults(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", dir)
 
@@ -617,12 +527,8 @@ func TestCorruptOrMissingStateFallsBackToDefaults(t *testing.T) {
 	}
 
 	path := profile.StateFile("test")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(filepath.Dir(path), 0o700))
+	c.NoError(os.WriteFile(path, []byte("{not json"), 0o600))
 	if got := loadModelView("test"); !got.toolsOnly || len(got.keys) == 0 {
 		t.Errorf("a corrupt file did not fall back to the default view: %+v", got)
 	}
@@ -652,9 +558,7 @@ func TestClosingThePanelSavesTheQuery(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("the query was not persisted when the panel closed")
-	}
+	assert.NewCollecting(t).True(found, "the query was not persisted when the panel closed")
 }
 
 // TestModelViewStoreIsANoOpForAnEmptyProfileName pins Fix 8: an empty
@@ -671,9 +575,7 @@ func TestModelViewStoreIsANoOpForAnEmptyProfileName(t *testing.T) {
 
 	got := loadModelView("")
 	for _, k := range got.keys {
-		if k.field == colAgentic {
-			t.Fatal("saveModelView(\"\", ...) persisted state despite the empty profile name")
-		}
+		assert.NewAborting(t).NotEq(colAgentic, k.field, "saveModelView(\"\", ...) persisted state despite the empty profile name")
 	}
 }
 
@@ -688,18 +590,15 @@ func TestModelViewStoreIsANoOpForAnEmptyProfileName(t *testing.T) {
 // TestBoundsAdmitModelsTheCatalogCannotAnswerFor pins -- so this is the only
 // way to ask for benchmarked models only.
 func TestScoredStopExcludesUnscoredModels(t *testing.T) {
+	c := assert.NewCollecting(t)
 	v := defaultModelView()
 	v.setBound(colIntel, bound{minIx: stopIndex(t, minStops(colIntel), "scored")})
 
 	rows := selectModels(scoredQueryRows(), "", v)
-	if len(rows) == 0 {
-		t.Fatal("the scored stop excluded everything, including scored models")
-	}
+	c.Require().NotEmpty(rows, "the scored stop excluded everything, including scored models")
 	for _, r := range rows {
-		if r.IntelligenceIndex == nil {
-			t.Errorf("row %q has no intelligence score but survived the scored stop; "+
-				"the stop is a no-op again", r.GetId())
-		}
+		c.NotNil(r.IntelligenceIndex, "row %q has no intelligence score but survived the scored stop; "+
+			"the stop is a no-op again", r.GetId())
 	}
 }
 
@@ -717,9 +616,7 @@ func TestScoredStopIsNotAppliedToOtherFields(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("a context bound rejected a model the catalog cannot answer for")
-	}
+	assert.NewCollecting(t).True(found, "a context bound rejected a model the catalog cannot answer for")
 }
 
 func scoredQueryRows() []*rafikiv1.ModelRow {

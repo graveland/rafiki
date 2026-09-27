@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // pkg/executor builds an adapter from this package and is required to link no
@@ -17,8 +19,6 @@ func TestAdapterDoesNotLinkPostgres(t *testing.T) {
 		t.Skipf("go list unavailable: %v", err)
 	}
 	for _, dep := range strings.Split(string(out), "\n") {
-		if strings.Contains(dep, "jackc/pgx") || strings.Contains(dep, "lib/pq") {
-			t.Errorf("pkg/fundi/lspadapter links %s; the executor imports this package and must link no database driver", dep)
-		}
+		assert.NewCollecting(t).False(strings.Contains(dep, "jackc/pgx") || strings.Contains(dep, "lib/pq"), "pkg/fundi/lspadapter links %s; the executor imports this package and must link no database driver", dep)
 	}
 }

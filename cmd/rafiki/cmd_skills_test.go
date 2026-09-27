@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSplitQualified(t *testing.T) {
@@ -15,42 +17,28 @@ func TestSplitQualified(t *testing.T) {
 		{"bare", "rafiki", "bare"},
 	} {
 		ns, name := splitQualified(tc.in)
-		if ns != tc.ns || name != tc.name {
-			t.Errorf("%q: got (%q,%q), want (%q,%q)", tc.in, ns, name, tc.ns, tc.name)
-		}
+		assert.NewCollecting(t).False(ns != tc.ns || name != tc.name, "%q: got (%q,%q), want (%q,%q)", tc.in, ns, name, tc.ns, tc.name)
 	}
 }
 
 func TestDerivePluginNamespaceFallsBackToTheDirectoryName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir() + "/mycorpus"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(dir, 0o755))
 	got, err := derivePluginNamespace(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "mycorpus" {
-		t.Errorf("got %q, want %q", got, "mycorpus")
-	}
+	c.Require().NoError(err)
+	c.Eq("mycorpus", got, "got")
 }
 
 func TestDerivePluginNamespaceReadsAMarketplaceManifest(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
-	if err := os.MkdirAll(dir+"/.claude-plugin", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(dir+"/.claude-plugin", 0o755))
 	manifest := `{"name":"aiguide","plugins":[{"name":"pg","source":"./"}]}`
-	if err := os.WriteFile(dir+"/.claude-plugin/marketplace.json", []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(dir+"/.claude-plugin/marketplace.json", []byte(manifest), 0o644))
 	got, err := derivePluginNamespace(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "pg" {
-		t.Errorf("got %q, want %q — the PLUGIN name, not the marketplace name", got, "pg")
-	}
+	c.Require().NoError(err)
+	c.Eq("pg", got, "got")
 }
 
 // `rafiki skills import .` used to fall back to a namespace literally named
@@ -71,9 +59,7 @@ func TestDerivePluginNamespaceRefusesDotAndDotDot(t *testing.T) {
 	cmd.SetOut(&strings.Builder{})
 	cmd.SetErr(&strings.Builder{})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--namespace") {
-		t.Fatalf("skills import . = %v, want an error naming --namespace", err)
-	}
+	assert.NewAborting(t).False(err == nil || !strings.Contains(err.Error(), "--namespace"), "skills import . = %v, want an error naming --namespace", err)
 
 	// --namespace is the documented escape hatch and still works.
 	cmd = newSkillsImportCmd()

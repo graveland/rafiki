@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestParseList(t *testing.T) {
@@ -98,46 +100,32 @@ func TestParseList(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			got, err := Parse(tt.text)
 			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("Parse(%q) = %v, want error %q", tt.text, got, tt.wantErr)
-				}
-				if err.Error() != tt.wantErr {
-					t.Fatalf("Parse(%q) error = %q, want %q", tt.text, err, tt.wantErr)
-				}
+				c.Require().Error(err, "Parse(%q) = %v, want error %q", tt.text, got, tt.wantErr)
+				c.Require().Eq(tt.wantErr, err.Error(), "Parse(%q) error = %q, want", tt.text, err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("Parse(%q) unexpected error: %v", tt.text, err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("Parse(%q) = %v, want %v", tt.text, got, tt.want)
-			}
+			c.Require().NoError(err, "Parse(%q) unexpected error", tt.text)
+			c.Require().Len(got, len(tt.want), "Parse(%q) = %v, want %v", tt.text, got, tt.want)
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("Parse(%q)[%d] = %+v, want %+v", tt.text, i, got[i], tt.want[i])
-				}
+				c.Eq(tt.want[i], got[i], "Parse(%q)[%d] = %+v, want", tt.text, i, got[i])
 			}
 		})
 	}
 }
 
 func TestParseEntriesMatchesParse(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// ParseEntries must handle comments and blanks exactly as Parse does.
 	lines := []string{"", "# header", "a.go:1-2", "  ", "b.go # tail"}
 	got, err := ParseEntries(lines)
-	if err != nil {
-		t.Fatalf("ParseEntries(%q) unexpected error: %v", lines, err)
-	}
+	c.Require().NoError(err, "ParseEntries(%q) unexpected error", lines)
 	want, _ := Parse(strings.Join(lines, "\n"))
-	if len(got) != len(want) {
-		t.Fatalf("ParseEntries = %v, Parse = %v", got, want)
-	}
+	c.Require().Len(got, len(want), "ParseEntries = %v, Parse = %v", got, want)
 	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("ParseEntries[%d] = %+v, want %+v", i, got[i], want[i])
-		}
+		c.Eq(want[i], got[i], "ParseEntries[%d] = %+v, want", i, got[i])
 	}
 	if _, err := ParseEntries([]string{"a.go:-"}); err == nil || err.Error() != `prefill: line 1: empty range ":-"` {
 		t.Errorf("ParseEntries error = %v, want empty-range error on line 1", err)
@@ -209,19 +197,14 @@ func TestPrefillValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			err := Validate(tt.entries)
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("Validate(%v) unexpected error: %v", tt.entries, err)
-				}
+				c.NoError(err, "Validate(%v) unexpected error", tt.entries)
 				return
 			}
-			if err == nil {
-				t.Fatalf("Validate(%v) = nil, want error %q", tt.entries, tt.wantErr)
-			}
-			if err.Error() != tt.wantErr {
-				t.Fatalf("Validate(%v) error = %q, want %q", tt.entries, err, tt.wantErr)
-			}
+			c.Error(err, "Validate(%v) = nil, want error %q", tt.entries, tt.wantErr)
+			c.Eq(tt.wantErr, err.Error(), "Validate(%v) error = %q, want", tt.entries, err)
 		})
 	}
 }
@@ -239,8 +222,7 @@ func TestPrefillIsGlob(t *testing.T) {
 		"dir/{a,b}/x.go:1-2": true,
 	}
 	for path, want := range tests {
-		if got := IsGlob(path); got != want {
-			t.Errorf("IsGlob(%q) = %v, want %v", path, got, want)
-		}
+		got := IsGlob(path)
+		assert.NewCollecting(t).Eq(want, got, "IsGlob(%q) = %v, want", path, got)
 	}
 }

@@ -13,15 +13,17 @@ package integration_test
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestMCPInjectedConfigReachesTheAgentControlSurface(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d := bootMCPDaemon(t)
 	token := d.createMCPUser(t)
 
@@ -40,14 +42,10 @@ func TestMCPInjectedConfigReachesTheAgentControlSurface(t *testing.T) {
 			mcpToken = v
 		}
 	}
-	if mcpToken != token {
-		t.Fatalf("RAFIKI_MCP_TOKEN = %q, want the user token %q", mcpToken, token)
-	}
+	c.Require().Eq(token, mcpToken, "RAFIKI_MCP_TOKEN")
 
 	var mcpConfigJSON string
-	if vals.MCPConfig == "" {
-		t.Fatalf("values = %+v, missing MCPConfig", vals)
-	}
+	c.Require().NotEq("", vals.MCPConfig, "values = %+v, missing MCPConfig", vals)
 	mcpConfigJSON = vals.MCPConfig
 
 	var doc struct {
@@ -61,25 +59,15 @@ func TestMCPInjectedConfigReachesTheAgentControlSurface(t *testing.T) {
 		t.Fatalf("--mcp-config is not valid JSON: %v (%s)", err, mcpConfigJSON)
 	}
 	rafiki, ok := doc.MCPServers["rafiki"]
-	if !ok {
-		t.Fatalf("mcpServers = %v, missing \"rafiki\"", doc.MCPServers)
-	}
-	if rafiki.Type != "http" {
-		t.Errorf("type = %q, want \"http\"", rafiki.Type)
-	}
-	if rafiki.URL != d.proxyURL+"/mcp" {
-		t.Fatalf("url = %q, want %q", rafiki.URL, d.proxyURL+"/mcp")
-	}
+	c.Require().True(ok, "mcpServers = %v, missing \"rafiki\"", doc.MCPServers)
+	c.Eq("http", rafiki.Type, "type = %q, want \"http\"", rafiki.Type)
+	c.Require().Eq(d.proxyURL+"/mcp", rafiki.URL, "url")
 	gotHeader := rafiki.Headers["Authorization"]
 	wantPlaceholder := "Bearer ${RAFIKI_MCP_TOKEN}"
-	if gotHeader != wantPlaceholder {
-		t.Fatalf("Authorization header = %q, want the literal placeholder %q", gotHeader, wantPlaceholder)
-	}
+	c.Require().Eq(wantPlaceholder, gotHeader, "Authorization header")
 	// The token must never be inlined into the JSON — argv is world-readable
 	// via ps; only the placeholder may travel there.
-	if strings.Contains(mcpConfigJSON, mcpToken) {
-		t.Errorf("--mcp-config inlines the user token; only the ${RAFIKI_MCP_TOKEN} placeholder may travel in argv (%s)", mcpConfigJSON)
-	}
+	c.NotStrContains(mcpConfigJSON, mcpToken, "--mcp-config inlines the user token; only the ${RAFIKI_MCP_TOKEN} placeholder may travel in argv (")
 	// Perform the substitution Claude Code would do, then actually connect.
 	resolvedHeader := strings.ReplaceAll(gotHeader, "${RAFIKI_MCP_TOKEN}", mcpToken)
 	resolvedToken := strings.TrimPrefix(resolvedHeader, "Bearer ")
@@ -87,19 +75,13 @@ func TestMCPInjectedConfigReachesTheAgentControlSurface(t *testing.T) {
 	// mcpConnect appends /mcp itself, so pass the base URL.
 	sess := mcpConnect(t, rafiki.URL[:len(rafiki.URL)-len("/mcp")], resolvedToken)
 	tools, err := sess.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
+	c.Require().NoError(err, "ListTools")
 	var got []string
 	for _, tool := range tools.Tools {
 		got = append(got, tool.Name)
 	}
 	for _, want := range mcpToolNames {
-		if !slices.Contains(got, want) {
-			t.Errorf("tool %q missing from injected-config session; got %v", want, got)
-		}
+		c.Contains(got, want, "tool")
 	}
-	if len(got) != len(mcpToolNames) {
-		t.Errorf("got %d tools %v, want exactly %d (%v)", len(got), got, len(mcpToolNames), mcpToolNames)
-	}
+	c.Len(got, len(mcpToolNames), "got %d tools %v, want exactly %d (%v)", len(got), got, len(mcpToolNames), mcpToolNames)
 }

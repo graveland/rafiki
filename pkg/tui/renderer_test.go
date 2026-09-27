@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/session"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func finalizedBlocks(n int) []session.Block {
@@ -38,9 +40,7 @@ func TestLinesCacheIsTransparent(t *testing.T) {
 	warm.Lines(blocks[:3], 3, 100) // prime
 	got := warm.Lines(blocks, len(blocks), 100)
 
-	if strings.Join(got, "\n") != strings.Join(cold, "\n") {
-		t.Errorf("warm cache output differs from cold:\nwarm: %q\ncold: %q", got, cold)
-	}
+	assert.NewCollecting(t).Eq(strings.Join(cold, "\n"), strings.Join(got, "\n"), "warm cache output differs from cold:\nwarm: %q\ncold: %q", got, cold)
 }
 
 // A user message's text is styled AFTER wrapping, one physical row at a time
@@ -51,6 +51,7 @@ func TestLinesCacheIsTransparent(t *testing.T) {
 // This exercises both sources of a continuation row: an embedded newline in
 // the prompt, and a single logical line long enough to wrap on its own.
 func TestUserMessageEveryPhysicalRowIsStyled(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newRenderer()
 	r.width = 30
 	b := session.Block{Kind: session.KindUser, Text: "first line\n" +
@@ -58,13 +59,9 @@ func TestUserMessageEveryPhysicalRowIsStyled(t *testing.T) {
 	out := r.renderBlock(b)
 
 	lines := strings.Split(strings.TrimPrefix(out, "\n"), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("test setup: expected at least 3 physical rows (1 short line + a wrapped long one), got %d: %q", len(lines), lines)
-	}
+	c.Require().GreaterOrEqual(3, len(lines), "test setup: expected at least 3 physical rows (1 short line + a wrapped long one), got %d: %q", len(lines), lines)
 	for i, l := range lines {
-		if !strings.Contains(l, "\x1b[1;36m") {
-			t.Errorf("row %d = %q, want it to carry its own opening style code -- a row with none renders unstyled", i, l)
-		}
+		c.StrContains(l, "\x1b[1;36m", "row %d = %q, want it to carry its own opening style code -- a row with none renders unstyled", i, l)
 	}
 }
 
@@ -79,9 +76,7 @@ func TestLinesRebuildsWhenFinalizedShrinks(t *testing.T) {
 	got := r.Lines(short, 2, 100)
 	want := newRenderer().Lines(short, 2, 100)
 
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("shrinking Finalized did not rebuild:\ngot:  %q\nwant: %q", got, want)
-	}
+	assert.NewCollecting(t).Eq(strings.Join(want, "\n"), strings.Join(got, "\n"), "shrinking Finalized did not rebuild:\ngot:  %q\nwant: %q", got, want)
 }
 
 // TestLinesCapsToolResultsOnPlainOutput uses the shape tool output actually
@@ -99,6 +94,7 @@ func TestLinesRebuildsWhenFinalizedShrinks(t *testing.T) {
 // Tool output is not markdown. It is rendered preformatted now, which fixes
 // both the cap and the loss of line structure.
 func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var plain strings.Builder
 	for i := 1; i <= 500; i++ {
 		plain.WriteString("result line " + strconv.Itoa(i) + "\n")
@@ -112,21 +108,12 @@ func TestLinesCapsToolResultsOnPlainOutput(t *testing.T) {
 	got := newRenderer().Lines(blocks, 1, 100)
 	joined := strings.Join(got, "\n")
 
-	if n := strings.Count(joined, "result line"); n > toolResultHeadLines+toolResultTailLines {
-		t.Errorf("tool result not capped: %d occurrences, cap is %d",
-			n, toolResultHeadLines+toolResultTailLines)
-	}
-	if !strings.Contains(joined, "omitted") {
-		t.Errorf("capped output must say how much was elided; got:\n%s", joined)
-	}
+	c.LessOrEqual(toolResultHeadLines+toolResultTailLines, strings.Count(joined, "result line"), "tool result not capped")
+	c.StrContains(joined, "omitted", "capped output must say how much was elided; got:\n")
 	// The TAIL survives, not the head: a command's ending carries its error,
 	// and a long build's last lines are where it has got to.
-	if !strings.Contains(joined, "result line 500") {
-		t.Errorf("capped output dropped the LAST line; the tail is the part worth keeping:\n%s", joined)
-	}
-	if strings.Contains(joined, "result line 1\n") {
-		t.Errorf("capped output kept the head; it must keep the tail:\n%s", joined)
-	}
+	c.StrContains(joined, "result line 500", "capped output dropped the LAST line; the tail is the part worth keeping:\n")
+	c.NotStrContains(joined, "result line 1\n", "capped output kept the head; it must keep the tail:\n")
 }
 
 // TestLinesPreservesToolOutputLineStructure is the other half: plain tool
@@ -150,9 +137,7 @@ func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 			hits++
 		}
 	}
-	if hits != 3 {
-		t.Errorf("three tool output lines collapsed onto %d display lines: %q", hits, got)
-	}
+	assert.NewCollecting(t).Eq(3, hits, "three tool output lines collapsed onto %d display lines: %q", hits, got)
 }
 
 // A tool result is arbitrary bytes, and this shape actually occurred: a
@@ -165,6 +150,7 @@ func TestLinesPreservesToolOutputLineStructure(t *testing.T) {
 // result carried in, which can only appear immediately adjacent to the text
 // they decorated. Observed 2026-09-09.
 func TestToolResultControlCharsNeverReachTheTerminal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	res := "Rebasing (1/1029)\rRebasing (2/1029)\x1b[2K\x1b[1merror:\x1b[0m could not apply a1b2c3"
 	blocks := []session.Block{{
 		Kind:      session.KindAssistant,
@@ -174,23 +160,16 @@ func TestToolResultControlCharsNeverReachTheTerminal(t *testing.T) {
 
 	got := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
 
-	if strings.Contains(got, "\r") {
-		t.Errorf("a carriage return reached the terminal:\n%q", got)
-	}
-	if strings.Contains(got, "\x1b[2K") || strings.Contains(got, "\x1b[1merror") || strings.Contains(got, "apply\x1b[0m") {
-		t.Errorf("the result's own escape sequences survived:\n%q", got)
-	}
-	if !strings.Contains(got, "Rebasing (2/1029)") {
-		t.Errorf("the CR-folded progress line was lost:\n%s", got)
-	}
-	if !strings.Contains(got, "error: could not apply") {
-		t.Errorf("stripped text was lost:\n%s", got)
-	}
+	c.NotStrContains(got, "\r", "a carriage return reached the terminal:\n")
+	c.False(strings.Contains(got, "\x1b[2K") || strings.Contains(got, "\x1b[1merror") || strings.Contains(got, "apply\x1b[0m"), "the result's own escape sequences survived:\n%q", got)
+	c.StrContains(got, "Rebasing (2/1029)", "the CR-folded progress line was lost:\n")
+	c.StrContains(got, "error: could not apply", "stripped text was lost:\n")
 }
 
 // The command line is transcript content too: a command carrying an escape or
 // a CR must not reach the terminal any more than a result carrying one.
 func TestToolArgControlCharsNeverReachTheTerminal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	blocks := []session.Block{{
 		Kind:  session.KindAssistant,
 		Final: true,
@@ -203,15 +182,9 @@ func TestToolArgControlCharsNeverReachTheTerminal(t *testing.T) {
 	}}
 
 	got := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
-	if strings.Contains(got, "\r") {
-		t.Errorf("a carriage return reached the terminal from the command line:\n%q", got)
-	}
-	if strings.Contains(got, "\x1b[31mred") || strings.Contains(got, "red\x1b[0m") {
-		t.Errorf("the command's own escape sequences survived:\n%q", got)
-	}
-	if !strings.Contains(got, "printf 'red'") {
-		t.Errorf("the stripped command text was lost:\n%q", got)
-	}
+	c.NotStrContains(got, "\r", "a carriage return reached the terminal from the command line:\n")
+	c.False(strings.Contains(got, "\x1b[31mred") || strings.Contains(got, "red\x1b[0m"), "the command's own escape sequences survived:\n%q", got)
+	c.StrContains(got, "printf 'red'", "the stripped command text was lost:\n")
 }
 
 // sanitizeControlChars is the byte-level contract the two tests above pin
@@ -219,23 +192,18 @@ func TestToolArgControlCharsNeverReachTheTerminal(t *testing.T) {
 // C0 controls and DEL drop, tab and newline survive.
 func TestSanitizeControlChars(t *testing.T) {
 	got := sanitizeControlChars("a\r\nb\rc\x1b[2KD\x1b[0m\x07e\x7ff\tg")
-	if got != "a\nb\ncDef\tg" {
-		t.Errorf("sanitizeControlChars = %q, want %q", got, "a\nb\ncDef\tg")
-	}
+	assert.NewCollecting(t).Eq("a\nb\ncDef\tg", got, "sanitizeControlChars")
 }
 
 // TestLinesReturnsLinesNotOneString: Task 7 feeds this to
 // viewport.SetContentLines, and a prepend's YOffset shift is exactly
 // len(prepended) only if a block's lines are separate elements.
 func TestLinesReturnsLinesNotOneString(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := newRenderer().Lines(finalizedBlocks(3), 3, 100)
-	if len(got) < 3 {
-		t.Fatalf("expected at least one line per block, got %d: %q", len(got), got)
-	}
+	c.Require().GreaterOrEqual(3, len(got), "expected at least one line per block, got %d: %q", len(got), got)
 	for i, l := range got {
-		if strings.Contains(l, "\n") {
-			t.Errorf("line %d contains a newline, so it is not one line: %q", i, l)
-		}
+		c.NotStrContains(l, "\n", "line %d contains a newline, so it is not one line", i)
 	}
 }
 
@@ -246,14 +214,11 @@ func TestLinesReturnsLinesNotOneString(t *testing.T) {
 // line two rows below it said "connected". Emptiness is the shell's to
 // describe, with the focus state it alone knows; the renderer renders blocks.
 func TestEmptyTranscriptRendersNoLines(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := newRenderer().Lines(nil, 0, 100)
-	if len(got) != 0 {
-		t.Errorf("Lines(nil, 0) = %q, want no lines", got)
-	}
+	c.Empty(got, "Lines(nil, 0)")
 	for _, l := range got {
-		if strings.Contains(l, "onnecting") {
-			t.Errorf("empty transcript claims to be connecting: %q", l)
-		}
+		c.NotStrContains(l, "onnecting", "empty transcript claims to be connecting")
 	}
 }
 
@@ -272,40 +237,33 @@ func TestToolCallShowsItsArgument(t *testing.T) {
 		{"noargs", `{}`, ""},
 	} {
 		got := toolArgSummary(tc.name, tc.input, maxToolArgWidth)
-		if got != tc.want {
-			t.Errorf("toolArgSummary(%q, %q, maxToolArgWidth) = %q, want %q", tc.name, tc.input, got, tc.want)
-		}
+		assert.NewCollecting(t).Eq(tc.want, got, "toolArgSummary(%q, %q, maxToolArgWidth) = %q, want", tc.name, tc.input, got)
 	}
 }
 
 // A multi-line argument must not unroll into the transcript and bury the
 // conversation it is part of.
 func TestToolArgumentIsOneBoundedLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := toolArgSummary("bash", `{"command":"`+strings.Repeat("x", 500)+`"}`, maxToolArgWidth)
-	if strings.Contains(got, "\n") {
-		t.Error("argument summary spans lines")
-	}
-	if len([]rune(got)) > maxToolArgWidth {
-		t.Errorf("argument summary is %d runes, cap is %d", len([]rune(got)), maxToolArgWidth)
-	}
+	c.NotStrContains(got, "\n", "argument summary spans lines")
+	c.LessOrEqual(maxToolArgWidth, len([]rune(got)), "argument summary is")
 
 	multi := toolArgSummary("write", `{"path":"a\nb\nc"}`, maxToolArgWidth)
-	if strings.Contains(multi, "\n") {
-		t.Errorf("multi-line argument was not collapsed: %q", multi)
-	}
+	c.NotStrContains(multi, "\n", "multi-line argument was not collapsed")
 }
 
 // A guessed tool name degrades silently to the JSON fallback and looks like it
 // works, so the map is pinned against the real registry.
 func TestToolArgKeysNameRealTools(t *testing.T) {
 	for name := range toolArgKeys {
-		if _, ok := tools.TierOf(name); !ok {
-			t.Errorf("toolArgKeys names %q, which is not a registered tool", name)
-		}
+		_, ok := tools.TierOf(name)
+		assert.NewCollecting(t).True(ok, "toolArgKeys names %q, which is not a registered tool", name)
 	}
 }
 
 func TestToolArgKeysNameRealSchemaProperties(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// The value side of toolArgKeys was never checked, so agent_send/view/kill
 	// all carried "child_id" while every one of those tools declares "agent".
 	want := map[string][]string{
@@ -315,12 +273,8 @@ func TestToolArgKeysNameRealSchemaProperties(t *testing.T) {
 	}
 	for tool, keys := range want {
 		got, ok := toolArgKeys[tool]
-		if !ok {
-			t.Fatalf("toolArgKeys has no entry for %q", tool)
-		}
-		if got[0] != keys[0] {
-			t.Errorf("toolArgKeys[%q][0] = %q, want %q", tool, got[0], keys[0])
-		}
+		c.Require().True(ok, "toolArgKeys has no entry for %q", tool)
+		c.Eq(keys[0], got[0], "toolArgKeys[%q][0] = %q, want", tool, got[0])
 	}
 }
 
@@ -328,9 +282,7 @@ func TestToolArgKeysNameRealSchemaProperties(t *testing.T) {
 // and unreadable and a count is the honest summary.
 func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {
 	got := toolArgSummary("task_add", `{"items":[{"content":"a"},{"content":"b"},{"content":"c"}]}`, maxToolArgWidth)
-	if got != "items×3" {
-		t.Errorf("toolArgSummary(task_add, 3 items, maxToolArgWidth) = %q, want %q", got, "items×3")
-	}
+	assert.NewCollecting(t).Eq("items×3", got, "toolArgSummary(task_add, 3 items, maxToolArgWidth)")
 }
 
 // Three weights, by gutter rather than by background: pi backgrounds its tool
@@ -338,6 +290,7 @@ func TestBatchToolArgumentsSummariseAsACount(t *testing.T) {
 // the agent's own prose, so that gets the solid bar, thinking a dotted one, and
 // tool calls none at all.
 func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	blocks := []session.Block{{
 		Kind:      session.KindAssistant,
 		Final:     true,
@@ -359,24 +312,21 @@ func TestTranscriptWeightsAreDistinguishable(t *testing.T) {
 			tool = p
 		}
 	}
-	if prose == "" || think == "" || tool == "" {
-		t.Fatalf("missing a weight: prose=%q think=%q tool=%q", prose, think, tool)
-	}
+	c.Require().False(prose == "" || think == "" || tool == "", "missing a weight: prose=%q think=%q tool=%q", prose, think, tool)
 	if !strings.HasPrefix(prose, "▌") {
 		t.Errorf("assistant prose lacks the solid gutter: %q", prose)
 	}
 	if !strings.HasPrefix(think, "┊") {
 		t.Errorf("thinking lacks the dotted gutter: %q", think)
 	}
-	if strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊") {
-		t.Errorf("tool calls must stay unadorned: %q", tool)
-	}
+	c.False(strings.HasPrefix(tool, "▌") || strings.HasPrefix(tool, "┊"), "tool calls must stay unadorned: %q", tool)
 }
 
 // A "── tool_use" rule under every block of a tool-calling turn — which is
 // most blocks — competes with the content while repeating what the ⚒ line
 // already showed. The unusual endings still show.
 func TestOnlyInterestingStopReasonsAreShown(t *testing.T) {
+	c := assert.NewCollecting(t)
 	render := func(reason string) string {
 		blocks := []session.Block{{
 			Kind: session.KindAssistant, Final: true,
@@ -385,14 +335,10 @@ func TestOnlyInterestingStopReasonsAreShown(t *testing.T) {
 		return ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
 	}
 	for _, quiet := range []string{"end_turn", "tool_use", "stop", ""} {
-		if strings.Contains(render(quiet), "──") {
-			t.Errorf("stop reason %q is routine and must not be printed", quiet)
-		}
+		c.NotStrContains(render(quiet), "──", "stop reason %q is routine and must not be printed", quiet)
 	}
 	for _, loud := range []string{"max_tokens", "refusal", "error"} {
-		if !strings.Contains(render(loud), loud) {
-			t.Errorf("stop reason %q is worth reading and must be printed", loud)
-		}
+		c.StrContains(render(loud), loud, "stop reason")
 	}
 }
 
@@ -400,6 +346,7 @@ func TestOnlyInterestingStopReasonsAreShown(t *testing.T) {
 // ENTIRE height — the call line and every row of output — so it is findable at
 // a glance rather than by reading for a ✗ among the ✓s.
 func TestFailedToolCallIsMarkedDownItsWholeHeight(t *testing.T) {
+	c := assert.NewCollecting(t)
 	blocks := []session.Block{{
 		Kind: session.KindAssistant, Final: true,
 		ToolCalls: []session.ToolCall{{
@@ -421,16 +368,9 @@ func TestFailedToolCallIsMarkedDownItsWholeHeight(t *testing.T) {
 			marked++
 		}
 	}
-	if total == 0 {
-		t.Fatal("nothing rendered")
-	}
-	if marked != total {
-		t.Errorf("%d of %d rows carry the failure bar; every row of a failed call must:\n%s",
-			marked, total, strings.Join(lines, "\n"))
-	}
-	if !strings.Contains(ansi.Strip(strings.Join(lines, "\n")), "✗") {
-		t.Error("a failed call must still be marked ✗")
-	}
+	c.Require().NotEq(0, total, "nothing rendered")
+	c.Eq(total, marked, "%d of %d rows carry the failure bar; every row of a failed call must:\n%s", marked, total, strings.Join(lines, "\n"))
+	c.StrContains(ansi.Strip(strings.Join(lines, "\n")), "✗", "a failed call must still be marked ✗")
 }
 
 // A successful call stays unadorned — the bar has to mean something.
@@ -440,9 +380,7 @@ func TestSuccessfulToolCallKeepsNoFailureBar(t *testing.T) {
 		ToolCalls: []session.ToolCall{{Name: "bash", Result: "ok", IsError: false}},
 	}}
 	joined := ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
-	if strings.Contains(joined, "▌") {
-		t.Errorf("a successful call must carry no failure bar:\n%s", joined)
-	}
+	assert.NewCollecting(t).NotStrContains(joined, "▌", "a successful call must carry no failure bar:\n")
 }
 
 // A call that ended with no result must not claim success. HasResult is not
@@ -451,27 +389,21 @@ func TestSuccessfulToolCallKeepsNoFailureBar(t *testing.T) {
 // silent success. There are real instances: a production database here holds
 // 38 bash calls with no matching tool_result.
 func TestToolCallWithNoResultDoesNotClaimSuccess(t *testing.T) {
+	c := assert.NewCollecting(t)
 	none := render(session.ToolCall{Name: "bash"})
-	if strings.Contains(none, "✓") {
-		t.Errorf("a call with no result claims success:\n%s", none)
-	}
-	if !strings.Contains(none, "⋯") {
-		t.Errorf("a call the turn abandoned must be marked:\n%s", none)
-	}
-	if strings.Contains(none, "no result") {
-		t.Errorf("the verbose 'no result' text is gone; the glyph is the whole marker:\n%s", none)
-	}
+	c.NotStrContains(none, "✓", "a call with no result claims success:\n")
+	c.StrContains(none, "⋯", "a call the turn abandoned must be marked:\n")
+	c.NotStrContains(none, "no result", "the verbose 'no result' text is gone; the glyph is the whole marker:\n")
 
 	// A tool that legitimately returned nothing still succeeded.
 	empty := render(session.ToolCall{Name: "bash", HasResult: true})
-	if !strings.Contains(empty, "✓") {
-		t.Errorf("an empty-but-real result must still read as success:\n%s", empty)
-	}
+	c.StrContains(empty, "✓", "an empty-but-real result must still read as success:\n")
 }
 
 // The regression that would have caught the frozen transcript. A tool result
 // arriving after the assistant message must appear on the NEXT render.
 func TestToolResultArrivingLateIsRendered(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := session.New("c1")
 	s.Apply(&rafikiv1.Event{
 		ChildId: "c1",
@@ -489,9 +421,7 @@ func TestToolResultArrivingLateIsRendered(t *testing.T) {
 
 	r := newRenderer()
 	first := strings.Join(r.Lines(s.Blocks, s.Finalized, 80), "\n")
-	if strings.Contains(first, "MARKER_OUTPUT") {
-		t.Fatalf("result present before it arrived:\n%s", first)
-	}
+	c.Require().NotStrContains(first, "MARKER_OUTPUT", "result present before it arrived:\n")
 
 	s.Apply(&rafikiv1.Event{
 		ChildId: "c1",
@@ -512,9 +442,7 @@ func TestToolResultArrivingLateIsRendered(t *testing.T) {
 	})
 
 	second := strings.Join(r.Lines(s.Blocks, s.Finalized, 80), "\n")
-	if !strings.Contains(second, "MARKER_OUTPUT") {
-		t.Errorf("a tool result that arrived after its assistant message was never rendered:\n%s", second)
-	}
+	c.StrContains(second, "MARKER_OUTPUT", "a tool result that arrived after its assistant message was never rendered:\n")
 }
 
 // With more than one unfinalized block, a change in an EARLIER one must still
@@ -530,9 +458,7 @@ func TestLiveFingerprintCoversEveryUnfinalizedBlock(t *testing.T) {
 	blocks[0].ToolCalls[0].Result = "changed"
 	blocks[0].ToolCalls[0].HasResult = true
 	after := session.LiveFingerprint(blocks, 0)
-	if before == after {
-		t.Error("a change in a non-final block that is not the last one did not change the fingerprint")
-	}
+	assert.NewCollecting(t).NotEq(after, before, "a change in a non-final block that is not the last one did not change the fingerprint")
 }
 
 // render draws one tool call in a finalized assistant block, stripped of ANSI
@@ -547,14 +473,13 @@ func render(tc session.ToolCall) string {
 // tool call is ⋯. Both are on screen at once, so they must not collide.
 func TestAbandonedToolCallDoesNotUseTheBlockedTaskGlyph(t *testing.T) {
 	out := render(session.ToolCall{Name: "bash"})
-	if strings.Contains(out, "⊘") {
-		t.Errorf("⊘ means a blocked task; an abandoned tool call must not use it:\n%s", out)
-	}
+	assert.NewCollecting(t).NotStrContains(out, "⊘", "⊘ means a blocked task; an abandoned tool call must not use it:\n")
 }
 
 // A long result shows both ends. The head carries a command's banner and its
 // first error; the tail carries how it ended.
 func TestLongToolResultShowsHeadAndTail(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var lines []string
 	for i := 1; i <= 300; i++ {
 		lines = append(lines, "L"+strconv.Itoa(i))
@@ -566,19 +491,13 @@ func TestLongToolResultShowsHeadAndTail(t *testing.T) {
 	})
 
 	for _, want := range []string{"L1", "L4", "L289", "L300"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q from head/tail window:\n%s", want, out)
-		}
+		c.StrContains(out, want, "missing")
 	}
 	for _, notWant := range []string{"L5", "L150", "L288"} {
-		if strings.Contains(out, notWant) {
-			t.Errorf("%q should have been elided:\n%s", notWant, out)
-		}
+		c.NotStrContains(out, notWant, "%q should have been elided:\n", notWant)
 	}
 	// 300 - 4 - 12 = 284
-	if !strings.Contains(out, "[omitted 284 lines]") {
-		t.Errorf("missing or wrong omission marker:\n%s", out)
-	}
+	c.StrContains(out, "[omitted 284 lines]", "missing or wrong omission marker:\n")
 }
 
 // Exactly the budget, and one under it, must not be elided at all.
@@ -591,26 +510,21 @@ func TestShortToolResultIsNotElided(t *testing.T) {
 		out := render(session.ToolCall{
 			Name: "bash", HasResult: true, Result: strings.Join(lines, "\n"),
 		})
-		if strings.Contains(out, "omitted") {
-			t.Errorf("a %d-line result was elided; the budget is 16:\n%s", n, out)
-		}
+		assert.NewCollecting(t).NotStrContains(out, "omitted", "a %d-line result was elided; the budget is 16:\n", n)
 	}
 }
 
 // Every argument, not just the one the tool is "about". Seeing only the path
 // of an edit tells you nothing about what the edit does.
 func TestCompactToolArgsListEveryKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := toolArgLines("edit", `{"path":"src/main.go","old_string":"a","new_string":"b","replace_all":false}`, false, maxToolArgWidth)
 	joined := strings.Join(got, "\n")
 	for _, want := range []string{"old_string", "new_string", "replace_all"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("missing argument %q:\n%s", want, joined)
-		}
+		c.StrContains(joined, want, "missing argument")
 	}
 	// The headline argument is on the call line already and must not repeat.
-	if strings.Contains(joined, "path:") {
-		t.Errorf("the headline argument was repeated in the list:\n%s", joined)
-	}
+	c.NotStrContains(joined, "path:", "the headline argument was repeated in the list:\n")
 }
 
 // Deterministic ordering: ranging a map reorders the list between frames.
@@ -621,22 +535,17 @@ func TestToolArgLinesAreSorted(t *testing.T) {
 	ia := strings.Index(joined, "alpha")
 	im := strings.Index(joined, "monkey")
 	iz := strings.Index(joined, "zebra")
-	if ia >= im || im >= iz {
-		t.Errorf("arguments not sorted by key:\n%s", joined)
-	}
+	assert.NewCollecting(t).False(ia >= im || im >= iz, "arguments not sorted by key:\n%s", joined)
 }
 
 // Compact folds a multi-line value to one line and says how big it was.
 func TestCompactFoldsMultilineValues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
 	got := toolArgLines("write", in, false, maxToolArgWidth)
 	joined := strings.Join(got, "\n")
-	if strings.Count(joined, "\n") != len(got)-1 {
-		t.Errorf("a compact argument line contains a newline:\n%q", joined)
-	}
-	if !strings.Contains(joined, "B)") {
-		t.Errorf("missing size marker on a folded value:\n%s", joined)
-	}
+	c.Eq(len(got)-1, strings.Count(joined, "\n"), "a compact argument line contains a newline:\n%q", joined)
+	c.StrContains(joined, "B)", "missing size marker on a folded value:\n")
 }
 
 // Expanded prints the value in full, across lines.
@@ -644,9 +553,7 @@ func TestExpandedShowsFullMultilineValues(t *testing.T) {
 	in := `{"path":"n.md","content":"one\ntwo\nthree"}`
 	joined := strings.Join(toolArgLines("write", in, true, maxToolArgWidth), "\n")
 	for _, want := range []string{"one", "two", "three"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("expanded output missing %q:\n%s", want, joined)
-		}
+		assert.NewCollecting(t).StrContains(joined, want, "expanded output missing")
 	}
 }
 
@@ -654,6 +561,7 @@ func TestExpandedShowsFullMultilineValues(t *testing.T) {
 // reuses r.cached for every block below Finalized, so toggling the flag
 // without discarding that cache changed nothing a reader could see.
 func TestExpandArgsChangesAFinalizedBlock(t *testing.T) {
+	c := assert.NewCollecting(t)
 	blocks := []session.Block{{
 		Kind: session.KindAssistant, Final: true,
 		ToolCalls: []session.ToolCall{{
@@ -671,94 +579,71 @@ func TestExpandArgsChangesAFinalizedBlock(t *testing.T) {
 	r.cached, r.cachedUpTo, r.lastFP, r.liveOut = nil, 0, "", nil
 	expanded := strings.Join(r.Lines(blocks, 1, 80), "\n")
 
-	if compact == expanded {
-		t.Fatalf("expanding a finalized block changed nothing:\n%s", compact)
-	}
-	if !strings.Contains(expanded, "two") {
-		t.Errorf("expanded output is missing the full value:\n%s", expanded)
-	}
+	c.Require().NotEq(expanded, compact, "expanding a finalized block changed nothing:\n")
+	c.StrContains(expanded, "two", "expanded output is missing the full value:\n")
 }
 
 // bash's `command` is its ONLY argument, so skipping the headline key in both
 // modes made the full command unreachable from the cockpit: truncated on the
 // call line, and absent from the detail list. ^O exists to fix exactly this.
 func TestExpandShowsTheHeadlineArgumentInFull(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := "echo " + strings.Repeat("alpha beta gamma delta ", 12)
 	input := `{"command":"` + cmd + `"}`
 
 	compact := strings.Join(toolArgLines("bash", input, false, maxToolArgWidth), "\n")
-	if strings.Contains(compact, "command") {
-		t.Errorf("compact must leave the headline on the call line:\n%s", compact)
-	}
+	c.NotStrContains(compact, "command", "compact must leave the headline on the call line:\n")
 
 	expanded := strings.Join(toolArgLines("bash", input, true, maxToolArgWidth), "\n")
-	if !strings.Contains(expanded, "command") {
-		t.Fatalf("expanded dropped bash's only argument:\n%s", expanded)
-	}
+	c.Require().StrContains(expanded, "command", "expanded dropped bash's only argument:\n")
 	// The tail of the command, which the call line's truncation cuts off.
-	if !strings.Contains(expanded, "delta") {
-		t.Errorf("expanded is still truncating the command:\n%s", expanded)
-	}
+	c.StrContains(expanded, "delta", "expanded is still truncating the command:\n")
 }
 
 // A wide pane must not be capped at the narrow-pane floor. bash's command IS
 // the call, so throwing away half a 200-column terminal loses the part of a
 // long command that says what it actually did.
 func TestArgBudgetGrowsWithThePane(t *testing.T) {
-	if got := argBudget(80, "bash"); got != maxToolArgWidth {
-		t.Errorf("argBudget(80) = %d, want the %d floor", got, maxToolArgWidth)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq(maxToolArgWidth, argBudget(80, "bash"), "argBudget(80)")
 	wide := argBudget(200, "bash")
-	if wide <= maxToolArgWidth {
-		t.Errorf("argBudget(200) = %d, want more than the %d floor", wide, maxToolArgWidth)
-	}
+	c.Greater(maxToolArgWidth, wide, "argBudget(200)")
 
 	long := "echo " + strings.Repeat("x y ", 60)
 	got := toolArgSummary("bash", `{"command":"`+long+`"}`, wide)
-	if len([]rune(got)) <= maxToolArgWidth {
-		t.Errorf("a wide pane still truncated at the floor: %d runes", len([]rune(got)))
-	}
+	c.Greater(maxToolArgWidth, len([]rune(got)), "a wide pane still truncated at the floor")
 }
 
 // Thinking was truncate(ThinkText, 120) -- one line, cut mid-sentence, which
 // is where the reasoning gets interesting. It is bounded in wrapped ROWS now,
 // keeping both ends, and ^O lifts the bound entirely.
 func TestThinkingIsBoundedByRowsAndFullyShownWhenExpanded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	think := strings.TrimSpace(strings.Repeat("The user wants a test command. ", 60))
 	blocks := []session.Block{{Kind: session.KindAssistant, Final: true, ThinkText: think}}
 
 	r := newRenderer()
 	compact := strings.Join(r.Lines(blocks, 1, 80), "\n")
-	if !strings.Contains(compact, "[omitted") {
-		t.Errorf("a long thinking block must be elided, not silently cut:\n%s", compact)
-	}
-	if n := strings.Count(compact, "\n"); n > thinkHeadRows+thinkTailRows+4 {
-		t.Errorf("thinking took %d rows, budget is %d+%d plus chrome", n, thinkHeadRows, thinkTailRows)
-	}
+	c.StrContains(compact, "[omitted", "a long thinking block must be elided, not silently cut:\n")
+	n := strings.Count(compact, "\n")
+	c.LessOrEqual(thinkHeadRows+thinkTailRows+4, n, "thinking took %d rows, budget is %d+%d plus chrome", n, thinkHeadRows, thinkTailRows)
 
 	r2 := newRenderer()
 	r2.expandArgs = true
 	expanded := strings.Join(r2.Lines(blocks, 1, 80), "\n")
-	if strings.Contains(expanded, "[omitted") {
-		t.Errorf("^O must show the whole thinking block:\n%s", expanded)
-	}
-	if len(expanded) <= len(compact) {
-		t.Error("expanded thinking is not longer than the elided form")
-	}
+	c.NotStrContains(expanded, "[omitted", "^O must show the whole thinking block:\n")
+	c.Greater(len(compact), len(expanded), "expanded thinking is not longer than the elided form")
 }
 
 // The old cap was 120 characters on one line. A short thinking block must not
 // be elided at all, and a normal one must survive past 120 characters.
 func TestShortThinkingIsNotElided(t *testing.T) {
+	c := assert.NewCollecting(t)
 	think := "The user wants me to run a test bash command with a good number of arguments. " +
 		"Let me run something with many arguments so the rendering is exercised properly."
 	blocks := []session.Block{{Kind: session.KindAssistant, Final: true, ThinkText: think}}
 	out := strings.Join(newRenderer().Lines(blocks, 1, 100), "\n")
-	if strings.Contains(out, "[omitted") {
-		t.Errorf("a two-sentence thinking block was elided:\n%s", out)
-	}
+	c.NotStrContains(out, "[omitted", "a two-sentence thinking block was elided:\n")
 	// The tail, which truncate(_, 120) cut off.
-	if !strings.Contains(out, "properly") {
-		t.Errorf("thinking is still cut at 120 characters:\n%s", out)
-	}
+	c.StrContains(out, "properly", "thinking is still cut at 120 characters:\n")
 }

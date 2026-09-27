@@ -4,11 +4,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/presets"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestPresetWiringConnectPutMapsInvalid pins the Connect-plane contract the
@@ -19,6 +20,7 @@ import (
 // behind the controller is presets_test.go's in-memory fake; validation
 // refusing the spec first is the point.
 func TestPresetWiringConnectPutMapsInvalid(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctl := &Controller{presetStore: newFakePresetStore("")}
 	m := connectPresets{c: ctl}
 	tools := []string{"not-a-real-tool"}
@@ -27,10 +29,6 @@ func TestPresetWiringConnectPutMapsInvalid(t *testing.T) {
 		Kind:  presets.KindFundi,
 		Tools: &tools,
 	})
-	if err == nil {
-		t.Fatal("PutPreset naming an unknown tool: got nil error")
-	}
-	if !errors.Is(err, connectapi.ErrInvalidPreset) {
-		t.Fatalf("PutPreset error does not wrap connectapi.ErrInvalidPreset: %v", err)
-	}
+	ck.Error(err, "PutPreset naming an unknown tool: got nil error")
+	ck.ErrorIs(err, connectapi.ErrInvalidPreset, "PutPreset error does not wrap connectapi.ErrInvalidPreset")
 }

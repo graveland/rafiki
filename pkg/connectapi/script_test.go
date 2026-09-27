@@ -18,6 +18,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scriptChildScope is the per-child credential shape the three script verbs
@@ -149,6 +151,7 @@ func scriptServer(t *testing.T, callerID string, hub *recordedHub) rafikiv1conne
 // credential, or the unix socket's anonymous local trust — has no position in
 // the agent tree for the verbs to act on.
 func TestScriptVerbsRequireAChildCredential(t *testing.T) {
+	c := assert.NewAborting(t)
 	client := scriptServer(t, "", &recordedHub{stream: &scriptedStream{}})
 
 	if _, err := client.Report(context.Background(), connect.NewRequest(&rafikiv1.ReportRequest{
@@ -162,15 +165,11 @@ func TestScriptVerbsRequireAChildCredential(t *testing.T) {
 		t.Fatalf("SetResult as a user = %v, want %v", err, connect.CodePermissionDenied)
 	}
 	userStream, err := client.Receive(context.Background(), connect.NewRequest(&rafikiv1.ReceiveRequest{}))
-	if err != nil {
-		t.Fatalf("Receive as a user: %v", err)
-	}
+	c.NoError(err, "Receive as a user")
 	if userStream.Receive() {
 		t.Fatalf("Receive as a user delivered %+v", userStream.Msg())
 	}
-	if connect.CodeOf(userStream.Err()) != connect.CodePermissionDenied {
-		t.Fatalf("Receive as a user = %v, want %v", userStream.Err(), connect.CodePermissionDenied)
-	}
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(userStream.Err()), "Receive as a user = %v, want", userStream.Err())
 }
 
 // TestScriptVerbsWithAnEmptyChildIDRefused proves the empty-ChildID scope —
@@ -200,9 +199,7 @@ func TestScriptVerbsWithAnEmptyChildIDRefused(t *testing.T) {
 		t.Fatalf("SetResult with an empty-ChildID scope = %v, want %v", err, connect.CodePermissionDenied)
 	}
 	emptyStream, err := client.Receive(context.Background(), connect.NewRequest(&rafikiv1.ReceiveRequest{}))
-	if err != nil {
-		t.Fatalf("Receive with an empty-ChildID scope: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Receive with an empty-ChildID scope")
 	if emptyStream.Receive() || connect.CodeOf(emptyStream.Err()) != connect.CodePermissionDenied {
 		t.Fatalf("Receive with an empty-ChildID scope = %v, want %v", emptyStream.Err(), connect.CodePermissionDenied)
 	}
@@ -226,9 +223,7 @@ func TestScriptVerbsWithoutAHubFailClosed(t *testing.T) {
 		t.Fatalf("SetResult without a hub = %v, want %v", err, connect.CodeUnavailable)
 	}
 	userStream, err := client.Receive(context.Background(), connect.NewRequest(&rafikiv1.ReceiveRequest{}))
-	if err != nil {
-		t.Fatalf("Receive without a hub: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Receive without a hub")
 	if userStream.Receive() || connect.CodeOf(userStream.Err()) != connect.CodeUnavailable {
 		t.Fatalf("Receive without a hub = %v, want %v", userStream.Err(), connect.CodeUnavailable)
 	}
@@ -237,18 +232,16 @@ func TestScriptVerbsWithoutAHubFailClosed(t *testing.T) {
 // TestReportForwardsToTheCallerOwnParent is the happy path: the caller's own
 // id — from the credential, never from the request — is what reaches the hub.
 func TestReportForwardsToTheCallerOwnParent(t *testing.T) {
+	c := assert.NewAborting(t)
 	hub := &recordedHub{stream: &scriptedStream{}}
 	client := scriptServer(t, "c_script", hub)
 
-	if _, err := client.Report(context.Background(), connect.NewRequest(&rafikiv1.ReportRequest{
+	_, err := client.Report(context.Background(), connect.NewRequest(&rafikiv1.ReportRequest{
 		Kind: "progress", DataJson: `{"step":1}`,
-	})); err != nil {
-		t.Fatalf("Report: %v", err)
-	}
+	}))
+	c.NoError(err, "Report")
 	reports := hub.gotReports()
-	if len(reports) != 1 {
-		t.Fatalf("want 1 report, got %d", len(reports))
-	}
+	c.Len(reports, 1, "want 1 report, got %d", len(reports))
 	if reports[0].callerID != "c_script" || reports[0].kind != "progress" ||
 		reports[0].dataJSON != `{"step":1}` {
 		t.Fatalf("report = %+v", reports[0])
@@ -259,6 +252,7 @@ func TestReportForwardsToTheCallerOwnParent(t *testing.T) {
 // 64-byte kind cap, control characters, JSON parse, 4 KiB cap — refused with
 // CodeInvalidArgument, never truncated.
 func TestReportValidatesKindAndData(t *testing.T) {
+	c := assert.NewAborting(t)
 	cases := []struct {
 		name string
 		req  rafikiv1.ReportRequest
@@ -274,21 +268,15 @@ func TestReportValidatesKindAndData(t *testing.T) {
 	for i := range cases {
 		tc := &cases[i]
 		_, err := client.Report(context.Background(), connect.NewRequest(&tc.req))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Fatalf("%s: Report = %v, want %v", tc.name, err, connect.CodeInvalidArgument)
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: Report = %v, want", tc.name, err)
 	}
-	if got := hub.gotReports(); len(got) != 0 {
-		t.Fatalf("refused reports reached the hub: %+v", got)
-	}
+	c.Empty(hub.gotReports(), "refused reports reached the hub")
 	// At the cap exactly: accepted.
 	_, err := client.Report(context.Background(), connect.NewRequest(&rafikiv1.ReportRequest{
 		Kind:     "progress",
 		DataJson: `{"pad":"` + strings.Repeat("x", 4086) + `"}`,
 	}))
-	if err != nil {
-		t.Fatalf("4 KiB report refused: %v", err)
-	}
+	c.NoError(err, "4 KiB report refused")
 }
 
 // TestReceiveIsSelfOnly proves the identity check: child_id empty (own inbox)
@@ -296,6 +284,7 @@ func TestReportValidatesKindAndData(t *testing.T) {
 // PermissionDenied — and the sibling's id reaching the hub would be a
 // fail-open bug, so the refusal is checked before Receive is called.
 func TestReceiveIsSelfOnly(t *testing.T) {
+	c := assert.NewAborting(t)
 	hub := &recordedHub{stream: &scriptedStream{msgs: []*rafikiv1.ScriptMessage{
 		{Body: &rafikiv1.ScriptMessage_Text_{Text: &rafikiv1.ScriptMessage_Text{
 			Text: "do work", Mode: rafikiv1.SendMode_SEND_MODE_PROMPT, MessageIds: []string{"m1"},
@@ -305,16 +294,12 @@ func TestReceiveIsSelfOnly(t *testing.T) {
 
 	// Own id, explicit: allowed.
 	stream, err := client.Receive(context.Background(), connect.NewRequest(&rafikiv1.ReceiveRequest{ChildId: "c_script"}))
-	if err != nil {
-		t.Fatalf("Receive(own id): %v", err)
-	}
+	c.NoError(err, "Receive(own id)")
 	if !stream.Receive() {
 		t.Fatalf("first Receive failed: %v", stream.Err())
 	}
 	msg := stream.Msg()
-	if msg.GetText().GetText() != "do work" || msg.GetText().GetMessageIds()[0] != "m1" {
-		t.Fatalf("text message = %+v", msg)
-	}
+	c.False(msg.GetText().GetText() != "do work" || msg.GetText().GetMessageIds()[0] != "m1", "text message = %+v", msg)
 	if stream.Receive() {
 		t.Fatalf("second Receive = %+v, want stream end", stream.Msg())
 	}
@@ -331,24 +316,19 @@ func TestReceiveIsSelfOnly(t *testing.T) {
 	// on the first Receive, not on the initial call.
 	before := len(hub.gotReceives())
 	sibStream, err := client.Receive(context.Background(), connect.NewRequest(&rafikiv1.ReceiveRequest{ChildId: "c_sibling"}))
-	if err != nil {
-		t.Fatalf("Receive(sibling) call: %v", err)
-	}
+	c.NoError(err, "Receive(sibling) call")
 	if sibStream.Receive() {
 		t.Fatalf("Receive(sibling) delivered %+v", sibStream.Msg())
 	}
-	if connect.CodeOf(sibStream.Err()) != connect.CodePermissionDenied {
-		t.Fatalf("Receive(sibling) = %v, want %v", sibStream.Err(), connect.CodePermissionDenied)
-	}
-	if after := len(hub.gotReceives()); after != before {
-		t.Fatalf("refused Receive reached the hub: %+v", hub.gotReceives())
-	}
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(sibStream.Err()), "Receive(sibling) = %v, want", sibStream.Err())
+	c.Eq(before, len(hub.gotReceives()), "refused Receive reached the hub: %+v", hub.gotReceives())
 }
 
 // TestSetResultIsSelfOnlyAndValidated: the result is stored against the
 // caller's own id, and malformed or oversized JSON is refused before the hub
 // is reached.
 func TestSetResultIsSelfOnlyAndValidated(t *testing.T) {
+	c := assert.NewAborting(t)
 	hub := &recordedHub{stream: &scriptedStream{}}
 	client := scriptServer(t, "c_script", hub)
 
@@ -358,22 +338,17 @@ func TestSetResultIsSelfOnlyAndValidated(t *testing.T) {
 		t.Fatalf("SetResult: %v", err)
 	}
 	results := hub.gotResults()
-	if len(results) != 1 || results[0].callerID != "c_script" || results[0].resultJSON != `{"answer":42}` {
-		t.Fatalf("result = %+v", results)
-	}
+	c.False(len(results) != 1 || results[0].callerID != "c_script" || results[0].resultJSON != `{"answer":42}`, "result = %+v", results)
 
 	for name, res := range map[string]string{
 		"malformed": `{"answer":`,
 		"empty":     ``,
 		"oversized": `{"pad":"` + strings.Repeat("x", 4097) + `"}`,
 	} {
-		if _, err := client.SetResult(context.Background(), connect.NewRequest(&rafikiv1.SetResultRequest{ResultJson: res})); connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Fatalf("%s result: SetResult = %v, want %v", name, err, connect.CodeInvalidArgument)
-		}
+		_, err := client.SetResult(context.Background(), connect.NewRequest(&rafikiv1.SetResultRequest{ResultJson: res}))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s result: SetResult = %v, want", name, err)
 	}
-	if got := len(hub.gotResults()); got != 1 {
-		t.Fatalf("refused results reached the hub: %d", got)
-	}
+	c.Eq(1, len(hub.gotResults()), "refused results reached the hub")
 
 	// At the cap exactly: accepted (and stored trimmed — F3's rule).
 	if _, err := client.SetResult(context.Background(), connect.NewRequest(&rafikiv1.SetResultRequest{
@@ -382,19 +357,14 @@ func TestSetResultIsSelfOnlyAndValidated(t *testing.T) {
 		t.Fatalf("4 KiB result refused: %v", err)
 	}
 	results = hub.gotResults()
-	if len(results) != 2 || results[1].resultJSON != `{"pad":"`+strings.Repeat("x", 4086)+`"}` {
-		t.Fatalf("at-cap result = %+v", results)
-	}
+	c.False(len(results) != 2 || results[1].resultJSON != `{"pad":"`+strings.Repeat("x", 4086)+`"}`, "at-cap result = %+v", results)
 
 	// Trailing whitespace is trimmed, not stored: json.Valid would accept
 	// padding newlines and they would land verbatim in the parent's frame.
-	if _, err := client.SetResult(context.Background(), connect.NewRequest(&rafikiv1.SetResultRequest{
+	_, err := client.SetResult(context.Background(), connect.NewRequest(&rafikiv1.SetResultRequest{
 		ResultJson: `{"answer":7}` + "\n\n",
-	})); err != nil {
-		t.Fatalf("whitespace-padded result refused: %v", err)
-	}
+	}))
+	c.NoError(err, "whitespace-padded result refused")
 	results = hub.gotResults()
-	if len(results) != 3 || results[2].resultJSON != `{"answer":7}` {
-		t.Fatalf("trimmed result = %+v", results)
-	}
+	c.False(len(results) != 3 || results[2].resultJSON != `{"answer":7}`, "trimmed result = %+v", results)
 }

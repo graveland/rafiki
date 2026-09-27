@@ -13,6 +13,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // aliasPinSet builds the two-aliases-one-id registry through the REAL config
@@ -45,9 +47,7 @@ only = ["novita"]
 func aliasPinSet(t *testing.T) *providers.Set {
 	t.Helper()
 	set, err := providers.Parse([]byte(aliasPinTOML))
-	if err != nil {
-		t.Fatalf("Parse alias-pin providers.toml: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse alias-pin providers.toml")
 	return set
 }
 
@@ -57,9 +57,8 @@ func sendAliasParams(t *testing.T, c *Client, model string) {
 	t.Helper()
 	params := anthropic.MessageNewParams{Model: anthropic.Model(model), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
-	if _, err := c.SendParams(context.Background(), SendMeta{}, params); err != nil {
-		t.Fatalf("SendParams(%s): %v", model, err)
-	}
+	_, err := c.SendParams(context.Background(), SendMeta{}, params)
+	assert.NewAborting(t).NoError(err, "SendParams(%s)", model)
 }
 
 // wireBody marshals one captured request the way the wire sees it, including
@@ -67,9 +66,7 @@ func sendAliasParams(t *testing.T, c *Client, model string) {
 func wireBody(t *testing.T, reqs []anthropic.MessageNewParams, i int) string {
 	t.Helper()
 	b, err := json.Marshal(reqs[i])
-	if err != nil {
-		t.Fatalf("marshal wire params: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal wire params")
 	return string(b)
 }
 
@@ -79,6 +76,7 @@ func wireBody(t *testing.T, reqs []anthropic.MessageNewParams, i int) string {
 // has no static pin, so this also proves an alias pin carries the provider
 // field on its own, with nothing to merge from.
 func TestSendParamsAliasOnlyPinsProvider(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"), respondText("ok"),
 	}}
@@ -89,23 +87,16 @@ func TestSendParamsAliasOnlyPinsProvider(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	sendAliasParams(t, c, "openrouter/glm-flash@together")
 	sendAliasParams(t, c, "openrouter/glm-flash@fireworks")
 
-	if openrouter.calls != 2 {
-		t.Fatalf("openrouter called %d times, want 2", openrouter.calls)
-	}
+	ck.Require().Eq(2, openrouter.calls, "openrouter called")
 	for i, want := range []string{"together", "fireworks"} {
 		body := wireBody(t, openrouter.lastReq, i)
-		if got := string(openrouter.lastReq[i].Model); got != "z-ai/glm-5.3-flash" {
-			t.Errorf("request %d: model = %q, want the aliases' shared real id z-ai/glm-5.3-flash", i, got)
-		}
-		if !strings.Contains(body, `"provider":{"only":["`+want+`"]}`) {
-			t.Errorf("request %d (%s alias): wire body missing provider.only [%s]: %s", i, want, want, body)
-		}
+		got := string(openrouter.lastReq[i].Model)
+		ck.Eq("z-ai/glm-5.3-flash", got, "request %d: model = %q, want the aliases' shared real id z-ai/glm-5.3-flash", i, got)
+		ck.StrContains(body, `"provider":{"only":["`+want+`"]}`, "request %d (%s alias): wire body missing provider.only [%s]", i, want, want)
 	}
 	// And the two bodies must differ ONLY in the pin, not the model.
 	if got := wireBody(t, openrouter.lastReq, 0); !strings.Contains(got, `"only":["together"]`) ||
@@ -123,6 +114,7 @@ func TestSendParamsAliasOnlyPinsProvider(t *testing.T) {
 // only replaces it for that request — the alias is the explicit, more
 // specific declaration.
 func TestSendParamsAliasOnlyReplacesStaticPin(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
@@ -133,18 +125,12 @@ func TestSendParamsAliasOnlyReplacesStaticPin(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	sendAliasParams(t, c, "openrouter/glm52-novita")
 
 	body := wireBody(t, openrouter.lastReq, 0)
-	if !strings.Contains(body, `"provider":{"only":["novita"]}`) {
-		t.Errorf("alias pin must REPLACE the static pin, wire body = %s", body)
-	}
-	if strings.Contains(body, `"fireworks"`) {
-		t.Errorf("static pin leaked past the alias pin, wire body = %s", body)
-	}
+	ck.StrContains(body, `"provider":{"only":["novita"]}`, "alias pin must REPLACE the static pin, wire body =")
+	ck.NotStrContains(body, `"fireworks"`, "static pin leaked past the alias pin, wire body =")
 }
 
 // TestSendParamsNonAliasUnaffectedByAliasSupport proves a non-alias model
@@ -152,6 +138,7 @@ func TestSendParamsAliasOnlyReplacesStaticPin(t *testing.T) {
 // field for an unpinned, unignored id, and no pin from ANY alias that happens
 // to share the provider.
 func TestSendParamsNonAliasUnaffectedByAliasSupport(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
@@ -162,24 +149,19 @@ func TestSendParamsNonAliasUnaffectedByAliasSupport(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	sendAliasParams(t, c, "openrouter/moonshotai/kimi-k3")
 
 	body := wireBody(t, openrouter.lastReq, 0)
-	if strings.Contains(body, `"provider"`) {
-		t.Errorf("non-alias unpinned model must not carry a provider field: %s", body)
-	}
-	if got := string(openrouter.lastReq[0].Model); got != "moonshotai/kimi-k3" {
-		t.Errorf("model = %q, want moonshotai/kimi-k3 untranslated", got)
-	}
+	ck.NotStrContains(body, `"provider"`, "non-alias unpinned model must not carry a provider field")
+	ck.Eq("moonshotai/kimi-k3", string(openrouter.lastReq[0].Model), "model")
 }
 
 // TestSendParamsAliasOnlyMergesGuardIgnore proves the guard's ignore list
 // still merges with an alias pin: the alias decides which providers MAY serve,
 // the guard still vetoes ones it has ejected.
 func TestSendParamsAliasOnlyMergesGuardIgnore(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
@@ -190,9 +172,7 @@ func TestSendParamsAliasOnlyMergesGuardIgnore(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	// Eject "Together" for the z-ai/glm-5.3-flash line: five qualifying misses
 	// (the first turn of a conversation is never evidence).
 	g := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
@@ -209,15 +189,14 @@ func TestSendParamsAliasOnlyMergesGuardIgnore(t *testing.T) {
 	sendAliasParams(t, c, "openrouter/glm-flash@fireworks")
 
 	body := wireBody(t, openrouter.lastReq, 0)
-	if !strings.Contains(body, `"provider":{"only":["fireworks"],"ignore":["together"]}`) {
-		t.Errorf("alias pin + guard ignore not merged as expected, wire body = %s", body)
-	}
+	ck.StrContains(body, `"provider":{"only":["fireworks"],"ignore":["together"]}`, "alias pin + guard ignore not merged as expected, wire body =")
 }
 
 // TestSendParamsOperatorBanReachesTheWire proves an operator ban — recorded
 // against every model line, not the model being sent — lands in the outgoing
 // provider.ignore alongside an alias pin, on a model the guard never observed.
 func TestSendParamsOperatorBanReachesTheWire(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	openrouter := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
 		respondText("ok"),
 	}}
@@ -228,9 +207,7 @@ func TestSendParamsOperatorBanReachesTheWire(t *testing.T) {
 		WithCatalog(seededCatalog(t)),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	g := routing.NewProviderGuard(routing.DefaultEjectTTL, testLogger(t))
 	if _, err := g.Ban(context.Background(), time.Now(), "open-inference", 0, ""); err != nil {
 		t.Fatal(err)
@@ -240,7 +217,5 @@ func TestSendParamsOperatorBanReachesTheWire(t *testing.T) {
 	sendAliasParams(t, c, "openrouter/glm-flash@fireworks")
 
 	body := wireBody(t, openrouter.lastReq, 0)
-	if !strings.Contains(body, `"provider":{"only":["fireworks"],"ignore":["open-inference"]}`) {
-		t.Errorf("operator ban not merged into the wire body: %s", body)
-	}
+	ck.StrContains(body, `"provider":{"only":["fireworks"],"ignore":["open-inference"]}`, "operator ban not merged into the wire body")
 }

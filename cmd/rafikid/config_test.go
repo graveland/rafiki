@@ -4,19 +4,19 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestLoadConfig_EmptyPathIsZeroValue(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cfg, err := loadConfig("")
-	if err != nil {
-		t.Fatalf("loadConfig(\"\"): %v", err)
-	}
-	if len(cfg.OpenAIRoutes) != 0 || cfg.DefaultModel != "" {
-		t.Errorf("empty path should yield a zero Config, got %+v", cfg)
-	}
+	c.Require().NoError(err, "loadConfig(\"\")")
+	c.False(len(cfg.OpenAIRoutes) != 0 || cfg.DefaultModel != "", "empty path should yield a zero Config, got %+v", cfg)
 }
 
 func TestLoadConfig_ParsesRoutesAndModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rafiki.yaml")
 	body := `openai_routes:
@@ -24,26 +24,17 @@ func TestLoadConfig_ParsesRoutesAndModel(t *testing.T) {
     upstream: openrouter
 default_model: haiku-latest
 `
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(body), 0o600))
 
 	cfg, err := loadConfig(path)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if len(cfg.OpenAIRoutes) != 1 || cfg.OpenAIRoutes[0].Prefix != "moonshotai/" {
-		t.Errorf("OpenAIRoutes = %+v, want one moonshotai/ route", cfg.OpenAIRoutes)
-	}
-	if cfg.DefaultModel != "haiku-latest" {
-		t.Errorf("DefaultModel = %q, want haiku-latest", cfg.DefaultModel)
-	}
+	c.Require().NoError(err, "loadConfig")
+	c.False(len(cfg.OpenAIRoutes) != 1 || cfg.OpenAIRoutes[0].Prefix != "moonshotai/", "OpenAIRoutes = %+v, want one moonshotai/ route", cfg.OpenAIRoutes)
+	c.Eq("haiku-latest", cfg.DefaultModel, "DefaultModel")
 }
 
 func TestLoadConfig_MissingFileIsAnError(t *testing.T) {
-	if _, err := loadConfig(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
-		t.Error("loadConfig on a missing file should error, not silently yield defaults")
-	}
+	_, err := loadConfig(filepath.Join(t.TempDir(), "absent.yaml"))
+	assert.NewCollecting(t).Error(err, "loadConfig on a missing file should error, not silently yield defaults")
 }
 
 // A named config that cannot be parsed is fatal, not a silent fallback to
@@ -51,16 +42,14 @@ func TestLoadConfig_MissingFileIsAnError(t *testing.T) {
 // which is exactly the case where guessing at defaults would serve the wrong
 // credentials.
 func TestLoadConfig_MalformedYAMLIsAnError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.yaml")
 	// Unclosed flow mapping: not valid YAML at any indentation.
 	body := "openai_routes: [this is not valid yaml"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(path); err == nil {
-		t.Error("loadConfig on malformed YAML should error, not silently yield defaults")
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(body), 0o600))
+	_, err := loadConfig(path)
+	c.Error(err, "loadConfig on malformed YAML should error, not silently yield defaults")
 }
 
 // default_model precedence: the config file wins when set; an empty config
@@ -68,17 +57,13 @@ func TestLoadConfig_MalformedYAMLIsAnError(t *testing.T) {
 func TestResolveDefaultModel_ConfigWinsOverEnv(t *testing.T) {
 	t.Setenv("RAFIKI_DEFAULT_MODEL", "env-model")
 	got := resolveDefaultModel(Config{DefaultModel: "config-model"})
-	if got != "config-model" {
-		t.Errorf("resolveDefaultModel = %q, want config-model (config should win over env)", got)
-	}
+	assert.NewCollecting(t).Eq("config-model", got, "resolveDefaultModel")
 }
 
 func TestResolveDefaultModel_FallsThroughToEnv(t *testing.T) {
 	t.Setenv("RAFIKI_DEFAULT_MODEL", "env-model")
 	got := resolveDefaultModel(Config{})
-	if got != "env-model" {
-		t.Errorf("resolveDefaultModel = %q, want env-model (empty config should fall through to env)", got)
-	}
+	assert.NewCollecting(t).Eq("env-model", got, "resolveDefaultModel")
 }
 
 // TestProviderGuardEnabled proves RAFIKI_PROVIDER_GUARD only disables the guard
@@ -99,8 +84,7 @@ func TestProviderGuardEnabled(t *testing.T) {
 		"0":       false,
 		"no":      false,
 	} {
-		if got := providerGuardEnabled(in); got != want {
-			t.Errorf("providerGuardEnabled(%q) = %v, want %v", in, got, want)
-		}
+		got := providerGuardEnabled(in)
+		assert.NewCollecting(t).Eq(want, got, "providerGuardEnabled(%q) = %v, want", in, got)
 	}
 }

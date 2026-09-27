@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeConversationInsights struct {
@@ -57,12 +59,11 @@ func TestConversationSearchNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("ConversationSearch unwired err = %v, want %v", err, connect.CodeUnavailable)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "ConversationSearch unwired err = %v, want", err)
 }
 
 func TestConversationSearchMapsRowsAndFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeConversationInsights{rows: []connectapi.ConversationSummaryRow{{
 		ID: "c1", Name: "fix the lease", Owner: "brent", Persona: "worker",
 		Source: "proxy", Model: "openrouter/x/glm", Status: "idle", DrivenBy: "fundi",
@@ -74,101 +75,71 @@ func TestConversationSearchMapsRowsAndFilter(t *testing.T) {
 
 	resp, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Owner: "brent", Limit: 20}))
-	if err != nil {
-		t.Fatalf("ConversationSearch: %v", err)
-	}
-	if f.gotFilter.Owner != "brent" {
-		t.Errorf("filter Owner = %q, want brent", f.gotFilter.Owner)
-	}
-	if f.gotFilter.Limit != 20 {
-		t.Errorf("filter Limit = %d, want 20", f.gotFilter.Limit)
-	}
+	c.Require().NoError(err, "ConversationSearch")
+	c.Eq("brent", f.gotFilter.Owner, "filter Owner")
+	c.Eq(20, f.gotFilter.Limit, "filter Limit")
 	got := resp.Msg.GetRows()
-	if len(got) != 1 {
-		t.Fatalf("rows = %d, want 1", len(got))
-	}
-	if got[0].GetId() != "c1" {
-		t.Errorf("Id = %q, want c1", got[0].GetId())
-	}
-	if got[0].GetOwner() != "brent" {
-		t.Errorf("Owner = %q, want brent", got[0].GetOwner())
-	}
-	if got[0].GetTotalCostUsd() != 0.0123 {
-		t.Errorf("TotalCostUsd = %v, want 0.0123", got[0].GetTotalCostUsd())
-	}
+	c.Require().Len(got, 1, "rows = %d, want 1", len(got))
+	c.Eq("c1", got[0].GetId(), "Id")
+	c.Eq("brent", got[0].GetOwner(), "Owner")
+	c.Eq(0.0123, got[0].GetTotalCostUsd(), "TotalCostUsd")
 }
 
 // The server clamps a caller's limit; it never forwards an unbounded one.
 func TestConversationSearchClampsLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeConversationInsights{}
 	s := newConversationsServer(f)
 
 	_, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Limit: 100000}))
-	if err != nil {
-		t.Fatalf("ConversationSearch: %v", err)
-	}
-	if f.gotFilter.Limit != 500 {
-		t.Errorf("filter Limit = %d, want clamped to 500", f.gotFilter.Limit)
-	}
+	c.Require().NoError(err, "ConversationSearch")
+	c.Eq(500, f.gotFilter.Limit, "filter Limit")
 }
 
 func TestConversationSearchErrorFailsInternalAndRedacts(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down: host=db.internal user=rafiki")})
 	_, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Fatalf("ConversationSearch error err = %v, want %v", err, connect.CodeInternal)
-	}
+	c.Require().Eq(connect.CodeInternal, connect.CodeOf(err), "ConversationSearch error err = %v, want", err)
 	// The raw error's text must not reach the peer: a pgx failure names the
 	// database host, user and database.
 	var ce *connect.Error
-	if !errors.As(err, &ce) {
-		t.Fatalf("want a *connect.Error, got %T", err)
-	}
-	if msg := ce.Message(); msg != "internal error; see the daemon log" {
-		t.Errorf("internal error text = %q, want the mapErr redaction", msg)
-	}
+	c.Require().True(errors.As(err, &ce), "want a *connect.Error, got %T", err)
+	c.Eq("internal error; see the daemon log", ce.Message(), "internal error text")
 }
 
 // An error the source already coded -- scopeFor's refusal, or a connectapi.ControllerError
 // the adapter translated -- must reach the wire under its own code and message,
 // never re-wrapped as internal.
 func TestConversationSearchPreservesACodedError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	coded := connect.NewError(connect.CodePermissionDenied,
 		errors.New("conversation queries require a user credential"))
 	s := newConversationsServer(&fakeConversationInsights{err: coded})
 	_, err := s.ConversationSearch(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("coded error err = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if err.Error() != coded.Error() {
-		t.Errorf("coded error text = %q, want %q", err.Error(), coded.Error())
-	}
+	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "coded error err = %v, want", err)
+	c.Eq(coded.Error(), err.Error(), "coded error text")
 }
 
 func TestConversationExportPreservesACodedError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	coded := connect.NewError(connect.CodePermissionDenied,
 		errors.New("conversation queries require a user credential"))
 	s := newConversationsServer(&fakeConversationInsights{err: coded})
 	_, err := s.ConversationExport(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "c1"}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("coded error err = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if err.Error() != coded.Error() {
-		t.Errorf("coded error text = %q, want %q", err.Error(), coded.Error())
-	}
+	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "coded error err = %v, want", err)
+	c.Eq(coded.Error(), err.Error(), "coded error text")
 }
 
 func TestConversationExportNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.ConversationExport(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "c1"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("ConversationExport unwired err = %v, want %v", err, connect.CodeUnavailable)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "ConversationExport unwired err = %v, want", err)
 }
 
 // Empty id on the EXPORT request — there is no such field on search.
@@ -176,9 +147,7 @@ func TestConversationExportEmptyIDFailsInvalidArgument(t *testing.T) {
 	s := newConversationsServer(&fakeConversationInsights{})
 	_, err := s.ConversationExport(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationExportRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("ConversationExport empty id err = %v, want %v", err, connect.CodeInvalidArgument)
-	}
+	assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ConversationExport empty id err = %v, want", err)
 }
 
 // ok=false must read as not-found: a scope miss and a missing conversation are
@@ -187,12 +156,11 @@ func TestConversationExportOkFalseReadsAsNotFound(t *testing.T) {
 	s := newConversationsServer(&fakeConversationInsights{ok: false})
 	_, err := s.ConversationExport(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "someone-elses"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("ConversationExport ok=false err = %v, want %v", err, connect.CodeNotFound)
-	}
+	assert.NewAborting(t).Eq(connect.CodeNotFound, connect.CodeOf(err), "ConversationExport ok=false err = %v, want", err)
 }
 
 func TestConversationExportMapsTranscript(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeConversationInsights{
 		ok: true,
 		tr: connectapi.TranscriptRow{
@@ -216,20 +184,14 @@ func TestConversationExportMapsTranscript(t *testing.T) {
 
 	resp, err := s.ConversationExport(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationExportRequest{ConversationId: "conv-1"}))
-	if err != nil {
-		t.Fatalf("ConversationExport: %v", err)
-	}
-	if f.gotID != "conv-1" {
-		t.Errorf("got conversation id %q, want conv-1", f.gotID)
-	}
+	c.Require().NoError(err, "ConversationExport")
+	c.Eq("conv-1", f.gotID, "got conversation id")
 	msg := resp.Msg
 	if msg.GetConversationId() != "conv-1" || msg.GetOwner() != "brent" || msg.GetDrivenBy() != "claude" {
 		t.Errorf("header = (%q,%q,%q), want (conv-1,brent,claude)",
 			msg.GetConversationId(), msg.GetOwner(), msg.GetDrivenBy())
 	}
-	if len(msg.GetTurns()) != 3 {
-		t.Fatalf("turns = %d, want 3", len(msg.GetTurns()))
-	}
+	c.Require().Len(msg.GetTurns(), 3, "turns = %d, want 3", len(msg.GetTurns()))
 	turn := msg.GetTurns()[0]
 	if turn.GetOrdinal() != 3 || turn.GetRole() != "assistant" || string(turn.GetContent()) != `[{"type":"text"}]` {
 		t.Errorf("turn = (%d,%q,%s), want (3,assistant,[{\"type\":\"text\"}])",
@@ -265,9 +227,7 @@ func TestConversationQueryNotWiredFailsUnavailable(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.ConversationQuery(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationQueryRequest{Name: "tools"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("ConversationQuery unwired err = %v, want %v", err, connect.CodeUnavailable)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "ConversationQuery unwired err = %v, want", err)
 }
 
 // Empty name on the QUERY request: the catalogue is addressed by name and no
@@ -276,14 +236,13 @@ func TestConversationQueryEmptyNameFailsInvalidArgument(t *testing.T) {
 	s := newConversationsServer(&fakeConversationInsights{})
 	_, err := s.ConversationQuery(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationQueryRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("ConversationQuery empty name err = %v, want %v", err, connect.CodeInvalidArgument)
-	}
+	assert.NewAborting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "ConversationQuery empty name err = %v, want", err)
 }
 
 // A successful query must carry the declared columns through verbatim and
 // land each cell in the oneof variant its QueryRowValue flags select.
 func TestConversationQueryMapsColumnsAndCellVariants(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeConversationInsights{result: connectapi.CatalogueResult{
 		Columns: []connectapi.QueryColumnMeta{
 			{Name: "tool", Kind: "string"},
@@ -302,47 +261,32 @@ func TestConversationQueryMapsColumnsAndCellVariants(t *testing.T) {
 		connect.NewRequest(&rafikiv1.ConversationQueryRequest{
 			Name: "tools", SinceUnix: ptrInt64(1757000000), Owner: "brent", Path: "proxy",
 		}))
-	if err != nil {
-		t.Fatalf("ConversationQuery: %v", err)
-	}
-	if f.gotName != "tools" {
-		t.Errorf("got name %q, want tools", f.gotName)
-	}
+	c.Require().NoError(err, "ConversationQuery")
+	c.Eq("tools", f.gotName, "got name")
 	if f.gotQuery.Owner != "brent" || f.gotQuery.SinceUnix != 1757000000 || f.gotQuery.Path != "proxy" {
 		t.Errorf("filter = %+v, want owner=brent since=1757000000 path=proxy", f.gotQuery)
 	}
 	cols := resp.Msg.GetColumns()
-	if len(cols) != 3 || cols[0].GetName() != "tool" || cols[1].GetKind() != "int" || cols[2].GetFormat() != "usd" {
-		t.Errorf("columns = %+v, want (tool,string)(calls,int)(avg_cost,float,usd)", cols)
-	}
+	c.False(len(cols) != 3 || cols[0].GetName() != "tool" || cols[1].GetKind() != "int" || cols[2].GetFormat() != "usd", "columns = %+v, want (tool,string)(calls,int)(avg_cost,float,usd)", cols)
 	rows := resp.Msg.GetRows()
-	if len(rows) != 1 || len(rows[0].GetCells()) != 3 {
-		t.Fatalf("rows = %+v, want one row of three cells", rows)
-	}
+	c.Require().False(len(rows) != 1 || len(rows[0].GetCells()) != 3, "rows = %+v, want one row of three cells", rows)
 	cells := rows[0].GetCells()
 	if cells[0].GetStrValue() != "bash" || cells[1].GetIntValue() != 42 || cells[2].GetFloatValue() != 0.125 {
 		t.Errorf("cells = (%q,%d,%v), want (bash,42,0.125)",
 			cells[0].GetStrValue(), cells[1].GetIntValue(), cells[2].GetFloatValue())
 	}
-	if cells[0].GetV() == nil || cells[1].GetV() == nil || cells[2].GetV() == nil {
-		t.Errorf("oneof not set on every cell: %+v", cells)
-	}
+	c.False(cells[0].GetV() == nil || cells[1].GetV() == nil || cells[2].GetV() == nil, "oneof not set on every cell: %+v", cells)
 }
 
 // An error from the source rides queryError: uncoded becomes a redacted
 // internal, exactly like Search and Export.
 func TestConversationQueryErrorFailsInternalAndRedacts(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := newConversationsServer(&fakeConversationInsights{err: errors.New("db down: host=db.internal user=rafiki")})
 	_, err := s.ConversationQuery(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationQueryRequest{Name: "tools"}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Fatalf("ConversationQuery error err = %v, want %v", err, connect.CodeInternal)
-	}
+	c.Require().Eq(connect.CodeInternal, connect.CodeOf(err), "ConversationQuery error err = %v, want", err)
 	var ce *connect.Error
-	if !errors.As(err, &ce) {
-		t.Fatalf("want a *connect.Error, got %T", err)
-	}
-	if msg := ce.Message(); msg != "internal error; see the daemon log" {
-		t.Errorf("internal error text = %q, want the mapErr redaction", msg)
-	}
+	c.Require().True(errors.As(err, &ce), "want a *connect.Error, got %T", err)
+	c.Eq("internal error; see the daemon log", ce.Message(), "internal error text")
 }

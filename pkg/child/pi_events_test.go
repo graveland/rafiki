@@ -3,6 +3,8 @@ package child
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestPiAssistantMessage_RequiredFields asserts that a marshalled AssistantMessage
@@ -12,6 +14,7 @@ import (
 // the pi-ai type system requires the rest, so a child that omits them produces a
 // frame the TUI may reject when it casts to AssistantMessage.
 func TestPiAssistantMessage_RequiredFields(t *testing.T) {
+	c := assert.NewAborting(t)
 	msg := PiAssistantMessage{
 		Role: "assistant",
 		Content: []PiContentBlock{
@@ -25,13 +28,9 @@ func TestPiAssistantMessage_RequiredFields(t *testing.T) {
 		Timestamp:  1234,
 	}
 	b, err := json.Marshal(msg)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	c.NoError(err, "marshal")
 	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	c.NoError(json.Unmarshal(b, &m), "unmarshal")
 	for _, k := range []string{"role", "content", "api", "provider", "model", "usage", "stopReason", "timestamp"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("assistant message missing required key %q: %s", k, b)
@@ -67,6 +66,7 @@ func TestPiAssistantMessage_RequiredFields(t *testing.T) {
 // match the pi-ai TS unions exactly: text/thinking/toolCall (NOT tool_use), and
 // the toolCall block uses `arguments` (NOT input).
 func TestPiContentBlocks_TypeStrings(t *testing.T) {
+	ck := assert.NewAborting(t)
 	cases := []struct {
 		block    PiContentBlock
 		wantType string
@@ -78,19 +78,14 @@ func TestPiContentBlocks_TypeStrings(t *testing.T) {
 	}
 	for _, c := range cases {
 		b, err := json.Marshal(c.block)
-		if err != nil {
-			t.Fatalf("marshal %s: %v", c.wantType, err)
-		}
+		ck.NoError(err, "marshal %s", c.wantType)
 		var m map[string]any
-		if err := json.Unmarshal(b, &m); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
+		ck.NoError(json.Unmarshal(b, &m), "unmarshal")
 		if m["type"] != c.wantType {
 			t.Fatalf("block type = %v, want %q (%s)", m["type"], c.wantType, b)
 		}
-		if _, ok := m[c.wantKey]; !ok {
-			t.Fatalf("block %q missing key %q: %s", c.wantType, c.wantKey, b)
-		}
+		_, ok := m[c.wantKey]
+		ck.True(ok, "block %q missing key %q: %s", c.wantType, c.wantKey, b)
 	}
 
 	// A toolCall must carry id/name/arguments and must NOT carry input.
@@ -98,34 +93,30 @@ func TestPiContentBlocks_TypeStrings(t *testing.T) {
 	b, _ := json.Marshal(tc)
 	var m map[string]any
 	_ = json.Unmarshal(b, &m)
-	if m["id"] != "toolu_1" || m["name"] != "Bash" {
-		t.Fatalf("toolCall id/name wrong: %s", b)
-	}
-	if _, bad := m["input"]; bad {
-		t.Fatalf("toolCall must not use `input` (pi uses `arguments`): %s", b)
-	}
+	ck.False(m["id"] != "toolu_1" || m["name"] != "Bash", "toolCall id/name wrong: %s", b)
+	_, bad := m["input"]
+	ck.False(bad, "toolCall must not use `input` (pi uses `arguments`): %s", b)
 }
 
 // TestPiUserMessage_Shape asserts a UserMessage carries role/content/timestamp.
 func TestPiUserMessage_Shape(t *testing.T) {
+	c := assert.NewAborting(t)
 	u := PiUserMessage{Role: "user", Content: "hi there", Timestamp: 9}
 	b, _ := json.Marshal(u)
 	var m map[string]any
 	_ = json.Unmarshal(b, &m)
 	for _, k := range []string{"role", "content", "timestamp"} {
-		if _, ok := m[k]; !ok {
-			t.Fatalf("user message missing %q: %s", k, b)
-		}
+		_, ok := m[k]
+		c.True(ok, "user message missing %q: %s", k, b)
 	}
-	if m["role"] != "user" || m["content"] != "hi there" {
-		t.Fatalf("user message wrong: %s", b)
-	}
+	c.False(m["role"] != "user" || m["content"] != "hi there", "user message wrong: %s", b)
 }
 
 // TestPiToolResultMessage_Shape asserts a ToolResultMessage carries the
 // toolResult role, toolCallId/toolName, a content array of text blocks, isError,
 // and timestamp — the shape pi-ai's ToolResultMessage type requires.
 func TestPiToolResultMessage_Shape(t *testing.T) {
+	c := assert.NewAborting(t)
 	tr := PiToolResultMessage{
 		Role:       "toolResult",
 		ToolCallID: "toolu_1",
@@ -142,26 +133,21 @@ func TestPiToolResultMessage_Shape(t *testing.T) {
 			t.Fatalf("toolResult missing %q: %s", k, b)
 		}
 	}
-	if m["role"] != "toolResult" || m["toolCallId"] != "toolu_1" {
-		t.Fatalf("toolResult wrong: %s", b)
-	}
+	c.False(m["role"] != "toolResult" || m["toolCallId"] != "toolu_1", "toolResult wrong: %s", b)
 	content, ok := m["content"].([]any)
-	if !ok || len(content) != 1 {
-		t.Fatalf("toolResult content not a 1-element array: %s", b)
-	}
+	c.False(!ok || len(content) != 1, "toolResult content not a 1-element array: %s", b)
 }
 
 // TestPiEvents_TypeDiscriminators asserts the emitted AgentSessionEvent JSON
 // frames carry the exact `type` discriminators and required sibling fields.
 func TestPiEvents_TypeDiscriminators(t *testing.T) {
+	c := assert.NewAborting(t)
 	asst := PiAssistantMessage{Role: "assistant", Content: []PiContentBlock{PiTextBlock("hi")}, API: "anthropic-messages", Provider: "anthropic", Model: "m", StopReason: "stop", Timestamp: 1}
 
 	mustType := func(t *testing.T, frame []byte, want string) map[string]any {
 		t.Helper()
 		var m map[string]any
-		if err := json.Unmarshal(frame, &m); err != nil {
-			t.Fatalf("unmarshal %s: %v", want, err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal(frame, &m), "unmarshal %s", want)
 		if m["type"] != want {
 			t.Fatalf("type = %v, want %q: %s", m["type"], want, frame)
 		}
@@ -189,17 +175,13 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 	}
 
 	ts := mustType(t, mustMarshal(t, PiToolExecutionStart("t1", "Bash", map[string]any{"command": "ls"}, "")), "tool_execution_start")
-	if ts["toolCallId"] != "t1" || ts["toolName"] != "Bash" {
-		t.Fatalf("tool_execution_start fields wrong: %v", ts)
-	}
+	c.False(ts["toolCallId"] != "t1" || ts["toolName"] != "Bash", "tool_execution_start fields wrong: %v", ts)
 	if _, ok := ts["args"]; !ok {
 		t.Fatal("tool_execution_start missing args")
 	}
 
 	te := mustType(t, mustMarshal(t, PiToolExecutionEnd("t1", "Bash", "ok", false, "")), "tool_execution_end")
-	if te["toolCallId"] != "t1" || te["isError"] != false {
-		t.Fatalf("tool_execution_end fields wrong: %v", te)
-	}
+	c.False(te["toolCallId"] != "t1" || te["isError"] != false, "tool_execution_end fields wrong: %v", te)
 	result, ok := te["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("tool_execution_end result is not an object: %v", te["result"])
@@ -226,8 +208,6 @@ func TestPiEvents_TypeDiscriminators(t *testing.T) {
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal")
 	return b
 }

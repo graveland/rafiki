@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testGuard() *ProviderGuard {
@@ -32,19 +34,16 @@ func hit(conv, provider string) Observation {
 // observation in a conversation is never evidence (no previous turn to compare
 // against), so six calls are needed to produce five qualifying misses.
 func TestGuardEjectsAfterFiveMisses(t *testing.T) {
+	c := assert.NewAborting(t)
 	g := testGuard()
 	now := time.Now()
 	for i := range 5 {
 		g.Observe(now, miss("c1", "CoreWeave"))
-		if got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro"); len(got) != 0 {
-			t.Fatalf("ejected after %d observations (%d qualifying), want none yet: %v", i+1, i, got)
-		}
+		c.Empty(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), "ejected after %d observations (%d qualifying), want none yet", i+1, i)
 	}
 	g.Observe(now, miss("c1", "CoreWeave"))
 	got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro")
-	if len(got) != 1 || got[0] != "coreweave" {
-		t.Fatalf("IgnoredFor = %v, want [coreweave]", got)
-	}
+	c.False(len(got) != 1 || got[0] != "coreweave", "IgnoredFor = %v, want [coreweave]", got)
 }
 
 // TestGuardHitResetsStreak proves a single cache hit clears the streak, so an
@@ -59,9 +58,7 @@ func TestGuardHitResetsStreak(t *testing.T) {
 		g.Observe(now, miss("c1", "Novita"))
 		g.Observe(now, hit("c1", "Novita"))
 	}
-	if got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro"); len(got) != 0 {
-		t.Errorf("IgnoredFor = %v, want none", got)
-	}
+	assert.NewCollecting(t).Empty(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), "IgnoredFor")
 }
 
 // TestGuardDisqualification proves each of the five qualification rules. In
@@ -91,9 +88,7 @@ func TestGuardDisqualification(t *testing.T) {
 				tc.mutate(i, &o)
 				g.Observe(now, o)
 			}
-			if got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro"); len(got) != 0 {
-				t.Errorf("IgnoredFor = %v, want none", got)
-			}
+			assert.NewCollecting(t).Empty(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), "IgnoredFor")
 		})
 	}
 }
@@ -101,17 +96,14 @@ func TestGuardDisqualification(t *testing.T) {
 // TestGuardEjectionExpires proves an ejection lapses after the TTL, so a
 // provider that fixes its cache is not blacklisted forever.
 func TestGuardEjectionExpires(t *testing.T) {
+	c := assert.NewCollecting(t)
 	g := testGuard()
 	now := time.Now()
 	for range 6 {
 		g.Observe(now, miss("c1", "CoreWeave"))
 	}
-	if got := g.IgnoredFor(now.Add(23*time.Hour), "deepseek/deepseek-v4-pro"); len(got) != 1 {
-		t.Errorf("at 23h IgnoredFor = %v, want [coreweave]", got)
-	}
-	if got := g.IgnoredFor(now.Add(25*time.Hour), "deepseek/deepseek-v4-pro"); len(got) != 0 {
-		t.Errorf("at 25h IgnoredFor = %v, want none", got)
-	}
+	c.Len(g.IgnoredFor(now.Add(23*time.Hour), "deepseek/deepseek-v4-pro"), 1, "at 23h IgnoredFor")
+	c.Empty(g.IgnoredFor(now.Add(25*time.Hour), "deepseek/deepseek-v4-pro"), "at 25h IgnoredFor")
 }
 
 // TestGuardIgnoreListCapped proves the safety valve: no matter how many
@@ -126,25 +118,20 @@ func TestGuardIgnoreListCapped(t *testing.T) {
 			g.Observe(now, miss(conv, p))
 		}
 	}
-	if got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro"); len(got) != 3 {
-		t.Errorf("IgnoredFor = %v, want 3 entries", got)
-	}
+	assert.NewCollecting(t).Len(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), 3, "IgnoredFor")
 }
 
 // TestGuardScopedToModelLine proves an ejection blames one model line only: the
 // same provider stays eligible for every other model.
 func TestGuardScopedToModelLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	g := testGuard()
 	now := time.Now()
 	for range 6 {
 		g.Observe(now, miss("c1", "CoreWeave"))
 	}
-	if got := g.IgnoredFor(now, "z-ai/glm-5.2"); len(got) != 0 {
-		t.Errorf("glm IgnoredFor = %v, want none", got)
-	}
-	if got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro"); len(got) != 1 {
-		t.Errorf("deepseek IgnoredFor = %v, want [coreweave]", got)
-	}
+	c.Empty(g.IgnoredFor(now, "z-ai/glm-5.2"), "glm IgnoredFor")
+	c.Len(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), 1, "deepseek IgnoredFor")
 }
 
 // TestModelLine proves a stamped point release folds into its line, so an
@@ -158,9 +145,8 @@ func TestModelLine(t *testing.T) {
 		"openai/gpt-4":                      "openai/gpt-4",
 		"claude-haiku-4-5":                  "claude-haiku-4-5",
 	} {
-		if got := ModelLine(in); got != want {
-			t.Errorf("ModelLine(%q) = %q, want %q", in, got, want)
-		}
+		got := ModelLine(in)
+		assert.NewCollecting(t).Eq(want, got, "ModelLine(%q) = %q, want", in, got)
 	}
 }
 
@@ -169,9 +155,7 @@ func TestModelLine(t *testing.T) {
 func TestGuardNilSafe(t *testing.T) {
 	var g *ProviderGuard
 	g.Observe(time.Now(), miss("c1", "CoreWeave"))
-	if got := g.IgnoredFor(time.Now(), "deepseek/deepseek-v4-pro"); got != nil {
-		t.Errorf("IgnoredFor = %v, want nil", got)
-	}
+	assert.NewCollecting(t).Nil(g.IgnoredFor(time.Now(), "deepseek/deepseek-v4-pro"), "IgnoredFor")
 }
 
 // replayTurn mirrors one row of the testdata fixtures.
@@ -187,17 +171,12 @@ type replayTurn struct {
 
 func loadReplay(t *testing.T, name string) []replayTurn {
 	t.Helper()
+	c := assert.NewAborting(t)
 	b, err := os.ReadFile(filepath.Join("testdata", name))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
+	c.NoError(err, "read fixture")
 	var turns []replayTurn
-	if err := json.Unmarshal(b, &turns); err != nil {
-		t.Fatalf("decode fixture: %v", err)
-	}
-	if len(turns) == 0 {
-		t.Fatal("fixture is empty")
-	}
+	c.NoError(json.Unmarshal(b, &turns), "decode fixture")
+	c.NotEmpty(turns, "fixture is empty")
 	return turns
 }
 
@@ -240,13 +219,10 @@ func TestReplayHealthyNovitaNeverEjects(t *testing.T) {
 // input token. The guard must catch it within a handful of turns rather than
 // after 207 of them.
 func TestReplayBrokenCoreWeaveEjects(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ejectedAt, turns, g := replay(t, "coreweave_broken.json")
-	if ejectedAt < 0 {
-		t.Fatal("replaying the CoreWeave incident produced no ejection")
-	}
-	if ejectedAt > 10 {
-		t.Errorf("ejected at turn %d, want within the first 10 — detection cost is the uncached turns before it fires", ejectedAt)
-	}
+	c.Require().GreaterOrEqual(0, ejectedAt, "replaying the CoreWeave incident produced no ejection")
+	c.LessOrEqual(10, ejectedAt, "ejected at turn")
 	if got := g.IgnoredFor(time.Now(), "deepseek/deepseek-v4-pro"); len(got) != 1 || got[0] != "coreweave" {
 		t.Errorf("IgnoredFor = %v, want [coreweave]", got)
 	}

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +20,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestBuildInjectionFrameShapes(t *testing.T) {
@@ -68,18 +69,16 @@ func TestBuildInjectionFrameShapes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			got, err := buildInjectionFrame(tc.batch, tc.id)
-			if err != nil {
-				t.Fatalf("buildInjectionFrame: %v", err)
-			}
-			if string(got) != tc.want {
-				t.Errorf("frame =\n  %s\nwant\n  %s", got, tc.want)
-			}
+			c.Require().NoError(err, "buildInjectionFrame")
+			c.Eq(tc.want, string(got), "frame =\n  %s\nwant\n", got)
 		})
 	}
 }
 
 func TestInboundFromFrameClassifies(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct {
 		frame    string
 		wantOK   bool
@@ -95,28 +94,21 @@ func TestInboundFromFrameClassifies(t *testing.T) {
 		{`not json`, false, 0, ""},
 	} {
 		in, ok := inboundFromFrame("c_1", json.RawMessage(tc.frame))
-		if ok != tc.wantOK {
-			t.Fatalf("inboundFromFrame(%s) ok = %v, want %v", tc.frame, ok, tc.wantOK)
-		}
+		c.Require().Eq(tc.wantOK, ok, "inboundFromFrame(%s) ok = %v, want", tc.frame, ok)
 		if !ok {
 			continue
 		}
-		if in.Mode != tc.wantMode || in.Text != tc.wantText {
-			t.Errorf("inboundFromFrame(%s) = %+v, want mode %v text %q", tc.frame, in, tc.wantMode, tc.wantText)
-		}
+		c.False(in.Mode != tc.wantMode || in.Text != tc.wantText, "inboundFromFrame(%s) = %+v, want mode %v text %q", tc.frame, in, tc.wantMode, tc.wantText)
 	}
 }
 
 func TestConsumeFramesMapsFrameIdsToRows(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	rec, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "hi"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.Require().NoError(err, "Accept")
+	ck.Require().NoError(st.MarkSent(ctx, []string{rec.ID}), "MarkSent")
 
 	c := &Controller{
 		inbox:      inbox.NewQueue(inbox.QueueConfig{Store: st}),
@@ -124,12 +116,10 @@ func TestConsumeFramesMapsFrameIdsToRows(t *testing.T) {
 	}
 	c.consumeFrames([]string{"F1"})
 
-	if rows, _ := st.Pending(ctx, "c_1"); len(rows) != 0 {
-		t.Errorf("the acked row should be terminal, still pending: %+v", rows)
-	}
-	if _, still := c.sentFrames["F1"]; still {
-		t.Error("an acked frame must be forgotten")
-	}
+	rows, _ := st.Pending(ctx, "c_1")
+	ck.Empty(rows, "the acked row should be terminal, still pending")
+	_, still := c.sentFrames["F1"]
+	ck.False(still, "an acked frame must be forgotten")
 }
 
 // TestDeliverInboxDefersForScriptChildren pins the delivery contract wave 3
@@ -140,23 +130,18 @@ func TestConsumeFramesMapsFrameIdsToRows(t *testing.T) {
 // would be the wave-2 review's F1 bug class all over again, so the test
 // asserts on the ROW STATE, not just the return.
 func TestDeliverInboxDefersForScriptChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ctx := context.Background()
 
 	accept := func(childID string) (string, inbox.Store, inbox.Batch) {
 		st := inbox.NewMemory()
 		in := inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "hello " + childID}
 		rec, err := st.Accept(ctx, in)
-		if err != nil {
-			t.Fatalf("Accept: %v", err)
-		}
+		ck.NoError(err, "Accept")
 		rows, err := st.Pending(ctx, childID)
-		if err != nil {
-			t.Fatalf("Pending: %v", err)
-		}
+		ck.NoError(err, "Pending")
 		batches := inbox.Coalesce(rows, inbox.BatchConfig{MaxFragments: 30, MaxBytesPerFlush: 65536})
-		if len(batches) != 1 {
-			t.Fatalf("Coalesce = %d batches, want 1", len(batches))
-		}
+		ck.Len(batches, 1, "Coalesce = %d batches, want 1", len(batches))
 		return rec.ID, st, batches[0]
 	}
 
@@ -165,9 +150,7 @@ func TestDeliverInboxDefersForScriptChildren(t *testing.T) {
 	c := &Controller{st: childstore.New(), cm: newChildManager(), inbox: inbox.NewQueue(inbox.QueueConfig{Store: st})}
 	c.st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript, Status: protocol.StatusStreaming})
 	awaitAck, err := c.deliverInbox(ctx, batch)
-	if err == nil || !errors.Is(err, errInboxDeferred) {
-		t.Fatalf("script child delivery = (%v, %v), want the deferred sentinel", awaitAck, err)
-	}
+	ck.False(err == nil || !errors.Is(err, errInboxDeferred), "script child delivery = (%v, %v), want the deferred sentinel", awaitAck, err)
 	if rows, _ := st.Pending(ctx, "c_script"); len(rows) != 1 || rows[0].ID != rowID {
 		t.Fatalf("the script child's row must stay pending for its Receive stream; pending = %+v", rows)
 	}
@@ -201,6 +184,7 @@ func (r *consumeRecorder) MarkConsumed(ctx context.Context, ids []string) error 
 }
 
 func TestConsumeFramesGroupsByChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	base := inbox.NewMemory()
 	rec := &consumeRecorder{Store: base}
 	ctx := context.Background()
@@ -208,12 +192,8 @@ func TestConsumeFramesGroupsByChild(t *testing.T) {
 	rowFor := func(childID string) string {
 		t.Helper()
 		r, err := base.Accept(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "hi"})
-		if err != nil {
-			t.Fatalf("Accept: %v", err)
-		}
-		if err := base.MarkSent(ctx, []string{r.ID}); err != nil {
-			t.Fatalf("MarkSent: %v", err)
-		}
+		ck.Require().NoError(err, "Accept")
+		ck.Require().NoError(base.MarkSent(ctx, []string{r.ID}), "MarkSent")
 		return r.ID
 	}
 	rowA, rowB := rowFor("c_a"), rowFor("c_b")
@@ -231,27 +211,20 @@ func TestConsumeFramesGroupsByChild(t *testing.T) {
 	calls := rec.calls
 	rec.mu.Unlock()
 
-	if len(calls) != 2 {
-		t.Fatalf("MarkConsumed calls = %d (%v); want one per child — a single call means "+
-			"one child's lock was held while another child's rows were mutated", len(calls), calls)
-	}
+	ck.Require().Len(calls, 2, "MarkConsumed calls = %d (%v); want one per child — a single call means "+
+		"one child's lock was held while another child's rows were mutated", len(calls), calls)
 	want := map[string]string{rowA: "c_a", rowB: "c_b"}
 	for _, ids := range calls {
-		if len(ids) != 1 {
-			t.Fatalf("a per-child call carried %d ids (%v); want 1", len(ids), ids)
-		}
+		ck.Require().Len(ids, 1, "a per-child call carried %d ids (%v); want 1", len(ids), ids)
 		if _, ok := want[ids[0]]; !ok {
 			t.Fatalf("unexpected row id %q in call %v", ids[0], ids)
 		}
 		delete(want, ids[0])
 	}
-	if len(want) != 0 {
-		t.Fatalf("rows never consumed: %v", want)
-	}
+	ck.Require().Empty(want, "rows never consumed")
 	for _, child := range []string{"c_a", "c_b"} {
-		if rows, _ := base.Pending(ctx, child); len(rows) != 0 {
-			t.Errorf("%s still has pending rows: %+v", child, rows)
-		}
+		rows, _ := base.Pending(ctx, child)
+		ck.Empty(rows, "%s still has pending rows", child)
 	}
 }
 
@@ -266,9 +239,7 @@ func TestForgetFramesIsScopedToOneChild(t *testing.T) {
 	}}
 	c.forgetFrames("c_a")
 
-	if len(c.sentFrames) != 1 {
-		t.Fatalf("sentFrames = %+v; want only c_b's entry", c.sentFrames)
-	}
+	assert.NewAborting(t).Len(c.sentFrames, 1, "sentFrames")
 	if _, ok := c.sentFrames["FB"]; !ok {
 		t.Errorf("another child's unconfirmed frame was forgotten: %+v", c.sentFrames)
 	}
@@ -302,32 +273,26 @@ func (r *acceptRecorder) accepted() []inbox.Inbound {
 // does. Persisting a control frame would replay a get_state — or worse, a
 // cancellation — into an unrelated later turn.
 func TestSendPersistsTurnBoundFramesAndPassesControlFramesThrough(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	rec := &acceptRecorder{Store: inbox.NewMemory()}
 	ctrl.inbox = ctrl.newInboxQueue(rec)
 
 	childID := spawnTestChild(t, ctrl, nil)
 
-	if err := ctrl.Send(childID, json.RawMessage(`{"type":"prompt","message":"hi"}`)); err != nil {
-		t.Fatalf("Send(prompt): %v", err)
-	}
+	c.NoError(ctrl.Send(childID, json.RawMessage(`{"type":"prompt","message":"hi"}`)), "Send(prompt)")
 	rows := rec.accepted()
-	if len(rows) != 1 || rows[0].Mode != inbox.ModePrompt || rows[0].Text != "hi" {
-		t.Fatalf("a prompt must be durably accepted before it is written; got %+v", rows)
-	}
+	c.False(len(rows) != 1 || rows[0].Mode != inbox.ModePrompt || rows[0].Text != "hi", "a prompt must be durably accepted before it is written; got %+v", rows)
 
-	if err := ctrl.Send(childID, json.RawMessage(`{"type":"get_state","id":"g1"}`)); err != nil {
-		t.Fatalf("Send(get_state): %v", err)
-	}
-	if got := rec.accepted(); len(got) != 1 {
-		t.Fatalf("a control frame must not be persisted; store now holds %+v", got)
-	}
+	c.NoError(ctrl.Send(childID, json.RawMessage(`{"type":"get_state","id":"g1"}`)), "Send(get_state)")
+	c.Len(rec.accepted(), 1, "a control frame must not be persisted; store now holds")
 }
 
 // TestSendRefusesADeadChildBeforePersisting: "durably accepted" is a promise.
 // Making it for a child that has exited turns a clean error into a row nobody
 // will ever consume.
 func TestSendRefusesADeadChildBeforePersisting(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	rec := &acceptRecorder{Store: inbox.NewMemory()}
 	ctrl.inbox = ctrl.newInboxQueue(rec)
@@ -337,12 +302,8 @@ func TestSendRefusesADeadChildBeforePersisting(t *testing.T) {
 	})
 	err := ctrl.Send("c_gone", json.RawMessage(`{"type":"prompt","message":"hi"}`))
 	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) || ce.Code != protocol.ErrChildExited {
-		t.Fatalf("Send to an exited child = %v; want a coded child_exited error", err)
-	}
-	if got := rec.accepted(); len(got) != 0 {
-		t.Fatalf("validation must run before persist; store holds %+v", got)
-	}
+	c.False(!errors.As(err, &ce) || ce.Code != protocol.ErrChildExited, "Send to an exited child = %v; want a coded child_exited error", err)
+	c.Empty(rec.accepted(), "validation must run before persist; store holds")
 }
 
 // TestOrphanSteerArrivesAsASteer is the degraded path end to end: a PushSteer
@@ -353,6 +314,7 @@ func TestSendRefusesADeadChildBeforePersisting(t *testing.T) {
 // Mutation check: hardcode inbox.ModePrompt in deliverOrphans' frame building
 // and this test fails on the frame type.
 func TestOrphanSteerArrivesAsASteer(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 	childID := spawnTestChild(t, ctrl, nil)
 
@@ -361,21 +323,16 @@ func TestOrphanSteerArrivesAsASteer(t *testing.T) {
 	}})
 
 	got := waitForChildFrame(t, ctrl, childID, "steer")
-	if !strings.Contains(got.Message, "executor lost") {
-		t.Errorf("the steer lost its text: %+v", got)
-	}
-	if !strings.Contains(got.Message, `<rafiki-event source="executor">`) {
-		t.Errorf("the orphan lost its source wrapper: %+v", got)
-	}
-	if got.ID != "" {
-		t.Errorf("an orphan has no rows and must not ask for an ack: %+v", got)
-	}
+	c.StrContains(got.Message, "executor lost", "the steer lost its text: %+v", got)
+	c.StrContains(got.Message, `<rafiki-event source="executor">`, "the orphan lost its source wrapper: %+v", got)
+	c.Eq("", got.ID, "an orphan has no rows and must not ask for an ack: %+v", got)
 }
 
 // TestOrphansCoalesceLikeRows proves the degraded path shares the durable
 // path's rules rather than reimplementing them: last-write-wins on the key,
 // and any steer in the group makes the whole batch a steer.
 func TestOrphansCoalesceLikeRows(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 	childID := spawnTestChild(t, ctrl, nil)
 
@@ -386,13 +343,9 @@ func TestOrphansCoalesceLikeRows(t *testing.T) {
 	})
 
 	got := waitForChildFrame(t, ctrl, childID, "steer")
-	if strings.Contains(got.Message, "w1 first") {
-		t.Errorf("a superseded fragment survived: %s", got.Message)
-	}
+	c.NotStrContains(got.Message, "w1 first", "a superseded fragment survived")
 	for _, want := range []string{"w1 second", "budget exhausted"} {
-		if !strings.Contains(got.Message, want) {
-			t.Errorf("fragment %q missing from %s", want, got.Message)
-		}
+		c.StrContains(got.Message, want, "fragment")
 	}
 }
 
@@ -415,9 +368,7 @@ type childFrame struct {
 func waitForChildFrame(t *testing.T, ctrl *Controller, childID, frameType string) childFrame {
 	t.Helper()
 	ch, ok := ctrl.cm.Get(childID)
-	if !ok {
-		t.Fatalf("child %s is not live", childID)
-	}
+	assert.NewAborting(t).True(ok, "child %s is not live", childID)
 	deadline := time.Now().Add(5 * time.Second)
 	var seen []string
 	for time.Now().Before(deadline) {
@@ -449,9 +400,7 @@ func fakeClaudeScript(t *testing.T) string {
 		"printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$SID\\\",\\\"model\\\":\\\"claude-opus-4-8\\\"}\"\n" +
 		"while IFS= read -r line; do :; done\n" +
 		"while true; do sleep 0.05; done\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(script, []byte(body), 0o755), "write fake claude")
 	return script
 }
 
@@ -466,14 +415,13 @@ func fakeClaudeScript(t *testing.T) string {
 // Mutation check: swap ctrl.connectInbox() for ctrl.inbox below and this test
 // fails on the row count.
 func TestConnectAbortToAClaudeChildIsNeverPersisted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl, childID := newClaudeTestChild(t, fakeClaudeScript(t))
 	rec := &acceptRecorder{Store: inbox.NewMemory()}
 	ctrl.inbox = ctrl.newInboxQueue(rec)
 
 	before, ok := ctrl.cm.Get(childID)
-	if !ok {
-		t.Fatalf("child %s is not live", childID)
-	}
+	c.Require().True(ok, "child %s is not live", childID)
 	pidBefore := before.PID()
 
 	srv := connectapi.NewServer(nil)
@@ -483,17 +431,11 @@ func TestConnectAbortToAClaudeChildIsNeverPersisted(t *testing.T) {
 		ChildId: childID,
 		Mode:    rafikiv1.SendMode_SEND_MODE_ABORT,
 	}))
-	if err != nil {
-		t.Fatalf("Send(ABORT): %v", err)
-	}
-	if got := rec.accepted(); len(got) != 0 {
-		t.Fatalf("a claude abort must never become a row; store holds %+v", got)
-	}
+	c.Require().NoError(err, "Send(ABORT)")
+	c.Require().Empty(rec.accepted(), "a claude abort must never become a row; store holds")
 	// No row means no id to quote back. An invented one would resolve to
 	// nothing in every store.
-	if id := resp.Msg.GetMessageId(); id != "" {
-		t.Errorf("message_id = %q; want empty — there is no row to name", id)
-	}
+	c.Eq("", resp.Msg.GetMessageId(), "message_id")
 
 	// And it must still abort: the interrupt path replaces the process under
 	// the same child id.
@@ -516,11 +458,10 @@ func TestConnectAbortToAClaudeChildIsNeverPersisted(t *testing.T) {
 // (which re-execs rafikid and needs a model); the live process underneath only
 // has to accept a frame.
 func TestConnectAbortToAFundiChildStillQueues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctrl := newTestController(t)
 	childID := spawnTestChild(t, ctrl, nil)
-	if err := ctrl.st.Update(childID, func(s *childstore.Session) { s.Kind = protocol.KindFundi }); err != nil {
-		t.Fatalf("relabel kind: %v", err)
-	}
+	c.Require().NoError(ctrl.st.Update(childID, func(s *childstore.Session) { s.Kind = protocol.KindFundi }), "relabel kind")
 	rec := &acceptRecorder{Store: inbox.NewMemory()}
 	ctrl.inbox = ctrl.newInboxQueue(rec)
 
@@ -531,16 +472,10 @@ func TestConnectAbortToAFundiChildStillQueues(t *testing.T) {
 		ChildId: childID,
 		Mode:    rafikiv1.SendMode_SEND_MODE_ABORT,
 	}))
-	if err != nil {
-		t.Fatalf("Send(ABORT): %v", err)
-	}
+	c.Require().NoError(err, "Send(ABORT)")
 	rows := rec.accepted()
-	if len(rows) != 1 || rows[0].Mode != inbox.ModeAbort {
-		t.Fatalf("a fundi abort must be durably accepted; store holds %+v", rows)
-	}
-	if resp.Msg.GetMessageId() != rows[0].ID {
-		t.Errorf("message_id = %q; want the row id %q", resp.Msg.GetMessageId(), rows[0].ID)
-	}
+	c.Require().False(len(rows) != 1 || rows[0].Mode != inbox.ModeAbort, "a fundi abort must be durably accepted; store holds %+v", rows)
+	c.Eq(rows[0].ID, resp.Msg.GetMessageId(), "message_id")
 	// And it was DELIVERED, not merely stored: an abort awaits no ack, so a
 	// successful write retires the row on the spot. A row still pending would
 	// mean Accept persisted and nothing ever wrote it to the child.
@@ -557,15 +492,12 @@ func TestConnectAbortToAFundiChildStillQueues(t *testing.T) {
 //
 // Mutation check: swap Reset for Drop in releaseInboxOnExit and this fails.
 func TestExitResetsSentRowsRatherThanDroppingThem(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	rec, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.Require().NoError(err, "Accept")
+	ck.Require().NoError(st.MarkSent(ctx, []string{rec.ID}), "MarkSent")
 
 	c := newTestController(t)
 	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
@@ -573,20 +505,15 @@ func TestExitResetsSentRowsRatherThanDroppingThem(t *testing.T) {
 	c.releaseInboxOnExit("c_1")
 
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("an exited child's unconfirmed row must return to pending so a resume can run it; got %d", len(rows))
-	}
-	if len(c.sentFrames) != 0 {
-		t.Errorf("the dead child's frame bookkeeping must go with it: %+v", c.sentFrames)
-	}
+	ck.Require().NoError(err, "Pending")
+	ck.Require().Len(rows, 1, "an exited child's unconfirmed row must return to pending so a resume can run it; got %d", len(rows))
+	ck.Empty(c.sentFrames, "the dead child's frame bookkeeping must go with it")
 }
 
 // TestForgetDropsTheQueue is the other half: forget is the one moment there
 // will never be a turn again, so the rows terminate.
 func TestForgetDropsTheQueue(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"}); err != nil {
@@ -598,12 +525,8 @@ func TestForgetDropsTheQueue(t *testing.T) {
 	c.dropInboxForForgotten("c_1", "child forgotten")
 
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("a forgotten child's queue must be dropped; %d rows survived", len(rows))
-	}
+	ck.NoError(err, "Pending")
+	ck.Empty(rows, "a forgotten child's queue must be dropped; %d rows survived", len(rows))
 	// Dropped, not merely un-pending: a terminal row is what the retention
 	// sweep can reach. A row left in any other state leaks forever.
 	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 1 {
@@ -625,6 +548,7 @@ func TestForgetDropsTheQueue(t *testing.T) {
 // lease-ownership bug caused, and there is no future resume that can ever
 // revive a dropped row.
 func TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"}); err != nil {
@@ -639,17 +563,11 @@ func TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns(t *testing.T) {
 		Labels:  map[string]string{"rafiki/daemon": "some-other-daemon"},
 	})
 
-	if err := c.Close("c_1"); err != nil {
-		t.Fatalf("Forget: %v", err)
-	}
+	ck.NoError(c.Close("c_1"), "Forget")
 
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(rows))
-	}
+	ck.NoError(err, "Pending")
+	ck.Len(rows, 1, "a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(rows))
 }
 
 // TestForgetDropsInboxForAnOwnedChild is the other half: an ordinary forget
@@ -658,6 +576,7 @@ func TestForgetDoesNotDropInboxForAChildAnotherDaemonOwns(t *testing.T) {
 // failing loudly, which is why this is asserted as its own test rather than
 // inferred from the cross-daemon case above.
 func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "work"}); err != nil {
@@ -674,17 +593,11 @@ func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
 		// itself.
 	})
 
-	if err := c.Close("c_1"); err != nil {
-		t.Fatalf("Forget: %v", err)
-	}
+	ck.NoError(c.Close("c_1"), "Forget")
 
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("an owned, forgotten child's queue must be dropped; %d rows survived", len(rows))
-	}
+	ck.NoError(err, "Pending")
+	ck.Empty(rows, "an owned, forgotten child's queue must be dropped; %d rows survived", len(rows))
 }
 
 // TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne mirrors
@@ -694,6 +607,7 @@ func TestForgetDropsInboxForAnOwnedChild(t *testing.T) {
 // carries its old ExitedAt, so this path reaches the identical trap on a
 // timer rather than needing a client to call Forget at the wrong moment.
 func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	for _, id := range []string{"c_mine", "c_theirs"} {
@@ -712,33 +626,22 @@ func TestForgetAllExitedSkipsInboxForAnUnownedChildButDropsForAnOwnedOne(t *test
 	})
 
 	closed, err := c.CloseAllExited(0)
-	if err != nil {
-		t.Fatalf("ForgetAllExited: %v", err)
-	}
-	if len(closed) != 2 {
-		t.Fatalf("ForgetAllExited count = %d, want 2 (both are still forgotten locally)", len(closed))
-	}
+	ck.NoError(err, "ForgetAllExited")
+	ck.Len(closed, 2, "ForgetAllExited count = %d, want 2 (both are still forgotten locally)", len(closed))
 
 	mineRows, err := st.Pending(ctx, "c_mine")
-	if err != nil {
-		t.Fatalf("Pending c_mine: %v", err)
-	}
-	if len(mineRows) != 0 {
-		t.Fatalf("an owned child's queue must be dropped; %d rows survived", len(mineRows))
-	}
+	ck.NoError(err, "Pending c_mine")
+	ck.Empty(mineRows, "an owned child's queue must be dropped; %d rows survived", len(mineRows))
 
 	theirsRows, err := st.Pending(ctx, "c_theirs")
-	if err != nil {
-		t.Fatalf("Pending c_theirs: %v", err)
-	}
-	if len(theirsRows) != 1 {
-		t.Fatalf("a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(theirsRows))
-	}
+	ck.NoError(err, "Pending c_theirs")
+	ck.Len(theirsRows, 1, "a child owned by another daemon must keep its queue intact; %d rows survived, want 1", len(theirsRows))
 }
 
 // TestHandleChildExitResetsTheInbox proves the hook is wired at the exit site,
 // not merely that the helper works.
 func TestHandleChildExitResetsTheInbox(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	childID := spawnTestChild(t, ctrl, nil)
 	st := inbox.NewMemory()
@@ -746,12 +649,8 @@ func TestHandleChildExitResetsTheInbox(t *testing.T) {
 
 	ctx := context.Background()
 	row, err := st.Accept(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "work"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{row.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	c.NoError(err, "Accept")
+	c.NoError(st.MarkSent(ctx, []string{row.ID}), "MarkSent")
 
 	if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
 		t.Fatalf("Kill: %v", err)
@@ -785,10 +684,9 @@ func TestHandleChildExitResetsTheInbox(t *testing.T) {
 // exercise the disjunct under test rather than the (already-covered)
 // claude/pi exemption.
 func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
-	if ctrl.leases != nil {
-		t.Fatal("test assumes no database pool; ctrl.leases must be nil")
-	}
+	c.Nil(ctrl.leases, "test assumes no database pool; ctrl.leases must be nil")
 
 	got, err := ctrl.Spawn(context.Background(), protocol.SpawnRequest{
 		Kind:      protocol.KindFundi,
@@ -796,9 +694,7 @@ func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
 		Cwd:       t.TempDir(),
 		NoSession: true,
 	}, users.Identity{})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	c.NoError(err, "Spawn")
 	childID := got.ChildID
 
 	st := inbox.NewMemory()
@@ -806,12 +702,8 @@ func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
 
 	ctx := context.Background()
 	row, err := st.Accept(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModePrompt, Text: "work"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{row.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	c.NoError(err, "Accept")
+	c.NoError(st.MarkSent(ctx, []string{row.ID}), "MarkSent")
 
 	if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
 		t.Fatalf("Kill: %v", err)
@@ -838,6 +730,7 @@ func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
 // exactly the delivery DrainIdle had just refused, one line later, defeating
 // the coalescing eventbuf exists for.
 func TestDrainInboxDeliversDirectMessagesOnly(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Source: "", Text: "direct message"}); err != nil {
@@ -859,9 +752,7 @@ func TestDrainInboxDeliversDirectMessagesOnly(t *testing.T) {
 	c := newTestController(t)
 	c.drainInbox(q, "c_1")
 
-	if len(delivered) != 1 {
-		t.Fatalf("delivered %d batches, want 1 (direct only)", len(delivered))
-	}
+	ck.Len(delivered, 1, "delivered %d batches, want 1 (direct only)", len(delivered))
 	if delivered[0].Source != "" || delivered[0].Frags[0] != "direct message" {
 		t.Fatalf("delivered batch = %+v; want the direct message, not the still-debouncing fragment", delivered[0])
 	}
@@ -869,12 +760,8 @@ func TestDrainInboxDeliversDirectMessagesOnly(t *testing.T) {
 	// The fragment must still be pending -- untouched, ready for eventbuf's
 	// own debounce/DrainIdle to release it in its own time.
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 || rows[0].Source != "subagents" {
-		t.Fatalf("pending after drainInbox = %+v; want the fragment still pending, untouched", rows)
-	}
+	ck.NoError(err, "Pending")
+	ck.False(len(rows) != 1 || rows[0].Source != "subagents", "pending after drainInbox = %+v; want the fragment still pending, untouched", rows)
 }
 
 // TestForgetPathsDropTheQueue covers BOTH deletion paths. ForgetAllExited is a
@@ -891,9 +778,7 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 		{
 			name: "Forget",
 			forget: func(t *testing.T, ctrl *Controller, childID string) {
-				if err := ctrl.Close(childID); err != nil {
-					t.Fatalf("Forget: %v", err)
-				}
+				assert.NewAborting(t).NoError(ctrl.Close(childID), "Forget")
 			},
 		},
 		{
@@ -925,9 +810,8 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 
 			tc.forget(t, ctrl, childID)
 
-			if rows, _ := st.Pending(ctx, childID); len(rows) != 0 {
-				t.Fatalf("a forgotten child's queue must be dropped; %d rows survived", len(rows))
-			}
+			rows, _ := st.Pending(ctx, childID)
+			assert.NewAborting(t).Empty(rows, "a forgotten child's queue must be dropped; %d rows survived", len(rows))
 			if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 1 {
 				t.Fatalf("swept %d rows (err=%v); want 1 — a row left non-terminal is one "+
 					"the retention sweep can never reach", n, err)
@@ -980,11 +864,10 @@ func idleDrainFixture(t *testing.T, text string) (*Controller, *drainRecorder, *
 		Deliver:  rec.deliver,
 		Batch:    ctrl.inboxBatch,
 	})
-	if _, err := st.Accept(context.Background(), inbox.Inbound{
+	_, err := st.Accept(context.Background(), inbox.Inbound{
 		ChildID: childID, Mode: inbox.ModePrompt, Text: text,
-	}); err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
+	})
+	assert.NewAborting(t).NoError(err, "Accept")
 	return ctrl, rec, st, childID
 }
 
@@ -993,9 +876,8 @@ func idleDrainFixture(t *testing.T, text string) (*Controller, *drainRecorder, *
 // what picks it up.
 func TestIdleTransitionDrainsTheInbox(t *testing.T) {
 	ctrl, rec, _, childID := idleDrainFixture(t, "left behind")
-	if _, ok := ctrl.st.SetStatus(childID, protocol.StatusStreaming); !ok {
-		t.Fatalf("SetStatus: child %s not in store", childID)
-	}
+	_, ok := ctrl.st.SetStatus(childID, protocol.StatusStreaming)
+	assert.NewAborting(t).True(ok, "SetStatus: child %s not in store", childID)
 
 	ctrl.handleStatusChange(childID, protocol.StatusIdle, protocol.StatusStreaming)
 
@@ -1020,21 +902,20 @@ func TestIdleTransitionDrainsTheInbox(t *testing.T) {
 //
 // Mutation check: drop the `newStatus == StatusIdle` condition and this fails.
 func TestNonIdleTransitionDoesNotDrainTheInbox(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl, rec, st, childID := idleDrainFixture(t, "not yet")
 
 	ctrl.handleStatusChange(childID, protocol.StatusStreaming, protocol.StatusIdle)
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if got := rec.seen(); len(got) != 0 {
-			t.Fatalf("a pending row was delivered on a transition INTO a working status; "+
-				"the buffer's debounce and busy gate are both bypassed: %+v", got)
-		}
+		got := rec.seen()
+		c.Empty(got, "a pending row was delivered on a transition INTO a working status; "+
+			"the buffer's debounce and busy gate are both bypassed: %+v", got)
 		time.Sleep(10 * time.Millisecond)
 	}
-	if rows, _ := st.Pending(context.Background(), childID); len(rows) != 1 {
-		t.Fatalf("the row should still be pending; got %d", len(rows))
-	}
+	rows, _ := st.Pending(context.Background(), childID)
+	c.Len(rows, 1, "the row should still be pending; got %d", len(rows))
 }
 
 // sweepRecorder captures the cutoff the retention sweep asks for.
@@ -1069,9 +950,7 @@ func TestSweepTickSweepsTheInboxWithTheRetentionWindow(t *testing.T) {
 	ctrl.sweepTick(t.Context())
 
 	got := rec.seen()
-	if len(got) != 1 {
-		t.Fatalf("Sweep calls = %d; want exactly 1 from the periodic tick", len(got))
-	}
+	assert.NewAborting(t).Len(got, 1, "Sweep calls = %d; want exactly 1 from the periodic tick", len(got))
 	want := before.Add(-inboxRetention)
 	if d := got[0].Sub(want); d < 0 || d > 5*time.Second {
 		t.Errorf("sweep cutoff = %v; want ~%v (now - inboxRetention)", got[0], want)
@@ -1092,27 +971,23 @@ func TestSweepTickSweepsTheInboxWithTheRetentionWindow(t *testing.T) {
 // classify before persisting), which is exactly why the guard belongs at the
 // one point every delivery funnels through rather than at a third call site.
 func TestStaleClaudeAbortRowIsRetiredNotReplayed(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl, childID := newClaudeTestChild(t, fakeClaudeScript(t))
 	st := inbox.NewMemory()
 	ctrl.inbox = ctrl.newInboxQueue(st)
 
 	before, ok := ctrl.cm.Get(childID)
-	if !ok {
-		t.Fatalf("child %s is not live", childID)
-	}
+	c.True(ok, "child %s is not live", childID)
 	pidBefore := before.PID()
 
 	ctx := context.Background()
 	if _, err := st.Accept(ctx, inbox.Inbound{ChildID: childID, Mode: inbox.ModeAbort}); err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
-	if err := ctrl.inbox.DeliverAll(ctx, childID); err != nil {
-		t.Fatalf("DeliverAll: %v", err)
-	}
+	c.NoError(ctrl.inbox.DeliverAll(ctx, childID), "DeliverAll")
 
-	if rows, _ := st.Pending(ctx, childID); len(rows) != 0 {
-		t.Fatalf("the stale abort must be retired, not left to be retried forever: %+v", rows)
-	}
+	rows, _ := st.Pending(ctx, childID)
+	c.Empty(rows, "the stale abort must be retired, not left to be retried forever")
 	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 1 {
 		t.Fatalf("swept %d rows (err=%v); want 1 — the retired row must be terminal", n, err)
 	}

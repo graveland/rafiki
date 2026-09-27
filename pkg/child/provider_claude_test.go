@@ -6,51 +6,41 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestClaudeProvider_Bootstrap_IsNil(t *testing.T) {
-	if got := (ClaudeProvider{}).BootstrapFrame(); got != nil {
-		t.Fatalf("claude needs no bootstrap, got %q", got)
-	}
+	assert.NewAborting(t).Nil((ClaudeProvider{}).BootstrapFrame(), "claude needs no bootstrap, got")
 }
 
 func TestClaudeProvider_Parse_SystemInitIsFirstResponse(t *testing.T) {
+	c := assert.NewAborting(t)
 	line := []byte(`{"type":"system","subtype":"init","session_id":"sess-123","model":"claude-opus-4-8","cwd":"/tmp"}`)
 	res := ClaudeProvider{}.Parse(line)
-	if !res.FirstResponse {
-		t.Fatal("system/init should be FirstResponse")
-	}
-	if !res.HasMeta || res.Meta.SessionID != "sess-123" || res.Meta.Model != "claude-opus-4-8" {
-		t.Fatalf("meta = %+v hasMeta=%v", res.Meta, res.HasMeta)
-	}
-	if len(res.Events) != 0 {
-		t.Fatalf("system/init should emit no SM events, got %+v", res.Events)
-	}
+	c.True(res.FirstResponse, "system/init should be FirstResponse")
+	c.False(!res.HasMeta || res.Meta.SessionID != "sess-123" || res.Meta.Model != "claude-opus-4-8", "meta = %+v hasMeta=%v", res.Meta, res.HasMeta)
+	c.Empty(res.Events, "system/init should emit no SM events, got")
 }
 
 func TestParseInitCapturesSlashCommands(t *testing.T) {
+	c := assert.NewAborting(t)
 	line := []byte(`{"type":"system","subtype":"init","session_id":"s1","model":"claude","slash_commands":["compact","review","init"]}`)
 	res := ClaudeProvider{}.Parse(line)
-	if !res.HasMeta {
-		t.Fatal("init frame should produce metadata")
-	}
-	if len(res.Meta.SlashCommands) != 3 || res.Meta.SlashCommands[0] != "compact" {
-		t.Fatalf("SlashCommands = %v, want [compact review init]", res.Meta.SlashCommands)
-	}
+	c.True(res.HasMeta, "init frame should produce metadata")
+	c.False(len(res.Meta.SlashCommands) != 3 || res.Meta.SlashCommands[0] != "compact", "SlashCommands = %v, want [compact review init]", res.Meta.SlashCommands)
 }
 
 func TestClaudeProvider_ReadyOnSpawn(t *testing.T) {
+	c := assert.NewAborting(t)
 	// claude is silent on stdout until prompted, so readiness is process-up.
-	if !(ClaudeProvider{}).ReadyOnSpawn() {
-		t.Fatal("claude must be ReadyOnSpawn (no stdout readiness signal exists)")
-	}
+	c.True((ClaudeProvider{}).ReadyOnSpawn(), "claude must be ReadyOnSpawn (no stdout readiness signal exists)")
 	// pi announces readiness via response.get_state, so it is NOT ready on spawn.
-	if (IdentityProvider{}).ReadyOnSpawn() {
-		t.Fatal("pi must NOT be ReadyOnSpawn (it waits for response.get_state)")
-	}
+	c.False((IdentityProvider{}).ReadyOnSpawn(), "pi must NOT be ReadyOnSpawn (it waits for response.get_state)")
 }
 
 func TestClaudeProvider_Parse_NonInitSystemIsNoop(t *testing.T) {
+	c := assert.NewAborting(t)
 	// The SessionStart hook lifecycle (and any non-init system frame) must NOT be
 	// treated as readiness or emit SM events — readiness is process-up, and these
 	// frames only ever arrive once a turn is already running.
@@ -59,24 +49,17 @@ func TestClaudeProvider_Parse_NonInitSystemIsNoop(t *testing.T) {
 		`{"type":"system","subtype":"hook_response","session_id":"sess-h"}`,
 	} {
 		res := ClaudeProvider{}.Parse([]byte(line))
-		if res.FirstResponse {
-			t.Fatalf("non-init system frame must not signal FirstResponse: %s", line)
-		}
-		if len(res.Events) != 0 {
-			t.Fatalf("non-init system frame should emit no SM events, got %+v", res.Events)
-		}
+		c.False(res.FirstResponse, "non-init system frame must not signal FirstResponse: %s", line)
+		c.Empty(res.Events, "non-init system frame should emit no SM events, got")
 	}
 }
 
 func TestClaudeProvider_Parse_AssistantTextIsAgentStart(t *testing.T) {
+	c := assert.NewAborting(t)
 	line := []byte(`{"type":"assistant","session_id":"sess-123","message":{"content":[{"type":"text","text":"hi"}]}}`)
 	res := ClaudeProvider{}.Parse(line)
-	if res.FirstResponse {
-		t.Fatal("assistant must not be FirstResponse")
-	}
-	if len(res.Events) != 1 || res.Events[0].Type != "agent_start" {
-		t.Fatalf("events = %+v", res.Events)
-	}
+	c.False(res.FirstResponse, "assistant must not be FirstResponse")
+	c.False(len(res.Events) != 1 || res.Events[0].Type != "agent_start", "events = %+v", res.Events)
 }
 
 func TestClaudeProvider_Parse_AssistantToolUseStartsTool(t *testing.T) {
@@ -84,35 +67,26 @@ func TestClaudeProvider_Parse_AssistantToolUseStartsTool(t *testing.T) {
 	res := ClaudeProvider{}.Parse(line)
 	// First agent_start (assistant content present), then one tool_execution_start
 	// per tool_use block.
-	if len(res.Events) != 2 || res.Events[0].Type != "agent_start" || res.Events[1].Type != "tool_execution_start" {
-		t.Fatalf("events = %+v", res.Events)
-	}
+	assert.NewAborting(t).False(len(res.Events) != 2 || res.Events[0].Type != "agent_start" || res.Events[1].Type != "tool_execution_start", "events = %+v", res.Events)
 }
 
 func TestClaudeProvider_Parse_ToolResultEndsTool(t *testing.T) {
 	line := []byte(`{"type":"user","session_id":"s","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`)
 	res := ClaudeProvider{}.Parse(line)
-	if len(res.Events) != 1 || res.Events[0].Type != "tool_execution_end" {
-		t.Fatalf("events = %+v", res.Events)
-	}
+	assert.NewAborting(t).False(len(res.Events) != 1 || res.Events[0].Type != "tool_execution_end", "events = %+v", res.Events)
 }
 
 func TestClaudeProvider_Parse_ResultIsAgentEnd(t *testing.T) {
+	c := assert.NewAborting(t)
 	line := []byte(`{"type":"result","subtype":"success","session_id":"sess-123","total_cost_usd":0.01}`)
 	res := ClaudeProvider{}.Parse(line)
-	if len(res.Events) != 1 || res.Events[0].Type != "agent_end" {
-		t.Fatalf("events = %+v", res.Events)
-	}
-	if !res.HasMeta || res.Meta.SessionID != "sess-123" {
-		t.Fatalf("result should carry session id, meta=%+v", res.Meta)
-	}
+	c.False(len(res.Events) != 1 || res.Events[0].Type != "agent_end", "events = %+v", res.Events)
+	c.False(!res.HasMeta || res.Meta.SessionID != "sess-123", "result should carry session id, meta=%+v", res.Meta)
 }
 
 func TestClaudeProvider_Parse_Garbage(t *testing.T) {
 	res := ClaudeProvider{}.Parse([]byte(`not json`))
-	if res.FirstResponse || res.HasMeta || len(res.Events) != 0 {
-		t.Fatalf("garbage should be a no-op, got %+v", res)
-	}
+	assert.NewAborting(t).False(res.FirstResponse || res.HasMeta || len(res.Events) != 0, "garbage should be a no-op, got %+v", res)
 }
 
 // TestClaudeProvider_GoldenTranscripts replays the captured transcripts through
@@ -124,10 +98,9 @@ func TestClaudeProvider_Parse_Garbage(t *testing.T) {
 func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 	for _, name := range []string{"startup_and_turn.jsonl", "turn_with_tool.jsonl"} {
 		t.Run(name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			f, err := os.Open("testdata/claude/" + name)
-			if err != nil {
-				t.Fatalf("open fixture: %v", err)
-			}
+			c.NoError(err, "open fixture")
 			defer func() { _ = f.Close() }()
 
 			firstResponses, agentEnds := 0, 0
@@ -148,24 +121,17 @@ func TestClaudeProvider_GoldenTranscripts(t *testing.T) {
 					}
 				}
 			}
-			if err := sc.Err(); err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			if firstResponses != 1 {
-				t.Fatalf("want exactly 1 FirstResponse (one init line), got %d", firstResponses)
-			}
-			if agentEnds < 1 {
-				t.Fatalf("want >=1 agent_end (terminal result), got %d", agentEnds)
-			}
+			c.NoError(sc.Err(), "scan")
+			c.Eq(1, firstResponses, "want exactly 1 FirstResponse (one init line), got")
+			c.GreaterOrEqual(1, agentEnds, "want >=1 agent_end (terminal result), got")
 		})
 	}
 }
 
 func TestClaudeProvider_EncodePrompt(t *testing.T) {
+	c := assert.NewAborting(t)
 	got := ClaudeProvider{}.EncodeOutbound([]byte(`{"type":"prompt","message":"hello there"}`))
-	if got == nil {
-		t.Fatal("prompt must encode to a non-nil frame")
-	}
+	c.NotNil(got, "prompt must encode to a non-nil frame")
 	var env struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -173,29 +139,20 @@ func TestClaudeProvider_EncodePrompt(t *testing.T) {
 			Content string `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal(got, &env); err != nil {
-		t.Fatalf("encoded frame is not valid JSON: %v (%s)", err, got)
-	}
-	if env.Type != "user" || env.Message.Role != "user" || env.Message.Content != "hello there" {
-		t.Fatalf("bad envelope: %s", got)
-	}
+	err := json.Unmarshal(got, &env)
+	c.NoError(err, "encoded frame is not valid JSON: %v (%s)", err, got)
+	c.False(env.Type != "user" || env.Message.Role != "user" || env.Message.Content != "hello there", "bad envelope: %s", got)
 }
 
 func TestClaudeProvider_EncodeSteerSameAsPrompt(t *testing.T) {
 	got := ClaudeProvider{}.EncodeOutbound([]byte(`{"type":"steer","message":"keep going"}`))
-	if got == nil || !json.Valid(got) {
-		t.Fatalf("steer should encode like a prompt, got %q", got)
-	}
+	assert.NewAborting(t).False(got == nil || !json.Valid(got), "steer should encode like a prompt, got %q", got)
 }
 
 func TestClaudeProvider_EncodeUnknownDropped(t *testing.T) {
-	if got := (ClaudeProvider{}).EncodeOutbound([]byte(`{"type":"set_session_name","name":"x"}`)); got != nil {
-		t.Fatalf("unsupported frame should be dropped (nil), got %q", got)
-	}
+	assert.NewAborting(t).Nil((ClaudeProvider{}).EncodeOutbound([]byte(`{"type":"set_session_name","name":"x"}`)), "unsupported frame should be dropped (nil), got")
 }
 
 func TestClaudeProvider_EncodeGarbageDropped(t *testing.T) {
-	if got := (ClaudeProvider{}).EncodeOutbound([]byte(`not json`)); got != nil {
-		t.Fatalf("garbage should be dropped (nil), got %q", got)
-	}
+	assert.NewAborting(t).Nil((ClaudeProvider{}).EncodeOutbound([]byte(`not json`)), "garbage should be dropped (nil), got")
 }

@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSpawnKindLabel(t *testing.T) {
@@ -13,8 +15,7 @@ func TestSpawnKindLabel(t *testing.T) {
 		protocol.KindFundi:  protocol.KindFundi,
 	}
 	for in, want := range cases {
-		if got := spawnKindLabel(in); got != want {
-			t.Errorf("spawnKindLabel(%q) = %q, want %q", in, got, want)
-		}
+		got := spawnKindLabel(in)
+		assert.NewCollecting(t).Eq(want, got, "spawnKindLabel(%q) = %q, want", in, got)
 	}
 }

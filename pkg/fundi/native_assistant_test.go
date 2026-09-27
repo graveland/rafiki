@@ -9,6 +9,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type nativeCapture struct{ events []*rafikiv1.Event }
@@ -21,6 +23,7 @@ func (c *nativeCapture) Publish(ev *rafikiv1.Event) { c.events = append(c.events
 // events and child_exited — and nothing the model actually said. A cockpit
 // attaching to any agent saw its own prompts and no answers.
 func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var out bytes.Buffer
 	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
 	sink := &nativeCapture{}
@@ -37,25 +40,13 @@ func TestEmitterPublishesNativeAssistantMessage(t *testing.T) {
 	}, 0)
 
 	am := findAssistant(t, sink.events)
-	if got := am.GetRawStopReason(); got != "end_turn" {
-		t.Errorf("raw stop reason = %q, want %q", got, "end_turn")
-	}
-	if am.GetStopReason() != rafikiv1.StopReason_STOP_REASON_END_TURN {
-		t.Errorf("stop reason = %v, want END_TURN", am.GetStopReason())
-	}
-	if len(am.GetContent()) != 3 {
-		t.Fatalf("got %d content blocks, want 3: %+v", len(am.GetContent()), am.GetContent())
-	}
-	if got := am.GetContent()[0].GetThinking().GetThinking(); got != "hmm" {
-		t.Errorf("thinking = %q, want %q", got, "hmm")
-	}
-	if got := am.GetContent()[1].GetText().GetText(); got != "the answer" {
-		t.Errorf("text = %q, want %q", got, "the answer")
-	}
+	c.Eq("end_turn", am.GetRawStopReason(), "raw stop reason")
+	c.Eq(rafikiv1.StopReason_STOP_REASON_END_TURN, am.GetStopReason(), "stop reason")
+	c.Require().Len(am.GetContent(), 3, "got %d content blocks, want 3", len(am.GetContent()))
+	c.Eq("hmm", am.GetContent()[0].GetThinking().GetThinking(), "thinking")
+	c.Eq("the answer", am.GetContent()[1].GetText().GetText(), "text")
 	tu := am.GetContent()[2].GetToolUse()
-	if tu.GetId() != "tu_1" || tu.GetName() != "bash" || tu.GetInputJson() != `{"cmd":"ls"}` {
-		t.Errorf("tool use = %+v", tu)
-	}
+	c.False(tu.GetId() != "tu_1" || tu.GetName() != "bash" || tu.GetInputJson() != `{"cmd":"ls"}`, "tool use = %+v", tu)
 }
 
 // The STREAMED path must publish it too, and this is the arm that actually
@@ -78,9 +69,7 @@ func TestStreamedTurnPublishesTheAssistantMessage(t *testing.T) {
 	em.publishAssistant(resp, 0)
 
 	am := findAssistant(t, sink.events)
-	if got := am.GetContent()[0].GetText().GetText(); got != "streamed reply" {
-		t.Errorf("text = %q, want %q", got, "streamed reply")
-	}
+	assert.NewCollecting(t).Eq("streamed reply", am.GetContent()[0].GetText().GetText(), "text")
 }
 
 func TestPublishAssistantCarriesRunningCost(t *testing.T) {
@@ -96,9 +85,7 @@ func TestPublishAssistantCarriesRunningCost(t *testing.T) {
 	}, 1.2345)
 
 	am := findAssistant(t, sink.events)
-	if am.CostUsd == nil {
-		t.Fatal("CostUsd is nil, want the running total")
-	}
+	assert.NewAborting(t).NotNil(am.CostUsd, "CostUsd is nil, want the running total")
 	if diff := am.GetCostUsd() - 1.2345; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("CostUsd = %v, want 1.2345", am.GetCostUsd())
 	}
@@ -107,6 +94,7 @@ func TestPublishAssistantCarriesRunningCost(t *testing.T) {
 // turn_end is durable and is how a non-TUI consumer sees a turn boundary at
 // all. It carries the turn's usage so a cost consumer needs no second source.
 func TestAgentEndPublishesTurnEnd(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var out bytes.Buffer
 	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
 	sink := &nativeCapture{}
@@ -130,12 +118,8 @@ func TestAgentEndPublishesTurnEnd(t *testing.T) {
 			te = t2
 		}
 	}
-	if te == nil {
-		t.Fatalf("no turn_end published; got %d events", len(sink.events))
-	}
-	if te.GetRawStopReason() != "end_turn" {
-		t.Errorf("turn_end raw stop reason = %q, want %q", te.GetRawStopReason(), "end_turn")
-	}
+	c.Require().NotNil(te, "no turn_end published; got %d events", len(sink.events))
+	c.Eq("end_turn", te.GetRawStopReason(), "turn_end raw stop reason")
 	if te.GetUsage().GetInputTokens() != 10 || te.GetUsage().GetOutputTokens() != 3 {
 		t.Errorf("turn_end usage = %+v, want in=10 out=3", te.GetUsage())
 	}
@@ -158,6 +142,7 @@ func findAssistant(t *testing.T, evs []*rafikiv1.Event) *rafikiv1.AssistantMessa
 // its arguments and its ✓/✗ and nothing of what it returned. Verified against
 // a real daemon before the fix: every event arrived with resultLen=0.
 func TestToolEndPublishesTheOutput(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var out bytes.Buffer
 	em := NewEmitter(NewFrontend(bytes.NewReader(nil), &out, nil), "anthropic", nil)
 	sink := &nativeCapture{}
@@ -174,16 +159,8 @@ func TestToolEndPublishesTheOutput(t *testing.T) {
 			}
 		}
 	}
-	if tr == nil {
-		t.Fatalf("no tool_result published; got %d events", len(sink.events))
-	}
-	if tr.GetToolUseId() != "tu_1" {
-		t.Errorf("tool_use_id = %q, want tu_1", tr.GetToolUseId())
-	}
-	if !tr.GetIsError() {
-		t.Error("a failed tool's result must carry is_error")
-	}
-	if got := tr.GetContent()[0].GetText().GetText(); got != "cat: /nope: No such file" {
-		t.Errorf("result text = %q", got)
-	}
+	c.Require().NotNil(tr, "no tool_result published; got %d events", len(sink.events))
+	c.Eq("tu_1", tr.GetToolUseId(), "tool_use_id")
+	c.True(tr.GetIsError(), "a failed tool's result must carry is_error")
+	c.Eq("cat: /nope: No such file", tr.GetContent()[0].GetText().GetText(), "result text =")
 }

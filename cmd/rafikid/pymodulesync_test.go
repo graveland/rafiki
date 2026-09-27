@@ -16,6 +16,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/pymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakePymoduleStore is an in-memory pymodules.Store. It records the owner id
@@ -183,6 +185,7 @@ func newPymoduleFixture() *pymoduleFixture {
 // owner label must skip the executor entirely: no owner resolution, no store
 // read, no RPC.
 func TestPymodulePusherSkipsExecutorWithNoOwnerLabel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	live := []execpool.LiveExecutor{
 		{Executor: executors.Executor{ID: "exec-noowner"}, Describe: &executorpb.DescribeResponse{PymodulesSync: true}},
 	}
@@ -201,30 +204,23 @@ func TestPymodulePusherSkipsExecutorWithNoOwnerLabel(t *testing.T) {
 	}
 
 	le := live[0]
-	if pp.eligible(le) {
-		t.Error("an executor with no owner label must not be eligible for a pymodule push")
-	}
+	c.False(pp.eligible(le), "an executor with no owner label must not be eligible for a pymodule push")
 	// The same executor WITH an owner label is eligible: the label is the gate,
 	// not merely the Describe flag.
 	le.Executor.Labels = map[string]string{"owner": "alice"}
-	if !pp.eligible(le) {
-		t.Error("an executor with an owner label and PymodulesSync must be eligible")
-	}
+	c.True(pp.eligible(le), "an executor with an owner label and PymodulesSync must be eligible")
 	le.Executor.Labels = nil
 
 	pp.pushAll(context.Background())
-	if len(store.listed) != 0 {
-		t.Errorf("store.List called for owner(s) %v; a no-owner executor must reach no store read", store.listed)
-	}
-	if len(client.requests) != 0 {
-		t.Errorf("%d SyncPyModules RPC(s) attempted; a no-owner executor must receive none", len(client.requests))
-	}
+	c.Empty(store.listed, "store.List called for owner(s)")
+	c.Empty(client.requests, "%d SyncPyModules RPC(s) attempted; a no-owner executor must receive none", len(client.requests))
 }
 
 // The pusher is owner-scoped: pushing to one executor must read and send only
 // THAT executor's owner's rows — never another owner's, and nothing at all
 // for an owner whose username does not resolve.
 func TestPymodulePusherRequestsOnlyTargetOwnersModules(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newPymoduleFixture()
 
 	// A direct push to exec-bob must read u_bob's rows only.
@@ -234,24 +230,17 @@ func TestPymodulePusherRequestsOnlyTargetOwnersModules(t *testing.T) {
 	if len(f.store.listed) != 1 || f.store.listed[0] != "u_bob" {
 		t.Fatalf("store.List called for %v, want only [u_bob]", f.store.listed)
 	}
-	if len(f.client.requests) != 1 {
-		t.Fatalf("%d RPC(s) attempted, want 1", len(f.client.requests))
-	}
+	c.Require().Len(f.client.requests, 1, "%d RPC(s) attempted, want 1", len(f.client.requests))
 	if got := moduleNames(f.client.requests[0]); len(got) != 1 || got[0] != "bob_util" {
 		t.Errorf("exec-bob received modules %v, want only bob's", got)
 	}
 
 	// An owner label that does not resolve pushes nothing at all.
 	before := len(f.store.listed)
-	if _, err := f.pp.pushTo(context.Background(), "exec-ghost"); err != nil {
-		t.Fatalf("pushTo(exec-ghost) = %v, want nil", err)
-	}
-	if len(f.store.listed) != before {
-		t.Errorf("store.List called %d more time(s) for an unresolvable owner", len(f.store.listed)-before)
-	}
-	if len(f.client.requests) != 1 {
-		t.Errorf("an unresolvable owner must receive no RPC; got %d total", len(f.client.requests))
-	}
+	_, err := f.pp.pushTo(context.Background(), "exec-ghost")
+	c.Require().NoError(err, "pushTo(exec-ghost)")
+	c.Len(f.store.listed, before, "store.List called %d more time(s) for an unresolvable owner", len(f.store.listed)-before)
+	c.Len(f.client.requests, 1, "an unresolvable owner must receive no RPC; got %d total", len(f.client.requests))
 
 	// The fan-out must still be per-owner: each executor gets only its own
 	// owner's rows, resolved through its own label. pushAll fans out
@@ -264,14 +253,10 @@ func TestPymodulePusherRequestsOnlyTargetOwnersModules(t *testing.T) {
 		"exec-bob":   bobC,
 	}
 	f2.pp.pushAll(context.Background())
-	if len(f2.store.listed) != 2 {
-		t.Fatalf("store.List called %d time(s) across the fan-out, want 2 (one per owner)", len(f2.store.listed))
-	}
+	c.Require().Len(f2.store.listed, 2, "store.List called %d time(s) across the fan-out, want 2 (one per owner)", len(f2.store.listed))
 	gotOwners := slices.Clone(f2.store.listed)
 	slices.Sort(gotOwners)
-	if !slices.Equal(gotOwners, []string{"u_alice", "u_bob"}) {
-		t.Errorf("store.List called for %v, want exactly [u_alice u_bob] — each executor its own owner", f2.store.listed)
-	}
+	c.EqDiff([]string{"u_alice", "u_bob"}, gotOwners, "store.List called for %v, want exactly [u_alice u_bob] — each executor its own owner", f2.store.listed)
 	if len(aliceC.requests) != 1 || len(bobC.requests) != 1 {
 		t.Fatalf("SyncPyModules requests: exec-alice %d, exec-bob %d; want 1 each", len(aliceC.requests), len(bobC.requests))
 	}
@@ -295,53 +280,43 @@ func TestPymodulePusherBuildsSortedPayload(t *testing.T) {
 // decide whether to rewrite, so the module order must be deterministic
 // (sorted by name) regardless of the order the store returned rows in.
 func TestBuildPyModulesSortsByName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := buildPyModules([]pymodules.Record{
 		{Name: "zebra_plot", Code: "def zebra_plot(): pass"},
 		{Name: "apple_util", Code: "def apple_util(): pass"},
 		{Name: "mango_io", Code: "def mango_io(): pass"},
 	}, "v7")
 
-	if req.GetVersion() != "v7" {
-		t.Errorf("version %q not stamped", req.GetVersion())
-	}
+	c.Eq("v7", req.GetVersion(), "version")
 	got := moduleNames(req)
 	want := []string{"apple_util", "mango_io", "zebra_plot"}
-	if !slices.Equal(got, want) {
-		t.Errorf("modules = %v, want %v (sorted by name)", got, want)
-	}
+	c.EqDiff(want, got, "modules")
 	codes := map[string]string{}
 	for _, m := range req.GetModules() {
 		codes[m.GetName()] = m.GetCode()
 	}
-	if codes["apple_util"] != "def apple_util(): pass" {
-		t.Errorf("code not carried: %q", codes["apple_util"])
-	}
+	c.Eq("def apple_util(): pass", codes["apple_util"], "code not carried")
 
 	// Zero rows build an empty payload, not an error: an owner who has saved
 	// nothing yet is a legitimate state, and syncing zero modules correctly
 	// prunes that owner's cache dir (unlike skills, there is no
 	// remove-everything hazard to guard against).
-	if got := len(buildPyModules(nil, "v1").GetModules()); got != 0 {
-		t.Errorf("empty corpus produced %d modules, want 0", got)
-	}
+	c.Eq(0, len(buildPyModules(nil, "v1").GetModules()), "empty corpus produced")
 }
 
 // The venv build results ride the SyncPyModules response; pushTo must return
 // them, not discard them — the caller renders build failures to the user.
 func TestPymodulePusherPushToReturnsVenvResults(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newPymoduleFixture()
 	want := []*executorpb.PyModuleVenvResult{{Name: "alice_chart", Ready: true}}
 	f.client.venvResults = want
 
 	got, err := f.pp.pushTo(context.Background(), "exec-alice")
-	if err != nil {
-		t.Fatalf("pushTo(exec-alice) = %v, want nil", err)
-	}
-	if !slices.EqualFunc(got, want, func(a, b *executorpb.PyModuleVenvResult) bool {
+	c.Require().NoError(err, "pushTo(exec-alice)")
+	c.True(slices.EqualFunc(got, want, func(a, b *executorpb.PyModuleVenvResult) bool {
 		return a.GetName() == b.GetName() && a.GetReady() == b.GetReady() && a.GetError() == b.GetError()
-	}) {
-		t.Errorf("pushTo returned %+v, want the response's venv results %+v", got, want)
-	}
+	}), "pushTo returned %+v, want the response's venv results %+v", got, want)
 }
 
 // pushAll aggregates the venv results across every executor it pushed to,
@@ -361,9 +336,7 @@ func TestPymodulePusherPushAllAggregatesAcrossExecutors(t *testing.T) {
 	for _, r := range got {
 		byName[r.GetName()] = r
 	}
-	if len(byName) != 2 {
-		t.Fatalf("pushAll returned %d distinct result(s) %v, want 2 (one per executor)", len(byName), got)
-	}
+	assert.NewAborting(t).Len(byName, 2, "pushAll returned %d distinct result(s) %v, want 2 (one per executor)", len(byName), got)
 	if r := byName["alice_chart"]; r == nil || !r.GetReady() {
 		t.Errorf("alice_chart result missing or wrong: %+v", r)
 	}
@@ -414,9 +387,7 @@ func TestPymodulePusherPushAllRunsExecutorsConcurrently(t *testing.T) {
 	case <-time.After(waitLimit):
 		t.Fatal("pushAll did not return after both pushes were released")
 	}
-	if len(got) != 2 {
-		t.Fatalf("pushAll returned %d result(s), want 2", len(got))
-	}
+	assert.NewAborting(t).Len(got, 2, "pushAll returned %d result(s), want 2", len(got))
 }
 
 // The push timeout must be tunable: a venv build can take minutes, and the
@@ -424,30 +395,21 @@ func TestPymodulePusherPushAllRunsExecutorsConcurrently(t *testing.T) {
 // values fall back to the default rather than failing the push.
 func TestPymoduleSyncTimeoutEnvOverride(t *testing.T) {
 	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "2s")
-	if got := pymoduleSyncTimeout(); got != 2*time.Second {
-		t.Errorf("pymoduleSyncTimeout() = %v, want 2s", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq(2*time.Second, pymoduleSyncTimeout(), "pymoduleSyncTimeout()")
 
 	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "")
-	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
-		t.Errorf("unset env: pymoduleSyncTimeout() = %v, want the 5m default", got)
-	}
+	c.Eq(5*time.Minute, pymoduleSyncTimeout(), "unset env: pymoduleSyncTimeout()")
 
 	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "not-a-duration")
-	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
-		t.Errorf("garbage env: pymoduleSyncTimeout() = %v, want the 5m default", got)
-	}
+	c.Eq(5*time.Minute, pymoduleSyncTimeout(), "garbage env: pymoduleSyncTimeout()")
 
 	// A parseable "0" or negative would otherwise become an already-expired
 	// push context -- every push failing loudly forever under a config that
 	// looks inert -- so both fall back to the default like garbage.
 	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "0")
-	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
-		t.Errorf("zero env: pymoduleSyncTimeout() = %v, want the 5m default", got)
-	}
+	c.Eq(5*time.Minute, pymoduleSyncTimeout(), "zero env: pymoduleSyncTimeout()")
 
 	t.Setenv("RAFIKI_PYMODULE_SYNC_TIMEOUT", "-30s")
-	if got := pymoduleSyncTimeout(); got != 5*time.Minute {
-		t.Errorf("negative env: pymoduleSyncTimeout() = %v, want the 5m default", got)
-	}
+	c.Eq(5*time.Minute, pymoduleSyncTimeout(), "negative env: pymoduleSyncTimeout()")
 }

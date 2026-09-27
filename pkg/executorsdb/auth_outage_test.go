@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // An auth OUTAGE must not be reported as an auth FAILURE.
@@ -27,6 +29,7 @@ import (
 // violated here for the lifetime of the file; the test exists so it cannot be
 // reintroduced by a future tidy-up of the error handling.
 func TestAuthenticateOnAClosedPoolIsNotTerminal(t *testing.T) {
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		dsn = os.Getenv("RAFIKI_DB")
@@ -35,22 +38,14 @@ func TestAuthenticateOnAClosedPoolIsNotTerminal(t *testing.T) {
 		t.Skip("RAFIKI_TEST_DSN is not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	c.NoError(err, "connect")
 	store := NewPostgresStore(pool)
 	pool.Close() // the outage
 
 	_, err = store.Authenticate(context.Background(), "any-credential")
-	if err == nil {
-		t.Fatal("authenticating against a closed pool succeeded")
-	}
-	if errors.Is(err, executors.ErrNotFound) {
-		t.Fatal("a store outage was reported as ErrNotFound, which IsTerminalAuthError treats as terminal — every executor reconnecting during a database blip would exit permanently")
-	}
-	if executors.IsTerminalAuthError(err) {
-		t.Fatalf("IsTerminalAuthError(%v) = true; an unanswerable check must be retryable", err)
-	}
+	c.Error(err, "authenticating against a closed pool succeeded")
+	c.False(errors.Is(err, executors.ErrNotFound), "a store outage was reported as ErrNotFound, which IsTerminalAuthError treats as terminal — every executor reconnecting during a database blip would exit permanently")
+	c.False(executors.IsTerminalAuthError(err), "IsTerminalAuthError(%v) = true; an unanswerable check must be retryable", err)
 }
 
 // The same invariant, on Enroll's token lookup specifically.
@@ -65,6 +60,7 @@ func TestAuthenticateOnAClosedPoolIsNotTerminal(t *testing.T) {
 // IsTerminalAuthError treats as terminal — every executor enrolling during a
 // database blip would have been told its token was permanently invalid.
 func TestEnrollBlockedByALockIsNotTerminal(t *testing.T) {
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		dsn = os.Getenv("RAFIKI_DB")
@@ -74,15 +70,11 @@ func TestEnrollBlockedByALockIsNotTerminal(t *testing.T) {
 	}
 
 	lockerPool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect (locker): %v", err)
-	}
+	c.NoError(err, "connect (locker)")
 	defer lockerPool.Close()
 
 	lockTx, err := lockerPool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin locker tx: %v", err)
-	}
+	c.NoError(err, "begin locker tx")
 	defer func() { _ = lockTx.Rollback(context.Background()) }()
 	if _, err := lockTx.Exec(context.Background(),
 		"LOCK TABLE conversations.executor_enrollment_token IN ACCESS EXCLUSIVE MODE"); err != nil {
@@ -90,9 +82,7 @@ func TestEnrollBlockedByALockIsNotTerminal(t *testing.T) {
 	}
 
 	storePool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect (store): %v", err)
-	}
+	c.NoError(err, "connect (store)")
 	defer storePool.Close()
 	store := NewPostgresStore(storePool)
 
@@ -100,13 +90,7 @@ func TestEnrollBlockedByALockIsNotTerminal(t *testing.T) {
 	defer cancel()
 
 	_, _, err = store.Enroll(ctx, "any-token", nil)
-	if err == nil {
-		t.Fatal("enrolling while the token table was locked succeeded")
-	}
-	if errors.Is(err, executors.ErrTokenUnknown) {
-		t.Fatal("a blocked lookup was reported as ErrTokenUnknown, which IsTerminalAuthError treats as terminal — every executor enrolling during a database blip would be told its token was permanently invalid")
-	}
-	if executors.IsTerminalAuthError(err) {
-		t.Fatalf("IsTerminalAuthError(%v) = true; an unanswerable check must be retryable", err)
-	}
+	c.Error(err, "enrolling while the token table was locked succeeded")
+	c.False(errors.Is(err, executors.ErrTokenUnknown), "a blocked lookup was reported as ErrTokenUnknown, which IsTerminalAuthError treats as terminal — every executor enrolling during a database blip would be told its token was permanently invalid")
+	c.False(executors.IsTerminalAuthError(err), "IsTerminalAuthError(%v) = true; an unanswerable check must be retryable", err)
 }

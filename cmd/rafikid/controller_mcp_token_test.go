@@ -8,6 +8,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestChildMCPTokenIsPerChildAndForgotten pins the per-child MCP secret's
@@ -18,28 +20,21 @@ import (
 // one the controller holds, and the exit hook in handleChildExit stops a dead
 // child's secret from resolving.
 func TestChildMCPTokenIsPerChildAndForgotten(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 
 	// Two spawns yield different secrets, 32 crypto/rand bytes hex encoded.
 	tokA := c.mintMCPToken("c_a")
 	tokB := c.mintMCPToken("c_b")
-	if tokA == "" || tokB == "" {
-		t.Fatal("mintMCPToken returned an empty secret")
-	}
-	if tokA == tokB {
-		t.Fatal("two children must mint different MCP secrets")
-	}
-	if len(tokA) != 64 {
-		t.Fatalf("secret length = %d, want 64 hex chars (32 crypto/rand bytes)", len(tokA))
-	}
+	ck.False(tokA == "" || tokB == "", "mintMCPToken returned an empty secret")
+	ck.NotEq(tokB, tokA, "two children must mint different MCP secrets")
+	ck.Len(tokA, 64, "secret length = %d, want 64 hex chars (32 crypto/rand bytes)", len(tokA))
 
 	// Mint-or-reuse keyed on the child: Resume and RespawnChild rebuild the
 	// spawn environment through the same proxyChildEnv/darajaClaudeParams
 	// path, so a second mint for the SAME child must return the stored secret
 	// — a fresh one would orphan the credential the running child holds.
-	if again := c.mintMCPToken("c_a"); again != tokA {
-		t.Fatalf("second mint for the same child = %q, want the stored %q (resume must reuse)", again, tokA)
-	}
+	ck.Eq(tokA, c.mintMCPToken("c_a"), "second mint for the same child")
 
 	// Each secret resolves to its own child and owner, through the same store
 	// path OwnerUserIDForChild reads.
@@ -52,13 +47,9 @@ func TestChildMCPTokenIsPerChildAndForgotten(t *testing.T) {
 		Kind: protocol.KindClaude, OwnerUserID: "u_owner_b",
 	})
 	cid, uid, ok := c.ChildForMCPToken(tokA)
-	if !ok || cid != "c_a" || uid != "u_owner_a" {
-		t.Fatalf("ChildForMCPToken(tokA) = (%q, %q, %v), want c_a/u_owner_a/true", cid, uid, ok)
-	}
+	ck.False(!ok || cid != "c_a" || uid != "u_owner_a", "ChildForMCPToken(tokA) = (%q, %q, %v), want c_a/u_owner_a/true", cid, uid, ok)
 	cid, uid, ok = c.ChildForMCPToken(tokB)
-	if !ok || cid != "c_b" || uid != "u_owner_b" {
-		t.Fatalf("ChildForMCPToken(tokB) = (%q, %q, %v), want c_b/u_owner_b/true", cid, uid, ok)
-	}
+	ck.False(!ok || cid != "c_b" || uid != "u_owner_b", "ChildForMCPToken(tokB) = (%q, %q, %v), want c_b/u_owner_b/true", cid, uid, ok)
 	if _, _, ok := c.ChildForMCPToken("not-a-secret"); ok {
 		t.Fatal("an unknown secret must not resolve")
 	}
@@ -71,18 +62,15 @@ func TestChildMCPTokenIsPerChildAndForgotten(t *testing.T) {
 	childID := spawnProxiedTestChild(t, c, "u_spawn_owner")
 	tok := c.mintMCPToken(childID) // A0: the same secret the spawn minted
 	cid, uid, ok = c.ChildForMCPToken(tok)
-	if !ok || cid != childID || uid != "u_spawn_owner" {
-		t.Fatalf("the spawned child's secret = (%q, %q, %v), want it to resolve to its own child and owner", cid, uid, ok)
-	}
+	ck.False(!ok || cid != childID || uid != "u_spawn_owner", "the spawned child's secret = (%q, %q, %v), want it to resolve to its own child and owner", cid, uid, ok)
 
 	// The exit hook: handleChildExit forgets the secret beside MarkExited.
 	// Kill waits for cm.Remove — the final step of handleChildExit — so the
 	// forget is deterministic by the time Kill returns.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := c.Kill(ctx, childID, 2000, 2000); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	_, err := c.Kill(ctx, childID, 2000, 2000)
+	ck.NoError(err, "Kill")
 	if _, _, ok := c.ChildForMCPToken(tok); ok {
 		t.Fatal("a dead child's MCP secret must stop resolving once the exit hook ran")
 	}
@@ -103,9 +91,7 @@ func spawnProxiedTestChild(t *testing.T, c *Controller, ownerUserID string) stri
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := c.Spawn(ctx, req, users.Identity{UserID: ownerUserID, Username: "brent"})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Spawn")
 	return res.ChildID
 }
 
@@ -116,6 +102,7 @@ func spawnProxiedTestChild(t *testing.T, c *Controller, ownerUserID string) stri
 // forever and are pure memory; the sweep drops them when the map grows one
 // threshold past its last sweep, and keeps entries whose child is alive.
 func TestMCPTokenSweepDropsEntriesForDeadChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestController(t)
 	c.mcpSweepAt = 3 // small threshold: the three entries this test mints reach it
 
@@ -134,9 +121,7 @@ func TestMCPTokenSweepDropsEntriesForDeadChildren(t *testing.T) {
 		t.Fatal("child A has no store row to exit")
 	}
 
-	if got := c.mcpTokensByChild["c_sweep_a"]; got != tokA {
-		t.Fatalf("A's entry missing before the sweep")
-	}
+	ck.Eq(tokA, c.mcpTokensByChild["c_sweep_a"], "A's entry missing before the sweep")
 
 	c.sweepMCPTokensIfDue()
 
@@ -149,17 +134,12 @@ func TestMCPTokenSweepDropsEntriesForDeadChildren(t *testing.T) {
 	if _, ok := c.mcpTokensByChild["c_sweep_c"]; !ok {
 		t.Fatal("the sweep dropped an entry whose child is alive")
 	}
-	if _, _, ok := c.ChildForMCPToken(tokC); !ok {
-		t.Fatal("the surviving entry no longer resolves")
-	}
+	_, _, ok := c.ChildForMCPToken(tokC)
+	ck.True(ok, "the surviving entry no longer resolves")
 	// The sweep must also drop both halves of a dropped entry: the secret key
 	// in mcpTokens is gone, not orphaned.
-	if got := len(c.mcpTokens); got != 1 {
-		t.Fatalf("mcpTokens holds %d entries after the sweep, want 1 (both indexes move together)", got)
-	}
+	ck.Eq(1, len(c.mcpTokens), "mcpTokens holds")
 	// And the next sweep is amortized: it must not fire again until the map
 	// grows one threshold past the post-sweep size.
-	if c.mcpSweepAt != 1+mcpTokenSweepThreshold {
-		t.Fatalf("post-sweep trigger = %d, want live-set(1) + threshold", c.mcpSweepAt)
-	}
+	ck.Eq(1+mcpTokenSweepThreshold, c.mcpSweepAt, "post-sweep trigger")
 }

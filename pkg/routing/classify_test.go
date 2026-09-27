@@ -7,20 +7,17 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRetryableExcludesContextCancellation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Context cancellation should not be retryable.
-	if retryable(context.Canceled) {
-		t.Error("retryable(context.Canceled) = true, want false")
-	}
-	if retryable(context.DeadlineExceeded) {
-		t.Error("retryable(context.DeadlineExceeded) = true, want false")
-	}
+	c.False(retryable(context.Canceled), "retryable(context.Canceled) = true, want false")
+	c.False(retryable(context.DeadlineExceeded), "retryable(context.DeadlineExceeded) = true, want false")
 	// But 5xx errors should still be retryable.
-	if !retryable(&anthropic.Error{StatusCode: 529}) {
-		t.Error("retryable(500 error) = false, want true")
-	}
+	c.True(retryable(&anthropic.Error{StatusCode: 529}), "retryable(500 error) = false, want true")
 }
 
 // The real Anthropic body for an exhausted account, verbatim.
@@ -43,9 +40,8 @@ func TestCreditExhausted(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := CreditExhausted(tt.status, []byte(tt.body)); got != tt.want {
-				t.Errorf("CreditExhausted(%d, %q) = %v, want %v", tt.status, tt.body, got, tt.want)
-			}
+			got := CreditExhausted(tt.status, []byte(tt.body))
+			assert.NewCollecting(t).Eq(tt.want, got, "CreditExhausted(%d, %q) = %v, want", tt.status, tt.body, got)
 		})
 	}
 }
@@ -53,31 +49,18 @@ func TestCreditExhausted(t *testing.T) {
 // An out-of-credit account is NOT retryable (the same request fails
 // identically) but IS failover-worthy — the whole point of the distinction.
 func TestFailoverWorthyIncludesCreditExhaustion(t *testing.T) {
+	c := assert.NewCollecting(t)
 	err := &anthropic.Error{StatusCode: 400}
-	if uerr := err.UnmarshalJSON([]byte(creditBody)); uerr != nil {
-		t.Fatalf("UnmarshalJSON: %v", uerr)
-	}
-	if retryable(err) {
-		t.Error("retryable(credit-exhausted) = true, want false (retrying it is pointless)")
-	}
-	if !FailoverWorthy(err) {
-		t.Error("FailoverWorthy(credit-exhausted) = false, want true")
-	}
+	c.Require().NoError(err.UnmarshalJSON([]byte(creditBody)), "UnmarshalJSON")
+	c.False(retryable(err), "retryable(credit-exhausted) = true, want false (retrying it is pointless)")
+	c.True(FailoverWorthy(err), "FailoverWorthy(credit-exhausted) = false, want true")
 	// An ordinary 400 stays non-failover-worthy: failing over would just
 	// re-send a malformed request to a second provider.
 	bad := &anthropic.Error{StatusCode: 400}
-	if uerr := bad.UnmarshalJSON([]byte(`{"error":{"message":"max_tokens: must be >= 1"}}`)); uerr != nil {
-		t.Fatalf("UnmarshalJSON: %v", uerr)
-	}
-	if FailoverWorthy(bad) {
-		t.Error("FailoverWorthy(ordinary 400) = true, want false")
-	}
+	c.Require().NoError(bad.UnmarshalJSON([]byte(`{"error":{"message":"max_tokens: must be >= 1"}}`)), "UnmarshalJSON")
+	c.False(FailoverWorthy(bad), "FailoverWorthy(ordinary 400) = true, want false")
 	// Nil and status-only errors must not panic (RawJSON, not Error(), which
 	// dereferences Request/Response).
-	if FailoverWorthy(nil) {
-		t.Error("FailoverWorthy(nil) = true, want false")
-	}
-	if !FailoverWorthy(&anthropic.Error{StatusCode: 529}) {
-		t.Error("FailoverWorthy(529) = false, want true")
-	}
+	c.False(FailoverWorthy(nil), "FailoverWorthy(nil) = true, want false")
+	c.True(FailoverWorthy(&anthropic.Error{StatusCode: 529}), "FailoverWorthy(529) = false, want true")
 }

@@ -3,9 +3,10 @@
 package users
 
 import (
-	"errors"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestNormalizeUsername(t *testing.T) {
@@ -29,23 +30,16 @@ func TestNormalizeUsername(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			got, err := NormalizeUsername(tt.in)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("NormalizeUsername(%q) = %q, want an error", tt.in, got)
-				}
+				c.Require().Error(err, "NormalizeUsername(%q) = %q, want an error", tt.in, got)
 				// Callers distinguish a bad name from an unreachable store.
-				if !errors.Is(err, ErrInvalidUsername) {
-					t.Fatalf("error = %v, want it to wrap ErrInvalidUsername", err)
-				}
+				c.Require().ErrorIs(err, ErrInvalidUsername, "error")
 				return
 			}
-			if err != nil {
-				t.Fatalf("NormalizeUsername(%q): %v", tt.in, err)
-			}
-			if got != tt.want {
-				t.Errorf("NormalizeUsername(%q) = %q, want %q", tt.in, got, tt.want)
-			}
+			c.Require().NoError(err, "NormalizeUsername(%q)", tt.in)
+			c.Eq(tt.want, got, "NormalizeUsername(%q) = %q, want", tt.in, got)
 		})
 	}
 }
@@ -58,7 +52,6 @@ func TestNormalizeUsernameCapCountsBytesNotRunes(t *testing.T) {
 	if len(in) <= MaxUsernameLen {
 		t.Skipf("fixture is %d bytes, not over the %d cap", len(in), MaxUsernameLen)
 	}
-	if _, err := NormalizeUsername(in); err == nil {
-		t.Fatal("a 66-byte, 33-rune name was accepted; the cap is counting runes")
-	}
+	_, err := NormalizeUsername(in)
+	assert.NewAborting(t).Error(err, "a 66-byte, 33-rune name was accepted; the cap is counting runes")
 }

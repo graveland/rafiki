@@ -4,13 +4,14 @@ package integration_test
 
 import (
 	"context"
-	"slices"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestConnectChildScopedOnTheConnectPlane is the end-to-end proof of the
@@ -26,6 +27,7 @@ import (
 // their own wiring; only this test proves the daemon's.
 func TestConnectChildScopedOnTheConnectPlane(t *testing.T) {
 	t.Parallel()
+	ck := assert.NewAborting(t)
 	d, dumps := bootMCPChildDaemon(t)
 	userToken := d.createMCPUser(t)
 	userSess := mcpConnect(t, d.proxyURL, userToken)
@@ -34,9 +36,7 @@ func TestConnectChildScopedOnTheConnectPlane(t *testing.T) {
 	childA := mcpSpawnClaudeChild(t, userSess, "connect-scoped-a")
 	dump := waitClaudeDump(t, d, dumps, childA)
 	mcpToken := dump.envValue("RAFIKI_MCP_TOKEN")
-	if mcpToken == "" {
-		t.Fatal("the spawned claude child's environment carries no RAFIKI_MCP_TOKEN")
-	}
+	ck.NotEq("", mcpToken, "the spawned claude child's environment carries no RAFIKI_MCP_TOKEN")
 
 	// The subtree: one descendant spawned UNDER the caller (operator-seeded,
 	// as the cockpit would) and one top-level sibling tree the caller must
@@ -53,33 +53,25 @@ func TestConnectChildScopedOnTheConnectPlane(t *testing.T) {
 	lreq := connect.NewRequest(&rafikiv1.ListChildrenRequest{})
 	lreq.Header().Set("Authorization", "Bearer "+mcpToken)
 	resp, err := client.ListChildren(ctx, lreq)
-	if err != nil {
-		t.Fatalf("ListChildren as child: %v", err)
-	}
+	ck.NoError(err, "ListChildren as child")
 	var got []string
 	for _, c := range resp.Msg.GetChildren() {
 		got = append(got, c.GetChildId())
 	}
-	if !slices.Equal(got, []string{kid}) {
-		t.Fatalf("child ListChildren = %v, want exactly [%s] (its subtree only)", got, kid)
-	}
+	ck.EqDiff([]string{kid}, got, "child ListChildren = %v, want exactly [%s] (its subtree only)", got, kid)
 
 	// Control: the operator credential still sees the whole fleet.
 	ureq := connect.NewRequest(&rafikiv1.ListChildrenRequest{})
 	ureq.Header().Set("Authorization", "Bearer "+userToken)
 	uresp, err := client.ListChildren(ctx, ureq)
-	if err != nil {
-		t.Fatalf("ListChildren as user: %v", err)
-	}
+	ck.NoError(err, "ListChildren as user")
 	var seen bool
 	for _, c := range uresp.Msg.GetChildren() {
 		if c.GetChildId() == outsider {
 			seen = true
 		}
 	}
-	if !seen {
-		t.Fatalf("user ListChildren omitted the top-level child %s", outsider)
-	}
+	ck.True(seen, "user ListChildren omitted the top-level child %s", outsider)
 
 	// Kill of the caller itself: refused — a child is not a descendant of
 	// itself.

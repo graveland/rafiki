@@ -1,6 +1,10 @@
 package paths
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 // The FUNDI_* and PIC_*/PI_CONTROLLER_* spellings are gone. Get reads exactly
 // one name — a fallback chain three renames deep is the drift this
@@ -10,18 +14,15 @@ func TestGet_ReadsOnlyTheCurrentName(t *testing.T) {
 	t.Setenv("FUNDI_SOCKET", "/run/old.sock")
 	t.Setenv("PI_CONTROLLER_SOCKET", "/run/ancient.sock")
 
-	if got := Get(Socket); got != "/run/new.sock" {
-		t.Errorf("Get(Socket) = %q, want /run/new.sock", got)
-	}
+	assert.NewCollecting(t).Eq("/run/new.sock", Get(Socket), "Get(Socket)")
 }
 
 func TestGet_DoesNotFallBackToRetiredSpellings(t *testing.T) {
 	t.Setenv("FUNDI_SOCKET", "/run/old.sock")
 	t.Setenv("PI_CONTROLLER_SOCKET", "/run/ancient.sock")
 
-	if got := Get(Socket); got != "" {
-		t.Errorf("Get(Socket) = %q with only retired spellings set, want \"\"", got)
-	}
+	got := Get(Socket)
+	assert.NewCollecting(t).Eq("", got, "Get(Socket) = %q with only retired spellings set, want \"\"", got)
 }
 
 // RAFIKI_URL/RAFIKI_TOKEN are client-side — what this process presents — and
@@ -39,8 +40,6 @@ func TestOwnedVariableNames(t *testing.T) {
 		Instructions: "RAFIKI_INSTRUCTIONS",
 	}
 	for got, want := range cases {
-		if got != want {
-			t.Errorf("variable constant = %q, want %q", got, want)
-		}
+		assert.NewCollecting(t).Eq(want, got, "variable constant")
 	}
 }

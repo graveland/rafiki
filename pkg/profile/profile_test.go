@@ -5,9 +5,12 @@ package profile
 import (
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestParseReadsBothEndpointKinds(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s, err := Parse([]byte(`
 [profile.work]
 socket = "/tmp/ctl.sock"
@@ -21,37 +24,21 @@ url    = "https://rafiki.example.net"
 kind   = "fundi"
 preset = "cheap"
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	c.Require().NoError(err, "Parse")
 	if got := s.Names(); len(got) != 2 || got[0] != "personal" || got[1] != "work" {
 		t.Fatalf("Names() = %v, want [personal work]", got)
 	}
 
 	w, ok := s.Get("work")
-	if !ok {
-		t.Fatal("Get(work): not found")
-	}
-	if w.Name != "work" {
-		t.Errorf("Name = %q, want work", w.Name)
-	}
-	if w.Socket != "/tmp/ctl.sock" || w.URL != "" {
-		t.Errorf("endpoint = socket:%q url:%q", w.Socket, w.URL)
-	}
-	if w.Proxy != "http://localhost:8035" || w.Kind != "claude" || w.Model != "claude-opus-5" {
-		t.Errorf("defaults = %+v", w)
-	}
-	if w.Labels["env"] != "work" {
-		t.Errorf("Labels = %v, want env=work", w.Labels)
-	}
+	c.Require().True(ok, "Get(work): not found")
+	c.Eq("work", w.Name, "Name")
+	c.False(w.Socket != "/tmp/ctl.sock" || w.URL != "", "endpoint = socket:%q url:%q", w.Socket, w.URL)
+	c.False(w.Proxy != "http://localhost:8035" || w.Kind != "claude" || w.Model != "claude-opus-5", "defaults = %+v", w)
+	c.Eq("work", w.Labels["env"], "Labels = %v, want env=work", w.Labels)
 
 	p, _ := s.Get("personal")
-	if p.URL != "https://rafiki.example.net" || p.Socket != "" {
-		t.Errorf("personal endpoint = socket:%q url:%q", p.Socket, p.URL)
-	}
-	if p.Preset != "cheap" {
-		t.Errorf("Preset = %q, want cheap", p.Preset)
-	}
+	c.False(p.URL != "https://rafiki.example.net" || p.Socket != "", "personal endpoint = socket:%q url:%q", p.Socket, p.URL)
+	c.Eq("cheap", p.Preset, "Preset")
 }
 
 func TestParseRejectsBadProfiles(t *testing.T) {
@@ -98,28 +85,21 @@ func TestParseRejectsBadProfiles(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			_, err := Parse([]byte(tc.toml))
-			if err == nil {
-				t.Fatalf("Parse(%q) = nil error, want one containing %q", tc.toml, tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Parse error = %q, want it to contain %q", err, tc.want)
-			}
+			c.Error(err, "Parse(%q) = nil error, want one containing %q", tc.toml, tc.want)
+			c.StrContains(err.Error(), tc.want, "Parse error = %q, want it to contain", err)
 		})
 	}
 }
 
 func TestParseAcceptsAnEmptyFile(t *testing.T) {
+	c := assert.NewAborting(t)
 	s, err := Parse(nil)
-	if err != nil {
-		t.Fatalf("Parse(nil): %v", err)
-	}
-	if len(s.Names()) != 0 {
-		t.Fatalf("Names() = %v, want empty", s.Names())
-	}
-	if _, ok := s.Get("anything"); ok {
-		t.Fatal("Get on an empty Set returned ok")
-	}
+	c.NoError(err, "Parse(nil)")
+	c.Empty(s.Names(), "Names()")
+	_, ok := s.Get("anything")
+	c.False(ok, "Get on an empty Set returned ok")
 }
 
 // TestValidNameRejectsTraversal pins the guard that stops `rafiki profile
@@ -143,16 +123,11 @@ func TestValidNameRejectsTraversal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run("name="+tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			err := ValidName(tc.name)
-			if tc.wantErr && err == nil {
-				t.Fatalf("ValidName(%q) = nil error, want one", tc.name)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("ValidName(%q) = %v, want nil", tc.name, err)
-			}
-			if tc.wantErr && !strings.Contains(err.Error(), tc.name) && tc.name != "" {
-				t.Fatalf("ValidName error %q does not name the rejected name %q", err, tc.name)
-			}
+			c.False(tc.wantErr && err == nil, "ValidName(%q) = nil error, want one", tc.name)
+			c.False(!tc.wantErr && err != nil, "ValidName(%q) = %v, want nil", tc.name, err)
+			c.False(tc.wantErr && !strings.Contains(err.Error(), tc.name) && tc.name != "", "ValidName error %q does not name the rejected name %q", err, tc.name)
 		})
 	}
 }

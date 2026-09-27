@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestWebfetchFetchesHTTP(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := w.Write([]byte("hello from http")); err != nil {
@@ -23,31 +26,22 @@ func TestWebfetchFetchesHTTP(t *testing.T) {
 	opts := ToolOpts{Web: true, HTTPClient: srv.Client()}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool == nil {
-		t.Fatal("Materialize returned nil with Web=true")
-	}
+	c.NoError(err, "Materialize")
+	c.NotNil(tool, "Materialize returned nil with Web=true")
 
 	result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{
 		"url": srv.URL,
 	}))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(result.Text, "hello from http") {
-		t.Fatalf("want hello from http, got: %q", result.Text)
-	}
+	c.NoError(err, "Execute")
+	c.StrContains(result.Text, "hello from http", "want hello from http, got")
 }
 
 func TestWebfetchRejectsNonHTTPScheme(t *testing.T) {
+	c := assert.NewCollecting(t)
 	opts := ToolOpts{Web: true}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	for _, scheme := range []string{"ftp://example.com", "file:///etc/passwd", "gopher://example.com"} {
 		result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{"url": scheme}))
@@ -55,13 +49,12 @@ func TestWebfetchRejectsNonHTTPScheme(t *testing.T) {
 			t.Errorf("Execute(%q) returned error: %v", scheme, err)
 			continue
 		}
-		if !strings.Contains(strings.ToLower(result.Text), "only http") {
-			t.Errorf("want 'only http/https' rejection for %q, got: %q", scheme, result.Text)
-		}
+		c.StrContains(strings.ToLower(result.Text), "only http", "want 'only http/https' rejection for %q, got: %q", scheme, result.Text)
 	}
 }
 
 func TestWebfetchCapsBodyAt100KB(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Serve 200 KB of text — the tool must stop reading at 100 KB.
 	payload := strings.Repeat("x", 200*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,23 +68,18 @@ func TestWebfetchCapsBodyAt100KB(t *testing.T) {
 	opts := ToolOpts{Web: true, HTTPClient: srv.Client()}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.NoError(err, "Materialize")
 
 	result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{"url": srv.URL}))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if len(result.Text) > 110*1024 { // allow some overhead from ClipBudget envelope
-		t.Fatalf("body too long: got %d bytes, cap is 100 KB", len(result.Text))
-	}
+	c.NoError(err, "Execute")
+	c.LessOrEqual(110*1024, len(result.Text), "body too long: got") // allow some overhead from ClipBudget envelope
 	if !strings.Contains(result.Text, "x") {
 		t.Fatalf("body does not contain expected content: %q", result.Text[:min(len(result.Text), 200)])
 	}
 }
 
 func TestWebfetchBlocksLoopback(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write([]byte("secret")); err != nil {
 			panic(err)
@@ -102,27 +90,20 @@ func TestWebfetchBlocksLoopback(t *testing.T) {
 	opts := ToolOpts{Web: true}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.NoError(err, "Materialize")
 
 	// httptest.NewServer binds to a loopback address.
 	result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{"url": srv.URL}))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(strings.ToLower(result.Text), "blocked") {
-		t.Fatalf("loopback was not blocked, got: %q", result.Text)
-	}
+	c.NoError(err, "Execute")
+	c.StrContains(strings.ToLower(result.Text), "blocked", "loopback was not blocked, got: %q", result.Text)
 }
 
 func TestWebfetchBlocksPrivateRanges(t *testing.T) {
+	c := assert.NewCollecting(t)
 	opts := ToolOpts{Web: true}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 
 	privateURLs := []string{
 		"http://10.0.0.1/",
@@ -136,65 +117,51 @@ func TestWebfetchBlocksPrivateRanges(t *testing.T) {
 			t.Errorf("Execute(%q) returned error: %v", u, err)
 			continue
 		}
-		if !strings.Contains(strings.ToLower(result.Text), "blocked") {
-			t.Errorf("private range %q not blocked, got: %q", u, result.Text)
-		}
+		c.StrContains(strings.ToLower(result.Text), "blocked", "private range %q not blocked, got: %q", u, result.Text)
 	}
 }
 
 func TestWebfetchBlocksLinkLocal(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := ToolOpts{Web: true}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.NoError(err, "Materialize")
 
 	// 169.254.169.254 is the cloud metadata endpoint.
 	result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{"url": "http://169.254.169.254/"}))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(strings.ToLower(result.Text), "blocked") {
-		t.Fatalf("link-local 169.254.169.254 not blocked, got: %q", result.Text)
-	}
+	c.NoError(err, "Execute")
+	c.StrContains(strings.ToLower(result.Text), "blocked", "link-local 169.254.169.254 not blocked, got: %q", result.Text)
 }
 
 func TestWebfetchGateOffReturnsNil(t *testing.T) {
+	c := assert.NewAborting(t)
 	opts := ToolOpts{Web: false}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
-	if tool != nil {
-		t.Fatal("expected nil tool when Web gate is off")
-	}
+	c.NoError(err, "Materialize")
+	c.Nil(tool, "expected nil tool when Web gate is off")
 }
 
 func TestWebfetchResolvesHostnameToBlockedIP(t *testing.T) {
+	c := assert.NewAborting(t)
 	// Point a hostname at a private address via a test resolver.
 	// We can't override DNS in this test easily, but we can test
 	// the IP-checking function directly.
 	opts := ToolOpts{Web: true}
 	blueprint := &WebfetchBlueprint{}
 	tool, err := blueprint.Materialize(opts)
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.NoError(err, "Materialize")
 
 	// localhost resolves to 127.0.0.1 / ::1 — must be blocked.
 	result, err := tool.Execute(context.Background(), mustMarshal(t, map[string]string{"url": "http://localhost:12345/nonexistent"}))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if !strings.Contains(strings.ToLower(result.Text), "blocked") {
-		t.Fatalf("localhost was not blocked by its resolved IP, got: %q", result.Text)
-	}
+	c.NoError(err, "Execute")
+	c.StrContains(strings.ToLower(result.Text), "blocked", "localhost was not blocked by its resolved IP, got: %q", result.Text)
 }
 
 // isBlockedIP is tested directly to ensure the range checks are correct.
 func TestIsBlockedIP(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tests := []struct {
 		ip      string
 		blocked bool
@@ -220,27 +187,23 @@ func TestIsBlockedIP(t *testing.T) {
 	}
 	for _, tc := range tests {
 		ip := net.ParseIP(tc.ip)
-		if ip == nil {
-			t.Fatalf("invalid test IP: %q", tc.ip)
-		}
-		if got := isBlockedIP(ip); got != tc.blocked {
-			t.Errorf("isBlockedIP(%s) = %v, want %v", tc.ip, got, tc.blocked)
-		}
+		c.Require().NotNil(ip, "invalid test IP: %q", tc.ip)
+		got := isBlockedIP(ip)
+		c.Eq(tc.blocked, got, "isBlockedIP(%s) = %v, want", tc.ip, got)
 	}
 }
 
 func mustMarshal(t *testing.T, v any) ToolInput {
 	t.Helper()
 	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal")
 	return ToolInput(b)
 }
 
 // TestIsBlockedIPRanges pins the address ranges. Each of these was either
 // reachable before the hardening or is a well-known filter bypass.
 func TestIsBlockedIPRanges(t *testing.T) {
+	c := assert.NewCollecting(t)
 	blocked := []string{
 		"127.0.0.1",              // loopback
 		"::1",                    // loopback v6
@@ -261,20 +224,14 @@ func TestIsBlockedIPRanges(t *testing.T) {
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
-		if ip == nil {
-			t.Fatalf("test bug: %q is not a valid IP", s)
-		}
-		if !isBlockedIP(ip) {
-			t.Errorf("isBlockedIP(%s) = false, want true", s)
-		}
+		c.Require().NotNil(ip, "test bug: %q is not a valid IP", s)
+		c.True(isBlockedIP(ip), "isBlockedIP(%s) = false, want true", s)
 	}
 
 	allowed := []string{"1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:2800:220:1::1"}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)
-		if isBlockedIP(ip) {
-			t.Errorf("isBlockedIP(%s) = true, want false (public address)", s)
-		}
+		c.False(isBlockedIP(ip), "isBlockedIP(%s) = true, want false (public address)", s)
 	}
 }
 
@@ -289,39 +246,31 @@ func TestIsBlockedIPRanges(t *testing.T) {
 // This test drives the real production client (no injected transport) with
 // only the loopback exemption needed to reach httptest.
 func TestWebfetchBlocksRedirectToMetadata(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/iam/security-credentials/", http.StatusFound)
 	}))
 	defer srv.Close()
 
 	tool, err := (&WebfetchBlueprint{}).Materialize(ToolOpts{Web: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	wt, ok := tool.(*webfetchTool)
-	if !ok {
-		t.Fatalf("expected *webfetchTool, got %T", tool)
-	}
+	c.True(ok, "expected *webfetchTool, got %T", tool)
 	// Allow loopback so the first hop reaches httptest; everything else
 	// keeps the production predicate, so the redirect target stays blocked.
 	wt.blocked = func(ip net.IP) bool { return !ip.IsLoopback() && isBlockedIP(ip) }
 
 	res, err := wt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"url":%q}`, srv.URL)))
-	if err != nil {
-		t.Fatalf("expected a tool result, got a hard error: %v", err)
-	}
-	if strings.Contains(res.Text, "SecretAccessKey") || strings.Contains(res.Text, "AccessKeyId") {
-		t.Fatalf("metadata content reached the model: %q", res.Text)
-	}
-	if !strings.Contains(res.Text, "blocked") {
-		t.Fatalf("expected the redirect to be refused as a blocked address, got: %q", res.Text)
-	}
+	c.NoError(err, "expected a tool result, got a hard error")
+	c.False(strings.Contains(res.Text, "SecretAccessKey") || strings.Contains(res.Text, "AccessKeyId"), "metadata content reached the model: %q", res.Text)
+	c.StrContains(res.Text, "blocked", "expected the redirect to be refused as a blocked address, got")
 }
 
 // TestWebfetchGuardedClientAllowsNormalFetch proves the guard does not break
 // an ordinary fetch — without this, a guard that blocked everything would
 // pass the test above for the wrong reason.
 func TestWebfetchGuardedClientAllowsNormalFetch(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, "<html><body><p>hello from the server</p></body></html>")
@@ -329,17 +278,11 @@ func TestWebfetchGuardedClientAllowsNormalFetch(t *testing.T) {
 	defer srv.Close()
 
 	tool, err := (&WebfetchBlueprint{}).Materialize(ToolOpts{Web: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	wt := tool.(*webfetchTool)
 	wt.blocked = func(ip net.IP) bool { return !ip.IsLoopback() && isBlockedIP(ip) }
 
 	res, err := wt.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"url":%q}`, srv.URL)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Text, "hello from the server") {
-		t.Fatalf("guarded client broke a normal fetch, got: %q", res.Text)
-	}
+	c.NoError(err)
+	c.StrContains(res.Text, "hello from the server", "guarded client broke a normal fetch, got")
 }

@@ -2,7 +2,11 @@
 
 package quotafmt
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestUtilization(t *testing.T) {
 	frac := 0.42
@@ -19,9 +23,8 @@ func TestUtilization(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := Utilization(c.v); got != c.want {
-				t.Errorf("Utilization(%v) = %q, want %q", c.v, got, c.want)
-			}
+			got := Utilization(c.v)
+			assert.NewCollecting(t).Eq(c.want, got, "Utilization(%v) = %q, want", c.v, got)
 		})
 	}
 }

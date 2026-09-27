@@ -3,30 +3,25 @@
 package main
 
 import (
-	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRequireDSNPrefersExplicitFlag(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "postgres://from-env/db")
+	c := assert.NewAborting(t)
 	got, err := requireDSN("postgres://from-flag/db")
-	if err != nil {
-		t.Fatalf("requireDSN returned error: %v", err)
-	}
-	if got != "postgres://from-flag/db" {
-		t.Fatalf("want the flag value, got %q", got)
-	}
+	c.NoError(err, "requireDSN returned error")
+	c.Eq("postgres://from-flag/db", got, "want the flag value, got")
 }
 
 func TestRequireDSNFallsBackToEnv(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "postgres://from-env/db")
+	c := assert.NewAborting(t)
 	got, err := requireDSN("")
-	if err != nil {
-		t.Fatalf("requireDSN returned error: %v", err)
-	}
-	if got != "postgres://from-env/db" {
-		t.Fatalf("want the env value, got %q", got)
-	}
+	c.NoError(err, "requireDSN returned error")
+	c.Eq("postgres://from-env/db", got, "want the env value, got")
 }
 
 // The daemon requires a database (Phase C design 2.1). An absent DSN is a
@@ -34,15 +29,10 @@ func TestRequireDSNFallsBackToEnv(t *testing.T) {
 // accounting, no task ledger, no users, and no executor plane.
 func TestRequireDSNEmptyIsAnError(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "")
+	c := assert.NewAborting(t)
 	_, err := requireDSN("")
-	if err == nil {
-		t.Fatal("want an error when no DSN is configured, got nil")
-	}
+	c.Error(err, "want an error when no DSN is configured, got nil")
 	// The message must tell the operator how to fix it.
-	if !strings.Contains(err.Error(), "RAFIKI_DB") {
-		t.Fatalf("error must name RAFIKI_DB, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "timescale/timescaledb") {
-		t.Fatalf("error must name the documented docker image, got: %v", err)
-	}
+	c.StrContains(err.Error(), "RAFIKI_DB", "error must name RAFIKI_DB, got: %v", err)
+	c.StrContains(err.Error(), "timescale/timescaledb", "error must name the documented docker image, got: %v", err)
 }

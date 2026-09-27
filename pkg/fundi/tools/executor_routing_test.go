@@ -7,21 +7,20 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorclient"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestRoutedToolsGoToTheExecutor(t *testing.T) {
+	c := assert.NewAborting(t)
 	fake := executorclient.NewFake()
 	fake.SetResult("read", "from executor")
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd: t.TempDir(), Executor: fake,
 	})
 	out, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out != "from executor" {
-		t.Fatalf("read did not route to the executor; got %q", out)
-	}
+	c.NoError(err)
+	c.Eq("from executor", out, "read did not route to the executor; got")
 }
 
 // The routed set is exactly the machine-local tools and nothing else.
@@ -53,6 +52,7 @@ func TestOnlyMachineLocalToolsAreRouted(t *testing.T) {
 // against the daemon's own filesystem. This is the rule the whole executor
 // architecture exists to establish; everything else is plumbing.
 func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reg := tools.DefaultBlueprint.MaterializeAll(tools.ToolOpts{
 		Cwd:         t.TempDir(),
 		FileTracker: tools.NewFileTracker(),
@@ -66,9 +66,7 @@ func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
 	}
 
 	for _, name := range tools.WorkspaceTools() {
-		if names[name] {
-			t.Errorf("%q was registered with no executor; it would run on the daemon's own filesystem", name)
-		}
+		c.False(names[name], "%q was registered with no executor; it would run on the daemon's own filesystem", name)
 	}
 
 	// The daemon tier is unaffected: an agent with no workspace is still an
@@ -76,8 +74,6 @@ func TestNoExecutorMeansNoWorkspaceTools(t *testing.T) {
 	// ToolOpts, while agent_spawn would decline without an AgentSpawner and
 	// webfetch/websearch decline without ToolsWeb.
 	for _, name := range []string{"task_add", "task_list", "task_update", "task_drop"} {
-		if !names[name] {
-			t.Errorf("%q is missing; a workspace-less agent still has the daemon tier", name)
-		}
+		c.False(!names[name], "%q is missing; a workspace-less agent still has the daemon tier", name)
 	}
 }

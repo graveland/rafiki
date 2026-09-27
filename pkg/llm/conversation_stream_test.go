@@ -13,25 +13,24 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newTestConversation builds a store-less (in-memory) Conversation around
 // sender — fast unit-test scaffolding for the streaming path, no DB needed.
 func newTestConversation(t *testing.T, sender Sender) *Conversation {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	c, err := NewClient(
 		WithProviderSender("anthropic", sender),
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	return conv
 }
 
@@ -41,6 +40,7 @@ func newTestConversation(t *testing.T, sender Sender) *Conversation {
 // (mirrors TestSend_StreamEngagesWithFallbackAndBreakerConfigured's setup).
 func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Conversation, *Client) {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	c, err := NewClient(
 		WithProviderSender("anthropic", primary),
 		WithProviderSender("openrouter", fallback),
@@ -49,15 +49,11 @@ func newTestConversationWithBreaker(t *testing.T, primary, fallback Sender) (*Co
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback("openrouter"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.NoError(err)
 	return conv, c
 }
 
@@ -69,9 +65,7 @@ func newTestConversationWithOpenBreaker(t *testing.T, primary, fallback Sender) 
 	t.Helper()
 	conv, c := newTestConversationWithBreaker(t, primary, fallback)
 	c.Breaker("anthropic").RecordResult(time.Now(), true)
-	if !c.Breaker("anthropic").Open() {
-		t.Fatal("test setup: breaker did not open")
-	}
+	assert.NewAborting(t).True(c.Breaker("anthropic").Open(), "test setup: breaker did not open")
 	return conv, c
 }
 
@@ -309,21 +303,19 @@ func (s *leakySender) NewStreaming(_ context.Context, _ anthropic.MessageNewPara
 // attempted=true return — a single NewStreaming call, no retry loop to
 // confound the assertion.
 func TestSendStreaming_ClosesStreamEvenWhenNewStreamingReturnsBothStreamAndError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	decoder := &closeTrackingDecoder{}
 	sender := &leakySender{decoder: decoder}
 	conv := newTestConversation(t, sender)
 
 	_, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err == nil {
-		t.Fatal("Send must fail: leakySender's NewStreaming always errors")
-	}
-	if !decoder.closed {
-		t.Error("stream must be closed even when NewStreaming returns a non-nil error alongside a non-nil stream")
-	}
+	c.Require().Error(err, "Send must fail: leakySender's NewStreaming always errors")
+	c.True(decoder.closed, "stream must be closed even when NewStreaming returns a non-nil error alongside a non-nil stream")
 }
 
 func TestSend_StreamHandlerReceivesEventsAndAccumulates(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := newFakeStreamingSender(textStreamEvents("Hel", "lo")...)
 	conv := newTestConversation(t, sender)
 
@@ -334,18 +326,10 @@ func TestSend_StreamHandlerReceivesEventsAndAccumulates(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if got := strings.Join(seen, ""); got != "Hello" {
-		t.Errorf("handler saw %q, want Hello", got)
-	}
-	if got := textOfMessage(msg); got != "Hello" {
-		t.Errorf("accumulated message = %q, want Hello", got)
-	}
-	if sender.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1", sender.streamCalls)
-	}
+	c.Require().NoError(err, "Send")
+	c.Eq("Hello", strings.Join(seen, ""), "handler saw")
+	c.Eq("Hello", textOfMessage(msg), "accumulated message")
+	c.Eq(1, sender.streamCalls, "streamCalls")
 }
 
 // TestSend_StreamBackfillsInputTokensFromMessageDelta is the regression for
@@ -360,6 +344,7 @@ func TestSend_StreamHandlerReceivesEventsAndAccumulates(t *testing.T) {
 // attach TUI as a permanent "0.0%" context usage indistinguishable from a
 // genuinely empty prompt.
 func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
+	c := assert.NewCollecting(t)
 	events := []ssestream.Event{
 		sseEvent("message_start", `{"type":"message_start","message":{"id":"msg_or","type":"message",
 			"role":"assistant","model":"deepseek/deepseek-v4-pro","content":[],
@@ -375,21 +360,11 @@ func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
 	conv := newTestConversation(t, sender)
 
 	msg, err := conv.Send(context.Background(), UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if msg.Usage.InputTokens != 101 {
-		t.Errorf("InputTokens = %d, want 101 (from the final message_delta, not message_start's 0)", msg.Usage.InputTokens)
-	}
-	if msg.Usage.CacheReadInputTokens != 20 {
-		t.Errorf("CacheReadInputTokens = %d, want 20", msg.Usage.CacheReadInputTokens)
-	}
-	if msg.Usage.CacheCreationInputTokens != 3 {
-		t.Errorf("CacheCreationInputTokens = %d, want 3", msg.Usage.CacheCreationInputTokens)
-	}
-	if msg.Usage.OutputTokens != 5 {
-		t.Errorf("OutputTokens = %d, want 5 (Accumulate's own existing behavior, unaffected by the backfill)", msg.Usage.OutputTokens)
-	}
+	c.Require().NoError(err, "Send")
+	c.Eq(101, msg.Usage.InputTokens, "InputTokens")
+	c.Eq(20, msg.Usage.CacheReadInputTokens, "CacheReadInputTokens")
+	c.Eq(3, msg.Usage.CacheCreationInputTokens, "CacheCreationInputTokens")
+	c.Eq(5, msg.Usage.OutputTokens, "OutputTokens")
 }
 
 // TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens is the
@@ -400,49 +375,37 @@ func TestSend_StreamBackfillsInputTokensFromMessageDelta(t *testing.T) {
 // messageStartEvent sets input_tokens=10 and messageDeltaEvent carries no
 // input_tokens field at all (unmarshals to 0), exactly that shape.
 func TestSend_StreamMessageDeltaNeverClobbersRealAnthropicInputTokens(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := newFakeStreamingSender(textStreamEvents("hi")...)
 	conv := newTestConversation(t, sender)
 
 	msg, err := conv.Send(context.Background(), UserText("hi"), WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if msg.Usage.InputTokens != 10 {
-		t.Errorf("InputTokens = %d, want 10 (message_start's real value, not clobbered by message_delta's zero)", msg.Usage.InputTokens)
-	}
+	c.Require().NoError(err, "Send")
+	c.Eq(10, msg.Usage.InputTokens, "InputTokens")
 }
 
 func TestSend_FallsBackWhenSenderCannotStream(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &nonStreamingFake{reply: "Hello"}
 	conv := newTestConversation(t, sender)
 
 	called := false
 	msg, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) { called = true }))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if called {
-		t.Error("handler must not fire for a non-streaming sender")
-	}
-	if got := textOfMessage(msg); got != "Hello" {
-		t.Errorf("non-streaming fallback message = %q, want Hello", got)
-	}
-	if sender.calls != 1 {
-		t.Errorf("New calls = %d, want exactly 1 (no duplicate attempt)", sender.calls)
-	}
+	c.Require().NoError(err, "Send")
+	c.False(called, "handler must not fire for a non-streaming sender")
+	c.Eq("Hello", textOfMessage(msg), "non-streaming fallback message")
+	c.Eq(1, sender.calls, "New calls")
 }
 
 func TestSend_NoHandlerUsesNonStreamingPath(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := newFakeStreamingSender(textStreamEvents("x")...)
 	conv := newTestConversation(t, sender)
 
-	if _, err := conv.Send(context.Background(), UserText("hi")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if sender.streamCalls != 0 {
-		t.Error("no handler means no streaming call")
-	}
+	_, err := conv.Send(context.Background(), UserText("hi"))
+	c.Require().NoError(err, "Send")
+	c.Eq(0, sender.streamCalls, "no handler means no streaming call")
 }
 
 // seedBigHistory writes n large messages so the default TrimPolicy has
@@ -457,9 +420,7 @@ func seedBigHistory(t *testing.T, conv *Conversation, n int) {
 		}
 		msg := anthropic.MessageParam{Role: role,
 			Content: []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(big)}}
-		if err := conv.appendMessage(context.Background(), i, msg, nil); err != nil {
-			t.Fatal(err)
-		}
+		assert.NewAborting(t).NoError(conv.appendMessage(context.Background(), i, msg, nil))
 	}
 }
 
@@ -469,6 +430,7 @@ func seedBigHistory(t *testing.T, conv *Conversation, n int) {
 // realistic API shape — see streamScript's openErr doc), so the retry must
 // still happen and must still stream through the handler.
 func TestSend_StreamTrimRetrySucceedsWhenNoEventsDelivered(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{openErr: promptTooLargeErr()},
 		{events: textStreamEvents("after trim")},
@@ -483,18 +445,10 @@ func TestSend_StreamTrimRetrySucceedsWhenNoEventsDelivered(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("Send with trim-retry: %v", err)
-	}
-	if got := textOfMessage(msg); got != "after trim" {
-		t.Errorf("message = %q, want %q", got, "after trim")
-	}
-	if got := strings.Join(seen, ""); got != "after trim" {
-		t.Errorf("handler saw %q, want only the retry's content", got)
-	}
-	if sender.streamCalls != 2 {
-		t.Errorf("streamCalls = %d, want 2 (failed attempt + successful retry)", sender.streamCalls)
-	}
+	c.Require().NoError(err, "Send with trim-retry")
+	c.Eq("after trim", textOfMessage(msg), "message")
+	c.Eq("after trim", strings.Join(seen, ""), "handler saw")
+	c.Eq(2, sender.streamCalls, "streamCalls")
 	if len(sender.lastParams) != 2 || len(sender.lastParams[1].Messages) >= len(sender.lastParams[0].Messages) {
 		t.Errorf("retry not trimmed: attempts=%d", len(sender.lastParams))
 	}
@@ -509,6 +463,7 @@ func TestSend_StreamTrimRetrySucceedsWhenNoEventsDelivered(t *testing.T) {
 // deliberately delivers a real content event and THEN errors
 // prompt-too-large, to prove the guard holds regardless.
 func TestSend_StreamTrimRetryNeverRetriesAfterDelivery(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{
 			events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
@@ -528,21 +483,11 @@ func TestSend_StreamTrimRetryNeverRetriesAfterDelivery(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err == nil {
-		t.Fatal("Send must fail: a retry after partial delivery would double-deliver events")
-	}
-	if !isPromptTooLarge(err) {
-		t.Errorf("expected the underlying prompt-too-large error to surface, got: %v", err)
-	}
-	if sender.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1 (must NOT retry once events were delivered)", sender.streamCalls)
-	}
-	if handlerCalls != 3 {
-		t.Errorf("handler invoked %d times, want exactly 3 (the first attempt's events only)", handlerCalls)
-	}
-	if strings.Join(seen, "") != "partial" {
-		t.Errorf("handler saw %q, want only %q (never the second script)", strings.Join(seen, ""), "partial")
-	}
+	c.Require().Error(err, "Send must fail: a retry after partial delivery would double-deliver events")
+	c.True(isPromptTooLarge(err), "expected the underlying prompt-too-large error to surface, got: %v", err)
+	c.Eq(1, sender.streamCalls, "streamCalls")
+	c.Eq(3, handlerCalls, "handler invoked")
+	c.Eq("partial", strings.Join(seen, ""), "handler saw")
 }
 
 // TestSend_StreamEngagesWithFallbackAndBreakerConfigured guards the
@@ -553,6 +498,7 @@ func TestSend_StreamTrimRetryNeverRetriesAfterDelivery(t *testing.T) {
 // Streaming must engage here even though a fallback chain and an active
 // breaker are both configured, as long as nothing has actually failed.
 func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	primary := newFakeStreamingSender(textStreamEvents("Hi", " there")...)
 	fallback := &nonStreamingFake{reply: "must not be used"}
 	c, err := NewClient(
@@ -563,15 +509,11 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback("openrouter"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	var seen []string
 	msg, err := conv.Send(context.Background(), UserText("hi"),
@@ -580,21 +522,11 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if primary.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1: streaming must engage with a fallback chain + breaker configured", primary.streamCalls)
-	}
-	if got := strings.Join(seen, ""); got != "Hi there" {
-		t.Errorf("handler saw %q, want %q", got, "Hi there")
-	}
-	if got := textOfMessage(msg); got != "Hi there" {
-		t.Errorf("message = %q, want %q", got, "Hi there")
-	}
-	if fallback.calls != 0 {
-		t.Errorf("fallback called %d times, want 0 (primary succeeded)", fallback.calls)
-	}
+	ck.Require().NoError(err, "Send")
+	ck.Eq(1, primary.streamCalls, "streamCalls")
+	ck.Eq("Hi there", strings.Join(seen, ""), "handler saw")
+	ck.Eq("Hi there", textOfMessage(msg), "message")
+	ck.Eq(0, fallback.calls, "fallback called")
 }
 
 // TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure proves the other half
@@ -603,6 +535,7 @@ func TestSend_StreamEngagesWithFallbackAndBreakerConfigured(t *testing.T) {
 // SendParams retry can reach the fallback chain - nothing was delivered, so
 // nothing can be double-delivered by that retry.
 func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	// One script entry: NewStreaming AND New (the callModel retry SendParams
 	// makes) both fail the same retryable way, modeling a primary that's
 	// genuinely down rather than one that behaves differently per call.
@@ -616,40 +549,22 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback("openrouter"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	handlerCalls := 0
 	msg, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) { handlerCalls++ }))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if got := textOfMessage(msg); got != "fallback done" {
-		t.Errorf("message = %q, want %q (fallback must be reached)", got, "fallback done")
-	}
-	if handlerCalls != 0 {
-		t.Errorf("handler invoked %d times, want 0 (nothing streamed: primary rejected pre-delivery, fallback doesn't stream)", handlerCalls)
-	}
-	if primary.streamCalls != 1 {
-		t.Errorf("primary.streamCalls = %d, want 1 (the failed streaming attempt)", primary.streamCalls)
-	}
-	if primary.newCalls != 1 {
-		t.Errorf("primary.newCalls = %d, want 1 (SendParams/callModel retrying primary non-streamed before failing over)", primary.newCalls)
-	}
-	if fallback.calls != 1 {
-		t.Errorf("fallback.calls = %d, want 1", fallback.calls)
-	}
-	if !c.Breaker("anthropic").Open() {
-		t.Error("breaker must be open after the retryable primary failure")
-	}
+	ck.Require().NoError(err, "Send")
+	ck.Eq("fallback done", textOfMessage(msg), "message")
+	ck.Eq(0, handlerCalls, "handler invoked")
+	ck.Eq(1, primary.streamCalls, "primary.streamCalls")
+	ck.Eq(1, primary.newCalls, "primary.newCalls")
+	ck.Eq(1, fallback.calls, "fallback.calls")
+	ck.True(c.Breaker("anthropic").Open(), "breaker must be open after the retryable primary failure")
 }
 
 // TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent is the
@@ -667,6 +582,7 @@ func TestSend_StreamFailsOverOnPreDeliveryPrimaryFailure(t *testing.T) {
 // empty message reconstructed from message_start alone and the test would
 // never reach the fallback at all.
 func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	primary := &fakeStreamingSender{scripts: []streamScript{{
 		events:   []ssestream.Event{messageStartEvent()},
 		trailErr: overloadedErr(),
@@ -681,15 +597,11 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		Fallback("openrouter"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	var seen []string
 	msg, err := conv.Send(context.Background(), UserText("hi"),
@@ -698,24 +610,12 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("expected failover to the fallback, got error: %v", err)
-	}
-	if got := textOfMessage(msg); got != "recovered" {
-		t.Errorf("message = %q, want %q — did not fail over", got, "recovered")
-	}
-	if len(seen) != 0 {
-		t.Errorf("handler saw content %v from a stream that delivered none", seen)
-	}
-	if primary.streamCalls != 1 {
-		t.Errorf("primary.streamCalls = %d, want 1", primary.streamCalls)
-	}
-	if primary.newCalls != 1 {
-		t.Errorf("primary.newCalls = %d, want 1 (SendParams/callModel retrying primary non-streamed before failing over)", primary.newCalls)
-	}
-	if fallback.calls != 1 {
-		t.Errorf("fallback.calls = %d, want 1", fallback.calls)
-	}
+	ck.Require().NoError(err, "expected failover to the fallback, got error")
+	ck.Eq("recovered", textOfMessage(msg), "message")
+	ck.Empty(seen, "handler saw content")
+	ck.Eq(1, primary.streamCalls, "primary.streamCalls")
+	ck.Eq(1, primary.newCalls, "primary.newCalls")
+	ck.Eq(1, fallback.calls, "fallback.calls")
 }
 
 // TestSendStreaming_StepsAsideWhenBreakerIsOpen is the C3 regression: an open
@@ -726,6 +626,7 @@ func TestSend_FailsOverWhenStreamDiesAfterMessageStartButBeforeContent(t *testin
 // streamed, proving the sender is never touched rather than merely that its
 // output goes unobserved.
 func TestSendStreaming_StepsAsideWhenBreakerIsOpen(t *testing.T) {
+	c := assert.NewCollecting(t)
 	primary := newFakeStreamingSender(textDeltaEvent("should not be reached"), messageStopEvent())
 	fallback := &nonStreamingFake{reply: "via fallback"}
 	conv, _ := newTestConversationWithOpenBreaker(t, primary, fallback)
@@ -734,18 +635,10 @@ func TestSendStreaming_StepsAsideWhenBreakerIsOpen(t *testing.T) {
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {
 			t.Error("handler fired despite an open breaker on the primary")
 		}))
-	if err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if got := textOfMessage(msg); got != "via fallback" {
-		t.Errorf("message = %q, want the fallback's reply", got)
-	}
-	if primary.calls != 0 {
-		t.Errorf("primary called %d times with breaker open, want 0", primary.calls)
-	}
-	if fallback.calls != 1 {
-		t.Errorf("fallback called %d times, want 1", fallback.calls)
-	}
+	c.Require().NoError(err, "Send")
+	c.Eq("via fallback", textOfMessage(msg), "message")
+	c.Eq(0, primary.calls, "primary called")
+	c.Eq(1, fallback.calls, "fallback called")
 }
 
 // TestSendStreaming_RecordsResultIntoBreaker is the other half of C3: a
@@ -762,6 +655,7 @@ func TestSendStreaming_StepsAsideWhenBreakerIsOpen(t *testing.T) {
 // recorded this failure. If the breaker ends up open, sendStreaming itself
 // must be what did it.
 func TestSendStreaming_RecordsResultIntoBreaker(t *testing.T) {
+	c := assert.NewCollecting(t)
 	primary := &fakeStreamingSender{scripts: []streamScript{{
 		events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
 		trailErr: overloadedErr(),
@@ -771,20 +665,12 @@ func TestSendStreaming_RecordsResultIntoBreaker(t *testing.T) {
 
 	_, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err == nil {
-		t.Fatal("Send must fail: content already delivered, so no failover is possible")
-	}
-	if fallback.calls != 0 {
-		t.Errorf("fallback called %d times, want 0 (no failover once content has delivered)", fallback.calls)
-	}
+	c.Require().Error(err, "Send must fail: content already delivered, so no failover is possible")
+	c.Eq(0, fallback.calls, "fallback called")
 
 	b := client.Breaker("anthropic")
-	if b == nil {
-		t.Fatal("no breaker configured")
-	}
-	if !breakerSawFailure(b) {
-		t.Error("streamed failure was not recorded — the breaker cannot open from the streaming path")
-	}
+	c.Require().NotNil(b, "no breaker configured")
+	c.True(breakerSawFailure(b), "streamed failure was not recorded — the breaker cannot open from the streaming path")
 }
 
 // rateLimitStreamErr builds the error an in-band SSE rate-limit rejection
@@ -802,6 +688,7 @@ func rateLimitStreamErr() error {
 // is the in-band twin of the typed 429 above and must take the identical
 // path: ModelGate backpressure, then one fresh attempt.
 func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{trailErr: rateLimitStreamErr()},
 		{events: textStreamEvents("after retry")},
@@ -811,15 +698,11 @@ func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	c.modelGate = NewModelGate(10*time.Millisecond, 50*time.Millisecond)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	var seen []string
 	msg, err := conv.Send(context.Background(), UserText("hi"),
@@ -828,18 +711,10 @@ func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("Send with in-band rate-limit retry: %v", err)
-	}
-	if got := textOfMessage(msg); got != "after retry" {
-		t.Errorf("message = %q, want %q", got, "after retry")
-	}
-	if got := strings.Join(seen, ""); got != "after retry" {
-		t.Errorf("handler saw %q, want only the retry's content", got)
-	}
-	if sender.streamCalls != 2 {
-		t.Errorf("streamCalls = %d, want 2 (failed + retry)", sender.streamCalls)
-	}
+	ck.Require().NoError(err, "Send with in-band rate-limit retry")
+	ck.Eq("after retry", textOfMessage(msg), "message")
+	ck.Eq("after retry", strings.Join(seen, ""), "handler saw")
+	ck.Eq(2, sender.streamCalls, "streamCalls")
 }
 
 // TestSend_StreamDoesNotRetryAfterDeliveryEvenForInBandRateLimit pins the
@@ -847,6 +722,7 @@ func TestSend_StreamRetriesOnPreDeliveryInBandRateLimit(t *testing.T) {
 // handler, no classification of the trailing error can make the send safe
 // to replay.
 func TestSend_StreamDoesNotRetryAfterDeliveryEvenForInBandRateLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{
 			events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
@@ -863,21 +739,14 @@ func TestSend_StreamDoesNotRetryAfterDeliveryEvenForInBandRateLimit(t *testing.T
 				seen = append(seen, d)
 			}
 		}))
-	if err == nil {
-		t.Fatal("Send must fail: delivered content + in-band 429 cannot retry")
-	}
-	if !IsRateLimitStreamError(err) {
-		t.Errorf("expected in-band rate limit error to surface, got: %v", err)
-	}
-	if sender.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1 (must NOT retry after delivery)", sender.streamCalls)
-	}
-	if strings.Join(seen, "") != "partial" {
-		t.Errorf("handler saw %q, want only the first attempt's partial content", strings.Join(seen, ""))
-	}
+	c.Require().Error(err, "Send must fail: delivered content + in-band 429 cannot retry")
+	c.True(IsRateLimitStreamError(err), "expected in-band rate limit error to surface, got: %v", err)
+	c.Eq(1, sender.streamCalls, "streamCalls")
+	c.Eq("partial", strings.Join(seen, ""), "handler saw")
 }
 
 func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{openErr: rateLimitErr()},
 		{events: textStreamEvents("after retry")},
@@ -887,15 +756,11 @@ func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	c.modelGate = NewModelGate(10*time.Millisecond, 50*time.Millisecond)
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	var seen []string
 	msg, err := conv.Send(context.Background(), UserText("hi"),
@@ -904,21 +769,14 @@ func TestSend_StreamRetriesOnPreDeliveryRateLimit(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err != nil {
-		t.Fatalf("Send with rate-limit retry: %v", err)
-	}
-	if got := textOfMessage(msg); got != "after retry" {
-		t.Errorf("message = %q, want %q", got, "after retry")
-	}
-	if got := strings.Join(seen, ""); got != "after retry" {
-		t.Errorf("handler saw %q, want only the retry's content", got)
-	}
-	if sender.streamCalls != 2 {
-		t.Errorf("streamCalls = %d, want 2 (failed + retry)", sender.streamCalls)
-	}
+	ck.Require().NoError(err, "Send with rate-limit retry")
+	ck.Eq("after retry", textOfMessage(msg), "message")
+	ck.Eq("after retry", strings.Join(seen, ""), "handler saw")
+	ck.Eq(2, sender.streamCalls, "streamCalls")
 }
 
 func TestSend_StreamDoesNotRetryAfterDeliveryEvenForRateLimit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{
 			events:   []ssestream.Event{messageStartEvent(), contentBlockStartEvent(), textDeltaEvent("partial")},
@@ -935,21 +793,15 @@ func TestSend_StreamDoesNotRetryAfterDeliveryEvenForRateLimit(t *testing.T) {
 				seen = append(seen, d)
 			}
 		}))
-	if err == nil {
-		t.Fatal("Send must fail: delivered content + 429 cannot retry")
-	}
-	if isRL, _ := isRateLimit(err); !isRL {
-		t.Errorf("expected rate limit error to surface, got: %v", err)
-	}
-	if sender.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1 (must NOT retry after delivery)", sender.streamCalls)
-	}
-	if strings.Join(seen, "") != "partial" {
-		t.Errorf("handler saw %q, want only the first attempt's partial content", strings.Join(seen, ""))
-	}
+	c.Require().Error(err, "Send must fail: delivered content + 429 cannot retry")
+	isRL, _ := isRateLimit(err)
+	c.True(isRL, "expected rate limit error to surface, got: %v", err)
+	c.Eq(1, sender.streamCalls, "streamCalls")
+	c.Eq("partial", strings.Join(seen, ""), "handler saw")
 }
 
 func TestSend_StreamDoesNotRetryNonRateLimitErrors(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{openErr: authErr()},
 		{events: textStreamEvents("SHOULD NOT APPEAR")},
@@ -958,15 +810,12 @@ func TestSend_StreamDoesNotRetryNonRateLimitErrors(t *testing.T) {
 
 	_, err := conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err == nil {
-		t.Fatal("Send must fail: 401 is not retryable")
-	}
-	if sender.streamCalls != 1 {
-		t.Errorf("streamCalls = %d, want 1 (non-429 must not retry)", sender.streamCalls)
-	}
+	c.Require().Error(err, "Send must fail: 401 is not retryable")
+	c.Eq(1, sender.streamCalls, "streamCalls")
 }
 
 func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	gate := NewModelGate(10*time.Millisecond, 50*time.Millisecond)
 	sender := &fakeStreamingSender{scripts: []streamScript{
 		{openErr: rateLimitErr()},
@@ -977,25 +826,17 @@ func TestSend_StreamRespectsRateLimitPolicyMaxRetries(t *testing.T) {
 		WithDefaultModel("claude-haiku-4-5"),
 		WithLogger(testLogger(t)),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 	c.modelGate = gate
 
 	conv, err := c.Conversation(context.Background(),
 		NewConversation("", "test"), Model("claude-haiku-4-5"), SystemText("sys"),
 		WithRateLimitPolicy(RateLimitPolicy{MaxRetries: 2}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(err)
 
 	_, err = conv.Send(context.Background(), UserText("hi"),
 		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
-	if err == nil {
-		t.Fatal("Send must fail after 2 retries")
-	}
+	ck.Require().Error(err, "Send must fail after 2 retries")
 	// 1 initial + 2 retries = 3 total.
-	if sender.streamCalls != 3 {
-		t.Errorf("streamCalls = %d, want 3 (1 initial + 2 retries)", sender.streamCalls)
-	}
+	ck.Eq(3, sender.streamCalls, "streamCalls")
 }

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/presets"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakePresetStore is an in-memory PresetStore. It records what the tools
@@ -94,9 +96,7 @@ func TestPresetToolsDeclineWithoutStore(t *testing.T) {
 		PresetListBlueprint{}, PresetGetBlueprint{}, PresetPutBlueprint{}, PresetDeleteBlueprint{},
 	} {
 		tool, err := bp.Materialize(ToolOpts{})
-		if tool != nil || err != nil {
-			t.Errorf("%T.Materialize with nil Presets = (%v, %v), want (nil, nil)", bp, tool, err)
-		}
+		assert.NewCollecting(t).False(tool != nil || err != nil, "%T.Materialize with nil Presets = (%v, %v), want (nil, nil)", bp, tool, err)
 	}
 }
 
@@ -105,54 +105,40 @@ func TestPresetToolsDeclineWithoutStore(t *testing.T) {
 // zero-value trap -- collapsing the two -- silently turns a narrow preset
 // into an everything preset.
 func TestPresetPutKeepsEmptyToolsDistinct(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePresetStore{}
 	tool, err := PresetPutBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	if _, err := tool.Execute(context.Background(), ToolInput(`{"name":"a","tools":[]}`)); err != nil {
 		t.Fatalf("Execute(tools:[]): %v", err)
 	}
-	if len(store.puts) != 1 {
-		t.Fatalf("store Put calls = %d, want 1", len(store.puts))
-	}
+	c.Require().Len(store.puts, 1, "store Put calls = %d, want 1", len(store.puts))
 	if got := store.puts[0].Tools; got == nil || len(*got) != 0 {
 		t.Errorf(`"tools":[] arrived as %#v, want a non-nil pointer to an empty slice`, got)
 	}
 
 	store2 := &fakePresetStore{}
 	tool2, err := PresetPutBlueprint{}.Materialize(ToolOpts{Presets: store2})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	if _, err := tool2.Execute(context.Background(), ToolInput(`{"name":"a"}`)); err != nil {
 		t.Fatalf("Execute(no tools): %v", err)
 	}
-	if got := store2.puts[0].Tools; got != nil {
-		t.Errorf("absent tools arrived as %#v, want nil", got)
-	}
+	c.Nil(store2.puts[0].Tools, "absent tools arrived as")
 }
 
 // A not-found from the store must keep wrapping presets.ErrNotFound so a
 // caller can errors.Is against the domain sentinel, while reading as the
 // tool's own sentence.
 func TestPresetGetNotFoundWrapsErrNotFound(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tool, err := PresetGetBlueprint{}.Materialize(ToolOpts{Presets: &fakePresetStore{getErr: presets.ErrNotFound}})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	_, err = tool.Execute(context.Background(), ToolInput(`{"name":"nope"}`))
-	if err == nil || !errors.Is(err, presets.ErrNotFound) {
-		t.Fatalf("Execute(nope) = %v, want an error wrapping presets.ErrNotFound", err)
-	}
-	if want := `preset_get: no preset "nope"`; err.Error() != want {
-		t.Errorf("Execute error = %q, want exactly %q", err.Error(), want)
-	}
+	c.Require().False(err == nil || !errors.Is(err, presets.ErrNotFound), "Execute(nope) = %v, want an error wrapping presets.ErrNotFound", err)
+	c.Eq(`preset_get: no preset "nope"`, err.Error(), "Execute error")
 
 	histTool, err := PresetGetBlueprint{}.Materialize(ToolOpts{Presets: &fakePresetStore{histErr: presets.ErrNotFound}})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	if _, err := histTool.Execute(context.Background(), ToolInput(`{"name":"nope","history":true}`)); err == nil || !errors.Is(err, presets.ErrNotFound) {
 		t.Errorf("Execute(history of nope) = %v, want an error wrapping presets.ErrNotFound", err)
 	}
@@ -162,6 +148,7 @@ func TestPresetGetNotFoundWrapsErrNotFound(t *testing.T) {
 // returns them, with deleted_at only on deleted rows and written_by_child
 // only when set -- and the spec's tri-state visible through the JSON.
 func TestPresetGetHistoryJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	live := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	gone := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := &fakePresetStore{histRecs: []presets.Record{
@@ -170,29 +157,22 @@ func TestPresetGetHistoryJSON(t *testing.T) {
 		{ID: 1, Name: "default:impl", Kind: presets.KindFundi, Model: "m/old", CreatedAt: gone, DeletedAt: &gone},
 	}}
 	tool, err := PresetGetBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"default:impl","history":true}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	var versions []map[string]any
 	if err := json.Unmarshal([]byte(res.Text), &versions); err != nil {
 		t.Fatalf("output is not a JSON array: %v\n%s", err, res.Text)
 	}
-	if len(versions) != 2 {
-		t.Fatalf("got %d versions, want 2:\n%s", len(versions), res.Text)
-	}
+	c.Require().Len(versions, 2, "got %d versions, want 2:\n%s", len(versions), res.Text)
 	if versions[0]["version"] != float64(3) || versions[1]["version"] != float64(1) {
 		t.Errorf("versions out of order: %v, %v", versions[0]["version"], versions[1]["version"])
 	}
 	if got := versions[0]["created_at"]; got != live.UTC().Format(time.RFC3339) {
 		t.Errorf("created_at = %v, want %v (RFC3339)", got, live.UTC().Format(time.RFC3339))
 	}
-	if got := versions[0]["written_by_child"]; got != "c_child" {
-		t.Errorf("written_by_child = %v, want c_child", got)
-	}
+	got := versions[0]["written_by_child"]
+	c.False(got != "c_child", "written_by_child = %v, want c_child", got)
 	if _, ok := versions[0]["deleted_at"]; ok {
 		t.Error("a live row must not carry deleted_at")
 	}
@@ -221,6 +201,7 @@ func TestPresetGetHistoryJSON(t *testing.T) {
 // The default (no history) form returns exactly the latest live version, and
 // its pretty JSON carries the version stamp and full spec.
 func TestPresetGetLatestJSON(t *testing.T) {
+	c := assert.NewAborting(t)
 	fixed := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
 	cost := 2.5
 	store := &fakePresetStore{getRec: presets.Record{
@@ -228,13 +209,9 @@ func TestPresetGetLatestJSON(t *testing.T) {
 		Labels: map[string]string{"team": "core"}, MaxCost: &cost,
 	}}
 	tool, err := PresetGetBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.NoError(err, "Materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"default:impl"}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.NoError(err, "Execute")
 	if !strings.HasPrefix(res.Text, "{\n  \"version\": 7") {
 		t.Errorf("output is not MarshalIndent-two-spaces JSON naming version 7; got:\n%s", res.Text)
 	}
@@ -249,9 +226,7 @@ func TestPresetGetLatestJSON(t *testing.T) {
 		t.Error("a live preset_get row must not carry deleted_at")
 	}
 	spec, ok := obj["spec"].(map[string]any)
-	if !ok {
-		t.Fatalf("carries no spec object: %v", obj)
-	}
+	c.True(ok, "carries no spec object: %v", obj)
 	if spec["name"] != "default:impl" {
 		t.Errorf("spec.name = %v", spec["name"])
 	}
@@ -267,35 +242,24 @@ func TestPresetGetLatestJSON(t *testing.T) {
 // tab-separated row per preset in the store's order, with a placeholder for
 // an unset model.
 func TestPresetListEmptyAndRows(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePresetStore{}
 	tool, err := PresetListBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(`{}`))
-	if err != nil {
-		t.Fatalf("Execute on an empty store: %v", err)
-	}
-	if res.Text != "No presets." {
-		t.Errorf("empty store output = %q, want %q", res.Text, "No presets.")
-	}
+	c.Require().NoError(err, "Execute on an empty store")
+	c.Eq("No presets.", res.Text, "empty store output")
 
 	store.listRecs = []presets.Record{
 		{ID: 1, Name: "default:implementer", Kind: presets.KindFundi, Description: "impl seat"},
 		{ID: 2, Name: "default:reviewer", Kind: presets.KindFundi, Model: "anthropic/claude-opus-4", Description: "review seat"},
 	}
 	res, err = tool.Execute(context.Background(), ToolInput(`{"prefix":"default:"}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
+	c.Require().NoError(err, "Execute")
 	want := "default:implementer\tfundi\t(default model)\timpl seat\n" +
 		"default:reviewer\tfundi\tanthropic/claude-opus-4\treview seat"
-	if res.Text != want {
-		t.Errorf("list output =\n%s\nwant\n%s", res.Text, want)
-	}
-	if store.listPrefix != "default:" {
-		t.Errorf("prefix = %q, want it passed through to the store", store.listPrefix)
-	}
+	c.Eq(want, res.Text, "list output =\n")
+	c.Eq("default:", store.listPrefix, "prefix")
 }
 
 // Every preset_* description ends with the convention text: it is the only
@@ -303,40 +267,28 @@ func TestPresetListEmptyAndRows(t *testing.T) {
 // from.
 func TestPresetDescriptionsCarryConvention(t *testing.T) {
 	for _, d := range []string{presetListDescription, presetGetDescription, presetPutDescription, presetDeleteDescription} {
-		if !strings.Contains(d, presetConvention) {
-			t.Errorf("description does not carry presetConvention:\n%s", d)
-		}
+		assert.NewCollecting(t).StrContains(d, presetConvention, "description does not carry presetConvention:\n")
 	}
 }
 
 func TestPresetPutReportsSavedVersion(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePresetStore{}
 	tool, err := PresetPutBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"default:implementer"}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if want := `saved "default:implementer" as version 1`; res.Text != want {
-		t.Errorf("result = %q, want %q", res.Text, want)
-	}
+	c.Require().NoError(err, "Execute")
+	c.Eq(`saved "default:implementer" as version 1`, res.Text, "result")
 }
 
 func TestPresetDeleteReportsDeletedName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &fakePresetStore{}
 	tool, err := PresetDeleteBlueprint{}.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("Materialize: %v", err)
-	}
+	c.Require().NoError(err, "Materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(`{"name":"default:reviewer"}`))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if want := `deleted "default:reviewer"`; res.Text != want {
-		t.Errorf("result = %q, want %q", res.Text, want)
-	}
+	c.Require().NoError(err, "Execute")
+	c.Eq(`deleted "default:reviewer"`, res.Text, "result")
 	if len(store.deleted) != 1 || store.deleted[0] != "default:reviewer" {
 		t.Errorf("store Delete calls = %v, want [default:reviewer]", store.deleted)
 	}
@@ -369,12 +321,9 @@ func TestPresetToolsWrapStoreErrorsWithTheirVerbPrefix(t *testing.T) {
 
 func mustMaterialize(t *testing.T, bp Materializer, store PresetStore) Tool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	tool, err := bp.Materialize(ToolOpts{Presets: store})
-	if err != nil {
-		t.Fatalf("%T.Materialize: %v", bp, err)
-	}
-	if tool == nil {
-		t.Fatalf("%T.Materialize declined with a store configured", bp)
-	}
+	c.NoError(err, "%T.Materialize", bp)
+	c.NotNil(tool, "%T.Materialize declined with a store configured", bp)
 	return tool
 }

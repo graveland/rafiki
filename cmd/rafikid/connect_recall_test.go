@@ -18,6 +18,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeConnectRecallStore answers the calls the connect adapter makes; anything
@@ -69,6 +71,7 @@ func connectRecallWith(st recall.Store) connectRecall {
 // caller → the zero Scope the store refuses (PermissionDenied), and the memory
 // owner is always the caller's own id.
 func TestConnectRecallOverridesScopeFromIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
 	fs := &fakeConnectRecallStore{}
 	s := &connectapi.Server{}
 	s.SetRecallManager(connectRecallWith(fs))
@@ -83,15 +86,11 @@ func TestConnectRecallOverridesScopeFromIdentity(t *testing.T) {
 	admin := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u-admin", Username: "brent", Via: server.ProvenanceUser, IsAdmin: true})
 	hits, err := connectRecallWith(fs).Recall(admin, poisoned, 10)
-	if err != nil {
-		t.Fatalf("admin recall: %v", err)
-	}
+	c.NoError(err, "admin recall")
 	if fs.scope != (recall.Scope{All: true}) || fs.owner != "u-admin" {
 		t.Fatalf("admin store saw scope %+v owner %q, want All/u-admin", fs.scope, fs.owner)
 	}
-	if len(hits) != 0 {
-		t.Fatalf("fake returned %d hits, want 0", len(hits))
-	}
+	c.Empty(hits, "fake returned %d hits, want 0", len(hits))
 
 	// Through the handler: the wire carries no scope at all, and the identity
 	// still lands on the store.
@@ -106,12 +105,8 @@ func TestConnectRecallOverridesScopeFromIdentity(t *testing.T) {
 
 	// Anonymous: the zero Scope reaches the store and is refused there.
 	_, err = s.Recall(context.Background(), connect.NewRequest(&rafikiv1.RecallRequest{Query: "x"}))
-	if !errors.Is(err, recall.ErrInvalidScope) || connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("anonymous recall err = %v, want PermissionDenied wrapping ErrInvalidScope", err)
-	}
-	if fs.scope != (recall.Scope{}) {
-		t.Fatalf("anonymous store saw scope %+v, want the zero Scope", fs.scope)
-	}
+	c.False(!errors.Is(err, recall.ErrInvalidScope) || connect.CodeOf(err) != connect.CodePermissionDenied, "anonymous recall err = %v, want PermissionDenied wrapping ErrInvalidScope", err)
+	c.Eq((recall.Scope{}), fs.scope, "anonymous store saw scope")
 }
 
 // TestConnectRecallBackfillAdminOnly pins the backfill gates: a non-admin is
@@ -120,6 +115,7 @@ func TestConnectRecallOverridesScopeFromIdentity(t *testing.T) {
 // all-history, budgetless backfill — and an admin with a positive budget arms
 // exactly the three state keys, with spent reset to "0".
 func TestConnectRecallBackfillAdminOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &connectapi.Server{}
 	fs := &fakeConnectRecallStore{}
 	s.SetRecallManager(connectRecallWith(fs))
@@ -129,12 +125,8 @@ func TestConnectRecallBackfillAdminOnly(t *testing.T) {
 	_, err := s.RecallBackfill(user, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
 		SinceUnix: 1700000000, MaxCostUsd: 5,
 	}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("non-admin backfill: got code %v, want PermissionDenied", connect.CodeOf(err))
-	}
-	if len(fs.states) != 0 {
-		t.Fatalf("refused backfill wrote state %v", fs.states)
-	}
+	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "non-admin backfill: got code")
+	c.Require().Empty(fs.states, "refused backfill wrote state")
 
 	admin := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u-admin", Username: "brent", Via: server.ProvenanceUser, IsAdmin: true})
@@ -142,55 +134,40 @@ func TestConnectRecallBackfillAdminOnly(t *testing.T) {
 		_, err := s.RecallBackfill(admin, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
 			SinceUnix: 1700000000, MaxCostUsd: cost,
 		}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Fatalf("backfill with max_cost_usd %v: got code %v, want InvalidArgument", cost, connect.CodeOf(err))
-		}
-		if !errors.Is(err, connectapi.ErrNoBackfillBudget) {
-			t.Fatalf("budget refusal does not wrap ErrNoBackfillBudget: %v", err)
-		}
+		c.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "backfill with max_cost_usd %v: got code %v, want InvalidArgument", cost, connect.CodeOf(err))
+		c.Require().ErrorIs(err, connectapi.ErrNoBackfillBudget, "budget refusal does not wrap ErrNoBackfillBudget")
 	}
 	// The zero-value request itself: both fields zero.
 	if _, err := s.RecallBackfill(admin, connect.NewRequest(&rafikiv1.RecallBackfillRequest{})); connect.CodeOf(err) != connect.CodeInvalidArgument {
 		t.Fatalf("zero-value RecallBackfillRequest: got code %v, want InvalidArgument", connect.CodeOf(err))
 	}
-	if len(fs.states) != 0 {
-		t.Fatalf("refused backfill wrote state %v", fs.states)
-	}
+	c.Require().Empty(fs.states, "refused backfill wrote state")
 
 	_, err = s.RecallBackfill(admin, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
 		SinceUnix: 1700000000, MaxCostUsd: 2.5,
 	}))
-	if err != nil {
-		t.Fatalf("admin backfill: %v", err)
-	}
+	c.Require().NoError(err, "admin backfill")
 	want := map[string]string{
 		"backfill_since":      "2023-11-14T22:13:20Z", // RFC3339 of unix 1700000000
 		"backfill_budget_usd": "2.5",
 		"backfill_spent_usd":  "0",
 	}
 	for k, v := range want {
-		if fs.states[k] != v {
-			t.Errorf("state[%s] = %q, want %q", k, fs.states[k], v)
-		}
+		c.Eq(v, fs.states[k], "state[%s] = %q, want", k, fs.states[k])
 	}
-	if len(fs.states) != len(want) {
-		t.Errorf("backfill wrote %d keys (%v), want exactly %v", len(fs.states), fs.states, want)
-	}
+	c.Len(fs.states, len(want), "backfill wrote %d keys (%v), want exactly %v", len(fs.states), fs.states, want)
 }
 
 // TestConnectRecallStatusCarriesModels pins the two models the store does not
 // know: the embedder's (empty when BM25-only) and the configured summarizer's.
 func TestConnectRecallStatusCarriesModels(t *testing.T) {
+	ck := assert.NewAborting(t)
 	rt := &recallRuntime{
 		st:           &fakeConnectRecallStore{},
 		summaryModel: "sum-model",
 	}
 	m := connectRecall{c: &Controller{recall: rt}}
 	st, err := m.Status(context.Background())
-	if err != nil {
-		t.Fatalf("status without embedder: %v", err)
-	}
-	if st.EmbeddingModel != "" || st.SummaryModel != "sum-model" {
-		t.Fatalf("status = %+v, want empty embedding model and sum-model", st)
-	}
+	ck.NoError(err, "status without embedder")
+	ck.False(st.EmbeddingModel != "" || st.SummaryModel != "sum-model", "status = %+v, want empty embedding model and sum-model", st)
 }

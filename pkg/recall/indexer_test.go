@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // indexerFakeStore implements only the Store methods the indexer calls; the
@@ -171,6 +172,7 @@ func indexerToolMsg(conv string, ordinal int) Message {
 }
 
 func TestIndexerExtractCreatesWindowsFromZero(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &indexerFakeStore{
 		cursors: []ExtractCursor{{Conversation: indexerConv("c1")}},
 		messages: map[string][]Message{
@@ -178,41 +180,24 @@ func TestIndexerExtractCreatesWindowsFromZero(t *testing.T) {
 		},
 	}
 	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-	if err := ix.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
-	if store.cursorsCalls != 1 {
-		t.Fatalf("ExtractCursors calls = %d, want 1", store.cursorsCalls)
-	}
-	if got := store.cursorsExcluded[0]; !slices.Equal(got, ExcludedEntrypoints) {
-		t.Errorf("excluded = %v, want %v", got, ExcludedEntrypoints)
-	}
-	if got := store.cursorsLimits[0]; got != extractCursorLimit {
-		t.Errorf("limit = %d, want %d", got, extractCursorLimit)
-	}
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
+	c.Require().Eq(1, store.cursorsCalls, "ExtractCursors calls")
+	c.EqDiff(ExcludedEntrypoints, store.cursorsExcluded[0], "excluded")
+	c.Eq(extractCursorLimit, store.cursorsLimits[0], "limit")
 	if len(store.fromIDs) != 1 || store.fromIDs[0] != "c1" || store.fromOrdinals[0] != 0 {
 		t.Fatalf("MessagesFrom = %v from %v, want [c1] from [0]", store.fromIDs, store.fromOrdinals)
 	}
-	if len(store.writes) != 1 {
-		t.Fatalf("WriteWindows calls = %d, want 1", len(store.writes))
-	}
+	c.Require().Len(store.writes, 1, "WriteWindows calls = %d, want 1", len(store.writes))
 	ws := store.writes[0].ws
-	if len(ws) != 1 {
-		t.Fatalf("windows written = %d, want 1", len(ws))
-	}
+	c.Require().Len(ws, 1, "windows written = %d, want 1", len(ws))
 	w := ws[0]
-	if w.ConversationID != "c1" || w.OwnerUserID != "u1" || w.Seq != 0 || w.OrdinalFrom != 0 || w.OrdinalTo != 1 {
-		t.Errorf("window = %+v", w)
-	}
-	if !strings.Contains(w.Text, "user: first") || !strings.Contains(w.Text, "user: second") {
-		t.Errorf("window text = %q", w.Text)
-	}
-	if w.Sealed {
-		t.Error("a sole window must stay unsealed")
-	}
+	c.False(w.ConversationID != "c1" || w.OwnerUserID != "u1" || w.Seq != 0 || w.OrdinalFrom != 0 || w.OrdinalTo != 1, "window = %+v", w)
+	c.False(!strings.Contains(w.Text, "user: first") || !strings.Contains(w.Text, "user: second"), "window text = %q", w.Text)
+	c.False(w.Sealed, "a sole window must stay unsealed")
 }
 
 func TestIndexerExtractRebuildsUnsealedTailFromItsStart(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tail := &Window{ID: "w-tail", ConversationID: "c1", OwnerUserID: "u1",
 		Seq: 2, OrdinalFrom: 5, OrdinalTo: 9, Text: "user: tail", ExtractorVersion: ExtractorVersion}
 	store := &indexerFakeStore{
@@ -222,32 +207,23 @@ func TestIndexerExtractRebuildsUnsealedTailFromItsStart(t *testing.T) {
 		},
 	}
 	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-	if err := ix.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
 	if len(store.fromIDs) != 1 || store.fromIDs[0] != "c1" || store.fromOrdinals[0] != tail.OrdinalFrom {
 		t.Fatalf("MessagesFrom = %v from %v, want [c1] from [%d]", store.fromIDs, store.fromOrdinals, tail.OrdinalFrom)
 	}
-	if len(store.writes) != 1 {
-		t.Fatalf("WriteWindows calls = %d, want 1", len(store.writes))
-	}
+	c.Require().Len(store.writes, 1, "WriteWindows calls = %d, want 1", len(store.writes))
 	ws := store.writes[0].ws
-	if len(ws) == 0 {
-		t.Fatal("no windows written")
-	}
+	c.Require().NotEmpty(ws, "no windows written")
 	first := ws[0]
 	if first.Seq != tail.Seq || first.ID != tail.ID {
 		t.Errorf("first window Seq/ID = %d/%q, want rebuilt tail %d/%q", first.Seq, first.ID, tail.Seq, tail.ID)
 	}
-	if first.OrdinalFrom != 5 || first.OrdinalTo != 7 {
-		t.Errorf("first window ordinals = %d..%d, want 5..7", first.OrdinalFrom, first.OrdinalTo)
-	}
-	if first.Sealed {
-		t.Error("rebuilt tail must stay unsealed")
-	}
+	c.False(first.OrdinalFrom != 5 || first.OrdinalTo != 7, "first window ordinals = %d..%d, want 5..7", first.OrdinalFrom, first.OrdinalTo)
+	c.False(first.Sealed, "rebuilt tail must stay unsealed")
 }
 
 func TestIndexerExtractContinuesAfterSealedTailWithOverlap(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tail := &Window{ID: "w3", ConversationID: "c1", OwnerUserID: "u1",
 		Seq: 3, OrdinalFrom: 7, OrdinalTo: 10, Text: "user: m10", Sealed: true, ExtractorVersion: ExtractorVersion}
 	store := &indexerFakeStore{
@@ -260,25 +236,15 @@ func TestIndexerExtractContinuesAfterSealedTailWithOverlap(t *testing.T) {
 		},
 	}
 	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-	if err := ix.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
 	if len(store.fromIDs) != 1 || store.fromIDs[0] != "c1" || store.fromOrdinals[0] != tail.OrdinalTo {
 		t.Fatalf("MessagesFrom = %v from %v, want [c1] from [%d]", store.fromIDs, store.fromOrdinals, tail.OrdinalTo)
 	}
-	if len(store.writes) != 1 {
-		t.Fatalf("WriteWindows calls = %d, want 1", len(store.writes))
-	}
+	c.Require().Len(store.writes, 1, "WriteWindows calls = %d, want 1", len(store.writes))
 	ws := store.writes[0].ws
-	if len(ws) == 0 {
-		t.Fatal("no windows written")
-	}
-	if ws[0].Seq != tail.Seq+1 {
-		t.Errorf("first new window Seq = %d, want %d (tail.Seq+1)", ws[0].Seq, tail.Seq+1)
-	}
-	if ws[0].ID != "" {
-		t.Errorf("first new window ID = %q, want empty (assigned by the store)", ws[0].ID)
-	}
+	c.Require().NotEmpty(ws, "no windows written")
+	c.Eq(tail.Seq+1, ws[0].Seq, "first new window Seq")
+	c.Eq("", ws[0].ID, "first new window ID")
 	if ws[0].OrdinalFrom != 10 || ws[0].OrdinalTo != 13 {
 		t.Errorf("first new window ordinals = %d..%d, want 10..13", ws[0].OrdinalFrom, ws[0].OrdinalTo)
 	}
@@ -286,6 +252,7 @@ func TestIndexerExtractContinuesAfterSealedTailWithOverlap(t *testing.T) {
 
 func TestIndexerExtractKeepsTailWhenAllWindowsNil(t *testing.T) {
 	t.Run("unsealed tail", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		tail := &Window{ID: "w-tail", ConversationID: "c1", OwnerUserID: "u1",
 			Seq: 2, OrdinalFrom: 5, OrdinalTo: 6, ExtractorVersion: ExtractorVersion}
 		store := &indexerFakeStore{
@@ -295,14 +262,11 @@ func TestIndexerExtractKeepsTailWhenAllWindowsNil(t *testing.T) {
 			},
 		}
 		ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-		if err := ix.Tick(context.Background()); err != nil {
-			t.Fatalf("Tick: %v", err)
-		}
-		if len(store.writes) != 0 {
-			t.Errorf("WriteWindows calls = %d, want 0 (nil build keeps the existing tail)", len(store.writes))
-		}
+		c.Require().NoError(ix.Tick(context.Background()), "Tick")
+		c.Empty(store.writes, "WriteWindows calls = %d, want 0 (nil build keeps the existing tail)", len(store.writes))
 	})
 	t.Run("sealed tail with only the overlap left", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		tail := &Window{ID: "w3", ConversationID: "c1", OwnerUserID: "u1",
 			Seq: 3, OrdinalFrom: 7, OrdinalTo: 10, Sealed: true, ExtractorVersion: ExtractorVersion}
 		store := &indexerFakeStore{
@@ -312,54 +276,34 @@ func TestIndexerExtractKeepsTailWhenAllWindowsNil(t *testing.T) {
 			},
 		}
 		ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-		if err := ix.Tick(context.Background()); err != nil {
-			t.Fatalf("Tick: %v", err)
-		}
-		if len(store.writes) != 0 {
-			t.Errorf("WriteWindows calls = %d, want 0 (nothing past the overlap)", len(store.writes))
-		}
+		c.Require().NoError(ix.Tick(context.Background()), "Tick")
+		c.Empty(store.writes, "WriteWindows calls = %d, want 0 (nothing past the overlap)", len(store.writes))
 	})
 }
 
 func TestIndexerEmbedPassBatchesAndCaps(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &indexerFakeStore{pending: make([]EmbedItem, 1000)}
 	for i := range store.pending {
 		store.pending[i] = EmbedItem{Source: SourceWindow, ID: strconv.Itoa(i), Text: fmt.Sprintf("text %d", i)}
 	}
 	emb := &indexerFakeEmbedder{model: "embed-model"}
 	ix := NewIndexer(IndexerOptions{Store: store, Embedder: emb, Logger: indexerTestLogger()})
-	if err := ix.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
-	if len(emb.calls) != embedBatchesPerTick {
-		t.Fatalf("Embed calls = %d, want %d", len(emb.calls), embedBatchesPerTick)
-	}
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
+	c.Require().Len(emb.calls, embedBatchesPerTick, "Embed calls = %d, want", len(emb.calls))
 	for i, batch := range emb.calls {
-		if len(batch) != EmbedBatchSize {
-			t.Errorf("batch %d has %d inputs, want %d", i, len(batch), EmbedBatchSize)
-		}
+		c.Len(batch, EmbedBatchSize, "batch %d has %d inputs, want", i, len(batch))
 	}
-	if store.pendingCalls != embedBatchesPerTick {
-		t.Errorf("PendingEmbeds calls = %d, want %d", store.pendingCalls, embedBatchesPerTick)
-	}
-	if store.pendingModels[0] != emb.model {
-		t.Errorf("PendingEmbeds model = %q, want %q", store.pendingModels[0], emb.model)
-	}
-	if store.pendingLimits[0] != EmbedBatchSize {
-		t.Errorf("PendingEmbeds limit = %d, want %d", store.pendingLimits[0], EmbedBatchSize)
-	}
-	if store.setEmbedCalls != embedBatchesPerTick {
-		t.Errorf("SetEmbeddings calls = %d, want %d", store.setEmbedCalls, embedBatchesPerTick)
-	}
-	if len(store.setEmbedVecs[0]) != EmbedBatchSize {
-		t.Errorf("SetEmbeddings vectors = %d, want %d", len(store.setEmbedVecs[0]), EmbedBatchSize)
-	}
-	if left := len(store.pending); left != 1000-embedBatchesPerTick*EmbedBatchSize {
-		t.Errorf("pending left = %d, want %d (embed pass resumed next tick)", left, 1000-embedBatchesPerTick*EmbedBatchSize)
-	}
+	c.Eq(embedBatchesPerTick, store.pendingCalls, "PendingEmbeds calls")
+	c.Eq(emb.model, store.pendingModels[0], "PendingEmbeds model")
+	c.Eq(EmbedBatchSize, store.pendingLimits[0], "PendingEmbeds limit")
+	c.Eq(embedBatchesPerTick, store.setEmbedCalls, "SetEmbeddings calls")
+	c.Len(store.setEmbedVecs[0], EmbedBatchSize, "SetEmbeddings vectors = %d, want", len(store.setEmbedVecs[0]))
+	c.Eq(1000-embedBatchesPerTick*EmbedBatchSize, len(store.pending), "pending left")
 }
 
 func TestIndexerNoEmbedderSkipsEmbedPass(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &indexerFakeStore{
 		cursors: []ExtractCursor{{Conversation: indexerConv("c1")}},
 		messages: map[string][]Message{
@@ -367,31 +311,23 @@ func TestIndexerNoEmbedderSkipsEmbedPass(t *testing.T) {
 		},
 	}
 	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
-	if err := ix.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
-	}
-	if store.pendingCalls != 0 {
-		t.Errorf("PendingEmbeds calls = %d, want 0", store.pendingCalls)
-	}
-	if store.cursorsCalls != 1 {
-		t.Errorf("ExtractCursors calls = %d, want 1 (extract pass still runs)", store.cursorsCalls)
-	}
+	c.Require().NoError(ix.Tick(context.Background()), "Tick")
+	c.Eq(0, store.pendingCalls, "PendingEmbeds calls")
+	c.Eq(1, store.cursorsCalls, "ExtractCursors calls")
 }
 
 func TestIndexerSummaryPassRuns(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sum := &indexerFakeSummaries{err: errors.New("summarizer down")}
 	store := &indexerFakeStore{}
 	ix := NewIndexer(IndexerOptions{Store: store, Summaries: sum, Logger: indexerTestLogger()})
 	err := ix.Tick(context.Background())
-	if sum.calls != 1 {
-		t.Errorf("Pass calls = %d, want 1", sum.calls)
-	}
-	if err == nil {
-		t.Error("Tick must surface the summary pass error")
-	}
+	c.Eq(1, sum.calls, "Pass calls")
+	c.Error(err, "Tick must surface the summary pass error")
 }
 
 func TestIndexerRunSkipsTickWhenLockHeld(t *testing.T) {
+	c := assert.NewCollecting(t)
 	store := &indexerFakeStore{} // tryLockOK false: another daemon holds the lock
 	ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger(), Tick: 5 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -405,12 +341,8 @@ func TestIndexerRunSkipsTickWhenLockHeld(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	<-done
-	if store.cursorsCalls != 0 {
-		t.Errorf("ExtractCursors calls = %d, want 0 while the lock is held elsewhere", store.cursorsCalls)
-	}
-	if store.tryLockCalls == 0 {
-		t.Error("no tick was attempted; the skip path was never exercised")
-	}
+	c.Eq(0, store.cursorsCalls, "ExtractCursors calls")
+	c.NotEq(0, store.tryLockCalls, "no tick was attempted; the skip path was never exercised")
 }
 
 func TestIndexerRunStopsOnCancel(t *testing.T) {

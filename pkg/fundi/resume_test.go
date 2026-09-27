@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/agentloop"
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestResumeBootTimeOrphanRepair is Task 15's Requirement 1: a
@@ -42,6 +44,7 @@ import (
 // which must reattach to the very same conversation and run the boot-time
 // repair before returning.
 func TestResumeBootTimeOrphanRepair(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -54,38 +57,25 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
-	if err != nil {
-		t.Fatalf("NewClient (process 1): %v", err)
-	}
+	c.NoError(err, "NewClient (process 1)")
 	conv1, err := client1.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("Conversation (process 1): %v", err)
-	}
+	c.NoError(err, "Conversation (process 1)")
 
 	turnCtx, cancel := context.WithCancel(ctx)
 	defer cancel() // no-op once the tool has already cancelled; guards early-return paths
 	tools := cancelOnExecuteTools{cancel: cancel}
-	if _, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserText("go")); runErr == nil {
-		t.Fatal("agentloop.Run (process 1) succeeded, want an error from the cancelled-context persist " +
-			"(the tool cancels turnCtx before the tool_result gets persisted)")
-	}
+	_, runErr := agentloop.Run(turnCtx, conv1, tools, nil, llm.UserText("go"))
+	c.Error(runErr, "agentloop.Run (process 1) succeeded, want an error from the cancelled-context persist "+
+		"(the tool cancels turnCtx before the tool_result gets persisted)")
 
 	// Prove the premise: process 1 genuinely left a dangling tool_use, not
 	// one artificially seeded by the test.
 	before, err := conv1.History(ctx)
-	if err != nil {
-		t.Fatalf("History (pre-repair): %v", err)
-	}
-	if len(before) != 2 {
-		t.Fatalf("pre-repair history has %d rows, want 2 (user + assistant tool_use); rows: %+v", len(before), before)
-	}
+	c.NoError(err, "History (pre-repair)")
+	c.Len(before, 2, "pre-repair history has %d rows, want 2 (user + assistant tool_use); rows", len(before))
 	assistant := before[1]
-	if assistant.Param.Role != anthropic.MessageParamRoleAssistant {
-		t.Fatalf("row 1 role = %v, want assistant", assistant.Param.Role)
-	}
-	if len(assistant.ToolUseIDs) != 1 || assistant.ToolUseIDs[0] != "tu_1" {
-		t.Fatalf("assistant.ToolUseIDs = %v, want [tu_1] (the orphan never formed)", assistant.ToolUseIDs)
-	}
+	c.Eq(anthropic.MessageParamRoleAssistant, assistant.Param.Role, "row 1 role")
+	c.False(len(assistant.ToolUseIDs) != 1 || assistant.ToolUseIDs[0] != "tu_1", "assistant.ToolUseIDs = %v, want [tu_1] (the orphan never formed)", assistant.ToolUseIDs)
 	t.Log("confirmed: process 1 left a genuine dangling tool_use (tu_1), unrepaired")
 
 	// --- process 2: BuildEngine again with the same ref against the same
@@ -100,39 +90,25 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 		Providers: providers.Default(),
 	}
 	eng2, shutdown2, err := cfg.BuildEngine(ctx, fe)
-	if err != nil {
-		t.Fatalf("BuildEngine (process 2): %v", err)
-	}
+	c.NoError(err, "BuildEngine (process 2)")
 	defer shutdown2()
 	defer eng2.Close()
 
-	if eng2.conv.ID != conv1.ID {
-		t.Fatalf("process 2 conversation id = %s, want it to reattach to process 1's conversation %s", eng2.conv.ID, conv1.ID)
-	}
+	c.Eq(conv1.ID, eng2.conv.ID, "process 2 conversation id")
 
 	// The boot-time repair must have run synchronously inside BuildEngine,
 	// before it returned to us - assert directly on the persisted history.
 	after, err := eng2.conv.History(ctx)
-	if err != nil {
-		t.Fatalf("History (post-repair): %v", err)
-	}
-	if len(after) != 3 {
-		t.Fatalf("post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows: %+v", len(after), after)
-	}
+	c.NoError(err, "History (post-repair)")
+	c.Len(after, 3, "post-repair history has %d rows, want 3 (user, assistant, synthetic result); rows", len(after))
 	repairRow := after[2]
-	if repairRow.Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("repair row role = %v, want user", repairRow.Param.Role)
-	}
-	if len(repairRow.Param.Content) != 1 {
-		t.Fatalf("repair row has %d blocks, want 1", len(repairRow.Param.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, repairRow.Param.Role, "repair row role")
+	c.Len(repairRow.Param.Content, 1, "repair row has %d blocks, want 1", len(repairRow.Param.Content))
 	tr := repairRow.Param.Content[0].OfToolResult
 	if tr == nil || tr.ToolUseID != "tu_1" {
 		t.Fatalf("repair row block = %+v, want a tool_result for tu_1", repairRow.Param.Content[0])
 	}
-	if !tr.IsError.Value {
-		t.Fatal("synthesized tool_result is not marked IsError")
-	}
+	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
 
 	// Per correction (B): a scripted Continue succeeding proves nothing - the
 	// fake sender ignores request contents and llm.Continue does no
@@ -147,16 +123,10 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 		llm.WithStore(pool),
 		llm.WithDefaultModel("claude-x"),
 	)
-	if err != nil {
-		t.Fatalf("NewClient (process 3, capturing): %v", err)
-	}
+	c.NoError(err, "NewClient (process 3, capturing)")
 	conv3, err := client3.Conversation(ctx, llm.Entrypoint("agent"), llm.ByExternalRef(ref))
-	if err != nil {
-		t.Fatalf("Conversation (process 3, capturing): %v", err)
-	}
-	if conv3.ID != conv1.ID {
-		t.Fatalf("process 3 conversation id = %s, want it to reattach to %s too", conv3.ID, conv1.ID)
-	}
+	c.NoError(err, "Conversation (process 3, capturing)")
+	c.Eq(conv1.ID, conv3.ID, "process 3 conversation id")
 	if _, err := conv3.Continue(ctx); err != nil {
 		t.Fatalf("Continue after boot-time repair failed: %v", err)
 	}
@@ -172,6 +142,7 @@ func TestResumeBootTimeOrphanRepair(t *testing.T) {
 // mints when there is no store - since a later resume can only find the
 // conversation again via a real id.
 func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
+	c := assert.NewAborting(t)
 	silenceSlog(t)
 	pool, _ := dbTestPool(t)
 	ctx := context.Background()
@@ -188,9 +159,7 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 		Providers: providers.Default(),
 	}
 	eng, shutdown, err := cfg.BuildEngine(ctx, fe)
-	if err != nil {
-		t.Fatalf("BuildEngine: %v", err)
-	}
+	c.NoError(err, "BuildEngine")
 	defer shutdown()
 
 	if strings.HasPrefix(eng.conv.ID, "mem-") {
@@ -201,14 +170,10 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 	go func() { runDone <- fe.Run() }()
 
 	writeFrame(t, inW, map[string]any{"type": "get_state", "id": "1"})
-	if err := inW.Close(); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(inW.Close())
 	select {
 	case runErr := <-runDone:
-		if runErr != nil {
-			t.Fatalf("Frontend.Run: %v", runErr)
-		}
+		c.NoError(runErr, "Frontend.Run")
 	case <-time.After(5 * time.Second):
 		t.Fatal("Frontend.Run did not return after stdin closed")
 	}
@@ -222,13 +187,7 @@ func TestResumeReportsConversationIDAsSessionID(t *testing.T) {
 		} `json:"data"`
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		t.Fatal("Frontend wrote no frames; expected a get_state response")
-	}
-	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
-		t.Fatalf("parse get_state response %q: %v", lines[0], err)
-	}
-	if resp.Data.SessionID != eng.conv.ID {
-		t.Fatalf("get_state sessionId = %q, want %q (the DB-backed conversation id)", resp.Data.SessionID, eng.conv.ID)
-	}
+	c.False(len(lines) == 0 || lines[0] == "", "Frontend wrote no frames; expected a get_state response")
+	c.NoError(json.Unmarshal([]byte(lines[0]), &resp), "parse get_state response %q", lines[0])
+	c.Eq(eng.conv.ID, resp.Data.SessionID, "get_state sessionId")
 }

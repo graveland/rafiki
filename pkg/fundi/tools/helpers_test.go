@@ -1,14 +1,16 @@
 package tools
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 // testReadTool returns a materialized read tool for tests.
 func testReadTool(t *testing.T, tr *FileTracker, cwd string) *readTool {
 	t.Helper()
 	rt, err := (&ReadBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return rt.(*readTool)
 }
 
@@ -16,9 +18,7 @@ func testReadTool(t *testing.T, tr *FileTracker, cwd string) *readTool {
 func testEditTool(t *testing.T, tr *FileTracker, cwd string) *editTool {
 	t.Helper()
 	et, err := (&EditBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return et.(*editTool)
 }
 
@@ -26,9 +26,7 @@ func testEditTool(t *testing.T, tr *FileTracker, cwd string) *editTool {
 func testWriteTool(t *testing.T, tr *FileTracker, cwd string) *writeTool {
 	t.Helper()
 	wt, err := (&WriteBlueprint{}).Materialize(ToolOpts{FileTracker: tr, Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return wt.(*writeTool)
 }
 
@@ -36,9 +34,7 @@ func testWriteTool(t *testing.T, tr *FileTracker, cwd string) *writeTool {
 func testGrepTool(t *testing.T, cwd string) *grepTool {
 	t.Helper()
 	gt, err := (&GrepBlueprint{}).Materialize(ToolOpts{Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return gt.(*grepTool)
 }
 
@@ -46,8 +42,6 @@ func testGrepTool(t *testing.T, cwd string) *grepTool {
 func testGlobTool(t *testing.T, cwd string) *globTool {
 	t.Helper()
 	gt, err := (&GlobBlueprint{}).Materialize(ToolOpts{Cwd: cwd})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return gt.(*globTool)
 }

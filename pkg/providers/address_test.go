@@ -3,10 +3,11 @@
 package providers_test
 
 import (
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 const addrTOML = `
@@ -31,9 +32,7 @@ context_window = 16384
 
 func TestSplit(t *testing.T) {
 	set, err := providers.Parse([]byte(addrTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	cases := []struct {
 		in           string
 		wantProvider string
@@ -51,16 +50,11 @@ func TestSplit(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			p, model, err := set.Split(tc.in)
-			if err != nil {
-				t.Fatalf("Split(%q): %v", tc.in, err)
-			}
-			if p.Name != tc.wantProvider {
-				t.Errorf("provider = %q, want %q", p.Name, tc.wantProvider)
-			}
-			if model != tc.wantModel {
-				t.Errorf("model = %q, want %q", model, tc.wantModel)
-			}
+			c.Require().NoError(err, "Split(%q)", tc.in)
+			c.Eq(tc.wantProvider, p.Name, "provider")
+			c.Eq(tc.wantModel, model, "model")
 		})
 	}
 }
@@ -71,30 +65,21 @@ func TestSplit(t *testing.T) {
 // somewhere plausible-looking instead of failing.
 func TestSplitUnknownProviderErrors(t *testing.T) {
 	set, err := providers.Parse([]byte(addrTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	for _, in := range []string{"deepseek/deepseek-chat", "openai/gpt-4o", "google/gemini-2.5-pro"} {
 		t.Run(in, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			_, _, err := set.Split(in)
-			if err == nil {
-				t.Fatalf("Split(%q) succeeded; want an unknown-provider error", in)
-			}
-			if !strings.Contains(err.Error(), "unknown provider") {
-				t.Errorf("error = %q, want it to contain \"unknown provider\"", err.Error())
-			}
-			if !strings.Contains(err.Error(), "openrouter") {
-				t.Errorf("error = %q, want it to list the configured names so the fix is obvious", err.Error())
-			}
+			c.Require().Error(err, "Split(%q) succeeded; want an unknown-provider error", in)
+			c.StrContains(err.Error(), "unknown provider", "error = %q, want it to contain \"unknown provider\"", err.Error())
+			c.StrContains(err.Error(), "openrouter", "error")
 		})
 	}
 }
 
 func TestSplitEmptyErrors(t *testing.T) {
 	set, err := providers.Parse([]byte(addrTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	if _, _, err := set.Split(""); err == nil {
 		t.Error("Split(\"\") succeeded; want an error")
 	}
@@ -102,23 +87,18 @@ func TestSplitEmptyErrors(t *testing.T) {
 
 func TestSplitTrailingSlashErrors(t *testing.T) {
 	set, err := providers.Parse([]byte(addrTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	if _, _, err := set.Split("anthropic/"); err == nil {
 		t.Error("Split(\"anthropic/\") succeeded; want an error for an empty model id")
 	}
 }
 
 func TestSplitRaw(t *testing.T) {
+	c := assert.NewCollecting(t)
 	name, model := providers.SplitRaw("openrouter/deepseek/deepseek-chat")
-	if name != "openrouter" || model != "deepseek/deepseek-chat" {
-		t.Errorf("SplitRaw = (%q, %q), want (openrouter, deepseek/deepseek-chat)", name, model)
-	}
+	c.False(name != "openrouter" || model != "deepseek/deepseek-chat", "SplitRaw = (%q, %q), want (openrouter, deepseek/deepseek-chat)", name, model)
 	name, model = providers.SplitRaw("claude-sonnet-5")
-	if name != "" || model != "claude-sonnet-5" {
-		t.Errorf("SplitRaw of a bare id = (%q, %q), want (\"\", claude-sonnet-5)", name, model)
-	}
+	c.False(name != "" || model != "claude-sonnet-5", "SplitRaw of a bare id = (%q, %q), want (\"\", claude-sonnet-5)", name, model)
 }
 
 const resolveTOML = `
@@ -154,9 +134,7 @@ id = "models/Qwen3.8-27B-Abliterated-MLX-4bit"
 // share one id and must keep their own pins apart.
 func TestResolveReturnsAlias(t *testing.T) {
 	set, err := providers.Parse([]byte(resolveTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	cases := []struct {
 		in           string
 		wantProvider string
@@ -175,35 +153,21 @@ func TestResolveReturnsAlias(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			p, model, alias, err := set.Resolve(tc.in)
-			if err != nil {
-				t.Fatalf("Resolve(%q): %v", tc.in, err)
-			}
-			if p.Name != tc.wantProvider {
-				t.Errorf("provider = %q, want %q", p.Name, tc.wantProvider)
-			}
-			if model != tc.wantModel {
-				t.Errorf("model = %q, want %q", model, tc.wantModel)
-			}
-			if tc.wantAlias && alias == nil {
-				t.Fatalf("alias = nil, want the matched alias")
-			}
+			c.Require().NoError(err, "Resolve(%q)", tc.in)
+			c.Eq(tc.wantProvider, p.Name, "provider")
+			c.Eq(tc.wantModel, model, "model")
+			c.Require().False(tc.wantAlias && alias == nil, "alias = nil, want the matched alias")
 			if !tc.wantAlias {
-				if alias != nil {
-					t.Fatalf("alias = %+v, want nil for a non-alias id", alias)
-				}
+				c.Require().Nil(alias, "alias")
 				return
 			}
-			if got, want := alias.ID, tc.wantModel; got != want {
-				t.Errorf("alias.ID = %q, want %q", got, want)
-			}
-			if len(alias.Only) != len(tc.wantOnly) {
-				t.Fatalf("alias.Only = %v, want %v", alias.Only, tc.wantOnly)
-			}
+			got, want := alias.ID, tc.wantModel
+			c.Eq(want, got, "alias.ID")
+			c.Require().Len(alias.Only, len(tc.wantOnly), "alias.Only = %v, want %v", alias.Only, tc.wantOnly)
 			for i := range tc.wantOnly {
-				if alias.Only[i] != tc.wantOnly[i] {
-					t.Errorf("alias.Only[%d] = %q, want %q", i, alias.Only[i], tc.wantOnly[i])
-				}
+				c.Eq(tc.wantOnly[i], alias.Only[i], "alias.Only[%d] = %q, want", i, alias.Only[i])
 			}
 		})
 	}
@@ -211,9 +175,7 @@ func TestResolveReturnsAlias(t *testing.T) {
 
 func TestResolveUnknownProviderErrors(t *testing.T) {
 	set, err := providers.Parse([]byte(resolveTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	if _, _, _, err := set.Resolve("deepseek/deepseek-chat"); err == nil {
 		t.Error("Resolve of an unknown provider succeeded; want an error")
 	}
@@ -224,9 +186,7 @@ func TestResolveUnknownProviderErrors(t *testing.T) {
 // not change behaviour.
 func TestSplitMatchesResolve(t *testing.T) {
 	set, err := providers.Parse([]byte(resolveTOML))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	for _, in := range []string{
 		"openrouter/glm-flash@together",
 		"openrouter/glm-flash@fireworks",
@@ -236,18 +196,14 @@ func TestSplitMatchesResolve(t *testing.T) {
 		"anthropic/claude-sonnet-5",
 	} {
 		t.Run(in, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			pSplit, modelSplit, errSplit := set.Split(in)
 			pResolve, modelResolve, _, errResolve := set.Resolve(in)
-			if (errSplit == nil) != (errResolve == nil) {
-				t.Fatalf("Split err = %v, Resolve err = %v; must agree", errSplit, errResolve)
-			}
+			c.Require().Eq((errResolve == nil), (errSplit == nil), "Split err = %v, Resolve err = %v; must agree", errSplit, errResolve)
 			if errSplit != nil {
 				return
 			}
-			if pSplit.Name != pResolve.Name || modelSplit != modelResolve {
-				t.Errorf("Split = (%q, %q), Resolve = (%q, %q); must agree",
-					pSplit.Name, modelSplit, pResolve.Name, modelResolve)
-			}
+			c.False(pSplit.Name != pResolve.Name || modelSplit != modelResolve, "Split = (%q, %q), Resolve = (%q, %q); must agree", pSplit.Name, modelSplit, pResolve.Name, modelResolve)
 		})
 	}
 }

@@ -4,37 +4,31 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestProjectContextReturnsWorkspaceInstructionFiles(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("executor-side rules"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("executor-side rules"), 0o600))
 
 	s := NewServer(Options{Root: dir, NoLSP: true})
 	defer func() { _ = s.Close() }()
 
 	prov, err := s.Provision(context.Background(),
 		connect.NewRequest(&executorpb.ProvisionRequest{ChildId: "c_test"}))
-	if err != nil {
-		t.Fatalf("Provision: %v", err)
-	}
+	c.Require().NoError(err, "Provision")
 
 	resp, err := s.ProjectContext(context.Background(),
 		connect.NewRequest(&executorpb.ProjectContextRequest{WorkspaceId: prov.Msg.WorkspaceId}))
-	if err != nil {
-		t.Fatalf("ProjectContext: %v", err)
-	}
-	if !strings.Contains(resp.Msg.ContextFiles, "executor-side rules") {
-		t.Errorf("ContextFiles = %q, want the workspace's CLAUDE.md", resp.Msg.ContextFiles)
-	}
+	c.Require().NoError(err, "ProjectContext")
+	c.StrContains(resp.Msg.ContextFiles, "executor-side rules", "ContextFiles")
 }
 
 // An unknown workspace must be refused, not answered from the executor's root.
@@ -45,28 +39,21 @@ func TestProjectContextRejectsAnUnknownWorkspace(t *testing.T) {
 
 	_, err := s.ProjectContext(context.Background(),
 		connect.NewRequest(&executorpb.ProjectContextRequest{WorkspaceId: "ws_nope"}))
-	if err == nil {
-		t.Error("an unknown workspace_id was answered")
-	}
+	assert.NewCollecting(t).Error(err, "an unknown workspace_id was answered")
 }
 
 // A workspace with no instruction files is the ordinary case and must be an
 // empty answer rather than an error.
 func TestProjectContextEmptyWorkspaceIsNotAnError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := NewServer(Options{Root: t.TempDir(), NoLSP: true})
 	defer func() { _ = s.Close() }()
 
 	prov, err := s.Provision(context.Background(),
 		connect.NewRequest(&executorpb.ProvisionRequest{ChildId: "c_test"}))
-	if err != nil {
-		t.Fatalf("Provision: %v", err)
-	}
+	c.Require().NoError(err, "Provision")
 	resp, err := s.ProjectContext(context.Background(),
 		connect.NewRequest(&executorpb.ProjectContextRequest{WorkspaceId: prov.Msg.WorkspaceId}))
-	if err != nil {
-		t.Fatalf("ProjectContext: %v", err)
-	}
-	if resp.Msg.ContextFiles != "" {
-		t.Errorf("ContextFiles = %q, want empty", resp.Msg.ContextFiles)
-	}
+	c.Require().NoError(err, "ProjectContext")
+	c.Eq("", resp.Msg.ContextFiles, "ContextFiles")
 }

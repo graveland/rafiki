@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeLoader struct{ msgs []store.Message }
@@ -54,20 +56,18 @@ func threeMessages() []store.Message {
 }
 
 func TestGetHistoryReturnsAllByDefault(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
 	s.SetChildResolver(fakeResolver{})
 
 	resp, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
-	if err != nil {
-		t.Fatalf("GetHistory: %v", err)
-	}
-	if got := len(resp.Msg.Events); got != 3 {
-		t.Fatalf("got %d events, want 3", got)
-	}
+	c.NoError(err, "GetHistory")
+	c.Eq(3, len(resp.Msg.Events), "got")
 }
 
 func TestGetHistoryFiltersByAfterOrdinal(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
 	s.SetChildResolver(fakeResolver{})
 
@@ -76,43 +76,31 @@ func TestGetHistoryFiltersByAfterOrdinal(t *testing.T) {
 			ChildId:      "c_1",
 			AfterOrdinal: proto.Int32(0),
 		}))
-	if err != nil {
-		t.Fatalf("GetHistory: %v", err)
-	}
-	if got := len(resp.Msg.Events); got != 2 {
-		t.Fatalf("got %d events, want 2 (ordinals 1 and 2)", got)
-	}
-	if resp.Msg.Events[0].GetOrdinal() != 1 {
-		t.Fatalf("first ordinal = %d, want 1", resp.Msg.Events[0].GetOrdinal())
-	}
+	c.NoError(err, "GetHistory")
+	c.Eq(2, len(resp.Msg.Events), "got")
+	c.Eq(1, resp.Msg.Events[0].GetOrdinal(), "first ordinal")
 }
 
 func TestRoutesReturnsControlHandler(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{})
 
 	path, h := s.Routes()
-	if path == "" {
-		t.Fatal("empty path")
-	}
-	if h == nil {
-		t.Fatal("nil handler")
-	}
+	c.NotEq("", path, "empty path")
+	c.NotNil(h, "nil handler")
 }
 
 // An empty child id is rejected before resolution is ever attempted, so this
 // case deliberately wires no resolver: it must stay InvalidArgument rather
 // than becoming the Unavailable a missing resolver produces.
 func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{msgs: nil})
 
 	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: ""}))
-	if err == nil {
-		t.Fatal("want an error for an empty child id, got nil")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Fatalf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	c.Error(err, "want an error for an empty child id, got nil")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // The child id and the conversation id are different identifiers: child ids
@@ -120,36 +108,31 @@ func TestGetHistoryRejectsEmptyChildID(t *testing.T) {
 // WHERE conversation_id = $1::uuid. Without a resolver the handler must fail
 // rather than pass the child id through as if it were a conversation id.
 func TestGetHistoryFailsClosedWithoutResolver(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
 	// No SetChildResolver call.
 
 	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
-	if err == nil {
-		t.Fatal("want an error when no resolver is wired, got nil")
-	}
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	c.Error(err, "want an error when no resolver is wired, got nil")
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestGetHistoryRejectsUnknownChild(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := connectapi.NewServer(fakeLoader{msgs: threeMessages()})
 	s.SetChildResolver(fakeResolver{known: map[string]string{}}) // resolves nothing
 
 	_, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_unknown"}))
-	if err == nil {
-		t.Fatal("want an error for an unresolvable child id, got nil")
-	}
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("code = %v, want NotFound", connect.CodeOf(err))
-	}
+	c.Error(err, "want an error for an unresolvable child id, got nil")
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "code")
 }
 
 // The resolver must be consulted for the STORAGE lookup only: events still
 // carry the child id the caller asked about, not the conversation UUID.
 func TestGetHistoryLoadsByConversationIDButLabelsByChildID(t *testing.T) {
+	c := assert.NewAborting(t)
 	loader := &recordingLoader{msgs: threeMessages()}
 	s := connectapi.NewServer(loader)
 	s.SetChildResolver(fakeResolver{known: map[string]string{
@@ -158,13 +141,7 @@ func TestGetHistoryLoadsByConversationIDButLabelsByChildID(t *testing.T) {
 
 	resp, err := s.GetHistory(context.Background(),
 		connect.NewRequest(&rafikiv1.GetHistoryRequest{ChildId: "c_1"}))
-	if err != nil {
-		t.Fatalf("GetHistory: %v", err)
-	}
-	if loader.gotID != "1e3f4a9c-0000-4000-8000-000000000001" {
-		t.Fatalf("loaded with %q, want the resolved conversation id", loader.gotID)
-	}
-	if got := resp.Msg.Events[0].GetChildId(); got != "c_1" {
-		t.Fatalf("event child id = %q, want c_1", got)
-	}
+	c.NoError(err, "GetHistory")
+	c.Eq("1e3f4a9c-0000-4000-8000-000000000001", loader.gotID, "loaded with")
+	c.Eq("c_1", resp.Msg.Events[0].GetChildId(), "event child id")
 }

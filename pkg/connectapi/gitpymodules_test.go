@@ -11,6 +11,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeGitSources records every call the handlers make, so a test can assert
@@ -94,9 +96,7 @@ func TestGitPymoduleManagerUnavailableBeforeWiring(t *testing.T) {
 			t.Errorf("%s with no manager: accepted", call.name)
 			continue
 		}
-		if connect.CodeOf(err) != connect.CodeUnavailable {
-			t.Errorf("%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
-		}
+		assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "%s with no manager: got code %v, want Unavailable", call.name, connect.CodeOf(err))
 	}
 }
 
@@ -105,41 +105,31 @@ func TestGitPymoduleManagerUnavailableBeforeWiring(t *testing.T) {
 // ambiguous between the blob store and a git source — both refused before
 // the manager is touched.
 func TestAddPymoduleGitSourceRejectsEmptyName(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeGitSources{}
 	s.SetGitSourceManager(f)
 
 	for _, name := range []string{"", "local"} {
 		_, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{Name: name, Url: "https://example.net/x.git"}))
-		if err == nil {
-			t.Fatalf("add with name %q: accepted", name)
-		}
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("add with name %q: got code %v, want InvalidArgument", name, connect.CodeOf(err))
-		}
+		c.Require().Error(err, "add with name %q: accepted", name)
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "add with name %q: got code %v, want InvalidArgument", name, connect.CodeOf(err))
 	}
-	if f.addRow != (GitSourceRow{}) {
-		t.Errorf("manager was called despite the rejections: %+v", f.addRow)
-	}
+	c.Eq((GitSourceRow{}), f.addRow, "manager was called despite the rejections")
 }
 
 // TestAddPymoduleGitSourceRejectsEmptyURL: a git source without a url has
 // nothing for the executor to clone.
 func TestAddPymoduleGitSourceRejectsEmptyURL(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeGitSources{}
 	s.SetGitSourceManager(f)
 
 	_, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{Name: "ops_tools", Url: ""}))
-	if err == nil {
-		t.Fatal("add without url: accepted")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("add without url: got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if f.addRow != (GitSourceRow{}) {
-		t.Errorf("manager was called despite the rejection: %+v", f.addRow)
-	}
+	c.Require().Error(err, "add without url: accepted")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "add without url: got code")
+	c.Eq((GitSourceRow{}), f.addRow, "manager was called despite the rejection")
 }
 
 // TestSetGitSourceManagerNilIsRefused: SetGitSourceManager(nil) is refused,
@@ -149,9 +139,7 @@ func TestSetGitSourceManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetGitSourceManager(nil)
 	_, err := s.ListPymoduleGitSources(context.Background(), connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("after SetGitSourceManager(nil): got code %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetGitSourceManager(nil): got code")
 }
 
 // TestGitPymoduleHandlersPassThroughToManager pins the handler contract on a
@@ -159,6 +147,7 @@ func TestSetGitSourceManagerNilIsRefused(t *testing.T) {
 // manager's rows, an unknown name maps to NotFound, a store failure maps to
 // Internal, and validation failures never reach the manager.
 func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 
 	// Add passes (name, url, ref) through and returns the row; an empty ref
@@ -168,9 +157,7 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	resp, err := s.AddPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.AddPymoduleGitSourceRequest{
 		Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main",
 	}))
-	if err != nil {
-		t.Fatalf("add: %v", err)
-	}
+	c.Require().NoError(err, "add")
 	if got := f.addRow; got.Name != "ops_tools" || got.URL != "https://example.net/ops.git" || got.Ref != "main" {
 		t.Errorf("manager got %+v, want ops_tools/url/main", got)
 	}
@@ -184,12 +171,8 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 		{Name: "shared_lib", URL: "https://example.net/lib.git", Ref: "v2"},
 	}})
 	lresp, err := s.ListPymoduleGitSources(context.Background(), connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(lresp.Msg.GetRows()) != 2 {
-		t.Fatalf("list returned %d rows, want 2", len(lresp.Msg.GetRows()))
-	}
+	c.Require().NoError(err, "list")
+	c.Require().Len(lresp.Msg.GetRows(), 2, "list returned %d rows, want 2", len(lresp.Msg.GetRows()))
 	if lresp.Msg.GetRows()[0].GetName() != "ops_tools" || lresp.Msg.GetRows()[0].GetRef() != "main" {
 		t.Errorf("list row 0 = %+v", lresp.Msg.GetRows()[0])
 	}
@@ -201,25 +184,15 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 		venvReady: true,
 	})
 	rresp, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "ops_tools"}))
-	if err != nil {
-		t.Fatalf("refresh: %v", err)
-	}
-	if got := len(rresp.Msg.GetScripts()); got != 1 {
-		t.Errorf("refresh returned %d script(s), want 1", got)
-	}
-	if got := len(rresp.Msg.GetPackages()); got != 1 {
-		t.Errorf("refresh returned %d package(s), want 1", got)
-	}
-	if !rresp.Msg.GetVenvReady() {
-		t.Error("refresh response lost venvReady")
-	}
+	c.Require().NoError(err, "refresh")
+	c.Eq(1, len(rresp.Msg.GetScripts()), "refresh returned")
+	c.Eq(1, len(rresp.Msg.GetPackages()), "refresh returned")
+	c.True(rresp.Msg.GetVenvReady(), "refresh response lost venvReady")
 
 	// A venv failure stays in the response: the refresh itself succeeded.
 	s.SetGitSourceManager(&fakeGitSources{venvReady: false, venvError: "uv sync failed"})
 	rresp, err = s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "ops_tools"}))
-	if err != nil {
-		t.Fatalf("refresh with failed venv: %v", err)
-	}
+	c.Require().NoError(err, "refresh with failed venv")
 	if rresp.Msg.GetVenvReady() || rresp.Msg.GetVenvError() != "uv sync failed" {
 		t.Errorf("refresh response lost the venv failure: ready=%v error=%q", rresp.Msg.GetVenvReady(), rresp.Msg.GetVenvError())
 	}
@@ -231,22 +204,16 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	if _, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "ops_tools"})); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if f.removed != "ops_tools" {
-		t.Errorf("manager removed %q, want ops_tools", f.removed)
-	}
+	c.Eq("ops_tools", f.removed, "manager removed")
 
 	s.SetGitSourceManager(&fakeGitSources{delErr: gitpymodules.ErrNotFound})
 	_, err = s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "gone"}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("remove of unknown name: got code %v, want NotFound", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeNotFound, connect.CodeOf(err), "remove of unknown name: got code")
 
 	boom := errors.New("connection refused")
 	s.SetGitSourceManager(&fakeGitSources{delErr: boom})
 	_, err = s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "x"}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("remove store failure: got code %v, want Internal", connect.CodeOf(err))
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "remove store failure: got code")
 
 	// A malformed name is refused before the manager, on every verb that
 	// takes one — the store would reject it too, but the handler owes the

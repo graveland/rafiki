@@ -11,23 +11,20 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestAnalyzeEventUnion documents the union contract every Backend must
 // honor: Kind selects exactly one payload.
 func TestAnalyzeEventUnion(t *testing.T) {
+	c := assert.NewAborting(t)
 	ev := AnalyzeEvent{Kind: EventAnalysis, Analysis: &analyze.Analysis{ConversationID: "c1"}}
-	if ev.Kind != EventAnalysis || ev.Analysis == nil || ev.Progress != nil || ev.Summary != nil {
-		t.Fatalf("analysis event should carry only Analysis: %+v", ev)
-	}
+	c.False(ev.Kind != EventAnalysis || ev.Analysis == nil || ev.Progress != nil || ev.Summary != nil, "analysis event should carry only Analysis: %+v", ev)
 	p := AnalyzeEvent{Kind: EventProgress, Progress: &Progress{ConversationID: "c1", State: StateFailed, Detail: "boom"}}
-	if p.Progress.State != StateFailed || p.Progress.Detail != "boom" {
-		t.Fatalf("progress event lost fields: %+v", p.Progress)
-	}
+	c.False(p.Progress.State != StateFailed || p.Progress.Detail != "boom", "progress event lost fields: %+v", p.Progress)
 	errEv := AnalyzeEvent{Kind: EventError, Err: errors.New("analysis failed")}
-	if errEv.Kind != EventError || errEv.Err == nil || errEv.Analysis != nil || errEv.Progress != nil || errEv.Summary != nil {
-		t.Fatalf("error event should carry only Err with all payloads nil: %+v", errEv)
-	}
+	c.False(errEv.Kind != EventError || errEv.Err == nil || errEv.Analysis != nil || errEv.Progress != nil || errEv.Summary != nil, "error event should carry only Err with all payloads nil: %+v", errEv)
 }
 
 // TestBackendInterfaceIsImplementable pins the method set: a compile-time
@@ -79,6 +76,7 @@ func (*nopBackend) SetFindingStatus(context.Context, string, string) (store.Find
 // one of these types marshaled with its bare Go field names (PascalCase),
 // silently breaking any consumer expecting the server's snake_case contract.
 func TestWireJSONTagsMatchServerShape(t *testing.T) {
+	c := assert.NewAborting(t)
 	sum := Summary{
 		Ranked: []RankedFindingWithDraft{
 			{
@@ -95,13 +93,9 @@ func TestWireJSONTagsMatchServerShape(t *testing.T) {
 	}
 
 	raw, err := json.Marshal(sum)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(json.Unmarshal(raw, &m))
 	for _, key := range []string{"ranked", "analyzed", "skipped", "failed", "remaining", "population", "totals"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("Summary JSON missing snake_case key %q: %s", key, raw)
@@ -109,9 +103,7 @@ func TestWireJSONTagsMatchServerShape(t *testing.T) {
 	}
 
 	totals, ok := m["totals"].(map[string]any)
-	if !ok {
-		t.Fatalf("Summary.totals did not marshal as an object: %s", raw)
-	}
+	c.True(ok, "Summary.totals did not marshal as an object: %s", raw)
 	for _, key := range []string{"input_tokens", "output_tokens", "cost_usd"} {
 		if _, ok := totals[key]; !ok {
 			t.Errorf("Totals JSON missing snake_case key %q: %s", key, raw)
@@ -119,26 +111,18 @@ func TestWireJSONTagsMatchServerShape(t *testing.T) {
 	}
 
 	ranked, ok := m["ranked"].([]any)
-	if !ok || len(ranked) != 1 {
-		t.Fatalf("Summary.ranked did not marshal as a one-element array: %s", raw)
-	}
+	c.False(!ok || len(ranked) != 1, "Summary.ranked did not marshal as a one-element array: %s", raw)
 	rf, ok := ranked[0].(map[string]any)
-	if !ok {
-		t.Fatalf("ranked[0] did not marshal as an object: %s", raw)
-	}
+	c.True(ok, "ranked[0] did not marshal as an object: %s", raw)
 	if _, ok := rf["draft"]; !ok {
 		t.Errorf("RankedFindingWithDraft JSON missing snake_case key %q: %s", "draft", raw)
 	}
 
 	prog := Progress{ConversationID: "c1", State: StateDone, InputTokens: 1, OutputTokens: 2, CostUSD: 0.5}
 	praw, err := json.Marshal(prog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var pm map[string]any
-	if err := json.Unmarshal(praw, &pm); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(json.Unmarshal(praw, &pm))
 	for _, key := range []string{"conversation_id", "state", "input_tokens", "output_tokens", "cost_usd"} {
 		if _, ok := pm[key]; !ok {
 			t.Errorf("Progress JSON missing snake_case key %q: %s", key, praw)
@@ -147,13 +131,9 @@ func TestWireJSONTagsMatchServerShape(t *testing.T) {
 
 	fr := store.FindingRow{ID: "f1", AnalysisID: "a1", Axis: "grind", TopicKey: "tk", Title: "t", ExpectedSavingsTokens: 7, Status: "open"}
 	fraw, err := json.Marshal(fr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	var fm map[string]any
-	if err := json.Unmarshal(fraw, &fm); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(json.Unmarshal(fraw, &fm))
 	for _, key := range []string{"id", "analysis_id", "axis", "topic_key", "title", "expected_savings_tokens", "status"} {
 		if _, ok := fm[key]; !ok {
 			t.Errorf("store.FindingRow JSON missing snake_case key %q: %s", key, fraw)

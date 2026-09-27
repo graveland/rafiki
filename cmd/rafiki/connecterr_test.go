@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestConnectErrFormatPrefersTheRafikiReason(t *testing.T) {
@@ -20,45 +22,34 @@ func TestConnectErrFormatPrefersTheRafikiReason(t *testing.T) {
 	// The reason names rafiki's precise cause; Connect's coarser code is
 	// dropped when one is attached.
 	want := "child_exited: child c_1 already exited"
-	if got := formatConnectErr(e); got != want {
-		t.Fatalf("formatConnectErr = %q, want %q", got, want)
-	}
+	assert.NewAborting(t).Eq(want, formatConnectErr(e), "formatConnectErr")
 }
 
 func TestConnectErrFormatFallsBackToCodeAndMessage(t *testing.T) {
 	e := connect.NewError(connect.CodeNotFound, errors.New("no such child"))
 	want := "not_found: no such child"
-	if got := formatConnectErr(e); got != want {
-		t.Fatalf("formatConnectErr = %q, want %q", got, want)
-	}
+	assert.NewAborting(t).Eq(want, formatConnectErr(e), "formatConnectErr")
 }
 
 func TestConnectErrFormatUnwrapsWrappedErrors(t *testing.T) {
+	c := assert.NewAborting(t)
 	e := rpcreason.Attach(
 		connect.NewError(connect.CodePermissionDenied, errors.New("operator-only spawn field")),
 		protocol.ErrInvalidArgs)
 	wrapped := fmt.Errorf("spawn: %w", e)
 	want := "invalid_args: operator-only spawn field"
-	if got := formatConnectErr(wrapped); got != want {
-		t.Fatalf("formatConnectErr(wrapped) = %q, want %q", got, want)
-	}
+	c.Eq(want, formatConnectErr(wrapped), "formatConnectErr(wrapped)")
 
 	plain := connect.NewError(connect.CodeUnavailable, errors.New("connection refused"))
 	wrappedPlain := fmt.Errorf("dial: %w", plain)
-	if got := formatConnectErr(wrappedPlain); got != "unavailable: connection refused" {
-		t.Fatalf("formatConnectErr(wrapped plain) = %q", got)
-	}
+	c.Eq("unavailable: connection refused", formatConnectErr(wrappedPlain), "formatConnectErr(wrapped plain) =")
 }
 
 func TestConnectErrFormatNonConnectError(t *testing.T) {
 	err := errors.New("ordinary failure")
-	if got := formatConnectErr(err); got != "ordinary failure" {
-		t.Fatalf("formatConnectErr = %q, want the error's own text", got)
-	}
+	assert.NewAborting(t).Eq("ordinary failure", formatConnectErr(err), "formatConnectErr")
 }
 
 func TestConnectErrFormatNilIsSafe(t *testing.T) {
-	if got := formatConnectErr(nil); got != "" {
-		t.Fatalf("formatConnectErr(nil) = %q, want empty", got)
-	}
+	assert.NewAborting(t).Eq("", formatConnectErr(nil), "formatConnectErr(nil)")
 }

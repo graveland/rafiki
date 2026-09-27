@@ -6,6 +6,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The reschedule decision must come from the ROW, never from Describe.
@@ -29,7 +31,5 @@ func TestRescheduleReadsTheRowNotTheSelfReport(t *testing.T) {
 	// And the honest case still works.
 	le.Executor.WorkspaceMode = "ephemeral"
 	le.Describe.WorkspaceMode = "pinned"
-	if !executorAcceptsReschedule(le) {
-		t.Fatal("an executor whose ROW says ephemeral was rejected")
-	}
+	assert.NewAborting(t).True(executorAcceptsReschedule(le), "an executor whose ROW says ephemeral was rejected")
 }

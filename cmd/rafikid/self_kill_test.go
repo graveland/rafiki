@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/eventbuf"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSelfKillStoreSetAndTake(t *testing.T) {
@@ -20,9 +22,7 @@ func TestSelfKillStoreSetAndTake(t *testing.T) {
 	}
 	s.set("c1", killMark{parent: true})
 	mark, ok := s.take("c1")
-	if !ok || !mark.parent || mark.mcpUser != "" {
-		t.Fatalf("take() = (%+v, %v), want the parent mark", mark, ok)
-	}
+	assert.NewAborting(t).False(!ok || !mark.parent || mark.mcpUser != "", "take() = (%+v, %v), want the parent mark", mark, ok)
 	if _, ok := s.take("c1"); ok {
 		t.Fatal("take must clear the mark — a second take must find nothing")
 	}
@@ -53,9 +53,8 @@ func TestExitCausedByShutdown(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := exitCausedByShutdown(tc.res); got != tc.want {
-				t.Fatalf("exitCausedByShutdown(%+v) = %v, want %v", tc.res, got, tc.want)
-			}
+			got := exitCausedByShutdown(tc.res)
+			assert.NewAborting(t).Eq(tc.want, got, "exitCausedByShutdown(%+v) = %v, want", tc.res, got)
 		})
 	}
 }
@@ -84,9 +83,7 @@ func TestSelfKillDispositionFor(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := selfKillDispositionFor(tc.mark, tc.caused)
-			if got != tc.want {
-				t.Fatalf("selfKillDispositionFor(%+v, %v) = %+v, want %+v", tc.mark, tc.caused, got, tc.want)
-			}
+			assert.NewAborting(t).Eq(tc.want, got, "selfKillDispositionFor(%+v, %v) = %+v, want", tc.mark, tc.caused, got)
 		})
 	}
 }
@@ -120,9 +117,7 @@ func spawnTestChildWithParent(t *testing.T, ctrl *Controller, parentID string) s
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn")
 	return res.ChildID
 }
 
@@ -132,6 +127,7 @@ func spawnTestChildWithParent(t *testing.T, ctrl *Controller, parentID string) s
 // subagent "exited" — its tool call already confirmed that synchronously.
 func TestAgentKillSuppressesExitNotice(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl, clk, cap := killNoticeFixture(t)
 
 	coordID := spawnTestChild(t, ctrl, nil)
@@ -140,14 +136,10 @@ func TestAgentKillSuppressesExitNotice(t *testing.T) {
 	spawner := newControllerSpawner(ctrl, coordID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := spawner.Kill(ctx, workerID); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.NoError(spawner.Kill(ctx, workerID), "Kill")
 
 	clk.Advance(6 * time.Second)
-	if got := cap.batches(); len(got) != 0 {
-		t.Fatalf("a self-initiated kill must not notify the coordinator: %+v", got)
-	}
+	c.Empty(cap.batches(), "a self-initiated kill must not notify the coordinator")
 }
 
 // TestCLIKillStillNotifies pins the other half: a human killing a
@@ -156,6 +148,7 @@ func TestAgentKillSuppressesExitNotice(t *testing.T) {
 // the coordinator, since it did not already know.
 func TestCLIKillStillNotifies(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl, clk, cap := killNoticeFixture(t)
 
 	coordID := spawnTestChild(t, ctrl, nil)
@@ -163,15 +156,12 @@ func TestCLIKillStillNotifies(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := ctrl.Kill(ctx, workerID, 0, 0); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	_, err := ctrl.Kill(ctx, workerID, 0, 0)
+	c.NoError(err, "Kill")
 
 	clk.Advance(6 * time.Second)
 	batches := cap.batches()
-	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited") {
-		t.Fatalf("a CLI kill must still notify the coordinator: %+v", batches)
-	}
+	c.False(len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited"), "a CLI kill must still notify the coordinator: %+v", batches)
 }
 
 // TestAgentKillOfASignallingChildStillSuppresses pins the claude half of the
@@ -187,6 +177,7 @@ func TestCLIKillStillNotifies(t *testing.T) {
 // custom ladder timeouts, so the test drives them directly): mark, then Kill.
 func TestAgentKillOfASignallingChildStillSuppresses(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl, clk, cap := killNoticeFixture(t)
 
 	coordID := spawnTestChild(t, ctrl, nil)
@@ -199,26 +190,18 @@ func TestAgentKillOfASignallingChildStillSuppresses(t *testing.T) {
 		NoSession: true, ParentChildID: coordID,
 		Env: map[string]string{"FAKE_PI_SHUTDOWN_DELAY": "2"},
 	}, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
+	c.NoError(err, "spawn")
 	workerID := res.ChildID
 
 	ctrl.selfKilled.set(workerID, killMark{parent: true})
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
 	killRes, err := ctrl.Kill(ctx2, workerID, 250, 250)
-	if err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
-	if !killRes.Escalated || killRes.Signal == "" {
-		t.Fatalf("the ladder must have escalated to a signal for this fixture to exercise the rung: %+v", killRes)
-	}
+	c.NoError(err, "Kill")
+	c.False(!killRes.Escalated || killRes.Signal == "", "the ladder must have escalated to a signal for this fixture to exercise the rung: %+v", killRes)
 
 	clk.Advance(6 * time.Second)
-	if got := cap.batches(); len(got) != 0 {
-		t.Fatalf("a self-initiated kill must suppress the notice even when it had to signal: %+v", got)
-	}
+	c.Empty(cap.batches(), "a self-initiated kill must suppress the notice even when it had to signal")
 }
 
 // TestForeignDeathDuringASelfKillStillNotifies pins the reason the causality
@@ -229,6 +212,7 @@ func TestAgentKillOfASignallingChildStillSuppresses(t *testing.T) {
 // a death the kill did not cause.
 func TestForeignDeathDuringASelfKillStillNotifies(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl, clk, cap := killNoticeFixture(t)
 
 	coordID := spawnTestChild(t, ctrl, nil)
@@ -236,19 +220,11 @@ func TestForeignDeathDuringASelfKillStillNotifies(t *testing.T) {
 
 	ctrl.selfKilled.set(workerID, killMark{parent: true})
 	ch, ok := ctrl.cm.Get(workerID)
-	if !ok {
-		t.Fatal("worker not live")
-	}
-	if err := syscall.Kill(-ch.PID(), syscall.SIGKILL); err != nil {
-		t.Fatalf("external kill: %v", err)
-	}
-	if !waitForChildRemoval(ctrl.cm, workerID, killWaitTimeout) {
-		t.Fatal("worker never removed")
-	}
+	c.True(ok, "worker not live")
+	c.NoError(syscall.Kill(-ch.PID(), syscall.SIGKILL), "external kill")
+	c.True(waitForChildRemoval(ctrl.cm, workerID, killWaitTimeout), "worker never removed")
 
 	clk.Advance(6 * time.Second)
 	batches := cap.batches()
-	if len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited") {
-		t.Fatalf("a foreign kill during a self-kill must still notify the coordinator: %+v", batches)
-	}
+	c.False(len(batches) != 1 || !strings.Contains(batches[0].fragments[0], "exited"), "a foreign kill during a self-kill must still notify the coordinator: %+v", batches)
 }

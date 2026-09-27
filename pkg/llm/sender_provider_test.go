@@ -12,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A local, keyless Anthropic-compatible server is the whole point of the
@@ -22,6 +24,7 @@ import (
 // passed.
 func TestSenderForKeylessLocal(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	c := assert.NewCollecting(t)
 	var gotPath, gotKey, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -37,9 +40,7 @@ func TestSenderForKeylessLocal(t *testing.T) {
 		Kind:    providers.KindAnthropic,
 		BaseURL: srv.URL,
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	if _, err := sender.New(context.Background(), anthropic.MessageNewParams{
 		Model:     anthropic.Model("local"),
 		MaxTokens: 16,
@@ -47,19 +48,14 @@ func TestSenderForKeylessLocal(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if gotPath != "/v1/messages" {
-		t.Errorf("path = %q, want /v1/messages", gotPath)
-	}
-	if gotKey != "" {
-		t.Errorf("x-api-key = %q, want empty: a keyless provider must send no credential", gotKey)
-	}
-	if gotAuth != "" {
-		t.Errorf("Authorization = %q, want empty", gotAuth)
-	}
+	c.Eq("/v1/messages", gotPath, "path")
+	c.Eq("", gotKey, "x-api-key")
+	c.Eq("", gotAuth, "Authorization")
 }
 
 func TestSenderForSendsKeyWhenConfigured(t *testing.T) {
 	t.Setenv("TEST_PROVIDER_KEY", "sk-test-123")
+	c := assert.NewCollecting(t)
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("x-api-key")
@@ -74,21 +70,18 @@ func TestSenderForSendsKeyWhenConfigured(t *testing.T) {
 		BaseURL:   srv.URL,
 		APIKeyEnv: "TEST_PROVIDER_KEY",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if gotKey != "sk-test-123" {
-		t.Errorf("x-api-key = %q, want sk-test-123", gotKey)
-	}
+	c.Eq("sk-test-123", gotKey, "x-api-key")
 }
 
 // The openrouter kind's headers are owned by the handler, never by config.
 func TestSenderForOpenRouterHeaders(t *testing.T) {
 	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	c := assert.NewCollecting(t)
 	var referer, title string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		referer = r.Header.Get("Referer")
@@ -102,16 +95,12 @@ func TestSenderForOpenRouterHeaders(t *testing.T) {
 		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if referer == "" || title != "rafiki" {
-		t.Errorf("Referer = %q, X-OpenRouter-Title = %q; want the handler's own headers", referer, title)
-	}
+	c.False(referer == "" || title != "rafiki", "Referer = %q, X-OpenRouter-Title = %q; want the handler's own headers", referer, title)
 }
 
 // WithSessionID must reach OpenRouter as x-session-id — the sticky-routing
@@ -120,6 +109,7 @@ func TestSenderForOpenRouterHeaders(t *testing.T) {
 // passthrough face; this is the same mechanism for fundi's native path).
 func TestSenderForOpenRouterSessionID(t *testing.T) {
 	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	c := assert.NewCollecting(t)
 	var gotSession string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotSession = r.Header.Get("x-session-id")
@@ -132,23 +122,20 @@ func TestSenderForOpenRouterSessionID(t *testing.T) {
 		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
 	_, _ = sender.New(ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if gotSession != "conv-abc-123" {
-		t.Errorf("x-session-id = %q, want conv-abc-123", gotSession)
-	}
+	c.Eq("conv-abc-123", gotSession, "x-session-id")
 }
 
 // No WithSessionID on the context means no header at all — never an empty
 // x-session-id value, which OpenRouter would treat as a real (empty) session.
 func TestSenderForOpenRouterNoSessionIDWithoutContextValue(t *testing.T) {
 	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	c := assert.NewCollecting(t)
 	var sawHeader bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, sawHeader = r.Header["X-Session-Id"]
@@ -161,22 +148,19 @@ func TestSenderForOpenRouterNoSessionIDWithoutContextValue(t *testing.T) {
 		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	_, _ = sender.New(context.Background(), anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if sawHeader {
-		t.Error("x-session-id header present with no session id on the context")
-	}
+	c.False(sawHeader, "x-session-id header present with no session id on the context")
 }
 
 // The Anthropic-native path must never see x-session-id, even if the caller's
 // context happens to carry one (e.g. a fallback chain sharing ctx with an
 // OpenRouter primary) — it is an OpenRouter-only concept.
 func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var sawHeader bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, sawHeader = r.Header["X-Session-Id"]
@@ -188,17 +172,13 @@ func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
 	sender, err := llm.SenderFor(providers.Provider{
 		Name: "anthropic", Kind: providers.KindAnthropic, BaseURL: srv.URL,
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
 	_, _ = sender.New(ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if sawHeader {
-		t.Error("x-session-id header present on the Anthropic-native path")
-	}
+	c.False(sawHeader, "x-session-id header present on the Anthropic-native path")
 }
 
 // The kind is implemented (Task 2.1): SenderForKey routes it through
@@ -207,23 +187,19 @@ func TestSenderForAnthropicNeverSeesSessionID(t *testing.T) {
 // openai_sender_test.go (TestOpenAISenderNewRequiresBaseURL,
 // TestSenderForKeyBuildsOpenAISender).
 func TestSenderForKeyOpenAIKindBuildsSender(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindOpenAI, BaseURL: "http://x"}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor(openai): %v", err)
-	}
-	if _, ok := s.(llm.StreamingSender); !ok {
-		t.Error("SenderFor(openai) must return a StreamingSender; streaming would silently degrade to non-streaming")
-	}
+	c.Require().NoError(err, "SenderFor(openai)")
+	_, ok := s.(llm.StreamingSender)
+	c.True(ok, "SenderFor(openai) must return a StreamingSender; streaming would silently degrade to non-streaming")
 }
 
 func TestSenderForStreams(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sender, err := llm.SenderFor(providers.Provider{Name: "x", Kind: providers.KindAnthropic, BaseURL: "http://127.0.0.1:1"}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
-	if _, ok := sender.(llm.StreamingSender); !ok {
-		t.Error("SenderFor must return a StreamingSender; the streaming path silently degrades to non-streaming otherwise")
-	}
+	c.Require().NoError(err, "SenderFor")
+	_, ok := sender.(llm.StreamingSender)
+	c.True(ok, "SenderFor must return a StreamingSender; the streaming path silently degrades to non-streaming otherwise")
 }
 
 // A KindAnthropic provider (e.g. Fireworks' Anthropic-compatible endpoint)
@@ -233,6 +209,7 @@ func TestSenderForStreams(t *testing.T) {
 // capability: pinning conversations to a backend on a provider whose sticky
 // routing header isn't OpenRouter's.
 func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var gotAffinity string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAffinity = r.Header.Get("x-session-affinity")
@@ -245,17 +222,13 @@ func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
 		Name: "fireworks", Kind: providers.KindAnthropic,
 		BaseURL: srv.URL, SessionHeader: "x-session-affinity",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-xyz-789")
 	_, _ = sender.New(ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if gotAffinity != "conv-xyz-789" {
-		t.Errorf("x-session-affinity = %q, want conv-xyz-789", gotAffinity)
-	}
+	c.Eq("conv-xyz-789", gotAffinity, "x-session-affinity")
 }
 
 // An explicit session_header on a KindAnthropicOpenRouter provider overrides
@@ -263,6 +236,7 @@ func TestSenderForAnthropicKindHonorsConfiguredSessionHeader(t *testing.T) {
 // ignored — the override, not the default, must win.
 func TestSenderForOpenRouterExplicitSessionHeaderOverridesDefault(t *testing.T) {
 	t.Setenv("TEST_OR_KEY", "sk-or-1")
+	c := assert.NewCollecting(t)
 	var gotCustom, gotDefault string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCustom = r.Header.Get("x-custom-session")
@@ -276,18 +250,12 @@ func TestSenderForOpenRouterExplicitSessionHeaderOverridesDefault(t *testing.T) 
 		Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
 		BaseURL: srv.URL, APIKeyEnv: "TEST_OR_KEY", SessionHeader: "x-custom-session",
 	}, nil)
-	if err != nil {
-		t.Fatalf("SenderFor: %v", err)
-	}
+	c.Require().NoError(err, "SenderFor")
 	ctx := llm.WithSessionID(context.Background(), "conv-abc-123")
 	_, _ = sender.New(ctx, anthropic.MessageNewParams{
 		Model: anthropic.Model("m"), MaxTokens: 16,
 		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if gotCustom != "conv-abc-123" {
-		t.Errorf("x-custom-session = %q, want conv-abc-123", gotCustom)
-	}
-	if gotDefault != "" {
-		t.Errorf("x-session-id = %q, want empty — the explicit override must replace the default, not add to it", gotDefault)
-	}
+	c.Eq("conv-abc-123", gotCustom, "x-custom-session")
+	c.Eq("", gotDefault, "x-session-id")
 }

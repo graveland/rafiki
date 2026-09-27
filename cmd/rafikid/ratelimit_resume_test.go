@@ -10,6 +10,8 @@ import (
 	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // shrinkRateWatch makes the auto-resume schedule fire in milliseconds: the
@@ -119,6 +121,7 @@ func waitForResumePrompts(t *testing.T, ctrl *Controller, childID string, want i
 // retry notices the TUI renders (⟳ on schedule, cleared on fire).
 func TestRateLimitResumeSchedulesOnA429WhileIdle(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	shrinkRateWatch(t, ctrl)
 
@@ -132,19 +135,13 @@ func TestRateLimitResumeSchedulesOnA429WhileIdle(t *testing.T) {
 	for time.Now().Before(deadline) && !nc.scheduled(1) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !nc.scheduled(1) {
-		t.Fatal("no will_retry=true schedule notice was published for attempt 1")
-	}
-	if waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second) < 1 {
-		t.Fatal("the auto-resume prompt never reached the child")
-	}
+	c.True(nc.scheduled(1), "no will_retry=true schedule notice was published for attempt 1")
+	c.GreaterOrEqual(1, waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second), "the auto-resume prompt never reached the child")
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && !nc.fired(1) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !nc.fired(1) {
-		t.Fatal("no will_retry=false firing notice — the rail's ⟳ would never clear")
-	}
+	c.True(nc.fired(1), "no will_retry=false firing notice — the rail's ⟳ would never clear")
 }
 
 // The idle hook is the other trigger, and the success verdict is its veto: a
@@ -152,6 +149,7 @@ func TestRateLimitResumeSchedulesOnA429WhileIdle(t *testing.T) {
 // schedule, while a 429 the latest success does not post-date must.
 func TestMaybeRateLimitResumeSuccessVeto(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	shrinkRateWatch(t, ctrl)
 
@@ -160,15 +158,11 @@ func TestMaybeRateLimitResumeSuccessVeto(t *testing.T) {
 	ctrl.RateLimited(childID, time.Now().Add(50*time.Millisecond))
 	ctrl.TurnSucceeded(childID)
 	ctrl.maybeRateLimitResume(childID)
-	if waitForResumePrompts(t, ctrl, childID, 1, 300*time.Millisecond) != 0 {
-		t.Fatal("a success post-dating the 429 must not schedule a resume")
-	}
+	c.Eq(0, waitForResumePrompts(t, ctrl, childID, 1, 300*time.Millisecond), "a success post-dating the 429 must not schedule a resume")
 
 	ctrl.RateLimited(childID, time.Now().Add(50*time.Millisecond))
 	ctrl.maybeRateLimitResume(childID)
-	if waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second) < 1 {
-		t.Fatal("a limit the latest success does not post-date must schedule a resume")
-	}
+	c.GreaterOrEqual(1, waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second), "a limit the latest success does not post-date must schedule a resume")
 }
 
 // A success arriving while a resume is pending cancels it: the model answered,
@@ -190,9 +184,7 @@ func TestTurnSucceededCancelsAPendingResume(t *testing.T) {
 		t.Fatalf("after a success: timer=%v attempts=%d, want nil/0", st.timer, st.attempts)
 	}
 	time.Sleep(600 * time.Millisecond)
-	if waitForResumePrompts(t, ctrl, childID, 1, 100*time.Millisecond) != 0 {
-		t.Fatal("a canceled resume delivered its prompt")
-	}
+	assert.NewAborting(t).Eq(0, waitForResumePrompts(t, ctrl, childID, 1, 100*time.Millisecond), "a canceled resume delivered its prompt")
 }
 
 // Consecutive rate-limited turns — each resume re-429s with no intervening
@@ -200,6 +192,7 @@ func TestTurnSucceededCancelsAPendingResume(t *testing.T) {
 // publishes an abandonment notice and stops delivering prompts.
 func TestRateLimitResumeAttemptsAreCapped(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	shrinkRateWatch(t, ctrl)
 
@@ -213,12 +206,8 @@ func TestRateLimitResumeAttemptsAreCapped(t *testing.T) {
 		for time.Now().Before(deadline) && !nc.scheduled(attempt) {
 			time.Sleep(5 * time.Millisecond)
 		}
-		if !nc.scheduled(attempt) {
-			t.Fatalf("resume attempt %d was never scheduled", attempt)
-		}
-		if waitForResumePrompts(t, ctrl, childID, attempt, 2*time.Second) < attempt {
-			t.Fatalf("resume attempt %d never delivered its prompt", attempt)
-		}
+		c.True(nc.scheduled(attempt), "resume attempt %d was never scheduled", attempt)
+		c.GreaterOrEqual(attempt, waitForResumePrompts(t, ctrl, childID, attempt, 2*time.Second), "resume attempt")
 	}
 
 	// One more rate-limited cycle: no fourth schedule, and the abandonment
@@ -228,12 +217,8 @@ func TestRateLimitResumeAttemptsAreCapped(t *testing.T) {
 	for time.Now().Before(deadline) && !nc.abandoned() {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !nc.abandoned() {
-		t.Fatal("no abandonment notice after the attempt cap")
-	}
-	if waitForResumePrompts(t, ctrl, childID, maxRateLimitResumes+1, 300*time.Millisecond) != maxRateLimitResumes {
-		t.Fatal("a fourth prompt was delivered past the attempt cap")
-	}
+	c.True(nc.abandoned(), "no abandonment notice after the attempt cap")
+	c.Eq(maxRateLimitResumes, waitForResumePrompts(t, ctrl, childID, maxRateLimitResumes+1, 300*time.Millisecond), "a fourth prompt was delivered past the attempt cap")
 }
 
 // An exited child is RELAUNCHED, then prompted: the same --resume path a
@@ -241,15 +226,15 @@ func TestRateLimitResumeAttemptsAreCapped(t *testing.T) {
 // replacement process.
 func TestRateLimitResumeRelaunchesAnExitedChild(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	shrinkRateWatch(t, ctrl)
 
 	childID := spawnTestChild(t, ctrl, nil)
 	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := ctrl.Kill(killCtx, childID, 2000, 500); err != nil {
-		t.Fatalf("kill: %v", err)
-	}
+	_, err := ctrl.Kill(killCtx, childID, 2000, 500)
+	c.NoError(err, "kill")
 	waitForExited(t, ctrl.st, childID, 5*time.Second)
 
 	// Kill's ByShutdown dropped the watch (a deliberate kill must not
@@ -262,18 +247,16 @@ func TestRateLimitResumeRelaunchesAnExitedChild(t *testing.T) {
 
 	ctrl.fireRateLimitResume(childID, 1)
 
-	if _, ok := ctrl.cm.Get(childID); !ok {
-		t.Fatal("the exited child was not relaunched by the auto-resume")
-	}
-	if waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second) < 1 {
-		t.Fatal("the relaunched child never received the continuation prompt")
-	}
+	_, ok := ctrl.cm.Get(childID)
+	c.True(ok, "the exited child was not relaunched by the auto-resume")
+	c.GreaterOrEqual(1, waitForResumePrompts(t, ctrl, childID, 1, 2*time.Second), "the relaunched child never received the continuation prompt")
 }
 
 // An operator-driven death (Kill, daemon shutdown — anything ByShutdown)
 // drops the watch, canceling the pending resume: the kill must not be undone.
 func TestKillDropsAPendingResume(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	shrinkRateWatch(t, ctrl)
 
@@ -285,15 +268,12 @@ func TestKillDropsAPendingResume(t *testing.T) {
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := ctrl.Kill(killCtx, childID, 2000, 500); err != nil {
-		t.Fatalf("kill: %v", err)
-	}
+	_, err := ctrl.Kill(killCtx, childID, 2000, 500)
+	c.NoError(err, "kill")
 	// handleChildExit drops the watch before it marks the row exited, so an
 	// exited store status proves the drop already ran.
 	waitForExited(t, ctrl.st, childID, 5*time.Second)
-	if st := ctrl.rateWatch.state(childID, false); st != nil {
-		t.Fatal("a ByShutdown exit must drop the watch")
-	}
+	c.Nil(ctrl.rateWatch.state(childID, false), "a ByShutdown exit must drop the watch")
 }
 
 // The observer gate: an id that resolves to no supervised claude child — an
@@ -304,8 +284,6 @@ func TestRateLimitedIgnoresUnknownSessions(t *testing.T) {
 	ctrl := newTestController(t)
 
 	ctrl.RateLimited("not-a-child-id", time.Now().Add(time.Hour))
-	if st := ctrl.rateWatch.state("not-a-child-id", false); st != nil {
-		t.Fatal("an unresolvable session must not arm the watch")
-	}
+	assert.NewAborting(t).Nil(ctrl.rateWatch.state("not-a-child-id", false), "an unresolvable session must not arm the watch")
 	ctrl.TurnSucceeded("not-a-child-id")
 }

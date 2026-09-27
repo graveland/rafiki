@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/pymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // "local" is the sentinel the pymodule tool surface uses for the built-in
@@ -17,9 +19,7 @@ import (
 // pkg/gitpymodulesdb and is pinned there by TestPostgresStorePutRejectsReservedLocalName).
 func TestGitSourceRecordPutRejectsReservedLocalName(t *testing.T) {
 	err := ValidateName("local")
-	if !errors.Is(err, ErrReservedName) {
-		t.Fatalf("ValidateName(\"local\") = %v, want ErrReservedName", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrReservedName, "ValidateName(\"local\") = %v, want ErrReservedName", err)
 }
 
 // Beyond the reserved sentinel, a git source's name follows the pymodule
@@ -27,10 +27,10 @@ func TestGitSourceRecordPutRejectsReservedLocalName(t *testing.T) {
 // pymodules.ValidName is the one check that already fits (bare Python
 // identifier, 1-64 chars).
 func TestGitSourceRecordValidateNameMirrorsPymodulesRules(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, name := range []string{"rotate_keys", "_ops_tools", "a"} {
-		if err := ValidateName(name); err != nil {
-			t.Errorf("ValidateName(%q) = %v, want nil", name, err)
-		}
+		err := ValidateName(name)
+		c.NoError(err, "ValidateName(%q) = %v, want nil", name, err)
 	}
 	for _, name := range []string{"", "1abc", "has space", "a/b", "..", "over-64-chars-" + strings.Repeat("x", 50)} {
 		err := ValidateName(name)
@@ -38,9 +38,7 @@ func TestGitSourceRecordValidateNameMirrorsPymodulesRules(t *testing.T) {
 			t.Errorf("ValidateName(%q) = nil, want an error", name)
 			continue
 		}
-		if errors.Is(err, ErrReservedName) {
-			t.Errorf("ValidateName(%q) = ErrReservedName, want the pymodules.ValidName error", name)
-		}
+		c.False(errors.Is(err, ErrReservedName), "ValidateName(%q) = ErrReservedName, want the pymodules.ValidName error", name)
 	}
 	// The two rules must compose: the reserved check wins for "local", and
 	// ValidName's own verdict is passed through untouched for the rest.

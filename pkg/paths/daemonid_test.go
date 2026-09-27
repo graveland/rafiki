@@ -4,73 +4,50 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestDaemonIDPrefersEnv(t *testing.T) {
 	t.Setenv(DaemonIDVar, "from-env")
+	c := assert.NewCollecting(t)
 	id, source, err := DaemonID()
-	if err != nil {
-		t.Fatalf("DaemonID: %v", err)
-	}
-	if id != "from-env" {
-		t.Errorf("id = %q, want %q", id, "from-env")
-	}
-	if source != "env" {
-		t.Errorf("source = %q, want %q", source, "env")
-	}
+	c.Require().NoError(err, "DaemonID")
+	c.Eq("from-env", id, "id")
+	c.Eq("env", source, "source")
 }
 
 func TestDaemonIDGeneratesAndPersists(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv(DaemonIDVar, "")
 
 	first, source, err := DaemonID()
-	if err != nil {
-		t.Fatalf("first DaemonID: %v", err)
-	}
-	if first == "" {
-		t.Fatal("first DaemonID returned an empty id")
-	}
-	if source == "env" {
-		t.Errorf("source = %q, want the file path", source)
-	}
+	c.Require().NoError(err, "first DaemonID")
+	c.Require().NotEq("", first, "first DaemonID returned an empty id")
+	c.NotEq("env", source, "source")
 
 	second, _, err := DaemonID()
-	if err != nil {
-		t.Fatalf("second DaemonID: %v", err)
-	}
-	if second != first {
-		t.Errorf("id changed across calls: %q then %q", first, second)
-	}
+	c.Require().NoError(err, "second DaemonID")
+	c.Eq(first, second, "id changed across calls")
 }
 
 func TestDaemonIDIgnoresBlankFile(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
 	t.Setenv(DaemonIDVar, "")
 
-	if err := os.MkdirAll(DataDir(), 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(DaemonIDFile(), []byte("   \n"), 0o600); err != nil {
-		t.Fatalf("write blank file: %v", err)
-	}
+	c.Require().NoError(os.MkdirAll(DataDir(), 0o700), "mkdir")
+	c.Require().NoError(os.WriteFile(DaemonIDFile(), []byte("   \n"), 0o600), "write blank file")
 
 	id, _, err := DaemonID()
-	if err != nil {
-		t.Fatalf("DaemonID: %v", err)
-	}
-	if id == "" {
-		t.Fatal("a whitespace-only file must be replaced, not returned")
-	}
+	c.Require().NoError(err, "DaemonID")
+	c.Require().NotEq("", id, "a whitespace-only file must be replaced, not returned")
 	raw, err := os.ReadFile(DaemonIDFile())
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if string(raw) != id {
-		t.Errorf("file holds %q, want %q", string(raw), id)
-	}
+	c.Require().NoError(err, "read back")
+	c.Eq(id, string(raw), "file holds")
 }
 
 var _ = filepath.Join

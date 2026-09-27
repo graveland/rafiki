@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +24,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeProxyStore struct {
@@ -140,11 +141,10 @@ func (f *fakeProxyStore) RecordThread(ctx context.Context, session, convID, turn
 }
 
 func TestMessagesProxyStreamsAndCaptures(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Fake Anthropic upstream returns a minimal SSE stream.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-api-key") != "real-key" {
-			t.Errorf("upstream missing real key, got %q", r.Header.Get("x-api-key"))
-		}
+		c.Eq("real-key", r.Header.Get("x-api-key"), "upstream missing real key, got")
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
 			`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}`+"\n\n"+
@@ -164,29 +164,21 @@ func TestMessagesProxyStreamsAndCaptures(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-1")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Errorf("client did not receive the streamed body: %q", rec.Body.String())
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status =")
+	c.StrContains(rec.Body.String(), "message_stop", "client did not receive the streamed body")
 	if fs.intents != 1 || fs.completes != 1 {
 		t.Errorf("capture: intents=%d completes=%d, want 1/1", fs.intents, fs.completes)
 	}
 	if fs.lastStop != "end_turn" || fs.lastOut != 9 {
 		t.Errorf("captured stop=%q out=%d, want end_turn/9", fs.lastStop, fs.lastOut)
 	}
-	if fs.lastIntentModel != "claude" {
-		t.Errorf("captured intent model=%q, want claude", fs.lastIntentModel)
-	}
+	c.Eq("claude", fs.lastIntentModel, "captured intent model")
 	// No X-Rafiki-Source header → source defaults to "claude"; interactive proxy
 	// turns are human-authored.
 	if fs.lastIntentSource != "claude" || fs.lastIntentAuthorKind != "human" {
 		t.Errorf("captured provenance source=%q author_kind=%q, want claude/human", fs.lastIntentSource, fs.lastIntentAuthorKind)
 	}
-	if fs.lastLatencyMS < 0 {
-		t.Errorf("captured latency_ms=%d, want >= 0", fs.lastLatencyMS)
-	}
+	c.GreaterOrEqual(0, fs.lastLatencyMS, "captured latency_ms")
 }
 
 func TestMessagesProxySourceHeaderOverridesEntrypoint(t *testing.T) {
@@ -206,12 +198,11 @@ func TestMessagesProxySourceHeaderOverridesEntrypoint(t *testing.T) {
 	req.Header.Set("X-Rafiki-Source", "slack")
 	p.ServeHTTP(rec, req)
 
-	if fs.lastIntentSource != "slack" {
-		t.Errorf("source = %q, want slack (from X-Rafiki-Source)", fs.lastIntentSource)
-	}
+	assert.NewCollecting(t).Eq("slack", fs.lastIntentSource, "source")
 }
 
 func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// A successful stream whose CompleteTurn write fails must not strand the turn
 	// as 'pending'; the proxy falls back to FailTurn so it lands as 'error'.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -234,15 +225,12 @@ func TestMessagesProxyCompleteTurnFailureFallsBackToFailTurn(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-cfail")
 	p.ServeHTTP(rec, req)
 
-	if fs.completes != 1 {
-		t.Errorf("CompleteTurn should have been attempted once, got %d", fs.completes)
-	}
-	if fs.fails != 1 {
-		t.Errorf("FailTurn fallback should fire on CompleteTurn failure, got fails=%d", fs.fails)
-	}
+	c.Eq(1, fs.completes, "CompleteTurn should have been attempted once, got")
+	c.Eq(1, fs.fails, "FailTurn fallback should fire on CompleteTurn failure, got fails=")
 }
 
 func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// A successful stream whose response write fails must not strand the turn
 	// as 'pending'; the proxy falls back to FailTurn so it lands as 'error'.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -265,15 +253,12 @@ func TestMessagesProxyAppendFailureFallsBackToFailTurn(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-cappend")
 	p.ServeHTTP(rec, req)
 
-	if fs.fails != 1 {
-		t.Errorf("FailTurn fallback should fire on AppendResponseMessage failure, got fails=%d", fs.fails)
-	}
-	if !strings.Contains(fs.lastFailMsg, "append response failed:") {
-		t.Errorf("fail message = %q, want the append-response prefix", fs.lastFailMsg)
-	}
+	c.Eq(1, fs.fails, "FailTurn fallback should fire on AppendResponseMessage failure, got fails=")
+	c.StrContains(fs.lastFailMsg, "append response failed:", "fail message")
 }
 
 func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Upstream returns a non-2xx with no failover configured: the turn must be
 	// recorded as failed, never completed.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -292,33 +277,24 @@ func TestMessagesProxyFailsTurnOnUpstreamError(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-err")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500 passed through", rec.Code)
-	}
+	c.Eq(http.StatusInternalServerError, rec.Code, "status")
 	// A non-envelope error body must reach the client byte-for-byte unmangled
 	// (surfaceProviderError returns false → passthrough).
-	if got := rec.Body.String(); got != `{"type":"error","error":{"type":"api_error"}}` {
-		t.Errorf("client body = %q, want the upstream body passed through unchanged", got)
-	}
+	c.Eq(`{"type":"error","error":{"type":"api_error"}}`, rec.Body.String(), "client body")
 	if fs.fails != 1 || fs.completes != 0 {
 		t.Errorf("capture: fails=%d completes=%d, want 1/0", fs.fails, fs.completes)
 	}
 	// The failure reason must carry the upstream error body, not just the status,
 	// so a failed turn is diagnosable from the capture store alone.
-	if !strings.Contains(fs.lastFailMsg, "upstream status 500") {
-		t.Errorf("fail msg = %q, want it to mention the status", fs.lastFailMsg)
-	}
-	if !strings.Contains(fs.lastFailMsg, `"api_error"`) {
-		t.Errorf("fail msg = %q, want it to include the upstream error body", fs.lastFailMsg)
-	}
+	c.StrContains(fs.lastFailMsg, "upstream status 500", "fail msg")
+	c.StrContains(fs.lastFailMsg, `"api_error"`, "fail msg")
 	// The request is decomposed even on failure, so the messages that triggered
 	// the error are recorded.
-	if fs.decomposes != 1 {
-		t.Errorf("decomposes = %d, want 1 (request decomposed on failure)", fs.decomposes)
-	}
+	c.Eq(1, fs.decomposes, "decomposes")
 }
 
 func TestMessagesProxyMalformedSuccessBecomes502(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// The OpenRouter shared-pool failure that motivated the guard: a streaming
 	// request gets HTTP 200 with a plain-text gateway error body. Forwarding
 	// that hands the client an unparseable "success" it cannot retry — surface
@@ -338,18 +314,12 @@ func TestMessagesProxyMalformedSuccessBecomes502(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502 for a malformed success", rec.Code)
-	}
+	c.Eq(http.StatusBadGateway, rec.Code, "status")
 	// The client gets an Anthropic-style error envelope whose message carries
 	// the upstream body, so the failure is displayable and diagnosable.
 	body := rec.Body.String()
-	if !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, "error code: 521") {
-		t.Errorf("client body = %q, want an error envelope containing the upstream body", body)
-	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
-		t.Errorf("content-type = %q, want application/json", ct)
-	}
+	c.False(!strings.Contains(body, `"type":"error"`) || !strings.Contains(body, "error code: 521"), "client body = %q, want an error envelope containing the upstream body", body)
+	c.StrContains(rec.Header().Get("Content-Type"), "application/json", "content-type")
 	if fs.fails != 1 || fs.completes != 0 {
 		t.Errorf("capture: fails=%d completes=%d, want 1/0", fs.fails, fs.completes)
 	}
@@ -359,6 +329,7 @@ func TestMessagesProxyMalformedSuccessBecomes502(t *testing.T) {
 }
 
 func TestMessagesProxyNonStreamJSON200PassesThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// The guard must not mangle a legitimate non-streaming response: no
 	// "stream" in the request → a JSON 200 is the expected shape.
 	msg := `{"id":"msg_1","type":"message","role":"assistant","model":"claude","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`
@@ -375,27 +346,18 @@ func TestMessagesProxyNonStreamJSON200PassesThrough(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude"}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 passed through", rec.Code)
-	}
-	if rec.Body.String() != msg {
-		t.Errorf("body mutated:\n got: %s\nwant: %s", rec.Body.String(), msg)
-	}
+	c.Eq(http.StatusOK, rec.Code, "status")
+	c.Eq(msg, rec.Body.String(), "body mutated:\n got")
 }
 
 func TestBoundedErrorBody(t *testing.T) {
-	if got := boundedErrorBody([]byte("   ")); got != "" {
-		t.Errorf("blank body => %q, want empty", got)
-	}
-	if got := boundedErrorBody([]byte(`{"e":1}`)); got != `{"e":1}` {
-		t.Errorf("small body => %q, want passthrough", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("", boundedErrorBody([]byte("   ")), "blank body =>")
+	c.Eq(`{"e":1}`, boundedErrorBody([]byte(`{"e":1}`)), "small body =>")
 	// An oversized body whose byte cut lands mid multi-byte rune must still be
 	// valid UTF-8 (3-byte '€' guarantees the 8 KiB offset splits a rune).
 	out := boundedErrorBody([]byte(strings.Repeat("€", 3000)))
-	if !utf8.ValidString(out) {
-		t.Errorf("truncated output is not valid UTF-8")
-	}
+	c.True(utf8.ValidString(out), "truncated output is not valid UTF-8")
 	if !strings.HasSuffix(out, "…(truncated)") {
 		t.Errorf("want truncation marker, got tail %q", out[len(out)-16:])
 	}
@@ -425,18 +387,16 @@ func TestSurfaceProviderError(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			out, ok := surfaceProviderError(c.in)
-			if ok != c.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
-			}
-			if ok && !strings.Contains(string(out), c.wantContains) {
-				t.Errorf("out = %s, want it to contain %q", out, c.wantContains)
-			}
+			ck.Require().Eq(c.wantOK, ok, "ok")
+			ck.False(ok && !strings.Contains(string(out), c.wantContains), "out = %s, want it to contain %q", out, c.wantContains)
 		})
 	}
 }
 
 func TestMessagesProxySurfacesProviderErrorToClient(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// OpenRouter buries the provider's real error in error.metadata.raw and shows
 	// only "Provider returned error" at the top level. The proxy must lift the
 	// real message so a client displaying error.message (Claude Code) sees it.
@@ -462,32 +422,23 @@ func TestMessagesProxySurfacesProviderErrorToClient(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-surface")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 passed through", rec.Code)
-	}
+	c.Require().Eq(http.StatusBadRequest, rec.Code, "status")
 	var got struct {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("client body not JSON: %v", err)
-	}
-	if !strings.Contains(got.Error.Message, "OpenAI:") || !strings.Contains(got.Error.Message, "gpt-5-codex") {
-		t.Errorf("client error.message = %q, want the provider detail surfaced", got.Error.Message)
-	}
+	c.Require().NoError(json.Unmarshal(rec.Body.Bytes(), &got), "client body not JSON")
+	c.False(!strings.Contains(got.Error.Message, "OpenAI:") || !strings.Contains(got.Error.Message, "gpt-5-codex"), "client error.message = %q, want the provider detail surfaced", got.Error.Message)
 	// Content-Length must match the rewritten body, not the upstream's.
-	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprint(rec.Body.Len()) {
-		t.Errorf("Content-Length = %q, want %d", cl, rec.Body.Len())
-	}
+	cl := rec.Header().Get("Content-Length")
+	c.Eq(fmt.Sprint(rec.Body.Len()), cl, "Content-Length = %q, want %d", cl, rec.Body.Len())
 	// Capture still records the failure (with the original raw body) and
 	// decomposes the request.
 	if fs.fails != 1 || fs.decomposes != 1 {
 		t.Errorf("fails=%d decomposes=%d, want 1/1", fs.fails, fs.decomposes)
 	}
-	if !strings.Contains(fs.lastFailMsg, "unsupported_value") {
-		t.Errorf("fail msg = %q, want the original raw body stored", fs.lastFailMsg)
-	}
+	c.StrContains(fs.lastFailMsg, "unsupported_value", "fail msg")
 }
 
 func TestHandleUpstreamErrorContentEncoding(t *testing.T) {
@@ -512,6 +463,7 @@ func TestHandleUpstreamErrorContentEncoding(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Encoding", "br")
 				w.WriteHeader(http.StatusBadRequest)
@@ -527,42 +479,27 @@ func TestHandleUpstreamErrorContentEncoding(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","stream":true}`))
 			p.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400", rec.Code)
-			}
-			if got := rec.Header().Get("Content-Encoding"); got != tc.wantEncoding {
-				t.Errorf("Content-Encoding = %q, want %q", got, tc.wantEncoding)
-			}
+			c.Require().Eq(http.StatusBadRequest, rec.Code, "status")
+			c.Eq(tc.wantEncoding, rec.Header().Get("Content-Encoding"), "Content-Encoding")
 		})
 	}
 }
 
 func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(529) // overloaded
 	}))
 	defer primary.Close()
 	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// OpenRouter authenticates via Authorization: Bearer, not x-api-key.
-		if got := r.Header.Get("Authorization"); got != "Bearer or-key" {
-			t.Errorf("OR auth = %q, want %q", got, "Bearer or-key")
-		}
-		if r.Header.Get("x-api-key") != "" {
-			t.Errorf("OR should not receive x-api-key, got %q", r.Header.Get("x-api-key"))
-		}
-		if got := r.Header.Get("Referer"); got != "https://github.com/graveland/rafiki" {
-			t.Errorf("OR Referer = %q, want https://github.com/graveland/rafiki", got)
-		}
-		if got := r.Header.Get("X-Openrouter-Title"); got != "rafiki" {
-			t.Errorf("OR X-OpenRouter-Title = %q, want rafiki", got)
-		}
-		if got := r.Header.Get("x-session-id"); got == "" {
-			t.Error("OR x-session-id is empty")
-		}
+		c.Eq("Bearer or-key", r.Header.Get("Authorization"), "OR auth")
+		c.Eq("", r.Header.Get("x-api-key"), "OR should not receive x-api-key, got")
+		c.Eq("https://github.com/graveland/rafiki", r.Header.Get("Referer"), "OR Referer")
+		c.Eq("rafiki", r.Header.Get("X-Openrouter-Title"), "OR X-OpenRouter-Title")
+		c.NotEq("", r.Header.Get("x-session-id"), "OR x-session-id is empty")
 		// Source defaults to "claude" when unset → no categories.
-		if got := r.Header.Get("X-Openrouter-Categories"); got != "" {
-			t.Errorf("OR X-OpenRouter-Categories = %q, want empty (source is not rafiki-claude)", got)
-		}
+		c.Eq("", r.Header.Get("X-Openrouter-Categories"), "OR X-OpenRouter-Categories")
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_delta\n"+
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}`+"\n\n"+
@@ -580,12 +517,8 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Errorf("client did not get the OR stream: %q", rec.Body.String())
-	}
-	if fs.lastUpstream != "openrouter" {
-		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
-	}
+	c.StrContains(rec.Body.String(), "message_stop", "client did not get the OR stream")
+	c.Eq("openrouter", fs.lastUpstream, "captured upstream")
 
 	// rafiki-claude source → categories header expected.
 	catsSeen := false
@@ -601,15 +534,14 @@ func TestMessagesProxyFailsOverToOpenRouter(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	req2.Header.Set("X-Rafiki-Source", "rafiki-claude")
 	p.ServeHTTP(rec2, req2)
-	if !catsSeen {
-		t.Error("OR X-OpenRouter-Categories missing; want cli-agent when source is rafiki-claude")
-	}
+	c.True(catsSeen, "OR X-OpenRouter-Categories missing; want cli-agent when source is rafiki-claude")
 }
 
 // A retryable primary failure (5xx/429) is retried against the primary per
 // routing.RetryBackoffs before failing over; a primary that recovers within
 // the retry budget never reaches OpenRouter.
 func TestMessagesProxyRetriesPrimaryBeforeFailover(t *testing.T) {
+	c := assert.NewCollecting(t)
 	orig := routing.RetryBackoffs
 	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { routing.RetryBackoffs = orig }()
@@ -642,20 +574,15 @@ func TestMessagesProxyRetriesPrimaryBeforeFailover(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if primaryCalls != 3 {
-		t.Errorf("primary calls = %d, want 3 (2 failures + 1 success)", primaryCalls)
-	}
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Errorf("client did not get the primary's stream: %q", rec.Body.String())
-	}
-	if fs.lastUpstream != "anthropic" {
-		t.Errorf("captured upstream=%q, want anthropic", fs.lastUpstream)
-	}
+	c.Eq(3, primaryCalls, "primary calls")
+	c.StrContains(rec.Body.String(), "message_stop", "client did not get the primary's stream")
+	c.Eq("anthropic", fs.lastUpstream, "captured upstream")
 }
 
 // A primary that stays down through the entire retry budget still fails over
 // to OpenRouter, after exhausting all configured retries.
 func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
+	c := assert.NewCollecting(t)
 	orig := routing.RetryBackoffs
 	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { routing.RetryBackoffs = orig }()
@@ -684,15 +611,9 @@ func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if primaryCalls != 1+len(routing.RetryBackoffs) {
-		t.Errorf("primary calls = %d, want %d (1 initial + %d retries)", primaryCalls, 1+len(routing.RetryBackoffs), len(routing.RetryBackoffs))
-	}
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Errorf("client did not get the OR stream: %q", rec.Body.String())
-	}
-	if fs.lastUpstream != "openrouter" {
-		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
-	}
+	c.Eq(1+len(routing.RetryBackoffs), primaryCalls, "primary calls = %d, want %d (1 initial + %d retries)", primaryCalls, 1+len(routing.RetryBackoffs), len(routing.RetryBackoffs))
+	c.StrContains(rec.Body.String(), "message_stop", "client did not get the OR stream")
+	c.Eq("openrouter", fs.lastUpstream, "captured upstream")
 }
 
 // An out-of-credit primary (a 400, so not retryable by status) fails over to
@@ -700,6 +621,7 @@ func TestMessagesProxyFailsOverAfterExhaustingRetries(t *testing.T) {
 // for the request — and trips the breaker so the next request skips the
 // primary entirely.
 func TestMessagesProxyFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
+	c := assert.NewCollecting(t)
 	orig := routing.RetryBackoffs
 	routing.RetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { routing.RetryBackoffs = orig }()
@@ -733,35 +655,24 @@ func TestMessagesProxyFailsOverWhenPrimaryOutOfCredit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if primaryCalls != 1 {
-		t.Errorf("primary calls = %d, want 1 (no retries against an unfunded account)", primaryCalls)
-	}
-	if !strings.Contains(rec.Body.String(), "message_stop") {
-		t.Errorf("client did not get the OR stream: %q", rec.Body.String())
-	}
-	if fs.lastUpstream != "openrouter" {
-		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
-	}
-	if !breaker.Open() {
-		t.Error("breaker must be open after an out-of-credit primary rejection")
-	}
+	c.Eq(1, primaryCalls, "primary calls")
+	c.StrContains(rec.Body.String(), "message_stop", "client did not get the OR stream")
+	c.Eq("openrouter", fs.lastUpstream, "captured upstream")
+	c.True(breaker.Open(), "breaker must be open after an out-of-credit primary rejection")
 
 	// Breaker now open: the next request skips the primary entirely.
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec2, req2)
-	if primaryCalls != 1 {
-		t.Errorf("primary calls = %d after a second request, want 1 (breaker open)", primaryCalls)
-	}
-	if orCalls != 2 {
-		t.Errorf("openrouter calls = %d, want 2", orCalls)
-	}
+	c.Eq(1, primaryCalls, "primary calls")
+	c.Eq(2, orCalls, "openrouter calls")
 }
 
 // An ordinary 400 is neither retryable nor failover-worthy: it is the caller's
 // own bad request, so it must be surfaced verbatim rather than re-sent to a
 // second provider that would reject it identically.
 func TestMessagesProxyOrdinaryBadRequestDoesNotFailOver(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const badReq = `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: must be greater than or equal to 1"}}`
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -785,19 +696,14 @@ func TestMessagesProxyOrdinaryBadRequestDoesNotFailOver(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-haiku-4-5-20251001","stream":true}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", rec.Code)
-	}
+	c.Eq(http.StatusBadRequest, rec.Code, "status")
 	// The body must survive the classification peek intact.
-	if rec.Body.String() != badReq {
-		t.Errorf("client body = %q, want the upstream rejection verbatim %q", rec.Body.String(), badReq)
-	}
-	if breaker.Open() {
-		t.Error("breaker must stay closed on a caller-caused 400")
-	}
+	c.Eq(badReq, rec.Body.String(), "client body")
+	c.False(breaker.Open(), "breaker must stay closed on a caller-caused 400")
 }
 
 func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("primary must not be called for slash model")
 		w.WriteHeader(http.StatusBadRequest)
@@ -805,16 +711,10 @@ func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	defer primary.Close()
 	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// OpenRouter authenticates via Authorization: Bearer, not x-api-key.
-		if got := r.Header.Get("Authorization"); got != "Bearer or-key" {
-			t.Errorf("OR auth = %q, want %q", got, "Bearer or-key")
-		}
-		if r.Header.Get("x-api-key") != "" {
-			t.Errorf("OR should not receive x-api-key, got %q", r.Header.Get("x-api-key"))
-		}
+		c.Eq("Bearer or-key", r.Header.Get("Authorization"), "OR auth")
+		c.Eq("", r.Header.Get("x-api-key"), "OR should not receive x-api-key, got")
 		orBody, _ := io.ReadAll(r.Body)
-		if got := modelOf(t, orBody); got != "openai/gpt-4o" {
-			t.Errorf("OR received model = %q, want openai/gpt-4o", got)
-		}
+		c.Eq("openai/gpt-4o", modelOf(t, orBody), "OR received model")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"marker":"from-openrouter","type":"message","stop_reason":"end_turn","usage":{"output_tokens":3}}`)
 	}))
@@ -832,17 +732,14 @@ func TestMessagesProxySlashRoutesDirectToOpenRouter(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer client-token")
 	p.ServeHTTP(rec, req)
 
-	if !strings.Contains(rec.Body.String(), "from-openrouter") {
-		t.Errorf("client did not get the OR response: %q", rec.Body.String())
-	}
-	if fs.lastUpstream != "openrouter" {
-		t.Errorf("captured upstream=%q, want openrouter", fs.lastUpstream)
-	}
+	c.StrContains(rec.Body.String(), "from-openrouter", "client did not get the OR response")
+	c.Eq("openrouter", fs.lastUpstream, "captured upstream")
 }
 
 // A pinned model line (routing provider pins) gets its provider preferences
 // injected into the OpenRouter body; a caller-supplied provider object wins.
 func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var orBodies [][]byte
 	orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -867,16 +764,12 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 	send(`{"model":"z-ai/glm-5.2","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	send(`{"model":"z-ai/glm-5.2","provider":{"only":["baseten"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	send(`{"model":"openai/gpt-4o","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	if len(orBodies) != 3 {
-		t.Fatalf("OpenRouter received %d requests, want 3", len(orBodies))
-	}
+	c.Require().Len(orBodies, 3, "OpenRouter received %d requests, want 3", len(orBodies))
 
 	providerOf := func(body []byte) map[string]any {
 		t.Helper()
 		var payload map[string]any
-		if err := json.Unmarshal(body, &payload); err != nil {
-			t.Fatalf("unmarshal OR body: %v", err)
-		}
+		c.Require().NoError(json.Unmarshal(body, &payload), "unmarshal OR body")
 		prov, _ := payload["provider"].(map[string]any)
 		return prov
 	}
@@ -886,9 +779,7 @@ func TestMessagesProxyPinsProviderForPinnedModel(t *testing.T) {
 	if prov := providerOf(orBodies[1]); fmt.Sprintf("%v", prov["only"]) != "[baseten]" {
 		t.Errorf("caller-supplied provider must win, got %v", prov)
 	}
-	if prov := providerOf(orBodies[2]); prov != nil {
-		t.Errorf("unpinned model must carry no provider, got %v", prov)
-	}
+	c.Nil(providerOf(orBodies[2]), "unpinned model must carry no provider, got")
 }
 
 // TestDoOpenRouterMergesIgnoreList proves an ejected provider reaches the wire
@@ -916,6 +807,7 @@ func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
 		{"caller supplied provider block", `{"model":"deepseek/deepseek-v4-pro","provider":{"only":["novita"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			var got map[string]any
 			orSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewDecoder(r.Body).Decode(&got)
@@ -937,14 +829,10 @@ func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
 
 			prov, _ := got["provider"].(map[string]any)
 			ignore, _ := prov["ignore"].([]any)
-			if len(ignore) != 1 || ignore[0] != "coreweave" {
-				t.Errorf("provider.ignore = %v, want [coreweave]; full provider block = %v", ignore, prov)
-			}
+			c.False(len(ignore) != 1 || ignore[0] != "coreweave", "provider.ignore = %v, want [coreweave]; full provider block = %v", ignore, prov)
 			if strings.Contains(tc.name, "caller supplied") {
 				only, _ := prov["only"].([]any)
-				if len(only) != 1 || only[0] != "novita" {
-					t.Errorf("caller-supplied provider fields must survive the merge, got %v", prov)
-				}
+				c.False(len(only) != 1 || only[0] != "novita", "caller-supplied provider fields must survive the merge, got %v", prov)
 			}
 		})
 	}
@@ -953,6 +841,7 @@ func TestDoOpenRouterMergesIgnoreList(t *testing.T) {
 // A slash model on a proxy with no OpenRouter key returns 502 AND must resolve
 // the turn it began, or the row is stranded 'pending' forever (a false orphan).
 func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fs := &fakeProxyStore{}
 	p := NewMessagesProxy(nil, nil, "real-key", "http://unused", "" /*defaultModel*/, nil /*catalog*/, logger)
@@ -964,18 +853,15 @@ func TestMessagesProxySlashWithoutOpenRouterFailsTurn(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer client-token")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "openai/gpt-4o") {
-		t.Errorf("body should name the model, got %q", rec.Body.String())
-	}
+	c.Eq(http.StatusBadGateway, rec.Code, "status")
+	c.StrContains(rec.Body.String(), "openai/gpt-4o", "body should name the model, got")
 	if fs.intents != 1 || fs.fails != 1 || fs.completes != 0 {
 		t.Errorf("intents=%d fails=%d completes=%d, want 1/1/0 (turn must be failed, not stranded)", fs.intents, fs.fails, fs.completes)
 	}
 }
 
 func TestProxyResolveModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cat := routing.NewModelCatalog(nil, time.Minute, logger)
 	p := &MessagesProxy{logger: logger, catalog: cat, defaultModel: "haiku-latest"}
@@ -988,49 +874,25 @@ func TestProxyResolveModel(t *testing.T) {
 
 	// empty model -> default (haiku-latest) -> concrete anthropic id
 	body, resolved, err := p.resolveAndAdapt([]byte(`{"max_tokens":1,"messages":[]}`))
-	if err != nil {
-		t.Fatalf("empty->default errored: %v", err)
-	}
-	if got := modelOf(t, body); got != "claude-haiku-4-5" {
-		t.Errorf("empty->default = %q, want claude-haiku-4-5", got)
-	}
-	if resolved != "claude-haiku-4-5" {
-		t.Errorf("empty->default resolved = %q, want claude-haiku-4-5", resolved)
-	}
+	c.Require().NoError(err, "empty->default errored")
+	c.Eq("claude-haiku-4-5", modelOf(t, body), "empty->default")
+	c.Eq("claude-haiku-4-5", resolved, "empty->default resolved")
 	// explicit sonnet-latest -> concrete
 	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"sonnet-latest","max_tokens":1}`))
-	if err != nil {
-		t.Fatalf("sonnet-latest errored: %v", err)
-	}
-	if got := modelOf(t, body); got != "claude-sonnet-5" {
-		t.Errorf("sonnet-latest = %q, want claude-sonnet-5", got)
-	}
-	if resolved != "claude-sonnet-5" {
-		t.Errorf("sonnet-latest resolved = %q, want claude-sonnet-5", resolved)
-	}
+	c.Require().NoError(err, "sonnet-latest errored")
+	c.Eq("claude-sonnet-5", modelOf(t, body), "sonnet-latest")
+	c.Eq("claude-sonnet-5", resolved, "sonnet-latest resolved")
 	// concrete id -> untouched
 	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"claude-opus-4-8"}`))
-	if err != nil {
-		t.Fatalf("concrete errored: %v", err)
-	}
-	if got := modelOf(t, body); got != "claude-opus-4-8" {
-		t.Errorf("concrete = %q, want unchanged", got)
-	}
-	if resolved != "claude-opus-4-8" {
-		t.Errorf("concrete resolved = %q, want unchanged", resolved)
-	}
+	c.Require().NoError(err, "concrete errored")
+	c.Eq("claude-opus-4-8", modelOf(t, body), "concrete")
+	c.Eq("claude-opus-4-8", resolved, "concrete resolved")
 	// short model alias -> the line's newest OR slash id (selectUpstream then
 	// routes the slash id to OpenRouter, per the slash-routing tests above)
 	body, resolved, err = p.resolveAndAdapt([]byte(`{"model":"kimi-k3","max_tokens":1}`))
-	if err != nil {
-		t.Fatalf("kimi-k3 errored: %v", err)
-	}
-	if got := modelOf(t, body); got != "moonshotai/kimi-k3" {
-		t.Errorf("kimi-k3 = %q, want moonshotai/kimi-k3", got)
-	}
-	if resolved != "moonshotai/kimi-k3" {
-		t.Errorf("kimi-k3 resolved = %q, want moonshotai/kimi-k3", resolved)
-	}
+	c.Require().NoError(err, "kimi-k3 errored")
+	c.Eq("moonshotai/kimi-k3", modelOf(t, body), "kimi-k3")
+	c.Eq("moonshotai/kimi-k3", resolved, "kimi-k3 resolved")
 	// a model alias the catalog can't resolve -> error (no hardcoded fallback)
 	if _, _, err = p.resolveAndAdapt([]byte(`{"model":"deepseek-v4-pro"}`)); err == nil {
 		t.Error("deepseek-v4-pro absent from catalog must error")
@@ -1042,27 +904,22 @@ func TestProxyResolveModel(t *testing.T) {
 	// malformed body -> best-effort passthrough, no error
 	garbage := []byte(`not json`)
 	body, resolved, err = p.resolveAndAdapt(garbage)
-	if err != nil || resolved != "" || string(body) != string(garbage) {
-		t.Errorf("malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
-	}
+	c.False(err != nil || resolved != "" || string(body) != string(garbage), "malformed body = (%q,%q,%v), want passthrough+empty+nil", body, resolved, err)
 }
 
 // End-to-end: a real proxied turn decomposes into conversation_message rows
 // (user + assistant) and leaves conversation_turn.request NULL — the bulky
 // full-request JSONB is no longer written now that decomposition covers it.
 func TestProxy_DecomposesConversation(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
-		}
+		c.Require().Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(admin.Close)
 	name := fmt.Sprintf("rafiki_decompose_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
@@ -1070,18 +927,12 @@ func TestProxy_DecomposesConversation(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)") })
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(store.Migrate(ctx, pool))
 
 	cs := capture.NewCaptureStore(pool)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1099,27 +950,17 @@ func TestProxy_DecomposesConversation(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "sess-decompose-1")
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status = %d, body=%s", rec.Code, rec.Body.String())
 
 	// user message + assistant response decomposed; turn.request left NULL
 	var msgs int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.conversation_message`).Scan(&msgs); err != nil {
-		t.Fatal(err)
-	}
-	if msgs != 2 {
-		t.Errorf("conversation_message count = %d, want 2", msgs)
-	}
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.conversation_message`).Scan(&msgs))
+	c.Eq(2, msgs, "conversation_message count")
 	var reqNull bool
-	if err := pool.QueryRow(ctx,
-		`SELECT request IS NULL FROM conversations.conversation_turn LIMIT 1`).Scan(&reqNull); err != nil {
-		t.Fatal(err)
-	}
-	if !reqNull {
-		t.Error("conversation_turn.request should be NULL; decomposition replaces the full-JSONB write")
-	}
+	c.Require().NoError(pool.QueryRow(ctx,
+		`SELECT request IS NULL FROM conversations.conversation_turn LIMIT 1`).Scan(&reqNull))
+	c.True(reqNull, "conversation_turn.request should be NULL; decomposition replaces the full-JSONB write")
 }
 
 func modelOf(t *testing.T, body []byte) string {
@@ -1127,9 +968,7 @@ func modelOf(t *testing.T, body []byte) string {
 	var m struct {
 		Model string `json:"model"`
 	}
-	if err := json.Unmarshal(body, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	assert.NewAborting(t).NoError(json.Unmarshal(body, &m), "unmarshal")
 	return m.Model
 }
 
@@ -1150,6 +989,7 @@ func TestMessagesProxyAdaptsEffort(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			var gotEffort string
 			var sawOutputConfig bool
 			or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1184,13 +1024,9 @@ func TestMessagesProxyAdaptsEffort(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody))
 			p.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
-			}
+			c.Require().Eq(http.StatusOK, rec.Code, "status = %d, body=%s", rec.Code, rec.Body.String())
 			if tc.wantEffort == "" {
-				if sawOutputConfig && gotEffort != "" {
-					t.Errorf("effort should be stripped, upstream saw %q", gotEffort)
-				}
+				c.False(sawOutputConfig && gotEffort != "", "effort should be stripped, upstream saw %q", gotEffort)
 			} else if gotEffort != tc.wantEffort {
 				t.Errorf("upstream effort = %q, want %q", gotEffort, tc.wantEffort)
 			}
@@ -1254,9 +1090,7 @@ func TestMessagesProxyEffortRetry(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{"high", "medium", "medium"} // req1 high (rejected), req1-retry medium, req2 medium
-	if !reflect.DeepEqual(efforts, want) {
-		t.Errorf("upstream efforts = %v, want %v", efforts, want)
-	}
+	assert.NewCollecting(t).EqDiff(want, efforts, "upstream efforts")
 }
 
 // ConversationTokens satisfies proxyStore. Returns a fixed two-model rollup so
@@ -1290,9 +1124,7 @@ func TestCostFieldsPricesTurnAndConversation(t *testing.T) {
 	// This turn: 1M output on sonnet = $15.00. Total = 15 + 3 + 2 = $20.00.
 	got := p.costFields(req, "conv-1", "claude-sonnet-5", routing.CapturedUsage{OutputTokens: 1_000_000})
 	want := []any{"cost_turn", "15.000000", "cost_total", "20.00"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("costFields = %v, want %v", got, want)
-	}
+	assert.NewCollecting(t).EqDeep(want, got, "costFields")
 }
 
 // TestCostFieldsUnpricedModelIsSilent proves an unpriced model logs no cost at
@@ -1304,9 +1136,7 @@ func TestCostFieldsUnpricedModelIsSilent(t *testing.T) {
 	p := &MessagesProxy{store: &fakeProxyStore{}, catalog: cat, logger: slog.New(slog.DiscardHandler)}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 
-	if got := p.costFields(req, "conv-1", "some/unknown-model", routing.CapturedUsage{OutputTokens: 5}); got != nil {
-		t.Errorf("costFields for an unpriced model = %v, want nil", got)
-	}
+	assert.NewCollecting(t).Nil(p.costFields(req, "conv-1", "some/unknown-model", routing.CapturedUsage{OutputTokens: 5}), "costFields for an unpriced model")
 }
 
 // TestMessagesProxyCompactionRebases drives the REAL MessagesProxy over
@@ -1324,24 +1154,19 @@ func TestCostFieldsUnpricedModelIsSilent(t *testing.T) {
 // was ordinal 2 — colliding with the compaction_summary boundary row and
 // putting the response before the horizon instead of after it.
 func TestMessagesProxyCompactionRebases(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
-		}
+		c.Require().Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 
 	ctx := context.Background()
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	c.Require().NoError(err, "connect")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	c.Require().NoError(store.Migrate(ctx, pool), "Migrate")
 
 	// Fake Anthropic upstream: the same minimal SSE stream
 	// TestMessagesProxyStreamsAndCaptures uses — message_start carries input
@@ -1372,9 +1197,7 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 		strings.NewReader(`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
 	req.Header.Set("X-Rafiki-Session", session)
 	p.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first request: status = %d, body=%s", rec.Code, rec.Body.String())
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "first request: status = %d, body=%s", rec.Code, rec.Body.String())
 
 	// Turn 2 — the post-compaction request, exactly how Claude Code drives the
 	// proxy after its own context compaction: full history replaced by a
@@ -1393,45 +1216,32 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 			`{"role":"user","content":"continue"}]}`))
 	req2.Header.Set("X-Rafiki-Session", session)
 	p.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("second request: status = %d, body=%s", rec2.Code, rec2.Body.String())
-	}
+	c.Require().Eq(http.StatusOK, rec2.Code, "second request: status = %d, body=%s", rec2.Code, rec2.Body.String())
 
 	// Resolve the conversation the session header created.
 	var convID string
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT id::text FROM conversations.conversation WHERE external_ref = $1`,
-		session).Scan(&convID); err != nil {
-		t.Fatalf("resolve conversation by external_ref %q: %v", session, err)
-	}
+		session).Scan(&convID), "resolve conversation by external_ref %q", session)
 
 	// A boundary was recorded: the horizon is non-zero.
 	var horizon int
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT coalesce(resume_from_ordinal,0) FROM conversations.conversation WHERE id=$1::uuid`,
-		convID).Scan(&horizon); err != nil {
-		t.Fatalf("read resume_from_ordinal: %v", err)
-	}
-	if horizon == 0 {
-		t.Fatalf("resume_from_ordinal = 0, want non-zero: the post-compaction request diverged from the anchor but no boundary was recorded")
-	}
+		convID).Scan(&horizon), "read resume_from_ordinal")
+	c.Require().NotEq(0, horizon, "resume_from_ordinal = 0, want non-zero: the post-compaction request diverged from the anchor but no boundary was recorded")
 
 	// Load through the same API the reattach display path uses, so the
 	// assertions below are about what a reader of the conversation sees.
 	msgs, err := store.NewMessages(pool).Load(ctx, convID)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(msgs) != 5 {
-		t.Fatalf("Load returned %d messages, want 5 (ordinals 0..4 dense); ordinals seen: %v",
-			len(msgs), func() []int {
-				out := make([]int, 0, len(msgs))
-				for _, m := range msgs {
-					out = append(out, m.Ordinal)
-				}
-				return out
-			}())
-	}
+	c.Require().NoError(err, "Load")
+	c.Require().Len(msgs, 5, "Load returned %d messages, want 5 (ordinals 0..4 dense); ordinals seen: %v", len(msgs), func() []int {
+		out := make([]int, 0, len(msgs))
+		for _, m := range msgs {
+			out = append(out, m.Ordinal)
+		}
+		return out
+	}())
 	byOrdinal := make(map[int]store.Message, len(msgs))
 	for _, m := range msgs {
 		byOrdinal[m.Ordinal] = m
@@ -1448,24 +1258,16 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 		t.Errorf("ordinal 0 content = %s (marshal err %v), want the original %q message still present", b, merr, "hello")
 	}
 	var helloPresent bool
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM conversations.conversation_message
 		   WHERE conversation_id=$1::uuid AND ordinal=0 AND role='user' AND content='"hello"'::jsonb)`,
-		convID).Scan(&helloPresent); err != nil {
-		t.Fatalf("check original message survived: %v", err)
-	}
-	if !helloPresent {
-		t.Errorf(`original message "hello" no longer present at ordinal 0 — pre-compaction history was lost (design §5 regression)`)
-	}
+		convID).Scan(&helloPresent), "check original message survived")
+	c.True(helloPresent, `original message "hello" no longer present at ordinal 0 — pre-compaction history was lost (design §5 regression)`)
 
 	// The row at the horizon is the compaction summary boundary.
 	mb := byOrdinal[horizon]
-	if mb.Kind == nil || *mb.Kind != "compaction_summary" {
-		t.Errorf("row at resume_from_ordinal %d: kind = %v, want compaction_summary", horizon, mb.Kind)
-	}
-	if mb.InputTokens == nil {
-		t.Errorf("compaction_summary row at %d carries no input_tokens (the replaced-context size), want non-nil", horizon)
-	}
+	c.False(mb.Kind == nil || *mb.Kind != "compaction_summary", "row at resume_from_ordinal %d: kind = %v, want compaction_summary", horizon, mb.Kind)
+	c.NotNil(mb.InputTokens, "compaction_summary row at %d carries no input_tokens (the replaced-context size), want non-nil", horizon)
 
 	// The second request's messages and response landed at horizon-relative
 	// ordinals: continuation at horizon+1, response at horizon+2. The pre-fix
@@ -1483,32 +1285,22 @@ func TestMessagesProxyCompactionRebases(t *testing.T) {
 	// direct witness that AppendResponseMessage consumed DecomposeRequest's
 	// return value rather than a precomputed request-message count.
 	var turnCount int
-	if err := pool.QueryRow(ctx,
+	c.Require().NoError(pool.QueryRow(ctx,
 		`SELECT count(*) FROM conversations.conversation_turn WHERE conversation_id=$1`,
-		convID).Scan(&turnCount); err != nil {
-		t.Fatalf("count turns: %v", err)
-	}
-	if turnCount != 2 {
-		t.Fatalf("conversation has %d turns, want 2", turnCount)
-	}
+		convID).Scan(&turnCount), "count turns")
+	c.Require().Eq(2, turnCount, "conversation has")
 	rows, err := pool.Query(ctx,
 		`SELECT coalesce(response_ordinal,-1) FROM conversations.conversation_turn
 		  WHERE conversation_id=$1 ORDER BY created_at, id`, convID)
-	if err != nil {
-		t.Fatalf("read turn response ordinals: %v", err)
-	}
+	c.Require().NoError(err, "read turn response ordinals")
 	defer rows.Close()
 	var respOrdinals []int
 	for rows.Next() {
 		var o int
-		if err := rows.Scan(&o); err != nil {
-			t.Fatalf("scan response_ordinal: %v", err)
-		}
+		c.Require().NoError(rows.Scan(&o), "scan response_ordinal")
 		respOrdinals = append(respOrdinals, o)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read turn response ordinals: %v", err)
-	}
+	c.Require().NoError(rows.Err(), "read turn response ordinals")
 	if len(respOrdinals) != 2 || respOrdinals[0] != 1 || respOrdinals[1] != horizon+2 {
 		t.Errorf("turn response ordinals = %v, want [1 %d] (turn 1 pre-compaction; turn 2 horizon-relative, not the request-message count 2)", respOrdinals, horizon+2)
 	}
@@ -1527,6 +1319,7 @@ func (f *fakeRawTrace) Insert(_ context.Context, r rawtrace.RawHTTPRequest) erro
 }
 
 func TestRawTraceRecordsAMalformedSuccess(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// A 2xx wearing the wrong Content-Type is a gateway error page. It is
 	// surfaced to the client as a 502 and, before this, recorded nowhere.
 	rec := &fakeRawTrace{}
@@ -1547,18 +1340,13 @@ func TestRawTraceRecordsAMalformedSuccess(t *testing.T) {
 		strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	p.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", w.Code)
-	}
-	if len(rec.inserted) != 1 {
-		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
-	}
-	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "upstream is unwell") {
-		t.Errorf("resp body = %q, want the upstream error page", got)
-	}
+	c.Require().Eq(http.StatusBadGateway, w.Code, "status")
+	c.Require().Len(rec.inserted, 1, "raw traces recorded = %d, want 1", len(rec.inserted))
+	c.StrContains(string(rec.inserted[0].RespBody), "upstream is unwell", "resp body")
 }
 
 func TestRawTraceRecordsATruncatedStream(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// Upstream dies mid-stream: the partial body is the forensic value, and the
 	// trace's Error should name the same read failure the turn reason does.
 	rec := &fakeRawTrace{}
@@ -1590,24 +1378,17 @@ func TestRawTraceRecordsATruncatedStream(t *testing.T) {
 
 	// The bytes streamed before the cut were already forwarded, so the client
 	// saw a 200 head; the turn must still be failed and the trace still stored.
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
+	c.Require().Eq(http.StatusOK, w.Code, "status")
 	if fs.fails != 1 || !strings.Contains(fs.lastFailMsg, "mid-stream read error") {
 		t.Fatalf("fail msg = %q, want the mid-stream read error", fs.lastFailMsg)
 	}
-	if len(rec.inserted) != 1 {
-		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
-	}
-	if got := rec.inserted[0].Error; !strings.Contains(got, "mid-stream read error") {
-		t.Errorf("trace error = %q, want the mid-stream read error", got)
-	}
-	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "message_start") {
-		t.Errorf("resp body = %q, want the partial stream", got)
-	}
+	c.Require().Len(rec.inserted, 1, "raw traces recorded = %d, want 1", len(rec.inserted))
+	c.StrContains(rec.inserted[0].Error, "mid-stream read error", "trace error")
+	c.StrContains(string(rec.inserted[0].RespBody), "message_start", "resp body")
 }
 
 func TestRawTraceRecordsACaptureParseFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// A stream the parser cannot reassemble fails the turn; the stored body
 	// prefix is the only forensic record of what the upstream actually sent.
 	rec := &fakeRawTrace{}
@@ -1628,21 +1409,13 @@ func TestRawTraceRecordsACaptureParseFailure(t *testing.T) {
 		strings.NewReader(`{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	p.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (the bytes were forwarded)", w.Code)
-	}
+	c.Require().Eq(http.StatusOK, w.Code, "status")
 	if fs.fails != 1 || !strings.Contains(fs.lastFailMsg, "capture parse failed") {
 		t.Fatalf("fail msg = %q, want the capture parse failure", fs.lastFailMsg)
 	}
-	if len(rec.inserted) != 1 {
-		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
-	}
-	if got := rec.inserted[0].Error; !strings.Contains(got, "capture parse failed") {
-		t.Errorf("trace error = %q, want the capture parse failure", got)
-	}
-	if got := string(rec.inserted[0].RespBody); !strings.Contains(got, "nothing resembling an SSE stream") {
-		t.Errorf("resp body = %q, want the unparseable body", got)
-	}
+	c.Require().Len(rec.inserted, 1, "raw traces recorded = %d, want 1", len(rec.inserted))
+	c.StrContains(rec.inserted[0].Error, "capture parse failed", "trace error")
+	c.StrContains(string(rec.inserted[0].RespBody), "nothing resembling an SSE stream", "resp body")
 }
 
 func TestSubagentTurnsAreAttributedToAnAgent(t *testing.T) {
@@ -1674,18 +1447,15 @@ func TestSubagentTurnsAreAttributedToAnAgent(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			body := mustMarshal(t, map[string]any{
 				"model":    "claude-sonnet-5",
 				"system":   []any{map[string]any{"type": "text", "text": tc.systemText}},
 				"messages": []any{},
 			})
 			kind, source := authorAttribution(body, "claude")
-			if kind != tc.wantKind {
-				t.Errorf("author_kind = %q, want %q", kind, tc.wantKind)
-			}
-			if source != tc.wantSource {
-				t.Errorf("source = %q, want %q", source, tc.wantSource)
-			}
+			c.Eq(tc.wantKind, kind, "author_kind")
+			c.Eq(tc.wantSource, source, "source")
 		})
 	}
 }
@@ -1694,17 +1464,14 @@ func TestAuthorAttributionKeepsANonClaudeSourceIntact(t *testing.T) {
 	// X-Rafiki-Source is how one proxy serves a TUI, a slack bot and diagnose.
 	// A subagent suffix must never overwrite an entrypoint it did not set.
 	body := mustMarshal(t, map[string]any{"messages": []any{}})
-	if _, source := authorAttribution(body, "slack"); source != "slack" {
-		t.Errorf("source = %q, want %q", source, "slack")
-	}
+	_, source := authorAttribution(body, "slack")
+	assert.NewCollecting(t).Eq("slack", source, "source")
 }
 
 func mustMarshal(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal")
 	return b
 }
 
@@ -1712,6 +1479,7 @@ func mustMarshal(t *testing.T, v any) []byte {
 // that makes thread observation live: without it, RecordThread exists and its
 // store tests pass, and real traffic records nothing, erroring nowhere.
 func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1733,24 +1501,12 @@ func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
 			"diagnostics":{"previous_message_id":"msg_prev"}}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if fs.threads != 1 {
-		t.Fatalf("RecordThread calls = %d, want 1", fs.threads)
-	}
-	if fs.lastPrevMsg != "msg_prev" {
-		t.Errorf("prevMessageID = %q, want %q (the request's diagnostics.previous_message_id)", fs.lastPrevMsg, "msg_prev")
-	}
-	if fs.lastOwnMsg != "msg_own" {
-		t.Errorf("ownMessageID = %q, want %q (the response's assistant message id)", fs.lastOwnMsg, "msg_own")
-	}
-	if fs.lastSession != "" {
-		t.Errorf("session = %q, want empty (no X-Rafiki-Session header sent)", fs.lastSession)
-	}
-	if fs.lastIsSubagent {
-		t.Error("isSubagent = true, want false (no billing header on the request)")
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Require().Eq(1, fs.threads, "RecordThread calls")
+	c.Eq("msg_prev", fs.lastPrevMsg, "prevMessageID")
+	c.Eq("msg_own", fs.lastOwnMsg, "ownMessageID")
+	c.Eq("", fs.lastSession, "session")
+	c.False(fs.lastIsSubagent, "isSubagent = true, want false (no billing header on the request)")
 }
 
 // TestProxyClassifiesTheThreadFromTheBillingHeader pins the other half of the
@@ -1758,6 +1514,7 @@ func TestProxyRecordsTheThreadAfterAppendingTheResponse(t *testing.T) {
 // RecordThread, because the routing decision depends on both and a proxy that
 // drops either one silently routes every turn to the main thread.
 func TestProxyClassifiesTheThreadFromTheBillingHeader(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1779,18 +1536,10 @@ func TestProxyClassifiesTheThreadFromTheBillingHeader(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_wiring_test")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if fs.threads != 1 {
-		t.Fatalf("RecordThread calls = %d, want 1", fs.threads)
-	}
-	if fs.lastSession != "c_wiring_test" {
-		t.Errorf("session = %q, want the X-Rafiki-Session value %q", fs.lastSession, "c_wiring_test")
-	}
-	if !fs.lastIsSubagent {
-		t.Error("isSubagent = false, want true (cc_is_subagent=true in the billing header)")
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Require().Eq(1, fs.threads, "RecordThread calls")
+	c.Eq("c_wiring_test", fs.lastSession, "session")
+	c.True(fs.lastIsSubagent, "isSubagent = false, want true (cc_is_subagent=true in the billing header)")
 }
 
 // TestProxyRoutesTheTurnIntentToTheResolvedThreadRow pins the beginCapture
@@ -1800,6 +1549,7 @@ func TestProxyClassifiesTheThreadFromTheBillingHeader(t *testing.T) {
 // EnsureConversationByExternalRef (the pre-3.1 single-row behavior) passes
 // the suite silently.
 func TestProxyRoutesTheTurnIntentToTheResolvedThreadRow(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1820,24 +1570,17 @@ func TestProxyRoutesTheTurnIntentToTheResolvedThreadRow(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_route_test")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if fs.lastThreadID != "thread-b" {
-		t.Errorf("ResolveThreadConversation threadID = %q, want the lookup's answer %q", fs.lastThreadID, "thread-b")
-	}
-	if want := "c_route_test:thread-b"; fs.lastResolvedRef != want {
-		t.Errorf("resolved external_ref = %q, want %q", fs.lastResolvedRef, want)
-	}
-	if fs.lastIntentConv != "conv-branch" {
-		t.Errorf("turn intent landed on conversation %q, want the thread's own row %q", fs.lastIntentConv, "conv-branch")
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq("thread-b", fs.lastThreadID, "ResolveThreadConversation threadID")
+	c.Eq("c_route_test:thread-b", fs.lastResolvedRef, "resolved external_ref")
+	c.Eq("conv-branch", fs.lastIntentConv, "turn intent landed on conversation")
 }
 
 // TestRecordThreadFailureIsLoggedAndSwallowed: thread observation must never be
 // able to fail a turn that otherwise succeeded, so its own write failure is
 // logged and dropped rather than routed through failTurn.
 func TestRecordThreadFailureIsLoggedAndSwallowed(t *testing.T) {
+	c := assert.NewAborting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -1859,12 +1602,8 @@ func TestRecordThreadFailureIsLoggedAndSwallowed(t *testing.T) {
 			"diagnostics":{"previous_message_id":"msg_prev"}}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (a thread write failure must not fail the turn)", rec.Code)
-	}
-	if fs.fails != 0 {
-		t.Fatalf("FailTurn calls = %d, want 0 (observation is never failTurn)", fs.fails)
-	}
+	c.Eq(http.StatusOK, rec.Code, "status")
+	c.Eq(0, fs.fails, "FailTurn calls")
 }
 
 // stubThreadObserver records what beginCapture told it, so the synthetic
@@ -1905,6 +1644,7 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	t.Run("non-root thread", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		obs := &stubThreadObserver{}
 		fs := &fakeProxyStore{threadID: "thread-9"}
 		p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
@@ -1916,15 +1656,9 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		req.Header.Set("X-Rafiki-Session", "c_parent")
 		p.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
-		}
-		if len(obs.calls) != 1 {
-			t.Fatalf("observer calls = %d, want 1", len(obs.calls))
-		}
-		if obs.calls[0] != "c_parent|thread-9|conv-branch" {
-			t.Errorf("call = %q, want %q: the hook gets the branch row the turn intent lands on", obs.calls[0], "c_parent|thread-9|conv-branch")
-		}
+		c.Require().Eq(http.StatusOK, rec.Code, "status")
+		c.Require().Len(obs.calls, 1, "observer calls = %d, want 1", len(obs.calls))
+		c.Eq("c_parent|thread-9|conv-branch", obs.calls[0], "call")
 	})
 
 	t.Run("root thread is never observed", func(t *testing.T) {
@@ -1939,12 +1673,11 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		req.Header.Set("X-Rafiki-Session", "c_root")
 		p.ServeHTTP(rec, req)
 
-		if len(obs.calls) != 0 {
-			t.Errorf("observer calls = %v, want none: the root thread is already a real child", obs.calls)
-		}
+		assert.NewCollecting(t).Empty(obs.calls, "observer calls")
 	})
 
 	t.Run("observer failure does not fail the turn", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		obs := &stubThreadObserver{err: errors.New("parent not found")}
 		fs := &fakeProxyStore{threadID: "thread-9"}
 		p := NewMessagesProxy(nil, nil, "real-key", upstream.URL, "", nil, logger)
@@ -1956,12 +1689,8 @@ func TestThreadObserverIsToldAboutNonRootThreads(t *testing.T) {
 		req.Header.Set("X-Rafiki-Session", "c_parent")
 		p.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 (a missing child record must never be a dead turn)", rec.Code)
-		}
-		if fs.fails != 0 {
-			t.Errorf("FailTurn calls = %d, want 0", fs.fails)
-		}
+		c.Require().Eq(http.StatusOK, rec.Code, "status")
+		c.Eq(0, fs.fails, "FailTurn calls")
 	})
 }
 
@@ -1984,6 +1713,7 @@ func newStreamUpstream(msgID string) *httptest.Server {
 // external_ref, mints nothing, and never notifies the observer (the root
 // thread is already a real child).
 func TestMainThreadTurn1OnAFreshSessionKeepsTheBareRef(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := newStreamUpstream("msg_own")
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -1998,21 +1728,11 @@ func TestMainThreadTurn1OnAFreshSessionKeepsTheBareRef(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_fresh_main")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if fs.lastThreadID != "" {
-		t.Errorf("ResolveThreadConversation threadID = %q, want \"\" (main turn 1 keeps the bare ref)", fs.lastThreadID)
-	}
-	if fs.lastResolvedRef != "c_fresh_main" {
-		t.Errorf("resolved external_ref = %q, want the bare session value", fs.lastResolvedRef)
-	}
-	if fs.lastIntentID != "" {
-		t.Errorf("TurnIntent.ID = %q, want empty (the DB default mints the main thread's turn id)", fs.lastIntentID)
-	}
-	if len(obs.calls) != 0 {
-		t.Errorf("observer calls = %v, want none: the root thread is a real child", obs.calls)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq("", fs.lastThreadID, "ResolveThreadConversation threadID = %q, want \"\" (main turn 1 keeps the bare ref)", fs.lastThreadID)
+	c.Eq("c_fresh_main", fs.lastResolvedRef, "resolved external_ref")
+	c.Eq("", fs.lastIntentID, "TurnIntent.ID")
+	c.Empty(obs.calls, "observer calls")
 }
 
 // TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread pins the
@@ -2022,6 +1742,7 @@ func TestMainThreadTurn1OnAFreshSessionKeepsTheBareRef(t *testing.T) {
 // shape (history replaced by a summary, previous_message_id gone); routing it
 // to a branch would strand every later main turn off the root row.
 func TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := newStreamUpstream("msg_own")
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -2036,21 +1757,11 @@ func TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_compacted")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if fs.lastThreadID != "" {
-		t.Errorf("ResolveThreadConversation threadID = %q, want empty: without cc_is_subagent a predecessorless turn is the main thread", fs.lastThreadID)
-	}
-	if fs.lastResolvedRef != "c_compacted" {
-		t.Errorf("resolved external_ref = %q, want the bare session value", fs.lastResolvedRef)
-	}
-	if fs.lastIntentID != "" {
-		t.Errorf("TurnIntent.ID = %q, want empty: the main thread never pre-mints", fs.lastIntentID)
-	}
-	if len(obs.calls) != 0 {
-		t.Errorf("observer calls = %v, want none", obs.calls)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	c.Eq("", fs.lastThreadID, "ResolveThreadConversation threadID")
+	c.Eq("c_compacted", fs.lastResolvedRef, "resolved external_ref")
+	c.Eq("", fs.lastIntentID, "TurnIntent.ID")
+	c.Empty(obs.calls, "observer calls")
 }
 
 // TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver pins
@@ -2069,6 +1780,7 @@ func TestUnflaggedFoundingOnAnExistingFamilyStaysMainThread(t *testing.T) {
 // only for a founder that can ACT — see
 // TestToolLessFounderForksWithoutASyntheticChild.
 func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := newStreamUpstream("msg_own")
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -2085,18 +1797,11 @@ func TestIndependentFoundingRequestPreMintsItsTurnAndCallsTheObserver(t *testing
 	req.Header.Set("X-Rafiki-Session", "c_found")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if _, err := uuid.Parse(fs.lastIntentID); err != nil {
-		t.Fatalf("InsertTurnIntent received TurnIntent.ID = %q, want a pre-minted UUID", fs.lastIntentID)
-	}
-	if want := "c_found:" + fs.lastIntentID; fs.lastResolvedRef != want {
-		t.Errorf("resolved external_ref = %q, want the branch named after the pre-minted turn %q", fs.lastResolvedRef, want)
-	}
-	if fs.lastIntentConv != "conv-branch" {
-		t.Errorf("turn intent landed on conversation %q, want the founding turn's own branch row", fs.lastIntentConv)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
+	_, err := uuid.Parse(fs.lastIntentID)
+	c.Require().NoError(err, "InsertTurnIntent received TurnIntent.ID = %q, want a pre-minted UUID", fs.lastIntentID)
+	c.Eq("c_found:"+fs.lastIntentID, fs.lastResolvedRef, "resolved external_ref")
+	c.Eq("conv-branch", fs.lastIntentConv, "turn intent landed on conversation")
 	if len(obs.calls) != 1 || obs.calls[0] != "c_found|"+fs.lastIntentID+"|conv-branch" {
 		t.Errorf("observer calls = %v, want [%s] on the founding request itself (single-turn subagents must still appear)", obs.calls, "c_found|"+fs.lastIntentID+"|conv-branch")
 	}
@@ -2125,6 +1830,7 @@ func TestToolLessFounderForksWithoutASyntheticChild(t *testing.T) {
 			`[{"name":"web_search","type":"web_search_20250305","max_uses":8}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			upstream := newStreamUpstream("msg_own")
 			defer upstream.Close()
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -2141,18 +1847,11 @@ func TestToolLessFounderForksWithoutASyntheticChild(t *testing.T) {
 			req.Header.Set("X-Rafiki-Session", "c_helper")
 			p.ServeHTTP(rec, req)
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200", rec.Code)
-			}
-			if _, err := uuid.Parse(fs.lastIntentID); err != nil {
-				t.Fatalf("TurnIntent.ID = %q, want a pre-minted UUID: the helper still forks", fs.lastIntentID)
-			}
-			if want := "c_helper:" + fs.lastIntentID; fs.lastResolvedRef != want {
-				t.Errorf("resolved external_ref = %q, want %q: a tool-less founder keeps its own ordinal space off the root", fs.lastResolvedRef, want)
-			}
-			if len(obs.calls) != 0 {
-				t.Errorf("observer calls = %v, want none: a founder that declares no client tool cannot act and is not an agent", obs.calls)
-			}
+			c.Require().Eq(http.StatusOK, rec.Code, "status")
+			_, err := uuid.Parse(fs.lastIntentID)
+			c.Require().NoError(err, "TurnIntent.ID = %q, want a pre-minted UUID: the helper still forks", fs.lastIntentID)
+			c.Eq("c_helper:"+fs.lastIntentID, fs.lastResolvedRef, "resolved external_ref")
+			c.Empty(obs.calls, "observer calls")
 		})
 	}
 }
@@ -2163,6 +1862,7 @@ func TestToolLessFounderForksWithoutASyntheticChild(t *testing.T) {
 // even a founding turn whose response could not be appended is stamped and
 // the thread's next turn resolves to the branch instead of re-founding.
 func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := newStreamUpstream("msg_own")
 	defer upstream.Close()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -2178,12 +1878,8 @@ func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 			"diagnostics":{"previous_message_id":"msg_prev"}}`))
 	p.ServeHTTP(rec, req)
 
-	if fs.fails == 0 {
-		t.Fatal("FailTurn calls = 0, want 1 (the append failure is still loud)")
-	}
-	if fs.threads != 1 {
-		t.Errorf("RecordThread calls = %d, want 1: the thread stamp must precede the append-error return", fs.threads)
-	}
+	c.Require().NotEq(0, fs.fails, "FailTurn calls = 0, want 1 (the append failure is still loud)")
+	c.Eq(1, fs.threads, "RecordThread calls")
 }
 
 // TestRawTraceCapturesRealHeaders pins the actual bug: upstreamReqHeaders and
@@ -2194,11 +1890,10 @@ func TestRecordThreadRunsBeforeAFailedResponseAppend(t *testing.T) {
 // show the real credential REDACTED (present, not dropped) and any upstream
 // response header at all, neither of which the old allowlist could produce.
 func TestRawTraceCapturesRealHeaders(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rec := &fakeRawTrace{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("x-api-key"); got != "real-key" {
-			t.Errorf("upstream saw x-api-key = %q, want real-key (redaction must happen at capture, not on the wire)", got)
-		}
+		c.Eq("real-key", r.Header.Get("x-api-key"), "upstream saw x-api-key")
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Anthropic-Ratelimit-Requests-Remaining", "42")
 		_, _ = w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
@@ -2215,26 +1910,17 @@ func TestRawTraceCapturesRealHeaders(t *testing.T) {
 		strings.NewReader(`{"model":"claude-sonnet-5","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
 	p.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	if len(rec.inserted) != 1 {
-		t.Fatalf("raw traces recorded = %d, want 1", len(rec.inserted))
-	}
+	c.Require().Eq(http.StatusOK, w.Code, "status")
+	c.Require().Len(rec.inserted, 1, "raw traces recorded = %d, want 1", len(rec.inserted))
 
 	var reqHeaders map[string]string
 	if err := json.Unmarshal(rec.inserted[0].ReqHeaders, &reqHeaders); err != nil {
 		t.Fatalf("ReqHeaders not valid JSON: %v (%s)", err, rec.inserted[0].ReqHeaders)
 	}
-	if reqHeaders["X-Api-Key"] != "<redacted>" {
-		t.Errorf("req X-Api-Key = %q, want <redacted> (present, not the real key, not dropped)", reqHeaders["X-Api-Key"])
-	}
+	c.Eq("<redacted>", reqHeaders["X-Api-Key"], "req X-Api-Key")
 
 	var respHeaders map[string]string
-	if err := json.Unmarshal(rec.inserted[0].RespHeaders, &respHeaders); err != nil {
-		t.Fatalf("RespHeaders not valid JSON: %v (%s)", err, rec.inserted[0].RespHeaders)
-	}
-	if respHeaders["Anthropic-Ratelimit-Requests-Remaining"] != "42" {
-		t.Errorf("resp Anthropic-Ratelimit-Requests-Remaining = %q, want 42 (the old allowlist could never carry an arbitrary upstream header)", respHeaders["Anthropic-Ratelimit-Requests-Remaining"])
-	}
+	err := json.Unmarshal(rec.inserted[0].RespHeaders, &respHeaders)
+	c.Require().NoError(err, "RespHeaders not valid JSON: %v (%s)", err, rec.inserted[0].RespHeaders)
+	c.Eq("42", respHeaders["Anthropic-Ratelimit-Requests-Remaining"], "resp Anthropic-Ratelimit-Requests-Remaining")
 }

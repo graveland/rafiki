@@ -1,8 +1,13 @@
 package childstore
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestSnapshot_RoundTripsKindAndConfigDir(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := &Session{
 		ChildID:   "c1",
 		Cwd:       "/tmp",
@@ -10,10 +15,6 @@ func TestSnapshot_RoundTripsKindAndConfigDir(t *testing.T) {
 		ConfigDir: "/home/u/.claude-personal",
 	}
 	snap := s.Snapshot()
-	if snap.Kind != "claude" {
-		t.Fatalf("snapshot Kind = %q, want claude", snap.Kind)
-	}
-	if snap.ConfigDir != "/home/u/.claude-personal" {
-		t.Fatalf("snapshot ConfigDir = %q", snap.ConfigDir)
-	}
+	c.Eq("claude", snap.Kind, "snapshot Kind")
+	c.Eq("/home/u/.claude-personal", snap.ConfigDir, "snapshot ConfigDir =")
 }

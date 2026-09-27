@@ -8,23 +8,21 @@ import (
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestStopCmd_NoCloseFlagRemoved(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newStopCmd()
-	if cmd.Flags().Lookup("no-close") != nil {
-		t.Error("--no-close should be gone: stop never closes, so there is nothing to suppress")
-	}
-	if cmd.Flags().Lookup("no-forget") != nil {
-		t.Error("--no-forget should be gone: stop never closes, so there is nothing to suppress")
-	}
+	c.Nil(cmd.Flags().Lookup("no-close"), "--no-close should be gone: stop never closes, so there is nothing to suppress")
+	c.Nil(cmd.Flags().Lookup("no-forget"), "--no-forget should be gone: stop never closes, so there is nothing to suppress")
 }
 
 func TestStopCmd_KeepsKillAsAnAlias(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cmd := newStopCmd()
-	if cmd.Name() != "stop" {
-		t.Errorf("Name() = %q, want stop", cmd.Name())
-	}
+	c.Eq("stop", cmd.Name(), "Name()")
 	var hasKill, hasK bool
 	for _, a := range cmd.Aliases {
 		switch a {
@@ -34,32 +32,24 @@ func TestStopCmd_KeepsKillAsAnAlias(t *testing.T) {
 			hasK = true
 		}
 	}
-	if !hasKill {
-		t.Error("`kill` must stay an alias: it is in muscle memory and in scripts")
-	}
-	if !hasK {
-		t.Error("`k` was kill's short alias and must survive the rename")
-	}
+	c.True(hasKill, "`kill` must stay an alias: it is in muscle memory and in scripts")
+	c.True(hasK, "`k` was kill's short alias and must survive the rename")
 }
 
 func TestRenderStopResults_JSON_CarriesError(t *testing.T) {
+	c := assert.NewAborting(t)
 	results := []stopTargetResult{
 		{Arg: "c_ok", ChildID: "c_ok", Kill: &rafikiv1.KillResponse{ExitCode: int32Ptr(0)}},
 		{Arg: "c_bad", Err: errors.New("child not found")},
 	}
 	var buf bytes.Buffer
-	if err := renderStopResults(&buf, results, outputJSON, false); err != nil {
-		t.Fatalf("renderStopResults: %v", err)
-	}
+	c.NoError(renderStopResults(&buf, results, outputJSON, false), "renderStopResults")
 	var decoded struct {
 		Results []stopResultJSON `json:"results"`
 	}
-	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
-		t.Fatalf("decode output: %v (raw=%s)", err, buf.String())
-	}
-	if len(decoded.Results) != 2 {
-		t.Fatalf("results = %d, want 2", len(decoded.Results))
-	}
+	err := json.Unmarshal(buf.Bytes(), &decoded)
+	c.NoError(err, "decode output: %v (raw=%s)", err, buf.String())
+	c.Len(decoded.Results, 2, "results = %d, want 2", len(decoded.Results))
 	if decoded.Results[0].ID != "c_ok" || decoded.Results[0].Error != "" {
 		t.Errorf("results[0] = %+v, want id=c_ok error=\"\"", decoded.Results[0])
 	}
@@ -69,15 +59,12 @@ func TestRenderStopResults_JSON_CarriesError(t *testing.T) {
 }
 
 func TestRenderStopResults_Table_NoPanicOnNilExitCode(t *testing.T) {
+	c := assert.NewCollecting(t)
 	results := []stopTargetResult{
 		{Arg: "c_bad", Err: errors.New("child not found")},
 	}
 	var buf bytes.Buffer
-	if err := renderStopResults(&buf, results, outputTable, false); err != nil {
-		t.Fatalf("renderStopResults: %v", err)
-	}
+	c.Require().NoError(renderStopResults(&buf, results, outputTable, false), "renderStopResults")
 	out := buf.String()
-	if !strings.Contains(out, "c_bad") || !strings.Contains(out, "child not found") {
-		t.Errorf("table output missing id or error: %s", out)
-	}
+	c.False(!strings.Contains(out, "c_bad") || !strings.Contains(out, "child not found"), "table output missing id or error: %s", out)
 }

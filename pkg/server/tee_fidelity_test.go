@@ -21,6 +21,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/capture"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The fidelity rule: the tee mutates nothing except the model field.
@@ -48,6 +50,7 @@ const weirdSSE = "event: message_start\n" +
 	"event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 
 func TestMessagesTeePassesBodyAndHeadersByteFaithful(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var upstreamGotBody []byte
 	var upstreamGotHeaders http.Header
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,32 +80,18 @@ func TestMessagesTeePassesBodyAndHeadersByteFaithful(t *testing.T) {
 
 	// Request body reached the upstream byte-identical (model was already
 	// concrete: no resolution rewrite).
-	if !bytes.Equal(upstreamGotBody, []byte(fidelityBody)) {
-		t.Errorf("request body mutated by the tee:\n got: %s\nwant: %s", upstreamGotBody, fidelityBody)
-	}
+	c.True(bytes.Equal(upstreamGotBody, []byte(fidelityBody)), "request body mutated by the tee:\n got: %s\nwant: %s", upstreamGotBody, fidelityBody)
 	// Fidelity headers forwarded; inbound client auth stripped and replaced.
-	if got := upstreamGotHeaders.Get("anthropic-beta"); got != "prompt-caching-2024-07-31,other-beta" {
-		t.Errorf("anthropic-beta = %q", got)
-	}
+	c.Eq("prompt-caching-2024-07-31,other-beta", upstreamGotHeaders.Get("anthropic-beta"), "anthropic-beta =")
 	// x-session-id is an OpenRouter session-pinning concept: never forwarded
 	// to the Anthropic primary (keeps the primary request byte-exact to
 	// pre-extraction), forwarded on OpenRouter paths (tested below).
-	if got := upstreamGotHeaders.Get("x-session-id"); got != "" {
-		t.Errorf("x-session-id forwarded to the Anthropic primary: %q", got)
-	}
-	if got := upstreamGotHeaders.Get("anthropic-version"); got != "2023-06-01" {
-		t.Errorf("anthropic-version = %q", got)
-	}
-	if got := upstreamGotHeaders.Get("x-api-key"); got != "real-key" {
-		t.Errorf("x-api-key = %q, want the server key", got)
-	}
-	if got := upstreamGotHeaders.Get("Authorization"); got != "" {
-		t.Errorf("client Authorization leaked upstream: %q", got)
-	}
+	c.Eq("", upstreamGotHeaders.Get("x-session-id"), "x-session-id forwarded to the Anthropic primary")
+	c.Eq("2023-06-01", upstreamGotHeaders.Get("anthropic-version"), "anthropic-version =")
+	c.Eq("real-key", upstreamGotHeaders.Get("x-api-key"), "x-api-key")
+	c.Eq("", upstreamGotHeaders.Get("Authorization"), "client Authorization leaked upstream")
 	// Response stream reached the client byte-identical.
-	if rec.Body.String() != weirdSSE {
-		t.Errorf("response stream mutated:\n got: %q\nwant: %q", rec.Body.String(), weirdSSE)
-	}
+	c.Eq(weirdSSE, rec.Body.String(), "response stream mutated:\n got")
 }
 
 // The OpenRouter path of the messages face DOES forward x-session-id
@@ -126,12 +115,11 @@ func TestMessagesOpenRouterPathForwardsSessionID(t *testing.T) {
 	req.Header.Set("x-session-id", "sentinel-session-42")
 	p.ServeHTTP(rec, req)
 
-	if gotSession != "sentinel-session-42" {
-		t.Errorf("x-session-id on the OpenRouter path = %q, want forwarded", gotSession)
-	}
+	assert.NewCollecting(t).Eq("sentinel-session-42", gotSession, "x-session-id on the OpenRouter path")
 }
 
 func TestChatCompletionsProxyStreamsAndCaptures(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const chatSSE = `data: {"id":"cc-1","model":"openai/gpt-4o","choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}` + "\n\n" +
 		`data: {"id":"cc-1","choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}` + "\n\n" +
 		`data: {"id":"cc-1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":4}}}` + "\n\n" +
@@ -162,30 +150,18 @@ func TestChatCompletionsProxyStreamsAndCaptures(t *testing.T) {
 	req.Header.Set("x-session-id", "or-pin-9")
 	p.ServeHTTP(rec, req)
 
-	if rec.Body.String() != chatSSE {
-		t.Errorf("stream mutated:\n got: %q", rec.Body.String())
-	}
-	if gotAuth != "Bearer or-key" {
-		t.Errorf("upstream auth = %q", gotAuth)
-	}
-	if gotSession != "or-pin-9" {
-		t.Errorf("x-session-id = %q", gotSession)
-	}
-	if !bytes.Equal(gotBody, []byte(body)) {
-		t.Errorf("request body mutated (this face resolves nothing): %s", gotBody)
-	}
+	c.Eq(chatSSE, rec.Body.String(), "stream mutated:\n got")
+	c.Eq("Bearer or-key", gotAuth, "upstream auth =")
+	c.Eq("or-pin-9", gotSession, "x-session-id =")
+	c.True(bytes.Equal(gotBody, []byte(body)), "request body mutated (this face resolves nothing): %s", gotBody)
 	if fs.completes != 1 || fs.fails != 0 {
 		t.Fatalf("capture: completes=%d fails=%d, want 1/0", fs.completes, fs.fails)
 	}
 	if fs.last.StopReason != "stop" || fs.last.InputTokens != 12 || fs.last.OutputTokens != 9 || fs.last.CacheReadTokens != 4 {
 		t.Errorf("captured turn = %+v, want stop/12/9/cache4", fs.last)
 	}
-	if !strings.Contains(string(fs.last.Response), "Hello world") {
-		t.Errorf("canonical response missing accumulated content: %s", fs.last.Response)
-	}
-	if fs.lastIntent.Protocol != "openai" {
-		t.Errorf("protocol = %q, want openai", fs.lastIntent.Protocol)
-	}
+	c.StrContains(string(fs.last.Response), "Hello world", "canonical response missing accumulated content: %s", fs.last.Response)
+	c.Eq("openai", fs.lastIntent.Protocol, "protocol")
 }
 
 func TestChatCompletionsProxyFailsTurnOnUpstreamError(t *testing.T) {
@@ -205,9 +181,7 @@ func TestChatCompletionsProxyFailsTurnOnUpstreamError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"openai/gpt-4o"}`))
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusTooManyRequests {
-		t.Errorf("status = %d, want 429 passed through", rec.Code)
-	}
+	assert.NewCollecting(t).Eq(http.StatusTooManyRequests, rec.Code, "status")
 	if fs.fails != 1 || fs.completes != 0 {
 		t.Errorf("capture: fails=%d completes=%d, want 1/0", fs.fails, fs.completes)
 	}
@@ -239,9 +213,7 @@ func TestChatCompletionsRoutesByModelPrefix(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`"}`))
 		p.ServeHTTP(rec, req)
 	}
-	if len(hits) != 2 || hits[0] != "default" || hits[1] != "special" {
-		t.Errorf("routing hits = %v, want [default special]", hits)
-	}
+	assert.NewCollecting(t).False(len(hits) != 2 || hits[0] != "default" || hits[1] != "special", "routing hits = %v, want [default special]", hits)
 }
 
 func TestUserTokenAuth_HeaderVariantsMultipleUsers(t *testing.T) {
@@ -266,6 +238,7 @@ func TestUserTokenAuth_HeaderVariantsMultipleUsers(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			gotIdentity = nil
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -273,12 +246,8 @@ func TestUserTokenAuth_HeaderVariantsMultipleUsers(t *testing.T) {
 				req.Header.Set(c.hdr, c.value)
 			}
 			h.ServeHTTP(rec, req)
-			if rec.Code != c.wantStatus {
-				t.Fatalf("status = %d, want %d", rec.Code, c.wantStatus)
-			}
-			if c.wantUser != "" && (gotIdentity == nil || gotIdentity.Username != c.wantUser) {
-				t.Errorf("identity = %+v, want %q", gotIdentity, c.wantUser)
-			}
+			ck.Require().Eq(c.wantStatus, rec.Code, "status")
+			ck.False(c.wantUser != "" && (gotIdentity == nil || gotIdentity.Username != c.wantUser), "identity = %+v, want %q", gotIdentity, c.wantUser)
 		})
 	}
 }
@@ -354,9 +323,7 @@ func TestMessagesOpenRouterPathFallsBackToConvID(t *testing.T) {
 	// No x-session-id set.
 	p.ServeHTTP(rec, req)
 
-	if gotSession != "conv-openai" {
-		t.Errorf("x-session-id fallback = %q, want rafiki's conversation id", gotSession)
-	}
+	assert.NewCollecting(t).Eq("conv-openai", gotSession, "x-session-id fallback")
 }
 
 // The OpenAI face has the same fallback: no client x-session-id, fall back
@@ -383,9 +350,7 @@ func TestChatCompletionsFallsBackToConvID(t *testing.T) {
 	// No x-session-id set.
 	p.ServeHTTP(rec, req)
 
-	if gotSession != "conv-openai" {
-		t.Errorf("x-session-id fallback = %q, want rafiki's conversation id", gotSession)
-	}
+	assert.NewCollecting(t).Eq("conv-openai", gotSession, "x-session-id fallback")
 }
 
 // End-to-end tee against a REAL capture store (RAFIKI_TEST_DSN): adversarial
@@ -393,18 +358,15 @@ func TestChatCompletionsFallsBackToConvID(t *testing.T) {
 // reassembled canonical response — the fake-store tests can't catch
 // store-layer marshaling issues.
 func TestMessagesTeeWithRealStore(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
-		}
+		c.Require().Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(admin.Close)
 	name := fmt.Sprintf("rafiki_tee_%d", time.Now().UnixNano())
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
@@ -412,18 +374,12 @@ func TestMessagesTeeWithRealStore(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)") })
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(store.Migrate(ctx, pool))
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -444,52 +400,37 @@ func TestMessagesTeeWithRealStore(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "tee-real-store")
 	p.ServeHTTP(rec, req)
 
-	if rec.Body.String() != weirdSSE {
-		t.Fatalf("stream mutated under real store")
-	}
+	c.Require().Eq(weirdSSE, rec.Body.String(), "stream mutated under real store")
 	var status string
 	var responseNull bool
 	var outTokens int64
-	if err := pool.QueryRow(ctx, `SELECT t.status, t.response IS NULL, t.output_tokens
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT t.status, t.response IS NULL, t.output_tokens
 		FROM conversations.conversation_turn t
 		JOIN conversations.conversation c ON c.id = t.conversation_id
-		WHERE c.external_ref = 'tee-real-store'`).Scan(&status, &responseNull, &outTokens); err != nil {
-		t.Fatalf("read captured turn: %v", err)
-	}
-	if status != "complete" || outTokens != 7 {
-		t.Errorf("turn = %s/%d tokens, want complete/7", status, outTokens)
-	}
-	if !responseNull {
-		t.Error("turn.response should be NULL; decomposition replaces the full-JSONB write")
-	}
+		WHERE c.external_ref = 'tee-real-store'`).Scan(&status, &responseNull, &outTokens), "read captured turn")
+	c.False(status != "complete" || outTokens != 7, "turn = %s/%d tokens, want complete/7", status, outTokens)
+	c.True(responseNull, "turn.response should be NULL; decomposition replaces the full-JSONB write")
 	// The canonical response's marshaling correctness is now verified via the
 	// decomposed assistant conversation_message instead of turn.response.
 	var msgContent string
-	if err := pool.QueryRow(ctx, `SELECT m.content::text
+	c.Require().NoError(pool.QueryRow(ctx, `SELECT m.content::text
 		FROM conversations.conversation_message m
 		JOIN conversations.conversation c ON c.id = m.conversation_id
-		WHERE c.external_ref = 'tee-real-store' AND m.role = 'assistant'`).Scan(&msgContent); err != nil {
-		t.Fatalf("read decomposed assistant message: %v", err)
-	}
+		WHERE c.external_ref = 'tee-real-store' AND m.role = 'assistant'`).Scan(&msgContent), "read decomposed assistant message")
 	var content any
-	if err := json.Unmarshal([]byte(msgContent), &content); err != nil {
-		t.Errorf("decomposed assistant content is not valid JSON: %v", err)
-	}
+	c.NoError(json.Unmarshal([]byte(msgContent), &content), "decomposed assistant content is not valid JSON")
 }
 
 // OpenAI SSE tool_calls deltas (fragmented arguments) reassemble into the
 // canonical message; undecodable chunks and empty streams are parse errors.
 func TestParseOpenAIResponseToolCallsAndStrictness(t *testing.T) {
+	c := assert.NewCollecting(t)
 	toolSSE := `data: {"id":"cc-2","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"ci"}}]},"finish_reason":null}]}` + "\n\n" +
 		`data: {"id":"cc-2","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ty\":\"sf\"}"}}]},"finish_reason":"tool_calls"}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	finish, _, canonical, err := parseOpenAIResponse("text/event-stream", []byte(toolSSE))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if finish != "tool_calls" {
-		t.Errorf("finish = %q", finish)
-	}
+	c.Require().NoError(err, "parse")
+	c.Eq("tool_calls", finish, "finish =")
 	var m struct {
 		Choices []struct {
 			Message struct {
@@ -497,14 +438,10 @@ func TestParseOpenAIResponseToolCallsAndStrictness(t *testing.T) {
 			} `json:"message"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(canonical, &m); err != nil {
-		t.Fatalf("canonical: %v", err)
-	}
+	c.Require().NoError(json.Unmarshal(canonical, &m), "canonical")
 	tc := m.Choices[0].Message.ToolCalls
-	if len(tc) != 1 || tc[0].ID != "call_1" || tc[0].Function.Name != "get_weather" ||
-		tc[0].Function.Arguments != `{"city":"sf"}` {
-		t.Errorf("tool_calls reassembly wrong: %+v", tc)
-	}
+	c.False(len(tc) != 1 || tc[0].ID != "call_1" || tc[0].Function.Name != "get_weather" ||
+		tc[0].Function.Arguments != `{"city":"sf"}`, "tool_calls reassembly wrong: %+v", tc)
 
 	// Strictness: garbage chunk and empty stream are errors, not silent
 	// zero-usage completions.
@@ -530,6 +467,7 @@ func TestParseOpenAIResponseToolCallsAndStrictness(t *testing.T) {
 // the upstream parks after message_start + a ping, and the client must
 // observe the ping BEFORE the upstream is released.
 func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sseHead := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"id":"msg_ping","type":"message","role":"assistant","model":"claude-opus-4-8","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}` + "\n\n"
 	ssePing := "event: ping\n" + `data: {"type":"ping"}` + "\n\n"
@@ -564,9 +502,7 @@ func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(fidelityBody))
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
+	c.Require().NoError(err, "post")
 	defer resp.Body.Close()
 
 	lines := make(chan string)
@@ -609,12 +545,8 @@ func TestMessagesTeeForwardsPingsDuringUpstreamSilence(t *testing.T) {
 		case line := <-lines:
 			got.WriteString(line)
 		case rerr := <-readErr:
-			if rerr != io.EOF {
-				t.Fatalf("read: %v", rerr)
-			}
-			if want := sseHead + ssePing + sseTail; got.String() != want {
-				t.Errorf("stream mutated:\n got: %q\nwant: %q", got.String(), want)
-			}
+			c.Require().False(rerr != io.EOF, "read: %v", rerr)
+			c.Eq(sseHead+ssePing+sseTail, got.String(), "stream mutated:\n got")
 			return
 		case <-time.After(10 * time.Second):
 			t.Fatal("stream did not finish after upstream release")

@@ -23,6 +23,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // replayStdout reads a fanEvent into its stdout payload for assertions.
@@ -33,6 +35,7 @@ func replayStdout(ev *fanEvent) string { return string(ev.Response().GetStdout()
 // subscribe. The old fan dropped all three events silently; the belt must
 // replay them in broadcast order. Fails against the pre-belt code.
 func TestPoolReplayBeltBuffersBeforeTheFirstSubscribe(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := New(NewRegistry())
 	holder := newRelayHolder("c1", nil, pool)
 
@@ -54,23 +57,15 @@ func TestPoolReplayBeltBuffersBeforeTheFirstSubscribe(t *testing.T) {
 	for i, w := range want {
 		select {
 		case ev, ok := <-ch:
-			if !ok {
-				t.Fatalf("event %d: channel closed early", i)
-			}
-			if ev.Err() != nil {
-				t.Fatalf("event %d: unexpected stream error: %v", i, ev.Err())
-			}
+			c.True(ok, "event %d: channel closed early", i)
+			c.NoError(ev.Err(), "event %d: unexpected stream error", i)
 			if w.code == 0 {
-				if got := replayStdout(ev); got != w.text {
-					t.Fatalf("event %d: stdout = %q, want %q (replay dropped or reordered)", i, got, w.text)
-				}
+				got := replayStdout(ev)
+				c.Eq(w.text, got, "event %d: stdout = %q, want %q (replay dropped or reordered)", i, got, w.text)
 			} else {
-				if ev.Response().GetExited() == nil {
-					t.Fatalf("event %d: want an Exited event, got %T", i, ev.Response().GetEvent())
-				}
-				if code := ev.Response().GetExited().ExitCode; code != w.code {
-					t.Fatalf("event %d: exit code = %d, want %d (the lost-exit defect)", i, code, w.code)
-				}
+				c.NotNil(ev.Response().GetExited(), "event %d: want an Exited event, got %T", i, ev.Response().GetEvent())
+				code := ev.Response().GetExited().ExitCode
+				c.Eq(w.code, code, "event %d: exit code = %d, want %d (the lost-exit defect)", i, code, w.code)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("event %d never replayed: the pre-subscribe broadcast was dropped", i)
@@ -83,6 +78,7 @@ func TestPoolReplayBeltBuffersBeforeTheFirstSubscribe(t *testing.T) {
 // order — a terminal event is by definition the last one, so it must survive
 // an overflow (the Exited broadcast itself evicts the oldest buffered event).
 func TestPoolReplayBeltIsBoundedDropOldest(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := New(NewRegistry())
 	holder := newRelayHolder("c1", nil, pool)
 
@@ -92,9 +88,7 @@ func TestPoolReplayBeltIsBoundedDropOldest(t *testing.T) {
 	}
 	holder.broadcast(fanEvent{resp: exited(9, "")})
 
-	if len(pool.replay["c1"]) != relayReplayMax {
-		t.Fatalf("belt holds %d events, want the %d cap", len(pool.replay["c1"]), relayReplayMax)
-	}
+	c.Len(pool.replay["c1"], relayReplayMax, "belt holds %d events, want the %d cap", len(pool.replay["c1"]), relayReplayMax)
 
 	ch, unsub := holder.subscribe()
 	defer unsub()
@@ -107,9 +101,7 @@ func TestPoolReplayBeltIsBoundedDropOldest(t *testing.T) {
 		select {
 		case ev := <-ch:
 			b := ev.Response().GetStdout()
-			if b == nil {
-				t.Fatalf("event %d: want stdout, got %T", i, ev.Response().GetEvent())
-			}
+			c.NotNil(b, "event %d: want stdout, got %T", i, ev.Response().GetEvent())
 			if want := byte(i + 1 + (emit - relayReplayMax)); b[0] != want {
 				t.Fatalf("event %d: seq %d, want %d (oldest events should have been dropped)", i, b[0], want)
 			}
@@ -133,6 +125,7 @@ func TestPoolReplayBeltIsBoundedDropOldest(t *testing.T) {
 // delivered twice to a consumer that already processed it, see the belt's
 // doc comment in relay.go).
 func TestPoolReplayBeltSecondSubscriberGetsNoReplay(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := New(NewRegistry())
 	holder := newRelayHolder("c1", nil, pool)
 
@@ -143,9 +136,7 @@ func TestPoolReplayBeltSecondSubscriberGetsNoReplay(t *testing.T) {
 	// Drain the replay so the first subscriber is caught up.
 	select {
 	case ev := <-first:
-		if replayStdout(ev) != "early" {
-			t.Fatalf("first subscriber replay = %q, want %q", replayStdout(ev), "early")
-		}
+		c.Eq("early", replayStdout(ev), "first subscriber replay")
 	case <-time.After(2 * time.Second):
 		t.Fatal("the first subscriber never received the replay")
 	}
@@ -165,9 +156,7 @@ func TestPoolReplayBeltSecondSubscriberGetsNoReplay(t *testing.T) {
 	for name, ch := range map[string]<-chan *fanEvent{"first": first, "second": second} {
 		select {
 		case ev := <-ch:
-			if replayStdout(ev) != "live" {
-				t.Fatalf("%s subscriber got %q, want %q", name, replayStdout(ev), "live")
-			}
+			c.Eq("live", replayStdout(ev), "%s subscriber got %q, want", name, replayStdout(ev))
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s subscriber did not receive the live event", name)
 		}
@@ -181,6 +170,7 @@ func TestPoolReplayBeltSecondSubscriberGetsNoReplay(t *testing.T) {
 // the events over (channel closes after) so the pump can still learn the
 // outcome instead of retrying into a gone connection.
 func TestPoolReplayBeltSurvivesHolderDeath(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := New(NewRegistry())
 	holder := newRelayHolder("c1", nil, pool)
 
@@ -191,27 +181,19 @@ func TestPoolReplayBeltSurvivesHolderDeath(t *testing.T) {
 	holder.stop()
 
 	ch, unsub, err := pool.Watch("c1")
-	if err != nil {
-		t.Fatalf("Watch with a non-empty belt must serve the belt, got: %v", err)
-	}
+	c.NoError(err, "Watch with a non-empty belt must serve the belt, got")
 	defer unsub()
 
 	select {
 	case ev, ok := <-ch:
-		if !ok {
-			t.Fatal("belt channel closed before delivering the events")
-		}
-		if replayStdout(ev) != "life " {
-			t.Fatalf("belt delivered %q, want the buffered stdout", replayStdout(ev))
-		}
+		c.True(ok, "belt channel closed before delivering the events")
+		c.Eq("life ", replayStdout(ev), "belt delivered")
 	case <-time.After(2 * time.Second):
 		t.Fatal("the belt was lost with the holder (the pre-fix strand)")
 	}
 	select {
 	case ev, ok := <-ch:
-		if !ok {
-			t.Fatal("belt channel closed before delivering the exit")
-		}
+		c.True(ok, "belt channel closed before delivering the exit")
 		if ev.Response().GetExited() == nil || ev.Response().GetExited().ExitCode != 7 {
 			t.Fatalf("belt delivered %T, want the Exited event", ev.Response().GetEvent())
 		}
@@ -219,16 +201,13 @@ func TestPoolReplayBeltSurvivesHolderDeath(t *testing.T) {
 		t.Fatal("the exit never survived the holder death")
 	}
 	// Delivered exactly once: the channel closes after the belt.
-	if _, ok := <-ch; ok {
-		t.Fatal("the belt channel must close after handing the events over")
-	}
+	_, ok := <-ch
+	c.False(ok, "the belt channel must close after handing the events over")
 
 	// And a Watch afterwards propagates the no-connection error (the pump's
 	// retry contract) — the belt was consumed.
 	_, _, err = pool.Watch("c1")
-	if err == nil {
-		t.Fatal("Watch with no connection and an empty belt must fail (retry contract)")
-	}
+	c.Error(err, "Watch with no connection and an empty belt must fail (retry contract)")
 }
 
 // TestBeltIsPumpOnlyAdminWatchGetsLiveOnly pins H-7: the replay belt is the
@@ -240,6 +219,7 @@ func TestPoolReplayBeltSurvivesHolderDeath(t *testing.T) {
 // the first assertion fails: the admin drains the belt and the pump's next
 // Watch re-strands the child as `streaming` forever.
 func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
+	c := assert.NewAborting(t)
 	reg := NewRegistry()
 	pool := New(reg)
 	// A registered "live" connection whose holder never starts a receive
@@ -267,9 +247,7 @@ func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
 	// see nothing buffered. What it misses while unsubscribed is dropped FOR
 	// it, never taken from the pump.
 	adminCh, unsubAdmin, err := pool.WatchLive("c1")
-	if err != nil {
-		t.Fatalf("WatchLive with a live connection: %v", err)
-	}
+	c.NoError(err, "WatchLive with a live connection")
 	defer unsubAdmin()
 	select {
 	case ev := <-adminCh:
@@ -280,15 +258,11 @@ func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
 	// The pump's Watch drains the belt in broadcast order, terminal event
 	// included, and the belt is gone afterwards.
 	pumpCh, unsubPump, err := pool.Watch("c1")
-	if err != nil {
-		t.Fatalf("pump Watch with a non-empty belt: %v", err)
-	}
+	c.NoError(err, "pump Watch with a non-empty belt")
 	defer unsubPump()
 	select {
 	case ev := <-pumpCh:
-		if got := replayStdout(ev); got != "life " {
-			t.Fatalf("pump replay = %q, want the buffered stdout", got)
-		}
+		c.Eq("life ", replayStdout(ev), "pump replay")
 	case <-time.After(2 * time.Second):
 		t.Fatal("the pump never received the belted stdout (the admin took it)")
 	}
@@ -303,9 +277,7 @@ func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
 	pool.mu.RLock()
 	empty := len(pool.replay["c1"])
 	pool.mu.RUnlock()
-	if empty != 0 {
-		t.Fatalf("belt still holds %d events after the pump's Watch", empty)
-	}
+	c.Eq(0, empty, "belt still holds")
 
 	// Live events reach BOTH subscribers from here on — the admin's
 	// live-only semantics are identical to today's live behaviour.
@@ -332,6 +304,7 @@ func TestBeltIsPumpOnlyAdminWatchGetsLiveOnly(t *testing.T) {
 // with no live connection and an empty belt, Watch propagates the error (the
 // pump's retry contract) instead of serving anything.
 func TestDropReplayKillsTheBeltAndItCannotBeRevived(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := New(NewRegistry())
 	holder := newRelayHolder("c1", nil, pool)
 
@@ -342,27 +315,21 @@ func TestDropReplayKillsTheBeltAndItCannotBeRevived(t *testing.T) {
 	pool.mu.RLock()
 	held := len(pool.replay["c1"])
 	pool.mu.RUnlock()
-	if held != 2 {
-		t.Fatalf("setup: belt holds %d events, want 2", held)
-	}
+	c.Eq(2, held, "setup: belt holds")
 
 	pool.DropReplay("c1")
 
 	pool.mu.RLock()
 	held = len(pool.replay["c1"])
 	pool.mu.RUnlock()
-	if held != 0 {
-		t.Fatalf("belt still holds %d events after DropReplay (the per-child leak)", held)
-	}
+	c.Eq(0, held, "belt still holds")
 
 	// A later Watch gets the no-connection error — the killed child's frames
 	// cannot be revived from anywhere.
-	if _, _, err := pool.Watch("c1"); err == nil {
-		t.Fatal("Watch after DropReplay served a belt; a killed child's frames must not be revivable")
-	}
-	if _, ok := pool.takeReplayChan("c1"); ok {
-		t.Fatal("takeReplayChan after DropReplay must find nothing")
-	}
+	_, _, err := pool.Watch("c1")
+	c.Error(err, "Watch after DropReplay served a belt; a killed child's frames must not be revivable")
+	_, ok := pool.takeReplayChan("c1")
+	c.False(ok, "takeReplayChan after DropReplay must find nothing")
 
 	// Idempotent: Kill, Close and Evict may all run for one child.
 	pool.DropReplay("c1")
@@ -412,6 +379,7 @@ func (stubFastExitDaraja) Health(context.Context, *connect.Request[darajapb.Heal
 // still deliver stdout AND the exit, the two inputs a script child's settle
 // is computed from. With the pre-belt fan this hangs as "streaming forever".
 func TestScriptExitBeforeTheFirstSubscribeStillReachesTheRunner(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool, _, teardown := connectFakeDaraja(t, stubFastExitDaraja{})
 	defer teardown()
 
@@ -434,15 +402,11 @@ func TestScriptExitBeforeTheFirstSubscribeStillReachesTheRunner(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !bufferedExited {
-		t.Fatal("the exit was never buffered pre-subscribe — the test no longer reproduces the drop window")
-	}
+	c.True(bufferedExited, "the exit was never buffered pre-subscribe — the test no longer reproduces the drop window")
 
 	r := NewRunner(pool, "c1")
 	_, stdoutR, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("runner start: %v", err)
-	}
+	c.NoError(err, "runner start")
 	defer stdoutR.Close()
 
 	// The stdout pipe is SYNCHRONOUS (io.Pipe): the replayed stdout chunk
@@ -461,12 +425,8 @@ func TestScriptExitBeforeTheFirstSubscribeStillReachesTheRunner(t *testing.T) {
 	}()
 	select {
 	case got := <-done:
-		if got[0] != 7 {
-			t.Fatalf("Wait = code %d, want 7 (the lost-exit defect: the child would hang as streaming forever)", got[0])
-		}
-		if out := <-stdoutDone; out != "fast-out\n" {
-			t.Fatalf("stdout = %q, want the replayed chunk verbatim", out)
-		}
+		c.Eq(7, got[0], "Wait = code")
+		c.Eq("fast-out\n", <-stdoutDone, "stdout")
 	case <-time.After(10 * time.Second):
 		t.Fatal("the script's exit never reached the runner (the child would hang as streaming forever)")
 	}

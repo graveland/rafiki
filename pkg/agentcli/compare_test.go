@@ -13,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeBackend is a Backend stub for Compare tests: Analyze looks up the
@@ -66,38 +68,30 @@ func (*fakeBackend) SetFindingStatus(context.Context, string, string) (store.Fin
 }
 
 func TestCompareRunsEachModelAndIsolatesFailures(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &fakeBackend{byModel: map[string]*Summary{
 		"claude-haiku-4-5": {Analyzed: 1, Ranked: []RankedFindingWithDraft{{RankedFinding: analyze.RankedFinding{Finding: analyze.Finding{Axis: "grind", Title: "a"}}}}},
 	}, failFor: map[string]bool{"broken/model": true}}
 	runs, err := Compare(context.Background(), fake, AnalyzeRequest{Profile: &analyze.Profile{}}, []string{"claude-haiku-4-5", "broken/model"}, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("want a run per model, got %d", len(runs))
-	}
+	c.Require().NoError(err)
+	c.Require().Len(runs, 2, "want a run per model, got %d", len(runs))
 	if runs[0].Err != nil || runs[0].Summary.Analyzed != 1 {
 		t.Errorf("first run should succeed: %+v", runs[0])
 	}
-	if runs[1].Err == nil {
-		t.Error("failing model must record its error, not abort the sweep")
-	}
+	c.Error(runs[1].Err, "failing model must record its error, not abort the sweep")
 }
 
 func TestRenderCompareTable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
 	err := RenderCompare(&b, []CompareRun{
 		{Model: "claude-haiku-4-5", Summary: &Summary{Analyzed: 1, Ranked: []RankedFindingWithDraft{{RankedFinding: analyze.RankedFinding{Finding: analyze.Finding{Axis: "grind", Title: "a"}}}}, Totals: Totals{OutputTokens: 500}}},
 		{Model: "broken/model", Err: errors.New("upstream refused")},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	out := b.String()
 	for _, want := range []string{"claude-haiku-4-5", "broken/model", "ERROR"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("compare table missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "compare table missing")
 	}
 }
 
@@ -107,26 +101,19 @@ func TestRenderCompareTable(t *testing.T) {
 // succeeded. A partial failure (at least one model ok) must still report a
 // nil error — each run's own Err/failed() already carries that signal.
 func TestCompareErrorsWhenEveryModelFails(t *testing.T) {
+	c := assert.NewAborting(t)
 	allFail := &fakeBackend{failFor: map[string]bool{"a": true, "b": true}}
 	runs, err := Compare(context.Background(), allFail, AnalyzeRequest{Profile: &analyze.Profile{}}, []string{"a", "b"}, t.TempDir())
-	if err == nil {
-		t.Fatal("want an error when every model in the sweep failed")
-	}
-	if len(runs) != 2 {
-		t.Fatalf("want a run per model even on total failure, got %d", len(runs))
-	}
+	c.Error(err, "want an error when every model in the sweep failed")
+	c.Len(runs, 2, "want a run per model even on total failure, got %d", len(runs))
 
 	partial := &fakeBackend{
 		byModel: map[string]*Summary{"ok-model": {Analyzed: 1}},
 		failFor: map[string]bool{"broken-model": true},
 	}
 	runs, err = Compare(context.Background(), partial, AnalyzeRequest{Profile: &analyze.Profile{}}, []string{"ok-model", "broken-model"}, t.TempDir())
-	if err != nil {
-		t.Fatalf("a partial failure (one model ok) must not error Compare itself: %v", err)
-	}
-	if len(runs) != 2 || runs[1].Err == nil {
-		t.Fatalf("the failing model's own run must still record its error: %+v", runs)
-	}
+	c.NoError(err, "a partial failure (one model ok) must not error Compare itself")
+	c.False(len(runs) != 2 || runs[1].Err == nil, "the failing model's own run must still record its error: %+v", runs)
 }
 
 // TestRenderCompareDistinguishesZeroAnalyzedFailureFromOK covers Fix 6's
@@ -134,25 +121,19 @@ func TestCompareErrorsWhenEveryModelFails(t *testing.T) {
 // nonetheless recorded per-conversation failures rendered as "ok" before
 // this fix — identical to a run that simply had zero eligible candidates.
 func TestRenderCompareDistinguishesZeroAnalyzedFailureFromOK(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var b bytes.Buffer
 	err := RenderCompare(&b, []CompareRun{
 		{Model: "quietly-failed", Summary: nil, Analyzed: 0, Failed: 3},
 		{Model: "genuinely-empty", Summary: &Summary{Analyzed: 0, Skipped: 5}, Analyzed: 0, Failed: 0},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	out := b.String()
-	if !strings.Contains(out, "FAILED") {
-		t.Errorf("a zero-analyzed run with recorded failures must render FAILED, got:\n%s", out)
-	}
-	if !strings.Contains(out, "genuinely-empty") {
-		t.Errorf("missing genuinely-empty row:\n%s", out)
-	}
+	c.StrContains(out, "FAILED", "a zero-analyzed run with recorded failures must render FAILED, got:\n")
+	c.StrContains(out, "genuinely-empty", "missing genuinely-empty row:\n")
 }
 
 func TestModelSlug(t *testing.T) {
-	if got := modelSlug("~moonshotai/kimi-latest"); strings.ContainsAny(got, "/~") {
-		t.Fatalf("slug %q must be path-safe", got)
-	}
+	got := modelSlug("~moonshotai/kimi-latest")
+	assert.NewAborting(t).False(strings.ContainsAny(got, "/~"), "slug %q must be path-safe", got)
 }

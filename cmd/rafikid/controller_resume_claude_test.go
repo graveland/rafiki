@@ -8,42 +8,38 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestResolveSpawnPlan_Claude(t *testing.T) {
+	c := assert.NewAborting(t)
 	_, argv, prov, err := resolveSpawnPlan(protocol.SpawnRequest{
 		Kind:     "claude",
 		PiBinary: "/custom/claude",
 		Model:    "claude-opus-4-8",
 	}, "", "", proxyenv.Values{})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if _, ok := prov.(child.ClaudeProvider); !ok {
-		t.Fatalf("provider = %T, want child.ClaudeProvider", prov)
-	}
-	if !strings.Contains(strings.Join(argv, " "), "--input-format stream-json") {
-		t.Fatalf("argv missing stream-json: %v", argv)
-	}
+	c.NoError(err, "err")
+	_, ok := prov.(child.ClaudeProvider)
+	c.True(ok, "provider = %T, want child.ClaudeProvider", prov)
+	c.StrContains(strings.Join(argv, " "), "--input-format stream-json", "argv missing stream-json: %v", argv)
 }
 
 func TestResolveSpawnPlan_DefaultKind(t *testing.T) {
+	c := assert.NewAborting(t)
 	_, _, prov, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "", Model: "anthropic/test"}, "", "st", proxyenv.Values{})
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if _, ok := prov.(child.IdentityProvider); !ok {
-		t.Fatalf("empty kind should default to IdentityProvider (fundi), got %T", prov)
-	}
+	c.NoError(err, "err")
+	_, ok := prov.(child.IdentityProvider)
+	c.True(ok, "empty kind should default to IdentityProvider (fundi), got %T", prov)
 }
 
 func TestResolveSpawnPlan_UnknownKind(t *testing.T) {
-	if _, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}, "", "", proxyenv.Values{}); err == nil {
-		t.Fatal("expected error for unknown kind")
-	}
+	_, _, _, err := resolveSpawnPlan(protocol.SpawnRequest{Kind: "bogus"}, "", "", proxyenv.Values{})
+	assert.NewAborting(t).Error(err, "expected error for unknown kind")
 }
 
 func TestResumeRequestFromSnapshot_Claude(t *testing.T) {
+	c := assert.NewAborting(t)
 	snap := childstore.Snapshot{
 		Cwd:       "/tmp",
 		Kind:      "claude",
@@ -52,12 +48,8 @@ func TestResumeRequestFromSnapshot_Claude(t *testing.T) {
 		SessionID: "sess-xyz",
 	}
 	req := resumeRequestFromSnapshot(snap, "")
-	if req.Kind != "claude" || req.ConfigDir != "/home/u/.claude-personal" {
-		t.Fatalf("kind/configdir not carried: %+v", req)
-	}
-	if req.ResumeSession != "sess-xyz" {
-		t.Fatalf("claude must resume by session id, got ResumeSession=%q", req.ResumeSession)
-	}
+	c.False(req.Kind != "claude" || req.ConfigDir != "/home/u/.claude-personal", "kind/configdir not carried: %+v", req)
+	c.Eq("sess-xyz", req.ResumeSession, "claude must resume by session id, got ResumeSession=")
 }
 
 func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
@@ -68,9 +60,7 @@ func TestResumeRequestFromSnapshot_Pi(t *testing.T) {
 		SessionID:   "ignored-for-pi",
 	}
 	req := resumeRequestFromSnapshot(snap, "")
-	if req.ResumeSession != "/tmp/sessions/s.jsonl" {
-		t.Fatalf("pi must resume by session file path, got %q", req.ResumeSession)
-	}
+	assert.NewAborting(t).Eq("/tmp/sessions/s.jsonl", req.ResumeSession, "pi must resume by session file path, got")
 }
 
 // TestResumeRequestFromSnapshot_CarriesRecordRequests guards against the bug
@@ -88,8 +78,6 @@ func TestResumeRequestFromSnapshot_CarriesRecordRequests(t *testing.T) {
 			RecordRequests: want,
 		}
 		req := resumeRequestFromSnapshot(snap, "")
-		if req.RecordRequests != want {
-			t.Fatalf("RecordRequests = %v, want %v — resumed child must keep the flag it was spawned with", req.RecordRequests, want)
-		}
+		assert.NewAborting(t).Eq(want, req.RecordRequests, "RecordRequests")
 	}
 }

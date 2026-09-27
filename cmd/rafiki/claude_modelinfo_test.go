@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/profile"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // unreachableDaemonProfile seeds an isolated profile manifest naming a socket
@@ -16,16 +18,13 @@ import (
 // if a real daemon happens to be running.
 func unreachableDaemonProfile(t *testing.T) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"scratch": {Name: "scratch", Socket: filepath.Join(t.TempDir(), "no-such.sock")},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("scratch"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.SavePointer("scratch"), "SavePointer")
 }
 
 // The behaviour that must never regress: an unreachable daemon returns 0,
@@ -41,23 +40,18 @@ func TestAutoCompactWindowReturnsZeroWhenDaemonDown(t *testing.T) {
 	unreachableDaemonProfile(t)
 
 	got := claudeAutoCompactWindow(context.Background(), nil, "anthropic/claude-opus-5")
-	if got != 0 {
-		t.Fatalf("an unreachable daemon must yield 0, got %d", got)
-	}
+	assert.NewAborting(t).Eq(0, got, "an unreachable daemon must yield 0, got")
 }
 
 // Bounded: a slow lookup must not delay the launch. The whole RPC is raced
 // against a budget; whatever replaces it must keep that property.
 func TestAutoCompactWindowIsBounded(t *testing.T) {
+	c := assert.NewAborting(t)
 	unreachableDaemonProfile(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already dead
 	start := time.Now()
-	if got := claudeAutoCompactWindow(ctx, nil, "anthropic/claude-opus-5"); got != 0 {
-		t.Fatalf("got %d", got)
-	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("took %s; the lookup must never delay a launch", d)
-	}
+	c.Eq(0, claudeAutoCompactWindow(ctx, nil, "anthropic/claude-opus-5"), "got")
+	c.LessOrEqual(2*time.Second, time.Since(start), "took")
 }

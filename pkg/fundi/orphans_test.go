@@ -10,6 +10,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // capturingSender is a scripted llm.Sender (same replay-in-order contract as
@@ -36,9 +38,7 @@ func newCapturingSender(t *testing.T, bodies ...string) *capturingSender {
 	s := &capturingSender{}
 	for i, b := range bodies {
 		var msg anthropic.Message
-		if err := json.Unmarshal([]byte(b), &msg); err != nil {
-			t.Fatalf("capturingSender: unmarshal scripted body %d: %v", i, err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal([]byte(b), &msg), "capturingSender: unmarshal scripted body %d", i)
 		s.turns = append(s.turns, &msg)
 	}
 	return s
@@ -80,9 +80,7 @@ func (s *capturingSender) lastParams(t *testing.T) anthropic.MessageNewParams {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.captured) == 0 {
-		t.Fatal("capturingSender: New was never called")
-	}
+	assert.NewAborting(t).NotEmpty(s.captured, "capturingSender: New was never called")
 	return s.captured[len(s.captured)-1]
 }
 
@@ -94,6 +92,7 @@ func (s *capturingSender) lastParams(t *testing.T) anthropic.MessageNewParams {
 // exists to restore.
 func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam, toolUseID string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	for i, m := range msgs {
 		if m.Role != anthropic.MessageParamRoleAssistant {
 			continue
@@ -108,14 +107,9 @@ func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam,
 		if !hasToolUse {
 			continue
 		}
-		if i+1 >= len(msgs) {
-			t.Fatalf("request has %d messages; the assistant message with tool_use %q is the last one — no follow-up tool_result",
-				len(msgs), toolUseID)
-		}
+		c.Less(len(msgs), i+1, "request has %d messages; the assistant message with tool_use %q is the last one — no follow-up tool_result", len(msgs), toolUseID)
 		next := msgs[i+1]
-		if next.Role != anthropic.MessageParamRoleUser {
-			t.Fatalf("message after tool_use %q has role %v, want user", toolUseID, next.Role)
-		}
+		c.Eq(anthropic.MessageParamRoleUser, next.Role, "message after tool_use %q has role %v, want user", toolUseID, next.Role)
 		for _, block := range next.Content {
 			if tr := block.OfToolResult; tr != nil && tr.ToolUseID == toolUseID {
 				return
@@ -132,51 +126,41 @@ func assertToolResultFollowsToolUse(t *testing.T, msgs []anthropic.MessageParam,
 // RepairOrphans doesn't touch.
 func testConversation(t *testing.T, bodies ...string) *llm.Conversation {
 	t.Helper()
+	c := assert.NewAborting(t)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", scriptedSender(t, bodies...)),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	return conv
 }
 
 func TestRepairOrphansOnEmptyConversation(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	n, err := RepairOrphans(context.Background(), conv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Fatalf("RepairOrphans on an empty conversation synthesized %d results, want 0", n)
-	}
+	c.NoError(err)
+	c.Eq(0, n, "RepairOrphans on an empty conversation synthesized")
 }
 
 func TestRepairOrphansNoOpWhenTrailingMessageIsUser(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	if err := conv.SeedHistory(ctx, []llm.Message{
+	c.NoError(conv.SeedHistory(ctx, []llm.Message{
 		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	}))
 	n, err := RepairOrphans(ctx, conv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Fatalf("RepairOrphans with a trailing user row synthesized %d results, want 0", n)
-	}
+	c.NoError(err)
+	c.Eq(0, n, "RepairOrphans with a trailing user row synthesized")
 }
 
 func TestRepairOrphansNoOpWhenAllToolUseResolved(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	if err := conv.SeedHistory(ctx, []llm.Message{
+	c.NoError(conv.SeedHistory(ctx, []llm.Message{
 		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
 		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
@@ -184,23 +168,13 @@ func TestRepairOrphansNoOpWhenAllToolUseResolved(t *testing.T) {
 		{Role: anthropic.MessageParamRoleUser, Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolResultBlock("tu_1", "file.txt", false),
 		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	}))
 	n, err := RepairOrphans(ctx, conv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Fatalf("RepairOrphans with every tool_use already resolved synthesized %d results, want 0", n)
-	}
+	c.NoError(err)
+	c.Eq(0, n, "RepairOrphans with every tool_use already resolved synthesized")
 	history, err := conv.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(history) != 3 {
-		t.Fatalf("history grew to %d rows, want 3 (no-op must not append anything)", len(history))
-	}
+	c.NoError(err)
+	c.Len(history, 3, "history grew to %d rows, want 3 (no-op must not append anything)", len(history))
 }
 
 // TestRepairOrphansSynthesizesOnlyUnresolvedToolUse covers the partial-batch
@@ -210,9 +184,10 @@ func TestRepairOrphansNoOpWhenAllToolUseResolved(t *testing.T) {
 // resolved id would itself violate the API shape (two tool_result blocks for
 // one tool_use id).
 func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
+	c := assert.NewAborting(t)
 	conv := testConversation(t, sampleEndTurn)
 	ctx := context.Background()
-	if err := conv.SeedHistory(ctx, []llm.Message{
+	c.NoError(conv.SeedHistory(ctx, []llm.Message{
 		{Role: anthropic.MessageParamRoleUser, Content: llm.UserText("go")},
 		{Role: anthropic.MessageParamRoleAssistant, Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolUseBlock("tu_1", map[string]any{}, "bash"),
@@ -221,39 +196,23 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 		{Role: anthropic.MessageParamRoleUser, Content: []anthropic.ContentBlockParamUnion{
 			anthropic.NewToolResultBlock("tu_1", "file.txt", false),
 		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	}))
 
 	n, err := RepairOrphans(ctx, conv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("RepairOrphans synthesized %d results, want 1 (only tu_2 is unresolved)", n)
-	}
+	c.NoError(err)
+	c.Eq(1, n, "RepairOrphans synthesized")
 
 	history, err := conv.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(history) != 4 {
-		t.Fatalf("history has %d rows, want 4 (one synthetic row appended)", len(history))
-	}
+	c.NoError(err)
+	c.Len(history, 4, "history has %d rows, want 4 (one synthetic row appended)", len(history))
 	last := history[len(history)-1]
-	if last.Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("synthesized row role = %v, want user", last.Param.Role)
-	}
-	if len(last.Param.Content) != 1 {
-		t.Fatalf("synthesized row has %d blocks, want 1 (tu_1 must not be re-synthesized)", len(last.Param.Content))
-	}
+	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "synthesized row role")
+	c.Len(last.Param.Content, 1, "synthesized row has %d blocks, want 1 (tu_1 must not be re-synthesized)", len(last.Param.Content))
 	tr := last.Param.Content[0].OfToolResult
 	if tr == nil || tr.ToolUseID != "tu_2" {
 		t.Fatalf("synthesized block = %+v, want a tool_result for tu_2", last.Param.Content[0])
 	}
-	if !tr.IsError.Value {
-		t.Fatal("synthesized tool_result is not marked IsError")
-	}
+	c.True(tr.IsError.Value, "synthesized tool_result is not marked IsError")
 }
 
 // TestRepairOrphansRoundTrip is the brief's Step 1(a): seed a store-less
@@ -268,17 +227,14 @@ func TestRepairOrphansSynthesizesOnlyUnresolvedToolUse(t *testing.T) {
 // doc comment) since the fake transport can't reject a malformed request the
 // way the real API would.
 func TestRepairOrphansRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	sender := newCapturingSender(t, sampleResp, sampleEndTurn)
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", sender),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	conv, err := client.Conversation(context.Background(), llm.NewConversation("", "agent"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	ctx := context.Background()
 
 	// sampleResp is a tool_use response (id tu_1); the tool it names never
@@ -288,21 +244,13 @@ func TestRepairOrphansRoundTrip(t *testing.T) {
 	}
 
 	n, err := RepairOrphans(ctx, conv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("RepairOrphans synthesized %d results, want 1 (tu_1)", n)
-	}
+	c.NoError(err)
+	c.Eq(1, n, "RepairOrphans synthesized")
 
 	history, err := conv.History(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	last := history[len(history)-1]
-	if last.Param.Role != anthropic.MessageParamRoleUser {
-		t.Fatalf("history's trailing row role = %v, want user", last.Param.Role)
-	}
+	c.Eq(anthropic.MessageParamRoleUser, last.Param.Role, "history's trailing row role")
 	tr := last.Param.Content[0].OfToolResult
 	if tr == nil || tr.ToolUseID != "tu_1" {
 		t.Fatalf("trailing row's block = %+v, want a tool_result for tu_1", last.Param.Content[0])

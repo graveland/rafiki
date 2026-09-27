@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // waitForExit polls a job until it reports exited, or fails.
@@ -15,9 +17,7 @@ func waitForExit(t *testing.T, r *jobRegistry, handle string, within time.Durati
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		_, _, exited, code, found := r.output(handle, 0)
-		if !found {
-			t.Fatalf("job %s vanished from the registry while waiting for it to exit", handle)
-		}
+		assert.NewAborting(t).True(found, "job %s vanished from the registry while waiting for it to exit", handle)
 		if exited {
 			return code
 		}
@@ -37,16 +37,13 @@ func waitForExit(t *testing.T, r *jobRegistry, handle string, within time.Durati
 // never scheduled, and the goroutine leaks. `npm run dev` is the case the job
 // registry's own comments cite, and it is exactly this shape.
 func TestAJobLeavingAGrandchildOnThePipeStillReportsExited(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
 	handle, err := r.start("sleep 300 & echo started; exit 0", "h1", "ws-1", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if code := waitForExit(t, r, handle, 15*time.Second); code != 0 {
-		t.Errorf("exit code = %d, want 0", code)
-	}
+	c.Require().NoError(err, "start")
+	c.Eq(0, waitForExit(t, r, handle, 15*time.Second), "exit code")
 }
 
 // ...and its exit code must be the one the process actually returned.
@@ -69,13 +66,10 @@ func TestALingeringGrandchildDoesNotCorruptTheExitCode(t *testing.T) {
 		{"clean failure", "echo hi; exit 3", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			handle, err := r.start(tc.script, "", "ws-1", "")
-			if err != nil {
-				t.Fatalf("start: %v", err)
-			}
-			if code := waitForExit(t, r, handle, 15*time.Second); code != tc.want {
-				t.Errorf("exit code = %d, want %d", code, tc.want)
-			}
+			c.Require().NoError(err, "start")
+			c.Eq(tc.want, waitForExit(t, r, handle, 15*time.Second), "exit code")
 		})
 	}
 }
@@ -88,6 +82,7 @@ func TestALingeringGrandchildDoesNotCorruptTheExitCode(t *testing.T) {
 // a 100 KB in-memory ring dropped the oldest bytes permanently, so a build that
 // printed 5 MB and failed early lost the failure.
 func TestOutputBeyondTheReadCapIsStillOnDisk(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	r := newJobRegistry(dir, dir, defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
@@ -95,37 +90,23 @@ func TestOutputBeyondTheReadCapIsStillOnDisk(t *testing.T) {
 	// One distinctive early line, then enough noise to push it past the cap.
 	script := fmt.Sprintf("echo NEEDLE_AT_THE_START; for i in $(seq 1 %d); do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", (maxJobResponse/49)+200)
 	handle, err := r.start(script, "", "ws-1", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	c.Require().NoError(err, "start")
 	waitForExit(t, r, handle, 20*time.Second)
 
 	data, total, _, _, _ := r.output(handle, 0)
-	if int64(len(data)) > maxJobResponse {
-		t.Errorf("a single read returned %d bytes; the cap is %d", len(data), maxJobResponse)
-	}
-	if strings.Contains(string(data), "NEEDLE_AT_THE_START") {
-		t.Fatal("the fixture did not exceed the read cap; the test proves nothing")
-	}
-	if total <= maxJobResponse {
-		t.Fatalf("total = %d, expected more than the read cap", total)
-	}
+	c.LessOrEqual(maxJobResponse, int64(len(data)), "a single read returned %d bytes; the cap is", len(data))
+	c.Require().NotStrContains(string(data), "NEEDLE_AT_THE_START", "the fixture did not exceed the read cap; the test proves nothing")
+	c.Require().Greater(maxJobResponse, total, "total")
 
 	// The dropped bytes must be recoverable, and the reader must be told where.
 	path := r.outputPath(handle)
-	if path == "" {
-		t.Fatal("no spill path for a job whose output was clipped")
-	}
+	c.Require().NotEq("", path, "no spill path for a job whose output was clipped")
 	if !strings.Contains(string(data), filepath.Base(path)) {
 		t.Errorf("the clipped read does not name the file holding the rest:\n%s", string(data)[:200])
 	}
 	full, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading the spill file: %v", err)
-	}
-	if !strings.Contains(string(full), "NEEDLE_AT_THE_START") {
-		t.Error("the early output was destroyed rather than spilled")
-	}
+	c.Require().NoError(err, "reading the spill file")
+	c.StrContains(string(full), "NEEDLE_AT_THE_START", "the early output was destroyed rather than spilled")
 }
 
 // Retention is bounded by BYTES per workspace and by nothing else — no timers.
@@ -135,6 +116,7 @@ func TestOutputBeyondTheReadCapIsStillOnDisk(t *testing.T) {
 // unreadable by the time anyone came back for it. Finished jobs are evicted
 // oldest-first only when the workspace exceeds its byte budget.
 func TestFinishedJobsAreEvictedByByteBudgetOldestFirst(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const budget = 64 << 10
 	r := newJobRegistry(t.TempDir(), t.TempDir(), budget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
@@ -142,9 +124,7 @@ func TestFinishedJobsAreEvictedByByteBudgetOldestFirst(t *testing.T) {
 	var handles []string
 	for i := range 8 {
 		h, err := r.start(fmt.Sprintf("for i in $(seq 1 400); do echo job%d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done", i), "", "ws-1", "")
-		if err != nil {
-			t.Fatalf("start: %v", err)
-		}
+		c.Require().NoError(err, "start")
 		waitForExit(t, r, h, 15*time.Second)
 		handles = append(handles, h)
 	}
@@ -152,55 +132,42 @@ func TestFinishedJobsAreEvictedByByteBudgetOldestFirst(t *testing.T) {
 	if _, _, _, _, found := r.output(handles[len(handles)-1], 0); !found {
 		t.Error("the most recent finished job was evicted; eviction must drop the OLDEST first")
 	}
-	if _, _, _, _, found := r.output(handles[0], 0); found {
-		t.Error("the oldest finished job survived a budget that cannot hold every job")
-	}
-	if got := r.workspaceBytes("ws-1"); got > budget {
-		t.Errorf("workspace holds %d bytes, over its %d budget", got, budget)
-	}
+	_, _, _, _, found := r.output(handles[0], 0)
+	c.False(found, "the oldest finished job survived a budget that cannot hold every job")
+	c.LessOrEqual(budget, r.workspaceBytes("ws-1"), "workspace holds")
 }
 
 // A running job is never evicted: its output is live, and dropping it would
 // lose the stream rather than an archive.
 func TestARunningJobIsNeverEvicted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const budget = 32 << 10
 	r := newJobRegistry(t.TempDir(), t.TempDir(), budget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-1") })
 
 	live, err := r.start("echo live-marker; sleep 300", "", "ws-1", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	c.Require().NoError(err, "start")
 	for range 6 {
 		h, err := r.start("for i in $(seq 1 400); do echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; done", "", "ws-1", "")
-		if err != nil {
-			t.Fatalf("start: %v", err)
-		}
+		c.Require().NoError(err, "start")
 		waitForExit(t, r, h, 15*time.Second)
 	}
 
 	data, _, exited, _, found := r.output(live, 0)
-	if !found {
-		t.Fatal("the running job was evicted to make room for finished ones")
-	}
-	if exited {
-		t.Fatal("fixture: the live job exited early")
-	}
-	if !strings.Contains(string(data), "live-marker") {
-		t.Error("the running job's output was discarded")
-	}
+	c.Require().True(found, "the running job was evicted to make room for finished ones")
+	c.Require().False(exited, "fixture: the live job exited early")
+	c.StrContains(string(data), "live-marker", "the running job's output was discarded")
 }
 
 // Releasing a workspace takes its jobs AND their files with it — that is the
 // only lifecycle event that ends retention.
 func TestReleasingAWorkspaceRemovesItsJobsAndFiles(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	r := newJobRegistry(dir, dir, defaultJobBudget)
 
 	h, err := r.start("echo done", "", "ws-1", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	c.Require().NoError(err, "start")
 	waitForExit(t, r, h, 15*time.Second)
 	path := r.outputPath(h)
 	if _, err := os.Stat(path); err != nil {
@@ -209,9 +176,8 @@ func TestReleasingAWorkspaceRemovesItsJobsAndFiles(t *testing.T) {
 
 	r.releaseWorkspace("ws-1")
 
-	if _, _, _, _, found := r.output(h, 0); found {
-		t.Error("a released workspace's job is still readable")
-	}
+	_, _, _, _, found := r.output(h, 0)
+	c.False(found, "a released workspace's job is still readable")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("the spill file outlived its workspace: %v", err)
 	}
@@ -220,23 +186,19 @@ func TestReleasingAWorkspaceRemovesItsJobsAndFiles(t *testing.T) {
 // Releasing one workspace must not touch another's jobs. This was finding D4,
 // caught once and easy to reintroduce while rewriting the sweep.
 func TestReleasingOneWorkspaceLeavesAnothersJobsAlone(t *testing.T) {
+	c := assert.NewAborting(t)
 	r := newJobRegistry(t.TempDir(), t.TempDir(), defaultJobBudget)
 	t.Cleanup(func() { r.releaseWorkspace("ws-2") })
 
 	a, err := r.start("echo a", "", "ws-1", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	c.NoError(err, "start")
 	b, err := r.start("echo b", "", "ws-2", "")
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	c.NoError(err, "start")
 	waitForExit(t, r, a, 15*time.Second)
 	waitForExit(t, r, b, 15*time.Second)
 
 	r.releaseWorkspace("ws-1")
 
-	if _, _, _, _, found := r.output(b, 0); !found {
-		t.Fatal("releasing ws-1 destroyed ws-2's job")
-	}
+	_, _, _, _, found := r.output(b, 0)
+	c.True(found, "releasing ws-1 destroyed ws-2's job")
 }

@@ -4,9 +4,10 @@ package proxyenv
 
 import (
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func envMap(t *testing.T, env []string) (map[string]string, []string) {
@@ -29,17 +30,15 @@ func envMap(t *testing.T, env []string) (map[string]string, []string) {
 // untouched, so enabling this feature cannot break an install that has not
 // configured a proxy.
 func TestClaudeEnv_NoURLIsPassthrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := []string{"ANTHROPIC_API_KEY=sk-real", "ANTHROPIC_BASE_URL=http://inherited", "HOME=/h"}
 	env, v := ClaudeEnv(in, ClaudeOptions{})
-	if !slices.Equal(env, in) {
-		t.Errorf("env = %v, want it unchanged", env)
-	}
-	if v.MCPConfig != "" || len(v.ModelArgs) > 0 {
-		t.Errorf("values = %+v, want none", v)
-	}
+	c.EqDiff(in, env, "env")
+	c.False(v.MCPConfig != "" || len(v.ModelArgs) > 0, "values = %+v, want none", v)
 }
 
 func TestClaudeEnv_SetsProxyAndStrips(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := []string{
 		"ANTHROPIC_API_KEY=sk-real",
 		"OPENROUTER_API_KEY=sk-or",
@@ -51,27 +50,16 @@ func TestClaudeEnv_SetsProxyAndStrips(t *testing.T) {
 	}
 	env, _ := ClaudeEnv(in, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
 	got, dupes := envMap(t, env)
-	if len(dupes) != 0 {
-		t.Errorf("inherited copies survived alongside the new values: %v", dupes)
-	}
+	c.Empty(dupes, "inherited copies survived alongside the new values")
 	for _, k := range Credentials {
-		if _, ok := got[k]; ok {
-			t.Errorf("%s leaked to a proxied child", k)
-		}
+		_, ok := got[k]
+		c.False(ok, "%s leaked to a proxied child", k)
 	}
-	if got["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
-		t.Errorf("stale base URL survived: %q", got["ANTHROPIC_BASE_URL"])
-	}
-	if _, ok := got["ANTHROPIC_MODEL"]; ok {
-		t.Error("ANTHROPIC_MODEL must never be set — it is allowlist-validated client-side")
-	}
-	if got["RAFIKI_MCP_TOKEN"] != "tok" {
-		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q (the outer value must not survive stripping)",
-			got["RAFIKI_MCP_TOKEN"], "tok")
-	}
-	if got["HOME"] != "/h" {
-		t.Errorf("unrelated variable lost: HOME=%q", got["HOME"])
-	}
+	c.Eq("http://localhost:8035", got["ANTHROPIC_BASE_URL"], "stale base URL survived")
+	_, ok := got["ANTHROPIC_MODEL"]
+	c.False(ok, "ANTHROPIC_MODEL must never be set — it is allowlist-validated client-side")
+	c.Eq("tok", got["RAFIKI_MCP_TOKEN"], "RAFIKI_MCP_TOKEN")
+	c.Eq("/h", got["HOME"], "unrelated variable lost: HOME=")
 }
 
 // Claude Code refuses to send to a custom base URL without an auth token, so an
@@ -79,9 +67,7 @@ func TestClaudeEnv_SetsProxyAndStrips(t *testing.T) {
 func TestClaudeEnv_EmptyTokenGetsPlaceholder(t *testing.T) {
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x"})
 	got, _ := envMap(t, env)
-	if got["ANTHROPIC_AUTH_TOKEN"] == "" {
-		t.Error("ANTHROPIC_AUTH_TOKEN empty; Claude Code will not send to a custom base URL")
-	}
+	assert.NewCollecting(t).NotEq("", got["ANTHROPIC_AUTH_TOKEN"], "ANTHROPIC_AUTH_TOKEN empty; Claude Code will not send to a custom base URL")
 }
 
 // A proxied child gets _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL so Claude
@@ -90,40 +76,31 @@ func TestClaudeEnv_EmptyTokenGetsPlaceholder(t *testing.T) {
 func TestClaudeEnv_DefaultsFirstPartyAssume(t *testing.T) {
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x"})
 	got, _ := envMap(t, env)
-	if got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] != "1" {
-		t.Errorf("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = %q, want 1", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"])
-	}
+	assert.NewCollecting(t).Eq("1", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"], "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL")
 }
 
 // An explicit inherited value is a deliberate choice and must survive — a
 // default that overrode it would make distrusting a proxy impossible.
 func TestClaudeEnv_InheritedDefaultWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := []string{"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=0", "HOME=/h"}
 	env, _ := ClaudeEnv(in, ClaudeOptions{URL: "http://x"})
 	got, dupes := envMap(t, env)
-	if got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] != "0" {
-		t.Errorf("explicit value overridden: %q", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"])
-	}
-	if slices.Contains(dupes, "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL") {
-		t.Error("default appended alongside the inherited value")
-	}
+	c.Eq("0", got["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"], "explicit value overridden")
+	c.NotContains(dupes, "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "default appended alongside the inherited value")
 }
 
 func TestClaudeEnv_ModelUsesCustomOption(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, v := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Model: "moonshotai/kimi-k3"})
 	got, _ := envMap(t, env)
-	if got["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "moonshotai/kimi-k3" {
-		t.Errorf("ANTHROPIC_CUSTOM_MODEL_OPTION = %q", got["ANTHROPIC_CUSTOM_MODEL_OPTION"])
-	}
-	if _, ok := got["ANTHROPIC_MODEL"]; ok {
-		t.Error("ANTHROPIC_MODEL set; it would be rejected before the request leaves")
-	}
+	c.Eq("moonshotai/kimi-k3", got["ANTHROPIC_CUSTOM_MODEL_OPTION"], "ANTHROPIC_CUSTOM_MODEL_OPTION =")
+	_, ok := got["ANTHROPIC_MODEL"]
+	c.False(ok, "ANTHROPIC_MODEL set; it would be rejected before the request leaves")
 	// Values.ModelArgs is the --model pair the argv producer appends — it
 	// REPLACES the plain pair, so the child carries exactly one --model.
 	wantPair := []string{"--model", "moonshotai/kimi-k3"}
-	if !slices.Equal(v.ModelArgs, wantPair) {
-		t.Errorf("Values.ModelArgs = %v, want %v", v.ModelArgs, wantPair)
-	}
+	c.EqDiff(wantPair, v.ModelArgs, "Values.ModelArgs")
 }
 
 // Gated on URL, not Model: a session with no model chosen must still get
@@ -131,20 +108,15 @@ func TestClaudeEnv_ModelUsesCustomOption(t *testing.T) {
 // the surface.
 func TestClaudeEnv_MCPConfigPresentWithNoModel(t *testing.T) {
 	_, v := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "tok"})
-	if v.MCPConfig == "" {
-		t.Errorf("Values = %+v, want MCPConfig set even with no model", v)
-	}
+	assert.NewCollecting(t).NotEq("", v.MCPConfig, "Values = %+v, want MCPConfig set even with no model", v)
 }
 
 func TestClaudeEnv_MCPConfigJSONShape(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, v := ClaudeEnv(nil, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
 	got, _ := envMap(t, env)
-	if got["RAFIKI_MCP_TOKEN"] != "tok" {
-		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "tok")
-	}
-	if v.MCPConfig == "" {
-		t.Fatal("Values.MCPConfig empty for a proxied session")
-	}
+	c.Eq("tok", got["RAFIKI_MCP_TOKEN"], "RAFIKI_MCP_TOKEN")
+	c.Require().NotEq("", v.MCPConfig, "Values.MCPConfig empty for a proxied session")
 	var doc struct {
 		MCPServers map[string]struct {
 			Type    string            `json:"type"`
@@ -152,34 +124,23 @@ func TestClaudeEnv_MCPConfigJSONShape(t *testing.T) {
 			Headers map[string]string `json:"headers"`
 		} `json:"mcpServers"`
 	}
-	if err := json.Unmarshal([]byte(v.MCPConfig), &doc); err != nil {
-		t.Fatalf("Values.MCPConfig is not valid JSON: %v (%s)", err, v.MCPConfig)
-	}
+	err := json.Unmarshal([]byte(v.MCPConfig), &doc)
+	c.Require().NoError(err, "Values.MCPConfig is not valid JSON: %v (%s)", err, v.MCPConfig)
 	rafiki, ok := doc.MCPServers["rafiki"]
-	if !ok {
-		t.Fatalf("mcpServers = %v, missing \"rafiki\" key", doc.MCPServers)
-	}
-	if rafiki.Type != "http" {
-		t.Errorf("type = %q, want http", rafiki.Type)
-	}
-	if rafiki.URL != "http://localhost:8035/mcp" {
-		t.Errorf("url = %q, want http://localhost:8035/mcp", rafiki.URL)
-	}
-	if rafiki.Headers["Authorization"] != "Bearer ${RAFIKI_MCP_TOKEN}" {
-		t.Errorf("Authorization header = %q, want the RAFIKI_MCP_TOKEN placeholder", rafiki.Headers["Authorization"])
-	}
+	c.Require().True(ok, "mcpServers = %v, missing \"rafiki\" key", doc.MCPServers)
+	c.Eq("http", rafiki.Type, "type")
+	c.Eq("http://localhost:8035/mcp", rafiki.URL, "url")
+	c.Eq("Bearer ${RAFIKI_MCP_TOKEN}", rafiki.Headers["Authorization"], "Authorization header")
 }
 
 // No URL means unproxied: RAFIKI_MCP_TOKEN must not appear from nowhere.
 func TestClaudeEnv_MCPTokenAbsentWhenUnproxied(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, v := ClaudeEnv([]string{"HOME=/h"}, ClaudeOptions{})
 	got, _ := envMap(t, env)
-	if _, ok := got["RAFIKI_MCP_TOKEN"]; ok {
-		t.Error("RAFIKI_MCP_TOKEN set with no URL configured")
-	}
-	if v.MCPConfig != "" || len(v.ModelArgs) > 0 {
-		t.Errorf("values = %+v, want none", v)
-	}
+	_, ok := got["RAFIKI_MCP_TOKEN"]
+	c.False(ok, "RAFIKI_MCP_TOKEN set with no URL configured")
+	c.False(v.MCPConfig != "" || len(v.ModelArgs) > 0, "values = %+v, want none", v)
 }
 
 // _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL suppresses Claude Code's own
@@ -191,9 +152,7 @@ func TestClaudeEnv_ToolSearchDisabledForNonAnthropicModels(t *testing.T) {
 	for _, model := range []string{"moonshotai/kimi-k3", "kimi-k3", "glm-5.2", "z-ai/glm-5.2", "~openai/gpt-latest"} {
 		env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Model: model})
 		got, _ := envMap(t, env)
-		if got["ENABLE_TOOL_SEARCH"] != "false" {
-			t.Errorf("model %q: ENABLE_TOOL_SEARCH = %q, want false", model, got["ENABLE_TOOL_SEARCH"])
-		}
+		assert.NewCollecting(t).Eq("false", got["ENABLE_TOOL_SEARCH"], "model %q: ENABLE_TOOL_SEARCH = %q, want false", model, got["ENABLE_TOOL_SEARCH"])
 	}
 }
 
@@ -203,81 +162,68 @@ func TestClaudeEnv_ToolSearchLeftAloneForAnthropicModels(t *testing.T) {
 	for _, model := range []string{"", "claude-opus-5", "opus-latest", "anthropic/claude-opus-5", "~anthropic/claude-opus-latest"} {
 		env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Model: model})
 		got, _ := envMap(t, env)
-		if v, ok := got["ENABLE_TOOL_SEARCH"]; ok {
-			t.Errorf("model %q: ENABLE_TOOL_SEARCH = %q, want unset", model, v)
-		}
+		v, ok := got["ENABLE_TOOL_SEARCH"]
+		assert.NewCollecting(t).False(ok, "model %q: ENABLE_TOOL_SEARCH = %q, want unset", model, v)
 	}
 }
 
 // An explicit setting is the user's call — including "yes, my proxy forwards
 // tool_reference to this model, leave it on".
 func TestClaudeEnv_ToolSearchInheritedValueWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := []string{"ENABLE_TOOL_SEARCH=auto:50", "HOME=/h"}
 	env, _ := ClaudeEnv(in, ClaudeOptions{URL: "http://x", Model: "moonshotai/kimi-k3"})
 	got, dupes := envMap(t, env)
-	if got["ENABLE_TOOL_SEARCH"] != "auto:50" {
-		t.Errorf("explicit value overridden: %q", got["ENABLE_TOOL_SEARCH"])
-	}
-	if slices.Contains(dupes, "ENABLE_TOOL_SEARCH") {
-		t.Error("appended alongside the inherited value")
-	}
+	c.Eq("auto:50", got["ENABLE_TOOL_SEARCH"], "explicit value overridden")
+	c.NotContains(dupes, "ENABLE_TOOL_SEARCH", "appended alongside the inherited value")
 }
 
 func TestClaudeEnv_AutoCompactOnlyWithModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", AutoCompactWindow: 180000})
 	got, _ := envMap(t, env)
-	if _, ok := got["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; ok {
-		t.Error("window pinned with no model to pin it for")
-	}
+	_, ok := got["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]
+	c.False(ok, "window pinned with no model to pin it for")
 	env, _ = ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Model: "m", AutoCompactWindow: 180000})
 	got, _ = envMap(t, env)
-	if got["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "180000" {
-		t.Errorf("CLAUDE_CODE_AUTO_COMPACT_WINDOW = %q, want 180000", got["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
-	}
+	c.Eq("180000", got["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
 }
 
 // The separator is a literal newline and nothing else: a comma or an escaped
 // \n silently collapses into one malformed header, and correlation just stops
 // working with no error anywhere.
 func TestFormatHeaders_NewlineSeparatedAndSorted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := FormatHeaders(map[string]string{
 		"X-Rafiki-Source":  "claude",
 		"X-Rafiki-Session": "sess-1",
 	})
 	want := "X-Rafiki-Session: sess-1\nX-Rafiki-Source: claude"
-	if got != want {
-		t.Errorf("got %q, want %q (newline-separated, sorted)", got, want)
-	}
-	if strings.Contains(got, ",") || strings.Contains(got, `\n`) {
-		t.Error("used a separator Claude Code does not accept")
-	}
+	c.Eq(want, got, "got")
+	c.False(strings.Contains(got, ",") || strings.Contains(got, `\n`), "used a separator Claude Code does not accept")
 }
 
 func TestFormatHeaders_Empty(t *testing.T) {
-	if got := FormatHeaders(nil); got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
+	assert.NewCollecting(t).Eq("", FormatHeaders(nil), "got")
 }
 
 // A value containing a newline would forge an extra header the proxy would read
 // as real; such a header is malformed anyway, so it is dropped.
 func TestFormatHeaders_DropsForgedHeaders(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := FormatHeaders(map[string]string{
 		"X-Good": "fine",
 		"X-Bad":  "a\nX-Injected: evil",
 	})
-	if strings.Contains(got, "X-Injected") {
-		t.Errorf("header injection through a value: %q", got)
-	}
-	if got != "X-Good: fine" {
-		t.Errorf("got %q, want only the good header", got)
-	}
+	c.NotStrContains(got, "X-Injected", "header injection through a value")
+	c.Eq("X-Good: fine", got, "got")
 }
 
 // Passthrough is defined by the ABSENCE of ANTHROPIC_AUTH_TOKEN: that variable
 // is what makes Claude Code use API-key auth instead of falling through to its
 // OAuth subscription. Verified against claude-cli 2.1.226.
 func TestClaudeEnv_PassthroughOmitsAuthToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	in := []string{"ANTHROPIC_API_KEY=sk-real", "HOME=/h"}
 	env, _ := ClaudeEnv(in, ClaudeOptions{
 		URL:             "http://localhost:8035",
@@ -286,24 +232,15 @@ func TestClaudeEnv_PassthroughOmitsAuthToken(t *testing.T) {
 		Headers:         map[string]string{"X-Rafiki-Session": "s1"},
 	})
 	got, dupes := envMap(t, env)
-	if len(dupes) > 0 {
-		t.Errorf("duplicate variables: %v", dupes)
-	}
+	c.LessOrEqual(0, len(dupes), "duplicate variables: %v", dupes)
 	if v, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
 		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want it absent entirely", v)
 	}
-	if _, ok := got["ANTHROPIC_API_KEY"]; ok {
-		t.Error("ANTHROPIC_API_KEY survived; it must be stripped or it outranks OAuth")
-	}
-	if got["ANTHROPIC_BASE_URL"] != "http://localhost:8035" {
-		t.Errorf("ANTHROPIC_BASE_URL = %q", got["ANTHROPIC_BASE_URL"])
-	}
-	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: dev") {
-		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want an X-Rafiki-Token line", got["ANTHROPIC_CUSTOM_HEADERS"])
-	}
-	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Session: s1") {
-		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want the caller's headers kept", got["ANTHROPIC_CUSTOM_HEADERS"])
-	}
+	_, ok := got["ANTHROPIC_API_KEY"]
+	c.False(ok, "ANTHROPIC_API_KEY survived; it must be stripped or it outranks OAuth")
+	c.Eq("http://localhost:8035", got["ANTHROPIC_BASE_URL"], "ANTHROPIC_BASE_URL =")
+	c.StrContains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: dev", "ANTHROPIC_CUSTOM_HEADERS")
+	c.StrContains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Session: s1", "ANTHROPIC_CUSTOM_HEADERS")
 }
 
 // The caller's Headers map must not be mutated: callers reuse it, and a
@@ -312,22 +249,18 @@ func TestClaudeEnv_PassthroughOmitsAuthToken(t *testing.T) {
 func TestClaudeEnv_PassthroughDoesNotMutateCallerHeaders(t *testing.T) {
 	headers := map[string]string{"X-Rafiki-Session": "s1"}
 	_, _ = ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "dev", PassthroughAuth: true, Headers: headers})
-	if _, ok := headers["X-Rafiki-Token"]; ok {
-		t.Error("ClaudeEnv mutated the caller's Headers map")
-	}
+	_, ok := headers["X-Rafiki-Token"]
+	assert.NewCollecting(t).False(ok, "ClaudeEnv mutated the caller's Headers map")
 }
 
 // Without the option, nothing changes: the token stays in ANTHROPIC_AUTH_TOKEN
 // and no X-Rafiki-Token header is emitted.
 func TestClaudeEnv_NoPassthroughKeepsAuthToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "dev"})
 	got, _ := envMap(t, env)
-	if got["ANTHROPIC_AUTH_TOKEN"] != "dev" {
-		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q", got["ANTHROPIC_AUTH_TOKEN"], "dev")
-	}
-	if strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token") {
-		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want no X-Rafiki-Token", got["ANTHROPIC_CUSTOM_HEADERS"])
-	}
+	c.Eq("dev", got["ANTHROPIC_AUTH_TOKEN"], "ANTHROPIC_AUTH_TOKEN")
+	c.NotStrContains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token", "ANTHROPIC_CUSTOM_HEADERS")
 }
 
 // The child paths must be able to split the two credentials: the proxy bearer
@@ -337,25 +270,16 @@ func TestClaudeEnv_NoPassthroughKeepsAuthToken(t *testing.T) {
 // header — both must keep the proxy value while RAFIKI_MCP_TOKEN carries the
 // child's.
 func TestMCPTokenOverridesToken(t *testing.T) {
+	c := assert.NewCollecting(t)
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "proxy", MCPToken: "child"})
 	got, _ := envMap(t, env)
-	if got["RAFIKI_MCP_TOKEN"] != "child" {
-		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "child")
-	}
-	if got["ANTHROPIC_AUTH_TOKEN"] != "proxy" {
-		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (the proxy bearer must not change)",
-			got["ANTHROPIC_AUTH_TOKEN"], "proxy")
-	}
+	c.Eq("child", got["RAFIKI_MCP_TOKEN"], "RAFIKI_MCP_TOKEN")
+	c.Eq("proxy", got["ANTHROPIC_AUTH_TOKEN"], "ANTHROPIC_AUTH_TOKEN")
 
 	env, _ = ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "proxy", MCPToken: "child", PassthroughAuth: true})
 	got, _ = envMap(t, env)
-	if got["RAFIKI_MCP_TOKEN"] != "child" {
-		t.Errorf("passthrough: RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "child")
-	}
-	if !strings.Contains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: proxy") {
-		t.Errorf("ANTHROPIC_CUSTOM_HEADERS = %q, want the proxy bearer in X-Rafiki-Token",
-			got["ANTHROPIC_CUSTOM_HEADERS"])
-	}
+	c.Eq("child", got["RAFIKI_MCP_TOKEN"], "passthrough: RAFIKI_MCP_TOKEN")
+	c.StrContains(got["ANTHROPIC_CUSTOM_HEADERS"], "X-Rafiki-Token: proxy", "ANTHROPIC_CUSTOM_HEADERS")
 }
 
 // Empty MCPToken falls back to Token, so the interactive path — where the two
@@ -364,9 +288,7 @@ func TestMCPTokenOverridesToken(t *testing.T) {
 func TestMCPTokenFallsBackToToken(t *testing.T) {
 	env, _ := ClaudeEnv(nil, ClaudeOptions{URL: "http://x", Token: "tok"})
 	got, _ := envMap(t, env)
-	if got["RAFIKI_MCP_TOKEN"] != "tok" {
-		t.Errorf("RAFIKI_MCP_TOKEN = %q, want %q", got["RAFIKI_MCP_TOKEN"], "tok")
-	}
+	assert.NewCollecting(t).Eq("tok", got["RAFIKI_MCP_TOKEN"], "RAFIKI_MCP_TOKEN")
 }
 
 // Values.MCPConfig is the BARE inline JSON — the shape claudeargv.Params.MCPConfig
@@ -382,17 +304,12 @@ func TestMCPTokenFallsBackToToken(t *testing.T) {
 // test/integration's TestClaudeArgvIdenticalAcrossPaths. Here the contract is
 // the value's shape alone.
 func TestClaudeEnvMCPConfigIsBareJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, v := ClaudeEnv(nil, ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
-	if v.MCPConfig == "" {
-		t.Fatal("Values.MCPConfig empty for a proxied session")
-	}
-	if strings.HasPrefix(v.MCPConfig, "--mcp-config=") {
-		t.Errorf("Values.MCPConfig = %q, want the bare JSON document (the flag prefix is the argv renderer's job)", v.MCPConfig)
-	}
+	c.Require().NotEq("", v.MCPConfig, "Values.MCPConfig empty for a proxied session")
+	c.False(strings.HasPrefix(v.MCPConfig, "--mcp-config="), "Values.MCPConfig = %q, want the bare JSON document (the flag prefix is the argv renderer's job)", v.MCPConfig)
 	if !strings.HasPrefix(v.MCPConfig, "{") {
 		t.Errorf("Values.MCPConfig = %q, want an inline JSON document starting with '{'", v.MCPConfig)
 	}
-	if !json.Valid([]byte(v.MCPConfig)) {
-		t.Errorf("Values.MCPConfig is not valid JSON: %q", v.MCPConfig)
-	}
+	c.True(json.Valid([]byte(v.MCPConfig)), "Values.MCPConfig is not valid JSON: %q", v.MCPConfig)
 }

@@ -25,6 +25,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // mcpStubUsers is the identity backend for the auth tests. Only Authenticate
@@ -80,17 +82,14 @@ func mcpRequestFor(userID string) *http.Request {
 // in-memory transport and returns the client session.
 func mcpConnect(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 	t.Helper()
+	c := assert.NewAborting(t)
 	st, ct := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(context.Background(), st, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = ss.Close() })
 	client := mcp.NewClient(&mcp.Implementation{Name: "mcp-face-test", Version: "0"}, nil)
 	cs, err := client.Connect(context.Background(), ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
@@ -98,9 +97,7 @@ func mcpConnect(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
 func mcpToolNames(t *testing.T, cs *mcp.ClientSession) []string {
 	t.Helper()
 	res, err := cs.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	names := make([]string, 0, len(res.Tools))
 	for _, tl := range res.Tools {
 		names = append(names, tl.Name)
@@ -137,9 +134,7 @@ func mcpPost(t *testing.T, mux *http.ServeMux, sessionID, token, body string, ex
 			continue
 		}
 		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), &m); err != nil {
-			t.Fatalf("decode sse payload %q: %v", line, err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal([]byte(strings.TrimPrefix(line, "data:")), &m), "decode sse payload %q", line)
 		msgs = append(msgs, m)
 	}
 	return rec.Code, rec.Header(), msgs
@@ -156,21 +151,14 @@ const (
 // session id the face bound to the caller's identity.
 func mcpHandshake(t *testing.T, mux *http.ServeMux, token string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	code, hdr, msgs := mcpPost(t, mux, "", token, mcpInitializeBody)
-	if code != http.StatusOK {
-		t.Fatalf("initialize: got %d, want 200", code)
-	}
-	if len(msgs) == 0 || msgs[0]["result"] == nil {
-		t.Fatalf("initialize produced no result: %v", msgs)
-	}
+	c.Eq(http.StatusOK, code, "initialize: got")
+	c.False(len(msgs) == 0 || msgs[0]["result"] == nil, "initialize produced no result: %v", msgs)
 	sid := hdr.Get("Mcp-Session-Id")
-	if sid == "" {
-		t.Fatal("initialize returned no Mcp-Session-Id")
-	}
+	c.NotEq("", sid, "initialize returned no Mcp-Session-Id")
 	code, _, _ = mcpPost(t, mux, sid, token, mcpInitializedBody)
-	if code != http.StatusAccepted {
-		t.Fatalf("notifications/initialized: got %d, want 202", code)
-	}
+	c.Eq(http.StatusAccepted, code, "notifications/initialized: got")
 	return sid
 }
 
@@ -180,9 +168,7 @@ func mcpResponseFor(t *testing.T, msgs []map[string]any, id float64) map[string]
 	for _, m := range msgs {
 		if m["id"] == id {
 			res, ok := m["result"].(map[string]any)
-			if !ok {
-				t.Fatalf("response %v carries no result: %v", id, m)
-			}
+			assert.NewAborting(t).True(ok, "response %v carries no result: %v", id, m)
 			return res
 		}
 	}
@@ -196,9 +182,7 @@ func mcpResultText(t *testing.T, msgs []map[string]any, id float64) (string, boo
 	t.Helper()
 	res := mcpResponseFor(t, msgs, id)
 	content, ok := res["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("result carries no content: %v", res)
-	}
+	assert.NewAborting(t).False(!ok || len(content) == 0, "result carries no content: %v", res)
 	block, ok := content[0].(map[string]any)
 	if !ok {
 		t.Fatalf("content block is not an object: %v", content[0])
@@ -208,6 +192,7 @@ func mcpResultText(t *testing.T, msgs []map[string]any, id float64) (string, boo
 }
 
 func TestMCPFaceIsReachedThroughUserTokenAuth(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, ledger := mcpFaceFixture(t)
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{tokens: map[string]users.Identity{
 		"tok-alice": {UserID: "u-alice", Username: "alice"},
@@ -223,27 +208,19 @@ func TestMCPFaceIsReachedThroughUserTokenAuth(t *testing.T) {
 	// so nothing — least of all a tool — executes. The task ledger is the
 	// flag: task_add is the call this request attempts.
 	code, _, _ := mcpPost(t, mux, "", "", mcpTaskAddBody)
-	if code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated tools/call: got %d, want 401", code)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 0 {
-		t.Fatalf("unauthenticated request executed a tool: %d rows in the caller's ledger", n)
-	}
+	c.Eq(http.StatusUnauthorized, code, "unauthenticated tools/call: got")
+	c.Eq(0, mcpLedgerCount(t, ledger, "u-alice"), "unauthenticated request executed a tool")
 
 	// Positive control: the identical call authenticated executes and lands
 	// in the caller's ledger — proving the flag above was settable and the
 	// 401 happened before execution rather than the tool being broken.
 	sid := mcpHandshake(t, mux, "tok-alice")
 	code, _, msgs := mcpPost(t, mux, sid, "tok-alice", mcpTaskAddBody)
-	if code != http.StatusOK {
-		t.Fatalf("authenticated tools/call: got %d, want 200", code)
-	}
+	c.Eq(http.StatusOK, code, "authenticated tools/call: got")
 	if text, isErr := mcpResultText(t, msgs, 3); isErr {
 		t.Fatalf("task_add failed: %s", text)
 	}
-	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 1 {
-		t.Fatalf("authenticated task_add did not reach the ledger: %d rows", n)
-	}
+	c.Eq(1, mcpLedgerCount(t, ledger, "u-alice"), "authenticated task_add did not reach the ledger")
 
 	// A user token that ALSO carries X-Rafiki-Session stays ProvenanceUser —
 	// provenance is a property of the credential, not the header — so a
@@ -251,33 +228,22 @@ func TestMCPFaceIsReachedThroughUserTokenAuth(t *testing.T) {
 	// full surface.
 	withSession := func(r *http.Request) { r.Header.Set("X-Rafiki-Session", "c_child2") }
 	code, hdr, _ := mcpPost(t, mux, "", "tok-alice", mcpInitializeBody, withSession)
-	if code != http.StatusOK {
-		t.Fatalf("user-token initialize with session header: got %d, want 200", code)
-	}
+	c.Eq(http.StatusOK, code, "user-token initialize with session header: got")
 	sid2 := hdr.Get("Mcp-Session-Id")
-	if sid2 == "" {
-		t.Fatal("user-token initialize with session header returned no Mcp-Session-Id")
-	}
+	c.NotEq("", sid2, "user-token initialize with session header returned no Mcp-Session-Id")
 	mcpPost(t, mux, sid2, "tok-alice", mcpInitializedBody, withSession)
 	code, _, msgs = mcpPost(t, mux, sid2, "tok-alice", mcpTaskAddBody, withSession)
-	if code != http.StatusOK {
-		t.Fatalf("user token with session header: got %d, want 200", code)
-	}
-	if text, isErr := mcpResultText(t, msgs, 3); isErr {
-		t.Fatalf("user token with session header lost the surface: %s", text)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 2 {
-		t.Fatalf("user token with session header did not execute: %d rows, want 2", n)
-	}
+	c.Eq(http.StatusOK, code, "user token with session header: got")
+	text, isErr := mcpResultText(t, msgs, 3)
+	c.False(isErr, "user token with session header lost the surface: %s", text)
+	c.Eq(2, mcpLedgerCount(t, ledger, "u-alice"), "user token with session header did not execute")
 }
 
 // mcpLedgerCount counts the rows one synthetic ledger key holds.
 func mcpLedgerCount(t *testing.T, store tasks.Store, userID string) int {
 	t.Helper()
 	rows, err := store.List(context.Background(), tasks.ListFilter{ConversationID: "user:" + userID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	return len(rows)
 }
 
@@ -298,21 +264,16 @@ func TestUnentitledReturns403(t *testing.T) {
 	})
 	withSession := func(r *http.Request) { r.Header.Set("X-Rafiki-Session", "c_child1") }
 	code, _, _ := mcpPost(t, mux, "", "child-secret", mcpInitializeBody, withSession)
-	if code != http.StatusForbidden {
-		t.Fatalf("child-attributed initialize: got %d, want 403", code)
-	}
+	assert.NewAborting(t).Eq(http.StatusForbidden, code, "child-attributed initialize: got")
 }
 
 func TestMCPFaceServerIsBuiltPerRequest(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
 	s1 := face.getServer(mcpRequestFor("u-alice"))
 	s2 := face.getServer(mcpRequestFor("u-bob"))
-	if s1 == nil || s2 == nil {
-		t.Fatal("getServer returned nil for an authenticated user")
-	}
-	if s1 == s2 {
-		t.Fatal("two identities got the same *mcp.Server; the per-request binding is gone")
-	}
+	c.False(s1 == nil || s2 == nil, "getServer returned nil for an authenticated user")
+	c.NotEq(s2, s1, "two identities got the same *mcp.Server; the per-request binding is gone")
 
 	// The binding, made observable: the ledger each server resolves scopes by
 	// the identity it was built for. (agent_list cannot show this — List is
@@ -327,19 +288,11 @@ func TestMCPFaceServerIsBuiltPerRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := cs1.CallTool(ctx, &mcp.CallToolParams{Name: "task_list"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(mcpCallText(t, res), "from-alice") {
-		t.Fatalf("alice's ledger lost the task: %s", mcpCallText(t, res))
-	}
+	c.NoError(err)
+	c.StrContains(mcpCallText(t, res), "from-alice", "alice's ledger lost the task")
 	res, err = cs2.CallTool(ctx, &mcp.CallToolParams{Name: "task_list"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(mcpCallText(t, res), "from-alice") {
-		t.Fatalf("bob's server read alice's ledger: %s", mcpCallText(t, res))
-	}
+	c.NoError(err)
+	c.NotStrContains(mcpCallText(t, res), "from-alice", "bob's server read alice's ledger")
 }
 
 func mcpCallText(t *testing.T, res *mcp.CallToolResult) string {
@@ -358,22 +311,17 @@ func mcpCallText(t *testing.T, res *mcp.CallToolResult) string {
 }
 
 func TestNoControllerReturns503(t *testing.T) {
+	c := assert.NewAborting(t)
 	face := newMCPFace(discardLogger(), nil, nil, "test")
-	if srv := face.getServer(mcpRequestFor("u-alice")); srv != nil {
-		t.Fatal("getServer built a server before SetController; the nil must reach Routes so it can answer 503")
-	}
+	c.Nil(face.getServer(mcpRequestFor("u-alice")), "getServer built a server before SetController; the nil must reach Routes so it can answer 503")
 	// The status, not the nil server, is the answer an MCP client reads.
 	mux := http.NewServeMux()
 	h := &server.Handler{}
 	h.MCPPath, h.MCP = face.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler { return next })
 	code, hdr, _ := mcpPost(t, mux, "", "tok-alice", mcpInitializeBody)
-	if code != http.StatusServiceUnavailable {
-		t.Fatalf("initialize before the controller is wired: got %d, want 503", code)
-	}
-	if ra := hdr.Get("Retry-After"); ra == "" {
-		t.Fatal("503 carried no Retry-After; a client cannot know to retry")
-	}
+	c.Eq(http.StatusServiceUnavailable, code, "initialize before the controller is wired: got")
+	c.NotEq("", hdr.Get("Retry-After"), "503 carried no Retry-After; a client cannot know to retry")
 }
 
 // The exact names of the surface, sorted, compared against literals. A
@@ -383,6 +331,7 @@ func TestNoControllerReturns503(t *testing.T) {
 // absent by its own blueprint's decline rule; the full set including it is
 // pinned by TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists.
 func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
 	want := []string{
@@ -405,17 +354,11 @@ func TestMCPFaceExposesTheExpectedToolNames(t *testing.T) {
 		"task_list",
 		"task_update",
 	}
-	if len(names) != len(want) {
-		t.Fatalf("got %d tools %v, want %d", len(names), names, len(want))
-	}
+	c.Len(names, len(want), "got %d tools %v, want", len(names), names)
 	for i, n := range names {
-		if n != want[i] {
-			t.Fatalf("tool %d: got %q, want %q (full list %v)", i, n, want[i], names)
-		}
+		c.Eq(want[i], n, "tool %d: got %q, want %q (full list %v)", i, n, want[i], names)
 	}
-	if slices.Contains(names, "quota_status") {
-		t.Fatalf("DB-less face (nil quota store) materialized quota_status; the blueprint's decline rule must fire")
-	}
+	c.NotContains(names, "quota_status", "DB-less face (nil quota store) materialized quota_status; the blueprint's decline rule must fire")
 }
 
 // The complete surface — every blueprint, quota_status included — materializes
@@ -461,9 +404,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		"task_list",
 		"task_update",
 	}
-	if !slices.Equal(names, want) {
-		t.Fatalf("full tool set = %v, want %v", names, want)
-	}
+	assert.NewAborting(t).EqDiff(want, names, "full tool set")
 }
 
 func TestMCPFaceDeclinesPymodulesWhenNoExecutorPool(t *testing.T) {
@@ -481,14 +422,13 @@ func TestMCPFaceDeclinesPymodulesWhenNoExecutorPool(t *testing.T) {
 	for provenance, req := range requests {
 		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
 		for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list", "pymodule_run"} {
-			if slices.Contains(names, name) {
-				t.Errorf("%s request unexpectedly exposes %s: %v", provenance, name, names)
-			}
+			assert.NewCollecting(t).NotContains(names, name, "%s request unexpectedly exposes", provenance)
 		}
 	}
 }
 
 func TestMCPFacePymodulesAppearWhenExecutorRouted(t *testing.T) {
+	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
 	ctrl := face.controller()
 	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
@@ -497,13 +437,9 @@ func TestMCPFacePymodulesAppearWhenExecutorRouted(t *testing.T) {
 
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
 	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list"} {
-		if !slices.Contains(names, name) {
-			t.Errorf("routed user request is missing %s: %v", name, names)
-		}
+		c.Contains(names, name, "routed user request is missing")
 	}
-	if slices.Contains(names, "pymodule_run") {
-		t.Errorf("user request unexpectedly exposes pymodule_run: %v", names)
-	}
+	c.NotContains(names, "pymodule_run", "user request unexpectedly exposes pymodule_run")
 }
 
 func TestMCPFacePymoduleRunAppearsForBoundChild(t *testing.T) {
@@ -522,12 +458,11 @@ func TestMCPFacePymoduleRunAppearsForBoundChild(t *testing.T) {
 		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
 	})
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(r.WithContext(ctx))))
-	if !slices.Contains(names, "pymodule_run") {
-		t.Errorf("bound child request is missing pymodule_run: %v", names)
-	}
+	assert.NewCollecting(t).Contains(names, "pymodule_run", "bound child request is missing pymodule_run")
 }
 
 func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
 	ctrl := face.controller()
 	ctrl.pymoduleStore = &fakePymoduleStore{rows: map[string][]pymodules.Record{}}
@@ -541,13 +476,9 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 	})
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(r.WithContext(ctx))))
 	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete", "pymodule_list"} {
-		if !slices.Contains(names, name) {
-			t.Errorf("unbound child request is missing %s: %v", name, names)
-		}
+		c.Contains(names, name, "unbound child request is missing")
 	}
-	if slices.Contains(names, "pymodule_run") {
-		t.Errorf("unbound child request unexpectedly exposes pymodule_run: %v", names)
-	}
+	c.NotContains(names, "pymodule_run", "unbound child request unexpectedly exposes pymodule_run")
 }
 
 // TestMCPFacePresetToolsForBothProvenances pins where the preset block sits in
@@ -556,11 +487,10 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 // four on a daemon with NO executor pool at all — nesting the block inside the
 // executor-routed condition strips them from both.
 func TestMCPFacePresetToolsForBothProvenances(t *testing.T) {
+	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
 	ctrl := face.controller()
-	if ctrl.claudeExecutorRouted() {
-		t.Fatal("fixture: the controller already routes through an executor pool; this test pins the pool-less state")
-	}
+	c.Require().False(ctrl.claudeExecutorRouted(), "fixture: the controller already routes through an executor pool; this test pins the pool-less state")
 	ctrl.presetStore = newFakePresetStore("u-alice", presetFixture("default:implementer"))
 
 	requests := map[string]*http.Request{
@@ -576,9 +506,7 @@ func TestMCPFacePresetToolsForBothProvenances(t *testing.T) {
 	for provenance, req := range requests {
 		names := mcpToolNames(t, mcpConnect(t, face.getServer(req)))
 		for _, name := range []string{"preset_list", "preset_get", "preset_put", "preset_delete"} {
-			if !slices.Contains(names, name) {
-				t.Errorf("%s request is missing %s: %v", provenance, name, names)
-			}
+			c.Contains(names, name, "%s request is missing", provenance)
 		}
 	}
 }
@@ -592,9 +520,7 @@ func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
 
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
 	for _, name := range []string{"preset_list", "preset_get", "preset_put", "preset_delete"} {
-		if slices.Contains(names, name) {
-			t.Errorf("nil preset store unexpectedly exposes %s: %v", name, names)
-		}
+		assert.NewCollecting(t).NotContains(names, name, "nil preset store unexpectedly exposes")
 	}
 }
 
@@ -606,22 +532,19 @@ func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
 // memory namespace, and there is no per-child namespace to bind instead, so
 // the child gets none of the six (see newRecallBinding).
 func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
+	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
 	recallTools := []string{"recall", "recall_context", "memory_put", "memory_get", "memory_tree", "memory_delete"}
 
 	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
 	for _, name := range recallTools {
-		if slices.Contains(names, name) {
-			t.Errorf("nil recall runtime unexpectedly exposes %s: %v", name, names)
-		}
+		c.NotContains(names, name, "nil recall runtime unexpectedly exposes")
 	}
 
 	face.controller().recall = &recallRuntime{st: &fakeRecallStore{}}
 	names = mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
 	for _, name := range recallTools {
-		if !slices.Contains(names, name) {
-			t.Errorf("user request is missing %s: %v", name, names)
-		}
+		c.Contains(names, name, "user request is missing")
 	}
 
 	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
@@ -630,9 +553,7 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	}))
 	names = mcpToolNames(t, mcpConnect(t, face.getServer(child)))
 	for _, name := range recallTools {
-		if slices.Contains(names, name) {
-			t.Errorf("child request unexpectedly exposes %s: %v", name, names)
-		}
+		c.NotContains(names, name, "child request unexpectedly exposes")
 	}
 
 	// The EMPTY-ChildID child shape (provenance named, no child): the
@@ -644,9 +565,7 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	}))
 	names = mcpToolNames(t, mcpConnect(t, face.getServer(anonymous)))
 	for _, name := range recallTools {
-		if slices.Contains(names, name) {
-			t.Errorf("empty-ChildID child request unexpectedly exposes %s: %v", name, names)
-		}
+		c.NotContains(names, name, "empty-ChildID child request unexpectedly exposes")
 	}
 }
 
@@ -659,6 +578,7 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 // mismatches before dispatch — a sibling presenting another child's session
 // id fails on the child-id half of the comparison.
 func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, ledger := mcpFaceFixture(t)
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{tokens: map[string]users.Identity{
 		"tok-alice": {UserID: "u-alice", Username: "alice"},
@@ -674,31 +594,20 @@ func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
 
 	// bob's token + alice's session id: refused before any tool runs.
 	code, _, _ := mcpPost(t, mux, sid, "tok-bob", mcpTaskAddBody)
-	if code != http.StatusForbidden {
-		t.Fatalf("bob on alice's session: got %d, want 403", code)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-bob"); n != 0 {
-		t.Fatalf("bob's session ride-along executed a tool: %d rows", n)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-alice"); n != 0 {
-		t.Fatalf("bob reached alice's ledger through her session: %d rows", n)
-	}
+	c.Eq(http.StatusForbidden, code, "bob on alice's session: got")
+	c.Eq(0, mcpLedgerCount(t, ledger, "u-bob"), "bob's session ride-along executed a tool")
+	c.Eq(0, mcpLedgerCount(t, ledger, "u-alice"), "bob reached alice's ledger through her session")
 
 	// Positive control: alice on her own session still executes.
 	code, _, msgs := mcpPost(t, mux, sid, "tok-alice", mcpTaskAddBody)
-	if code != http.StatusOK {
-		t.Fatalf("alice on her own session: got %d, want 200", code)
-	}
-	if text, isErr := mcpResultText(t, msgs, 3); isErr {
-		t.Fatalf("task_add failed for the session's owner: %s", text)
-	}
+	c.Eq(http.StatusOK, code, "alice on her own session: got")
+	text, isErr := mcpResultText(t, msgs, 3)
+	c.False(isErr, "task_add failed for the session's owner: %s", text)
 
 	// A session id the face never bound is refused too — a map miss must
 	// never become the one path that dispatches unvalidated.
 	code, _, _ = mcpPost(t, mux, "mcp-not-a-real-session", "tok-bob", mcpListToolsBody)
-	if code != http.StatusForbidden {
-		t.Fatalf("unknown session id: got %d, want 403", code)
-	}
+	c.Eq(http.StatusForbidden, code, "unknown session id: got")
 }
 
 // The overrides compose the blueprints' own text with the surface framing, so
@@ -708,25 +617,18 @@ func TestMCPFaceRejectsASessionIDPresentedByAnotherCaller(t *testing.T) {
 // that promise uses — a vacuous check here is how the contradiction shipped
 // once already.
 func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spawnDesc := mcpToolDescriptions["agent_spawn"]
 	for _, phrase := range []string{
 		"You will be notified",
 		"Do not sleep, poll",
 		"you are notified when a subagent settles",
 	} {
-		if strings.Contains(spawnDesc, phrase) {
-			t.Errorf("agent_spawn: ships the fundi-only notification promise %q", phrase)
-		}
+		c.NotStrContains(spawnDesc, phrase, "agent_spawn: ships the fundi-only notification promise")
 	}
-	if !strings.Contains(spawnDesc, mcpSpawnPrefix) {
-		t.Errorf("agent_spawn: the mandated prefix no longer rides at the front")
-	}
-	if !strings.Contains(spawnDesc, mcpNotificationNote) {
-		t.Errorf("agent_spawn: the conditional note is gone; there is no notification wording left")
-	}
-	if !strings.Contains(spawnDesc, mcpSpawnKeepDoing) {
-		t.Errorf("agent_spawn: the blueprint remainder after the excision was cut too; cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
-	}
+	c.StrContains(spawnDesc, mcpSpawnPrefix, "agent_spawn: the mandated prefix no longer rides at the front")
+	c.StrContains(spawnDesc, mcpNotificationNote, "agent_spawn: the conditional note is gone; there is no notification wording left")
+	c.StrContains(spawnDesc, mcpSpawnKeepDoing, "agent_spawn: the blueprint remainder after the excision was cut too; cut only %q..", mcpSpawnNotifyStart)
 
 	// conversation_search is composed like agent_spawn: scope note + blueprint
 	// text with the fundi-only ownership claim excised. A verbatim-containment
@@ -736,47 +638,29 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 	// the claim is true for a fundi child and false for an admin caller on
 	// this surface (newMCPConversationReader grants ScopeAll).
 	searchDesc := mcpToolDescriptions["conversation_search"]
-	if searchDesc == "" {
-		t.Fatal("conversation_search: no override; the fundi-only ownership claim ships verbatim")
-	}
-	if !strings.Contains(searchDesc, mcpConversationScopeNote) {
-		t.Errorf("conversation_search: the scope-aware note is gone")
-	}
+	c.Require().NotEq("", searchDesc, "conversation_search: no override; the fundi-only ownership claim ships verbatim")
+	c.StrContains(searchDesc, mcpConversationScopeNote, "conversation_search: the scope-aware note is gone")
 	for _, phrase := range []string{
 		"Results are scoped to conversations you own",
 		"there is no way to search another user's",
 	} {
-		if strings.Contains(searchDesc, phrase) {
-			t.Errorf("conversation_search: ships the fundi-only ownership claim %q, false for an admin caller", phrase)
-		}
+		c.NotStrContains(searchDesc, phrase, "conversation_search: ships the fundi-only ownership claim")
 	}
-	if !strings.Contains(searchDesc, "use conversation_export to read a specific conversation's full transcript") {
-		t.Errorf("conversation_search: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
-	}
+	c.StrContains(searchDesc, "use conversation_export to read a specific conversation's full transcript", "conversation_search: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 
 	// conversation_query is composed exactly like conversation_search: scope
 	// note + blueprint text with the fundi-only ownership claim excised. Same
 	// bespoke assertions for the same reason — a vacuous check here is how the
 	// ownership falsehood would ship beside the scope-aware note.
 	queryDesc := mcpToolDescriptions["conversation_query"]
-	if queryDesc == "" {
-		t.Fatal("conversation_query: no override; the fundi-only ownership claim ships verbatim")
-	}
-	if !strings.Contains(queryDesc, mcpConversationScopeNote) {
-		t.Errorf("conversation_query: the scope-aware note is gone")
-	}
-	if strings.Contains(queryDesc, "Results are scoped to conversations you own") {
-		t.Errorf("conversation_query: ships the fundi-only ownership claim, false for an admin caller")
-	}
-	if !strings.Contains(queryDesc, "agent-kind conversations only") ||
-		!strings.Contains(queryDesc, "coverage filters conversation creation week") {
-		t.Errorf("conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
-	}
+	c.Require().NotEq("", queryDesc, "conversation_query: no override; the fundi-only ownership claim ships verbatim")
+	c.StrContains(queryDesc, mcpConversationScopeNote, "conversation_query: the scope-aware note is gone")
+	c.NotStrContains(queryDesc, "Results are scoped to conversations you own", "conversation_query: ships the fundi-only ownership claim, false for an admin caller")
+	c.False(!strings.Contains(queryDesc, "agent-kind conversations only") ||
+		!strings.Contains(queryDesc, "coverage filters conversation creation week"), "conversation_query: the blueprint remainder before the excision was cut too; cut only %q..end", mcpSearchScopeStart)
 
 	for _, name := range []string{"pymodule_put", "pymodule_get", "pymodule_delete"} {
-		if !strings.Contains(mcpToolDescriptions[name], "A claude-kind child you spawn") {
-			t.Errorf("%s: missing the pymodule_run delegation pointer", name)
-		}
+		c.StrContains(mcpToolDescriptions[name], "A claude-kind child you spawn", "%s: missing the pymodule_run delegation pointer", name)
 	}
 
 	// agent_spawn's blueprint text ends with the preset paragraph (added after
@@ -785,9 +669,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 	// presets while preset_list sits beside it. The preset_ tools carry no
 	// overrides — their blueprint descriptions hold no fundi-only claim — so
 	// this paragraph is the face's only preset wording.
-	if !strings.Contains(spawnDesc, "preset") {
-		t.Errorf("agent_spawn: the preset paragraph is gone; the excision must cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
-	}
+	c.StrContains(spawnDesc, "preset", "agent_spawn: the preset paragraph is gone; the excision must cut only %q..%q", mcpSpawnNotifyStart, mcpSpawnKeepDoing)
 
 	pairs := map[string]tools.Tool{
 		"agent_send":          &tools.AgentSendBlueprint{},
@@ -806,9 +688,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 		if !overridden {
 			continue
 		}
-		if !strings.Contains(desc, bp.Description()) {
-			t.Errorf("%s: override no longer carries the blueprint's description; re-derive it instead of retyping", name)
-		}
+		c.StrContains(desc, bp.Description(), "%s: override no longer carries the blueprint's description; re-derive it instead of retyping", name)
 	}
 	for name := range mcpToolDescriptions {
 		var known bool
@@ -817,15 +697,11 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 				known = true
 			}
 		}
-		if !known {
-			t.Errorf("mcpToolDescriptions[%q] names no blueprint; the override is silently dead", name)
-		}
+		c.True(known, "mcpToolDescriptions[%q] names no blueprint; the override is silently dead", name)
 	}
 	for name, desc := range mcpToolDescriptions {
 		for _, phrase := range []string{"You will be notified", "Do not sleep, poll", "you are notified when a subagent settles"} {
-			if strings.Contains(desc, phrase) {
-				t.Errorf("%s: promises a settlement notification this surface does not deliver", name)
-			}
+			c.NotStrContains(desc, phrase, "%s: promises a settlement notification this surface does not deliver", name)
 		}
 	}
 }
@@ -840,6 +716,7 @@ func TestMCPFaceDescriptionsCarryTheBlueprintText(t *testing.T) {
 // phrases are the deferral coming back, and they fail loudly rather than
 // shipping silently again.
 func TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, name := range []string{"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill"} {
 		desc, ok := mcpToolDescriptions[name]
 		if !ok {
@@ -850,14 +727,10 @@ func TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool(t *testing.T) {
 			"use your own Task tool instead",
 			"For a lightweight subagent scoped to just this conversation",
 		} {
-			if strings.Contains(desc, phrase) {
-				t.Errorf("%s: defers to the client's native subagent tool (%q); the preference is rafiki's", name, phrase)
-			}
+			c.NotStrContains(desc, phrase, "%s: defers to the client's native subagent tool (%q); the preference is rafiki's", name, phrase)
 		}
 	}
-	if !strings.Contains(mcpToolDescriptions["agent_spawn"], "Prefer this over any built-in subagent tool") {
-		t.Errorf("agent_spawn: the preference assertion is gone; the surface is back to competing silently with the client's own Task tool")
-	}
+	c.StrContains(mcpToolDescriptions["agent_spawn"], "Prefer this over any built-in subagent tool", "agent_spawn: the preference assertion is gone; the surface is back to competing silently with the client's own Task tool")
 	// The ledger keeps its TodoWrite distinction — that one is true and load-
 	// bearing (it keeps a private plan out of the operator's ledger) — but the
 	// delegation pairing with agent_spawn must ride beside it, or a client that
@@ -865,9 +738,7 @@ func TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool(t *testing.T) {
 	// tools when it delegates.
 	ledger := mcpToolDescriptions["task_add"]
 	for _, phrase := range []string{"use your own TodoWrite tool", "pass its handle to agent_spawn"} {
-		if !strings.Contains(ledger, phrase) {
-			t.Errorf("task_add: missing %q; the ledger's reframe is incomplete", phrase)
-		}
+		c.StrContains(ledger, phrase, "task_add: missing")
 	}
 }
 
@@ -877,6 +748,7 @@ func TestMCPFaceDescriptionsDoNotDeferToTheNativeSubagentTool(t *testing.T) {
 // controllerSpawner.authorize, never a per-tool allowlist. The exact names are
 // the assertion of record (test/integration/mcp_test.go).
 func TestChildTokenGetsTheUserToolSet(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, _ := mcpFaceFixture(t)
 	// The DB-less fixture's *quota.Store is nil, so quota_status declines by
 	// its own rule; stub the reader for the full-set assertion, exactly as
@@ -922,9 +794,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		"task_list",
 		"task_update",
 	}
-	if !slices.Equal(names, want) {
-		t.Fatalf("child-token tool set = %v, want %v", names, want)
-	}
+	c.EqDiff(want, names, "child-token tool set")
 
 	// The identity, not just the spawner, drives the binding: a
 	// ProvenanceChildToken request through getServer must materialize a
@@ -932,9 +802,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 	// credential refusal).
 	r := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
 	ctx := server.WithIdentity(r.Context(), &server.Identity{UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken})
-	if srv := face.getServer(r.WithContext(ctx)); srv == nil {
-		t.Fatal("a ProvenanceChildToken identity got no server from getServer")
-	}
+	c.NotNil(face.getServer(r.WithContext(ctx)), "a ProvenanceChildToken identity got no server from getServer")
 }
 
 // TestSiblingCannotUseSiblingSession pins the (UserID, ChildID) rekey: two
@@ -942,6 +810,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 // child B present child A's Mcp-Session-Id and execute against A's bound
 // spawner — a privilege-escalation path between siblings.
 func TestSiblingCannotUseSiblingSession(t *testing.T) {
+	c := assert.NewAborting(t)
 	face, ledger := mcpFaceFixture(t)
 	tokenAuth := server.NewUserTokenAuth(&mcpStubUsers{}, "child-secret", time.Second)
 	tokenAuth.SetChildTokenLookup(func(token string) (string, string, bool) {
@@ -965,24 +834,15 @@ func TestSiblingCannotUseSiblingSession(t *testing.T) {
 	// Child B, same owner, child A's session id: refused before any tool
 	// runs, even though the UserIDs match exactly.
 	code, _, _ := mcpPost(t, mux, sid, "child-secret-b", mcpTaskAddBody)
-	if code != http.StatusForbidden {
-		t.Fatalf("sibling on sibling's session: got %d, want 403", code)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-owner"); n != 0 {
-		t.Fatalf("sibling ride-along executed a tool: %d rows", n)
-	}
+	c.Eq(http.StatusForbidden, code, "sibling on sibling's session: got")
+	c.Eq(0, mcpLedgerCount(t, ledger, "u-owner"), "sibling ride-along executed a tool")
 
 	// Positive control: child A on its own session still executes.
 	code, _, msgs := mcpPost(t, mux, sid, "child-secret-a", mcpTaskAddBody)
-	if code != http.StatusOK {
-		t.Fatalf("child A on its own session: got %d, want 200", code)
-	}
-	if text, isErr := mcpResultText(t, msgs, 3); isErr {
-		t.Fatalf("task_add failed for the session's own child: %s", text)
-	}
-	if n := mcpLedgerCount(t, ledger, "u-owner"); n != 1 {
-		t.Fatalf("child A's task_add did not reach the ledger: %d rows", n)
-	}
+	c.Eq(http.StatusOK, code, "child A on its own session: got")
+	text, isErr := mcpResultText(t, msgs, 3)
+	c.False(isErr, "task_add failed for the session's own child: %s", text)
+	c.Eq(1, mcpLedgerCount(t, ledger, "u-owner"), "child A's task_add did not reach the ledger")
 }
 
 // TestMCPEntitlementIsOneSpelling pins mcpEntitled against every identity
@@ -1002,8 +862,7 @@ func TestMCPEntitlementIsOneSpelling(t *testing.T) {
 		{"unknown provenance", &server.Identity{}, false},
 	}
 	for _, tc := range cases {
-		if got := mcpEntitled(tc.id); got != tc.want {
-			t.Errorf("%s: mcpEntitled = %v, want %v", tc.name, got, tc.want)
-		}
+		got := mcpEntitled(tc.id)
+		assert.NewCollecting(t).Eq(tc.want, got, "%s: mcpEntitled = %v, want", tc.name, got)
 	}
 }

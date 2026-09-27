@@ -37,7 +37,6 @@ package integration_test
 // one of each.
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -46,6 +45,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
@@ -77,9 +78,7 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 					Token: "proxy-bearer",
 					Model: req.Model,
 				})
-				if v.MCPConfig == "" || len(v.ModelArgs) == 0 {
-					t.Fatalf("proxied values = %+v, want MCPConfig and ModelArgs set", v)
-				}
+				assert.NewAborting(t).False(v.MCPConfig == "" || len(v.ModelArgs) == 0, "proxied values = %+v, want MCPConfig and ModelArgs set", v)
 				return v
 			}(),
 		},
@@ -91,6 +90,7 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			// Local-subprocess path: buildClaudeArgv's body, verbatim.
 			local := claudeargv.Build(claudeargv.ParamsFromSpawnRequest(req, tc.vals))
 
@@ -105,12 +105,8 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 			}
 			darajaArgv := daraja.SpecFromProto(wire).Argv(tc.vals.MCPConfig, tc.vals.ModelArgs)
 
-			if len(darajaArgv) == 0 {
-				t.Fatalf("daraja path produced no argv; Kind must be %q for SpecFromProto to map the spec", req.Kind)
-			}
-			if !reflect.DeepEqual(local, darajaArgv) {
-				t.Fatalf("argv paths diverged:\n local: %q\ndaraja: %q", local, darajaArgv)
-			}
+			c.Require().NotEmpty(darajaArgv, "daraja path produced no argv; Kind must be %q for SpecFromProto to map the spec", req.Kind)
+			c.Require().EqDiff(darajaArgv, local, "argv paths diverged:\n local")
 
 			// The properties the identity exists to protect, asserted on the
 			// shared argv so a vacuous-equal pair cannot hide a lost flag.
@@ -123,13 +119,9 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 				if tc.vals.MCPConfig == "" && strings.HasPrefix(want, "--mcp-config=") {
 					continue // unproxied: the element must be absent, checked below
 				}
-				if !argvCarries(local, want) {
-					t.Errorf("argv %q missing %q", local, want)
-				}
+				c.True(argvCarries(local, want), "argv %q missing %q", local, want)
 			}
-			if tc.vals.MCPConfig == "" && argvCarries(local, "--mcp-config=") {
-				t.Errorf("unproxied argv carries an --mcp-config element: %q", local)
-			}
+			c.False(tc.vals.MCPConfig == "" && argvCarries(local, "--mcp-config="), "unproxied argv carries an --mcp-config element: %q", local)
 
 			// The coordination prompt rides a proxied child exactly once,
 			// inside the single --append-system-prompt element, and never
@@ -143,16 +135,10 @@ func TestClaudeArgvIdenticalAcrossPaths(t *testing.T) {
 				}
 				appendCount++
 				value := local[i+1]
-				if tc.vals.MCPConfig != "" && !strings.Contains(value, claudeargv.CoordinationPrompt) {
-					t.Errorf("proxied argv carries no coordination prompt: %q", value)
-				}
-				if tc.vals.MCPConfig == "" && strings.Contains(value, claudeargv.CoordinationPrompt) {
-					t.Errorf("unproxied argv carries the coordination prompt: %q", value)
-				}
+				c.False(tc.vals.MCPConfig != "" && !strings.Contains(value, claudeargv.CoordinationPrompt), "proxied argv carries no coordination prompt: %q", value)
+				c.False(tc.vals.MCPConfig == "" && strings.Contains(value, claudeargv.CoordinationPrompt), "unproxied argv carries the coordination prompt: %q", value)
 			}
-			if appendCount != 1 {
-				t.Errorf("argv %q: want exactly one --append-system-prompt element, got %d", local, appendCount)
-			}
+			c.Eq(1, appendCount, "argv %q: want exactly one --append-system-prompt element, got", local)
 		})
 	}
 }

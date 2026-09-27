@@ -10,6 +10,8 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeSkills struct {
@@ -49,6 +51,7 @@ func (f *fakeSkills) SetSkillEnabled(context.Context, string, string, bool) erro
 // it could plant a row the next sync would then prune or fight over, so the
 // verb refuses it outright.
 func TestUpsertSkillRejectsTheReservedCoreSource(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakeSkills{}
 	s.SetSkillManager(f)
@@ -56,18 +59,13 @@ func TestUpsertSkillRejectsTheReservedCoreSource(t *testing.T) {
 	_, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
 		Name: "x", Body: "y", Source: "rafiki-core",
 	}))
-	if err == nil {
-		t.Fatal("upsert accepted the reserved source")
-	}
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("got code %v, want InvalidArgument", connect.CodeOf(err))
-	}
-	if len(f.upserts) != 0 {
-		t.Errorf("store was written despite the rejection: %+v", f.upserts)
-	}
+	c.Require().Error(err, "upsert accepted the reserved source")
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "got code")
+	c.Empty(f.upserts, "store was written despite the rejection")
 }
 
 func TestUpsertSkillDefaultsNamespaceAndSource(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := &Server{}
 	f := &fakeSkills{}
 	s.SetSkillManager(f)
@@ -75,12 +73,8 @@ func TestUpsertSkillDefaultsNamespaceAndSource(t *testing.T) {
 	_, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
 		Name: "x", Body: "y",
 	}))
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	if len(f.upserts) != 1 {
-		t.Fatalf("got %d upserts, want 1", len(f.upserts))
-	}
+	c.NoError(err, "upsert")
+	c.Len(f.upserts, 1, "got %d upserts, want 1", len(f.upserts))
 	if got := f.upserts[0]; got.Namespace != "rafiki" || got.Source != "manual" {
 		t.Errorf("got namespace=%q source=%q, want rafiki/manual", got.Namespace, got.Source)
 	}
@@ -97,9 +91,7 @@ func TestUpsertSkillMapsSourceConflictToAlreadyExists(t *testing.T) {
 	_, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
 		Name: "x", Body: "y",
 	}))
-	if connect.CodeOf(err) != connect.CodeAlreadyExists {
-		t.Errorf("got code %v (%v), want AlreadyExists", connect.CodeOf(err), err)
-	}
+	assert.NewCollecting(t).Eq(connect.CodeAlreadyExists, connect.CodeOf(err), "got code %v (%v), want AlreadyExists", connect.CodeOf(err), err)
 }
 
 // The two halves of a qualified name are a model-facing identifier and a
@@ -108,6 +100,7 @@ func TestUpsertSkillMapsSourceConflictToAlreadyExists(t *testing.T) {
 // store them. The verb is the one gate every client goes through, so the
 // check lives here rather than in the CLI.
 func TestUpsertSkillRejectsNonSlugNamespacesAndNames(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// namespace "" is deliberately absent: it is the documented spelling of
 	// the default namespace, not a bad value.
 	bad := []string{"has space", "a:b", "a/b", "a\tb", ".", ".."}
@@ -123,12 +116,8 @@ func TestUpsertSkillRejectsNonSlugNamespacesAndNames(t *testing.T) {
 			f := &fakeSkills{}
 			s.SetSkillManager(f)
 			_, err := s.UpsertSkill(context.Background(), connect.NewRequest(req))
-			if connect.CodeOf(err) != connect.CodeInvalidArgument {
-				t.Errorf("%s=%q: got code %v (%v), want InvalidArgument", what, val, connect.CodeOf(err), err)
-			}
-			if len(f.upserts) != 0 {
-				t.Errorf("%s=%q: store was written despite the rejection", what, val)
-			}
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s=%q: got code %v (%v), want InvalidArgument", what, val, connect.CodeOf(err), err)
+			c.Empty(f.upserts, "%s=%q: store was written despite the rejection", what, val)
 		}
 	}
 
@@ -137,14 +126,11 @@ func TestUpsertSkillRejectsNonSlugNamespacesAndNames(t *testing.T) {
 	s := &Server{}
 	f := &fakeSkills{}
 	s.SetSkillManager(f)
-	if _, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
+	_, err := s.UpsertSkill(context.Background(), connect.NewRequest(&rafikiv1.UpsertSkillRequest{
 		Namespace: "my-plugin", Name: "design-postgres-tables", Body: "y",
-	})); err != nil {
-		t.Fatalf("valid slug rejected: %v", err)
-	}
-	if len(f.upserts) != 1 {
-		t.Fatalf("got %d upserts, want 1", len(f.upserts))
-	}
+	}))
+	c.Require().NoError(err, "valid slug rejected")
+	c.Require().Len(f.upserts, 1, "got %d upserts, want 1", len(f.upserts))
 }
 
 // A missing skill is an ANSWER (NotFound), not an internal failure. Getting
@@ -156,9 +142,7 @@ func TestGetSkillMapsNotFound(t *testing.T) {
 	_, err := s.GetSkill(context.Background(), connect.NewRequest(&rafikiv1.GetSkillRequest{
 		Namespace: "rafiki", Name: "nope",
 	}))
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Errorf("got code %v (%v), want NotFound", connect.CodeOf(err), err)
-	}
+	assert.NewCollecting(t).Eq(connect.CodeNotFound, connect.CodeOf(err), "got code %v (%v), want NotFound", connect.CodeOf(err), err)
 	_ = errors.Is(err, nil)
 }
 
@@ -166,22 +150,18 @@ func TestGetSkillMapsNotFound(t *testing.T) {
 // manager returns populated rows. Dropping the strip would ship the whole
 // corpus into every list response, silently.
 func TestListSkillsOmitsBodies(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Server{}
 	s.SetSkillManager(&fakeSkills{rows: []SkillRow{
 		{Namespace: "rafiki", Name: "big", Body: "the entire skill document"},
 	}})
 
 	resp, err := s.ListSkills(context.Background(), connect.NewRequest(&rafikiv1.ListSkillsRequest{}))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	rows := resp.Msg.GetRows()
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
-	}
-	if got := rows[0].GetBody(); got != "" {
-		t.Errorf("list response carried a body of %d bytes, want empty", len(got))
-	}
+	c.Require().Len(rows, 1, "got %d rows, want 1", len(rows))
+	got := rows[0].GetBody()
+	c.Eq("", got, "list response carried a body of %d bytes, want empty", len(got))
 	// The strip must cost only the body: the row itself survives.
 	if rows[0].GetName() != "big" || rows[0].GetNamespace() != "rafiki" {
 		t.Errorf("row fields lost along with the body: %+v", rows[0])
@@ -192,6 +172,7 @@ func TestListSkillsOmitsBodies(t *testing.T) {
 // daemon-side adapter inverts it into the store's enabledOnly, so an inversion
 // here as well would double-flip and --all would silently stop working.
 func TestListSkillsPassesIncludeDisabledThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct{ include, want bool }{
 		{false, false},
 		{true, true},
@@ -199,13 +180,10 @@ func TestListSkillsPassesIncludeDisabledThrough(t *testing.T) {
 		f := &fakeSkills{}
 		s := &Server{}
 		s.SetSkillManager(f)
-		if _, err := s.ListSkills(context.Background(),
-			connect.NewRequest(&rafikiv1.ListSkillsRequest{IncludeDisabled: tc.include})); err != nil {
-			t.Fatal(err)
-		}
-		if f.sawIncludeDisabled != tc.want {
-			t.Errorf("IncludeDisabled=%v: manager got %v, want %v", tc.include, f.sawIncludeDisabled, tc.want)
-		}
+		_, err := s.ListSkills(context.Background(),
+			connect.NewRequest(&rafikiv1.ListSkillsRequest{IncludeDisabled: tc.include}))
+		c.Require().NoError(err)
+		c.Eq(tc.want, f.sawIncludeDisabled, "IncludeDisabled=%v: manager got %v, want", tc.include, f.sawIncludeDisabled)
 	}
 }
 
@@ -214,9 +192,7 @@ func TestListSkillsPassesIncludeDisabledThrough(t *testing.T) {
 func TestListSkillsUnwiredIsUnavailable(t *testing.T) {
 	s := &Server{}
 	_, err := s.ListSkills(context.Background(), connect.NewRequest(&rafikiv1.ListSkillsRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("want CodeUnavailable, got %v", err)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "want CodeUnavailable, got %v", err)
 }
 
 // SetSkillManager(nil) is refused, not stored — same rule as
@@ -226,7 +202,5 @@ func TestSetSkillManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetSkillManager(nil)
 	_, err := s.ListSkills(context.Background(), connect.NewRequest(&rafikiv1.ListSkillsRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("after SetSkillManager(nil): want CodeUnavailable, got %v", err)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetSkillManager(nil): want CodeUnavailable, got %v", err)
 }

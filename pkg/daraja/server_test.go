@@ -14,6 +14,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newTestServer starts a real h2c server over the given host and returns a
@@ -33,9 +35,7 @@ func newTestServer(t *testing.T, h *Host) (darajapbconnect.DarajaServiceClient, 
 	httpSrv := &http.Server{Handler: mux, Protocols: protos}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "listen")
 	t.Cleanup(func() { httpSrv.Close() })
 	go func() {
 		_ = httpSrv.Serve(ln)
@@ -55,38 +55,27 @@ func newTestServer(t *testing.T, h *Host) (darajapbconnect.DarajaServiceClient, 
 }
 
 func TestServerHealthReportsTheProcess(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	ck.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 
 	c, _ := newTestServer(t, h)
 	resp, err := c.Health(context.Background(), connect.NewRequest(&darajapb.HealthRequest{}))
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
-	if !resp.Msg.GetRunning() {
-		t.Error("running = false for a live process")
-	}
-	if resp.Msg.GetPid() == 0 {
-		t.Error("pid = 0 for a live process")
-	}
+	ck.Require().NoError(err, "Health")
+	ck.True(resp.Msg.GetRunning(), "running = false for a live process")
+	ck.NotEq(0, resp.Msg.GetPid(), "pid = 0 for a live process")
 }
 
 func TestServerShutdownEndsTheProcessAndSignalsExit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: testEchoBinary(t), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	ck.Require().NoError(h.Start(), "Start")
 	c, srv := newTestServer(t, h)
 
-	if _, err := c.Shutdown(context.Background(), connect.NewRequest(&darajapb.ShutdownRequest{})); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	if h.Running() {
-		t.Error("process still running after Shutdown")
-	}
+	_, err := c.Shutdown(context.Background(), connect.NewRequest(&darajapb.ShutdownRequest{}))
+	ck.Require().NoError(err, "Shutdown")
+	ck.False(h.Running(), "process still running after Shutdown")
 
 	// daraja exits with its child; the server publishes that intent so the CLI
 	// can return rather than serving a host with nothing in it.
@@ -101,6 +90,7 @@ func TestServerShutdownEndsTheProcessAndSignalsExit(t *testing.T) {
 // on the next stream. Without this, a reconnecting controller silently loses
 // whatever was in flight when its connection broke — and nothing errors.
 func TestUndeliveredEventSurvivesAFailedSend(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: "/bin/cat", Spec: ChildSpec{Kind: KindClaude}})
 	s := NewServer(h)
 
@@ -109,55 +99,39 @@ func TestUndeliveredEventSurvivesAFailedSend(t *testing.T) {
 	})
 
 	got := s.takePending()
-	if got == nil {
-		t.Fatal("stashed event was not returned")
-	}
-	if string(got.GetStdout()) != "in flight" {
-		t.Errorf("got %q, want %q", got.GetStdout(), "in flight")
-	}
-	if s.takePending() != nil {
-		t.Error("pending event was returned twice")
-	}
+	c.Require().NotNil(got, "stashed event was not returned")
+	c.Eq("in flight", string(got.GetStdout()), "got %q, want", got.GetStdout())
+	c.Nil(s.takePending(), "pending event was returned twice")
 }
 
 // Two Relay streams would split one event channel between them, giving each
 // consumer a random half of the child's output.
 func TestSecondRelayIsRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
 	h := NewHost(HostOptions{Binary: "/bin/cat", Spec: ChildSpec{Kind: KindClaude}})
 	s := NewServer(h)
 
-	if !s.attach() {
-		t.Fatal("first attach was refused")
-	}
-	if s.attach() {
-		t.Error("second attach was admitted; one Relay at a time is the contract")
-	}
+	c.Require().True(s.attach(), "first attach was refused")
+	c.False(s.attach(), "second attach was admitted; one Relay at a time is the contract")
 	s.detach()
-	if !s.attach() {
-		t.Error("attach was refused after detach")
-	}
+	c.True(s.attach(), "attach was refused after detach")
 }
 
 func TestServerRelayCarriesStdioBothWays(t *testing.T) {
+	ck := assert.NewAborting(t)
 	h := NewHost(HostOptions{Binary: testChildBinary(t, "cat"), Spec: ChildSpec{Kind: KindClaude}})
-	if err := h.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	ck.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
 	c, _ := newTestServer(t, h)
 
 	stream := c.Relay(context.Background())
-	if err := stream.Send(&darajapb.RelayRequest{Stdin: []byte("ping\n")}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
+	ck.NoError(stream.Send(&darajapb.RelayRequest{Stdin: []byte("ping\n")}), "Send")
 
 	deadline := time.Now().Add(5 * time.Second)
 	var got strings.Builder
 	for time.Now().Before(deadline) {
 		resp, err := stream.Receive()
-		if err != nil {
-			t.Fatalf("stream ended: %v", err)
-		}
+		ck.NoError(err, "stream ended")
 		got.Write(resp.GetStdout())
 		if strings.Contains(got.String(), "ping") {
 			return

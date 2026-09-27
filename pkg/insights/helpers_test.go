@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Integration tests need a real TimescaleDB (>= 2.22, PostgreSQL 18 for
@@ -26,19 +28,16 @@ var scratchSeq atomic.Uint64
 
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
-		if os.Getenv("RAFIKI_REQUIRE_DB") != "" {
-			t.Fatal("RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
-		}
+		c.Eq("", os.Getenv("RAFIKI_REQUIRE_DB"), "RAFIKI_TEST_DSN not set but RAFIKI_REQUIRE_DB is — the integration job must provide it")
 		t.Skip("RAFIKI_TEST_DSN not set; skipping integration test")
 	}
 	ctx := context.Background()
 
 	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
+	c.NoError(err, "connect admin")
 	t.Cleanup(admin.Close)
 
 	name := fmt.Sprintf("rafiki_insights_%d_%d", time.Now().UnixNano(), scratchSeq.Add(1))
@@ -50,19 +49,13 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	})
 
 	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse dsn: %v", err)
-	}
+	c.NoError(err, "parse dsn")
 	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("connect scratch db: %v", err)
-	}
+	c.NoError(err, "connect scratch db")
 	t.Cleanup(pool.Close)
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate scratch db: %v", err)
-	}
+	c.NoError(store.Migrate(ctx, pool), "migrate scratch db")
 	return pool
 }
 
@@ -81,9 +74,7 @@ func insertConversation(t *testing.T, pool *pgxpool.Pool, drivenBy, owner string
 		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by)
 		 VALUES ($1::uuid, 'team-platform', 'claude-fable-5', 'test', $2) RETURNING id::text`,
 		ownerArg, drivenBy).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert conversation")
 	return id
 }
 
@@ -103,12 +94,10 @@ func ensureUser(t *testing.T, pool *pgxpool.Pool, username string) string {
 	// token_sha256 is globally unique and tombstones keep their row, so a
 	// recreated username needs a fresh digest — reusing the name would collide
 	// with the removed user's row.
-	if err := pool.QueryRow(ctx,
+	assert.NewAborting(t).NoError(pool.QueryRow(ctx,
 		`INSERT INTO conversations.users (username, token_sha256)
 		 VALUES ($1, $1 || ':' || gen_random_uuid()::text) RETURNING id::text`,
-		username).Scan(&id); err != nil {
-		t.Fatalf("insert user %q: %v", username, err)
-	}
+		username).Scan(&id), "insert user %q", username)
 	return id
 }
 
@@ -168,9 +157,7 @@ func insertTurn(t *testing.T, pool *pgxpool.Pool, convID string, st seedTurn) st
 		st.inTok, st.outTok, st.cacheRead, st.cacheCreate,
 		nullStr(st.upstream), st.latencyMS, nullStr(st.source), nullStr(st.prefixHash),
 		st.responseOrdinal, nullJSON(st.prefixContent), createdAt, nullStr(st.servedProvider)).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert turn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert turn")
 	return id
 }
 
@@ -180,9 +167,7 @@ func insertMessage(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int,
 		`INSERT INTO conversations.conversation_message (conversation_id, ordinal, role, content)
 		 VALUES ($1, $2, $3, $4)`,
 		convID, ordinal, role, []byte(contentJSON))
-	if err != nil {
-		t.Fatalf("insert message: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert message")
 }
 
 // seedConversation creates a conversation with two complete turns and a

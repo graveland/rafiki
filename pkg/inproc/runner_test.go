@@ -21,6 +21,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // sampleEndTurn is one scripted assistant message: a completed turn whose text
@@ -50,18 +52,15 @@ func (panickingBashTool) Execute(context.Context, tools.ToolInput) (tools.ToolRe
 
 func writeFakeTurns(t *testing.T, bodies ...string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 	lines := make([]string, 0, len(bodies))
 	for _, b := range bodies {
 		var compact bytes.Buffer
-		if err := json.Compact(&compact, []byte(b)); err != nil {
-			t.Fatalf("compact scripted body: %v", err)
-		}
+		c.NoError(json.Compact(&compact, []byte(b)), "compact scripted body")
 		lines = append(lines, compact.String())
 	}
 	path := filepath.Join(t.TempDir(), "turns.ndjson")
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("write scripted turns: %v", err)
-	}
+	c.NoError(os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600), "write scripted turns")
 	return path
 }
 
@@ -96,6 +95,7 @@ func readFramesUntil(t *testing.T, r io.Reader, want string) []string {
 // shipped empty message_update frames twice with a fully green suite, both
 // times because every assertion targeted message_end.
 func TestRunnerDrivesAFakeTurn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := New(Options{
 		ChildID: "c_inproc",
 		Parent:  t.Context(),
@@ -111,14 +111,10 @@ func TestRunnerDrivesAFakeTurn(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(err, "Start")
 
 	// stderr must be a live reader at EOF, never nil: readStderr would panic.
-	if stderr == nil {
-		t.Fatal("Start returned a nil stderr")
-	}
+	c.Require().NotNil(stderr, "Start returned a nil stderr")
 	if _, err := io.ReadAll(stderr); err != nil {
 		t.Errorf("stderr read: %v", err)
 	}
@@ -139,33 +135,22 @@ func TestRunnerDrivesAFakeTurn(t *testing.T) {
 
 	joined := strings.Join(frames, "\n")
 	for _, want := range []string{"agent_start", "message_end", "agent_end"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("frame stream missing %q; got:\n%s", want, joined)
-		}
+		c.StrContains(joined, want, "frame stream missing")
 	}
-	if !strings.Contains(joined, "the fake reply") {
-		t.Errorf("frame stream missing the fake turn text; got:\n%s", joined)
-	}
+	c.StrContains(joined, "the fake reply", "frame stream missing the fake turn text; got:\n")
 
-	if err := stdin.Close(); err != nil {
-		t.Errorf("close stdin: %v", err)
-	}
+	c.NoError(stdin.Close(), "close stdin")
 	code, sig := r.Wait()
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0", code)
-	}
-	if sig != "" {
-		t.Errorf("signal = %q, want empty for an in-process runner", sig)
-	}
-	if r.PID() != 0 {
-		t.Errorf("PID() = %d, want 0", r.PID())
-	}
+	c.Eq(0, code, "exit code")
+	c.Eq("", sig, "signal")
+	c.Eq(0, r.PID(), "PID()")
 }
 
 // TestRunnerContainsPanic is the load-bearing test of this phase. A panic in
 // one conversation must become that child's exit, not the daemon's. Without the
 // recover in run(), this test crashes the test binary rather than failing.
 func TestRunnerContainsPanic(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := New(Options{
 		ChildID: "c_panic",
 		Parent:  t.Context(),
@@ -176,9 +161,7 @@ func TestRunnerContainsPanic(t *testing.T) {
 	})
 
 	_, stdout, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(err, "Start")
 
 	// The panic must close stdout so the daemon's readStdout sees an ordinary
 	// EOF and the normal child-exit path runs.
@@ -187,9 +170,7 @@ func TestRunnerContainsPanic(t *testing.T) {
 	}
 
 	code, _ := r.Wait()
-	if code == 0 {
-		t.Error("exit code = 0 after a panic, want non-zero")
-	}
+	c.NotEq(0, code, "exit code = 0 after a panic, want non-zero")
 }
 
 // TestRunnerBuildErrorIsAnExit proves a failed build is reported as a non-zero
@@ -205,9 +186,8 @@ func TestRunnerBuildErrorIsAnExit(t *testing.T) {
 	} else if _, rerr := io.ReadAll(stdout); rerr != nil {
 		t.Errorf("stdout read: %v", rerr)
 	}
-	if code, _ := r.Wait(); code == 0 {
-		t.Error("exit code = 0 after a build failure, want non-zero")
-	}
+	code, _ := r.Wait()
+	assert.NewCollecting(t).NotEq(0, code, "exit code = 0 after a build failure, want non-zero")
 }
 
 // hugeEndTurn returns a scripted end_turn assistant message whose text field
@@ -226,9 +206,7 @@ func hugeEndTurn(t *testing.T, size int) string {
 		"usage":       map[string]any{"input_tokens": 4, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
 	}
 	b, err := json.Marshal(msg)
-	if err != nil {
-		t.Fatalf("marshal huge end_turn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "marshal huge end_turn")
 	return string(b)
 }
 
@@ -250,6 +228,7 @@ func hugeEndTurn(t *testing.T, size int) string {
 // Wait() does NOT return on its own, then calls Kill() and requires Wait() to
 // return within a few seconds.
 func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// 256 KiB is 4x the largest OS pipe buffer (64 KiB on Linux and macOS), so
 	// the first frame alone already blocks a writer nobody is draining.
 	//
@@ -284,12 +263,8 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 
 	// Drive one prompt per scripted huge turn; the engine only needs to get
 	// partway through before its stdout write blocks.
@@ -321,9 +296,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 	}()
 	select {
 	case err := <-firstByte:
-		if err != nil {
-			t.Fatalf("reading the engine's first stdout byte: %v", err)
-		}
+		c.Require().NoError(err, "reading the engine's first stdout byte")
 	case <-time.After(30 * time.Second):
 		t.Fatal("engine emitted nothing within 30s; the write wedge under test was never reached")
 	}
@@ -344,9 +317,7 @@ func TestRunnerKillUnwedgesFullPipe(t *testing.T) {
 		// Expected: the engine is blocked writing to a full, undrained pipe.
 	}
 
-	if err := r.Kill(); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.Require().NoError(r.Kill(), "Kill")
 
 	select {
 	case <-waitDone:
@@ -493,6 +464,7 @@ func decodeUntilWithTimeout(t *testing.T, dec *json.Decoder, want string, timeou
 // Interrupt with Terminate/Kill would make every user abort kill the child,
 // which is exactly what this test guards against.
 func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	started := make(chan struct{})
 	r := New(Options{
 		ChildID: "c_interrupt",
@@ -502,12 +474,8 @@ func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 	dec := json.NewDecoder(stdout)
 
 	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
@@ -520,18 +488,12 @@ func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
 		t.Fatal("tool never started; the turn never went in flight")
 	}
 
-	if err := r.Interrupt(); err != nil {
-		t.Fatalf("Interrupt: %v", err)
-	}
+	c.Require().NoError(r.Interrupt(), "Interrupt")
 
 	first := decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second)
 	joined := strings.Join(first, "\n")
-	if !strings.Contains(joined, "tool_execution_end") {
-		t.Errorf("frames after Interrupt missing tool_execution_end; got:\n%s", joined)
-	}
-	if strings.Contains(joined, "agent_error") {
-		t.Errorf("Interrupt must not produce agent_error (it is not a loop failure); got:\n%s", joined)
-	}
+	c.StrContains(joined, "tool_execution_end", "frames after Interrupt missing tool_execution_end; got:\n")
+	c.NotStrContains(joined, "agent_error", "Interrupt must not produce agent_error (it is not a loop failure); got:\n")
 
 	// The runner must stay alive and accept another prompt -- the entire
 	// point of Interrupt over Terminate/Kill.
@@ -539,13 +501,9 @@ func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
 		t.Fatalf("write second prompt: %v", err)
 	}
 	second := decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second)
-	if !strings.Contains(strings.Join(second, "\n"), "the fake reply") {
-		t.Errorf("second turn missing the fake reply from sampleEndTurn; got:\n%s", strings.Join(second, "\n"))
-	}
+	c.StrContains(strings.Join(second, "\n"), "the fake reply", "second turn missing the fake reply from sampleEndTurn; got:\n")
 
-	if err := stdin.Close(); err != nil {
-		t.Errorf("close stdin: %v", err)
-	}
+	c.NoError(stdin.Close(), "close stdin")
 	if code, sig := r.Wait(); code != 0 || sig != "" {
 		t.Errorf("Wait() = (%d, %q), want (0, \"\") after a clean stdin EOF", code, sig)
 	}
@@ -558,6 +516,7 @@ func TestRunnerInterruptAbortsTurnButRunnerStaysAlive(t *testing.T) {
 // what child.Runner's doc comment describes as the escalation the daemon
 // performs before falling back to Kill.
 func TestRunnerTerminateEndsIt(t *testing.T) {
+	c := assert.NewCollecting(t)
 	started := make(chan struct{})
 	r := New(Options{
 		ChildID: "c_terminate",
@@ -567,12 +526,8 @@ func TestRunnerTerminateEndsIt(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 
 	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
 		t.Fatalf("write prompt: %v", err)
@@ -583,9 +538,7 @@ func TestRunnerTerminateEndsIt(t *testing.T) {
 		t.Fatal("tool never started; the turn never went in flight")
 	}
 
-	if err := r.Terminate(); err != nil {
-		t.Fatalf("Terminate: %v", err)
-	}
+	c.Require().NoError(r.Terminate(), "Terminate")
 
 	// Terminate cancels ctx but does not touch the pipes, so Frontend.Run
 	// keeps blocking on its next stdin read: the runner as a whole must NOT
@@ -601,9 +554,7 @@ func TestRunnerTerminateEndsIt(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	if err := stdin.Close(); err != nil {
-		t.Errorf("close stdin: %v", err)
-	}
+	c.NoError(stdin.Close(), "close stdin")
 	select {
 	case <-waitDone:
 	case <-time.After(5 * time.Second):
@@ -668,6 +619,7 @@ func cancelCtxChildCount(ctx context.Context) (int, bool) {
 // zero), the latter only when the context package's internals are still the
 // shape cancelCtxChildCount expects.
 func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
+	c := assert.NewCollecting(t)
 	parent, cancelParent := context.WithCancel(context.Background())
 	defer cancelParent()
 
@@ -689,27 +641,20 @@ func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
 		})
 
 		stdin, stdout, stderr, err := r.Start()
-		if err != nil {
-			t.Fatalf("Start %s: %v", id, err)
-		}
-		if err := stderr.Close(); err != nil {
-			t.Errorf("close stderr %s: %v", id, err)
-		}
+		c.Require().NoError(err, "Start %s", id)
+		c.NoError(stderr.Close(), "close stderr %s", id)
 		// Drain stdout so the engine can never block on a full pipe; this test
 		// is about the ordinary completion path, nothing else.
 		drained := make(chan struct{})
 		go func() {
 			defer close(drained)
-			if _, cerr := io.Copy(io.Discard, stdout); cerr != nil {
-				t.Errorf("drain stdout %s: %v", id, cerr)
-			}
+			_, cerr := io.Copy(io.Discard, stdout)
+			c.NoError(cerr, "drain stdout %s", id)
 		}()
 
 		// No prompt at all: closing stdin immediately is the shortest possible
 		// ordinary completion — Frontend.Run sees EOF, run() returns normally.
-		if err := stdin.Close(); err != nil {
-			t.Fatalf("close stdin %s: %v", id, err)
-		}
+		c.Require().NoError(stdin.Close(), "close stdin %s", id)
 		if code, sig := r.Wait(); code != 0 || sig != "" {
 			t.Fatalf("Wait() = (%d, %q) for %s, want (0, \"\") on a clean EOF", code, sig, id)
 		}
@@ -739,6 +684,7 @@ func TestRunnerReleasesChildContextOnNormalCompletion(t *testing.T) {
 // that defer is registered BEFORE run's recover defer, the resulting panic is
 // NOT contained — it kills the whole daemon rather than one child.
 func TestRunnerStartIsSingleShot(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := New(Options{
 		ChildID: "c_twice",
 		Parent:  t.Context(),
@@ -747,20 +693,14 @@ func TestRunnerStartIsSingleShot(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("first Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "first Start")
+	c.NoError(stderr.Close(), "close stderr")
 
 	if _, _, _, err := r.Start(); err == nil {
 		t.Fatal("second Start returned nil error; it must be rejected, not run() twice")
 	}
 
-	if err := stdin.Close(); err != nil {
-		t.Errorf("close stdin: %v", err)
-	}
+	c.NoError(stdin.Close(), "close stdin")
 	if _, err := io.ReadAll(stdout); err != nil {
 		t.Errorf("stdout read: %v", err)
 	}
@@ -815,6 +755,7 @@ func panicToolBuildFunc(fakeTurnsPath string) BuildFunc {
 // fail — it crashes the test binary, because agentloop runs the tool on an
 // errgroup goroutine that nothing recovers.
 func TestRunnerSurvivesAPanickingTool(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := New(Options{
 		ChildID: "c_toolpanic",
 		Parent:  t.Context(),
@@ -823,12 +764,8 @@ func TestRunnerSurvivesAPanickingTool(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 	dec := json.NewDecoder(stdout)
 
 	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
@@ -836,28 +773,18 @@ func TestRunnerSurvivesAPanickingTool(t *testing.T) {
 	}
 
 	first := strings.Join(decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second), "\n")
-	if !strings.Contains(first, "tool_execution_end") {
-		t.Errorf("no tool_execution_end after a panicking tool; got:\n%s", first)
-	}
-	if !strings.Contains(first, `"isError":true`) {
-		t.Errorf("the panicking tool did not produce an is_error result the model can see; got:\n%s", first)
-	}
-	if !strings.Contains(first, "tool exploded inside a real turn") {
-		t.Errorf("the tool result does not carry the panic value; got:\n%s", first)
-	}
+	c.StrContains(first, "tool_execution_end", "no tool_execution_end after a panicking tool; got:\n")
+	c.StrContains(first, `"isError":true`, "the panicking tool did not produce an is_error result the model can see; got:\n")
+	c.StrContains(first, "tool exploded inside a real turn", "the tool result does not carry the panic value; got:\n")
 
 	// Still alive: a contained tool panic must not end the conversation.
 	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"second"}` + "\n")); err != nil {
 		t.Fatalf("write second prompt: %v", err)
 	}
 	second := strings.Join(decodeUntilWithTimeout(t, dec, "agent_end", 15*time.Second), "\n")
-	if !strings.Contains(second, "the fake reply") {
-		t.Errorf("the child did not serve a second prompt after a contained tool panic; got:\n%s", second)
-	}
+	c.StrContains(second, "the fake reply", "the child did not serve a second prompt after a contained tool panic; got:\n")
 
-	if err := stdin.Close(); err != nil {
-		t.Errorf("close stdin: %v", err)
-	}
+	c.NoError(stdin.Close(), "close stdin")
 	if code, sig := r.Wait(); code != 0 || sig != "" {
 		t.Errorf("Wait() = (%d, %q), want (0, \"\") - a contained tool panic is not a child failure", code, sig)
 	}
@@ -912,6 +839,7 @@ func panickingTurnBuildFunc() BuildFunc {
 // non-zero. A silently stopped queue would instead leave the child looking
 // healthy forever while every prompt vanished.
 func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := New(Options{
 		ChildID: "c_workerpanic",
 		Parent:  t.Context(),
@@ -920,12 +848,8 @@ func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 
 	if _, err := stdin.Write([]byte(`{"type":"prompt","message":"go"}` + "\n")); err != nil {
 		t.Fatalf("write prompt: %v", err)
@@ -950,20 +874,12 @@ func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("stdout never reached EOF after a turn-worker panic; the child is wedged, not ended")
 	}
-	if got.err != nil {
-		t.Errorf("stdout must EOF cleanly so the daemon runs its normal child-exit path, got: %v", got.err)
-	}
-	if !strings.Contains(string(got.frames), "agent_error") {
-		t.Errorf("no agent_error frame explaining why the child died; got:\n%s", got.frames)
-	}
+	c.NoError(got.err, "stdout must EOF cleanly so the daemon runs its normal child-exit path, got")
+	c.StrContains(string(got.frames), "agent_error", "no agent_error frame explaining why the child died; got:\n%s", got.frames)
 
 	code, sig := r.Wait()
-	if code == 0 {
-		t.Error("exit code = 0 after a turn-worker panic, want non-zero")
-	}
-	if sig != "" {
-		t.Errorf("signal = %q, want empty - a panic is an exit, not a signal", sig)
-	}
+	c.NotEq(0, code, "exit code = 0 after a turn-worker panic, want non-zero")
+	c.Eq("", sig, "signal")
 
 	if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		t.Errorf("close stdin: %v", err)
@@ -986,6 +902,7 @@ func TestRunnerPanicInTurnWorkerEndsTheChild(t *testing.T) {
 // Runner, so it really is processRunner producing the reference values rather
 // than this test asserting a remembered literal.
 func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// --- in-process half ---------------------------------------------------
 	started := make(chan struct{})
 	r := New(Options{
@@ -996,12 +913,8 @@ func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
 	})
 
 	stdin, stdout, stderr, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := stderr.Close(); err != nil {
-		t.Errorf("close stderr: %v", err)
-	}
+	c.Require().NoError(err, "Start")
+	c.NoError(stderr.Close(), "close stderr")
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -1019,9 +932,7 @@ func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
 		t.Fatal("tool never started; the turn never went in flight")
 	}
 
-	if err := r.Kill(); err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.Require().NoError(r.Kill(), "Kill")
 	inCode, inSignal := r.Wait()
 	<-drained
 	if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
@@ -1038,22 +949,11 @@ func TestKillReportsTheSameExitShapeAsASignalledSubprocess(t *testing.T) {
 		PiBinary: "/bin/sh",
 		Argv:     []string{"-c", `trap "" TERM; while :; do sleep 0.05; done`},
 	})
-	if err != nil {
-		t.Fatalf("spawn subprocess child: %v", err)
-	}
+	c.Require().NoError(err, "spawn subprocess child")
 	res, err := ch.Shutdown(300*time.Millisecond, 300*time.Millisecond)
-	if err != nil {
-		t.Fatalf("subprocess Shutdown: %v", err)
-	}
-	if !res.Escalated {
-		t.Fatal("the subprocess exited before SIGKILL; this test needs a signalled reference, not a clean exit")
-	}
+	c.Require().NoError(err, "subprocess Shutdown")
+	c.Require().True(res.Escalated, "the subprocess exited before SIGKILL; this test needs a signalled reference, not a clean exit")
 
-	if inCode != res.ExitCode || inSignal != res.Signal {
-		t.Errorf("kill exit shape disagrees between runners:\n  in-process: (%d, %q)\n  subprocess: (%d, %q)",
-			inCode, inSignal, res.ExitCode, res.Signal)
-	}
-	if inSignal != killedSignal {
-		t.Errorf("in-process kill signal = %q, want %q", inSignal, killedSignal)
-	}
+	c.False(inCode != res.ExitCode || inSignal != res.Signal, "kill exit shape disagrees between runners:\n  in-process: (%d, %q)\n  subprocess: (%d, %q)", inCode, inSignal, res.ExitCode, res.Signal)
+	c.Eq(killedSignal, inSignal, "in-process kill signal")
 }

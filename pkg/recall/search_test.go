@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func utcDate(y int, m time.Month, d int) time.Time {
@@ -68,48 +70,37 @@ func (f *searchFakeEmbedder) Embed(_ context.Context, inputs []string) ([][]floa
 }
 
 func TestScopeZeroValueAdmitsNothing(t *testing.T) {
-	if (Scope{}).Valid() {
-		t.Fatal("Scope{} must admit nothing")
-	}
-	if !(Scope{All: true}).Valid() {
-		t.Fatal("Scope{All:true} must be valid")
-	}
-	if !(Scope{OwnerUserID: "u"}).Valid() {
-		t.Fatal(`Scope{OwnerUserID:"u"} must be valid`)
-	}
+	c := assert.NewAborting(t)
+	c.False((Scope{}).Valid(), "Scope{} must admit nothing")
+	c.True((Scope{All: true}).Valid(), "Scope{All:true} must be valid")
+	c.True((Scope{OwnerUserID: "u"}).Valid(), `Scope{OwnerUserID:"u"} must be valid`)
 }
 
 func TestParseHitIDRoundTripAndRejects(t *testing.T) {
+	c := assert.NewAborting(t)
 	for src, uuid := range map[Source]string{
 		SourceMemory: "mem-1", SourceSummary: "sum-2", SourceWindow: "win-3",
 	} {
 		id := HitID(src, uuid)
 		gotSrc, gotUUID, err := ParseHitID(id)
-		if err != nil || gotSrc != src || gotUUID != uuid {
-			t.Fatalf("ParseHitID(%q) = %v, %q, %v", id, gotSrc, gotUUID, err)
-		}
+		c.False(err != nil || gotSrc != src || gotUUID != uuid, "ParseHitID(%q) = %v, %q, %v", id, gotSrc, gotUUID, err)
 	}
 	for _, bad := range []string{"x:1", "m:", "nocolon", ""} {
 		_, _, err := ParseHitID(bad)
-		if err == nil {
-			t.Fatalf("ParseHitID(%q) accepted", bad)
-		}
-		if !strings.Contains(err.Error(), "recall: bad hit id") {
-			t.Fatalf("ParseHitID(%q) error = %v", bad, err)
-		}
+		c.Error(err, "ParseHitID(%q) accepted", bad)
+		c.StrContains(err.Error(), "recall: bad hit id", "ParseHitID(%q) error = %v", bad, err)
 	}
 }
 
 func TestFuseRRF(t *testing.T) {
+	c := assert.NewCollecting(t)
 	d1, d2 := utcDate(2026, 1, 2), utcDate(2026, 1, 3)
 	lists := [][]Hit{
 		{{ID: "m:a", Source: SourceMemory, When: d1}, {ID: "w:b", Source: SourceWindow, When: d2}, {ID: "s:c", Source: SourceSummary, When: d1}},
 		{{ID: "w:b", Source: SourceWindow, When: d2}, {ID: "w:d", Source: SourceWindow, When: d1}, {ID: "w:e", Source: SourceWindow, When: d1}},
 	}
 	fused := Fuse(lists, 10)
-	if len(fused) != 5 {
-		t.Fatalf("fused %d hits, want 5", len(fused))
-	}
+	c.Require().Len(fused, 5, "fused %d hits, want 5", len(fused))
 	want := map[string]float64{
 		"m:a": 1.0 / 61,
 		"w:b": 1.0/62 + 1.0/61,
@@ -118,20 +109,14 @@ func TestFuseRRF(t *testing.T) {
 		"w:e": 1.0 / 63,
 	}
 	for _, h := range fused {
-		if math.Abs(h.Score-want[h.ID]) > 1e-12 {
-			t.Errorf("%s score %v, want %v", h.ID, h.Score, want[h.ID])
-		}
+		c.LessOrEqual(1e-12, math.Abs(h.Score-want[h.ID]), "%s score %v, want %v", h.ID, h.Score, want[h.ID])
 	}
 	gotIDs := ids(fused)
 	wantIDs := []string{"w:b", "m:a", "w:d", "s:c", "w:e"}
 	for i := range wantIDs {
-		if gotIDs[i] != wantIDs[i] {
-			t.Fatalf("order %v, want %v", gotIDs, wantIDs)
-		}
+		c.Require().Eq(wantIDs[i], gotIDs[i], "order %v, want %v", gotIDs, wantIDs)
 	}
-	if n := strings.Count(strings.Join(gotIDs, ","), "w:b"); n != 1 {
-		t.Fatalf("w:b appears %d times", n)
-	}
+	c.Require().Eq(1, strings.Count(strings.Join(gotIDs, ","), "w:b"), "w:b appears")
 	if got := Fuse(lists, 2); len(got) != 2 || got[0].ID != "w:b" || got[1].ID != "m:a" {
 		t.Fatalf("Fuse limit 2 = %v", ids(got))
 	}
@@ -146,49 +131,38 @@ func ids(hits []Hit) []string {
 }
 
 func TestSearchDegradesToBM25OnEmbedError(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &searchFakeStore{bm25: map[Source][]Hit{
 		SourceWindow: {{ID: "w:1", Source: SourceWindow, Snippet: "hit", Rank: 1}},
 	}}
 	emb := &searchFakeEmbedder{model: "emb-1", err: errors.New("embed down")}
 	q := SearchQuery{Scope: Scope{All: true}, Text: "needle", Sources: []Source{SourceWindow}}
 	hits, err := Search(context.Background(), st, emb, q, 10)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(hits) != 1 || hits[0].ID != "w:1" {
-		t.Fatalf("hits = %v", hits)
-	}
+	c.NoError(err, "Search")
+	c.False(len(hits) != 1 || hits[0].ID != "w:1", "hits = %v", hits)
 	if len(emb.inputs) != 1 || len(emb.inputs[0]) != 1 || emb.inputs[0][0] != "needle" {
 		t.Fatalf("embed inputs = %v", emb.inputs)
 	}
-	if len(st.vecCalled) != 0 {
-		t.Fatalf("SearchVector called despite embed error: %v", st.vecCalled)
-	}
+	c.Empty(st.vecCalled, "SearchVector called despite embed error")
 }
 
 func TestSearchSkipsMemoryWithoutOwner(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &searchFakeStore{}
 	q := SearchQuery{Scope: Scope{All: true}, Text: "needle"}
 	if _, err := Search(context.Background(), st, nil, q, 5); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	for _, src := range st.bm25Called {
-		if src == SourceMemory {
-			t.Fatal("memory searched without MemoryOwner")
-		}
+		c.NotEq(SourceMemory, src, "memory searched without MemoryOwner")
 	}
-	if len(st.bm25Called) != 2 {
-		t.Fatalf("bm25 called for %v, want summary+window", st.bm25Called)
-	}
-	if st.lastQuery.Limit != 20 {
-		t.Fatalf("store saw Limit %d, want 20 (5*4)", st.lastQuery.Limit)
-	}
+	c.Len(st.bm25Called, 2, "bm25 called for")
+	c.Eq(20, st.lastQuery.Limit, "store saw Limit")
 
 	st2 := &searchFakeStore{}
 	q2 := SearchQuery{Scope: Scope{All: true}, MemoryOwner: "u1", Text: "needle"}
-	if _, err := Search(context.Background(), st2, nil, q2, 5); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := Search(context.Background(), st2, nil, q2, 5)
+	c.NoError(err, "Search")
 	found := false
 	for _, src := range st2.bm25Called {
 		if src == SourceMemory {
@@ -201,6 +175,7 @@ func TestSearchSkipsMemoryWithoutOwner(t *testing.T) {
 }
 
 func TestSearchFusesVectorWithBM25(t *testing.T) {
+	c := assert.NewAborting(t)
 	st := &searchFakeStore{
 		bm25: map[Source][]Hit{
 			SourceWindow: {{ID: "w:1", Source: SourceWindow, When: utcDate(2026, 1, 2)}},
@@ -212,25 +187,20 @@ func TestSearchFusesVectorWithBM25(t *testing.T) {
 	emb := &searchFakeEmbedder{model: "emb-1", vecs: [][]float32{{0.1, 0.2}}}
 	q := SearchQuery{Scope: Scope{All: true}, Text: "needle", Sources: []Source{SourceWindow}}
 	hits, err := Search(context.Background(), st, emb, q, 10)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(hits) != 2 {
-		t.Fatalf("hits = %v", ids(hits))
-	}
+	c.NoError(err, "Search")
+	c.Len(hits, 2, "hits = %v", ids(hits))
 	// w:1 ranks 1 in BM25 and 2 in vector (summed); w:2 ranks 1 in vector only.
 	if hits[0].ID != "w:1" || hits[1].ID != "w:2" {
 		t.Fatalf("order %v, want w:1 then w:2", ids(hits))
 	}
-	if len(emb.inputs) != 1 {
-		t.Fatalf("embed called %d times, want 1", len(emb.inputs))
-	}
+	c.Len(emb.inputs, 1, "embed called %d times, want 1", len(emb.inputs))
 	if st.lastVecModel != "emb-1" || len(st.lastVec) != 2 {
 		t.Fatalf("vector call model %q vec %v", st.lastVecModel, st.lastVec)
 	}
 }
 
 func TestFormatHitsTruncates(t *testing.T) {
+	c := assert.NewAborting(t)
 	hits := make([]Hit, 100)
 	for i := range hits {
 		hits[i] = Hit{
@@ -244,32 +214,21 @@ func TestFormatHitsTruncates(t *testing.T) {
 		}
 	}
 	out := FormatHits(hits)
-	if len(out) > RecallMaxOutputChars+60 {
-		t.Fatalf("output %d bytes exceeds cap %d", len(out), RecallMaxOutputChars+60)
-	}
+	c.LessOrEqual(RecallMaxOutputChars+60, len(out), "output")
 	if !strings.HasSuffix(out, "more hits truncated)") {
 		t.Fatalf("missing truncation line in %q", out[len(out)-60:])
 	}
-	if strings.Count(out, "\n") < 2 {
-		t.Fatalf("expected multiple hit lines, got %q", out)
-	}
-	if got := FormatHits(nil); got != "no matches" {
-		t.Fatalf("FormatHits(nil) = %q", got)
-	}
+	c.GreaterOrEqual(2, strings.Count(out, "\n"), "expected multiple hit lines, got %q", out)
+	c.Eq("no matches", FormatHits(nil), "FormatHits(nil) =")
 }
 
 func TestFormatHitLines(t *testing.T) {
+	c := assert.NewAborting(t)
 	when := utcDate(2026, 1, 2)
 	memory := formatHit(Hit{ID: "m:1", Source: SourceMemory, Path: "project", Name: "api", Snippet: "the api", When: when})
-	if want := "m:1  memory   project/api  2026-01-02  \"the api\""; memory != want {
-		t.Fatalf("memory line = %q, want %q", memory, want)
-	}
+	c.Eq("m:1  memory   project/api  2026-01-02  \"the api\"", memory, "memory line")
 	summary := formatHit(Hit{ID: "s:2", Source: SourceSummary, Repo: "rafiki", Title: "fix", Snippet: "did it", When: when})
-	if want := "s:2  summary  rafiki · 2026-01-02 · \"fix\"  \"did it\""; summary != want {
-		t.Fatalf("summary line = %q, want %q", summary, want)
-	}
+	c.Eq("s:2  summary  rafiki · 2026-01-02 · \"fix\"  \"did it\"", summary, "summary line")
 	window := formatHit(Hit{ID: "w:3", Source: SourceWindow, ConversationID: "conv12345678", OrdinalFrom: 5, OrdinalTo: 9, Snippet: "the text", When: when})
-	if want := "w:3  window   - · 2026-01-02 · conv conv1234…#5-9  \"the text\""; window != want {
-		t.Fatalf("window line = %q, want %q", window, want)
-	}
+	c.Eq("w:3  window   - · 2026-01-02 · conv conv1234…#5-9  \"the text\"", window, "window line")
 }

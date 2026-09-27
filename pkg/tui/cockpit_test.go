@@ -18,6 +18,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
 	"go.graveland.dev/rafiki/pkg/tui/session"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -78,35 +80,30 @@ func statusEventFor(id, state string, ord int32) *rafikiv1.Event {
 // that render). railCols()==0 with one agent and no peek is pinned by
 // TestCtrlRPeeksTheOneRowRail below.
 func TestRailRendersASingleChildRow(t *testing.T) {
+	c := assert.NewCollecting(t)
 	nodes := []rail.Node{{ChildID: "c_1", Name: "coordinator", Status: "idle"}}
 	got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0)
-	if got == "" {
-		t.Fatal("renderRail with one child must render the row it was given")
-	}
-	if !strings.Contains(got, "coordinator") {
-		t.Errorf("rail missing the only row:\n%s", got)
-	}
+	c.Require().NotEq("", got, "renderRail with one child must render the row it was given")
+	c.StrContains(got, "coordinator", "rail missing the only row:\n")
 }
 
 func TestRailAppearsWithTheSecondChild(t *testing.T) {
+	c := assert.NewCollecting(t)
 	nodes := []rail.Node{
 		{ChildID: "c_1", Name: "coordinator", Status: "streaming"},
 		{ChildID: "c_2", Name: "scout", ParentID: "c_1", Depth: 1, Status: "idle", Attention: 2},
 	}
 	got := renderRail(nodes, "c_1", "c_1", 24, false, nil, 0)
-	if got == "" {
-		t.Fatal("renderRail with two children must render")
-	}
+	c.Require().NotEq("", got, "renderRail with two children must render")
 	for _, want := range []string{"coordinator", "scout", "2", rail.AnimatedGlyph(nodes[0], 0)} {
-		if !strings.Contains(got, want) {
-			t.Errorf("rail missing %q:\n%s", want, got)
-		}
+		c.StrContains(got, want, "rail missing")
 	}
 }
 
 // ── status line identity & working spinner ──────────────────────────────────
 
 func TestStatusLineShowsFocusedAgentIdentity(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -114,12 +111,8 @@ func TestStatusLineShowsFocusedAgentIdentity(t *testing.T) {
 	})
 
 	got := ansi.Strip(c.View().Content)
-	if !strings.Contains(got, "scout") {
-		t.Errorf("status line missing the agent name:\n%s", got)
-	}
-	if !strings.Contains(got, "/work/scout") {
-		t.Errorf("status line missing the agent path:\n%s", got)
-	}
+	ck.StrContains(got, "scout", "status line missing the agent name:\n")
+	ck.StrContains(got, "/work/scout", "status line missing the agent path:\n")
 }
 
 // A bare `rafiki attach` has nothing focused (NewCockpit starts the rail
@@ -130,9 +123,7 @@ func TestStatusLineIdentityAbsentWithoutAFocusedChild(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	got := ansi.Strip(c.View().Content)
-	if strings.Contains(got, " · ") {
-		t.Errorf("no agent is focused, but the identity separator showed up:\n%s", got)
-	}
+	assert.NewCollecting(t).NotStrContains(got, " · ", "no agent is focused, but the identity separator showed up:\n")
 }
 
 // The footer names the active profile only when the caller says to -- this
@@ -142,9 +133,7 @@ func TestFooterShowsProfileBadgeWhenToldTo(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	got := ansi.Strip(c.View().Content)
-	if !strings.Contains(got, "work") {
-		t.Errorf("footer missing the profile badge:\n%s", got)
-	}
+	assert.NewCollecting(t).StrContains(got, "work", "footer missing the profile badge:\n")
 }
 
 // A single profile is unambiguous, so ShowProfileBadge is false and the
@@ -155,9 +144,7 @@ func TestFooterOmitsProfileBadgeWhenNotToldTo(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	got := ansi.Strip(c.View().Content)
-	if strings.Contains(got, "work") {
-		t.Errorf("profile badge shown despite ShowProfileBadge=false:\n%s", got)
-	}
+	assert.NewCollecting(t).NotStrContains(got, "work", "profile badge shown despite ShowProfileBadge=false:\n")
 }
 
 // The footer shows how close a capped agent is to its budget, not just what
@@ -171,9 +158,7 @@ func TestCostReadoutShowsCapAlongsideSpend(t *testing.T) {
 	c.rail.SetCost("c_1", 1.23)
 
 	got := c.costReadout()
-	if !strings.Contains(got, "1.23") || !strings.Contains(got, "5.00") {
-		t.Errorf("costReadout() = %q, want spend and cap both present", got)
-	}
+	assert.NewCollecting(t).False(!strings.Contains(got, "1.23") || !strings.Contains(got, "5.00"), "costReadout() = %q, want spend and cap both present", got)
 }
 
 // No spend yet means costReadout stays silent even with a cap set -- a wall
@@ -186,9 +171,7 @@ func TestCostReadoutOmitsCapWhenNothingSpentYet(t *testing.T) {
 		{ChildId: "c_1", Name: "capped", Status: "idle", Labels: map[string]string{}, MaxCost: &maxCost},
 	})
 
-	if got := c.costReadout(); got != "" {
-		t.Errorf("costReadout() = %q, want empty with zero spend", got)
-	}
+	assert.NewCollecting(t).Eq("", c.costReadout(), "costReadout()")
 }
 
 // An uncapped agent's readout is unchanged: just the spend, no suffix.
@@ -200,9 +183,7 @@ func TestCostReadoutOmitsCapWhenUnset(t *testing.T) {
 	c.rail.SetCost("c_1", 1.23)
 
 	got := c.costReadout()
-	if !strings.Contains(got, "1.23") || strings.Contains(got, "/") {
-		t.Errorf("costReadout() = %q, want spend with no cap suffix", got)
-	}
+	assert.NewCollecting(t).False(!strings.Contains(got, "1.23") || strings.Contains(got, "/"), "costReadout() = %q, want spend with no cap suffix", got)
 }
 
 // Nothing has completed a turn yet, so there is no prompt size to show.
@@ -210,9 +191,7 @@ func TestContextReadoutEmptyBeforeAnyTurn(t *testing.T) {
 	c := newTestCockpit("c_1")
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "scout", 0)})
 
-	if got := c.contextReadout(); got != "" {
-		t.Errorf("contextReadout() = %q, want empty before any completed turn", got)
-	}
+	assert.NewCollecting(t).Eq("", c.contextReadout(), "contextReadout()")
 }
 
 // With a known context window, the readout shows current/max and a percent.
@@ -224,26 +203,21 @@ func TestContextReadoutShowsWindowAndPercent(t *testing.T) {
 	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 50_000, 12_000, 0)) // 62000 total
 
 	got := c.contextReadout()
-	if got != "ctx:62k/200k (31%)" {
-		t.Errorf("contextReadout() = %q, want ctx:62k/200k (31%%)", got)
-	}
+	assert.NewCollecting(t).Eq("ctx:62k/200k (31%)", got, "contextReadout() = %q, want ctx:62k/200k (31%%)", got)
 }
 
 // No catalog entry means no known window -- every locally-served model has
 // none -- so the readout shows the token count alone rather than guessing a
 // percentage against an unknown denominator.
 func TestContextReadoutOmitsPercentWhenWindowUnknown(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "scout", 0)}) // ContextWindow 0
 	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 10_000, 0, 0))
 
 	got := c.contextReadout()
-	if got != "ctx:10k" {
-		t.Errorf("contextReadout() = %q, want ctx:10k (no percent against an unknown window)", got)
-	}
-	if strings.Contains(got, "%") || strings.Contains(got, "/") {
-		t.Errorf("contextReadout() = %q, must not guess a percent or a max", got)
-	}
+	ck.Eq("ctx:10k", got, "contextReadout()")
+	ck.False(strings.Contains(got, "%") || strings.Contains(got, "/"), "contextReadout() = %q, must not guess a percent or a max", got)
 }
 
 // CtxTokens == 0 is the same "nothing to show yet" case as before any turn --
@@ -256,9 +230,7 @@ func TestContextReadoutEmptyWhenTokensAreZero(t *testing.T) {
 	})
 	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 0, 0, 0))
 
-	if got := c.contextReadout(); got != "" {
-		t.Errorf("contextReadout() = %q, want empty when CtxTokens is 0", got)
-	}
+	assert.NewCollecting(t).Eq("", c.contextReadout(), "contextReadout()")
 }
 
 // Rounding: 1000/128000 rounds to 1%, not truncates to 0.
@@ -270,14 +242,13 @@ func TestContextReadoutRoundsThePercent(t *testing.T) {
 	c.rail.Apply(turnEndWithUsageFor("c_1", 1, 645, 0, 0)) // 645/128000 = 0.504% -> rounds to 1%
 
 	got := c.contextReadout()
-	if !strings.HasSuffix(got, "(1%)") {
-		t.Errorf("contextReadout() = %q, want a rounded 1%%", got)
-	}
+	assert.NewCollecting(t).True(strings.HasSuffix(got, "(1%)"), "contextReadout() = %q, want a rounded 1%%", got)
 }
 
 // The identity must clip rather than overflow -- a long cwd on a narrow
 // terminal must not push the status line past the window width.
 func TestStatusLineIdentityClipsToWidth(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -294,13 +265,10 @@ func TestStatusLineIdentityClipsToWidth(t *testing.T) {
 			continue
 		}
 		found = true
-		if w := ansi.StringWidth(line); w > 40 {
-			t.Errorf("status line is %d columns wide, budget is 40: %q", w, line)
-		}
+		w := ansi.StringWidth(line)
+		ck.LessOrEqual(40, w, "status line is %d columns wide, budget is 40: %q", w, line)
 	}
-	if !found {
-		t.Fatal("no line contained the agent name at all -- identity was dropped, not clipped")
-	}
+	ck.Require().True(found, "no line contained the agent name at all -- identity was dropped, not clipped")
 }
 
 func TestTranscriptShowsWorkingSpinnerWhenBusy(t *testing.T) {
@@ -311,9 +279,7 @@ func TestTranscriptShowsWorkingSpinnerWhenBusy(t *testing.T) {
 	})
 
 	got := ansi.Strip(c.View().Content)
-	if !strings.Contains(got, "streaming…") {
-		t.Errorf("transcript missing the working spinner line:\n%s", got)
-	}
+	assert.NewCollecting(t).StrContains(got, "streaming…", "transcript missing the working spinner line:\n")
 }
 
 func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
@@ -325,9 +291,7 @@ func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
 
 	got := ansi.Strip(c.View().Content)
 	for _, label := range []string{"streaming…", "running tool…", "compacting…", "working…"} {
-		if strings.Contains(got, label) {
-			t.Errorf("idle transcript should not show a working spinner, found %q:\n%s", label, got)
-		}
+		assert.NewCollecting(t).NotStrContains(got, label, "idle transcript should not show a working spinner, found")
 	}
 }
 
@@ -335,6 +299,7 @@ func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
 // flicker between each other in the instant before the first status event
 // confirms the turn started.
 func TestPendingSuppressesTheWorkingSpinner(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -343,29 +308,22 @@ func TestPendingSuppressesTheWorkingSpinner(t *testing.T) {
 	c.pending = "hello"
 
 	got := ansi.Strip(c.View().Content)
-	if strings.Contains(got, "streaming…") {
-		t.Error("pending send did not suppress the working spinner")
-	}
-	if !strings.Contains(got, "⏳ hello") {
-		t.Errorf("pending line missing:\n%s", got)
-	}
+	ck.NotStrContains(got, "streaming…", "pending send did not suppress the working spinner")
+	ck.StrContains(got, "⏳ hello", "pending line missing:\n")
 }
 
 func TestRailIndentsByDepth(t *testing.T) {
+	c := assert.NewCollecting(t)
 	nodes := []rail.Node{
 		{ChildID: "c_1", Name: "root", Status: "idle"},
 		{ChildID: "c_2", Name: "kid", ParentID: "c_1", Depth: 1, Status: "idle"},
 		{ChildID: "c_3", Name: "grandkid", ParentID: "c_2", Depth: 2, Status: "idle"},
 	}
 	lines := strings.Split(strings.TrimRight(renderRail(nodes, "c_1", "c_1", 30, false, nil, 0), "\n"), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("want 3 rows, got %d: %v", len(lines), lines)
-	}
+	c.Require().GreaterOrEqual(3, len(lines), "want 3 rows, got %d: %v", len(lines), lines)
 	indent := func(s string) int { return len(s) - len(strings.TrimLeft(s, " ")) }
 	for i := 1; i < 3; i++ {
-		if indent(lines[i]) <= indent(lines[i-1]) {
-			t.Errorf("row %d must indent deeper than row %d:\n%v", i, i-1, lines)
-		}
+		c.Greater(indent(lines[i-1]), indent(lines[i]), "row %d must indent deeper than row %d:\n%v", i, i-1, lines)
 	}
 }
 
@@ -375,29 +333,26 @@ func TestRailRowsAreClippedToWidth(t *testing.T) {
 		{ChildID: "c_2", Name: strings.Repeat("verylongname", 20), Status: "idle"},
 	}
 	for _, line := range strings.Split(renderRail(nodes, "c_1", "c_1", 20, false, nil, 0), "\n") {
-		if len([]rune(line)) > 20 {
-			t.Errorf("row is %d runes, want <= 20: %q", len([]rune(line)), line)
-		}
+		assert.NewCollecting(t).LessOrEqual(20, len([]rune(line)), "row is %d runes, want <= 20: %q", len([]rune(line)), line)
 	}
 }
 
 func TestClipCountsRunesNotBytes(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// A child name holds whatever a spawner typed. Byte truncation would split
 	// a rune and corrupt the line. clip measures DISPLAY COLUMNS (a CJK glyph
 	// is one rune but two columns) — see TestClipMeasuresDisplayWidthNotRunes
 	// in railview_test.go for the fuller regression pinning this.
 	got := clip("日本語のエージェント", 5)
-	if w := ansi.StringWidth(got); w != 5 {
-		t.Errorf("clip = %q (%d display columns), want 5", got, w)
-	}
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("clip = %q, want an ellipsis", got)
-	}
+	w := ansi.StringWidth(got)
+	c.Eq(5, w, "clip = %q (%d display columns), want 5", got, w)
+	c.True(strings.HasSuffix(got, "…"), "clip = %q, want an ellipsis", got)
 }
 
 // ── hop, LRU, keys ───────────────────────────────────────────────────────────
 
 func TestHopRetainsTheOldTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
 	c.sessions["c_1"].Apply(textEventFor("c_1", "keep me"))
@@ -405,16 +360,10 @@ func TestHopRetainsTheOldTranscript(t *testing.T) {
 	c.hop("c_2")
 	defer c.shutdown()
 
-	if c.sessions["c_1"] == nil {
-		t.Fatal("hopping away must KEEP the transcript: a full replay on every hop back is " +
-			"the cost the cockpit exists to remove")
-	}
-	if len(c.sessions["c_1"].Blocks) != 1 {
-		t.Errorf("blocks = %d, want 1", len(c.sessions["c_1"].Blocks))
-	}
-	if c.focused() != "c_2" {
-		t.Errorf("focused = %q, want c_2", c.focused())
-	}
+	ck.Require().NotNil(c.sessions["c_1"], "hopping away must KEEP the transcript: a full replay on every hop back is "+
+		"the cost the cockpit exists to remove")
+	ck.Len(c.sessions["c_1"].Blocks, 1, "blocks = %d, want 1", len(c.sessions["c_1"].Blocks))
+	ck.Eq("c_2", c.focused(), "focused")
 }
 
 func TestHopMarksTheOldChildRead(t *testing.T) {
@@ -429,9 +378,7 @@ func TestHopMarksTheOldChildRead(t *testing.T) {
 	defer c.shutdown()
 
 	n, _ := c.rail.Get("c_1")
-	if n.Attention != 0 || n.Seen != 5 {
-		t.Errorf("c_1 = attention %d seen %d, want 0/5", n.Attention, n.Seen)
-	}
+	assert.NewCollecting(t).False(n.Attention != 0 || n.Seen != 5, "c_1 = attention %d seen %d, want 0/5", n.Attention, n.Seen)
 }
 
 // c.status is a single global field: nothing else resets it on a focus
@@ -447,9 +394,7 @@ func TestHopUpdatesTheStatusLineToTheNewChild(t *testing.T) {
 
 	c.hop("c_2")
 
-	if want := "agent: shutting_down"; c.status != want {
-		t.Errorf("status = %q, want %q: the footer must describe the newly focused child", c.status, want)
-	}
+	assert.NewCollecting(t).Eq("agent: shutting_down", c.status, "status")
 }
 
 // MarkRead is otherwise only called reactively, when a NEW event arrives for
@@ -481,23 +426,22 @@ func TestHopClearsAnExistingUnreadBadgeOnAnAlreadyLoadedChild(t *testing.T) {
 }
 
 func TestLRUEvictsTheOldestButNeverTheFocused(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_0")
 	defer c.shutdown()
 	for i := 1; i <= maxSessions+2; i++ {
 		c.hop("c_" + strconv.Itoa(i))
 	}
-	if len(c.sessions) > maxSessions {
-		t.Fatalf("sessions = %d, want at most %d", len(c.sessions), maxSessions)
-	}
+	ck.Require().LessOrEqual(maxSessions, len(c.sessions), "sessions")
 	if _, ok := c.sessions["c_0"]; ok {
 		t.Error("the least-recently-focused session should have been evicted")
 	}
-	if _, ok := c.sessions[c.focused()]; !ok {
-		t.Error("the FOCUSED session must never be evicted")
-	}
+	_, ok := c.sessions[c.focused()]
+	ck.True(ok, "the FOCUSED session must never be evicted")
 }
 
 func TestSendModesAreDistinctKeys(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	for _, tc := range []struct {
 		key  tea.KeyPressMsg
@@ -512,17 +456,13 @@ func TestSendModesAreDistinctKeys(t *testing.T) {
 		{tea.KeyPressMsg{Code: tea.KeyEscape}, "esc", rafikiv1.SendMode_SEND_MODE_ABORT},
 		{tea.KeyPressMsg{Code: 'j', Text: "j"}, "j", rafikiv1.SendMode_SEND_MODE_UNSPECIFIED},
 	} {
-		if got := c.modeForKey(tc.key); got != tc.want {
-			t.Errorf("modeForKey(%q) = %v, want %v", tc.name, got, tc.want)
-		}
+		got := c.modeForKey(tc.key)
+		ck.Eq(tc.want, got, "modeForKey(%q) = %v, want", tc.name, got)
 	}
 	// Inferring the mode from agent state removes a real choice: C1a-2 made a
 	// prompt to a busy agent durably QUEUE, so queueing a follow-up and
 	// interrupting the running turn are both things a user wants.
-	if c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}) ==
-		c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}) {
-		t.Fatal("prompt and steer must not collapse onto one key")
-	}
+	ck.Require().NotEq(c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}), c.modeForKey(tea.KeyPressMsg{Code: tea.KeyEnter}), "prompt and steer must not collapse onto one key")
 }
 
 // child_spawned is the only event that introduces a rail row, and a child
@@ -530,33 +470,27 @@ func TestSendModesAreDistinctKeys(t *testing.T) {
 // replays only children named in the cursor. Without the self-heal that child
 // is invisible for the rest of the session.
 func TestTrafficFromAnUnknownChildTriggersAReseed(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)})
 
 	c.applyEvent(turnEndFor("c_ghost", 3))
-	if !c.reseeding {
-		t.Fatal("an event from an unknown child must request a re-seed")
-	}
+	ck.Require().True(c.reseeding, "an event from an unknown child must request a re-seed")
 
 	c.reseeding = false
 	c.applyEvent(turnEndFor("c_1", 4))
-	if c.reseeding {
-		t.Error("a known child must not trigger a re-seed")
-	}
+	ck.False(c.reseeding, "a known child must not trigger a re-seed")
 }
 
 func TestNeighbourWrapsInDisplayOrder(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		summaryFor("c_a", "alpha", 0), summaryFor("c_b", "bravo", 0),
 	})
 	c.rail.SetFocus("c_a")
-	if got := c.neighbour(-1); got != "c_b" {
-		t.Errorf("neighbour(-1) from the first row = %q, want c_b (wrap)", got)
-	}
-	if got := c.neighbour(+1); got != "c_b" {
-		t.Errorf("neighbour(+1) = %q, want c_b", got)
-	}
+	ck.Eq("c_b", c.neighbour(-1), "neighbour(-1) from the first row")
+	ck.Eq("c_b", c.neighbour(+1), "neighbour(+1)")
 }
 
 func TestShutdownIsIdempotent(t *testing.T) {
@@ -579,22 +513,17 @@ func TestShutdownIsIdempotent(t *testing.T) {
 // and slightly stronger: nothing is listening on this BaseURL, so the fetch
 // FAILS, and the focus stream must still open.
 func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	_, cmd := c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
 
-	if c.stopRail == nil {
-		t.Error("seed must start the rail stream")
-	}
-	if cmd == nil {
-		t.Fatal("seed must return a command for the initially focused child; " +
-			"without it the pane only ever sees rail-tier events and stays empty")
-	}
+	ck.NotNil(c.stopRail, "seed must start the rail stream")
+	ck.Require().NotNil(cmd, "seed must return a command for the initially focused child; "+
+		"without it the pane only ever sees rail-tier events and stays empty")
 	c.Update(cmd())
-	if c.stopFocus == nil {
-		t.Fatal("seed must open a FOCUS stream for the initially focused child; " +
-			"without it the pane only ever sees rail-tier events and stays empty")
-	}
+	ck.Require().NotNil(c.stopFocus, "seed must open a FOCUS stream for the initially focused child; "+
+		"without it the pane only ever sees rail-tier events and stays empty")
 }
 
 // FINDING 2. The rail subscription covers every child in the subject but
@@ -603,6 +532,7 @@ func TestSeedOpensTheFocusStreamForTheInitialChild(t *testing.T) {
 // next open resumes from exactly that cursor -- so everything the agent
 // produced while you were away was skipped, silently and permanently.
 func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0)})
@@ -613,9 +543,7 @@ func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 	c.focusChild = "c_1"
 	c.applyEvent(&rafikiv1.Event{ChildId: "c_1", Ordinal: ptr32(10),
 		Payload: &rafikiv1.Event_AssistantMessage{AssistantMessage: &rafikiv1.AssistantMessage{}}})
-	if got := c.sessions["c_1"].Cursor; got != 10 {
-		t.Fatalf("focused cursor = %d, want 10", got)
-	}
+	ck.Eq(10, c.sessions["c_1"].Cursor, "focused cursor")
 
 	// Hop away. The subscription MOVES only when the target's history lands --
 	// which is the moment c_1's stream actually stops -- so deliver it, then
@@ -625,10 +553,9 @@ func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 	c.Update(historyMsg{childID: "c_2", after: 0, events: nil})
 	c.applyEvent(turnEndFor("c_1", 250))
 
-	if got := c.sessions["c_1"].Cursor; got != 10 {
-		t.Fatalf("non-focused cursor = %d, want 10 -- a delivered event advanced it, so hopping "+
-			"back would resume from %d and skip ordinals 11..%d forever", got, got, got)
-	}
+	got := c.sessions["c_1"].Cursor
+	ck.Eq(10, got, "non-focused cursor = %d, want 10 -- a delivered event advanced it, so hopping "+
+		"back would resume from %d and skip ordinals 11..%d forever", got, got, got)
 }
 
 // FINDING 3. One renderer is shared by every session and its live-tail cache is
@@ -637,6 +564,7 @@ func TestRailEventsDoNotAdvanceANonFocusedSessionsCursor(t *testing.T) {
 // the stale one -- the previous child's half-finished paragraph, for the whole
 // of the next child's turn.
 func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r := newRenderer()
 	one := []session.Block{{Kind: session.KindAssistant, Text: "AAA-from-child-one"}}
 	r.Lines(one, 0, 100)
@@ -645,12 +573,8 @@ func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
 	for _, tail := range []string{"BBB-1", "BBB-12", "BBB-123"} {
 		two := []session.Block{{Kind: session.KindAssistant, Text: tail}}
 		out := strings.Join(r.Lines(two, 0, 100), "\n")
-		if strings.Contains(out, "AAA-from-child-one") {
-			t.Fatalf("render of %q leaked the previous child's tail:\n%s", tail, out)
-		}
-		if !strings.Contains(out, tail) {
-			t.Errorf("render of %q did not contain it:\n%s", tail, out)
-		}
+		c.Require().NotStrContains(out, "AAA-from-child-one", "render of %q leaked the previous child's tail:\n", tail)
+		c.StrContains(out, tail, "render of")
 	}
 }
 
@@ -661,6 +585,7 @@ func TestRendererDoesNotBleedAcrossSessions(t *testing.T) {
 // queued: an isolated live event arriving alone must return immediately with
 // exactly itself, not block hoping for company.
 func TestWaitForEventDrainsWhatIsAlreadyQueued(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ch := make(chan *rafikiv1.Event, 8)
 	for i := int32(0); i < 5; i++ {
 		ch <- turnEndFor("c_1", i)
@@ -668,31 +593,22 @@ func TestWaitForEventDrainsWhatIsAlreadyQueued(t *testing.T) {
 
 	msg := waitForEvent(ch)()
 	em, ok := msg.(eventMsg)
-	if !ok {
-		t.Fatalf("waitForEvent() = %T, want eventMsg", msg)
-	}
-	if len(em.evs) != 5 {
-		t.Fatalf("drained %d events, want all 5 already queued", len(em.evs))
-	}
+	c.Require().True(ok, "waitForEvent() = %T, want eventMsg", msg)
+	c.Require().Len(em.evs, 5, "drained %d events, want all 5 already queued", len(em.evs))
 	for i, ev := range em.evs {
-		if ev.GetOrdinal() != int32(i) {
-			t.Errorf("evs[%d] ordinal = %d, want %d -- order must survive the drain", i, ev.GetOrdinal(), i)
-		}
+		c.Eq(int32(i), ev.GetOrdinal(), "evs[%d] ordinal = %d, want %d -- order must survive the drain", i, ev.GetOrdinal(), i)
 	}
 }
 
 func TestWaitForEventReturnsASingleIsolatedEventImmediately(t *testing.T) {
+	c := assert.NewAborting(t)
 	ch := make(chan *rafikiv1.Event, 8)
 	ch <- turnEndFor("c_1", 0)
 
 	msg := waitForEvent(ch)()
 	em, ok := msg.(eventMsg)
-	if !ok {
-		t.Fatalf("waitForEvent() = %T, want eventMsg", msg)
-	}
-	if len(em.evs) != 1 {
-		t.Fatalf("drained %d events, want exactly the 1 queued", len(em.evs))
-	}
+	c.True(ok, "waitForEvent() = %T, want eventMsg", msg)
+	c.Len(em.evs, 1, "drained %d events, want exactly the 1 queued", len(em.evs))
 }
 
 // FINDING 4. reseeding was set by applyEvent and cleared only when the RPC
@@ -701,6 +617,7 @@ func TestWaitForEventReturnsASingleIsolatedEventImmediately(t *testing.T) {
 // cockpit amplified against a daemon that was already slow, which is the exact
 // condition the self-heal exists for.
 func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)})
@@ -716,15 +633,11 @@ func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
 			}
 		}
 	}
-	if dispatched != 1 {
-		t.Fatalf("dispatched %d re-seeds for a burst from one unknown child, want 1", dispatched)
-	}
+	ck.Require().Eq(1, dispatched, "dispatched")
 
 	// The reply releases the latch so a later gap can still self-heal.
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
-	if c.reseedInFlight {
-		t.Error("seedMsg must clear reseedInFlight")
-	}
+	ck.False(c.reseedInFlight, "seedMsg must clear reseedInFlight")
 }
 
 // FINDING 5. ListChildrenRequest has no subject filter, so an unfiltered seed
@@ -732,6 +645,7 @@ func TestReseedDispatchesAtMostOneInFlight(t *testing.T) {
 // are frozen by construction -- their events never match -- so they keep their
 // seed-time glyph forever, never badge, and still absorb focus.
 func TestSeedIsNarrowedToTheSubject(t *testing.T) {
+	c := assert.NewCollecting(t)
 	kids := []*rafikiv1.ChildSummary{
 		summaryFor("c_root", "root", 0),
 		withParent(summaryFor("c_kid", "kid", 0), "c_root"),
@@ -755,9 +669,7 @@ func TestSeedIsNarrowedToTheSubject(t *testing.T) {
 		got[n.ChildID] = true
 	}
 	for _, want := range []string{"c_root", "c_kid", "c_grandkid"} {
-		if !got[want] {
-			t.Errorf("%s missing from the subtree seed; got %v", want, got)
-		}
+		c.False(!got[want], "%s missing from the subtree seed; got %v", want, got)
 	}
 	for _, bad := range []string{"c_other", "c_otherkid"} {
 		if got[bad] {
@@ -769,9 +681,7 @@ func TestSeedIsNarrowedToTheSubject(t *testing.T) {
 	all := NewCockpit(Options{BaseURL: "http://127.0.0.1:1"})
 	defer all.shutdown()
 	all.Update(seedMsg{children: kids})
-	if n := all.rail.Len(); n != len(kids) {
-		t.Errorf("subject `all` seeded %d of %d children", n, len(kids))
-	}
+	c.Eq(len(kids), all.rail.Len(), "subject `all` seeded")
 }
 
 func ptr32(v int32) *int32 { return &v }
@@ -785,21 +695,16 @@ var errSeedDown = errors.New("daemon unreachable")
 // schedules itself on the stream layer's capped backoff and the attempt count
 // resets on the first success.
 func TestFailedSeedRetriesOnTheBackoffSchedule(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 
 	// First failure: the attempt count climbs and a retry is scheduled --
 	// nothing else would re-attempt ListChildren on a quiet daemon.
 	_, cmd := c.Update(seedMsg{err: errSeedDown})
-	if c.reseedInFlight {
-		t.Fatal("a failed seed must release reseedInFlight")
-	}
-	if c.seedAttempt != 1 {
-		t.Fatalf("seedAttempt = %d after one failure, want 1", c.seedAttempt)
-	}
-	if cmd == nil {
-		t.Fatal("a failed seed must schedule a retry, not wait for the next event")
-	}
+	ck.False(c.reseedInFlight, "a failed seed must release reseedInFlight")
+	ck.Eq(1, c.seedAttempt, "seedAttempt")
+	ck.NotNil(cmd, "a failed seed must schedule a retry, not wait for the next event")
 
 	// The timer fires and re-dispatches ListChildren. Nothing is listening on
 	// this BaseURL, so driving the seed command to completion fails fast.
@@ -808,9 +713,7 @@ func TestFailedSeedRetriesOnTheBackoffSchedule(t *testing.T) {
 		t.Fatalf("retry command produced %T, want seedRetryMsg", msg)
 	}
 	_, seedCmd := c.Update(seedRetryMsg{})
-	if !c.reseedInFlight || seedCmd == nil {
-		t.Fatal("seedRetryMsg with no seed running must dispatch ListChildren")
-	}
+	ck.False(!c.reseedInFlight || seedCmd == nil, "seedRetryMsg with no seed running must dispatch ListChildren")
 
 	// That attempt fails too; the count climbs and another retry is scheduled.
 	if sm, ok := seedCmd().(seedMsg); !ok || sm.err == nil {
@@ -830,9 +733,7 @@ func TestFailedSeedRetriesOnTheBackoffSchedule(t *testing.T) {
 
 	// Success resets the schedule to its fast end.
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 0)}})
-	if c.seedAttempt != 0 {
-		t.Fatalf("seedAttempt = %d after a successful seed, want 0", c.seedAttempt)
-	}
+	ck.Eq(0, c.seedAttempt, "seedAttempt")
 }
 
 func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary {
@@ -848,6 +749,7 @@ func withParent(s *rafikiv1.ChildSummary, parent string) *rafikiv1.ChildSummary 
 // past five agents opened five. Browsing must move a cursor and nothing else;
 // enter commits.
 func TestMoveSelectionDoesNotHop(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		summaryFor("c_a", "alpha", 0),
@@ -859,19 +761,17 @@ func TestMoveSelectionDoesNotHop(t *testing.T) {
 
 	c.moveSelection(+1)
 
-	if c.selected != "c_b" {
-		t.Errorf("selection = %q, want c_b", c.selected)
-	}
-	if got := c.rail.Focus(); got != "c_a" {
-		t.Errorf("moving the selection changed focus to %q; focus must only "+
-			"change on commit", got)
-	}
+	ck.Eq("c_b", c.selected, "selection")
+	got := c.rail.Focus()
+	ck.Eq("c_a", got, "moving the selection changed focus to %q; focus must only "+
+		"change on commit", got)
 }
 
 // TestMoveSelectionClampsAtTheEnds: selection clamps where neighbour() wraps.
 // Two bindings that both wrap are indistinguishable in use, and wrapping is
 // what the attention jump does.
 func TestMoveSelectionClampsAtTheEnds(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		summaryFor("c_a", "alpha", 0), summaryFor("c_b", "bravo", 0),
@@ -879,15 +779,11 @@ func TestMoveSelectionClampsAtTheEnds(t *testing.T) {
 	c.selected = "c_a"
 
 	c.moveSelection(-1)
-	if c.selected != "c_a" {
-		t.Errorf("selection moved off the top to %q", c.selected)
-	}
+	ck.Eq("c_a", c.selected, "selection moved off the top to")
 
 	c.selected = "c_b"
 	c.moveSelection(+1)
-	if c.selected != "c_b" {
-		t.Errorf("selection moved off the bottom to %q", c.selected)
-	}
+	ck.Eq("c_b", c.selected, "selection moved off the bottom to")
 }
 
 // TestMoveSelectionDefaultsToTheFocusedChild: tabbing into the rail without a
@@ -903,9 +799,7 @@ func TestMoveSelectionDefaultsToTheFocusedChild(t *testing.T) {
 
 	c.moveSelection(+1)
 
-	if c.selected != "c_c" {
-		t.Errorf("selection = %q, want c_c (started from focused c_b)", c.selected)
-	}
+	assert.NewCollecting(t).Eq("c_c", c.selected, "selection")
 }
 
 // ── rail preview ───────────────────────────────────────────────────────────
@@ -915,6 +809,7 @@ func TestMoveSelectionDefaultsToTheFocusedChild(t *testing.T) {
 // feed -- stays where it was. ⏎ is what makes the highlighted agent the live,
 // typed-to one.
 func TestArrowsPreviewTheHighlightedAgentWithoutHopping(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -927,18 +822,15 @@ func TestArrowsPreviewTheHighlightedAgentWithoutHopping(t *testing.T) {
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 
-	if got := c.rail.Focus(); got != "c_a" {
-		t.Errorf("an arrow moved focus to %q; only ⏎ may switch agents", got)
-	}
+	ck.Eq("c_a", c.rail.Focus(), "an arrow moved focus to")
 	content := ansi.Strip(c.View().Content)
-	if !strings.Contains(content, "bravo says hi") {
-		t.Errorf("arrowing down did not preview c_b's transcript:\n%s", content)
-	}
+	ck.StrContains(content, "bravo says hi", "arrowing down did not preview c_b's transcript:\n")
 }
 
 // ⏎ is where reading ends and talking begins: the highlighted agent becomes
 // the focused one and the keys go back to the input.
 func TestCommitSwitchesFocusAndEntersTheInput(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -951,22 +843,14 @@ func TestCommitSwitchesFocusAndEntersTheInput(t *testing.T) {
 	c.Update(keyMsg("enter"))
 
 	defer c.shutdown()
-	if got := c.rail.Focus(); got != "c_b" {
-		t.Errorf("⏎ left focus on %q, want c_b", got)
-	}
-	if c.focus != focusInput {
-		t.Errorf("⏎ left focus on the agents pane; it must hand the keys to the input")
-	}
-	if !c.ta.Focused() {
-		t.Error("⏎ returned to the input pane with the textarea still blurred")
-	}
+	ck.Eq("c_b", c.rail.Focus(), "⏎ left focus on")
+	ck.Eq(focusInput, c.focus, "⏎ left focus on the agents pane; it must hand the keys to the input")
+	ck.True(c.ta.Focused(), "⏎ returned to the input pane with the textarea still blurred")
 	// The commit is also where the browse overlay comes down: the cockpit is
 	// either browsing (rail focused) or talking (full width), never a rail
 	// drawn beside an unfocused input. Pinned in full by
 	// TestEveryRailExitHidesTheRail.
-	if c.railCols() != 0 {
-		t.Error("⏎ left the rail drawn; committing must land full width")
-	}
+	ck.Eq(0, c.railCols(), "⏎ left the rail drawn; committing must land full width")
 }
 
 // The cockpit holds two modes and nothing between them: BROWSE (rail on screen
@@ -978,6 +862,7 @@ func TestCommitSwitchesFocusAndEntersTheInput(t *testing.T) {
 func TestEveryRailExitHidesTheRail(t *testing.T) {
 	for _, key := range []string{"enter", "esc", "tab"} {
 		t.Run(key, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			c := railWith(t, "c_1", "c_2")
 			defer c.shutdown()
 
@@ -987,15 +872,9 @@ func TestEveryRailExitHidesTheRail(t *testing.T) {
 
 			c.Update(keyMsg(key))
 
-			if c.railCols() != 0 {
-				t.Errorf("%s from the rail left it drawn", key)
-			}
-			if c.focus != focusInput {
-				t.Errorf("%s left focus = %v, want input", key, c.focus)
-			}
-			if !c.ta.Focused() {
-				t.Errorf("%s left the textarea blurred", key)
-			}
+			ck.Eq(0, c.railCols(), "%s from the rail left it drawn", key)
+			ck.Eq(focusInput, c.focus, "%s left focus = %v, want input", key, c.focus)
+			ck.True(c.ta.Focused(), "%s left the textarea blurred", key)
 		})
 	}
 }
@@ -1006,27 +885,20 @@ func TestEveryRailExitHidesTheRail(t *testing.T) {
 // only until the rail is entered and left again. The mode rule has exactly one
 // exception and this pins its boundary.
 func TestRailPinEndsAtTheNextVisit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := railWith(t, "c_1", "c_2")
 	defer c.shutdown()
 	ctrlR(c) // hide
 	ctrlR(c) // show again, unfocused: the watch-mode pin
 
-	if c.railCols() == 0 {
-		t.Fatal("the second ^R did not reveal the rail")
-	}
-	if c.focus != focusInput {
-		t.Fatalf("focus = %v after the ^R reveal, want input -- the pin is the UNFOCUSED rail", c.focus)
-	}
+	ck.Require().NotEq(0, c.railCols(), "the second ^R did not reveal the rail")
+	ck.Require().Eq(focusInput, c.focus, "focus")
 
 	c.Update(keyMsg("tab")) // visit the rail
 	c.Update(keyMsg("esc")) // and leave it
 
-	if c.railCols() != 0 {
-		t.Error("the pin survived a visit to the rail")
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v after leaving, want input", c.focus)
-	}
+	ck.Eq(0, c.railCols(), "the pin survived a visit to the rail")
+	ck.Eq(focusInput, c.focus, "focus")
 }
 
 // Browsing pages the pane through the highlighted agents' transcripts LIVE:
@@ -1042,9 +914,7 @@ func TestPreviewMovesTheSubscriptionToTheViewedChild(t *testing.T) {
 		summaryFor("c_1", "one", 4), summaryFor("c_2", "two", 9),
 	}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil}) // opens c_1's stream
-	if c.focusChild != "c_1" || c.stopFocus == nil {
-		t.Fatal("setup: c_1's focus stream never opened")
-	}
+	assert.NewAborting(t).False(c.focusChild != "c_1" || c.stopFocus == nil, "setup: c_1's focus stream never opened")
 
 	c.focus = focusRail
 	c.selected = "c_2"
@@ -1075,6 +945,7 @@ func TestPreviewMovesTheSubscriptionToTheViewedChild(t *testing.T) {
 // one that must be running. The browsed child's stream stops; on the next
 // visit it resumes from the cursor it kept, which is what makes the gap safe.
 func TestLeaveRailReturnsTheSubscriptionToTheCommittedAgent(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1087,18 +958,12 @@ func TestLeaveRailReturnsTheSubscriptionToTheCommittedAgent(t *testing.T) {
 	c.Update(historyMsg{childID: "c_2", after: 9, events: []*rafikiv1.Event{
 		historyEvent("c_2", "preview line", 0, false),
 	}})
-	if c.focusChild != "c_2" {
-		t.Fatalf("setup: browsing did not move the subscription (owner %q)", c.focusChild)
-	}
+	ck.Require().Eq("c_2", c.focusChild, "setup: browsing did not move the subscription (owner")
 
 	c.Update(keyMsg("esc"))
 
-	if c.focus != focusInput {
-		t.Fatal("esc did not return to the input")
-	}
-	if c.focusChild != "c_1" {
-		t.Errorf("after esc the subscription sits on %q; the committed agent's pane is what is on screen", c.focusChild)
-	}
+	ck.Require().Eq(focusInput, c.focus, "esc did not return to the input")
+	ck.Eq("c_1", c.focusChild, "after esc the subscription sits on")
 }
 
 // The browsed child's session keeps the cursor its live feed advanced, so a
@@ -1127,9 +992,7 @@ func TestHopBackToABrowsedChildResumesFromItsLiveCursor(t *testing.T) {
 	c.Update(keyMsg("esc")) // subscription returns to c_1
 	c.hop("c_2")
 
-	if c.focusChild != "c_2" {
-		t.Fatalf("hop to the browsed child left the subscription on %q", c.focusChild)
-	}
+	assert.NewAborting(t).Eq("c_2", c.focusChild, "hop to the browsed child left the subscription on")
 	// Resuming re-opens from the session cursor (12); the already-applied
 	// ordinals are not replayed into duplicated blocks.
 	if s := c.sessions["c_2"]; len(s.Blocks) != 2 {
@@ -1142,6 +1005,7 @@ func TestHopBackToABrowsedChildResumesFromItsLiveCursor(t *testing.T) {
 // opens resuming from exactly that -- so nothing logged while the fetch ran is
 // skipped, and the next open resumes from where the pane actually is.
 func TestPreviewDeliveryResumesFromTheWatermark(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1158,16 +1022,12 @@ func TestPreviewDeliveryResumesFromTheWatermark(t *testing.T) {
 	if !s.HasCursor || s.Cursor != 9 {
 		t.Fatalf("preview left cursor at %d/%v, want the watermark 9; the next open would resume from the wrong place", s.Cursor, s.HasCursor)
 	}
-	if c.focusChild != "c_2" {
-		t.Errorf("delivering the preview did not open its subscription (owner %q)", c.focusChild)
-	}
+	ck.Eq("c_2", c.focusChild, "delivering the preview did not open its subscription (owner")
 
 	// And committing to the row the subscription is already on must not churn
 	// it: openFocus's owner check makes ⏎ on the previewed row free.
 	c.hop("c_2")
-	if c.focusChild != "c_2" {
-		t.Errorf("committing to the previewed child moved the subscription to %q", c.focusChild)
-	}
+	ck.Eq("c_2", c.focusChild, "committing to the previewed child moved the subscription to")
 }
 
 // Displayed is read -- but ONLY what was displayed. A preview whose fetch
@@ -1211,9 +1071,7 @@ func TestPreviewMarksReadOnlyWhenDisplayed(t *testing.T) {
 	if s := c.sessions["c_2"]; len(s.Blocks) != 2 {
 		t.Errorf("the late fetch should still warm the session; blocks = %d", len(s.Blocks))
 	}
-	if c.focusChild != before {
-		t.Errorf("a late delivery moved the subscription to %q; only a rested cursor does that", c.focusChild)
-	}
+	assert.NewCollecting(t).Eq(before, c.focusChild, "a late delivery moved the subscription to")
 }
 
 // GetHistory is the most expensive RPC this client issues and a stream move is
@@ -1222,6 +1080,7 @@ func TestPreviewMarksReadOnlyWhenDisplayed(t *testing.T) {
 // older cursor position is a no-op -- a sweep costs one action at the final
 // rest, and never two fetches for the same child at once.
 func TestSweepDebouncesThePreviewFetch(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1230,30 +1089,20 @@ func TestSweepDebouncesThePreviewFetch(t *testing.T) {
 	c.focus = focusRail
 	c.selected = "c_1"
 
-	if cmd := c.moveSelection(+1); cmd == nil {
-		t.Fatal("moving onto a child with no transcript in hand must arm the preview debounce")
-	}
-	if c.historyInFlight["c_2"] {
-		t.Fatal("moving onto a row issued its fetch immediately; it must wait for the cursor to rest")
-	}
+	ck.NotNil(c.moveSelection(+1), "moving onto a child with no transcript in hand must arm the preview debounce")
+	ck.False(c.historyInFlight["c_2"], "moving onto a row issued its fetch immediately; it must wait for the cursor to rest")
 
 	// The cursor has rested: exactly one fetch, and a STALE tick -- armed
 	// before the cursor moved on -- must not stack anything behind it.
 	c.Update(previewTickMsg{seq: c.selectedSeq})
-	if !c.historyInFlight["c_2"] {
-		t.Fatal("the cursor rested on c_2 but its transcript was never fetched")
-	}
+	ck.False(!c.historyInFlight["c_2"], "the cursor rested on c_2 but its transcript was never fetched")
 	if c.moveSelection(+1); c.historyInFlight["c_3"] {
 		t.Fatal("moving on issued its fetch before the cursor rested on c_3")
 	}
 	c.Update(previewTickMsg{seq: c.selectedSeq - 1}) // the tick armed while on c_2
-	if c.historyInFlight["c_3"] {
-		t.Fatal("a stale tick acted after the cursor had moved on")
-	}
+	ck.False(c.historyInFlight["c_3"], "a stale tick acted after the cursor had moved on")
 	c.Update(previewTickMsg{seq: c.selectedSeq})
-	if !c.historyInFlight["c_3"] {
-		t.Fatal("the rested cursor on c_3 did not fetch its transcript")
-	}
+	ck.False(!c.historyInFlight["c_3"], "the rested cursor on c_3 did not fetch its transcript")
 }
 
 // A history fetch that fails for the VIEWED child is not a blank pane: the
@@ -1262,6 +1111,7 @@ func TestSweepDebouncesThePreviewFetch(t *testing.T) {
 // than the conversation. A LATE failure (the cursor moved on while the fetch
 // ran) drops the empty session, since nothing on screen asked for it.
 func TestFailedHistoryForTheViewedChildFallsBackToTheLog(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
@@ -1276,22 +1126,20 @@ func TestFailedHistoryForTheViewedChildFallsBackToTheLog(t *testing.T) {
 	if c.focusChild != "c_2" || c.stopFocus == nil {
 		t.Errorf("a failed read left the subscription on %q; the log replay is the fallback, not a blank pane", c.focusChild)
 	}
-	if got := c.status; !strings.Contains(got, "history unavailable") {
-		t.Errorf("status = %q, want the reason the pane is thin", got)
-	}
+	ck.StrContains(c.status, "history unavailable", "status")
 
 	// A late failure lands for a child nobody is looking at.
 	c.moveSelection(-1) // back to c_1
 	c.Update(historyMsg{childID: "c_2", after: 6, err: errors.New("boom again")})
-	if _, ok := c.sessions["c_2"]; ok {
-		t.Error("a late failed fetch kept an empty session for a child nothing displays")
-	}
+	_, ok := c.sessions["c_2"]
+	ck.False(ok, "a late failed fetch kept an empty session for a child nothing displays")
 }
 
 // While browsing, the status line describes the agent under the cursor -- the
 // transcript beside it is that agent's, and a status naming a different child
 // would read as its own.
 func TestStatusLineDescribesThePreviewedAgent(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_a")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -1304,13 +1152,9 @@ func TestStatusLineDescribesThePreviewedAgent(t *testing.T) {
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // preview c_b
 
-	if got := c.displayStatus(); got != "agent: streaming" {
-		t.Errorf("status = %q, want the previewed agent's state", got)
-	}
+	ck.Eq("agent: streaming", c.displayStatus(), "status")
 	// And the pane says it is a preview, or it reads as a live conversation.
-	if !strings.Contains(ansi.Strip(c.View().Content), "preview") {
-		t.Error("browsing another agent left the status line unmarked; a preview must say so")
-	}
+	ck.StrContains(ansi.Strip(c.View().Content), "preview", "browsing another agent left the status line unmarked; a preview must say so")
 }
 
 // ── input ────────────────────────────────────────────────────────────────────
@@ -1326,23 +1170,20 @@ func TestTypingReachesTheTextarea(t *testing.T) {
 	for _, r := range "hello" {
 		c.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	if got := c.ta.Value(); got != "hello" {
-		t.Errorf("textarea value = %q, want %q", got, "hello")
-	}
+	assert.NewCollecting(t).Eq("hello", c.ta.Value(), "textarea value")
 }
 
 // The ring OWNS the textarea's focus. Left focused while another pane takes
 // keys, it blinks a cursor in an input that is ignoring you; left blurred on
 // the way back to input, typing stops working again.
 func TestOnlyTheInputPaneHoldsTextareaFocus(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
 	})
-	if !c.ta.Focused() {
-		t.Fatal("input pane holds focus at start but the textarea is blurred")
-	}
+	ck.Require().True(c.ta.Focused(), "input pane holds focus at start but the textarea is blurred")
 	for _, want := range []struct {
 		pane    focusPane
 		focused bool
@@ -1351,17 +1192,15 @@ func TestOnlyTheInputPaneHoldsTextareaFocus(t *testing.T) {
 		{focusInput, true},
 	} {
 		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-		if c.focus != want.pane {
-			t.Fatalf("after ⇥ focus = %v, want %v", c.focus, want.pane)
-		}
-		if got := c.ta.Focused(); got != want.focused {
-			t.Errorf("pane %v: textarea focused = %v, want %v", want.pane, got, want.focused)
-		}
+		ck.Require().Eq(want.pane, c.focus, "after ⇥ focus")
+		got := c.ta.Focused()
+		ck.Eq(want.focused, got, "pane %v: textarea focused = %v, want", want.pane, got)
 	}
 }
 
 // Escaping back to input must restore typing, not just the label.
 func TestEscapeFromRailRefocusesTheTextarea(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	// Two agents, so ⇥ really lands on the rail — with none the ring is a
@@ -1371,37 +1210,28 @@ func TestEscapeFromRailRefocusesTheTextarea(t *testing.T) {
 	})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // → rail
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
-	if c.focus != focusInput {
-		t.Fatalf("esc left focus at %v, want input", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("esc returned to the input pane with the textarea still blurred")
-	}
+	ck.Require().Eq(focusInput, c.focus, "esc left focus at")
+	ck.True(c.ta.Focused(), "esc returned to the input pane with the textarea still blurred")
 }
 
 // ^G was a write-only toggle: it flipped showHelp and View never read it, so
 // the key documented in the footer and in `rafiki attach --help` did nothing
 // at all.
 func TestHelpToggleRendersBindings(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	before := ansi.Strip(c.View().Content)
 
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
 	help := ansi.Strip(c.View().Content)
-	if help == before {
-		t.Fatal("^G changed nothing on screen")
-	}
+	ck.Require().NotEq(before, help, "^G changed nothing on screen")
 	for _, want := range []string{"steer", "abort", "next pane"} {
-		if !strings.Contains(help, want) {
-			t.Errorf("help overlay is missing %q:\n%s", want, help)
-		}
+		ck.StrContains(help, want, "help overlay is missing")
 	}
 
 	c.Update(tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl})
-	if got := ansi.Strip(c.View().Content); got != before {
-		t.Error("^G twice did not return to the previous view")
-	}
+	ck.Eq(before, ansi.Strip(c.View().Content), "^G twice did not return to the previous view")
 }
 
 // ⇧⏎ is the standard newline in a send-on-⏎ input. It needs an explicit
@@ -1409,18 +1239,15 @@ func TestHelpToggleRendersBindings(t *testing.T) {
 // ^M, which are the same byte -- are taken by Send, so without one a prompt
 // can only ever be a single line.
 func TestShiftEnterInsertsANewlineAndDoesNotSend(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 
-	if got := c.ta.Value(); got != "a\nb" {
-		t.Errorf("textarea value = %q, want %q", got, "a\nb")
-	}
-	if c.pending != "" {
-		t.Errorf("⇧⏎ sent %q; it must only insert a newline", c.pending)
-	}
+	ck.Eq("a\nb", c.ta.Value(), "textarea value")
+	ck.Eq("", c.pending, "⇧⏎ sent")
 }
 
 // ^J is the fallback. A terminal has to speak the Kitty keyboard protocol for
@@ -1433,13 +1260,12 @@ func TestCtrlJInsertsANewline(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 
-	if got := c.ta.Value(); got != "a\nb" {
-		t.Errorf("textarea value = %q, want %q", got, "a\nb")
-	}
+	assert.NewCollecting(t).Eq("a\nb", c.ta.Value(), "textarea value")
 }
 
 // ⏎ still sends, and a multi-line prompt sends whole.
 func TestEnterStillSendsTheWholeMultilinePrompt(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
@@ -1447,12 +1273,8 @@ func TestEnterStillSendsTheWholeMultilinePrompt(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if c.pending != "a\nb" {
-		t.Errorf("pending = %q, want %q", c.pending, "a\nb")
-	}
-	if c.ta.Value() != "" {
-		t.Errorf("textarea not cleared after send: %q", c.ta.Value())
-	}
+	ck.Eq("a\nb", c.pending, "pending")
+	ck.Eq("", c.ta.Value(), "textarea not cleared after send")
 }
 
 // ── history ──────────────────────────────────────────────────────────────────
@@ -1487,9 +1309,7 @@ func TestHistorySeedsTheTranscript(t *testing.T) {
 	}})
 
 	s := c.sessions["c_1"]
-	if len(s.Blocks) != 2 {
-		t.Fatalf("history produced %d blocks, want 2", len(s.Blocks))
-	}
+	assert.NewAborting(t).Len(s.Blocks, 2, "history produced %d blocks, want 2", len(s.Blocks))
 	if s.Blocks[0].Text != "what is 2+2" || s.Blocks[1].Text != "four" {
 		t.Errorf("blocks = %q / %q", s.Blocks[0].Text, s.Blocks[1].Text)
 	}
@@ -1505,6 +1325,7 @@ func TestHistorySeedsTheTranscript(t *testing.T) {
 // under -- the resume point -- never anything derived from the history events
 // themselves.
 func TestHistoryDoesNotMoveTheEventLogCursor(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
@@ -1514,17 +1335,13 @@ func TestHistoryDoesNotMoveTheEventLogCursor(t *testing.T) {
 	}})
 
 	s := c.sessions["c_1"]
-	if s.Cursor != 4 {
-		t.Fatalf("cursor = %d, want the log watermark 4; the two ordinal spaces are "+
-			"unrelated and history must never set %d", s.Cursor, s.Cursor)
-	}
+	ck.Eq(4, s.Cursor, "cursor = %d, want the log watermark 4; the two ordinal spaces are "+
+		"unrelated and history must never set %d", s.Cursor, s.Cursor)
 
 	// A real log event afterwards must still land, and one at or below the
 	// watermark must be deduped by it.
 	c.applyEvent(userMessageEventFor("c_1", "live", 5))
-	if len(s.Blocks) != 2 {
-		t.Fatalf("live event after history produced %d blocks, want 2", len(s.Blocks))
-	}
+	ck.Len(s.Blocks, 2, "live event after history produced %d blocks, want 2", len(s.Blocks))
 }
 
 // A child with no persisted conversation must replay the whole log rather than
@@ -1536,9 +1353,7 @@ func TestEmptyHistoryReplaysTheWholeLog(t *testing.T) {
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 7)}})
 
 	c.Update(historyMsg{childID: "c_1", after: 7, events: nil})
-	if c.stopFocus == nil {
-		t.Fatal("empty history must still open the focus stream")
-	}
+	assert.NewAborting(t).NotNil(c.stopFocus, "empty history must still open the focus stream")
 }
 
 // Hopping back must not re-fetch: the transcript is already in hand and a
@@ -1555,9 +1370,7 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 	c.applyEvent(textEventFor("c_1", "live")) // gives the session a real cursor
 
 	c.hop("c_2")
-	if cmd := c.hop("c_1"); cmd != nil {
-		t.Error("hopping back to a child whose transcript is already loaded must not re-fetch history")
-	}
+	assert.NewCollecting(t).Nil(c.hop("c_1"), "hopping back to a child whose transcript is already loaded must not re-fetch history")
 }
 
 // ── the session's single feed ──────────────────────────────────────────────
@@ -1567,20 +1380,17 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 // there is no third site, so a regression here parks a ⏳ over the input box
 // for the rest of the session.
 func TestPendingClearsWhenTheMessageComesBack(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
 	c.Update(historyMsg{childID: "c_1", after: 4, events: nil})
 
 	c.sendWith(rafikiv1.SendMode_SEND_MODE_PROMPT, "hello", nil)
-	if c.pending != "hello" {
-		t.Fatalf("pending = %q, want the sent text", c.pending)
-	}
+	ck.Require().Eq("hello", c.pending, "pending")
 
 	c.applyEvent(userMessageEventFor("c_1", "hello", 5))
-	if c.pending != "" {
-		t.Errorf("the message came back and pending = %q; the ⏳ never clears", c.pending)
-	}
+	ck.Eq("", c.pending, "the message came back and pending")
 }
 
 // The rail and focus streams are independent feeds, and only the focus one
@@ -1604,9 +1414,7 @@ func TestRailDeliveryAheadOfFocusDoesNotEatTheUserMessage(t *testing.T) {
 	c.Update(railEventMsg{evs: []*rafikiv1.Event{statusEventFor("c_1", "streaming", 148)}})
 	c.Update(eventMsg{evs: []*rafikiv1.Event{userMessageEventFor("c_1", "go for it", 147)}})
 
-	if c.pending != "" {
-		t.Errorf("pending = %q: the user_message was eaten by the rail's cursor advance and the ⏳ never cleared", c.pending)
-	}
+	assert.NewCollecting(t).Eq("", c.pending, "pending")
 	s := c.sessions["c_1"]
 	if n := len(s.Blocks); n == 0 || s.Blocks[n-1].Kind != session.KindUser || s.Blocks[n-1].Text != "go for it" {
 		t.Errorf("the sent message never reached the transcript; blocks = %d", n)
@@ -1680,9 +1488,7 @@ func TestWaitForRailEventReturnsRailEventMsg(t *testing.T) {
 
 	msg := waitForRailEvent(ch)()
 	rm, ok := msg.(railEventMsg)
-	if !ok {
-		t.Fatalf("waitForRailEvent() = %T, want railEventMsg", msg)
-	}
+	assert.NewAborting(t).True(ok, "waitForRailEvent() = %T, want railEventMsg", msg)
 	if len(rm.evs) != 2 || rm.evs[0].GetOrdinal() != 1 || rm.evs[1].GetOrdinal() != 2 {
 		t.Fatalf("drained %d events; order and count must survive the drain", len(rm.evs))
 	}
@@ -1699,6 +1505,7 @@ func TestWaitForRailEventReturnsRailEventMsg(t *testing.T) {
 // coming and going after exactly one event, and the reconnect re-seed
 // sentinel was dropped with it.
 func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "one", 4)}})
@@ -1706,9 +1513,7 @@ func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
 	// First rail event through the real channel.
 	c.railCh <- statusEventFor("c_1", "streaming", 148)
 	delivered := runCmdDeep(t, waitForRailEvent(c.railCh))
-	if len(delivered) != 1 {
-		t.Fatalf("first delivery produced %d messages, want 1", len(delivered))
-	}
+	ck.Len(delivered, 1, "first delivery produced %d messages, want 1", len(delivered))
 	rm, ok := delivered[0].(railEventMsg)
 	if !ok {
 		t.Fatalf("rail delivery arrived as %T, want railEventMsg", delivered[0])
@@ -1717,9 +1522,7 @@ func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
 	// Feeding it through Update must re-arm a rail waiter that still reads the
 	// RAIL channel -- the second event must come back as railEventMsg too.
 	_, cmd := c.Update(rm)
-	if cmd == nil {
-		t.Fatal("Update returned no command: the rail waiter was consumed and never re-armed")
-	}
+	ck.NotNil(cmd, "Update returned no command: the rail waiter was consumed and never re-armed")
 	c.railCh <- statusEventFor("c_1", "idle", 149)
 	second := runCmdDeep(t, cmd)
 	var gotRail bool
@@ -1730,9 +1533,7 @@ func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
 		}
 		if rm2, ok := m.(railEventMsg); ok {
 			gotRail = true
-			if len(rm2.evs) != 1 || rm2.evs[0].GetOrdinal() != 149 {
-				t.Fatalf("re-armed waiter delivered %v, want the second event", rm2.evs)
-			}
+			ck.False(len(rm2.evs) != 1 || rm2.evs[0].GetOrdinal() != 149, "re-armed waiter delivered %v, want the second event", rm2.evs)
 			// Fold it the way Update would: the rail must see it, the session
 			// must not.
 			c.Update(rm2)
@@ -1755,14 +1556,13 @@ func TestRailWaiterSurvivesItsOwnDelivery(t *testing.T) {
 // to be dropped on the eventMsg path, so children spawned during a disconnect
 // never appeared.
 func TestNilSentinelThroughTheRealRailChannelRequestsAReSeed(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	defer c.shutdown()
 
 	c.railCh <- nil
 	delivered := runCmdDeep(t, waitForRailEvent(c.railCh))
-	if len(delivered) != 1 {
-		t.Fatalf("sentinel delivery produced %d messages, want 1", len(delivered))
-	}
+	ck.Len(delivered, 1, "sentinel delivery produced %d messages, want 1", len(delivered))
 	rm, ok := delivered[0].(railEventMsg)
 	if !ok || len(rm.evs) != 1 || rm.evs[0] != nil {
 		t.Fatalf("sentinel arrived as %T, want railEventMsg carrying nil", delivered[0])
@@ -1771,9 +1571,7 @@ func TestNilSentinelThroughTheRealRailChannelRequestsAReSeed(t *testing.T) {
 	c.Update(rm)
 	// maybeReseed consumes the request synchronously: reseeding flips to
 	// reseedInFlight and a ListChildren rides out with the returned command.
-	if !c.reseeding && !c.reseedInFlight {
-		t.Fatal("nil sentinel did not arm the re-seed")
-	}
+	ck.False(!c.reseeding && !c.reseedInFlight, "nil sentinel did not arm the re-seed")
 }
 
 // ── interaction ──────────────────────────────────────────────────────────────
@@ -1782,6 +1580,7 @@ func TestNilSentinelThroughTheRealRailChannelRequestsAReSeed(t *testing.T) {
 // repeat quits — and anything in between disarms, so a ^C now and a ^C a minute
 // later are two intentions rather than a quit.
 func TestQuitTakesTwoPresses(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	for _, k := range []tea.KeyPressMsg{
 		{Code: 'c', Mod: tea.ModCtrl},
 		{Code: 'd', Mod: tea.ModCtrl},
@@ -1792,33 +1591,24 @@ func TestQuitTakesTwoPresses(t *testing.T) {
 		if _, cmd := c.Update(k); cmd != nil {
 			t.Fatalf("%v: one press quit; it must arm and wait for the repeat", k)
 		}
-		if c.quitting {
-			t.Fatalf("%v: one press set quitting", k)
-		}
-		if c.notice == "" {
-			t.Errorf("%v: an armed quit must say so on screen", k)
-		}
-		if _, cmd := c.Update(k); cmd == nil {
-			t.Fatalf("%v: the repeat must quit", k)
-		}
-		if !c.quitting {
-			t.Errorf("%v: the repeat must set quitting", k)
-		}
+		ck.Require().False(c.quitting, "%v: one press set quitting", k)
+		ck.NotEq("", c.notice, "%v: an armed quit must say so on screen", k)
+		_, cmd := c.Update(k)
+		ck.Require().NotNil(cmd, "%v: the repeat must quit", k)
+		ck.True(c.quitting, "%v: the repeat must set quitting", k)
 	}
 }
 
 func TestAnotherKeyDisarmsTheQuit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	c.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
 	c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
-	if _, cmd := c.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); cmd != nil {
-		t.Fatal("a keystroke between the two presses must disarm the quit")
-	}
-	if c.quitting {
-		t.Error("a disarmed quit still quit")
-	}
+	_, cmd := c.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	ck.Require().Nil(cmd, "a keystroke between the two presses must disarm the quit")
+	ck.False(c.quitting, "a disarmed quit still quit")
 }
 
 // A transcript shorter than the pane is bottom-anchored, so the newest line
@@ -1826,22 +1616,17 @@ func TestAnotherKeyDisarmsTheQuit(t *testing.T) {
 // renders from the top by default, which made a new conversation start at the
 // ceiling and crawl down.
 func TestShortTranscriptIsBottomAnchored(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	p := c.pane("c_1")
 	c.syncViewport(p, []string{"only line"})
 
 	view := strings.Split(ansi.Strip(p.vp.View()), "\n")
-	if len(view) < 2 {
-		t.Fatalf("viewport rendered %d lines, want a full pane", len(view))
-	}
-	if strings.TrimSpace(view[0]) != "" {
-		t.Errorf("short transcript starts at the TOP of the pane; want it padded to the bottom:\n%q", view[0])
-	}
+	ck.Require().GreaterOrEqual(2, len(view), "viewport rendered")
+	ck.Eq("", strings.TrimSpace(view[0]), "short transcript starts at the TOP of the pane; want it padded to the bottom:\n%q", view[0])
 	last := strings.TrimSpace(view[len(view)-1])
-	if last != "only line" {
-		t.Errorf("last pane row = %q, want the transcript's newest line", last)
-	}
+	ck.Eq("only line", last, "last pane row")
 }
 
 // ── scrolling from the input pane ────────────────────────────────────────────
@@ -1864,20 +1649,15 @@ func paneWithContent(t *testing.T, c *Cockpit) *paneState {
 // Reaching the transcript must not require leaving the box you type in — the
 // reason to read back is usually to decide what to type next.
 func TestPageKeysScrollTheTranscriptFromTheInputPane(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	p := paneWithContent(t, c)
 	before := p.vp.YOffset()
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	if c.focus != focusInput {
-		t.Fatal("PgUp moved focus; it must scroll in place")
-	}
-	if p.vp.YOffset() >= before {
-		t.Errorf("PgUp did not scroll: offset %d → %d", before, p.vp.YOffset())
-	}
-	if c.ta.Value() != "" {
-		t.Errorf("PgUp reached the textarea: %q", c.ta.Value())
-	}
+	ck.Require().Eq(focusInput, c.focus, "PgUp moved focus; it must scroll in place")
+	ck.Less(before, p.vp.YOffset(), "PgUp did not scroll: offset")
+	ck.Eq("", c.ta.Value(), "PgUp reached the textarea")
 }
 
 // ↑ is SHARED. With a single-line prompt the cursor has nowhere to go, so the
@@ -1888,14 +1668,13 @@ func TestUpScrollsWhenTheCursorCannotMove(t *testing.T) {
 	before := p.vp.YOffset()
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	if p.vp.YOffset() >= before {
-		t.Errorf("↑ on a single-line prompt did not scroll: offset %d → %d", before, p.vp.YOffset())
-	}
+	assert.NewCollecting(t).Less(before, p.vp.YOffset(), "↑ on a single-line prompt did not scroll: offset")
 }
 
 // ...and the textarea keeps it whenever the cursor CAN move, so a multi-line
 // prompt is still editable.
 func TestUpStaysInTheTextareaWhenItHasSomewhereToGo(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	p := paneWithContent(t, c)
 	before := p.vp.YOffset()
@@ -1904,17 +1683,11 @@ func TestUpStaysInTheTextareaWhenItHasSomewhereToGo(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	c.Update(tea.KeyPressMsg{Code: 'b', Text: "b"})
 	row := c.ta.Line()
-	if row == 0 {
-		t.Fatal("fixture is vacuous: the prompt is not multi-line")
-	}
+	ck.Require().NotEq(0, row, "fixture is vacuous: the prompt is not multi-line")
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	if c.ta.Line() != row-1 {
-		t.Errorf("↑ did not move the textarea cursor: row %d → %d", row, c.ta.Line())
-	}
-	if p.vp.YOffset() != before {
-		t.Error("↑ scrolled the transcript while the cursor still had a line above it")
-	}
+	ck.Eq(row-1, c.ta.Line(), "↑ did not move the textarea cursor: row %d →", row)
+	ck.Eq(before, p.vp.YOffset(), "↑ scrolled the transcript while the cursor still had a line above it")
 }
 
 // home/end are top/bottom, FROM THE INPUT PANE. They were transcript-pane-only
@@ -1922,21 +1695,19 @@ func TestUpStaysInTheTextareaWhenItHasSomewhereToGo(t *testing.T) {
 // box nobody tabbed away, and a key that only works in a pane you never visit
 // is a key that does not work.
 func TestHomeAndEndJumpTheTranscript(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	p := paneWithContent(t, c)
 	c.Update(tea.KeyPressMsg{Code: tea.KeyHome})
-	if p.vp.YOffset() != 0 {
-		t.Errorf("home left offset at %d, want the top", p.vp.YOffset())
-	}
+	ck.Eq(0, p.vp.YOffset(), "home left offset at")
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnd})
-	if !p.vp.AtBottom() {
-		t.Error("end did not reach the bottom")
-	}
+	ck.True(p.vp.AtBottom(), "end did not reach the bottom")
 }
 
 // Naming the focused pane in a grey footer line was not enough: that is not
 // where the eye is, so finding it meant cycling ⇥ and watching for a response.
 func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -1946,20 +1717,14 @@ func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
 	seen := map[focusPane]string{}
 	for _, want := range []focusPane{focusRail, focusInput} {
 		c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-		if c.focus != want {
-			t.Fatalf("focus = %v, want %v", c.focus, want)
-		}
+		ck.Require().Eq(want, c.focus, "focus")
 		raw := c.View().Content
-		if !strings.Contains(ansi.Strip(raw), " "+want.String()+" ") {
-			t.Errorf("%v: the footer badge does not name the pane", want)
-		}
+		ck.StrContains(ansi.Strip(raw), " "+want.String()+" ", "%v: the footer badge does not name the pane", want)
 		seen[want] = raw
 	}
 	// The panes must look DIFFERENT, not merely be named differently: the
 	// badge alone is the thing that was already there and was missed.
-	if seen[focusRail] == seen[focusInput] {
-		t.Error("rail and input focus render identically")
-	}
+	ck.NotEq(seen[focusInput], seen[focusRail], "rail and input focus render identically")
 }
 
 // "↓ more below" answered whether you were at the bottom, never where you
@@ -1970,24 +1735,19 @@ func TestTheFocusedPaneIsMarkedOnScreen(t *testing.T) {
 // At the bottom the readout is hidden entirely -- that slot belongs to
 // contextReadout there -- and it reappears only once you scroll back.
 func TestScrollPositionReportsWhereYouAre(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	paneWithContent(t, c) // 200 lines, pane is 24 tall
 
-	if got := c.scrollPosition(); got != "" {
-		t.Errorf("at the bottom the readout = %q, want empty", got)
-	}
+	ck.Eq("", c.scrollPosition(), "at the bottom the readout")
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	got := c.scrollPosition()
 	if !strings.HasPrefix(got, "↓") {
 		t.Errorf("scrolled up, readout = %q, want it to mark more below", got)
 	}
-	if strings.Contains(got, "200/200") {
-		t.Errorf("readout did not move after PgUp: %q", got)
-	}
-	if !strings.Contains(got, "/200") {
-		t.Errorf("readout lost the total: %q", got)
-	}
+	ck.NotStrContains(got, "200/200", "readout did not move after PgUp")
+	ck.StrContains(got, "/200", "readout lost the total")
 }
 
 // A transcript shorter than the pane is padded to sit at the bottom -- and a
@@ -1999,9 +1759,7 @@ func TestScrollPositionHiddenForShortPaddedTranscript(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.syncViewport(c.pane("c_1"), []string{"one", "two"})
 
-	if got := c.scrollPosition(); got != "" {
-		t.Errorf("readout = %q, want empty -- a short transcript never leaves the bottom", got)
-	}
+	assert.NewCollecting(t).Eq("", c.scrollPosition(), "readout")
 }
 
 // It is right-aligned so it does not move when the key hints do.
@@ -2013,9 +1771,7 @@ func TestScrollPositionIsRightAligned(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
 	last := lines[len(lines)-1]
 
-	if !strings.HasSuffix(strings.TrimRight(last, " "), "%") {
-		t.Errorf("footer does not end with the position readout:\n%q", last)
-	}
+	assert.NewCollecting(t).True(strings.HasSuffix(strings.TrimRight(last, " "), "%"), "footer does not end with the position readout:\n%q", last)
 }
 
 // ⇥ is a TOGGLE, not a three-stop cycle. The transcript pane existed to give
@@ -2023,6 +1779,7 @@ func TestScrollPositionIsRightAligned(t *testing.T) {
 // the input pane scrolls directly now, so the third stop bought nothing and
 // cost a press on every agent switch — the move made most often.
 func TestFocusRingIsATwoStopToggle(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -2030,29 +1787,22 @@ func TestFocusRingIsATwoStopToggle(t *testing.T) {
 	})
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if c.focus != focusRail {
-		t.Fatalf("first ⇥ → %v, want agents", c.focus)
-	}
+	ck.Eq(focusRail, c.focus, "first ⇥ →")
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if c.focus != focusInput {
-		t.Fatalf("second ⇥ → %v, want input; the ring must be two stops", c.focus)
-	}
+	ck.Eq(focusInput, c.focus, "second ⇥ →")
 }
 
 // With the rail hidden there is nothing to switch to, and ⇥ must leave focus
 // where it is rather than parking it on a pane that no longer exists.
 func TestTabIsInertWhenTheRailIsHidden(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}) // hide the rail
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if c.focus != focusInput {
-		t.Errorf("focus = %v, want input", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("⇥ with the rail hidden left the textarea blurred")
-	}
+	ck.Eq(focusInput, c.focus, "focus")
+	ck.True(c.ta.Focused(), "⇥ with the rail hidden left the textarea blurred")
 }
 
 // ── the one-agent rail: ^R peeks it ──────────────────────────────────────
@@ -2076,35 +1826,27 @@ func ctrlR(c *Cockpit) {
 }
 
 func TestCtrlRPeeksTheOneRowRail(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 
 	// The default look first: a single-agent session is a full-width
 	// conversation, the state a fresh `create` opens in.
-	if c.railCols() != 0 {
-		t.Fatal("rail is drawn with one agent before anyone asked for it")
-	}
+	ck.Require().Eq(0, c.railCols(), "rail is drawn with one agent before anyone asked for it")
 
 	ctrlR(c)
 
-	if c.railCols() == 0 {
-		t.Error("^R with one agent did not reveal the rail")
-	}
-	if c.focus != focusRail {
-		t.Errorf("focus = %v after ^R, want the rail — the peek is how `n` becomes reachable", c.focus)
-	}
-	if !c.railPeek {
-		t.Error("the reveal was not recorded as a peek, so leaving the rail cannot put it back")
-	}
+	ck.NotEq(0, c.railCols(), "^R with one agent did not reveal the rail")
+	ck.Eq(focusRail, c.focus, "focus")
+	ck.True(c.railPeek, "the reveal was not recorded as a peek, so leaving the rail cannot put it back")
 	// The "▶ " focus cursor is rendered by nothing but the rail (the status
 	// line names the agent too, so the name alone would not prove the rail
 	// drew). Glyph-agnostic: the glyph sits between cursor and name.
-	if !strings.Contains(ansi.Strip(c.View().Content), "▶ ") {
-		t.Errorf("the peeked rail did not render its row under the focus cursor:\n%s", c.View().Content)
-	}
+	ck.StrContains(ansi.Strip(c.View().Content), "▶ ", "the peeked rail did not render its row under the focus cursor:\n%s", c.View().Content)
 }
 
 func TestSpawnFormOpensWhilePeeked(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 	ctrlR(c)
@@ -2113,60 +1855,42 @@ func TestSpawnFormOpensWhilePeeked(t *testing.T) {
 	// agent there is no other keyboard route to the spawn form.
 	c.Update(keyMsg("n"))
 
-	if c.form == nil {
-		t.Fatal("n on the peeked rail did not open the spawn form")
-	}
+	ck.Require().NotNil(c.form, "n on the peeked rail did not open the spawn form")
 	// A modal still takes the whole panel — the peek survives underneath and
 	// the rail comes back when the form closes.
-	if c.railCols() != 0 {
-		t.Error("the rail is drawn behind the create form")
-	}
+	ck.Eq(0, c.railCols(), "the rail is drawn behind the create form")
 	c.Update(keyMsg("esc"))
-	if c.form != nil {
-		t.Error("esc did not close the form")
-	}
-	if c.railCols() == 0 {
-		t.Error("the peeked rail did not come back when the form closed")
-	}
+	ck.Nil(c.form, "esc did not close the form")
+	ck.NotEq(0, c.railCols(), "the peeked rail did not come back when the form closed")
 }
 
 func TestLeavingThePeekedRailPutsItBack(t *testing.T) {
 	for _, key := range []string{"esc", "enter"} {
 		t.Run(key, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			c := oneAgentCockpit(t)
 			defer c.shutdown()
 			ctrlR(c)
 
 			c.Update(keyMsg(key))
 
-			if c.railCols() != 0 {
-				t.Errorf("%s from the peeked rail left it drawn", key)
-			}
-			if c.focus != focusInput {
-				t.Errorf("focus = %v after %s, want input", c.focus, key)
-			}
-			if !c.ta.Focused() {
-				t.Errorf("%s returned to the input pane with the textarea blurred", key)
-			}
+			ck.Eq(0, c.railCols(), "%s from the peeked rail left it drawn", key)
+			ck.Eq(focusInput, c.focus, "focus = %v after %s, want input", c.focus, key)
+			ck.True(c.ta.Focused(), "%s returned to the input pane with the textarea blurred", key)
 		})
 	}
 }
 
 func TestCtrlRWhilePeekedHidesItAgain(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 	ctrlR(c)
 	ctrlR(c)
 
-	if c.railCols() != 0 {
-		t.Error("a second ^R did not hide the peeked rail")
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v after hiding, want input", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("hiding the rail while it holds focus left the textarea blurred")
-	}
+	ck.Eq(0, c.railCols(), "a second ^R did not hide the peeked rail")
+	ck.Eq(focusInput, c.focus, "focus")
+	ck.True(c.ta.Focused(), "hiding the rail while it holds focus left the textarea blurred")
 }
 
 // ⇥ with one agent is the same round trip the multi-agent rail already runs:
@@ -2175,33 +1899,24 @@ func TestCtrlRWhilePeekedHidesItAgain(t *testing.T) {
 // even though nothing rendered), a second ⇥ returns focus to input, and
 // leaving the rail puts it back.
 func TestTabPeeksTheOneRowRail(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 
 	c.Update(keyMsg("tab"))
-	if c.focus != focusRail {
-		t.Fatalf("first ⇥ → %v, want the rail (peeked, not skipped)", c.focus)
-	}
-	if c.railCols() == 0 {
-		t.Fatal("⇥ moved focus onto a rail that is not drawn")
-	}
+	ck.Require().Eq(focusRail, c.focus, "first ⇥ →")
+	ck.Require().NotEq(0, c.railCols(), "⇥ moved focus onto a rail that is not drawn")
 
 	c.Update(keyMsg("tab"))
-	if c.focus != focusInput {
-		t.Fatalf("second ⇥ → %v, want input; the ring is two stops", c.focus)
-	}
+	ck.Require().Eq(focusInput, c.focus, "second ⇥ →")
 
 	// Leaving the rail (esc/⏎ go through leaveRail) re-hides it. Go back onto
 	// the rail first — the peek survives a focus move, exactly like a
 	// multi-agent peek.
 	c.Update(keyMsg("tab"))
 	c.Update(keyMsg("esc"))
-	if c.railCols() != 0 {
-		t.Error("esc after the peek did not put the rail back")
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v after esc, want input", c.focus)
-	}
+	ck.Eq(0, c.railCols(), "esc after the peek did not put the rail back")
+	ck.Eq(focusInput, c.focus, "focus")
 }
 
 // A peek cannot outlive the last row: closing the peeked row out of the rail
@@ -2209,50 +1924,34 @@ func TestTabPeeksTheOneRowRail(t *testing.T) {
 // the transcript — and must not strand pane focus on the list that stopped
 // existing, the same trap the focus ring exists to close.
 func TestPeekEndsWithTheLastRow(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 	ctrlR(c)
-	if c.railCols() == 0 {
-		t.Fatal("the peek did not reveal the rail to begin with")
-	}
-	if c.focus != focusRail {
-		t.Fatal("the peek did not focus the rail")
-	}
+	ck.Require().NotEq(0, c.railCols(), "the peek did not reveal the rail to begin with")
+	ck.Require().Eq(focusRail, c.focus, "the peek did not focus the rail")
 
 	c.applyClosed(closedMsg{childID: "c_1", name: "c_1"})
 
-	if c.rail.Len() != 0 {
-		t.Fatalf("rail still holds %d rows after the close", c.rail.Len())
-	}
-	if c.railCols() != 0 {
-		t.Error("an empty rail column is still drawn after its only row closed")
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v after the last row closed, want input", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("the textarea is still blurred after the rail emptied under focus")
-	}
-	if c.railPeek {
-		t.Error("the peek survived its row; it would resurrect the rail for the next single agent")
-	}
+	ck.Require().Eq(0, c.rail.Len(), "rail still holds")
+	ck.Eq(0, c.railCols(), "an empty rail column is still drawn after its only row closed")
+	ck.Eq(focusInput, c.focus, "focus")
+	ck.True(c.ta.Focused(), "the textarea is still blurred after the rail emptied under focus")
+	ck.False(c.railPeek, "the peek survived its row; it would resurrect the rail for the next single agent")
 }
 
 // Closing the last agent leaves nothing to view -- the same state a bare
 // attach with no children lands in, and it gets the same answer. Driven
 // through Update so the form's catalog fetch is not dropped on the floor.
 func TestClosingTheLastAgentOpensCreateForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := oneAgentCockpit(t)
 	defer c.shutdown()
 
 	c.Update(closedMsg{childID: "c_1", name: "c_1"})
 
-	if c.form == nil {
-		t.Fatal("closing the last agent did not open the create form")
-	}
-	if c.railCols() != 0 {
-		t.Error("an empty rail should not be drawn behind the create form")
-	}
+	ck.Require().NotNil(c.form, "closing the last agent did not open the create form")
+	ck.Eq(0, c.railCols(), "an empty rail should not be drawn behind the create form")
 }
 
 // Closing one of several is not that state: the rail still has something on it.
@@ -2261,78 +1960,64 @@ func TestClosingOneOfSeveralAgentsLeavesTheFormShut(t *testing.T) {
 	exitChild(c, "c_1")
 	c.Update(closedMsg{childID: "c_1", name: "c_1"})
 
-	if c.form != nil {
-		t.Error("the create form opened with an agent still on the rail")
-	}
+	assert.NewCollecting(t).Nil(c.form, "the create form opened with an agent still on the rail")
 }
 
 // esc out of the form on an empty rail must not strand you: ⇥ is how you get
 // to the rail everywhere else, and with no rows the rail's only job is the
 // form, so ⇥ goes there rather than being a dead key.
 func TestTabOnAnEmptyRailReopensCreateForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := bareCockpit(t)
 	c.Update(seedMsg{children: nil})
 	defer c.shutdown()
 	c.Update(keyMsg("esc"))
-	if c.form != nil {
-		t.Fatal("esc did not close the create form")
-	}
+	ck.Require().Nil(c.form, "esc did not close the create form")
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 
-	if c.form == nil {
-		t.Error("⇥ on an empty rail did not reopen the create form")
-	}
+	ck.NotNil(c.form, "⇥ on an empty rail did not reopen the create form")
 }
 
 // Zero agents: ^R goes straight to the create form. There is nothing to peek
 // at, and a rail with no rows is not a state worth entering -- it is the
 // thing the form exists to fix.
 func TestCtrlRWithNoAgentsOpensCreateForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := bareCockpit(t)
 	defer c.shutdown()
 
 	ctrlR(c)
 
-	if c.form == nil {
-		t.Error("^R with no agents did not open the create form")
-	}
-	if c.railCols() != 0 {
-		t.Error("^R revealed a rail with no agents in it")
-	}
+	ck.NotNil(c.form, "^R with no agents did not open the create form")
+	ck.Eq(0, c.railCols(), "^R revealed a rail with no agents in it")
 }
 
 // ⇥ reveals a rail the USER hid with two agents, the other half of the
 // reveal branch cyclePane now computes from railVisible rather than the bare
 // flag — hiding is about screen space, not about giving up agent switching.
 func TestTabRevealsTheHiddenRailWithTwoAgents(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
 		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
 	})
 	c.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}) // hide the rail
-	if c.railCols() != 0 {
-		t.Fatal("the rail did not hide to begin with")
-	}
+	ck.Require().Eq(0, c.railCols(), "the rail did not hide to begin with")
 
 	c.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 
-	if c.focus != focusRail {
-		t.Fatalf("⇥ over a hidden rail → %v, want the rail revealed and focused", c.focus)
-	}
-	if c.railCols() == 0 {
-		t.Error("⇥ focused a rail that is still hidden")
-	}
-	if !c.railPeek {
-		t.Error("the ⇥ reveal was not recorded as a peek")
-	}
+	ck.Require().Eq(focusRail, c.focus, "⇥ over a hidden rail →")
+	ck.NotEq(0, c.railCols(), "⇥ focused a rail that is still hidden")
+	ck.True(c.railPeek, "the ⇥ reveal was not recorded as a peek")
 }
 
 // Two or more agents: the ^R toggle keeps its existing flip semantics — the
 // peek machinery is for the rail the DEFAULT look hides, not the one the user
 // chose to collapse.
 func TestCtrlRTogglesWithTwoAgentsAsBefore(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.rail.Seed([]*rafikiv1.ChildSummary{
@@ -2340,22 +2025,14 @@ func TestCtrlRTogglesWithTwoAgentsAsBefore(t *testing.T) {
 	})
 	defer c.shutdown()
 
-	if c.railCols() == 0 {
-		t.Fatal("the rail is not drawn with two agents to begin with")
-	}
+	ck.Require().NotEq(0, c.railCols(), "the rail is not drawn with two agents to begin with")
 
 	ctrlR(c)
-	if c.railCols() != 0 {
-		t.Error("^R did not hide the rail with two agents")
-	}
-	if c.railPeek {
-		t.Error("hiding recorded a peek; the peek flag belongs to reveals, not to a collapse")
-	}
+	ck.Eq(0, c.railCols(), "^R did not hide the rail with two agents")
+	ck.False(c.railPeek, "hiding recorded a peek; the peek flag belongs to reveals, not to a collapse")
 
 	ctrlR(c)
-	if c.railCols() == 0 {
-		t.Error("a second ^R did not restore the rail")
-	}
+	ck.NotEq(0, c.railCols(), "a second ^R did not restore the rail")
 }
 
 // ── where a bare `rafiki attach` lands ───────────────────────────────────────
@@ -2371,58 +2048,43 @@ func bareCockpit(t *testing.T) *Cockpit {
 // an empty child. Opening on it puts the cursor in a box that cannot accept
 // work and hides the one thing there is to do.
 func TestBareAttachLandsOnAgentSelection(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := bareCockpit(t)
-	if c.focus != focusRail {
-		t.Fatalf("focus = %v before seed, want agents", c.focus)
-	}
-	if c.ta.Focused() {
-		t.Error("the textarea is focused while no agent is selected")
-	}
+	ck.Require().Eq(focusRail, c.focus, "focus")
+	ck.False(c.ta.Focused(), "the textarea is focused while no agent is selected")
 
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
 		summaryFor("c_1", "one", 0), summaryFor("c_2", "two", 0),
 	}})
-	if c.focus != focusRail {
-		t.Fatalf("focus = %v after seed, want agents", c.focus)
-	}
+	ck.Require().Eq(focusRail, c.focus, "focus")
 	// The cursor must already be somewhere, or ↑/↓ and ⏎ need a priming press.
-	if c.selected == "" {
-		t.Error("no rail row is under the cursor; ⏎ would open nothing")
-	}
+	ck.NotEq("", c.selected, "no rail row is under the cursor; ⏎ would open nothing")
 	defer c.shutdown()
 }
 
 // One child is not a choice: picking from a list of one is a keystroke that
 // carries no information.
 func TestBareAttachWithOneChildOpensIt(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := bareCockpit(t)
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{summaryFor("c_1", "only", 0)}})
 	defer c.shutdown()
 
-	if c.focused() != "c_1" {
-		t.Errorf("focused child = %q, want the only one", c.focused())
-	}
-	if c.focus != focusInput {
-		t.Errorf("focus = %v, want input — there was nothing to choose", c.focus)
-	}
-	if !c.ta.Focused() {
-		t.Error("landed on the input pane with the textarea blurred")
-	}
+	ck.Eq("c_1", c.focused(), "focused child")
+	ck.Eq(focusInput, c.focus, "focus")
+	ck.True(c.ta.Focused(), "landed on the input pane with the textarea blurred")
 }
 
 // No children is not a choice either, and there is nothing to view — land
 // straight in the create form instead of stranding focus on an empty pane.
 func TestBareAttachWithNoChildrenOpensCreateForm(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := bareCockpit(t)
 	c.Update(seedMsg{children: nil})
 	defer c.shutdown()
 
-	if c.form == nil {
-		t.Fatal("no children seeded, want the create form open")
-	}
-	if c.railCols() != 0 {
-		t.Error("an empty rail should not be drawn behind the create form")
-	}
+	ck.Require().NotNil(c.form, "no children seeded, want the create form open")
+	ck.Eq(0, c.railCols(), "an empty rail should not be drawn behind the create form")
 }
 
 // The confirmation is built from the binding's help text, so naming only ^C
@@ -2436,9 +2098,7 @@ func TestQuitConfirmationNamesBothKeys(t *testing.T) {
 		c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 		c.Update(k)
 		for _, want := range []string{"^C", "^D"} {
-			if !strings.Contains(c.notice, want) {
-				t.Errorf("after %v the notice is %q, want it to name %s", k, c.notice, want)
-			}
+			assert.NewCollecting(t).StrContains(c.notice, want, "after %v the notice is %q, want it to name", k, c.notice)
 		}
 	}
 }
@@ -2448,6 +2108,7 @@ func TestQuitConfirmationNamesBothKeys(t *testing.T) {
 // A fixed three rows wasted two on the common one-line prompt and hid
 // everything past the third on a long one.
 func TestInputGrowsWithThePromptAndStops(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	start := c.ta.Height()
@@ -2458,27 +2119,22 @@ func TestInputGrowsWithThePromptAndStops(t *testing.T) {
 		c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	}
 	grown := c.ta.Height()
-	if grown <= start {
-		t.Fatalf("input height %d → %d; it must grow with the prompt", start, grown)
-	}
+	ck.Require().Greater(start, grown, "input height")
 	// The transcript yields exactly the rows the box took, or they overlap.
-	if got, want := c.bodyHeight(), body-(grown-start); got != want {
-		t.Errorf("body height = %d, want %d — the transcript must yield the rows the input gained", got, want)
-	}
+	got, want := c.bodyHeight(), body-(grown-start)
+	ck.Eq(want, got, "body height")
 
 	for i := 0; i < 40; i++ {
 		c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 		c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	}
-	if h := c.ta.Height(); h > maxInputHeight {
-		t.Errorf("input grew to %d rows, past its %d cap; a prompt must not swallow the transcript",
-			h, maxInputHeight)
-	}
+	ck.LessOrEqual(maxInputHeight, c.ta.Height(), "input grew to")
 }
 
 // A big paste is a file, not something you meant to type. Unrolling one buries
 // the conversation and pins the box at its cap.
 func TestLargePasteFoldsToAToken(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	big := strings.Repeat("a line\n", 50)
@@ -2486,16 +2142,11 @@ func TestLargePasteFoldsToAToken(t *testing.T) {
 	c.Update(tea.PasteMsg{Content: big})
 
 	shown := c.ta.Value()
-	if strings.Contains(shown, "a line") {
-		t.Errorf("a 50-line paste was unrolled into the box: %q", truncate(shown, 60))
-	}
-	if !strings.Contains(shown, "51 lines") {
-		t.Errorf("the token must say how much it stands for; got %q", shown)
-	}
+	ck.NotStrContains(shown, "a line", "a 50-line paste was unrolled into the box: %q", truncate(shown, 60))
+	ck.StrContains(shown, "51 lines", "the token must say how much it stands for; got")
 	// ...and the full text is what actually gets sent.
-	if got := c.expandPastes(shown); got != big {
-		t.Errorf("expansion did not restore the paste (%d chars vs %d)", len(got), len(big))
-	}
+	got := c.expandPastes(shown)
+	ck.Eq(big, got, "expansion did not restore the paste (%d chars vs %d)", len(got), len(big))
 }
 
 // Small pastes are what you meant to type and belong in the box.
@@ -2503,9 +2154,7 @@ func TestSmallPasteIsInsertedWhole(t *testing.T) {
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.PasteMsg{Content: "one\ntwo"})
-	if c.ta.Value() != "one\ntwo" {
-		t.Errorf("small paste = %q, want it inserted whole", c.ta.Value())
-	}
+	assert.NewCollecting(t).Eq("one\ntwo", c.ta.Value(), "small paste")
 }
 
 // Pasting the same content again is how you say you actually wanted to see it.
@@ -2517,13 +2166,12 @@ func TestPastingTwiceInsertsTheFullText(t *testing.T) {
 	c.Update(tea.PasteMsg{Content: big})
 	c.Update(tea.PasteMsg{Content: big})
 
-	if !strings.Contains(c.ta.Value(), "a line") {
-		t.Error("pasting the same content twice must insert it in full")
-	}
+	assert.NewCollecting(t).StrContains(c.ta.Value(), "a line", "pasting the same content twice must insert it in full")
 }
 
 // The prompt that leaves is the full text, and the tokens leave with it.
 func TestSendExpandsAndClearsPastes(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	big := strings.Repeat("a line\n", 50)
@@ -2532,12 +2180,8 @@ func TestSendExpandsAndClearsPastes(t *testing.T) {
 	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if !strings.Contains(c.pending, "a line") {
-		t.Errorf("the sent prompt kept the token instead of the text: %q", truncate(c.pending, 60))
-	}
-	if len(c.pastes) != 0 {
-		t.Error("pastes outlived the prompt they belonged to")
-	}
+	ck.StrContains(c.pending, "a line", "the sent prompt kept the token instead of the text: %q", truncate(c.pending, 60))
+	ck.Empty(c.pastes, "pastes outlived the prompt they belonged to")
 }
 
 // A terminal sends CARRIAGE RETURNS for the line breaks inside a bracketed
@@ -2549,6 +2193,7 @@ func TestCarriageReturnPasteIsCountedAndFolded(t *testing.T) {
 		{"CR", "\r"}, {"CRLF", "\r\n"}, {"LF", "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ck := assert.NewCollecting(t)
 			c := newTestCockpit("c_1")
 			c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 			var body strings.Builder
@@ -2562,19 +2207,12 @@ func TestCarriageReturnPasteIsCountedAndFolded(t *testing.T) {
 			c.Update(tea.PasteMsg{Content: body.String()})
 
 			shown := c.ta.Value()
-			if !strings.Contains(shown, "40 lines") {
-				t.Fatalf("a 40-line %s paste was not folded; box holds %q",
-					tc.name, truncate(shown, 60))
-			}
+			ck.Require().StrContains(shown, "40 lines", "a 40-line %s paste was not folded; box holds %q", tc.name, truncate(shown, 60))
 			// What gets SENT must have real newlines: an agent should not
 			// receive a prompt whose line breaks are carriage returns.
 			expanded := c.expandPastes(shown)
-			if strings.Contains(expanded, "\r") {
-				t.Error("carriage returns survived into the sent prompt")
-			}
-			if n := strings.Count(expanded, "\n"); n != 39 {
-				t.Errorf("expanded paste has %d newlines, want 39", n)
-			}
+			ck.NotStrContains(expanded, "\r", "carriage returns survived into the sent prompt")
+			ck.Eq(39, strings.Count(expanded, "\n"), "expanded paste has")
 		})
 	}
 }
@@ -2582,6 +2220,7 @@ func TestCarriageReturnPasteIsCountedAndFolded(t *testing.T) {
 // Lines alone was not enough: one wide line is a single line of many thousands
 // of characters and pinned the box at its cap.
 func TestWidePasteFoldsEvenOnOneLine(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	wide := strings.Repeat("x", pasteCharThreshold+1)
@@ -2589,15 +2228,9 @@ func TestWidePasteFoldsEvenOnOneLine(t *testing.T) {
 	c.Update(tea.PasteMsg{Content: wide})
 
 	shown := c.ta.Value()
-	if strings.Contains(shown, wide) {
-		t.Errorf("a %d-character single-line paste was not folded", len(wide))
-	}
-	if !strings.Contains(shown, "chars") {
-		t.Errorf("a one-line paste must be measured in chars; got %q", shown)
-	}
-	if got := c.expandPastes(shown); got != wide {
-		t.Error("expansion did not restore the wide paste")
-	}
+	ck.NotStrContains(shown, wide, "a %d-character single-line paste was not folded", len(wide))
+	ck.StrContains(shown, "chars", "a one-line paste must be measured in chars; got")
+	ck.Eq(wide, c.expandPastes(shown), "expansion did not restore the wide paste")
 }
 
 func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
@@ -2605,39 +2238,30 @@ func TestPasteUnderBothBoundsIsInsertedWhole(t *testing.T) {
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	small := strings.Repeat("y", pasteCharThreshold-1)
 	c.Update(tea.PasteMsg{Content: small})
-	if c.ta.Value() != small {
-		t.Error("a paste under both bounds must be inserted whole")
-	}
+	assert.NewCollecting(t).Eq(small, c.ta.Value(), "a paste under both bounds must be inserted whole")
 }
 
 // ^U is the shell reflex for "kill the line", and the textarea's own ^U
 // (DeleteBeforeCursor) already clears the whole prompt in the common case of
 // one line with the cursor at the end — this widens it to the whole box.
 func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.PasteMsg{Content: strings.Repeat("a line\r", 40)})
 	c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	c.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	c.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
-	if c.ta.Value() == "" || len(c.pastes) == 0 {
-		t.Fatal("fixture is vacuous: nothing to clear")
-	}
+	ck.Require().False(c.ta.Value() == "" || len(c.pastes) == 0, "fixture is vacuous: nothing to clear")
 
 	c.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
 
-	if c.ta.Value() != "" {
-		t.Errorf("box still holds %q; ^U must clear all of it, not one line", c.ta.Value())
-	}
+	ck.Eq("", c.ta.Value(), "box still holds")
 	// The folded pastes go with it: their tokens are what referred to them,
 	// and leaving the text behind would attach it to a later prompt that
 	// happened to contain a matching token.
-	if len(c.pastes) != 0 {
-		t.Error("folded pastes outlived the input that referenced them")
-	}
-	if c.quitting {
-		t.Error("^U quit the cockpit")
-	}
+	ck.Empty(c.pastes, "folded pastes outlived the input that referenced them")
+	ck.False(c.quitting, "^U quit the cockpit")
 }
 
 // ── attachments ──────────────────────────────────────────────────────────────
@@ -2645,44 +2269,32 @@ func TestClearInputEmptiesTheBoxAndItsPastes(t *testing.T) {
 // A terminal never sends image DATA through a bracketed paste. Dragging a file
 // pastes its PATH, which is the only way an image reaches the input box today.
 func TestPastingAnImagePathStagesIt(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "shot.png")
-	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600))
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	c.Update(tea.PasteMsg{Content: path})
 
-	if len(c.attachments) != 1 {
-		t.Fatalf("staged %d attachments, want 1", len(c.attachments))
-	}
-	if got := c.attachments[0].mediaType; got != "image/png" {
-		t.Errorf("media type = %q, want image/png", got)
-	}
-	if !strings.Contains(c.ta.Value(), "shot.png") {
-		t.Errorf("the box should name the attachment; got %q", c.ta.Value())
-	}
+	ck.Require().Len(c.attachments, 1, "staged %d attachments, want 1", len(c.attachments))
+	ck.Eq("image/png", c.attachments[0].mediaType, "media type")
+	ck.StrContains(c.ta.Value(), "shot.png", "the box should name the attachment; got")
 	// The path itself must not be left in the prompt as text.
-	if strings.Contains(c.ta.Value(), dir) {
-		t.Errorf("the raw path leaked into the prompt: %q", c.ta.Value())
-	}
+	ck.NotStrContains(c.ta.Value(), dir, "the raw path leaked into the prompt")
 }
 
 // Ordinary text that merely looks path-shaped is untouched, and so is a path
 // to something that is not there.
 func TestNonImagePastesAreUnaffected(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
 	c.Update(tea.PasteMsg{Content: "/no/such/file.png"})
-	if len(c.attachments) != 0 {
-		t.Error("a path to a missing file must not stage an attachment")
-	}
-	if c.ta.Value() != "/no/such/file.png" {
-		t.Errorf("a missing path must land as plain text; got %q", c.ta.Value())
-	}
+	ck.Empty(c.attachments, "a path to a missing file must not stage an attachment")
+	ck.Eq("/no/such/file.png", c.ta.Value(), "a missing path must land as plain text; got")
 
 	c.ta.Reset()
 	c.Update(tea.PasteMsg{Content: "just some prose"})
@@ -2694,56 +2306,45 @@ func TestNonImagePastesAreUnaffected(t *testing.T) {
 // An attachment alone is a message: a screenshot with nothing to say still has
 // something to say. Requiring text would make it unsendable.
 func TestAnAttachmentAloneCanBeSent(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "only.png")
-	if err := os.WriteFile(path, []byte("\x89PNGdata"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(os.WriteFile(path, []byte("\x89PNGdata"), 0o600))
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.PasteMsg{Content: path})
 	c.ta.Reset() // no text at all, just the attachment
 
 	_, cmd := c.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("an attachment with no text must still send")
-	}
-	if len(c.attachments) != 0 {
-		t.Error("attachments outlived the prompt they rode on")
-	}
+	ck.Require().NotNil(cmd, "an attachment with no text must still send")
+	ck.Empty(c.attachments, "attachments outlived the prompt they rode on")
 }
 
 // ^U clears staged attachments too — the token that referred to them is gone.
 func TestClearInputDropsStagedAttachments(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.png")
-	if err := os.WriteFile(path, []byte("\x89PNGdata"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	ck.Require().NoError(os.WriteFile(path, []byte("\x89PNGdata"), 0o600))
 	c := newTestCockpit("c_1")
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	c.Update(tea.PasteMsg{Content: path})
 
 	c.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
-	if len(c.attachments) != 0 {
-		t.Error("^U left attachments staged with no token referring to them")
-	}
+	ck.Empty(c.attachments, "^U left attachments staged with no token referring to them")
 }
 
 // The toggle must reach the renderer AND invalidate the pane cache. Flipping
 // a flag that paneSig does not carry changes nothing on screen.
 func TestExpandArgsTogglesAndInvalidates(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_1")
 	before := c.expandArgs
 	c.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
-	if c.expandArgs == before {
-		t.Fatal("^O did not toggle expandArgs")
-	}
+	ck.NotEq(before, c.expandArgs, "^O did not toggle expandArgs")
 	var sig paneSig
 	sig.expandArgs = c.expandArgs
-	if !sig.expandArgs {
-		t.Fatal("paneSig has no expandArgs field")
-	}
+	ck.True(sig.expandArgs, "paneSig has no expandArgs field")
 }
 
 // A prompt sent to a busy agent used to sit in the inbox until the turn
@@ -2763,54 +2364,42 @@ func TestEnterSteersABusyAgent(t *testing.T) {
 		{"exited", rafikiv1.SendMode_SEND_MODE_PROMPT},
 		{"", rafikiv1.SendMode_SEND_MODE_PROMPT},
 	} {
-		if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, tc.status); got != tc.want {
-			t.Errorf("status %q: got %v, want %v", tc.status, got, tc.want)
-		}
+		got := sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, tc.status)
+		assert.NewCollecting(t).Eq(tc.want, got, "status %q: got %v, want", tc.status, got)
 	}
 }
 
 // An explicit steer stays a steer, and abort is never rewritten.
 func TestExplicitModesAreNotRewritten(t *testing.T) {
-	if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_STEER, "idle"); got != rafikiv1.SendMode_SEND_MODE_STEER {
-		t.Errorf("an explicit steer at an idle agent became %v", got)
-	}
-	if got := sendModeFor(rafikiv1.SendMode_SEND_MODE_ABORT, "streaming"); got != rafikiv1.SendMode_SEND_MODE_ABORT {
-		t.Errorf("abort was rewritten to %v", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq(rafikiv1.SendMode_SEND_MODE_STEER, sendModeFor(rafikiv1.SendMode_SEND_MODE_STEER, "idle"), "an explicit steer at an idle agent became")
+	c.Eq(rafikiv1.SendMode_SEND_MODE_ABORT, sendModeFor(rafikiv1.SendMode_SEND_MODE_ABORT, "streaming"), "abort was rewritten to")
 }
 
 // ^L must force a real repaint, not a cached one. The pane skips rebuilding
 // when its signature is unchanged, so clearing the screen without
 // invalidating leaves it blank until the next event.
 func TestRedrawInvalidatesThePaneCache(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := &paneState{renderer: newRenderer(), atBottom: true}
 	s := session.New("c1")
 	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
 	s.Finalized = 1
 
-	if got := p.linesFor(s, 80, 24, false); got == nil {
-		t.Fatal("first render returned nil")
-	}
-	if got := p.linesFor(s, 80, 24, false); got != nil {
-		t.Fatal("second render should have been a cache hit")
-	}
+	c.Require().NotNil(p.linesFor(s, 80, 24, false), "first render returned nil")
+	c.Require().Nil(p.linesFor(s, 80, 24, false), "second render should have been a cache hit")
 	p.invalidate()
-	if got := p.linesFor(s, 80, 24, false); got == nil {
-		t.Error("invalidate did not force a rebuild")
-	}
+	c.NotNil(p.linesFor(s, 80, 24, false), "invalidate did not force a rebuild")
 }
 
 // No polling. The cockpit already sees every tool call, so a completed task
 // mutation is the refresh trigger.
 func TestTaskToolsTriggerARefresh(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, name := range []string{"task_add", "task_update", "task_drop"} {
-		if !isTaskTool(name) {
-			t.Errorf("%s must trigger a task refresh", name)
-		}
+		c.True(isTaskTool(name), "%s must trigger a task refresh", name)
 	}
 	for _, name := range []string{"bash", "read", "agent_spawn", ""} {
-		if isTaskTool(name) {
-			t.Errorf("%s must not trigger a task refresh", name)
-		}
+		c.False(isTaskTool(name), "%s must not trigger a task refresh", name)
 	}
 }

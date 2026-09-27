@@ -10,7 +10,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -23,6 +22,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeSender records the last request and answers with a fixed reply — the
@@ -98,30 +99,21 @@ func bindingWith(st recall.Store, owner users.Identity) *recallBinding {
 }
 
 func TestRecallBindingScopeFromIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
 	admin := bindingWith(&fakeRecallStore{}, users.Identity{UserID: "u-admin", IsAdmin: true})
-	if admin.scope != (recall.Scope{All: true}) {
-		t.Fatalf("admin scope = %+v, want All", admin.scope)
-	}
+	c.Eq((recall.Scope{All: true}), admin.scope, "admin scope")
 	user := bindingWith(&fakeRecallStore{}, users.Identity{UserID: "u-bob"})
-	if user.scope != (recall.Scope{OwnerUserID: "u-bob"}) {
-		t.Fatalf("user scope = %+v, want OwnerUserID u-bob", user.scope)
-	}
+	c.Eq((recall.Scope{OwnerUserID: "u-bob"}), user.scope, "user scope")
 	anon := bindingWith(&fakeRecallStore{}, users.Identity{})
-	if anon.scope != (recall.Scope{}) {
-		t.Fatalf("anonymous scope = %+v, want the zero Scope", anon.scope)
-	}
+	c.Eq((recall.Scope{}), anon.scope, "anonymous scope")
 
 	// The zero scope must reach the store and be refused there — the binding
 	// degrades exactly like newMCPConversationReader's deny-all Scope, and
 	// recall.Search surfaces the store's ErrInvalidScope.
 	fs := &fakeRecallStore{}
 	_, err := bindingWith(fs, users.Identity{}).Recall(t.Context(), toolsRecallQuery("ghosts"))
-	if !errors.Is(err, recall.ErrInvalidScope) {
-		t.Fatalf("zero-scope Recall error = %v, want ErrInvalidScope", err)
-	}
-	if fs.searchScope != (recall.Scope{}) {
-		t.Fatalf("store saw scope %+v, want the zero Scope", fs.searchScope)
-	}
+	c.ErrorIs(err, recall.ErrInvalidScope, "zero-scope Recall error")
+	c.Eq((recall.Scope{}), fs.searchScope, "store saw scope")
 }
 
 // toolsRecallQuery builds the tool-facing query shape the recall tool sends.
@@ -130,20 +122,16 @@ func toolsRecallQuery(text string) tools.RecallQuery {
 }
 
 func TestRecallBindingMemoryOwnerAlwaysCaller(t *testing.T) {
+	c := assert.NewAborting(t)
 	fs := &fakeRecallStore{}
 	b := bindingWith(fs, users.Identity{UserID: "u-admin", IsAdmin: true})
 	if _, err := b.Recall(t.Context(), toolsRecallQuery("x")); err != nil {
 		t.Fatalf("Recall: %v", err)
 	}
-	if fs.searchOwner != "u-admin" {
-		t.Fatalf("search MemoryOwner = %q, want the admin's own id", fs.searchOwner)
-	}
-	if _, err := b.MemoryPut(t.Context(), "proj.r", "note", "body", nil); err != nil {
-		t.Fatalf("MemoryPut: %v", err)
-	}
-	if fs.putOwner != "u-admin" {
-		t.Fatalf("PutMemory owner = %q, want the admin's own id (memories are never daemon-wide)", fs.putOwner)
-	}
+	c.Eq("u-admin", fs.searchOwner, "search MemoryOwner")
+	_, err := b.MemoryPut(t.Context(), "proj.r", "note", "body", nil)
+	c.NoError(err, "MemoryPut")
+	c.Eq("u-admin", fs.putOwner, "PutMemory owner")
 }
 
 func TestRecallBindingNilWhenDisabled(t *testing.T) {
@@ -151,9 +139,7 @@ func TestRecallBindingNilWhenDisabled(t *testing.T) {
 	rb := newRecallBinding(c, users.Identity{UserID: "u-alice"}, false)
 	// The interface itself must be nil — a typed-nil *recallBinding here would
 	// defeat every recall blueprint's decline.
-	if rb != nil {
-		t.Fatalf("newRecallBinding on a nil recall runtime = %T, want a nil interface", rb)
-	}
+	assert.NewAborting(t).Nil(rb, "newRecallBinding on a nil recall runtime")
 }
 
 // TestRecallWiring runs the wiring tests whose pinned names do not contain
@@ -170,64 +156,44 @@ func TestRecallWiring(t *testing.T) {
 }
 
 func TestStartRecallNoConfigLeavesInterfacesNil(t *testing.T) {
+	c := assert.NewAborting(t)
 	rt := buildRecallRuntime(nil, &providers.Set{}, nil, discardLogger())
-	if rt.st == nil {
-		t.Fatal("store must always be built when a pool exists")
-	}
-	if rt.indexer == nil {
-		t.Fatal("indexer must always be built; it runs BM25-only without an embedder")
-	}
-	if rt.emb != nil {
-		t.Fatalf("embedder = %T, want a nil interface with no [embeddings] config", rt.emb)
-	}
-	if rt.sums != nil {
-		t.Fatalf("summarizer = %T, want a nil interface with no [summaries] config", rt.sums)
-	}
-	if rt.summaryModel != "" {
-		t.Fatalf("summaryModel = %q, want empty", rt.summaryModel)
-	}
+	c.NotNil(rt.st, "store must always be built when a pool exists")
+	c.NotNil(rt.indexer, "indexer must always be built; it runs BM25-only without an embedder")
+	c.Nil(rt.emb, "embedder")
+	c.Nil(rt.sums, "summarizer")
+	c.Eq("", rt.summaryModel, "summaryModel")
 
 	// The positive branch: both configs present and a client to complete on
 	// materialize both — proving the nil above is a branch decision, not an
 	// accident of the constructor.
 	sender := &fakeSender{}
 	client, err := llm.NewClient(llm.WithProviderSender("anthropic", sender), llm.WithDefaultModel("claude-haiku-4-5"))
-	if err != nil {
-		t.Fatalf("llm.NewClient: %v", err)
-	}
+	c.NoError(err, "llm.NewClient")
 	prov := &providers.Set{
 		Embeddings: &providers.EmbeddingsConfig{URL: "http://127.0.0.1:1/v1/embeddings", Model: "emb-1", Dimensions: 8},
 		Summaries:  &providers.SummariesConfig{Model: "claude-haiku-4-5", MaxSegmentTokens: 9000},
 	}
 	rt = buildRecallRuntime(nil, prov, client, discardLogger())
-	if rt.emb == nil {
-		t.Fatal("[embeddings] config must build the embedder")
-	}
-	if rt.sums == nil {
-		t.Fatal("[summaries] config with a client must build the summarizer")
-	}
-	if rt.summaryModel != "claude-haiku-4-5" {
-		t.Fatalf("summaryModel = %q, want the configured model", rt.summaryModel)
-	}
+	c.NotNil(rt.emb, "[embeddings] config must build the embedder")
+	c.NotNil(rt.sums, "[summaries] config with a client must build the summarizer")
+	c.Eq("claude-haiku-4-5", rt.summaryModel, "summaryModel")
 
 	// Summaries configured but no client: the completer is what the
 	// summarizer drives, so without one the pass stays off — windowing and
 	// memories are client-free and still run.
 	rt = buildRecallRuntime(nil, prov, nil, discardLogger())
-	if rt.sums != nil {
-		t.Fatalf("summarizer built without an llm client = %T, want nil", rt.sums)
-	}
+	c.Nil(rt.sums, "summarizer built without an llm client")
 }
 
 func TestStartRecallNoPoolDisables(t *testing.T) {
 	c := &Controller{}
 	startRecall(t.Context(), c, nil, &providers.Set{}, nil, discardLogger())
-	if c.recall != nil {
-		t.Fatalf("startRecall without a pool wired %+v, want nil (the DB-less posture)", c.recall)
-	}
+	assert.NewAborting(t).Nil(c.recall, "startRecall without a pool wired")
 }
 
 func TestRecallContextWindowRendersNeighbours(t *testing.T) {
+	c := assert.NewCollecting(t)
 	msg := func(ord int, role, text string) recall.Message {
 		return recall.Message{
 			ConversationID: "c1", Ordinal: ord, Role: role,
@@ -245,17 +211,13 @@ func TestRecallContextWindowRendersNeighbours(t *testing.T) {
 	}
 	b := bindingWith(fs, users.Identity{UserID: "u-bob"})
 	out, err := b.Context(t.Context(), "w:w1", 1, 2, 8000)
-	if err != nil {
-		t.Fatalf("Context: %v", err)
-	}
+	c.Require().NoError(err, "Context")
 	// before=1, after=2 around ordinals 10..12: the window asks for 9..14.
 	if fs.msgFrom != 9 || fs.msgTo != 14 {
 		t.Fatalf("Messages range = %d..%d, want 9..14", fs.msgFrom, fs.msgTo)
 	}
 	for _, want := range []string{"#9 user: before question", "#10 assistant: span answer", "#12 assistant: closing"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("context output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "context output missing")
 	}
 
 	// The summary shape: id, conversation name, ordinals, title, body.
@@ -265,13 +227,9 @@ func TestRecallContextWindowRendersNeighbours(t *testing.T) {
 	}}
 	sb := bindingWith(summaryStore, users.Identity{UserID: "u-bob"})
 	out, err = sb.Context(t.Context(), "s:s1", 0, 0, 8000)
-	if err != nil {
-		t.Fatalf("summary Context: %v", err)
-	}
+	c.Require().NoError(err, "summary Context")
 	for _, want := range []string{"conversation c1 · A conversation", "ordinals 2-9", "A title", "A body"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("summary context missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "summary context missing")
 	}
 }
 
@@ -291,6 +249,7 @@ func (f *fakeRecallStoreWithConversation) Conversation(ctx context.Context, scop
 }
 
 func TestRecallMemoryTreeFallsBackWhenLarge(t *testing.T) {
+	c := assert.NewCollecting(t)
 	big := strings.Repeat("x", recall.TreeMaxChars/2) // two of these bust the budget
 	fs := &fakeRecallStore{memories: []recall.Memory{
 		{ID: "1", Path: "proj", Name: "one", Body: big},
@@ -299,50 +258,30 @@ func TestRecallMemoryTreeFallsBackWhenLarge(t *testing.T) {
 	b := bindingWith(fs, users.Identity{UserID: "u-bob"})
 
 	out, err := b.MemoryTree(t.Context(), "proj", 0)
-	if err != nil {
-		t.Fatalf("MemoryTree: %v", err)
-	}
-	if !strings.Contains(out, "proj/one: ") || !strings.Contains(out, "proj/two: ") {
-		t.Errorf("degraded tree missing the path lines:\n%.200s", out)
-	}
-	if !strings.Contains(out, "(subtree too large for full bodies; call memory_tree on a narrower path)") {
-		t.Errorf("degraded tree missing the narrowing ask:\n%.200s", out)
-	}
-	if strings.Contains(out, big) {
-		t.Error("degraded tree leaked a full body")
-	}
+	c.Require().NoError(err, "MemoryTree")
+	c.False(!strings.Contains(out, "proj/one: ") || !strings.Contains(out, "proj/two: "), "degraded tree missing the path lines:\n%.200s", out)
+	c.StrContains(out, "(subtree too large for full bodies; call memory_tree on a narrower path)", "degraded tree missing the narrowing ask:\n")
+	c.NotStrContains(out, big, "degraded tree leaked a full body")
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(line, "proj/") {
 			continue
 		}
 		_, first, ok := strings.Cut(line, ": ")
-		if !ok {
-			t.Fatalf("degraded line %q has no first-line separator", line)
-		}
-		if len([]rune(first)) > 120 {
-			t.Errorf("first line longer than 120 chars: %q", first)
-		}
+		c.Require().True(ok, "degraded line %q has no first-line separator", line)
+		c.LessOrEqual(120, len([]rune(first)), "first line longer than 120 chars: %q", first)
 	}
 
 	// Under budget: full bodies.
 	fs = &fakeRecallStore{memories: []recall.Memory{{ID: "1", Path: "proj", Name: "one", Body: "small body"}}}
 	out, err = bindingWith(fs, users.Identity{UserID: "u-bob"}).MemoryTree(t.Context(), "proj", 0)
-	if err != nil {
-		t.Fatalf("MemoryTree small: %v", err)
-	}
-	if out != "## proj/one\nsmall body" {
-		t.Fatalf("small tree = %q, want the full-body render", out)
-	}
+	c.Require().NoError(err, "MemoryTree small")
+	c.Require().Eq("## proj/one\nsmall body", out, "small tree")
 
 	// Empty: the explicit nothing answer, never an empty string.
 	fs = &fakeRecallStore{}
 	out, err = bindingWith(fs, users.Identity{UserID: "u-bob"}).MemoryTree(t.Context(), "proj", 0)
-	if err != nil {
-		t.Fatalf("MemoryTree empty: %v", err)
-	}
-	if out != "no memories under proj" {
-		t.Fatalf("empty tree = %q", out)
-	}
+	c.Require().NoError(err, "MemoryTree empty")
+	c.Require().Eq("no memories under proj", out, "empty tree =")
 }
 
 // TestRecallUnknownSourceNameErrors pins the addendum's strictness: the tool
@@ -362,6 +301,7 @@ func TestRecallUnknownSourceNameErrors(t *testing.T) {
 // row. The indexer's candidate queries filter on exactly this value, so this
 // is the self-capture-exclusion contract pinned end to end.
 func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := scratchPool(t)
 	ctx := t.Context()
 	sender := &fakeSender{reply: &anthropic.Message{
@@ -375,47 +315,29 @@ func TestLLMCompleterUsesSummaryEntrypoint(t *testing.T) {
 		llm.WithDefaultModel("claude-haiku-4-5"),
 		llm.WithLogger(discardLogger()),
 	)
-	if err != nil {
-		t.Fatalf("llm.NewClient: %v", err)
-	}
+	c.NoError(err, "llm.NewClient")
 	pricer := insights.Pricer(func(model string) (routing.ModelPricing, bool) {
 		return routing.ModelPricing{PromptUSD: 1, CompletionUSD: 2}, true
 	})
 	comp := &llmCompleter{client: client, model: "claude-haiku-4-5", pricer: pricer}
 	got, err := comp.Complete(ctx, "", "summarize this", "the transcript", 1234)
-	if err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if got.Text != "the summary text" || got.Model != "claude-haiku-4-5" {
-		t.Fatalf("completion = %+v", got)
-	}
-	if got.InputTokens != 100 || got.OutputTokens != 40 {
-		t.Fatalf("usage = %d/%d, want 100/40 from the response", got.InputTokens, got.OutputTokens)
-	}
+	c.NoError(err, "Complete")
+	c.False(got.Text != "the summary text" || got.Model != "claude-haiku-4-5", "completion = %+v", got)
+	c.False(got.InputTokens != 100 || got.OutputTokens != 40, "usage = %d/%d, want 100/40 from the response", got.InputTokens, got.OutputTokens)
 	// detectCost's arithmetic: input*1 + output*2.
-	if got.CostUSD != 180 {
-		t.Fatalf("CostUSD = %v, want 180", got.CostUSD)
-	}
-	if sender.got == nil {
-		t.Fatal("sender saw no request")
-	}
-	if sender.got.MaxTokens != 1234 {
-		t.Fatalf("MaxTokens = %d, want the completer's cap", sender.got.MaxTokens)
-	}
+	c.Eq(180, got.CostUSD, "CostUSD")
+	c.NotNil(sender.got, "sender saw no request")
+	c.Eq(1234, sender.got.MaxTokens, "MaxTokens")
 	if sys := sender.got.System; len(sys) == 0 || sys[0].Text != "summarize this" {
 		t.Fatalf("system = %+v, want the summarizer prompt", sys)
 	}
 
 	// The load-bearing pin: the captured conversation's origin entrypoint.
 	var entrypoint string
-	if err := pool.QueryRow(ctx,
+	c.NoError(pool.QueryRow(ctx,
 		`SELECT origin_entrypoint FROM conversations.conversation WHERE origin_entrypoint = $1`,
-		recall.SummaryEntrypoint).Scan(&entrypoint); err != nil {
-		t.Fatalf("no conversation captured under %q: %v", recall.SummaryEntrypoint, err)
-	}
-	if entrypoint != recall.SummaryEntrypoint {
-		t.Fatalf("entrypoint = %q", entrypoint)
-	}
+		recall.SummaryEntrypoint).Scan(&entrypoint), "no conversation captured under %q", recall.SummaryEntrypoint)
+	c.Eq(recall.SummaryEntrypoint, entrypoint, "entrypoint =")
 }
 
 // TestLLMCompleterResolvesCatalogModel pins the catalog-model resolution the
@@ -437,38 +359,27 @@ func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
 	}
 
 	t.Run("provider-qualified id splits to the catalog-native id", func(t *testing.T) {
+		ck := assert.NewAborting(t)
 		c := newLLMCompleter(nil, prov(nil), "openrouter/z-ai/glm-5.3-flash", nil)
-		if c.model != "openrouter/z-ai/glm-5.3-flash" {
-			t.Fatalf("model = %q, want the configured string (the stable identity)", c.model)
-		}
-		if c.catalogModel != "z-ai/glm-5.3-flash" {
-			t.Fatalf("catalogModel = %q, want the provider-local id", c.catalogModel)
-		}
+		ck.Eq("openrouter/z-ai/glm-5.3-flash", c.model, "model")
+		ck.Eq("z-ai/glm-5.3-flash", c.catalogModel, "catalogModel")
 	})
 	t.Run("alias resolves to the real id", func(t *testing.T) {
 		p := prov(map[string]providers.ModelAlias{"glm": {ID: "z-ai/glm-5.3-flash", ContextWindow: 1310720}})
 		c := newLLMCompleter(nil, p, "openrouter/glm", nil)
-		if c.catalogModel != "z-ai/glm-5.3-flash" {
-			t.Fatalf("catalogModel = %q, want the alias's real id", c.catalogModel)
-		}
+		assert.NewAborting(t).Eq("z-ai/glm-5.3-flash", c.catalogModel, "catalogModel")
 	})
 	t.Run("bare id resolves against the default provider unchanged", func(t *testing.T) {
 		c := newLLMCompleter(nil, prov(nil), "claude-haiku-4-5", nil)
-		if c.catalogModel != "claude-haiku-4-5" {
-			t.Fatalf("catalogModel = %q, want the id unchanged", c.catalogModel)
-		}
+		assert.NewAborting(t).Eq("claude-haiku-4-5", c.catalogModel, "catalogModel")
 	})
 	t.Run("unknown provider falls back to the raw string", func(t *testing.T) {
 		c := newLLMCompleter(nil, prov(nil), "weird/x", nil)
-		if c.catalogModel != "weird/x" {
-			t.Fatalf("catalogModel = %q, want the raw fallback", c.catalogModel)
-		}
+		assert.NewAborting(t).Eq("weird/x", c.catalogModel, "catalogModel")
 	})
 	t.Run("nil provider set falls back to the raw string", func(t *testing.T) {
 		c := newLLMCompleter(nil, nil, "openrouter/z-ai/glm-5.3-flash", nil)
-		if c.catalogModel != "openrouter/z-ai/glm-5.3-flash" {
-			t.Fatalf("catalogModel = %q, want the raw fallback", c.catalogModel)
-		}
+		assert.NewAborting(t).Eq("openrouter/z-ai/glm-5.3-flash", c.catalogModel, "catalogModel")
 	})
 }
 
@@ -478,6 +389,7 @@ func TestLLMCompleterResolvesCatalogModel(t *testing.T) {
 // a summary's cost is never silently zero because the responder spelled the id
 // differently than the catalog does. Rides the TestRecallWiring shim.
 func TestLLMCompleterCompletionCostFallback(t *testing.T) {
+	c := assert.NewAborting(t)
 	usage := anthropic.Usage{InputTokens: 1000, OutputTokens: 100}
 	known := func(ids ...string) insights.Pricer {
 		set := map[string]struct{}{}
@@ -499,16 +411,10 @@ func TestLLMCompleterCompletionCostFallback(t *testing.T) {
 		return routing.ModelPricing{}, false
 	}
 	completionCost(recorder, "echoed-id", "z-ai/glm-5.3-flash", usage)
-	if len(saw) != 2 || saw[0] != "echoed-id" || saw[1] != "z-ai/glm-5.3-flash" {
-		t.Fatalf("pricer saw %v, want [echoed-id z-ai/glm-5.3-flash]", saw)
-	}
+	c.False(len(saw) != 2 || saw[0] != "echoed-id" || saw[1] != "z-ai/glm-5.3-flash", "pricer saw %v, want [echoed-id z-ai/glm-5.3-flash]", saw)
 	saw = nil
 	completionCost(recorder, "echoed-id", "echoed-id", usage)
-	if len(saw) != 1 {
-		t.Fatalf("pricer saw %v, want a single probe when the fallback equals the first", saw)
-	}
+	c.Len(saw, 1, "pricer saw")
 	saw = nil
-	if got := completionCost(known("echoed-id"), "echoed-id", "z-ai/glm-5.3-flash", usage); got != 0 {
-		t.Fatalf("cost = %v, want 0 (zero-priced entry is a hit, not a miss)", got)
-	}
+	c.Eq(0, completionCost(known("echoed-id"), "echoed-id", "z-ai/glm-5.3-flash", usage), "cost")
 }

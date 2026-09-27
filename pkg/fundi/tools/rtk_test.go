@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeRTK creates a fake rtk binary in a temp directory, adds it to PATH, and
@@ -13,11 +15,10 @@ import (
 // function that restores the original PATH.
 func fakeRTK(t *testing.T) (cleanup func()) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	f, err := os.Create(filepath.Join(dir, "rtk"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	script := `#!/bin/bash
 if [ "$1" = "--version" ]; then
   echo "rtk 0.45.0"
@@ -30,9 +31,7 @@ exit 0
 		t.Fatal(err)
 	}
 	f.Close()
-	if err := os.Chmod(f.Name(), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Chmod(f.Name(), 0o755))
 
 	// t.Setenv, not os.Setenv: the manual save/restore leaked. PATH was
 	// swapped by several tests and restored to whatever it happened to be
@@ -60,19 +59,16 @@ exit 0
 // versionOutput is the full line that `rtk --version` prints (e.g. "rtk 0.22.0").
 func fakeRTKVersion(t *testing.T, versionOutput string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	f, err := os.Create(filepath.Join(dir, "rtk"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	script := "#!/bin/bash\nif [ \"$1\" = \"--version\" ]; then\n  echo \"" + versionOutput + "\"\n  exit 0\nfi\necho \"$@\"\nexit 0\n"
 	if _, err := f.WriteString(script); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
-	if err := os.Chmod(f.Name(), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Chmod(f.Name(), 0o755))
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 
 	// Parse the version from the output to determine ok status.
@@ -166,9 +162,7 @@ func TestHasShellChaining(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.command, func(t *testing.T) {
 			got := hasShellChaining(tc.command)
-			if got != tc.chaining {
-				t.Errorf("hasShellChaining(%q) = %v, want %v", tc.command, got, tc.chaining)
-			}
+			assert.NewCollecting(t).Eq(tc.chaining, got, "hasShellChaining(%q) = %v, want", tc.command, got)
 		})
 	}
 }
@@ -189,9 +183,7 @@ func TestRtkRewriteChainingGuard(t *testing.T) {
 	for _, cmd := range chained {
 		t.Run(cmd, func(t *testing.T) {
 			_, applied := rtkRewrite(RTKAuto, cmd)
-			if applied {
-				t.Errorf("rtkRewrite(%q) should not rewrite a chained command", cmd)
-			}
+			assert.NewCollecting(t).False(applied, "rtkRewrite(%q) should not rewrite a chained command", cmd)
 		})
 	}
 }
@@ -201,9 +193,7 @@ func TestRtkRewriteRTKOff(t *testing.T) {
 	defer cleanup()
 
 	_, applied := rtkRewrite(RTKOff, "git status")
-	if applied {
-		t.Error("rtkRewrite with RTKOff should return applied=false")
-	}
+	assert.NewCollecting(t).False(applied, "rtkRewrite with RTKOff should return applied=false")
 }
 
 func TestRtkRewriteMapping(t *testing.T) {
@@ -298,13 +288,10 @@ func TestRtkRewriteMapping(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.command, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			argv, applied := rtkRewrite(RTKAuto, tc.command)
-			if !applied {
-				t.Fatalf("rtkRewrite(%q) should be applied", tc.command)
-			}
-			if !stringSlicesEqual(argv, tc.want) {
-				t.Errorf("rtkRewrite(%q) = %v, want %v", tc.command, argv, tc.want)
-			}
+			c.Require().True(applied, "rtkRewrite(%q) should be applied", tc.command)
+			c.True(stringSlicesEqual(argv, tc.want), "rtkRewrite(%q) = %v, want %v", tc.command, argv, tc.want)
 		})
 	}
 }
@@ -337,9 +324,7 @@ func TestRtkRewriteUnmapped(t *testing.T) {
 	for _, cmd := range unmapped {
 		t.Run(cmd, func(t *testing.T) {
 			_, applied := rtkRewrite(RTKAuto, cmd)
-			if applied {
-				t.Errorf("rtkRewrite(%q) should NOT be applied (unmapped command)", cmd)
-			}
+			assert.NewCollecting(t).False(applied, "rtkRewrite(%q) should NOT be applied (unmapped command)", cmd)
 		})
 	}
 }
@@ -360,9 +345,7 @@ func TestRtkRewriteNpmSubcommand(t *testing.T) {
 	for _, cmd := range mapped {
 		t.Run(cmd, func(t *testing.T) {
 			_, applied := rtkRewrite(RTKAuto, cmd)
-			if !applied {
-				t.Errorf("rtkRewrite(%q) should be applied (valid npm subcommand)", cmd)
-			}
+			assert.NewCollecting(t).True(applied, "rtkRewrite(%q) should be applied (valid npm subcommand)", cmd)
 		})
 	}
 
@@ -377,9 +360,7 @@ func TestRtkRewriteNpmSubcommand(t *testing.T) {
 	for _, cmd := range unmapped {
 		t.Run(cmd, func(t *testing.T) {
 			_, applied := rtkRewrite(RTKAuto, cmd)
-			if applied {
-				t.Errorf("rtkRewrite(%q) should NOT be applied", cmd)
-			}
+			assert.NewCollecting(t).False(applied, "rtkRewrite(%q) should NOT be applied", cmd)
 		})
 	}
 }
@@ -387,17 +368,13 @@ func TestRtkRewriteNpmSubcommand(t *testing.T) {
 func TestRtkRewriteVersionGuardTooOld(t *testing.T) {
 	fakeRTKVersion(t, "rtk 0.22.0")
 	_, applied := rtkRewrite(RTKAuto, "git status")
-	if applied {
-		t.Error("rtkRewrite should return applied=false for rtk < 0.23.0")
-	}
+	assert.NewCollecting(t).False(applied, "rtkRewrite should return applied=false for rtk < 0.23.0")
 }
 
 func TestRtkRewriteVersionGuardUnparseable(t *testing.T) {
 	fakeRTKVersion(t, "rtk nope")
 	_, applied := rtkRewrite(RTKAuto, "git status")
-	if applied {
-		t.Error("rtkRewrite should return applied=false for unparseable version")
-	}
+	assert.NewCollecting(t).False(applied, "rtkRewrite should return applied=false for unparseable version")
 }
 
 func TestRtkRewriteMissingRtk(t *testing.T) {
@@ -407,9 +384,7 @@ func TestRtkRewriteMissingRtk(t *testing.T) {
 	t.Cleanup(func() { resetRTKCache(nil) })
 
 	_, applied := rtkRewrite(RTKAuto, "git status")
-	if applied {
-		t.Error("rtkRewrite should return applied=false when rtk is missing")
-	}
+	assert.NewCollecting(t).False(applied, "rtkRewrite should return applied=false when rtk is missing")
 }
 
 func TestRtkRewriteRTKOnNoRtk(t *testing.T) {
@@ -425,9 +400,7 @@ func TestRtkRewriteRTKOnNoRtk(t *testing.T) {
 	// this assertion was the whole of RTKOn's behaviour, which is what made
 	// `on` byte-identical to `auto`.
 	_, applied := rtkRewrite(RTKOn, "git status")
-	if applied {
-		t.Error("rtkRewrite must still fail open in RTKOn mode; the hard requirement lives at startup")
-	}
+	assert.NewCollecting(t).False(applied, "rtkRewrite must still fail open in RTKOn mode; the hard requirement lives at startup")
 }
 
 func TestRtkRewriteRTKOnWithVersionOk(t *testing.T) {
@@ -435,9 +408,7 @@ func TestRtkRewriteRTKOnWithVersionOk(t *testing.T) {
 	defer cleanup()
 
 	_, applied := rtkRewrite(RTKOn, "git status")
-	if !applied {
-		t.Error("rtkRewrite should return applied=true in RTKOn mode with valid rtk")
-	}
+	assert.NewCollecting(t).True(applied, "rtkRewrite should return applied=true in RTKOn mode with valid rtk")
 }
 
 func TestFailOpenGuards(t *testing.T) {
@@ -464,9 +435,7 @@ func TestFailOpenGuards(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			argv, applied := rtkRewrite(RTKAuto, tc.cmd)
-			if applied {
-				t.Errorf("rtkRewrite(%q) = (%v, true), want (nil, false)", tc.cmd, argv)
-			}
+			assert.NewCollecting(t).False(applied, "rtkRewrite(%q) = (%v, true), want (nil, false)", tc.cmd, argv)
 		})
 	}
 }
@@ -501,9 +470,7 @@ func TestShellSplit(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
 			got := shellSplit(tc.input)
-			if !stringSlicesEqual(got, tc.want) {
-				t.Errorf("shellSplit(%q) = %v, want %v", tc.input, got, tc.want)
-			}
+			assert.NewCollecting(t).True(stringSlicesEqual(got, tc.want), "shellSplit(%q) = %v, want %v", tc.input, got, tc.want)
 		})
 	}
 }
@@ -543,10 +510,7 @@ func TestSemverGTE(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.v, func(t *testing.T) {
 			got := semverGTE(tc.v, tc.maj, tc.min, tc.pat)
-			if got != tc.ok {
-				t.Errorf("semverGTE(%q, %d, %d, %d) = %v, want %v",
-					tc.v, tc.maj, tc.min, tc.pat, got, tc.ok)
-			}
+			assert.NewCollecting(t).Eq(tc.ok, got, "semverGTE(%q, %d, %d, %d) = %v, want", tc.v, tc.maj, tc.min, tc.pat, got)
 		})
 	}
 }
@@ -571,9 +535,8 @@ func TestRtkRewriteLeavesHeadAndTailAlone(t *testing.T) {
 		"tail -20 app.log",
 		"tail -f app.log",
 	} {
-		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
-			t.Errorf("rtkRewrite(%q) was rewritten to %v; it must fall through to bash", cmd, argv)
-		}
+		argv, applied := rtkRewrite(RTKAuto, cmd)
+		assert.NewCollecting(t).False(applied, "rtkRewrite(%q) was rewritten to %v; it must fall through to bash", cmd, argv)
 	}
 }
 
@@ -595,9 +558,8 @@ func TestRtkRewriteRefusesMultilineCommands(t *testing.T) {
 		"git status\r\ngit log",
 		"docker ps\ndocker images",
 	} {
-		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
-			t.Errorf("rtkRewrite(%q) was rewritten to %v; a multi-line command must never be rewritten", cmd, argv)
-		}
+		argv, applied := rtkRewrite(RTKAuto, cmd)
+		assert.NewCollecting(t).False(applied, "rtkRewrite(%q) was rewritten to %v; a multi-line command must never be rewritten", cmd, argv)
 	}
 }
 
@@ -619,9 +581,8 @@ func TestRtkRewriteRefusesShellExpansion(t *testing.T) {
 		"git status # check the tree",
 		"ls {a,b}",
 	} {
-		if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
-			t.Errorf("rtkRewrite(%q) was rewritten to %v; the no-shell path cannot expand it", cmd, argv)
-		}
+		argv, applied := rtkRewrite(RTKAuto, cmd)
+		assert.NewCollecting(t).False(applied, "rtkRewrite(%q) was rewritten to %v; the no-shell path cannot expand it", cmd, argv)
 	}
 }
 
@@ -637,9 +598,8 @@ func TestRtkRewriteEscapedQuoteDoesNotHidePipeline(t *testing.T) {
 	defer cleanup()
 
 	cmd := `grep a\"b file | wc -l`
-	if argv, applied := rtkRewrite(RTKAuto, cmd); applied {
-		t.Fatalf("rtkRewrite(%q) was rewritten to %v; the pipeline must be detected", cmd, argv)
-	}
+	argv, applied := rtkRewrite(RTKAuto, cmd)
+	assert.NewAborting(t).False(applied, "rtkRewrite(%q) was rewritten to %v; the pipeline must be detected", cmd, argv)
 }
 
 // TestRtkRewriteStillHandlesQuotedMetacharacters guards the other
@@ -659,9 +619,8 @@ func TestRtkRewriteStillHandlesQuotedMetacharacters(t *testing.T) {
 		"find . -name '*.go'",
 		"kubectl get pods",
 	} {
-		if _, applied := rtkRewrite(RTKAuto, cmd); !applied {
-			t.Errorf("rtkRewrite(%q) was not applied; the guard is now too broad", cmd)
-		}
+		_, applied := rtkRewrite(RTKAuto, cmd)
+		assert.NewCollecting(t).True(applied, "rtkRewrite(%q) was not applied; the guard is now too broad", cmd)
 	}
 }
 
@@ -677,6 +636,7 @@ func TestRtkRewriteStillHandlesQuotedMetacharacters(t *testing.T) {
 // have been substituted. Single-quoted expansion characters are genuinely
 // inert and must keep working.
 func TestRtkRewriteDoubleQuoteExpansion(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cleanup := fakeRTK(t)
 	defer cleanup()
 
@@ -697,11 +657,7 @@ func TestRtkRewriteDoubleQuoteExpansion(t *testing.T) {
 	// choosing single quotes.
 	cmd := `git commit -m 'release $VERSION'`
 	argv, applied := rtkRewrite(RTKAuto, cmd)
-	if !applied {
-		t.Fatalf("rtkRewrite(%q) should be applied; single-quoted $ is inert", cmd)
-	}
+	c.Require().True(applied, "rtkRewrite(%q) should be applied; single-quoted $ is inert", cmd)
 	want := []string{"rtk", "git", "commit", "-m", "release $VERSION"}
-	if !stringSlicesEqual(argv, want) {
-		t.Errorf("rtkRewrite(%q) = %v, want %v", cmd, argv, want)
-	}
+	c.True(stringSlicesEqual(argv, want), "rtkRewrite(%q) = %v, want %v", cmd, argv, want)
 }

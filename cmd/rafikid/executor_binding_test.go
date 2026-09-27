@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/skills"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeExec is one executor's client. Each call returns the next queued error
@@ -268,36 +270,32 @@ func (f *fakeBinder) ForgetJob(childID, handle string) {
 }
 
 func TestBoundExecutorBindsLazilyAndSticks(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a"}
 	fb := newFakeBinder(a)
 	b := newBoundExecutor("child-1", fb)
 
 	for i := 0; i < 3; i++ {
-		if _, err := b.Execute(context.Background(), "read", nil); err != nil {
-			t.Fatalf("call %d: %v", i, err)
-		}
+		_, err := b.Execute(context.Background(), "read", nil)
+		c.NoError(err, "call %d", i)
 	}
-	if fb.provisions != 1 {
-		t.Fatalf("a working executor must be provisioned ONCE and held; got %d provisions", fb.provisions)
-	}
+	c.Eq(1, fb.provisions, "a working executor must be provisioned ONCE and held; got")
 }
 
 func TestBoundExecutorDoesNotRebindOnToolFailure(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a", errs: []error{fmt.Errorf("wrapped: %w", execpool.ErrToolFailed)}}
 	b2 := &fakeExec{id: "b"}
 	fb := newFakeBinder(a, b2)
 	b := newBoundExecutor("child-1", fb)
 
 	_, err := b.Execute(context.Background(), "bash", nil)
-	if !errors.Is(err, execpool.ErrToolFailed) {
-		t.Fatalf("a tool failure must be returned to the caller unchanged, got %v", err)
-	}
-	if fb.provisions != 1 {
-		t.Fatalf("bash exiting nonzero must NEVER migrate a child; got %d provisions", fb.provisions)
-	}
+	c.ErrorIs(err, execpool.ErrToolFailed, "a tool failure must be returned to the caller unchanged, got")
+	c.Eq(1, fb.provisions, "bash exiting nonzero must NEVER migrate a child; got")
 }
 
 func TestBoundExecutorRebindsWhenTheExecutorIsGone(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a", errs: []error{fmt.Errorf("wrapped: %w", execpool.ErrExecutorGone)}}
 	b2 := &fakeExec{id: "b"}
 	fb := newFakeBinder(a, b2)
@@ -314,15 +312,12 @@ func TestBoundExecutorRebindsWhenTheExecutorIsGone(t *testing.T) {
 	fb.mu.Unlock()
 
 	got, err := b.Execute(context.Background(), "read", nil)
-	if err != nil {
-		t.Fatalf("a departed executor must be replaced, not surfaced: %v", err)
-	}
-	if got != "b:read" {
-		t.Fatalf("the retry must run on the NEW executor; got %q", got)
-	}
+	c.NoError(err, "a departed executor must be replaced, not surfaced")
+	c.Eq("b:read", got, "the retry must run on the NEW executor; got")
 }
 
 func TestBoundExecutorReprovisionsOnSameExecutorWhenOnlyWorkspaceIsGone(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a"}
 	fb := newFakeBinder(a)
 	b := newBoundExecutor("child-1", fb)
@@ -333,18 +328,14 @@ func TestBoundExecutorReprovisionsOnSameExecutorWhenOnlyWorkspaceIsGone(t *testi
 	// a stays LIVE; only its in-memory workspace registry lost the id.
 	a.errs = []error{fmt.Errorf("wrapped: %w", execpool.ErrExecutorGone)}
 
-	if _, err := b.Execute(context.Background(), "read", nil); err != nil {
-		t.Fatalf("a lost workspace on a live executor must be re-provisioned: %v", err)
-	}
-	if fb.provisions != 2 {
-		t.Fatalf("want exactly one re-provision, got %d total provisions", fb.provisions)
-	}
-	if fb.chooseCalls != 1 {
-		t.Fatalf("a lost WORKSPACE must not re-run selection; ChooseFor called %d times", fb.chooseCalls)
-	}
+	_, err := b.Execute(context.Background(), "read", nil)
+	c.NoError(err, "a lost workspace on a live executor must be re-provisioned")
+	c.Eq(2, fb.provisions, "want exactly one re-provision, got")
+	c.Eq(1, fb.chooseCalls, "a lost WORKSPACE must not re-run selection; ChooseFor called")
 }
 
 func TestBoundExecutorRetriesOnlyOnce(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a", errs: []error{
 		fmt.Errorf("1: %w", execpool.ErrExecutorGone),
 		fmt.Errorf("2: %w", execpool.ErrExecutorGone),
@@ -354,23 +345,19 @@ func TestBoundExecutorRetriesOnlyOnce(t *testing.T) {
 	b := newBoundExecutor("child-1", fb)
 
 	_, err := b.Execute(context.Background(), "read", nil)
-	if err == nil {
-		t.Fatal("an executor failing every time must surface the error, not loop")
-	}
-	if a.calls > 2 {
-		t.Fatalf("at most one retry per call; the executor saw %d calls", a.calls)
-	}
+	c.Error(err, "an executor failing every time must surface the error, not loop")
+	c.LessOrEqual(2, a.calls, "at most one retry per call; the executor saw")
 }
 
 func TestBoundExecutorConcurrentFailuresProduceOneRebind(t *testing.T) {
+	c := assert.NewAborting(t)
 	a := &fakeExec{id: "a"}
 	b2 := &fakeExec{id: "b"}
 	fb := newFakeBinder(a, b2)
 	b := newBoundExecutor("child-1", fb)
 
-	if _, err := b.Execute(context.Background(), "read", nil); err != nil {
-		t.Fatal(err)
-	}
+	_, err := b.Execute(context.Background(), "read", nil)
+	c.NoError(err)
 	fb.mu.Lock()
 	fb.liveByID["a"] = false
 	fb.mu.Unlock()
@@ -392,23 +379,18 @@ func TestBoundExecutorConcurrentFailuresProduceOneRebind(t *testing.T) {
 
 	// One provision at bind + exactly one at rebind. Eight concurrent
 	// failures must not provision eight workspaces.
-	if fb.provisions != 2 {
-		t.Fatalf("concurrent failures must coalesce into ONE rebind; got %d provisions", fb.provisions)
-	}
+	c.Eq(2, fb.provisions, "concurrent failures must coalesce into ONE rebind; got")
 }
 
 func TestBoundExecutorUnboundReturnsTheRefusalReason(t *testing.T) {
+	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	fb.chooseErr = errors.New("spawn refused: no executor satisfies \"machine=xyz\"")
 	b := newBoundExecutor("child-1", fb)
 
 	_, err := b.Execute(context.Background(), "read", nil)
-	if err == nil {
-		t.Fatal("an unbound executor must error")
-	}
-	if !contains(err.Error(), "no executor satisfies") {
-		t.Fatalf("the refusal diagnostic must reach the agent, got %q", err)
-	}
+	c.Error(err, "an unbound executor must error")
+	c.True(contains(err.Error(), "no executor satisfies"), "the refusal diagnostic must reach the agent, got %q", err)
 }
 
 func TestBoundExecutorNeverRunsInProcess(t *testing.T) {
@@ -427,9 +409,7 @@ func TestBoundExecutorNeverRunsInProcess(t *testing.T) {
 	if _, err := b.StartJob(context.Background(), "echo hi"); err == nil {
 		t.Fatal("StartJob must refuse when unbound")
 	}
-	if err := b.Ping(context.Background()); err == nil {
-		t.Fatal("Ping must refuse when unbound")
-	}
+	assert.NewAborting(t).Error(b.Ping(context.Background()), "Ping must refuse when unbound")
 }
 
 // Re-provisioning in place leaves the OLD workspace registered on a LIVE
@@ -437,18 +417,16 @@ func TestBoundExecutorNeverRunsInProcess(t *testing.T) {
 // and its retained background-job output were stranded until the executor
 // process exited.
 func TestReprovisionInPlaceReleasesTheOldWorkspace(t *testing.T) {
+	c := assert.NewAborting(t)
 	f := newFakeBinder()
 	f.mode = "pinned"
 	f.live = true
 	b := newBoundExecutor("c1", f)
-	if _, _, err := b.clientFor(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	_, _, err := b.clientFor(context.Background())
+	c.NoError(err)
 	first := f.lastWorkspace
 
-	if !b.recover(context.Background(), b.stale(), execpool.ErrExecutorGone, true) {
-		t.Fatal("want a re-provision")
-	}
+	c.True(b.recover(context.Background(), b.stale(), execpool.ErrExecutorGone, true), "want a re-provision")
 	if !f.released[first] {
 		t.Fatalf("workspace %q was never released; it and its job output are "+
 			"stranded on a live executor", first)
@@ -506,9 +484,7 @@ func TestStartJobArmsAWatchThroughTheBinder(t *testing.T) {
 	b := newBoundExecutor("child-1", fb)
 
 	handle, err := b.StartJob(context.Background(), "npm run dev")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
@@ -520,57 +496,47 @@ func TestStartJobArmsAWatchThroughTheBinder(t *testing.T) {
 // A failed start started nothing: a watch on a handle that does not exist
 // would poll forever and eventually report a job gone that never ran.
 func TestFailedStartJobArmsNothing(t *testing.T) {
+	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	fb.failWith = errors.New("no such executor")
 	b := newBoundExecutor("child-1", fb)
 
-	if _, err := b.StartJob(context.Background(), "npm run dev"); err == nil {
-		t.Fatal("expected the scripted failure")
-	}
+	_, err := b.StartJob(context.Background(), "npm run dev")
+	c.Error(err, "expected the scripted failure")
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
-	if len(fb.watched) != 0 {
-		t.Fatalf("watched = %v; a failed start must arm no watch", fb.watched)
-	}
+	c.Empty(fb.watched, "watched")
 }
 
 // bash_kill resolved the job on purpose: the watch is dropped so the exit
 // never injects a turn's worth of old news.
 func TestKillJobForgetsTheWatch(t *testing.T) {
+	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	b := newBoundExecutor("child-1", fb)
 
 	handle, err := b.StartJob(context.Background(), "npm run dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := b.KillJob(context.Background(), handle); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
+	c.NoError(b.KillJob(context.Background(), handle))
 
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
 	if len(fb.forgetJobs) != 1 || fb.forgetJobs[0] != "child-1|"+handle {
 		t.Fatalf("forgetJobs = %v, want exactly [child-1|%s]", fb.forgetJobs, handle)
 	}
-	if len(fb.watched) != 1 {
-		t.Fatalf("watched = %v; the kill must not disturb the record of the start", fb.watched)
-	}
+	c.Len(fb.watched, 1, "watched")
 }
 
 // A kill that never landed (the stream broke) drops nothing: the job may
 // still be running, and its exit is still news.
 func TestFailedKillJobKeepsTheWatch(t *testing.T) {
+	c := assert.NewAborting(t)
 	fb := newFakeBinder()
 	fb.failWith = errors.New("stream broken")
 	b := newBoundExecutor("child-1", fb)
 
-	if err := b.KillJob(context.Background(), "job-1"); err == nil {
-		t.Fatal("expected the scripted failure")
-	}
+	c.Error(b.KillJob(context.Background(), "job-1"), "expected the scripted failure")
 	fb.mu.Lock()
 	defer fb.mu.Unlock()
-	if len(fb.forgetJobs) != 0 {
-		t.Fatalf("forgetJobs = %v; a failed kill must not drop the watch", fb.forgetJobs)
-	}
+	c.Empty(fb.forgetJobs, "forgetJobs")
 }

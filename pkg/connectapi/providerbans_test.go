@@ -13,6 +13,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeProviderBans struct {
@@ -52,43 +54,35 @@ func TestSetProviderBanManagerNilIsRefused(t *testing.T) {
 	s := &Server{}
 	s.SetProviderBanManager(nil)
 	_, err := s.ListProviderBans(context.Background(), connect.NewRequest(&rafikiv1.ListProviderBansRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("after SetProviderBanManager(nil): got code %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetProviderBanManager(nil): got code")
 }
 
 // TestBanProviderDurationIsTriState proves absent means "until lifted" and an
 // explicit zero is refused rather than collapsing into the same meaning.
 func TestBanProviderDurationIsTriState(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeProviderBans{}
 	s := &Server{}
 	s.SetProviderBanManager(f)
 	ctx := context.Background()
 
 	resp, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{Provider: "openinference"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.Msg.GetBan().ExpiresAt != nil {
-		t.Errorf("an unbounded ban carries expires_at %d", resp.Msg.GetBan().GetExpiresAt())
-	}
+	c.Require().NoError(err)
+	c.Nil(resp.Msg.GetBan().ExpiresAt, "an unbounded ban carries expires_at %d", resp.Msg.GetBan().GetExpiresAt())
 
 	if _, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{
 		Provider: "openinference", DurationSeconds: proto.Int64(3600),
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if want := []time.Duration{0, time.Hour}; fmt.Sprint(f.bannedFor) != fmt.Sprint(want) {
-		t.Errorf("manager saw durations %v, want %v", f.bannedFor, want)
-	}
+	want := []time.Duration{0, time.Hour}
+	c.Eq(fmt.Sprint(want), fmt.Sprint(f.bannedFor), "manager saw durations %v, want %v", f.bannedFor, want)
 
 	for _, secs := range []int64{0, -5} {
 		_, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{
 			Provider: "openinference", DurationSeconds: proto.Int64(secs),
 		}))
-		if connect.CodeOf(err) != connect.CodeInvalidArgument {
-			t.Errorf("duration %d: code %v, want InvalidArgument", secs, connect.CodeOf(err))
-		}
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "duration %d: code %v, want InvalidArgument", secs, connect.CodeOf(err))
 	}
 }
 
@@ -106,16 +100,13 @@ func TestProviderBanErrorMapping(t *testing.T) {
 		{"other", errors.New("db down"), connect.CodeInternal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			s := &Server{}
 			s.SetProviderBanManager(&fakeProviderBans{banErr: tc.err, unbanErr: tc.err})
 			_, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{Provider: "p"}))
-			if connect.CodeOf(err) != tc.want {
-				t.Errorf("BanProvider code %v, want %v", connect.CodeOf(err), tc.want)
-			}
+			c.Eq(tc.want, connect.CodeOf(err), "BanProvider code")
 			_, err = s.UnbanProvider(ctx, connect.NewRequest(&rafikiv1.UnbanProviderRequest{Provider: "p"}))
-			if connect.CodeOf(err) != tc.want {
-				t.Errorf("UnbanProvider code %v, want %v", connect.CodeOf(err), tc.want)
-			}
+			c.Eq(tc.want, connect.CodeOf(err), "UnbanProvider code")
 		})
 	}
 }
@@ -124,7 +115,5 @@ func TestBanProviderRequiresProvider(t *testing.T) {
 	s := &Server{}
 	s.SetProviderBanManager(&fakeProviderBans{})
 	_, err := s.BanProvider(context.Background(), connect.NewRequest(&rafikiv1.BanProviderRequest{Provider: "  "}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }

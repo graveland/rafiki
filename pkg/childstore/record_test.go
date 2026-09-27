@@ -1,11 +1,12 @@
 package childstore
 
 import (
-	"reflect"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestRecordRoundTrip is the test that actually protects the JSONB split. Every
@@ -82,34 +83,26 @@ func TestRecordRoundTrip(t *testing.T) {
 	// Compare via Snapshot so the unexported mutex does not defeat DeepEqual.
 	want := orig.Snapshot()
 	have := got.Snapshot()
-	if !reflect.DeepEqual(want, have) {
-		t.Errorf("round trip lost data:\n want %+v\n have %+v", want, have)
-	}
+	assert.NewCollecting(t).EqDiff(have, want, "round trip lost data:\n want")
 }
 
 // TestRecordFromSnapshotSetsLastStatusEmpty proves RecordFromSnapshot does not
 // invent a last_status. Only the exit path writes that column (design §1.5),
 // and a record that guesses one would make every child look resume-worthy.
 func TestRecordFromSnapshotSetsLastStatusEmpty(t *testing.T) {
+	c := assert.NewCollecting(t)
 	s := &Session{ChildID: "c_1", Kind: protocol.KindFundi, Status: protocol.StatusIdle}
 	rec := RecordFromSnapshot(s.Snapshot())
-	if rec.LastStatus != "" {
-		t.Errorf("LastStatus = %q, want empty", rec.LastStatus)
-	}
-	if rec.Status != string(protocol.StatusIdle) {
-		t.Errorf("Status = %q, want %q", rec.Status, protocol.StatusIdle)
-	}
+	c.Eq("", rec.LastStatus, "LastStatus")
+	c.Eq(string(protocol.StatusIdle), rec.Status, "Status = %q, want %q", rec.Status, protocol.StatusIdle)
 }
 
 // TestSessionFromRecordDoesNotRestoreRings pins design §1.3: the exit-time ring
 // snapshots are not persisted, so a recovered session must come back with nil
 // rings rather than an empty non-nil slice a caller might mistake for data.
 func TestSessionFromRecordDoesNotRestoreRings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	sess := SessionFromRecord(ChildRecord{ChildID: "c_1", Kind: protocol.KindFundi, Status: "exited"})
-	if sess.ExitedRing != nil {
-		t.Errorf("ExitedRing = %v, want nil", sess.ExitedRing)
-	}
-	if sess.ExitedRenderRing != nil {
-		t.Errorf("ExitedRenderRing = %v, want nil", sess.ExitedRenderRing)
-	}
+	c.Nil(sess.ExitedRing, "ExitedRing")
+	c.Nil(sess.ExitedRenderRing, "ExitedRenderRing")
 }

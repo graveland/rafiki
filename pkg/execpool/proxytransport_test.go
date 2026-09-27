@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/executor"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // proxyPoolFixture stands up a real pkg/executor.Server (with the given
@@ -28,9 +30,7 @@ func proxyPoolFixture(t *testing.T, proxies map[string]string) (*Pool, string) {
 	p.healthInterval = time.Hour // no health polling noise in this test
 
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), NoLSP: true, Proxies: proxies})
-	if err := joinViaUpgrade(t, p, srv); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(joinViaUpgrade(t, p, srv))
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 	return p, executorID
@@ -39,6 +39,7 @@ func proxyPoolFixture(t *testing.T, proxies map[string]string) (*Pool, string) {
 // The transport turns one http.Request into a ProxyStart plus body chunks, and
 // one ProxyHead plus body chunks back into an http.Response.
 func TestProxyTransportRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var gotPath, gotHeader, gotBody string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.RequestURI()
@@ -56,45 +57,28 @@ func TestProxyTransportRoundTrip(t *testing.T) {
 	rt := NewProxyTransport(p, executorID, "vmlx")
 	req, err := http.NewRequest(http.MethodPost, "http://ignored.invalid/v1/messages?x=1",
 		strings.NewReader("hello"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	req.Header.Set("X-Test", "yes")
 
 	resp, err := (&http.Client{Transport: rt}).Do(req)
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
+	c.Require().NoError(err, "RoundTrip")
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusCreated)
-	}
-	if got := resp.Header.Get("X-Reply"); got != "yes" {
-		t.Errorf("response header X-Reply = %q, want yes", got)
-	}
+	c.Eq(http.StatusCreated, resp.StatusCode, "status")
+	c.Eq("yes", resp.Header.Get("X-Reply"), "response header X-Reply")
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
-	if string(body) != "world" {
-		t.Errorf("body = %q, want %q", body, "world")
-	}
+	c.Require().NoError(err, "read body")
+	c.Eq("world", string(body), "body = %q, want", body)
 
-	if gotPath != "/v1/messages?x=1" {
-		t.Errorf("upstream saw path %q, want %q", gotPath, "/v1/messages?x=1")
-	}
-	if gotHeader != "yes" {
-		t.Errorf("upstream saw X-Test = %q, want yes", gotHeader)
-	}
-	if gotBody != "hello" {
-		t.Errorf("upstream saw body %q, want %q", gotBody, "hello")
-	}
+	c.Eq("/v1/messages?x=1", gotPath, "upstream saw path")
+	c.Eq("yes", gotHeader, "upstream saw X-Test")
+	c.Eq("hello", gotBody, "upstream saw body")
 }
 
 // A response must be readable before the upstream finishes — an SSE stream
 // that only arrives at EOF is useless for a streaming turn.
 func TestProxyTransportStreamsIncrementally(t *testing.T) {
+	c := assert.NewAborting(t)
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
@@ -114,9 +98,7 @@ func TestProxyTransportStreamsIncrementally(t *testing.T) {
 	rt := NewProxyTransport(p, executorID, "vmlx")
 
 	resp, err := (&http.Client{Transport: rt}).Get("http://ignored.invalid/stream")
-	if err != nil {
-		t.Fatalf("RoundTrip: %v", err)
-	}
+	c.NoError(err, "RoundTrip")
 	defer resp.Body.Close()
 
 	first := make([]byte, 1)
@@ -128,24 +110,16 @@ func TestProxyTransportStreamsIncrementally(t *testing.T) {
 
 	select {
 	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("read first byte: %v", err)
-		}
+		c.NoError(err, "read first byte")
 	case <-time.After(3 * time.Second):
 		t.Fatal("did not receive the first chunk before the upstream finished writing")
 	}
-	if string(first) != "a" {
-		t.Fatalf("first byte = %q, want %q", first, "a")
-	}
+	c.Eq("a", string(first), "first byte = %q, want", first)
 
 	close(release)
 	rest, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read rest: %v", err)
-	}
-	if string(rest) != "b" {
-		t.Fatalf("rest = %q, want %q", rest, "b")
-	}
+	c.NoError(err, "read rest")
+	c.Eq("b", string(rest), "rest = %q, want", rest)
 }
 
 func TestProxyTransportUndeclaredNameSurfacesError(t *testing.T) {
@@ -162,9 +136,7 @@ func TestProxyTransportUndeclaredNameSurfacesError(t *testing.T) {
 		resp.Body.Close()
 		t.Fatalf("RoundTrip succeeded with status %d, want an error naming the undeclared proxy", resp.StatusCode)
 	}
-	if !strings.Contains(err.Error(), "nope") {
-		t.Errorf("error = %q, want it to mention the proxy name %q", err.Error(), "nope")
-	}
+	assert.NewCollecting(t).StrContains(err.Error(), "nope", "error")
 }
 
 // A caller resolving connectClientFor for an executor that never connected
@@ -175,9 +147,7 @@ func TestProxyTransportUnknownExecutor(t *testing.T) {
 	rt := NewProxyTransport(p, "exec-does-not-exist", "vmlx")
 
 	_, err := (&http.Client{Transport: rt}).Get("http://ignored.invalid/v1/messages")
-	if err == nil {
-		t.Fatal("RoundTrip succeeded against an executor that was never connected")
-	}
+	assert.NewAborting(t).Error(err, "RoundTrip succeeded against an executor that was never connected")
 }
 
 // A background goroutine mutating req.Header while RoundTrip reads it would be
@@ -212,9 +182,7 @@ func TestProxyTransportConcurrentRoundTripsDoNotRace(t *testing.T) {
 				t.Errorf("read body: %v", err)
 				return
 			}
-			if string(b) != "ping" {
-				t.Errorf("body = %q, want %q", b, "ping")
-			}
+			assert.NewCollecting(t).Eq("ping", string(b), "body = %q, want", b)
 		}()
 	}
 	wg.Wait()

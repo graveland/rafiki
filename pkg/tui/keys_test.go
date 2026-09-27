@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/key"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestNoGlobalBindingStealsATextareaKey is this chunk's most important test.
@@ -20,9 +22,8 @@ import (
 // ctrl+b, ctrl+g and ctrl+d are grandfathered: the cockpit already took them
 // before this chunk and the design accepts the loss.
 func TestNoGlobalBindingStealsATextareaKey(t *testing.T) {
-	if got := defaultKeyMap().globalConflicts(); len(got) > 0 {
-		t.Errorf("global bindings steal textarea keys: %s", strings.Join(got, ", "))
-	}
+	got := defaultKeyMap().globalConflicts()
+	assert.NewCollecting(t).LessOrEqual(0, len(got), "global bindings steal textarea keys: %s", strings.Join(got, ", "))
 }
 
 // TestCtrlAReachesTheTextarea pins that ToggleRail moved off ctrl+a: it used
@@ -30,14 +31,11 @@ func TestNoGlobalBindingStealsATextareaKey(t *testing.T) {
 // ctrl+a is now unclaimed by any global, so it reaches the textarea like any
 // other unbound emacs key.
 func TestCtrlAReachesTheTextarea(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, s := range defaultKeyMap().ToggleRail.Keys() {
-		if s == "ctrl+a" {
-			t.Fatal("ToggleRail must not bind ctrl+a — it belongs to the textarea's line-start")
-		}
+		c.Require().NotEq("ctrl+a", s, "ToggleRail must not bind ctrl+a — it belongs to the textarea's line-start")
 	}
-	if grandfathered["ctrl+a"] {
-		t.Error("ctrl+a should not be grandfathered: nothing global claims it anymore")
-	}
+	c.False(grandfathered["ctrl+a"], "ctrl+a should not be grandfathered: nothing global claims it anymore")
 }
 
 // TestDefaultKeyMapBindsWhatTheFooterClaims keeps the advertised keys and the
@@ -85,9 +83,7 @@ func TestCyclePaneSkipsHiddenRail(t *testing.T) {
 
 	c.cyclePane(+1)
 
-	if c.focus != focusInput {
-		t.Errorf("focus = %v, want input (a hidden rail must be skipped)", c.focus)
-	}
+	assert.NewCollecting(t).Eq(focusInput, c.focus, "focus")
 }
 
 // The ring is a two-stop toggle: the transcript pane is gone, because the input
@@ -98,17 +94,14 @@ func TestCyclePaneSkipsHiddenRail(t *testing.T) {
 // cycled onto an empty rail nobody could see, the exact trap railVisible
 // exists to close.
 func TestCyclePaneTogglesInputAndRail(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := railWith(t, "c_a", "c_b")
 	c.focus = focusInput
 
 	c.cyclePane(+1)
-	if c.focus != focusRail {
-		t.Fatalf("after one tab: focus = %v, want rail", c.focus)
-	}
+	ck.Eq(focusRail, c.focus, "after one tab: focus")
 	c.cyclePane(+1)
-	if c.focus != focusInput {
-		t.Fatalf("after two tabs: focus = %v, want input", c.focus)
-	}
+	ck.Eq(focusInput, c.focus, "after two tabs: focus")
 }
 
 func TestCyclePaneBackwards(t *testing.T) {
@@ -117,9 +110,7 @@ func TestCyclePaneBackwards(t *testing.T) {
 
 	c.cyclePane(-1)
 
-	if c.focus != focusRail {
-		t.Errorf("shift+tab from input: focus = %v, want rail", c.focus)
-	}
+	assert.NewCollecting(t).Eq(focusRail, c.focus, "shift+tab from input: focus")
 }
 
 // TestHidingTheRailWhileItHasFocusReleasesIt: ctrl+b is global, so it can fire
@@ -131,18 +122,14 @@ func TestHidingTheRailWhileItHasFocusReleasesIt(t *testing.T) {
 
 	c.cyclePane(0)
 
-	if c.focus == focusRail {
-		t.Error("focus stayed on the hidden rail")
-	}
+	assert.NewCollecting(t).NotEq(focusRail, c.focus, "focus stayed on the hidden rail")
 }
 
 // ^E is the obvious mnemonic for expand and is NOT available: bubbles'
 // textarea binds it to end-of-line. ^O is free and matches other agent TUIs.
 func TestExpandArgsBindingIsFree(t *testing.T) {
 	for _, k := range defaultKeyMap().ExpandArgs.Keys() {
-		if textareaKeys[k] && !grandfathered[k] {
-			t.Errorf("ExpandArgs binds %q, which the textarea already owns", k)
-		}
+		assert.NewCollecting(t).False(textareaKeys[k] && !grandfathered[k], "ExpandArgs binds %q, which the textarea already owns", k)
 	}
 }
 
@@ -170,9 +157,7 @@ func TestLifecycleKeysStayRailLocal(t *testing.T) {
 	}
 	for name, b := range globals {
 		for _, s := range b.Keys() {
-			if rail[s] {
-				t.Errorf("global %s binds %q, which is a rail lifecycle key", name, s)
-			}
+			assert.NewCollecting(t).False(rail[s], "global %s binds %q, which is a rail lifecycle key", name, s)
 		}
 	}
 }

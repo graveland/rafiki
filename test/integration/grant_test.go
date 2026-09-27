@@ -28,6 +28,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/executorsdb"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // grantDaemon boots the daemon with an executor listener wired to the test
@@ -57,14 +59,11 @@ func requireExecutorDB(t *testing.T) string {
 // path, key path, and the leaf certificate's SHA-256 fingerprint (hex).
 func grantCert(t *testing.T, dir string) (certPath, keyPath, fingerprint string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	c.NoError(err, "generate key")
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("serial: %v", err)
-	}
+	c.NoError(err, "serial")
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "localhost"},
@@ -74,21 +73,13 @@ func grantCert(t *testing.T, dir string) (certPath, keyPath, fingerprint string)
 		DNSNames:     []string{"localhost"},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
+	c.NoError(err, "create cert")
 	certPath = filepath.Join(dir, "executor.crt")
 	keyPath = filepath.Join(dir, "executor.key")
-	if err := os.WriteFile(certPath, pemEncodeCert(der), 0o600); err != nil {
-		t.Fatalf("write cert: %v", err)
-	}
+	c.NoError(os.WriteFile(certPath, pemEncodeCert(der), 0o600), "write cert")
 	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshal key: %v", err)
-	}
-	if err := os.WriteFile(keyPath, pemEncodeKey(keyDER), 0o600); err != nil {
-		t.Fatalf("write key: %v", err)
-	}
+	c.NoError(err, "marshal key")
+	c.NoError(os.WriteFile(keyPath, pemEncodeKey(keyDER), 0o600), "write key")
 	sum := sha256.Sum256(der)
 	return certPath, keyPath, hex.EncodeToString(sum[:])
 }
@@ -127,9 +118,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 		base = "/tmp"
 	}
 	homeDir, err := os.MkdirTemp(base, "rafiki-grant")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mkdirtemp")
 	certPath, keyPath, fp := grantCert(t, homeDir)
 
 	appDir := filepath.Join(homeDir, "rafiki")
@@ -229,6 +218,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 // docker. Returns the enrolled executor's ID.
 func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) string {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	// A label unique to THIS enrollment, so the row can be identified by the
 	// enrollment that created it rather than by the caller's labels.
@@ -249,9 +239,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 		WorkspaceMode: "pinned",
 		ExpiresAt:     time.Now().Add(time.Hour),
 	})
-	if err != nil {
-		t.Fatalf("mint token: %v", err)
-	}
+	c.NoError(err, "mint token")
 
 	root := t.TempDir()
 	credFile := filepath.Join(t.TempDir(), "cred")
@@ -263,9 +251,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 		"--root", root,
 	)
 	cmd.Env = os.Environ()
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start executor: %v", err)
-	}
+	c.NoError(cmd.Start(), "start executor")
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(os.Kill)
 		_ = cmd.Wait()
@@ -288,9 +274,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if enrolledID == "" {
-		t.Fatalf("executor %v never enrolled and became live", labels)
-	}
+	c.NotEq("", enrolledID, "executor %v never enrolled and became live", labels)
 	return enrolledID
 }
 
@@ -337,6 +321,7 @@ func (g *grantDaemon) grantSpawn(t *testing.T, parent, selector, model string) (
 // executors (no docker): a coordinator confined to env=home spawns a worker
 // naming env=work, and the refusal names the excluded executor.
 func TestGrant_NativeNarrowing(t *testing.T) {
+	c := assert.NewAborting(t)
 	dsn := requireExecutorDB(t)
 	g := bootGrantDaemon(t, dsn)
 
@@ -350,9 +335,7 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 
 	// The coordinator is a top-level agent (empty parent) that lands on env=home.
 	coordID, err := g.grantSpawn(t, "", "env=home", "anthropic/claude-x")
-	if err != nil {
-		t.Fatalf("coordinator spawn failed: %v", err)
-	}
+	c.NoError(err, "coordinator spawn failed")
 
 	// A worker under the coordinator naming env=work starts UNBOUND: a
 	// parented child whose selector matches no live executor in its
@@ -360,36 +343,23 @@ func TestGrant_NativeNarrowing(t *testing.T) {
 	// restart parks its connection for a full health tick and surviving
 	// that window is what lazy binding exists for.
 	unboundID, err := g.grantSpawn(t, coordID, "env=work", "anthropic/claude-x")
-	if err != nil {
-		t.Fatalf("a parented worker with no matching executor must "+
-			"start unbound, not be refused: %v", err)
-	}
+	c.NoError(err, "a parented worker with no matching executor must "+
+		"start unbound, not be refused: %v", err)
 	unboundSummary := getChild(t, g.control(t), unboundID)
-	if unboundSummary.GetLabels()["rafiki/executor-state"] != "unbound" {
-		t.Fatalf("the worker outside its parent's set must carry "+
-			"rafiki/executor-state=unbound, got labels=%v",
-			unboundSummary.GetLabels())
-	}
+	c.Eq("unbound", unboundSummary.GetLabels()["rafiki/executor-state"], "the worker outside its parent's set must carry "+
+		"rafiki/executor-state=unbound, got labels=%v", unboundSummary.GetLabels())
 
 	// A worker naming env=home — inside the set — lands, and the child's
 	// store record carries the executor it landed on (the same label phase 09
 	// prompt visibility reads).
 	okID, err := g.grantSpawn(t, coordID, "env=home", "anthropic/claude-x")
-	if err != nil {
-		t.Fatalf("a worker inside the parent's set was refused: %v", err)
-	}
+	c.NoError(err, "a worker inside the parent's set was refused")
 	snap := getChild(t, g.control(t), okID)
 	landedID := snap.GetLabels()["rafiki/executor"]
-	if landedID == "" {
-		t.Fatalf("worker did not record the executor it landed on (labels %v)", snap.GetLabels())
-	}
+	c.NotEq("", landedID, "worker did not record the executor it landed on (labels %v)", snap.GetLabels())
 	// The worker must have landed on an executor bearing the env=home label —
 	// which, given multiple test runs, may be any such row, not one specific id.
 	landed, err := g.store.Get(context.Background(), landedID)
-	if err != nil {
-		t.Fatalf("worker landed on unknown executor %q: %v", landedID, err)
-	}
-	if landed.Labels["env"] != "home" {
-		t.Fatalf("worker landed on env=%q, want env=home (%v)", landed.Labels["env"], landed.Labels)
-	}
+	c.NoError(err, "worker landed on unknown executor %q", landedID)
+	c.Eq("home", landed.Labels["env"], "worker landed on env=%q, want env=home (%v)", landed.Labels["env"], landed.Labels)
 }

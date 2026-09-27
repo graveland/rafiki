@@ -19,6 +19,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/analyze"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // captureStdout runs fn with os.Stdout redirected to an in-memory pipe and
@@ -27,21 +29,16 @@ import (
 // this is the only way to assert on their output from outside the package.
 func captureStdout(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
+	c.NoError(err, "os.Pipe")
 	orig := os.Stdout
 	os.Stdout = w
 	fnErr := fn()
 	os.Stdout = orig
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
-	}
+	c.NoError(w.Close(), "close pipe writer")
 	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read pipe: %v", err)
-	}
+	c.NoError(err, "read pipe")
 	return string(out), fnErr
 }
 
@@ -50,11 +47,10 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 // --corpus runs have something real to compact/detect against.
 func writeCorpusTranscript(t *testing.T, dir, name, convID string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	textContent := func(s string) json.RawMessage {
 		b, err := json.Marshal([]map[string]any{{"type": "text", "text": s}})
-		if err != nil {
-			t.Fatal(err)
-		}
+		c.NoError(err)
 		return b
 	}
 	tr := map[string]any{
@@ -68,12 +64,8 @@ func writeCorpusTranscript(t *testing.T, dir, name, convID string) {
 		},
 	}
 	raw, err := json.Marshal(tr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
+	c.NoError(os.WriteFile(filepath.Join(dir, name), raw, 0o644))
 }
 
 // canonReportFindings is a single report_findings tool_use response with one
@@ -96,9 +88,7 @@ const canonProposeSkillEdit = `{"id":"msg_2","type":"message","role":"assistant"
 
 func TestParseAnalyzeArgsStageFlags(t *testing.T) {
 	got, err := parseAnalyzeArgs([]string{"--detect", "019f-aaaa"})
-	if err != nil || got.StopAfter != "detect" || len(got.ConversationIDs) != 1 {
-		t.Fatalf("parse = %+v, %v", got, err)
-	}
+	assert.NewAborting(t).False(err != nil || got.StopAfter != "detect" || len(got.ConversationIDs) != 1, "parse = %+v, %v", got, err)
 	if _, err := parseAnalyzeArgs([]string{"--detect", "--rank", "x"}); err == nil {
 		t.Fatal("stage flags must be mutually exclusive")
 	}
@@ -111,67 +101,47 @@ func TestParseAnalyzeArgsStageFlags(t *testing.T) {
 }
 
 func TestParseAnalyzeArgsCompareSplitsAndTrims(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got, err := parseAnalyzeArgs([]string{"--corpus", "/tmp/x", "--compare", "a,b , c"})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	c.Require().NoError(err, "parse")
 	want := []string{"a", "b", "c"}
-	if len(got.Compare) != len(want) {
-		t.Fatalf("Compare = %+v, want %+v", got.Compare, want)
-	}
+	c.Require().Len(got.Compare, len(want), "Compare = %+v, want %+v", got.Compare, want)
 	for i, m := range want {
-		if got.Compare[i] != m {
-			t.Errorf("Compare[%d] = %q, want %q", i, got.Compare[i], m)
-		}
+		c.Eq(m, got.Compare[i], "Compare[%d] = %q, want", i, got.Compare[i])
 	}
 }
 
 func TestParseAnalyzeArgsCompareRequiresCorpus(t *testing.T) {
-	if _, err := parseAnalyzeArgs([]string{"--compare", "a,b", "019f-aaaa"}); err == nil {
-		t.Fatal("--compare without --corpus must be rejected")
-	}
+	_, err := parseAnalyzeArgs([]string{"--compare", "a,b", "019f-aaaa"})
+	assert.NewAborting(t).Error(err, "--compare without --corpus must be rejected")
 }
 
 func TestParseAnalyzeArgsCorpusNoDSN(t *testing.T) {
 	// Corpus mode should parse successfully without a DSN
 	t.Setenv("RAFIKI_DB", "")
 	t.Setenv("RAFIKI_TEST_DSN", "")
+	c := assert.NewAborting(t)
 	got, err := parseAnalyzeArgs([]string{"--corpus", "/tmp/transcripts"})
-	if err != nil {
-		t.Fatalf("--corpus without DSN should parse: %v", err)
-	}
-	if got.CorpusDir != "/tmp/transcripts" {
-		t.Fatalf("corpus dir = %q, want /tmp/transcripts", got.CorpusDir)
-	}
-	if got.DB != "" {
-		t.Fatalf("DB should be empty, got %q", got.DB)
-	}
+	c.NoError(err, "--corpus without DSN should parse")
+	c.Eq("/tmp/transcripts", got.CorpusDir, "corpus dir")
+	c.Eq("", got.DB, "DB should be empty, got")
 
 	// But conversation ids still require a DSN
 	dsn := "postgres://localhost/test"
 	got, err = parseAnalyzeArgs([]string{"--db", dsn, "019f-aaaa"})
-	if err != nil {
-		t.Fatalf("parse with DSN: %v", err)
-	}
-	if got.DB != dsn {
-		t.Fatalf("DB = %q, want %q", got.DB, dsn)
-	}
+	c.NoError(err, "parse with DSN")
+	c.Eq(dsn, got.DB, "DB")
 }
 
 func TestResolveProfileFromAnalyzerDir(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "profiles.yaml"), []byte("default:\n  detector_model: claude-haiku-4-5\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "detector.md"), []byte("BASE DETECTOR"), 0o644)
 	p, err := resolveProfile(dir, "", "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.DetectorModel != "claude-haiku-4-5" {
-		t.Fatalf("model = %q", p.DetectorModel)
-	}
-	if !strings.Contains(p.EffectiveDetectorPrompt(analyze.BuiltinDetectorPrompt()), "BASE DETECTOR") {
-		t.Error("analyzer-dir base prompt must be attached to the profile")
-	}
+	c.Require().NoError(err)
+	c.Require().Eq("claude-haiku-4-5", p.DetectorModel, "model =")
+	c.StrContains(p.EffectiveDetectorPrompt(analyze.BuiltinDetectorPrompt()), "BASE DETECTOR", "analyzer-dir base prompt must be attached to the profile")
 	if _, err := resolveProfile(dir, "nope", "", true); err == nil {
 		t.Fatal("unknown profile name must error")
 	}
@@ -179,34 +149,24 @@ func TestResolveProfileFromAnalyzerDir(t *testing.T) {
 	// ~/.config/rafiki/profiles/<name>/analyzer/ from the embedded default,
 	// which names a real model.
 	auto, err := resolveProfile("", "", "", true)
-	if err != nil {
-		t.Fatalf("no analyzer dir must fall back to the auto-seeded default, got: %v", err)
-	}
-	if auto.DetectorModel == "" {
-		t.Fatal("auto-seeded default profile must name a detector model")
-	}
+	c.Require().NoError(err, "no analyzer dir must fall back to the auto-seeded default, got")
+	c.Require().NotEq("", auto.DetectorModel, "auto-seeded default profile must name a detector model")
 }
 
 func TestDirectUpstreamRejectsSlashModel(t *testing.T) {
+	c := assert.NewAborting(t)
 	p := &analyze.Profile{DetectorModel: "deepseek/deepseek-v4-pro"}
-	if err := checkModelServable(p, false /* proxied */); err == nil {
-		t.Fatal("slash ids cannot be served direct-to-Anthropic; must fail fast")
-	}
-	if err := checkModelServable(p, true); err != nil {
-		t.Fatalf("proxied slash id must be allowed: %v", err)
-	}
+	c.Error(checkModelServable(p, false), "slash ids cannot be served direct-to-Anthropic; must fail fast") /* proxied */
+	c.NoError(checkModelServable(p, true), "proxied slash id must be allowed")
 }
 
 // TestResolveProfileCompactNeedsNoModel: the compact stage makes no LLM
 // call, so it must resolve without a model — the zero-credential dev loop.
 func TestResolveProfileCompactNeedsNoModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p, err := resolveProfile("", "", "", false)
-	if err != nil {
-		t.Fatalf("compact-stage profile resolution must not require a model: %v", err)
-	}
-	if p.Compact.MaxToolResultBytes == 0 {
-		t.Error("Defaults() must still apply so Compact has a policy")
-	}
+	c.Require().NoError(err, "compact-stage profile resolution must not require a model")
+	c.NotEq(0, p.Compact.MaxToolResultBytes, "Defaults() must still apply so Compact has a policy")
 }
 
 // Fix 7: --analyzer-dir with no --profile and no "default" profile must
@@ -214,18 +174,13 @@ func TestResolveProfileCompactNeedsNoModel(t *testing.T) {
 // with a zero-value profile — even when --model is also given, since
 // --model only overrides the three model fields.
 func TestResolveProfileNoDefaultEnumeratesAvailable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "profiles.yaml"), []byte("prod:\n  detector_model: claude-haiku-4-5\nstaging:\n  detector_model: claude-haiku-4-5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(dir, "profiles.yaml"), []byte("prod:\n  detector_model: claude-haiku-4-5\nstaging:\n  detector_model: claude-haiku-4-5\n"), 0o644))
 
 	_, err := resolveProfile(dir, "", "", true)
-	if err == nil {
-		t.Fatal("no --profile and no default profile must error")
-	}
-	if !strings.Contains(err.Error(), "prod") || !strings.Contains(err.Error(), "staging") {
-		t.Errorf("error must enumerate available profiles, got: %v", err)
-	}
+	c.Require().Error(err, "no --profile and no default profile must error")
+	c.False(!strings.Contains(err.Error(), "prod") || !strings.Contains(err.Error(), "staging"), "error must enumerate available profiles, got: %v", err)
 
 	// Passing --model must not paper over the missing default: --model only
 	// overrides detector/rank/draft, not filters/compact policy/prompt bases.
@@ -242,6 +197,7 @@ func TestResolveProfileNoDefaultEnumeratesAvailable(t *testing.T) {
 // host --proxy-url points at, alongside the intended proxy bearer token.
 func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "developers-real-anthropic-key")
+	c := assert.NewCollecting(t)
 
 	var gotAPIKey, gotAuth string
 	var requests int
@@ -255,12 +211,8 @@ func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	client, proxied, err := resolveUpstream(srv.URL, "proxy-bearer-token")
-	if err != nil {
-		t.Fatalf("resolveUpstream: %v", err)
-	}
-	if !proxied {
-		t.Fatal("resolveUpstream with --proxy-url must report proxied=true")
-	}
+	c.Require().NoError(err, "resolveUpstream")
+	c.Require().True(proxied, "resolveUpstream with --proxy-url must report proxied=true")
 
 	// Actually issue a call through the resolved client so the SDK's real
 	// composed request options run header-by-header, not just an inspection
@@ -270,15 +222,9 @@ func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 		MaxTokens: 1,
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))},
 	})
-	if requests != 1 {
-		t.Fatalf("proxy server saw %d requests, want 1", requests)
-	}
-	if gotAPIKey != "" {
-		t.Errorf("X-Api-Key leaked to the proxy: %q (must be empty)", gotAPIKey)
-	}
-	if gotAuth != "Bearer proxy-bearer-token" {
-		t.Errorf("Authorization = %q, want Bearer proxy-bearer-token", gotAuth)
-	}
+	c.Require().Eq(1, requests, "proxy server saw")
+	c.Eq("", gotAPIKey, "X-Api-Key leaked to the proxy")
+	c.Eq("Bearer proxy-bearer-token", gotAuth, "Authorization")
 }
 
 // Fix 2: the compact stage must print the compacted transcript to stdout
@@ -287,35 +233,26 @@ func TestResolveUpstreamProxyDoesNotLeakAPIKey(t *testing.T) {
 func TestAgentAnalyzeCompactNoOutPrintsStdout(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "")
 	t.Setenv("RAFIKI_TEST_DSN", "")
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 
 	out, err := captureStdout(t, func() error {
 		return agentAnalyzeCmd([]string{"--corpus", dir, "--compact"})
 	})
-	if err != nil {
-		t.Fatalf("agentAnalyzeCmd --compact: %v", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		t.Fatal("--compact with no --out must print the compacted transcript, got empty stdout")
-	}
+	c.Require().NoError(err, "agentAnalyzeCmd --compact")
+	c.Require().NotEq("", strings.TrimSpace(out), "--compact with no --out must print the compacted transcript, got empty stdout")
 
 	jsonOut, err := captureStdout(t, func() error {
 		return agentAnalyzeCmd([]string{"--corpus", dir, "--compact", "-J"})
 	})
-	if err != nil {
-		t.Fatalf("agentAnalyzeCmd --compact -J: %v", err)
-	}
-	if strings.TrimSpace(jsonOut) == "" {
-		t.Fatal("--compact -J with no --out must print JSON, got empty stdout")
-	}
+	c.Require().NoError(err, "agentAnalyzeCmd --compact -J")
+	c.Require().NotEq("", strings.TrimSpace(jsonOut), "--compact -J with no --out must print JSON, got empty stdout")
 	var parsed analyzeResultJSON
 	if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
 		t.Fatalf("--compact -J output must be valid JSON: %v\noutput: %s", err, jsonOut)
 	}
-	if len(parsed.Payloads) != 1 {
-		t.Errorf("payloads = %d, want 1 compacted transcript", len(parsed.Payloads))
-	}
+	c.Len(parsed.Payloads, 1, "payloads = %d, want 1 compacted transcript", len(parsed.Payloads))
 }
 
 // Fix 2: the detect stage must also print its per-conversation analysis to
@@ -324,6 +261,7 @@ func TestAgentAnalyzeCompactNoOutPrintsStdout(t *testing.T) {
 func TestAgentAnalyzeDetectNoOutPrintsStdout(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "")
 	t.Setenv("RAFIKI_TEST_DSN", "")
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 
@@ -340,12 +278,8 @@ func TestAgentAnalyzeDetectNoOutPrintsStdout(t *testing.T) {
 			"--model", "claude-haiku-4-5",
 		})
 	})
-	if err != nil {
-		t.Fatalf("agentAnalyzeCmd --detect: %v", err)
-	}
-	if strings.TrimSpace(out) == "" {
-		t.Fatal("--detect with no --out must print the analysis, got empty stdout")
-	}
+	c.NoError(err, "agentAnalyzeCmd --detect")
+	c.NotEq("", strings.TrimSpace(out), "--detect with no --out must print the analysis, got empty stdout")
 }
 
 // Fix 3: a drafted skill edit carried on a Summary's ranked finding must be
@@ -354,6 +288,7 @@ func TestAgentAnalyzeDetectNoOutPrintsStdout(t *testing.T) {
 func TestAgentAnalyzeWithOutWritesSkillEdits(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "")
 	t.Setenv("RAFIKI_TEST_DSN", "")
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 	outDir := t.TempDir()
@@ -378,21 +313,13 @@ func TestAgentAnalyzeWithOutWritesSkillEdits(t *testing.T) {
 			"--out", outDir,
 		})
 	})
-	if err != nil {
-		t.Fatalf("agentAnalyzeCmd: %v", err)
-	}
+	c.Require().NoError(err, "agentAnalyzeCmd")
 
 	written := filepath.Join(outDir, "skills", "pgbouncer-restart", "SKILL.md")
 	content, err := os.ReadFile(written)
-	if err != nil {
-		t.Fatalf("drafted skill file not written to disk: %v", err)
-	}
-	if !strings.Contains(string(content), "PgBouncer Restart") {
-		t.Errorf("written skill file content = %q, want it to contain the drafted content", content)
-	}
-	if !strings.Contains(out, written) {
-		t.Errorf("stdout must report the written skill file path %q, got: %s", written, out)
-	}
+	c.Require().NoError(err, "drafted skill file not written to disk")
+	c.StrContains(string(content), "PgBouncer Restart", "written skill file content = %q, want it to contain the drafted content", content)
+	c.StrContains(out, written, "stdout must report the written skill file path")
 }
 
 // Fix 4: `agent findings dismiss/action` must dispatch regardless of whether
@@ -407,13 +334,10 @@ func TestAgentFindingsDismissDispatchesRegardlessOfFlagOrder(t *testing.T) {
 		{"flag first", []string{"--db", "", "dismiss", "deadbeef"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			err := agentFindingsCmd(tc.args)
-			if err == nil {
-				t.Fatal("dismiss with an empty --db must error attempting the mutation, not succeed")
-			}
-			if !strings.Contains(err.Error(), "--db") {
-				t.Errorf("error must be connectPool's DSN-required error (proving dismiss was reached), got: %v", err)
-			}
+			c.Require().Error(err, "dismiss with an empty --db must error attempting the mutation, not succeed")
+			c.StrContains(err.Error(), "--db", "error must be connectPool's DSN-required error (proving dismiss was reached), got: %v", err)
 		})
 	}
 }
@@ -422,16 +346,11 @@ func TestAgentFindingsDismissDispatchesRegardlessOfFlagOrder(t *testing.T) {
 // agentExportCmd's fixed-arity check, and an unknown verb must error rather
 // than silently falling through to the list path.
 func TestAgentFindingsRejectsLeftoverArgsAndUnknownVerb(t *testing.T) {
-	if err := agentFindingsCmd([]string{"dismiss", "--db", "", "id1", "extra"}); err == nil {
-		t.Fatal("dismiss with more than one id must error")
-	}
+	c := assert.NewCollecting(t)
+	c.Require().Error(agentFindingsCmd([]string{"dismiss", "--db", "", "id1", "extra"}), "dismiss with more than one id must error")
 	err := agentFindingsCmd([]string{"bogus"})
-	if err == nil {
-		t.Fatal("an unknown first positional argument must error, not silently list")
-	}
-	if !strings.Contains(err.Error(), "unknown") {
-		t.Errorf("error should name the command unknown, got: %v", err)
-	}
+	c.Require().Error(err, "an unknown first positional argument must error, not silently list")
+	c.StrContains(err.Error(), "unknown", "error should name the command unknown, got: %v", err)
 }
 
 // Fix 5: --compare must honor -j, marshaling the sweep's runs as JSON
@@ -439,6 +358,7 @@ func TestAgentFindingsRejectsLeftoverArgsAndUnknownVerb(t *testing.T) {
 func TestAgentAnalyzeCompareHonorsJSONFlag(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "")
 	t.Setenv("RAFIKI_TEST_DSN", "")
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 
@@ -455,25 +375,20 @@ func TestAgentAnalyzeCompareHonorsJSONFlag(t *testing.T) {
 			"-J",
 		})
 	})
-	if err != nil {
-		t.Fatalf("agentAnalyzeCmd --compare -J: %v", err)
-	}
+	c.Require().NoError(err, "agentAnalyzeCmd --compare -J")
 	var runs []compareRunJSON
 	if err := json.Unmarshal([]byte(out), &runs); err != nil {
 		t.Fatalf("--compare -J output must be valid JSON: %v\noutput: %s", err, out)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("runs = %d, want 2 (one per swept model)", len(runs))
-	}
-	if runs[0].Model != "model-a" || runs[1].Model != "model-b" {
-		t.Errorf("runs = %+v, want model-a then model-b", runs)
-	}
+	c.Require().Len(runs, 2, "runs = %d, want 2 (one per swept model)", len(runs))
+	c.False(runs[0].Model != "model-a" || runs[1].Model != "model-b", "runs = %+v, want model-a then model-b", runs)
 }
 
 // Fix 6: --compare must preflight the profile's draft model, not just the
 // swept detector models — a full-pipeline compare run with no draft model
 // configured must error naming draft_model/--model, before any network call.
 func TestAgentAnalyzeCompareRequiresDraftModel(t *testing.T) {
+	c := assert.NewCollecting(t)
 	dir := t.TempDir()
 	writeCorpusTranscript(t, dir, "conv-a.json", "corpus-conv-a")
 
@@ -481,22 +396,16 @@ func TestAgentAnalyzeCompareRequiresDraftModel(t *testing.T) {
 	// draft_model, so reconstructing "no draft model configured" needs an
 	// explicit analyzer dir whose profile sets only a detector model.
 	analyzerDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(analyzerDir, "profiles.yaml"),
-		[]byte("default:\n  detector_model: claude-haiku-4-5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(filepath.Join(analyzerDir, "profiles.yaml"),
+		[]byte("default:\n  detector_model: claude-haiku-4-5\n"), 0o644))
 
 	err := agentAnalyzeCmd([]string{
 		"--corpus", dir, "--compare", "model-a", "--analyzer-dir", analyzerDir,
 		"--proxy-url", "http://127.0.0.1:0", "--proxy-token", "tok",
 		// No --model, no --draft/--detect/--rank: full pipeline, no draft model configured.
 	})
-	if err == nil {
-		t.Fatal("--compare through the draft stage with no draft model must error")
-	}
-	if !strings.Contains(err.Error(), "draft_model") && !strings.Contains(err.Error(), "--model") {
-		t.Errorf("error must name draft_model/--model, got: %v", err)
-	}
+	c.Require().Error(err, "--compare through the draft stage with no draft model must error")
+	c.False(!strings.Contains(err.Error(), "draft_model") && !strings.Contains(err.Error(), "--model"), "error must name draft_model/--model, got: %v", err)
 }
 
 // Fix 6: --compare must also reject an unservable model in the sweep when
@@ -509,9 +418,7 @@ func TestAgentAnalyzeCompareRejectsUnservableModel(t *testing.T) {
 	err := agentAnalyzeCmd([]string{
 		"--corpus", dir, "--detect", "--compare", "deepseek/deepseek-v4-pro",
 	})
-	if err == nil {
-		t.Fatal("a slash-id model direct-to-Anthropic can't serve must be rejected before any per-conversation work")
-	}
+	assert.NewAborting(t).Error(err, "a slash-id model direct-to-Anthropic can't serve must be rejected before any per-conversation work")
 }
 
 // sampleQueryResult is one result exercising every cell shape insights.Entry
@@ -535,10 +442,9 @@ func sampleQueryResult() insights.QueryResult {
 }
 
 func TestRenderQueryResultTable(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var got bytes.Buffer
-	if err := renderQueryResult(&got, agentcli.ModeTable, sampleQueryResult()); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(renderQueryResult(&got, agentcli.ModeTable, sampleQueryResult()))
 	for _, tc := range []struct {
 		name, want string
 	}{
@@ -548,9 +454,7 @@ func TestRenderQueryResultTable(t *testing.T) {
 		{"pct format", "50%"},
 		{"unformatted float", "0.73"},
 	} {
-		if !strings.Contains(got.String(), tc.want) {
-			t.Errorf("%s: output missing %q:\n%s", tc.name, tc.want, got.String())
-		}
+		c.StrContains(got.String(), tc.want, "%s: output missing %q:\n", tc.name, tc.want)
 	}
 }
 
@@ -558,6 +462,7 @@ func TestRenderQueryResultTable(t *testing.T) {
 // numbers, never strings — which is the whole reason Q2/Q3 typed the wire.
 // Both JSON modes carry the same typed shape; only the indentation differs.
 func TestRenderQueryResultJSONTypedValues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	for _, tc := range []struct {
 		mode         agentcli.Mode
 		wantIndented bool
@@ -566,27 +471,18 @@ func TestRenderQueryResultJSONTypedValues(t *testing.T) {
 		{agentcli.ModeJSONCompact, false},
 	} {
 		var got bytes.Buffer
-		if err := renderQueryResult(&got, tc.mode, sampleQueryResult()); err != nil {
-			t.Fatalf("mode %v: %v", tc.mode, err)
-		}
-		if tc.wantIndented != strings.Contains(got.String(), "\n  ") {
-			t.Errorf("mode %v: indentation wrong:\n%s", tc.mode, got.String())
-		}
+		c.Require().NoError(renderQueryResult(&got, tc.mode, sampleQueryResult()), "mode %v", tc.mode)
+		c.Eq(tc.wantIndented, strings.Contains(got.String(), "\n  "), "mode %v: indentation wrong:\n%s", tc.mode, got.String())
 
 		var back struct {
 			Columns []string `json:"columns"`
 			Rows    [][]any  `json:"rows"`
 		}
-		if err := json.Unmarshal(got.Bytes(), &back); err != nil {
-			t.Fatalf("mode %v: output is not valid JSON: %v\n%s", tc.mode, err, got.String())
-		}
-		if len(back.Columns) != 5 || back.Columns[2] != "cost" {
-			t.Errorf("mode %v: columns did not survive: %+v", tc.mode, back.Columns)
-		}
+		err := json.Unmarshal(got.Bytes(), &back)
+		c.Require().NoError(err, "mode %v: output is not valid JSON: %v\n%s", tc.mode, err, got.String())
+		c.False(len(back.Columns) != 5 || back.Columns[2] != "cost", "mode %v: columns did not survive: %+v", tc.mode, back.Columns)
 		row := back.Rows[0]
-		if len(row) != 5 {
-			t.Fatalf("mode %v: row width %d, want 5", tc.mode, len(row))
-		}
+		c.Require().Len(row, 5, "mode %v: row width %d, want 5", tc.mode, len(row))
 		if s, ok := row[0].(string); !ok || s != "bash" {
 			t.Errorf("mode %v: cell 0: got %#v, want string \"bash\"", tc.mode, row[0])
 		}
@@ -608,6 +504,7 @@ func TestRenderQueryResultJSONTypedValues(t *testing.T) {
 // wording as the two adapters, never silently shorten a JSON row or render an
 // empty cell.
 func TestRenderQueryResultUnknownEntryFails(t *testing.T) {
+	c := assert.NewAborting(t)
 	res := sampleQueryResult()
 	res.Rows = [][]insights.Entry{{nil, insights.IntEntry(1)}}
 	for _, tc := range []struct {
@@ -620,11 +517,7 @@ func TestRenderQueryResultUnknownEntryFails(t *testing.T) {
 	} {
 		var got bytes.Buffer
 		err := renderQueryResult(&got, tc.mode, res)
-		if err == nil {
-			t.Fatalf("%s: want an error for a nil Entry, got none (output:\n%s)", tc.name, got.String())
-		}
-		if !strings.Contains(err.Error(), "agent_cli: unhandled insights.Entry type") {
-			t.Fatalf("%s: error %q does not name the site and type", tc.name, err)
-		}
+		c.Error(err, "%s: want an error for a nil Entry, got none (output:\n%s)", tc.name, got.String())
+		c.StrContains(err.Error(), "agent_cli: unhandled insights.Entry type", "%s: error %q does not name the site and type", tc.name, err)
 	}
 }

@@ -10,6 +10,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/routing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubPricer prices exactly one model, with a distinct rate per component so a
@@ -43,15 +45,14 @@ const costResp = `{
 func mustCostResp(t *testing.T) *anthropic.Message {
 	t.Helper()
 	var resp anthropic.Message
-	if err := json.Unmarshal([]byte(costResp), &resp); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(json.Unmarshal([]byte(costResp), &resp))
 	return &resp
 }
 
 // A priced turn must carry a per-component cost breakdown on its usage, and the
 // pricer must be queried with the SERVED model id from the response.
 func TestMapAssistantMessagePricesUsage(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var queried []string
 	resp := mustCostResp(t)
 
@@ -64,46 +65,33 @@ func TestMapAssistantMessagePricesUsage(t *testing.T) {
 	wantTotal := wantInput + wantOutput + wantCacheRead + wantCacheWrite
 
 	got := mapped.Usage.Cost
-	if got.Input != wantInput || got.Output != wantOutput ||
-		got.CacheRead != wantCacheRead || got.CacheWrite != wantCacheWrite {
-		t.Errorf("cost components = %+v, want input=%v output=%v cacheRead=%v cacheWrite=%v",
-			got, wantInput, wantOutput, wantCacheRead, wantCacheWrite)
-	}
-	if got.Total != wantTotal {
-		t.Errorf("cost total = %v, want %v", got.Total, wantTotal)
-	}
-	if len(queried) == 0 || queried[0] != "claude-sonnet-4-5-20250929" {
-		t.Errorf("pricer queried with %v, want the served model id claude-sonnet-4-5-20250929", queried)
-	}
+	c.False(got.Input != wantInput || got.Output != wantOutput ||
+		got.CacheRead != wantCacheRead || got.CacheWrite != wantCacheWrite, "cost components = %+v, want input=%v output=%v cacheRead=%v cacheWrite=%v", got, wantInput, wantOutput, wantCacheRead, wantCacheWrite)
+	c.Eq(wantTotal, got.Total, "cost total")
+	c.False(len(queried) == 0 || queried[0] != "claude-sonnet-4-5-20250929", "pricer queried with %v, want the served model id claude-sonnet-4-5-20250929", queried)
 	// Token counts must be untouched by the pricing change.
-	if mapped.Usage.Input != 1000 || mapped.Usage.Output != 200 {
-		t.Errorf("usage tokens = %+v, want input=1000 output=200", mapped.Usage)
-	}
+	c.False(mapped.Usage.Input != 1000 || mapped.Usage.Output != 200, "usage tokens = %+v, want input=1000 output=200", mapped.Usage)
 }
 
 // Negative control: no pricer at all (the fake-sender / offline case) must
 // leave cost zero rather than panicking.
 func TestMapAssistantMessageNilPricerIsFree(t *testing.T) {
+	c := assert.NewCollecting(t)
 	mapped := MapAssistantMessage(mustCostResp(t), "anthropic", nil)
-	if mapped.Usage.Cost != (child.PiCost{}) {
-		t.Fatalf("cost = %+v, want zero with a nil pricer", mapped.Usage.Cost)
-	}
-	if mapped.Usage.Input != 1000 {
-		t.Errorf("tokens must still be mapped with a nil pricer, got %+v", mapped.Usage)
-	}
+	c.Require().Eq((child.PiCost{}), mapped.Usage.Cost, "cost")
+	c.Eq(1000, mapped.Usage.Input, "tokens must still be mapped with a nil pricer, got %+v", mapped.Usage)
 }
 
 // Negative control: an unpriced model (pricer returns ok=false) is free.
 func TestMapAssistantMessageUnpricedModelIsFree(t *testing.T) {
 	mapped := MapAssistantMessage(mustCostResp(t), "anthropic", stubPricer(t, "some-other-model", nil))
-	if mapped.Usage.Cost != (child.PiCost{}) {
-		t.Fatalf("cost = %+v, want zero for an unpriced model", mapped.Usage.Cost)
-	}
+	assert.NewAborting(t).Eq((child.PiCost{}), mapped.Usage.Cost, "cost")
 }
 
 // agent_end reports the turn total, so cost must accumulate across the turn's
 // assistant messages the same way tokens do.
 func TestAgentEndSumsCostAcrossTurns(t *testing.T) {
+	c := assert.NewCollecting(t)
 	resp := mustCostResp(t)
 	var out bytes.Buffer
 	fe := NewFrontend(strings.NewReader(""), &out, &fakeHandler{})
@@ -130,28 +118,16 @@ func TestAgentEndSumsCostAcrossTurns(t *testing.T) {
 		var probe struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(l), &probe); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		c.Require().NoError(json.Unmarshal([]byte(l), &probe), "bad frame %q", l)
 		if probe.Type == "agent_end" {
-			if err := json.Unmarshal([]byte(l), &end); err != nil {
-				t.Fatalf("agent_end unmarshal: %v", err)
-			}
+			c.Require().NoError(json.Unmarshal([]byte(l), &end), "agent_end unmarshal")
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("no agent_end frame emitted")
-	}
-	if want := single.Total * 2; end.Usage.Cost.Total != want {
-		t.Errorf("agent_end cost total = %v, want 2 turns = %v", end.Usage.Cost.Total, want)
-	}
-	if want := single.Input * 2; end.Usage.Cost.Input != want {
-		t.Errorf("agent_end cost input = %v, want %v", end.Usage.Cost.Input, want)
-	}
-	if end.Usage.Input != 2000 {
-		t.Errorf("agent_end input tokens = %d, want 2000", end.Usage.Input)
-	}
+	c.Require().True(found, "no agent_end frame emitted")
+	c.Eq(single.Total*2, end.Usage.Cost.Total, "agent_end cost total")
+	c.Eq(single.Input*2, end.Usage.Cost.Input, "agent_end cost input")
+	c.Eq(2000, end.Usage.Input, "agent_end input tokens")
 }
 
 // agentEndCostAndCount extracts the agent_end frame's usage.cost.total and
@@ -159,6 +135,7 @@ func TestAgentEndSumsCostAcrossTurns(t *testing.T) {
 // streaming and non-streaming emission paths below.
 func agentEndCostAndCount(t *testing.T, out string) (total float64, messages int) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	var end struct {
 		Usage struct {
 			Cost struct{ Total float64 } `json:"cost"`
@@ -168,19 +145,13 @@ func agentEndCostAndCount(t *testing.T, out string) (total float64, messages int
 	var found bool
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		var probe struct{ Type string }
-		if err := json.Unmarshal([]byte(l), &probe); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		c.NoError(json.Unmarshal([]byte(l), &probe), "bad frame %q", l)
 		if probe.Type == "agent_end" {
-			if err := json.Unmarshal([]byte(l), &end); err != nil {
-				t.Fatalf("agent_end unmarshal: %v", err)
-			}
+			c.NoError(json.Unmarshal([]byte(l), &end), "agent_end unmarshal")
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("no agent_end frame emitted")
-	}
+	c.True(found, "no agent_end frame emitted")
 	return end.Usage.Cost.Total, len(end.Messages)
 }
 
@@ -192,6 +163,7 @@ func agentEndCostAndCount(t *testing.T, out string) (total float64, messages int
 // paths diverge, per-turn cost silently differs depending on whether streaming
 // was used.
 func TestStreamEndFoldsCostIdenticallyToAssistantTurn(t *testing.T) {
+	c := assert.NewAborting(t)
 	resp := mustCostResp(t)
 	pricer := stubPricer(t, "claude-sonnet-4-5-20250929", nil)
 
@@ -214,13 +186,7 @@ func TestStreamEndFoldsCostIdenticallyToAssistantTurn(t *testing.T) {
 	totalA, messagesA := agentEndCostAndCount(t, outA.String())
 	totalB, messagesB := agentEndCostAndCount(t, outB.String())
 
-	if totalA != totalB {
-		t.Fatalf("cost total diverges between paths: AssistantTurn=%v StreamStart/StreamEnd=%v", totalA, totalB)
-	}
-	if totalA == 0 {
-		t.Fatal("test is vacuous: expected a nonzero priced cost total")
-	}
-	if messagesA != messagesB {
-		t.Fatalf("accumulated message count diverges between paths: AssistantTurn=%d StreamStart/StreamEnd=%d", messagesA, messagesB)
-	}
+	c.Eq(totalB, totalA, "cost total diverges between paths: AssistantTurn")
+	c.NotEq(0, totalA, "test is vacuous: expected a nonzero priced cost total")
+	c.Eq(messagesB, messagesA, "accumulated message count diverges between paths: AssistantTurn")
 }

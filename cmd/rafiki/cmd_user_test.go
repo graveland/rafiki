@@ -30,73 +30,54 @@ import (
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeTokenedProfile isolates the profile environment and writes one profile
 // "it" at sockPath, with a token file when token != "".
 func writeTokenedProfile(t *testing.T, sockPath, token string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	set := profile.Set{Profiles: map[string]profile.Profile{
 		"it": {Name: "it", Socket: sockPath},
 	}}
-	if err := profile.Save(set); err != nil {
-		t.Fatalf("save profile: %v", err)
-	}
-	if err := profile.SavePointer("it"); err != nil {
-		t.Fatalf("save pointer: %v", err)
-	}
+	c.NoError(profile.Save(set), "save profile")
+	c.NoError(profile.SavePointer("it"), "save pointer")
 	if token != "" {
-		if err := profile.WriteToken("it", token); err != nil {
-			t.Fatalf("write token: %v", err)
-		}
+		c.NoError(profile.WriteToken("it", token), "write token")
 	}
 }
 
 // `rafiki user create` is also the login step: the token is shown once, so
 // the CLI must persist it or the user is locked out of their own daemon.
 func TestWriteTokenFileCreates0600(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token")
 
-	if err := writeTokenFile(path, "rfk_secret"); err != nil {
-		t.Fatalf("writeTokenFile: %v", err)
-	}
+	c.NoError(writeTokenFile(path, "rfk_secret"), "writeTokenFile")
 
 	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(b) != "rfk_secret\n" {
-		t.Fatalf("content = %q", b)
-	}
+	c.NoError(err, "read")
+	c.Eq("rfk_secret\n", string(b), "content = %q", b)
 	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600", fi.Mode().Perm())
-	}
+	c.NoError(err, "stat")
+	c.Eq(0o600, fi.Mode().Perm(), "mode")
 }
 
 // Overwriting must not widen the mode of an existing file, and must not
 // leave the old (longer) token's tail behind.
 func TestWriteTokenFileOverwritesCleanly(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token")
-	if err := os.WriteFile(path, []byte("rfk_a_very_long_previous_token\n"), 0o644); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := writeTokenFile(path, "rfk_short"); err != nil {
-		t.Fatalf("writeTokenFile: %v", err)
-	}
+	c.NoError(os.WriteFile(path, []byte("rfk_a_very_long_previous_token\n"), 0o644), "seed")
+	c.NoError(writeTokenFile(path, "rfk_short"), "writeTokenFile")
 	b, _ := os.ReadFile(path)
-	if string(b) != "rfk_short\n" {
-		t.Fatalf("content = %q; the old token was not fully replaced", b)
-	}
+	c.Eq("rfk_short\n", string(b), "content = %q; the old token was not fully replaced", b)
 	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %v, want 0600 after overwrite", fi.Mode().Perm())
-	}
+	c.Eq(0o600, fi.Mode().Perm(), "mode")
 }
 
 // TestUserCreateWritesTheProfilesTokenNotAGlobalOne pins the property Task 7
@@ -104,34 +85,23 @@ func TestWriteTokenFileOverwritesCleanly(t *testing.T) {
 // file (profile.TokenFile), not a single global one — minting a credential
 // against one daemon must not disturb another profile's credential.
 func TestUserCreateWritesTheProfilesTokenNotAGlobalOne(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
+	c.NoError(profile.Save(profile.Set{Profiles: map[string]profile.Profile{
 		"work":     {Name: "work", Socket: "/tmp/work.sock"},
 		"personal": {Name: "personal", URL: "https://h", Proxy: "https://h"},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.WriteToken("work", "sk-work-existing"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if err := profile.SavePointer("personal"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
+	}}), "Save")
+	c.NoError(profile.WriteToken("work", "sk-work-existing"), "WriteToken")
+	c.NoError(profile.SavePointer("personal"), "SavePointer")
 
-	if err := profile.WriteToken("personal", "sk-personal-new"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
+	c.NoError(profile.WriteToken("personal", "sk-personal-new"), "WriteToken")
 
 	// The bug this feature exists to fix: minting on one daemon must not
 	// disturb the other's credential.
-	if got := profile.ReadToken("work"); got != "sk-work-existing" {
-		t.Fatalf("work token = %q after writing personal's; it was clobbered", got)
-	}
-	if got := profile.ReadToken("personal"); got != "sk-personal-new" {
-		t.Fatalf("personal token = %q", got)
-	}
+	c.Eq("sk-work-existing", profile.ReadToken("work"), "work token")
+	c.Eq("sk-personal-new", profile.ReadToken("personal"), "personal token =")
 }
 
 // ─── renderUserCreate: write-failure-still-prints-token ────────────────────
@@ -150,18 +120,15 @@ func sampleCreateResponse() *rafikiv1.CreateUserResponse {
 // the plaintext token exactly once, so a token-file write failure must never
 // suppress it from stdout, only warn on stderr.
 func TestRenderUserCreate_WriteFailureStillPrintsToken(t *testing.T) {
+	c := assert.NewAborting(t)
 	writeErr := errors.New("permission denied")
 	failingWrite := func(path, token string) error { return writeErr }
 
 	var stdout, stderr bytes.Buffer
 	err := renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", true, failingWrite, outputAuto)
-	if err != nil {
-		t.Fatalf("renderUserCreate returned an error instead of degrading: %v", err)
-	}
+	c.NoError(err, "renderUserCreate returned an error instead of degrading")
 
-	if !strings.Contains(stdout.String(), "rfk_only_copy_ever") {
-		t.Fatalf("token missing from stdout after a write failure — it is now unrecoverable\nstdout: %s", stdout.String())
-	}
+	c.StrContains(stdout.String(), "rfk_only_copy_ever", "token missing from stdout after a write failure — it is now unrecoverable\nstdout")
 	if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), writeErr.Error()) {
 		t.Fatalf("stderr does not warn about the write failure: %s", stderr.String())
 	}
@@ -170,40 +137,28 @@ func TestRenderUserCreate_WriteFailureStillPrintsToken(t *testing.T) {
 // TestRenderUserCreate_NoWriteNeverCallsWriteFn pins --no-write: writeFn must
 // not be invoked at all, not merely "invoked and its result ignored".
 func TestRenderUserCreate_NoWriteNeverCallsWriteFn(t *testing.T) {
+	c := assert.NewAborting(t)
 	called := false
 	writeFn := func(path, token string) error { called = true; return nil }
 
 	var stdout, stderr bytes.Buffer
-	if err := renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", false, writeFn, outputAuto); err != nil {
-		t.Fatalf("renderUserCreate: %v", err)
-	}
-	if called {
-		t.Fatal("writeFn was called despite shouldWrite=false")
-	}
-	if !strings.Contains(stdout.String(), "rfk_only_copy_ever") {
-		t.Fatalf("token missing from stdout: %s", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected no stderr output on --no-write, got: %s", stderr.String())
-	}
+	c.NoError(renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", false, writeFn, outputAuto), "renderUserCreate")
+	c.False(called, "writeFn was called despite shouldWrite=false")
+	c.StrContains(stdout.String(), "rfk_only_copy_ever", "token missing from stdout")
+	c.Eq(0, stderr.Len(), "expected no stderr output on --no-write, got: %s", stderr.String())
 }
 
 // TestRenderUserCreate_SuccessfulWriteConfirms pins the happy path's stderr
 // confirmation, which is the only signal a scripted caller has that the token
 // actually landed on disk.
 func TestRenderUserCreate_SuccessfulWriteConfirms(t *testing.T) {
+	c := assert.NewAborting(t)
 	writeFn := func(path, token string) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	if err := renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/config/rafiki/token", true, writeFn, outputAuto); err != nil {
-		t.Fatalf("renderUserCreate: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "/config/rafiki/token") {
-		t.Fatalf("stderr does not confirm the write path: %s", stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "rfk_only_copy_ever") {
-		t.Fatalf("token missing from stdout: %s", stdout.String())
-	}
+	c.NoError(renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/config/rafiki/token", true, writeFn, outputAuto), "renderUserCreate")
+	c.StrContains(stderr.String(), "/config/rafiki/token", "stderr does not confirm the write path")
+	c.StrContains(stdout.String(), "rfk_only_copy_ever", "token missing from stdout")
 }
 
 // TestRenderUserCreate_PrintsCanonicalProtojsonInEveryMode pins the create
@@ -222,29 +177,21 @@ func TestRenderUserCreate_PrintsCanonicalProtojsonInEveryMode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			var stdout, stderr bytes.Buffer
-			if err := renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", false, func(string, string) error { return nil }, tc.mode); err != nil {
-				t.Fatalf("renderUserCreate: %v", err)
-			}
+			c.NoError(renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", false, func(string, string) error { return nil }, tc.mode), "renderUserCreate")
 			out := stdout.String()
-			if !strings.Contains(out, "rfk_only_copy_ever") {
-				t.Fatalf("token missing from stdout in mode %v: %s", tc.mode, out)
-			}
+			c.StrContains(out, "rfk_only_copy_ever", "token missing from stdout in mode %v", tc.mode)
 			// protojson renders int64 as a string; the canonical name is
 			// camelCase createdAtUnix.
 			var got map[string]any
-			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
-				t.Fatalf("output is not JSON in mode %v: %v\n%s", tc.mode, err, out)
-			}
+			err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got)
+			c.NoError(err, "output is not JSON in mode %v: %v\n%s", tc.mode, err, out)
 			if got["createdAtUnix"] != "1800000000" {
 				t.Fatalf("createdAtUnix = %v, want the string \"1800000000\" (protojson's int64 form)", got["createdAtUnix"])
 			}
-			if got["id"] != "usr_1" || got["username"] != "alice" {
-				t.Fatalf("unexpected fields: %v", got)
-			}
-			if tc.compact && strings.Contains(out, "\n") && strings.Count(out, "\n") > 1 {
-				t.Fatalf("JSONL create output is not one line: %q", out)
-			}
+			c.False(got["id"] != "usr_1" || got["username"] != "alice", "unexpected fields: %v", got)
+			c.False(tc.compact && strings.Contains(out, "\n") && strings.Count(out, "\n") > 1, "JSONL create output is not one line: %q", out)
 		})
 	}
 }
@@ -265,35 +212,22 @@ func sampleUserRows() []*rafikiv1.UserRow {
 // removal time. Row lines are matched by id and split on the table's cell
 // separator, since pkg/table draws a bordered box.
 func TestEmitUserList_TableShowsAdminAndRemoval(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
-	if err := emitUserList(&out, sampleUserRows(), outputTable, false); err != nil {
-		t.Fatalf("emitUserList: %v", err)
-	}
+	c.NoError(emitUserList(&out, sampleUserRows(), outputTable, false), "emitUserList")
 	got := out.String()
 	for _, want := range []string{"ID", "USER", "ADMIN", "CREATED", "REMOVED", "usr_1", "usr_2"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("table output missing %q:\n%s", want, got)
-		}
+		c.StrContains(got, want, "table output missing")
 	}
 
 	alice := tableRowFor(t, got, "usr_1")
-	if len(alice) != 5 {
-		t.Fatalf("alice's row = %v, want 5 cells", alice)
-	}
-	if alice[1] != "alice" || alice[2] != "yes" {
-		t.Fatalf("alice's row = %v, want the admin marked", alice)
-	}
-	if alice[4] != "-" {
-		t.Fatalf("alice's REMOVED cell = %q, want \"-\" (she is active)", alice[4])
-	}
+	c.Len(alice, 5, "alice's row")
+	c.False(alice[1] != "alice" || alice[2] != "yes", "alice's row = %v, want the admin marked", alice)
+	c.Eq("-", alice[4], "alice's REMOVED cell = %q, want \"-\" (she is active)", alice[4])
 
 	bob := tableRowFor(t, got, "usr_2")
-	if bob[1] != "bob" || bob[2] != "-" {
-		t.Fatalf("bob's row = %v, want a non-admin", bob)
-	}
-	if bob[4] == "-" {
-		t.Fatalf("bob's REMOVED cell = %q, want the tombstone date", bob[4])
-	}
+	c.False(bob[1] != "bob" || bob[2] != "-", "bob's row = %v, want a non-admin", bob)
+	c.NotEq("-", bob[4], "bob's REMOVED cell")
 }
 
 // tableRowFor finds the bordered table row carrying id and returns its
@@ -323,19 +257,15 @@ func tableRowFor(t *testing.T, out, id string) []string {
 // rendered output cannot leak one.
 func TestEmitUserList_JSONIsTheCanonicalProtojson(t *testing.T) {
 	t.Run("json envelope", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		var out bytes.Buffer
-		if err := emitUserList(&out, sampleUserRows(), outputJSON, false); err != nil {
-			t.Fatalf("emitUserList: %v", err)
-		}
+		c.NoError(emitUserList(&out, sampleUserRows(), outputJSON, false), "emitUserList")
 		var got struct {
 			Rows []map[string]any `json:"rows"`
 		}
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-			t.Fatalf("output is not the rows envelope: %v\n%s", err, out.String())
-		}
-		if len(got.Rows) != 2 {
-			t.Fatalf("got %d rows, want 2: %s", len(got.Rows), out.String())
-		}
+		err := json.Unmarshal(out.Bytes(), &got)
+		c.NoError(err, "output is not the rows envelope: %v\n%s", err, out.String())
+		c.Len(got.Rows, 2, "got %d rows, want 2: %s", len(got.Rows), out.String())
 		if got.Rows[0]["createdAtUnix"] != "1800000000" {
 			t.Fatalf("createdAtUnix = %v, want the string protojson form", got.Rows[0]["createdAtUnix"])
 		}
@@ -345,29 +275,18 @@ func TestEmitUserList_JSONIsTheCanonicalProtojson(t *testing.T) {
 		if _, ok := got.Rows[0]["is_admin"]; ok {
 			t.Fatalf("snake_case field name survived: %s", out.String())
 		}
-		if s := strings.ToLower(out.String()); strings.Contains(s, "token") {
-			t.Fatalf("rendered user list mentions a token: %s", out.String())
-		}
+		c.NotStrContains(strings.ToLower(out.String()), "token", "rendered user list mentions a token: %s", out.String())
 	})
 	t.Run("jsonl one row per line", func(t *testing.T) {
+		c := assert.NewAborting(t)
 		var out bytes.Buffer
-		if err := emitUserList(&out, sampleUserRows(), outputJSONL, false); err != nil {
-			t.Fatalf("emitUserList: %v", err)
-		}
+		c.NoError(emitUserList(&out, sampleUserRows(), outputJSONL, false), "emitUserList")
 		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-		if len(lines) != 2 {
-			t.Fatalf("got %d lines, want one row per line:\n%s", len(lines), out.String())
-		}
-		if strings.Contains(out.String(), "rows") {
-			t.Fatalf("JSONL must not carry the envelope:\n%s", out.String())
-		}
+		c.Len(lines, 2, "got %d lines, want one row per line:\n%s", len(lines), out.String())
+		c.NotStrContains(out.String(), "rows", "JSONL must not carry the envelope:\n")
 		var row map[string]any
-		if err := json.Unmarshal([]byte(lines[0]), &row); err != nil {
-			t.Fatalf("line 0 is not a row object: %v", err)
-		}
-		if row["username"] != "alice" {
-			t.Fatalf("line 0 = %v, want alice's row", row)
-		}
+		c.NoError(json.Unmarshal([]byte(lines[0]), &row), "line 0 is not a row object")
+		c.False(row["username"] != "alice", "line 0 = %v, want alice's row", row)
 	})
 }
 
@@ -383,9 +302,7 @@ func TestUserConnectErr_RendersTheRafikiReason(t *testing.T) {
 		protocol.ErrInvalidArgs)
 
 	got := userConnectErr(err, "sock")
-	if got.Error() != "invalid_args: username alice is already taken" {
-		t.Fatalf("userConnectErr = %q, want the reason rendered", got.Error())
-	}
+	assert.NewAborting(t).Eq("invalid_args: username alice is already taken", got.Error(), "userConnectErr")
 }
 
 // TestUserConnectErr_KeepsTheInfrastructureAdvice pins that the three codes
@@ -393,14 +310,11 @@ func TestUserConnectErr_RendersTheRafikiReason(t *testing.T) {
 // stale, the daemon predates Connect — keep diagnoseConnectError's advice
 // instead of the bare code-and-message rendering.
 func TestUserConnectErr_KeepsTheInfrastructureAdvice(t *testing.T) {
+	c := assert.NewAborting(t)
 	unreachable := connect.NewError(connect.CodeUnavailable, errors.New("connection refused"))
 	got := userConnectErr(unreachable, "/tmp/x/controller.sock")
-	if !strings.Contains(got.Error(), "cannot reach the rafiki daemon at /tmp/x/controller.sock") {
-		t.Fatalf("unreachable error lost the daemon-down advice: %v", got)
-	}
-	if !errors.Is(got, unreachable) {
-		t.Fatal("the original error is no longer wrapped")
-	}
+	c.StrContains(got.Error(), "cannot reach the rafiki daemon at /tmp/x/controller.sock", "unreachable error lost the daemon-down advice: %v", got)
+	c.ErrorIs(got, unreachable, "the original error is no longer wrapped")
 
 	stale := connect.NewError(connect.CodeUnauthenticated, errors.New("invalid auth token"))
 	if got := userConnectErr(stale, "sock"); !strings.Contains(got.Error(), "check its token file") {
@@ -412,9 +326,8 @@ func TestUserConnectErr_KeepsTheInfrastructureAdvice(t *testing.T) {
 // (a wrapped io error from the transport, say) rendering as themselves.
 func TestUserConnectErr_NonConnectErrorPassesThrough(t *testing.T) {
 	err := errors.New("ordinary failure")
-	if got := userConnectErr(err, "sock"); got.Error() != "ordinary failure" {
-		t.Fatalf("userConnectErr = %v, want the error's own text", got)
-	}
+	got := userConnectErr(err, "sock")
+	assert.NewAborting(t).Eq("ordinary failure", got.Error(), "userConnectErr = %v, want the error's own text", got)
 }
 
 // ─── the commands against a fake Connect server ────────────────────────────
@@ -536,9 +449,7 @@ func serveUserScratch(t *testing.T, stub *userStubControl, token string) {
 
 	// os.MkdirTemp, not t.TempDir: the UDS path cap.
 	dir, err := os.MkdirTemp("", "rafiki-u")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 
@@ -551,6 +462,7 @@ func serveUserScratch(t *testing.T, stub *userStubControl, token string) {
 // token-less dial; a stale token is unstuck on the daemon host) — and the
 // minted token lands in the profile's token file and on stdout exactly once.
 func TestUserCreateSendsTheProfileTokenOverConnect(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &userStubControl{}
 	serveUserScratch(t, stub, "rfk_stale")
 
@@ -560,15 +472,9 @@ func TestUserCreateSendsTheProfileTokenOverConnect(t *testing.T) {
 	}
 
 	req := stub.lastCreate()
-	if req == nil {
-		t.Fatal("the stub never saw a CreateUser request")
-	}
-	if got := req.Msg.GetUsername(); got != "alice" {
-		t.Fatalf("username = %q, want alice", got)
-	}
-	if got := req.Header().Get("Authorization"); got != "Bearer rfk_stale" {
-		t.Fatalf("Authorization = %q, want the profile's token on the wire", got)
-	}
+	c.NotNil(req, "the stub never saw a CreateUser request")
+	c.Eq("alice", req.Msg.GetUsername(), "username")
+	c.Eq("Bearer rfk_stale", req.Header().Get("Authorization"), "Authorization")
 
 	// The minted token replaced the profile's (now stale) one — the login
 	// step — and was printed once for the human.
@@ -577,33 +483,25 @@ func TestUserCreateSendsTheProfileTokenOverConnect(t *testing.T) {
 	} else if got := strings.TrimSpace(string(b)); got != "rfk_new_minted" {
 		t.Fatalf("token file = %q, want the freshly minted token", got)
 	}
-	if !strings.Contains(out.String(), "rfk_new_minted") {
-		t.Fatalf("minted token missing from stdout:\n%s", out.String())
-	}
+	c.StrContains(out.String(), "rfk_new_minted", "minted token missing from stdout:\n")
 }
 
 // TestUserListReachesTheSocketProfilesDaemon drives `user list` against a
 // daemon served on the profile's OWN socket.
 func TestUserListReachesTheSocketProfilesDaemon(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &userStubControl{rows: sampleUserRows()}
 	serveUserScratch(t, stub, "")
 
 	root, out := userTestRoot(t, newUserListCmd(), "list")
-	if err := root.Execute(); err != nil {
-		t.Fatalf("user list failed: %v\n%s", err, out.String())
-	}
+	err := root.Execute()
+	c.NoError(err, "user list failed: %v\n%s", err, out.String())
 
 	got := out.String()
-	if !strings.Contains(got, "alice") || !strings.Contains(got, "bob") {
-		t.Fatalf("user list output missing the stub's rows:\n%s", got)
-	}
+	c.False(!strings.Contains(got, "alice") || !strings.Contains(got, "bob"), "user list output missing the stub's rows:\n%s", got)
 	req := stub.lastList()
-	if req == nil {
-		t.Fatal("the stub never saw a ListUsers request")
-	}
-	if req.Msg.GetIncludeDeleted() {
-		t.Fatal("the default list must not ask for tombstoned rows")
-	}
+	c.NotNil(req, "the stub never saw a ListUsers request")
+	c.False(req.Msg.GetIncludeDeleted(), "the default list must not ask for tombstoned rows")
 }
 
 // TestUserListAllAsksForTombstonedRows pins the --all flag's wire effect.
@@ -612,9 +510,8 @@ func TestUserListAllAsksForTombstonedRows(t *testing.T) {
 	serveUserScratch(t, stub, "")
 
 	root, out := userTestRoot(t, newUserListCmd(), "list", "--all")
-	if err := root.Execute(); err != nil {
-		t.Fatalf("user list --all failed: %v\n%s", err, out.String())
-	}
+	err := root.Execute()
+	assert.NewAborting(t).NoError(err, "user list --all failed: %v\n%s", err, out.String())
 	if req := stub.lastList(); req == nil || !req.Msg.GetIncludeDeleted() {
 		t.Fatalf("--all did not set include_deleted: %+v", stub.lastList())
 	}
@@ -623,6 +520,7 @@ func TestUserListAllAsksForTombstonedRows(t *testing.T) {
 // TestUserListJSONLOverTheWire pins the -J contract end to end: one compact
 // row per line, no envelope, straight from a live (fake) daemon.
 func TestUserListJSONLOverTheWire(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &userStubControl{rows: sampleUserRows()}
 	serveUserScratch(t, stub, "")
 
@@ -631,40 +529,27 @@ func TestUserListJSONLOverTheWire(t *testing.T) {
 		t.Fatalf("user list -J failed: %v\n%s", err, out.String())
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want one row per line:\n%s", len(lines), out.String())
-	}
+	c.Len(lines, 2, "got %d lines, want one row per line:\n%s", len(lines), out.String())
 	var row map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &row); err != nil {
-		t.Fatalf("line 0 is not a row object: %v\n%s", err, out.String())
-	}
-	if row["username"] != "alice" {
-		t.Fatalf("line 0 = %v, want alice's row", row)
-	}
+	err := json.Unmarshal([]byte(lines[0]), &row)
+	c.NoError(err, "line 0 is not a row object: %v\n%s", err, out.String())
+	c.False(row["username"] != "alice", "line 0 = %v, want alice's row", row)
 }
 
 // TestUserRmSendsTheUsername pins rm's request and its stderr confirmation.
 func TestUserRmSendsTheUsername(t *testing.T) {
+	c := assert.NewAborting(t)
 	stub := &userStubControl{}
 	serveUserScratch(t, stub, "rfk_tok")
 
 	root, out := userTestRoot(t, newUserRmCmd(), "rm", "alice")
-	if err := root.Execute(); err != nil {
-		t.Fatalf("user rm failed: %v\n%s", err, out.String())
-	}
+	err := root.Execute()
+	c.NoError(err, "user rm failed: %v\n%s", err, out.String())
 	req := stub.lastRm()
-	if req == nil {
-		t.Fatal("the stub never saw a RemoveUser request")
-	}
-	if got := req.Msg.GetUsername(); got != "alice" {
-		t.Fatalf("username = %q, want alice", got)
-	}
-	if got := req.Header().Get("Authorization"); got != "Bearer rfk_tok" {
-		t.Fatalf("Authorization = %q, want the profile's token on the wire", got)
-	}
-	if !strings.Contains(out.String(), "removed alice") {
-		t.Fatalf("rm did not confirm the removal:\n%s", out.String())
-	}
+	c.NotNil(req, "the stub never saw a RemoveUser request")
+	c.Eq("alice", req.Msg.GetUsername(), "username")
+	c.Eq("Bearer rfk_tok", req.Header().Get("Authorization"), "Authorization")
+	c.StrContains(out.String(), "removed alice", "rm did not confirm the removal:\n")
 }
 
 // TestUserRmPropagatesARefusal pins that a daemon-side refusal reaches the
@@ -672,14 +557,13 @@ func TestUserRmSendsTheUsername(t *testing.T) {
 // success with an empty confirmation. The refusing handler mirrors the admin
 // gate's shape (connect_users.go's requireUserAdmin).
 func TestUserRmPropagatesARefusal(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	resetProfileCache()
 
 	// os.MkdirTemp, not t.TempDir: the UDS path cap.
 	dir, err := os.MkdirTemp("", "rafiki-u")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "controller.sock")
 
@@ -688,9 +572,7 @@ func TestUserRmPropagatesARefusal(t *testing.T) {
 	writeTokenedProfile(t, sock, "rfk_tok")
 
 	root, out := userTestRoot(t, newUserRmCmd(), "rm", "alice")
-	if err := root.Execute(); err == nil {
-		t.Fatalf("rm succeeded against a refusing daemon:\n%s", out.String())
-	}
+	c.Error(root.Execute(), "rm succeeded against a refusing daemon:\n%s", out.String())
 }
 
 // refusingUserControl refuses RemoveUser the way the daemon's admin gate
@@ -717,8 +599,6 @@ func TestUserCreateHelpPinsNonAdminAndRafikidAdminRecovery(t *testing.T) {
 		"NON-admin",
 		"rafikid user create --admin",
 	} {
-		if !strings.Contains(long, phrase) {
-			t.Errorf("user create help is missing pinned phrase %q; help text:\n%s", phrase, long)
-		}
+		assert.NewCollecting(t).StrContains(long, phrase, "user create help is missing pinned phrase")
 	}
 }

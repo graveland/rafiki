@@ -5,7 +5,6 @@ import (
 	"context"
 	"log/slog"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -14,6 +13,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestShouldAutoResume pins the recovery predicate. The row's status is the
@@ -45,9 +46,7 @@ func TestShouldAutoResume(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldAutoResume(tc.rec); got != tc.want {
-				t.Errorf("shouldAutoResume = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, shouldAutoResume(tc.rec), "shouldAutoResume")
 		})
 	}
 }
@@ -78,9 +77,7 @@ func TestScriptNeedsRestartSettle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := scriptNeedsRestartSettle(tc.rec, tc.own); got != tc.want {
-				t.Errorf("scriptNeedsRestartSettle = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, scriptNeedsRestartSettle(tc.rec, tc.own), "scriptNeedsRestartSettle")
 		})
 	}
 }
@@ -109,9 +106,7 @@ func TestRecoveryActionWorkspaceMode(t *testing.T) {
 				Kind: protocol.KindFundi, Status: "idle", WorkspaceMode: tc.mode,
 				Labels: map[string]string{"rafiki/workspace": "w1", "rafiki/executor": "e1"},
 			}
-			if got := recoveryAction(rec); got != tc.want {
-				t.Errorf("recoveryAction = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, recoveryAction(rec), "recoveryAction")
 		})
 	}
 }
@@ -169,9 +164,7 @@ func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldAutoResume(tc.rec); got != tc.want {
-				t.Errorf("shouldAutoResume = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, shouldAutoResume(tc.rec), "shouldAutoResume")
 		})
 	}
 }
@@ -180,6 +173,7 @@ func TestShouldAutoResumeAfterDaemonCrash(t *testing.T) {
 // A resumed child that keeps rafiki/workspace points at a workspace id that
 // died with the old executor process — the registry is in memory.
 func TestStripStaleBindings(t *testing.T) {
+	c := assert.NewCollecting(t)
 	labels := map[string]string{
 		"rafiki/workspace": "w1",
 		"rafiki/executor":  "e1",
@@ -189,54 +183,42 @@ func TestStripStaleBindings(t *testing.T) {
 	if _, ok := got["rafiki/workspace"]; ok {
 		t.Error("rafiki/workspace survived")
 	}
-	if _, ok := got["rafiki/executor"]; ok {
-		t.Error("rafiki/executor survived")
-	}
-	if got["owner"] != "brent" {
-		t.Error("an unrelated label was dropped")
-	}
-	if got["rafiki/executor-state"] != "unbound" {
-		t.Errorf("executor-state = %q, want %q", got["rafiki/executor-state"], "unbound")
-	}
+	_, ok := got["rafiki/executor"]
+	c.False(ok, "rafiki/executor survived")
+	c.Eq("brent", got["owner"], "an unrelated label was dropped")
+	c.Eq("unbound", got["rafiki/executor-state"], "executor-state")
 }
 
 // TestStripStaleWorkspace proves the pinned-recovery path strips only the
 // workspace id — the executor identity survives so boundExecutor.doRecover can
 // check IsLive and re-provision on the same machine.
 func TestStripStaleWorkspace(t *testing.T) {
+	c := assert.NewCollecting(t)
 	labels := map[string]string{
 		"rafiki/workspace": "w1",
 		"rafiki/executor":  "e1",
 		"owner":            "brent",
 	}
 	got := stripStaleWorkspace(labels)
-	if _, ok := got["rafiki/workspace"]; ok {
-		t.Error("rafiki/workspace survived")
-	}
-	if got["rafiki/executor"] != "e1" {
-		t.Errorf("rafiki/executor = %q, want %q — must survive so doRecover can re-provision on the same machine", got["rafiki/executor"], "e1")
-	}
-	if got["owner"] != "brent" {
-		t.Error("an unrelated label was dropped")
-	}
-	if got["rafiki/executor-state"] != "unbound" {
-		t.Errorf("executor-state = %q, want %q", got["rafiki/executor-state"], "unbound")
-	}
+	_, ok := got["rafiki/workspace"]
+	c.False(ok, "rafiki/workspace survived")
+	c.Eq("e1", got["rafiki/executor"], "rafiki/executor")
+	c.Eq("brent", got["owner"], "an unrelated label was dropped")
+	c.Eq("unbound", got["rafiki/executor-state"], "executor-state")
 }
 
 // TestRecoveryReplaysUnconfirmedMessages is design §8's test #1 in unit form:
 // a message written to a child that died before consuming it must be delivered
 // again, not silently retired.
 func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	rec, _ := st.Accept(ctx, inbox.Inbound{
 		ChildID: "c_1", Mode: inbox.ModePrompt, Source: "subagents",
 		Key: "c_2", Text: "agent c_2 settled",
 	})
-	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(st.MarkSent(ctx, []string{rec.ID}), "MarkSent")
 
 	var delivered []inbox.Batch
 	c := newTestController(t)
@@ -258,9 +240,7 @@ func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
 	c.resetUnconfirmedOnOwnership("c_1")
 	c.replayInbox(ctx, "c_1")
 
-	if len(delivered) != 1 {
-		t.Fatalf("want the settle redelivered after restart, got %d batches", len(delivered))
-	}
+	ck.Len(delivered, 1, "want the settle redelivered after restart, got %d batches", len(delivered))
 	if delivered[0].Source != "subagents" || delivered[0].Frags[0] != "agent c_2 settled" {
 		t.Errorf("replayed batch = %+v", delivered[0])
 	}
@@ -278,20 +258,15 @@ func TestRecoveryReplaysUnconfirmedMessages(t *testing.T) {
 // over every known child, or call a bulk ResetSent) and this fails — c_2's
 // row becomes visible to Pending even though c_2 was never passed in.
 func TestResetUnconfirmedOnOwnershipIsScopedToOneChild(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 
 	rec1, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "for c_1"})
-	if err != nil {
-		t.Fatalf("Accept c_1: %v", err)
-	}
+	ck.NoError(err, "Accept c_1")
 	rec2, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_2", Mode: inbox.ModePrompt, Text: "for c_2"})
-	if err != nil {
-		t.Fatalf("Accept c_2: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec1.ID, rec2.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(err, "Accept c_2")
+	ck.NoError(st.MarkSent(ctx, []string{rec1.ID, rec2.ID}), "MarkSent")
 
 	c := newTestController(t)
 	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
@@ -299,23 +274,15 @@ func TestResetUnconfirmedOnOwnershipIsScopedToOneChild(t *testing.T) {
 	c.resetUnconfirmedOnOwnership("c_1")
 
 	pendingC1, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending c_1: %v", err)
-	}
-	if len(pendingC1) != 1 {
-		t.Fatalf("c_1's row was not reset to pending: %+v", pendingC1)
-	}
+	ck.NoError(err, "Pending c_1")
+	ck.Len(pendingC1, 1, "c_1's row was not reset to pending")
 
 	// c_2's row must still be 'sent' (not reset to pending): Pending only
 	// returns rows in StatePending, so a leaked scope would show up here as
 	// c_2's row becoming visible.
 	pendingC2, err := st.Pending(ctx, "c_2")
-	if err != nil {
-		t.Fatalf("Pending c_2: %v", err)
-	}
-	if len(pendingC2) != 0 {
-		t.Fatalf("c_2's row was reset to pending by a call scoped to c_1: %+v", pendingC2)
-	}
+	ck.NoError(err, "Pending c_2")
+	ck.Empty(pendingC2, "c_2's row was reset to pending by a call scoped to c_1")
 }
 
 // TestRecoveryStaysExitedResetsRatherThanDrops pins the final review's C1
@@ -329,15 +296,12 @@ func TestResetUnconfirmedOnOwnershipIsScopedToOneChild(t *testing.T) {
 // RESETS. A Drop here would have permanently discarded a row a later manual
 // `rafiki resume` should have been able to deliver.
 func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	rec0, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "orphaned"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec0.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(err, "Accept")
+	ck.NoError(st.MarkSent(ctx, []string{rec0.ID}), "MarkSent")
 
 	c := newTestController(t)
 	c.inbox = inbox.NewQueue(inbox.QueueConfig{Store: st})
@@ -360,12 +324,8 @@ func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
 	// resume's idle drain can only ever redeliver 'pending' rows, never
 	// 'sent' ones), and it must NOT be terminal.
 	rows, err := st.Pending(ctx, "c_1")
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("a child staying exited must have its unconfirmed row reset to pending, not dropped: %d rows pending, want 1", len(rows))
-	}
+	ck.NoError(err, "Pending")
+	ck.Len(rows, 1, "a child staying exited must have its unconfirmed row reset to pending, not dropped: %d rows pending, want 1", len(rows))
 	if n, err := st.Sweep(ctx, time.Now().Add(time.Hour)); err != nil || n != 0 {
 		t.Fatalf("swept %d rows (err=%v); want 0 — a reset row is not terminal and must survive the retention sweep", n, err)
 	}
@@ -404,15 +364,12 @@ func TestRecoveryStaysExitedResetsRatherThanDrops(t *testing.T) {
 // because step 1 already ran before anything could mark a fresh 'sent' row,
 // and step 2 is what did that marking.
 func TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered(t *testing.T) {
+	ck := assert.NewAborting(t)
 	st := inbox.NewMemory()
 	ctx := context.Background()
 	rec, err := st.Accept(ctx, inbox.Inbound{ChildID: "c_1", Mode: inbox.ModePrompt, Text: "pre-crash message"})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(err, "Accept")
+	ck.NoError(st.MarkSent(ctx, []string{rec.ID}), "MarkSent")
 
 	var deliveries int
 	c := newTestController(t)
@@ -428,20 +385,14 @@ func TestReplayDoesNotDuplicateARowTheIdleDrainAlreadyDelivered(t *testing.T) {
 	c.resetUnconfirmedOnOwnership("c_1")
 
 	// Step 2: the ordinary idle-transition drain, direct messages only.
-	if err := c.inbox.Deliver(ctx, "c_1", ""); err != nil {
-		t.Fatalf("Deliver (idle drain): %v", err)
-	}
-	if deliveries != 1 {
-		t.Fatalf("deliveries after the idle drain = %d, want 1", deliveries)
-	}
+	ck.NoError(c.inbox.Deliver(ctx, "c_1", ""), "Deliver (idle drain)")
+	ck.Eq(1, deliveries, "deliveries after the idle drain")
 
 	// Step 3: recoverOne's post-resume replay.
 	c.replayInbox(ctx, "c_1")
 
-	if deliveries != 1 {
-		t.Fatalf("deliveries after replayInbox = %d, want 1 (still) — "+
-			"the row was redelivered a second time, exactly the duplicate I2 describes", deliveries)
-	}
+	ck.Eq(1, deliveries, "deliveries after replayInbox = %d, want 1 (still) — "+
+		"the row was redelivered a second time, exactly the duplicate I2 describes", deliveries)
 }
 
 // TestRecoveryOwnership pins design §4.1. Every daemon sharing a database sees
@@ -536,9 +487,7 @@ func TestRecoveryOwnership(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := recoveryOwnership(tc.rec, tc.me, tc.live); got != tc.want {
-				t.Errorf("recoveryOwnership = %v, want %v", got, tc.want)
-			}
+			assert.NewCollecting(t).Eq(tc.want, recoveryOwnership(tc.rec, tc.me, tc.live), "recoveryOwnership")
 		})
 	}
 }
@@ -594,6 +543,7 @@ func captureLogs(t *testing.T) *lockedBuffer {
 // fails. An assertion on the inbox row alone does NOT fail under that
 // mutation — verified — which is why this test does not rest on one.
 func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
+	ck := assert.NewAborting(t)
 	const (
 		childID = "c_foreign"
 		conv    = "22222222-2222-2222-2222-222222222222"
@@ -605,12 +555,8 @@ func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
 	rec1, err := st.Accept(ctx, inbox.Inbound{
 		ChildID: childID, Mode: inbox.ModePrompt, Text: "in flight on the other daemon",
 	})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec1.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(err, "Accept")
+	ck.NoError(st.MarkSent(ctx, []string{rec1.ID}), "MarkSent")
 
 	c := newTestController(t)
 	c.daemonID = "me"
@@ -627,26 +573,19 @@ func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
 
 	c.recoverOne(ctx, rec, map[string]bool{conv: true})
 
-	if got := logs.String(); strings.Contains(got, "auto-resuming fundi child") {
-		t.Fatalf("attempted to resume a child owned by another live daemon; log:\n%s", got)
-	}
+	ck.NotStrContains(logs.String(), "auto-resuming fundi child", "attempted to resume a child owned by another live daemon; log:\n")
 
 	// It is still in the store, so `rafiki list` shows it. We are declining to
 	// RUN it, not hiding it.
-	if _, ok := c.st.Get(childID); !ok {
-		t.Fatalf("foreign-live child must still be loaded into the store")
-	}
+	_, ok := c.st.Get(childID)
+	ck.True(ok, "foreign-live child must still be loaded into the store")
 
 	// Defence in depth, not the primary guard (see the doc comment): its
 	// in-flight row is untouched. Pending only returns StatePending rows, so a
 	// reset would make this non-empty.
 	pending, err := st.Pending(ctx, childID)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("another daemon's in-flight 'sent' row was reset to pending: %+v", pending)
-	}
+	ck.NoError(err, "Pending")
+	ck.Empty(pending, "another daemon's in-flight 'sent' row was reset to pending")
 }
 
 // TestRecoverOneReleasesInboxForItsOwnExitedChild proves the gate did not
@@ -654,6 +593,7 @@ func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
 // takes the planStayExited branch and still resets its unconfirmed rows, which
 // is what lets a later manual `rafiki resume` deliver them.
 func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
+	ck := assert.NewAborting(t)
 	const childID = "c_mine"
 	ctx := context.Background()
 
@@ -661,12 +601,8 @@ func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
 	rec1, err := st.Accept(ctx, inbox.Inbound{
 		ChildID: childID, Mode: inbox.ModePrompt, Text: "queued for my own child",
 	})
-	if err != nil {
-		t.Fatalf("Accept: %v", err)
-	}
-	if err := st.MarkSent(ctx, []string{rec1.ID}); err != nil {
-		t.Fatalf("MarkSent: %v", err)
-	}
+	ck.NoError(err, "Accept")
+	ck.NoError(st.MarkSent(ctx, []string{rec1.ID}), "MarkSent")
 
 	c := newTestController(t)
 	c.daemonID = "me"
@@ -682,12 +618,8 @@ func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
 	c.recoverOne(ctx, rec, nil)
 
 	pending, err := st.Pending(ctx, childID)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-	if len(pending) != 1 {
-		t.Fatalf("this daemon's own exited child must have its unconfirmed rows reset; got %+v", pending)
-	}
+	ck.NoError(err, "Pending")
+	ck.Len(pending, 1, "this daemon's own exited child must have its unconfirmed rows reset; got")
 }
 
 // TestRecoverOneStampsOwnershipOnAnAdoptedRow pins the fix for the
@@ -698,6 +630,7 @@ func TestRecoverOneReleasesInboxForItsOwnExitedChild(t *testing.T) {
 // The row here is a terminal one (the closed-child corpse); the stamp must
 // fire for it too, and no resume may be attempted.
 func TestRecoverOneStampsOwnershipOnAnAdoptedRow(t *testing.T) {
+	ck := assert.NewAborting(t)
 	const childID = "c_adopted"
 	ctx := context.Background()
 	logs := captureLogs(t)
@@ -717,27 +650,16 @@ func TestRecoverOneStampsOwnershipOnAnAdoptedRow(t *testing.T) {
 
 	c.recoverOne(ctx, rec, nil)
 
-	if len(store.adoptions) != 1 {
-		t.Fatalf("AdoptOwnership calls = %d, want 1", len(store.adoptions))
-	}
+	ck.Len(store.adoptions, 1, "AdoptOwnership calls = %d, want 1", len(store.adoptions))
 	if got := store.adoptions[0]; got != [2]string{childID, "me"} {
 		t.Fatalf("AdoptOwnership = %v, want [%s me]", got, childID)
 	}
 
 	snap, ok := c.st.Get(childID)
-	if !ok {
-		t.Fatalf("adopted child not loaded into the store")
-	}
-	if snap.Labels["rafiki/daemon"] != "me" {
-		t.Fatalf("placeholder rafiki/daemon = %q, want %q (Close reads the snapshot)",
-			snap.Labels["rafiki/daemon"], "me")
-	}
-	if snap.Labels["rafiki/parent"] != "c_root" {
-		t.Fatalf("existing labels lost in the stamp: %v", snap.Labels)
-	}
-	if got := logs.String(); strings.Contains(got, "auto-resuming fundi child") {
-		t.Fatalf("a terminal row must not be resumed; log:\n%s", got)
-	}
+	ck.True(ok, "adopted child not loaded into the store")
+	ck.Eq("me", snap.Labels["rafiki/daemon"], "placeholder rafiki/daemon")
+	ck.Eq("c_root", snap.Labels["rafiki/parent"], "existing labels lost in the stamp: %v", snap.Labels)
+	ck.NotStrContains(logs.String(), "auto-resuming fundi child", "a terminal row must not be resumed; log:\n")
 }
 
 // TestRecoverOneDoesNotStampALiveForeignRow keeps the stamp from widening:
@@ -766,9 +688,7 @@ func TestRecoverOneDoesNotStampALiveForeignRow(t *testing.T) {
 
 	c.recoverOne(ctx, rec, map[string]bool{conv: true})
 
-	if len(store.adoptions) != 0 {
-		t.Fatalf("AdoptOwnership called for a foreign-live row: %v", store.adoptions)
-	}
+	assert.NewAborting(t).Empty(store.adoptions, "AdoptOwnership called for a foreign-live row")
 }
 
 // startOrphanStandIn launches a real process the signal path can address, so
@@ -777,9 +697,7 @@ func TestRecoverOneDoesNotStampALiveForeignRow(t *testing.T) {
 func startOrphanStandIn(t *testing.T) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sleep", "120")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleep stand-in: %v", err)
-	}
+	assert.NewAborting(t).NoError(cmd.Start(), "start sleep stand-in")
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
@@ -791,9 +709,7 @@ func startOrphanStandIn(t *testing.T) *exec.Cmd {
 // for liveness while the process runs.
 func procAlive(t *testing.T, pid int) {
 	t.Helper()
-	if err := syscall.Kill(pid, 0); err != nil {
-		t.Fatalf("pid %d should still be alive: %v", pid, err)
-	}
+	assert.NewAborting(t).NoError(syscall.Kill(pid, 0), "pid %d should still be alive", pid)
 }
 
 // waitOrphanDeath waits for the stand-in to actually EXIT — not Kill(pid,0):

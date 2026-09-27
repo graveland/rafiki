@@ -8,16 +8,15 @@ import (
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestParseConfigPairs(t *testing.T) {
+	c := assert.NewAborting(t)
 	pairs, err := parseConfigPairs([]string{"currency.code=CAD", "currency.rate=1.38"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pairs) != 2 {
-		t.Fatalf("got %d pairs, want 2", len(pairs))
-	}
+	c.NoError(err)
+	c.Len(pairs, 2, "got %d pairs, want 2", len(pairs))
 	if pairs[0].key.name != "currency.code" || pairs[0].val != "CAD" {
 		t.Errorf("pair 0 = %+v", pairs[0])
 	}
@@ -27,96 +26,76 @@ func TestParseConfigPairs(t *testing.T) {
 }
 
 func TestParseConfigPairs_MalformedArg(t *testing.T) {
-	if _, err := parseConfigPairs([]string{"currency.code"}); err == nil {
-		t.Fatal("want an error for an arg with no '='")
-	}
+	_, err := parseConfigPairs([]string{"currency.code"})
+	assert.NewAborting(t).Error(err, "want an error for an arg with no '='")
 }
 
 func TestParseConfigPairs_UnknownKey(t *testing.T) {
-	if _, err := parseConfigPairs([]string{"bogus=5"}); err == nil {
-		t.Fatal("want an error for an unregistered key")
-	}
+	_, err := parseConfigPairs([]string{"bogus=5"})
+	assert.NewAborting(t).Error(err, "want an error for an unregistered key")
 }
 
 // A value with its own '=' (unlikely for these keys, but the split must not
 // assume there is exactly one) keeps everything after the first '='.
 func TestParseConfigPairs_ValueContainsEquals(t *testing.T) {
+	c := assert.NewCollecting(t)
 	pairs, err := parseConfigPairs([]string{"currency.code=CA=D"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pairs[0].val != "CA=D" {
-		t.Errorf("val = %q, want %q", pairs[0].val, "CA=D")
-	}
+	c.Require().NoError(err)
+	c.Eq("CA=D", pairs[0].val, "val")
 }
 
 // The whole point of validating against a scratch state first: a later pair
 // failing must not leave an earlier pair applied.
 func TestRunConfigSet_BatchIsAtomic(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
 
 	cmd := newConfigSetCmd()
 	err := cmd.RunE(cmd, []string{"currency.code=CAD", "currency.rate=not-a-number"})
-	if err == nil {
-		t.Fatal("want an error from the invalid second pair")
-	}
+	c.Require().Error(err, "want an error from the invalid second pair")
 
 	got := clientstate.LoadScoped(clientstate.Scope{})
-	if got.Currency != nil {
-		t.Errorf("Currency = %+v, want nil -- the valid first pair must not have applied", got.Currency)
-	}
+	c.Nil(got.Currency, "Currency")
 }
 
 func TestRunConfigSet_AppliesValidBatch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	isolateProfiles(t)
 
 	cmd := newConfigSetCmd()
-	if err := cmd.RunE(cmd, []string{"currency.code=cad", "currency.rate=1.38"}); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(cmd.RunE(cmd, []string{"currency.code=cad", "currency.rate=1.38"}))
 
 	got := clientstate.LoadScoped(clientstate.Scope{})
-	if got.Currency == nil || got.Currency.Code != "CAD" || got.Currency.Rate != 1.38 {
-		t.Errorf("Currency = %+v, want {CAD 1.38} (code uppercased)", got.Currency)
-	}
+	c.False(got.Currency == nil || got.Currency.Code != "CAD" || got.Currency.Rate != 1.38, "Currency = %+v, want {CAD 1.38} (code uppercased)", got.Currency)
 }
 
 func TestRenderConfig_Table(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
 	s := clientstate.State{Currency: &clientstate.Currency{Code: "CAD", Rate: 1.38}}
-	if err := renderConfig(&buf, s, clientstate.State{}, outputTable, false); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(renderConfig(&buf, s, clientstate.State{}, outputTable, false))
 	out := buf.String()
 	for _, want := range []string{"currency.code", "CAD", "currency.rate", "1.38"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output missing %q:\n%s", want, out)
-		}
+		c.StrContains(out, want, "output missing")
 	}
 }
 
 // Unset settings show as "-" (table) rather than an empty cell, matching
 // every other unset column in `rafiki list`.
 func TestRenderConfig_TableUnset(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
-	if err := renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(buf.String(), "-") {
-		t.Fatalf("unset value should render as \"-\":\n%s", buf.String())
-	}
+	c.NoError(renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false))
+	c.StrContains(buf.String(), "-", "unset value should render as \"-\":\n")
 }
 
 func TestRenderConfig_JSON(t *testing.T) {
+	c := assert.NewAborting(t)
 	var buf bytes.Buffer
 	s := clientstate.State{Currency: &clientstate.Currency{Code: "CAD", Rate: 1.38}}
-	if err := renderConfig(&buf, s, clientstate.State{}, outputJSON, false); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(renderConfig(&buf, s, clientstate.State{}, outputJSON, false))
 	out := buf.String()
-	if !strings.Contains(out, `"currency.code": "CAD"`) || !strings.Contains(out, `"currency.rate": "1.38"`) {
-		t.Fatalf("JSON output: %s", out)
-	}
+	c.False(!strings.Contains(out, `"currency.code": "CAD"`) || !strings.Contains(out, `"currency.rate": "1.38"`), "JSON output: %s", out)
 }
 
 // Per-profile is the default; a key is global only when it is a property
@@ -128,21 +107,15 @@ func TestEveryConfigKeyDeclaresItsScopeAndDefaultsToProfile(t *testing.T) {
 		"currency.rate": true,
 	}
 	for _, k := range configKeys {
-		if k.global != global[k.name] {
-			t.Errorf("configKey %q: global = %v, want %v — see the plan's Task 11 before changing this",
-				k.name, k.global, global[k.name])
-		}
+		assert.NewCollecting(t).Eq(global[k.name], k.global, "configKey %q: global = %v, want %v — see the plan's Task 11 before changing this", k.name, k.global, global[k.name])
 	}
 }
 
 func TestConfigShowReportsTheScope(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateProfiles(t)
 	var buf bytes.Buffer
-	if err := renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false); err != nil {
-		t.Fatalf("renderConfig: %v", err)
-	}
+	c.NoError(renderConfig(&buf, clientstate.State{}, clientstate.State{}, outputTable, false), "renderConfig")
 	out := buf.String()
-	if !strings.Contains(out, "SCOPE") {
-		t.Fatalf("config show has no scope column:\n%s", out)
-	}
+	c.StrContains(out, "SCOPE", "config show has no scope column:\n")
 }

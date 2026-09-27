@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestServeProxyInjectsSecretAndStripsCallerCredentials is the checkpoint
@@ -26,6 +28,7 @@ import (
 // reach the target; the injected secret must.
 func TestServeProxyInjectsSecretAndStripsCallerCredentials(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	var seen http.Header
 	var seenPath string
@@ -36,16 +39,12 @@ func TestServeProxyInjectsSecretAndStripsCallerCredentials(t *testing.T) {
 	}))
 	t.Cleanup(inner.Close)
 	target, err := url.Parse(inner.URL)
-	if err != nil {
-		t.Fatalf("parse target: %v", err)
-	}
+	c.NoError(err, "parse target")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := Serve(ctx, tempSocketDir(t), target, "child-secret-1")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
+	c.NoError(err, "serve")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	resp := dial(t, srv.path, func(req *http.Request) {
@@ -56,20 +55,12 @@ func TestServeProxyInjectsSecretAndStripsCallerCredentials(t *testing.T) {
 	}, "/rafiki.v1.ControlService/Spawn")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("proxy status = %d, body %s", resp.StatusCode, body)
-	}
+	c.Eq(http.StatusOK, resp.StatusCode, "proxy status = %d, body %s", resp.StatusCode, body)
 
-	if seenPath != "/rafiki.v1.ControlService/Spawn" {
-		t.Fatalf("proxied path = %q", seenPath)
-	}
-	if got := seen.Get("Authorization"); got != "Bearer child-secret-1" {
-		t.Fatalf("Authorization at target = %q, want the injected secret", got)
-	}
+	c.Eq("/rafiki.v1.ControlService/Spawn", seenPath, "proxied path =")
+	c.Eq("Bearer child-secret-1", seen.Get("Authorization"), "Authorization at target")
 	for _, k := range []string{"X-Rafiki-Session", "X-Rafiki-Other"} {
-		if got := seen.Get(k); got != "" {
-			t.Fatalf("caller-supplied %s leaked to the target: %q", k, got)
-		}
+		c.Eq("", seen.Get(k), "caller-supplied %s leaked to the target", k)
 	}
 }
 
@@ -78,6 +69,7 @@ func TestServeProxyInjectsSecretAndStripsCallerCredentials(t *testing.T) {
 // URL form does.
 func TestServeHandlerFormStripsAndInjects(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	var seen http.Header
 	mux := http.NewServeMux()
@@ -89,9 +81,7 @@ func TestServeHandlerFormStripsAndInjects(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := ServeHandler(ctx, tempSocketDir(t), mux, "handler-secret")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
+	c.NoError(err, "serve")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	resp := dial(t, srv.path, func(req *http.Request) {
@@ -99,15 +89,9 @@ func TestServeHandlerFormStripsAndInjects(t *testing.T) {
 		req.Header.Set("X-Rafiki-Session", "s")
 	}, "/probe")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("handler-proxy status = %d", resp.StatusCode)
-	}
-	if got := seen.Get("Authorization"); got != "Bearer handler-secret" {
-		t.Fatalf("Authorization at handler = %q", got)
-	}
-	if got := seen.Get("X-Rafiki-Session"); got != "" {
-		t.Fatalf("X-Rafiki-Session leaked to the handler: %q", got)
-	}
+	c.Eq(http.StatusOK, resp.StatusCode, "handler-proxy status =")
+	c.Eq("Bearer handler-secret", seen.Get("Authorization"), "Authorization at handler =")
+	c.Eq("", seen.Get("X-Rafiki-Session"), "X-Rafiki-Session leaked to the handler")
 }
 
 // TestServePermissions pins the filesystem contract: dir 0700, socket 0600.
@@ -119,57 +103,43 @@ func TestServeHandlerFormStripsAndInjects(t *testing.T) {
 // pin actually tests the creation path.
 func TestServePermissions(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	t.Cleanup(inner.Close)
 	target, err := url.Parse(inner.URL)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	c.NoError(err, "parse")
 
 	dir := filepath.Join(tempSocketDir(t), "host")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := Serve(ctx, dir, target, "s")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
+	c.NoError(err, "serve")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	fi, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat dir: %v", err)
-	}
-	if got := fi.Mode().Perm(); got != 0o700 {
-		t.Fatalf("dir mode = %o, want 700", got)
-	}
+	c.NoError(err, "stat dir")
+	c.Eq(0o700, fi.Mode().Perm(), "dir mode")
 	fi, err = os.Stat(srv.path)
-	if err != nil {
-		t.Fatalf("stat socket: %v", err)
-	}
-	if got := fi.Mode().Perm(); got != 0o600 {
-		t.Fatalf("socket mode = %o, want 600 (the socket is the credential)", got)
-	}
+	c.NoError(err, "stat socket")
+	c.Eq(0o600, fi.Mode().Perm(), "socket mode")
 }
 
 // TestServeRefusesALiveListener mirrors serveConnectUDS's refuse-not-clobber
 // rule: a second Serve on a live path must fail, never bind over it.
 func TestServeRefusesALiveListener(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	t.Cleanup(inner.Close)
 	target, err := url.Parse(inner.URL)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	c.NoError(err, "parse")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	first, err := Serve(ctx, tempSocketDir(t), target, "s")
-	if err != nil {
-		t.Fatalf("first serve: %v", err)
-	}
+	c.NoError(err, "first serve")
 	t.Cleanup(func() { _ = first.Close() })
 
 	if _, err := Serve(ctx, filepath.Dir(first.path), target, "s"); err == nil {
@@ -181,23 +151,18 @@ func TestServeRefusesALiveListener(t *testing.T) {
 // the socket file is gone and a dial fails.
 func TestCloseUnlinksAndStopsServing(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	t.Cleanup(inner.Close)
 	target, err := url.Parse(inner.URL)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	c.NoError(err, "parse")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := Serve(ctx, tempSocketDir(t), target, "s")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
-	if err := srv.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	c.NoError(err, "serve")
+	c.NoError(srv.Close(), "close")
 	if _, err := os.Stat(srv.path); !os.IsNotExist(err) {
 		t.Fatalf("socket file survived Close: err=%v", err)
 	}
@@ -205,9 +170,7 @@ func TestCloseUnlinksAndStopsServing(t *testing.T) {
 		t.Fatal("dial succeeded after Close; the listener is still serving")
 	}
 	// Idempotent.
-	if err := srv.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
-	}
+	c.NoError(srv.Close(), "second close")
 }
 
 // TestServeHTTP11AndH2C proves both transports the plan promises work
@@ -215,22 +178,19 @@ func TestCloseUnlinksAndStopsServing(t *testing.T) {
 // prior-knowledge h2c client (the Connect client shape).
 func TestServeHTTP11AndH2C(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	inner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	t.Cleanup(inner.Close)
 	target, err := url.Parse(inner.URL)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	c.NoError(err, "parse")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	srv, err := Serve(ctx, tempSocketDir(t), target, "s")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
+	c.NoError(err, "serve")
 	t.Cleanup(func() { _ = srv.Close() })
 
 	// HTTP/1.1: no http2 transport, just a unix dial.
@@ -251,17 +211,11 @@ func TestServeHTTP11AndH2C(t *testing.T) {
 		},
 	}}
 	req, err := http.NewRequest(http.MethodGet, "http://childsock.invalid/any", nil)
-	if err != nil {
-		t.Fatalf("build h2c request: %v", err)
-	}
+	c.NoError(err, "build h2c request")
 	resp2, err := h2c.Do(req)
-	if err != nil {
-		t.Fatalf("h2c request: %v", err)
-	}
+	c.NoError(err, "h2c request")
 	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("h2c request failed: %d", resp2.StatusCode)
-	}
+	c.Eq(http.StatusOK, resp2.StatusCode, "h2c request failed")
 }
 
 // tempSocketDir is a socket path short enough for the kernel's 104-byte
@@ -275,9 +229,7 @@ func tempSocketDir(t *testing.T) string {
 		base = "/tmp"
 	}
 	dir, err := os.MkdirTemp(base, "childsock-it-")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "mkdirtemp")
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
@@ -286,6 +238,7 @@ func tempSocketDir(t *testing.T) string {
 
 func dial(t *testing.T, path string, mutate func(*http.Request), urlPath string) *http.Response {
 	t.Helper()
+	c := assert.NewAborting(t)
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -293,16 +246,12 @@ func dial(t *testing.T, path string, mutate func(*http.Request), urlPath string)
 		},
 	}}
 	req, err := http.NewRequest(http.MethodGet, "http://childsock.invalid"+urlPath, nil)
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
+	c.NoError(err, "build request")
 	req.Header.Set("Content-Type", "application/json")
 	if mutate != nil {
 		mutate(req)
 	}
 	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("dial %s: %v", path, err)
-	}
+	c.NoError(err, "dial %s", path)
 	return resp
 }

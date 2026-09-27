@@ -19,6 +19,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // tokenRoundTripper is the client half of cmd/rafiki's bearerTransport.
@@ -132,15 +134,12 @@ func tlsClient(srv *httptest.Server, token string) rafikiv1connect.ControlClient
 // The unary half: a credentialed call reaches the handler rather than the
 // face's 404.
 func TestCockpitUnaryWorksOverTheSharedTLSListener(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := setupTLSMount(t, nil, nil)
 	resp, err := tlsClient(srv, mountTestToken).ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if err != nil {
-		t.Fatalf("ListChildren over TLS: %v", err)
-	}
-	if len(resp.Msg.GetChildren()) != 1 {
-		t.Fatalf("got %d children, want 1", len(resp.Msg.GetChildren()))
-	}
+	c.NoError(err, "ListChildren over TLS")
+	c.Len(resp.Msg.GetChildren(), 1, "got %d children, want 1", len(resp.Msg.GetChildren()))
 }
 
 // The assertion the remote cockpit rests on. The shared listener advertises
@@ -151,6 +150,7 @@ func TestCockpitUnaryWorksOverTheSharedTLSListener(t *testing.T) {
 // that were wrong, a remote cockpit would connect, list children, and then
 // show a permanently empty transcript.
 func TestStreamEventsSurvivesHTTP11ALPN(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -163,26 +163,18 @@ func TestStreamEventsSurvivesHTTP11ALPN(t *testing.T) {
 		connect.NewRequest(&rafikiv1.StreamEventsRequest{
 			Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
 		}))
-	if err != nil {
-		t.Fatalf("StreamEvents over http/1.1: %v", err)
-	}
+	c.NoError(err, "StreamEvents over http/1.1")
 	if !stream.Receive() {
 		t.Fatalf("no event arrived over http/1.1: %v", stream.Err())
 	}
-	if got := stream.Msg().GetAgentStatus().GetState(); got != "idle" {
-		t.Fatalf("state = %q, want idle", got)
-	}
+	c.Eq("idle", stream.Msg().GetAgentStatus().GetState(), "state")
 
 	// Prove the negotiation really was HTTP/1.1 rather than a silent h2
 	// upgrade making the test vacuous.
 	probe, err := srv.Client().Get(srv.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("probe: %v", err)
-	}
+	c.NoError(err, "probe")
 	defer probe.Body.Close()
-	if probe.ProtoMajor != 1 {
-		t.Fatalf("negotiated HTTP/%d; this test is only meaningful over HTTP/1.1", probe.ProtoMajor)
-	}
+	c.Eq(1, probe.ProtoMajor, "negotiated HTTP/")
 }
 
 // The listener is public, so an uncredentialed cockpit must be refused. The
@@ -192,18 +184,14 @@ func TestCockpitOverTLSRefusesAnUncredentialedCaller(t *testing.T) {
 	srv := setupTLSMount(t, nil, nil)
 	_, err := tlsClient(srv, "").ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnauthenticated {
-		t.Fatalf("want CodeUnauthenticated, got %v (%v)", connect.CodeOf(err), err)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnauthenticated, connect.CodeOf(err), "want CodeUnauthenticated, got %v (%v)", connect.CodeOf(err), err)
 }
 
 func TestCockpitOverTLSRefusesAWrongToken(t *testing.T) {
 	srv := setupTLSMount(t, nil, nil)
 	_, err := tlsClient(srv, "wrong").ListChildren(context.Background(),
 		connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnauthenticated {
-		t.Fatalf("want CodeUnauthenticated, got %v (%v)", connect.CodeOf(err), err)
-	}
+	assert.NewAborting(t).Eq(connect.CodeUnauthenticated, connect.CodeOf(err), "want CodeUnauthenticated, got %v (%v)", connect.CodeOf(err), err)
 }
 
 // The identity the face resolved must survive into the lifecycle seam, because
@@ -211,37 +199,29 @@ func TestCockpitOverTLSRefusesAWrongToken(t *testing.T) {
 // matched by executor admission selectors. connectLifecycle.Spawn hardcoded
 // users.Identity{} for as long as the socket was the only reachable mount.
 func TestTheFacesIdentityReachesTheLifecycleSeam(t *testing.T) {
+	c := assert.NewAborting(t)
 	lc := &identityLifecycle{}
 	srv := setupTLSMount(t, nil, lc)
 
 	_, err := tlsClient(srv, mountTestToken).Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp"}))
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if lc.saw == nil {
-		t.Fatal("no identity on the handler's context: a remote spawn would be unowned")
-	}
-	if lc.saw.Username != "brent" {
-		t.Fatalf("username = %q, want the authenticated caller", lc.saw.Username)
-	}
+	c.NoError(err, "Spawn")
+	c.NotNil(lc.saw, "no identity on the handler's context: a remote spawn would be unowned")
+	c.Eq("brent", lc.saw.Username, "username")
 }
 
 // ServeMux prefers the longest matching pattern, so the Connect prefix must
 // win over the face's "/". Getting this wrong is invisible until a cockpit
 // request comes back as CodeUnimplemented.
 func TestTheProxyFaceDoesNotShadowTheConnectRoutes(t *testing.T) {
+	c := assert.NewAborting(t)
 	srv := setupTLSMount(t, nil, nil)
 	if _, err := tlsClient(srv, mountTestToken).GetChild(context.Background(),
 		connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: "c_1"})); err != nil {
 		t.Fatalf("GetChild: %v", err)
 	}
 	resp, err := srv.Client().Get(srv.URL + "/nope")
-	if err != nil {
-		t.Fatalf("face probe: %v", err)
-	}
+	c.NoError(err, "face probe")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("face status = %d, want the face's own answer", resp.StatusCode)
-	}
+	c.Eq(http.StatusNotFound, resp.StatusCode, "face status")
 }

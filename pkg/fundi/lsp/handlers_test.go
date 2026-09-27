@@ -3,6 +3,8 @@ package lsp
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestHandleWorkspaceConfiguration_NilParams covers a server that sends the
@@ -10,13 +12,10 @@ import (
 // still be a well-formed empty array, not a nil that marshals to JSON null,
 // which is not the same wire shape as "[]".
 func TestHandleWorkspaceConfiguration_NilParams(t *testing.T) {
+	c := assert.NewAborting(t)
 	result, err := HandleWorkspaceConfiguration(nil)
-	if err != nil {
-		t.Fatalf("HandleWorkspaceConfiguration(nil): %v", err)
-	}
-	if len(result) != 0 {
-		t.Fatalf("got %d results, want 0", len(result))
-	}
+	c.NoError(err, "HandleWorkspaceConfiguration(nil)")
+	c.Empty(result, "got %d results, want 0", len(result))
 }
 
 // TestHandleWorkspaceConfiguration_OneResultPerItem pins the ordering and
@@ -24,18 +23,13 @@ func TestHandleWorkspaceConfiguration_NilParams(t *testing.T) {
 // so a wrong-length array or nulls-in-the-wrong-order would silently
 // misattribute settings.
 func TestHandleWorkspaceConfiguration_OneResultPerItem(t *testing.T) {
+	c := assert.NewCollecting(t)
 	raw := json.RawMessage(`{"items":[{"section":"gopls"},{"section":"go"},{"section":"gopls.staticcheck"}]}`)
 	result, err := HandleWorkspaceConfiguration(&raw)
-	if err != nil {
-		t.Fatalf("HandleWorkspaceConfiguration: %v", err)
-	}
-	if len(result) != 3 {
-		t.Fatalf("got %d results, want 3 (one per requested item)", len(result))
-	}
+	c.Require().NoError(err, "HandleWorkspaceConfiguration")
+	c.Require().Len(result, 3, "got %d results, want 3 (one per requested item)", len(result))
 	for i, r := range result {
-		if r != nil {
-			t.Errorf("item %d: got %v, want null", i, r)
-		}
+		c.Nil(r, "item %d: got %v, want null", i, r)
 	}
 }
 
@@ -45,7 +39,6 @@ func TestHandleWorkspaceConfiguration_OneResultPerItem(t *testing.T) {
 // blanket success would not be.
 func TestHandleWorkspaceConfiguration_MalformedParams(t *testing.T) {
 	raw := json.RawMessage(`not json`)
-	if _, err := HandleWorkspaceConfiguration(&raw); err == nil {
-		t.Fatal("expected an error for malformed params, got nil")
-	}
+	_, err := HandleWorkspaceConfiguration(&raw)
+	assert.NewAborting(t).Error(err, "expected an error for malformed params, got nil")
 }

@@ -9,6 +9,8 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/llm"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stallWriter is an io.Writer whose Write blocks forever once stall() is
@@ -71,14 +73,13 @@ func (s panickingSender) New(context.Context, anthropic.MessageNewParams) (*anth
 // TestRunnerPanicInTurnWorkerEndsTheChild in internal/inproc, which requires
 // the daemon to actually receive it, and which a plain reversal fails.
 func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
+	c := assert.NewCollecting(t)
 	silenceSlog(t)
 	w := newStallWriter()
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", panickingSender{w: w}),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	fatalCalled := make(chan error, 1)
 	fe := NewFrontend(nil, w, nil)
@@ -91,9 +92,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 		ConvOpts: []llm.ConvOption{llm.NewConversation("", "agent")},
 		OnFatal:  func(err error) { fatalCalled <- err },
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 	t.Cleanup(w.release)
 
@@ -103,9 +102,7 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 	// fires at all: fatal() is parked in Emit and OnFatal is never reached.
 	select {
 	case ferr := <-fatalCalled:
-		if ferr == nil {
-			t.Error("OnFatal was called with a nil error")
-		}
+		c.Error(ferr, "OnFatal was called with a nil error")
 	case <-time.After(20 * time.Second):
 		t.Fatal("OnFatal was never called: fatal() is blocked emitting agent_error to a reader " +
 			"that stopped consuming, inside the path whose only job is to end this child")
@@ -137,14 +134,13 @@ func TestFatalDoesNotBlockOnAStalledReader(t *testing.T) {
 // OnFatal runs, so an owner that tears the child down on that callback cannot
 // truncate it.
 func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	silenceSlog(t)
 	out := &syncBuffer{}
 	client, err := llm.NewClient(
 		llm.WithProviderSender("anthropic", panickingSender{w: newStallWriter()}),
 		llm.WithDefaultModel("claude-x"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	// The sender above stalls its OWN throwaway writer, not this one, so the
 	// Frontend's writes here never block.
 	fe := NewFrontend(nil, out, nil)
@@ -161,9 +157,7 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 		// the child: the agent_error must already be there.
 		OnFatal: func(error) { seenAtFatal <- out.String() },
 	}, fe)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	eng.Start() // open the worker gate; the harness has no boot-time work
 
 	eng.HandlePrompt("go")
@@ -176,8 +170,6 @@ func TestFatalEmitsTheAgentErrorWhenTheReaderIsAlive(t *testing.T) {
 	eng.Wait()
 
 	types := frameTypes(t, snapshot)
-	if countFrames(types, "agent_error") != 1 {
-		t.Errorf("no agent_error frame on the wire by the time OnFatal ran; the owner's teardown "+
-			"can now truncate the only explanation of why the child died: %v", types)
-	}
+	c.Eq(1, countFrames(types, "agent_error"), "no agent_error frame on the wire by the time OnFatal ran; the owner's teardown "+
+		"can now truncate the only explanation of why the child died: %v", types)
 }

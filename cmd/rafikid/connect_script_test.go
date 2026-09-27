@@ -19,6 +19,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // scriptHubFixture: one controller with an in-memory childstore, a capturing
@@ -55,20 +57,17 @@ func scriptParented(c *Controller) {
 // script's own id, under the "script" source — so it coalesces and defers
 // exactly like a subagent settle.
 func TestScriptReportPushesToTheParentsBuffer(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, cap, _, clk := scriptHubFixture(t)
 	scriptParented(c)
 	hub := c.connectScriptHub()
 
-	if err := hub.Report(context.Background(), "c_script", "progress", `{"step":1}`); err != nil {
-		t.Fatalf("Report: %v", err)
-	}
+	ck.NoError(hub.Report(context.Background(), "c_script", "progress", `{"step":1}`), "Report")
 
 	// The buffer debounces; the fake clock flushes it.
 	clk.Advance(6 * time.Second)
 	batches := cap.batches()
-	if len(batches) != 1 {
-		t.Fatalf("want 1 batch to the parent, got %d: %+v", len(batches), batches)
-	}
+	ck.Len(batches, 1, "want 1 batch to the parent, got %d", len(batches))
 	if batches[0].childID != "c_coord" || batches[0].source != scriptEventSource {
 		t.Fatalf("batch = %+v, want parent c_coord / source %q", batches[0], scriptEventSource)
 	}
@@ -84,89 +83,64 @@ func TestScriptReportPushesToTheParentsBuffer(t *testing.T) {
 // script with no parent appends its report to its OWN event log as a durable
 // script_report event.
 func TestScriptReportTopLevelWritesItsOwnDurableLog(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, cap, elog, clk := scriptHubFixture(t)
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_top", Name: "top", Status: protocol.StatusStreaming, StartedAt: time.Now(),
 	})
 	hub := c.connectScriptHub()
 
-	if err := hub.Report(context.Background(), "c_top", "error", `{"msg":"boom"}`); err != nil {
-		t.Fatalf("Report: %v", err)
-	}
+	ck.NoError(hub.Report(context.Background(), "c_top", "error", `{"msg":"boom"}`), "Report")
 	clk.Advance(6 * time.Second)
-	if batches := cap.batches(); len(batches) != 0 {
-		t.Fatalf("a top-level report must not reach any buffer: %+v", batches)
-	}
+	ck.Empty(cap.batches(), "a top-level report must not reach any buffer")
 	recs, err := elog.Read(context.Background(), "c_top", -1, 10)
-	if err != nil {
-		t.Fatalf("event log read: %v", err)
-	}
-	if len(recs) != 1 {
-		t.Fatalf("want 1 durable event, got %d", len(recs))
-	}
+	ck.NoError(err, "event log read")
+	ck.Len(recs, 1, "want 1 durable event, got %d", len(recs))
 	var ev rafikiv1.Event
-	if err := protojson.Unmarshal(recs[0].Payload, &ev); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
-	}
+	ck.NoError(protojson.Unmarshal(recs[0].Payload, &ev), "unmarshal payload")
 	report := ev.GetScriptReport()
 	if report == nil || report.GetKind() != "error" || report.GetDataJson() != `{"msg":"boom"}` {
 		t.Fatalf("payload = %+v", &ev)
 	}
-	if recs[0].Ordinal != 0 {
-		t.Fatalf("durable report has ordinal %d, want 0", recs[0].Ordinal)
-	}
+	ck.Eq(0, recs[0].Ordinal, "durable report has ordinal")
 }
 
 // TestSetResultStoresLastWriteWins pins 2.3's storage half: the result lands
 // on the calling child's session, the durable write is attempted, and a
 // second call replaces the first.
 func TestSetResultStoresLastWriteWins(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, _, _, _ := scriptHubFixture(t)
 	scriptParented(c)
 	hub := c.connectScriptHub()
 
-	if err := hub.SetResult(context.Background(), "c_script", `{"answer":1}`); err != nil {
-		t.Fatalf("first SetResult: %v", err)
-	}
-	if err := hub.SetResult(context.Background(), "c_script", `{"answer":2}`); err != nil {
-		t.Fatalf("second SetResult: %v", err)
-	}
+	ck.NoError(hub.SetResult(context.Background(), "c_script", `{"answer":1}`), "first SetResult")
+	ck.NoError(hub.SetResult(context.Background(), "c_script", `{"answer":2}`), "second SetResult")
 	snap, ok := c.st.Get("c_script")
-	if !ok {
-		t.Fatal("child vanished")
-	}
-	if snap.Result != `{"answer":2}` {
-		t.Fatalf("Result = %q, want the last write", snap.Result)
-	}
+	ck.True(ok, "child vanished")
+	ck.Eq(`{"answer":2}`, snap.Result, "Result")
 
 	err := hub.SetResult(context.Background(), "c_unknown", `{}`)
-	if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("SetResult(unknown) = %v, want %v", err, connect.CodeNotFound)
-	}
+	ck.Eq(connect.CodeNotFound, connect.CodeOf(err), "SetResult(unknown) = %v, want", err)
 }
 
 // TestSettleFragmentCarriesResult pins the settle half of 2.3: a child with a
 // stored result injects it verbatim into the parent's fragment; one without a
 // result is unchanged.
 func TestSettleFragmentCarriesResult(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, cap, _, clk := scriptHubFixture(t)
 	scriptParented(c)
-	if err := c.st.Update("c_script", func(s *childstore.Session) {
+	ck.NoError(c.st.Update("c_script", func(s *childstore.Session) {
 		s.Result = `{"answer":42}`
-	}); err != nil {
-		t.Fatalf("store result: %v", err)
-	}
+	}), "store result")
 
 	c.handleStatusChange("c_script", protocol.StatusIdle, protocol.StatusStreaming)
 	clk.Advance(6 * time.Second)
 	batches := cap.batches()
-	if len(batches) != 1 || len(batches[0].fragments) != 1 {
-		t.Fatalf("want 1 batch of 1 fragment, got %+v", batches)
-	}
+	ck.False(len(batches) != 1 || len(batches[0].fragments) != 1, "want 1 batch of 1 fragment, got %+v", batches)
 	frag := batches[0].fragments[0]
-	if !strings.Contains(frag, "final result of c_script") || !strings.Contains(frag, `{"answer":42}`) {
-		t.Fatalf("fragment = %q", frag)
-	}
+	ck.False(!strings.Contains(frag, "final result of c_script") || !strings.Contains(frag, `{"answer":42}`), "fragment = %q", frag)
 }
 
 // TestScriptReceiveDrainsThePulledBatch pins the F1 fix: Queue.Pull consumes
@@ -175,6 +149,7 @@ func TestSettleFragmentCarriesResult(t *testing.T) {
 // nothing behind it (a stop was requested). Driven through Recv, the way the
 // Connect handler drives it, so the done latch engages on the abort stop.
 func TestScriptReceiveDrainsThePulledBatch(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, _, _, _ := scriptHubFixture(t)
 	scriptParented(c)
 	mem := inbox.NewMemory()
@@ -202,36 +177,24 @@ func TestScriptReceiveDrainsThePulledBatch(t *testing.T) {
 
 	hub := c.connectScriptHub()
 	stream, err := hub.Receive(context.Background(), "c_script")
-	if err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	ck.NoError(err, "Receive")
 	ctx := context.Background()
 
 	// One pull consumed all four rows — none stays pending after the first
 	// delivery, which is what makes retention on the stream load-bearing.
 	m, err := stream.Recv(ctx)
-	if err != nil || m.GetText().GetText() != "row-a" ||
-		m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_PROMPT {
-		t.Fatalf("first delivery = %+v err=%v", m, err)
-	}
+	ck.False(err != nil || m.GetText().GetText() != "row-a" ||
+		m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_PROMPT, "first delivery = %+v err=%v", m, err)
 	pending, err := mem.Pending(ctx, "c_script")
-	if err != nil {
-		t.Fatalf("pending read: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pull consumed %d rows, want 0 pending", len(pending))
-	}
+	ck.NoError(err, "pending read")
+	ck.Empty(pending, "pull consumed %d rows, want 0 pending", len(pending))
 
 	// The rest of the retained batch: row-b (steer), then the abort's stop.
 	m, err = stream.Recv(ctx)
-	if err != nil || m.GetText().GetText() != "row-b" ||
-		m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_STEER {
-		t.Fatalf("second delivery = %+v err=%v", m, err)
-	}
+	ck.False(err != nil || m.GetText().GetText() != "row-b" ||
+		m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_STEER, "second delivery = %+v err=%v", m, err)
 	m, err = stream.Recv(ctx)
-	if err != nil || m.GetStop().GetReason() != "abort requested" {
-		t.Fatalf("abort delivery = %+v err=%v", m, err)
-	}
+	ck.False(err != nil || m.GetStop().GetReason() != "abort requested", "abort delivery = %+v err=%v", m, err)
 
 	// The abort ends the stream: row-c — accepted after the stop was
 	// requested — is discarded, not delivered, and the stream stays ended.
@@ -244,6 +207,7 @@ func TestScriptReceiveDrainsThePulledBatch(t *testing.T) {
 // as text, an abort row arrives as the stop variant, and the child's exit
 // ends the stream — each pulled row consumed exactly once.
 func TestScriptReceiveStreamsInboxAndStops(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, _, _, _ := scriptHubFixture(t)
 	scriptParented(c)
 	mem := inbox.NewMemory()
@@ -254,9 +218,7 @@ func TestScriptReceiveStreamsInboxAndStops(t *testing.T) {
 
 	hub := c.connectScriptHub()
 	stream, err := hub.Receive(context.Background(), "c_script")
-	if err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	ck.NoError(err, "Receive")
 
 	// Nothing yet: the poll fires on the interval, so drive one poll with a
 	// short-deadline context and expect it to time out, not deliver.
@@ -273,11 +235,9 @@ func TestScriptReceiveStreamsInboxAndStops(t *testing.T) {
 		t.Fatalf("accept prompt: %v", err)
 	}
 	m, stop, err := stream.(*scriptStream).pollOnce(context.Background())
-	if err != nil || stop || m == nil || m.GetText().GetText() != "do the work" ||
+	ck.False(err != nil || stop || m == nil || m.GetText().GetText() != "do the work" ||
 		m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_PROMPT ||
-		len(m.GetText().GetMessageIds()) != 1 {
-		t.Fatalf("prompt delivery = %+v stop=%v err=%v", m, stop, err)
-	}
+		len(m.GetText().GetMessageIds()) != 1, "prompt delivery = %+v stop=%v err=%v", m, stop, err)
 
 	if _, err := c.inbox.Accept(context.Background(), inbox.Inbound{
 		ChildID: "c_script", Mode: inbox.ModeSteer, Text: "faster",
@@ -285,9 +245,7 @@ func TestScriptReceiveStreamsInboxAndStops(t *testing.T) {
 		t.Fatalf("accept steer: %v", err)
 	}
 	m, stop, err = stream.(*scriptStream).pollOnce(context.Background())
-	if err != nil || stop || m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_STEER {
-		t.Fatalf("steer delivery = %+v stop=%v err=%v", m, stop, err)
-	}
+	ck.False(err != nil || stop || m.GetText().GetMode() != rafikiv1.SendMode_SEND_MODE_STEER, "steer delivery = %+v stop=%v err=%v", m, stop, err)
 
 	if _, err := c.inbox.Accept(context.Background(), inbox.Inbound{
 		ChildID: "c_script", Mode: inbox.ModeAbort,
@@ -295,26 +253,18 @@ func TestScriptReceiveStreamsInboxAndStops(t *testing.T) {
 		t.Fatalf("accept abort: %v", err)
 	}
 	m, stop, err = stream.(*scriptStream).pollOnce(context.Background())
-	if err != nil || !stop || m.GetStop().GetReason() != "abort requested" {
-		t.Fatalf("abort delivery = %+v stop=%v err=%v", m, stop, err)
-	}
+	ck.False(err != nil || !stop || m.GetStop().GetReason() != "abort requested", "abort delivery = %+v stop=%v err=%v", m, stop, err)
 
 	// Every pulled row is consumed: the store holds nothing pending.
 	rows, err := mem.Pending(context.Background(), "c_script")
-	if err != nil {
-		t.Fatalf("pending read: %v", err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("pulled rows are still pending: %+v", rows)
-	}
+	ck.NoError(err, "pending read")
+	ck.Empty(rows, "pulled rows are still pending")
 
 	// The child exits: the stream stops and stays stopped. The terminal stop
 	// goes through Recv (as the handler drives it), so the done latch engages.
 	_, _ = c.st.SetStatus("c_script", protocol.StatusExited)
 	m, err = stream.Recv(context.Background())
-	if err != nil || m.GetStop().GetReason() != "child exited" {
-		t.Fatalf("exit delivery = %+v err=%v", m, err)
-	}
+	ck.False(err != nil || m.GetStop().GetReason() != "child exited", "exit delivery = %+v err=%v", m, err)
 	if _, err := stream.Recv(context.Background()); !errors.Is(err, io.EOF) {
 		t.Fatalf("Recv after terminal stop = %v, want io.EOF", err)
 	}

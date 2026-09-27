@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestIsAbortFrame(t *testing.T) {
@@ -31,9 +32,8 @@ func TestIsAbortFrame(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isAbortFrame([]byte(tc.frame)); got != tc.want {
-				t.Fatalf("isAbortFrame(%q) = %v, want %v", tc.frame, got, tc.want)
-			}
+			got := isAbortFrame([]byte(tc.frame))
+			assert.NewAborting(t).Eq(tc.want, got, "isAbortFrame(%q) = %v, want", tc.frame, got)
 		})
 	}
 }
@@ -55,9 +55,7 @@ func newClaudeTestChild(t *testing.T, script string) (*Controller, string) {
 	defer cancel()
 
 	res, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn claude: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "spawn claude")
 
 	// Wait for SessionID to be sniffed (the fake emits system/init immediately).
 	deadline := time.Now().Add(5 * time.Second)
@@ -72,6 +70,7 @@ func newClaudeTestChild(t *testing.T, script string) (*Controller, string) {
 }
 
 func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
+	ck := assert.NewAborting(t)
 	// Fake claude: emits system/init, then loops reading stdin (blocking).
 	// Does NOT trap SIGINT — relies on default SIGINT termination so the test
 	// harness's externally-delivered SIGINT reliably kills the process.
@@ -88,22 +87,16 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 		"printf '%s\\n' \"{\\\"type\\\":\\\"system\\\",\\\"subtype\\\":\\\"init\\\",\\\"session_id\\\":\\\"$SID\\\",\\\"model\\\":\\\"claude-opus-4-8\\\"}\"\n" +
 		"while IFS= read -r line; do :; done\n" +
 		"while true; do sleep 0.05; done\n"
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatalf("write fake: %v", err)
-	}
+	ck.NoError(os.WriteFile(script, []byte(body), 0o755), "write fake")
 
 	c, childID := newClaudeTestChild(t, script)
 
 	// Capture the live process PID before abort.
 	chBefore, ok := c.cm.Get(childID)
-	if !ok {
-		t.Fatalf("child %s not live before abort", childID)
-	}
+	ck.True(ok, "child %s not live before abort", childID)
 	pidBefore := chBefore.PID()
 
-	if err := c.Send(childID, []byte(`{"type":"abort"}`)); err != nil {
-		t.Fatalf("send abort: %v", err)
-	}
+	ck.NoError(c.Send(childID, []byte(`{"type":"abort"}`)), "send abort")
 
 	// Child must still be live under the same childID (resumed), with a NEW pid,
 	// and must reach idle.
@@ -116,12 +109,8 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if chAfter == nil {
-		t.Fatal("child was not resumed under the same childID after abort")
-	}
-	if chAfter.PID() == pidBefore {
-		t.Fatal("expected a new process after interrupt+resume")
-	}
+	ck.NotNil(chAfter, "child was not resumed under the same childID after abort")
+	ck.NotEq(pidBefore, chAfter.PID(), "expected a new process after interrupt+resume")
 
 	// SessionID arrives on a later frame than the pid/status transition the loop
 	// above waits for, so it needs its own wait. Asserting it immediately made
@@ -136,9 +125,7 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if gotSession != "got-fresh" {
-		t.Fatalf("resumed session id = %q, want got-fresh (proves --resume <id> was threaded)", gotSession)
-	}
+	ck.Eq("got-fresh", gotSession, "resumed session id")
 }
 
 // TestBuildDarajaAbortSpec_UsesFreshSessionNotOriginalLaunch proves the whole
@@ -148,27 +135,18 @@ func TestHandleClaudeAbort_InterruptsAndResumes(t *testing.T) {
 // freshly-sniffed session id instead, or the restarted process silently
 // starts a brand-new conversation and discards history.
 func TestBuildDarajaAbortSpec_UsesFreshSessionNotOriginalLaunch(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Model:         "claude-sonnet-5",
 		ResumeSession: "", // the ORIGINAL launch's spec — empty for a fresh spawn
 	}
 	spec := buildDarajaAbortSpec(snap, "sess-live-sniffed")
 
-	if spec.Kind != darajapb.Kind_KIND_CLAUDE {
-		t.Fatalf("Kind = %v, want KIND_CLAUDE", spec.Kind)
-	}
-	if spec.Claude == nil {
-		t.Fatal("Claude params must not be nil")
-	}
-	if spec.Claude.Model != "claude-sonnet-5" {
-		t.Errorf("Model = %q, want the child's own model preserved across the restart", spec.Claude.Model)
-	}
-	if spec.Claude.ResumeSession != "sess-live-sniffed" {
-		t.Errorf("ResumeSession = %q, want the freshly sniffed session id, not the original launch's (empty)", spec.Claude.ResumeSession)
-	}
-	if spec.Claude.PermissionMode != "bypassPermissions" {
-		t.Errorf("PermissionMode = %q, want the same default claudeRunner launches with", spec.Claude.PermissionMode)
-	}
+	c.Require().Eq(darajapb.Kind_KIND_CLAUDE, spec.Kind, "Kind")
+	c.Require().NotNil(spec.Claude, "Claude params must not be nil")
+	c.Eq("claude-sonnet-5", spec.Claude.Model, "Model")
+	c.Eq("sess-live-sniffed", spec.Claude.ResumeSession, "ResumeSession")
+	c.Eq("bypassPermissions", spec.Claude.PermissionMode, "PermissionMode")
 }
 
 // TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch proves the branch
@@ -179,31 +157,26 @@ func TestBuildDarajaAbortSpec_UsesFreshSessionNotOriginalLaunch(t *testing.T) {
 // hang forever waiting on a process that will never report Exited the way a
 // daraja-routed child's relay stream does.
 func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := newTestController(t)
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fakeclaude.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/bash\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\",\"model\":\"claude-sonnet-5\"}'\ncat >/dev/null\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	c.NoError(os.WriteFile(script, []byte("#!/bin/bash\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\",\"model\":\"claude-sonnet-5\"}'\ncat >/dev/null\n"), 0o755), "write fake claude")
 
 	req := protocol.SpawnRequest{Kind: "claude", Cwd: t.TempDir(), PiBinary: script, NoSession: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := ctrl.Spawn(ctx, req, users.Identity{})
-	if err != nil {
-		t.Fatalf("spawn claude: %v", err)
-	}
+	c.NoError(err, "spawn claude")
 	// Stamp the label a real daraja launch would have set (claudeRunner), on
 	// a child that is actually a local subprocess — sufficient to drive the
 	// branch predicate without standing up a real executor+daraja stack.
-	if err := ctrl.st.Update(res.ChildID, func(s *childstore.Session) {
+	c.NoError(ctrl.st.Update(res.ChildID, func(s *childstore.Session) {
 		if s.Labels == nil {
 			s.Labels = map[string]string{}
 		}
 		s.Labels["rafiki/executor"] = "01test0000000000000000000"
-	}); err != nil {
-		t.Fatalf("stamp label: %v", err)
-	}
+	}), "stamp label")
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -214,12 +187,8 @@ func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
 	}
 
 	err = ctrl.Send(res.ChildID, []byte(`{"type":"abort"}`))
-	if err == nil {
-		t.Fatal("want an error: no daraja pool is wired in this test controller")
-	}
-	if got := err.Error(); got != "daraja pool not wired" {
-		t.Fatalf("err = %q, want the daraja-pool-not-wired refusal (proves the label routed to handleDarajaClaudeAbort, not the local-subprocess path)", got)
-	}
+	c.Error(err, "want an error: no daraja pool is wired in this test controller")
+	c.Eq("daraja pool not wired", err.Error(), "err")
 }
 
 // TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields pins the two
@@ -231,6 +200,7 @@ func TestHandleClaudeAbort_DarajaChildTakesTheRestartBranch(t *testing.T) {
 // record-requests — stays deliberately omitted: Restart never rebuilds the
 // environment, only argv.)
 func TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	snap := childstore.Snapshot{
 		Model:              "claude-sonnet-5",
 		AppendSystemPrompt: "be terse",
@@ -238,13 +208,7 @@ func TestBuildDarajaAbortSpec_CarriesArgvShapedRestartFields(t *testing.T) {
 	}
 	spec := buildDarajaAbortSpec(snap, "sess-live-sniffed")
 
-	if spec.Claude == nil {
-		t.Fatal("Claude params must not be nil")
-	}
-	if spec.Claude.AppendSystemPrompt != "be terse" {
-		t.Errorf("AppendSystemPrompt = %q, want the snapshot's value preserved across the restart", spec.Claude.AppendSystemPrompt)
-	}
-	if !slices.Equal(spec.Claude.ExtraArgs, []string{"--foo", "bar"}) {
-		t.Errorf("ExtraArgs = %v, want the snapshot's operator args preserved across the restart", spec.Claude.ExtraArgs)
-	}
+	c.Require().NotNil(spec.Claude, "Claude params must not be nil")
+	c.Eq("be terse", spec.Claude.AppendSystemPrompt, "AppendSystemPrompt")
+	c.EqDiff([]string{"--foo", "bar"}, spec.Claude.ExtraArgs, "ExtraArgs")
 }

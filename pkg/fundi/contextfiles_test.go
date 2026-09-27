@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // isolateHome points $HOME at an empty temp directory and clears
@@ -35,15 +37,13 @@ func captureSlog(t *testing.T) *syncBuffer {
 
 func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c := assert.NewAborting(t)
+	c.NoError(os.MkdirAll(filepath.Dir(path), 0o755))
+	c.NoError(os.WriteFile(path, []byte(content), 0o644))
 }
 
 func TestLoadContextFilesUserGlobal(t *testing.T) {
+	c := assert.NewAborting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "") // force the ~/.config fallback, ignoring any real value
@@ -52,12 +52,8 @@ func TestLoadContextFilesUserGlobal(t *testing.T) {
 
 	cwd := t.TempDir() // no git root, no local instruction files
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "GLOBAL_MARKER") {
-		t.Fatalf("expected global instructions-file content, got %q", got)
-	}
+	c.NoError(err)
+	c.StrContains(got, "GLOBAL_MARKER", "expected global instructions-file content, got")
 }
 
 // TestLoadContextFiles_UsesFundiInstructionsNotClaude locks down the point of
@@ -65,6 +61,7 @@ func TestLoadContextFilesUserGlobal(t *testing.T) {
 // paths.InstructionsFile() ($RAFIKI_INSTRUCTIONS, else <ConfigDir>/instructions.md),
 // never from Claude Code's own ~/.claude/CLAUDE.md.
 func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -77,15 +74,9 @@ func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
 	t.Setenv("RAFIKI_INSTRUCTIONS", inst)
 
 	got, err := LoadContextFiles(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "FUNDI-INSTRUCTIONS-MARKER") {
-		t.Error("did not load $RAFIKI_INSTRUCTIONS")
-	}
-	if strings.Contains(got, "CLAUDE-PROFILE-MARKER") {
-		t.Error("read ~/.claude/CLAUDE.md; fundi must not read its config from Claude's directory")
-	}
+	c.Require().NoError(err)
+	c.StrContains(got, "FUNDI-INSTRUCTIONS-MARKER", "did not load $RAFIKI_INSTRUCTIONS")
+	c.NotStrContains(got, "CLAUDE-PROFILE-MARKER", "read ~/.claude/CLAUDE.md; fundi must not read its config from Claude's directory")
 }
 
 // TestLoadContextFiles_MissingInstructionsIsNotAnError covers the "most
@@ -94,9 +85,8 @@ func TestLoadContextFiles_UsesFundiInstructionsNotClaude(t *testing.T) {
 // an error.
 func TestLoadContextFiles_MissingInstructionsIsNotAnError(t *testing.T) {
 	t.Setenv("RAFIKI_INSTRUCTIONS", filepath.Join(t.TempDir(), "absent.md"))
-	if _, err := LoadContextFiles(t.TempDir()); err != nil {
-		t.Fatalf("missing instructions file must be skipped silently, got %v", err)
-	}
+	_, err := LoadContextFiles(t.TempDir())
+	assert.NewAborting(t).NoError(err, "missing instructions file must be skipped silently, got")
 }
 
 // TestLoadContextFilesNestedGitRootAndInclude covers the brief's primary
@@ -105,12 +95,11 @@ func TestLoadContextFiles_MissingInstructionsIsNotAnError(t *testing.T) {
 // before cwd), and the include must be inlined rather than left as a literal
 // @-line.
 func TestLoadContextFilesNestedGitRootAndInclude(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Mkdir(filepath.Join(root, ".git"), 0o755))
 	mustWriteFile(t, filepath.Join(root, "CLAUDE.md"), "ROOT_MARKER instructions\n@docs/extra.md\n")
 	mustWriteFile(t, filepath.Join(root, "docs", "extra.md"), "INCLUDED_MARKER content")
 
@@ -118,50 +107,39 @@ func TestLoadContextFilesNestedGitRootAndInclude(t *testing.T) {
 	mustWriteFile(t, filepath.Join(cwd, "AGENTS.md"), "CWD_MARKER agent instructions")
 
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 
 	for _, marker := range []string{"ROOT_MARKER", "INCLUDED_MARKER", "CWD_MARKER"} {
-		if !strings.Contains(got, marker) {
-			t.Fatalf("expected %s in output, got %q", marker, got)
-		}
+		c.StrContains(got, marker, "expected")
 	}
 	// The raw @-include line must not survive verbatim - it should have been
 	// replaced by the included content.
-	if strings.Contains(got, "@docs/extra.md") {
-		t.Fatalf("include line was not inlined: %q", got)
-	}
+	c.NotStrContains(got, "@docs/extra.md", "include line was not inlined")
 	// git root content precedes cwd content (cache-stability ordering).
-	if strings.Index(got, "ROOT_MARKER") > strings.Index(got, "CWD_MARKER") {
-		t.Fatalf("expected root content before cwd content, got %q", got)
-	}
+	c.LessOrEqual(strings.Index(got, "CWD_MARKER"), strings.Index(got, "ROOT_MARKER"), "expected root content before cwd content, got %q", got)
 }
 
 // TestLoadContextFilesDedupWhenCwdIsGitRoot covers the dedup rule: when cwd
 // IS the git root, its CLAUDE.md must be emitted exactly once, not twice.
 func TestLoadContextFilesDedupWhenCwdIsGitRoot(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.Mkdir(filepath.Join(root, ".git"), 0o755))
 	mustWriteFile(t, filepath.Join(root, "CLAUDE.md"), "ONLY_ONCE_MARKER")
 
 	got, err := LoadContextFiles(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := strings.Count(got, "ONLY_ONCE_MARKER"); n != 1 {
-		t.Fatalf("expected ONLY_ONCE_MARKER exactly once, got %d in %q", n, got)
-	}
+	c.NoError(err)
+	n := strings.Count(got, "ONLY_ONCE_MARKER")
+	c.Eq(1, n, "expected ONLY_ONCE_MARKER exactly once, got %d in %q", n, got)
 }
 
 // TestLoadContextFilesCycleTerminates is the brief's named scenario:
 // a.md @-> b.md @-> a.md must terminate rather than hang or stack overflow,
 // and produce the missing/cycle marker.
 func TestLoadContextFilesCycleTerminates(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 
 	cwd := t.TempDir()
@@ -170,29 +148,22 @@ func TestLoadContextFilesCycleTerminates(t *testing.T) {
 	mustWriteFile(t, filepath.Join(cwd, "b.md"), "@a.md")
 
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "[missing include:") {
-		t.Fatalf("expected a missing/cycle marker, got %q", got)
-	}
+	c.NoError(err)
+	c.StrContains(got, "[missing include:", "expected a missing/cycle marker, got")
 }
 
 // TestLoadContextFilesMissingInclude covers a single dangling @-reference: it
 // must become the literal marker, not an error.
 func TestLoadContextFilesMissingInclude(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 
 	cwd := t.TempDir()
 	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "before\n@nope.md\nafter")
 
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "[missing include: nope.md]") {
-		t.Fatalf("expected missing-include marker, got %q", got)
-	}
+	c.NoError(err)
+	c.StrContains(got, "[missing include: nope.md]", "expected missing-include marker, got")
 }
 
 // TestLoadContextFilesDepthCapTerminates builds a long include chain (well
@@ -200,6 +171,7 @@ func TestLoadContextFilesMissingInclude(t *testing.T) {
 // just cycle detection - bounds recursion. The deepest file's content must
 // not surface, and a marker must appear instead.
 func TestLoadContextFilesDepthCapTerminates(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 
 	cwd := t.TempDir()
@@ -211,15 +183,9 @@ func TestLoadContextFilesDepthCapTerminates(t *testing.T) {
 	mustWriteFile(t, filepath.Join(cwd, "chain"+strconv.Itoa(chainLen)+".md"), "UNREACHABLE_LEAF_MARKER")
 
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(got, "UNREACHABLE_LEAF_MARKER") {
-		t.Fatalf("depth cap did not bound recursion, leaf content leaked: %q", got)
-	}
-	if !strings.Contains(got, "[missing include:") {
-		t.Fatalf("expected depth-cap marker, got %q", got)
-	}
+	c.NoError(err)
+	c.NotStrContains(got, "UNREACHABLE_LEAF_MARKER", "depth cap did not bound recursion, leaf content leaked")
+	c.StrContains(got, "[missing include:", "expected depth-cap marker, got")
 }
 
 // TestLoadContextFilesLogsNonNotExistStatError covers loadInstructionFile's
@@ -230,6 +196,7 @@ func TestLoadContextFilesDepthCapTerminates(t *testing.T) {
 // non-root - must be logged, not just mapped to the empty-string "absent"
 // result used for the ordinary missing-file case.
 func TestLoadContextFilesLogsNonNotExistStatError(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 	logged := captureSlog(t)
 
@@ -237,20 +204,12 @@ func TestLoadContextFilesLogsNonNotExistStatError(t *testing.T) {
 	// A regular file where CLAUDE.md's parent directory would need to be:
 	// stat-ing "notadir/CLAUDE.md" fails with ENOTDIR, not ENOENT.
 	notADir := filepath.Join(cwd, "notadir")
-	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(notADir, []byte("x"), 0o644))
 
 	got, err := LoadContextFiles(filepath.Join(notADir, "sub"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "" {
-		t.Fatalf("expected no content from an unreadable path, got %q", got)
-	}
-	if !strings.Contains(logged.String(), "failed to stat instruction file") {
-		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
-	}
+	c.NoError(err)
+	c.Eq("", got, "expected no content from an unreadable path, got")
+	c.StrContains(logged.String(), "failed to stat instruction file", "expected the stat error to be logged, got")
 }
 
 // TestLoadContextFilesLogsNonNotExistIncludeStatError is
@@ -260,53 +219,39 @@ func TestLoadContextFilesLogsNonNotExistStatError(t *testing.T) {
 // silent missing-include marker) - matching the analogous top-level
 // instruction file case above.
 func TestLoadContextFilesLogsNonNotExistIncludeStatError(t *testing.T) {
+	c := assert.NewAborting(t)
 	isolateHome(t)
 	logged := captureSlog(t)
 
 	cwd := t.TempDir()
 	notADir := filepath.Join(cwd, "notadir")
-	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(notADir, []byte("x"), 0o644))
 	mustWriteFile(t, filepath.Join(cwd, "CLAUDE.md"), "before\n@notadir/CLAUDE.md\nafter")
 
 	got, err := LoadContextFiles(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "[missing include: notadir/CLAUDE.md]") {
-		t.Fatalf("expected missing-include marker for the unreadable target, got %q", got)
-	}
-	if !strings.Contains(logged.String(), "failed to stat include target") {
-		t.Fatalf("expected the stat error to be logged, got %q", logged.String())
-	}
+	c.NoError(err)
+	c.StrContains(got, "[missing include: notadir/CLAUDE.md]", "expected missing-include marker for the unreadable target, got")
+	c.StrContains(logged.String(), "failed to stat include target", "expected the stat error to be logged, got")
 }
 
 func TestTruncateContextFiles_NoCapReturnsUnchanged(t *testing.T) {
 	content := strings.Repeat("x", 10000)
-	if got := truncateContextFiles(content, 0); got != content {
-		t.Error("budgetTokens=0 must return content unchanged")
-	}
+	assert.NewCollecting(t).Eq(content, truncateContextFiles(content, 0), "budgetTokens=0 must return content unchanged")
 }
 
 func TestTruncateContextFiles_UnderBudgetReturnsUnchanged(t *testing.T) {
 	content := "short content\nsecond line"
-	if got := truncateContextFiles(content, 1000); got != content {
-		t.Errorf("content under budget must return unchanged, got %q", got)
-	}
+	assert.NewCollecting(t).Eq(content, truncateContextFiles(content, 1000), "content under budget must return unchanged, got")
 }
 
 func TestTruncateContextFiles_OverBudgetCutsAtNewlineAndMarks(t *testing.T) {
+	c := assert.NewCollecting(t)
 	// estimatedCharsPerToken=4, so budget=10 tokens => 40 byte budget.
 	content := "0123456789\n0123456789\n0123456789\n0123456789\n"
 	got := truncateContextFiles(content, 10)
-	if strings.Contains(got, "0123456789\n0123456789\n0123456789\n0123456789") {
-		t.Errorf("expected truncation, but full content survived: %q", got)
-	}
+	c.NotStrContains(got, "0123456789\n0123456789\n0123456789\n0123456789", "expected truncation, but full content survived")
 	if !strings.HasPrefix(got, "0123456789\n0123456789\n0123456789") {
 		t.Errorf("expected the kept prefix to end at a newline boundary within budget, got %q", got)
 	}
-	if !strings.Contains(got, "truncated to fit this model's context budget") {
-		t.Errorf("expected a truncation marker, got %q", got)
-	}
+	c.StrContains(got, "truncated to fit this model's context budget", "expected a truncation marker, got")
 }

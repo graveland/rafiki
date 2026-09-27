@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +17,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeGitSourceStore is an in-memory gitpymodules.Store. Upsert semantics
@@ -183,6 +184,7 @@ func gitSourceNames(resp *executorpb.SyncPyModuleGitSourceResponse) []string {
 // responder's snapshot is visible in the cache before the second is released,
 // and the second's overwrites it.
 func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 	// Two executors both resolve to alice: a second live executor for the
 	// same owner, so "latest" is a two-way race the test controls. Both block
@@ -242,28 +244,19 @@ func TestGitPymodulePusherRefreshCachesLatestInventory(t *testing.T) {
 		if inv, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok && len(inv.Scripts) == 0 {
 			break // the early client answers with an empty (nil) inventory
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the first responder's inventory never landed in the cache")
-		}
+		ck.Require().False(time.Now().After(deadline), "the first responder's inventory never landed in the cache")
 		time.Sleep(time.Millisecond)
 	}
 
 	close(late.release)
-	if err := <-done; err != nil {
-		t.Fatalf("refresh = %v, want nil", err)
-	}
+	ck.Require().NoError(<-done, "refresh")
 
 	inv, ok := f.gp.inventoryFor("u_alice", "ops_tools")
-	if !ok {
-		t.Fatal("inventoryFor found nothing after a refresh that had responders")
-	}
-	if got, want := gitSourceNames(&executorpb.SyncPyModuleGitSourceResponse{Scripts: inv.Scripts, Packages: inv.Packages}),
-		[]string{"script:late_script", "package:late_pkg"}; !slices.Equal(got, want) {
-		t.Errorf("cached inventory = %v, want %v (the LAST responder's, not the first's)", got, want)
-	}
-	if !inv.VenvReady {
-		t.Error("cached inventory lost venvReady")
-	}
+	ck.Require().True(ok, "inventoryFor found nothing after a refresh that had responders")
+	got, want := gitSourceNames(&executorpb.SyncPyModuleGitSourceResponse{Scripts: inv.Scripts, Packages: inv.Packages}),
+		[]string{"script:late_script", "package:late_pkg"}
+	ck.EqDiff(want, got, "cached inventory")
+	ck.True(inv.VenvReady, "cached inventory lost venvReady")
 
 	// The same inventory under bob's name/owner is invisible: the cache key
 	// carries the owner.
@@ -316,9 +309,7 @@ func TestGitPymodulePusherRefreshRunsExecutorsInParallel(t *testing.T) {
 	close(late.release)
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("refresh = %v, want nil", err)
-		}
+		assert.NewAborting(t).NoError(err, "refresh")
 	case <-time.After(waitLimit):
 		t.Fatal("refresh did not return after both executors were released")
 	}
@@ -328,6 +319,7 @@ func TestGitPymodulePusherRefreshRunsExecutorsInParallel(t *testing.T) {
 // read: every cached source name for ONE owner comes back, and no other
 // owner's does — the "list everything" path Task 3.2's inventories build on.
 func TestGitPymodulePusherAllInventorySpansMultipleSources(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 
 	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err != nil {
@@ -336,42 +328,29 @@ func TestGitPymodulePusherAllInventorySpansMultipleSources(t *testing.T) {
 	if _, err := f.gp.refresh(context.Background(), "u_alice", "shared_lib", "https://example.net/lib.git", "v2"); err != nil {
 		t.Fatalf("refresh shared_lib: %v", err)
 	}
-	if _, err := f.gp.refresh(context.Background(), "u_bob", "bob_lib", "https://example.net/boblib.git", "trunk"); err != nil {
-		t.Fatalf("refresh bob_lib: %v", err)
-	}
+	_, err := f.gp.refresh(context.Background(), "u_bob", "bob_lib", "https://example.net/boblib.git", "trunk")
+	c.Require().NoError(err, "refresh bob_lib")
 
 	alice := f.gp.allInventory("u_alice")
-	if len(alice) != 2 {
-		t.Fatalf("allInventory(u_alice) = %d source(s) %v, want 2", len(alice), alice)
-	}
+	c.Require().Len(alice, 2, "allInventory(u_alice) = %d source(s) %v, want 2", len(alice), alice)
 	for _, name := range []string{"ops_tools", "shared_lib"} {
-		if _, ok := alice[name]; !ok {
-			t.Errorf("allInventory(u_alice) is missing %q", name)
-		}
+		_, ok := alice[name]
+		c.True(ok, "allInventory(u_alice) is missing %q", name)
 	}
 	if _, ok := alice["bob_lib"]; ok {
 		t.Error("allInventory(u_alice) leaked bob's source")
 	}
 
 	bob := f.gp.allInventory("u_bob")
-	if len(bob) != 1 {
-		t.Fatalf("allInventory(u_bob) = %d source(s), want 1", len(bob))
-	}
-	if _, ok := bob["bob_lib"]; !ok {
-		t.Error("allInventory(u_bob) is missing bob_lib")
-	}
+	c.Require().Len(bob, 1, "allInventory(u_bob) = %d source(s), want 1", len(bob))
+	_, ok := bob["bob_lib"]
+	c.True(ok, "allInventory(u_bob) is missing bob_lib")
 
 	// Every fan-out was owner-scoped: alice's executors got alice's two
 	// refreshes, bob's got his one, and the unresolvable ghost got nothing.
-	if got := f.clients["exec-alice"].callCount(); got != 2 {
-		t.Errorf("exec-alice received %d refresh RPC(s), want 2", got)
-	}
-	if got := f.clients["exec-bob"].callCount(); got != 1 {
-		t.Errorf("exec-bob received %d refresh RPC(s), want 1", got)
-	}
-	if got := f.clients["exec-ghost"].callCount(); got != 0 {
-		t.Errorf("exec-ghost received %d refresh RPC(s), want 0", got)
-	}
+	c.Eq(2, f.clients["exec-alice"].callCount(), "exec-alice received")
+	c.Eq(1, f.clients["exec-bob"].callCount(), "exec-bob received")
+	c.Eq(0, f.clients["exec-ghost"].callCount(), "exec-ghost received")
 }
 
 // Both aggregation branches of a mixed fan-out: (a) every eligible executor
@@ -387,12 +366,12 @@ func TestGitPymodulePusherRefreshEveryExecutorFailingIsAnError(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "every eligible executor failed (1)") {
 		t.Errorf("refresh error = %v, want it to name the failed count", err)
 	}
-	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
-		t.Error("a fully-failed refresh left a cache entry behind")
-	}
+	_, ok := f.gp.inventoryFor("u_alice", "ops_tools")
+	assert.NewCollecting(t).False(ok, "a fully-failed refresh left a cache entry behind")
 }
 
 func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 	// A second executor for the same owner: one fails, one answers.
 	second := execpool.LiveExecutor{
@@ -411,16 +390,10 @@ func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 	f.clients["exec-alice"].err = errors.New("git fetch failed: network unreachable")
 
 	inv, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
-	if err != nil {
-		t.Fatalf("refresh with one responder = %v, want nil", err)
-	}
-	if len(inv.Scripts) != 1 || inv.Scripts[0].GetName() != "rotate_keys" || !inv.VenvReady {
-		t.Errorf("refresh returned %+v, want the successful executor's snapshot", inv)
-	}
+	c.Require().NoError(err, "refresh with one responder")
+	c.False(len(inv.Scripts) != 1 || inv.Scripts[0].GetName() != "rotate_keys" || !inv.VenvReady, "refresh returned %+v, want the successful executor's snapshot", inv)
 	cached, present := f.gp.inventoryFor("u_alice", "ops_tools")
-	if !present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys" {
-		t.Errorf("cached inventory = %+v (present %v), want the successful executor's snapshot", cached, present)
-	}
+	c.False(!present || len(cached.Scripts) != 1 || cached.Scripts[0].GetName() != "rotate_keys", "cached inventory = %+v (present %v), want the successful executor's snapshot", cached, present)
 }
 
 // TestGitPymodulePusherRefreshSkipsIneligibleExecutors: the Describe flag and
@@ -429,6 +402,7 @@ func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 // nothing — and a refresh with no eligible executor at all fails loudly
 // rather than silently succeeding with an empty inventory.
 func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 	// exec-alice loses the flag entirely: the source's own owner has no
 	// eligible executor left, so the refresh must fail, not no-op.
@@ -438,46 +412,35 @@ func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
 		t.Fatal("refresh with no eligible executor: succeeded, want an error")
 	}
 	for id, c := range f.clients {
-		if got := c.callCount(); got != 0 {
-			t.Errorf("%s received %d refresh RPC(s); an ineligible executor must receive none", id, got)
-		}
+		got := c.callCount()
+		ck.Eq(0, got, "%s received %d refresh RPC(s); an ineligible executor must receive none", id, got)
 	}
-	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
-		t.Error("a failed refresh left a cache entry behind")
-	}
+	_, ok := f.gp.inventoryFor("u_alice", "ops_tools")
+	ck.False(ok, "a failed refresh left a cache entry behind")
 
 	// With the flag back on, the refresh reaches exactly the owner's own
 	// resolvable executors.
 	f.pool.live[0].Describe = &executorpb.DescribeResponse{PymoduleGitSync: true}
-	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err != nil {
-		t.Fatalf("refresh after re-enabling the flag: %v", err)
-	}
-	if got := f.clients["exec-alice"].callCount(); got != 1 {
-		t.Errorf("exec-alice received %d refresh RPC(s), want 1", got)
-	}
-	if got := f.clients["exec-bob"].callCount(); got != 0 {
-		t.Errorf("exec-bob received %d refresh RPC(s); alice's refresh must not reach bob's executor", got)
-	}
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	ck.Require().NoError(err, "refresh after re-enabling the flag")
+	ck.Eq(1, f.clients["exec-alice"].callCount(), "exec-alice received")
+	ck.Eq(0, f.clients["exec-bob"].callCount(), "exec-bob received")
 }
 
 // A source whose venv failed to build still caches: discovery worked, only
 // the build didn't — the snapshot carries ready=false plus the executor's
 // error so the CLI can print it and the inventory is not lost.
 func TestGitPymodulePusherRefreshCachesVenvFailure(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 	f.clients["exec-alice"].resp = &executorpb.SyncPyModuleGitSourceResponse{
 		Scripts:   []*executorpb.GitSourceScript{{Name: "rotate_keys"}},
 		VenvReady: false,
 		VenvError: "uv sync failed: no solution",
 	}
-	if _, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main"); err != nil {
-		t.Fatalf("refresh = %v, want nil", err)
-	}
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "refresh")
 	inv, ok := f.gp.inventoryFor("u_alice", "ops_tools")
-	if !ok {
-		t.Fatal("inventoryFor found nothing")
-	}
-	if inv.VenvReady || inv.VenvError != "uv sync failed: no solution" {
-		t.Errorf("cached venv state = ready %v error %q, want false + the executor's error", inv.VenvReady, inv.VenvError)
-	}
+	c.Require().True(ok, "inventoryFor found nothing")
+	c.False(inv.VenvReady || inv.VenvError != "uv sync failed: no solution", "cached venv state = ready %v error %q, want false + the executor's error", inv.VenvReady, inv.VenvError)
 }

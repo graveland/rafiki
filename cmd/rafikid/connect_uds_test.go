@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +22,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"connectrpc.com/connect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // shortTempDir returns a SHORT-lived temp dir whose path cannot exceed the
@@ -31,9 +32,7 @@ import (
 func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rafiki")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
@@ -50,6 +49,7 @@ func udsHTTPClient(sock string) *http.Client {
 }
 
 func TestServeConnectUDSAnswersRPCs(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -60,9 +60,7 @@ func TestServeConnectUDSAnswersRPCs(t *testing.T) {
 	srv := connectapi.NewServer(nil)
 
 	ln, err := serveConnectUDS(ctx, srv, nil, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	if fi, statErr := os.Stat(sock); statErr != nil {
@@ -73,15 +71,11 @@ func TestServeConnectUDSAnswersRPCs(t *testing.T) {
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
 	_, err = client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: "c_nope"}))
-	if err == nil {
-		t.Fatal("want an error from GetChild with no lister wired")
-	}
+	c.Error(err, "want an error from GetChild with no lister wired")
 	// The critical assertion: a REAL Connect error, not the CodeUnimplemented
 	// that a missing route produces. Unimplemented here means the handler was
 	// never mounted.
-	if connect.CodeOf(err) == connect.CodeUnimplemented {
-		t.Fatalf("route not mounted: got CodeUnimplemented (%v)", err)
-	}
+	c.NotEq(connect.CodeUnimplemented, connect.CodeOf(err), "route not mounted: got CodeUnimplemented (%v)", err)
 }
 
 // stubUserStore resolves exactly one token, for proving identity actually
@@ -122,6 +116,7 @@ func (r recordingQuotaReader) RateLimitStatus(ctx context.Context) (connectapi.R
 // anything else keyed on the caller's own identity) always saw a nil
 // identity here, because the UDS mount had no identity resolution at all.
 func TestServeConnectUDSResolvesIdentity(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -137,9 +132,7 @@ func TestServeConnectUDSResolvesIdentity(t *testing.T) {
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
@@ -153,9 +146,7 @@ func TestServeConnectUDSResolvesIdentity(t *testing.T) {
 
 	select {
 	case id := <-seen:
-		if id == nil || id.UserID != want.UserID || id.Username != want.Username {
-			t.Fatalf("identity resolved over UDS = %+v, want %+v", id, want)
-		}
+		c.False(id == nil || id.UserID != want.UserID || id.Username != want.Username, "identity resolved over UDS = %+v, want %+v", id, want)
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler was never reached")
 	}
@@ -168,6 +159,7 @@ func TestServeConnectUDSResolvesIdentity(t *testing.T) {
 // refuses it answer the same operator differently depending on which plane
 // the request took.
 func TestServeConnectUDSUnknownTokenIsRefused(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -182,21 +174,15 @@ func TestServeConnectUDSUnknownTokenIsRefused(t *testing.T) {
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
 	req := connect.NewRequest(&rafikiv1.GetRateLimitStatusRequest{})
 	req.Header().Set("Authorization", "Bearer rfk_stale_or_wrong_daemon")
 	_, err = client.GetRateLimitStatus(ctx, req)
-	if connect.CodeOf(err) != connect.CodeUnauthenticated {
-		t.Fatalf("GetRateLimitStatus with an unrecognized token: %v, want CodeUnauthenticated", err)
-	}
-	if !strings.Contains(err.Error(), "invalid auth token") {
-		t.Fatalf("message = %q, want the framed handshake's wording", err)
-	}
+	c.Eq(connect.CodeUnauthenticated, connect.CodeOf(err), "GetRateLimitStatus with an unrecognized token: %v, want CodeUnauthenticated", err)
+	c.StrContains(err.Error(), "invalid auth token", "message = %q, want the framed handshake's wording", err)
 	select {
 	case id := <-seen:
 		t.Fatalf("the handler ran despite an unrecognized credential (identity %+v)", id)
@@ -209,6 +195,7 @@ func TestServeConnectUDSUnknownTokenIsRefused(t *testing.T) {
 // the proxy-face middleware follow, for the same reason: a 401-shaped answer
 // makes clients discard working tokens, and a pgx error carries the DSN.
 func TestServeConnectUDSStoreOutageIsUnavailable(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -223,24 +210,16 @@ func TestServeConnectUDSStoreOutageIsUnavailable(t *testing.T) {
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
 	req := connect.NewRequest(&rafikiv1.GetRateLimitStatusRequest{})
 	req.Header().Set("Authorization", "Bearer rfk_good")
 	_, err = client.GetRateLimitStatus(ctx, req)
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("GetRateLimitStatus during a store outage: %v, want CodeUnavailable", err)
-	}
-	if strings.Contains(err.Error(), "connection refused") {
-		t.Fatalf("store error text leaked to the caller: %q", err)
-	}
-	if !strings.Contains(err.Error(), "identity store unavailable") {
-		t.Fatalf("message = %q, want the fixed outage message", err)
-	}
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "GetRateLimitStatus during a store outage: %v, want CodeUnavailable", err)
+	c.NotStrContains(err.Error(), "connection refused", "store error text leaked to the caller: %q", err)
+	c.StrContains(err.Error(), "identity store unavailable", "message = %q, want the fixed outage message", err)
 	select {
 	case id := <-seen:
 		t.Fatalf("the handler ran during a store outage (identity %+v)", id)
@@ -251,6 +230,7 @@ func TestServeConnectUDSStoreOutageIsUnavailable(t *testing.T) {
 // No credential at all stays anonymous — the unchanged half of the rule. The
 // socket decided admission; a credential was never the price of entry.
 func TestServeConnectUDSNoCredentialIsAnonymous(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -265,9 +245,7 @@ func TestServeConnectUDSNoCredentialIsAnonymous(t *testing.T) {
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
 	ln, err := serveConnectUDS(ctx, srv, auth, sock)
-	if err != nil {
-		t.Fatalf("serveConnectUDS: %v", err)
-	}
+	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
 	client := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
@@ -276,9 +254,7 @@ func TestServeConnectUDSNoCredentialIsAnonymous(t *testing.T) {
 	}
 	select {
 	case id := <-seen:
-		if id != nil {
-			t.Fatalf("a credential-less request carried identity %+v, want nil", id)
-		}
+		c.Nil(id, "a credential-less request carried identity")
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler was never reached")
 	}
@@ -290,9 +266,7 @@ func TestServeConnectUDSRefusesALiveSocket(t *testing.T) {
 
 	sock := filepath.Join(t.TempDir(), "s")
 	ln, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, sock)
-	if err != nil {
-		t.Fatalf("first serveConnectUDS: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "first serveConnectUDS")
 	defer ln.Close()
 
 	if _, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, sock); err == nil {

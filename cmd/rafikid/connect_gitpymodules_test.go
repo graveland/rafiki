@@ -10,6 +10,8 @@ import (
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/server"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // newGitAdapterFixture wires a connectGitSources over the git pusher fixture:
@@ -26,6 +28,7 @@ func newGitAdapterFixture() (*gitSourceFixture, connectGitSources) {
 // the anonymous unix-socket caller writes the shared unattributed bucket and
 // an identified caller writes (and lists) only its own.
 func TestConnectGitSourcesOwnerFromContext(t *testing.T) {
+	c := assert.NewAborting(t)
 	f, m := newGitAdapterFixture()
 
 	// No identity on the ctx: the anonymous unix-socket case. With no pusher
@@ -37,37 +40,23 @@ func TestConnectGitSourcesOwnerFromContext(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	rows, err := m.ListGitSources(context.Background())
-	if err != nil {
-		t.Fatalf("ListGitSources with no identity: %v", err)
-	}
-	if len(rows) != 1 || rows[0].Name != "anon_lib" {
-		t.Fatalf("anonymous list = %+v, want only anon_lib (the unattributed bucket)", rows)
-	}
+	c.NoError(err, "ListGitSources with no identity")
+	c.False(len(rows) != 1 || rows[0].Name != "anon_lib", "anonymous list = %+v, want only anon_lib (the unattributed bucket)", rows)
 
 	// An identified ctx: writes and reads land in THAT identity's bucket.
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 	rows, err = m.ListGitSources(alice)
-	if err != nil {
-		t.Fatalf("ListGitSources as u_alice: %v", err)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("alice's list = %+v, want her two seeded sources", rows)
-	}
+	c.NoError(err, "ListGitSources as u_alice")
+	c.Len(rows, 2, "alice's list")
 
 	// bob's ctx sees bob's rows only.
 	bob := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_bob"})
 	rows, err = m.ListGitSources(bob)
-	if err != nil {
-		t.Fatalf("ListGitSources as u_bob: %v", err)
-	}
-	if len(rows) != 1 || rows[0].Name != "bob_lib" {
-		t.Fatalf("bob's list = %+v, want only [bob_lib]", rows)
-	}
+	c.NoError(err, "ListGitSources as u_bob")
+	c.False(len(rows) != 1 || rows[0].Name != "bob_lib", "bob's list = %+v, want only [bob_lib]", rows)
 
 	// Removing is owner-scoped too: bob can delete bob_lib and nothing else.
-	if err := m.RemoveGitSource(bob, "bob_lib"); err != nil {
-		t.Fatalf("RemoveGitSource as u_bob: %v", err)
-	}
+	c.NoError(m.RemoveGitSource(bob, "bob_lib"), "RemoveGitSource as u_bob")
 	if len(f.store.deleted) != 1 || f.store.deleted[0] != [2]string{"u_bob", "bob_lib"} {
 		t.Fatalf("deletes = %v, want exactly [u_bob bob_lib]", f.store.deleted)
 	}
@@ -83,24 +72,17 @@ func TestConnectGitSourcesOwnerFromContext(t *testing.T) {
 // the STORED url/ref — a later Put repoints the source, and a refresh must
 // follow the registration, not a stale caller-supplied pair.
 func TestConnectGitSourcesAddRefreshesFirstAndRefreshReusesStored(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, m := newGitAdapterFixture()
 	f.clients["exec-alice"].resp = &executorpb.SyncPyModuleGitSourceResponse{VenvReady: true}
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
 	row, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
-	if err != nil {
-		t.Fatalf("AddGitSource: %v", err)
-	}
-	if row.Name != "fresh_tools" || row.URL != "https://example.net/fresh.git" || row.Ref != "develop" {
-		t.Fatalf("AddGitSource row = %+v", row)
-	}
+	c.Require().NoError(err, "AddGitSource")
+	c.Require().False(row.Name != "fresh_tools" || row.URL != "https://example.net/fresh.git" || row.Ref != "develop", "AddGitSource row = %+v", row)
 	// The first refresh went out synchronously, to alice's executor only.
-	if got := f.clients["exec-alice"].callCount(); got != 1 {
-		t.Fatalf("exec-alice received %d refresh RPC(s) after add, want 1", got)
-	}
-	if got := f.clients["exec-bob"].callCount(); got != 0 {
-		t.Errorf("exec-bob received %d refresh RPC(s) after alice's add, want 0", got)
-	}
+	c.Require().Eq(1, f.clients["exec-alice"].callCount(), "exec-alice received")
+	c.Eq(0, f.clients["exec-bob"].callCount(), "exec-bob received")
 
 	// Repoint the source, then refresh: the executor must be told the NEW
 	// url/ref from the store, not the add-time pair.
@@ -108,15 +90,9 @@ func TestConnectGitSourcesAddRefreshesFirstAndRefreshReusesStored(t *testing.T) 
 		t.Fatalf("repoint: %v", err)
 	}
 	scripts, packages, venvReady, venvError, err := m.RefreshGitSource(alice, "fresh_tools")
-	if err != nil {
-		t.Fatalf("RefreshGitSource: %v", err)
-	}
-	if len(scripts) != 0 || len(packages) != 0 || !venvReady || venvError != "" {
-		t.Errorf("RefreshGitSource = %v/%v ready=%v err=%q, want the empty default executor answer", scripts, packages, venvReady, venvError)
-	}
-	if got := f.clients["exec-alice"].callCount(); got != 2 {
-		t.Fatalf("exec-alice received %d refresh RPC(s) after refresh, want 2", got)
-	}
+	c.Require().NoError(err, "RefreshGitSource")
+	c.False(len(scripts) != 0 || len(packages) != 0 || !venvReady || venvError != "", "RefreshGitSource = %v/%v ready=%v err=%q, want the empty default executor answer", scripts, packages, venvReady, venvError)
+	c.Require().Eq(2, f.clients["exec-alice"].callCount(), "exec-alice received")
 	req := f.clients["exec-alice"].requests[1]
 	if req.GetUrl() != "https://example.net/moved.git" || req.GetRef() != "release" || req.GetName() != "fresh_tools" {
 		t.Errorf("refresh payload = name %q url %q ref %q, want the STORED registration", req.GetName(), req.GetUrl(), req.GetRef())
@@ -134,6 +110,7 @@ func TestConnectGitSourcesAddRefreshesFirstAndRefreshReusesStored(t *testing.T) 
 // still survives in the store, so the retry is `python repo refresh`, not a
 // second add.
 func TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow(t *testing.T) {
+	c := assert.NewAborting(t)
 	f, m := newGitAdapterFixture()
 	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
@@ -143,18 +120,14 @@ func TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow(t *testing.T) {
 	}
 
 	rows, err := m.ListGitSources(alice)
-	if err != nil {
-		t.Fatalf("ListGitSources after the failed add: %v", err)
-	}
+	c.NoError(err, "ListGitSources after the failed add")
 	survived := false
 	for _, r := range rows {
 		if r.Name == "fresh_tools" {
 			survived = r.URL == "https://example.net/fresh.git" && r.Ref == "develop"
 		}
 	}
-	if !survived {
-		t.Fatalf("rows after a failed first refresh = %+v, want fresh_tools to have survived the failed refresh", rows)
-	}
+	c.True(survived, "rows after a failed first refresh = %+v, want fresh_tools to have survived the failed refresh", rows)
 }
 
 // TestConnectGitSourcesNilPusherStillRegisters pins the nil guard: a daemon
@@ -163,23 +136,18 @@ func TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow(t *testing.T) {
 // to refresh on. A refresh without a pool fails with a named error rather
 // than panicking or pretending.
 func TestConnectGitSourcesNilPusherStillRegisters(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	f := newGitSourceFixture()
 	m := connectGitSources{c: &Controller{gitpymoduleStore: f.store}} // pusher deliberately nil
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
 	row, err := m.AddGitSource(alice, "solo_tools", "https://example.net/solo.git", "main")
-	if err != nil {
-		t.Fatalf("AddGitSource with nil pusher: %v", err)
-	}
-	if row.Name != "solo_tools" || row.URL != "https://example.net/solo.git" {
-		t.Errorf("AddGitSource row = %+v", row)
-	}
+	ck.Require().NoError(err, "AddGitSource with nil pusher")
+	ck.False(row.Name != "solo_tools" || row.URL != "https://example.net/solo.git", "AddGitSource row = %+v", row)
 	if _, _, _, _, err := m.RefreshGitSource(alice, "solo_tools"); err == nil {
 		t.Fatal("RefreshGitSource with nil pusher: succeeded, want a named error")
 	}
-	if err := m.RemoveGitSource(alice, "solo_tools"); err != nil {
-		t.Fatalf("RemoveGitSource with nil pusher: %v", err)
-	}
+	ck.Require().NoError(m.RemoveGitSource(alice, "solo_tools"), "RemoveGitSource with nil pusher")
 }
 
 // TestGitPymoduleRemoveEvictsCachedInventory pins the eviction on remove: the
@@ -189,6 +157,7 @@ func TestConnectGitSourcesNilPusherStillRegisters(t *testing.T) {
 // every span surface until the daemon restarts. After a remove, the removed
 // name is gone from both readers while an unrelated source's entry survives.
 func TestGitPymoduleRemoveEvictsCachedInventory(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, m := newGitAdapterFixture()
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
@@ -204,9 +173,7 @@ func TestGitPymoduleRemoveEvictsCachedInventory(t *testing.T) {
 		t.Fatal("precondition: ops_tools was never cached")
 	}
 
-	if err := m.RemoveGitSource(alice, "ops_tools"); err != nil {
-		t.Fatalf("RemoveGitSource: %v", err)
-	}
+	c.Require().NoError(m.RemoveGitSource(alice, "ops_tools"), "RemoveGitSource")
 
 	if _, ok := f.gp.inventoryFor("u_alice", "ops_tools"); ok {
 		t.Error("inventoryFor still reports a removed source; its rows would keep rendering on `python list --repo ops_tools`")
@@ -218,7 +185,6 @@ func TestGitPymoduleRemoveEvictsCachedInventory(t *testing.T) {
 	if _, ok := all["shared_lib"]; !ok {
 		t.Error("allInventory lost shared_lib, which was NOT removed")
 	}
-	if _, ok := f.gp.inventoryFor("u_alice", "shared_lib"); !ok {
-		t.Error("inventoryFor lost shared_lib, which was NOT removed")
-	}
+	_, ok := f.gp.inventoryFor("u_alice", "shared_lib")
+	c.True(ok, "inventoryFor lost shared_lib, which was NOT removed")
 }

@@ -3,9 +3,12 @@ package tools
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestSchemaJSONRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
@@ -18,9 +21,7 @@ func TestSchemaJSONRoundTrip(t *testing.T) {
 	raw := s.JSON()
 
 	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	c.NoError(json.Unmarshal(raw, &got), "json.Unmarshal")
 
 	typ, ok := got["type"].(string)
 	if !ok || typ != "object" {
@@ -28,9 +29,7 @@ func TestSchemaJSONRoundTrip(t *testing.T) {
 	}
 
 	props, ok := got["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("no properties map")
-	}
+	c.True(ok, "no properties map")
 	path, ok := props["path"].(map[string]any)
 	if !ok || path["type"] != "string" {
 		t.Fatalf("path property = %v", props["path"])
@@ -47,6 +46,7 @@ func TestSchemaJSONRoundTrip(t *testing.T) {
 }
 
 func TestSchemaNestedObject(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := Schema{
 		Type: "object",
 		Properties: []SchemaProperty{
@@ -67,9 +67,7 @@ func TestSchemaNestedObject(t *testing.T) {
 
 	raw := s.JSON()
 	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
+	c.NoError(json.Unmarshal(raw, &got), "json.Unmarshal")
 
 	props := got["properties"].(map[string]any)
 	edits := props["edits"].(map[string]any)
@@ -77,23 +75,16 @@ func TestSchemaNestedObject(t *testing.T) {
 		t.Fatalf("edits.type = %v", edits["type"])
 	}
 	items, ok := edits["items"].(map[string]any)
-	if !ok {
-		t.Fatal("no items")
-	}
+	c.True(ok, "no items")
 	itemProps, ok := items["properties"].(map[string]any)
-	if !ok || len(itemProps) != 2 {
-		t.Fatalf("items.properties = %v", itemProps)
-	}
+	c.False(!ok || len(itemProps) != 2, "items.properties = %v", itemProps)
 }
 
 func TestSchemaEmptyJSON(t *testing.T) {
+	c := assert.NewAborting(t)
 	s := Schema{}
 	raw := s.JSON()
 	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("empty schema should produce empty JSON object, got %v", got)
-	}
+	c.NoError(json.Unmarshal(raw, &got), "json.Unmarshal")
+	c.Empty(got, "empty schema should produce empty JSON object, got")
 }

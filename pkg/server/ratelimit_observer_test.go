@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubRateLimitObserver records what the proxy told it, so the 429 and
@@ -52,6 +54,7 @@ func newRateLimitTestProxy(t *testing.T, upstreamURL string, fs *fakeProxyStore)
 // headers; the observer must see the child's session and the reset of the
 // window whose status says it is doing the limiting.
 func TestRateLimitObserverSeesA429WithTheLimitingWindowsReset(t *testing.T) {
+	c := assert.NewCollecting(t)
 	reset5h := time.Now().Add(5 * time.Hour).UTC().Truncate(time.Second)
 	reset7d := time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -71,19 +74,11 @@ func TestRateLimitObserverSeesA429WithTheLimitingWindowsReset(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_child1")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 passed through", rec.Code)
-	}
+	c.Require().Eq(http.StatusTooManyRequests, rec.Code, "status")
 	got, ok := obs.limited["c_child1"]
-	if !ok {
-		t.Fatal("observer was not told about the 429")
-	}
-	if !got.Equal(reset5h) {
-		t.Errorf("resetAt = %v, want the 5h (limiting) window's reset %v", got, reset5h)
-	}
-	if len(obs.oks) != 0 {
-		t.Errorf("TurnSucceeded = %v, want none", obs.oks)
-	}
+	c.Require().True(ok, "observer was not told about the 429")
+	c.True(got.Equal(reset5h), "resetAt = %v, want the 5h (limiting) window's reset %v", got, reset5h)
+	c.Empty(obs.oks, "TurnSucceeded")
 }
 
 // When no window's status identifies the limiter, the earliest reset of any
@@ -97,9 +92,8 @@ func TestRateLimitResetAtPrefersEarliestWhenNoWindowIsIdentified(t *testing.T) {
 	h.Set("Anthropic-Ratelimit-Unified-5h-Reset", reset5h.Format(time.RFC3339))
 	h.Set("Anthropic-Ratelimit-Unified-7d-Reset", reset7d.Format(time.RFC3339))
 	h.Set("Retry-After", "9999")
-	if got := rateLimitResetAt(h); !got.Equal(reset5h) {
-		t.Errorf("rateLimitResetAt = %v, want the earliest window reset %v (Retry-After must not win)", got, reset5h)
-	}
+	got := rateLimitResetAt(h)
+	assert.NewCollecting(t).True(got.Equal(reset5h), "rateLimitResetAt = %v, want the earliest window reset %v (Retry-After must not win)", got, reset5h)
 }
 
 // A 429 with neither a unified header nor Retry-After reports the zero time:
@@ -111,9 +105,8 @@ func TestRateLimitResetAtIsZeroWhenNothingNamesAReset(t *testing.T) {
 	}
 	h := http.Header{}
 	h.Set("Retry-After", "nonsense")
-	if got := rateLimitResetAt(h); !got.IsZero() {
-		t.Errorf("unparseable Retry-After = %v, want the zero time", got)
-	}
+	got := rateLimitResetAt(h)
+	assert.NewCollecting(t).True(got.IsZero(), "unparseable Retry-After = %v, want the zero time", got)
 }
 
 func TestParseRetryAfterHeader(t *testing.T) {
@@ -126,14 +119,14 @@ func TestParseRetryAfterHeader(t *testing.T) {
 	if got := parseRetryAfterHeader(date); !got.Equal(want) {
 		t.Errorf("HTTP-date form = %v, want %v", got, want)
 	}
-	if got := parseRetryAfterHeader(""); !got.IsZero() {
-		t.Errorf("empty = %v, want zero", got)
-	}
+	got := parseRetryAfterHeader("")
+	assert.NewCollecting(t).True(got.IsZero(), "empty = %v, want zero", got)
 }
 
 // A clean completion is the verdict that clears the watch; the observer must
 // see it with the child's session.
 func TestRateLimitObserverSeesCleanCompletions(t *testing.T) {
+	c := assert.NewCollecting(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "event: message_start\n"+
@@ -150,15 +143,11 @@ func TestRateLimitObserverSeesCleanCompletions(t *testing.T) {
 	req.Header.Set("X-Rafiki-Session", "c_child1")
 	p.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	c.Require().Eq(http.StatusOK, rec.Code, "status")
 	if len(obs.oks) != 1 || obs.oks[0] != "c_child1" {
 		t.Errorf("TurnSucceeded = %v, want exactly one call for c_child1", obs.oks)
 	}
-	if len(obs.limited) != 0 {
-		t.Errorf("RateLimited = %v, want none", obs.limited)
-	}
+	c.Empty(obs.limited, "RateLimited")
 }
 
 // A non-429 failure is not the watch's business: the auto-resume exists for
@@ -195,7 +184,5 @@ func TestRateLimitWatchableGates(t *testing.T) {
 	if got := rateLimitWatchable(captureRef{on: true, session: ""}); got != "" {
 		t.Errorf("session-less ref = %q, want \"\" (hand-configured client)", got)
 	}
-	if got := rateLimitWatchable(captureRef{on: true, session: "c_child1"}); got != "c_child1" {
-		t.Errorf("main-thread ref = %q, want c_child1", got)
-	}
+	assert.NewCollecting(t).Eq("c_child1", rateLimitWatchable(captureRef{on: true, session: "c_child1"}), "main-thread ref")
 }

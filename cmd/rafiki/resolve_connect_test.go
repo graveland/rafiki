@@ -11,6 +11,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeResolveClient is a ControlClient whose ListChildren returns canned
@@ -173,32 +175,21 @@ func TestResolveTargetConnect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			isolateProfiles(t)
 			if tt.activeMarker != "" {
-				if err := setActive("resolve-test", tt.activeMarker); err != nil {
-					t.Fatalf("setActive: %v", err)
-				}
+				c.NoError(setActive("resolve-test", tt.activeMarker), "setActive")
 			}
 
 			got, err := resolveTargetConnect(context.Background(), tt.fake, "resolve-test", tt.input, "test-endpoint")
 			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("resolveTargetConnect(%q) = %q, want error %q", tt.input, got, tt.wantErr)
-				}
-				if err.Error() != tt.wantErr {
-					t.Fatalf("resolveTargetConnect(%q) error = %q, want %q", tt.input, err.Error(), tt.wantErr)
-				}
+				c.Error(err, "resolveTargetConnect(%q) = %q, want error %q", tt.input, got, tt.wantErr)
+				c.Eq(tt.wantErr, err.Error(), "resolveTargetConnect(%q) error = %q, want", tt.input, err.Error())
 			} else {
-				if err != nil {
-					t.Fatalf("resolveTargetConnect(%q): %v", tt.input, err)
-				}
-				if got != tt.want {
-					t.Fatalf("resolveTargetConnect(%q) = %q, want %q", tt.input, got, tt.want)
-				}
+				c.NoError(err, "resolveTargetConnect(%q)", tt.input)
+				c.Eq(tt.want, got, "resolveTargetConnect(%q) = %q, want", tt.input, got)
 			}
-			if tt.fake.listCalls != tt.wantListCalls {
-				t.Fatalf("ListChildren called %d times, want %d", tt.fake.listCalls, tt.wantListCalls)
-			}
+			c.Eq(tt.wantListCalls, tt.fake.listCalls, "ListChildren called")
 		})
 	}
 }
@@ -207,31 +198,18 @@ func TestResolveTargetConnect(t *testing.T) {
 // the active-marker fallback never round-trip. listCalls is the direct
 // assertion; the request-shape check inside ListChildren is a second guard.
 func TestResolveTargetConnectFastPathSkipsTheList(t *testing.T) {
+	ck := assert.NewAborting(t)
 	isolateProfiles(t)
-	if err := setActive("resolve-test", "c_marked"); err != nil {
-		t.Fatalf("setActive: %v", err)
-	}
+	ck.NoError(setActive("resolve-test", "c_marked"), "setActive")
 	c := &fakeResolveClient{}
 
 	got, err := resolveTargetConnect(context.Background(), c, "resolve-test", "", "test-endpoint")
-	if err != nil {
-		t.Fatalf("resolveTargetConnect(\"\"): %v", err)
-	}
-	if got != "c_marked" {
-		t.Fatalf("active marker not honored: got %q", got)
-	}
-	if c.listCalls != 0 {
-		t.Fatalf("ListChildren called %d times for the active-marker fast path, want 0", c.listCalls)
-	}
+	ck.NoError(err, "resolveTargetConnect(\"\")")
+	ck.Eq("c_marked", got, "active marker not honored: got")
+	ck.Eq(0, c.listCalls, "ListChildren called")
 
 	got, err = resolveTargetConnect(context.Background(), c, "resolve-test", "c_direct", "test-endpoint")
-	if err != nil {
-		t.Fatalf("resolveTargetConnect(c_direct): %v", err)
-	}
-	if got != "c_direct" {
-		t.Fatalf("c_ fast path not honored: got %q", got)
-	}
-	if c.listCalls != 0 {
-		t.Fatalf("ListChildren called %d times for the c_ fast path, want 0", c.listCalls)
-	}
+	ck.NoError(err, "resolveTargetConnect(c_direct)")
+	ck.Eq("c_direct", got, "c_ fast path not honored: got")
+	ck.Eq(0, c.listCalls, "ListChildren called")
 }

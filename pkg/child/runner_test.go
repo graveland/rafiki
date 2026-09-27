@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // stubRunner is a Runner backed by in-memory streams. It proves Spawn honours
@@ -54,6 +56,7 @@ func (s *stubRunner) Interrupt() error { return nil }
 // spec, Spawn must not exec anything, and frames from the runner's stdout must
 // reach the ring exactly as they would from a process.
 func TestSpawnUsesInjectedRunner(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	stub := &stubRunner{
 		stdoutFrames: `{"type":"agent_start"}` + "\n" + `{"type":"agent_end"}` + "\n",
 	}
@@ -65,9 +68,7 @@ func TestSpawnUsesInjectedRunner(t *testing.T) {
 		Cwd:     t.TempDir(),
 		Runner:  stub,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.Require().NoError(err, "Spawn")
 
 	select {
 	case <-c.Done():
@@ -76,33 +77,22 @@ func TestSpawnUsesInjectedRunner(t *testing.T) {
 	}
 
 	got := c.RingSnapshot()
-	if len(got) != 2 {
-		t.Fatalf("ring holds %d frames, want 2: %q", len(got), got)
-	}
-	if !strings.Contains(string(got[0]), "agent_start") {
-		t.Errorf("first frame = %q, want agent_start", got[0])
-	}
-	if c.PID() != 0 {
-		t.Errorf("PID() = %d, want 0 for an injected runner", c.PID())
-	}
+	ck.Require().Len(got, 2, "ring holds %d frames, want 2", len(got))
+	ck.StrContains(string(got[0]), "agent_start", "first frame = %q, want agent_start", got[0])
+	ck.Eq(0, c.PID(), "PID()")
 
 	stub.mu.Lock()
 	started, waited := stub.started, stub.waited
 	stub.mu.Unlock()
-	if !started {
-		t.Error("runner.Start was never called")
-	}
-	if !waited {
-		t.Error("runner.Wait was never called")
-	}
+	ck.True(started, "runner.Start was never called")
+	ck.True(waited, "runner.Wait was never called")
 }
 
 // TestSpawnWithoutRunnerStillRequiresBinary preserves the process path's
 // contract: no runner and no binary is a spec error, not a panic.
 func TestSpawnWithoutRunnerStillRequiresBinary(t *testing.T) {
-	if _, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_nobin", Cwd: t.TempDir()}); err == nil {
-		t.Fatal("expected an error when neither Runner nor PiBinary is set")
-	}
+	_, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_nobin", Cwd: t.TempDir()})
+	assert.NewAborting(t).Error(err, "expected an error when neither Runner nor PiBinary is set")
 }
 
 // TestSpawnInjectedRunnerSkipsCwdExistenceCheck proves the other half of the
@@ -118,9 +108,7 @@ func TestSpawnInjectedRunnerSkipsCwdExistenceCheck(t *testing.T) {
 		Cwd:     "/definitely/not/a/directory",
 		Runner:  stub,
 	})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Spawn")
 	select {
 	case <-c.Done():
 	case <-time.After(5 * time.Second):
@@ -133,17 +121,14 @@ func TestSpawnInjectedRunnerSkipsCwdExistenceCheck(t *testing.T) {
 // rooted at Cwd (newProcessRunner sets cmd.Dir = spec.Cwd), so a missing Cwd
 // must still be refused there.
 func TestSpawnWithoutRunnerRejectsMissingCwd(t *testing.T) {
+	c := assert.NewCollecting(t)
 	_, err := Spawn(t.Context(), SpawnSpec{
 		ChildID:  "c_nocwd",
 		Cwd:      "/definitely/not/a/directory",
 		PiBinary: "/bin/true",
 	})
-	if err == nil {
-		t.Fatal("expected an error for a Cwd that does not exist on the subprocess path")
-	}
-	if !strings.Contains(err.Error(), "cwd") {
-		t.Errorf("error = %q, want it to mention cwd", err.Error())
-	}
+	c.Require().Error(err, "expected an error for a Cwd that does not exist on the subprocess path")
+	c.StrContains(err.Error(), "cwd", "error")
 }
 
 // closeCounter wraps a stream and counts Close calls, so a test can assert on
@@ -207,23 +192,18 @@ func (r *recordingRunner) Interrupt() error    { return nil }
 // failed Build, a frontend scan error, a contained panic) is their common case
 // rather than an exception.
 func TestSuperviseClosesChildOutputStreams(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	r := newRecordingRunner(`{"type":"agent_start"}` + "\n" + `{"type":"agent_end"}` + "\n")
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_fd", Cwd: t.TempDir(), Runner: r})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.Require().NoError(err, "Spawn")
 	select {
 	case <-c.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("child did not finish within 5s")
 	}
 
-	if got := r.stdout.count(); got != 1 {
-		t.Errorf("stdout closed %d times, want exactly 1; supervise must release it after wg.Wait()", got)
-	}
-	if got := r.stderr.count(); got != 1 {
-		t.Errorf("stderr closed %d times, want exactly 1; supervise must release it after wg.Wait()", got)
-	}
+	ck.Eq(1, r.stdout.count(), "stdout closed")
+	ck.Eq(1, r.stderr.count(), "stderr closed")
 }
 
 // TestSuperviseClosesStdinOnSelfExit covers the third stream, on the path that
@@ -244,11 +224,10 @@ func TestSuperviseClosesChildOutputStreams(t *testing.T) {
 // Shutdown's is step 1 of the graceful ladder when it runs BEFORE the child
 // exits.
 func TestSuperviseClosesStdinOnSelfExit(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	r := newRecordingRunner(`{"type":"agent_end"}` + "\n")
 	c, err := Spawn(t.Context(), SpawnSpec{ChildID: "c_fd_stdin", Cwd: t.TempDir(), Runner: r})
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	ck.Require().NoError(err, "Spawn")
 	// Done() is closed by supervise's LAST deferred call, after its cleanup
 	// block has run — so observing it means the closes have already happened.
 	select {
@@ -265,10 +244,9 @@ func TestSuperviseClosesStdinOnSelfExit(t *testing.T) {
 	if _, err := c.Shutdown(time.Second, time.Second); err != nil {
 		t.Fatalf("Shutdown: %v", err)
 	}
-	if got := r.stdin.count(); got != 2 {
-		t.Errorf("stdin closed %d times after a follow-up Shutdown, want 2 "+
-			"(supervise's close plus Shutdown's own, which must tolerate the already-closed handle)", got)
-	}
+	got := r.stdin.count()
+	ck.Eq(2, got, "stdin closed %d times after a follow-up Shutdown, want 2 "+
+		"(supervise's close plus Shutdown's own, which must tolerate the already-closed handle)", got)
 }
 
 // Setpgid is the default because a child that spawns subprocesses must be
@@ -279,47 +257,33 @@ func TestSuperviseClosesStdinOnSelfExit(t *testing.T) {
 // Nothing else observes this, so a regression is silent — hence a test that
 // reads the real pgid out of the kernel.
 func TestInheritProcessGroupPutsTheChildInOurGroup(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r, err := newProcessRunner(SpawnSpec{
 		PiBinary:            "/bin/cat",
 		InheritProcessGroup: true,
 	})
-	if err != nil {
-		t.Fatalf("newProcessRunner: %v", err)
-	}
+	c.Require().NoError(err, "newProcessRunner")
 	stdin, _, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(err, "Start")
 	defer func() { _ = stdin.Close(); _, _ = r.Wait() }()
 
 	got, err := syscall.Getpgid(r.PID())
-	if err != nil {
-		t.Fatalf("Getpgid(%d): %v", r.PID(), err)
-	}
-	if want := syscall.Getpgrp(); got != want {
-		t.Errorf("child pgid = %d, want our own %d", got, want)
-	}
+	c.Require().NoError(err, "Getpgid(%d)", r.PID())
+	c.Eq(syscall.Getpgrp(), got, "child pgid")
 	_ = os.Getpid()
 }
 
 func TestDefaultStillGivesTheChildItsOwnGroup(t *testing.T) {
+	c := assert.NewCollecting(t)
 	r, err := newProcessRunner(SpawnSpec{PiBinary: "/bin/cat"})
-	if err != nil {
-		t.Fatalf("newProcessRunner: %v", err)
-	}
+	c.Require().NoError(err, "newProcessRunner")
 	stdin, _, _, err := r.Start()
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	c.Require().NoError(err, "Start")
 	defer func() { _ = stdin.Close(); _, _ = r.Wait() }()
 
 	got, err := syscall.Getpgid(r.PID())
-	if err != nil {
-		t.Fatalf("Getpgid: %v", err)
-	}
-	if got != r.PID() {
-		t.Errorf("child pgid = %d, want its own pid %d", got, r.PID())
-	}
+	c.Require().NoError(err, "Getpgid")
+	c.Eq(r.PID(), got, "child pgid")
 }
 
 // A child that inherited our group must still be signallable.
@@ -331,20 +295,17 @@ func TestDefaultStillGivesTheChildItsOwnGroup(t *testing.T) {
 // Shutdown and Restart RPCs. The group the child belongs to is daraja's own
 // and must not be signalled, so the pid itself is the only remaining target.
 func TestInheritProcessGroupChildIsStillSignallable(t *testing.T) {
+	c := assert.NewAborting(t)
 	r, err := newProcessRunner(SpawnSpec{
 		PiBinary:            "/bin/sh",
 		Argv:                []string{"-c", "sleep 30"},
 		InheritProcessGroup: true,
 	})
-	if err != nil {
-		t.Fatalf("newProcessRunner: %v", err)
-	}
+	c.NoError(err, "newProcessRunner")
 	if _, _, _, err := r.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := r.Terminate(); err != nil {
-		t.Fatalf("Terminate: %v", err)
-	}
+	c.NoError(r.Terminate(), "Terminate")
 
 	// Without the pid fallback this never returns: SIGTERM went to a group
 	// that does not exist, and /bin/sh outlives the test.

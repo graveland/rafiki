@@ -2,9 +2,14 @@
 
 package proxyenv
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/multigres/testkit/assert"
+)
 
 func TestParsePassthroughMode(t *testing.T) {
+	c := assert.NewCollecting(t)
 	cases := []struct {
 		in   string
 		want PassthroughMode
@@ -22,35 +27,21 @@ func TestParsePassthroughMode(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got, err := ParsePassthroughMode(tc.in)
-		if err != nil {
-			t.Fatalf("ParsePassthroughMode(%q): %v", tc.in, err)
-		}
-		if got != tc.want {
-			t.Errorf("ParsePassthroughMode(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+		c.Require().NoError(err, "ParsePassthroughMode(%q)", tc.in)
+		c.Eq(tc.want, got, "ParsePassthroughMode(%q) = %q, want", tc.in, got)
 	}
 }
 
 func TestParsePassthroughModeRejectsGarbage(t *testing.T) {
-	if _, err := ParsePassthroughMode("onn"); err == nil {
-		t.Fatal("want an error for an unrecognised value")
-	}
+	_, err := ParsePassthroughMode("onn")
+	assert.NewAborting(t).Error(err, "want an error for an unrecognised value")
 }
 
 func TestPassthroughAuthFor(t *testing.T) {
-	if !PassthroughAuthFor(PassthroughAuto, "") {
-		t.Error("auto + no model should bill the subscription (Claude Code picks its own Anthropic id)")
-	}
-	if !PassthroughAuthFor(PassthroughAuto, "claude-opus-5") {
-		t.Error("auto + anthropic model should bill the subscription")
-	}
-	if PassthroughAuthFor(PassthroughAuto, "openai/gpt-4o") {
-		t.Error("auto + non-anthropic model should bill the daemon's key")
-	}
-	if !PassthroughAuthFor(PassthroughOn, "openai/gpt-4o") {
-		t.Error("on must force passthrough regardless of model")
-	}
-	if PassthroughAuthFor(PassthroughOff, "claude-opus-5") {
-		t.Error("off must force the daemon's key regardless of model")
-	}
+	c := assert.NewCollecting(t)
+	c.True(PassthroughAuthFor(PassthroughAuto, ""), "auto + no model should bill the subscription (Claude Code picks its own Anthropic id)")
+	c.True(PassthroughAuthFor(PassthroughAuto, "claude-opus-5"), "auto + anthropic model should bill the subscription")
+	c.False(PassthroughAuthFor(PassthroughAuto, "openai/gpt-4o"), "auto + non-anthropic model should bill the daemon's key")
+	c.True(PassthroughAuthFor(PassthroughOn, "openai/gpt-4o"), "on must force passthrough regardless of model")
+	c.False(PassthroughAuthFor(PassthroughOff, "claude-opus-5"), "off must force the daemon's key regardless of model")
 }

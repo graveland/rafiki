@@ -5,11 +5,14 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executors"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestDarajaLaunchUDSFilter verifies that when dialAddr is a UDS path,
 // only UDS-enrolled executors survive candidate filtering.
 func TestDarajaLaunchUDSFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	fake := &udsmockPool{
 		udsSet: map[string]bool{"e1": true, "e3": true},
 		live: []execpool.LiveExecutor{
@@ -34,13 +37,9 @@ func TestDarajaLaunchUDSFilter(t *testing.T) {
 		candidates = udsCandidates
 	}
 
-	if len(candidates) != 2 {
-		t.Errorf("got %d UDS candidates, want 2", len(candidates))
-	}
+	c.Len(candidates, 2, "got %d UDS candidates, want 2", len(candidates))
 	for i, le := range candidates {
-		if !fake.udsSet[le.Executor.ID] {
-			t.Errorf("candidate[%d] = %s, expected a UDS executor", i, le.Executor.ID)
-		}
+		c.False(!fake.udsSet[le.Executor.ID], "candidate[%d] = %s, expected a UDS executor", i, le.Executor.ID)
 	}
 }
 
@@ -66,9 +65,7 @@ func TestDarajaLaunchTCPDialAcceptAll(t *testing.T) {
 		candidates = filtered
 	}
 
-	if len(candidates) != 1 {
-		t.Errorf("got %d candidates with TCP dialAddr, want 1", len(candidates))
-	}
+	assert.NewCollecting(t).Len(candidates, 1, "got %d candidates with TCP dialAddr, want 1", len(candidates))
 }
 
 // ---------------------------------------------------------------------------

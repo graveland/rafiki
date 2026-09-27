@@ -3,20 +3,20 @@
 package profile
 
 import (
-	"errors"
 	"os"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestLoadWithNoManifestSaysSo(t *testing.T) {
 	setXDG(t)
 	_, err := Load()
-	if !errors.Is(err, ErrNoManifest) {
-		t.Fatalf("Load() error = %v, want it to wrap ErrNoManifest", err)
-	}
+	assert.NewAborting(t).ErrorIs(err, ErrNoManifest, "Load() error")
 }
 
 func TestSaveThenLoadRoundTrips(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
 
 	in := Set{Profiles: map[string]Profile{
@@ -27,70 +27,41 @@ func TestSaveThenLoadRoundTrips(t *testing.T) {
 		},
 		"personal": {Name: "personal", URL: "https://rafiki.example.net", Preset: "cheap"},
 	}}
-	if err := Save(in); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	c.NoError(Save(in), "Save")
 
 	out, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	c.NoError(err, "Load")
 	w, ok := out.Get("work")
-	if !ok {
-		t.Fatal("work missing after round trip")
-	}
-	if w.Socket != "/tmp/ctl.sock" || w.Kind != "claude" || w.Labels["env"] != "work" {
-		t.Fatalf("work round-tripped as %+v", w)
-	}
+	c.True(ok, "work missing after round trip")
+	c.False(w.Socket != "/tmp/ctl.sock" || w.Kind != "claude" || w.Labels["env"] != "work", "work round-tripped as %+v", w)
 	p, _ := out.Get("personal")
-	if p.URL != "https://rafiki.example.net" || p.Preset != "cheap" {
-		t.Fatalf("personal round-tripped as %+v", p)
-	}
+	c.False(p.URL != "https://rafiki.example.net" || p.Preset != "cheap", "personal round-tripped as %+v", p)
 }
 
 func TestManifestIsNotWorldReadable(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if err := Save(Set{Profiles: map[string]Profile{"a": {Name: "a", Socket: "/s"}}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	c.NoError(Save(Set{Profiles: map[string]Profile{"a": {Name: "a", Socket: "/s"}}}), "Save")
 	fi, err := os.Stat(ProfilesFile())
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("profiles.toml mode = %v, want no group/other bits", fi.Mode().Perm())
-	}
+	c.NoError(err, "stat")
+	c.Eq(0, fi.Mode().Perm()&0o077, "profiles.toml mode = %v, want no group/other bits", fi.Mode().Perm())
 }
 
 func TestPointerRoundTripsAndDegradesQuietly(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if got := LoadPointer(); got != "" {
-		t.Fatalf("LoadPointer with no file = %q, want empty", got)
-	}
-	if err := SavePointer("work"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
-	if got := LoadPointer(); got != "work" {
-		t.Fatalf("LoadPointer = %q, want work", got)
-	}
+	c.Eq("", LoadPointer(), "LoadPointer with no file")
+	c.NoError(SavePointer("work"), "SavePointer")
+	c.Eq("work", LoadPointer(), "LoadPointer")
 }
 
 func TestTokenRoundTripsAt0600(t *testing.T) {
+	c := assert.NewAborting(t)
 	setXDG(t)
-	if got := ReadToken("work"); got != "" {
-		t.Fatalf("ReadToken with no file = %q, want empty", got)
-	}
-	if err := WriteToken("work", "sk-test\n"); err != nil {
-		t.Fatalf("WriteToken: %v", err)
-	}
-	if got := ReadToken("work"); got != "sk-test" {
-		t.Fatalf("ReadToken = %q, want sk-test (trimmed)", got)
-	}
+	c.Eq("", ReadToken("work"), "ReadToken with no file")
+	c.NoError(WriteToken("work", "sk-test\n"), "WriteToken")
+	c.Eq("sk-test", ReadToken("work"), "ReadToken")
 	fi, err := os.Stat(TokenFile("work"))
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("token mode = %v, want 0600", fi.Mode().Perm())
-	}
+	c.NoError(err, "stat")
+	c.Eq(0o600, fi.Mode().Perm(), "token mode")
 }

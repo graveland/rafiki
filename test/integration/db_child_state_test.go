@@ -25,6 +25,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── daemon harness: stderr capture and the proxy face's port ─────────────
@@ -99,6 +101,7 @@ func waitProxyListen(t *testing.T, stderr *stderrBuf) string {
 // against the same tree; callers without a restart remove it themselves.
 func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 	t.Helper()
+	c := assert.NewAborting(t)
 
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
@@ -107,9 +110,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 
 	// Ensure migrations are applied.
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
+	c.NoError(err, "pool")
 	if err := store.Migrate(context.Background(), pool); err != nil {
 		pool.Close()
 		t.Fatalf("migrate: %v", err)
@@ -123,9 +124,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		base = "/tmp"
 	}
 	homeDir, err := os.MkdirTemp(base, "rafiki-it-db")
-	if err != nil {
-		t.Fatalf("mkdirtemp: %v", err)
-	}
+	c.NoError(err, "mkdirtemp")
 
 	appDir := filepath.Join(homeDir, "rafiki")
 	socketPath := filepath.Join(appDir, "controller.sock")
@@ -193,9 +192,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 		lastErr = err
 		time.Sleep(20 * time.Millisecond)
 	}
-	if lastErr != nil {
-		t.Fatalf("daemon never accepted on %s: %v\nstderr:\n%s", socketPath, lastErr, stderr.tail(4000))
-	}
+	c.NoError(lastErr, "daemon never accepted on %s: %v\nstderr:\n%s", socketPath, lastErr, stderr.tail(4000))
 
 	// The proxy face announces itself on stderr once it is serving.
 	d.proxyURL = waitProxyListen(t, stderr)
@@ -213,6 +210,7 @@ func (d *daemon) stopDaemonNoRemove() {
 // It spawns a fundi child, stops the daemon, wipes the state directory, restarts
 // with the same daemon id, and verifies the child is still present.
 func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
+	ck := assert.NewAborting(t)
 	if os.Getenv("RAFIKI_TEST_DSN") == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
@@ -232,9 +230,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 
 	// 3. Wipe the state directory.
 	stateDir := filepath.Join(d1.homeDir, "rafiki", "state")
-	if err := os.RemoveAll(stateDir); err != nil {
-		t.Fatalf("remove state dir: %v", err)
-	}
+	ck.NoError(os.RemoveAll(stateDir), "remove state dir")
 
 	// 4. Restart with the same daemon id and home dir.
 	cmd := exec.Command(binaryPath)
@@ -246,9 +242,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 		"RAFIKI_DB="+os.Getenv("RAFIKI_TEST_DSN"),
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start second daemon: %v", err)
-	}
+	ck.NoError(cmd.Start(), "start second daemon")
 	d2 := &daemon{
 		socketPath: d1.socketPath,
 		proc:       cmd,
@@ -278,9 +272,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 			found = c
 		}
 	}
-	if found == nil {
-		t.Fatal("child not found after restart with wiped state dir")
-	}
+	ck.NotNil(found, "child not found after restart with wiped state dir")
 
 	// 6. Clean up: kill, then forget.
 	killAndForget(t, d2, childID)
@@ -290,19 +282,16 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 // inserted directly into conversations.child is loaded by the daemon on
 // restart — it appears in ListChildren as exited.
 func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	if os.Getenv("RAFIKI_TEST_DSN") == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
+	ck.Require().NoError(err, "pool")
 	defer pool.Close()
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	ck.Require().NoError(store.Migrate(context.Background(), pool), "migrate")
 
 	convID := insertTestConversation(t, pool)
 
@@ -315,9 +304,7 @@ func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
 		VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8, $9)`,
 		childID, protocol.KindFundi, string(protocol.StatusExited), "idle",
 		time.Now(), "ephemeral", convID, configJSON, labelsJSON)
-	if err != nil {
-		t.Fatalf("insert child row: %v", err)
-	}
+	ck.Require().NoError(err, "insert child row")
 	// A fresh pool: the one above is closed by this function's defer, which
 	// runs BEFORE cleanups, so reusing it deletes nothing and — because the
 	// error is discarded — says nothing about it either. The row carries no
@@ -342,15 +329,11 @@ func TestDBChildState_ChildRowVisibleAfterRestart(t *testing.T) {
 	for _, c := range listChildren(t, d.control(t)) {
 		if c.GetChildId() == childID {
 			found = true
-			if c.GetStatus() != string(protocol.StatusExited) {
-				t.Errorf("recovered child status = %q, want %q", c.GetStatus(), protocol.StatusExited)
-			}
+			ck.Eq(string(protocol.StatusExited), c.GetStatus(), "recovered child status = %q, want %q", c.GetStatus(), protocol.StatusExited)
 			break
 		}
 	}
-	if !found {
-		t.Error("child row not found in ListChildren — recovery did not load it")
-	}
+	ck.True(found, "child row not found in ListChildren — recovery did not load it")
 
 	d.stopDaemonNoRemove()
 	os.RemoveAll(d.homeDir)
@@ -362,9 +345,7 @@ func insertTestConversation(t *testing.T, pool *pgxpool.Pool) string {
 	err := pool.QueryRow(context.Background(),
 		`INSERT INTO conversations.conversation (origin_entrypoint, driven_by)
 		 VALUES ('test','server') RETURNING id::text`).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert conversation")
 	return id
 }
 
@@ -376,12 +357,11 @@ func sendTurn(t *testing.T, d *daemon, childID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if _, err := d.control(t).SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
+	_, err := d.control(t).SendFrame(ctx, connect.NewRequest(&rafikiv1.SendFrameRequest{
 		ChildId:   childID,
 		FrameJson: `{"type":"get_state","id":"u1"}`,
-	})); err != nil {
-		t.Fatalf("SendFrame failed: %v", err)
-	}
+	}))
+	assert.NewAborting(t).NoError(err, "SendFrame failed")
 }
 
 // killAndForget stops a recovered child and forgets it, tolerating the race
@@ -397,6 +377,7 @@ func sendTurn(t *testing.T, d *daemon, childID string) {
 // succeeds converges on the one state both agree about.
 func killAndForget(t *testing.T, d *daemon, childID string) {
 	t.Helper()
+	c := assert.NewAborting(t)
 	client := d.control(t)
 
 	var last error
@@ -409,9 +390,7 @@ func killAndForget(t *testing.T, d *daemon, childID string) {
 		kctx, kcancel := context.WithTimeout(context.Background(), 15*time.Second)
 		_, killErr := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: childID}))
 		kcancel()
-		if killErr != nil && rpcreason.Reason(killErr) != protocol.ErrChildExited {
-			t.Fatalf("Kill failed: %v", killErr)
-		}
+		c.False(killErr != nil && rpcreason.Reason(killErr) != protocol.ErrChildExited, "Kill failed: %v", killErr)
 
 		// Close maps its refusals through ConnectErr, so the precise reason
 		// rides the error as a rafiki-domain detail — the same code the framed
@@ -423,9 +402,7 @@ func killAndForget(t *testing.T, d *daemon, childID string) {
 			return
 		}
 		last = closeErr
-		if rpcreason.Reason(closeErr) != protocol.ErrNotExited {
-			t.Fatalf("Close failed: %v", closeErr)
-		}
+		c.Eq(protocol.ErrNotExited, rpcreason.Reason(closeErr), "Close failed: %v", closeErr)
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Errorf("Close never succeeded; last error: %v", last)
@@ -477,9 +454,7 @@ func dropDaemonRows(t *testing.T, daemonID string) {
 func openPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "pool")
 	return pool
 }
 
@@ -519,6 +494,7 @@ func noRealProviderEnv() []string {
 // TestDBChildState_ResumesAfterDaemonCrash is the regression test for the
 // defect that broke the design's motivating scenario.
 func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
+	ck := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -529,12 +505,8 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 	// Ensure migrations.
 	{
 		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			t.Fatalf("pool: %v", err)
-		}
-		if err := store.Migrate(context.Background(), pool); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
+		ck.NoError(err, "pool")
+		ck.NoError(store.Migrate(context.Background(), pool), "migrate")
 		pool.Close()
 	}
 
@@ -550,10 +522,8 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 	pool := openPool(t, dsn)
 	defer pool.Close()
 	var lastStatus *string
-	if err := pool.QueryRow(context.Background(),
-		`SELECT last_status FROM conversations.child WHERE child_id = $1`, childID).Scan(&lastStatus); err != nil {
-		t.Fatalf("read last_status: %v", err)
-	}
+	ck.NoError(pool.QueryRow(context.Background(),
+		`SELECT last_status FROM conversations.child WHERE child_id = $1`, childID).Scan(&lastStatus), "read last_status")
 	if lastStatus != nil && *lastStatus != "" {
 		t.Fatalf("last_status = %q; the test is not exercising a crash", *lastStatus)
 	}
@@ -568,9 +538,7 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 		"RAFIKI_DB="+dsn,
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start second daemon: %v", err)
-	}
+	ck.NoError(cmd.Start(), "start second daemon")
 	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir}
 	t.Cleanup(func() {
 		_ = d2.proc.Process.Signal(syscall.SIGTERM)
@@ -625,6 +593,7 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 // standing up a second agent for no added coverage of the code path under
 // test.
 func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -635,12 +604,8 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 
 	{
 		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			t.Fatalf("pool: %v", err)
-		}
-		if err := store.Migrate(context.Background(), pool); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
+		c.NoError(err, "pool")
+		c.NoError(store.Migrate(context.Background(), pool), "migrate")
 		pool.Close()
 	}
 
@@ -687,13 +652,9 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 	_ = d1.proc.Wait()
 
 	var state string
-	if err := pool.QueryRow(context.Background(),
-		`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
-		t.Fatalf("read seeded row state before restart: %v", err)
-	}
-	if state != "sent" {
-		t.Fatalf("seeded row state = %q before restart, want 'sent' — the crash must not have touched it", state)
-	}
+	c.NoError(pool.QueryRow(context.Background(),
+		`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state), "read seeded row state before restart")
+	c.Eq("sent", state, "seeded row state")
 
 	// Restart with the same daemon id and home dir — the recovery path under
 	// test.
@@ -707,9 +668,7 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	cmd.Env = append(cmd.Env, noRealCreds...)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start second daemon: %v", err)
-	}
+	c.NoError(cmd.Start(), "start second daemon")
 	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir}
 	t.Cleanup(func() {
 		_ = d2.proc.Process.Signal(syscall.SIGTERM)
@@ -745,10 +704,8 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 	// direction, so it buys nothing.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if err := pool.QueryRow(context.Background(),
-			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
-			t.Fatalf("poll seeded row state: %v", err)
-		}
+		c.NoError(pool.QueryRow(context.Background(),
+			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state), "poll seeded row state")
 		if state == "consumed" {
 			break
 		}
@@ -793,6 +750,7 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 // transition away from 'sent' at any point during the poll is a failure —
 // not just whatever it settles on by the end.
 func TestDBChildState_InboxReplayDoesNotCrossDaemons(t *testing.T) {
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
@@ -845,12 +803,8 @@ func TestDBChildState_InboxReplayDoesNotCrossDaemons(t *testing.T) {
 
 	{
 		pool, err := pgxpool.New(context.Background(), dsn)
-		if err != nil {
-			t.Fatalf("pool: %v", err)
-		}
-		if err := store.Migrate(context.Background(), pool); err != nil {
-			t.Fatalf("migrate: %v", err)
-		}
+		c.NoError(err, "pool")
+		c.NoError(store.Migrate(context.Background(), pool), "migrate")
 		pool.Close()
 	}
 
@@ -905,13 +859,9 @@ func TestDBChildState_InboxReplayDoesNotCrossDaemons(t *testing.T) {
 	deadline := time.Now().Add(12 * time.Second)
 	for {
 		var state string
-		if err := pool.QueryRow(context.Background(),
-			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state); err != nil {
-			t.Fatalf("poll seeded row state: %v", err)
-		}
-		if state != "sent" {
-			t.Fatalf("seeded row state = %q; a child owned by another daemon must never be replayed", state)
-		}
+		c.NoError(pool.QueryRow(context.Background(),
+			`SELECT state FROM conversations.agent_inbox WHERE id = $1`, rowID).Scan(&state), "poll seeded row state")
+		c.Eq("sent", state, "seeded row state")
 		if time.Now().After(deadline) {
 			break
 		}

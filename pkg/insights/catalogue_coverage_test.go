@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // coverageSeedConversation inserts a conversation with a given
@@ -24,9 +26,7 @@ func coverageSeedConversation(t *testing.T, pool *pgxpool.Pool, entrypoint, owne
 		`INSERT INTO conversations.conversation (owner_user_id, persona, model, origin_entrypoint, driven_by)
 		 VALUES ($1::uuid, 'team-platform', 'claude-fable-5', $2, 'client') RETURNING id::text`,
 		ownerArg, entrypoint).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert conversation: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert conversation")
 	return id
 }
 
@@ -39,18 +39,14 @@ func coverageSeedChild(t *testing.T, pool *pgxpool.Pool, convID string) {
 		`INSERT INTO conversations.child (child_id, conversation_id, kind, status, spawned_at)
 		 VALUES ($1, $2::uuid, 'fundi', 'exited', now())`,
 		"test-child-"+convID, convID)
-	if err != nil {
-		t.Fatalf("insert child row: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "insert child row")
 }
 
 // coverageCellInt reads an IntEntry cell out of a coverage query row.
 func coverageCellInt(t *testing.T, e Entry) int64 {
 	t.Helper()
 	v, ok := e.(IntEntry)
-	if !ok {
-		t.Fatalf("coverage cell is %T, want IntEntry", e)
-	}
+	assert.NewAborting(t).True(ok, "coverage cell is %T, want IntEntry", e)
 	return int64(v)
 }
 
@@ -58,9 +54,7 @@ func coverageCellInt(t *testing.T, e Entry) int64 {
 func coverageCellFloat(t *testing.T, e Entry) float64 {
 	t.Helper()
 	v, ok := e.(FloatEntry)
-	if !ok {
-		t.Fatalf("coverage cell is %T, want FloatEntry", e)
-	}
+	assert.NewAborting(t).True(ok, "coverage cell is %T, want FloatEntry", e)
 	return float64(v)
 }
 
@@ -69,6 +63,7 @@ func coverageCellFloat(t *testing.T, e Entry) float64 {
 // without, and expects one weekly row with conversations=2, with_child=1 and
 // coverage=0.5.
 func TestQueryCoverageComputesRatio(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	withChild := coverageSeedConversation(t, pool, "agent", "coverage-carol")
@@ -76,23 +71,12 @@ func TestQueryCoverageComputesRatio(t *testing.T) {
 	coverageSeedConversation(t, pool, "agent", "coverage-carol")
 
 	got, err := New(pool).Query(ctx, ScopeOwner(ensureUser(t, pool, "coverage-carol")), "coverage", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query coverage: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("coverage query returned %d rows, want 1 (both conversations fall in the same week): %+v",
-			len(got.Rows), got.Rows)
-	}
+	c.Require().NoError(err, "query coverage")
+	c.Require().Len(got.Rows, 1, "coverage query returned %d rows, want 1 (both conversations fall in the same week)", len(got.Rows))
 	row := got.Rows[0]
-	if convs := coverageCellInt(t, row[1]); convs != 2 {
-		t.Errorf("conversations = %d, want 2", convs)
-	}
-	if withChild := coverageCellInt(t, row[2]); withChild != 1 {
-		t.Errorf("with_child = %d, want 1", withChild)
-	}
-	if cov := coverageCellFloat(t, row[3]); cov != 0.5 {
-		t.Errorf("coverage = %v, want 0.5", cov)
-	}
+	c.Eq(2, coverageCellInt(t, row[1]), "conversations")
+	c.Eq(1, coverageCellInt(t, row[2]), "with_child")
+	c.Eq(0.5, coverageCellFloat(t, row[3]), "coverage")
 }
 
 // TestQueryCoverageIgnoresNonAgentEntrypoints seeds a claude-entrypoint
@@ -100,34 +84,26 @@ func TestQueryCoverageComputesRatio(t *testing.T) {
 // agent one counts, since only agent-kind conversations ever get a child row
 // by design.
 func TestQueryCoverageIgnoresNonAgentEntrypoints(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	coverageSeedConversation(t, pool, "agent", "coverage-dave")
 	coverageSeedConversation(t, pool, "claude", "coverage-dave")
 
 	got, err := New(pool).Query(ctx, ScopeOwner(ensureUser(t, pool, "coverage-dave")), "coverage", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query coverage: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("coverage query returned %d rows, want 1: %+v", len(got.Rows), got.Rows)
-	}
+	c.Require().NoError(err, "query coverage")
+	c.Require().Len(got.Rows, 1, "coverage query returned %d rows, want 1", len(got.Rows))
 	row := got.Rows[0]
-	if convs := coverageCellInt(t, row[1]); convs != 1 {
-		t.Errorf("conversations = %d, want 1 (only the agent-entrypoint conversation counts)", convs)
-	}
-	if withChild := coverageCellInt(t, row[2]); withChild != 0 {
-		t.Errorf("with_child = %d, want 0 (neither fixture got a child row)", withChild)
-	}
-	if cov := coverageCellFloat(t, row[3]); cov != 0.0 {
-		t.Errorf("coverage = %v, want 0", cov)
-	}
+	c.Eq(1, coverageCellInt(t, row[1]), "conversations")
+	c.Eq(0, coverageCellInt(t, row[2]), "with_child")
+	c.Eq(0.0, coverageCellFloat(t, row[3]), "coverage")
 }
 
 // TestQueryCoverageScopeOwnerExcludesOtherOwners is the standard scope-owner
 // shape: a ScopeOwner(carol) coverage query over agent conversations owned by
 // carol and erin counts only carol's.
 func TestQueryCoverageScopeOwnerExcludesOtherOwners(t *testing.T) {
+	c := assert.NewCollecting(t)
 	ctx := context.Background()
 	pool := newTestPool(t)
 	carolConv := coverageSeedConversation(t, pool, "agent", "coverage-carol")
@@ -136,20 +112,10 @@ func TestQueryCoverageScopeOwnerExcludesOtherOwners(t *testing.T) {
 	coverageSeedChild(t, pool, erinConv)
 
 	got, err := New(pool).Query(ctx, ScopeOwner(ensureUser(t, pool, "coverage-carol")), "coverage", StatsFilter{})
-	if err != nil {
-		t.Fatalf("query coverage scoped to carol: %v", err)
-	}
-	if len(got.Rows) != 1 {
-		t.Fatalf("scoped coverage query returned %d rows, want 1 (carol's only): %+v", len(got.Rows), got.Rows)
-	}
+	c.Require().NoError(err, "query coverage scoped to carol")
+	c.Require().Len(got.Rows, 1, "scoped coverage query returned %d rows, want 1 (carol's only)", len(got.Rows))
 	row := got.Rows[0]
-	if convs := coverageCellInt(t, row[1]); convs != 1 {
-		t.Errorf("conversations = %d, want 1 (erin's row must be excluded by scope)", convs)
-	}
-	if withChild := coverageCellInt(t, row[2]); withChild != 1 {
-		t.Errorf("with_child = %d, want 1", withChild)
-	}
-	if cov := coverageCellFloat(t, row[3]); cov != 1.0 {
-		t.Errorf("coverage = %v, want 1", cov)
-	}
+	c.Eq(1, coverageCellInt(t, row[1]), "conversations")
+	c.Eq(1, coverageCellInt(t, row[2]), "with_child")
+	c.Eq(1.0, coverageCellFloat(t, row[3]), "coverage")
 }

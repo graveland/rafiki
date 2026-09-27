@@ -5,7 +5,6 @@ package llm_test
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +12,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/providers"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type recordingSender struct {
@@ -49,9 +50,7 @@ default_provider = "vmlx"
 kind = "anthropic"
 base_url = "http://localhost:8005"
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Parse")
 	return set
 }
 
@@ -59,15 +58,14 @@ base_url = "http://localhost:8005"
 // keyless local-only client impossible to construct. That requirement is gone:
 // what is required is a sender for the provider the model names.
 func TestNewClientNeedsNoAnthropicSender(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(localSet(t)),
 		llm.WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &calls}),
 		llm.WithDefaultModel("vmlx/qwen3"),
 	)
-	if err != nil {
-		t.Fatalf("NewClient with no anthropic sender: %v", err)
-	}
+	ck.Require().NoError(err, "NewClient with no anthropic sender")
 	if _, err := c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
 		Model: anthropic.Model("vmlx/qwen3"), MaxTokens: 8,
 	}); err != nil {
@@ -75,32 +73,26 @@ func TestNewClientNeedsNoAnthropicSender(t *testing.T) {
 	}
 	// The sender receives the PROVIDER-LOCAL id, with the provider prefix
 	// stripped: "vmlx/qwen3" addresses provider vmlx and model qwen3.
-	if len(calls) != 1 || calls[0] != "vmlx:qwen3" {
-		t.Errorf("calls = %v, want [vmlx:qwen3]", calls)
-	}
+	ck.False(len(calls) != 1 || calls[0] != "vmlx:qwen3", "calls = %v, want [vmlx:qwen3]", calls)
 }
 
 func TestSendParamsUnknownProviderErrors(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c, err := llm.NewClient(
 		llm.WithProviders(localSet(t)),
 		llm.WithProviderSender("vmlx", recordingSender{name: "vmlx", calls: &[]string{}}),
 	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	ck.Require().NoError(err, "NewClient")
 	_, err = c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
 		Model: anthropic.Model("deepseek/deepseek-chat"), MaxTokens: 8,
 	})
-	if err == nil {
-		t.Fatal("SendParams with an unconfigured provider succeeded")
-	}
-	if !strings.Contains(err.Error(), "unknown provider") {
-		t.Errorf("error = %q, want \"unknown provider\"", err.Error())
-	}
+	ck.Require().Error(err, "SendParams with an unconfigured provider succeeded")
+	ck.StrContains(err.Error(), "unknown provider", "error = %q, want \"unknown provider\"", err.Error())
 }
 
 // Configured fallback applies when the caller supplies none.
 func TestConfiguredFallbackUsed(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte(`
 default_provider = "primary"
 
@@ -113,9 +105,7 @@ fallback = ["backup"]
 kind = "anthropic"
 base_url = "http://localhost:2"
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	ck.Require().NoError(err, "Parse")
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(set),
@@ -123,22 +113,19 @@ base_url = "http://localhost:2"
 		llm.WithProviderSender("backup", recordingSender{name: "backup", calls: &calls}),
 		llm.WithBreaker(time.Minute),
 	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	ck.Require().NoError(err, "NewClient")
 	if _, err := c.SendParams(context.Background(), llm.SendMeta{}, anthropic.MessageNewParams{
 		Model: anthropic.Model("primary/m"), MaxTokens: 8,
 	}); err != nil {
 		t.Fatalf("SendParams: %v", err)
 	}
-	if len(calls) != 2 || calls[0] != "primary:m" || calls[1] != "backup:m" {
-		t.Errorf("calls = %v, want [primary:m backup:m]", calls)
-	}
+	ck.False(len(calls) != 2 || calls[0] != "primary:m" || calls[1] != "backup:m", "calls = %v, want [primary:m backup:m]", calls)
 }
 
 // A caller-supplied fallback list wins outright, and an EMPTY caller list means
 // no failover — nothing silently substitutes the configured list for it.
 func TestCallerFallbackWins(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	set, err := providers.Parse([]byte(`
 default_provider = "primary"
 
@@ -155,9 +142,7 @@ base_url = "http://localhost:2"
 kind = "anthropic"
 base_url = "http://localhost:3"
 `))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	ck.Require().NoError(err, "Parse")
 	var calls []string
 	c, err := llm.NewClient(
 		llm.WithProviders(set),
@@ -166,15 +151,11 @@ base_url = "http://localhost:3"
 		llm.WithProviderSender("other", recordingSender{name: "other", calls: &calls}),
 		llm.WithBreaker(time.Minute),
 	)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
+	ck.Require().NoError(err, "NewClient")
 	if _, err := c.SendParams(context.Background(), llm.SendMeta{Fallback: []string{"other"}}, anthropic.MessageNewParams{
 		Model: anthropic.Model("primary/m"), MaxTokens: 8,
 	}); err != nil {
 		t.Fatalf("SendParams: %v", err)
 	}
-	if len(calls) != 2 || calls[1] != "other:m" {
-		t.Errorf("calls = %v, want the caller's [other] to win over the configured [backup]", calls)
-	}
+	ck.False(len(calls) != 2 || calls[1] != "other:m", "calls = %v, want the caller's [other] to win over the configured [backup]", calls)
 }

@@ -9,27 +9,27 @@ import (
 	"testing"
 
 	skillspkg "go.graveland.dev/rafiki/pkg/skills"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // writeSkill creates <dir>/<name>/SKILL.md with the given frontmatter and
 // body, mirroring the layout DiscoverSkills expects.
 func writeSkill(t *testing.T, dir, name, description, body string) skillspkg.SkillMeta {
 	t.Helper()
+	c := assert.NewAborting(t)
 	skillDir := filepath.Join(dir, name)
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.MkdirAll(skillDir, 0o755))
 	path := filepath.Join(skillDir, "SKILL.md")
 	content := "---\nname: " + name + "\ndescription: " + description + "\n---\n" + body
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(path, []byte(content), 0o644))
 	return skillspkg.SkillMeta{Name: name, Description: description, Dir: skillDir, Path: path}
 }
 
 // TestSkillToolReturnsBodyAndBaseDir covers the tool's success shape: the
 // base-dir line, then the SKILL.md body with frontmatter stripped.
 func TestSkillToolReturnsBodyAndBaseDir(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	meta := writeSkill(t, dir, "reviewer", "reviews code", "REVIEWER_BODY_MARKER\nstep one\n")
 
@@ -38,26 +38,21 @@ func TestSkillToolReturnsBodyAndBaseDir(t *testing.T) {
 	r.Register(skillT)
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"reviewer"}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	c.NoError(err, "unexpected error")
 
 	wantPrefix := "Base directory for this skill: " + meta.Dir + "\n\n"
 	if !strings.HasPrefix(out, wantPrefix) {
 		t.Fatalf("expected output to start with %q, got %q", wantPrefix, out)
 	}
-	if !strings.Contains(out, "REVIEWER_BODY_MARKER") {
-		t.Fatalf("expected body content in output, got %q", out)
-	}
-	if strings.Contains(out, "description: reviews code") {
-		t.Fatalf("expected frontmatter stripped from output, got %q", out)
-	}
+	c.StrContains(out, "REVIEWER_BODY_MARKER", "expected body content in output, got")
+	c.NotStrContains(out, "description: reviews code", "expected frontmatter stripped from output, got")
 }
 
 // TestSkillToolUnknownNameListsAvailable covers the required-recovery path:
 // an unknown skill name is a tool error (is_error result) whose message
 // lists the available names so the model can self-correct.
 func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	m1 := writeSkill(t, dir, "alpha", "alpha desc", "alpha body")
 	m2 := writeSkill(t, dir, "beta", "beta desc", "beta body")
@@ -67,12 +62,8 @@ func TestSkillToolUnknownNameListsAvailable(t *testing.T) {
 	r.Register(skillT)
 
 	out, err := r.Execute(context.Background(), "skill", json.RawMessage(`{"skill":"nonexistent"}`))
-	if err == nil {
-		t.Fatalf("expected an error for an unknown skill, got output %q", out)
-	}
-	if !strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta") {
-		t.Fatalf("expected error to list available skill names, got %v", err)
-	}
+	c.Error(err, "expected an error for an unknown skill, got output %q", out)
+	c.False(!strings.Contains(err.Error(), "alpha") || !strings.Contains(err.Error(), "beta"), "expected error to list available skill names, got %v", err)
 }
 
 // TestSkillToolRegistersUnderName asserts the tool is registered as "skill"
@@ -91,9 +82,7 @@ func TestSkillToolRegistersUnderName(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatal("expected a \"skill\" tool to be registered")
-	}
+	assert.NewAborting(t).True(found, "expected a \"skill\" tool to be registered")
 }
 
 // TestSkillBlueprintDeclinesWithoutSkills pins the contract that keeps a
@@ -110,9 +99,7 @@ func TestSkillBlueprintDeclinesWithoutSkills(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := (&SkillBlueprint{}).Materialize(ToolOpts{Skills: tc.skills})
-			if err != nil {
-				t.Fatalf("Materialize returned an error: %v", err)
-			}
+			assert.NewAborting(t).NoError(err, "Materialize returned an error")
 			if got != nil {
 				t.Fatalf("Materialize returned a tool %q, want nil (declined)", got.Name())
 			}
@@ -124,6 +111,7 @@ func TestSkillBlueprintDeclinesWithoutSkills(t *testing.T) {
 // marked Inline resolves by QUALIFIED name and fetches its body through
 // ToolOpts.InlineSkillBody, passing the namespace and bare name separately.
 func TestSkillToolServesAnInlineBody(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var gotNS, gotName string
 	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
 		Skills: []skillspkg.SkillMeta{
@@ -134,57 +122,39 @@ func TestSkillToolServesAnInlineBody(t *testing.T) {
 			return "the body", nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("materialize: %v", err)
-	}
+	c.Require().NoError(err, "materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if gotNS != "rafiki" || gotName != "coordinating" {
-		t.Errorf("fetcher got (%q,%q), want (rafiki,coordinating)", gotNS, gotName)
-	}
-	if !strings.Contains(res.Text, "the body") {
-		t.Errorf("result did not carry the body: %v", res)
-	}
+	c.Require().NoError(err, "execute")
+	c.False(gotNS != "rafiki" || gotName != "coordinating", "fetcher got (%q,%q), want (rafiki,coordinating)", gotNS, gotName)
+	c.StrContains(res.Text, "the body", "result did not carry the body: %v", res)
 }
 
 // An inline skill has no directory, so the result must NOT claim one — there
 // is nothing on disk for the model to read.
 func TestInlineSkillResultHasNoBaseDirectoryLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
 		Skills: []skillspkg.SkillMeta{
 			{Namespace: "rafiki", Name: "coordinating", Inline: true},
 		},
 		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
 	})
-	if err != nil {
-		t.Fatalf("materialize: %v", err)
-	}
+	c.Require().NoError(err, "materialize")
 	res, err := tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"rafiki:coordinating"}`)))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if strings.Contains(res.Text, "Base directory") {
-		t.Errorf("inline result claimed a base directory: %v", res)
-	}
+	c.Require().NoError(err, "execute")
+	c.NotStrContains(res.Text, "Base directory", "inline result claimed a base directory: %v", res)
 }
 
 func TestUnknownSkillErrorListsQualifiedNames(t *testing.T) {
+	c := assert.NewCollecting(t)
 	tool, err := SkillBlueprint{}.Materialize(ToolOpts{
 		Skills: []skillspkg.SkillMeta{
 			{Namespace: "rafiki", Name: "coordinating", Inline: true},
 		},
 		InlineSkillBody: func(context.Context, string, string) (string, error) { return "b", nil },
 	})
-	if err != nil {
-		t.Fatalf("materialize: %v", err)
-	}
+	c.Require().NoError(err, "materialize")
 	_, err = tool.Execute(context.Background(), ToolInput(json.RawMessage(`{"skill":"coordinating"}`)))
-	if err == nil {
-		t.Fatal("bare name resolved; want an error naming the qualified form")
-	}
-	if !strings.Contains(err.Error(), "rafiki:coordinating") {
-		t.Errorf("error does not offer the qualified name: %v", err)
-	}
+	c.Require().Error(err, "bare name resolved; want an error naming the qualified form")
+	c.StrContains(err.Error(), "rafiki:coordinating", "error does not offer the qualified name: %v", err)
 }

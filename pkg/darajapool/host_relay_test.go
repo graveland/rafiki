@@ -14,24 +14,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/daraja"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testScriptBinary(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fake-script")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755))
 	return path
 }
 
 func TestRealHostScriptExitReachesTheRunner(t *testing.T) {
+	c := assert.NewAborting(t)
 	// The sleep keeps the host's events from landing before the pool's relay
 	// stream attaches, separating an attach race from a broken relay.
 	bin := testScriptBinary(t, `sleep 0.5; echo relayed-out; echo relayed-err >&2; exit 3`)
@@ -39,9 +39,7 @@ func TestRealHostScriptExitReachesTheRunner(t *testing.T) {
 		Binary: bin,
 		Spec:   daraja.ChildSpec{Kind: daraja.KindScript, ExtraArgs: []string{bin}},
 	})
-	if err := host.Start(); err != nil {
-		t.Fatalf("host start: %v", err)
-	}
+	c.NoError(host.Start(), "host start")
 
 	pool, _, teardown := connectFakeDaraja(t, daraja.NewServer(host))
 	defer teardown()
@@ -62,17 +60,13 @@ func TestRealHostScriptExitReachesTheRunner(t *testing.T) {
 		if live {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the daraja connection never became live in the pool")
-		}
+		c.False(time.Now().After(deadline), "the daraja connection never became live in the pool")
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	r := NewRunner(pool, "c1")
 	_, stdoutR, stderrR, err := r.Start()
-	if err != nil {
-		t.Fatalf("runner start: %v", err)
-	}
+	c.NoError(err, "runner start")
 
 	// Wait is the settle input: it must return the script's exit code.
 	done := make(chan [2]string, 1)
@@ -101,16 +95,12 @@ func TestRealHostScriptExitReachesTheRunner(t *testing.T) {
 	for range 2 {
 		select {
 		case res := <-results:
-			if res.err != nil {
-				t.Fatalf("read %s: %v", res.name, res.err)
-			}
+			c.NoError(res.err, "read %s", res.name)
 			want := "relayed-out"
 			if res.name == "stderr" {
 				want = "relayed-err"
 			}
-			if !strings.Contains(res.data, want) {
-				t.Fatalf("%s = %q, want it to contain %q", res.name, res.data, want)
-			}
+			c.StrContains(res.data, want, "%s = %q, want it to contain", res.name, res.data)
 		case <-time.After(20 * time.Second):
 			t.Fatal("timeout reading the relayed streams")
 		}
@@ -118,9 +108,7 @@ func TestRealHostScriptExitReachesTheRunner(t *testing.T) {
 
 	select {
 	case got := <-done:
-		if got[0] != "3" || got[1] != "" {
-			t.Fatalf("Wait = %v, want code 3 with no signal", got)
-		}
+		c.False(got[0] != "3" || got[1] != "", "Wait = %v, want code 3 with no signal", got)
 	case <-time.After(15 * time.Second):
 		t.Fatal("the script's exit never reached the runner (the child would hang as streaming forever)")
 	}

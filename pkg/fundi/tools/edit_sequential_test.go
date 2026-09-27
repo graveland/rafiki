@@ -7,14 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestEditToolSequentialSecondEditSeesFirstResult(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("one two three"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte("one two three"), 0o644))
 	tr := NewFileTracker()
 	readTool := testReadTool(t, tr, "")
 	editTool := testEditTool(t, tr, "")
@@ -28,22 +29,17 @@ func TestEditToolSequentialSecondEditSeesFirstResult(t *testing.T) {
 	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"edits":[{"old_string":"one","new_string":"ONE"},{"old_string":"ONE two","new_string":"UNO duo"}],"sequential":true}`, p),
 	))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	c.NoError(err, "unexpected error")
 	b, _ := os.ReadFile(p)
 	got := string(b)
-	if got != "UNO duo three" {
-		t.Fatalf("sequential edit failed: got %q, want %q", got, "UNO duo three")
-	}
+	c.Eq("UNO duo three", got, "sequential edit failed: got")
 }
 
 func TestEditToolSequentialWithoutFlagRejectsChained(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("one two three"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte("one two three"), 0o644))
 	tr := NewFileTracker()
 	readTool := testReadTool(t, tr, "")
 	editTool := testEditTool(t, tr, "")
@@ -56,20 +52,15 @@ func TestEditToolSequentialWithoutFlagRejectsChained(t *testing.T) {
 	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"edits":[{"old_string":"one","new_string":"ONE"},{"old_string":"ONE two","new_string":"UNO duo"}]}`, p),
 	))
-	if err == nil {
-		t.Fatal("expected error for chained old_string in non-sequential mode")
-	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("expected 'not found' error, got %v", err)
-	}
+	c.Error(err, "expected error for chained old_string in non-sequential mode")
+	c.StrContains(err.Error(), "not found", "expected 'not found' error, got %v", err)
 }
 
 func TestEditToolDefaultModeStillRejectsOverlaps(t *testing.T) {
+	c := assert.NewAborting(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "a.txt")
-	if err := os.WriteFile(p, []byte("hello world"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(os.WriteFile(p, []byte("hello world"), 0o644))
 	tr := NewFileTracker()
 	readTool := testReadTool(t, tr, "")
 	editTool := testEditTool(t, tr, "")
@@ -80,7 +71,5 @@ func TestEditToolDefaultModeStillRejectsOverlaps(t *testing.T) {
 	_, err := editTool.Execute(context.Background(), ToolInput(
 		fmt.Sprintf(`{"path":%q,"edits":[{"old_string":"hello world","new_string":"hi there"},{"old_string":"world","new_string":"planet"}]}`, p),
 	))
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Fatalf("expected overlap error, got %v", err)
-	}
+	c.False(err == nil || !strings.Contains(err.Error(), "overlap"), "expected overlap error, got %v", err)
 }

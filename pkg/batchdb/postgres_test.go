@@ -14,22 +14,21 @@ import (
 	"go.graveland.dev/rafiki/pkg/batch/batchtest"
 	"go.graveland.dev/rafiki/pkg/batchdb"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	if dsn == "" {
 		t.Skip("RAFIKI_TEST_DSN not set")
 	}
 	pool, err := pgxpool.New(context.Background(), dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
+	c.NoError(err, "connect")
 	t.Cleanup(pool.Close)
-	if err := store.Migrate(context.Background(), pool); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	c.NoError(store.Migrate(context.Background(), pool), "migrate")
 	return pool
 }
 
@@ -58,73 +57,40 @@ func TestPostgresConformance(t *testing.T) {
 // after a Complete) must not clobber it. MemStore already behaves this way;
 // these pin the same semantics on the Postgres store.
 func TestStaleClobberNoOps(t *testing.T) {
+	c := assert.NewAborting(t)
 	pool := testPool(t)
 	ctx := context.Background()
 	s := freshStore(t, pool)
 
 	row, err := s.Insert(ctx, batch.Row{CustomID: "conv-1", Model: "vendor/m:batch", State: batch.StateQueued})
-	if err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	if err := s.MarkSubmitting(ctx, []int64{row.ID}); err != nil {
-		t.Fatalf("MarkSubmitting: %v", err)
-	}
-	if err := s.MarkSubmitted(ctx, []int64{row.ID}, "batch-9"); err != nil {
-		t.Fatalf("MarkSubmitted: %v", err)
-	}
-	if err := s.Complete(ctx, row.ID, json.RawMessage(`{"id":"msg_1"}`)); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
+	c.NoError(err, "Insert")
+	c.NoError(s.MarkSubmitting(ctx, []int64{row.ID}), "MarkSubmitting")
+	c.NoError(s.MarkSubmitted(ctx, []int64{row.ID}, "batch-9"), "MarkSubmitted")
+	c.NoError(s.Complete(ctx, row.ID, json.RawMessage(`{"id":"msg_1"}`)), "Complete")
 	got, ok, err := s.Live(ctx, "conv-1")
-	if err != nil || !ok {
-		t.Fatalf("Live: %v %v", got, err)
-	}
+	c.False(err != nil || !ok, "Live: %v %v", got, err)
 
 	// Every late write from the stale paths is a silent no-op.
-	if err := s.Fail(ctx, row.ID, "late failure"); err != nil {
-		t.Fatalf("Fail after Complete: %v", err)
-	}
-	if err := s.Requeue(ctx, []int64{row.ID}); err != nil {
-		t.Fatalf("Requeue after Complete: %v", err)
-	}
-	if err := s.MarkSubmitting(ctx, []int64{row.ID}); err != nil {
-		t.Fatalf("MarkSubmitting after Complete: %v", err)
-	}
-	if err := s.MarkSubmitted(ctx, []int64{row.ID}, "batch-late"); err != nil {
-		t.Fatalf("MarkSubmitted after Complete: %v", err)
-	}
-	if err := s.Complete(ctx, row.ID, json.RawMessage(`{"id":"late"}`)); err != nil {
-		t.Fatalf("Complete again: %v", err)
-	}
+	c.NoError(s.Fail(ctx, row.ID, "late failure"), "Fail after Complete")
+	c.NoError(s.Requeue(ctx, []int64{row.ID}), "Requeue after Complete")
+	c.NoError(s.MarkSubmitting(ctx, []int64{row.ID}), "MarkSubmitting after Complete")
+	c.NoError(s.MarkSubmitted(ctx, []int64{row.ID}, "batch-late"), "MarkSubmitted after Complete")
+	c.NoError(s.Complete(ctx, row.ID, json.RawMessage(`{"id":"late"}`)), "Complete again")
 
 	got, ok, err = s.Live(ctx, "conv-1")
-	if err != nil || !ok {
-		t.Fatalf("Live after stale writes: %v %v", got, err)
-	}
-	if got.State != batch.StateCompleted || got.ProviderBatchID != "batch-9" ||
-		string(got.Response) != `{"id":"msg_1"}` || got.Error != "" {
-		t.Fatalf("stale writes clobbered the completed row: %+v", got)
-	}
+	c.False(err != nil || !ok, "Live after stale writes: %v %v", got, err)
+	c.False(got.State != batch.StateCompleted || got.ProviderBatchID != "batch-9" ||
+		string(got.Response) != `{"id":"msg_1"}` || got.Error != "", "stale writes clobbered the completed row: %+v", got)
 
 	// Tombstone is idempotent: the second one is also a no-op.
-	if err := s.Tombstone(ctx, row.ID); err != nil {
-		t.Fatalf("Tombstone: %v", err)
-	}
-	if err := s.Tombstone(ctx, row.ID); err != nil {
-		t.Fatalf("second Tombstone: %v", err)
-	}
-	if err := s.Fail(ctx, row.ID, "after tombstone"); err != nil {
-		t.Fatalf("Fail after Tombstone: %v", err)
-	}
+	c.NoError(s.Tombstone(ctx, row.ID), "Tombstone")
+	c.NoError(s.Tombstone(ctx, row.ID), "second Tombstone")
+	c.NoError(s.Fail(ctx, row.ID, "after tombstone"), "Fail after Tombstone")
 	if _, ok, _ := s.Live(ctx, "conv-1"); ok {
 		t.Fatal("Live after Tombstone: row visible")
 	}
 	var n int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM conversations.batch_call WHERE custom_id = 'conv-1'`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected exactly one tombstoned row, found %d", n)
-	}
+	c.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM conversations.batch_call WHERE custom_id = 'conv-1'`).Scan(&n), "count")
+	c.Eq(1, n, "expected exactly one tombstoned row, found")
 }

@@ -14,6 +14,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/rpcreason"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // fakeChildOps records what each handler passes and answers with injected
@@ -122,36 +124,31 @@ func newChildOpsServer(o *fakeChildOps) *connectapi.Server {
 // ─── Success paths ────────────────────────────────────────────────────────────
 
 func TestChildOpsResumePassesChildAndKeyThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{resumeID: "c_resumed"}
 	resp, err := newChildOpsServer(f).Resume(context.Background(),
 		connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: "c_exit", ApiKey: "sk-key"}))
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
+	c.Require().NoError(err, "Resume")
 	if f.resumeChildID != "c_exit" || f.resumeAPIKey != "sk-key" {
 		t.Errorf("seam got childID=%q apiKey=%q, want c_exit/sk-key", f.resumeChildID, f.resumeAPIKey)
 	}
-	if resp.Msg.GetChildId() != "c_resumed" {
-		t.Errorf("resp child_id = %q, want c_resumed", resp.Msg.GetChildId())
-	}
+	c.Eq("c_resumed", resp.Msg.GetChildId(), "resp child_id")
 }
 
 func TestChildOpsCloseAllExitedPassesOlderThanThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{exitedIDs: []string{"c_a", "c_b"}}
 	resp, err := newChildOpsServer(f).CloseAllExited(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseAllExitedRequest{OlderThanMs: 5000}))
-	if err != nil {
-		t.Fatalf("CloseAllExited: %v", err)
-	}
-	if f.exitedOlderMs != 5000 {
-		t.Errorf("seam got older_than_ms = %d, want 5000", f.exitedOlderMs)
-	}
+	c.Require().NoError(err, "CloseAllExited")
+	c.Eq(5000, f.exitedOlderMs, "seam got older_than_ms")
 	if len(resp.Msg.GetChildIds()) != 2 || resp.Msg.GetChildIds()[0] != "c_a" {
 		t.Errorf("resp child_ids = %v, want [c_a c_b]", resp.Msg.GetChildIds())
 	}
 }
 
 func TestChildOpsSetLabelsPassesSetAndRemoveThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{labelsOut: map[string]string{"team": "core"}}
 	resp, err := newChildOpsServer(f).SetLabels(context.Background(),
 		connect.NewRequest(&rafikiv1.SetLabelsRequest{
@@ -159,15 +156,11 @@ func TestChildOpsSetLabelsPassesSetAndRemoveThrough(t *testing.T) {
 			Set:     map[string]string{"team": "core"},
 			Remove:  []string{"stale"},
 		}))
-	if err != nil {
-		t.Fatalf("SetLabels: %v", err)
-	}
+	c.Require().NoError(err, "SetLabels")
 	if f.labelsChildID != "c_1" || f.labelsSet["team"] != "core" || len(f.labelsRemove) != 1 || f.labelsRemove[0] != "stale" {
 		t.Errorf("seam got childID=%q set=%v remove=%v, want c_1/{team:core}/[stale]", f.labelsChildID, f.labelsSet, f.labelsRemove)
 	}
-	if resp.Msg.GetLabels()["team"] != "core" {
-		t.Errorf("resp labels = %v, want team=core", resp.Msg.GetLabels())
-	}
+	c.Eq("core", resp.Msg.GetLabels()["team"], "resp labels = %v, want team=core", resp.Msg.GetLabels())
 }
 
 func TestChildOpsStatusReturnsTheSeamAnswer(t *testing.T) {
@@ -181,9 +174,7 @@ func TestChildOpsStatusReturnsTheSeamAnswer(t *testing.T) {
 	}
 	resp, err := newChildOpsServer(&fakeChildOps{statusOut: want}).Status(context.Background(),
 		connect.NewRequest(&rafikiv1.StatusRequest{}))
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "Status")
 	if resp.Msg.GetVersion() != "test" || resp.Msg.GetStartedAt() != 1234 ||
 		resp.Msg.GetChildren().GetLive() != 2 || resp.Msg.GetChildren().GetExited() != 1 ||
 		resp.Msg.GetMemoryBytes() != 64 || resp.Msg.GetSocket() != "/tmp/s.sock" || resp.Msg.GetLogsDir() != "/tmp/logs" {
@@ -192,6 +183,7 @@ func TestChildOpsStatusReturnsTheSeamAnswer(t *testing.T) {
 }
 
 func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
+	c := assert.NewAborting(t)
 	f := &fakeChildOps{searchOut: &rafikiv1.SearchResponse{
 		Hits:      []*rafikiv1.SearchResponse_SearchHit{{ChildId: "c_1", Snippet: "hit"}},
 		TotalHits: 1, Scanned: 3, Elapsed: 9,
@@ -203,12 +195,8 @@ func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
 				CwdContains: "/work", HasLabel: []string{"team"},
 			},
 		}))
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if f.searchReq == nil {
-		t.Fatal("the seam was never called")
-	}
+	c.NoError(err, "Search")
+	c.NotNil(f.searchReq, "the seam was never called")
 	if f.searchReq.GetQuery() != "needle" || !f.searchReq.GetRegex() ||
 		f.searchReq.GetLimit() != 7 || f.searchReq.GetContext() != 2 ||
 		f.searchReq.GetSessionFilter().GetCwdContains() != "/work" ||
@@ -225,21 +213,17 @@ func TestChildOpsSearchReceivesTheRequest(t *testing.T) {
 // answer is CodeUnimplemented with the stub's own text, not a mapped
 // ControllerError or a redacted internal.
 func TestChildOpsShutdownDaemonFailsClosedUnimplemented(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{}
 	_, err := newChildOpsServer(f).ShutdownDaemon(context.Background(),
 		connect.NewRequest(&rafikiv1.ShutdownDaemonRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnimplemented {
-		t.Errorf("code = %v, want Unimplemented", connect.CodeOf(err))
-	}
-	if err == nil || !strings.Contains(err.Error(), "not yet wired") {
-		t.Errorf("message = %v, want the stub's not-yet-wired text", err)
-	}
-	if f.shutdownCalled {
-		t.Error("the seam's ShutdownDaemon was called; the handler must refuse before the seam")
-	}
+	c.Eq(connect.CodeUnimplemented, connect.CodeOf(err), "code")
+	c.False(err == nil || !strings.Contains(err.Error(), "not yet wired"), "message = %v, want the stub's not-yet-wired text", err)
+	c.False(f.shutdownCalled, "the seam's ShutdownDaemon was called; the handler must refuse before the seam")
 }
 
 func TestChildOpsModelInfoReturnsTheSeamAnswer(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{modelOut: &rafikiv1.ModelInfoResponse{
 		ResolvedId:          "prov/real-id",
 		ContextWindow:       200000,
@@ -249,30 +233,21 @@ func TestChildOpsModelInfoReturnsTheSeamAnswer(t *testing.T) {
 	}}
 	resp, err := newChildOpsServer(f).ModelInfo(context.Background(),
 		connect.NewRequest(&rafikiv1.ModelInfoRequest{Model: "prov/alias"}))
-	if err != nil {
-		t.Fatalf("ModelInfo: %v", err)
-	}
+	c.Require().NoError(err, "ModelInfo")
 	m := resp.Msg
-	if m.GetModel() != "prov/alias" || m.GetResolvedId() != "prov/real-id" ||
+	c.False(m.GetModel() != "prov/alias" || m.GetResolvedId() != "prov/real-id" ||
 		m.GetContextWindow() != 200000 || m.GetMaxCompletionTokens() != 32000 ||
-		m.GetAutoCompactWindow() != 180000 || !m.GetKnown() {
-		t.Errorf("resp = %+v, want the seam answer with the requested model echoed", m)
-	}
+		m.GetAutoCompactWindow() != 180000 || !m.GetKnown(), "resp = %+v, want the seam answer with the requested model echoed", m)
 }
 
 func TestChildOpsConversationStatsWrapsTheJSON(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{statsJSON: `{"volume":{"conversations":3}}`}
 	resp, err := newChildOpsServer(f).ConversationStats(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationStatsRequest{Owner: "u1", SinceUnix: 42}))
-	if err != nil {
-		t.Fatalf("ConversationStats: %v", err)
-	}
-	if resp.Msg.GetStatsJson() != f.statsJSON {
-		t.Errorf("stats_json = %q, want the seam JSON verbatim", resp.Msg.GetStatsJson())
-	}
-	if f.statsReq == nil {
-		t.Fatal("the seam was never called")
-	}
+	c.Require().NoError(err, "ConversationStats")
+	c.Eq(f.statsJSON, resp.Msg.GetStatsJson(), "stats_json")
+	c.Require().NotNil(f.statsReq, "the seam was never called")
 	if f.statsReq.GetOwner() != "u1" || f.statsReq.GetSinceUnix() != 42 {
 		t.Errorf("seam got %+v, want the request fields intact", f.statsReq)
 	}
@@ -283,41 +258,31 @@ func TestChildOpsConversationStatsWrapsTheJSON(t *testing.T) {
 func TestChildOpsResumeRequiresChildID(t *testing.T) {
 	_, err := newChildOpsServer(&fakeChildOps{}).Resume(context.Background(),
 		connect.NewRequest(&rafikiv1.ResumeRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestChildOpsSetLabelsRequiresChildID(t *testing.T) {
 	_, err := newChildOpsServer(&fakeChildOps{}).SetLabels(context.Background(),
 		connect.NewRequest(&rafikiv1.SetLabelsRequest{Set: map[string]string{"a": "b"}}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestChildOpsSetLabelsRequiresSetOrRemove(t *testing.T) {
 	_, err := newChildOpsServer(&fakeChildOps{}).SetLabels(context.Background(),
 		connect.NewRequest(&rafikiv1.SetLabelsRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestChildOpsSearchRequiresQuery(t *testing.T) {
 	_, err := newChildOpsServer(&fakeChildOps{}).Search(context.Background(),
 		connect.NewRequest(&rafikiv1.SearchRequest{Limit: 10}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestChildOpsModelInfoRequiresModel(t *testing.T) {
 	_, err := newChildOpsServer(&fakeChildOps{}).ModelInfo(context.Background(),
 		connect.NewRequest(&rafikiv1.ModelInfoRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // ─── Unwired fails closed ─────────────────────────────────────────────────────
@@ -369,9 +334,7 @@ func TestChildOpsUnwiredFailsClosed(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call(s)
-			if connect.CodeOf(err) != connect.CodeUnavailable {
-				t.Errorf("code = %v, want Unavailable (err = %v)", connect.CodeOf(err), err)
-			}
+			assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code = %v, want Unavailable (err = %v)", connect.CodeOf(err), err)
 		})
 	}
 }
@@ -383,21 +346,16 @@ func TestChildOpsUnwiredFailsClosed(t *testing.T) {
 // precise reason riding the detail, so a client can branch on not_resumable
 // without parsing message text.
 func TestChildOpsResumeNotResumableBecomesFailedPrecondition(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{resumeErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNotResumable,
 		Message: "child is not exited (status: running)",
 	}}
 	_, err := newChildOpsServer(f).Resume(context.Background(),
 		connect.NewRequest(&rafikiv1.ResumeRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeFailedPrecondition {
-		t.Errorf("code = %v, want FailedPrecondition", connect.CodeOf(err))
-	}
-	if got := rpcreason.Reason(err); got != "not_resumable" {
-		t.Errorf("reason = %q, want not_resumable", got)
-	}
-	if err == nil || !strings.Contains(err.Error(), "child is not exited") {
-		t.Errorf("message = %v, want the daemon's authored text", err)
-	}
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.Eq("not_resumable", rpcreason.Reason(err), "reason")
+	c.False(err == nil || !strings.Contains(err.Error(), "child is not exited"), "message = %v, want the daemon's authored text", err)
 }
 
 // A generic error — something that is not a ControllerError — keeps the
@@ -405,15 +363,12 @@ func TestChildOpsResumeNotResumableBecomesFailedPrecondition(t *testing.T) {
 // internal text, never infrastructure text like a pgx failure naming the
 // database.
 func TestChildOpsUncodedErrorIsRedactedInternal(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{exitedErr: errors.New("pq: relation does not exist")}
 	_, err := newChildOpsServer(f).CloseAllExited(context.Background(),
 		connect.NewRequest(&rafikiv1.CloseAllExitedRequest{}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
-	if err == nil || strings.Contains(err.Error(), "relation does not exist") {
-		t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-	}
+	c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+	c.False(err == nil || strings.Contains(err.Error(), "relation does not exist"), "err.Error() = %v, want the raw cause redacted", err)
 }
 
 // The remaining handlers share mapChildOpsErr with CloseAllExited, so their
@@ -454,15 +409,12 @@ func TestChildOpsUncodedErrorsRedactedInternalPerHandler(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			f := &fakeChildOps{}
 			tc.inject(f, errors.New("pq: relation does not exist"))
 			err := tc.call(newChildOpsServer(f))
-			if connect.CodeOf(err) != connect.CodeInternal {
-				t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-			}
-			if err == nil || strings.Contains(err.Error(), "relation does not exist") {
-				t.Errorf("err.Error() = %v, want the raw cause redacted", err)
-			}
+			c.Eq(connect.CodeInternal, connect.CodeOf(err), "code")
+			c.False(err == nil || strings.Contains(err.Error(), "relation does not exist"), "err.Error() = %v, want the raw cause redacted", err)
 		})
 	}
 }
@@ -471,32 +423,26 @@ func TestChildOpsUncodedErrorsRedactedInternalPerHandler(t *testing.T) {
 // refusal — must reach the wire as it was coded, not be re-wrapped into
 // internal by ConnectErr's non-ControllerError path.
 func TestChildOpsCodedErrorPassesThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{statsErr: connect.NewError(connect.CodePermissionDenied,
 		errors.New("conversation queries require a user credential"))}
 	_, err := newChildOpsServer(f).ConversationStats(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationStatsRequest{}))
-	if connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Errorf("code = %v, want PermissionDenied", connect.CodeOf(err))
-	}
-	if err == nil || !strings.Contains(err.Error(), "require a user credential") {
-		t.Errorf("message = %v, want the authored text", err)
-	}
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+	c.False(err == nil || !strings.Contains(err.Error(), "require a user credential"), "message = %v, want the authored text", err)
 }
 
 // The authored ControllerError text rides the FailedPrecondition on the
 // conversation stats face too, same as resume: ErrNoAgentDB is the daemon
 // configuration gap the Controller writes a curated message for.
 func TestChildOpsConversationStatsNoAgentDBKeepsAuthoredText(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeChildOps{statsErr: &connectapi.ControllerError{
 		Code:    protocol.ErrNoAgentDB,
 		Message: "no agent database configured (RAFIKI_DB unset)",
 	}}
 	_, err := newChildOpsServer(f).ConversationStats(context.Background(),
 		connect.NewRequest(&rafikiv1.ConversationStatsRequest{}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable (errmap's ErrNoAgentDB row)", connect.CodeOf(err))
-	}
-	if err == nil || !strings.Contains(err.Error(), "no agent database configured") {
-		t.Errorf("message = %v, want the daemon's authored text", err)
-	}
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
+	c.False(err == nil || !strings.Contains(err.Error(), "no agent database configured"), "message = %v, want the daemon's authored text", err)
 }

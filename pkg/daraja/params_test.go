@@ -3,11 +3,12 @@
 package daraja
 
 import (
-	"strings"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The coordination prompt merges into the wire params only when the child
@@ -17,20 +18,15 @@ import (
 // paths that consume this mapping is pinned by test/integration's
 // TestClaudeArgvIdenticalAcrossPaths.
 func TestClaudeParamsForRequestCoordinationPrompt(t *testing.T) {
+	c := assert.NewCollecting(t)
 	req := protocol.SpawnRequest{AppendSystemPrompt: "be terse"}
 
 	got := ClaudeParamsForRequest(req, true)
-	if got.AppendSystemPrompt != claudeargv.CoordinationPrompt+"\n\nbe terse" {
-		t.Errorf("mcpAgentControl=true: AppendSystemPrompt = %q, want prompt + caller text", got.AppendSystemPrompt)
-	}
+	c.Eq(claudeargv.CoordinationPrompt+"\n\nbe terse", got.AppendSystemPrompt, "mcpAgentControl=true: AppendSystemPrompt")
 
 	got = ClaudeParamsForRequest(req, false)
-	if got.AppendSystemPrompt != "be terse" {
-		t.Errorf("mcpAgentControl=false: AppendSystemPrompt = %q, want the caller's text untouched", got.AppendSystemPrompt)
-	}
+	c.Eq("be terse", got.AppendSystemPrompt, "mcpAgentControl=false: AppendSystemPrompt")
 
 	got = ClaudeParamsForRequest(protocol.SpawnRequest{}, true)
-	if !strings.Contains(got.AppendSystemPrompt, "agent_spawn") {
-		t.Errorf("mcpAgentControl=true, no caller prompt: AppendSystemPrompt = %q, want the coordination prompt", got.AppendSystemPrompt)
-	}
+	c.StrContains(got.AppendSystemPrompt, "agent_spawn", "mcpAgentControl=true, no caller prompt: AppendSystemPrompt")
 }

@@ -3,21 +3,21 @@ package paths
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func writeEnv(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "service.env")
-	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	assert.NewAborting(t).NoError(os.WriteFile(p, []byte(content), 0o600))
 	return p
 }
 
 func TestLoadEnvFile_Basics(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := writeEnv(t, `# a comment
 
 RAFIKI_TEST_BARE=plain
@@ -33,15 +33,9 @@ RAFIKI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 	}
 
 	applied, warnings, err := LoadEnvFile(p)
-	if err != nil {
-		t.Fatalf("LoadEnvFile: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
-	}
-	if len(applied) != 6 {
-		t.Errorf("applied %d vars, want 6: %v", len(applied), applied)
-	}
+	c.Require().NoError(err, "LoadEnvFile")
+	c.Empty(warnings, "unexpected warnings")
+	c.Len(applied, 6, "applied %d vars, want 6", len(applied))
 	for k, want := range map[string]string{
 		"RAFIKI_TEST_BARE":     "plain",
 		"RAFIKI_TEST_EXPORTED": "exported",
@@ -52,9 +46,8 @@ RAFIKI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 		// expansion, so & and ? are ordinary characters.
 		"RAFIKI_TEST_DSN": "postgres://u@h:5432/db?sslmode=disable&application_name=fundi",
 	} {
-		if got := os.Getenv(k); got != want {
-			t.Errorf("%s = %q, want %q", k, got, want)
-		}
+		got := os.Getenv(k)
+		c.Eq(want, got, "%s = %q, want", k, got)
 	}
 }
 
@@ -63,54 +56,43 @@ RAFIKI_TEST_DSN=postgres://u@h:5432/db?sslmode=disable&application_name=fundi
 // one. Both spellings must produce a real newline.
 func TestLoadEnvFile_Newlines(t *testing.T) {
 	t.Run("escape sequence", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		p := writeEnv(t, "RAFIKI_TEST_HDRS=\"X-A: 1\\nX-B: 2\"\n")
 		os.Unsetenv("RAFIKI_TEST_HDRS") //nolint:errcheck
 		t.Setenv("RAFIKI_TEST_HDRS", "")
 		os.Unsetenv("RAFIKI_TEST_HDRS") //nolint:errcheck
-		if _, _, err := LoadEnvFile(p); err != nil {
-			t.Fatalf("LoadEnvFile: %v", err)
-		}
-		if got := os.Getenv("RAFIKI_TEST_HDRS"); got != "X-A: 1\nX-B: 2" {
-			t.Errorf("got %q, want a real newline between the headers", got)
-		}
+		_, _, err := LoadEnvFile(p)
+		c.Require().NoError(err, "LoadEnvFile")
+		c.Eq("X-A: 1\nX-B: 2", os.Getenv("RAFIKI_TEST_HDRS"), "got")
 	})
 
 	t.Run("literal multi-line value", func(t *testing.T) {
+		c := assert.NewCollecting(t)
 		p := writeEnv(t, "RAFIKI_TEST_HDRS2=\"X-A: 1\nX-B: 2\"\nRAFIKI_TEST_AFTER=after\n")
 		t.Setenv("RAFIKI_TEST_HDRS2", "")
 		os.Unsetenv("RAFIKI_TEST_HDRS2") //nolint:errcheck
 		t.Setenv("RAFIKI_TEST_AFTER", "")
 		os.Unsetenv("RAFIKI_TEST_AFTER") //nolint:errcheck
-		if _, _, err := LoadEnvFile(p); err != nil {
-			t.Fatalf("LoadEnvFile: %v", err)
-		}
-		if got := os.Getenv("RAFIKI_TEST_HDRS2"); got != "X-A: 1\nX-B: 2" {
-			t.Errorf("got %q, want the two lines joined by a newline", got)
-		}
+		_, _, err := LoadEnvFile(p)
+		c.Require().NoError(err, "LoadEnvFile")
+		c.Eq("X-A: 1\nX-B: 2", os.Getenv("RAFIKI_TEST_HDRS2"), "got")
 		// Parsing must resume normally after the multi-line value closes.
-		if got := os.Getenv("RAFIKI_TEST_AFTER"); got != "after" {
-			t.Errorf("assignment after a multi-line value was lost: %q", got)
-		}
+		c.Eq("after", os.Getenv("RAFIKI_TEST_AFTER"), "assignment after a multi-line value was lost")
 	})
 }
 
 // The real environment wins, so `RAFIKI_DB=... rafikid` still overrides the
 // file and a service manager's own settings are not silently replaced.
 func TestLoadEnvFile_ExistingEnvWins(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := writeEnv(t, "RAFIKI_TEST_PRESET=from-file\n")
 	t.Setenv("RAFIKI_TEST_PRESET", "from-environment")
 
 	applied, _, err := LoadEnvFile(p)
-	if err != nil {
-		t.Fatalf("LoadEnvFile: %v", err)
-	}
-	if got := os.Getenv("RAFIKI_TEST_PRESET"); got != "from-environment" {
-		t.Errorf("file overrode the real environment: got %q", got)
-	}
+	c.Require().NoError(err, "LoadEnvFile")
+	c.Eq("from-environment", os.Getenv("RAFIKI_TEST_PRESET"), "file overrode the real environment: got")
 	for _, k := range applied {
-		if k == "RAFIKI_TEST_PRESET" {
-			t.Error("reported applying a variable that was already set")
-		}
+		c.NotEq("RAFIKI_TEST_PRESET", k, "reported applying a variable that was already set")
 	}
 }
 
@@ -118,85 +100,63 @@ func TestLoadEnvFile_ExistingEnvWins(t *testing.T) {
 // file is absent is worse than one that starts without it.
 func TestLoadEnvFile_MissingIsNotAnError(t *testing.T) {
 	applied, warnings, err := LoadEnvFile(filepath.Join(t.TempDir(), "nope.env"))
-	if err != nil || len(applied) != 0 || len(warnings) != 0 {
-		t.Errorf("missing file: got applied=%v warnings=%v err=%v, want all empty", applied, warnings, err)
-	}
+	assert.NewCollecting(t).False(err != nil || len(applied) != 0 || len(warnings) != 0, "missing file: got applied=%v warnings=%v err=%v, want all empty", applied, warnings, err)
 }
 
 // One bad line must not cost the operator every good one — the failure mode
 // pkg/models' silent nil-on-parse-error demonstrates.
 func TestLoadEnvFile_MalformedLinesWarnButDoNotAbort(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := writeEnv(t, "this is not an assignment\n=novalue\nRAFIKI_TEST_GOOD=kept\n")
 	t.Setenv("RAFIKI_TEST_GOOD", "")
 	os.Unsetenv("RAFIKI_TEST_GOOD") //nolint:errcheck
 
 	applied, warnings, err := LoadEnvFile(p)
-	if err != nil {
-		t.Fatalf("LoadEnvFile: %v", err)
-	}
-	if len(warnings) != 2 {
-		t.Errorf("got %d warnings, want 2: %v", len(warnings), warnings)
-	}
-	if os.Getenv("RAFIKI_TEST_GOOD") != "kept" {
-		t.Error("a good assignment after malformed lines was dropped")
-	}
-	if len(applied) != 1 {
-		t.Errorf("applied = %v, want just the good one", applied)
-	}
+	c.Require().NoError(err, "LoadEnvFile")
+	c.Len(warnings, 2, "got %d warnings, want 2", len(warnings))
+	c.Eq("kept", os.Getenv("RAFIKI_TEST_GOOD"), "a good assignment after malformed lines was dropped")
+	c.Len(applied, 1, "applied")
 }
 
 func TestLoadEnvFile_WarnsOnLoosePermissions(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := writeEnv(t, "RAFIKI_TEST_PERM=x\n")
-	if err := os.Chmod(p, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.Chmod(p, 0o644))
 	t.Setenv("RAFIKI_TEST_PERM", "")
 	os.Unsetenv("RAFIKI_TEST_PERM") //nolint:errcheck
 
 	applied, warnings, err := LoadEnvFile(p)
-	if err != nil {
-		t.Fatalf("LoadEnvFile: %v", err)
-	}
-	if len(warnings) == 0 || !strings.Contains(warnings[0], "0600") {
-		t.Errorf("want a permissions warning naming 0600, got %v", warnings)
-	}
+	c.Require().NoError(err, "LoadEnvFile")
+	c.False(len(warnings) == 0 || !strings.Contains(warnings[0], "0600"), "want a permissions warning naming 0600, got %v", warnings)
 	// Warn, do not refuse: the variables must still be applied.
-	if os.Getenv("RAFIKI_TEST_PERM") != "x" || len(applied) != 1 {
-		t.Error("loose permissions blocked the load; it should only warn")
-	}
+	c.False(os.Getenv("RAFIKI_TEST_PERM") != "x" || len(applied) != 1, "loose permissions blocked the load; it should only warn")
 }
 
 func TestServiceEnvFile_HonoursOverride(t *testing.T) {
 	t.Setenv(EnvFile, "/tmp/custom.env")
-	if got := ServiceEnvFile(); got != "/tmp/custom.env" {
-		t.Errorf("ServiceEnvFile() = %q, want the override", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("/tmp/custom.env", ServiceEnvFile(), "ServiceEnvFile()")
 	t.Setenv(EnvFile, "")
-	if got := ServiceEnvFile(); filepath.Base(got) != "service.env" {
-		t.Errorf("ServiceEnvFile() = %q, want it to end in service.env", got)
-	}
+	got := ServiceEnvFile()
+	c.Eq("service.env", filepath.Base(got), "ServiceEnvFile() = %q, want it to end in service.env", got)
 }
 
 func TestExecutorEnvFile_HonoursOverride(t *testing.T) {
 	t.Setenv(ExecutorEnvFileEnv, "/tmp/executor-custom.env")
-	if got := ExecutorEnvFile(); got != "/tmp/executor-custom.env" {
-		t.Errorf("ExecutorEnvFile() = %q, want the override", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("/tmp/executor-custom.env", ExecutorEnvFile(), "ExecutorEnvFile()")
 	t.Setenv(ExecutorEnvFileEnv, "")
-	if got := ExecutorEnvFile(); filepath.Base(got) != "executor.env" {
-		t.Errorf("ExecutorEnvFile() = %q, want it to end in executor.env", got)
-	}
+	got := ExecutorEnvFile()
+	c.Eq("executor.env", filepath.Base(got), "ExecutorEnvFile() = %q, want it to end in executor.env", got)
 }
 
 func TestExecutorOverridesFile_HonoursOverride(t *testing.T) {
 	t.Setenv(ExecutorOverridesFileEnv, "/tmp/executor-overrides-custom.env")
-	if got := ExecutorOverridesFile(); got != "/tmp/executor-overrides-custom.env" {
-		t.Errorf("ExecutorOverridesFile() = %q, want the override", got)
-	}
+	c := assert.NewCollecting(t)
+	c.Eq("/tmp/executor-overrides-custom.env", ExecutorOverridesFile(), "ExecutorOverridesFile()")
 	t.Setenv(ExecutorOverridesFileEnv, "")
-	if got := ExecutorOverridesFile(); filepath.Base(got) != "executor-overrides.env" {
-		t.Errorf("ExecutorOverridesFile() = %q, want it to end in executor-overrides.env", got)
-	}
+	got := ExecutorOverridesFile()
+	c.Eq("executor-overrides.env", filepath.Base(got), "ExecutorOverridesFile() = %q, want it to end in executor-overrides.env", got)
 }
 
 // The overrides loader is the executor's escape hatch: launchd seeds
@@ -205,6 +165,7 @@ func TestExecutorOverridesFile_HonoursOverride(t *testing.T) {
 // OVERRIDES can beat the unit. Every variable it names wins, present or not,
 // which is the exact opposite of TestLoadEnvFile_ExistingEnvWins.
 func TestLoadEnvFileOverrides_BeatsTheEnvironment(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := writeEnv(t, `RAFIKI_OVR_NEW=from-file
 RAFIKI_OVR_EXISTING=from-file
 RAFIKI_OVR_EMPTY=
@@ -219,24 +180,17 @@ RAFIKI_OVR_EMPTY=
 	t.Setenv("RAFIKI_OVR_UNTOUCHED", "keep-me")
 
 	applied, warnings, err := LoadEnvFileOverrides(p)
-	if err != nil {
-		t.Fatalf("LoadEnvFileOverrides: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
-	}
-	if len(applied) != 3 {
-		t.Errorf("applied %d vars, want 3: %v", len(applied), applied)
-	}
+	c.Require().NoError(err, "LoadEnvFileOverrides")
+	c.Empty(warnings, "unexpected warnings")
+	c.Len(applied, 3, "applied %d vars, want 3", len(applied))
 	for k, want := range map[string]string{
 		"RAFIKI_OVR_NEW":       "from-file",
 		"RAFIKI_OVR_EXISTING":  "from-file", // overrode the process value
 		"RAFIKI_OVR_EMPTY":     "",
 		"RAFIKI_OVR_UNTOUCHED": "keep-me",
 	} {
-		if got := os.Getenv(k); got != want {
-			t.Errorf("%s = %q, want %q", k, got, want)
-		}
+		got := os.Getenv(k)
+		c.Eq(want, got, "%s = %q, want", k, got)
 	}
 }
 
@@ -244,9 +198,7 @@ RAFIKI_OVR_EMPTY=
 // file must not fail serve.
 func TestLoadEnvFileOverrides_MissingIsNotAnError(t *testing.T) {
 	applied, warnings, err := LoadEnvFileOverrides(filepath.Join(t.TempDir(), "nope.env"))
-	if err != nil || len(applied) != 0 || len(warnings) != 0 {
-		t.Errorf("missing file: got applied=%v warnings=%v err=%v, want all empty", applied, warnings, err)
-	}
+	assert.NewCollecting(t).False(err != nil || len(applied) != 0 || len(warnings) != 0, "missing file: got applied=%v warnings=%v err=%v, want all empty", applied, warnings, err)
 }
 
 // parseEnvFile is the pure half of LoadEnvFile: it must report what a file
@@ -254,46 +206,38 @@ func TestLoadEnvFileOverrides_MissingIsNotAnError(t *testing.T) {
 // that, because it has to learn a file's keys during an install without
 // applying anyone's credentials to the running command.
 func TestParseEnvFile_DoesNotTouchTheEnvironment(t *testing.T) {
+	c := assert.NewCollecting(t)
 	const key = "RAFIKI_PARSE_PURITY_PROBE"
 	if _, ok := os.LookupEnv(key); ok {
 		t.Fatalf("%s is already set; pick a different probe name", key)
 	}
 
 	vars, warnings, err := parseEnvFile(strings.NewReader(key+"=value\n"), "probe.env")
-	if err != nil {
-		t.Fatalf("parseEnvFile: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("warnings = %v, want none", warnings)
-	}
-	if len(vars) != 1 || vars[0].Key != key || vars[0].Value != "value" {
-		t.Fatalf("vars = %+v, want one %s=value", vars, key)
-	}
-	if _, ok := os.LookupEnv(key); ok {
-		t.Errorf("parseEnvFile exported %s into the environment", key)
-	}
+	c.Require().NoError(err, "parseEnvFile")
+	c.Empty(warnings, "warnings")
+	c.Require().False(len(vars) != 1 || vars[0].Key != key || vars[0].Value != "value", "vars = %+v, want one %s=value", vars, key)
+	_, ok := os.LookupEnv(key)
+	c.False(ok, "parseEnvFile exported %s into the environment", key)
 }
 
 // File order is preserved: MergeEnvFile reports a file's keys, and a shuffled
 // report is a confusing one.
 func TestParseEnvFile_PreservesOrder(t *testing.T) {
+	c := assert.NewCollecting(t)
 	vars, _, err := parseEnvFile(strings.NewReader("B=2\nA=1\nC=3\n"), "probe.env")
-	if err != nil {
-		t.Fatalf("parseEnvFile: %v", err)
-	}
+	c.Require().NoError(err, "parseEnvFile")
 	var got []string
 	for _, v := range vars {
 		got = append(got, v.Key)
 	}
-	if !slices.Equal(got, []string{"B", "A", "C"}) {
-		t.Errorf("got %v, want [B A C] in file order", got)
-	}
+	c.EqDiff([]string{"B", "A", "C"}, got, "got")
 }
 
 // The property the whole feature rests on: whatever MergeEnvFile writes,
 // parseEnvFile must read back byte-identically. A DSN carries '?' and '&',
 // a password can carry anything at all.
 func TestMergeEnvFile_RoundTripsAwkwardValues(t *testing.T) {
+	c := assert.NewCollecting(t)
 	awkward := map[string]string{
 		"PLAIN":        "simple",
 		"DSN":          "postgres://u:p@h:5432/db?sslmode=disable&application_name=x",
@@ -308,33 +252,21 @@ func TestMergeEnvFile_RoundTripsAwkwardValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "service.env")
 
 	res, err := MergeEnvFile(path, awkward, "test")
-	if err != nil {
-		t.Fatalf("MergeEnvFile: %v", err)
-	}
-	if len(res.Added) != len(awkward) {
-		t.Fatalf("Added = %v, want all %d keys", res.Added, len(awkward))
-	}
+	c.Require().NoError(err, "MergeEnvFile")
+	c.Require().Len(res.Added, len(awkward), "Added")
 
 	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer f.Close()
 	got, warnings, err := parseEnvFile(f, path)
-	if err != nil {
-		t.Fatalf("parseEnvFile: %v", err)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("re-parsing what we wrote produced warnings: %v", warnings)
-	}
+	c.Require().NoError(err, "parseEnvFile")
+	c.Empty(warnings, "re-parsing what we wrote produced warnings")
 	back := map[string]string{}
 	for _, v := range got {
 		back[v.Key] = v.Value
 	}
 	for k, want := range awkward {
-		if back[k] != want {
-			t.Errorf("%s round-tripped as %q, want %q", k, back[k], want)
-		}
+		c.Eq(want, back[k], "%s round-tripped as %q, want", k, back[k])
 	}
 }
 
@@ -342,87 +274,60 @@ func TestMergeEnvFile_RoundTripsAwkwardValues(t *testing.T) {
 // existing key is never rewritten, and a differing value is reported rather
 // than silently discarded or silently overwritten.
 func TestMergeEnvFile_NeverRewritesAnExistingKey(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "service.env")
 	original := "# hand written\nRAFIKI_DB=postgres://old@h/db\nRAFIKI_SAMPLE_SECRET=same\n"
-	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte(original), 0600))
 
 	res, err := MergeEnvFile(path, map[string]string{
 		"RAFIKI_DB":            "postgres://new@h/db", // differs -> Conflict
 		"RAFIKI_SAMPLE_SECRET": "same",                // identical -> Existing
 		"ANTHROPIC_API_KEY":    "sk-ant",              // new -> Added
 	}, "test")
-	if err != nil {
-		t.Fatalf("MergeEnvFile: %v", err)
-	}
-	if !slices.Equal(res.Added, []string{"ANTHROPIC_API_KEY"}) {
-		t.Errorf("Added = %v, want [ANTHROPIC_API_KEY]", res.Added)
-	}
-	if !slices.Equal(res.Existing, []string{"RAFIKI_SAMPLE_SECRET"}) {
-		t.Errorf("Existing = %v, want [RAFIKI_SAMPLE_SECRET]", res.Existing)
-	}
-	if !slices.Equal(res.Conflict, []string{"RAFIKI_DB"}) {
-		t.Errorf("Conflict = %v, want [RAFIKI_DB]", res.Conflict)
-	}
-	if !slices.Equal(res.Defined, []string{"RAFIKI_DB", "RAFIKI_SAMPLE_SECRET"}) {
-		t.Errorf("Defined = %v, want the file's pre-merge keys in order", res.Defined)
-	}
+	c.Require().NoError(err, "MergeEnvFile")
+	c.EqDiff([]string{"ANTHROPIC_API_KEY"}, res.Added, "Added")
+	c.EqDiff([]string{"RAFIKI_SAMPLE_SECRET"}, res.Existing, "Existing")
+	c.EqDiff([]string{"RAFIKI_DB"}, res.Conflict, "Conflict")
+	c.EqDiff([]string{"RAFIKI_DB", "RAFIKI_SAMPLE_SECRET"}, res.Defined, "Defined")
 
 	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	if !strings.HasPrefix(string(after), original) {
 		t.Error("MergeEnvFile rewrote existing content instead of appending to it")
 	}
-	if strings.Contains(string(after), "postgres://new@h/db") {
-		t.Error("a conflicting value was written into the file")
-	}
+	c.NotStrContains(string(after), "postgres://new@h/db", "a conflicting value was written into the file")
 }
 
 // A reinstall that has nothing new to add must not touch the file at all —
 // otherwise repeated installs accumulate empty comment headers.
 func TestMergeEnvFile_NoOpLeavesTheFileByteIdentical(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "service.env")
 	vars := map[string]string{"RAFIKI_DB": "postgres://u@h/db"}
 	if _, err := MergeEnvFile(path, vars, "test"); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 
 	res, err := MergeEnvFile(path, vars, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Added) != 0 {
-		t.Errorf("Added = %v on a no-op merge, want none", res.Added)
-	}
+	c.Require().NoError(err)
+	c.Empty(res.Added, "Added")
 	second, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(first) != string(second) {
-		t.Errorf("a no-op merge changed the file:\n--- first ---\n%s\n--- second ---\n%s", first, second)
-	}
+	c.Require().NoError(err)
+	c.Eq(string(second), string(first), "a no-op merge changed the file:\n--- first ---\n%s\n--- second ---\n%s", first, second)
 }
 
 // It holds credentials. A file this creates must not be readable by anyone else.
 func TestMergeEnvFile_CreatesAt0600(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "sub", "service.env")
 	if _, err := MergeEnvFile(path, map[string]string{"K": "v"}, "test"); err != nil {
 		t.Fatalf("MergeEnvFile: %v", err)
 	}
 	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0600 {
-		t.Errorf("created mode %04o, want 0600", perm)
-	}
+	c.Require().NoError(err)
+	c.Eq(0600, fi.Mode().Perm(), "created mode")
 }
 
 // Appending a NEW credential into an existing loose-permission file tightens
@@ -432,25 +337,16 @@ func TestMergeEnvFile_CreatesAt0600(t *testing.T) {
 // a credential is about to be appended, leaving the file world-readable would
 // defeat the reason it exists.
 func TestMergeEnvFile_TightensLoosePermissionsBeforeAppendingACredential(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "service.env")
-	if err := os.WriteFile(path, []byte("EXISTING=1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte("EXISTING=1\n"), 0644))
 
 	res, err := MergeEnvFile(path, map[string]string{"NEW": "v"}, "test")
-	if err != nil {
-		t.Fatalf("MergeEnvFile: %v", err)
-	}
-	if res.Tightened != 0644 {
-		t.Errorf("Tightened = %04o, want 0644 (the permissions it tightened FROM)", res.Tightened)
-	}
+	c.Require().NoError(err, "MergeEnvFile")
+	c.Eq(0644, res.Tightened, "Tightened")
 	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0600 {
-		t.Errorf("mode = %04o after appending a credential, want 0600", perm)
-	}
+	c.Require().NoError(err)
+	c.Eq(0600, fi.Mode().Perm(), "mode")
 	// The credential itself must still have been written.
 	if got, err := os.ReadFile(path); err != nil || !strings.Contains(string(got), "NEW=") {
 		t.Fatalf("credential was not appended: %v, %q", err, got)
@@ -464,58 +360,38 @@ func TestMergeEnvFile_TightensLoosePermissionsBeforeAppendingACredential(t *test
 // added to it would be an unannounced side effect on a call that changed
 // nothing else.
 func TestMergeEnvFile_ObservingALoosePermissionFileWarnsWithoutChmod(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "service.env")
-	if err := os.WriteFile(path, []byte("EXISTING=1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte("EXISTING=1\n"), 0644))
 
 	res, err := MergeEnvFile(path, map[string]string{"EXISTING": "1"}, "test") // already present, identical value
-	if err != nil {
-		t.Fatalf("MergeEnvFile: %v", err)
-	}
-	if len(res.Added) != 0 {
-		t.Fatalf("Added = %v, want none (this is a pure observe, nothing new)", res.Added)
-	}
-	if res.Tightened != 0 {
-		t.Errorf("Tightened = %04o, want 0: nothing was added, so permissions must be left alone", res.Tightened)
-	}
-	if len(res.Warnings) == 0 {
-		t.Fatal("no warning for a 0644 file holding credentials")
-	}
+	c.Require().NoError(err, "MergeEnvFile")
+	c.Require().Empty(res.Added, "Added")
+	c.Eq(0, res.Tightened, "Tightened")
+	c.Require().NotEmpty(res.Warnings, "no warning for a 0644 file holding credentials")
 	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0644 {
-		t.Errorf("mode changed to %04o; an observe-only merge must not chmod the file", perm)
-	}
+	c.Require().NoError(err)
+	c.Eq(0644, fi.Mode().Perm(), "mode changed to")
 }
 
 // A file not ending in a newline must not have the first appended line
 // concatenated onto its last one.
 func TestMergeEnvFile_SeparatesFromAnUnterminatedLastLine(t *testing.T) {
+	c := assert.NewCollecting(t)
 	path := filepath.Join(t.TempDir(), "service.env")
-	if err := os.WriteFile(path, []byte("EXISTING=1"), 0600); err != nil { // no trailing \n
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(path, []byte("EXISTING=1"), 0600)) // no trailing \n
 	if _, err := MergeEnvFile(path, map[string]string{"NEW": "v"}, "test"); err != nil {
 		t.Fatal(err)
 	}
 
 	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	defer f.Close()
 	vars, _, err := parseEnvFile(f, path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(err)
 	back := map[string]string{}
 	for _, v := range vars {
 		back[v.Key] = v.Value
 	}
-	if back["EXISTING"] != "1" || back["NEW"] != "v" {
-		t.Errorf("appending to an unterminated file corrupted it: %v", back)
-	}
+	c.False(back["EXISTING"] != "1" || back["NEW"] != "v", "appending to an unterminated file corrupted it: %v", back)
 }

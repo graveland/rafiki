@@ -55,6 +55,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ─── harness: daemon + fake claude children ──────────────────────────────────
@@ -94,9 +96,8 @@ func bootMCPChildDaemon(t *testing.T) (*daemon, string) {
 func fakeClaudeBin(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(repoRoot, "test", "integration", "fake-claude.sh")
-	if _, err := os.Stat(p); err != nil {
-		t.Fatalf("fake-claude.sh not found at %s: %v", p, err)
-	}
+	_, err := os.Stat(p)
+	assert.NewAborting(t).NoError(err, "fake-claude.sh not found at %s", p)
 	return p
 }
 
@@ -247,9 +248,7 @@ func mcpSpawnClaudeChild(t *testing.T, sess *mcp.ClientSession, name string) str
 		"kind":   "claude",
 	})
 	id := mcpFirstAgentID(t, text)
-	if id == "" {
-		t.Fatalf("agent_spawn(%s) returned no agent id; output:\n%s", name, text)
-	}
+	assert.NewAborting(t).NotEq("", id, "agent_spawn(%s) returned no agent id; output:\n%s", name, text)
 	return id
 }
 
@@ -267,9 +266,7 @@ func mcpRawInitialize(t *testing.T, d *daemon, token string, id int) string {
 		t.Fatalf("child-token initialize status = %d, want 200 (body: %.200s)\nstderr:\n%s", resp.StatusCode, b, d.stderr.tail(2000))
 	}
 	sid := resp.Header.Get("Mcp-Session-Id")
-	if sid == "" {
-		t.Fatal("child-token initialize response carried no Mcp-Session-Id")
-	}
+	assert.NewAborting(t).NotEq("", sid, "child-token initialize response carried no Mcp-Session-Id")
 	mcpReadSSEData(t, resp, float64(id))
 	return sid
 }
@@ -290,9 +287,7 @@ func mcpRawToolsListNames(t *testing.T, d *daemon, token, sid string, id int) []
 			} `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(mcpReadSSEData(t, resp, float64(id)), &payload); err != nil {
-		t.Fatalf("decode tools/list SSE frame: %v", err)
-	}
+	assert.NewAborting(t).NoError(json.Unmarshal(mcpReadSSEData(t, resp, float64(id)), &payload), "decode tools/list SSE frame")
 	names := make([]string, 0, len(payload.Result.Tools))
 	for _, tl := range payload.Result.Tools {
 		names = append(names, tl.Name)
@@ -306,9 +301,7 @@ func mcpDrain(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "read response body")
 	return string(raw)
 }
 
@@ -322,9 +315,7 @@ func mcpAssertExactToolSet(t *testing.T, where string, got []string) {
 	want := slices.Clone(mcpChildToolNames)
 	slices.Sort(want)
 	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Fatalf("%s: tools/list = %v, want exactly %v", where, got, want)
-	}
+	assert.NewAborting(t).EqDiff(want, got, "%s: tools/list = %v, want exactly", where, got)
 }
 
 // ─── the tests ───────────────────────────────────────────────────────────────
@@ -346,6 +337,7 @@ func mcpAssertExactToolSet(t *testing.T, where string, got []string) {
 //	     tools/list with it alone gets 403, never a tool list or a stream.
 func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d, dumps := bootMCPChildDaemon(t)
 	token := d.createMCPUser(t)
 	userSess := mcpConnect(t, d.proxyURL, token)
@@ -359,33 +351,23 @@ func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 
 	// The attribution header the /v1/messages face bills through names this
 	// same child — the id the MCP secret resolves onto.
-	if got := dumpA.sessionHeader(); got != childA {
-		t.Errorf("X-Rafiki-Session in the child's environment = %q, want %q", got, childA)
-	}
+	c.Eq(childA, dumpA.sessionHeader(), "X-Rafiki-Session in the child's environment")
 
 	mcpToken := dumpA.envValue("RAFIKI_MCP_TOKEN")
-	if mcpToken == "" {
-		t.Fatal("the spawned claude child's environment carries no RAFIKI_MCP_TOKEN; the spawn path delivered no per-child secret")
-	}
-	if mcpToken == token {
-		t.Fatal("the per-child secret must not be the owner's user token")
-	}
+	c.Require().NotEq("", mcpToken, "the spawned claude child's environment carries no RAFIKI_MCP_TOKEN; the spawn path delivered no per-child secret")
+	c.Require().NotEq(token, mcpToken, "the per-child secret must not be the owner's user token")
 	// The per-boot proxy bearer rides the same environment (it is the billing
 	// credential on every child path) and must stay a DIFFERENT secret from
 	// the per-child one — its presence here is what makes A2's negative leg
 	// below a real credential rather than a guess.
 	bootToken := dumpA.envValue("ANTHROPIC_AUTH_TOKEN")
-	if bootToken == "" || bootToken == mcpToken {
-		t.Fatalf("ANTHROPIC_AUTH_TOKEN = %q; the per-boot proxy bearer must be present and distinct from the per-child secret", bootToken)
-	}
+	c.Require().False(bootToken == "" || bootToken == mcpToken, "ANTHROPIC_AUTH_TOKEN = %q; the per-boot proxy bearer must be present and distinct from the per-child secret", bootToken)
 
 	// Headline: tools/list through the child-token session is exactly the
 	// tool set mcpToolNames pins — no more, no fewer.
 	sessA := mcpConnect(t, d.proxyURL, mcpToken)
 	tools, err := sessA.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("child-token ListTools: %v", err)
-	}
+	c.Require().NoError(err, "child-token ListTools")
 	var got []string
 	for _, tl := range tools.Tools {
 		got = append(got, tl.Name)
@@ -406,39 +388,24 @@ func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 		"model":  "anthropic/sonnet-latest",
 	})
 	underA := mcpFirstAgentID(t, underText)
-	if underA == "" {
-		t.Fatalf("agent_spawn through the child-token session returned no id; output:\n%s", underText)
-	}
+	c.Require().NotEq("", underA, "agent_spawn through the child-token session returned no id; output:\n%s", underText)
 
 	listA := mcpOK(t, sessA, "agent_list", nil)
-	if !strings.Contains(listA, underA) {
-		t.Fatalf("child-token agent_list omits the child's own descendant %s; output:\n%s", underA, listA)
-	}
-	if strings.Contains(listA, outsider) {
-		t.Fatalf("child-token agent_list leaked the non-descendant %s — the child-token arm bound a user spawner (daemon-wide scope), not a controller spawner; output:\n%s", outsider, listA)
-	}
+	c.Require().StrContains(listA, underA, "child-token agent_list omits the child's own descendant")
+	c.Require().NotStrContains(listA, outsider, "child-token agent_list leaked the non-descendant")
 	listUser := mcpOK(t, userSess, "agent_list", nil)
-	if !strings.Contains(listUser, outsider) {
-		t.Fatalf("user-token agent_list does not see the top-level row %s, so the child-token omission proves nothing; output:\n%s", outsider, listUser)
-	}
-	if !strings.Contains(listUser, childA) {
-		t.Fatalf("user-token agent_list does not see the spawned child %s; output:\n%s", childA, listUser)
-	}
+	c.Require().StrContains(listUser, outsider, "user-token agent_list does not see the top-level row")
+	c.Require().StrContains(listUser, childA, "user-token agent_list does not see the spawned child")
 
 	// A2: the bare per-boot proxy secret is a billing credential, not an
 	// agent-control one. No X-Rafiki-Session header means nothing attributes
 	// it to a child, so it resolves to an identity with no provenance, and
 	// the face must answer 403 before any server object is built.
 	resp, body := mcpRawBody(t, d.proxyURL, bootToken, "", `{"jsonrpc":"2.0","id":9,"method":"tools/list"}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("bare per-boot secret tools/list status = %d, want 403 (body: %.200s)", resp.StatusCode, body)
-	}
-	if strings.Contains(body, `"result"`) {
-		t.Errorf("the bare per-boot secret got a JSON-RPC result; an unentitled credential must never reach the tool surface (body: %.200s)", body)
-	}
-	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/event-stream") {
-		t.Errorf("the bare per-boot secret was answered with %q; an unentitled credential must never get a stream", ct)
-	}
+	c.Eq(http.StatusForbidden, resp.StatusCode, "bare per-boot secret tools/list status = %d, want 403 (body: %.200s)", resp.StatusCode, body)
+	c.NotStrContains(body, `"result"`, "the bare per-boot secret got a JSON-RPC result; an unentitled credential must never reach the tool surface (body")
+	ct := resp.Header.Get("Content-Type")
+	c.False(strings.HasPrefix(ct, "text/event-stream"), "the bare per-boot secret was answered with %q; an unentitled credential must never get a stream", ct)
 }
 
 // TestMCPGrandchildTokenReachesTheAgentControlSurface is the second-hop twin
@@ -454,6 +421,7 @@ func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 // surface at all.
 func TestMCPGrandchildTokenReachesTheAgentControlSurface(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d, dumps := bootMCPChildDaemon(t)
 	token := d.createMCPUser(t)
 	userSess := mcpConnect(t, d.proxyURL, token)
@@ -468,21 +436,15 @@ func TestMCPGrandchildTokenReachesTheAgentControlSurface(t *testing.T) {
 	grandchild := mcpSpawnClaudeChild(t, sessA, "mcp-gc-under")
 
 	tokGC := waitClaudeDump(t, d, dumps, grandchild).envValue("RAFIKI_MCP_TOKEN")
-	if tokGC == "" {
-		t.Fatal("the agent-spawned grandchild's environment carries no RAFIKI_MCP_TOKEN; the spawn path delivered no per-child secret")
-	}
-	if tokGC == token {
-		t.Fatal("the grandchild's per-child secret must not be the owner's user token")
-	}
+	c.NotEq("", tokGC, "the agent-spawned grandchild's environment carries no RAFIKI_MCP_TOKEN; the spawn path delivered no per-child secret")
+	c.NotEq(token, tokGC, "the grandchild's per-child secret must not be the owner's user token")
 
 	// Headline: the grandchild's own secret establishes a session and reaches
 	// the full agent-control tool set. The failure this guards used to be a
 	// 401 on the initialize itself.
 	sessGC := mcpConnect(t, d.proxyURL, tokGC)
 	tools, err := sessGC.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("grandchild-token ListTools: %v", err)
-	}
+	c.NoError(err, "grandchild-token ListTools")
 	var got []string
 	for _, tl := range tools.Tools {
 		got = append(got, tl.Name)
@@ -493,9 +455,7 @@ func TestMCPGrandchildTokenReachesTheAgentControlSurface(t *testing.T) {
 	// agent_list shows its own subtree — empty, it has spawned nothing — and
 	// must not leak its parent or anything above it.
 	listGC := mcpOK(t, sessGC, "agent_list", nil)
-	if strings.Contains(listGC, childA) {
-		t.Fatalf("grandchild-token agent_list leaked its own parent %s — the binding is not scoped to the grandchild's position; output:\n%s", childA, listGC)
-	}
+	c.NotStrContains(listGC, childA, "grandchild-token agent_list leaked its own parent")
 }
 
 // TestMCPChildKillNonDescendantRefused: two sibling children; A's secret
@@ -505,6 +465,7 @@ func TestMCPGrandchildTokenReachesTheAgentControlSurface(t *testing.T) {
 // refusal from passing for a kill verb that is simply broken.
 func TestMCPChildKillNonDescendantRefused(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 	d, dumps := bootMCPChildDaemon(t)
 	token := d.createMCPUser(t)
 	userSess := mcpConnect(t, d.proxyURL, token)
@@ -512,25 +473,17 @@ func TestMCPChildKillNonDescendantRefused(t *testing.T) {
 	childA := mcpSpawnClaudeChild(t, userSess, "mcp-killer-a")
 	childB := mcpSpawnClaudeChild(t, userSess, "mcp-sibling-b")
 	tokA := waitClaudeDump(t, d, dumps, childA).envValue("RAFIKI_MCP_TOKEN")
-	if tokA == "" {
-		t.Fatal("child A's environment carries no RAFIKI_MCP_TOKEN")
-	}
+	c.NotEq("", tokA, "child A's environment carries no RAFIKI_MCP_TOKEN")
 
 	sessA := mcpConnect(t, d.proxyURL, tokA)
 	res, text := mcpCallTool(t, sessA, "agent_kill", map[string]any{"agent": childB})
-	if !res.IsError {
-		t.Fatalf("agent_kill on sibling %s succeeded; a child may only kill its own subtree (output:\n%s)", childB, text)
-	}
-	if !strings.Contains(text, "not a descendant") {
-		t.Fatalf("agent_kill refusal does not state the non-descendant reason; output:\n%s", text)
-	}
+	c.True(res.IsError, "agent_kill on sibling %s succeeded; a child may only kill its own subtree (output:\n%s)", childB, text)
+	c.StrContains(text, "not a descendant", "agent_kill refusal does not state the non-descendant reason; output:\n")
 
 	// Positive control: A's own descendant must be killable by A's secret.
 	underA := mcpSpawnClaudeChild(t, sessA, "mcp-under-killer")
 	killText := mcpOK(t, sessA, "agent_kill", map[string]any{"agent": underA})
-	if !strings.Contains(killText, underA) {
-		t.Fatalf("agent_kill on A's own descendant %s did not name it; output:\n%s", underA, killText)
-	}
+	c.StrContains(killText, underA, "agent_kill on A's own descendant")
 }
 
 // TestMCPChildSessionNotShared: A's secret establishes a session; B's secret
@@ -539,6 +492,7 @@ func TestMCPChildKillNonDescendantRefused(t *testing.T) {
 // and a UserID-keyed map would let B execute against A's bound spawner.
 func TestMCPChildSessionNotShared(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d, dumps := bootMCPChildDaemon(t)
 	token := d.createMCPUser(t)
 	userSess := mcpConnect(t, d.proxyURL, token)
@@ -547,12 +501,8 @@ func TestMCPChildSessionNotShared(t *testing.T) {
 	childB := mcpSpawnClaudeChild(t, userSess, "mcp-sess-b")
 	tokA := waitClaudeDump(t, d, dumps, childA).envValue("RAFIKI_MCP_TOKEN")
 	tokB := waitClaudeDump(t, d, dumps, childB).envValue("RAFIKI_MCP_TOKEN")
-	if tokA == "" || tokB == "" {
-		t.Fatalf("child secrets missing (A=%q B=%q)", tokA, tokB)
-	}
-	if tokA == tokB {
-		t.Fatal("two children minted the same MCP secret")
-	}
+	c.Require().False(tokA == "" || tokB == "", "child secrets missing (A=%q B=%q)", tokA, tokB)
+	c.Require().NotEq(tokB, tokA, "two children minted the same MCP secret")
 
 	// A establishes a session; the initialize stream is read to EOF, which is
 	// what lets the daemon's handler return and record the binding.
@@ -560,12 +510,8 @@ func TestMCPChildSessionNotShared(t *testing.T) {
 
 	// B's token presenting A's session id: 403, never a dispatch.
 	resp, body := mcpRawBody(t, d.proxyURL, tokB, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("sibling presenting another child's Mcp-Session-Id: status = %d, want 403 (body: %.200s)", resp.StatusCode, body)
-	}
-	if strings.Contains(body, `"result"`) {
-		t.Errorf("the hijacked session carried a JSON-RPC result (body: %.200s)", body)
-	}
+	c.Eq(http.StatusForbidden, resp.StatusCode, "sibling presenting another child's Mcp-Session-Id: status = %d, want 403 (body: %.200s)", resp.StatusCode, body)
+	c.NotStrContains(body, `"result"`, "the hijacked session carried a JSON-RPC result (body")
 
 	// The principal check is what refused it, not the session id or the verb:
 	// A's own token on its own session still lists the full tool set...
@@ -591,6 +537,7 @@ func TestMCPChildSessionNotShared(t *testing.T) {
 // surface.
 func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d, dumps := bootMCPChildDaemon(t)
 
 	const wantPrompt = "integration-test system prompt appendix"
@@ -604,19 +551,13 @@ func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 		AppendSystemPrompt: wantPrompt,
 		ExtraArgs:          []string{"--foo", "bar"},
 	}))
-	if err != nil {
-		t.Fatalf("spawn (claude, argv flags) failed: %v", err)
-	}
+	c.Require().NoError(err, "spawn (claude, argv flags) failed")
 	childID := resp.Msg.GetChildId()
-	if childID == "" {
-		t.Fatal("spawn returned empty childId")
-	}
+	c.Require().NotEq("", childID, "spawn returned empty childId")
 
 	dump := waitClaudeDump(t, d, dumps, childID)
 	for _, want := range []string{"--append-system-prompt", "--foo", "bar"} {
-		if !slices.Contains(dump.argv, want) {
-			t.Errorf("claude argv %q is missing %q; the spawn path dropped it", dump.argv, want)
-		}
+		c.Contains(dump.argv, want, "claude argv")
 	}
 	// The caller's appendix rides the SAME element as the daemon's coordination
 	// prompt (--append-system-prompt is last-wins, so the merge must be one
@@ -624,22 +565,14 @@ func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	// coordination prompt rides because this daemon serves the proxy face, so
 	// the child carries the MCP agent-control surface the prompt names.
 	appendValue := argvValue(dump.argv, "--append-system-prompt")
-	if !strings.Contains(appendValue, wantPrompt) {
-		t.Errorf("claude argv's --append-system-prompt value %q is missing the caller's appendix %q", appendValue, wantPrompt)
-	}
-	if !strings.Contains(appendValue, claudeargv.CoordinationPrompt) {
-		t.Errorf("claude argv's --append-system-prompt value %q is missing the coordination prompt", appendValue)
-	}
+	c.StrContains(appendValue, wantPrompt, "claude argv's --append-system-prompt value")
+	c.StrContains(appendValue, claudeargv.CoordinationPrompt, "claude argv's --append-system-prompt value")
 
 	// The same dump pins the security invariant on the real launch: the
 	// per-child secret travels by ENVIRONMENT only. It must appear in the env
 	// half and never in the argv half, whose --mcp-config carries only the
 	// ${RAFIKI_MCP_TOKEN} placeholder (ps renders argv world-readable).
 	tok := dump.envValue("RAFIKI_MCP_TOKEN")
-	if tok == "" {
-		t.Fatal("the child's environment carries no RAFIKI_MCP_TOKEN")
-	}
-	if slices.Contains(dump.argv, tok) {
-		t.Errorf("the per-child MCP secret appears in the child's argv %q; it must travel by environment only", dump.argv)
-	}
+	c.Require().NotEq("", tok, "the child's environment carries no RAFIKI_MCP_TOKEN")
+	c.NotContains(dump.argv, tok, "the per-child MCP secret appears in the child's argv")
 }

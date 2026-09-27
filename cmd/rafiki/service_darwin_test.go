@@ -7,12 +7,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/paths"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // testSpec returns a minimal serviceSpec for template rendering tests.
@@ -26,10 +27,9 @@ func testSpec() serviceSpec {
 }
 
 func TestRenderPlist_ContainsSpecFields(t *testing.T) {
+	c := assert.NewCollecting(t)
 	content, err := renderServiceConfig(testSpec(), launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
+	c.Require().NoError(err, "renderServiceConfig")
 
 	for _, want := range []string{
 		"/usr/local/bin/rafikid",
@@ -37,17 +37,14 @@ func TestRenderPlist_ContainsSpecFields(t *testing.T) {
 		"/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
 		"controller.log",
 	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("plist missing %q\ngot:\n%s", want, content)
-		}
+		c.StrContains(content, want, "plist missing")
 	}
 }
 
 func TestRenderPlist_Format(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	content, err := renderServiceConfig(testSpec(), launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
+	ck.Require().NoError(err, "renderServiceConfig")
 
 	checks := []string{
 		"<?xml version=\"1.0\"",
@@ -64,30 +61,25 @@ func TestRenderPlist_Format(t *testing.T) {
 		"<key>PATH</key>",
 	}
 	for _, c := range checks {
-		if !strings.Contains(content, c) {
-			t.Errorf("plist missing %q", c)
-		}
+		ck.StrContains(content, c, "plist missing")
 	}
 }
 
 func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
 		"RAFIKI_URL":    "postgres://postgres@localhost:5432/rafiki?sslmode=disable",
 		"RAFIKI_SOCKET": "/tmp/rafiki.sock",
 	}
 	out, err := renderServiceConfig(spec, launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
+	c.Require().NoError(err, "renderServiceConfig")
 	for _, want := range []string{
 		"<key>RAFIKI_URL</key>",
 		"<string>postgres://postgres@localhost:5432/rafiki?sslmode=disable</string>",
 		"<key>RAFIKI_SOCKET</key>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("plist missing %q\n---\n%s", want, out)
-		}
+		c.StrContains(out, want, "plist missing")
 	}
 }
 
@@ -95,23 +87,16 @@ func TestRenderPlist_IncludesCapturedEnv(t *testing.T) {
 // would produce a plist launchd refuses to parse — the service would become
 // uninstallable over the very variable this mechanism exists to carry.
 func TestRenderPlist_EscapesXML(t *testing.T) {
+	c := assert.NewCollecting(t)
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
 		"RAFIKI_URL": "postgres://h/db?sslmode=disable&application_name=rafiki<1>",
 	}
 	out, err := renderServiceConfig(spec, launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
-	if strings.Contains(out, "&application_name") {
-		t.Error("raw ampersand emitted; the plist would not parse")
-	}
-	if !strings.Contains(out, "&amp;application_name") {
-		t.Errorf("ampersand not escaped\n---\n%s", out)
-	}
-	if strings.Contains(out, "rafiki<1>") {
-		t.Error("raw angle brackets emitted")
-	}
+	c.Require().NoError(err, "renderServiceConfig")
+	c.NotStrContains(out, "&application_name", "raw ampersand emitted; the plist would not parse")
+	c.StrContains(out, "&amp;application_name", "ampersand not escaped\n---\n")
+	c.NotStrContains(out, "rafiki<1>", "raw angle brackets emitted")
 	// The real check: it must actually parse as XML.
 	if err := xml.Unmarshal([]byte(out), new(any)); err != nil {
 		t.Errorf("rendered plist is not well-formed XML: %v\n---\n%s", err, out)
@@ -122,28 +107,24 @@ func TestRenderPlist_EscapesXML(t *testing.T) {
 // plist; a map ranged directly would reorder keys at random and make every
 // reinstall look like a change.
 func TestRenderPlist_Deterministic(t *testing.T) {
+	c := assert.NewAborting(t)
 	spec := testSpec()
 	spec.ExtraEnv = map[string]string{
 		"RAFIKI_URL": "url", "RAFIKI_SOCKET": "/s", "RAFIKI_PI_BINARY": "/pi",
 		"RAFIKI_DEFAULT_MODEL": "m", "RAFIKI_MCP_CONFIG": "/c",
 	}
 	first, err := renderServiceConfig(spec, launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
+	c.NoError(err, "renderServiceConfig")
 	for range 20 {
 		again, err := renderServiceConfig(spec, launchdLabel)
-		if err != nil {
-			t.Fatalf("renderServiceConfig: %v", err)
-		}
-		if again != first {
-			t.Fatal("plist rendering is not deterministic")
-		}
+		c.NoError(err, "renderServiceConfig")
+		c.Eq(first, again, "plist rendering is not deterministic")
 	}
 }
 
 // The plist is 0644. Whatever else changes, a DSN must never appear in it.
 func TestRenderServiceConfig_NeverContainsADSN(t *testing.T) {
+	c := assert.NewCollecting(t)
 	unit, secret, _ := captureDaemonEnv([]string{
 		"RAFIKI_DB=postgres://u:hunter2@localhost/rafiki",
 		"RAFIKI_DEFAULT_MODEL=anthropic/opus-latest",
@@ -156,32 +137,21 @@ func TestRenderServiceConfig_NeverContainsADSN(t *testing.T) {
 		ExtraEnv:     unit,
 		SecretEnv:    secret,
 	}, launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
+	c.Require().NoError(err, "renderServiceConfig")
 	for _, forbidden := range []string{"hunter2", "postgres://", "RAFIKI_DB"} {
-		if strings.Contains(out, forbidden) {
-			t.Errorf("rendered plist contains %q:\n%s", forbidden, out)
-		}
+		c.NotStrContains(out, forbidden, "rendered plist contains")
 	}
-	if !strings.Contains(out, "RAFIKI_DEFAULT_MODEL") {
-		t.Error("a non-secret variable stopped being baked into the plist")
-	}
+	c.StrContains(out, "RAFIKI_DEFAULT_MODEL", "a non-secret variable stopped being baked into the plist")
 }
 
 // No captured environment must still render a valid plist — the pre-existing
 // HOME/PATH-only shape.
 func TestRenderPlist_EmptyExtraEnv(t *testing.T) {
+	c := assert.NewCollecting(t)
 	out, err := renderServiceConfig(testSpec(), launchdLabel)
-	if err != nil {
-		t.Fatalf("renderServiceConfig: %v", err)
-	}
-	if strings.Contains(out, "RAFIKI_") {
-		t.Errorf("unexpected RAFIKI_ key with no captured env\n---\n%s", out)
-	}
-	if err := xml.Unmarshal([]byte(out), new(any)); err != nil {
-		t.Errorf("not well-formed XML: %v", err)
-	}
+	c.Require().NoError(err, "renderServiceConfig")
+	c.NotStrContains(out, "RAFIKI_", "unexpected RAFIKI_ key with no captured env\n---\n")
+	c.NoError(xml.Unmarshal([]byte(out), new(any)), "not well-formed XML")
 }
 
 // The regression this guards: `launchctl bootstrap` fails against a job that
@@ -193,6 +163,7 @@ func TestRenderPlist_EmptyExtraEnv(t *testing.T) {
 // bootout (best-effort) before bootstrap so a reinstall actually replaces the
 // running job, not just the file on disk.
 func TestDarwinInstall_BootsOutBeforeBootstrappingSoAReinstallActuallyReloads(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -216,9 +187,7 @@ func TestDarwinInstall_BootsOutBeforeBootstrappingSoAReinstallActuallyReloads(t 
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 
-	if err := b.Install(spec); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
+	c.Require().NoError(b.Install(spec), "Install")
 
 	var bootoutIdx, bootstrapIdx = -1, -1
 	for i, call := range calls {
@@ -232,20 +201,15 @@ func TestDarwinInstall_BootsOutBeforeBootstrappingSoAReinstallActuallyReloads(t 
 			bootstrapIdx = i
 		}
 	}
-	if bootoutIdx == -1 {
-		t.Fatalf("Install never called launchctl bootout; calls: %v", calls)
-	}
-	if bootstrapIdx == -1 {
-		t.Fatalf("Install never called launchctl bootstrap; calls: %v", calls)
-	}
-	if bootoutIdx >= bootstrapIdx {
-		t.Errorf("bootout (call %d) did not run before bootstrap (call %d): %v", bootoutIdx, bootstrapIdx, calls)
-	}
+	c.Require().NotEq(-1, bootoutIdx, "Install never called launchctl bootout; calls: %v", calls)
+	c.Require().NotEq(-1, bootstrapIdx, "Install never called launchctl bootstrap; calls: %v", calls)
+	c.Less(bootstrapIdx, bootoutIdx, "bootout (call %d) did not run before bootstrap (call %d): %v", bootoutIdx, bootstrapIdx, calls)
 }
 
 // Install must still succeed when bootout fails — the expected, unproblematic
 // case on a clean machine where the job was never loaded in the first place.
 func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -273,15 +237,10 @@ func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
-	if err := b.Install(spec); err != nil {
-		t.Fatalf("Install: %v, want success even though bootout failed (job was never loaded)", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")); err != nil {
-		t.Errorf("plist was not written: %v", err)
-	}
-	if printCallsBeforeBootstrap != 0 {
-		t.Errorf("expected the poll to be skipped on the bootout-not-found fast path, but launchctl print was called %d time(s) before bootstrap", printCallsBeforeBootstrap)
-	}
+	c.Require().NoError(b.Install(spec), "Install")
+	_, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"))
+	c.NoError(err, "plist was not written")
+	c.Eq(0, printCallsBeforeBootstrap, "expected the poll to be skipped on the bootout-not-found fast path, but launchctl print was called")
 }
 
 // The regression this guards, verified twice on real hardware: bootout is
@@ -292,6 +251,7 @@ func TestDarwinInstall_SucceedsWhenBootoutFailsBecauseNotLoaded(t *testing.T) {
 // bootstrap/load exit codes — it must verify via `launchctl print` and
 // return a real error when that verification shows the job never loaded.
 func TestDarwinInstall_LyingLoadExitZeroStillReportsErrorWhenVerificationFindsNothingLoaded(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -323,12 +283,8 @@ func TestDarwinInstall_LyingLoadExitZeroStillReportsErrorWhenVerificationFindsNo
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	err := b.Install(spec)
-	if err == nil {
-		t.Fatal("Install: got nil error, want a real error — the service verifiably did not load")
-	}
-	if !strings.Contains(err.Error(), "not loaded") {
-		t.Errorf("Install error %q does not clearly say the service is not loaded", err.Error())
-	}
+	c.Require().Error(err, "Install: got nil error, want a real error — the service verifiably did not load")
+	c.StrContains(err.Error(), "not loaded", "Install error")
 }
 
 // bootout succeeding means a job really was loaded and is (asynchronously)
@@ -336,6 +292,7 @@ func TestDarwinInstall_LyingLoadExitZeroStillReportsErrorWhenVerificationFindsNo
 // before bootstrapping, and stop polling as soon as it does — it must not
 // always burn the full cap.
 func TestDarwinInstall_PollsUntilUnloadedThenBootstraps(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -381,23 +338,16 @@ func TestDarwinInstall_PollsUntilUnloadedThenBootstraps(t *testing.T) {
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
-	if err := b.Install(spec); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	if !sawBootstrap {
-		t.Fatal("Install never called launchctl bootstrap")
-	}
-	if printCallsBeforeBootstrap != 3 {
-		t.Errorf("expected the poll to stop as soon as print reported gone (3rd call), got %d print calls before bootstrap", printCallsBeforeBootstrap)
-	}
-	if sleeps == 0 {
-		t.Error("expected the poll to sleep between attempts")
-	}
+	c.Require().NoError(b.Install(spec), "Install")
+	c.Require().True(sawBootstrap, "Install never called launchctl bootstrap")
+	c.Eq(3, printCallsBeforeBootstrap, "expected the poll to stop as soon as print reported gone (3rd call), got")
+	c.NotEq(0, sleeps, "expected the poll to sleep between attempts")
 }
 
 // If the job never reports gone, Install must not give up on reloading the
 // machine: it still proceeds to bootstrap once the poll cap is exhausted.
 func TestDarwinInstall_PollCapExpiryStillAttemptsBootstrap(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -433,19 +383,11 @@ func TestDarwinInstall_PollCapExpiryStillAttemptsBootstrap(t *testing.T) {
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
-	if err := b.Install(spec); err != nil {
-		t.Fatalf("Install: %v, want the cap expiring to still fall through to bootstrap and succeed", err)
-	}
-	if !sawBootstrap {
-		t.Fatal("Install never called launchctl bootstrap after the poll cap expired")
-	}
+	c.Require().NoError(b.Install(spec), "Install")
+	c.Require().True(sawBootstrap, "Install never called launchctl bootstrap after the poll cap expired")
 	wantAttempts := int(installPollCap / installPollInterval)
-	if printCallsBeforeBootstrap != wantAttempts {
-		t.Errorf("expected the poll to exhaust its full cap of %d attempts, got %d", wantAttempts, printCallsBeforeBootstrap)
-	}
-	if sleeps != wantAttempts {
-		t.Errorf("expected %d sleeps (one per poll attempt), got %d", wantAttempts, sleeps)
-	}
+	c.Eq(wantAttempts, printCallsBeforeBootstrap, "expected the poll to exhaust its full cap of")
+	c.Eq(wantAttempts, sleeps, "expected")
 }
 
 // Controller-review regression: bootout succeeds (a job WAS loaded) but the
@@ -492,9 +434,7 @@ func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.
 	spec := testSpec()
 	spec.LogPath = filepath.Join(home, "controller.log")
 	err := b.Install(spec)
-	if err == nil {
-		t.Fatal("Install: got nil error, want a real error -- the poll never confirmed the stale job was gone, bootstrap failed, and the lying legacy load cannot be trusted to have replaced it")
-	}
+	assert.NewAborting(t).Error(err, "Install: got nil error, want a real error -- the poll never confirmed the stale job was gone, bootstrap failed, and the lying legacy load cannot be trusted to have replaced it")
 }
 
 // --- Restart tests ---
@@ -509,6 +449,7 @@ func TestDarwinInstall_UnconfirmedUnloadWithFailedBootstrapIsAnError(t *testing.
 // pid — which Restart must wait for and treat as success without ever
 // escalating to SIGKILL.
 func TestDarwinRestart_SignalsAndWaitsForRespawn(t *testing.T) {
+	c := assert.NewCollecting(t)
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
 	defer func() { sleepFn = origSleep }()
@@ -551,20 +492,15 @@ func TestDarwinRestart_SignalsAndWaitsForRespawn(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 5 * time.Second}
-	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-	if sigterms != 1 {
-		t.Errorf("expected exactly one SIGTERM, got %d", sigterms)
-	}
-	if sigkills != 0 {
-		t.Errorf("expected no SIGKILL when the process exits on its own, got %d", sigkills)
-	}
+	c.Require().NoError(b.Restart(), "Restart")
+	c.Eq(1, sigterms, "expected exactly one SIGTERM, got")
+	c.Eq(0, sigkills, "expected no SIGKILL when the process exits on its own, got")
 }
 
 // The process ignores SIGTERM entirely. Restart must wait out restartGrace
 // and then escalate to SIGKILL rather than hanging forever or giving up.
 func TestDarwinRestart_EscalatesToSIGKILLWhenProcessWontDie(t *testing.T) {
+	c := assert.NewCollecting(t)
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
 	defer func() { sleepFn = origSleep }()
@@ -602,15 +538,9 @@ func TestDarwinRestart_EscalatesToSIGKILLWhenProcessWontDie(t *testing.T) {
 	// restartGrace of 0 makes the very first liveness check see the deadline
 	// already passed, forcing escalation without a real sleep in the test.
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 0}
-	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-	if sigterms != 1 {
-		t.Errorf("expected one SIGTERM before escalating, got %d", sigterms)
-	}
-	if sigkills != 1 {
-		t.Errorf("expected escalation to SIGKILL when the process never exits, got %d", sigkills)
-	}
+	c.Require().NoError(b.Restart(), "Restart")
+	c.Eq(1, sigterms, "expected one SIGTERM before escalating, got")
+	c.Eq(1, sigkills, "expected escalation to SIGKILL when the process never exits, got")
 }
 
 // If launchd never respawns the job (KeepAlive disabled, a throttle, …),
@@ -645,15 +575,14 @@ func TestDarwinRestart_ErrorsWhenLaunchdNeverRespawns(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: time.Millisecond}
-	if err := b.Restart(); err == nil {
-		t.Fatal("Restart: got nil error, want an error — launchd never respawned the job")
-	}
+	assert.NewAborting(t).Error(b.Restart(), "Restart: got nil error, want an error — launchd never respawned the job")
 }
 
 // The service is installed but not currently running (e.g. it crashed and
 // launchd is sitting out a throttle). Restart has nothing to signal, so it
 // must ask launchd to start it rather than passively waiting.
 func TestDarwinRestart_NotRunningKickstarts(t *testing.T) {
+	c := assert.NewAborting(t)
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
 	defer func() { sleepFn = origSleep }()
@@ -676,12 +605,8 @@ func TestDarwinRestart_NotRunningKickstarts(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath(), restartGrace: 5 * time.Second}
-	if err := b.Restart(); err != nil {
-		t.Fatalf("Restart: %v", err)
-	}
-	if !sawKickstart {
-		t.Fatal("Restart did not kickstart a not-currently-running service")
-	}
+	c.NoError(b.Restart(), "Restart")
+	c.True(sawKickstart, "Restart did not kickstart a not-currently-running service")
 }
 
 // Restart on a service that was never installed must fail rather than
@@ -697,9 +622,7 @@ func TestDarwinRestart_NotInstalledIsAnError(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
-	if err := b.Restart(); err == nil {
-		t.Fatal("Restart: got nil error, want an error — the service was never installed")
-	}
+	assert.NewAborting(t).Error(b.Restart(), "Restart: got nil error, want an error — the service was never installed")
 }
 
 // --- Uninstall tests ---
@@ -707,17 +630,14 @@ func TestDarwinRestart_NotInstalledIsAnError(t *testing.T) {
 // Happy path: bootout succeeds, the poll confirms the job gone, and only
 // then does Uninstall remove the plist and report success.
 func TestDarwinUninstall_ConfirmsUnloadBeforeRemovingPlist(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(plistDir, 0755))
 	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(plistPath, []byte("<plist/>"), 0644))
 
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
@@ -746,15 +666,10 @@ func TestDarwinUninstall_ConfirmsUnloadBeforeRemovingPlist(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
-	if err := b.Uninstall(); err != nil {
-		t.Fatalf("Uninstall: %v", err)
-	}
-	if printCalls < 3 {
-		t.Errorf("expected Uninstall to poll until confirmed gone, got only %d print calls", printCalls)
-	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Errorf("expected the plist to be removed once unload was confirmed, stat err = %v", err)
-	}
+	c.Require().NoError(b.Uninstall(), "Uninstall")
+	c.GreaterOrEqual(3, printCalls, "expected Uninstall to poll until confirmed gone, got only")
+	_, err := os.Stat(plistPath)
+	c.True(os.IsNotExist(err), "expected the plist to be removed once unload was confirmed, stat err = %v", err)
 }
 
 // The fast path: bootout fails because the job was never loaded in the first
@@ -762,17 +677,14 @@ func TestDarwinUninstall_ConfirmsUnloadBeforeRemovingPlist(t *testing.T) {
 // stray plist with no loaded job is exactly the case Uninstall exists to clean
 // up).
 func TestDarwinUninstall_NeverLoadedSkipsPollAndRemovesPlist(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(plistDir, 0755))
 	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(plistPath, []byte("<plist/>"), 0644))
 
 	origSleep := sleepFn
 	var sleeps int
@@ -792,15 +704,10 @@ func TestDarwinUninstall_NeverLoadedSkipsPollAndRemovesPlist(t *testing.T) {
 	}
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
-	if err := b.Uninstall(); err != nil {
-		t.Fatalf("Uninstall: %v", err)
-	}
-	if sleeps != 0 {
-		t.Errorf("expected the never-loaded fast path to skip polling entirely, got %d sleeps", sleeps)
-	}
-	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
-		t.Errorf("expected the plist to be removed, stat err = %v", err)
-	}
+	c.Require().NoError(b.Uninstall(), "Uninstall")
+	c.Eq(0, sleeps, "expected the never-loaded fast path to skip polling entirely, got")
+	_, err := os.Stat(plistPath)
+	c.True(os.IsNotExist(err), "expected the plist to be removed, stat err = %v", err)
 }
 
 // The regression this task exists to fix: bootout reports success (a job WAS
@@ -810,17 +717,14 @@ func TestDarwinUninstall_NeverLoadedSkipsPollAndRemovesPlist(t *testing.T) {
 // NOT delete the plist in that case, since a stray process with no plist at
 // all is strictly worse than one still nominally launchd-managed.
 func TestDarwinUninstall_UnconfirmedUnloadIsAnErrorAndKeepsThePlist(t *testing.T) {
+	c := assert.NewCollecting(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	plistDir := filepath.Join(home, "Library", "LaunchAgents")
-	if err := os.MkdirAll(plistDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.MkdirAll(plistDir, 0755))
 	plistPath := filepath.Join(plistDir, launchdLabel+".plist")
-	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	c.Require().NoError(os.WriteFile(plistPath, []byte("<plist/>"), 0644))
 
 	origSleep := sleepFn
 	sleepFn = func(time.Duration) {}
@@ -845,10 +749,7 @@ func TestDarwinUninstall_UnconfirmedUnloadIsAnErrorAndKeepsThePlist(t *testing.T
 
 	b := &darwinBackend{label: launchdLabel, logPath: paths.ServiceLogPath()}
 	err := b.Uninstall()
-	if err == nil {
-		t.Fatal("Uninstall: got nil error, want a real error -- unload was never confirmed")
-	}
-	if _, statErr := os.Stat(plistPath); statErr != nil {
-		t.Errorf("expected the plist to survive an unconfirmed uninstall, stat err = %v", statErr)
-	}
+	c.Require().Error(err, "Uninstall: got nil error, want a real error -- unload was never confirmed")
+	_, statErr := os.Stat(plistPath)
+	c.NoError(statErr, "expected the plist to survive an unconfirmed uninstall, stat err =")
 }

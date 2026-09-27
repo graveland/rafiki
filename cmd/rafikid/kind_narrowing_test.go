@@ -12,6 +12,8 @@ import (
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // A parent confined to an executor must not be able to spawn a child of a kind
@@ -50,6 +52,7 @@ func TestKindNarrowing(t *testing.T) {
 		{name: "confined parent, script child, no pool", parentSel: "env=ci", kind: protocol.KindScript, wantRefused: true, wantLocalNote: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			st := childstore.New()
 			st.Insert(&childstore.Session{
 				ChildID:          "c_parent",
@@ -62,27 +65,15 @@ func TestKindNarrowing(t *testing.T) {
 			}, tc.poolConnected, tc.scriptRouted)
 
 			if tc.wantRefused {
-				if err == nil {
-					t.Fatal("spawn was admitted; want a refusal")
-				}
+				c.Require().Error(err, "spawn was admitted; want a refusal")
 				var ce *connectapi.ControllerError
-				if !errors.As(err, &ce) {
-					t.Fatalf("error is %T, want *connectapi.ControllerError: %v", err, err)
-				}
-				if ce.Code != protocol.ErrInvalidArgs {
-					t.Errorf("code = %q, want %q", ce.Code, protocol.ErrInvalidArgs)
-				}
-				if !strings.Contains(err.Error(), "executor") {
-					t.Errorf("refusal does not explain the executor grant: %v", err)
-				}
-				if tc.wantLocalNote && !strings.Contains(err.Error(), "local-subprocess fallback") {
-					t.Errorf("claude no-pool refusal does not name the local-subprocess fallback: %v", err)
-				}
+				c.Require().True(errors.As(err, &ce), "error is %T, want *connectapi.ControllerError: %v", err, err)
+				c.Eq(protocol.ErrInvalidArgs, ce.Code, "code")
+				c.StrContains(err.Error(), "executor", "refusal does not explain the executor grant: %v", err)
+				c.False(tc.wantLocalNote && !strings.Contains(err.Error(), "local-subprocess fallback"), "claude no-pool refusal does not name the local-subprocess fallback: %v", err)
 				return
 			}
-			if err != nil {
-				t.Fatalf("spawn was refused: %v", err)
-			}
+			c.Require().NoError(err, "spawn was refused")
 		})
 	}
 }
@@ -93,9 +84,7 @@ func TestKindNarrowing(t *testing.T) {
 func TestKindNarrowingIgnoresTopLevelSpawns(t *testing.T) {
 	st := childstore.New()
 	for _, poolConnected := range []bool{false, true} {
-		if err := checkKindNarrowing(st, protocol.SpawnRequest{Kind: protocol.KindClaude}, poolConnected, false); err != nil {
-			t.Fatalf("a top-level claude spawn was refused (poolConnected=%v): %v", poolConnected, err)
-		}
+		assert.NewAborting(t).NoError(checkKindNarrowing(st, protocol.SpawnRequest{Kind: protocol.KindClaude}, poolConnected, false), "a top-level claude spawn was refused (poolConnected=%v)", poolConnected)
 	}
 }
 
@@ -106,18 +95,13 @@ func TestKindNarrowingIgnoresTopLevelSpawns(t *testing.T) {
 // guard refused. claudeExecutorRouted is the shared definition; this test
 // pins it to the two fields that decide the fallback so the two cannot drift.
 func TestClaudeExecutorRoutedMatchesClaudeRunnerFallback(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := &Controller{}
-	if c.claudeExecutorRouted() {
-		t.Fatal("no pool: claudeExecutorRouted must be false (claudeRunner falls back locally)")
-	}
+	ck.False(c.claudeExecutorRouted(), "no pool: claudeExecutorRouted must be false (claudeRunner falls back locally)")
 	c.execPoolConn = &execpool.Pool{}
-	if c.claudeExecutorRouted() {
-		t.Fatal("execPoolConn alone is not enough: claudeRunner also requires darajaPool")
-	}
+	ck.False(c.claudeExecutorRouted(), "execPoolConn alone is not enough: claudeRunner also requires darajaPool")
 	c.darajaPool = &darajapool.Pool{}
-	if !c.claudeExecutorRouted() {
-		t.Fatal("both pool connections set: claude children launch on the pool")
-	}
+	ck.True(c.claudeExecutorRouted(), "both pool connections set: claude children launch on the pool")
 }
 
 // The guard's script predicate and scriptRunner's fallback predicate must be
@@ -129,24 +113,17 @@ func TestClaudeExecutorRoutedMatchesClaudeRunnerFallback(t *testing.T) {
 // (both pool connections, and a live executor advertising the launch kind) so
 // the two cannot drift.
 func TestScriptExecutorRoutedMatchesScriptRunnerFallback(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c := &Controller{}
-	if c.scriptExecutorRouted() {
-		t.Fatal("no pool: scriptExecutorRouted must be false (scriptRunner falls back locally)")
-	}
+	ck.False(c.scriptExecutorRouted(), "no pool: scriptExecutorRouted must be false (scriptRunner falls back locally)")
 	c.execPoolConn = &execpool.Pool{}
-	if c.scriptExecutorRouted() {
-		t.Fatal("execPoolConn alone is not enough: the runner also requires darajaPool")
-	}
+	ck.False(c.scriptExecutorRouted(), "execPoolConn alone is not enough: the runner also requires darajaPool")
 	c.darajaPool = &darajapool.Pool{}
 	c.execPool = &fakePool{live: []execpool.LiveExecutor{ex("e1", map[string]string{"env": "ci"}, "")}}
-	if c.scriptExecutorRouted() {
-		t.Fatal("no live executor advertises the script launch kind: the local fallback stays")
-	}
+	ck.False(c.scriptExecutorRouted(), "no live executor advertises the script launch kind: the local fallback stays")
 	c.execPool = &fakePool{live: []execpool.LiveExecutor{{
 		Executor: executors.Executor{ID: "e1", Labels: map[string]string{"env": "ci"}, Enabled: true},
 		Describe: &executorpb.DescribeResponse{LaunchKinds: []string{"script"}},
 	}}}
-	if !c.scriptExecutorRouted() {
-		t.Fatal("a live executor advertising --launch script: script children launch on the pool")
-	}
+	ck.True(c.scriptExecutorRouted(), "a live executor advertising --launch script: script children launch on the pool")
 }

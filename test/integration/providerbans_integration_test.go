@@ -5,9 +5,10 @@ package integration_test
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestCLI_ProviderBanRoundTrip drives ban → bans → unban through the real
@@ -16,29 +17,22 @@ import (
 // a leftover ban would be rehydrated by every later daemon.
 func TestCLI_ProviderBanRoundTrip(t *testing.T) {
 	t.Parallel()
+	c := assert.NewCollecting(t)
 	d := bootDaemon(t)
 	slug := "it-banned-" + time.Now().Format("150405.000000")
 
 	out, err := cliCmd(t, d, "providers", "ban", slug, "--note", "spinning").CombinedOutput()
-	if err != nil {
-		t.Fatalf("providers ban failed: %v\noutput: %s", err, out)
-	}
+	c.Require().NoError(err, "providers ban failed: %v\noutput: %s", err, out)
 	t.Cleanup(func() { _ = cliCmd(t, d, "providers", "unban", slug).Run() })
-	if !strings.Contains(string(out), "banned "+slug+" from all models until lifted") {
-		t.Fatalf("ban output = %q", out)
-	}
+	c.Require().StrContains(string(out), "banned "+slug+" from all models until lifted", "ban output = %q", out)
 
 	listed := func() map[string]any {
 		t.Helper()
 		out, err := cliCmd(t, d, "providers", "bans", "-J").Output()
-		if err != nil {
-			t.Fatalf("providers bans failed: %v", err)
-		}
+		c.Require().NoError(err, "providers bans failed")
 		for line := range bytes.Lines(out) {
 			var row map[string]any
-			if err := json.Unmarshal(line, &row); err != nil {
-				t.Fatalf("bans -J line %q: %v", line, err)
-			}
+			c.Require().NoError(json.Unmarshal(line, &row), "bans -J line %q", line)
 			if row["provider"] == slug {
 				return row
 			}
@@ -46,23 +40,14 @@ func TestCLI_ProviderBanRoundTrip(t *testing.T) {
 		return nil
 	}
 	row := listed()
-	if row == nil {
-		t.Fatalf("%s missing from providers bans", slug)
-	}
-	if row["reason"] != "operator" || row["model_line"] != "*" || row["note"] != "spinning" {
-		t.Errorf("listed ban = %v", row)
-	}
-	if _, ok := row["expires_at"]; ok {
-		t.Errorf("an unbounded ban lists expires_at: %v", row)
-	}
+	c.Require().NotNil(row, "%s missing from providers bans", slug)
+	c.False(row["reason"] != "operator" || row["model_line"] != "*" || row["note"] != "spinning", "listed ban = %v", row)
+	_, ok := row["expires_at"]
+	c.False(ok, "an unbounded ban lists expires_at: %v", row)
 
 	if out, err := cliCmd(t, d, "providers", "unban", slug).CombinedOutput(); err != nil {
 		t.Fatalf("providers unban failed: %v\noutput: %s", err, out)
 	}
-	if row := listed(); row != nil {
-		t.Errorf("%s still listed after unban: %v", slug, row)
-	}
-	if err := cliCmd(t, d, "providers", "unban", slug).Run(); err == nil {
-		t.Error("a second unban succeeded; want not-found")
-	}
+	c.Nil(listed(), "%s still listed after unban", slug)
+	c.Error(cliCmd(t, d, "providers", "unban", slug).Run(), "a second unban succeeded; want not-found")
 }

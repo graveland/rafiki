@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type capturingSink struct{ events []*rafikiv1.Event }
@@ -19,6 +21,7 @@ type capturingSink struct{ events []*rafikiv1.Event }
 func (c *capturingSink) Publish(ev *rafikiv1.Event) { c.events = append(c.events, ev) }
 
 func TestEmitterPublishesNativeUserMessage(t *testing.T) {
+	c := assert.NewAborting(t)
 	var out bytes.Buffer
 	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
 	em := fundi.NewEmitter(fe, "anthropic", nil)
@@ -28,13 +31,9 @@ func TestEmitterPublishesNativeUserMessage(t *testing.T) {
 
 	em.UserMessage("hello there")
 
-	if len(sink.events) != 1 {
-		t.Fatalf("got %d native events, want 1", len(sink.events))
-	}
+	c.Len(sink.events, 1, "got %d native events, want 1", len(sink.events))
 	um := sink.events[0].GetUserMessage()
-	if um == nil {
-		t.Fatal("event is not a user message")
-	}
+	c.NotNil(um, "event is not a user message")
 	if len(um.Content) != 1 || um.Content[0].GetText().GetText() != "hello there" {
 		t.Fatalf("unexpected content: %+v", um.Content)
 	}
@@ -48,9 +47,7 @@ func TestEmitterWithNoSinkDoesNotPanic(t *testing.T) {
 
 	em.UserMessage("hello there")
 
-	if out.Len() == 0 {
-		t.Fatal("pi frame output disappeared; the pi path must be unchanged")
-	}
+	assert.NewAborting(t).NotEq(0, out.Len(), "pi frame output disappeared; the pi path must be unchanged")
 }
 
 // A multi-call agentic turn must publish the FINAL call's usage on turn_end —
@@ -61,6 +58,7 @@ func TestEmitterWithNoSinkDoesNotPanic(t *testing.T) {
 // as "3888k", which is Σ over 45 calls. cost_usd keeps turn-total semantics
 // and agent_end's pi usage stays the summed throughput.
 func TestTurnEndUsageIsTheFinalCallNotTheSum(t *testing.T) {
+	c := assert.NewCollecting(t)
 	var out bytes.Buffer
 	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
 	em := fundi.NewEmitter(fe, "anthropic", nil)
@@ -74,9 +72,7 @@ func TestTurnEndUsageIsTheFinalCallNotTheSum(t *testing.T) {
 			"usage":{"input_tokens":%d,"output_tokens":10,"cache_read_input_tokens":%d}}`,
 			input, input, cacheRead)
 		var resp anthropic.Message
-		if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-			t.Fatal(err)
-		}
+		c.Require().NoError(json.Unmarshal([]byte(raw), &resp))
 		em.AssistantTurn(&resp)
 	}
 
@@ -90,17 +86,13 @@ func TestTurnEndUsageIsTheFinalCallNotTheSum(t *testing.T) {
 			te = p
 		}
 	}
-	if te == nil {
-		t.Fatal("no turn_end event published")
-	}
+	c.Require().NotNil(te, "no turn_end event published")
 	u := te.GetUsage()
 	if u.GetInputTokens() != 2000 || u.GetCacheReadTokens() != 60_000 {
 		t.Errorf("turn_end usage = input %d cache_read %d, want the FINAL call's 2000/60000 (a sum reads 3000/110000)",
 			u.GetInputTokens(), u.GetCacheReadTokens())
 	}
-	if te.CostUsd == nil {
-		t.Error("turn_end.cost_usd unset; it keeps turn-total semantics and must stay present")
-	}
+	c.NotNil(te.CostUsd, "turn_end.cost_usd unset; it keeps turn-total semantics and must stay present")
 
 	// The pi agent_end frame still carries the SUMMED throughput (the fundi
 	// extension usage its consumers read), so the two vocabularies stay
@@ -119,11 +111,6 @@ func TestTurnEndUsageIsTheFinalCallNotTheSum(t *testing.T) {
 			agentEndUsage, found = *frame.Usage, true
 		}
 	}
-	if !found {
-		t.Fatal("agent_end frame carried no usage")
-	}
-	if agentEndUsage.Input != 3000 || agentEndUsage.CacheRead != 110_000 {
-		t.Errorf("agent_end usage = input %d cache_read %d, want the turn sum 3000/110000",
-			agentEndUsage.Input, agentEndUsage.CacheRead)
-	}
+	c.Require().True(found, "agent_end frame carried no usage")
+	c.False(agentEndUsage.Input != 3000 || agentEndUsage.CacheRead != 110_000, "agent_end usage = input %d cache_read %d, want the turn sum 3000/110000", agentEndUsage.Input, agentEndUsage.CacheRead)
 }

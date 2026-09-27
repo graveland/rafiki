@@ -9,6 +9,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // childstoreWithSession returns a store holding one exited session row under
@@ -30,6 +32,7 @@ func childstoreWithSession(t *testing.T, childID string) *childstore.Store {
 // frame) and the err field (always nil by design; live stderr races the
 // reader goroutine).
 func TestRawChildIOGetStreamsMatchesFramed(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	ctrl := &Controller{st: childstoreWithSession(t, "child-1"), cm: newChildManager()}
 	a := connectRawChildIO{c: ctrl}
 
@@ -44,25 +47,13 @@ func TestRawChildIOGetStreamsMatchesFramed(t *testing.T) {
 	// falls back to the on-disk dump. In must be an EMPTY slice, not nil, so
 	// the proto repeated field never serializes as absent.
 	res, err := a.GetStreams(context.Background(), "child-1", "all")
-	if err != nil {
-		t.Fatalf("GetStreams(exited): %v", err)
-	}
+	ck.Require().NoError(err, "GetStreams(exited)")
 	want, werr := ctrl.GetStreams("child-1", "all") // the framed payload, verbatim
-	if werr != nil {
-		t.Fatalf("framed GetStreams: %v", werr)
-	}
-	if res.Alive != want.Alive {
-		t.Errorf("alive = %v, want %v", res.Alive, want.Alive)
-	}
-	if res.In == nil {
-		t.Error("In = nil, want an empty slice")
-	}
-	if len(res.In) != len(want.In) {
-		t.Errorf("len(In) = %d, want %d", len(res.In), len(want.In))
-	}
-	if len(res.Err) != 0 {
-		t.Errorf("Err = %q, want empty (live stderr is never served)", res.Err)
-	}
+	ck.Require().NoError(werr, "framed GetStreams")
+	ck.Eq(want.Alive, res.Alive, "alive")
+	ck.NotNil(res.In, "In = nil, want an empty slice")
+	ck.Len(res.In, len(want.In), "len(In) = %d, want", len(res.In))
+	ck.Empty(res.Err, "Err")
 }
 
 // TestRawChildIOGetStreamsPassesWhichThrough pins that the which selector
@@ -73,9 +64,8 @@ func TestRawChildIOGetStreamsPassesWhichThrough(t *testing.T) {
 	ctrl := &Controller{st: childstoreWithSession(t, "child-1"), cm: newChildManager()}
 	a := connectRawChildIO{c: ctrl}
 	for _, which := range []string{"", "in", "err", "all"} {
-		if _, err := a.GetStreams(context.Background(), "child-1", which); err != nil {
-			t.Errorf("GetStreams(which=%q): %v", which, err)
-		}
+		_, err := a.GetStreams(context.Background(), "child-1", which)
+		assert.NewCollecting(t).NoError(err, "GetStreams(which=%q)", which)
 	}
 }
 

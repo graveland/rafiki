@@ -11,6 +11,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeUserAdmin struct {
@@ -54,14 +56,14 @@ func TestUserAdminHandlersUnwiredAreUnavailable(t *testing.T) {
 	if _, err := s.ListUsers(context.Background(), connect.NewRequest(&rafikiv1.ListUsersRequest{})); connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Fatalf("ListUsers: got code %v, want Unavailable", connect.CodeOf(err))
 	}
-	if _, err := s.RemoveUser(context.Background(), connect.NewRequest(&rafikiv1.RemoveUserRequest{Username: "a"})); connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Fatalf("RemoveUser: got code %v, want Unavailable", connect.CodeOf(err))
-	}
+	_, err := s.RemoveUser(context.Background(), connect.NewRequest(&rafikiv1.RemoveUserRequest{Username: "a"}))
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "RemoveUser: got code")
 }
 
 // TestUserRPCsRoundTrip proves the handlers pass requests and responses
 // through the seam unmodified.
 func TestUserRPCsRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
 	f := &fakeUserAdmin{
 		createResp: &rafikiv1.CreateUserResponse{Id: "u1", Username: "alice", Token: "rfk_x", CreatedAtUnix: 100},
 		listRows:   []*rafikiv1.UserRow{{Id: "u1", Username: "alice", CreatedAtUnix: 100}},
@@ -71,17 +73,13 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	createResp, err := s.CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: "alice"}))
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	c.NoError(err, "CreateUser")
 	if createResp.Msg.GetUsername() != "alice" || createResp.Msg.GetToken() != "rfk_x" || createResp.Msg.GetCreatedAtUnix() != 100 {
 		t.Fatalf("CreateUser response = %+v", createResp.Msg)
 	}
 
 	listResp, err := s.ListUsers(ctx, connect.NewRequest(&rafikiv1.ListUsersRequest{IncludeDeleted: true, Limit: 5}))
-	if err != nil {
-		t.Fatalf("ListUsers: %v", err)
-	}
+	c.NoError(err, "ListUsers")
 	if !f.gotIncludeDeleted || f.gotLimit != 5 {
 		t.Fatalf("List saw includeDeleted=%v limit=%d, want true 5", f.gotIncludeDeleted, f.gotLimit)
 	}
@@ -92,9 +90,7 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 	if _, err := s.RemoveUser(ctx, connect.NewRequest(&rafikiv1.RemoveUserRequest{Username: "alice"})); err != nil {
 		t.Fatalf("RemoveUser: %v", err)
 	}
-	if f.gotRemoveName != "alice" {
-		t.Fatalf("Remove saw username %q, want alice", f.gotRemoveName)
-	}
+	c.Eq("alice", f.gotRemoveName, "Remove saw username")
 }
 
 // TestUserAdminErrMapping proves userAdminErr passes an already-coded error
@@ -129,9 +125,8 @@ func TestUserAdminErrMapping(t *testing.T) {
 				t.Errorf("RemoveUser code %v, want %v", connect.CodeOf(err), tc.want)
 			}
 			if tc.name == "uncoded error redacted" {
-				if _, err := s.CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: "a"})); err.Error() == tc.err.Error() {
-					t.Error("uncoded error text leaked onto the wire; it must be redacted")
-				}
+				_, err := s.CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: "a"}))
+				assert.NewCollecting(t).NotEq(tc.err.Error(), err.Error(), "uncoded error text leaked onto the wire; it must be redacted")
 			}
 		})
 	}

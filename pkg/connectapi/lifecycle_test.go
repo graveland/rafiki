@@ -11,6 +11,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 type fakeLifecycle struct {
@@ -59,6 +61,7 @@ func (f *fakeLifecycle) SetBudget(_ context.Context, childID string, maxCost flo
 }
 
 func TestSpawnPassesFieldsThrough(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
@@ -69,24 +72,16 @@ func TestSpawnPassesFieldsThrough(t *testing.T) {
 		ParentChildId: "c_0", ExecutorSelector: "kind=native",
 		Labels: map[string]string{"team": "a"},
 	}))
-	if err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if resp.Msg.GetChildId() != "c_new" {
-		t.Errorf("ChildId = %q, want c_new", resp.Msg.GetChildId())
-	}
+	c.Require().NoError(err, "Spawn")
+	c.Eq("c_new", resp.Msg.GetChildId(), "ChildId")
 	if f.got.Cwd != "/work" || f.got.Name != "scout" || f.got.Kind != "fundi" {
 		t.Errorf("params wrong: %+v", f.got)
 	}
-	if f.got.Preset != "reviewer" {
-		t.Errorf("Preset = %q, want reviewer", f.got.Preset)
-	}
+	c.Eq("reviewer", f.got.Preset, "Preset")
 	if f.got.ParentChildID != "c_0" || f.got.ExecutorSelector != "kind=native" {
 		t.Errorf("lineage/selector wrong: %+v", f.got)
 	}
-	if f.got.Labels["team"] != "a" {
-		t.Errorf("labels wrong: %+v", f.got.Labels)
-	}
+	c.Eq("a", f.got.Labels["team"], "labels wrong: %+v", f.got.Labels)
 }
 
 // TestSpawnUnsetBudgetsStayNil is the important one: unset must NOT become
@@ -97,10 +92,9 @@ func TestSpawnUnsetBudgetsStayNil(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
-	if _, err := s.Spawn(context.Background(),
-		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"})); err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
+	_, err := s.Spawn(context.Background(),
+		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
+	assert.NewAborting(t).NoError(err, "Spawn")
 	if f.got.MaxDepth != nil {
 		t.Errorf("MaxDepth = %v, want nil", *f.got.MaxDepth)
 	}
@@ -115,44 +109,34 @@ func TestSpawnUnsetBudgetsStayNil(t *testing.T) {
 // TestSpawnExplicitZeroBudgetsSurvive is the mirror image: an explicit zero
 // must arrive as a non-nil pointer to zero.
 func TestSpawnExplicitZeroBudgetsSurvive(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f := &fakeLifecycle{}
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(f)
 
 	zeroI := int32(0)
 	zeroF := float64(0)
-	if _, err := s.Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
+	_, err := s.Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{
 		Cwd: "/work", MaxDepth: &zeroI, MaxCost: &zeroF, MaxChildren: &zeroI,
-	})); err != nil {
-		t.Fatalf("Spawn: %v", err)
-	}
-	if f.got.MaxDepth == nil || *f.got.MaxDepth != 0 {
-		t.Error("explicit MaxDepth=0 was lost")
-	}
-	if f.got.MaxCost == nil || *f.got.MaxCost != 0 {
-		t.Error("explicit MaxCost=0 was lost")
-	}
-	if f.got.MaxChildren == nil || *f.got.MaxChildren != 0 {
-		t.Error("explicit MaxChildren=0 was lost")
-	}
+	}))
+	c.Require().NoError(err, "Spawn")
+	c.False(f.got.MaxDepth == nil || *f.got.MaxDepth != 0, "explicit MaxDepth=0 was lost")
+	c.False(f.got.MaxCost == nil || *f.got.MaxCost != 0, "explicit MaxCost=0 was lost")
+	c.False(f.got.MaxChildren == nil || *f.got.MaxChildren != 0, "explicit MaxChildren=0 was lost")
 }
 
 func TestSpawnRequiresCwd(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(&fakeLifecycle{})
 	_, err := s.Spawn(context.Background(), connect.NewRequest(&rafikiv1.SpawnRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestSpawnWithoutLifecycleFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }
 
 func TestSpawnErrorBecomesInternal(t *testing.T) {
@@ -160,12 +144,11 @@ func TestSpawnErrorBecomesInternal(t *testing.T) {
 	s.SetChildLifecycle(&fakeLifecycle{spawnErr: errors.New("budget exceeded")})
 	_, err := s.Spawn(context.Background(),
 		connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/work"}))
-	if connect.CodeOf(err) != connect.CodeInternal {
-		t.Errorf("code = %v, want Internal", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInternal, connect.CodeOf(err), "code")
 }
 
 func TestKillPassesTimeouts(t *testing.T) {
+	c := assert.NewCollecting(t)
 	code := 0
 	f := &fakeLifecycle{killOut: connectapi.KillOutcome{ExitCode: &code, DurationMs: 12}}
 	s := connectapi.NewServer(nil)
@@ -174,34 +157,26 @@ func TestKillPassesTimeouts(t *testing.T) {
 	resp, err := s.Kill(context.Background(), connect.NewRequest(&rafikiv1.KillRequest{
 		ChildId: "c_1", ShutdownTimeoutMs: 5000, KillTimeoutMs: 2000,
 	}))
-	if err != nil {
-		t.Fatalf("Kill: %v", err)
-	}
+	c.Require().NoError(err, "Kill")
 	if f.killedID != "c_1" || f.gotShutdow != 5000 || f.gotKill != 2000 {
 		t.Errorf("kill args wrong: id=%q shutdown=%d kill=%d", f.killedID, f.gotShutdow, f.gotKill)
 	}
 	if resp.Msg.GetExitCode() != 0 || resp.Msg.GetDurationMs() != 12 {
 		t.Errorf("outcome wrong: exit=%d duration=%d", resp.Msg.GetExitCode(), resp.Msg.GetDurationMs())
 	}
-	if resp.Msg.GetChildId() != "c_1" {
-		t.Errorf("ChildId = %q, want c_1", resp.Msg.GetChildId())
-	}
+	c.Eq("c_1", resp.Msg.GetChildId(), "ChildId")
 }
 
 func TestKillRequiresChildID(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	s.SetChildLifecycle(&fakeLifecycle{})
 	_, err := s.Kill(context.Background(), connect.NewRequest(&rafikiv1.KillRequest{}))
-	if connect.CodeOf(err) != connect.CodeInvalidArgument {
-		t.Errorf("code = %v, want InvalidArgument", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 func TestKillWithoutLifecycleFailsClosed(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	_, err := s.Kill(context.Background(),
 		connect.NewRequest(&rafikiv1.KillRequest{ChildId: "c_1"}))
-	if connect.CodeOf(err) != connect.CodeUnavailable {
-		t.Errorf("code = %v, want Unavailable", connect.CodeOf(err))
-	}
+	assert.NewCollecting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }

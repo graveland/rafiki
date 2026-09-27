@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func TestModelGateBackoff(t *testing.T) {
@@ -49,6 +51,7 @@ func TestModelGateMaxDelayCapsExponential(t *testing.T) {
 }
 
 func TestModelGateBeforeSendBlocks(t *testing.T) {
+	c := assert.NewCollecting(t)
 	g := NewModelGate(10*time.Second, 300*time.Second)
 	g.record429("kimi-k3", 0)
 
@@ -59,21 +62,15 @@ func TestModelGateBeforeSendBlocks(t *testing.T) {
 	err := g.beforeSend(ctx, "kimi-k3")
 	elapsed := time.Since(start)
 
-	if err == nil {
-		t.Fatal("beforeSend should have blocked until context deadline")
-	}
-	if elapsed < 40*time.Millisecond {
-		t.Errorf("beforeSend returned too quickly: %v", elapsed)
-	}
+	c.Require().Error(err, "beforeSend should have blocked until context deadline")
+	c.GreaterOrEqual(40*time.Millisecond, elapsed, "beforeSend returned too quickly")
 }
 
 func TestModelGateBeforeSendUnblocked(t *testing.T) {
 	g := NewModelGate(10*time.Second, 300*time.Second)
 	ctx := context.Background()
 	err := g.beforeSend(ctx, "kimi-k3")
-	if err != nil {
-		t.Fatalf("unblocked model should pass immediately: %v", err)
-	}
+	assert.NewAborting(t).NoError(err, "unblocked model should pass immediately")
 }
 
 func TestModelGateSeparateModels(t *testing.T) {
@@ -95,9 +92,7 @@ func checkBlocked(t *testing.T, g *ModelGate, model string, want time.Duration) 
 	g.mu.Unlock()
 	got := time.Until(until)
 	tolerance := 50 * time.Millisecond
-	if got < want-tolerance || got > want+tolerance {
-		t.Errorf("%s blocked for %v, want ~%v", model, got, want)
-	}
+	assert.NewCollecting(t).False(got < want-tolerance || got > want+tolerance, "%s blocked for %v, want ~%v", model, got, want)
 }
 
 func TestIsRateLimit(t *testing.T) {
@@ -157,41 +152,28 @@ func TestIsRateLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
 			gotRL, gotRA := isRateLimit(tt.err)
-			if gotRL != tt.wantRL {
-				t.Errorf("isRateLimit() = %v, want %v", gotRL, tt.wantRL)
-			}
-			if gotRA != tt.wantRA {
-				t.Errorf("retryAfter = %v, want %v", gotRA, tt.wantRA)
-			}
+			c.Eq(tt.wantRL, gotRL, "isRateLimit()")
+			c.Eq(tt.wantRA, gotRA, "retryAfter")
 		})
 	}
 }
 
 func TestRateLimitPolicyEffective(t *testing.T) {
+	c := assert.NewCollecting(t)
 	p := RateLimitPolicy{}.effective()
-	if p.MaxRetries != 10 {
-		t.Errorf("MaxRetries = %d, want 10", p.MaxRetries)
-	}
-	if p.BaseDelay != 10*time.Second {
-		t.Errorf("BaseDelay = %v, want 10s", p.BaseDelay)
-	}
-	if p.MaxDelay != 300*time.Second {
-		t.Errorf("MaxDelay = %v, want 300s", p.MaxDelay)
-	}
+	c.Eq(10, p.MaxRetries, "MaxRetries")
+	c.Eq(10*time.Second, p.BaseDelay, "BaseDelay")
+	c.Eq(300*time.Second, p.MaxDelay, "MaxDelay")
 
 	custom := RateLimitPolicy{MaxRetries: 3, BaseDelay: time.Second, MaxDelay: 10 * time.Second}.effective()
-	if custom.MaxRetries != 3 || custom.BaseDelay != time.Second || custom.MaxDelay != 10*time.Second {
-		t.Error("custom values were overwritten")
-	}
+	c.False(custom.MaxRetries != 3 || custom.BaseDelay != time.Second || custom.MaxDelay != 10*time.Second, "custom values were overwritten")
 }
 
 func TestIsRateLimitWithRetryAfterHelper(t *testing.T) {
+	c := assert.NewCollecting(t)
 	rl, ra := isRateLimit(rateLimitErrWithRetryAfter(45))
-	if !rl {
-		t.Error("expected 429 with Retry-After to be a rate limit")
-	}
-	if ra != 45*time.Second {
-		t.Errorf("retryAfter = %v, want 45s", ra)
-	}
+	c.True(rl, "expected 429 with Retry-After to be a rate limit")
+	c.Eq(45*time.Second, ra, "retryAfter")
 }

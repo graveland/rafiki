@@ -11,6 +11,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // EnsureThreadChild must publish child_spawned exactly like a real Spawn does
@@ -21,42 +23,32 @@ import (
 // reseed -- `rafiki list`/`logs`/`tail` don't share the bug because they
 // query ListChildren fresh every time.
 func TestEnsureThreadChildPublishesNativeChildSpawned(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
 	})
 
-	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
-		t.Fatalf("EnsureThreadChild: %v", err)
-	}
+	ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"), "EnsureThreadChild")
 	id := threadChildID("c_parent", "thread-a")
 
 	recs, err := c.evlog.Read(context.Background(), id, -1, 0)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
+	ck.Require().NoError(err, "Read")
 	var found *rafikiv1.ChildSpawned
 	for _, r := range recs {
 		if r.Type == "child_spawned" {
 			var ev rafikiv1.Event
-			if err := protojson.Unmarshal(r.Payload, &ev); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
+			ck.Require().NoError(protojson.Unmarshal(r.Payload, &ev), "unmarshal")
 			found = ev.GetChildSpawned()
 		}
 	}
-	if found == nil {
-		t.Fatal("no child_spawned event in the log")
-	}
-	if found.GetParentId() != "c_parent" {
-		t.Errorf("parent_id = %q, want %q", found.GetParentId(), "c_parent")
-	}
-	if found.GetChildId() != id {
-		t.Errorf("child_id = %q, want %q", found.GetChildId(), id)
-	}
+	ck.Require().NotNil(found, "no child_spawned event in the log")
+	ck.Eq("c_parent", found.GetParentId(), "parent_id")
+	ck.Eq(id, found.GetChildId(), "child_id")
 }
 
 func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	// childstore.Store inserts a *Session, not a Snapshot: see the pattern at
 	// cmd/rafikid/agent_runtime_test.go:715.
@@ -65,48 +57,31 @@ func TestSyntheticChildIsParentedAndDoesNotConsumeTheChildBudget(t *testing.T) {
 		MaxChildren: 2,
 	})
 
-	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
-		t.Fatalf("EnsureThreadChild: %v", err)
-	}
+	ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"), "EnsureThreadChild")
 	id := threadChildID("c_parent", "thread-a")
 	snap, ok := c.st.Get(id)
-	if !ok {
-		t.Fatalf("no synthetic child for thread-a (looked for %q)", id)
-	}
-	if snap.Labels[childstore.LabelParent] != "c_parent" {
-		t.Errorf("parent label = %q, want %q", snap.Labels[childstore.LabelParent], "c_parent")
-	}
-	if snap.Labels[labelNativeSubagent] != "1" {
-		t.Errorf("missing the %s label; the rail must be able to tell a native subagent from a rafiki agent", labelNativeSubagent)
-	}
-	if snap.PID != 0 {
-		t.Errorf("PID = %d, want 0: a native subagent has no process", snap.PID)
-	}
+	ck.Require().True(ok, "no synthetic child for thread-a (looked for %q)", id)
+	ck.Eq("c_parent", snap.Labels[childstore.LabelParent], "parent label")
+	ck.Eq("1", snap.Labels[labelNativeSubagent], "missing the %s label; the rail must be able to tell a native subagent from a rafiki agent", labelNativeSubagent)
+	ck.Eq(0, snap.PID, "PID")
 
 	// A native subagent is not a budgeted cross-process agent.
-	if got := c.st.LiveDescendantCount("c_parent"); got != 0 {
-		t.Errorf("LiveDescendantCount = %d, want 0: a synthetic child must not consume MaxChildren", got)
-	}
+	ck.Eq(0, c.st.LiveDescendantCount("c_parent"), "LiveDescendantCount")
 
 	// Idempotent: the proxy calls this on every turn of the thread.
-	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
-		t.Fatalf("second EnsureThreadChild: %v", err)
-	}
+	ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"), "second EnsureThreadChild")
 	// Descendants KEEPS the synthetic child (agent_list and the budget member
 	// lists must see it); only the MaxChildren gate above excludes it.
-	if n := len(c.st.Descendants("c_parent")); n != 1 {
-		t.Errorf("Descendants = %d, want 1: the synthetic child is a real member of the tree", n)
-	}
+	ck.Eq(1, len(c.st.Descendants("c_parent")), "Descendants")
 }
 
 func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
 	})
-	if err := c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"); err != nil {
-		t.Fatalf("EnsureThreadChild: %v", err)
-	}
+	ck.Require().NoError(c.EnsureThreadChild("c_parent", "thread-a", "conv-uuid-a"), "EnsureThreadChild")
 	id := threadChildID("c_parent", "thread-a")
 
 	// The join: message msg_sub1 belongs to thread-a, and the frame carrying it
@@ -114,16 +89,10 @@ func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
 	c.noteSubagentToolCall("c_parent", "thread-a", "toolu_ABC")
 
 	snap, ok := c.st.Get(id)
-	if !ok {
-		t.Fatalf("no synthetic child %q", id)
-	}
-	if got := snap.Labels[labelSpawnedByTool]; got != "toolu_ABC" {
-		t.Errorf("%s = %q, want %q", labelSpawnedByTool, got, "toolu_ABC")
-	}
-	if snap.Name != "task:toolu_ABC" {
-		t.Errorf("name = %q, want %q: an opaque thread uuid is not findable in the parent's transcript",
-			snap.Name, "task:toolu_ABC")
-	}
+	ck.Require().True(ok, "no synthetic child %q", id)
+	got := snap.Labels[labelSpawnedByTool]
+	ck.Eq("toolu_ABC", got, "%s = %q, want", labelSpawnedByTool, got)
+	ck.Eq("task:toolu_ABC", snap.Name, "name")
 
 	// Idempotent: the hook fires on every frame of the subagent's output.
 	c.noteSubagentToolCall("c_parent", "thread-a", "toolu_ABC")
@@ -137,10 +106,9 @@ func TestNoteSubagentNamesTheChildAfterItsToolCall(t *testing.T) {
 // built without a pool has no capture store, and the observation must be
 // dropped silently rather than dereference nil in the request path.
 func TestHandleSubagentObservationNilStoreIsInert(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	c := newTestController(t)
-	if c.captureStore != nil {
-		t.Fatalf("newTestController built a capture store without a pool; the nil path is not exercised")
-	}
+	ck.Require().Nil(c.captureStore, "newTestController built a capture store without a pool; the nil path is not exercised")
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_parent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
 	})
@@ -149,9 +117,8 @@ func TestHandleSubagentObservationNilStoreIsInert(t *testing.T) {
 	c.HandleSubagentObservation("c_parent", child.SubagentObservation{
 		MessageID: "msg_whatever", ParentToolUseID: "toolu_XYZ",
 	})
-	if _, ok := c.st.Get(threadChildID("c_parent", "thread-a")); ok {
-		t.Error("a nil capture store must never create or rename a synthetic child")
-	}
+	_, ok := c.st.Get(threadChildID("c_parent", "thread-a"))
+	ck.False(ok, "a nil capture store must never create or rename a synthetic child")
 }
 
 // TestHandleSubagentObservationJoinsTheThreadByMessageID pins the join end to
@@ -161,48 +128,35 @@ func TestHandleSubagentObservationNilStoreIsInert(t *testing.T) {
 // X-Rafiki-Session: childID and ThreadOfPredecessorInSession scopes to that
 // session family. Needs a database (skips without RAFIKI_TEST_DSN).
 func TestHandleSubagentObservationJoinsTheThreadByMessageID(t *testing.T) {
+	ck := assert.NewCollecting(t)
 	pool := openTestPool(t)
 	cs := capture.NewCaptureStore(pool)
 
 	convID, err := cs.EnsureConversationByExternalRef(context.Background(), capture.ConversationRef{
 		OriginEntrypoint: "test", DrivenBy: "client", ExternalRef: "c_joinparent",
 	})
-	if err != nil {
-		t.Fatalf("EnsureConversationByExternalRef: %v", err)
-	}
+	ck.Require().NoError(err, "EnsureConversationByExternalRef")
 	turnID, createdAt, err := cs.InsertTurnIntent(context.Background(), capture.TurnIntent{
 		ConversationID: convID, Model: "m", Source: "rafiki-claude", AuthorKind: "agent",
 	})
-	if err != nil {
-		t.Fatalf("InsertTurnIntent: %v", err)
-	}
+	ck.Require().NoError(err, "InsertTurnIntent")
 	// The founding turn of a subagent thread: thread_id = its own id.
-	if err := cs.RecordThread(context.Background(), "c_joinparent", convID, turnID, createdAt, "", "msg_join_1", true); err != nil {
-		t.Fatalf("RecordThread: %v", err)
-	}
+	ck.Require().NoError(cs.RecordThread(context.Background(), "c_joinparent", convID, turnID, createdAt, "", "msg_join_1", true), "RecordThread")
 
 	c := newTestController(t)
 	c.captureStore = cs
 	c.st.Insert(&childstore.Session{
 		ChildID: "c_joinparent", Kind: protocol.KindClaude, Status: protocol.StatusIdle,
 	})
-	if err := c.EnsureThreadChild("c_joinparent", turnID, convID); err != nil {
-		t.Fatalf("EnsureThreadChild: %v", err)
-	}
+	ck.Require().NoError(c.EnsureThreadChild("c_joinparent", turnID, convID), "EnsureThreadChild")
 
 	c.HandleSubagentObservation("c_joinparent", child.SubagentObservation{
 		MessageID: "msg_join_1", ParentToolUseID: "toolu_JOIN",
 	})
 	snap, ok := c.st.Get(threadChildID("c_joinparent", turnID))
-	if !ok {
-		t.Fatalf("no synthetic child for the joined thread %q", turnID)
-	}
-	if snap.Labels[labelSpawnedByTool] != "toolu_JOIN" {
-		t.Errorf("label = %q, want toolu_JOIN", snap.Labels[labelSpawnedByTool])
-	}
-	if snap.Name != "task:toolu_JOIN" {
-		t.Errorf("name = %q, want task:toolu_JOIN", snap.Name)
-	}
+	ck.Require().True(ok, "no synthetic child for the joined thread %q", turnID)
+	ck.Eq("toolu_JOIN", snap.Labels[labelSpawnedByTool], "label")
+	ck.Eq("task:toolu_JOIN", snap.Name, "name")
 
 	// A message id the store never saw resolves to nothing: the observation is
 	// dropped silently and the child keeps its recorded identity.

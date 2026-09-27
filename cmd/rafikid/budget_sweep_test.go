@@ -8,6 +8,8 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/tasks"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // Over budget mid-flight is BLOCKED, not ORPHANED. orphaned means "the owner
@@ -15,6 +17,7 @@ import (
 // budget. Conflating them destroys the only signal that separates a dead agent
 // from a paused one.
 func TestOverBudgetBlocksTasksRatherThanOrphaningThem(t *testing.T) {
+	ck := assert.NewAborting(t)
 	c, clk, cap := settleFixture(t)
 	store := tasks.NewMemoryStore()
 	c.tasks = store
@@ -37,15 +40,9 @@ func TestOverBudgetBlocksTasksRatherThanOrphaningThem(t *testing.T) {
 	c.sweepBudgets(ctx)
 
 	rows, err := store.List(ctx, tasks.ListFilter{ConversationID: "conv-w1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rows[0].Status != tasks.StatusBlocked {
-		t.Fatalf("want blocked, got %s", rows[0].Status)
-	}
-	if rows[0].Status == tasks.StatusOrphaned {
-		t.Fatal("orphaned means the owner is gone; this agent is alive")
-	}
+	ck.NoError(err)
+	ck.Eq(tasks.StatusBlocked, rows[0].Status, "want blocked, got")
+	ck.NotEq(tasks.StatusOrphaned, rows[0].Status, "orphaned means the owner is gone; this agent is alive")
 
 	// And the agent is TOLD, as a steer: an over-budget worker must not spend
 	// another 40 seconds believing it can still spawn and call models.
@@ -56,9 +53,7 @@ func TestOverBudgetBlocksTasksRatherThanOrphaningThem(t *testing.T) {
 			told = true
 		}
 	}
-	if !told {
-		t.Fatal("an over-budget agent must be told mid-turn, not after it finishes")
-	}
+	ck.True(told, "an over-budget agent must be told mid-turn, not after it finishes")
 }
 
 func TestUnderBudgetSweepDoesNothing(t *testing.T) {
@@ -71,9 +66,7 @@ func TestUnderBudgetSweepDoesNothing(t *testing.T) {
 	_ = c.st.Update("c_coord", func(s *childstore.Session) { s.MaxCost = 10.00 })
 	c.sweepBudgets(ctx)
 
-	if got := cap.batches(); len(got) != 0 {
-		t.Fatalf("an under-budget subtree must be silent: %+v", got)
-	}
+	assert.NewAborting(t).Empty(cap.batches(), "an under-budget subtree must be silent")
 }
 
 // The sweep must not re-block and re-steer on every tick. Once told, an agent
@@ -89,9 +82,7 @@ func TestBudgetSweepIsIdempotentWhileStillOverBudget(t *testing.T) {
 	before := len(cap.batches())
 	c.sweepBudgets(ctx)
 	c.sweepBudgets(ctx)
-	if got := len(cap.batches()); got != before {
-		t.Fatalf("the sweep steered %d times; it must steer once per breach", got)
-	}
+	assert.NewAborting(t).Eq(before, len(cap.batches()), "the sweep steered")
 }
 
 // Raising the budget must un-stick the subtree: the next sweep clears the
@@ -106,7 +97,5 @@ func TestRaisingTheBudgetClearsTheBreach(t *testing.T) {
 
 	_ = c.st.Update("c_coord", func(s *childstore.Session) { s.MaxCost = 500.00 })
 	c.sweepBudgets(ctx)
-	if c.budgetBreached("c_coord") {
-		t.Fatal("a raised budget must clear the breach")
-	}
+	assert.NewAborting(t).False(c.budgetBreached("c_coord"), "a raised budget must clear the breach")
 }

@@ -8,24 +8,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"github.com/multigres/testkit/assert"
 )
 
 func createCmdFor(t *testing.T, argv ...string) (*cobra.Command, []string) {
 	t.Helper()
 	cmd := newCreateCmd()
 	cmd.SetArgs(argv)
-	if err := cmd.ParseFlags(argv); err != nil {
-		t.Fatalf("parse %v: %v", argv, err)
-	}
+	assert.NewAborting(t).NoError(cmd.ParseFlags(argv), "parse %v", argv)
 	return cmd, cmd.Flags().Args()
 }
 
 // Bare create is the one invocation with nothing to go on.
 func TestBareCreateWantsTheForm(t *testing.T) {
 	cmd, args := createCmdFor(t)
-	if !wantsCreateForm(cmd, args, true) {
-		t.Error("bare create should open the form")
-	}
+	assert.NewCollecting(t).True(wantsCreateForm(cmd, args, true), "bare create should open the form")
 }
 
 // Anything that SHAPES the child is a statement of intent, so create honours
@@ -39,27 +37,21 @@ func TestShapingFlagsSuppressTheForm(t *testing.T) {
 		{"--cwd", "/tmp"},
 	} {
 		cmd, args := createCmdFor(t, argv...)
-		if wantsCreateForm(cmd, args, true) {
-			t.Errorf("%v should spawn directly, not open the form", argv)
-		}
+		assert.NewCollecting(t).False(wantsCreateForm(cmd, args, true), "%v should spawn directly, not open the form", argv)
 	}
 }
 
 // A flag that says what happens AFTER the spawn is not a shaping flag.
 func TestNonShapingFlagsStillOpenTheForm(t *testing.T) {
 	cmd, args := createCmdFor(t, "--keep-on-exit")
-	if !wantsCreateForm(cmd, args, true) {
-		t.Error("--keep-on-exit describes exit behaviour, not the child")
-	}
+	assert.NewCollecting(t).True(wantsCreateForm(cmd, args, true), "--keep-on-exit describes exit behaviour, not the child")
 }
 
 // -i forces the form even with shaping flags, which is how you get a PREFILLED
 // form rather than no form at all.
 func TestInteractiveForcesTheFormEvenWithFlags(t *testing.T) {
 	cmd, args := createCmdFor(t, "-i", "--kind", "claude")
-	if !wantsCreateForm(cmd, args, true) {
-		t.Error("-i should force the form")
-	}
+	assert.NewCollecting(t).True(wantsCreateForm(cmd, args, true), "-i should force the form")
 }
 
 // A form cannot render into a pipe, so a non-TTY always spawns directly --
@@ -67,9 +59,7 @@ func TestInteractiveForcesTheFormEvenWithFlags(t *testing.T) {
 func TestNonTTYNeverOpensTheForm(t *testing.T) {
 	for _, argv := range [][]string{{}, {"-i"}} {
 		cmd, args := createCmdFor(t, argv...)
-		if wantsCreateForm(cmd, args, false) {
-			t.Errorf("%v opened the form with no terminal", argv)
-		}
+		assert.NewCollecting(t).False(wantsCreateForm(cmd, args, false), "%v opened the form with no terminal", argv)
 	}
 }
 
@@ -78,9 +68,7 @@ func TestNonTTYNeverOpensTheForm(t *testing.T) {
 func TestEveryShapingFlagExists(t *testing.T) {
 	cmd := newCreateCmd()
 	for _, name := range shapingFlags {
-		if cmd.Flags().Lookup(name) == nil {
-			t.Errorf("shapingFlags names %q, which create does not define", name)
-		}
+		assert.NewCollecting(t).NotNil(cmd.Flags().Lookup(name), "shapingFlags names %q, which create does not define", name)
 	}
 }
 
@@ -88,9 +76,7 @@ func TestEveryShapingFlagExists(t *testing.T) {
 // form like any other shaping flag (reachable with the form only via -i).
 func TestExecutorFlagSuppressesTheForm(t *testing.T) {
 	cmd, args := createCmdFor(t, "--executor", "greyshift")
-	if wantsCreateForm(cmd, args, true) {
-		t.Error("--executor should spawn directly, not open the form")
-	}
+	assert.NewCollecting(t).False(wantsCreateForm(cmd, args, true), "--executor should spawn directly, not open the form")
 }
 
 // The session executor is a fundi-only offer. A launch-required kind can never
@@ -112,10 +98,8 @@ func TestWantsSessionExecutor(t *testing.T) {
 		{"--no-local-executor opts out entirely", "", "fundi", true, false, ""},
 		{"an unknown kind gets nothing", "", "", false, false, ""},
 	} {
-		if got := wantsSessionExecutor(tc.selector, tc.executorRef, tc.kind, tc.noLocalExecutor); got != tc.want {
-			t.Errorf("%s: wantsSessionExecutor(%q, %q, %v) = %v, want %v",
-				tc.name, tc.selector, tc.kind, tc.noLocalExecutor, got, tc.want)
-		}
+		got := wantsSessionExecutor(tc.selector, tc.executorRef, tc.kind, tc.noLocalExecutor)
+		assert.NewCollecting(t).Eq(tc.want, got, "%s: wantsSessionExecutor(%q, %q, %v) = %v, want", tc.name, tc.selector, tc.kind, tc.noLocalExecutor, got)
 	}
 }
 
@@ -124,16 +108,11 @@ func TestWantsSessionExecutor(t *testing.T) {
 // (create's own Long help). The model prefill stays empty under a preset:
 // the daemon resolves the preset's model.
 func TestCreateFormDefaultsCarryThePreset(t *testing.T) {
+	c := assert.NewCollecting(t)
 	got := createFormDefaults(protocol.SpawnRequest{
 		Name: "scout", Kind: "fundi", Preset: "reviewer", ExecutorRef: "greyshift", Cwd: "/tmp/x",
 	})
-	if got.Preset != "reviewer" {
-		t.Errorf("Preset = %q, want reviewer", got.Preset)
-	}
-	if got.Name != "scout" || got.Kind != "fundi" || got.Executor != "greyshift" || got.Cwd != "/tmp/x" {
-		t.Errorf("defaults wrong: %+v", got)
-	}
-	if got.Model != "" {
-		t.Errorf("Model = %q, want empty under a preset (the daemon resolves it)", got.Model)
-	}
+	c.Eq("reviewer", got.Preset, "Preset")
+	c.False(got.Name != "scout" || got.Kind != "fundi" || got.Executor != "greyshift" || got.Cwd != "/tmp/x", "defaults wrong: %+v", got)
+	c.Eq("", got.Model, "Model")
 }

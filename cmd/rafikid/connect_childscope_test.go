@@ -22,6 +22,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/tasks"
 	"go.graveland.dev/rafiki/pkg/users"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // The wire-level proof of wave 1's childScoped policy: a real per-child
@@ -304,16 +306,13 @@ func TestConnectChildScopedVerbs(t *testing.T) {
 		t.Run(verb.name, func(t *testing.T) {
 			for _, tgt := range targets {
 				t.Run(tgt.name, func(t *testing.T) {
+					c := assert.NewAborting(t)
 					err := verb.call(tgt.id, childCaller)
 					if tgt.want {
-						if connect.CodeOf(err) == connect.CodePermissionDenied {
-							t.Fatalf("%s on %s = %v, want allowed", verb.name, tgt.id, err)
-						}
+						c.NotEq(connect.CodePermissionDenied, connect.CodeOf(err), "%s on %s = %v, want allowed", verb.name, tgt.id, err)
 						return
 					}
-					if connect.CodeOf(err) != connect.CodePermissionDenied {
-						t.Fatalf("%s on %s = %v, want %v", verb.name, tgt.id, err, connect.CodePermissionDenied)
-					}
+					c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s on %s = %v, want", verb.name, tgt.id, err)
 				})
 			}
 		})
@@ -325,6 +324,7 @@ func TestConnectChildScopedVerbs(t *testing.T) {
 // work, and a denied one never did. (The matrix above asserts codes; this one
 // asserts that the codes are not masking a silently skipped handler.)
 func TestConnectChildScopedMechanicsReached(t *testing.T) {
+	c := assert.NewAborting(t)
 	fx := mountChildScope(t)
 	ctx := context.Background()
 
@@ -354,12 +354,9 @@ func TestConnectChildScopedMechanicsReached(t *testing.T) {
 	// A refused kill never reaches the lifecycle.
 	sreq := connect.NewRequest(&rafikiv1.KillRequest{ChildId: "c_sib"})
 	childCaller(sreq.Header())
-	if _, err := fx.client.Kill(ctx, sreq); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("Kill of sibling = %v, want PermissionDenied", err)
-	}
-	if len(fx.lifecycle.kills) != 1 {
-		t.Fatalf("refused kill reached the lifecycle: %v", fx.lifecycle.kills)
-	}
+	_, err := fx.client.Kill(ctx, sreq)
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "Kill of sibling = %v, want PermissionDenied", err)
+	c.Len(fx.lifecycle.kills, 1, "refused kill reached the lifecycle")
 }
 
 // TestConnectChildScopedGateRefusedShapes proves the ONLY child credential
@@ -442,14 +439,10 @@ func TestConnectChildScopedGateRefusedShapes(t *testing.T) {
 	for _, cred := range gateRefusedCredentials() {
 		for _, verb := range invoke {
 			t.Run(cred.name+"/"+verb.name, func(t *testing.T) {
+				c := assert.NewAborting(t)
 				err := verb.call(cred.set)
-				if connect.CodeOf(err) != connect.CodePermissionDenied {
-					t.Fatalf("%s with a %s credential = %v, want %v",
-						verb.name, cred.name, err, connect.CodePermissionDenied)
-				}
-				if verb.touched() {
-					t.Fatalf("%s with a %s credential reached its mechanics", verb.name, cred.name)
-				}
+				c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential = %v, want", verb.name, cred.name, err)
+				c.False(verb.touched(), "%s with a %s credential reached its mechanics", verb.name, cred.name)
 			})
 		}
 	}
@@ -460,15 +453,14 @@ func TestConnectChildScopedGateRefusedShapes(t *testing.T) {
 // parent or the stranger tree — and the status filter still applies. It also
 // pins the control direction: a user credential still sees the whole fleet.
 func TestConnectChildScopedListChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
 	fx := mountChildScope(t)
 	ctx := context.Background()
 
 	req := connect.NewRequest(&rafikiv1.ListChildrenRequest{})
 	childCaller(req.Header())
 	resp, err := fx.client.ListChildren(ctx, req)
-	if err != nil {
-		t.Fatalf("ListChildren as child: %v", err)
-	}
+	ck.NoError(err, "ListChildren as child")
 	var got []string
 	for _, c := range resp.Msg.GetChildren() {
 		got = append(got, c.GetChildId())
@@ -477,36 +469,24 @@ func TestConnectChildScopedListChildren(t *testing.T) {
 	// and the store's list order is an implementation detail.
 	sort.Strings(got)
 	want := []string{"c_grand", "c_kid"}
-	if len(got) != len(want) {
-		t.Fatalf("children = %v, want %v (only the subtree)", got, want)
-	}
+	ck.Len(got, len(want), "children = %v, want %v (only the subtree)", got, want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("children = %v, want %v", got, want)
-		}
+		ck.Eq(want[i], got[i], "children = %v, want %v", got, want)
 	}
 
 	// The status filter passes through to the subtree query.
 	filtered := connect.NewRequest(&rafikiv1.ListChildrenRequest{Statuses: []string{"running"}})
 	childCaller(filtered.Header())
 	resp, err = fx.client.ListChildren(ctx, filtered)
-	if err != nil {
-		t.Fatalf("ListChildren filtered as child: %v", err)
-	}
-	if len(resp.Msg.GetChildren()) != 0 {
-		t.Fatalf("running-only subtree = %d rows, want 0", len(resp.Msg.GetChildren()))
-	}
+	ck.NoError(err, "ListChildren filtered as child")
+	ck.Empty(resp.Msg.GetChildren(), "running-only subtree = %d rows, want 0", len(resp.Msg.GetChildren()))
 
 	// Control: the operator still sees the whole fleet.
 	user := connect.NewRequest(&rafikiv1.ListChildrenRequest{})
 	userCaller(user.Header())
 	resp, err = fx.client.ListChildren(ctx, user)
-	if err != nil {
-		t.Fatalf("ListChildren as user: %v", err)
-	}
-	if len(resp.Msg.GetChildren()) != 6 {
-		t.Fatalf("user ListChildren = %d rows, want 6 (whole fleet)", len(resp.Msg.GetChildren()))
-	}
+	ck.NoError(err, "ListChildren as user")
+	ck.Len(resp.Msg.GetChildren(), 6, "user ListChildren = %d rows, want 6 (whole fleet)", len(resp.Msg.GetChildren()))
 }
 
 // TestConnectChildScopedSpawnForcesParent proves the spawn-side rule: a
@@ -514,6 +494,7 @@ func TestConnectChildScopedListChildren(t *testing.T) {
 // parent (or none) never survives — while a user credential's is passed
 // through untouched.
 func TestConnectChildScopedSpawnForcesParent(t *testing.T) {
+	c := assert.NewAborting(t)
 	fx := mountChildScope(t)
 	ctx := context.Background()
 
@@ -523,12 +504,8 @@ func TestConnectChildScopedSpawnForcesParent(t *testing.T) {
 	if _, err := fx.client.Spawn(ctx, req); err != nil {
 		t.Fatalf("Spawn as child: %v", err)
 	}
-	if len(fx.lifecycle.spawns) != 1 {
-		t.Fatalf("spawn reached mechanics %d times, want 1", len(fx.lifecycle.spawns))
-	}
-	if got := fx.lifecycle.spawns[0].ParentChildID; got != "c_mine" {
-		t.Fatalf("ParentChildID = %q, want forced c_mine", got)
-	}
+	c.Len(fx.lifecycle.spawns, 1, "spawn reached mechanics %d times, want 1", len(fx.lifecycle.spawns))
+	c.Eq("c_mine", fx.lifecycle.spawns[0].ParentChildID, "ParentChildID")
 
 	// No parent at all: still forced.
 	fx.lifecycle.spawns = nil
@@ -537,20 +514,15 @@ func TestConnectChildScopedSpawnForcesParent(t *testing.T) {
 	if _, err := fx.client.Spawn(ctx, bare); err != nil {
 		t.Fatalf("Spawn without parent as child: %v", err)
 	}
-	if got := fx.lifecycle.spawns[0].ParentChildID; got != "c_mine" {
-		t.Fatalf("ParentChildID = %q, want forced c_mine", got)
-	}
+	c.Eq("c_mine", fx.lifecycle.spawns[0].ParentChildID, "ParentChildID")
 
 	// Control: the operator's parent id rides through untouched.
 	fx.lifecycle.spawns = nil
 	user := connect.NewRequest(&rafikiv1.SpawnRequest{Cwd: "/tmp", ParentChildId: "c_root", Name: "w"})
 	userCaller(user.Header())
-	if _, err := fx.client.Spawn(ctx, user); err != nil {
-		t.Fatalf("Spawn as user: %v", err)
-	}
-	if got := fx.lifecycle.spawns[0].ParentChildID; got != "c_root" {
-		t.Fatalf("user spawn ParentChildID = %q, want c_root passed through", got)
-	}
+	_, err := fx.client.Spawn(ctx, user)
+	c.NoError(err, "Spawn as user")
+	c.Eq("c_root", fx.lifecycle.spawns[0].ParentChildID, "user spawn ParentChildID")
 }
 
 // TestConnectChildScopedListTasks proves the ledger's subtree boundary: a
@@ -577,25 +549,20 @@ func TestConnectChildScopedListTasks(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewAborting(t)
 			fx.tasks.convs = nil
 			req := connect.NewRequest(&rafikiv1.ListTasksRequest{ConversationId: tc.conv})
 			childCaller(req.Header())
 			_, err := fx.client.ListTasks(ctx, req)
 			if tc.want {
-				if err != nil {
-					t.Fatalf("ListTasks(%q) = %v, want allowed", tc.conv, err)
-				}
+				c.NoError(err, "ListTasks(%q) = %v, want allowed", tc.conv, err)
 				if len(fx.tasks.convs) != 1 || fx.tasks.convs[0] != tc.conv {
 					t.Fatalf("ledger saw %v, want [%q]", fx.tasks.convs, tc.conv)
 				}
 				return
 			}
-			if connect.CodeOf(err) != connect.CodePermissionDenied {
-				t.Fatalf("ListTasks(%q) = %v, want PermissionDenied", tc.conv, err)
-			}
-			if len(fx.tasks.convs) != 0 {
-				t.Fatalf("refused ListTasks reached the ledger: %v", fx.tasks.convs)
-			}
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "ListTasks(%q) = %v, want PermissionDenied", tc.conv, err)
+			c.Empty(fx.tasks.convs, "refused ListTasks reached the ledger")
 		})
 	}
 
@@ -603,9 +570,8 @@ func TestConnectChildScopedListTasks(t *testing.T) {
 	fx.tasks.convs = nil
 	user := connect.NewRequest(&rafikiv1.ListTasksRequest{})
 	userCaller(user.Header())
-	if _, err := fx.client.ListTasks(ctx, user); err != nil {
-		t.Fatalf("ListTasks as user: %v", err)
-	}
+	_, err := fx.client.ListTasks(ctx, user)
+	assert.NewAborting(t).NoError(err, "ListTasks as user")
 	if len(fx.tasks.convs) != 1 || fx.tasks.convs[0] != "" {
 		t.Fatalf("user ledger saw %v, want the unfiltered pass-through", fx.tasks.convs)
 	}
@@ -615,6 +581,7 @@ func TestConnectChildScopedListTasks(t *testing.T) {
 // StreamEvents rule the target matrix cannot express: the daemon-wide All
 // subject is operator-only for a child credential, whatever its subtree.
 func TestConnectChildScopedStreamEventsRefusesAllSubject(t *testing.T) {
+	c := assert.NewAborting(t)
 	fx := mountChildScope(t)
 	ctx := context.Background()
 
@@ -624,9 +591,7 @@ func TestConnectChildScopedStreamEventsRefusesAllSubject(t *testing.T) {
 	childCaller(req.Header())
 	stream, err := fx.client.StreamEvents(ctx, req)
 	if err != nil {
-		if connect.CodeOf(err) != connect.CodePermissionDenied {
-			t.Fatalf("StreamEvents all-subject as child = %v, want %v", err, connect.CodePermissionDenied)
-		}
+		c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "StreamEvents all-subject as child = %v, want", err)
 		return
 	}
 	if err := receiveToEnd(stream); connect.CodeOf(err) != connect.CodePermissionDenied {
@@ -641,12 +606,8 @@ func TestConnectChildScopedStreamEventsRefusesAllSubject(t *testing.T) {
 	})
 	userCaller(user.Header())
 	stream, err = fx.client.StreamEvents(ctx, user)
-	if err != nil {
-		t.Fatalf("StreamEvents all-subject as user: %v", err)
-	}
-	if err := receiveToEnd(stream); err != nil {
-		t.Fatalf("user all-subject stream = %v, want a clean end", err)
-	}
+	c.NoError(err, "StreamEvents all-subject as user")
+	c.NoError(receiveToEnd(stream), "user all-subject stream")
 }
 
 // TestChildScopeFor pins the source's identity branches, including the one
@@ -655,35 +616,24 @@ func TestConnectChildScopedStreamEventsRefusesAllSubject(t *testing.T) {
 // (nil is the operator path, and a vanished child must not be upgraded to an
 // operator).
 func TestChildScopeFor(t *testing.T) {
+	c := assert.NewAborting(t)
 	ctrl := childTree(t)
 	ctx := context.Background()
 
-	if sc := ctrl.childScopeFor(ctx); sc != nil {
-		t.Fatalf("nil identity resolved %v, want the operator path", sc)
-	}
-	if sc := ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
+	c.Nil(ctrl.childScopeFor(ctx), "nil identity resolved")
+	c.Nil(ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", Username: "brent", Via: server.ProvenanceUser,
-	})); sc != nil {
-		t.Fatalf("user credential resolved %v, want the operator path", sc)
-	}
-	if sc := ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
+	})), "user credential resolved")
+	c.Nil(ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", Via: server.ProvenanceChildAttributed,
-	})); sc != nil {
-		t.Fatalf("per-boot+session resolved %v, want the operator path", sc)
-	}
+	})), "per-boot+session resolved")
 
 	sc := ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", ChildID: "c_mine", Via: server.ProvenanceChildToken,
 	}))
-	if sc == nil {
-		t.Fatal("per-child secret resolved nil, want a subtree scope")
-	}
-	if sc.ChildID() != "c_mine" {
-		t.Fatalf("ChildID = %q, want c_mine", sc.ChildID())
-	}
-	if err := sc.Authorize("c_kid"); err != nil {
-		t.Fatalf("Authorize(descendant) = %v, want nil", err)
-	}
+	c.NotNil(sc, "per-child secret resolved nil, want a subtree scope")
+	c.Eq("c_mine", sc.ChildID(), "ChildID")
+	c.NoError(sc.Authorize("c_kid"), "Authorize(descendant)")
 
 	// The EMPTY-ChildID resolve — the credential names the provenance but no
 	// child: non-nil scope, everything refused. Never the operator path
@@ -691,33 +641,20 @@ func TestChildScopeFor(t *testing.T) {
 	sc = ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", Via: server.ProvenanceChildToken,
 	}))
-	if sc == nil {
-		t.Fatal("empty-ChildID child resolved nil, want an always-refusing scope")
-	}
+	c.NotNil(sc, "empty-ChildID child resolved nil, want an always-refusing scope")
 	if err := sc.Authorize("c_kid"); connect.CodeOf(err) != connect.CodePermissionDenied {
 		t.Fatalf("empty-ChildID Authorize = %v, want %v", err, connect.CodePermissionDenied)
 	}
-	if got := sc.Subtree(nil); len(got) != 0 {
-		t.Fatalf("empty-ChildID Subtree = %v, want empty", got)
-	}
-	if sc.ConversationInScope("conv-c_mine") {
-		t.Fatal("empty-ChildID admitted a conversation")
-	}
+	c.Empty(sc.Subtree(nil), "empty-ChildID Subtree")
+	c.False(sc.ConversationInScope("conv-c_mine"), "empty-ChildID admitted a conversation")
 
 	// The vanished row: non-nil scope, everything refused.
 	sc = ctrl.childScopeFor(server.WithIdentity(ctx, &server.Identity{
 		UserID: "u1", ChildID: "c_gone", Via: server.ProvenanceChildToken,
 	}))
-	if sc == nil {
-		t.Fatal("vanished child resolved nil, want an always-refusing scope")
-	}
-	if err := sc.Authorize("c_kid"); connect.CodeOf(err) != connect.CodePermissionDenied {
-		t.Fatalf("vanished child Authorize = %v, want %v", err, connect.CodePermissionDenied)
-	}
-	if got := sc.Subtree(nil); len(got) != 0 {
-		t.Fatalf("vanished child Subtree = %v, want empty", got)
-	}
-	if sc.ConversationInScope("conv-c_mine") {
-		t.Fatal("vanished child admitted a conversation")
-	}
+	c.NotNil(sc, "vanished child resolved nil, want an always-refusing scope")
+	err := sc.Authorize("c_kid")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "vanished child Authorize = %v, want", err)
+	c.Empty(sc.Subtree(nil), "vanished child Subtree")
+	c.False(sc.ConversationInScope("conv-c_mine"), "vanished child admitted a conversation")
 }

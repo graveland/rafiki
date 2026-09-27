@@ -8,11 +8,14 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestSubagentLineagePersistence verifies that spawns with parentChildId
 // correctly record the lineage and that it persists through store reads.
 func TestSubagentLineagePersistence(t *testing.T) {
+	c := assert.NewCollecting(t)
 	d := bootDaemon(t)
 	client := d.control(t)
 
@@ -29,9 +32,7 @@ func TestSubagentLineagePersistence(t *testing.T) {
 		found[s.GetChildId()] = true
 	}
 	for _, want := range []string{topA, topB, kid} {
-		if !found[want] {
-			t.Errorf("child %s not found in list: %v", want, found)
-		}
+		c.False(!found[want], "child %s not found in list: %v", want, found)
 	}
 
 	// Verify topA's child has the parent label set.
@@ -43,9 +44,8 @@ func TestSubagentLineagePersistence(t *testing.T) {
 
 	// Kill topA and its children.
 	kctx, kcancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if _, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: topA})); err != nil {
-		t.Fatalf("Kill failed: %v", err)
-	}
+	_, err := client.Kill(kctx, connect.NewRequest(&rafikiv1.KillRequest{ChildId: topA}))
+	c.Require().NoError(err, "Kill failed")
 	kcancel()
 
 	// Wait for the child to exit too.

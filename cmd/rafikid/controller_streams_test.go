@@ -16,26 +16,23 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/ring"
 	"go.graveland.dev/rafiki/pkg/store"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestController_GetStreams_StoreMiss verifies that GetStreams returns a
 // ControllerError with ErrChildNotFound when the child is absent from the store.
 func TestController_GetStreams_StoreMiss(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 
 	_, err := ctrl.GetStreams("does-not-exist", "all")
-	if err == nil {
-		t.Fatalf("expected error for missing child, got nil")
-	}
+	c.Error(err, "expected error for missing child, got nil")
 	var ce *connectapi.ControllerError
-	if !errors.As(err, &ce) {
-		t.Fatalf("expected *connectapi.ControllerError, got %T: %v", err, err)
-	}
-	if ce.Code != protocol.ErrChildNotFound {
-		t.Fatalf("expected code %s, got %s", protocol.ErrChildNotFound, ce.Code)
-	}
+	c.True(errors.As(err, &ce), "expected *connectapi.ControllerError, got %T: %v", err, err)
+	c.Eq(protocol.ErrChildNotFound, ce.Code, "expected code")
 }
 
 // TestController_GetStreams_StoreOnlyChild verifies the Alive:false path: a
@@ -43,6 +40,7 @@ func TestController_GetStreams_StoreMiss(t *testing.T) {
 // that has exited) returns Alive:false with no error and no stream data.
 func TestController_GetStreams_StoreOnlyChild(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	ctrl.st.Insert(&childstore.Session{
@@ -51,21 +49,16 @@ func TestController_GetStreams_StoreOnlyChild(t *testing.T) {
 	})
 
 	res, err := ctrl.GetStreams("exited-child", "all")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Alive {
-		t.Fatalf("expected alive=false for store-only child, got %+v", res)
-	}
-	if res.In != nil || res.Err != nil {
-		t.Fatalf("expected no stream data, got %+v", res)
-	}
+	c.NoError(err, "unexpected error")
+	c.False(res.Alive, "expected alive=false for store-only child, got %+v", res)
+	c.False(res.In != nil || res.Err != nil, "expected no stream data, got %+v", res)
 }
 
 // TestGetRecentRenderedExited verifies the raw-vs-rendered selector on an
 // exited claude child: raw reads ExitedRing, rendered reads ExitedRenderRing.
 func TestGetRecentRenderedExited(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	ctrl.st.Insert(&childstore.Session{
@@ -80,20 +73,12 @@ func TestGetRecentRenderedExited(t *testing.T) {
 	})
 
 	raw, err := ctrl.GetRecent("c1", recentQuery{Rendered: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
-		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
-	}
+	c.NoError(err)
+	c.False(len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}`, "raw events = %v, want the raw frame", raw.Events)
 
 	rendered, err := ctrl.GetRecent("c1", recentQuery{Rendered: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}` {
-		t.Fatalf("rendered events = %v, want the render frame", rendered.Events)
-	}
+	c.NoError(err)
+	c.False(len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}`, "rendered events = %v, want the render frame", rendered.Events)
 }
 
 // TestGetRecentRenderedExitedNoRenderData verifies a rendered request for an
@@ -101,6 +86,7 @@ func TestGetRecentRenderedExited(t *testing.T) {
 // raw stream-json into the rendered view (claude raw stdout is not renderable).
 func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	ctrl.st.Insert(&childstore.Session{
@@ -114,20 +100,12 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 	})
 
 	rendered, err := ctrl.GetRecent("c2", recentQuery{Rendered: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rendered.Events) != 0 {
-		t.Fatalf("rendered events = %v, want zero (no raw fallback for claude)", rendered.Events)
-	}
+	c.NoError(err)
+	c.Empty(rendered.Events, "rendered events")
 
 	raw, err := ctrl.GetRecent("c2", recentQuery{Rendered: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
-		t.Fatalf("raw events = %v, want the raw frame", raw.Events)
-	}
+	c.NoError(err)
+	c.False(len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}`, "raw events = %v, want the raw frame", raw.Events)
 }
 
 // TestGetRecentClaudeUnresolvableFallsThrough pins the fallthrough the db
@@ -136,6 +114,7 @@ func TestGetRecentRenderedExitedNoRenderData(t *testing.T) {
 // for a child the proxy never saw.
 func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
 	t.Parallel()
+	ck := assert.NewAborting(t)
 
 	c := newTestController(t)
 	c.st.Insert(&childstore.Session{
@@ -145,15 +124,9 @@ func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
 		SessionID: "/tmp/session-file.json",
 	})
 	res, err := c.GetRecent("c_claude", recentQuery{Limit: 10, Rendered: true})
-	if err != nil {
-		t.Fatalf("GetRecent: %v", err)
-	}
-	if res.TotalInBuffer != 0 {
-		t.Fatalf("total = %d, want 0 with no pool", res.TotalInBuffer)
-	}
-	if c.recentSource() != "exited" {
-		t.Fatalf("source = %q, want %q", c.recentSource(), "exited")
-	}
+	ck.NoError(err, "GetRecent")
+	ck.Eq(0, res.TotalInBuffer, "total")
+	ck.Eq("exited", c.recentSource(), "source")
 }
 
 // TestGetRecentClaudeUsesTheDatabaseBranch pins the routing decision that
@@ -162,6 +135,7 @@ func TestGetRecentClaudeUnresolvableFallsThrough(t *testing.T) {
 // gets pi-vocabulary frames out of conversation_message. Needs a database,
 // because the claude route is the external_ref lookup.
 func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
+	ck := assert.NewAborting(t)
 	pool := openTestPool(t)
 
 	c := newTestController(t)
@@ -194,16 +168,10 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 		DrivenBy:         "client",
 		ExternalRef:      childID,
 	})
-	if err != nil {
-		t.Fatalf("EnsureConversationByExternalRef: %v", err)
-	}
+	ck.NoError(err, "EnsureConversationByExternalRef")
 	ms := store.NewMessages(pool)
-	if err := ms.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil); err != nil {
-		t.Fatalf("append user message: %v", err)
-	}
-	if err := ms.Append(ctx, convID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil); err != nil {
-		t.Fatalf("append assistant message: %v", err)
-	}
+	ck.NoError(ms.Append(ctx, convID, 0, anthropic.NewUserMessage(anthropic.NewTextBlock("hello")), nil), "append user message")
+	ck.NoError(ms.Append(ctx, convID, 1, anthropic.NewAssistantMessage(anthropic.NewTextBlock("hi from the database")), nil), "append assistant message")
 
 	c.st.Insert(&childstore.Session{
 		ChildID:   childID,
@@ -213,15 +181,9 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 	})
 
 	res, err := c.GetRecent(childID, recentQuery{Limit: 10, Rendered: true})
-	if err != nil {
-		t.Fatalf("GetRecent: %v", err)
-	}
-	if c.recentSource() != "db" {
-		t.Fatalf("source = %q, want %q", c.recentSource(), "db")
-	}
-	if res.TotalInBuffer == 0 {
-		t.Fatalf("total = 0, want the persisted frames")
-	}
+	ck.NoError(err, "GetRecent")
+	ck.Eq("db", c.recentSource(), "source")
+	ck.NotEq(0, res.TotalInBuffer, "total = 0, want the persisted frames")
 	var sawEnd, sawAgentEnd bool
 	for _, ev := range res.Events {
 		switch {
@@ -231,10 +193,7 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 			sawAgentEnd = true
 		}
 	}
-	if !sawEnd || !sawAgentEnd {
-		t.Fatalf("events missing message_end/agent_end pi frames: sawEnd=%v sawAgentEnd=%v, events=%s",
-			sawEnd, sawAgentEnd, res.Events)
-	}
+	ck.False(!sawEnd || !sawAgentEnd, "events missing message_end/agent_end pi frames: sawEnd=%v sawAgentEnd=%v, events=%s", sawEnd, sawAgentEnd, res.Events)
 }
 
 // TestGetRecentDiskFallback exercises the orphan-after-restart path: the
@@ -242,15 +201,14 @@ func TestGetRecentClaudeUsesTheDatabaseBranch(t *testing.T) {
 // on-disk dump (out.jsonl.gz / render.jsonl.gz).
 func TestGetRecentDiskFallback(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
 	out := [][]byte{[]byte(`{"type":"system"}`)}
 	render := [][]byte{[]byte(`{"type":"message_end"}`)}
-	if err := dumper.Dump("c1", nil, out, render, nil,
-		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}); err != nil {
-		t.Fatalf("dump: %v", err)
-	}
+	c.NoError(dumper.Dump("c1", nil, out, render, nil,
+		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}), "dump")
 
 	ctrl.st.Insert(&childstore.Session{
 		ChildID: "c1",
@@ -260,20 +218,12 @@ func TestGetRecentDiskFallback(t *testing.T) {
 	})
 
 	raw, err := ctrl.GetRecent("c1", recentQuery{Rendered: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}` {
-		t.Fatalf("raw events = %v, want the disk out frame", raw.Events)
-	}
+	c.NoError(err)
+	c.False(len(raw.Events) != 1 || string(raw.Events[0]) != `{"type":"system"}`, "raw events = %v, want the disk out frame", raw.Events)
 
 	rendered, err := ctrl.GetRecent("c1", recentQuery{Rendered: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}` {
-		t.Fatalf("rendered events = %v, want the disk render frame", rendered.Events)
-	}
+	c.NoError(err)
+	c.False(len(rendered.Events) != 1 || string(rendered.Events[0]) != `{"type":"message_end"}`, "rendered events = %v, want the disk render frame", rendered.Events)
 }
 
 // TestGetRecentDiskZeroTimestampSinceGuard verifies that disk-sourced frames
@@ -281,14 +231,13 @@ func TestGetRecentDiskFallback(t *testing.T) {
 // dropped wholesale.
 func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
 	render := [][]byte{[]byte(`{"type":"message_end"}`)}
-	if err := dumper.Dump("c1", nil, nil, render, nil,
-		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}); err != nil {
-		t.Fatalf("dump: %v", err)
-	}
+	c.NoError(dumper.Dump("c1", nil, nil, render, nil,
+		persist.Meta{ChildID: "c1"}, persist.ExitInfo{}), "dump")
 
 	ctrl.st.Insert(&childstore.Session{
 		ChildID: "c1",
@@ -297,12 +246,8 @@ func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 	})
 
 	res, err := ctrl.GetRecent("c1", recentQuery{Rendered: true, Since: 1716000000})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Events) != 1 || string(res.Events[0]) != `{"type":"message_end"}` {
-		t.Fatalf("events = %v, want the zero-TS disk frame kept despite Since", res.Events)
-	}
+	c.NoError(err)
+	c.False(len(res.Events) != 1 || string(res.Events[0]) != `{"type":"message_end"}`, "events = %v, want the zero-TS disk frame kept despite Since", res.Events)
 }
 
 // TestGetRecentByteBudget verifies GetRecent trims oldest events so the
@@ -311,6 +256,7 @@ func TestGetRecentDiskZeroTimestampSinceGuard(t *testing.T) {
 // an unbounded history dump would kill the connection (frame too large).
 func TestGetRecentByteBudget(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 
@@ -334,12 +280,8 @@ func TestGetRecentByteBudget(t *testing.T) {
 	})
 
 	res, err := ctrl.GetRecent("c1", recentQuery{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.TruncatedBySize {
-		t.Fatalf("TruncatedBySize = false, want true (payload exceeded budget)")
-	}
+	c.NoError(err)
+	c.True(res.TruncatedBySize, "TruncatedBySize = false, want true (payload exceeded budget)")
 	if len(res.Events) == 0 || len(res.Events) >= 5 {
 		t.Fatalf("len(Events) = %d, want a newest-tail subset (0 < n < 5)", len(res.Events))
 	}
@@ -347,17 +289,11 @@ func TestGetRecentByteBudget(t *testing.T) {
 	for _, ev := range res.Events {
 		total += len(ev) + 1
 	}
-	if total > protocol.MaxFrameBytes/2 {
-		t.Fatalf("payload = %d bytes, exceeds budget %d", total, protocol.MaxFrameBytes/2)
-	}
+	c.LessOrEqual(protocol.MaxFrameBytes/2, total, "payload")
 	// Newest events must be the ones kept.
 	last := res.Events[len(res.Events)-1]
-	if string(last) != string(events[4].Bytes) {
-		t.Fatalf("newest event not retained")
-	}
-	if res.TotalInBuffer != 5 {
-		t.Fatalf("TotalInBuffer = %d, want 5", res.TotalInBuffer)
-	}
+	c.Eq(string(events[4].Bytes), string(last), "newest event not retained")
+	c.Eq(5, res.TotalInBuffer, "TotalInBuffer")
 
 	// A small history passes through untrimmed.
 	ctrl.st.Insert(&childstore.Session{
@@ -367,9 +303,7 @@ func TestGetRecentByteBudget(t *testing.T) {
 		ExitedRing: []ring.Event{{Bytes: []byte(`{"type":"system"}`), Timestamp: 1}},
 	})
 	small, err := ctrl.GetRecent("c2", recentQuery{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	if small.TruncatedBySize || len(small.Events) != 1 {
 		t.Fatalf("small history: TruncatedBySize=%v len=%d, want false/1", small.TruncatedBySize, len(small.Events))
 	}
@@ -381,14 +315,13 @@ func TestGetRecentByteBudget(t *testing.T) {
 // and messages inserted, then GetRecent) lives in the integration suite.
 func TestGetRecentFundiNoDB(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
 	out := [][]byte{[]byte(`{"type":"agent_end","messages":[{"role":"assistant"}]}`)}
-	if err := dumper.Dump("f1", nil, out, nil, nil,
-		persist.Meta{ChildID: "f1"}, persist.ExitInfo{}); err != nil {
-		t.Fatalf("dump: %v", err)
-	}
+	c.NoError(dumper.Dump("f1", nil, out, nil, nil,
+		persist.Meta{ChildID: "f1"}, persist.ExitInfo{}), "dump")
 
 	ctrl.st.Insert(&childstore.Session{
 		ChildID: "f1",
@@ -398,12 +331,8 @@ func TestGetRecentFundiNoDB(t *testing.T) {
 
 	// Fundi children read from the DB, not disk. With no pool, result is empty.
 	raw, err := ctrl.GetRecent("f1", recentQuery{Rendered: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw.Events) != 0 {
-		t.Fatalf("raw events = %v, want empty (no DB pool, no disk fallback for fundi)", raw.Events)
-	}
+	c.NoError(err)
+	c.Empty(raw.Events, "raw events")
 }
 
 // TestGetRecentFundiAliveNoDB verifies that a live fundi child with no DB pool
@@ -411,15 +340,14 @@ func TestGetRecentFundiNoDB(t *testing.T) {
 // and the disk-merge path is removed.
 func TestGetRecentFundiAliveNoDB(t *testing.T) {
 	t.Parallel()
+	c := assert.NewAborting(t)
 
 	ctrl := newTestController(t)
 
 	childID := spawnTestChild(t, ctrl, nil)
-	if err := ctrl.st.Update(childID, func(s *childstore.Session) {
+	c.NoError(ctrl.st.Update(childID, func(s *childstore.Session) {
 		s.Kind = protocol.KindFundi
-	}); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
+	}), "Update failed")
 
 	// Write disk events — these should NOT appear in the result.
 	dumper := persist.NewLogDumper(ctrl.logsDir, persist.ModeOnExit)
@@ -427,18 +355,12 @@ func TestGetRecentFundiAliveNoDB(t *testing.T) {
 		[]byte(`{"type":"agent_start"}`),
 		[]byte(`{"type":"agent_end","messages":[{"role":"assistant"}]}`),
 	}
-	if err := dumper.Dump(childID, nil, diskOut, nil, nil,
-		persist.Meta{ChildID: childID}, persist.ExitInfo{}); err != nil {
-		t.Fatalf("dump: %v", err)
-	}
+	c.NoError(dumper.Dump(childID, nil, diskOut, nil, nil,
+		persist.Meta{ChildID: childID}, persist.ExitInfo{}), "dump")
 
 	raw, err := ctrl.GetRecent(childID, recentQuery{Rendered: false})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c.NoError(err)
 	// With no DB pool, fundi returns empty. The ring bootstrap events and disk
 	// dumps are no longer consulted.
-	if len(raw.Events) != 0 {
-		t.Fatalf("raw events = %v (len=%d), want empty (no DB pool for fundi)", raw.Events, len(raw.Events))
-	}
+	c.Empty(raw.Events, "raw events = %v (len=%d), want empty (no DB pool for fundi)", raw.Events, len(raw.Events))
 }

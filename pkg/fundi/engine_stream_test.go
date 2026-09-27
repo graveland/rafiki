@@ -12,6 +12,8 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // ---- streaming event fixtures ----
@@ -216,6 +218,7 @@ func (s *scriptedStreamingSender) NewStreaming(_ context.Context, _ anthropic.Me
 // TestStreamEndFoldsCostIdenticallyToAssistantTurn for that half of the
 // guarantee).
 func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{events: textTurnEvents("claude-x", "Hel", "lo")})
 	eng, out := newTestEngineWithSender(t, ts, sender)
@@ -235,31 +238,18 @@ func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
 	// is idempotent), end with exactly one message_end, and have at least one
 	// message_update in between (one per delta that carried real content).
 	rest := types[len(want):]
-	if len(rest) < 4 { // message_start, >=1 message_update, message_end, agent_end, agent_settled
-		t.Fatalf("assistant-turn+tail frames = %v, too short", rest)
-	}
-	if rest[0] != "message_start" {
-		t.Fatalf("first assistant frame = %q, want message_start", rest[0])
-	}
+	c.GreaterOrEqual(4, len(rest), "assistant-turn+tail frames = %v, too short", rest) // message_start, >=1 message_update, message_end, agent_end, agent_settled
+	c.Eq("message_start", rest[0], "first assistant frame")
 	tail := rest[len(rest)-2:]
-	if tail[0] != "agent_end" || tail[1] != "agent_settled" {
-		t.Fatalf("tail frames = %v, want [agent_end agent_settled]", tail)
-	}
+	c.False(tail[0] != "agent_end" || tail[1] != "agent_settled", "tail frames = %v, want [agent_end agent_settled]", tail)
 	body := rest[1 : len(rest)-2]
-	if len(body) < 2 {
-		t.Fatalf("assistant turn body = %v, want >=1 message_update then message_end", body)
-	}
-	if body[len(body)-1] != "message_end" {
-		t.Fatalf("assistant turn body = %v, want to end with message_end", body)
-	}
+	c.GreaterOrEqual(2, len(body), "assistant turn body = %v, want >=1 message_update then message_end", body)
+	c.Eq("message_end", body[len(body)-1], "assistant turn body = %v, want to end with message_end", body)
 	for _, ty := range body[:len(body)-1] {
-		if ty != "message_update" {
-			t.Fatalf("assistant turn body = %v, want only message_update before the final message_end", body)
-		}
+		c.Eq("message_update", ty, "assistant turn body = %v, want only message_update before the final message_end", body)
 	}
-	if n := countOfType(types, "message_start"); n != 2 { // user echo + assistant turn
-		t.Fatalf("message_start emitted %d times, want 2 (user echo + one streamed turn): %v", n, types)
-	}
+	n := countOfType(types, "message_start")
+	c.Eq(2, n, "message_start emitted %d times, want 2 (user echo + one streamed turn): %v", n, types) // user echo + assistant turn
 
 	// The final message_end must carry the fully assembled text and priced
 	// usage matching the accumulated token counts (10 in, 2 out per
@@ -277,15 +267,9 @@ func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
 	// The assistant turn's message_end is the last frame of `body` in `rest`,
 	// i.e. index len(want)+1+len(body)-1 in the full `types`/`lines` slice.
 	endIdx := len(want) + 1 + len(body) - 1
-	if err := json.Unmarshal([]byte(lines[endIdx]), &end); err != nil {
-		t.Fatalf("unmarshal assistant message_end frame: %v", err)
-	}
-	if len(end.Message.Content) != 1 || end.Message.Content[0].Text != "Hello" {
-		t.Fatalf("final message content = %+v, want one text block \"Hello\"", end.Message.Content)
-	}
-	if end.Message.Usage.Input != 10 || end.Message.Usage.Output != 2 {
-		t.Fatalf("final message usage = %+v, want input=10 output=2", end.Message.Usage)
-	}
+	c.NoError(json.Unmarshal([]byte(lines[endIdx]), &end), "unmarshal assistant message_end frame")
+	c.False(len(end.Message.Content) != 1 || end.Message.Content[0].Text != "Hello", "final message content = %+v, want one text block \"Hello\"", end.Message.Content)
+	c.False(end.Message.Usage.Input != 10 || end.Message.Usage.Output != 2, "final message usage = %+v, want input=10 output=2", end.Message.Usage)
 }
 
 // TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates proves the
@@ -296,6 +280,7 @@ func TestEngine_StreamsDeltasAndPricesFinalMessageOnce(t *testing.T) {
 // post-turn, via agentloop's own OnToolStart callback which only ever sees
 // resp.Content after the whole turn completes).
 func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
+	c := assert.NewAborting(t)
 	var gotInput json.RawMessage
 	var toolCalls int
 	ts := fakeToolSet{"bash": func(_ context.Context, in json.RawMessage) (string, error) {
@@ -316,16 +301,10 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 	eng.HandlePrompt("go")
 	eng.Wait()
 
-	if toolCalls != 1 {
-		t.Fatalf("tool called %d times, want exactly 1", toolCalls)
-	}
+	c.Eq(1, toolCalls, "tool called")
 	var args map[string]string
-	if err := json.Unmarshal(gotInput, &args); err != nil {
-		t.Fatalf("tool input %s is not valid JSON: %v", gotInput, err)
-	}
-	if args["command"] != "ls -la" {
-		t.Fatalf("tool input = %+v, want command=%q (fully reassembled, not a partial fragment)", args, "ls -la")
-	}
+	c.NoError(json.Unmarshal(gotInput, &args), "tool input %s is not valid JSON", gotInput)
+	c.Eq("ls -la", args["command"], "tool input = %+v, want command=%q (fully reassembled, not a partial fragment)", args, "ls -la")
 
 	types := frameTypes(t, out.String())
 	startIdx, endIdx, toolIdx := -1, -1, -1
@@ -342,9 +321,7 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 			endIdx = i
 		}
 	}
-	if toolIdx == -1 {
-		t.Fatalf("no tool_execution_start frame emitted: %v", types)
-	}
+	c.NotEq(-1, toolIdx, "no tool_execution_start frame emitted: %v", types)
 	// The tool_execution_start must come after the assistant turn's own
 	// message_end (the second message_end overall: user echo, then assistant
 	// turn 1), never before it.
@@ -359,12 +336,8 @@ func TestEngine_ToolUseDispatchesOnlyAfterInputFullyAccumulates(t *testing.T) {
 			}
 		}
 	}
-	if assistantEndIdx == -1 {
-		t.Fatalf("did not find the assistant turn's message_end: %v", types)
-	}
-	if toolIdx < assistantEndIdx {
-		t.Fatalf("tool_execution_start at %d fired before assistant message_end at %d: %v", toolIdx, assistantEndIdx, types)
-	}
+	c.NotEq(-1, assistantEndIdx, "did not find the assistant turn's message_end: %v", types)
+	c.GreaterOrEqual(assistantEndIdx, toolIdx, "tool_execution_start at %d fired before assistant message_end at %d: %v", toolIdx, assistantEndIdx, types)
 	_ = endIdx
 }
 
@@ -394,9 +367,8 @@ func TestEngine_HasContentGatePreventsOrphanedMessageStartOnPreContentFailure(t 
 		"agent_end", "agent_settled",
 	})
 	types := frameTypes(t, out.String())
-	if n := countOfType(types, "message_start"); n != 1 {
-		t.Fatalf("message_start emitted %d times, want exactly 1 (the user echo only): %v", n, types)
-	}
+	n := countOfType(types, "message_start")
+	assert.NewAborting(t).Eq(1, n, "message_start emitted %d times, want exactly 1 (the user echo only): %v", n, types)
 }
 
 // TestEngine_NonStreamingFallbackProducesWellFormedFrameSequence is the
@@ -596,6 +568,7 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 // nothing to emit until the whole turn completes and cannot make this
 // assertion pass; only genuine progressive streaming can.
 func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
+	c := assert.NewAborting(t)
 	release := make(chan struct{})
 	sender := &blockingStreamingSender{
 		prefix: []ssestream.Event{
@@ -625,10 +598,9 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 	// yet, because the scripted stream is parked inside blockingStreamDecoder
 	// and conv.Continue has not returned. This is exactly the assertion a
 	// batched implementation fails.
-	if n := countOfType(frameTypes(t, out.String()), "agent_end"); n != 0 {
-		t.Fatalf("agent_end already emitted (%d) after only a message_update was observed and before the stream "+
-			"was released — deltas are being batched and flushed at turn end, not streamed progressively as they arrive", n)
-	}
+	n := countOfType(frameTypes(t, out.String()), "agent_end")
+	c.Eq(0, n, "agent_end already emitted (%d) after only a message_update was observed and before the stream "+
+		"was released — deltas are being batched and flushed at turn end, not streamed progressively as they arrive", n)
 
 	close(release)
 	eng.Wait()
@@ -659,21 +631,13 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 		t.Fatalf("frame prefix = %v, want prefix %v", types, want)
 	}
 	rest := types[len(want):]
-	if len(rest) < 3 { // >=1 message_update, message_end, agent_end, agent_settled
-		t.Fatalf("assistant-turn+tail frames = %v, too short", rest)
-	}
+	c.GreaterOrEqual(3, len(rest), "assistant-turn+tail frames = %v, too short", rest) // >=1 message_update, message_end, agent_end, agent_settled
 	tail := rest[len(rest)-3:]
-	if tail[0] != "message_end" || tail[1] != "agent_end" || tail[2] != "agent_settled" {
-		t.Fatalf("tail frames = %v, want [message_end agent_end agent_settled]", tail)
-	}
+	c.False(tail[0] != "message_end" || tail[1] != "agent_end" || tail[2] != "agent_settled", "tail frames = %v, want [message_end agent_end agent_settled]", tail)
 	body := rest[:len(rest)-3]
-	if len(body) < 1 {
-		t.Fatalf("assistant turn body = %v, want >=1 message_update", body)
-	}
+	c.GreaterOrEqual(1, len(body), "assistant turn body = %v, want >=1 message_update", body)
 	for _, ty := range body {
-		if ty != "message_update" {
-			t.Fatalf("assistant turn body = %v, want only message_update before the final message_end", body)
-		}
+		c.Eq("message_update", ty, "assistant turn body = %v, want only message_update before the final message_end", body)
 	}
 }
 
@@ -700,6 +664,7 @@ func TestEngine_StreamsMessageUpdateBeforeTurnCompletes(t *testing.T) {
 // that emits but never grows the text (e.g. re-sending the same snapshot)
 // fails the strict length/prefix checks below.
 func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
+	c := assert.NewAborting(t)
 	release1 := make(chan struct{})
 	release2 := make(chan struct{})
 	sender := &stagedStreamingSender{stages: []streamStage{
@@ -735,9 +700,7 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 		return countOfType(frameTypes(t, out.String()), "message_update") >= 1
 	})
 	texts := assistantUpdateTexts(t, out.String())
-	if len(texts) != 1 || texts[0] != "Hel" {
-		t.Fatalf("after gate 1, message_update texts = %q, want exactly [\"Hel\"]", texts)
-	}
+	c.False(len(texts) != 1 || texts[0] != "Hel", "after gate 1, message_update texts = %q, want exactly [\"Hel\"]", texts)
 
 	// Sleep PAST streamFlushInterval before delivering "lo", so its flush
 	// check (now.Sub(lastFlush) >= streamFlushInterval) genuinely passes on
@@ -751,15 +714,9 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 		return countOfType(frameTypes(t, out.String()), "message_update") >= 2
 	})
 	texts = assistantUpdateTexts(t, out.String())
-	if len(texts) != 2 {
-		t.Fatalf("after gate 2 opened, message_update texts = %q, want exactly 2", texts)
-	}
-	if texts[0] != "Hel" || texts[1] != "Hello" {
-		t.Fatalf("message_update texts = %q, want [\"Hel\" \"Hello\"]", texts)
-	}
-	if len(texts[1]) <= len(texts[0]) {
-		t.Fatalf("second update %q is not strictly longer than the first %q", texts[1], texts[0])
-	}
+	c.Len(texts, 2, "after gate 2 opened, message_update texts")
+	c.False(texts[0] != "Hel" || texts[1] != "Hello", "message_update texts = %q, want [\"Hel\" \"Hello\"]", texts)
+	c.Greater(len(texts[0]), len(texts[1]), "second update %q is not strictly longer than the first %q", texts[1], texts[0])
 
 	const final = "Hello world"
 	for i, s := range texts {
@@ -773,9 +730,7 @@ func TestEngine_MessageUpdatesGrowAcrossFlushWindows(t *testing.T) {
 
 	// The final message_end (unconditional, from StreamEnd) must still carry
 	// the complete text regardless of the two mid-stream snapshots above.
-	if got := lastAssistantText(t, out.String()); got != final {
-		t.Fatalf("final assistant text = %q, want %q", got, final)
-	}
+	c.Eq(final, lastAssistantText(t, out.String()), "final assistant text")
 }
 
 // ---- coalescing tests (Task D3) ----
@@ -797,9 +752,7 @@ func lastAssistantText(t *testing.T, out string) string {
 				} `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(lines[i]), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", lines[i], err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal([]byte(lines[i]), &f), "bad frame %q", lines[i])
 		if f.Type != "message_end" {
 			continue
 		}
@@ -832,9 +785,7 @@ func TestEngine_CoalescingStillDeliversFinalContent(t *testing.T) {
 	eng.HandlePrompt("hi")
 	eng.Wait()
 
-	if got := lastAssistantText(t, out.String()); got != "Hello" {
-		t.Fatalf("final assistant text = %q, want %q — coalescing dropped the tail", got, "Hello")
-	}
+	assert.NewAborting(t).Eq("Hello", lastAssistantText(t, out.String()), "final assistant text")
 }
 
 // TestEngine_CoalescesManyDeltasIntoFewFrames proves the actual point of
@@ -857,9 +808,7 @@ func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
 	eng.HandlePrompt("hi")
 	eng.Wait()
 
-	if n := countOfType(frameTypes(t, out.String()), "message_update"); n > 10 {
-		t.Fatalf("200 deltas produced %d message_update frames; coalescing is not engaging", n)
-	}
+	assert.NewAborting(t).LessOrEqual(10, countOfType(frameTypes(t, out.String()), "message_update"), "200 deltas produced")
 }
 
 // ---- message_update content assertion (Task F2) ----
@@ -871,6 +820,7 @@ func TestEngine_CoalescesManyDeltasIntoFewFrames(t *testing.T) {
 // message_update rather than the last message_end.
 func assistantUpdateTexts(t *testing.T, out string) []string {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	var texts []string
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		if l == "" {
@@ -883,9 +833,7 @@ func assistantUpdateTexts(t *testing.T, out string) []string {
 		var typ struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(l), &typ); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		ck.NoError(json.Unmarshal([]byte(l), &typ), "bad frame %q", l)
 		if typ.Type != "message_update" {
 			continue
 		}
@@ -897,9 +845,7 @@ func assistantUpdateTexts(t *testing.T, out string) []string {
 				} `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad message_update frame %q: %v", l, err)
-		}
+		ck.NoError(json.Unmarshal([]byte(l), &f), "bad message_update frame %q", l)
 		var b strings.Builder
 		for _, c := range f.Message.Content {
 			if c.Type == "text" {
@@ -919,6 +865,7 @@ func assistantUpdateTexts(t *testing.T, out string) []string {
 // empty. THIS is the assertion that distinguishes streaming from batch
 // delivery with extra frames.
 func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
+	c := assert.NewAborting(t)
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{
 		events: textTurnEvents("claude-x", "Hel", "lo", " world"),
@@ -929,14 +876,10 @@ func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
 	eng.Wait()
 
 	texts := assistantUpdateTexts(t, out.String())
-	if len(texts) == 0 {
-		t.Fatal("no assistant message_update frames")
-	}
+	c.NotEmpty(texts, "no assistant message_update frames")
 	for i, s := range texts {
-		if s == "" {
-			t.Fatalf("message_update[%d] carried no text; frames are flowing but empty — "+
-				"this is batch delivery with extra frames (texts=%q)", i, texts)
-		}
+		c.NotEq("", s, "message_update[%d] carried no text; frames are flowing but empty — "+
+			"this is batch delivery with extra frames (texts=%q)", i, texts)
 	}
 	// Coalescing (250ms) means a fast scripted turn may produce just one
 	// update — that's correct and sufficient here; the assertion is that
@@ -956,6 +899,7 @@ func TestEngine_MessageUpdateCarriesPartialText(t *testing.T) {
 // for thinking blocks rather than text.
 func thinkingUpdateTexts(t *testing.T, out string) []string {
 	t.Helper()
+	ck := assert.NewAborting(t)
 	var texts []string
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		if l == "" {
@@ -964,9 +908,7 @@ func thinkingUpdateTexts(t *testing.T, out string) []string {
 		var typ struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal([]byte(l), &typ); err != nil {
-			t.Fatalf("bad frame %q: %v", l, err)
-		}
+		ck.NoError(json.Unmarshal([]byte(l), &typ), "bad frame %q", l)
 		if typ.Type != "message_update" {
 			continue
 		}
@@ -979,9 +921,7 @@ func thinkingUpdateTexts(t *testing.T, out string) []string {
 				} `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(l), &f); err != nil {
-			t.Fatalf("bad message_update frame %q: %v", l, err)
-		}
+		ck.NoError(json.Unmarshal([]byte(l), &f), "bad message_update frame %q", l)
 		var b strings.Builder
 		for _, c := range f.Message.Content {
 			if c.Type == "thinking" {
@@ -1008,9 +948,7 @@ func lastAssistantThinking(t *testing.T, out string) string {
 				} `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(lines[i]), &f); err != nil {
-			t.Fatalf("bad frame %q: %v", lines[i], err)
-		}
+		assert.NewAborting(t).NoError(json.Unmarshal([]byte(lines[i]), &f), "bad frame %q", lines[i])
 		if f.Type != "message_end" {
 			continue
 		}
@@ -1030,6 +968,7 @@ func lastAssistantThinking(t *testing.T, out string) string {
 // only content is thinking blocks triggers live message_update emission
 // (via hasContent) rather than waiting for OnTurn's AssistantTurn fallback.
 func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
+	c := assert.NewAborting(t)
 	release := make(chan struct{})
 	sender := &blockingStreamingSender{
 		prefix: []ssestream.Event{
@@ -1056,23 +995,17 @@ func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
 	})
 
 	// The turn must still be in flight.
-	if n := countOfType(frameTypes(t, out.String()), "agent_end"); n != 0 {
-		t.Fatalf("agent_end already emitted (%d) before the thinking stream was released", n)
-	}
+	c.Eq(0, countOfType(frameTypes(t, out.String()), "agent_end"), "agent_end already emitted (")
 
 	// Live message_update must carry the partial thinking text.
 	texts := thinkingUpdateTexts(t, out.String())
-	if len(texts) < 1 || texts[0] != "I should check options." {
-		t.Fatalf("mid-stream thinking update texts = %q, want [\"I should check options.\"]", texts)
-	}
+	c.False(len(texts) < 1 || texts[0] != "I should check options.", "mid-stream thinking update texts = %q, want [\"I should check options.\"]", texts)
 
 	close(release)
 	eng.Wait()
 
 	// Final message_end must carry the complete thinking text.
-	if got := lastAssistantThinking(t, out.String()); got != "I should check options. 1) merge, 2) push, 3) keep." {
-		t.Fatalf("final thinking = %q, want full accumulated text", got)
-	}
+	c.Eq("I should check options. 1) merge, 2) push, 3) keep.", lastAssistantThinking(t, out.String()), "final thinking")
 
 	// The full frame sequence must be well-formed.
 	types := frameTypes(t, out.String())
@@ -1086,9 +1019,7 @@ func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
 	}
 	rest := types[len(want):]
 	tail := rest[len(rest)-2:]
-	if tail[0] != "agent_end" || tail[1] != "agent_settled" {
-		t.Fatalf("tail frames = %v, want [agent_end agent_settled]", tail)
-	}
+	c.False(tail[0] != "agent_end" || tail[1] != "agent_settled", "tail frames = %v, want [agent_end agent_settled]", tail)
 }
 
 // TestEngine_ThinkingContentReachesFinalFrames proves that a thinking-only
@@ -1096,6 +1027,7 @@ func TestEngine_ThinkingOnlyStreamEmitsLiveUpdates(t *testing.T) {
 // still produces the proper message_start/message_update/message_end
 // sequence with thinking blocks intact in the final message.
 func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
+	ck := assert.NewAborting(t)
 	ts := fakeToolSet{}
 	sender := newScriptedStreamingSender(streamScript{
 		events: thinkingTurnEvents("deepseek/deepseek-v4-pro", "Let me think about this...", 3),
@@ -1110,17 +1042,12 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 	// With hasContent fixed, a fast thinking-only turn still gets at least one
 	// message_update (from the first delta), plus StreamEnd's final pair.
 	nUpdates := countOfType(types, "message_update")
-	if nUpdates == 0 {
-		t.Fatalf("no message_update frames emitted: %v — thinking-only response was suppressed", types)
-	}
-	if n := countOfType(types, "message_start"); n != 2 {
-		t.Fatalf("message_start emitted %d times, want 2 (user echo + assistant): %v", n, types)
-	}
+	ck.NotEq(0, nUpdates, "no message_update frames emitted: %v — thinking-only response was suppressed", types)
+	n := countOfType(types, "message_start")
+	ck.Eq(2, n, "message_start emitted %d times, want 2 (user echo + assistant): %v", n, types)
 
 	// The final message_end must carry the thinking block content.
-	if got := lastAssistantThinking(t, out.String()); got != "Let me think about this..." {
-		t.Fatalf("final thinking = %q, want %q", got, "Let me think about this...")
-	}
+	ck.Eq("Let me think about this...", lastAssistantThinking(t, out.String()), "final thinking")
 
 	// The agent_end message array must also include the thinking blocks.
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -1133,9 +1060,7 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 			break
 		}
 	}
-	if agentEnd.Type != "agent_end" {
-		t.Fatal("no agent_end frame")
-	}
+	ck.Eq("agent_end", agentEnd.Type, "no agent_end frame")
 	var foundThinking bool
 	for _, raw := range agentEnd.Messages {
 		var content struct {
@@ -1152,7 +1077,5 @@ func TestEngine_ThinkingContentReachesFinalFrames(t *testing.T) {
 			}
 		}
 	}
-	if !foundThinking {
-		t.Fatal("thinking content missing from agent_end messages array")
-	}
+	ck.True(foundThinking, "thinking content missing from agent_end messages array")
 }
