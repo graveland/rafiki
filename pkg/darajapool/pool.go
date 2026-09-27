@@ -5,10 +5,8 @@ package darajapool
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,7 +15,6 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"golang.org/x/net/http2"
 )
@@ -44,8 +41,9 @@ func (lc *liveConn) shutdown() {
 
 // ─── Pool ───────────────────────────────────────────────────────────────────
 
-// Pool accepts /daraja/connect upgrades, authenticates hello frames against
-// the Registry, and holds childID → live daraja connections.
+// Pool accepts /daraja/connect upgrades, authenticates them on the upgrade
+// request itself against the Registry, and holds childID → live daraja
+// connections.
 //
 // Deliberately NOT execpool.Pool. No rows, no health polling, no park windows,
 // no workspace provisioning. A daraja is one-to-one with a child the daemon
@@ -95,9 +93,60 @@ func (p *Pool) Reg() *Registry { return p.reg }
 // mux alongside anything else. The daraja DIALS rafikid and then SERVES HTTP/2;
 // rafikid ACCEPTS and is the HTTP client.
 func (p *Pool) UpgradeHandler() http.Handler {
-	return upgradeconn.Handler(upgradeconn.Daraja,
-		func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
-		func(c *upgradeconn.Conn, _ struct{}) { p.handleConn(c) })
+	return upgradeconn.Handler(upgradeconn.Daraja, p.authorize,
+		func(c *upgradeconn.Conn, childID string) { p.serve(c, childID) })
+}
+
+// authorize authenticates an upgrade request BEFORE the hijack, so a refusal
+// is an ordinary HTTP response and never touches the connection. A one-shot
+// launch ticket (Ticket) admits the first daraja for a child; a reconnect
+// credential presented with its child id (Bearer) admits every later one.
+// Either way a fresh credential is minted and returned on the 101, so the
+// newest connection is the only one that can come back.
+func (p *Pool) authorize(r *http.Request) (string, http.Header, error) {
+	scheme, secret, ref := upgradeconn.AuthorizationFrom(r)
+	if ref != nil {
+		return "", nil, ref
+	}
+
+	var childID string
+	switch scheme {
+	case upgradeconn.SchemeTicket:
+		// First launch: redeem the one-shot ticket.
+		id, ok := p.reg.RedeemTicket(secret)
+		if !ok {
+			return "", nil, &upgradeconn.Refusal{
+				Status: http.StatusUnauthorized,
+				Reason: "ticket is unknown, already used, or revoked",
+			}
+		}
+		childID = id
+
+	case upgradeconn.SchemeBearer:
+		// Reconnect: the credential must match the child it claims.
+		childID = r.Header.Get(upgradeconn.HeaderChildID)
+		if childID == "" || !p.reg.CheckCredential(secret, childID) {
+			return "", nil, &upgradeconn.Refusal{
+				Status: http.StatusUnauthorized,
+				Reason: "credential does not match this child",
+			}
+		}
+
+	case upgradeconn.SchemeEnroll:
+		return "", nil, &upgradeconn.Refusal{
+			Status: http.StatusUnauthorized,
+			Reason: "daraja does not enroll; send a Ticket or Bearer credential",
+		}
+	}
+
+	// Issue a fresh credential, invalidating whatever an older connection
+	// still holds. Failure to mint one is a daemon fault, not a peer fault:
+	// it becomes a 500, which the client retries.
+	cred, err := p.reg.IssueCredential(childID)
+	if err != nil {
+		return "", nil, fmt.Errorf("issue credential for %s: %w", childID, err)
+	}
+	return childID, http.Header{upgradeconn.HeaderCredential: {cred}}, nil
 }
 
 // ClientFor returns a daraja Connect client for childID, or an error if the
@@ -107,7 +156,7 @@ func (p *Pool) UpgradeHandler() http.Handler {
 // compares client identity with ==, and NewDarajaServiceClient allocates a
 // new pointer per call, so minting one here per call would never compare
 // equal to the one the holder was built with. lc.daraja is built once, in
-// handleConn.
+// serve.
 func (p *Pool) ClientFor(childID string) (darajapbconnect.DarajaServiceClient, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -255,7 +304,7 @@ func (p *Pool) installLive(childID string, lc *liveConn) {
 // there, and reports whether it did.
 //
 // Keying the delete on the childID alone let a stale connection evict its own
-// replacement: the old handleConn exits after a reconnect installed its
+// replacement: the old serve exits after a reconnect installed its
 // replacement and a remove keyed by ID would wipe out the working one.
 func (p *Pool) removeLive(childID string, lc *liveConn) bool {
 	p.mu.Lock()
@@ -267,69 +316,10 @@ func (p *Pool) removeLive(childID string, lc *liveConn) bool {
 	return false
 }
 
-// ─── handleConn ─────────────────────────────────────────────────────────────
-
-func (p *Pool) handleConn(conn net.Conn) {
+// serve runs after authorize upgraded the request, with childID already
+// resolved and the fresh credential already riding the 101.
+func (p *Pool) serve(conn *upgradeconn.Conn, childID string) {
 	defer conn.Close()
-
-	// Set a read deadline for the hello frame — a silent client must not
-	// wedge the accept loop.
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	hello, err := readHelloFrame(conn)
-	_ = conn.SetDeadline(time.Time{})
-	if err != nil {
-		slog.Warn("darajapool: hello read failed", "error", err)
-		return
-	}
-
-	var childID string
-	var credential string
-
-	switch {
-	case hello.Ticket != "":
-		// First launch: redeem the ticket
-		id, ok := p.reg.RedeemTicket(hello.Ticket)
-		if !ok {
-			writeDarajaHello(conn, protocol.DarajaHelloResponse{
-				Type:      "daraja_hello",
-				Error:     "ticket is unknown, already used, or revoked",
-				Retryable: false,
-			})
-			return
-		}
-		childID = id
-
-		// Issue a reconnect credential
-		credential, _ = p.reg.IssueCredential(childID)
-
-	case hello.Credential != "":
-		// Reconnect: verify the credential
-		if !p.reg.CheckCredential(hello.Credential, hello.ChildID) {
-			writeDarajaHello(conn, protocol.DarajaHelloResponse{
-				Type:      "daraja_hello",
-				Error:     "credential does not match this child",
-				Retryable: false,
-			})
-			return
-		}
-		childID = hello.ChildID
-		// Issue a new credential to invalidate older reconnects
-		credential, _ = p.reg.IssueCredential(childID)
-
-	default:
-		writeDarajaHello(conn, protocol.DarajaHelloResponse{
-			Type:      "daraja_hello",
-			Error:     "no ticket or credential in hello",
-			Retryable: false,
-		})
-		return
-	}
-
-	// Send the hello response with the credential (empty after first dial).
-	writeDarajaHello(conn, protocol.DarajaHelloResponse{
-		Type:       "daraja_hello",
-		Credential: credential,
-	})
 
 	// Wrap the upgraded connection into an HTTP/2 client so we can talk to daraja.
 	httpClient, err := clientForConn(conn)
@@ -411,39 +401,6 @@ func (p *Pool) handleConn(conn net.Conn) {
 			fn(childID)
 		}
 	}
-}
-
-// ─── hello frame read/write ─────────────────────────────────────────────────
-
-// readHelloFrame reads the newline-delimited hello frame from conn ONE BYTE
-// AT A TIME. An over-buffering reader would consume bytes past the newline
-// and leave them unavailable for the HTTP/2 transport that follows.
-func readHelloFrame(conn net.Conn) (protocol.DarajaHelloRequest, error) {
-	var buf [4096]byte
-	n := 0
-	for {
-		if n >= len(buf) {
-			return protocol.DarajaHelloRequest{}, fmt.Errorf("hello frame exceeds %d bytes", len(buf))
-		}
-		if _, err := io.ReadFull(conn, buf[n:n+1]); err != nil {
-			return protocol.DarajaHelloRequest{}, fmt.Errorf("read hello: %w", err)
-		}
-		if buf[n] == '\n' {
-			break
-		}
-		n++
-	}
-	var req protocol.DarajaHelloRequest
-	if err := json.Unmarshal(buf[:n], &req); err != nil {
-		return protocol.DarajaHelloRequest{}, fmt.Errorf("parse hello: %w", err)
-	}
-	return req, nil
-}
-
-func writeDarajaHello(conn net.Conn, resp protocol.DarajaHelloResponse) {
-	b, _ := json.Marshal(resp)
-	b = append(b, '\n')
-	_, _ = conn.Write(b)
 }
 
 // ─── inverted HTTP/2 client ─────────────────────────────────────────────────

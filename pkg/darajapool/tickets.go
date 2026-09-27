@@ -23,8 +23,11 @@ import (
 // Everything is in memory and nothing is persisted, matching
 // execpool.TicketRegistry's reasoning: a ticket is meaningful only while the
 // daemon that minted it is running, and a reconnect credential names a process
-// that dies with this daemon's ability to reach it. A restart therefore refuses
-// every reconnect — see DarajaHelloResponse.Retryable for why that is intended.
+// that dies with this daemon's ability to reach it. A restart therefore answers
+// every reconnect with 401, and daraja exits, taking claude with it. That is
+// intended — the daemon relaunches with --resume — but it means a rafikid
+// restart ends every live daraja, and anyone surprised by that should read
+// this comment rather than hunt a bug.
 type Registry struct {
 	mu      sync.Mutex
 	tickets map[string]string // ticket -> childID

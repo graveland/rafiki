@@ -4,21 +4,17 @@
 package daraja
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 	"golang.org/x/net/http2"
 )
@@ -29,11 +25,11 @@ type ConnectOptions struct {
 	Addr, SocketPath, ServerName, PinCert string
 	ChildID, Ticket                       string
 	Handler                               http.Handler
-	PID                                   int
 
-	// Credential is the reconnect credential the daemon returned in the first
-	// hello response. It is kept in memory only — claude dies with daraja, so
-	// persisting it would name something that no longer exists.
+	// Credential is the reconnect credential the daemon minted on the first
+	// successful upgrade (riding the 101 as Rafiki-Credential). It is kept in
+	// memory only — claude dies with daraja, so persisting it would name
+	// something that no longer exists.
 	Credential string
 }
 
@@ -79,6 +75,21 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 }
 
 func connectOnce(ctx context.Context, o ConnectOptions) (cred string, err error) {
+	// Authenticate on the upgrade request itself, before the 101: exactly one
+	// Authorization header — the ticket on the first dial, the credential the
+	// daemon minted on every later one — plus the child id the credential is
+	// checked against. Built before dialling, so a daraja with nothing to
+	// present never opens a connection at all.
+	hdr := http.Header{upgradeconn.HeaderChildID: {o.ChildID}}
+	switch {
+	case o.Ticket != "":
+		hdr.Set("Authorization", string(upgradeconn.SchemeTicket)+" "+o.Ticket)
+	case o.Credential != "":
+		hdr.Set("Authorization", string(upgradeconn.SchemeBearer)+" "+o.Credential)
+	default:
+		return "", fmt.Errorf("nothing to authenticate with: no ticket and no credential")
+	}
+
 	conn, host, err := dialDaemon(ctx, o)
 	if err != nil {
 		return "", err
@@ -88,25 +99,23 @@ func connectOnce(ctx context.Context, o ConnectOptions) (cred string, err error)
 	// Reach the /daraja/connect endpoint by PATH on the shared listener,
 	// upgrading out of HTTP/1.1. Same shape as executor's connectOnce.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Daraja, host, nil)
-	if err != nil {
-		return "", err
-	}
-
-	// The reader returned by writeHello must be served, not discarded.
-	// Task 1 bug: if we build a fresh bufio.Reader off upConn.Conn we drop
-	// whatever pipelined behind the hello response (the h2 preface).
-	rd, hello, err := writeHello(upConn, o)
+	upConn, resp, err := upgradeconn.Dial(conn, upgradeconn.Daraja, host, hdr)
 	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
-		return "", err
+		var ref *upgradeconn.Refused
+		if errors.As(err, &ref) && (ref.Status == 400 || ref.Status == 401 || ref.Status == 403) {
+			// A definitive answer about this credential: bad, revoked, spent
+			// or unknown. Retrying cannot change it — end the loop.
+			return "", fmt.Errorf("%w: %s", ErrRejected, ref.Reason)
+		}
+		return "", err // anything else (including 503) is retried by Connect
 	}
 
-	if hello.Credential != "" {
-		cred = hello.Credential
+	if c := resp.Get(upgradeconn.HeaderCredential); c != "" {
+		cred = c
 	}
 
-	err = ServeInverted(readerConn{Conn: upConn, r: rd}, o.Handler)
+	err = ServeInverted(upConn, o.Handler)
 	return cred, err
 }
 
@@ -162,94 +171,6 @@ func dialDaemon(ctx context.Context, o ConnectOptions) (net.Conn, string, error)
 	}
 	return conn, sni, nil
 }
-
-// writeHello sends the DarajaHelloRequest and reads the response, returning
-// the READER it used along with the outcome.
-//
-// Three differences from execpool/writeHello, each carrying its own comment:
-//
-//  1. The hello is protocol.DarajaHelloRequest, carrying ChildID and switching
-//     from Ticket to Credential after the first success.
-//
-//  2. The reader returned by this function is what gets served on the
-//     connection — do NOT derive a new reader off the bare Conn. The executor
-//     link had this bug before Task 1 fixed it; see execpool/dial.go for the
-//     rationale.
-//
-//  3. A terminal error ends the loop AND the process: daraja dies with its
-//     child. Reuse the Retryable discrimination — Retryable=false means rafikid
-//     answered definitively ("not valid"); Retryable=true means it could not
-//     check ("could not verify"), which is transient and worth retrying.
-func writeHello(conn io.ReadWriteCloser, o ConnectOptions) (io.Reader, protocol.DarajaHelloResponse, error) {
-	req := protocol.DarajaHelloRequest{
-		Type:    "daraja_hello",
-		ChildID: o.ChildID,
-		PID:     o.PID,
-	}
-	switch {
-	case o.Ticket != "":
-		req.Ticket = o.Ticket
-	case o.Credential != "":
-		req.Credential = o.Credential
-	default:
-		return nil, protocol.DarajaHelloResponse{}, fmt.Errorf(
-			"nothing to authenticate with: no ticket and no credential")
-	}
-
-	enc := json.NewEncoder(conn)
-	if err := enc.Encode(req); err != nil {
-		return nil, protocol.DarajaHelloResponse{}, fmt.Errorf("write hello: %w", err)
-	}
-
-	br := bufio.NewReaderSize(conn, 4096)
-	dec := json.NewDecoder(br)
-	var resp protocol.DarajaHelloResponse
-	if err := dec.Decode(&resp); err != nil {
-		return nil, protocol.DarajaHelloResponse{}, fmt.Errorf("read hello response: %w", err)
-	}
-	if resp.Error != "" {
-		// Retryable discriminates "I could not CHECK" from "this is NOT valid".
-		// Only the latter is worth exiting over: a transient failure should be
-		// retried; a definitive rejection (bad token, revoked row) must stop
-		// immediately — daraja dies with its child.
-		if resp.Retryable {
-			return nil, protocol.DarajaHelloResponse{}, fmt.Errorf("rafikid could not verify credential: %s", resp.Error)
-		}
-		return nil, protocol.DarajaHelloResponse{}, fmt.Errorf("%w: %s", ErrRejected, resp.Error)
-	}
-
-	// json.Decoder buffers too. Anything it read past the response's newline is
-	// in its Buffered() reader, ahead of whatever is still in br.
-	mr := io.MultiReader(dec.Buffered(), br)
-
-	// Consume the '\n' delimiter that terminates the hello response.
-	// Since json.Decoder parses the JSON object, it leaves the trailing newline
-	// in the buffer. We must consume up to and including that newline so the
-	// returned reader starts exactly at the next frame (the HTTP/2 preface).
-	var singleByte [1]byte
-	for {
-		_, err := mr.Read(singleByte[:])
-		if err != nil {
-			break
-		}
-		if singleByte[0] == '\n' {
-			break
-		}
-	}
-
-	return mr, resp, nil
-}
-
-// readerConn is a net.Conn whose reads come from r — the hello reader, which
-// already holds whatever the peer pipelined behind its response. Writes and
-// the rest of the Conn behaviour pass through unchanged. Mirrors execpool's
-// readerConn exactly.
-type readerConn struct {
-	net.Conn
-	r io.Reader
-}
-
-func (c readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // ServeInverted runs an HTTP/2 server on a connection this process DIALLED.
 // Mirrors execpool.ServeInverted exactly.

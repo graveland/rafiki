@@ -3,21 +3,114 @@
 package darajapool
 
 import (
-	"bufio"
-	"encoding/json"
+	"errors"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"go.graveland.dev/rafiki/pkg/darajapb"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
-// TestPoolConnectionStaysUp verifies that after installLive + relay start,
-// the connection survives past the hello exchange. It exercises:
-// - Hello frame exchange succeeds
-// - Live() reports the child immediately
+// servePoolOnTCP serves pool.UpgradeHandler on a fresh 127.0.0.1 listener and
+// returns its address. The server is closed by t.Cleanup; hijacked handlers
+// die with the connections the tests close in their own cleanups.
+func servePoolOnTCP(t *testing.T, pool *Pool) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: pool.UpgradeHandler()}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().String()
+}
+
+// dialUpgrade performs one daraja upgrade against addr with hdr. The dialled
+// conn is closed by t.Cleanup.
+func dialUpgrade(t *testing.T, addr string, hdr http.Header) (*upgradeconn.Conn, http.Header, error) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return upgradeconn.Dial(conn, upgradeconn.Daraja, addr, hdr)
+}
+
+// schemeHeader builds an Authorization header of the given scheme and secret,
+// plus the child id when one is set.
+func schemeHeader(scheme upgradeconn.Scheme, secret, childID string) http.Header {
+	h := http.Header{}
+	h.Set("Authorization", string(scheme)+" "+secret)
+	if childID != "" {
+		h.Set(upgradeconn.HeaderChildID, childID)
+	}
+	return h
+}
+
+// ticketHeader builds the Authorization a daraja sends on its first dial: the
+// one-shot launch ticket, plus the child id it claims.
+func ticketHeader(childID, ticket string) http.Header {
+	return schemeHeader(upgradeconn.SchemeTicket, ticket, childID)
+}
+
+// bearerHeader builds the Authorization a daraja sends on reconnect: the
+// credential the daemon minted, plus the child id it is bound to. An empty
+// childID omits the header entirely — that is the malformed case.
+func bearerHeader(childID, cred string) http.Header {
+	return schemeHeader(upgradeconn.SchemeBearer, cred, childID)
+}
+
+// waitLive polls until childID is the pool's only live connection.
+func waitLive(t *testing.T, pool *Pool, childID string) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		live := pool.Live()
+		if len(live) == 1 && live[0] == childID {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s never appeared in Live(): %v", childID, live)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// serveTestDaraja plays the daraja side of an upgraded connection: it serves
+// HTTP/2 with the stub DarajaService on the conn the test dialled, exactly as
+// real daraja does after its upgrade. Without it the pool's relay stream open
+// (startIn) never completes, installLive never runs, and the child never
+// appears in Live().
+func serveTestDaraja(t *testing.T, upConn *upgradeconn.Conn) {
+	t.Helper()
+	path, handler := darajapbconnect.NewDarajaServiceHandler(stubDaraja{})
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	h2s := &http2.Server{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h2s.ServeConn(upConn, &http2.ServeConnOpts{Handler: mux})
+	}()
+	t.Cleanup(func() {
+		upConn.Close()
+		<-done
+	})
+}
+
+// TestPoolConnectionStaysUp verifies that after a successful upgrade with a
+// ticket, the connection survives past the credential handover. It exercises:
+// - the upgrade succeeds and the 101 carries a fresh credential
+// - Live() reports the child
 // - ClientFor returns a usable client
 //
 // Previously handleConn blocked on <-lc.done without ever starting the
@@ -25,205 +118,179 @@ import (
 // the connection stays up long enough for these checks.
 func TestPoolConnectionStaysUp(t *testing.T) {
 	reg := NewRegistry()
-	tpk, _ := reg.MintTicket("c1")
+	tpk, err := reg.MintTicket("c1")
+	if err != nil {
+		t.Fatalf("mint ticket: %v", err)
+	}
 	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
 
-	serverConn, clientConn := net.Pipe()
-	t.Cleanup(func() {
-		serverConn.Close()
-		clientConn.Close()
-	})
-
-	// Run handleConn on the "server" side (simulates what upgradeconn gives us).
-	go pool.handleConn(serverConn)
-
-	// Simulate daraja writing its hello frame over the pipe.
-	hello := protocol.DarajaHelloRequest{
-		Type:    "daraja_hello",
-		ChildID: "c1",
-		Ticket:  tpk,
-	}
-	helloJSON, _ := json.Marshal(hello)
-	helloJSON = append(helloJSON, '\n')
-	_, err := clientConn.Write(helloJSON)
+	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
 	if err != nil {
-		t.Fatalf("write hello: %v", err)
+		t.Fatalf("upgrade dial: %v", err)
+	}
+	if cred := resp.Get(upgradeconn.HeaderCredential); cred == "" {
+		t.Fatal("expected a credential on the 101 response")
 	}
 
-	// Read exactly the hello response LINE. The relay driver now opens its
-	// stream immediately (Send(nil)), so real H2 preface bytes follow right
-	// behind it on the wire — a fixed-size read would capture both.
-	_ = clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-	line, err := bufio.NewReader(clientConn).ReadString('\n')
-	if err != nil {
-		t.Fatalf("read hello response: %v", err)
-	}
-	var resp protocol.DarajaHelloResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("parse response: %v; raw: %q", err, line)
-	}
-	if resp.Error != "" {
-		t.Fatalf("unexpected error: %s", resp.Error)
-	}
-	if resp.Credential == "" {
-		t.Fatal("expected credential in hello response")
-	}
+	serveTestDaraja(t, upConn)
+	waitLive(t, pool, "c1")
 
-	// Give handleConn time to complete installLive + relay start.
-	time.Sleep(200 * time.Millisecond)
-
-	// Connection should be live.
-	live := pool.Live()
-	found := false
-	for _, id := range live {
-		if id == "c1" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Logf("DEBUG: Live()=%v (expected c1 to be present)", live)
-		t.Errorf("c1 should appear in Live(), got: %v", live)
-	}
-
-	// Verify ClientFor returns a client.
-	cli, err := pool.ClientFor("c1")
-	if err != nil {
+	// ClientFor should return a client.
+	if _, err := pool.ClientFor("c1"); err != nil {
 		t.Fatalf("ClientFor: %v", err)
 	}
-	_ = cli // client is usable
-
-	// Tear down: close client side so handleProc sees EOF and exits cleanly.
-	clientConn.Close()
-	time.Sleep(50 * time.Millisecond)
 }
 
 // TestTicketAdmitsAndShowsInLive verifies that a daraja connecting with a valid
 // ticket gets admitted and appears in Live().
 func TestTicketAdmitsAndShowsInLive(t *testing.T) {
 	reg := NewRegistry()
-	tk, _ := reg.MintTicket("c1")
-	pool := New(reg)
-
-	serverConn, clientConn := net.Pipe()
-	t.Cleanup(func() {
-		serverConn.Close()
-		clientConn.Close()
-	})
-
-	go pool.handleConn(serverConn)
-
-	hello := protocol.DarajaHelloRequest{
-		Type:    "daraja_hello",
-		ChildID: "c1",
-		Ticket:  tk,
-	}
-	helloJSON, _ := json.Marshal(hello)
-	helloJSON = append(helloJSON, '\n')
-	_, err := clientConn.Write(helloJSON)
+	tk, err := reg.MintTicket("c1")
 	if err != nil {
-		t.Fatalf("write hello: %v", err)
+		t.Fatalf("mint ticket: %v", err)
+	}
+	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
+
+	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tk))
+	if err != nil {
+		t.Fatalf("upgrade dial: %v", err)
+	}
+	if cred := resp.Get(upgradeconn.HeaderCredential); cred == "" {
+		t.Fatal("expected a credential on the 101 response for first dial")
 	}
 
-	buf := make([]byte, 4096)
-	n, _ := clientConn.Read(buf)
-	respStr := string(buf[:n])
-
-	// Check response is not an error
-	var resp protocol.DarajaHelloResponse
-	if err := json.Unmarshal(buf[:n], &resp); err != nil {
-		t.Fatalf("invalid response: %v; raw: %s", err, respStr)
-	}
-	if resp.Error != "" {
-		t.Fatalf("expected success, got error: %s", resp.Error)
-	}
-	if resp.Credential == "" {
-		t.Fatal("expected credential in response for first dial")
-	}
-
-	// Give handleConn time to install the connection.
-	time.Sleep(50 * time.Millisecond)
-
-	// Connection should be live
-	live := pool.Live()
-	found := false
-	for _, id := range live {
-		if id == "c1" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("c1 should appear in Live(), got: %v", live)
-	}
+	serveTestDaraja(t, upConn)
+	waitLive(t, pool, "c1")
 }
 
-// Unknown ticket is refused terminally.
+// Unknown ticket is refused terminally: 401 on the upgrade request, no 101.
 func TestUnknownTicketIsRefusedTerminally(t *testing.T) {
 	reg := NewRegistry()
 	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
 
-	serverConn, clientConn := net.Pipe()
-	t.Cleanup(func() {
-		serverConn.Close()
-		clientConn.Close()
-	})
-
-	go pool.handleConn(serverConn)
-
-	hello := protocol.DarajaHelloRequest{
-		Type:    "daraja_hello",
-		ChildID: "c999",
-		Ticket:  "bogus-ticket",
+	_, _, err := dialUpgrade(t, addr, ticketHeader("c999", "bogus-ticket"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
 	}
-	helloJSON, _ := json.Marshal(hello)
-	helloJSON = append(helloJSON, '\n')
-	_, err := clientConn.Write(helloJSON)
-	if err != nil {
-		t.Fatalf("write hello: %v", err)
+	if ref.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", ref.Status)
 	}
-
-	buf := make([]byte, 1024)
-	n, _ := clientConn.Read(buf)
-	respStr := string(buf[:n])
-
-	if !strings.Contains(respStr, `"error"`) {
-		t.Fatalf("expected error response, got: %s", respStr)
+	if !strings.Contains(ref.Reason, "ticket is unknown") {
+		t.Errorf("reason = %q, want it to name the unknown ticket", ref.Reason)
 	}
 }
 
-// Wrong child credential is refused.
+// Wrong child credential is refused: a credential bound to c1 must not admit
+// a daraja claiming to be c2.
 func TestWrongChildCredentialIsRefused(t *testing.T) {
 	reg := NewRegistry()
-	cred, _ := reg.IssueCredential("c1")
-	pool := New(reg)
-
-	serverConn, clientConn := net.Pipe()
-	t.Cleanup(func() {
-		serverConn.Close()
-		clientConn.Close()
-	})
-
-	go pool.handleConn(serverConn)
-
-	hello := protocol.DarajaHelloRequest{
-		Type:       "daraja_hello",
-		ChildID:    "c2",
-		Credential: cred,
-	}
-	helloJSON, _ := json.Marshal(hello)
-	helloJSON = append(helloJSON, '\n')
-	_, err := clientConn.Write(helloJSON)
+	cred, err := reg.IssueCredential("c1")
 	if err != nil {
-		t.Fatalf("write hello: %v", err)
+		t.Fatalf("issue credential: %v", err)
 	}
+	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
 
-	buf := make([]byte, 1024)
-	n, _ := clientConn.Read(buf)
-	respStr := string(buf[:n])
+	_, _, err = dialUpgrade(t, addr, bearerHeader("c2", cred))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
+	}
+	if ref.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", ref.Status)
+	}
+	if !strings.Contains(ref.Reason, "credential does not match this child") {
+		t.Errorf("reason = %q, want the child mismatch", ref.Reason)
+	}
+}
 
-	if !strings.Contains(respStr, `"error"`) {
-		t.Fatalf("expected error response, got: %s", respStr)
+// Rotating the credential on every upgrade is what makes a displaced (older)
+// connection unable to reclaim the child: each admission mints a fresh
+// credential, so a credential presented twice only works once.
+func TestUpgradeRotatedCredentialInvalidatesThePrevious(t *testing.T) {
+	reg := NewRegistry()
+	tk, err := reg.MintTicket("c1")
+	if err != nil {
+		t.Fatalf("mint ticket: %v", err)
+	}
+	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
+
+	// Ticket admits and mints cred1.
+	upConn1, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tk))
+	if err != nil {
+		t.Fatalf("ticket upgrade: %v", err)
+	}
+	cred1 := resp.Get(upgradeconn.HeaderCredential)
+	if cred1 == "" {
+		t.Fatal("no credential on the ticket 101")
+	}
+	serveTestDaraja(t, upConn1) // keep conn 1 in place
+
+	// Bearer cred1 admits and mints cred2, invalidating cred1.
+	upConn2, resp2, err := dialUpgrade(t, addr, bearerHeader("c1", cred1))
+	if err != nil {
+		t.Fatalf("bearer upgrade with cred1: %v", err)
+	}
+	cred2 := resp2.Get(upgradeconn.HeaderCredential)
+	if cred2 == "" || cred2 == cred1 {
+		t.Fatalf("credential not rotated: cred1=%q cred2=%q", cred1, cred2)
+	}
+	serveTestDaraja(t, upConn2)
+
+	// Bearer cred1 again: refused, because cred2 replaced it.
+	_, _, err = dialUpgrade(t, addr, bearerHeader("c1", cred1))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("expected *upgradeconn.Refused for the spent credential, got %v", err)
+	}
+	if ref.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", ref.Status)
+	}
+}
+
+// A Bearer credential without its child id cannot be checked — the registry
+// keys credentials by child — so the upgrade is refused 401.
+func TestUpgradeBearerWithoutChildIdIs401(t *testing.T) {
+	reg := NewRegistry()
+	cred, err := reg.IssueCredential("c1")
+	if err != nil {
+		t.Fatalf("issue credential: %v", err)
+	}
+	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
+
+	_, _, err = dialUpgrade(t, addr, bearerHeader("", cred))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
+	}
+	if ref.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", ref.Status)
+	}
+}
+
+// Enroll is the executor's enrollment scheme; daraja never enrolls. The
+// upgrade must be refused 401 with a reason that names the valid schemes.
+func TestUpgradeEnrollSchemeIsRefused(t *testing.T) {
+	reg := NewRegistry()
+	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
+
+	_, _, err := dialUpgrade(t, addr, schemeHeader(upgradeconn.SchemeEnroll, "enroll-token", "c1"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) {
+		t.Fatalf("expected *upgradeconn.Refused, got %v", err)
+	}
+	if ref.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", ref.Status)
+	}
+	if !strings.Contains(ref.Reason, "daraja does not enroll") {
+		t.Errorf("reason = %q, want the no-enroll notice", ref.Reason)
 	}
 }
 

@@ -3,8 +3,6 @@
 package darajapool
 
 import (
-	"encoding/json"
-	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -12,7 +10,6 @@ import (
 	"golang.org/x/net/http2"
 
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
@@ -38,44 +35,17 @@ func connectFakeDaraja(t *testing.T, handler darajapbconnect.DarajaServiceHandle
 	}
 	pool = New(reg)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	addr := servePoolOnTCP(t, pool)
 
-	srv := &http.Server{Handler: pool.UpgradeHandler()}
-	go func() { _ = srv.Serve(ln) }()
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-
-	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Daraja, ln.Addr().String(), nil)
+	// Authenticate on the upgrade request itself: the one-shot ticket plus
+	// the child id, exactly what a real daraja's first dial sends. The fresh
+	// reconnect credential comes back as a header on the 101.
+	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
 	if err != nil {
 		t.Fatalf("upgrade dial: %v", err)
 	}
-
-	hello := protocol.DarajaHelloRequest{Type: "daraja_hello", ChildID: "c1", Ticket: tpk}
-	helloJSON, err := json.Marshal(hello)
-	if err != nil {
-		t.Fatalf("marshal hello: %v", err)
-	}
-	helloJSON = append(helloJSON, '\n')
-	if _, err := upConn.Write(helloJSON); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-
-	line, err := upConn.Reader().ReadString('\n')
-	if err != nil {
-		t.Fatalf("read hello response: %v", err)
-	}
-	var resp protocol.DarajaHelloResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("parse hello response %q: %v", line, err)
-	}
-	if resp.Error != "" {
-		t.Fatalf("hello refused: %s", resp.Error)
+	if resp.Get(upgradeconn.HeaderCredential) == "" {
+		t.Fatal("no credential on the 101 response")
 	}
 
 	deadline := time.After(3 * time.Second)
@@ -102,10 +72,8 @@ func connectFakeDaraja(t *testing.T, handler darajapbconnect.DarajaServiceHandle
 	}()
 
 	teardown = func() {
-		conn.Close()
+		upConn.Close()
 		<-h2done
-		srv.Close()
-		ln.Close()
 	}
 	return pool, "c1", teardown
 }

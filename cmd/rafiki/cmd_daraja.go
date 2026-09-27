@@ -54,7 +54,7 @@ func newDarajaServeCmd() *cobra.Command {
 			"The ticket arrives from the environment (RAFIKI_DARAJA_TICKET), never\n" +
 			"from argv: 1b-i's Launch builds a command line anyone on the machine\n" +
 			"can read with ps. The ticket is replaced by a reconnect credential on\n" +
-			"the first successful hello, which is held in memory only.\n\n" +
+			"the first successful connection, which is held in memory only.\n\n" +
 			"Trailing positional arguments after a bare \"--\" are passed to the\n" +
 			"child verbatim — the operator escape hatch for flags daraja does\n" +
 			"not map itself.",
@@ -189,7 +189,6 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	opts := daraja.ConnectOptions{
 		ChildID:    childID,
 		Handler:    mux,
-		PID:        os.Getpid(),
 		PinCert:    pinCert,
 		ServerName: serverName,
 	}
@@ -382,7 +381,6 @@ func runDarajaScriptServe(childID, interpreter, cwd string, argv []string, pinCe
 	opts := daraja.ConnectOptions{
 		ChildID:    childID,
 		Handler:    mux,
-		PID:        os.Getpid(),
 		PinCert:    pinCert,
 		ServerName: serverName,
 		Addr:       connect,

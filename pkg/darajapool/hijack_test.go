@@ -5,9 +5,7 @@ package darajapool
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -17,7 +15,6 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/darajapb"
 	"go.graveland.dev/rafiki/pkg/darajapb/darajapbconnect"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
@@ -67,49 +64,21 @@ func (stubDaraja) Health(context.Context, *connect.Request[darajapb.HealthReques
 // stream-lifetime bugs on the hijacked connection the way a real hijack can.
 func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
 	reg := NewRegistry()
-	tpk, _ := reg.MintTicket("c1")
+	tpk, err := reg.MintTicket("c1")
+	if err != nil {
+		t.Fatalf("mint ticket: %v", err)
+	}
 	pool := New(reg)
+	addr := servePoolOnTCP(t, pool)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	srv := &http.Server{Handler: pool.UpgradeHandler()}
-	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
-
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer conn.Close()
-
-	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Daraja, ln.Addr().String(), nil)
+	// The upgrade request itself carries the ticket; the fresh reconnect
+	// credential rides back on the 101.
+	upConn, resp, err := dialUpgrade(t, addr, ticketHeader("c1", tpk))
 	if err != nil {
 		t.Fatalf("upgrade dial: %v", err)
 	}
-
-	hello := protocol.DarajaHelloRequest{Type: "daraja_hello", ChildID: "c1", Ticket: tpk}
-	helloJSON, _ := json.Marshal(hello)
-	helloJSON = append(helloJSON, '\n')
-	if _, err := upConn.Write(helloJSON); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-
-	// Read the hello response line via the same reader upgradeconn hands
-	// back, so the HTTP/2 server that follows starts at the right byte.
-	line, err := upConn.Reader().ReadString('\n')
-	if err != nil {
-		t.Fatalf("read hello response: %v", err)
-	}
-	var resp protocol.DarajaHelloResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("parse hello response %q: %v", line, err)
-	}
-	if resp.Error != "" {
-		t.Fatalf("hello refused: %s", resp.Error)
+	if resp.Get(upgradeconn.HeaderCredential) == "" {
+		t.Fatal("no credential on the 101 response")
 	}
 
 	// Wait for installLive; the relay holder is registered synchronously
@@ -161,7 +130,7 @@ func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
 
 	// Now play daraja's role: serve HTTP/2 on the connection the pool holds
 	// as its client transport. This is exactly what real daraja does after
-	// its hello exchange, and is what starts stubDaraja.Relay sending.
+	// its upgrade, and is what starts stubDaraja.Relay sending.
 	path, handler := darajapbconnect.NewDarajaServiceHandler(stubDaraja{})
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
@@ -183,6 +152,6 @@ func TestHandleConnDeliversUncorruptedTrafficOverARealHijack(t *testing.T) {
 		}
 	}
 
-	conn.Close()
+	upConn.Close()
 	<-h2done
 }
