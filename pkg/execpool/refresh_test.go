@@ -24,7 +24,9 @@ func TestRelabellingReachesALiveConnection(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-1"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 	if got := p.Live()[0].Executor.Labels["env"]; got != "home" {
@@ -52,7 +54,9 @@ func TestDisablingAnExecutorRemovesItFromTheLivePool(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-2"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-2"}); err != nil {
+		t.Fatal(err)
+	}
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
@@ -76,7 +80,9 @@ func TestAnUnreadableRowDoesNotEvictAHealthyExecutor(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-3"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-3"}); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
 	// Get now fails for this id — the fake returns an error for any id it does
@@ -105,7 +111,9 @@ func TestADeletedRowEvictsALiveExecutor(t *testing.T) {
 	p.healthInterval = 20 * time.Millisecond
 	p.healthTimeout = 500 * time.Millisecond
 
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-deleted"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-deleted"}); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 
 	store.delete()
@@ -129,7 +137,9 @@ func TestASecondConnectionIsRefusedWhileTheFirstIsAlive(t *testing.T) {
 	p.healthInterval = time.Hour // no health loop interference
 	p.healthTimeout = 2 * time.Second
 
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-dup"}); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, 5*time.Second, "the first executor to join", func() bool { return len(p.Live()) == 1 })
 	first := p.Live()[0]
 
@@ -164,11 +174,15 @@ func TestAConnectionThatNoLongerAnswersIsReplaced(t *testing.T) {
 
 	// The incumbent accepts and then answers nothing — a black hole, which is
 	// what a slept laptop looks like from here.
-	joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-stale"})
+	if err := joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-stale"}); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, 5*time.Second, "the black hole to join", func() bool { return len(p.Live()) == 1 })
 
 	// The real executor comes back.
-	joinViaUpgrade(t, p, &stubHandler{executorID: "exec-stale"})
+	if err := joinViaUpgrade(t, p, &stubHandler{executorID: "exec-stale"}); err != nil {
+		t.Fatal(err)
+	}
 
 	waitFor(t, 10*time.Second, "the answering connection to take over", func() bool {
 		live := p.Live()

@@ -53,7 +53,9 @@ func TestUnresponsiveExecutorIsParkedRatherThanHangingForever(t *testing.T) {
 	p.healthInterval = 50 * time.Millisecond
 	p.healthTimeout = 150 * time.Millisecond
 
-	joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-blackhole"})
+	if err := joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-blackhole"}); err != nil {
+		t.Fatal(err)
+	}
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool {
 		return len(p.Live()) == 1
