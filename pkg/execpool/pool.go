@@ -254,9 +254,9 @@ func (p *Pool) fireOnConnect(executorID string) {
 // handler rather than a listener so the daemon can mount it on the listener it
 // already has.
 func (p *Pool) UpgradeHandler() http.Handler {
-	return upgradeconn.Handler(upgradeconn.Executor, func(c *upgradeconn.Conn) {
-		p.handleConn(c)
-	})
+	return upgradeconn.Handler(upgradeconn.Executor,
+		func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
+		func(c *upgradeconn.Conn, _ struct{}) { p.handleConn(c) })
 }
 
 // Serve runs the executor endpoint on a listener of its own.

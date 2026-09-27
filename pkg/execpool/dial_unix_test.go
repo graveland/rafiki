@@ -34,13 +34,15 @@ func TestConnectOverUnixSocketReachesTheUpgradeEndpoint(t *testing.T) {
 	reached := make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor),
-		upgradeconn.Handler(upgradeconn.Executor, func(c *upgradeconn.Conn) {
-			select {
-			case reached <- struct{}{}:
-			default:
-			}
-			c.Close()
-		}))
+		upgradeconn.Handler(upgradeconn.Executor,
+			func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
+			func(c *upgradeconn.Conn, _ struct{}) {
+				select {
+				case reached <- struct{}{}:
+				default:
+				}
+				c.Close()
+			}))
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Close() }()

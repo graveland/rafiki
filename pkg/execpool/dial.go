@@ -110,7 +110,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	// share one port and one certificate; a wrong endpoint now fails with a
 	// readable HTTP status instead of as garbage in the first frame.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	upConn, err := upgradeconn.Dial(conn, upgradeconn.Executor, host)
+	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Executor, host, nil)
 	if err != nil {
 		return err
 	}

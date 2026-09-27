@@ -95,9 +95,9 @@ func (p *Pool) Reg() *Registry { return p.reg }
 // mux alongside anything else. The daraja DIALS rafikid and then SERVES HTTP/2;
 // rafikid ACCEPTS and is the HTTP client.
 func (p *Pool) UpgradeHandler() http.Handler {
-	return upgradeconn.Handler(upgradeconn.Daraja, func(c *upgradeconn.Conn) {
-		p.handleConn(c)
-	})
+	return upgradeconn.Handler(upgradeconn.Daraja,
+		func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
+		func(c *upgradeconn.Conn, _ struct{}) { p.handleConn(c) })
 }
 
 // ClientFor returns a daraja Connect client for childID, or an error if the

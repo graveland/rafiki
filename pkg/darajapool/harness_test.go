@@ -51,7 +51,7 @@ func connectFakeDaraja(t *testing.T, handler darajapbconnect.DarajaServiceHandle
 		t.Fatalf("dial: %v", err)
 	}
 
-	upConn, err := upgradeconn.Dial(conn, upgradeconn.Daraja, ln.Addr().String())
+	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Daraja, ln.Addr().String(), nil)
 	if err != nil {
 		t.Fatalf("upgrade dial: %v", err)
 	}

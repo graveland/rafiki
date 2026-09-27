@@ -37,7 +37,8 @@ func helloOnlyDaemon(t *testing.T, cb func(protocol.DarajaHelloRequest) protocol
 		// byte-stream protocol. This mirrors what rafikid does on
 		// /daraja/connect.
 		h := upgradeconn.Handler(upgradeconn.Daraja,
-			func(upConn *upgradeconn.Conn) {
+			func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
+			func(upConn *upgradeconn.Conn, _ struct{}) {
 				defer upConn.Close()
 
 				var req protocol.DarajaHelloRequest

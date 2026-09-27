@@ -30,9 +30,13 @@ package upgradeconn
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -74,18 +78,40 @@ const (
 	Daraja Protocol = "rafiki-daraja"
 )
 
-// Handler returns an http.Handler that upgrades a matching request and hands
-// the resulting connection to serve.
+// Handler returns an http.Handler that upgrades a matching request, authorizes
+// it first, and hands the resulting connection to serve together with the
+// authorize result.
+//
+// authorize runs on the request BEFORE the connection is hijacked, so a refusal
+// is an ordinary HTTP response: no hijack, no goroutine, no frame parsing. It
+// must not read the request body. A *Refusal error answers with its status and
+// reason; any other error is logged and answered 500. The http.Header it
+// returns is written on the 101, sorted for deterministic output.
 //
 // serve owns the connection and must close it. It runs on the request's
 // goroutine, which the http.Server no longer tracks once hijacked, so a handler
 // that blocks forever leaks exactly one goroutine and one connection — the same
 // bargain any long-lived accept loop makes.
-func Handler(proto Protocol, serve func(*Conn)) http.Handler {
+func Handler[T any](proto Protocol,
+	authorize func(*http.Request) (T, http.Header, error),
+	serve func(*Conn, T),
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), string(proto)) {
 			http.Error(w, fmt.Sprintf("this endpoint speaks %s; send Upgrade: %s", proto, proto),
 				http.StatusUpgradeRequired)
+			return
+		}
+
+		t, hdr, err := authorize(r)
+		if err != nil {
+			var ref *Refusal
+			if errors.As(err, &ref) {
+				http.Error(w, ref.Reason, ref.Status)
+				return
+			}
+			slog.Error("upgradeconn: authorize failed", "proto", proto, "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
@@ -108,7 +134,26 @@ func Handler(proto Protocol, serve func(*Conn)) http.Handler {
 		// hijacked and no longer writes anything.
 		if _, err := brw.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
 			"Upgrade: " + string(proto) + "\r\n" +
-			"Connection: Upgrade\r\n\r\n"); err != nil {
+			"Connection: Upgrade\r\n"); err != nil {
+			conn.Close()
+			return
+		}
+		if len(hdr) > 0 {
+			keys := make([]string, 0, len(hdr))
+			for k := range hdr {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				for _, v := range hdr[k] {
+					if _, err := brw.WriteString(k + ": " + v + "\r\n"); err != nil {
+						conn.Close()
+						return
+					}
+				}
+			}
+		}
+		if _, err := brw.WriteString("\r\n"); err != nil {
 			conn.Close()
 			return
 		}
@@ -118,39 +163,114 @@ func Handler(proto Protocol, serve func(*Conn)) http.Handler {
 		}
 
 		// brw.Reader, not conn: see the Conn doc comment.
-		serve(&Conn{Conn: conn, r: brw.Reader})
+		serve(&Conn{Conn: conn, r: brw.Reader}, t)
 	})
 }
 
-// Dial performs the client half: it sends the upgrade request on an
+// Dial performs the client half: it sends the upgrade request with hdr on an
 // already-established connection and consumes the 101 response, returning a
-// Conn positioned at the first byte of the upgraded protocol.
+// Conn positioned at the first byte of the upgraded protocol together with the
+// 101's headers. Any other status returns *Refused carrying the response body.
+//
+// Upgrade and Connection are set here and hdr cannot override them; everything
+// else in hdr — e.g. Authorization — rides the request as given.
 //
 // The response is read with a bufio.Reader that is then CARRIED FORWARD in the
 // returned Conn. A server that pipelines its first bytes behind the 101 — which
 // the executor link does not, but a future protocol might — would otherwise
 // have them read into a buffer that is thrown away.
-func Dial(conn net.Conn, proto Protocol, host string) (*Conn, error) {
+func Dial(conn net.Conn, proto Protocol, host string, hdr http.Header) (*Conn, http.Header, error) {
 	req, err := http.NewRequest(http.MethodGet, "http://"+host+PathFor(proto), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Upgrade", string(proto))
 	req.Header.Set("Connection", "Upgrade")
+	for k, vs := range hdr {
+		// Not overridable: they identify the exchange itself.
+		switch http.CanonicalHeaderKey(k) {
+		case "Upgrade", "Connection":
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	if err := req.Write(conn); err != nil {
-		return nil, fmt.Errorf("upgrade: write request: %w", err)
+		return nil, nil, fmt.Errorf("upgrade: write request: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
-		return nil, fmt.Errorf("upgrade: read response: %w", err)
+		return nil, nil, fmt.Errorf("upgrade: read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, fmt.Errorf("upgrade: server answered %s, want 101 Switching Protocols", resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, nil, &Refused{Status: resp.StatusCode, Reason: strings.TrimSpace(string(body))}
 	}
-	return &Conn{Conn: conn, r: br}, nil
+	return &Conn{Conn: conn, r: br}, resp.Header, nil
+}
+
+// Header names carried on the upgrade exchange.
+const (
+	HeaderCredential   = "Rafiki-Credential"    // 101 response: a newly minted credential
+	HeaderExecutorID   = "Rafiki-Executor-Id"   // 101 response: executor row id
+	HeaderChildID      = "Rafiki-Child-Id"      // request: daraja's child id
+	HeaderSelfReported = "Rafiki-Self-Reported" // request: executor capability facts, url.Values-encoded
+)
+
+// Scheme is the Authorization scheme, which selects what the secret is.
+type Scheme string
+
+const (
+	SchemeBearer Scheme = "Bearer" // a durable (executor) or reconnect (daraja) credential
+	SchemeEnroll Scheme = "Enroll" // an executor enrollment token
+	SchemeTicket Scheme = "Ticket" // a one-shot session (executor) or launch (daraja) ticket
+)
+
+// noCredentialBody is the 401 body for a missing or malformed Authorization
+// header. It names the header form so a peer still speaking the JSON hello
+// learns that it predates header auth and must be upgraded.
+const noCredentialBody = `no credential on the upgrade request: send "Authorization: Bearer|Enroll|Ticket <secret>"; a peer sending a JSON hello frame predates header auth and must be upgraded`
+
+// Refusal answers an upgrade with Status and Reason instead of 101.
+type Refusal struct {
+	Status int
+	Reason string
+}
+
+func (r *Refusal) Error() string { return fmt.Sprintf("%d %s", r.Status, r.Reason) }
+
+// Refused is what Dial returns when the server answers anything but 101.
+type Refused struct {
+	Status int
+	Reason string // response body, trimmed, at most 4 KiB read
+}
+
+func (r *Refused) Error() string { return fmt.Sprintf("upgrade refused: %d %s", r.Status, r.Reason) }
+
+// AuthorizationFrom parses the single Authorization header. It returns a 401
+// *Refusal for a missing, repeated, schemeless, unknown-scheme, or empty-secret
+// header; otherwise the canonical Scheme and the secret.
+func AuthorizationFrom(r *http.Request) (Scheme, string, *Refusal) {
+	vals := r.Header.Values("Authorization")
+	if len(vals) != 1 {
+		return "", "", &Refusal{Status: http.StatusUnauthorized, Reason: noCredentialBody}
+	}
+	scheme, secret, ok := strings.Cut(vals[0], " ")
+	secret = strings.TrimSpace(secret)
+	if !ok || secret == "" {
+		return "", "", &Refusal{Status: http.StatusUnauthorized, Reason: noCredentialBody}
+	}
+	for _, s := range []Scheme{SchemeBearer, SchemeEnroll, SchemeTicket} {
+		if strings.EqualFold(scheme, string(s)) {
+			return s, secret, nil
+		}
+	}
+	return "", "", &Refusal{Status: http.StatusUnauthorized, Reason: noCredentialBody}
 }
 
 // PathFor is the single source of truth for each protocol's path, so the dialler

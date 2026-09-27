@@ -88,7 +88,7 @@ func connectOnce(ctx context.Context, o ConnectOptions) (cred string, err error)
 	// Reach the /daraja/connect endpoint by PATH on the shared listener,
 	// upgrading out of HTTP/1.1. Same shape as executor's connectOnce.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	upConn, err := upgradeconn.Dial(conn, upgradeconn.Daraja, host)
+	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Daraja, host, nil)
 	if err != nil {
 		return "", err
 	}
