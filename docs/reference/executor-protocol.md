@@ -36,7 +36,8 @@ daemon, and `--connect-socket`'s unix path when the daemon is local.
 
 A client-run executor is **transient**: it has **no database row** at all. The
 daemon mints a one-shot session ticket over the already-authenticated control
-connection, the client connects with the ticket (`ExecutorHelloRequest.Ticket`),
+connection, the client connects with the ticket (`Authorization: Ticket
+<ticket>` on the upgrade request),
 and the executor lives exactly as long as the control connection that asked for
 it. Closing the connection revokes the ticket and evicts the executor from the
 pool.
@@ -89,10 +90,12 @@ socket mount the same handler:
 GET /executor/connect HTTP/1.1
 Upgrade: rafiki-executor
 Connection: Upgrade
+Authorization: Bearer <credential>
         ↓
 HTTP/1.1 101 Switching Protocols
+Rafiki-Executor-Id: …
         ↓
-{"type":"executor_hello",…}\n     then HTTP/2, roles inverted
+HTTP/2, roles inverted
 ```
 
 One port and one certificate therefore serve the control plane (`/control`) and
@@ -126,50 +129,74 @@ Two consequences worth knowing:
 - **Codec:** Binary protobuf by default; JSON also supported (Connect's
   auto-negotiation).
 
-## Enrollment handshake
+## Authentication on the upgrade request
 
-Over the reverse-dialled transport the executor sends one newline-delimited
-JSON frame before any HTTP/2 framing, and rafikid answers with one:
+There is no hello frame and nothing is negotiated in-band. Authentication
+rides the HTTP Upgrade request itself, as a single `Authorization` header,
+and `upgradeconn.Handler` runs `authorize` BEFORE the connection is hijacked.
+A refusal is therefore an ordinary HTTP response — a status the peer can
+classify and a body it can log — rather than an authenticated connection that
+closes under it. A refused upgrade is never hijacked: no HTTP/2 begins, no
+side effect of the exchange (a spent token, a rotated credential) has happened
+or needs undoing, and the socket closes after the response.
 
-```jsonc
-// executor -> rafikid
-{"type":"executor_hello","token":"<enrollment token>"}      // first join
-{"type":"executor_hello","credential":"<durable credential>"} // thereafter
+The scheme selects what the secret is:
 
-// rafikid -> executor
-{"type":"executor_hello","executorId":"…","credential":"…"}  // success
-{"type":"executor_hello","error":"…","retryable":true}       // failure
-```
-
-Both sides must read this frame **byte at a time**. A buffered reader that
-consumes past the newline swallows the start of the peer's HTTP/2 stream, and
-the connection then dies with an unhelpful protocol error rather than a
-diagnosable one.
-
-### `retryable`
-
-`retryable` discriminates *"rafikid could not check this credential"* from
-*"this credential is not valid"*, and it decides whether the executor exits:
-
-| `retryable` | Meaning | Executor behaviour |
+| Scheme | Secret | Used when |
 |---|---|---|
-| absent / `false` | A decision about the credential — unknown, consumed, expired, disabled, no such row, or a `machine` name already claimed by another executor of the same owner. | Stop. Retrying cannot un-revoke a row, nor free a taken name. `Connect` returns `ErrEnrollmentRejected`. |
-| `true` | The store could not be reached or read. | Keep reconnecting with backoff. |
+| `Bearer` | the executor's durable credential, or the daraja's in-memory reconnect credential | every connection after the first |
+| `Enroll` | a one-time enrollment token minted by `EnrollExecutor` | an executor's first join |
+| `Ticket` | a one-shot session ticket (transient executor) or launch ticket (daraja) | the first connection for something with no durable identity |
 
-Absent means terminal, so an older daemon's responses behave as they always
-did.
+A missing, repeated, schemeless, unknown-scheme or empty-secret header is
+refused 401 with a body that names the header form, so a peer still speaking
+the pre-header-auth JSON hello learns that it predates header auth and must
+be upgraded.
 
-An unclassified error is reported as **retryable**. The failure directions are
-not symmetric: quitting on a genuinely dead credential costs a log line, while
-quitting on a transient one takes the machine out of service permanently — and
-because executors reconnect together, one database restart would otherwise
-take the entire fleet down.
+### Auxiliary headers
 
-The `error` string for a retryable failure is deliberately generic. The peer
-has by definition not proved who it is, and a store error routinely carries a
-DSN, a hostname or a query; the real error goes to rafikid's log.
+- `Rafiki-Self-Reported` (`Enroll` only) carries capability facts — os, arch,
+  version — url.Values-encoded. They are recorded on the row but are NEVER
+  merged into the trust labels: lying about arch only earns work the executor
+  cannot run, but a label that gates access cannot be asserted by the thing
+  it gates. A header that does not parse as url.Values is refused 400, not
+  silently dropped — enrollment is one-shot, so a discarded self-report could
+  not be corrected by retrying.
+- `Rafiki-Child-Id` (daraja, `Bearer` only) names the child the reconnect
+  credential claims; the credential must match it or the connection is
+  refused 401.
+- On the 101 response, `Rafiki-Executor-Id` names the row that answered, and
+  `Rafiki-Credential` carries a credential minted during the exchange — an
+  executor's durable identity on first enrollment, a daraja's reconnect
+  credential on every connection, so the newest connection is the only one
+  that can come back. Riding the 101 costs no extra round trip.
 
-A *terminal* failure does forward its text verbatim, so every terminal answer
+### Statuses
+
+| Status | Meaning | Peer behaviour |
+|---|---|---|
+| `401` | A decision about the credential — unknown, consumed, expired, disabled, no such row, or a `machine` name already claimed by another executor of the same owner. Also a missing or malformed Authorization header. | Stop. Retrying cannot un-revoke a row, nor free a taken name. `Connect` returns `ErrEnrollmentRejected` (daraja: `ErrRejected`). |
+| `400` | Malformed `Rafiki-Self-Reported`. | Stop — terminal. |
+| `503` | The store could not be reached or read. | Keep reconnecting with backoff. |
+| `409` | Another connection for this executor is already live and answering. | Retry shortly; if this machine is not sharing its credential with another, the incumbent is healthy and should be yielded to. |
+
+The client treats **400, 401 and 403 as terminal** and retries anything else
+(503, 409, a plain 500) — the classification the retired `retryable` field
+used to carry, now expressed in the status itself. 403 is in the terminal set
+defensively; nothing currently mints one. The failure directions are not
+symmetric: quitting on a genuinely dead credential costs a log line, while
+quitting on a transient one takes the machine out of service permanently —
+and because executors reconnect together, one database restart would
+otherwise take the entire fleet down. That is why a store blip must answer
+503 rather than down the fleet, and why a 409 — an incumbent still answering,
+so the row is healthy — is retried rather than fought.
+
+The 503 body is deliberately generic — *"rafikid could not verify the
+credential right now; retry"*. The peer has by definition not proved who it
+is, and a store error routinely carries a DSN, a hostname or a query; the
+real error goes to rafikid's log.
+
+A *terminal* refusal does forward its text verbatim, so every terminal answer
 must be a sentinel whose own message is written for the operator reading the
 executor's log. The name collision is the one that carries real advice — the
 enrollment token was minted with a `--name` another executor already holds, and
@@ -681,7 +708,7 @@ back to `dialAddr` only for an executor built before this existed.
 
 `ticket` is a one-shot credential delivered via environment variable
 (`RAFIKI_DARAJA_TICKET`, never argv — `ps` visibility is why). It is replaced
-by a durable credential on first successful hello.
+by a durable credential on first successful connection.
 
 `ChildSpec.ClaudeParams` also carries Phase 2's passthrough-billing fields —
 `proxy_url`, `proxy_token`, `passthrough_auth`, `auto_compact_window`,

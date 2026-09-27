@@ -890,7 +890,8 @@ routinely carried elsewhere and handed to the executor as `--enroll-token`.
 `(owner, machine)` is unique among rows carrying a `machine`; `EnrollExecutor`
 does not detect a collision (the token lives in the enrollment-token table,
 not in `executors`), so the index fires later, at REDEMPTION, as a terminal
-`executor_hello` error — while `CreateExecutor`, which writes the row
+401 on the executor's upgrade request — while `CreateExecutor`, which writes
+the row
 immediately, answers the collision inline with `CodeInvalidArgument`.
 
 `LabelExecutor` is how `owner` and `machine` are changed after the fact —

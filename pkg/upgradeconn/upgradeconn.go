@@ -19,9 +19,14 @@
 //
 // Putting an HTTP request IN FRONT of the stream fixes it. The client sends
 // an ordinary `GET /path` with an Upgrade header, the server's mux routes it
-// by path like anything else, the handler hijacks the connection and replies
-// 101, and only then does the byte-stream protocol begin. Same trick as
-// WebSocket.
+// by path like anything else, and the handler authenticates the request —
+// `Authorization: Bearer|Enroll|Ticket <secret>` — BEFORE hijacking, so a
+// refusal is an ordinary HTTP status, no connection is ever hijacked, and no
+// byte-stream protocol begins. Credentials the server mints during that
+// exchange ride the 101 response's headers (Rafiki-Credential,
+// Rafiki-Executor-Id). Once the 101 is written the byte-stream protocol
+// begins: HTTP/2, with the roles inverted, immediately. Same trick as
+// WebSocket, with the authentication moved onto the request.
 //
 // The payoff is one port, one certificate, one ingress rule — and, because an
 // Upgrade tunnel is what every HTTP proxy already understands, the option of
@@ -43,10 +48,12 @@ import (
 // Conn is a hijacked connection that reads through the buffer the HTTP server
 // left behind.
 //
-// This wrapper exists because of one landmine: the executor link must not
-// have its HTTP/2 client preface swallowed. It sends a hello frame and then
-// immediately starts speaking h2, so a reader that buffers past the newline
-// and is then discarded takes the preface with it. Reading EVERYTHING through
+// This wrapper exists because of one landmine: the upgraded link must not
+// have its HTTP/2 client preface swallowed. The link begins speaking h2
+// immediately after the 101, and those bytes can arrive pipelined behind the
+// 101 itself — already in the hijack buffer, not on the socket — so a reader
+// that over-reads and is then discarded takes the preface with it. Reading
+// EVERYTHING through
 // this wrapper makes over-reading harmless — nothing is discarded, and
 // nothing is lost, because there is only ever one reader.
 //
@@ -69,12 +76,12 @@ func (c *Conn) Reader() *bufio.Reader { return c.r }
 type Protocol string
 
 const (
-	// Executor is the reverse-dialled executor link: a hello frame, then
-	// HTTP/2 with the roles inverted.
+	// Executor is the reverse-dialled executor link: after the 101, HTTP/2
+	// with the roles inverted begins immediately.
 	Executor Protocol = "rafiki-executor"
-	// Daraja is the reverse-dialled per-child host link: a hello frame, then
-	// HTTP/2 with the roles inverted, exactly as Executor. Its own path because
-	// the two carry different hello frames and reach different registries.
+	// Daraja is the reverse-dialled per-child host link: after the 101,
+	// HTTP/2 with the roles inverted begins immediately, exactly as Executor.
+	// Its own path because the two reach different registries.
 	Daraja Protocol = "rafiki-daraja"
 )
 

@@ -105,9 +105,9 @@ func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 	})
 
 	c1 := dialTo(t, addr, Executor)
-	_, _ = c1.Write([]byte("{\"type\":\"executor_hello\"}\n"))
+	_, _ = c1.Write([]byte("{\"type\":\"executor_first\"}\n"))
 	c2 := dialTo(t, addr, Daraja)
-	_, _ = c2.Write([]byte("{\"type\":\"daraja_hello\"}\n"))
+	_, _ = c2.Write([]byte("{\"type\":\"daraja_first\"}\n"))
 
 	seen := map[string]bool{}
 	for range 2 {
@@ -118,15 +118,15 @@ func TestTwoProtocolsShareOneListenerByPath(t *testing.T) {
 			t.Fatal("timed out waiting for both handlers")
 		}
 	}
-	if !seen[`executor:{"type":"executor_hello"}`] {
+	if !seen[`executor:{"type":"executor_first"}`] {
 		t.Errorf("executor handler did not receive its frame; saw %v", seen)
 	}
-	if !seen[`daraja:{"type":"daraja_hello"}`] {
+	if !seen[`daraja:{"type":"daraja_first"}`] {
 		t.Errorf("daraja handler did not receive its frame; saw %v", seen)
 	}
 }
 
-// THE hazard. A client routinely writes its hello frame and its first
+// THE hazard. A client routinely writes its first frame and its first
 // payload in ONE segment, so by the time the HTTP server has finished parsing
 // the upgrade request those extra bytes are already in the hijack buffer — not
 // on the socket. A handler that reads the raw net.Conn loses them and the
@@ -165,7 +165,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 		"Host: " + addr + "\r\n" +
 		"Upgrade: " + string(Daraja) + "\r\n" +
 		"Connection: Upgrade\r\n\r\n" +
-		"{\"type\":\"daraja_hello\"}\n" +
+		"{\"type\":\"daraja_first\"}\n" +
 		"{\"type\":\"daraja_more\"}\n"
 	if _, err := raw.Write([]byte(req)); err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 		t.Errorf("101 carried %s %q, want %q", HeaderCredential, got, "c1")
 	}
 
-	for _, want := range []string{`{"type":"daraja_hello"}`, `{"type":"daraja_more"}`} {
+	for _, want := range []string{`{"type":"daraja_first"}`, `{"type":"daraja_more"}`} {
 		select {
 		case got := <-lines:
 			if got != want {
@@ -194,16 +194,17 @@ func TestUpgradeAuthBytesPipelinedBehindThe101AreNotLost(t *testing.T) {
 	}
 }
 
-// The mirror hazard. The executor writes a hello frame and then immediately
-// starts speaking HTTP/2, so anything that reads the hello with a throwaway
-// buffered reader takes the client preface with it and the connection dies
-// mid-frame. Reading everything through the one Conn keeps them in order.
+// The mirror hazard. The upgraded peer writes a first frame and then
+// immediately starts speaking HTTP/2, so anything that reads the first frame
+// with a throwaway buffered reader takes the client preface with it and the
+// connection dies mid-frame. Reading everything through the one Conn keeps
+// them in order.
 func TestAStreamFollowingTheFirstFrameSurvives(t *testing.T) {
 	done := make(chan string, 1)
 	addr := serveMux(t, map[Protocol]func(*Conn, struct{}){
 		Executor: func(c *Conn, _ struct{}) {
 			defer c.Close()
-			// Read the hello byte-at-a-time, the way the executor link does.
+			// Read the first frame byte-at-a-time, the way the executor link does.
 			var hello []byte
 			buf := make([]byte, 1)
 			for {
@@ -222,14 +223,14 @@ func TestAStreamFollowingTheFirstFrameSurvives(t *testing.T) {
 	})
 
 	c := dialTo(t, addr, Executor)
-	if _, err := c.Write([]byte("{\"type\":\"executor_hello\"}\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err != nil {
+	if _, err := c.Write([]byte("{\"type\":\"executor_first\"}\nPRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")); err != nil {
 		t.Fatal(err)
 	}
 	_ = c.Conn.(*net.TCPConn).CloseWrite()
 
 	select {
 	case got := <-done:
-		want := `{"type":"executor_hello"}|PRI * HTTP/2.0` + "\r\n\r\nSM\r\n\r\n"
+		want := `{"type":"executor_first"}|PRI * HTTP/2.0` + "\r\n\r\nSM\r\n\r\n"
 		if got != want {
 			t.Errorf("stream after the first frame was corrupted:\n got %q\nwant %q", got, want)
 		}

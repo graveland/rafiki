@@ -501,87 +501,6 @@ type ModelInfoResponseData struct {
 	Known               bool   `json:"known"`
 }
 
-// ─── Executor and daraja link frames ─────────────────────────────────────────
-
-// ExecutorHelloRequest is the executor's first frame on a reverse-dialled
-// connection. Exactly one of Token or Credential is set: Token on first
-// enrollment, Credential on every connection after.
-type ExecutorHelloRequest struct {
-	Type       string `json:"type"`
-	Token      string `json:"token,omitempty"`
-	Credential string `json:"credential,omitempty"`
-	// Ticket authenticates a TRANSIENT executor — one with no database row,
-	// created by an interactive client and living only as long as the control
-	// connection that asked for it. Minted by the daemon over an already
-	// authenticated control connection, so redeeming it proves the connection
-	// vouched for this executor. One-shot.
-	Ticket string `json:"ticket,omitempty"`
-	// SelfReported carries capability facts (os, arch, version). It is NEVER
-	// merged into the trust labels — lying about arch only earns work the
-	// executor cannot run, but a label that gates access cannot be asserted
-	// by the thing it gates.
-	SelfReported map[string]string `json:"selfReported,omitempty"`
-}
-
-// ExecutorHelloResponse answers it. Credential is non-empty only on the
-// enrollment exchange and is the executor's durable identity thereafter.
-type ExecutorHelloResponse struct {
-	Type       string `json:"type"`
-	ExecutorID string `json:"executorId,omitempty"`
-	Credential string `json:"credential,omitempty"`
-	Error      string `json:"error,omitempty"`
-	// Retryable discriminates "I could not check this credential" from "this
-	// credential is not valid". Only meaningful alongside Error.
-	//
-	// Without it the executor cannot tell a revoked row from a Postgres
-	// restart, and treating the second as the first makes every executor that
-	// reconnects during a database blip exit permanently — one transient
-	// failure taking down the whole fleet. Absent (false) means terminal,
-	// which keeps an older daemon's responses behaving as they always did.
-	Retryable bool `json:"retryable,omitempty"`
-}
-
-// DarajaHelloRequest is a daraja's first frame on a reverse-dialled connection.
-//
-// Exactly one of Ticket or Credential is set. Ticket is the one-shot the daemon
-// minted and passed through AdminService.Launch; Credential is the in-memory
-// reconnect credential the daemon returned in the hello response, presented on
-// every dial after the first.
-type DarajaHelloRequest struct {
-	Type    string `json:"type"`
-	ChildID string `json:"childId"`
-	Ticket  string `json:"ticket,omitempty"`
-	// Credential is held in daraja's MEMORY only and never written to disk.
-	// That is the correct scope: it authenticates this daraja, and claude dies
-	// with this daraja, so a credential outliving the process would name
-	// something that no longer exists.
-	Credential string `json:"credential,omitempty"`
-	// PID is daraja's own, for the daemon's logs. It is NOT the reaping handle
-	// — that is the process group AdminService.Launch returned — and nothing
-	// gating may be derived from it.
-	PID int `json:"pid,omitempty"`
-}
-
-// DarajaHelloResponse answers it.
-type DarajaHelloResponse struct {
-	Type string `json:"type"`
-	// Credential is the reconnect credential, returned on the TICKET exchange
-	// and empty thereafter. daraja keeps it in memory for the life of the
-	// process.
-	Credential string `json:"credential,omitempty"`
-	Error      string `json:"error,omitempty"`
-	// Retryable discriminates "I could not check this" from "this is not
-	// valid", exactly as ExecutorHelloResponse does and for the same reason.
-	//
-	// One difference matters here: a daemon RESTART empties the in-memory
-	// credential registry, so a reconnecting daraja is answered terminally and
-	// exits, taking claude with it. That is intended — the daemon relaunches
-	// with --resume — but it means a rafikid restart ends every live daraja,
-	// and anyone surprised by that should read this comment rather than hunt a
-	// bug.
-	Retryable bool `json:"retryable,omitempty"`
-}
-
 // ─── Executor management ─────────────────────────────────────────────────────
 
 // ExecutorEnrollRequest mints a one-time enrollment token.
@@ -646,7 +565,8 @@ type ExecutorCreateResponseData struct {
 // It carries only fields that do NOT gate access. owner, isolation,
 // workspace_mode and admits are all decided by the daemon from the connection,
 // because a client that names them can grant itself anything — the same reason
-// ExecutorHelloRequest keeps SelfReported out of the trust labels.
+// the executor's self-reported capability facts are kept out of the trust
+// labels.
 type ExecutorSessionRequest struct {
 	// Name is the operator-chosen name of the client's machine, so the daemon
 	// can find a durable executor that shares this filesystem.
