@@ -68,7 +68,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	results := make([]stopTargetResult, 0, len(args))
 	var failures int
 	for _, arg := range args {
-		childID, kr, err := stopOne(ctx, ctrl, profileName, arg, st, kt)
+		childID, kr, err := stopOne(ctx, ctrl, profileName, arg, ep.describe, st, kt)
 		results = append(results, stopTargetResult{Arg: arg, ChildID: childID, Kill: kr, Err: err})
 		if err != nil {
 			failures++
@@ -102,8 +102,8 @@ type stopTargetResult struct {
 
 // stopOne resolves arg and sends Kill for it. It does not close —
 // that composition lives in `rafiki close` now.
-func stopOne(ctx context.Context, ctrl rafikiv1connect.ControlClient, profileName, arg string, st, kt time.Duration) (string, *rafikiv1.KillResponse, error) {
-	childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg)
+func stopOne(ctx context.Context, ctrl rafikiv1connect.ControlClient, profileName, arg, describe string, st, kt time.Duration) (string, *rafikiv1.KillResponse, error) {
+	childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg, describe)
 	if err != nil {
 		return "", nil, err
 	}

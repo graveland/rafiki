@@ -43,7 +43,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 	var children []*rafikiv1.ChildSummary
 	var failures int
 	for _, arg := range args {
-		childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg)
+		childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg, ep.describe)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: resolve %q: %v\n", arg, err)
 			failures++

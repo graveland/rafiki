@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
 )
 
 // Two rows minted in the same window: UUIDv7s share their leading timestamp
@@ -185,6 +187,7 @@ type executorStubControl struct {
 	token      string
 	createdID  string
 	credential string
+	disableErr error
 
 	sawList    *rafikiv1.ListExecutorsRequest
 	sawLabel   *rafikiv1.LabelExecutorRequest
@@ -236,6 +239,9 @@ func (s *executorStubControl) DisableExecutor(
 	req *connect.Request[rafikiv1.DisableExecutorRequest],
 ) (*connect.Response[rafikiv1.DisableExecutorResponse], error) {
 	s.sawDisable = append(s.sawDisable, req.Msg.GetExecutorId())
+	if s.disableErr != nil {
+		return nil, s.disableErr
+	}
 	return connect.NewResponse(&rafikiv1.DisableExecutorResponse{}), nil
 }
 
@@ -535,4 +541,52 @@ func nonEmptyLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// TestExecutorVerbErrRendersReasonAndInfraAdvice pins the shared
+// connectVerbErr composition on an executor verb: a daemon refusal carrying a
+// rafiki reason renders `<reason>: <message>`, while an infrastructure
+// failure (Unavailable) renders diagnoseConnectError's advice instead of the
+// bare connect transport string.
+func TestExecutorVerbErrRendersReasonAndInfraAdvice(t *testing.T) {
+	denied := func() *executorStubControl {
+		srv := &executorStubControl{}
+		srv.disableErr = rpcreason.Attach(
+			connect.NewError(connect.CodePermissionDenied, errors.New("nope")),
+			"executor_disabled")
+		return srv
+	}
+
+	t.Run("reason-carrying refusal renders reason and message", func(t *testing.T) {
+		executorTestDaemon(t, denied())
+		root := newRootCmd()
+		root.SetArgs([]string{"executor", "disable", "abc123"})
+		var errOut bytes.Buffer
+		root.SetErr(&errOut)
+		err := root.Execute()
+		if err == nil {
+			t.Fatal("disable against a refusing daemon succeeded")
+		}
+		if got := err.Error(); !strings.Contains(got, "executor_disabled: nope") {
+			t.Errorf("error = %q, want `<reason>: <message>` shape", got)
+		}
+	})
+
+	t.Run("infra failure renders the advice", func(t *testing.T) {
+		srv := &executorStubControl{}
+		srv.disableErr = connect.NewError(connect.CodeUnavailable, errors.New("socket gone"))
+		executorTestDaemon(t, srv)
+
+		root := newRootCmd()
+		root.SetArgs([]string{"executor", "disable", "abc123"})
+		var errOut bytes.Buffer
+		root.SetErr(&errOut)
+		err := root.Execute()
+		if err == nil {
+			t.Fatal("disable against a down daemon succeeded")
+		}
+		if got := err.Error(); !strings.Contains(got, "is rafikid running?") {
+			t.Errorf("error = %q, want diagnoseConnectError's advice", got)
+		}
+	})
 }

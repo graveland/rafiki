@@ -54,7 +54,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// An id|name target: this is the child's status, not the daemon's.
 		// Same resolve/fetch pair `get` runs, but rendered through status's
 		// key/value block instead of the list table.
-		childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, args[0])
+		childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, args[0], ep.describe)
 		if err != nil {
 			return fmt.Errorf("resolve %q: %w", args[0], err)
 		}

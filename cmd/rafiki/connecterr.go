@@ -34,3 +34,17 @@ func formatConnectErr(err error) string {
 	}
 	return ce.Error()
 }
+
+// connectVerbErr renders a failed Connect RPC for a CLI verb's stderr,
+// composing the two failure shapes every Connect-backed verb wants. The
+// three infrastructure codes (Unimplemented/Unauthenticated/Unavailable)
+// get diagnoseConnectError's advice — describe names the endpoint for the
+// advice text; everything else renders through formatConnectErr, which
+// prefers the daemon's rafiki reason over connect's coarser code name.
+func connectVerbErr(err error, describe string) error {
+	switch connect.CodeOf(err) {
+	case connect.CodeUnimplemented, connect.CodeUnauthenticated, connect.CodeUnavailable:
+		return diagnoseConnectError(err, describe)
+	}
+	return errors.New(formatConnectErr(err))
+}

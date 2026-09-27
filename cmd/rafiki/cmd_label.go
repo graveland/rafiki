@@ -62,7 +62,7 @@ func runLabel(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, target)
+	childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, target, ep.describe)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -243,16 +242,8 @@ func runUserRm(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// userConnectErr renders a failed user RPC for the verb's stderr. The three
-// infrastructure codes keep diagnoseConnectError's advice — "is rafikid
-// running?", the token file, the daemon-too-old case name the fix for the
-// failures a user most likely caused — while every other code renders
-// through formatConnectErr, which prefers the daemon's rafiki reason over
-// connect's coarser code name.
+// userConnectErr renders a failed user RPC for the verb's stderr: a thin
+// alias of the shared connectVerbErr (see connecterr.go).
 func userConnectErr(err error, describe string) error {
-	switch connect.CodeOf(err) {
-	case connect.CodeUnimplemented, connect.CodeUnauthenticated, connect.CodeUnavailable:
-		return diagnoseConnectError(err, describe)
-	}
-	return errors.New(formatConnectErr(err))
+	return connectVerbErr(err, describe)
 }

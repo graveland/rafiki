@@ -142,7 +142,7 @@ func runExecutorEnroll(cmd *cobra.Command, _ []string) error {
 		TtlSeconds:    int64(ttl.Seconds()),
 	}))
 	if err != nil {
-		return fmt.Errorf("executor enroll: %s", formatConnectErr(err))
+		return connectVerbErr(err, ep.describe)
 	}
 
 	// Token to stdout ONLY; nothing else on stdout so it pipes.
@@ -193,7 +193,7 @@ func runExecutorList(cmd *cobra.Command, _ []string) error {
 	selector, _ := cmd.Flags().GetString("selector")
 	limit, _ := cmd.Flags().GetInt("limit")
 
-	rows, err := fetchExecutorRows(cmdCtx(cmd), ep.control(), selector, limit)
+	rows, err := fetchExecutorRows(cmdCtx(cmd), ep.control(), selector, limit, ep.describe)
 	if err != nil {
 		return err
 	}
@@ -214,13 +214,13 @@ func runExecutorList(cmd *cobra.Command, _ []string) error {
 // eligibility question instead. The limit rides the request as given; the
 // daemon applies the same default-50/clamp-500 contract its framed
 // dispatcher carried.
-func fetchExecutorRows(ctx context.Context, ctl rafikiv1connect.ControlClient, selector string, limit int) ([]*rafikiv1.ExecutorRow, error) {
+func fetchExecutorRows(ctx context.Context, ctl rafikiv1connect.ControlClient, selector string, limit int, describe string) ([]*rafikiv1.ExecutorRow, error) {
 	resp, err := ctl.ListExecutors(ctx, connect.NewRequest(&rafikiv1.ListExecutorsRequest{
 		Selector: selector,
 		Limit:    int32(limit),
 	}))
 	if err != nil {
-		return nil, fmt.Errorf("executor list: %s", formatConnectErr(err))
+		return nil, connectVerbErr(err, describe)
 	}
 	return resp.Msg.GetRows(), nil
 }
@@ -439,7 +439,7 @@ func runExecutorCreate(cmd *cobra.Command, _ []string) error {
 		Admits:        admits,
 	}))
 	if err != nil {
-		return fmt.Errorf("executor create: %s", formatConnectErr(err))
+		return connectVerbErr(err, ep.describe)
 	}
 	// The credential echo stays JSON in every mode — this verb renders no
 	// table: the response's canonical protojson, pretty by default and one
@@ -500,7 +500,7 @@ func runExecutorLabel(cmd *cobra.Command, args []string) error {
 		Remove:     removeKeys,
 	}))
 	if err != nil {
-		return fmt.Errorf("executor label: %s", formatConnectErr(err))
+		return connectVerbErr(err, ep.describe)
 	}
 
 	// The echo is the response's updated row as canonical protojson, in every
@@ -536,7 +536,7 @@ func runExecutorDisable(cmd *cobra.Command, args []string) error {
 	_, err = ep.control().DisableExecutor(cmdCtx(cmd),
 		connect.NewRequest(&rafikiv1.DisableExecutorRequest{ExecutorId: args[0]}))
 	if err != nil {
-		return fmt.Errorf("executor disable: %s", formatConnectErr(err))
+		return connectVerbErr(err, ep.describe)
 	}
 	fmt.Printf("Executor %s disabled.\n", args[0])
 	return nil
@@ -563,7 +563,7 @@ func runExecutorEnable(cmd *cobra.Command, args []string) error {
 	_, err = ep.control().EnableExecutor(cmdCtx(cmd),
 		connect.NewRequest(&rafikiv1.EnableExecutorRequest{ExecutorId: args[0]}))
 	if err != nil {
-		return fmt.Errorf("executor enable: %s", formatConnectErr(err))
+		return connectVerbErr(err, ep.describe)
 	}
 	fmt.Printf("Executor %s enabled.\n", args[0])
 	return nil
@@ -634,13 +634,13 @@ func runExecutorDelete(cmd *cobra.Command, args []string) error {
 	ctl := ep.control()
 
 	if !bulk {
-		return deleteOneExecutor(ctx, ctl, args[0])
+		return deleteOneExecutor(ctx, ctl, args[0], ep.describe)
 	}
 
 	// 500 is the ceiling the executor-admin listing enforces (the same
 	// default-50/clamp-500 contract the framed dispatcher carried); there is
 	// no "no limit".
-	all, err := fetchExecutorRows(ctx, ctl, "", 500)
+	all, err := fetchExecutorRows(ctx, ctl, "", 500, ep.describe)
 	if err != nil {
 		return err
 	}
@@ -670,8 +670,8 @@ func runExecutorDelete(cmd *cobra.Command, args []string) error {
 
 	var failed int
 	for _, e := range matches {
-		if err := deleteOneExecutor(ctx, ctl, e.GetId()); err != nil {
-			fmt.Fprintf(os.Stderr, "executor %s: %s\n", shortExecutorID(e.GetId()), formatConnectErr(err))
+		if err := deleteOneExecutor(ctx, ctl, e.GetId(), ep.describe); err != nil {
+			fmt.Fprintf(os.Stderr, "executor %s: %s\n", shortExecutorID(e.GetId()), err)
 			failed++
 		}
 	}
@@ -705,10 +705,10 @@ func confirmBulkDelete(n int) (bool, error) {
 // deleteOneExecutor removes one row. executorID may be the full row id or any
 // unique trailing fragment of four or more characters — the daemon resolves
 // it, exactly as the framed verb did.
-func deleteOneExecutor(ctx context.Context, ctl rafikiv1connect.ControlClient, executorID string) error {
+func deleteOneExecutor(ctx context.Context, ctl rafikiv1connect.ControlClient, executorID string, describe string) error {
 	if _, err := ctl.DeleteExecutor(ctx,
 		connect.NewRequest(&rafikiv1.DeleteExecutorRequest{ExecutorId: executorID})); err != nil {
-		return fmt.Errorf("executor delete: %s", formatConnectErr(err))
+		return connectVerbErr(err, describe)
 	}
 	fmt.Printf("Executor %s deleted.\n", executorID)
 	return nil

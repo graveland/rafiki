@@ -72,7 +72,7 @@ func runSend(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		target = args[0]
 	}
-	childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, target)
+	childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, target, ep.describe)
 	if err != nil {
 		return err
 	}

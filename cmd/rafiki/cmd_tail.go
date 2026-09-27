@@ -89,7 +89,7 @@ func runTail(cmd *cobra.Command, args []string) error {
 		subject: allSubject(selector),
 	}
 	if len(args) > 0 {
-		childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, args[0])
+		childID, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, args[0], ep.describe)
 		if err != nil {
 			return err
 		}

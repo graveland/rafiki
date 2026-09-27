@@ -145,7 +145,7 @@ func TestResolveTargetConnect(t *testing.T) {
 			name:          "list failure is wrapped",
 			input:         "beta",
 			fake:          fresh(connect.NewError(connect.CodeUnavailable, errors.New("socket gone"))),
-			wantErr:       "list children: unavailable: socket gone",
+			wantErr:       "cannot reach the rafiki daemon at test-endpoint — is rafikid running? (`rafiki status`): unavailable: socket gone",
 			wantListCalls: 1,
 		},
 		{
@@ -180,7 +180,7 @@ func TestResolveTargetConnect(t *testing.T) {
 				}
 			}
 
-			got, err := resolveTargetConnect(context.Background(), tt.fake, "resolve-test", tt.input)
+			got, err := resolveTargetConnect(context.Background(), tt.fake, "resolve-test", tt.input, "test-endpoint")
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("resolveTargetConnect(%q) = %q, want error %q", tt.input, got, tt.wantErr)
@@ -213,7 +213,7 @@ func TestResolveTargetConnectFastPathSkipsTheList(t *testing.T) {
 	}
 	c := &fakeResolveClient{}
 
-	got, err := resolveTargetConnect(context.Background(), c, "resolve-test", "")
+	got, err := resolveTargetConnect(context.Background(), c, "resolve-test", "", "test-endpoint")
 	if err != nil {
 		t.Fatalf("resolveTargetConnect(\"\"): %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResolveTargetConnectFastPathSkipsTheList(t *testing.T) {
 		t.Fatalf("ListChildren called %d times for the active-marker fast path, want 0", c.listCalls)
 	}
 
-	got, err = resolveTargetConnect(context.Background(), c, "resolve-test", "c_direct")
+	got, err = resolveTargetConnect(context.Background(), c, "resolve-test", "c_direct", "test-endpoint")
 	if err != nil {
 		t.Fatalf("resolveTargetConnect(c_direct): %v", err)
 	}

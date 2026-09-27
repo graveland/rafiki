@@ -692,3 +692,19 @@ func (s *refusingUserControl) RemoveUser(
 	return nil, connect.NewError(connect.CodePermissionDenied,
 		errors.New("user administration requires an admin user credential"))
 }
+
+// TestUserCreateHelpPinsTheAdminRecoveryPath pins the two phrases the brief
+// requires `user create`'s help to carry: the verb mints only NON-admin
+// users, and the admin recovery path is `rafikid user create --admin` on the
+// daemon host — so a later help rewording cannot silently drop them.
+func TestUserCreateHelpPinsNonAdminAndRafikidAdminRecovery(t *testing.T) {
+	long := newUserCreateCmd().Long
+	for _, phrase := range []string{
+		"NON-admin",
+		"rafikid user create --admin",
+	} {
+		if !strings.Contains(long, phrase) {
+			t.Errorf("user create help is missing pinned phrase %q; help text:\n%s", phrase, long)
+		}
+	}
+}

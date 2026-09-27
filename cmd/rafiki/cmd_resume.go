@@ -62,7 +62,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		input = args[0]
 	}
-	childID, err := resolveTargetConnect(ctx, ctrl, p.Name, input)
+	childID, err := resolveTargetConnect(ctx, ctrl, p.Name, input, ep.describe)
 	if err != nil {
 		return err
 	}

@@ -113,19 +113,10 @@ func conversationsMode(cmd *cobra.Command) (conversationview.Mode, error) {
 	return conversationview.ModeJSON, nil
 }
 
-// conversationConnectErr renders a Connect failure from the conversation RPCs
-// for stderr. The conversation path attaches rafiki's precise reasons as
-// google.rpc.ErrorInfo details, which connect's own rendering drops;
-// formatConnectErr surfaces them as `<reason>: <message>` — the same
-// `<x>: <message>` line shape every other Connect-backed verb prints through
-// main(). The three infrastructure codes keep diagnoseConnectError's endpoint
-// advice, which formatConnectErr alone would collapse away.
+// conversationConnectErr renders a failed conversation RPC for stderr: a
+// thin alias of the shared connectVerbErr (see connecterr.go).
 func conversationConnectErr(err error, endpoint string) error {
-	switch connect.CodeOf(err) {
-	case connect.CodeUnimplemented, connect.CodeUnauthenticated, connect.CodeUnavailable:
-		return diagnoseConnectError(err, endpoint)
-	}
-	return fmt.Errorf("%s", formatConnectErr(err))
+	return connectVerbErr(err, endpoint)
 }
 
 // renderStatsResponse renders ConversationStatsResponse. Its payload is
@@ -549,7 +540,7 @@ func runConversationsReview(cmd *cobra.Command, args []string) error {
 
 	ids := make([]string, 0, len(args))
 	for _, arg := range args {
-		id, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, arg)
+		id, err := resolveTargetConnect(ctx, client, mustProfile(cmd).Name, arg, ep.describe)
 		if err != nil {
 			return fmt.Errorf("resolve %q: %w", arg, err)
 		}
@@ -615,7 +606,7 @@ func runConversationsFindings(cmd *cobra.Command, _ []string) error {
 		Axis: axis, Skill: skill, Status: status, Limit: int32(limit),
 	}))
 	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+		return connectVerbErr(err, ep.describe)
 	}
 	return renderFindingsResponse(os.Stdout, mode, resp.Msg)
 }

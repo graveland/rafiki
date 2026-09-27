@@ -29,7 +29,7 @@ import (
 //
 // The request carries no filter: resolution must see every child, not just
 // the live ones.
-func resolveTargetConnect(ctx context.Context, c rafikiv1connect.ControlClient, profileName, input string) (string, error) {
+func resolveTargetConnect(ctx context.Context, c rafikiv1connect.ControlClient, profileName, input, describe string) (string, error) {
 	if input == "" {
 		input = getActive(profileName)
 		if input == "" {
@@ -42,7 +42,7 @@ func resolveTargetConnect(ctx context.Context, c rafikiv1connect.ControlClient, 
 
 	resp, err := c.ListChildren(ctx, connect.NewRequest(&rafikiv1.ListChildrenRequest{}))
 	if err != nil {
-		return "", fmt.Errorf("list children: %w", err)
+		return "", connectVerbErr(err, describe)
 	}
 	children := resp.Msg.GetChildren()
 

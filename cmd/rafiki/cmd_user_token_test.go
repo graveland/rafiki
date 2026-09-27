@@ -36,7 +36,9 @@ import (
 
 // refusingDaemon is a framed fake that mirrors the real UDS server's refusal
 // for a credential it does not know: an auth-error ctrl_response, then close.
-// Everything else is answered, so the token-less user-create dial gets through.
+// It feeds the retained framed-plane tests (TestWithTokenAdvice,
+// TestRefusedDialSurfacesAuthInvalidOnFirstRequest), which pin the
+// withTokenAdvice recovery text and the client's auth_invalid surfacing.
 type refusingDaemon struct {
 	mu     sync.Mutex
 	firsts []string
