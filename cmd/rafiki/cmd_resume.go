@@ -17,24 +17,21 @@ import (
 
 func newResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "resume [id|name]",
+		Use:     "resume [id|name...]",
 		Aliases: []string{"res"},
-		Short:   "Resume an exited child",
-		Long: `Resume a rafiki-managed child that has exited.
+		Short:   "Resume one or more exited children",
+		Long: `Resume one or more rafiki-managed children that have exited.
 
-  rafiki resume [id|name]
+  rafiki resume [id|name...]
 
-If id|name is omitted, uses the active marker.`,
-		Args: cobra.MaximumNArgs(1),
+If no id|name is given, uses the active marker.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: runResume,
 	}
 	cmd.Flags().String("api-key", "", "Optional API key override for this resume")
 	_ = cmd.RegisterFlagCompletionFunc("api-key", cobra.NoFileCompletions)
 
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		if len(args) > 0 {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		}
 		return completeChildrenByState(cmd, toComplete, func(ch completionChild) bool {
 			return ch.Status == string(protocol.StatusExited)
 		}), cobra.ShellCompDirectiveNoFileComp
@@ -58,52 +55,95 @@ func runResume(cmd *cobra.Command, args []string) error {
 
 	ctx := cmdCtx(cmd)
 	p := mustProfile(cmd)
-	var input string
-	if len(args) > 0 {
-		input = args[0]
-	}
-	childID, err := resolveTargetConnect(ctx, ctrl, p.Name, input, ep.describe)
-	if err != nil {
-		return err
-	}
-
 	apiKey, _ := cmd.Flags().GetString("api-key")
 
-	resp, err := ctrl.Resume(ctx, connect.NewRequest(&rafikiv1.ResumeRequest{
-		ChildId: childID,
-		ApiKey:  apiKey,
-	}))
-	if err != nil {
-		return diagnoseConnectError(err, ep.describe)
+	// No args resumes the active marker, same as before the command grew
+	// multi-target support: resolveTargetConnect treats "" as "use active".
+	targets := args
+	if len(targets) == 0 {
+		targets = []string{""}
 	}
 
-	_ = setActive(p.Name, childID)
+	var results []resumeResult
+	var failures int
+	for _, arg := range targets {
+		childID, err := resolveTargetConnect(ctx, ctrl, p.Name, arg, ep.describe)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: resolve %q: %v\n", arg, err)
+			failures++
+			continue
+		}
 
-	// The Resume response carries the child id only; text mode fetches a name
-	// with a best-effort get. A JSON/JSONL consumer does not need it and pays
-	// no extra round trip.
-	name := ""
-	if mode == outputTable {
-		name = resumeChildName(ctx, ctrl, childID)
+		resp, err := ctrl.Resume(ctx, connect.NewRequest(&rafikiv1.ResumeRequest{
+			ChildId: childID,
+			ApiKey:  apiKey,
+		}))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: resume %q: %s\n", arg, formatConnectErr(err))
+			failures++
+			continue
+		}
+
+		_ = setActive(p.Name, childID)
+
+		// The Resume response carries the child id only; text mode fetches a
+		// name with a best-effort get. A JSON/JSONL consumer does not need it
+		// and pays no extra round trip.
+		name := ""
+		if mode == outputTable {
+			name = resumeChildName(ctx, ctrl, childID)
+		}
+		results = append(results, resumeResult{ChildID: childID, Name: name, Resp: resp.Msg})
 	}
-	return renderResume(os.Stdout, childID, name, resp.Msg, mode)
+
+	if err := renderResume(os.Stdout, len(targets), results, mode); err != nil {
+		return err
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d target(s) failed", failures)
+	}
+	return nil
 }
 
-// renderResume writes the resume result in the requested mode: the Resume
-// response's canonical protojson pretty, one compact line, or the text line
-// `resumed <childID> (<name>)` — the name is dropped, never printed empty,
-// when the follow-up get could not resolve it.
-func renderResume(w io.Writer, childID, name string, msg proto.Message, mode outputMode) error {
+// resumeResult is one successfully resumed target. Failed targets never
+// reach here — their error is reported to stderr as it happens, mirroring
+// `rafiki get`'s multi-target error handling.
+type resumeResult struct {
+	ChildID string
+	Name    string
+	Resp    *rafikiv1.ResumeResponse
+}
+
+// renderResume writes the successful resume results in the requested mode.
+// wanted is the number of targets requested (before failures are dropped): a
+// single requested target that succeeded emits the bare Resume response's
+// canonical protojson, preserving the single-target JSON/JSONL contract from
+// before multi-target support; anything else wraps in the `{"rows":[...]}`
+// envelope shared by the CLI's other multi-target verbs. Table mode prints
+// one `resumed <childID> (<name>)` line per success, name dropped when the
+// follow-up get could not resolve it.
+func renderResume(w io.Writer, wanted int, results []resumeResult, mode outputMode) error {
 	switch mode {
 	case outputJSON, outputJSONL:
-		return emitProto(w, msg, mode)
-	default:
-		line := "resumed " + childID
-		if name != "" {
-			line += " (" + name + ")"
+		if wanted == 1 && len(results) == 1 {
+			return emitProto(w, results[0].Resp, mode)
 		}
-		_, err := fmt.Fprintln(w, line)
-		return err
+		msgs := make([]proto.Message, len(results))
+		for i, r := range results {
+			msgs[i] = r.Resp
+		}
+		return emitProtoRows(w, msgs, mode)
+	default:
+		for _, r := range results {
+			line := "resumed " + r.ChildID
+			if r.Name != "" {
+				line += " (" + r.Name + ")"
+			}
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 }
 

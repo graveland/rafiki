@@ -72,6 +72,23 @@ func TestGetCmd_MultiArg_ZeroArgsRejected(t *testing.T) {
 	assert.NewAborting(t).Error(err, "expected error for zero args, got nil")
 }
 
+// TestResumeCmd_MultiArg verifies that multiple positional args are accepted
+// and that zero positional args are still allowed — resume alone keeps the
+// pre-multi-target behavior of falling back to the active marker.
+func TestResumeCmd_MultiArg_AcceptsMultiple(t *testing.T) {
+	cmd := newResumeCmd()
+	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
+	cmd.SetArgs([]string{"child-a", "child-b"})
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for multiple args, got")
+}
+
+func TestResumeCmd_MultiArg_ZeroArgsOK(t *testing.T) {
+	cmd := newResumeCmd()
+	cmd.RunE = func(_ *cobra.Command, _ []string) error { return nil }
+	cmd.SetArgs([]string{})
+	assert.NewAborting(t).NoError(cmd.Execute(), "expected no error for zero args (falls back to active marker), got")
+}
+
 // ─── State-filtered completion predicate tests ───────────────────────────────
 
 // These tests exercise the filter predicates without needing a live daemon.
