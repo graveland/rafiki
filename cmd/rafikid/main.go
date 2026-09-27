@@ -712,6 +712,16 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
+	// Recovery must complete BEFORE the canonical socket accepts. The socket
+	// going live is every client's readiness signal (the integration harness
+	// dials it in a loop and treats acceptance as "daemon ready"), so a client
+	// that dials the instant it accepts must never observe the pre-recovery
+	// store: ListChildren/GetChild would report children missing that the
+	// database still holds. The retired framed listener bound this same path
+	// only after loadChildren for exactly that reason — keep the invariant on
+	// the one surviving socket.
+	ctrl.loadChildren(baseCtx)
+
 	if face != nil && face.Control != nil {
 		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, socketPath); err != nil {
 			// Fatal. This socket is how every local client reaches the daemon;
@@ -725,7 +735,6 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
-	ctrl.loadChildren(baseCtx)
 	ctrl.startSweeper(ctx)
 	ctrl.startLeaseRenewal(ctx)
 
