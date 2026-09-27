@@ -103,6 +103,20 @@ func Handler[T any](proto Protocol,
 			return
 		}
 
+		// Checked before authorize: it has no side effects, and authorize's
+		// side effects (redeeming a ticket, consuming an enroll token,
+		// rotating a credential) are all one-shot — failing here after a
+		// successful authorize would strand the peer with a spent credential
+		// and no way to retry.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			// net/http implements Hijacker on HTTP/1.x only — there is no
+			// hijack on HTTP/2. The listener in front of this must therefore
+			// serve 1.1, which is why it does not enable h2.
+			http.Error(w, "server does not support connection upgrade", http.StatusInternalServerError)
+			return
+		}
+
 		t, hdr, err := authorize(r)
 		if err != nil {
 			var ref *Refusal
@@ -112,15 +126,6 @@ func Handler[T any](proto Protocol,
 			}
 			slog.Error("upgradeconn: authorize failed", "proto", proto, "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			// net/http implements Hijacker on HTTP/1.x only — there is no
-			// hijack on HTTP/2. The listener in front of this must therefore
-			// serve 1.1, which is why it does not enable h2.
-			http.Error(w, "server does not support connection upgrade", http.StatusInternalServerError)
 			return
 		}
 
