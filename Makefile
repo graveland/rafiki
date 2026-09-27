@@ -264,10 +264,10 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 		echo "WARNING: RAFIKI_TEST_DSN unset (no .env?) — every DB-backed test will SKIP."; \
 		echo "         A green result here does NOT mean the store/insights code was exercised."; \
 	fi; \
-	if ! python3 -c 'import httpx' 2>/dev/null && [ -z "$${RAFIKI_TEST_SDK_PYTHON:-}" ]; then \
-		echo "WARNING: no python3 with httpx — the sdk/python tests (test/integration TestPythonSDK*) will SKIP."; \
-		echo "         Install httpx for the interpreter named python3 (or set RAFIKI_TEST_SDK_PYTHON to one)"; \
-		echo "         to exercise the SDK against a scratch daemon."; \
+	if ! command -v uv >/dev/null 2>&1 && [ -z "$${RAFIKI_TEST_SDK_PYTHON:-}" ]; then \
+		echo "WARNING: no uv on PATH — the sdk/python tests (test/integration TestPythonSDK*) will SKIP."; \
+		echo "         They build their interpreter with uv from sdk/python/pyproject.toml; install uv"; \
+		echo "         (or set RAFIKI_TEST_SDK_PYTHON to an interpreter with httpx)."; \
 	fi; \
 	go test -race -count=1 ./...
 

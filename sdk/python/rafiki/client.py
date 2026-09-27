@@ -105,6 +105,12 @@ class Client:
         # inside() clients never carry a token (the socket is the credential);
         # remember why for the error messages that matter.
         self._child = child
+        # child_id -> the child's event-log ordinal just before this client's
+        # latest prompt Send. While set, a settle must be a busy -> idle
+        # transition AFTER that ordinal: a fundi child reports idle between
+        # the Send and its turn starting, and settling on that idle reads a
+        # transcript the prompt has not reached. See _settle_one.
+        self._prompt_floor: dict = {}
 
     # ── constructors ─────────────────────────────────────────────────────────
 
@@ -267,7 +273,15 @@ class Client:
         for a in attachments or []:
             blocks.append(a if isinstance(a, _gen.event_pb.ContentBlock) else _block_from_dict(a))
         req = _gen.control_pb.SendRequest(child_id=child_id, mode=_mode_wire(mode), blocks=blocks)
-        return self._call("Send", req, _gen.control_pb.SendResponse).message_id
+        # A prompt starts new work, so a later settled()/wait() on this child
+        # must see that work's turn end, not the idle the child sits in until
+        # the prompt is picked up. The floor is read BEFORE the Send so a turn
+        # that starts and ends immediately still lands above it.
+        floor = (self.get(child_id).latest_ordinal or 0) if mode == "prompt" else None
+        message_id = self._call("Send", req, _gen.control_pb.SendResponse).message_id
+        if floor is not None:
+            self._prompt_floor[child_id] = floor
+        return message_id
 
     def stop(self, child_id: str, *, shutdown_timeout_ms: "int | None" = None, kill_timeout_ms: "int | None" = None):
         """Stop a child: the graceful window first, then the SIGTERM/SIGKILL
@@ -373,6 +387,11 @@ class Client:
         stream's open is replayed by the cursor rather than missed. Children
         are watched in the order given — ``settled()`` yields in watch
         order, not settle order; ``wait()`` is the all-at-once form.
+
+        A child this client sent a prompt (``send()``, or ``spawn()`` with a
+        prompt) settles only on the turn that prompt started: its idle
+        counts once a busy status follows the send, so the idle a fresh
+        child reports before its prompt is picked up is not a settle.
         """
         ids = list(children) if children is not None else []
         if not ids:
@@ -394,12 +413,27 @@ class Client:
 
     def _settle_one(self, child_id: str, *, timeout: "float | None" = None):
         """Watch one child to its settle, cursor-replayed so a settle that
-        lands during a reconnect is seen rather than waited past forever."""
+        lands during a reconnect is seen rather than waited past forever.
+
+        After this client sent the child a prompt, idle only counts once a
+        busy status has been seen above the prompt's floor ordinal — the same
+        working -> idle transition the daemon's own subagent-settled
+        notification fires on. Exited always settles."""
+        floor = self._prompt_floor.get(child_id)
+        busy = False
+
+        def settles(state: str) -> bool:
+            return state == "exited" or (state in SETTLED_STATES and (floor is None or busy))
+
+        def done(state: str, exit_code=None) -> Settle:
+            self._prompt_floor.pop(child_id, None)
+            return Settle(child_id, state, exit_code)
+
         summary = self.get(child_id)
-        if summary.status in SETTLED_STATES:
-            yield Settle(child_id, summary.status)
+        if settles(summary.status):
+            yield done(summary.status)
             return
-        last_ordinal = summary.latest_ordinal or 0
+        last_ordinal = floor if floor is not None else (summary.latest_ordinal or 0)
         deadline = None if timeout is None else time.monotonic() + timeout
 
         seen = last_ordinal
@@ -442,14 +476,16 @@ class Client:
                         continue
                     if ev.ordinal is not None:
                         seen = max(seen, ev.ordinal)
-                    if state in SETTLED_STATES:
-                        yield Settle(child_id, state, exit_code)
+                    if state not in SETTLED_STATES:
+                        busy = True
+                    elif settles(state):
+                        yield done(state, exit_code)
                         return
                 # Clean stream end without a settle: poll once more, in case
                 # the terminal status raced the stream closed.
                 summary = self.get(child_id)
-                if summary.status in SETTLED_STATES:
-                    yield Settle(child_id, summary.status)
+                if settles(summary.status):
+                    yield done(summary.status)
                     return
                 continue
             except StreamEnded:
@@ -458,8 +494,8 @@ class Client:
                 # clean end it can only mean here: poll once for a settle
                 # that raced the stream closed, else keep watching.
                 summary = self.get(child_id)
-                if summary.status in SETTLED_STATES:
-                    yield Settle(child_id, summary.status)
+                if settles(summary.status):
+                    yield done(summary.status)
                     return
                 continue
             except ConnectError as exc:

@@ -84,6 +84,10 @@ caller mistakes — they raise through immediately.
 
 Streaming calls retry too, with their delivery contracts spelled out:
 
+- After this client sends a child a prompt (`send()`, or `spawn()` with a
+  prompt), `settled()`/`wait()` settle it on the turn that prompt started — a
+  busy status after the send, then idle — never on the idle it reports before
+  picking the prompt up. Exited always settles.
 - `settled()`/`wait()` resume from the highest event ordinal actually seen
   (the daemon's replay cursor), so a settle that lands during a daemon
   restart is seen rather than waited past.
@@ -95,7 +99,9 @@ Streaming calls retry too, with their delivery contracts spelled out:
 ## Tests
 
 The Go test `TestPythonSDK*` in `test/integration` drives this SDK against a
-real scratch daemon (isolated profile, fake-LLM seat) when the environment's
-`python3` can import `httpx` — and says so, loudly, when it cannot. The
+real scratch daemon (isolated profile, fake-LLM seat). Its interpreter is a
+venv uv builds from this directory's `pyproject.toml` in the user cache
+(`RAFIKI_TEST_SDK_PYTHON` overrides it); with no uv on PATH the tests skip,
+loudly. The
 wire-level details (envelopes, error mapping, retry budget) are additionally
 covered without a daemon by the same test's self-check script.

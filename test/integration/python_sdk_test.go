@@ -33,33 +33,63 @@ package integration_test
 // SDK was never exercised" into a green that looks like a pass.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/multigres/testkit/assert"
 )
 
-// sdkPython returns the interpreter the SDK tests run (RAFIKI_TEST_SDK_PYTHON
-// when set — a venv python is the usual reason — else python3), skipping
-// LOUDLY when it cannot import httpx. The skip reason names the check and the
-// fix, so it survives both -v runs and the Makefile's warning.
+// sdkPython returns the interpreter the SDK tests run: RAFIKI_TEST_SDK_PYTHON
+// when set, else a uv-built venv holding exactly the dependencies
+// sdk/python/pyproject.toml declares — the same tool, reading the same
+// manifest, that builds a git source's venv on an executor. The venv lives
+// in the user cache, not the source tree, and holds only the dependencies:
+// every driver and pymodule puts sdk/python itself first on sys.path. It is
+// built once per test binary (the SDK tests run in parallel). A missing uv
+// or a failed build skips LOUDLY, naming the fix.
 func sdkPython(t *testing.T) string {
 	t.Helper()
-	py := os.Getenv("RAFIKI_TEST_SDK_PYTHON")
-	if py == "" {
-		py = "python3"
+	if py := os.Getenv("RAFIKI_TEST_SDK_PYTHON"); py != "" {
+		return py
 	}
-	if _, err := exec.LookPath(py); err != nil {
-		t.Skipf("sdk/python tests skipped: no %s on PATH (%v); install python3 with httpx, or set RAFIKI_TEST_SDK_PYTHON", py, err)
+	sdkVenvOnce.Do(func() { sdkVenvPython, sdkVenvSkip = buildSDKVenv() })
+	if sdkVenvSkip != "" {
+		t.Skip(sdkVenvSkip)
 	}
-	out, err := exec.Command(py, "-c", "import httpx").CombinedOutput()
+	return sdkVenvPython
+}
+
+var (
+	sdkVenvOnce   sync.Once
+	sdkVenvPython string
+	sdkVenvSkip   string
+)
+
+func buildSDKVenv() (python, skip string) {
+	uv, err := exec.LookPath("uv")
 	if err != nil {
-		t.Skipf("sdk/python tests skipped: %s cannot import httpx (%v: %s); pip install httpx, or point RAFIKI_TEST_SDK_PYTHON at an interpreter that has it", py, err, strings.TrimSpace(string(out)))
+		return "", fmt.Sprintf("sdk/python tests skipped: no uv on PATH (%v); install uv, or set RAFIKI_TEST_SDK_PYTHON to an interpreter with httpx", err)
 	}
-	return py
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Sprintf("sdk/python tests skipped: no user cache dir for the SDK venv (%v)", err)
+	}
+	venv := filepath.Join(cache, "rafiki", "test-sdk-venv")
+	python = filepath.Join(venv, "bin", "python")
+	for _, args := range [][]string{
+		{"venv", "--quiet", "--allow-existing", venv},
+		{"pip", "install", "--quiet", "--python", python, "-r", filepath.Join(repoRoot, "sdk", "python", "pyproject.toml")},
+	} {
+		if out, err := exec.Command(uv, args...).CombinedOutput(); err != nil {
+			return "", fmt.Sprintf("sdk/python tests skipped: uv %s failed (%v): %s", args[0], err, strings.TrimSpace(string(out)))
+		}
+	}
+	return python, ""
 }
 
 // bootSDKDaemon boots a script-capable DB-backed daemon (the fake-LLM seat
@@ -165,7 +195,7 @@ def note(s):
     with open(probe, "a") as f:
         f.write(s + "\n")
 
-STATE = {"unary_503s": 2, "stream_503s": 0, "requests": []}
+STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": []}
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -208,7 +238,28 @@ class H(BaseHTTPRequestHandler):
             env(self.wfile, {"stop": {"reason": "stopping"}})
             env(self.wfile, {"error": None}, end=True)
             return
+        if self.path.endswith("/Send"):
+            self._json({"messageId": "m_1"})
+            return
         if self.path.endswith("/StreamEvents"):
+            n = struct.unpack(">I", body[1:5])[0]
+            sreq = json.loads(body[5:5 + n])
+            if sreq["subject"]["child"] == "c_2":
+                # The prompted-child race: the first stream carries only the
+                # idle the child reports before its prompt is picked up, then
+                # closes; the turn itself (busy, then idle) is on the re-open.
+                cursor = int(sreq["cursor"]["ordinals"]["c_2"])
+                STATE["c2_cursors"].append(cursor)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/connect+json")
+                self.end_headers()
+                if cursor < 7:
+                    env(self.wfile, {"childId": "c_2", "ordinal": 7, "tsUnixMs": "1727", "agentStatus": {"state": "idle"}})
+                else:
+                    env(self.wfile, {"childId": "c_2", "ordinal": 8, "tsUnixMs": "1728", "agentStatus": {"state": "streaming"}})
+                    env(self.wfile, {"childId": "c_2", "ordinal": 9, "tsUnixMs": "1729", "agentStatus": {"state": "idle"}})
+                env(self.wfile, {"error": None}, end=True)
+                return
             if STATE["stream_503s"] > 0:
                 STATE["stream_503s"] -= 1
                 self._err(503, "unavailable", "gap")
@@ -224,6 +275,8 @@ class H(BaseHTTPRequestHandler):
             req = json.loads(body)
             if req.get("childId") == "c_1":
                 self._json({"child": {"childId": "c_1", "status": "streaming", "latestOrdinal": 6, "labels": {}}})
+            elif req.get("childId") == "c_2":
+                self._json({"child": {"childId": "c_2", "status": "idle", "latestOrdinal": 6, "labels": {}}})
             else:
                 self._err(403, "permission_denied", "not yours")
             return
@@ -285,6 +338,14 @@ def run():
         settles = list(c.settled(["c_1"]))
         assert [s.state for s in settles] == ["exited"], settles
         note("4 settled OK")
+
+        # 4b. a prompted child that still reports idle has NOT settled: the
+        # settle is the busy -> idle transition after the send, so the watch
+        # skips the pre-prompt idle at 7 and re-opens from it.
+        c.send("c_2", "go")
+        assert c.wait(["c_2"], timeout=10) == {"c_2": "idle"}
+        assert STATE["c2_cursors"] == [6, 7], STATE["c2_cursors"]
+        note("4b prompted settle OK")
 
         # 5. generated codec: presence, oneof guard, int64 as wire strings.
         req = control_pb.SpawnRequest(kind="fundi", max_cost=0.0)
