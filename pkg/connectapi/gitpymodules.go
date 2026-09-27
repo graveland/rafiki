@@ -85,9 +85,9 @@ func gitSourceError(err error) error {
 
 // validateGitSourceName applies the git-source name rule client-side of the
 // store: "local" is reserved for the blob store, everything else must be a
-// bare Python identifier — the name becomes the `repo` argument's value
-// across the whole pymodule tool surface, so the same rule that guards a
-// pymodule name guards it.
+// safe path segment (gitpymodules.ValidateName) — the name becomes the `repo`
+// argument's value across the whole pymodule tool surface and a checkout
+// directory on every executor.
 func validateGitSourceName(name string) error {
 	if name == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("name is required"))

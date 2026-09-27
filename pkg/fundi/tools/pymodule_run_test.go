@@ -733,8 +733,7 @@ func TestPymoduleRunRepoModulesResolveWithinRepo(t *testing.T) {
 }
 
 // TestPymoduleRunRepoRejectsPathLikeRepoNames pins the repo-name guard: a
-// repo value becomes a path segment under the cache root, so it must be the
-// same bare-identifier shape every other pymodule name is -- traversal,
+// repo value becomes a path segment under the cache root, so traversal,
 // directory-prefixed and file-extension forms are all rejected before
 // anything on disk is touched.
 func TestPymoduleRunRepoRejectsPathLikeRepoNames(t *testing.T) {
@@ -744,7 +743,7 @@ func TestPymoduleRunRepoRejectsPathLikeRepoNames(t *testing.T) {
 	for _, bad := range []string{"../sibling/evil", "sub/evil", "./evil", "evil.py"} {
 		_, err := tool.Execute(context.Background(), ToolInput(fmt.Sprintf(`{"repo": %q, "script": "main"}`, bad)))
 		c.Error(err, "want an error for the path-like repo %q, got nil", bad)
-		c.False(!strings.Contains(err.Error(), "Python identifier") || !strings.Contains(err.Error(), "repo"), "error for %q should say the repo must be a bare Python identifier, got: %v", bad, err)
+		c.False(!strings.Contains(err.Error(), "git source name") || !strings.Contains(err.Error(), "repo"), "error for %q should be the repo's git source name rule, got: %v", bad, err)
 	}
 	// Nothing escaped the guard into the managed cache root.
 	_, statErr := os.Stat(filepath.Join(paths.CacheDir(), "pymodule-repos", "sibling"))

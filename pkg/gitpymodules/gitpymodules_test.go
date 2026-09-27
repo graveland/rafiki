@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/pymodules"
-
 	"github.com/multigres/testkit/assert"
 )
 
@@ -22,27 +20,22 @@ func TestGitSourceRecordPutRejectsReservedLocalName(t *testing.T) {
 	assert.NewAborting(t).ErrorIs(err, ErrReservedName, "ValidateName(\"local\") = %v, want ErrReservedName", err)
 }
 
-// Beyond the reserved sentinel, a git source's name follows the pymodule
-// name rule -- it becomes the `repo` argument's value everywhere else, and
-// pymodules.ValidName is the one check that already fits (bare Python
-// identifier, 1-64 chars).
-func TestGitSourceRecordValidateNameMirrorsPymodulesRules(t *testing.T) {
+// Beyond the reserved sentinel, a git source's name is a single safe path
+// segment, not a Python identifier: it names a checkout directory and is never
+// imported, so "review-swarm" is accepted where pymodules.ValidName would
+// refuse it.
+func TestGitSourceRecordValidateNameIsAPathSegment(t *testing.T) {
 	c := assert.NewCollecting(t)
-	for _, name := range []string{"rotate_keys", "_ops_tools", "a"} {
+	for _, name := range []string{"rotate_keys", "_ops_tools", "a", "review-swarm", "1abc", strings.Repeat("x", 64)} {
 		err := ValidateName(name)
 		c.NoError(err, "ValidateName(%q) = %v, want nil", name, err)
 	}
-	for _, name := range []string{"", "1abc", "has space", "a/b", "..", "over-64-chars-" + strings.Repeat("x", 50)} {
+	for _, name := range []string{"", ".", "..", ".hidden", "v1.2", "evil.py", "-rf", "has space", "a/b", `a\b`, "a:b", "a\x00b", strings.Repeat("x", 65)} {
 		err := ValidateName(name)
 		if err == nil {
 			t.Errorf("ValidateName(%q) = nil, want an error", name)
 			continue
 		}
-		c.False(errors.Is(err, ErrReservedName), "ValidateName(%q) = ErrReservedName, want the pymodules.ValidName error", name)
-	}
-	// The two rules must compose: the reserved check wins for "local", and
-	// ValidName's own verdict is passed through untouched for the rest.
-	if want := pymodules.ValidName("has space"); ValidateName("has space") == nil || want == nil {
-		t.Fatalf("ValidateName must defer to pymodules.ValidName (got %v, pymodules says %v)", ValidateName("has space"), want)
+		c.False(errors.Is(err, ErrReservedName), "ValidateName(%q) = ErrReservedName, want the path-segment error", name)
 	}
 }

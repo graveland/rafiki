@@ -10,9 +10,9 @@ package gitpymodules
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
-
-	"go.graveland.dev/rafiki/pkg/pymodules"
 )
 
 // ErrNotFound means the git source does not exist for the given owner.
@@ -41,9 +41,9 @@ type Store interface {
 	// ownerUserID empty means unattributed. A git source registration is a
 	// pointer to repoint, not an append-only snippet history, so Put for an
 	// existing (owner, name) updates url/ref in place rather than inserting
-	// a new row. Put rejects name == "local" (ErrReservedName) and otherwise
-	// requires pymodules.ValidName -- see ValidateName, which every
-	// implementation must apply before touching the store.
+	// a new row. Put rejects name == "local" (ErrReservedName) and any other
+	// name ValidateName refuses; every implementation must apply it before
+	// touching the store.
 	Put(ctx context.Context, ownerUserID, name, url, ref string) (GitSourceRecord, error)
 
 	// List returns ownerUserID's sources ordered by name. ownerUserID empty
@@ -57,13 +57,28 @@ type Store interface {
 	Delete(ctx context.Context, ownerUserID, name string) error
 }
 
-// ValidateName is the name rule every Store.Put must enforce: "local" is
-// reserved for the blob store, and everything else must pass
-// pymodules.ValidName, because a git source's name becomes the value of the
-// `repo` argument across the whole pymodule tool surface.
+// validNameRe is a single safe path segment, not a Python identifier: a git
+// source's name only ever becomes a directory under the executor's checkout
+// cache and the value of the `repo` argument. Python never imports it — the
+// checkout's CONTENTS go on PYTHONPATH — so "review-swarm" is fine. No "."
+// (so no "..", hidden directories or extension-shaped names), no leading "-"
+// (nothing a subprocess could parse as an option), and no ":" (`--pymodule
+// <repo>:<script>` splits on it).
+var validNameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]*$`)
+
+// ValidateName is the name rule every Store.Put must enforce, and every
+// consumption point that turns a repo name into a path re-checks: "local" is
+// reserved for the blob store, and everything else must be a 1-64 character
+// validNameRe segment.
 func ValidateName(name string) error {
 	if name == "local" {
 		return ErrReservedName
 	}
-	return pymodules.ValidName(name)
+	if len(name) == 0 || len(name) > 64 {
+		return fmt.Errorf("git source name must be 1-64 characters, got %d", len(name))
+	}
+	if !validNameRe.MatchString(name) {
+		return fmt.Errorf("git source name %q may only contain letters, digits, \"_\" and \"-\", and must not start with \"-\"", name)
+	}
+	return nil
 }

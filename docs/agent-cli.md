@@ -752,7 +752,8 @@ Manage git-backed pymodule sources: owner-scoped `(name, url, ref)`
 registrations whose discovered scripts and packages children address as
 `repo=<name>` on the pymodule tools. The blob store above is itself one such
 scope under the reserved name `local`, which is why `repo add` refuses it.
-These are rare, setup-shaped operations, so they live here and on no agent
+A name is 1-64 letters, digits, `_` and `-`, not starting with `-` — it names
+a checkout directory and is never imported, so `review-swarm` is fine. These are rare, setup-shaped operations, so they live here and on no agent
 tool surface — registration goes over Connect (`AddPymoduleGitSource`/
 `ListPymoduleGitSources`/`RefreshPymoduleGitSource`/`RemovePymoduleGitSource`)
 and works against a remote daemon exactly as against a local one.

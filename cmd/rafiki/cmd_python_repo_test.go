@@ -257,7 +257,7 @@ func TestPythonRepoCommandTree(t *testing.T) {
 	// both refused before any round trip.
 	stub := &repoStubControl{}
 	newRepoHarness(t, stub)
-	for _, name := range []string{"local", "9bad"} {
+	for _, name := range []string{"local", "bad.name"} {
 		c.Error(runRepoCmd(t, "add", name, "https://example.net/x.git"), "python repo add %q: accepted, want the name refusal", name)
 	}
 	c.Empty(stub.addCalls, "the daemon was called despite the local name refusals")
@@ -346,7 +346,7 @@ func TestPythonRepoAddRejectsLocalNameBeforeDial(t *testing.T) {
 		c := assert.NewCollecting(t)
 		stub := &repoStubControl{}
 		newRepoHarness(t, stub)
-		for _, name := range []string{"local", "9bad"} {
+		for _, name := range []string{"local", "bad.name"} {
 			c.Error(runRepoCmd(t, "add", name, "https://example.net/x.git"), "python repo add %q: accepted", name)
 		}
 		c.Empty(stub.addCalls, "daemon called despite local refusals")

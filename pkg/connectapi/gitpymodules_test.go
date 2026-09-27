@@ -225,11 +225,11 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 		call func() error
 	}{
 		{"refresh", func() error {
-			_, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "9bad"}))
+			_, err := s.RefreshPymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: "bad.name"}))
 			return err
 		}},
 		{"remove", func() error {
-			_, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "9bad"}))
+			_, err := s.RemovePymoduleGitSource(context.Background(), connect.NewRequest(&rafikiv1.RemovePymoduleGitSourceRequest{Name: "bad.name"}))
 			return err
 		}},
 	} {

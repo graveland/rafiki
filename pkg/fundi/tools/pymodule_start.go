@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 )
@@ -111,7 +112,7 @@ func (t *pymoduleStartTool) Execute(ctx context.Context, input ToolInput) (ToolR
 	// it: the name becomes a path segment under the git cache on the hosting
 	// side, and the daemon re-checks it against the registered sources.
 	if in.Repo != pymodules.LocalRepo {
-		if err := pymodules.ValidName(in.Repo); err != nil {
+		if err := gitpymodules.ValidateName(in.Repo); err != nil {
 			return ToolResult{}, fmt.Errorf("pymodule_start: repo: %w", err)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/toolmeta"
 )
@@ -253,13 +254,10 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 // paths.CacheDir() rather than imported.
 func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInput) (ToolResult, error) {
 	// The repo name becomes a path segment under the cache root, so it is
-	// guarded by the same bare-identifier rule the blob path applies to its
-	// own names. gitpymodules.ValidateName applies exactly this rule (plus
-	// the "local" reservation, which the dispatch above already handled) to
-	// every registered source, so this matches what a stored name can be
-	// rather than being stricter; each consumption point still validates
-	// independently, never trusting an earlier check.
-	if err := pymodules.ValidName(in.Repo); err != nil {
+	// guarded by the rule every registered source was stored under; each
+	// consumption point validates independently, never trusting an earlier
+	// check.
+	if err := gitpymodules.ValidateName(in.Repo); err != nil {
 		return ToolResult{}, fmt.Errorf("pymodule_run: repo: %w", err)
 	}
 	if err := pymodules.ValidName(in.Script); err != nil {
