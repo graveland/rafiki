@@ -28,8 +28,8 @@ shorthands — **a different contract**: table on a TTY and a pipe alike (no
 TTY probe, no pipe→JSON rule), `-o json`/`-j` pretty JSON, and `-J`/`-o
 jsonl` one compact record per line with any `{"rows": …}` envelope unwrapped
 (`-j -J` together errors). The JSON *payload* still matches —
-`ctrl_conversation_search` puts its rows in a `{"rows": [...]}` envelope on
-the wire (control-protocol.md §6.18), and the client unwraps it before
+`ConversationSearch` puts its rows in a `{"rows": [...]}` envelope on the
+wire (control-protocol.md §2.3), and the client unwraps it before
 printing, so `rafiki conversations search -o json | jq '.[]'` and `rafikid
 agent search -J | jq '.[]'` iterate the same thing, as does `rafiki
 conversations search -J`. `analyze` stays
@@ -51,20 +51,24 @@ mismatch, not a rendering bug.
 
 The one non-`rafikid agent` command documented here, because `stats`/`search`'s
 `--owner` filter takes a name straight out of `rafiki user list` and readers
-need the source before the consumer. It talks to the daemon's control socket
-(`ctrl_user_create`/`ctrl_user_list`/`ctrl_user_rm` — see
-`docs/reference/control-protocol.md` §16), not Postgres directly, so it works
+need the source before the consumer. It talks to the daemon over the Connect
+plane (`CreateUser`/`ListUsers`/`RemoveUser` — see
+`docs/reference/control-protocol.md` §2.3), not Postgres directly, so it works
 wherever `rafiki` itself works, DSN or none.
 
 ```
-rafiki user create <name>   # mint a user; prints its token once
+rafiki user create <name>   # mint a NON-admin user; prints its token once
 rafiki user list            # active users; --all also lists tombstoned ones
 rafiki user rm <name>       # tombstone a user; its token stops working at once
 ```
 
-`rafiki user create` is also how a fresh daemon gets its first identity: while
-zero active users exist, the daemon is in bootstrap mode and `ctrl_user_create`
-is the only command any listener accepts (see README's "First user" section).
+Every verb here is an admin surface: it needs an admin user credential (or
+the anonymous local socket, which is the credential on the daemon's own
+host), and `create` NEVER mints an admin — admins come only from
+`rafikid user create <name> --admin` on the daemon host, which opens the
+database directly and is also how a fresh daemon gets its first identity (see
+README's "First user" section; the daemon logs that exact instruction once at
+startup while zero users exist).
 
 - **`--no-write`** (create only): print the token but skip writing it to the
   current profile's token file (`~/.config/rafiki/profiles/<name>/token`,
@@ -86,25 +90,21 @@ old global `~/.config/rafiki/token` (and the even older, already-unread
 `-j`) prints the resolved profile as ONE machine-readable record —
 `name`, `socket`, `url`, `connect_socket`, `token`, `kind`, `model`,
 `preset`, `labels` — whose `token` carries the resolved credential value (the
-human rendering shows only whether a token exists) and whose
-`connect_socket` names the Connect socket beside the profile's framed one.
-This is what [rafiki's Python SDK](../sdk/python/README.md) shells out to in
+human rendering shows only whether a token exists). This is what
+[rafiki's Python SDK](../sdk/python/README.md) shells out to in
 `Client.from_profile`; a rafiki binary that predates `-o json` on this verb
 makes the SDK fail with a rebuild hint rather than parse the text form.
+`connect_socket` equals `socket` (one control plane, one socket); the key is
+kept because rafiki-py reads it.
 
-**This only bites on a remote (`https://`) daemon, not the local dev loop.**
-`mustDial` (`cmd/rafiki/cli_helpers.go`) resolves the client's one profile
-(`pkg/profile`) and dials it: a profile with a `url` presents that profile's
-token file over TLS, a profile with a `socket` reads no token at all, because
-UDS connections skip auth entirely and are never bootstrap-restricted. So a
-stale token file cannot be why a *local* `rafiki user create` fails on a
-fresh daemon — that path is structurally unaffected by the file's contents.
-It genuinely bites during the `kubectl port-forward` first-user sequence: a
-token file left over from a different (or wiped) remote daemon turns what
-should be a no-credential bootstrap dial into an authenticated one, which
-then fails `auth_invalid`. If `rafiki user create` unexpectedly refuses
-against a remote daemon you know is fresh, check that profile's token file
-before suspecting the daemon.
+The stale-token failure mode is a REFUSED request, not a wrong daemon: a
+profile with a `url` presents its token file over TLS, and a token the daemon
+cannot resolve fails `unauthenticated`. `newConnectEndpoint`
+(`cmd/rafiki/connectclient.go`) resolves the client's one profile (`pkg/profile`)
+and fails before the round trip when a remote profile has no token at all. If
+`rafiki user create` refuses against a remote daemon, check that profile's
+token file before suspecting the daemon — and mint the replacement with
+`rafikid user create` on the daemon host, which never authenticates at all.
 
 ## `stats`
 
@@ -486,7 +486,7 @@ turn**: the engine reads them through the child's own Read tool and persists
 the tool_use/tool_result pairs as real conversation history, so the model
 starts its task already holding the files. The daemon carries the same
 pre-fill on `agent_spawn`'s `prefill` param and on the SpawnRequest `prefill`
-field (`docs/reference/control-protocol.md` §6.3).
+field (`docs/reference/control-protocol.md` §2.3).
 
 The list is a file, one entry per line:
 

@@ -82,7 +82,7 @@ Three Swahili words, three roles:
   against its own dependencies. Code written once in one
   conversation is still runnable in the next one, on another machine.
 - **Watch or drive the same conversation from anywhere.** A running agent
-  isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki watch`,
+  isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki tail`,
   another agent's MCP tools (`agent_view`/`agent_send`), and a script hitting
   the Connect API directly can all observe or steer the same conversation at
   once — the event log fans out to every subscriber, and any number of them
@@ -259,18 +259,17 @@ proactively. See `pkg/routing/effortmap.go` (`EffortCache`) and
 
 # rafiki — the agent daemon
 
-The control plane is newline-delimited JSON frames over a Unix socket (a
-legacy of rafiki's pi-controller fork), plus a Connect/protobuf plane for the
-TUI and remote access. The two planes share one identity: a profile with a
-token presents it to both — `ctrl_auth` as the framed socket's optional first
-frame, the bearer token on connect.sock — so owner-scoped state, presets
-above all, written through one plane is visible to the other. A token-less
-profile stays anonymous (local trust) on both, and a token that no longer
-resolves is refused on both (`auth_invalid` framed / Connect `unauthenticated`)
-with the same recovery: delete the profile's token file, or run
-`rafiki user create` — which dials token-less precisely so it still works
-when the stored token is stale. What the daemon adds beyond hosting a process
-is a
+The control plane is Connect (`proto/rafiki/v1/control.proto`): one unix
+socket (`<RuntimeDir>/controller.sock`) locally, one optional TLS listener
+remotely — the same RPC surface either way, and the one plane the CLI, the
+cockpit, the Python SDK and spawned children all speak. A profile with a
+token presents it as the bearer credential; owner-scoped state (presets
+above all) resolves against the connection's owner. A token-less profile
+stays anonymous on the local socket (local trust), and a token that no
+longer resolves is refused (`unauthenticated`) with the same recovery:
+delete the profile's token file, or run `rafikid user create <name>` on the
+daemon host — it opens the database directly, so it works when nothing can
+authenticate. What the daemon adds beyond hosting a process is a
 **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm`/`pkg/agentloop` directly.
 
@@ -296,7 +295,7 @@ A `script` child is a child whose brain is a saved pymodule process instead
 of an LLM — a workflow driver, not a worker. It gets everything a child
 already has: an id, lineage (its spawns are its children), labels, a
 budget/depth/`max_children` grant that bounds its whole subtree, an inbox,
-`agent_list`/cockpit presence, `agent_kill`, and `logs`/`tail`/`watch` over
+`agent_list`/cockpit presence, `agent_kill`, and `logs`/`tail` over
 its stdout and stderr.
 
 Spawn it with kind `script` and a spec naming the pymodule — `rafiki
@@ -843,10 +842,11 @@ Exactly one of `socket`/`url` is required. Each profile owns its own token
 file (`~/.config/rafiki/profiles/<name>/token`, 0600), and each daemon its own
 presets, so two daemons' model universes and credentials need not overlap. A
 profile's `preset` names one of that daemon's presets (`rafiki preset list`).
-On a local profile the token is optional but not decorative: it authenticates
-framed verbs too (the daemon's optional `ctrl_auth` on the socket), so a
-preset saved with `rafiki preset put` is visible to `rafiki create --preset`
-on the same profile.
+On a local profile the token is optional but not decorative: it resolves the
+connection's identity (the daemon's optional-credential rule on the local
+socket), so owner-scoped state — a preset saved with `rafiki preset put` —
+lands in the right bucket and is visible to `rafiki create --preset` on the
+same profile.
 
 **Resolution order:** `-P`/`--profile` for one command → `$RAFIKI_PROFILE`
 for one shell → the `current-profile` pointer (`rafiki profile use <name>`)
@@ -865,9 +865,9 @@ machine-readable record — name, socket, url, connect_socket, token, kind,
 model, preset, labels. Its `token` field carries the RESOLVED token value
 (the human rendering deliberately shows only whether a token exists), which
 is what machine consumers like [the Python SDK's](sdk/python/README.md)
-`Client.from_profile` build their connection from; `connect_socket` names the
-Connect socket beside the profile's framed socket, the one a Connect-plane
-client dials locally.
+`Client.from_profile` build their connection from. `connect_socket` equals
+`socket` — the one control socket — and the key is kept because rafiki-py
+reads it.
 
 `RAFIKI_URL`, `RAFIKI_TOKEN`, `RAFIKI_SOCKET`, `RAFIKI_DEFAULT_MODEL`,
 `RAFIKI_DEFAULT_PRESET`, `RAFIKI_DEFAULT_LABELS` are hard client-side errors
@@ -918,7 +918,7 @@ credentials needed on the client machine) — the same queries as `rafikid
 agent stats|search|export|query`, sibling renderers, transport-only
 difference. Output is table on a TTY and a pipe alike by default; `-o
 json`/`-j` for pretty JSON, `-J`/`-o jsonl` for one record per line. See
-`docs/agent-cli.md` and `docs/reference/control-protocol.md` §6.17-6.19.
+`docs/agent-cli.md` and `docs/reference/control-protocol.md` §2.3.
 
 `rafiki conversations review <id|name>...` asks the daemon to run the same
 LLM-driven skill-gap detector `rafikid agent analyze` uses, but over Connect
@@ -930,16 +930,26 @@ close itself).
 
 ### First user: claiming a fresh daemon
 
-A daemon with no users at all starts in **bootstrap mode**: every listener
-(UDS, and TCP/TLS if configured) admits a connection with no `ctrl_auth`
-frame and lets it run exactly one command, `ctrl_user_create` — whoever's
-lands first becomes the only user. Deliberate (a freshly-started pod has no
-operator shell to hand a token to), but it's a real if narrow race, logged as
-a WARN once a minute while the window stays open. Close it before exposing
-the daemon: run a local `rafikid` against the same `RAFIKI_DB` and create the
-user before the real daemon's socket is reachable, or `kubectl port-forward`
-to the pod and create it before any Service/Ingress exposes the control
-plane. Deleting the last active user (`rafiki user rm`) reopens the window.
+There is no bootstrap mode: no listener accepts an unauthenticated command
+that could mint a user, and Connect's `CreateUser` never mints an admin.
+The ONLY first-admin path is `rafikid user create <name> --admin` on the
+DAEMON HOST — it opens `RAFIKI_DB` directly, so it needs no running daemon,
+no socket and no token:
+
+```sh
+rafikid user create brent --admin   # on the machine that can reach the database
+```
+
+The daemon with zero users logs this once at startup:
+`no users exist: create one on this host with rafikid user create <name>
+--admin`. The plaintext token is printed exactly once (the daemon stores only
+its digest) and cannot be recovered afterward; write it into the operator
+profile's token file (`rafiki profile add <name> --url … --token …` for a
+remote daemon). `rafiki user create` over Connect mints only ordinary
+non-admin users and requires an admin credential — so a fresh pod has no
+self-service claim path, by design. `rafikid user create` without `--admin`
+is also the stale-token recovery path: it never authenticates to a daemon,
+so a stale credential cannot block minting its replacement.
 
 ---
 
@@ -992,11 +1002,11 @@ children get capture, failover and model resolution with no second process.
 The fundi kind never uses the face; it reaches the library in-process.
 
 The face binds all interfaces by default (`RAFIKI_PROXY_LISTEN`, default
-`:8035`). Auth is always required — a fresh daemon starts in bootstrap mode
-(above), so create a user once while `make run` is up:
+`:8035`). Auth is always required, and the first user is minted on the
+daemon host (above), so while `make run` is up:
 
 ```bash
-go run ./cmd/rafiki user create dev
+go run ./cmd/rafikid user create dev --admin
 ```
 
 That mints a token into the resolved profile's token file; `rafiki claude`
@@ -1084,8 +1094,16 @@ the live event stream.
 
 ### Watching without the cockpit
 
-`rafiki watch [id|name]` subscribes to the same lifecycle events the rail is
-built from and prints them to stdout, one line per event:
+`rafiki tail [id|name]` follows events as they happen — `rafiki tail [id]`
+is `rafiki logs -f -n 20`. With a child it backfills the child's last 20
+history events (`-n` tunes this; `-1` all, `0` none) and follows the live
+stream, exiting when the child exits. With no child it streams from every
+child you can see (lifecycle events only), starting now and running until
+you stop it — a child spawned later appears with no reopening, exactly like
+the rail. `--label k=v`/`--has-label k` narrow the fleet-wide stream to
+children whose labels match; `--types` narrows to named event types,
+`--all-types` widens to every type plus the ephemeral deltas, and `-r` emits
+one protojson `Event` per line instead of rendering:
 
 ```
 14:32:01  spawn   c_01ABC  impl-auth  parent=c_root
@@ -1095,8 +1113,10 @@ built from and prints them to stdout, one line per event:
 14:40:02  exit    c_01ABC  impl-auth  code=0 (lifetime 8m01s)
 ```
 
-Not a TUI, replays nothing — live events only, from everything you can see or
-one child's subtree when named. `-J` emits one raw event per line.
+Not a TUI — live events plus the bounded backfill, from everything you can
+see or one child when named. `rafiki logs <id> -f` is the same stream for
+one child with the full history first; `-r` on either emits raw protojson
+events.
 
 ### Keys
 
