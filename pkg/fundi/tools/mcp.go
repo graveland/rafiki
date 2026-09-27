@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -263,9 +264,16 @@ func (s *mcpServerSession) call(ctx context.Context, params *mcp.CallToolParams)
 // ("client is closing"/"server is closing"). The io.EOF pair covers the
 // transport dying under an in-flight call, which no sentinel is guaranteed
 // to wrap on every transport (the in-memory pair surfaces a bare io.EOF);
-// a live connection never legitimately ends a call with EOF. Caller-side
-// context cancellation is excluded: the CALL gave up, the session did not
-// die.
+// a live connection never legitimately ends a call with EOF. ErrClosedPipe
+// and net.ErrClosed are the same signal one step earlier, in the race
+// against the client's own read loop: after a server-side death the call
+// whose write reaches the dead pipe first surfaces io: read/write on
+// closed pipe rather than the terminal error the read loop would have
+// produced, and a network transport reset by the server surfaces use of
+// closed network connection the same way. A live session never
+// legitimately ends a call with any of them, which is the whole test this
+// function makes. Caller-side context cancellation is excluded: the CALL
+// gave up, the session did not die.
 func deadSession(err error) bool {
 	if err == nil {
 		return false
@@ -276,7 +284,9 @@ func deadSession(err error) bool {
 	return errors.Is(err, mcp.ErrSessionMissing) ||
 		errors.Is(err, mcp.ErrConnectionClosed) ||
 		errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrUnexpectedEOF)
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed)
 }
 
 // close drops the live session, if any. Safe to call repeatedly.
