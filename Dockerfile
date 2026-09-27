@@ -1,4 +1,4 @@
-FROM golang:1.26 AS build
+FROM golang:1.27 AS build
 
 WORKDIR /src
 
@@ -23,7 +23,7 @@ FROM debian:trixie-slim AS rtk
 # Pinned deliberately: rtk is pre-1.0 and moves fast, and an unpinned
 # "latest" would make the image non-reproducible and could change bash
 # output formatting under us. Bump this consciously.
-ARG RTK_VERSION=v0.45.0
+ARG RTK_VERSION=v0.50.0
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
