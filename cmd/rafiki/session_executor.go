@@ -31,6 +31,34 @@ import (
 // is a slow start where the cost of waiting too little is a confusing refusal.
 const sessionReadyTimeout = 20 * time.Second
 
+// sessionCleanupJoinCap bounds startSessionExecutor's wait for its two
+// goroutines (the execpool connection and the stream watch) when the session
+// ends. W4a review finding (MAJOR): execpool.Connect's remote dial is not
+// context-aware — tls.DialWithDialer performs its own handshake with no
+// deadline — so on a partitioned or black-holed remote daemon that goroutine
+// can stay stuck for the OS TCP connect timeout (~75s) or, if the peer accepts
+// TCP but never speaks TLS, indefinitely. Without this cap, the operator
+// quitting the cockpit or hitting Ctrl-C (whose deferred cleanup runs here)
+// blocks on the join for that long. Past the cap the join is abandoned, not
+// completed: the goroutines die with the process. The WaitGroup itself stays
+// so the join — and anything observing it under -race — remains meaningful.
+const sessionCleanupJoinCap = 3 * time.Second
+
+// boundedJoin waits for wg, but never longer than cap. Past the cap it
+// returns with the join still outstanding; the goroutines it was waiting on
+// are left to die with the process.
+func boundedJoin(wg *sync.WaitGroup, cap time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(cap):
+	}
+}
+
 // sessionConnectTarget decides where this client's executor dials.
 //
 // Derived from the resolved PROFILE rather than configured, so it always
@@ -54,10 +82,19 @@ func sessionConnectTarget(p profile.Resolved) (addr, socket string, err error) {
 // newConnectEndpoint — the CLI's usual single place that resolves an
 // endpoint — so this is the one other place that does it, from a
 // profile.Resolved instead of a command.
-func sessionConnectEndpoint(p profile.Resolved) connectEndpoint {
+//
+// The remote branch mirrors newConnectEndpoint's no-token guard too: this
+// plane has no bootstrap mode, so an absent credential can only ever produce
+// a bare Unauthenticated after a round trip, and naming the missing token
+// file here beats that (W4a minor). (Factoring one shared
+// connectEndpointFromProfile is parked in todo.md.)
+func sessionConnectEndpoint(p profile.Resolved) (connectEndpoint, error) {
 	if p.URL == "" {
 		sock := connectSocketFor(p)
 		httpClient := connectHTTPClient(sock)
+		// Optional, unlike the remote branch below: the socket itself is
+		// the trust boundary, and a local profile with no token must keep
+		// working for every verb that never looks at identity.
 		if p.Token != "" {
 			httpClient = &http.Client{Transport: &bearerTransport{base: httpClient.Transport, token: p.Token}}
 		}
@@ -66,14 +103,20 @@ func sessionConnectEndpoint(p profile.Resolved) connectEndpoint {
 			baseURL:    connectUDSBaseURL,
 			describe:   sock,
 			identity:   "unix:" + sock,
-		}
+		}, nil
+	}
+	if p.Token == "" {
+		return connectEndpoint{}, fmt.Errorf(
+			"profile %q names a remote daemon but has no token: write one to %s "+
+				"(or recreate it with `rafiki profile add %s --url %s --token …`)",
+			p.Name, profile.TokenFile(p.Name), p.Name, p.URL)
 	}
 	return connectEndpoint{
 		httpClient: &http.Client{Transport: &bearerTransport{base: http.DefaultTransport, token: p.Token}},
 		baseURL:    p.URL,
 		describe:   p.URL,
 		identity:   p.URL,
-	}
+	}, nil
 }
 
 // executorEnvURL is remoteDialURL's surviving half, kept local to the executor
@@ -139,7 +182,15 @@ func resolveExecutorConnectFlags(connect, connectSocket string) (string, string,
 // waitExecutorLive polls ListExecutors until an enabled, connected executor
 // matches selector, or sessionReadyTimeout elapses. chooseExecutor matches only
 // LIVE executors, so a spawn sent before this returns fails.
-func waitExecutorLive(ctx context.Context, cc rafikiv1connect.ControlClient, selector string) error {
+//
+// It must be called with the SESSION context, not the caller's: when the
+// daemon ends the ExecutorSession stream before the executor reports live, the
+// watch goroutine cancels that context, and this then surfaces the stream's
+// end (streamEnded) instead of a misleading "timed out waiting for executor
+// to connect" (W4a minor). streamEnded carries the watch goroutine's
+// classification of how the stream ended; when nothing was recorded, the
+// context's own error is returned.
+func waitExecutorLive(ctx context.Context, cc rafikiv1connect.ControlClient, selector string, streamEnded <-chan error) error {
 	deadline := time.Now().Add(sessionReadyTimeout)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -150,7 +201,12 @@ func waitExecutorLive(ctx context.Context, cc rafikiv1connect.ControlClient, sel
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			select {
+			case why := <-streamEnded:
+				return fmt.Errorf("executor session for %q ended before the executor connected: %w", selector, why)
+			default:
+				return ctx.Err()
+			}
 		case <-ticker.C:
 		}
 		if time.Now().After(deadline) {
@@ -213,10 +269,19 @@ func startSessionExecutor(ctx context.Context, root string, p profile.Resolved) 
 		return "", noop, err
 	}
 
-	ep := sessionConnectEndpoint(p)
+	ep, err := sessionConnectEndpoint(p)
+	if err != nil {
+		return "", noop, err
+	}
 	cc := ep.control()
 
 	sessionCtx, cancel := context.WithCancel(ctx)
+	// streamEnded records how the ExecutorSession stream ended, so the
+	// liveness wait can surface an eviction instead of a timeout (see
+	// waitExecutorLive). Buffered, and written before the write also tears
+	// the session down, so a reader woken by that teardown always sees the
+	// value.
+	streamEnded := make(chan error, 1)
 
 	stream, err := cc.ExecutorSession(sessionCtx, connect.NewRequest(&rafikiv1.ExecutorSessionRequest{
 		Name:  name,
@@ -299,28 +364,42 @@ func startSessionExecutor(ctx context.Context, root string, p profile.Resolved) 
 		// end, which is the daemon's eviction signal.
 		for stream.Receive() {
 		}
-		if sessionCtx.Err() == nil {
-			// The stream ended without this session asking it to: the
-			// daemon evicted this executor. Surface it exactly the way a
-			// dropped connection was surfaced before, and tear the local
-			// executor down — the ticket that authenticated it belonged to
-			// this stream and is now spent.
-			if err := stream.Err(); err != nil {
-				slog.Warn("this machine's executor stopped", "error", err)
-			} else {
-				slog.Warn("this machine's executor stopped: the daemon ended the session")
-			}
-			stop()
+		if sessionCtx.Err() != nil {
+			// This session ended the stream itself (cleanup, or the parent
+			// context going away): nothing to propagate, and warning would
+			// misdescribe a self-inflicted end as an eviction.
+			return
 		}
+		// The stream ended without this session asking it to: the daemon
+		// evicted this executor. Classify the end once — a real stream
+		// error, or a clean daemon-side end, which for this session is
+		// still an eviction — share it with the liveness wait, and tear
+		// the local executor down: the ticket that authenticated it
+		// belonged to this stream and is now spent.
+		var why error
+		if err := stream.Err(); err != nil {
+			why = err
+		} else {
+			why = errors.New("the daemon ended the session")
+		}
+		select {
+		case streamEnded <- why:
+		default:
+		}
+		slog.Warn("this machine's executor stopped", "error", why)
+		stop()
 	}()
 
-	if err := waitExecutorLive(ctx, cc, ready.GetSelector()); err != nil {
+	if err := waitExecutorLive(sessionCtx, cc, ready.GetSelector(), streamEnded); err != nil {
 		stop()
-		wg.Wait()
+		boundedJoin(&wg, sessionCleanupJoinCap)
 		return "", noop, err
 	}
 	return ready.GetSelector(), func() {
 		stop()
-		wg.Wait()
+		// Bounded, not bare: the join can otherwise hang past the process's
+		// lifetime on execpool.Connect's context-blind remote dial (see
+		// sessionCleanupJoinCap, W4a major).
+		boundedJoin(&wg, sessionCleanupJoinCap)
 	}, nil
 }

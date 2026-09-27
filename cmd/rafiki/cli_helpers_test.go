@@ -1,13 +1,9 @@
 package main
 
 import (
-	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"go.graveland.dev/rafiki/pkg/profile"
 )
 
 // TestDecideKillOnExit_Flags covers the non-interactive paths: flag overrides
@@ -104,35 +100,10 @@ func TestParseKillAnswer(t *testing.T) {
 	}
 }
 
-// TestDialDaemon_UsesTheProfilesSocket drives dialDaemon through a seeded
-// local-socket profile: it must attempt the UDS dial named by the profile (and
-// fail with a UDS-shaped error against a socket that doesn't exist), never
-// treat the absence of a URL as anything but "dial the socket". This
-// supersedes the old RAFIKI_URL-scheme gate (remoteDialURL, deleted): a
-// profile's endpoint is either a socket or an https:// URL by construction
-// (pkg/profile's validate), so there is no scheme ambiguity left to pin.
-func TestDialDaemon_UsesTheProfilesSocket(t *testing.T) {
-	isolateProfiles(t)
-	resetProfileCache()
-
-	sock := filepath.Join(t.TempDir(), "no-such.sock")
-	if err := profile.Save(profile.Set{Profiles: map[string]profile.Profile{
-		"scratch": {Name: "scratch", Socket: sock},
-	}}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := profile.SavePointer("scratch"); err != nil {
-		t.Fatalf("SavePointer: %v", err)
-	}
-
-	_, err := dialDaemon(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected a dial error against a nonexistent socket")
-	}
-	if !strings.Contains(err.Error(), "no-such.sock") {
-		t.Errorf("expected the UDS dial failure to name the socket path, got: %v", err)
-	}
-}
+// TestDialDaemon_UsesTheProfilesSocket was deleted with dialDaemon itself
+// (W4a): 4.5's Connect cutover removed completion's call, leaving dialDaemon
+// with no non-test caller, and its doc comment described a caller that no
+// longer existed.
 
 // B4 deleted the TypeScript TUI that rafiki-attach built. The helpers that
 // shelled out to it must go with it, or a non-detached `rafiki create` fails

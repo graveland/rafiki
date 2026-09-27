@@ -19,7 +19,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"go.graveland.dev/rafiki/pkg/claudeargv"
-	"go.graveland.dev/rafiki/pkg/client"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
@@ -123,26 +122,6 @@ func claudeAutoCompactWindow(ctx context.Context, cmd *cobra.Command, model stri
 		return 0
 	}
 	return int(resp.Msg.GetAutoCompactWindow())
-}
-
-// dialDaemon connects to the profile's daemon control endpoint over the
-// framed protocol, mirroring mustDial but returning an error instead of
-// exiting. mustDial is wrong for a caller that must degrade gracefully rather
-// than exit on a connection failure — see completeUsers's own doc comment for
-// why it is still the one caller left (there is no Connect RPC for user rows).
-// resolveProfile (rather than mustProfile) for the same reason: a
-// misconfigured profile must degrade the lookup, not kill the command.
-func dialDaemon(ctx context.Context, cmd *cobra.Command) (*client.Client, error) {
-	p, err := resolveProfile(cmd)
-	if err != nil {
-		return nil, err
-	}
-	if p.URL != "" {
-		return client.DialURL(ctx, p.URL, p.Token)
-	}
-	// Same token-carrying dial as mustDial: a degraded lookup must still be
-	// THE PROFILE'S identity, not an anonymous one.
-	return client.DialWithToken(p.Socket, p.Token)
 }
 
 // runClaude runs `rafiki claude [flags] [-- claude flags...]`.
