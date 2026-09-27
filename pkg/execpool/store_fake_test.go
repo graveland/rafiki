@@ -24,6 +24,8 @@ type fakeStore struct {
 	// authCalls counts Authenticate attempts, so a test can assert that a
 	// transient failure was RETRIED rather than accepted as terminal.
 	authCalls chan struct{}
+	// lastSelf is the self-reported map the most recent Enroll was given.
+	lastSelf map[string]string
 }
 
 func newFakeStore(id string) *fakeStore {
@@ -46,10 +48,23 @@ func (f *fakeStore) Authenticate(context.Context, string) (executors.Executor, e
 	return f.executor, nil
 }
 
-func (f *fakeStore) Enroll(context.Context, string, map[string]string) (executors.Executor, string, error) {
+func (f *fakeStore) Enroll(_ context.Context, _ string, self map[string]string) (executors.Executor, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastSelf = self
 	return f.executor, "credential", nil
+}
+
+// lastEnrollment returns the self-reported map the most recent Enroll was
+// given, copied under the lock so a racing health loop cannot tear the read.
+func (f *fakeStore) lastEnrollment() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.lastSelf))
+	for k, v := range f.lastSelf {
+		out[k] = v
+	}
+	return out
 }
 
 func (f *fakeStore) Create(context.Context, executors.NewToken) (executors.Executor, string, error) {

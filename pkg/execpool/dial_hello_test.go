@@ -1,84 +1,80 @@
 package execpool
 
 import (
-	"encoding/json"
-	"io"
-	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
-func TestBuildHelloCarriesATicket(t *testing.T) {
-	req, err := buildHello(ConnectOptions{Ticket: "tkt-abc"})
+func TestBuildAuthCarriesATicket(t *testing.T) {
+	hdr, err := buildAuth(ConnectOptions{Ticket: "tkt-abc"})
 	if err != nil {
-		t.Fatalf("a ticket is a complete credential on its own; buildHello "+
+		t.Fatalf("a ticket is a complete credential on its own; buildAuth "+
 			"must not demand --credential or --enroll-token beside it: %v", err)
 	}
-	if req.Ticket != "tkt-abc" {
-		t.Fatalf("Ticket = %q, want %q", req.Ticket, "tkt-abc")
+	if got, want := hdr.Get("Authorization"), "Ticket tkt-abc"; got != want {
+		t.Fatalf("Authorization = %q, want %q", got, want)
 	}
-	if req.Credential != "" || req.Token != "" {
-		t.Fatalf("a ticket-authenticated hello must carry nothing else, got "+
-			"credential=%q token=%q", req.Credential, req.Token)
+	if hdr.Get(upgradeconn.HeaderSelfReported) != "" {
+		t.Error("no self-reported facts were given; the header must be absent")
 	}
 }
 
 // A ticket is mutually exclusive with the durable paths (see ConnectOptions.Ticket).
 // It wins so that an interactive client with a stale executor.cred on disk still
 // gets a transient executor rather than silently reusing another identity.
-func TestBuildHelloPrefersTheTicketOverACredential(t *testing.T) {
-	req, err := buildHello(ConnectOptions{Ticket: "tkt", Credential: "cred"})
+func TestBuildAuthPrefersTheTicketOverACredential(t *testing.T) {
+	hdr, err := buildAuth(ConnectOptions{Ticket: "tkt", Credential: "cred"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Ticket != "tkt" || req.Credential != "" {
-		t.Fatalf("ticket must win: got ticket=%q credential=%q", req.Ticket, req.Credential)
+	if got, want := hdr.Get("Authorization"), "Ticket tkt"; got != want {
+		t.Fatalf("ticket must win: got Authorization %q, want %q", got, want)
 	}
 }
 
-func TestBuildHelloStillRefusesAnEmptyOptions(t *testing.T) {
-	if _, err := buildHello(ConnectOptions{}); err == nil {
-		t.Fatal("no ticket, no credential, no token: buildHello must refuse " +
-			"rather than send an unauthenticated hello")
+func TestBuildAuthStillRefusesAnEmptyOptions(t *testing.T) {
+	if _, err := buildAuth(ConnectOptions{}); err == nil {
+		t.Fatal("no ticket, no credential, no token: buildAuth must refuse " +
+			"rather than send an unauthenticated upgrade request")
 	}
 }
 
-// The daemon writes its hello response and, as the HTTP/2 CLIENT, immediately
-// sends the connection preface. Those bytes routinely share a segment with the
-// response, so a buffered reader that consumes past the response's newline
-// swallows the preface — and ServeInverted then starts mid-frame and rejects a
-// perfectly good connection.
-//
-// This drives the exact shape: one Write carrying the response AND the preface.
-// A test that sleeps between them passes regardless and proves nothing.
-func TestHelloReaderDoesNotSwallowPipelinedBytes(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-	go func() {
-		var req protocol.ExecutorHelloRequest
-		_ = json.NewDecoder(server).Decode(&req)
-		resp, _ := json.Marshal(protocol.ExecutorHelloResponse{
-			Type: "executor_hello", ExecutorID: "e1",
-		})
-		// One Write: the response, its newline, and the preface behind it.
-		_, _ = server.Write(append(append(resp, '\n'), []byte(preface)...))
-	}()
-
-	rd, _, _, err := writeHello(client, ConnectOptions{Credential: "c"})
+// Self-reported capability facts ride the upgrade request as a
+// url.Values-encoded Rafiki-Self-Reported header, and the credential is still
+// the explicit one.
+func TestBuildAuthEncodesSelfReported(t *testing.T) {
+	hdr, err := buildAuth(ConnectOptions{
+		Credential:   "cred",
+		SelfReported: map[string]string{"os": "linux", "arch": "arm64"},
+	})
 	if err != nil {
-		t.Fatalf("writeHello: %v", err)
+		t.Fatal(err)
 	}
+	if got, want := hdr.Get("Authorization"), "Bearer cred"; got != want {
+		t.Fatalf("Authorization = %q, want %q", got, want)
+	}
+	if got, want := hdr.Get(upgradeconn.HeaderSelfReported), "arch=arm64&os=linux"; got != want {
+		t.Fatalf("Rafiki-Self-Reported = %q, want %q", got, want)
+	}
+}
 
-	got := make([]byte, len(preface))
-	if _, err := io.ReadFull(rd, got); err != nil {
-		t.Fatalf("reading what followed the hello response: %v", err)
+// The real-world case for an interactive client: a machine that also runs
+// `rafiki executor serve` has a credential file on disk, and a session ticket
+// must still win over it — otherwise the session executor silently connects
+// as the durable one.
+func TestBuildAuthPrefersTheTicketOverACredentialFile(t *testing.T) {
+	credFile := filepath.Join(t.TempDir(), "credential")
+	if err := os.WriteFile(credFile, []byte("cred\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if string(got) != preface {
-		t.Errorf("after the hello response the stream held %q, want the h2 preface %q",
-			string(got), preface)
+	hdr, err := buildAuth(ConnectOptions{Ticket: "tkt", CredentialFile: credFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := hdr.Get("Authorization"), "Ticket tkt"; got != want {
+		t.Fatalf("the ticket must win over the credential file: got Authorization %q, want %q", got, want)
 	}
 }

@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // A store that cannot be READ is not a store that REJECTED you. Conflating the
@@ -76,14 +77,17 @@ func TestRetryableFailureDoesNotLeakTheStoreError(t *testing.T) {
 	store := newFakeStore("exec-1")
 	store.authErr = errors.New("failed to connect to `host=db.internal user=rafiki`: connection refused")
 
-	resp := helloExchange(t, store, protocol.ExecutorHelloRequest{Credential: "c"})
-
-	if !resp.Retryable {
-		t.Error("a store failure must be marked retryable")
+	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable {
+		t.Fatalf("a store failure must be refused 503, got %v", err)
+	}
+	if reason := ref.Reason; reason != "rafikid could not verify the credential right now; retry" {
+		t.Errorf("the 503 body must be the fixed retryable text, got %q", reason)
 	}
 	for _, leak := range []string{"db.internal", "user=rafiki", "connection refused"} {
-		if strings.Contains(resp.Error, leak) {
-			t.Errorf("the response leaked %q to an unauthenticated peer: %s", leak, resp.Error)
+		if strings.Contains(ref.Reason, leak) {
+			t.Errorf("the response leaked %q to an unauthenticated peer: %s", leak, ref.Reason)
 		}
 	}
 }
@@ -95,13 +99,13 @@ func TestTerminalRejectionNamesTheReason(t *testing.T) {
 	store := newFakeStore("exec-1")
 	store.authErr = executors.ErrDisabled
 
-	resp := helloExchange(t, store, protocol.ExecutorHelloRequest{Credential: "c"})
-
-	if resp.Retryable {
-		t.Error("a revoked row is terminal, not retryable")
+	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusUnauthorized {
+		t.Fatalf("a revoked credential must be refused 401, got %v", err)
 	}
-	if !strings.Contains(resp.Error, "disabled") {
-		t.Errorf("the refusal must name the reason: %q", resp.Error)
+	if !strings.Contains(ref.Reason, "disabled") {
+		t.Errorf("the refusal must name the reason: %q", ref.Reason)
 	}
 }
 
@@ -112,11 +116,109 @@ func TestUnclassifiedAuthErrorsAreTreatedAsRetryable(t *testing.T) {
 	store := newFakeStore("exec-1")
 	store.authErr = errors.New("something nobody anticipated")
 
-	resp := helloExchange(t, store, protocol.ExecutorHelloRequest{Credential: "c"})
-
-	if !resp.Retryable {
-		t.Error("an unclassified failure must fail toward retry, not toward exit")
+	_, _, err := upgradeExchange(t, New(store), bearerHeader("c"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusServiceUnavailable {
+		t.Fatalf("an unclassified failure must be refused 503 toward retry, got %v", err)
 	}
+}
+
+// A peer still speaking the old JSON hello frame sends no Authorization
+// header at all. The refusal must tell it that header auth replaced the hello
+// frame, so whoever operates the machine knows to upgrade.
+func TestUpgradeWithoutAuthorizationNamesTheUpgradeHint(t *testing.T) {
+	store := newFakeStore("exec-1")
+
+	_, _, err := upgradeExchange(t, New(store), nil)
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusUnauthorized {
+		t.Fatalf("a missing Authorization header must be refused 401, got %v", err)
+	}
+	if !strings.Contains(ref.Reason, "predates header auth") {
+		t.Errorf("the 401 must name the old-client hint, got %q", ref.Reason)
+	}
+}
+
+// One credential names one row, and the pool holds one connection per row: a
+// second connection while the incumbent answers is refused 409, and the
+// client classifies that as retryable rather than terminal — the incumbent
+// may simply be about to die.
+func TestUpgradeAlreadyConnectedIs409AndRetryable(t *testing.T) {
+	store := newFakeStore("exec-1")
+	addr, pin, p := servePool(t, store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { _ = Connect(ctx, connectOpts(t, addr, pin)) }()
+	waitFor(t, 5*time.Second, "the incumbent to join", func() bool { return len(p.Live()) == 1 })
+
+	_, _, err := upgradeExchange(t, p, bearerHeader("a-credential"))
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusConflict {
+		t.Fatalf("a second live connection must be refused 409, got %v", err)
+	}
+	if !strings.Contains(ref.Reason, "already live") {
+		t.Errorf("the 409 must say why: %q", ref.Reason)
+	}
+	if errors.Is(classifyRefusal(err), ErrEnrollmentRejected) {
+		t.Error("a 409 is retryable; the client must not classify it as a rejected credential")
+	}
+}
+
+// Enrollment carries the executor's self-reported capability facts to the
+// store, and the 101 answers with the minted credential and the row id.
+func TestUpgradeEnrollCarriesSelfReportedToTheStore(t *testing.T) {
+	store := newFakeStore("exec-1")
+
+	hdr := http.Header{
+		"Authorization":                {"Enroll t_token"},
+		upgradeconn.HeaderSelfReported: {"os=linux&arch=arm64"},
+	}
+	_, resp, err := upgradeExchange(t, New(store), hdr)
+	if err != nil {
+		t.Fatalf("enrollment upgrade refused: %v", err)
+	}
+	if got := store.lastEnrollment(); !mapsEqual(got, map[string]string{"os": "linux", "arch": "arm64"}) {
+		t.Errorf("Enroll received %v, want the self-reported facts", got)
+	}
+	if got := resp.Get(upgradeconn.HeaderCredential); got != "credential" {
+		t.Errorf("the 101 must carry the minted credential, got %q", got)
+	}
+	if got := resp.Get(upgradeconn.HeaderExecutorID); got != "exec-1" {
+		t.Errorf("the 101 must carry the executor id, got %q", got)
+	}
+}
+
+// A malformed Rafiki-Self-Reported header is a bad request, not an auth
+// failure: the credential may be fine, the encoding is not.
+func TestUpgradeMalformedSelfReportedIs400(t *testing.T) {
+	store := newFakeStore("exec-1")
+
+	hdr := http.Header{
+		"Authorization":                {"Enroll t_token"},
+		upgradeconn.HeaderSelfReported: {"%zz"},
+	}
+	_, _, err := upgradeExchange(t, New(store), hdr)
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusBadRequest {
+		t.Fatalf("a malformed self-reported header must be refused 400, got %v", err)
+	}
+}
+
+func bearerHeader(cred string) http.Header {
+	return http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " " + cred}}
+}
+
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -167,50 +269,21 @@ func connectOpts(t *testing.T, addr, pin string) ConnectOptions {
 	}
 }
 
-// helloExchange drives one hello frame through handleConn and returns the
-// response, without the reconnect loop in the way.
-func helloExchange(t *testing.T, store executors.Store, req protocol.ExecutorHelloRequest) protocol.ExecutorHelloResponse {
+// upgradeExchange drives one upgrade request through the pool's own endpoint
+// and returns the client half of the upgraded connection together with the
+// 101's headers. A refusal comes back as a *upgradeconn.Refused error, so a
+// test asserts on Status and Reason without the reconnect loop in the way.
+func upgradeExchange(t *testing.T, p *Pool, hdr http.Header) (*upgradeconn.Conn, http.Header, error) {
 	t.Helper()
-	ours, theirs := net.Pipe()
-	t.Cleanup(func() { _ = ours.Close(); _ = theirs.Close() })
+	srv := httptest.NewServer(p.UpgradeHandler())
+	t.Cleanup(srv.Close)
 
-	p := New(store)
-	go p.handleConn(theirs)
-
-	sendHelloFrame(t, ours, req)
-
-	_ = ours.SetReadDeadline(time.Now().Add(5 * time.Second))
-	line, err := readHelloResponseLine(ours)
+	host := strings.TrimPrefix(srv.URL, "http://")
+	conn, err := net.Dial("tcp", host)
 	if err != nil {
-		t.Fatalf("read hello response: %v", err)
+		t.Fatal(err)
 	}
-	var resp protocol.ExecutorHelloResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("parse hello response %q: %v", line, err)
-	}
-	return resp
-}
+	t.Cleanup(func() { _ = conn.Close() })
 
-// helloExchangeOn is helloExchange against a caller-supplied pool, for tests
-// that must mint into the same registry the connection will redeem from.
-func helloExchangeOn(t *testing.T, p *Pool, req protocol.ExecutorHelloRequest) protocol.ExecutorHelloResponse {
-	t.Helper()
-	ours, theirs := net.Pipe()
-	t.Cleanup(func() { _ = ours.Close(); _ = theirs.Close() })
-	go p.handleConn(theirs)
-	sendHelloFrame(t, ours, req)
-	_ = ours.SetReadDeadline(time.Now().Add(5 * time.Second))
-	line, err := readHelloResponseLine(ours)
-	if err != nil {
-		t.Fatalf("read hello response: %v", err)
-	}
-	var resp protocol.ExecutorHelloResponse
-	if err := json.Unmarshal([]byte(line), &resp); err != nil {
-		t.Fatalf("parse hello response %q: %v", line, err)
-	}
-	return resp
-}
-
-func protocolHello(ticket string) protocol.ExecutorHelloRequest {
-	return protocol.ExecutorHelloRequest{Type: "executor_hello", Ticket: ticket}
+	return upgradeconn.Dial(conn, upgradeconn.Executor, host, hdr)
 }

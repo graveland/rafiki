@@ -1,23 +1,20 @@
 package execpool
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
@@ -99,6 +96,13 @@ func Connect(ctx context.Context, o ConnectOptions) error {
 }
 
 func connectOnce(ctx context.Context, o ConnectOptions) error {
+	// Built BEFORE dialling: a bad config (nothing to authenticate with)
+	// must fail without a network round trip.
+	hdr, err := buildAuth(o)
+	if err != nil {
+		return err
+	}
+
 	conn, host, err := dialDaemon(ctx, o)
 	if err != nil {
 		return err
@@ -110,20 +114,16 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 	// share one port and one certificate; a wrong endpoint now fails with a
 	// readable HTTP status instead of as garbage in the first frame.
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	upConn, _, err := upgradeconn.Dial(conn, upgradeconn.Executor, host, nil)
-	if err != nil {
-		return err
-	}
-
-	// From here everything reads through upConn. The hello frame and the HTTP/2
-	// preface that follows it arrive in one stream, and the upgrade's buffer is
-	// part of that stream rather than something to be discarded.
-	rd, hello, credential, err := writeHello(upConn, o)
+	upConn, resp, err := upgradeconn.Dial(conn, upgradeconn.Executor, host, hdr)
 	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
-		return err
+		return classifyRefusal(err)
 	}
 
+	// From here everything reads through upConn — the upgrade's buffer holds
+	// whatever the peer pipelined behind the 101, and discarding it would
+	// start the HTTP/2 preface mid-frame.
+	credential := resp.Get(upgradeconn.HeaderCredential)
 	if credential != "" && o.CredentialFile != "" {
 		// The directory may not exist yet: the default lives under the user's
 		// data dir, deliberately NOT under --root, where the executor's own file
@@ -131,13 +131,30 @@ func connectOnce(ctx context.Context, o ConnectOptions) error {
 		if err := os.MkdirAll(filepath.Dir(o.CredentialFile), 0o700); err != nil {
 			return fmt.Errorf("create credential directory: %w", err)
 		}
-		if err := os.WriteFile(o.CredentialFile, []byte(credential+"\n"), 0600); err != nil {
+		if err := os.WriteFile(o.CredentialFile, []byte(credential+"\n"), 0o600); err != nil {
 			return fmt.Errorf("write credential: %w", err)
 		}
-		slog.Info("executor: enrolled", "id", hello.ExecutorID, "credentialFile", o.CredentialFile)
+		slog.Info("executor: enrolled", "id", resp.Get(upgradeconn.HeaderExecutorID), "credentialFile", o.CredentialFile)
 	}
 
-	return ServeInverted(ctx, readerConn{Conn: upConn, r: rd}, o.Handler)
+	return ServeInverted(ctx, upConn, o.Handler)
+}
+
+// classifyRefusal turns an upgrade refusal into the one terminal error the
+// reconnect loop honours. A 400, 401 or 403 is an ANSWER about this
+// credential — unknown, consumed, expired, disabled — and no amount of
+// retrying changes any of those. Any other status (a 503 store outage, a 409
+// incumbent still answering) returns the error unchanged, which Connect
+// treats as retryable.
+func classifyRefusal(err error) error {
+	var ref *upgradeconn.Refused
+	if errors.As(err, &ref) {
+		switch ref.Status {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf("%w: %s", ErrEnrollmentRejected, ref.Reason)
+		}
+	}
+	return err
 }
 
 // dialDaemon opens the transport under the executor link and returns it with
@@ -201,97 +218,46 @@ func credFileHas(path string) bool {
 	return err == nil && cred != ""
 }
 
-// buildHello chooses the credential this executor presents.
+// buildAuth builds the headers the upgrade request carries, choosing the
+// credential this executor presents.
 //
 // The ticket case is FIRST and returns immediately: a ticket is mutually
 // exclusive with the durable paths, and an interactive client on a machine that
 // also runs `rafiki executor serve` will have that executor's credential file
 // on disk. Falling through to it would silently connect the session executor as
 // the durable one — two identities, one row, and whichever reconnects last wins.
-func buildHello(o ConnectOptions) (protocol.ExecutorHelloRequest, error) {
-	req := protocol.ExecutorHelloRequest{
-		Type:         "executor_hello",
-		SelfReported: o.SelfReported,
-	}
+func buildAuth(o ConnectOptions) (http.Header, error) {
+	var auth string
 	switch {
 	case o.Ticket != "":
-		req.Ticket = o.Ticket
+		auth = string(upgradeconn.SchemeTicket) + " " + o.Ticket
 	case o.Credential != "":
 		// Supplied directly; no file is read and none will be written.
-		req.Credential = o.Credential
+		auth = string(upgradeconn.SchemeBearer) + " " + o.Credential
 	case credFileHas(o.CredentialFile):
-		cred, _ := readCredential(o.CredentialFile)
-		req.Credential = cred
+		cred, err := readCredential(o.CredentialFile)
+		if err != nil {
+			return nil, fmt.Errorf("read credential file: %w", err)
+		}
+		auth = string(upgradeconn.SchemeBearer) + " " + cred
 	case o.EnrollToken != "":
-		req.Token = o.EnrollToken
+		auth = string(upgradeconn.SchemeEnroll) + " " + o.EnrollToken
 	default:
-		return protocol.ExecutorHelloRequest{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"nothing to authenticate with: no session ticket, no --credential, "+
 				"no credential file at %s, and no --enroll-token",
 			o.CredentialFile)
 	}
-	return req, nil
-}
 
-// writeHello sends the hello and reads the response, returning the READER it
-// used along with the outcome.
-//
-// The reader must be returned, not discarded. rafikid answers and then, as the
-// HTTP/2 client, sends its connection preface — commonly in the same segment,
-// so those bytes are already inside this bufio.Reader by the time Decode
-// returns. Serving on the bare net.Conn drops them and http2.Server.ServeConn
-// starts mid-frame. Same rule as pkg/control's authHandshake, from the other
-// side of the connection.
-func writeHello(conn net.Conn, o ConnectOptions) (io.Reader, protocol.ExecutorHelloResponse, string, error) {
-	req, err := buildHello(o)
-	if err != nil {
-		return nil, protocol.ExecutorHelloResponse{}, "", err
-	}
-
-	enc := json.NewEncoder(conn)
-	if err := enc.Encode(req); err != nil {
-		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("write hello: %w", err)
-	}
-
-	br := bufio.NewReaderSize(conn, 4096)
-	dec := json.NewDecoder(br)
-	var resp protocol.ExecutorHelloResponse
-	if err := dec.Decode(&resp); err != nil {
-		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("read hello response: %w", err)
-	}
-	if resp.Error != "" {
-		// Retryable means rafikid could not CHECK the credential, not that it
-		// rejected one. Only the latter is worth exiting over: a revoked row
-		// will not un-revoke itself, but a database that is restarting will
-		// come back, and an executor that quits over it has turned a blip
-		// into an outage — across a fleet reconnecting together, the whole
-		// fleet's.
-		if resp.Retryable {
-			return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("rafikid could not verify the credential: %s", resp.Error)
+	hdr := http.Header{"Authorization": {auth}}
+	if len(o.SelfReported) > 0 {
+		vals := url.Values{}
+		for k, v := range o.SelfReported {
+			vals.Set(k, v)
 		}
-		return nil, protocol.ExecutorHelloResponse{}, "", fmt.Errorf("%w: %s", ErrEnrollmentRejected, resp.Error)
+		hdr.Set(upgradeconn.HeaderSelfReported, vals.Encode())
 	}
-
-	// json.Decoder buffers too. Anything it read past the response's newline is
-	// in its Buffered() reader, ahead of whatever is still in br.
-	mr := io.MultiReader(dec.Buffered(), br)
-
-	// Consume the '\n' delimiter that terminates the hello response.
-	// Since json.Decoder parses the JSON object, it leaves the trailing newline
-	// in the buffer. We must consume up to and including that newline so the
-	// returned reader starts exactly at the next frame (the HTTP/2 preface).
-	var singleByte [1]byte
-	for {
-		_, err := mr.Read(singleByte[:])
-		if err != nil {
-			break
-		}
-		if singleByte[0] == '\n' {
-			break
-		}
-	}
-
-	return mr, resp, resp.Credential, nil
+	return hdr, nil
 }
 
 func readCredential(path string) (string, error) {

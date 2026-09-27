@@ -35,7 +35,15 @@ func TestConnectOverUnixSocketReachesTheUpgradeEndpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor),
 		upgradeconn.Handler(upgradeconn.Executor,
-			func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
+			// Auth now rides the upgrade request itself. The executor dials
+			// with an Enroll token; anything without a usable Authorization
+			// header is refused before the hijack.
+			func(r *http.Request) (struct{}, http.Header, error) {
+				if _, _, ref := upgradeconn.AuthorizationFrom(r); ref != nil {
+					return struct{}{}, nil, ref
+				}
+				return struct{}{}, nil, nil
+			},
 			func(c *upgradeconn.Conn, _ struct{}) {
 				select {
 				case reached <- struct{}{}:

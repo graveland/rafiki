@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -19,7 +19,6 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
 	"go.graveland.dev/rafiki/pkg/executors"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
-	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
@@ -254,9 +253,8 @@ func (p *Pool) fireOnConnect(executorID string) {
 // handler rather than a listener so the daemon can mount it on the listener it
 // already has.
 func (p *Pool) UpgradeHandler() http.Handler {
-	return upgradeconn.Handler(upgradeconn.Executor,
-		func(*http.Request) (struct{}, http.Header, error) { return struct{}{}, nil, nil },
-		func(c *upgradeconn.Conn, _ struct{}) { p.handleConn(c) })
+	return upgradeconn.Handler(upgradeconn.Executor, p.authorize,
+		func(c *upgradeconn.Conn, a admission) { p.serve(c, a) })
 }
 
 // Serve runs the executor endpoint on a listener of its own.
@@ -281,74 +279,123 @@ func (p *Pool) Serve(ln net.Listener) error {
 // started once.
 func (p *Pool) StartSweeper(ctx context.Context) { go p.parkSweep(ctx) }
 
-func (p *Pool) handleConn(conn net.Conn) {
-	defer conn.Close()
+// admission is what authorize hands serve: an authenticated identity, plus
+// whether it arrived without a row.
+type admission struct {
+	executor   executors.Executor
+	credential string // non-empty only on enrollment
+	transient  bool
+}
 
-	// Set a read deadline for the hello frame — a silent client must not
-	// wedge the accept loop (see pkg/control/server.go:346-400).
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	hello, err := readHelloFrame(conn)
-	_ = conn.SetDeadline(time.Time{})
-	if err != nil {
-		slog.Warn("execpool: hello read failed", "error", err)
-		return
+// authorize authenticates the upgrade request and decides admission, BEFORE
+// the connection is hijacked. A refusal is therefore an ordinary HTTP
+// response — the peer is told why, with a status it can classify, instead of
+// watching an authenticated connection close under it.
+//
+// r.Context() is safe for the store and admit calls here: they finish before
+// the hijack, so the request's lifetime bounds them.
+func (p *Pool) authorize(r *http.Request) (admission, http.Header, error) {
+	scheme, secret, ref := upgradeconn.AuthorizationFrom(r)
+	if ref != nil {
+		return admission{}, nil, ref
 	}
 
 	var e executors.Executor
 	var credential string
 	var transient bool
-	ctx := context.Background()
 
-	switch {
-	case hello.Ticket != "":
+	switch scheme {
+	case upgradeconn.SchemeTicket:
 		// A transient executor: no row, no credential, no enrollment. The
 		// ticket was minted over an authenticated control connection, and
 		// redeeming it is what that connection's authentication buys.
-		grant, ok := p.tickets.Redeem(hello.Ticket)
+		grant, ok := p.tickets.Redeem(secret)
 		if !ok {
-			writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-				Type:  "executor_hello",
-				Error: "session ticket is unknown, already used, or revoked",
-				// Terminal. A ticket is one-shot and tied to a control
-				// connection; retrying cannot make a spent one valid, and a
-				// retry loop here would spin for the life of the process.
-				Retryable: false,
-			})
-			return
+			// Terminal. A ticket is one-shot and tied to a control
+			// connection; retrying cannot make a spent one valid, and a
+			// retry loop here would spin for the life of the process.
+			return admission{}, nil, &upgradeconn.Refusal{
+				Status: http.StatusUnauthorized,
+				Reason: "session ticket is unknown, already used, or revoked",
+			}
 		}
 		e, transient = grant.Executor(), true
-	case hello.Token != "":
+	case upgradeconn.SchemeEnroll:
 		// First enrollment.
-		e, credential, err = p.store.Enroll(ctx, hello.Token, hello.SelfReported)
-	case hello.Credential != "":
-		e, err = p.store.Authenticate(ctx, hello.Credential)
-	default:
-		writeHelloError(conn, "no token or credential in hello")
-		return
-	}
-	if err != nil {
-		writeAuthFailure(conn, err)
-		return
+		vals, err := url.ParseQuery(r.Header.Get(upgradeconn.HeaderSelfReported))
+		if err != nil {
+			return admission{}, nil, &upgradeconn.Refusal{
+				Status: http.StatusBadRequest,
+				Reason: "malformed Rafiki-Self-Reported header",
+			}
+		}
+		self := make(map[string]string, len(vals))
+		for k, vs := range vals {
+			if len(vs) > 0 {
+				self[k] = vs[0]
+			}
+		}
+		e, credential, err = p.store.Enroll(r.Context(), secret, self)
+		if err != nil {
+			return admission{}, nil, authRefusal(err)
+		}
+	case upgradeconn.SchemeBearer:
+		var err error
+		e, err = p.store.Authenticate(r.Context(), secret)
+		if err != nil {
+			return admission{}, nil, authRefusal(err)
+		}
 	}
 
-	// Decided BEFORE the hello response, so a refused peer is told why rather
-	// than watching an authenticated connection close under it.
+	// Decided BEFORE the 101, so a refused peer is told why rather than
+	// watching an authenticated connection close under it.
+	if err := p.admit(r.Context(), e.ID, r.RemoteAddr); err != nil {
+		if errors.Is(err, ErrAlreadyConnected) {
+			return admission{}, nil, &upgradeconn.Refusal{
+				Status: http.StatusConflict,
+				Reason: "another connection for this executor is already live and answering; " +
+					"if this machine is not sharing its credential with another, retry shortly",
+			}
+		}
+		return admission{}, nil, err
+	}
+
+	hdr := http.Header{upgradeconn.HeaderExecutorID: {e.ID}}
+	if credential != "" {
+		hdr.Set(upgradeconn.HeaderCredential, credential) // empty except on first enrollment
+	}
+	return admission{executor: e, credential: credential, transient: transient}, hdr, nil
+}
+
+// authRefusal answers a failed Enroll or Authenticate, telling the peer
+// whether the answer is about its CREDENTIAL or about our ability to check it.
+//
+// The non-terminal branch deliberately does not forward err.Error(). A store
+// failure is an internal error — a pgx message carrying the DSN, a hostname,
+// a query — and the peer on the other end has, by definition, not yet proved
+// who it is. The real error goes to the log, where it belongs.
+func authRefusal(err error) *upgradeconn.Refusal {
+	if executors.IsTerminalAuthError(err) {
+		return &upgradeconn.Refusal{Status: http.StatusUnauthorized, Reason: err.Error()}
+	}
+	slog.Error("execpool: could not verify an executor credential", "error", err)
+	return &upgradeconn.Refusal{
+		Status: http.StatusServiceUnavailable,
+		Reason: "rafikid could not verify the credential right now; retry",
+	}
+}
+
+// serve runs the post-authentication half of the executor link. It runs on
+// the request goroutine after the hijack, so the connection outlives the
+// request — hence context.Background, not r.Context().
+func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
+	defer conn.Close()
+
+	e := a.executor
+	transient := a.transient
+	ctx := context.Background()
+
 	remote := conn.RemoteAddr().String()
-	if err := p.admit(ctx, e.ID, remote); err != nil {
-		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-			Type: "executor_hello",
-			Error: "another connection for this executor is already live and answering; " +
-				"if this machine is not sharing its credential with another, retry shortly",
-			Retryable: true,
-		})
-		return
-	}
-
-	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-		Type:       "executor_hello",
-		ExecutorID: e.ID,
-		Credential: credential, // empty except on first enrollment
-	})
 
 	httpClient, err := ClientForConn(conn)
 	if err != nil {
@@ -358,11 +405,11 @@ func (p *Pool) handleConn(conn net.Conn) {
 
 	cl := executorpbconnect.NewExecutorServiceClient(httpClient, "http://executor")
 
-	// Bounded: the hello frame's read deadline was cleared above, and it has
-	// to be — it is a CONNECTION deadline, and this connection is about to
-	// live for hours. That leaves Describe as the one unbounded call on the
-	// admission path, where a peer that completes the handshake and then goes
-	// silent holds this goroutine and its connection open forever.
+	// Bounded: Describe is otherwise the one unbounded call on the
+	// admission path — the connection is about to live for hours, so no
+	// read deadline protects it — where a peer that completes the upgrade
+	// handshake and then goes silent holds this goroutine and its
+	// connection open forever.
 	joinCtx, cancelJoin := context.WithTimeout(ctx, p.joinTimeout)
 	desc, err := cl.Describe(joinCtx, connect.NewRequest(&executorpb.DescribeRequest{}))
 	cancelJoin()
@@ -898,73 +945,6 @@ func (p *Pool) healthCheck(ctx context.Context, id string, lc *liveConn) error {
 		_ = p.store.TouchSeen(ctx, id)
 	}
 	return nil
-}
-
-// ─── hello frame read, byte-at-a-time ──────────────────────────────────────
-
-// readHelloFrame reads the newline-delimited hello frame from conn ONE BYTE
-// AT A TIME. Unlike the control listener which reuses its bufio.Reader
-// (because the client pipelines its first request behind auth), here
-// everything after the hello frame is HTTP/2 framing that http2.Transport
-// must read itself. A buffered reader that consumes past the newline leaves
-// the transport starting mid-frame, and the connection dies with an
-// unhelpful protocol error.
-func readHelloFrame(conn net.Conn) (protocol.ExecutorHelloRequest, error) {
-	var buf [4096]byte
-	n := 0
-	for {
-		if n >= len(buf) {
-			return protocol.ExecutorHelloRequest{}, fmt.Errorf("hello frame exceeds %d bytes", len(buf))
-		}
-		if _, err := io.ReadFull(conn, buf[n:n+1]); err != nil {
-			return protocol.ExecutorHelloRequest{}, fmt.Errorf("read hello: %w", err)
-		}
-		if buf[n] == '\n' {
-			break
-		}
-		n++
-	}
-	var req protocol.ExecutorHelloRequest
-	if err := json.Unmarshal(buf[:n], &req); err != nil {
-		return protocol.ExecutorHelloRequest{}, fmt.Errorf("parse hello: %w", err)
-	}
-	return req, nil
-}
-
-func writeHelloResponse(conn net.Conn, resp protocol.ExecutorHelloResponse) {
-	b, _ := json.Marshal(resp)
-	b = append(b, '\n')
-	_, _ = conn.Write(b)
-}
-
-func writeHelloError(conn net.Conn, msg string) {
-	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-		Type:  "executor_hello",
-		Error: msg,
-	})
-}
-
-// writeAuthFailure answers a failed Enroll or Authenticate, telling the peer
-// whether the answer is about its CREDENTIAL or about our ability to check it.
-//
-// The retryable branch deliberately does not forward err.Error(). A store
-// failure is an internal error — a pgx message carrying the DSN, a hostname,
-// a query — and the peer on the other end has, by definition, not yet proved
-// who it is. The real error goes to the log, where it belongs.
-func writeAuthFailure(conn net.Conn, err error) {
-	if executors.IsTerminalAuthError(err) {
-		writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-			Type:  "executor_hello",
-			Error: err.Error(),
-		})
-		return
-	}
-	slog.Error("execpool: could not verify an executor credential", "error", err)
-	writeHelloResponse(conn, protocol.ExecutorHelloResponse{
-		Type:      "executor_hello",
-		Error:     "rafikid could not verify the credential right now; retry",
-		Retryable: true,
-	})
 }
 
 // ─── executorClient adapts a Connect client to tools.ExecutorClient ────────

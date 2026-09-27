@@ -2,10 +2,14 @@ package execpool
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // A ticket-authenticated executor must reach Pool.Live() with no row, no
@@ -16,7 +20,7 @@ func TestTicketExecutorConnectsAndGoesLive(t *testing.T) {
 	addr, pin, p := servePool(t, store)
 
 	// Mint BEFORE dialling — the ticket must already be in the registry when
-	// the hello arrives.
+	// the upgrade request arrives.
 	ticket, err := p.Tickets().Mint(TicketGrant{
 		ExecutorID:  "sess-01J0",
 		Owner:       "brent",
@@ -64,12 +68,19 @@ func TestSpentTicketIsRefusedTerminally(t *testing.T) {
 	if _, ok := p.Tickets().Redeem(ticket); !ok {
 		t.Fatal("first redeem must succeed")
 	}
-	resp := helloExchangeOn(t, p, protocolHello(ticket))
-	if resp.Error == "" {
-		t.Fatal("a spent ticket must be refused")
+	_, _, err = upgradeExchange(t, p, http.Header{
+		"Authorization": {string(upgradeconn.SchemeTicket) + " " + ticket},
+	})
+	var ref *upgradeconn.Refused
+	if !errors.As(err, &ref) || ref.Status != http.StatusUnauthorized {
+		t.Fatalf("a second redemption must be refused 401, got %v", err)
 	}
-	if resp.Retryable {
-		t.Fatal("a spent ticket is terminal; Retryable=true makes the executor " +
-			"spin for the life of the process")
+	if !strings.Contains(ref.Reason, "session ticket is unknown, already used, or revoked") {
+		t.Errorf("the refusal must say the ticket is spent: %q", ref.Reason)
+	}
+	// Terminal: classifying the refusal must yield the one error that stops
+	// the reconnect loop, not something the executor spins on.
+	if !errors.Is(classifyRefusal(err), ErrEnrollmentRejected) {
+		t.Error("a spent ticket is terminal; a 401 must classify as ErrEnrollmentRejected")
 	}
 }

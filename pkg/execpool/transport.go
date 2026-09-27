@@ -16,7 +16,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -79,16 +78,6 @@ func ServeInverted(ctx context.Context, conn net.Conn, handler http.Handler) err
 	})
 	return nil
 }
-
-// readerConn is a net.Conn whose reads come from r — the hello reader, which
-// already holds whatever the peer pipelined behind its response. Writes and
-// the rest of the Conn behaviour pass through unchanged.
-type readerConn struct {
-	net.Conn
-	r io.Reader
-}
-
-func (c readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // ClientForConn returns an http.Client that speaks HTTP/2 over exactly this
 // already-established connection. rafikid side.

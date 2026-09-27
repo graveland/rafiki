@@ -3,9 +3,9 @@ package execpool
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -14,7 +14,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
-	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/upgradeconn"
 )
 
 // blackHoleHandler answers Describe so the executor is admitted, then never
@@ -53,9 +53,7 @@ func TestUnresponsiveExecutorIsParkedRatherThanHangingForever(t *testing.T) {
 	p.healthInterval = 50 * time.Millisecond
 	p.healthTimeout = 150 * time.Millisecond
 
-	srvConn := invertedPair(t, &blackHoleHandler{executorID: "exec-blackhole"})
-
-	go p.handleConn(srvConn)
+	joinViaUpgrade(t, p, &blackHoleHandler{executorID: "exec-blackhole"})
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool {
 		return len(p.Live()) == 1
@@ -69,11 +67,9 @@ func TestUnresponsiveExecutorIsParkedRatherThanHangingForever(t *testing.T) {
 	}
 }
 
-// The join path in isolation. The hello frame has a read deadline, but it is a
-// CONNECTION deadline and has to be cleared before the connection goes on to
-// live for hours — which left Describe as the one unbounded call on the
-// admission path. A peer that completes the handshake and then never speaks
-// HTTP/2 held an accept goroutine and its connection open indefinitely.
+// The join path in isolation. A peer that completes the upgrade handshake and
+// then never speaks HTTP/2 must not hold the accept goroutine open
+// indefinitely: Describe on the join path is bounded by joinTimeout.
 func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
 	if err != nil {
@@ -81,17 +77,20 @@ func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 	}
 	defer ln.Close()
 
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, aErr := ln.Accept()
-		if aErr != nil {
-			return
-		}
-		if tc, ok := c.(*tls.Conn); ok {
-			_ = tc.Handshake()
-		}
-		accepted <- c
-	}()
+	p := New(newFakeStore("exec-silent"))
+	p.joinTimeout = 200 * time.Millisecond
+
+	serveDone := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor),
+		upgradeconn.Handler(upgradeconn.Executor, p.authorize,
+			func(c *upgradeconn.Conn, a admission) {
+				defer close(serveDone)
+				p.serve(c, a)
+			}))
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	dialed, err := tls.Dial("tcp", ln.Addr().String(), clientTLSConfig(t))
 	if err != nil {
@@ -101,23 +100,16 @@ func TestJoinDescribeIsBoundedByATimeout(t *testing.T) {
 	if err := dialed.Handshake(); err != nil {
 		t.Fatal(err)
 	}
-	// Send a well-formed hello and then go completely silent: never serve
-	// HTTP/2, never close.
-	sendHelloFrame(t, dialed, protocol.ExecutorHelloRequest{Credential: "c"})
-
-	p := New(newFakeStore("exec-silent"))
-	p.joinTimeout = 200 * time.Millisecond
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		p.handleConn(<-accepted)
-	}()
+	// Upgrade and then go completely silent: never serve HTTP/2, never close.
+	if _, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
+		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " c"}}); err != nil {
+		t.Fatalf("upgrade refused: %v", err)
+	}
 
 	select {
-	case <-done:
+	case <-serveDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("handleConn never returned: Describe on the join path is unbounded")
+		t.Fatal("serve never returned: Describe on the join path is unbounded")
 	}
 	if len(p.Live()) != 0 {
 		t.Fatal("an executor that never answered Describe must not be admitted")
@@ -152,10 +144,12 @@ func TestTransportEnablesHTTP2Keepalive(t *testing.T) {
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-// invertedPair stands up the real arrangement — executor dials and SERVES,
-// rafikid accepts and is the client — and returns rafikid's side, already
-// carrying a hello frame so handleConn can be driven directly.
-func invertedPair(t *testing.T, handler executorpbconnect.ExecutorServiceHandler) net.Conn {
+// joinViaUpgrade performs the full executor link against p: it dials in over
+// TLS, upgrades with a Bearer credential through the pool's own
+// authorization, and serves handler on the inverted connection — the same
+// shape the raw hello-frame helper used to drive, now through the real
+// upgrade path.
+func joinViaUpgrade(t *testing.T, p *Pool, handler executorpbconnect.ExecutorServiceHandler) error {
 	t.Helper()
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLSConfig(t))
 	if err != nil {
@@ -163,17 +157,11 @@ func invertedPair(t *testing.T, handler executorpbconnect.ExecutorServiceHandler
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	accepted := make(chan net.Conn, 1)
-	go func() {
-		c, aErr := ln.Accept()
-		if aErr != nil {
-			return
-		}
-		if tc, ok := c.(*tls.Conn); ok {
-			_ = tc.Handshake()
-		}
-		accepted <- c
-	}()
+	mux := http.NewServeMux()
+	mux.Handle(upgradeconn.PathFor(upgradeconn.Executor), p.UpgradeHandler())
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	dialed, err := tls.Dial("tcp", ln.Addr().String(), clientTLSConfig(t))
 	if err != nil {
@@ -184,52 +172,15 @@ func invertedPair(t *testing.T, handler executorpbconnect.ExecutorServiceHandler
 		t.Fatal(err)
 	}
 
-	sendHelloFrame(t, dialed, protocol.ExecutorHelloRequest{Credential: "c"})
+	upConn, _, err := upgradeconn.Dial(dialed, upgradeconn.Executor, "localhost",
+		http.Header{"Authorization": {string(upgradeconn.SchemeBearer) + " c"}})
+	if err != nil {
+		return err // refused: the caller asserts on the refusal
+	}
 
 	_, h := executorpbconnect.NewExecutorServiceHandler(handler)
-	go func() {
-		// Drain rafikid's hello RESPONSE before serving. Byte-at-a-time, so
-		// it stops exactly at the newline and leaves the HTTP/2 preface for
-		// the server — the same discipline readHelloFrame follows on the
-		// other side, and for the same reason.
-		if _, err := readHelloResponseLine(dialed); err != nil {
-			return
-		}
-		_ = ServeInverted(t.Context(), dialed, h)
-	}()
-
-	select {
-	case c := <-accepted:
-		return c
-	case <-time.After(5 * time.Second):
-		t.Fatal("no connection accepted")
-		return nil
-	}
-}
-
-func sendHelloFrame(t *testing.T, w net.Conn, req protocol.ExecutorHelloRequest) {
-	t.Helper()
-	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(append(b, '\n')); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func readHelloResponseLine(r net.Conn) (string, error) {
-	var buf []byte
-	one := make([]byte, 1)
-	for {
-		if _, err := r.Read(one); err != nil {
-			return "", err
-		}
-		if one[0] == '\n' {
-			return string(buf), nil
-		}
-		buf = append(buf, one[0])
-	}
+	go func() { _ = ServeInverted(t.Context(), upConn, h) }()
+	return nil
 }
 
 func waitFor(t *testing.T, limit time.Duration, what string, cond func() bool) {

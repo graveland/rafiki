@@ -28,7 +28,7 @@ func proxyPoolFixture(t *testing.T, proxies map[string]string) (*Pool, string) {
 	p.healthInterval = time.Hour // no health polling noise in this test
 
 	srv := executor.NewServer(executor.Options{Root: t.TempDir(), NoLSP: true, Proxies: proxies})
-	go p.handleConn(invertedPair(t, srv))
+	joinViaUpgrade(t, p, srv)
 
 	waitFor(t, 5*time.Second, "executor to join", func() bool { return len(p.Live()) == 1 })
 	return p, executorID
