@@ -636,6 +636,14 @@ can exit before the signal rungs. A script that holds NO stream is told
 nothing before the signals — the default 180 s graceful window applies, so
 callers that want a prompt death pass explicit timeouts.
 
+**Cost.** On `ListChildren`/`GetChild`, a script child's `cost_usd` is its
+SUBTREE's spend — the script drives no LLM turns of its own, but the fundi
+and claude children it spawned do, and subtree pricing folds the script
+child's own conversations in with theirs. When the cost source is missing or
+the query fails, the field is left unset: absent means "not reported", and a
+reported zero would claim a subtree measured at nothing. Every other kind's
+`cost_usd` is still that child's own conversation rollup, unchanged.
+
 **What a kill contains, and what it does not.** Killing a script child
 signals its process group: the script's own subprocesses die with it. Its
 DAEMON-MANAGED descendants — the fundi children it spawned through its

@@ -57,25 +57,41 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 }
 
 // summariesFor maps snapshots onto the protocol summaries every list-shaped
-// verb serves: ONE batched cost rollup (see costsFor — N serial round trips
-// was the cockpit's seed-path stall), and the snapshotToSummary field mapping
-// (provider+model join, nil PID for an exited child, Unix-millis stamps,
-// catalog-sourced context window) that is easy to get subtly wrong by hand.
-// Both the operator list and the child-scoped subtree list go through it, so
-// a child caller's ListChildren answers with the same per-row facts an
-// operator's does, minus the rows outside its subtree.
+// verb serves: ONE batched cost rollup for the non-script kinds (see costsFor
+// — N serial round trips was the cockpit's seed-path stall), per-subtree
+// pricing for script children (see scriptSpend), and the snapshotToSummary
+// field mapping (provider+model join, nil PID for an exited child,
+// Unix-millis stamps, catalog-sourced context window) that is easy to get
+// subtly wrong by hand. Both the operator list and the child-scoped subtree
+// list go through it, so a child caller's ListChildren answers with the same
+// per-row facts an operator's does, minus the rows outside its subtree.
 func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSummary {
 	// ONE rollup for the whole list. Pricing each child with its own
 	// SubtreeCost call meant N serial round trips, each with its own timeout,
 	// on the cockpit's seed path -- and the seed is re-run whenever an unknown
 	// child produces traffic, which is exactly the busy-fleet case where N is
-	// large.
-	costs := c.costsFor(kept)
+	// large. Script children are withheld from the rollup: their CostUSD is
+	// their SUBTREE's spend (scriptSpend), never a rollup of their own rows.
+	costSnaps := make([]childstore.Snapshot, 0, len(kept))
+	for _, s := range kept {
+		if s.Kind != protocol.KindScript {
+			costSnaps = append(costSnaps, s)
+		}
+	}
+	costs := c.costsFor(costSnaps)
+
+	// The script children price one subtree query each, under the same batch
+	// bound as the rollup: both are display numbers that must not hold up the
+	// list they decorate.
+	spendCtx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
+	defer cancel()
 
 	out := make([]protocol.ChildSummary, 0, len(kept))
 	for _, s := range kept {
 		sum := snapshotToSummary(s, c.ContextWindow)
-		if cost, ok := costs[s.ChildID]; ok {
+		if s.Kind == protocol.KindScript {
+			sum.CostUSD = c.scriptSpend(spendCtx, s.ChildID)
+		} else if cost, ok := costs[s.ChildID]; ok {
 			sum.CostUSD = &cost
 		}
 		out = append(out, sum)
@@ -90,10 +106,34 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 		return protocol.ChildSummary{}, false
 	}
 	sum := snapshotToSummary(snap, c.ContextWindow)
-	if cost, ok := c.costsFor([]childstore.Snapshot{snap})[childID]; ok {
-		sum.CostUSD = &cost
+	if snap.Kind != protocol.KindScript {
+		if cost, ok := c.costsFor([]childstore.Snapshot{snap})[childID]; ok {
+			sum.CostUSD = &cost
+		}
+		return sum, true
 	}
+	// A script child prices by subtree, the same rule the list path applies.
+	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
+	defer cancel()
+	sum.CostUSD = c.scriptSpend(ctx, childID)
 	return sum, true
+}
+
+// scriptSpend resolves one script child's CostUSD: the SUBTREE's spend. A
+// script child drives no turns of its own — its fundi and claude descendants
+// do — and subtreeSpend folds the script child's own conversations in with
+// the descendants', so the answer is the subtree's whole spend. An error
+// means the field stays unset: nil is "not reported", and a reported zero
+// would read as "the subtree has spent nothing", which nothing here measured.
+// The error itself is logged at Debug — an unpriced row is a display
+// degradation, not an RPC failure the caller could act on.
+func (c *Controller) scriptSpend(ctx context.Context, childID string) *float64 {
+	spend, err := c.subtreeSpend(ctx, childID)
+	if err != nil {
+		slog.Debug("connect: script child subtree spend unavailable", "child", childID, "error", err)
+		return nil
+	}
+	return &spend
 }
 
 // snapshotToSummary converts a childstore.Snapshot to the wire ChildSummary
@@ -159,7 +199,9 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 // number: a slow rollup must not hold up the list it decorates.
 const costRollupTimeout = 3 * time.Second
 
-// costsFor prices every child in one round trip, keyed by child id.
+// costsFor prices every non-script child in one round trip, keyed by child
+// id. Callers pass only non-script snapshots: a script child's CostUSD is its
+// subtree's spend (scriptSpend), not a rollup of its own conversations.
 //
 // The two correlation routes are NOT interchangeable and getting them the
 // wrong way round is silent. A conversation is found by UUID for a fundi child
