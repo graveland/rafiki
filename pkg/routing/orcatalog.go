@@ -74,6 +74,19 @@ type ProviderPrefs struct {
 	// by the static pins below — a provider is ignored because it misbehaved,
 	// not because of a policy judgement about its quantization or retention.
 	Ignore []string `json:"ignore,omitempty"`
+	// Sort prefers providers by price, throughput or latency. Empty means no
+	// opinion — and so does an explicit spec decision of "balanced", which
+	// Spec.Prefs omits (it is a decision to send no sort, not a value).
+	Sort string `json:"sort,omitempty"`
+	// Quantizations restricts serving to providers hosting these quantizations
+	// of the model's weights (a spec's quant floor expanded, or its list as
+	// written).
+	Quantizations []string `json:"quantizations,omitempty"`
+	// DataCollection is "deny" when a spec demands no provider that may store
+	// or train on prompts (nodata).
+	DataCollection string `json:"data_collection,omitempty"`
+	// ZDR restricts serving to zero-data-retention endpoints.
+	ZDR bool `json:"zdr,omitempty"`
 }
 
 // providerPins maps an OpenRouter model-line prefix (same line semantics as
