@@ -250,3 +250,33 @@ func findLine(rows []Row, line string) (Row, int, bool) {
 	}
 	return Row{}, -1, false
 }
+
+// TestRoutePolicyStoreSetRefusesUnmatchableLine: a line with three or more
+// "/"-segments can never match a reduced id (modelLineOf strips the provider
+// segment), so Set refuses it instead of writing a silently dead row.
+func TestRoutePolicyStoreSetRefusesUnmatchableLine(t *testing.T) {
+	c := assert.NewAborting(t)
+	s, ctx := testStore(t)
+	// Namespaced and 3-segment: unique per test, and refused for the shape.
+	line := "testline/" + t.Name() + "/model"
+
+	c.Error(s.Set(ctx, line, "sort=price"), "Set with a 3-segment line must be refused")
+	active, err := s.Active(ctx)
+	c.Require().NoError(err, "Active")
+	if _, _, ok := findLine(active, line); ok {
+		t.Error("the refused Set wrote a row anyway")
+	}
+}
+
+// TestPolicyLoadRefusesBadLineShape: Load fails loudly (naming nothing else —
+// the line itself is the problem) when a row's line can never match.
+func TestPolicyLoadRefusesBadLineShape(t *testing.T) {
+	p := NewPolicy()
+	err := p.Load([]Row{{ModelLine: "openrouter/z-ai/glm-5.3", Spec: "sort=price"}})
+	if err == nil {
+		t.Fatal("Load with an unmatchable line = nil error, want refusal")
+	}
+	if got := p.Resolve("z-ai/glm-5.3"); !got.IsZero() {
+		t.Fatalf("Resolve after failed Load = %q, want zero Spec (previous view intact)", got.String())
+	}
+}

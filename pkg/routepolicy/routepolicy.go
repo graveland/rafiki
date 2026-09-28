@@ -63,9 +63,24 @@ func NewPostgres(pool *pgxpool.Pool) Store { return &postgresStore{pool: pool} }
 
 type postgresStore struct{ pool *pgxpool.Pool }
 
-func (s *postgresStore) Set(ctx context.Context, modelLine, spec string) error {
-	if modelLine == "" {
+// validModelLine rejects lines that can never match: modelLineOf reduces
+// three-segment ids by stripping their provider segment, so a stored line with
+// three or more "/"-separated segments is compared only against reduced ids
+// and can never equal or prefix-match one — a silently dead row.
+func validModelLine(line string) error {
+	if line == "" {
 		return errors.New("routepolicy: model line must not be empty")
+	}
+	if strings.Count(line, "/") > 1 {
+		return fmt.Errorf("routepolicy: model line %q: a line names at most <model>/<id> — "+
+			"the provider segment is not part of a policy line", line)
+	}
+	return nil
+}
+
+func (s *postgresStore) Set(ctx context.Context, modelLine, spec string) error {
+	if err := validModelLine(modelLine); err != nil {
+		return err
 	}
 	if _, err := routing.ParseSpec(spec); err != nil {
 		return fmt.Errorf("routepolicy: model line %q: %w", modelLine, err)
@@ -151,6 +166,9 @@ func NewPolicy() *Policy { return &Policy{rows: map[string]routing.Spec{}} }
 func (p *Policy) Load(rows []Row) error {
 	specs := make(map[string]routing.Spec, len(rows))
 	for _, r := range rows {
+		if err := validModelLine(r.ModelLine); err != nil {
+			return err
+		}
 		spec, err := routing.ParseSpec(r.Spec)
 		if err != nil {
 			return fmt.Errorf("routepolicy: model line %q: %w", r.ModelLine, err)
