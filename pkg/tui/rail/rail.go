@@ -25,27 +25,23 @@ const ParentLabel = "rafiki/parent"
 // proxy synthesized from a captured thread, rather than a child rafiki spawned.
 const NativeSubagentLabel = "rafiki/native-subagent"
 
-// LiveStatuses is every protocol.Status except "exited".
-//
-// The set of nine is CLOSED and there is NO "running" status. A filter written
-// from intuition as status IN ('running', ...) selects nothing and silently
-// empties the rail; this repo has shipped that exact bug once already, in the
-// recovery predicate.
+// LiveStatuses is every protocol.Status except "exited" -- ten values, of
+// which "running" is a script child's steady state between spawn and exit (a
+// script never streams; its whole life is one run). This is the list the
+// cockpit sends as ListChildrenRequest.Statuses, so a status missing here is
+// a child the seed can never see: every event from it then trips the
+// reseed-on-unknown-child self-heal, which cannot find it either.
 func LiveStatuses() []string {
 	return []string{
-		"spawning", "idle", "streaming", "tool_running",
+		"spawning", "idle", "streaming", "running", "tool_running",
 		"compacting", "batch_wait", "blocked_ui", "shutting_down",
 	}
 }
 
 // Working reports whether a child is mid-turn: streaming a reply, executing a
-// tool, or compacting its context. The set of statuses is CLOSED
-// (protocol.Status's nine) and there is NO "running" status -- a predicate
-// written from intuition as status == "running" matches nothing and silently
-// does nothing, which this repo has shipped once already in the recovery path.
-// batch_wait is deliberately absent: a child parked on a provider Batch API is
-// waiting on hours-scale work that has already been submitted, so it must not
-// spin.
+// tool, or compacting its context. batch_wait is deliberately absent: a child
+// parked on a provider Batch API is waiting on hours-scale work that has
+// already been submitted, so it must not spin.
 func Working(status string) bool {
 	switch status {
 	case "streaming", "tool_running", "compacting":
@@ -61,7 +57,8 @@ type Node struct {
 	ParentID string
 	Depth    int
 
-	// Status is the last known agent state, one of protocol.Status's nine.
+	// Status is the last known agent state, one of protocol.Status's ten
+	// values.
 	Status string
 	Kind   string // protocol kind: "claude" | "fundi". "pi" is retired; an old row still renders. Empty until seeded.
 

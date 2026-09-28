@@ -290,7 +290,7 @@ func colorStatus(status string, useColor bool) string {
 	switch status {
 	case "idle":
 		return cyan(status)
-	case "streaming", "tool_running", "compacting":
+	case "streaming", "running", "tool_running", "compacting":
 		return green(status)
 	case "batch_wait":
 		return blue(status)

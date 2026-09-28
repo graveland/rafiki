@@ -61,8 +61,9 @@ STOP_TIMEOUT_SLACK_MS = 30_000
 
 # The states that mean "settled": a fundi child sits idle between turns
 # (agent_settled is pi's true-idle event; the daemon maps it to idle), and
-# exited is terminal. Everything else (spawning, streaming, tool_running,
-# compacting, blocked_ui, shutting_down) is still working.
+# exited is terminal. Everything else (spawning, streaming, running,
+# tool_running, compacting, blocked_ui, shutting_down) is still working --
+# "running" is a script child's steady state between spawn and exit.
 SETTLED_STATES = ("idle", "exited")
 
 # The durable event types a settle arrives as. A fundi or claude child

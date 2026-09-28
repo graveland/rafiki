@@ -31,9 +31,9 @@ const lifecycleTimeout = 3 * time.Minute
 const forceShutdownMs = 1
 
 // statusShuttingDown is protocol.StatusShuttingDown's wire value. Spelled out
-// rather than imported for the same reason rail.LiveStatuses spells the eight
-// out: this package renders status strings it receives over the wire and does
-// not otherwise depend on the daemon's types.
+// rather than imported for the same reason rail.LiveStatuses spells its
+// statuses out: this package renders status strings it receives over the wire
+// and does not otherwise depend on the daemon's types.
 const statusShuttingDown = "shutting_down"
 
 type spawnedMsg struct {

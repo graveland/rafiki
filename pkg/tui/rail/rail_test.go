@@ -3,6 +3,7 @@
 package rail_test
 
 import (
+	"slices"
 	"testing"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -59,12 +60,29 @@ func TestSeedAcceptsEveryLiveStatus(t *testing.T) {
 	c := assert.NewAborting(t)
 	var sums []*rafikiv1.ChildSummary
 	for i, st := range rail.LiveStatuses() {
-		c.NotEq("running", st, `"running" is not a protocol.Status value -- the set of nine is closed`)
 		sums = append(sums, summary("c_"+st, st, "", st, int32(i)))
 	}
 	r := rail.New()
 	r.Seed(sums)
-	c.Eq(8, r.Len(), "Len = %d, want 8; LiveStatuses = %v", r.Len(), rail.LiveStatuses())
+	c.Eq(9, r.Len(), "Len = %d, want 9; LiveStatuses = %v", r.Len(), rail.LiveStatuses())
+}
+
+// A script child sits at "running" -- never "streaming"; its whole life is one
+// run -- so the seed filter must admit it. LiveStatuses is what the cockpit
+// sends as ListChildrenRequest.Statuses, and a filter without running made a
+// script spawned before the cockpit attached invisible: no rail row, and every
+// event from the unknown child then re-armed the reseed self-heal, which could
+// not find it either. Pinned here at the rail level; the seed request itself
+// is cockpit.go's seedCmd.
+func TestSeedAcceptsRunningScriptChild(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.True(slices.Contains(rail.LiveStatuses(), "running"),
+		"LiveStatuses must include running or the cockpit's seed filter hides script children")
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{summary("c_script", "runner", "", "running", 4)})
+	n, ok := r.Get("c_script")
+	c.Require().True(ok, "a seeded running child must appear in the rail")
+	c.Eq("running", n.Status, "Status")
 }
 
 func TestSeedPopulatesCwd(t *testing.T) {

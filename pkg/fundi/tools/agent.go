@@ -18,7 +18,7 @@ type AgentInfo struct {
 	ChildID string
 	Name    string
 	Model   string
-	Status  string // spawning|idle|streaming|tool_running|compacting|blocked_ui|shutting_down|exited
+	Status  string // spawning|idle|streaming|running|tool_running|compacting|blocked_ui|shutting_down|exited
 	// Kind is the child protocol ("claude"); empty means the fundi runtime
 	// default. See docs/plans/2026-09-05-daraja-proxy-identity-design.md,
 	// Piece 4.
