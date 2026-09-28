@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,7 @@ type Client struct {
 
 	breakerWindow time.Duration
 	defaultModel  string
+	routingSpec   routing.Spec
 	modelGate     *ModelGate
 
 	rawTrace rawTraceRecorder       // nil when disabled
@@ -103,6 +105,15 @@ func WithLogger(l *slog.Logger) ClientOption {
 // per-conversation model, resolution errors rather than silently picking one.
 func WithDefaultModel(m string) ClientOption {
 	return func(c *Client) { c.defaultModel = m }
+}
+
+// WithRouting carries the resolved routing spec (routing.Spec — the bracketed
+// tail of the model string, or a routing policy row) for every OpenRouter
+// request this client sends: the request body's provider object is built from
+// spec.Prefs instead of the pin/guard logic alone. The zero spec (the
+// default) leaves every body byte-identical to the pre-spec client.
+func WithRouting(spec routing.Spec) ClientOption {
+	return func(c *Client) { c.routingSpec = spec }
 }
 
 // WithRecordRequests enables raw HTTP request/response capture to the debug
@@ -331,10 +342,14 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	}
 	c.mutateParams(p, alias, &params)
 
-	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", primary),
-	))
+	}
+	if !c.routingSpec.IsZero() {
+		attrs = append(attrs, attribute.String("rafiki.routing", c.routingSpec.String()))
+	}
+	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(attrs...))
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
@@ -345,8 +360,9 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 // anthropic-openrouter has one: OpenRouter's non-standard top-level "provider"
 // field, carrying the pinned routing preferences (an alias's own only pin
 // replacing the static pin when the request was made through an alias), plus
-// whatever the cache guard has ejected. providers.Validate refuses
-// extras.provider, so the user cannot clobber it.
+// whatever the cache guard has ejected — and, when a routing spec is set on
+// the client (WithRouting), the spec's own provider-routing decisions.
+// providers.Validate refuses extras.provider, so the user cannot clobber it.
 //
 // alias is the ModelAlias the requested model id matched, from
 // providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
@@ -356,7 +372,7 @@ func (c *Client) mutateParams(p providers.Provider, alias *providers.ModelAlias,
 	if p.Kind != providers.KindAnthropicOpenRouter {
 		return
 	}
-	applyProviderPrefs(params, alias, c.guard, p.Extras)
+	applyProviderPrefs(params, alias, c.guard, p.Extras, c.routingSpec)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -848,7 +864,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 	if breaker == nil {
 		resp, err := sender.New(ctx, params)
 		c.recordModelResult(params, err)
-		return resp, primary, err
+		return resp, primary, c.noEligibleError(string(params.Model), err)
 	}
 
 	if usePrimary {
@@ -859,7 +875,10 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			return resp, primary, nil
 		}
 		if !routing.FailoverWorthy(err) {
-			return nil, primary, err // not failover-worthy: don't fail over or trip
+			// not failover-worthy: don't fail over or trip. The no-eligible
+			// wrap below is decoration only (%w), so this classification
+			// sees exactly the error the sender returned.
+			return nil, primary, c.noEligibleError(string(params.Model), err)
 		}
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
 		c.logger.Warn("primary failed; failing over", "primary", primary, "error", err)
@@ -894,15 +913,33 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			c.modelGate.recordSuccess(string(params.Model))
 			return resp, fb, nil
 		}
-		lastErr = err
+		// Wrapped with the fallback's own (translated) model id, so the
+		// message names the id OpenRouter actually rejected.
+		lastErr = c.noEligibleError(string(fbParams.Model), err)
 	}
 	return nil, primary, lastErr
 }
 
-// applyProviderPrefs injects OpenRouter provider-routing preferences for pinned
-// model lines (routing.ProviderPrefsFor) plus any providers the guard has
-// ejected, as the request body's "provider" field, and merges the provider's
-// configured extras alongside.
+// applyProviderPrefs injects OpenRouter provider-routing preferences as the
+// request body's "provider" field and merges the provider's configured extras
+// alongside. Which preferences depends on spec, the resolved routing spec
+// (routing.Spec, zero = none):
+//
+//   - Zero spec — the pre-spec path (applyProviderPrefsPreSpec) runs verbatim:
+//     the static pin's prefs (routing.ProviderPrefsFor), overridden by an
+//     alias's own Only when non-empty, plus any providers the guard has
+//     ejected. Keeping today's code untouched — including the
+//     pinned-with-empty-Only corner, where a pin whose Only is empty still
+//     emits "provider": {} — is what guarantees a request with no spec
+//     produces a byte-identical body to the pre-spec client.
+//
+//   - Non-zero spec — the spec's own decisions take over the provider object
+//     through spec.Prefs: pinOnly is the alias's Only when non-empty, else the
+//     static pin's, and the spec's own Only (an explicit operator decision
+//     about where the request may be served) REPLACES it and bypasses the
+//     guard's bans and ejections; sort/quantizations/data-policy ride along,
+//     the data flags even under an only. prefs is sent only when spec.Prefs
+//     reports anything to send.
 //
 // An alias's Only pin, when non-empty, REPLACES the static pin's Only for this
 // request: the alias is the explicit, more specific declaration (two aliases
@@ -916,7 +953,37 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 // be assembled here in one call. "provider" is a reserved extras key
 // (providers.Validate refuses it) precisely because a user-supplied one would
 // otherwise delete the guard's ejections with no error and no log line.
-func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any) {
+func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any, spec routing.Spec) {
+	if spec.IsZero() {
+		applyProviderPrefsPreSpec(params, alias, g, extras)
+		return
+	}
+	pin, _ := routing.ProviderPrefsFor(string(params.Model))
+	pinOnly := pin.Only
+	if alias != nil && len(alias.Only) > 0 {
+		pinOnly = alias.Only
+	}
+	prefs, send := spec.Prefs(pinOnly, g.IgnoredFor(time.Now(), string(params.Model)))
+	fields := make(map[string]any, len(extras)+1)
+	for k, v := range extras {
+		fields[k] = v
+	}
+	if send {
+		fields["provider"] = prefs
+	}
+	if len(fields) == 0 {
+		return
+	}
+	params.SetExtraFields(fields)
+}
+
+// applyProviderPrefsPreSpec is the pre-routing-spec code path, run verbatim
+// for a zero spec so no body byte can change. Do not evolve it — new
+// behaviour belongs in the spec branch of applyProviderPrefs; the one
+// deliberate divergence is the pinned-with-empty-Only corner (a pin whose
+// Only is empty still emits "provider": {}), which spec.Prefs' send-flag
+// semantics would silently drop.
+func applyProviderPrefsPreSpec(params *anthropic.MessageNewParams, alias *providers.ModelAlias, g *routing.ProviderGuard, extras map[string]any) {
 	prefs, pinned := routing.ProviderPrefsFor(string(params.Model))
 	if alias != nil && len(alias.Only) > 0 {
 		prefs.Only = alias.Only
@@ -935,6 +1002,64 @@ func applyProviderPrefs(params *anthropic.MessageNewParams, alias *providers.Mod
 		fields["provider"] = prefs
 	}
 	params.SetExtraFields(fields)
+}
+
+// noEligibleStatuses are the HTTP statuses OpenRouter reports "nothing can
+// serve this request under its provider routing" with: 404 for the
+// "No endpoints found ..." family (including its data-policy variant) and 400
+// for "No allowed providers ...".
+var noEligibleStatuses = map[int]bool{
+	http.StatusBadRequest: true,
+	http.StatusNotFound:   true,
+}
+
+// noEligibleMarkers are that family's message fragments, matched
+// case-insensitively as substrings: OpenRouter returns them as prose inside
+// error.message with no machine-readable code distinguishing them from any
+// other 4xx (the same shape as pkg/routing's creditMarkers). The status
+// restriction in noEligibleUpstream keeps an unrelated 4xx that happens to
+// quote one of these phrases (an echoed prompt, say) from masquerading.
+var noEligibleMarkers = []string{
+	"no endpoints found",
+	"no allowed providers",
+}
+
+// noEligibleUpstream reports whether err is OpenRouter's no-eligible-provider
+// rejection: a 400/404 whose body's error message is about endpoints or
+// providers being unavailable — what a request whose routing spec (only,
+// nodata, zdr, quantizations) excludes every host gets back. The class is
+// deterministic — the same body fails identically forever — so it is never
+// retried (a 400/404 is neither routing.Retryable nor agentloop-retryable)
+// and the wrapper below only decorates it.
+func noEligibleUpstream(err error) bool {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if !noEligibleStatuses[apiErr.StatusCode] {
+		return false
+	}
+	lower := strings.ToLower(apiErr.RawJSON())
+	for _, m := range noEligibleMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// noEligibleError names the routing spec in OpenRouter's no-eligible-provider
+// rejection, so the operator sees WHICH spec excluded every provider and not
+// just OpenRouter's bare message. It wraps only when a non-zero spec is set
+// on the client, and the wrap is decoration only: %w keeps the SDK error
+// reachable, so FailoverWorthy and every retry classifier see exactly what
+// they saw before (a 400/404 is not failover-worthy, and the fallback chain
+// is unchanged).
+func (c *Client) noEligibleError(model string, err error) error {
+	if err == nil || c.routingSpec.IsZero() || !noEligibleUpstream(err) {
+		return err
+	}
+	return fmt.Errorf("no provider can serve %s under routing [%s]: %w", model, c.routingSpec.String(), err)
 }
 
 // ProviderOf extracts OpenRouter's non-standard top-level "provider" field
