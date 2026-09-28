@@ -351,6 +351,25 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	// (ClaudeProvider) never shares accumulation state across children.
 	prov = prov.Fresh()
 
+	// A script child has no turns: its status is running, set once at spawn
+	// (StateMachine.ForScript) and never touched by output — only the exit
+	// moves it. The machine is already running at construction, so record
+	// the spawning→running transition HERE, before supervise reads any
+	// stdout: the store, the rail and the event stream learn the initial
+	// status through the normal drain path (activateLiveChild's
+	// drainChildStatus), which a machine already at running can never produce
+	// on its own — and a first output line a silent script may never print
+	// must not be the thing that sets the status. Idle() still closes on the
+	// first line (Parse's FirstResponse), so the liveness wait is unchanged.
+	isScript := false
+	if _, ok := prov.(ScriptProvider); ok {
+		isScript = true
+	}
+	sm := NewStateMachine()
+	if isScript {
+		sm.ForScript()
+	}
+
 	c := &Child{
 		ID:           spec.ChildID,
 		spec:         spec,
@@ -364,7 +383,7 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		processDone:  make(chan struct{}),
 		bus:          bus.New[[]byte](bus.Options{}),
 		ring:         ring.New(ring.Options{}),
-		sm:           NewStateMachine(),
+		sm:           sm,
 		provider:     prov,
 		nativeSink:   spec.NativeSink,
 		onMeta:       spec.OnMeta,
@@ -372,6 +391,12 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 		transitionCh: make(chan struct{}, 1),
 		idle:         make(chan struct{}),
 		abandonAfter: abandonTimeout,
+	}
+
+	if isScript {
+		c.metaMu.Lock()
+		c.recordTransition(true, protocol.StatusSpawning)
+		c.metaMu.Unlock()
 	}
 
 	go c.supervise()

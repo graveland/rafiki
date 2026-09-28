@@ -32,7 +32,7 @@ const subagentEventSource = "subagents"
 // keep reporting elapsed time while it waits.
 func isWorkingStatus(s protocol.Status) bool {
 	switch s {
-	case protocol.StatusStreaming, protocol.StatusToolRunning,
+	case protocol.StatusRunning, protocol.StatusStreaming, protocol.StatusToolRunning,
 		protocol.StatusCompacting, protocol.StatusBlockedUI,
 		protocol.StatusBatchWait:
 		return true

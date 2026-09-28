@@ -64,7 +64,8 @@ reattach any time.`,
 // reason exited is — the stream is closing, not something to attach into.
 func isAttachable(ch completionChild) bool {
 	switch protocol.Status(ch.Status) {
-	case protocol.StatusIdle,
+	case protocol.StatusRunning,
+		protocol.StatusIdle,
 		protocol.StatusStreaming,
 		protocol.StatusToolRunning,
 		protocol.StatusCompacting,

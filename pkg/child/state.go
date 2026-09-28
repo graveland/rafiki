@@ -61,6 +61,7 @@ const pendingUICapacity = 64
 // Status() do). The SM does not provide internal synchronization.
 type StateMachine struct {
 	current     protocol.Status
+	script      bool              // kind=script: running from spawn, only exit moves it
 	stack       []protocol.Status // modal stack for compacting / blocked_ui
 	activeTools int               // outstanding tool_execution_start calls
 	counters    Counters
@@ -82,6 +83,22 @@ func NewStateMachine() *StateMachine {
 	}
 }
 
+// ForScript configures the machine for a kind=script child. Scripts have no
+// turns, so the turn machinery (idle/streaming/tool_running/…) never applies:
+// the status is StatusRunning, set once at spawn, never touched by output,
+// and replaced only by the process exit (exited). "running" is a working
+// status for every consumer that asks "is it working".
+//
+// The caller (Child.Spawn) records the spawning→running transition itself, so
+// the store, the rail and the event stream learn the initial status through
+// the normal drain path. ForScript must be called before the child's stdout
+// is read — a machine configured after its first event has already
+// misreported the status.
+func (sm *StateMachine) ForScript() {
+	sm.script = true
+	sm.current = protocol.StatusRunning
+}
+
 // Current returns the current status.
 func (sm *StateMachine) Current() protocol.Status {
 	return sm.current
@@ -95,6 +112,10 @@ func (sm *StateMachine) Counters() Counters {
 // OnFirstResponse transitions from spawning to idle when pi's first response
 // arrives on stdout. This is a separate method (rather than an OnPiEvent case)
 // because the trigger is process I/O, not a pi-RPC event type.
+//
+// For a script child (ForScript) this is always a no-op: the machine was
+// moved to running at spawn and never sits in spawning, so the first-response
+// signal still closes the child's Idle() wait without touching the status.
 func (sm *StateMachine) OnFirstResponse() (changed bool, prev protocol.Status) {
 	if sm.current == protocol.StatusSpawning {
 		prev = sm.current
@@ -109,6 +130,15 @@ func (sm *StateMachine) OnFirstResponse() (changed bool, prev protocol.Status) {
 // the state machine needs payload data to classify the request.
 func (sm *StateMachine) OnPiEvent(eventType string, meta *PiUIRequestMeta) (changed bool, prev protocol.Status) {
 	prev = sm.current
+	// A script child has no pi events: its output (script_output) is liveness
+	// only, and the turn machinery below is unreachable by construction. The
+	// guard — not an absent case — is what pins "output never moves the
+	// status": a script_output event after the exit must not revive a working
+	// status either, and OnProcessExit's exited stands until the machine is
+	// discarded.
+	if sm.script {
+		return false, sm.current
+	}
 	switch eventType {
 	case "agent_start":
 		sm.transition(protocol.StatusStreaming)

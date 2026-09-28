@@ -7,12 +7,12 @@ package child
 // agent protocol. The provider's job is narrower than any translator's:
 //
 //   - every line means "the child is alive and speaking". Parse reports
-//     FirstResponse (driving spawning→idle, which closes Idle() and unblocks
-//     activateLiveChild's post-spawn wait) and one synthesized agent_start
-//     (idle→streaming), so the rail renders a running script as WORKING and
-//     the busy checks treat it as mid-flight. Both are idempotent on every
-//     later line: OnFirstResponse transitions only from spawning, and
-//     streaming→streaming is not a transition.
+//     FirstResponse (driving liveness: it closes Idle() and unblocks
+//     activateLiveChild's post-spawn wait) and one script_output event per
+//     line carrying the raw text. A script child's status is running, set
+//     once at spawn (StateMachine.ForScript) and NEVER touched by output:
+//     scripts have no turns, so they never report idle/streaming, and only
+//     the process exit moves the status (to exited).
 //   - BusFrames is identity: the raw line is published verbatim, so the ring,
 //     the log dumps, logs/tail/watch and the cockpit transcript show exactly
 //     what the script printed, like any child's output.
@@ -33,11 +33,15 @@ func (ScriptProvider) BootstrapFrame() []byte { return nil }
 func (ScriptProvider) ReadyOnSpawn() bool { return false }
 
 // Parse classifies one stdout line of a script child. Every line counts as
-// liveness, regardless of its content.
+// liveness (FirstResponse), regardless of its content, and none of them is a
+// state-machine event: the line rides out as a script_output event, with the
+// raw text in ParsedEvent.Text, for the daemon to publish — coalesced — as
+// the child's durable ScriptOutput record. The status is running from spawn
+// and output never moves it.
 func (ScriptProvider) Parse(line []byte) ParseResult {
 	var res ParseResult
 	res.FirstResponse = true
-	res.Events = append(res.Events, ParsedEvent{Type: "agent_start"})
+	res.Events = append(res.Events, ParsedEvent{Type: "script_output", Text: string(line)})
 	return res
 }
 

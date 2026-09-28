@@ -138,13 +138,15 @@ message ContentBlockDelta {
   }
 }
 
-// AgentStatus.state is one of protocol.Status's nine values, exactly:
-// "spawning", "idle", "streaming", "tool_running", "compacting",
-// "batch_wait", "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
-// so a new daemon status does not require regenerating every client, but the
-// set is CLOSED — do not invent values here. Note that pi's distinction
-// between "this run ended" and "truly idle" is expressed as a transition back
-// to "idle"; there is no separate settled event.
+// AgentStatus.state is one of protocol.Status's ten values, exactly:
+// "spawning", "idle", "streaming", "running", "tool_running",
+// "compacting", "batch_wait", "blocked_ui", "shutting_down", "exited". It is
+// a string rather than an enum so a new daemon status does not require
+// regenerating every client, but the set is CLOSED — do not invent values
+// here. Note that pi's distinction between "this run ended" and "truly idle"
+// is expressed as a transition back to "idle"; there is no separate settled
+// event. "running" is a script child whose process is alive: scripts have no
+// turns, so they never report idle/streaming — output never moves the status.
 message AgentStatus {
   string state = 1;
 }
@@ -239,10 +241,21 @@ message ScriptReport {
   string data_json = 2;
 }
 
+// ScriptOutput is one chunk of a script child's raw stdout/stderr — the
+// child's durable output record. A script child has no conversation rows and
+// no turns, so this event, not GetHistory, is what a client backfills from.
+// stream is "stdout" or "stderr"; text is the verbatim output, coalesced by
+// the daemon (flush at 4 KiB or 250 ms, whichever first; a single line longer
+// than 4 KiB is split at 4 KiB, never otherwise).
+message ScriptOutput {
+  string stream = 1;
+  string text = 2;
+}
+
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — thirteen durable types as of the
-// script-children work, not the twelve this comment named before it and not
+// ordinal is set on DURABLE-tier events — fourteen durable types as of the
+// script-output work, not the thirteen this comment named before it and not
 // the two this comment originally named. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
@@ -279,5 +292,6 @@ message Event {
     ChildExited child_exited = 21;
     CompactionBoundary compaction_boundary = 22;
     ScriptReport script_report = 23;
+    ScriptOutput script_output = 24;
   }
 }

@@ -18,9 +18,14 @@ import "encoding/json"
 type Status string
 
 const (
-	StatusSpawning     Status = "spawning"
-	StatusIdle         Status = "idle"
-	StatusStreaming    Status = "streaming"
+	StatusSpawning  Status = "spawning"
+	StatusIdle      Status = "idle"
+	StatusStreaming Status = "streaming"
+	// StatusRunning is a script child whose process is alive; scripts have
+	// no turns, so they never report idle/streaming. Set once at spawn for
+	// kind=script, never touched by output, replaced only by exited. It is a
+	// working status for every consumer that asks "is it working".
+	StatusRunning      Status = "running"
 	StatusToolRunning  Status = "tool_running"
 	StatusCompacting   Status = "compacting"
 	StatusBatchWait    Status = "batch_wait"

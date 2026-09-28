@@ -638,6 +638,29 @@ class ScriptReport:
         return obj
 
 @dataclasses.dataclass
+class ScriptOutput:
+    stream: str = ""
+    text: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.stream != "":
+            out["stream"] = self.stream
+        if self.text != "":
+            out["text"] = self.text
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ScriptOutput":
+        obj = cls()
+        _v = _d.get("stream")
+        if _v is not None:
+            obj.stream = _v
+        _v = _d.get("text")
+        if _v is not None:
+            obj.text = _v
+        return obj
+
+@dataclasses.dataclass
 class Event:
     child_id: str = ""
     ordinal: Optional[int] = None
@@ -656,6 +679,7 @@ class Event:
     child_exited: Optional[ChildExited] = None
     compaction_boundary: Optional[CompactionBoundary] = None
     script_report: Optional[ScriptReport] = None
+    script_output: Optional[ScriptOutput] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -665,7 +689,7 @@ class Event:
             out["ordinal"] = self.ordinal
         if self.ts_unix_ms != 0:
             out["tsUnixMs"] = str(self.ts_unix_ms)
-        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report) if x is not None]
+        _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
         if self.user_message is not None:
@@ -696,6 +720,8 @@ class Event:
             out["compactionBoundary"] = self.compaction_boundary.to_dict()
         if self.script_report is not None:
             out["scriptReport"] = self.script_report.to_dict()
+        if self.script_output is not None:
+            out["scriptOutput"] = self.script_output.to_dict()
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Event":
@@ -751,6 +777,9 @@ class Event:
         _v = _d.get("scriptReport")
         if _v is not None:
             obj.script_report = ScriptReport.from_dict(_v)
+        _v = _d.get("scriptOutput")
+        if _v is not None:
+            obj.script_output = ScriptOutput.from_dict(_v)
         return obj
 
 

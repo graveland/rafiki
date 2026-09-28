@@ -46,6 +46,7 @@ var durableTypes = map[string]bool{
 	"retry":                true,
 	"compaction_boundary":  true,
 	"script_report":        true,
+	"script_output":        true,
 }
 
 // ephemeralTypes is listed explicitly rather than left as a default so that

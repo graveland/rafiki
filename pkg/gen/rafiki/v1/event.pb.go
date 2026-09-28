@@ -963,13 +963,15 @@ func (*ContentBlockDelta_Thinking) isContentBlockDelta_Delta() {}
 
 func (*ContentBlockDelta_InputJson) isContentBlockDelta_Delta() {}
 
-// AgentStatus.state is one of protocol.Status's nine values, exactly:
-// "spawning", "idle", "streaming", "tool_running", "compacting",
-// "batch_wait", "blocked_ui", "shutting_down", "exited". It is a string rather than an enum
-// so a new daemon status does not require regenerating every client, but the
-// set is CLOSED — do not invent values here. Note that pi's distinction
-// between "this run ended" and "truly idle" is expressed as a transition back
-// to "idle"; there is no separate settled event.
+// AgentStatus.state is one of protocol.Status's ten values, exactly:
+// "spawning", "idle", "streaming", "running", "tool_running",
+// "compacting", "batch_wait", "blocked_ui", "shutting_down", "exited". It is
+// a string rather than an enum so a new daemon status does not require
+// regenerating every client, but the set is CLOSED — do not invent values
+// here. Note that pi's distinction between "this run ended" and "truly idle"
+// is expressed as a transition back to "idle"; there is no separate settled
+// event. "running" is a script child whose process is alive: scripts have no
+// turns, so they never report idle/streaming — output never moves the status.
 type AgentStatus struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	State         string                 `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
@@ -1529,10 +1531,68 @@ func (x *ScriptReport) GetDataJson() string {
 	return ""
 }
 
+// ScriptOutput is one chunk of a script child's raw stdout/stderr — the
+// child's durable output record. A script child has no conversation rows and
+// no turns, so this event, not GetHistory, is what a client backfills from.
+// stream is "stdout" or "stderr"; text is the verbatim output, coalesced by
+// the daemon (flush at 4 KiB or 250 ms, whichever first; a single line longer
+// than 4 KiB is split at 4 KiB, never otherwise).
+type ScriptOutput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stream        string                 `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
+	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScriptOutput) Reset() {
+	*x = ScriptOutput{}
+	mi := &file_rafiki_v1_event_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScriptOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScriptOutput) ProtoMessage() {}
+
+func (x *ScriptOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_event_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScriptOutput.ProtoReflect.Descriptor instead.
+func (*ScriptOutput) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ScriptOutput) GetStream() string {
+	if x != nil {
+		return x.Stream
+	}
+	return ""
+}
+
+func (x *ScriptOutput) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
 // Event is the stream envelope.
 //
-// ordinal is set on DURABLE-tier events — thirteen durable types as of the
-// script-children work, not the twelve this comment named before it and not
+// ordinal is set on DURABLE-tier events — fourteen durable types as of the
+// script-output work, not the thirteen this comment named before it and not
 // the two this comment originally named. pkg/eventlog/tier.go is the authority.
 //
 // It is the EVENT LOG's per-child ordinal (conversations.event_log, migration
@@ -1570,6 +1630,7 @@ type Event struct {
 	//	*Event_ChildExited
 	//	*Event_CompactionBoundary
 	//	*Event_ScriptReport
+	//	*Event_ScriptOutput
 	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1577,7 +1638,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_rafiki_v1_event_proto_msgTypes[21]
+	mi := &file_rafiki_v1_event_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1589,7 +1650,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_event_proto_msgTypes[21]
+	mi := &file_rafiki_v1_event_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1602,7 +1663,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{21}
+	return file_rafiki_v1_event_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Event) GetChildId() string {
@@ -1759,6 +1820,15 @@ func (x *Event) GetScriptReport() *ScriptReport {
 	return nil
 }
 
+func (x *Event) GetScriptOutput() *ScriptOutput {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ScriptOutput); ok {
+			return x.ScriptOutput
+		}
+	}
+	return nil
+}
+
 type isEvent_Payload interface {
 	isEvent_Payload()
 }
@@ -1819,6 +1889,10 @@ type Event_ScriptReport struct {
 	ScriptReport *ScriptReport `protobuf:"bytes,23,opt,name=script_report,json=scriptReport,proto3,oneof"`
 }
 
+type Event_ScriptOutput struct {
+	ScriptOutput *ScriptOutput `protobuf:"bytes,24,opt,name=script_output,json=scriptOutput,proto3,oneof"`
+}
+
 func (*Event_UserMessage) isEvent_Payload() {}
 
 func (*Event_AssistantMessage) isEvent_Payload() {}
@@ -1846,6 +1920,8 @@ func (*Event_ChildExited) isEvent_Payload() {}
 func (*Event_CompactionBoundary) isEvent_Payload() {}
 
 func (*Event_ScriptReport) isEvent_Payload() {}
+
+func (*Event_ScriptOutput) isEvent_Payload() {}
 
 var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
@@ -1961,7 +2037,10 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\f_post_tokens\"?\n" +
 	"\fScriptReport\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1b\n" +
-	"\tdata_json\x18\x02 \x01(\tR\bdataJson\"\xfc\a\n" +
+	"\tdata_json\x18\x02 \x01(\tR\bdataJson\":\n" +
+	"\fScriptOutput\x12\x16\n" +
+	"\x06stream\x18\x01 \x01(\tR\x06stream\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\"\xbc\b\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
 	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
@@ -1982,7 +2061,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rchild_spawned\x18\x14 \x01(\v2\x17.rafiki.v1.ChildSpawnedH\x00R\fchildSpawned\x12;\n" +
 	"\fchild_exited\x18\x15 \x01(\v2\x16.rafiki.v1.ChildExitedH\x00R\vchildExited\x12P\n" +
 	"\x13compaction_boundary\x18\x16 \x01(\v2\x1d.rafiki.v1.CompactionBoundaryH\x00R\x12compactionBoundary\x12>\n" +
-	"\rscript_report\x18\x17 \x01(\v2\x17.rafiki.v1.ScriptReportH\x00R\fscriptReportB\t\n" +
+	"\rscript_report\x18\x17 \x01(\v2\x17.rafiki.v1.ScriptReportH\x00R\fscriptReport\x12>\n" +
+	"\rscript_output\x18\x18 \x01(\v2\x17.rafiki.v1.ScriptOutputH\x00R\fscriptOutputB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
 	"\b_ordinal*\xc8\x01\n" +
@@ -2009,7 +2089,7 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_rafiki_v1_event_proto_goTypes = []any{
 	(StopReason)(0),            // 0: rafiki.v1.StopReason
 	(*Usage)(nil),              // 1: rafiki.v1.Usage
@@ -2033,7 +2113,8 @@ var file_rafiki_v1_event_proto_goTypes = []any{
 	(*ChildExited)(nil),        // 19: rafiki.v1.ChildExited
 	(*CompactionBoundary)(nil), // 20: rafiki.v1.CompactionBoundary
 	(*ScriptReport)(nil),       // 21: rafiki.v1.ScriptReport
-	(*Event)(nil),              // 22: rafiki.v1.Event
+	(*ScriptOutput)(nil),       // 22: rafiki.v1.ScriptOutput
+	(*Event)(nil),              // 23: rafiki.v1.Event
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -2061,11 +2142,12 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	19, // 22: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
 	20, // 23: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
 	21, // 24: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
-	25, // [25:25] is the sub-list for method output_type
-	25, // [25:25] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	22, // 25: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -2091,7 +2173,7 @@ func file_rafiki_v1_event_proto_init() {
 	file_rafiki_v1_event_proto_msgTypes[16].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{}
-	file_rafiki_v1_event_proto_msgTypes[21].OneofWrappers = []any{
+	file_rafiki_v1_event_proto_msgTypes[22].OneofWrappers = []any{
 		(*Event_UserMessage)(nil),
 		(*Event_AssistantMessage)(nil),
 		(*Event_TurnStart)(nil),
@@ -2106,6 +2188,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*Event_ChildExited)(nil),
 		(*Event_CompactionBoundary)(nil),
 		(*Event_ScriptReport)(nil),
+		(*Event_ScriptOutput)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2113,7 +2196,7 @@ func file_rafiki_v1_event_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_event_proto_rawDesc), len(file_rafiki_v1_event_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

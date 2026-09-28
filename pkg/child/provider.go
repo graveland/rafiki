@@ -99,4 +99,11 @@ type ParsedEvent struct {
 	Type       string
 	UI         *PiUIRequestMeta // non-nil only for extension_ui_request
 	RetryError string           // set only for auto_retry_start
+	// Text carries the raw line, set only for script_output events: a script
+	// child's stdout is free-form text, not a JSONL protocol, so the line IS
+	// the payload and the daemon publishes it (coalesced) as the child's
+	// durable ScriptOutput record. Parse sees stdout lines only, so Text is
+	// always a stdout line today; a script's stderr reaches the daemon
+	// through a separate per-line hook, not through Parse.
+	Text string
 }
