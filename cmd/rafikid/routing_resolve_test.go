@@ -130,6 +130,17 @@ func TestRoutingDataFlagsSurviveSpawnSpec(t *testing.T) {
 	})
 	ck.Require().NoError(err, "resolveRouting")
 	ck.Eq("only=a,zdr", req.Routing, "policy zdr must survive the spawn's only")
+
+	// The spawn-level leg of the monotone rule: a spec's own zdr holds with
+	// NO policy row behind it at all (wave-3 review finding 3).
+	c0 := newTestController(t)
+	req0, err := resolveVia(t, c0, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "m[zdr]",
+	})
+	ck.Require().NoError(err, "resolveRouting (spawn zdr, empty policy)")
+	ck.Eq("zdr", req0.Routing, "the spawn's zdr stands alone")
 }
 
 // TestRoutingModelIsBaseId proves the stored session carries the BASE id: the

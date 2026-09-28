@@ -47,7 +47,11 @@ import (
 // replaced the model, the two can name different ids entirely — both are
 // parsed, spawn wins per key, and req.Model is set from whichever model
 // applyPreset actually applied (the request's own when it named one, else the
-// preset's). A parse error is ErrInvalidArgs naming the offending model
+// preset's). A preset whose model names a spec applies that spec EVEN when
+// the caller overrides the model string: the preset's spec is part of its
+// declared routing intent for the seat — its data flags and preferences
+// travel with the preset, not with one model id (wave-3 review finding 1).
+// A parse error is ErrInvalidArgs naming the offending model
 // string: unknown syntax is never silently dropped, because a misread spec
 // silently changes where requests are served.
 //
