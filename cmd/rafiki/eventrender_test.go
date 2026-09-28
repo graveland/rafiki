@@ -269,6 +269,36 @@ func TestEventRendererIgnoresEmptyAndNilEvents(t *testing.T) {
 	c.Eq("", r.observe(&rafikiv1.Event{}, time.Now()), "child-less event rendered")
 }
 
+// The retry schedule instant renders in the viewer's local zone — the
+// producing daemon's clock zone is arbitrary (a container runs UTC), which is
+// why it travels as resume_at_unix_ms rather than inside reason — next to a
+// line prefix that is local for the same reason.
+func TestEventRendererRetryScheduleLineIsViewerLocal(t *testing.T) {
+	c := assert.NewCollecting(t)
+	id := "c_01M3F2M6AMA3W09HD7R6Z58Q8B"
+
+	r := newEventRenderer()
+	_ = r.observe(spawnedFor(id, "impl-auth", ""), atClock(12, 0, 0.0))
+
+	ms := atClock(19, 10, 30.0).UnixMilli()
+	ev := &rafikiv1.Event{ChildId: id,
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
+			Attempt: 1, WillRetry: true, Reason: "rate limited (HTTP 429)",
+			MaxAttempts: 3, ResumeAtUnixMs: &ms,
+		}}}
+	got := r.observe(withTS(ev, atClock(19, 9, 58.0)), atClock(19, 9, 58.0))
+	want := "19:09:58  retry  c_01M3F2M6AMA3W09HD7R6Z58Q8B  impl-auth attempt=1 will-retry resumes 19:10:30 rate limited (HTTP 429)"
+	c.Eq(want, got, "retry schedule line:\n got")
+
+	// A resolution event names no schedule: no "resumes" token.
+	got = r.observe(withTS(&rafikiv1.Event{ChildId: id,
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
+			Attempt: 1, Reason: "auto-resume 1 firing",
+		}}}, atClock(19, 10, 31.0)), atClock(19, 10, 31.0))
+	want = "19:10:31  retry  c_01M3F2M6AMA3W09HD7R6Z58Q8B  impl-auth attempt=1 no-retry auto-resume 1 firing"
+	c.Eq(want, got, "retry resolution line:\n got")
+}
+
 func TestFmtDur(t *testing.T) {
 	cases := []struct {
 		d    time.Duration

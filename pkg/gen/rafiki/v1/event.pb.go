@@ -1189,13 +1189,27 @@ func (x *ToolExecutionEnd) GetIsError() bool {
 // Retry reports a turn-level retry attempt, so a supervisor can see an agent
 // looping rather than silently stalling. The daemon's rate-limit auto-resume
 // (cmd/rafikid's ratelimit_resume.go) is today's only producer: will_retry
-// true announces a scheduled resume (reason carries when), false resolves the
-// earlier announcement (fired, cleared by a success, or attempts exhausted).
+// true announces a scheduled resume (reason is the cause; the fire instant is
+// resume_at_unix_ms), false resolves the earlier announcement (fired, cleared
+// by a success, or attempts exhausted; reason carries the human sentence).
+//
+// Wall-clock times are never embedded in reason: the producing daemon's clock
+// zone is arbitrary (a container typically runs UTC), so a time it formats is
+// never the viewer's local time. Anything time-shaped travels as an epoch-ms
+// field and the client renders it in its own zone.
 type Retry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Attempt       int32                  `protobuf:"varint,1,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	WillRetry     bool                   `protobuf:"varint,2,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
-	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Attempt   int32                  `protobuf:"varint,1,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	WillRetry bool                   `protobuf:"varint,2,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
+	Reason    string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// The instant a will_retry=true schedule fires, epoch ms. Optional because
+	// absence is meaningful: resolution events (will_retry=false) name no
+	// schedule, and event rows written before the field existed have none.
+	// Clients render it in the viewer's local zone.
+	ResumeAtUnixMs *int64 `protobuf:"varint,4,opt,name=resume_at_unix_ms,json=resumeAtUnixMs,proto3,oneof" json:"resume_at_unix_ms,omitempty"`
+	// The producer's attempt cap, so a client can render "attempt 1/3" without
+	// parsing reason. 0 means not reported.
+	MaxAttempts   int32 `protobuf:"varint,5,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1249,6 +1263,20 @@ func (x *Retry) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *Retry) GetResumeAtUnixMs() int64 {
+	if x != nil && x.ResumeAtUnixMs != nil {
+		return *x.ResumeAtUnixMs
+	}
+	return 0
+}
+
+func (x *Retry) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
 }
 
 // ChildSpawned / ChildExited carry the agent tree's edges. rafiki models a
@@ -1904,12 +1932,15 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x1f\n" +
 	"\vduration_ms\x18\x02 \x01(\x03R\n" +
 	"durationMs\x12\x19\n" +
-	"\bis_error\x18\x03 \x01(\bR\aisError\"X\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\"\xc1\x01\n" +
 	"\x05Retry\x12\x18\n" +
 	"\aattempt\x18\x01 \x01(\x05R\aattempt\x12\x1d\n" +
 	"\n" +
 	"will_retry\x18\x02 \x01(\bR\twillRetry\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"Z\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12.\n" +
+	"\x11resume_at_unix_ms\x18\x04 \x01(\x03H\x00R\x0eresumeAtUnixMs\x88\x01\x01\x12!\n" +
+	"\fmax_attempts\x18\x05 \x01(\x05R\vmaxAttemptsB\x14\n" +
+	"\x12_resume_at_unix_ms\"Z\n" +
 	"\fChildSpawned\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1b\n" +
 	"\tparent_id\x18\x02 \x01(\tR\bparentId\x12\x12\n" +
@@ -2057,6 +2088,7 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlockDelta_Thinking)(nil),
 		(*ContentBlockDelta_InputJson)(nil),
 	}
+	file_rafiki_v1_event_proto_msgTypes[16].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[21].OneofWrappers = []any{

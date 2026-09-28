@@ -289,7 +289,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 			s.Blocks = append(s.Blocks, Block{
 				Kind:  KindSystem,
 				At:    time.Now(),
-				Text:  p.Retry.GetReason(),
+				Text:  retryScheduleText(p.Retry),
 				Final: true,
 			})
 		}
@@ -297,6 +297,25 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 		// A dead child answers no more tool calls.
 		s.settleAll()
 	}
+}
+
+// retryScheduleText renders the will_retry=true schedule line. The fire
+// instant travels as resume_at_unix_ms — the producing daemon's clock zone is
+// arbitrary (a container runs UTC), so a wall-clock it embedded in reason
+// would show a stranger's midnight — and is rendered here in the viewer's
+// local zone (time.UnixMilli is Local). An event with no instant (a producer
+// that names none, or a row written before the field existed) falls back to
+// the reason text verbatim.
+func retryScheduleText(r *rafikiv1.Retry) string {
+	if r.ResumeAtUnixMs == nil {
+		return r.GetReason()
+	}
+	text := fmt.Sprintf("%s; auto-resume scheduled for %s",
+		r.GetReason(), time.UnixMilli(r.GetResumeAtUnixMs()).Format("15:04:05"))
+	if max := r.GetMaxAttempts(); max > 0 {
+		return fmt.Sprintf("%s (attempt %d/%d)", text, r.GetAttempt(), max)
+	}
+	return fmt.Sprintf("%s (attempt %d)", text, r.GetAttempt())
 }
 
 // LastAssistant returns a pointer to the most recent assistant block, or nil.

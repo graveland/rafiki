@@ -491,6 +491,8 @@ class Retry:
     attempt: int = 0
     will_retry: bool = False
     reason: str = ""
+    resume_at_unix_ms: Optional[int] = None
+    max_attempts: int = 0
 
     def to_dict(self) -> dict:
         out = {}
@@ -500,6 +502,10 @@ class Retry:
             out["willRetry"] = self.will_retry
         if self.reason != "":
             out["reason"] = self.reason
+        if self.resume_at_unix_ms is not None:
+            out["resumeAtUnixMs"] = str(self.resume_at_unix_ms)
+        if self.max_attempts != 0:
+            out["maxAttempts"] = self.max_attempts
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "Retry":
@@ -513,6 +519,12 @@ class Retry:
         _v = _d.get("reason")
         if _v is not None:
             obj.reason = _v
+        _v = _d.get("resumeAtUnixMs")
+        if _v is not None:
+            obj.resume_at_unix_ms = _int_in(_v)
+        _v = _d.get("maxAttempts")
+        if _v is not None:
+            obj.max_attempts = _int_in(_v)
         return obj
 
 @dataclasses.dataclass

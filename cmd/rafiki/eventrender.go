@@ -190,6 +190,12 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		} else {
 			detail += " no-retry"
 		}
+		// The schedule instant renders in the viewer's local zone: the
+		// producing daemon's clock zone is arbitrary (a container is UTC),
+		// so it never embeds a formatted time in reason.
+		if p.Retry.ResumeAtUnixMs != nil {
+			detail += " resumes " + time.UnixMilli(p.Retry.GetResumeAtUnixMs()).Format("15:04:05")
+		}
 		if reason := p.Retry.GetReason(); reason != "" {
 			detail += " " + reason
 		}

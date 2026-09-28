@@ -10,6 +10,8 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"google.golang.org/protobuf/proto"
 )
 
 // This file implements the claude rate-limit auto-resume: when a
@@ -228,7 +230,7 @@ func (c *Controller) TurnSucceeded(session string) {
 		st.timer.Stop()
 		st.timer = nil
 		c.publishRateLimitNotice(session, false, st.attempts,
-			"rate limit cleared; scheduled auto-resume canceled")
+			"rate limit cleared; scheduled auto-resume canceled", time.Time{})
 	}
 	st.attempts = 0
 }
@@ -255,7 +257,7 @@ func (c *Controller) maybeRateLimitResume(childID string) {
 func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimitState) {
 	if st.attempts >= maxRateLimitResumes {
 		c.publishRateLimitNotice(childID, false, st.attempts, fmt.Sprintf(
-			"auto-resume abandoned after %d attempts; resume manually with `rafiki resume`", maxRateLimitResumes))
+			"auto-resume abandoned after %d attempts; resume manually with `rafiki resume`", maxRateLimitResumes), time.Time{})
 		slog.Warn("claude child rate limited; auto-resume attempts exhausted",
 			"childId", childID, "attempts", st.attempts, "resetAt", st.resetAt)
 		return
@@ -265,9 +267,10 @@ func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimit
 	fireAt := time.Now().Add(delay)
 	attempt := st.attempts
 	st.timer = time.AfterFunc(delay, func() { c.fireRateLimitResume(childID, attempt) })
-	c.publishRateLimitNotice(childID, true, attempt, fmt.Sprintf(
-		"rate limited (HTTP 429); auto-resume scheduled for %s (attempt %d/%d)",
-		fireAt.Format("15:04:05"), attempt, maxRateLimitResumes))
+	// The fire instant travels as resume_at_unix_ms, not formatted into the
+	// reason: this daemon's clock zone is arbitrary (a container runs UTC),
+	// and the viewer renders its own local zone.
+	c.publishRateLimitNotice(childID, true, attempt, "rate limited (HTTP 429)", fireAt)
 	slog.Warn("claude child rate limited; auto-resume scheduled",
 		"childId", childID, "resume_at", fireAt.Format(time.RFC3339),
 		"reset_at", st.resetAt.Format(time.RFC3339), "attempt", attempt, "max", maxRateLimitResumes)
@@ -343,24 +346,34 @@ func (c *Controller) deliverRateLimitResume(childID string, attempt int) {
 		slog.Warn("auto-resume prompt delivery failed", "childId", childID, "error", err)
 		return
 	}
-	c.publishRateLimitNotice(childID, false, attempt, fmt.Sprintf("auto-resume %d firing", attempt))
+	c.publishRateLimitNotice(childID, false, attempt, fmt.Sprintf("auto-resume %d firing", attempt), time.Time{})
 	slog.Info("rate-limited claude child auto-resumed", "childId", childID, "attempt", attempt)
 }
 
 // publishRateLimitNotice publishes the retry-family event the TUI renders:
 // will_retry=true shows the rail's ⟳ and appends a system notice to the
 // transcript with the scheduled time; will_retry=false clears the glyph.
+// resumeAt is the schedule's fire instant — set only for will_retry=true —
+// and rides the event as resume_at_unix_ms (epoch ms), never as a formatted
+// time in reason: this daemon's clock zone is arbitrary, so the client owns
+// the rendering. maxAttempts rides along on every event so a client can
+// render "attempt 1/3" without parsing text.
 // Event_Retry is durable-tier, so the notice replays on reattach. Durable and
 // best-effort at once: publishEvent logs a warn on a failed log append and
 // publishes anyway, the same contract every other caller relies on.
-func (c *Controller) publishRateLimitNotice(childID string, willRetry bool, attempt int, reason string) {
+func (c *Controller) publishRateLimitNotice(childID string, willRetry bool, attempt int, reason string, resumeAt time.Time) {
+	retry := &rafikiv1.Retry{
+		Attempt:     int32(attempt),
+		WillRetry:   willRetry,
+		Reason:      reason,
+		MaxAttempts: int32(maxRateLimitResumes),
+	}
+	if !resumeAt.IsZero() {
+		retry.ResumeAtUnixMs = proto.Int64(resumeAt.UnixMilli())
+	}
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId:  childID,
 		TsUnixMs: time.Now().UnixMilli(),
-		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
-			Attempt:   int32(attempt),
-			WillRetry: willRetry,
-			Reason:    reason,
-		}},
+		Payload:  &rafikiv1.Event_Retry{Retry: retry},
 	})
 }

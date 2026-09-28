@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/proto"
 )
 
 func textEvent(childID, text string) *rafikiv1.Event {
@@ -473,18 +475,51 @@ func retryEvent(childID string, willRetry bool, attempt int32, reason string) *r
 	}
 }
 
+// scheduleEvent is the will_retry=true half as the live daemon publishes it:
+// the cause rides in reason, the fire instant structurally in
+// resume_at_unix_ms. Anchored to time.Local because the session renders the
+// instant in the viewer's zone — the same digits assert on any machine.
+func scheduleEvent(childID string, resumeAt time.Time) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
+			Attempt:        1,
+			WillRetry:      true,
+			Reason:         "rate limited (HTTP 429)",
+			ResumeAtUnixMs: proto.Int64(resumeAt.UnixMilli()),
+			MaxAttempts:    3,
+		}},
+	}
+}
+
 // The daemon's rate-limit auto-resume is Event_Retry's only producer: a
 // scheduled resume must appear in the transcript as a system block naming
-// when it fires, exactly as the rail's ⟳ names it in the tree.
+// when it fires, exactly as the rail's ⟳ names it in the tree — in the
+// VIEWER's local zone, since the producing daemon's clock zone is arbitrary
+// (a container runs UTC).
 func TestRetryNoticeAppendsSystemBlock(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := session.New("c_test")
-	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+	s.Apply(scheduleEvent("c_test", time.Date(2026, 9, 26, 15, 4, 5, 0, time.Local)))
 
 	c.Require().Len(s.Blocks, 1, "blocks = %d, want 1", len(s.Blocks))
 	b := s.Blocks[0]
 	c.False(b.Kind != session.KindSystem || !b.Final, "block = kind %v final %v, want KindSystem final=true", b.Kind, b.Final)
 	c.StrContains(b.Text, "auto-resume scheduled for 15:04:05", "text")
+	c.StrContains(b.Text, "rate limited (HTTP 429); ", "text")
+	c.StrContains(b.Text, "(attempt 1/3)", "text")
+}
+
+// A schedule event with no fire instant — a producer that names none, or a
+// row written before resume_at_unix_ms existed — falls back to the reason
+// text verbatim rather than rendering a bogus zero time.
+func TestRetryScheduleWithoutInstantFallsBackToReason(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_test")
+	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 01:10:30 (attempt 1/3)"))
+
+	c.Require().Len(s.Blocks, 1, "blocks = %d, want 1", len(s.Blocks))
+	c.StrContains(s.Blocks[0].Text, "01:10:30", "text")
 }
 
 // The resolution half (fired, cleared by a success, abandoned) clears the
@@ -492,7 +527,7 @@ func TestRetryNoticeAppendsSystemBlock(t *testing.T) {
 // appends its own, and a "firing" divider between them would be noise.
 func TestRetryResolutionAppendsNoBlock(t *testing.T) {
 	s := session.New("c_test")
-	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+	s.Apply(scheduleEvent("c_test", time.Date(2026, 9, 26, 15, 4, 5, 0, time.Local)))
 	s.Apply(retryEvent("c_test", false, 1, "auto-resume 1 firing"))
 
 	assert.NewAborting(t).Len(s.Blocks, 1, "blocks = %d, want 1: the will_retry=false half appends nothing", len(s.Blocks))
@@ -520,7 +555,7 @@ func TestRetryNoticeDoesNotSettleRunningToolCalls(t *testing.T) {
 		ToolExecutionStart: &rafikiv1.ToolExecutionStart{ToolUseId: "tu_1", Name: "bash"},
 	}})
 
-	s.Apply(retryEvent("c_test", true, 1, "rate limited (HTTP 429); auto-resume scheduled for 15:04:05 (attempt 1/3)"))
+	s.Apply(scheduleEvent("c_test", time.Date(2026, 9, 26, 15, 4, 5, 0, time.Local)))
 
 	assert.NewCollecting(t).NotEq(len(s.Blocks), s.Finalized, "Finalized")
 }

@@ -55,7 +55,10 @@ func (nc *noticeCollector) scheduled(attempt int) bool {
 	nc.mu.Lock()
 	defer nc.mu.Unlock()
 	for _, r := range nc.retries {
-		if r.GetWillRetry() && int(r.GetAttempt()) == attempt && strings.Contains(r.GetReason(), "auto-resume scheduled") {
+		// The fire instant rides structurally (resume_at_unix_ms) — a schedule
+		// notice without one would leave the client nothing to render locally.
+		if r.GetWillRetry() && int(r.GetAttempt()) == attempt &&
+			r.ResumeAtUnixMs != nil && strings.Contains(r.GetReason(), "rate limited (HTTP 429)") {
 			return true
 		}
 	}

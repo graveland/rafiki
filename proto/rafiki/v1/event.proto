@@ -176,12 +176,26 @@ message ToolExecutionEnd {
 // Retry reports a turn-level retry attempt, so a supervisor can see an agent
 // looping rather than silently stalling. The daemon's rate-limit auto-resume
 // (cmd/rafikid's ratelimit_resume.go) is today's only producer: will_retry
-// true announces a scheduled resume (reason carries when), false resolves the
-// earlier announcement (fired, cleared by a success, or attempts exhausted).
+// true announces a scheduled resume (reason is the cause; the fire instant is
+// resume_at_unix_ms), false resolves the earlier announcement (fired, cleared
+// by a success, or attempts exhausted; reason carries the human sentence).
+//
+// Wall-clock times are never embedded in reason: the producing daemon's clock
+// zone is arbitrary (a container typically runs UTC), so a time it formats is
+// never the viewer's local time. Anything time-shaped travels as an epoch-ms
+// field and the client renders it in its own zone.
 message Retry {
   int32 attempt = 1;
   bool will_retry = 2;
   string reason = 3;
+  // The instant a will_retry=true schedule fires, epoch ms. Optional because
+  // absence is meaningful: resolution events (will_retry=false) name no
+  // schedule, and event rows written before the field existed have none.
+  // Clients render it in the viewer's local zone.
+  optional int64 resume_at_unix_ms = 4;
+  // The producer's attempt cap, so a client can render "attempt 1/3" without
+  // parsing reason. 0 means not reported.
+  int32 max_attempts = 5;
 }
 
 // ChildSpawned / ChildExited carry the agent tree's edges. rafiki models a
