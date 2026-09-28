@@ -67,6 +67,14 @@ seats = c.list_presets("review:")         # latest live row per name
 seat  = c.get_preset("review:reviewer")   # not_found raises ConnectError
 c.put_preset({"name": "review:reviewer", "kind": "fundi", "model": "...", "skills": []})
 
+# Routing-policy rows (any caller may read; a user or the local socket may
+# write). A row's line is a "-" prefix family: it matches model ids equal to
+# it or extending it with "-", so "z-ai/glm-5.3" also governs
+# "z-ai/glm-5.3-flash" and stamped releases.
+c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")   # daemon-validates the spec
+rows = c.list_routes()                                 # one RouteRow per live line
+c.delete_route("z-ai/glm-5.3")                         # not_found when there is none
+
 # Script-child verbs (identity = the child; from a user credential they
 # are refused — a user has no position in the tree to report from):
 c.report("progress", {"stage": "halfway"})     # → the parent's event buffer

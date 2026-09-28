@@ -20,8 +20,137 @@ func newProvidersCmd() *cobra.Command {
 		Use:   "providers",
 		Short: "Exclude OpenRouter providers from routing at runtime",
 	}
-	cmd.AddCommand(newProvidersBansCmd(), newProvidersBanCmd(), newProvidersUnbanCmd())
+	cmd.AddCommand(newProvidersBansCmd(), newProvidersBanCmd(), newProvidersUnbanCmd(), newProvidersRouteCmd())
 	return cmd
+}
+
+// ─── routing policy rows ─────────────────────────────────────────────────────
+
+func newProvidersRouteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "route",
+		Short: "Routing-policy rows: the OpenRouter provider spec each model line resolves to",
+		Long: `Per-model-line routing defaults, applied to every OpenRouter request that
+carries no stricter spec of its own (a spawn's "[...]" beats a preset's, which
+beats these rows).
+
+A policy line is a "-" prefix FAMILY: a row's line matches a model id equal to
+it or extending it with "-" — "z-ai/glm-5.3" also governs "z-ai/glm-5.3-flash"
+and stamped releases — unlike the cache guard's stamp-exact model lines. A line
+names at most <model>/<id>: the provider segment is not part of a policy line,
+and the store refuses longer shapes. Reading the rows is open to any caller;
+writing one (set, delete) requires a user credential or the local socket.`,
+	}
+	cmd.AddCommand(newProvidersRouteSetCmd(), newProvidersRouteListCmd(), newProvidersRouteDeleteCmd())
+	return cmd
+}
+
+func newProvidersRouteSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <line|*> <spec>",
+		Short: "Set the routing spec a model line resolves to",
+		Long: `Set the routing spec a model line resolves to, replacing any previous row
+for the line (a set is an append — the store keeps the history). SPEC is a
+routing spec in the model string's bracket grammar, e.g.
+"sort=price,quant=fp8+"; the empty string stores the zero spec (no opinion).
+The daemon validates SPEC and refuses what it cannot parse.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ep, err := newConnectEndpoint(cmd)
+			if err != nil {
+				return err
+			}
+			resp, err := ep.control().SetRoute(cmdCtx(cmd),
+				connect.NewRequest(&rafikiv1.SetRouteRequest{ModelLine: args[0], Spec: args[1]}))
+			if err != nil {
+				return err
+			}
+			row := resp.Msg.GetRow()
+			if row.GetSpec() == "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "set %s to the zero spec (no routing opinion)\n", row.GetModelLine())
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "set %s to %s\n", row.GetModelLine(), row.GetSpec())
+			return nil
+		},
+	}
+}
+
+func newProvidersRouteListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List the live routing-policy rows: each model line and its spec",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ep, err := newConnectEndpoint(cmd)
+			if err != nil {
+				return err
+			}
+			resp, err := ep.control().ListRoutes(cmdCtx(cmd),
+				connect.NewRequest(&rafikiv1.ListRoutesRequest{}))
+			if err != nil {
+				return err
+			}
+			mode, useColor, err := outputOpts(cmd)
+			if err != nil {
+				return err
+			}
+			return emitProviderRoutes(cmd.OutOrStdout(), resp.Msg, mode, useColor)
+		},
+	}
+}
+
+func newProvidersRouteDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <line|*>",
+		Short: "Remove the routing-policy row for a model line",
+		Long: `Remove the routing-policy row for a model line. The removal is appended as
+a tombstone — the history is kept, like every row in the log. Refused with
+not_found when the line has no live row (never set, or already deleted).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ep, err := newConnectEndpoint(cmd)
+			if err != nil {
+				return err
+			}
+			if _, err := ep.control().DeleteRoute(cmdCtx(cmd),
+				connect.NewRequest(&rafikiv1.DeleteRouteRequest{ModelLine: args[0]})); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "deleted the route for %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+// emitProviderRoutes writes ListRoutes' output in the resolved mode: -j is
+// the response's canonical protojson (the rows envelope), -J one compact row
+// per line, and the table is MODEL LINE, SPEC, SINCE.
+func emitProviderRoutes(w io.Writer, resp *rafikiv1.ListRoutesResponse, mode outputMode, useColor bool) error {
+	switch mode {
+	case outputJSON:
+		return emitProto(w, resp, mode)
+	case outputJSONL:
+		return emitProtoRows(w, resp.GetRows(), mode)
+	default:
+		tb := table.New(w, table.Options{Color: useColor})
+		tb.Header(dimHeader(useColor, "MODEL LINE", "SPEC", "SINCE")...)
+		for _, row := range resp.GetRows() {
+			tb.Row(row.GetModelLine(), defaultDash(row.GetSpec()), routeSince(row.GetCreatedAt()))
+		}
+		return tb.Render()
+	}
+}
+
+// routeSince renders a row's created_at — an RFC3339 string on the wire — the
+// way the bans table renders its stamps: local, date+time. Anything that does
+// not parse is passed through untouched rather than blanked.
+func routeSince(raw string) string {
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return raw
+	}
+	return t.Local().Format(time.DateTime)
 }
 
 // providerBanView is a ban as the CLI prints it in JSON: absolute times, and

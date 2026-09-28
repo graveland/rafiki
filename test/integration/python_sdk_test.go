@@ -14,11 +14,12 @@ package integration_test
 //   - TestPythonSDK_StandaloneLifecycle runs Client.from_profile() against a
 //     scratch daemon's control socket: spawn (with the fake-LLM seat), send,
 //     list with a label filter, wait for the settle, export the transcript,
-//     stop. export is the test that pins the Connect-plane spawn's owner
-//     attribution: ConversationExport is owner-scoped, so it answers
-//     not-found when the child's conversation row lands unattributed —
-//     which is exactly what an un-defaulted empty spawn kind used to do
-//     (controller.Spawn now resolves the fundi default itself).
+//     routing-policy rows (set, list, delete), stop. export is the test that
+//     pins the Connect-plane spawn's owner attribution: ConversationExport is
+//     owner-scoped, so it answers not-found when the child's conversation row
+//     lands unattributed — which is exactly what an un-defaulted empty spawn
+//     kind used to do (controller.Spawn now resolves the fundi default
+//     itself).
 //
 //   - TestPythonSDK_ScriptChild runs a script child whose pymodule IS the
 //     SDK: Client.inside() over the per-child socket, report/receive/result
@@ -195,7 +196,7 @@ def note(s):
     with open(probe, "a") as f:
         f.write(s + "\n")
 
-STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": []}
+STATE = {"unary_503s": 2, "stream_503s": 0, "requests": [], "c2_cursors": [], "routes": []}
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -279,6 +280,21 @@ class H(BaseHTTPRequestHandler):
                 self._json({"child": {"childId": "c_2", "status": "idle", "latestOrdinal": 6, "labels": {}}})
             else:
                 self._err(403, "permission_denied", "not yours")
+            return
+        if self.path.endswith("/SetRoute"):
+            req = json.loads(body)
+            STATE["routes"].append(["set", req.get("modelLine"), req.get("spec")])
+            self._json({"row": {"modelLine": req.get("modelLine"), "spec": req.get("spec"),
+                                "createdAt": "2026-09-28T10:00:00Z"}})
+            return
+        if self.path.endswith("/ListRoutes"):
+            self._json({"rows": [{"modelLine": "z-ai/glm-5.3", "spec": "sort=price,quant=fp8+",
+                                   "createdAt": "2026-09-28T10:00:00Z"}]})
+            return
+        if self.path.endswith("/DeleteRoute"):
+            req = json.loads(body)
+            STATE["routes"].append(["delete", req.get("modelLine")])
+            self._json({})
             return
         self._err(404, None, None)
 
@@ -392,6 +408,22 @@ def run():
         assert uds.is_unix is True, uds.is_unix
         uds.close()
         note("7 remote-idle-ceiling OK")
+
+        # 8. routing-policy rows: the three wrappers' wire shapes — the
+        # request carries the line and spec camelCased on the wire
+        # (modelLine), the response row parses into RouteRow's snake_case
+        # fields, and each verb rides its own RPC path.
+        row = c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")
+        assert row.model_line == "z-ai/glm-5.3" and row.spec == "sort=price,quant=fp8+" and row.created_at, row
+        rows = c.list_routes()
+        assert len(rows) == 1 and rows[0].spec == "sort=price,quant=fp8+", rows
+        assert c.delete_route("z-ai/glm-5.3") is None
+        assert STATE["routes"] == [
+            ["set", "z-ai/glm-5.3", "sort=price,quant=fp8+"],
+            ["delete", "z-ai/glm-5.3"],
+        ], STATE["routes"]
+        assert STATE["requests"][-1][0].endswith("/DeleteRoute"), STATE["requests"][-1]
+        note("8 routes OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:
@@ -472,6 +504,30 @@ def run():
         except ValueError:
             pass
         note("presets OK")
+
+        # routing-policy rows: set, list, delete — the operator surface the
+        # CLI's providers route verbs ride, and the daemon is the table's one
+        # writer. A row's line is a "-" prefix family, so this row would also
+        # govern z-ai/glm-5.3-flash; it does not touch the children above.
+        # The route backend is wired in main.go (task 3.1's lane); a daemon
+        # built without that wiring answers unavailable ("routes backend not
+        # yet wired"), which this section reports as a NAMED skip rather than
+        # failing the whole lifecycle — any OTHER unavailable (the daemon
+        # restarting) still raises, as it should. Drop the guard once the
+        # wiring has merged.
+        try:
+            c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")
+            row = [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"]
+            assert row and row[0].spec == "sort=price,quant=fp8+", row
+            c.delete_route("z-ai/glm-5.3")
+            assert not [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"], c.list_routes()
+            note("routes OK")
+        except ConnectError as exc:
+            if exc.code == "unavailable" and "not yet wired" in exc.message:
+                note("routes SKIPPED: the daemon has no route backend wired yet (pending task 3.1's main.go wiring)")
+            else:
+                note(traceback.format_exc())
+                sys.exit(1)
 
         # send lands an inbox row with a durable id.
         mid = c.send(cid, "a steer, unsteerable but durable")

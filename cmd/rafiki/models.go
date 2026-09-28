@@ -25,7 +25,73 @@ import (
 // "claude" child resolves only Anthropic ids, and offering it an OpenRouter id
 // produces a child that spawns, attaches and then never answers.
 func completeModel(cmd *cobra.Command, kind, toComplete string) []string {
+	// Inside a routing spec's brackets ("...[sort=p<TAB>") the candidates are
+	// grammar, not data — nothing here dials the daemon, so an unreachable
+	// daemon still completes a spec, and the base model's id list is
+	// irrelevant inside the brackets anyway.
+	if open := strings.IndexByte(toComplete, '['); open >= 0 {
+		return completeRoutingSpecTail(toComplete[open:])
+	}
 	return filterByPrefix(modelIDs(cmd, kind), toComplete)
+}
+
+// specKeys are the items a routing spec can carry, in ParseSpec's accepted
+// spelling and Spec.String's key order; offered each once, since ParseSpec
+// refuses a repeated key. specValues are the two value sets that are grammar
+// too: sort= takes one of ParseSpec's four spellings (the parse error's
+// price|throughput|latency|balanced order), quant= names OpenRouter's
+// quantizations (pkg/routing/spec.go's quantTiers plus "unknown"; a caller
+// appends "+" for a floor). only= takes provider slugs, which only the
+// daemon's catalog knows, so nothing is offered for it — these tables mirror
+// pkg/routing's grammar, and the daemon is the validator either way.
+var (
+	specKeys   = []string{"sort=", "quant=", "only=", "nodata", "zdr"}
+	specValues = map[string][]string{
+		"sort":  {"price", "throughput", "latency", "balanced"},
+		"quant": {"int4", "fp4", "mxfp4", "nvfp4", "fp6", "int8", "fp8", "mxfp8", "fp16", "bf16", "fp32", "unknown"},
+	}
+)
+
+// completeRoutingSpecTail returns completion candidates for the inside of a
+// model string's routing brackets. tail begins at the "[" (everything before
+// it is base id). Client-side by design — a completion must never dial the
+// daemon, never exit, never block past the completion deadline, never print.
+func completeRoutingSpecTail(tail string) []string {
+	inner := tail[1:]
+	if strings.Contains(inner, "]") {
+		return nil // the spec is closed; nothing left to offer
+	}
+	items := strings.Split(inner, ",")
+	last := items[len(items)-1]
+	if key, val, hasVal := strings.Cut(last, "="); hasVal {
+		return prefixFilter(specValues[key], val)
+	}
+	used := make(map[string]bool)
+	for _, item := range items[:len(items)-1] {
+		usedKey, _, _ := strings.Cut(item, "=")
+		used[usedKey] = true
+	}
+	out := make([]string, 0, len(specKeys))
+	for _, k := range specKeys {
+		if used[strings.TrimSuffix(k, "=")] || !strings.HasPrefix(k, last) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// prefixFilter returns the subset of candidates starting with prefix, in the
+// candidates' own order (grammar order here, unlike the sorted id lists
+// filterByPrefix serves).
+func prefixFilter(candidates []string, prefix string) []string {
+	var out []string
+	for _, c := range candidates {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // filterByPrefix returns the sorted subset of ids starting with prefix.

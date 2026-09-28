@@ -336,6 +336,33 @@ class Client:
         req = _gen.control_pb.PutPresetRequest(preset=row)
         return self._call("PutPreset", req, _gen.control_pb.PutPresetResponse).preset
 
+    # ── routing policy rows ──────────────────────────────────────────────────
+
+    def list_routes(self) -> "list":
+        """The live routing-policy rows, one per model line, ordered by line.
+        Readable by any caller — routing defaults name providers, not users.
+        A row's line matches model ids equal to it or extending it with "-"
+        ("z-ai/glm-5.3" also governs "z-ai/glm-5.3-flash")."""
+        req = _gen.control_pb.ListRoutesRequest()
+        return self._call("ListRoutes", req, _gen.control_pb.ListRoutesResponse).rows
+
+    def set_route(self, model_line: str, spec: str) -> _gen.control_pb.RouteRow:
+        """Write (or replace) the routing spec a model line resolves to, and
+        return the stored row. ``spec`` is the bracket grammar of a model
+        string, e.g. ``"sort=price,quant=fp8+"`` — the daemon validates it
+        (the empty string is the zero spec) and refuses what it cannot parse
+        with invalid_argument. Writing needs a user credential or the local
+        socket."""
+        req = _gen.control_pb.SetRouteRequest(model_line=model_line, spec=spec)
+        return self._call("SetRoute", req, _gen.control_pb.SetRouteResponse).row
+
+    def delete_route(self, model_line: str) -> None:
+        """Remove the routing-policy row for a model line (appended as a
+        tombstone — the history is kept). not_found when the line has no
+        live row."""
+        req = _gen.control_pb.DeleteRouteRequest(model_line=model_line)
+        self._call("DeleteRoute", req, _gen.control_pb.DeleteRouteResponse)
+
     # ── script-child verbs (Report / Receive / SetResult) ────────────────────
 
     def report(self, kind: str, data) -> None:
