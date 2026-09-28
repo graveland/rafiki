@@ -209,8 +209,8 @@ it must never be the store's own text for the same DSN reason.
 
 All RPCs documented below belong to the `rafiki.executor.v1.ExecutorService`
 service.
-`rafiki.admin.v1.AdminService` adds two more (`Launch`, `Reap`) on the same
-connection — see [AdminService: Launch and Reap](#adminservice-launch-and-reap).
+`rafiki.admin.v1.AdminService` adds three more (`Launch`, `Reap`, `Status`) on
+the same connection — see [AdminService: Launch, Reap and Status](#adminservice-launch-reap-and-status).
 
 ### Describe
 
@@ -666,7 +666,7 @@ One-shot poll of a background job. Never blocks.
 
 `Attach` remains the streaming path. Use `JobOutput` when you want a snapshot.
 
-## AdminService: Launch and Reap
+## AdminService: Launch, Reap and Status
 
 `rafiki.admin.v1.AdminService` is the machine-admin surface: starting and
 ending daraja hosts. It is deliberately NOT part of `ExecutorService` — the
@@ -758,6 +758,31 @@ Ends one launched daraja and its child: SIGTERM to the process group, wait out
 `stopLocked` rather than inventing a second escalation policy), then SIGKILL
 the group. An unknown `childId` returns `reaped=false`, NOT an error —
 reaping something already gone is the normal case, so Reap is idempotent.
+
+### Status
+
+```
+Status(childId) → { known, running, exit_code?, stderr_tail }
+```
+
+Unary. Reports whether this executor launched a daraja for `childId` and —
+once that daraja has exited — how: an unknown `childId` answers `known=false`
+(NOT an error, like Reap), a live one answers `known=true, running=true` with
+`exit_code` unset, and an exited one answers `known=true, running=false` with
+`exit_code` set (negative when it was killed by a signal) and `stderr_tail`
+carrying the last 4 KiB of the daraja process's stderr — the
+connection-failure diagnostics it logged on the way out.
+
+The record outlives the process on purpose. The launch entry is dropped when
+daraja exits so a recycled pgid is never signalled, but the Status record
+survives, because the daemon's launch wait (`darajapool.Launch`) polls Status
+every second alongside the connect signal: a daraja that died before its
+reverse dial arrived ends the wait at once with `exited (code N) before
+connecting: <stderr_tail>` instead of burning the full launch timeout on a
+machine that will never dial back. A later Launch of the same `childId`
+replaces the record; a refused Status poll (an old executor answers
+`Unimplemented`) is logged once and the wait continues on the connect signal
+and the timeout as before.
 
 ### The `socket` field is retired
 

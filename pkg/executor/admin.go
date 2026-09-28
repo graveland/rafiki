@@ -32,6 +32,10 @@ import (
 // daraja's own stopLocked rather than inventing a second policy.
 const defaultReapGrace = 3 * time.Second
 
+// stderrTailMax caps the stderr tail a launch record keeps for Status:
+// the daraja's own connection-failure diagnostics, never the whole pipe.
+const stderrTailMax = 4 * 1024
+
 // AdminOptions configures the machine-admin surface.
 type AdminOptions struct {
 	// SelfBinary is the path to this `rafiki` binary, which is re-executed as
@@ -98,10 +102,40 @@ type AdminOptions struct {
 // the dup-check lock before cmd.Start and swaps in the real entry afterwards.
 // Every reader must treat nil cmd as "nothing to signal yet" — the pgid field
 // is still zero, and kill(-0, ...) targets the caller's own group.
+//
+// The status pointer is set when the entry is built and never re-pointed; the
+// pointee it names is mutable and guarded by AdminServer.mu.
 type launched struct {
 	cmd     *exec.Cmd
 	pgid    int
 	supDone chan struct{} // closed when supervise exits
+	status  *launchRecord
+}
+
+// launchRecord is what Status answers from: whether the daraja is still
+// running and, once it has exited, its exit code and the last stderrTailMax
+// bytes of its stderr. It is created at Launch and OUTLIVES the process —
+// unlike the launched entry, which supervise deletes so a recycled pgid is
+// never signalled — because the daemon's connect wait polls Status precisely
+// when the daraja has died before connecting. A later Launch of the same
+// child id replaces the record.
+type launchRecord struct {
+	running    bool
+	exited     bool
+	exitCode   int32
+	stderrTail []byte
+}
+
+// appendStderrLine folds one stderr line into the tail, keeping only the LAST
+// stderrTailMax bytes so the tail is bounded no matter how chatty the process.
+// Caller holds the server lock.
+func (r *launchRecord) appendStderrLine(line string) {
+	b := append(r.stderrTail, line...)
+	b = append(b, '\n')
+	if len(b) > stderrTailMax {
+		b = b[len(b)-stderrTailMax:]
+	}
+	r.stderrTail = b
 }
 
 // AdminServer launches, supervises and reaps darajas.
@@ -114,10 +148,14 @@ type AdminServer struct {
 
 	mu sync.Mutex
 	m  map[string]*launched
+	// records answers Status: one per child id ever launched here, keyed by
+	// child id, surviving the process's exit (see launchRecord). Only Launch
+	// writes a key; supervise and the stderr relay mutate a record's fields.
+	records map[string]*launchRecord
 }
 
 func NewAdminServer(o AdminOptions) *AdminServer {
-	return &AdminServer{opts: o, m: map[string]*launched{}}
+	return &AdminServer{opts: o, m: map[string]*launched{}, records: map[string]*launchRecord{}}
 }
 
 func (a *AdminServer) Routes() (string, http.Handler) {
@@ -394,16 +432,20 @@ func (a *AdminServer) Launch(
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start daraja: %w", err))
 	}
 	pid := cmd.Process.Pid
-	go logDarajaStderr(childID, stderr)
+	rec := &launchRecord{running: true}
+	go a.logDarajaStderr(rec, childID, stderr)
 
 	// Swap the claim for the real entry. The entry is fully built BEFORE it
 	// enters the map and is never mutated after, so reap's read of l.pgid
 	// outside the lock is race-free; overwriting is safe because the claim
-	// itself is what blocked any other claimant to this childID.
+	// itself is what blocked any other claimant to this childID. The record
+	// replaces any left by an earlier daraja of this child id: Status must
+	// describe the daraja that is alive NOW.
 	done := make(chan struct{})
-	l := &launched{cmd: cmd, pgid: pid, supDone: done}
+	l := &launched{cmd: cmd, pgid: pid, supDone: done, status: rec}
 	a.mu.Lock()
 	a.m[childID] = l
+	a.records[childID] = rec
 	a.mu.Unlock()
 
 	go a.supervise(childID, l)
@@ -522,7 +564,8 @@ func (a *AdminServer) reap(childID string, grace time.Duration) bool {
 }
 
 // supervise waits on daraja, which is this process's DIRECT child, so it never
-// zombies and its exit is logged.
+// zombies and its exit is logged. The exit is also recorded on the launch
+// record, where Status reads it.
 //
 // It cannot wait on claude: darwin has no PR_SET_CHILD_SUBREAPER, so a claude
 // orphaned by a SIGKILLed daraja reparents to launchd rather than here. The
@@ -534,9 +577,16 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 
 	// Dropping the entry is what stops a recycled pgid from being signalled
 	// later: once the group is likely empty, this executor no longer claims it.
+	// The record deliberately survives the deletion — Status answers for an
+	// exited daraja, which is the whole point of the record.
 	a.mu.Lock()
 	if a.m[childID] == l {
 		delete(a.m, childID)
+	}
+	if rec := l.status; rec != nil {
+		rec.running = false
+		rec.exited = true
+		rec.exitCode = int32(code)
 	}
 	a.mu.Unlock()
 	close(l.supDone)
@@ -579,10 +629,43 @@ func (a *AdminServer) kindFor(spec *darajapb.ChildSpec) (string, error) {
 
 // logDarajaStderr relays a launched daraja's stderr into the executor's own
 // log, line by line, so its connection-failure diagnostics reach an operator
-// instead of /dev/null. Ends when the pipe closes (the process exited).
-func logDarajaStderr(childID string, stderr io.Reader) {
+// instead of /dev/null, and folds each line into the launch record's tail so
+// Status can carry the same diagnostics back to the daemon. Ends when the
+// pipe closes (the process exited).
+func (a *AdminServer) logDarajaStderr(rec *launchRecord, childID string, stderr io.Reader) {
 	sc := bufio.NewScanner(stderr)
 	for sc.Scan() {
 		slog.Warn("daraja stderr", "childID", childID, "line", sc.Text())
+		a.mu.Lock()
+		rec.appendStderrLine(sc.Text())
+		a.mu.Unlock()
 	}
+}
+
+// Status reports whether this executor launched a daraja for a child id and,
+// once it has exited, how: the exit code and the tail of its stderr. The
+// daemon's launch wait polls it every second so a daraja that dies before its
+// reverse dial lands fails the launch at once with the daraja's own
+// diagnostics instead of the full timeout.
+func (a *AdminServer) Status(
+	ctx context.Context, req *connect.Request[adminpb.StatusRequest],
+) (*connect.Response[adminpb.StatusResponse], error) {
+	a.mu.Lock()
+	rec := a.records[req.Msg.GetChildId()]
+	resp := &adminpb.StatusResponse{}
+	if rec == nil {
+		a.mu.Unlock()
+		return connect.NewResponse(resp), nil
+	}
+	resp.Known = true
+	resp.Running = rec.running
+	if rec.exited {
+		code := rec.exitCode
+		resp.ExitCode = &code
+	}
+	// Valid UTF-8 only: the tail rides a proto string, and a daraja that wrote
+	// binary garbage to stderr must not poison the response's encoding.
+	resp.StderrTail = strings.ToValidUTF8(string(rec.stderrTail), "\uFFFD")
+	a.mu.Unlock()
+	return connect.NewResponse(resp), nil
 }

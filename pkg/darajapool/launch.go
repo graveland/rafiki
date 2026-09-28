@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"connectrpc.com/connect"
@@ -20,6 +21,18 @@ import (
 // without leaving a caller (an RPC handler or a spawn request) hanging
 // indefinitely on a machine that never dials back.
 const defaultLaunchTimeout = 30 * time.Second
+
+// statusPollInterval is how often the connect wait asks the executor's
+// AdminService.Status whether the daraja has already died, alongside the
+// connect signal. An exited daraja ends the wait at once instead of burning
+// the whole timeout.
+const statusPollInterval = time.Second
+
+// statusCallTimeout bounds one Status call inside the wait. It exists so a
+// stalled executor (it was alive when Launch was accepted; it may not be a
+// second later) cannot wedge the wait's select — an arm that never returns
+// would keep the connected arm from firing even though the daraja dialled in.
+const statusCallTimeout = 2 * time.Second
 
 // adminLauncher is the slice of *execpool.Pool that Launch needs — an
 // interface for the same reason cmd/rafikid/executor_select.go's
@@ -53,6 +66,12 @@ type LaunchResult struct {
 
 // Launch mints a one-shot ticket, asks the chosen executor's AdminService to
 // start a daraja, and blocks until that daraja's reverse dial lands in Pool.
+// Alongside the connect signal the wait polls AdminService.Status every
+// second: a daraja that exits before connecting (its reverse dial will never
+// come) ends the wait at once with its exit code and stderr tail, while a
+// Status RPC that fails for any reason — an old executor without the RPC
+// answers Unimplemented — is logged once and the wait continues on the signal
+// and the timeout as before.
 //
 // The executor itself is already chosen by the caller. DarajaLaunch's
 // operator-facing selection (bare label match, no admission/lineage
@@ -123,16 +142,54 @@ func Launch(ctx context.Context, p LaunchParams) (LaunchResult, error) {
 		timeout = defaultLaunchTimeout
 	}
 
-	select {
-	case <-connected:
-		return LaunchResult{
-			Pid:  int32(launchResp.Msg.GetPid()),
-			Pgid: int32(launchResp.Msg.GetPgid()),
-		}, nil
-	case <-time.After(timeout):
-		p.Pool.Evict(p.ChildID)
-		return LaunchResult{}, fmt.Errorf("daraja for child %s did not connect within %s", p.ChildID, timeout)
-	case <-ctx.Done():
-		return LaunchResult{}, ctx.Err()
+	// The wait arms: the daraja's reverse dial, the overall timeout (one timer
+	// created here, so it is measured from the start of the wait and is never
+	// reset by the Status polling below), the caller's context, and a 1s poll
+	// of the executor's AdminService.Status — a daraja that died before
+	// connecting ends the wait at once with the daraja's own stderr instead of
+	// burning the full timeout on a machine that will never dial back.
+	timeoutC := time.After(timeout)
+	ticker := time.NewTicker(statusPollInterval)
+	defer ticker.Stop()
+
+	// A Status RPC error is reported once, not once per tick: an executor that
+	// predates the RPC (Unimplemented) or one that just died mid-wait must not
+	// spray a warning every second for the rest of the wait.
+	statusErrLogged := false
+
+	for {
+		select {
+		case <-connected:
+			return LaunchResult{
+				Pid:  int32(launchResp.Msg.GetPid()),
+				Pgid: int32(launchResp.Msg.GetPgid()),
+			}, nil
+		case <-timeoutC:
+			p.Pool.Evict(p.ChildID)
+			return LaunchResult{}, fmt.Errorf("daraja for child %s did not connect within %s", p.ChildID, timeout)
+		case <-ctx.Done():
+			return LaunchResult{}, ctx.Err()
+		case <-ticker.C:
+			sctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
+			status, err := adminCLI.Status(sctx, connect.NewRequest(&adminpb.StatusRequest{ChildId: p.ChildID}))
+			cancel()
+			if err != nil {
+				// Old executors answer Unimplemented; a just-died executor answers
+				// nothing at all. Both mean "keep waiting" — the connect signal and
+				// the timeout remain the authorities.
+				if !statusErrLogged {
+					statusErrLogged = true
+					slog.Warn("daraja launch: Status poll failed; waiting on the connect signal",
+						"childID", p.ChildID, "executor", p.ExecutorID, "error", err)
+				}
+				continue
+			}
+			if st := status.Msg; st.GetKnown() && !st.GetRunning() {
+				p.Pool.Evict(p.ChildID)
+				return LaunchResult{}, fmt.Errorf("daraja for child %s exited (code %d) before connecting: %s",
+					p.ChildID, st.GetExitCode(), st.GetStderrTail())
+			}
+			// Known and still running: keep waiting for the dial.
+		}
 	}
 }

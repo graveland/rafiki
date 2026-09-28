@@ -22,6 +22,13 @@ service AdminService {
   // Reap ends a launched daraja and its child: SIGTERM to the process group,
   // wait, then SIGKILL.
   rpc Reap(ReapRequest) returns (ReapResponse);
+
+  // Status reports whether this executor tracks a launched daraja for a child
+  // id, and — once that daraja has exited — how: its exit code and the last
+  // few KiB of its stderr. The daemon's launch wait polls it so a daraja that
+  // dies before its reverse dial lands fails the launch at once with the
+  // daraja's own diagnostics instead of waiting out the full timeout.
+  rpc Status(StatusRequest) returns (StatusResponse);
 }
 
 message LaunchRequest {
@@ -70,4 +77,26 @@ message ReapResponse {
   // reaped is false when child_id named no tracked launch, which is the normal
   // answer for something already gone. Reaping is idempotent.
   bool reaped = 1;
+}
+
+message StatusRequest {
+  // child_id names a launch this executor may be tracking. An id it never
+  // launched answers known=false, not an error — like Reap, asking after
+  // something already gone is normal.
+  string child_id = 1;
+}
+
+message StatusResponse {
+  // known is true when this executor launched (or is launching) a daraja for
+  // child_id. The record outlives the process, so a daraja that exited
+  // moments ago still answers known=true with running=false.
+  bool known = 1;
+  // running is true while the daraja process is still alive.
+  bool running = 2;
+  // exit_code is set only once the daraja has exited (negative when it was
+  // killed by a signal). A live daraja leaves it unset.
+  optional int32 exit_code = 3;
+  // stderr_tail is the last few KiB of the daraja process's stderr — the
+  // connection-failure diagnostics it logged on the way out.
+  string stderr_tail = 4;
 }

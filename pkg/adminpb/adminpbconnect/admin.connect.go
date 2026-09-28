@@ -37,6 +37,8 @@ const (
 	AdminServiceLaunchProcedure = "/rafiki.admin.v1.AdminService/Launch"
 	// AdminServiceReapProcedure is the fully-qualified name of the AdminService's Reap RPC.
 	AdminServiceReapProcedure = "/rafiki.admin.v1.AdminService/Reap"
+	// AdminServiceStatusProcedure is the fully-qualified name of the AdminService's Status RPC.
+	AdminServiceStatusProcedure = "/rafiki.admin.v1.AdminService/Status"
 )
 
 // AdminServiceClient is a client for the rafiki.admin.v1.AdminService service.
@@ -47,6 +49,12 @@ type AdminServiceClient interface {
 	// Reap ends a launched daraja and its child: SIGTERM to the process group,
 	// wait, then SIGKILL.
 	Reap(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error)
+	// Status reports whether this executor tracks a launched daraja for a child
+	// id, and — once that daraja has exited — how: its exit code and the last
+	// few KiB of its stderr. The daemon's launch wait polls it so a daraja that
+	// dies before its reverse dial lands fails the launch at once with the
+	// daraja's own diagnostics instead of waiting out the full timeout.
+	Status(context.Context, *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error)
 }
 
 // NewAdminServiceClient constructs a client for the rafiki.admin.v1.AdminService service. By
@@ -72,6 +80,12 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 			connect.WithSchema(adminServiceMethods.ByName("Reap")),
 			connect.WithClientOptions(opts...),
 		),
+		status: connect.NewClient[adminpb.StatusRequest, adminpb.StatusResponse](
+			httpClient,
+			baseURL+AdminServiceStatusProcedure,
+			connect.WithSchema(adminServiceMethods.ByName("Status")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -79,6 +93,7 @@ func NewAdminServiceClient(httpClient connect.HTTPClient, baseURL string, opts .
 type adminServiceClient struct {
 	launch *connect.Client[adminpb.LaunchRequest, adminpb.LaunchResponse]
 	reap   *connect.Client[adminpb.ReapRequest, adminpb.ReapResponse]
+	status *connect.Client[adminpb.StatusRequest, adminpb.StatusResponse]
 }
 
 // Launch calls rafiki.admin.v1.AdminService.Launch.
@@ -91,6 +106,11 @@ func (c *adminServiceClient) Reap(ctx context.Context, req *connect.Request[admi
 	return c.reap.CallUnary(ctx, req)
 }
 
+// Status calls rafiki.admin.v1.AdminService.Status.
+func (c *adminServiceClient) Status(ctx context.Context, req *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error) {
+	return c.status.CallUnary(ctx, req)
+}
+
 // AdminServiceHandler is an implementation of the rafiki.admin.v1.AdminService service.
 type AdminServiceHandler interface {
 	// Launch starts one daraja hosting one child and returns the handles needed
@@ -99,6 +119,12 @@ type AdminServiceHandler interface {
 	// Reap ends a launched daraja and its child: SIGTERM to the process group,
 	// wait, then SIGKILL.
 	Reap(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error)
+	// Status reports whether this executor tracks a launched daraja for a child
+	// id, and — once that daraja has exited — how: its exit code and the last
+	// few KiB of its stderr. The daemon's launch wait polls it so a daraja that
+	// dies before its reverse dial lands fails the launch at once with the
+	// daraja's own diagnostics instead of waiting out the full timeout.
+	Status(context.Context, *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error)
 }
 
 // NewAdminServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -120,12 +146,20 @@ func NewAdminServiceHandler(svc AdminServiceHandler, opts ...connect.HandlerOpti
 		connect.WithSchema(adminServiceMethods.ByName("Reap")),
 		connect.WithHandlerOptions(opts...),
 	)
+	adminServiceStatusHandler := connect.NewUnaryHandler(
+		AdminServiceStatusProcedure,
+		svc.Status,
+		connect.WithSchema(adminServiceMethods.ByName("Status")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/rafiki.admin.v1.AdminService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case AdminServiceLaunchProcedure:
 			adminServiceLaunchHandler.ServeHTTP(w, r)
 		case AdminServiceReapProcedure:
 			adminServiceReapHandler.ServeHTTP(w, r)
+		case AdminServiceStatusProcedure:
+			adminServiceStatusHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -141,4 +175,8 @@ func (UnimplementedAdminServiceHandler) Launch(context.Context, *connect.Request
 
 func (UnimplementedAdminServiceHandler) Reap(context.Context, *connect.Request[adminpb.ReapRequest]) (*connect.Response[adminpb.ReapResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.admin.v1.AdminService.Reap is not implemented"))
+}
+
+func (UnimplementedAdminServiceHandler) Status(context.Context, *connect.Request[adminpb.StatusRequest]) (*connect.Response[adminpb.StatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.admin.v1.AdminService.Status is not implemented"))
 }

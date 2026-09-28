@@ -270,6 +270,129 @@ func (x *ReapResponse) GetReaped() bool {
 	return false
 }
 
+type StatusRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// child_id names a launch this executor may be tracking. An id it never
+	// launched answers known=false, not an error — like Reap, asking after
+	// something already gone is normal.
+	ChildId       string `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatusRequest) Reset() {
+	*x = StatusRequest{}
+	mi := &file_rafiki_admin_v1_admin_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatusRequest) ProtoMessage() {}
+
+func (x *StatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_admin_v1_admin_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
+func (*StatusRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_admin_v1_admin_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StatusRequest) GetChildId() string {
+	if x != nil {
+		return x.ChildId
+	}
+	return ""
+}
+
+type StatusResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// known is true when this executor launched (or is launching) a daraja for
+	// child_id. The record outlives the process, so a daraja that exited
+	// moments ago still answers known=true with running=false.
+	Known bool `protobuf:"varint,1,opt,name=known,proto3" json:"known,omitempty"`
+	// running is true while the daraja process is still alive.
+	Running bool `protobuf:"varint,2,opt,name=running,proto3" json:"running,omitempty"`
+	// exit_code is set only once the daraja has exited (negative when it was
+	// killed by a signal). A live daraja leaves it unset.
+	ExitCode *int32 `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	// stderr_tail is the last few KiB of the daraja process's stderr — the
+	// connection-failure diagnostics it logged on the way out.
+	StderrTail    string `protobuf:"bytes,4,opt,name=stderr_tail,json=stderrTail,proto3" json:"stderr_tail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatusResponse) Reset() {
+	*x = StatusResponse{}
+	mi := &file_rafiki_admin_v1_admin_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatusResponse) ProtoMessage() {}
+
+func (x *StatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_admin_v1_admin_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
+func (*StatusResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_admin_v1_admin_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *StatusResponse) GetKnown() bool {
+	if x != nil {
+		return x.Known
+	}
+	return false
+}
+
+func (x *StatusResponse) GetRunning() bool {
+	if x != nil {
+		return x.Running
+	}
+	return false
+}
+
+func (x *StatusResponse) GetExitCode() int32 {
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetStderrTail() string {
+	if x != nil {
+		return x.StderrTail
+	}
+	return ""
+}
+
 var File_rafiki_admin_v1_admin_proto protoreflect.FileDescriptor
 
 const file_rafiki_admin_v1_admin_proto_rawDesc = "" +
@@ -288,10 +411,21 @@ const file_rafiki_admin_v1_admin_proto_rawDesc = "" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x19\n" +
 	"\bgrace_ms\x18\x02 \x01(\x05R\agraceMs\"&\n" +
 	"\fReapResponse\x12\x16\n" +
-	"\x06reaped\x18\x01 \x01(\bR\x06reaped2\x9e\x01\n" +
+	"\x06reaped\x18\x01 \x01(\bR\x06reaped\"*\n" +
+	"\rStatusRequest\x12\x19\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\"\x91\x01\n" +
+	"\x0eStatusResponse\x12\x14\n" +
+	"\x05known\x18\x01 \x01(\bR\x05known\x12\x18\n" +
+	"\arunning\x18\x02 \x01(\bR\arunning\x12 \n" +
+	"\texit_code\x18\x03 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x1f\n" +
+	"\vstderr_tail\x18\x04 \x01(\tR\n" +
+	"stderrTailB\f\n" +
+	"\n" +
+	"_exit_code2\xe9\x01\n" +
 	"\fAdminService\x12I\n" +
 	"\x06Launch\x12\x1e.rafiki.admin.v1.LaunchRequest\x1a\x1f.rafiki.admin.v1.LaunchResponse\x12C\n" +
-	"\x04Reap\x12\x1c.rafiki.admin.v1.ReapRequest\x1a\x1d.rafiki.admin.v1.ReapResponseB-Z+go.graveland.dev/rafiki/pkg/adminpb;adminpbb\x06proto3"
+	"\x04Reap\x12\x1c.rafiki.admin.v1.ReapRequest\x1a\x1d.rafiki.admin.v1.ReapResponse\x12I\n" +
+	"\x06Status\x12\x1e.rafiki.admin.v1.StatusRequest\x1a\x1f.rafiki.admin.v1.StatusResponseB-Z+go.graveland.dev/rafiki/pkg/adminpb;adminpbb\x06proto3"
 
 var (
 	file_rafiki_admin_v1_admin_proto_rawDescOnce sync.Once
@@ -305,22 +439,26 @@ func file_rafiki_admin_v1_admin_proto_rawDescGZIP() []byte {
 	return file_rafiki_admin_v1_admin_proto_rawDescData
 }
 
-var file_rafiki_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_rafiki_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_rafiki_admin_v1_admin_proto_goTypes = []any{
 	(*LaunchRequest)(nil),      // 0: rafiki.admin.v1.LaunchRequest
 	(*LaunchResponse)(nil),     // 1: rafiki.admin.v1.LaunchResponse
 	(*ReapRequest)(nil),        // 2: rafiki.admin.v1.ReapRequest
 	(*ReapResponse)(nil),       // 3: rafiki.admin.v1.ReapResponse
-	(*darajapb.ChildSpec)(nil), // 4: rafiki.daraja.v1.ChildSpec
+	(*StatusRequest)(nil),      // 4: rafiki.admin.v1.StatusRequest
+	(*StatusResponse)(nil),     // 5: rafiki.admin.v1.StatusResponse
+	(*darajapb.ChildSpec)(nil), // 6: rafiki.daraja.v1.ChildSpec
 }
 var file_rafiki_admin_v1_admin_proto_depIdxs = []int32{
-	4, // 0: rafiki.admin.v1.LaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	6, // 0: rafiki.admin.v1.LaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
 	0, // 1: rafiki.admin.v1.AdminService.Launch:input_type -> rafiki.admin.v1.LaunchRequest
 	2, // 2: rafiki.admin.v1.AdminService.Reap:input_type -> rafiki.admin.v1.ReapRequest
-	1, // 3: rafiki.admin.v1.AdminService.Launch:output_type -> rafiki.admin.v1.LaunchResponse
-	3, // 4: rafiki.admin.v1.AdminService.Reap:output_type -> rafiki.admin.v1.ReapResponse
-	3, // [3:5] is the sub-list for method output_type
-	1, // [1:3] is the sub-list for method input_type
+	4, // 3: rafiki.admin.v1.AdminService.Status:input_type -> rafiki.admin.v1.StatusRequest
+	1, // 4: rafiki.admin.v1.AdminService.Launch:output_type -> rafiki.admin.v1.LaunchResponse
+	3, // 5: rafiki.admin.v1.AdminService.Reap:output_type -> rafiki.admin.v1.ReapResponse
+	5, // 6: rafiki.admin.v1.AdminService.Status:output_type -> rafiki.admin.v1.StatusResponse
+	4, // [4:7] is the sub-list for method output_type
+	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -331,13 +469,14 @@ func file_rafiki_admin_v1_admin_proto_init() {
 	if File_rafiki_admin_v1_admin_proto != nil {
 		return
 	}
+	file_rafiki_admin_v1_admin_proto_msgTypes[5].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_admin_v1_admin_proto_rawDesc), len(file_rafiki_admin_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

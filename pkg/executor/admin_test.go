@@ -226,6 +226,38 @@ func main() {
 	return bin
 }
 
+// buildExitingDarajaStub is buildSelfStub with the opposite lifetime: it logs
+// lines to stderr (what a daraja does with its connection-failure diagnostics)
+// and exits with a code, so a launch produces a daraja-shaped DEATH to ask
+// Status about. The stderr volume exceeds stderrTailMax, so the record's tail
+// is exercised at its cap: early lines must be evicted, late lines kept.
+func buildExitingDarajaStub(t *testing.T) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	c.NoError(os.WriteFile(src, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	for i := 0; i < 60; i++ {
+		fmt.Fprintln(os.Stderr, strings.Repeat("x", 99))
+	}
+	fmt.Fprintln(os.Stderr, "daraja: connect failed: dial 127.0.0.1:1: connection refused")
+	os.Exit(3)
+}
+`), 0o600))
+	bin := filepath.Join(dir, "stub")
+	out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput()
+	c.NoError(err, "build stub: %v (output: %s)", err, out)
+	return bin
+}
+
 // A ticket in argv is readable by every process on the machine via ps. This
 // test reads the launched process's own command line back out of the kernel,
 // because an assertion against the argv slice we built would pass even if
@@ -830,4 +862,106 @@ func TestLaunchSpecWithoutATokenDoesNotLeakAStaleInheritedMCPToken(t *testing.T)
 	c.Require().Len(proxyLines, 1, "RAFIKI_DARAJA_PROXY_TOKEN carried")
 	c.NotStrContains(string(envDump), staleMCP, "stale inherited mcp token %q found anywhere in the launched environ:\n%s", staleMCP, envDump)
 	c.NotStrContains(string(envDump), staleProxy, "stale inherited proxy token %q found anywhere in the launched environ:\n%s", staleProxy, envDump)
+}
+
+// TestAdminStatusReportsExitAndStderr pins the Status contract the daemon's
+// launch wait leans on: a daraja that died before connecting answers
+// known=true, running=false, its exit code, and the LAST stderrTailMax bytes
+// of its stderr — while a child this executor never launched answers
+// known=false, not an error and not a guessed record.
+func TestAdminStatusReportsExitAndStderr(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildExitingDarajaStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	marker := "daraja: connect failed: dial 127.0.0.1:1: connection refused"
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-status",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	c.Require().NoError(err, "Launch")
+
+	// An unknown child: known=false, nothing else set.
+	resp, err := a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-ghost"}))
+	c.Require().NoError(err, "Status for an unknown child")
+	c.False(resp.Msg.GetKnown(), "Status answered known for a child it never launched")
+	c.False(resp.Msg.GetRunning(), "unknown child reported running")
+	c.Nil(resp.Msg.ExitCode, "unknown child carried an exit code")
+	c.Empty(resp.Msg.GetStderrTail(), "unknown child carried a stderr tail")
+
+	// The launched daraja exits within moments; poll Status the way the
+	// daemon's launch wait does, until the exit AND the stderr tail have both
+	// landed (the tail's relay goroutine may finish a scan after Wait does).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err = a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-status"}))
+		c.Require().NoError(err, "Status")
+		if resp.Msg.GetKnown() && !resp.Msg.GetRunning() && strings.Contains(resp.Msg.GetStderrTail(), marker) {
+			break
+		}
+		c.Require().False(time.Now().After(deadline), "Status never reported the exit; last: known=%v running=%v tail=%q",
+			resp.Msg.GetKnown(), resp.Msg.GetRunning(), resp.Msg.GetStderrTail())
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.True(resp.Msg.GetKnown(), "known")
+	c.False(resp.Msg.GetRunning(), "running")
+	c.Require().NotNil(resp.Msg.ExitCode, "an exited daraja must carry its exit code")
+	c.Eq(int32(3), *resp.Msg.ExitCode, "exit_code")
+
+	// The tail holds the END of the stderr, not the start: the stub wrote ~6KB
+	// of filler lines before the marker, so the early ones must be evicted and
+	// the tail must never exceed stderrTailMax bytes.
+	tail := resp.Msg.GetStderrTail()
+	c.StrContains(tail, marker, "stderr_tail")
+	c.NotStrContains(tail, "filler-000", "the tail must keep the LAST bytes; the first filler line survived")
+	c.False(len(tail) > stderrTailMax, "stderr_tail is %d bytes, want <= %d", len(tail), stderrTailMax)
+}
+
+// A LIVE daraja answers known=true, running=true with the exit code left
+// unset — the optional field is what distinguishes "no exit yet" from
+// "exited with a code", so a live daraja must never report one. And once it
+// HAS exited, the record outlives the process: known stays true and the exit
+// code becomes set.
+func TestAdminStatusReportsALiveDaraja(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-live",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	c.Require().NoError(err, "Launch")
+
+	resp, err := a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-live"}))
+	c.Require().NoError(err, "Status of a live daraja")
+	c.True(resp.Msg.GetKnown(), "known")
+	c.True(resp.Msg.GetRunning(), "running")
+	c.Nil(resp.Msg.ExitCode, "a live daraja must leave exit_code unset")
+
+	// Close reaps (SIGTERM; the stub normally exits 0 once it has booted) and
+	// joins the supervise goroutine, so the exit is recorded by the time it
+	// returns. The short settle is the stub's boot time: a SIGTERM that arrives
+	// before its signal.Notify registers kills the process instead (exit -1),
+	// which is a real daraja death too — either way a code is recorded.
+	time.Sleep(100 * time.Millisecond)
+	a.Close()
+	resp, err = a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-live"}))
+	c.Require().NoError(err, "Status after exit")
+	c.True(resp.Msg.GetKnown(), "the record must outlive the process")
+	c.False(resp.Msg.GetRunning(), "running")
+	c.Require().NotNil(resp.Msg.ExitCode, "an exited daraja must carry its exit code")
+	code := *resp.Msg.ExitCode
+	c.False(code != 0 && code != -1, "exit_code = %d, want 0 (caught the SIGTERM) or -1 (signalled mid-boot)", code)
 }
