@@ -142,6 +142,12 @@ const (
 	ControlBanProviderProcedure = "/rafiki.v1.Control/BanProvider"
 	// ControlUnbanProviderProcedure is the fully-qualified name of the Control's UnbanProvider RPC.
 	ControlUnbanProviderProcedure = "/rafiki.v1.Control/UnbanProvider"
+	// ControlListRoutesProcedure is the fully-qualified name of the Control's ListRoutes RPC.
+	ControlListRoutesProcedure = "/rafiki.v1.Control/ListRoutes"
+	// ControlSetRouteProcedure is the fully-qualified name of the Control's SetRoute RPC.
+	ControlSetRouteProcedure = "/rafiki.v1.Control/SetRoute"
+	// ControlDeleteRouteProcedure is the fully-qualified name of the Control's DeleteRoute RPC.
+	ControlDeleteRouteProcedure = "/rafiki.v1.Control/DeleteRoute"
 	// ControlReportProcedure is the fully-qualified name of the Control's Report RPC.
 	ControlReportProcedure = "/rafiki.v1.Control/Report"
 	// ControlReceiveProcedure is the fully-qualified name of the Control's Receive RPC.
@@ -249,6 +255,12 @@ type ControlClient interface {
 	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
 	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
 	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
+	// The route-policy RPCs: model_line → routing-spec rows the daemon resolves
+	// every request against. List is a read-only, non-scoped surface (routing
+	// defaults name providers, not users); Set and Delete are operator writes.
+	ListRoutes(context.Context, *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error)
+	SetRoute(context.Context, *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error)
+	DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error)
 	// The script-child verbs. All three are childScoped; Report is the one that
 	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
 	// on the caller itself. See the "Script children" block above for the
@@ -589,6 +601,24 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("UnbanProvider")),
 			connect.WithClientOptions(opts...),
 		),
+		listRoutes: connect.NewClient[v1.ListRoutesRequest, v1.ListRoutesResponse](
+			httpClient,
+			baseURL+ControlListRoutesProcedure,
+			connect.WithSchema(controlMethods.ByName("ListRoutes")),
+			connect.WithClientOptions(opts...),
+		),
+		setRoute: connect.NewClient[v1.SetRouteRequest, v1.SetRouteResponse](
+			httpClient,
+			baseURL+ControlSetRouteProcedure,
+			connect.WithSchema(controlMethods.ByName("SetRoute")),
+			connect.WithClientOptions(opts...),
+		),
+		deleteRoute: connect.NewClient[v1.DeleteRouteRequest, v1.DeleteRouteResponse](
+			httpClient,
+			baseURL+ControlDeleteRouteProcedure,
+			connect.WithSchema(controlMethods.ByName("DeleteRoute")),
+			connect.WithClientOptions(opts...),
+		),
 		report: connect.NewClient[v1.ReportRequest, v1.ReportResponse](
 			httpClient,
 			baseURL+ControlReportProcedure,
@@ -781,6 +811,9 @@ type controlClient struct {
 	listProviderBans         *connect.Client[v1.ListProviderBansRequest, v1.ListProviderBansResponse]
 	banProvider              *connect.Client[v1.BanProviderRequest, v1.BanProviderResponse]
 	unbanProvider            *connect.Client[v1.UnbanProviderRequest, v1.UnbanProviderResponse]
+	listRoutes               *connect.Client[v1.ListRoutesRequest, v1.ListRoutesResponse]
+	setRoute                 *connect.Client[v1.SetRouteRequest, v1.SetRouteResponse]
+	deleteRoute              *connect.Client[v1.DeleteRouteRequest, v1.DeleteRouteResponse]
 	report                   *connect.Client[v1.ReportRequest, v1.ReportResponse]
 	receive                  *connect.Client[v1.ReceiveRequest, v1.ScriptMessage]
 	setResult                *connect.Client[v1.SetResultRequest, v1.SetResultResponse]
@@ -1051,6 +1084,21 @@ func (c *controlClient) UnbanProvider(ctx context.Context, req *connect.Request[
 	return c.unbanProvider.CallUnary(ctx, req)
 }
 
+// ListRoutes calls rafiki.v1.Control.ListRoutes.
+func (c *controlClient) ListRoutes(ctx context.Context, req *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error) {
+	return c.listRoutes.CallUnary(ctx, req)
+}
+
+// SetRoute calls rafiki.v1.Control.SetRoute.
+func (c *controlClient) SetRoute(ctx context.Context, req *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error) {
+	return c.setRoute.CallUnary(ctx, req)
+}
+
+// DeleteRoute calls rafiki.v1.Control.DeleteRoute.
+func (c *controlClient) DeleteRoute(ctx context.Context, req *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error) {
+	return c.deleteRoute.CallUnary(ctx, req)
+}
+
 // Report calls rafiki.v1.Control.Report.
 func (c *controlClient) Report(ctx context.Context, req *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {
 	return c.report.CallUnary(ctx, req)
@@ -1224,6 +1272,12 @@ type ControlHandler interface {
 	ListProviderBans(context.Context, *connect.Request[v1.ListProviderBansRequest]) (*connect.Response[v1.ListProviderBansResponse], error)
 	BanProvider(context.Context, *connect.Request[v1.BanProviderRequest]) (*connect.Response[v1.BanProviderResponse], error)
 	UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error)
+	// The route-policy RPCs: model_line → routing-spec rows the daemon resolves
+	// every request against. List is a read-only, non-scoped surface (routing
+	// defaults name providers, not users); Set and Delete are operator writes.
+	ListRoutes(context.Context, *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error)
+	SetRoute(context.Context, *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error)
+	DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error)
 	// The script-child verbs. All three are childScoped; Report is the one that
 	// acts OUTWARD (on the caller's own parent), Receive and SetResult act only
 	// on the caller itself. See the "Script children" block above for the
@@ -1560,6 +1614,24 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("UnbanProvider")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlListRoutesHandler := connect.NewUnaryHandler(
+		ControlListRoutesProcedure,
+		svc.ListRoutes,
+		connect.WithSchema(controlMethods.ByName("ListRoutes")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetRouteHandler := connect.NewUnaryHandler(
+		ControlSetRouteProcedure,
+		svc.SetRoute,
+		connect.WithSchema(controlMethods.ByName("SetRoute")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlDeleteRouteHandler := connect.NewUnaryHandler(
+		ControlDeleteRouteProcedure,
+		svc.DeleteRoute,
+		connect.WithSchema(controlMethods.ByName("DeleteRoute")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlReportHandler := connect.NewUnaryHandler(
 		ControlReportProcedure,
 		svc.Report,
@@ -1798,6 +1870,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlBanProviderHandler.ServeHTTP(w, r)
 		case ControlUnbanProviderProcedure:
 			controlUnbanProviderHandler.ServeHTTP(w, r)
+		case ControlListRoutesProcedure:
+			controlListRoutesHandler.ServeHTTP(w, r)
+		case ControlSetRouteProcedure:
+			controlSetRouteHandler.ServeHTTP(w, r)
+		case ControlDeleteRouteProcedure:
+			controlDeleteRouteHandler.ServeHTTP(w, r)
 		case ControlReportProcedure:
 			controlReportHandler.ServeHTTP(w, r)
 		case ControlReceiveProcedure:
@@ -2047,6 +2125,18 @@ func (UnimplementedControlHandler) BanProvider(context.Context, *connect.Request
 
 func (UnimplementedControlHandler) UnbanProvider(context.Context, *connect.Request[v1.UnbanProviderRequest]) (*connect.Response[v1.UnbanProviderResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UnbanProvider is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListRoutes(context.Context, *connect.Request[v1.ListRoutesRequest]) (*connect.Response[v1.ListRoutesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListRoutes is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetRoute(context.Context, *connect.Request[v1.SetRouteRequest]) (*connect.Response[v1.SetRouteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetRoute is not implemented"))
+}
+
+func (UnimplementedControlHandler) DeleteRoute(context.Context, *connect.Request[v1.DeleteRouteRequest]) (*connect.Response[v1.DeleteRouteResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.DeleteRoute is not implemented"))
 }
 
 func (UnimplementedControlHandler) Report(context.Context, *connect.Request[v1.ReportRequest]) (*connect.Response[v1.ReportResponse], error) {

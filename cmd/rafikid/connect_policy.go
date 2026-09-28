@@ -41,7 +41,7 @@ const (
 	// the procedure is read-only and answers nothing scoped to a user beyond
 	// what the caller's own credential already names: ListModels,
 	// ListPresets, GetPreset, GetRateLimitStatus, ListProviderBans,
-	// ModelInfo. Anything writable must never be listed here.
+	// ListRoutes, ModelInfo. Anything writable must never be listed here.
 	policyAnyCaller
 
 	// policyChildScoped marks the verbs a child credential with subtree
@@ -83,7 +83,7 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 // budget, write) or ANSWER AS the caller (conversations, recall, executors)?
 // Then it is userOnly unless wave 1 will scope it to the caller's subtree
 // (childScoped). Does it only READ daemon-wide, non-owned facts? anyCaller —
-// and only these six, all read-only:
+// and only these seven, all read-only:
 //
 //	ListModels         the model catalog, no owner dimension
 //	ListPresets        preset names/metadata; a child may read, not write
@@ -91,6 +91,7 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 //	GetRateLimitStatus the rate-limit windows already attributed to the
 //	                   caller's own (or its owner's) account
 //	ListProviderBans   the ban list names providers, not users
+//	ListRoutes         routing defaults name providers, not users
 //	ModelInfo          per-model catalog lookup, the twin of ListModels
 var controlPolicyTable = map[string]controlPolicy{
 	// childScoped: a per-child credential may call these on its own subtree;
@@ -129,7 +130,7 @@ var controlPolicyTable = map[string]controlPolicy{
 	"SetResult": policyChildScoped,
 
 	// anyCaller: the read-only, non-scoped verbs — see the classification
-	// rule above for all six.
+	// rule above for all seven.
 	"ListModels":         policyAnyCaller,
 	"ListPresets":        policyAnyCaller,
 	"GetPreset":          policyAnyCaller,
@@ -174,6 +175,12 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListProviderBans": policyAnyCaller,
 	"BanProvider":      policyUserOnly,
 	"UnbanProvider":    policyUserOnly,
+	// The route-policy verbs. List is a read-only, non-scoped surface —
+	// routing defaults name providers, not users — but Set/Delete reroute
+	// every user's requests, so they are operator writes: userOnly.
+	"ListRoutes":  policyAnyCaller,
+	"SetRoute":    policyUserOnly,
+	"DeleteRoute": policyUserOnly,
 
 	// userOnly: the framed-protocol retirement verbs — operator verbs; no
 	// child tool reaches them; CreateUser/ListUsers/RemoveUser add an admin

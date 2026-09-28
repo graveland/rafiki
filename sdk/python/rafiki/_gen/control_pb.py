@@ -416,6 +416,7 @@ class ChildSummary:
     exit_signal: str = ""
     slash_commands: list[str] = dataclasses.field(default_factory=list)
     max_completion_tokens: int = 0
+    routing: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -461,6 +462,8 @@ class ChildSummary:
             out["slashCommands"] = [x for x in self.slash_commands]
         if self.max_completion_tokens != 0:
             out["maxCompletionTokens"] = self.max_completion_tokens
+        if self.routing != "":
+            out["routing"] = self.routing
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ChildSummary":
@@ -528,6 +531,9 @@ class ChildSummary:
         _v = _d.get("maxCompletionTokens")
         if _v is not None:
             obj.max_completion_tokens = _int_in(_v)
+        _v = _d.get("routing")
+        if _v is not None:
+            obj.routing = _v
         return obj
 
 @dataclasses.dataclass
@@ -4267,6 +4273,133 @@ class UnbanProviderResponse:
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "UnbanProviderResponse":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class RouteRow:
+    model_line: str = ""
+    spec: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model_line != "":
+            out["modelLine"] = self.model_line
+        if self.spec != "":
+            out["spec"] = self.spec
+        if self.created_at != "":
+            out["createdAt"] = self.created_at
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RouteRow":
+        obj = cls()
+        _v = _d.get("modelLine")
+        if _v is not None:
+            obj.model_line = _v
+        _v = _d.get("spec")
+        if _v is not None:
+            obj.spec = _v
+        _v = _d.get("createdAt")
+        if _v is not None:
+            obj.created_at = _v
+        return obj
+
+@dataclasses.dataclass
+class ListRoutesRequest:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListRoutesRequest":
+        obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class ListRoutesResponse:
+    rows: list[RouteRow] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.rows:
+            out["rows"] = [x.to_dict() for x in self.rows]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListRoutesResponse":
+        obj = cls()
+        _v = _d.get("rows")
+        if _v is not None:
+            obj.rows = [RouteRow.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class SetRouteRequest:
+    model_line: str = ""
+    spec: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model_line != "":
+            out["modelLine"] = self.model_line
+        if self.spec != "":
+            out["spec"] = self.spec
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRouteRequest":
+        obj = cls()
+        _v = _d.get("modelLine")
+        if _v is not None:
+            obj.model_line = _v
+        _v = _d.get("spec")
+        if _v is not None:
+            obj.spec = _v
+        return obj
+
+@dataclasses.dataclass
+class SetRouteResponse:
+    row: Optional[RouteRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.row is not None:
+            out["row"] = self.row.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRouteResponse":
+        obj = cls()
+        _v = _d.get("row")
+        if _v is not None:
+            obj.row = RouteRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class DeleteRouteRequest:
+    model_line: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model_line != "":
+            out["modelLine"] = self.model_line
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteRouteRequest":
+        obj = cls()
+        _v = _d.get("modelLine")
+        if _v is not None:
+            obj.model_line = _v
+        return obj
+
+@dataclasses.dataclass
+class DeleteRouteResponse:
+    pass
+
+    def to_dict(self) -> dict:
+        out = {}
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "DeleteRouteResponse":
         obj = cls()
         return obj
 

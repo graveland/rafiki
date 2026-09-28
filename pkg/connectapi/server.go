@@ -69,6 +69,7 @@ type Server struct {
 	gitSources     atomic.Pointer[GitSourceManager]
 	quota          atomic.Pointer[QuotaReader]
 	providerBans   atomic.Pointer[ProviderBanManager]
+	routes         atomic.Pointer[RouteManager]
 	conversations  atomic.Pointer[ConversationInsights]
 	reviewer       atomic.Pointer[ConversationReviewer]
 	findingsReader atomic.Pointer[ConversationFindingsReader]

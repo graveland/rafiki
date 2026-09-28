@@ -234,6 +234,10 @@ message ChildSummary {
   // model, zero when the catalog has no entry — the same rule
   // ChildSummary.context_window follows.
   int32 max_completion_tokens = 21;
+  // routing is the child's resolved routing spec in canonical form
+  // (routing.Spec.String()), empty when none. The model field stays the base
+  // id: the bracketed spec form is never folded into it.
+  string routing = 22;
 }
 
 message ListChildrenRequest {
@@ -943,6 +947,12 @@ service Control {
   rpc ListProviderBans(ListProviderBansRequest) returns (ListProviderBansResponse);
   rpc BanProvider(BanProviderRequest) returns (BanProviderResponse);
   rpc UnbanProvider(UnbanProviderRequest) returns (UnbanProviderResponse);
+  // The route-policy RPCs: model_line → routing-spec rows the daemon resolves
+  // every request against. List is a read-only, non-scoped surface (routing
+  // defaults name providers, not users); Set and Delete are operator writes.
+  rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc SetRoute(SetRouteRequest) returns (SetRouteResponse);
+  rpc DeleteRoute(DeleteRouteRequest) returns (DeleteRouteResponse);
   // The script-child verbs. All three are childScoped; Report is the one that
   // acts OUTWARD (on the caller's own parent), Receive and SetResult act only
   // on the caller itself. See the "Script children" block above for the
@@ -1279,6 +1289,37 @@ message BanProviderResponse {
 // live.
 message UnbanProviderRequest { string provider = 1; }
 message UnbanProviderResponse {}
+
+// RouteRow is one live routing-policy row: the model line it governs and the
+// routing spec (ParseSpec's grammar, e.g. "sort=price,quant=fp8+") resolved
+// for it. created_at renders as RFC3339 UTC.
+message RouteRow {
+  string model_line = 1;
+  string spec = 2;
+  string created_at = 3;
+}
+
+message ListRoutesRequest {}
+message ListRoutesResponse {
+  repeated RouteRow rows = 1;
+}
+
+// SetRouteRequest writes (or replaces) the routing spec for model_line. spec
+// must parse with routing.ParseSpec — the empty string is the zero spec.
+message SetRouteRequest {
+  string model_line = 1;
+  string spec = 2;
+}
+message SetRouteResponse {
+  RouteRow row = 1;
+}
+
+// DeleteRouteRequest removes the live row for model_line. NotFound when the
+// line has none.
+message DeleteRouteRequest {
+  string model_line = 1;
+}
+message DeleteRouteResponse {}
 
 // ─── Control-plane messages ────────────────────────────────────────────────
 // The request/response shapes behind the RPCs above. Unless a comment says

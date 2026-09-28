@@ -1070,8 +1070,12 @@ type ChildSummary struct {
 	// model, zero when the catalog has no entry — the same rule
 	// ChildSummary.context_window follows.
 	MaxCompletionTokens int32 `protobuf:"varint,21,opt,name=max_completion_tokens,json=maxCompletionTokens,proto3" json:"max_completion_tokens,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// routing is the child's resolved routing spec in canonical form
+	// (routing.Spec.String()), empty when none. The model field stays the base
+	// id: the bracketed spec form is never folded into it.
+	Routing       string `protobuf:"bytes,22,opt,name=routing,proto3" json:"routing,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChildSummary) Reset() {
@@ -1249,6 +1253,13 @@ func (x *ChildSummary) GetMaxCompletionTokens() int32 {
 		return x.MaxCompletionTokens
 	}
 	return 0
+}
+
+func (x *ChildSummary) GetRouting() string {
+	if x != nil {
+		return x.Routing
+	}
+	return ""
 }
 
 type ListChildrenRequest struct {
@@ -8999,6 +9010,329 @@ func (*UnbanProviderResponse) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{130}
 }
 
+// RouteRow is one live routing-policy row: the model line it governs and the
+// routing spec (ParseSpec's grammar, e.g. "sort=price,quant=fp8+") resolved
+// for it. created_at renders as RFC3339 UTC.
+type RouteRow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ModelLine     string                 `protobuf:"bytes,1,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
+	Spec          string                 `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RouteRow) Reset() {
+	*x = RouteRow{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[131]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteRow) ProtoMessage() {}
+
+func (x *RouteRow) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[131]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteRow.ProtoReflect.Descriptor instead.
+func (*RouteRow) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{131}
+}
+
+func (x *RouteRow) GetModelLine() string {
+	if x != nil {
+		return x.ModelLine
+	}
+	return ""
+}
+
+func (x *RouteRow) GetSpec() string {
+	if x != nil {
+		return x.Spec
+	}
+	return ""
+}
+
+func (x *RouteRow) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+type ListRoutesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRoutesRequest) Reset() {
+	*x = ListRoutesRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[132]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRoutesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRoutesRequest) ProtoMessage() {}
+
+func (x *ListRoutesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[132]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRoutesRequest.ProtoReflect.Descriptor instead.
+func (*ListRoutesRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{132}
+}
+
+type ListRoutesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rows          []*RouteRow            `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRoutesResponse) Reset() {
+	*x = ListRoutesResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[133]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRoutesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRoutesResponse) ProtoMessage() {}
+
+func (x *ListRoutesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[133]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRoutesResponse.ProtoReflect.Descriptor instead.
+func (*ListRoutesResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{133}
+}
+
+func (x *ListRoutesResponse) GetRows() []*RouteRow {
+	if x != nil {
+		return x.Rows
+	}
+	return nil
+}
+
+// SetRouteRequest writes (or replaces) the routing spec for model_line. spec
+// must parse with routing.ParseSpec — the empty string is the zero spec.
+type SetRouteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ModelLine     string                 `protobuf:"bytes,1,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
+	Spec          string                 `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetRouteRequest) Reset() {
+	*x = SetRouteRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[134]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetRouteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetRouteRequest) ProtoMessage() {}
+
+func (x *SetRouteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[134]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetRouteRequest.ProtoReflect.Descriptor instead.
+func (*SetRouteRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{134}
+}
+
+func (x *SetRouteRequest) GetModelLine() string {
+	if x != nil {
+		return x.ModelLine
+	}
+	return ""
+}
+
+func (x *SetRouteRequest) GetSpec() string {
+	if x != nil {
+		return x.Spec
+	}
+	return ""
+}
+
+type SetRouteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Row           *RouteRow              `protobuf:"bytes,1,opt,name=row,proto3" json:"row,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetRouteResponse) Reset() {
+	*x = SetRouteResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[135]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetRouteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetRouteResponse) ProtoMessage() {}
+
+func (x *SetRouteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[135]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetRouteResponse.ProtoReflect.Descriptor instead.
+func (*SetRouteResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{135}
+}
+
+func (x *SetRouteResponse) GetRow() *RouteRow {
+	if x != nil {
+		return x.Row
+	}
+	return nil
+}
+
+// DeleteRouteRequest removes the live row for model_line. NotFound when the
+// line has none.
+type DeleteRouteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ModelLine     string                 `protobuf:"bytes,1,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRouteRequest) Reset() {
+	*x = DeleteRouteRequest{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[136]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRouteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRouteRequest) ProtoMessage() {}
+
+func (x *DeleteRouteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[136]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRouteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRouteRequest) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{136}
+}
+
+func (x *DeleteRouteRequest) GetModelLine() string {
+	if x != nil {
+		return x.ModelLine
+	}
+	return ""
+}
+
+type DeleteRouteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRouteResponse) Reset() {
+	*x = DeleteRouteResponse{}
+	mi := &file_rafiki_v1_control_proto_msgTypes[137]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRouteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRouteResponse) ProtoMessage() {}
+
+func (x *DeleteRouteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_rafiki_v1_control_proto_msgTypes[137]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRouteResponse.ProtoReflect.Descriptor instead.
+func (*DeleteRouteResponse) Descriptor() ([]byte, []int) {
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{137}
+}
+
 // ResumeRequest mirrors protocol.ResumeRequest: re-spawn an exited child
 // against its persisted state record. api_key is used at spawn time only and
 // is never persisted.
@@ -9012,7 +9346,7 @@ type ResumeRequest struct {
 
 func (x *ResumeRequest) Reset() {
 	*x = ResumeRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[131]
+	mi := &file_rafiki_v1_control_proto_msgTypes[138]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9024,7 +9358,7 @@ func (x *ResumeRequest) String() string {
 func (*ResumeRequest) ProtoMessage() {}
 
 func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[131]
+	mi := &file_rafiki_v1_control_proto_msgTypes[138]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9037,7 +9371,7 @@ func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeRequest.ProtoReflect.Descriptor instead.
 func (*ResumeRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{131}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{138}
 }
 
 func (x *ResumeRequest) GetChildId() string {
@@ -9063,7 +9397,7 @@ type ResumeResponse struct {
 
 func (x *ResumeResponse) Reset() {
 	*x = ResumeResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[132]
+	mi := &file_rafiki_v1_control_proto_msgTypes[139]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9075,7 +9409,7 @@ func (x *ResumeResponse) String() string {
 func (*ResumeResponse) ProtoMessage() {}
 
 func (x *ResumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[132]
+	mi := &file_rafiki_v1_control_proto_msgTypes[139]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9088,7 +9422,7 @@ func (x *ResumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeResponse.ProtoReflect.Descriptor instead.
 func (*ResumeResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{132}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{139}
 }
 
 func (x *ResumeResponse) GetChildId() string {
@@ -9109,7 +9443,7 @@ type CloseAllExitedRequest struct {
 
 func (x *CloseAllExitedRequest) Reset() {
 	*x = CloseAllExitedRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[133]
+	mi := &file_rafiki_v1_control_proto_msgTypes[140]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9121,7 +9455,7 @@ func (x *CloseAllExitedRequest) String() string {
 func (*CloseAllExitedRequest) ProtoMessage() {}
 
 func (x *CloseAllExitedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[133]
+	mi := &file_rafiki_v1_control_proto_msgTypes[140]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9134,7 +9468,7 @@ func (x *CloseAllExitedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseAllExitedRequest.ProtoReflect.Descriptor instead.
 func (*CloseAllExitedRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{133}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{140}
 }
 
 func (x *CloseAllExitedRequest) GetOlderThanMs() int64 {
@@ -9155,7 +9489,7 @@ type CloseAllExitedResponse struct {
 
 func (x *CloseAllExitedResponse) Reset() {
 	*x = CloseAllExitedResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[134]
+	mi := &file_rafiki_v1_control_proto_msgTypes[141]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9167,7 +9501,7 @@ func (x *CloseAllExitedResponse) String() string {
 func (*CloseAllExitedResponse) ProtoMessage() {}
 
 func (x *CloseAllExitedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[134]
+	mi := &file_rafiki_v1_control_proto_msgTypes[141]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9180,7 +9514,7 @@ func (x *CloseAllExitedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseAllExitedResponse.ProtoReflect.Descriptor instead.
 func (*CloseAllExitedResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{134}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{141}
 }
 
 func (x *CloseAllExitedResponse) GetChildIds() []string {
@@ -9204,7 +9538,7 @@ type SetLabelsRequest struct {
 
 func (x *SetLabelsRequest) Reset() {
 	*x = SetLabelsRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[135]
+	mi := &file_rafiki_v1_control_proto_msgTypes[142]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9216,7 +9550,7 @@ func (x *SetLabelsRequest) String() string {
 func (*SetLabelsRequest) ProtoMessage() {}
 
 func (x *SetLabelsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[135]
+	mi := &file_rafiki_v1_control_proto_msgTypes[142]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9229,7 +9563,7 @@ func (x *SetLabelsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLabelsRequest.ProtoReflect.Descriptor instead.
 func (*SetLabelsRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{135}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{142}
 }
 
 func (x *SetLabelsRequest) GetChildId() string {
@@ -9263,7 +9597,7 @@ type SetLabelsResponse struct {
 
 func (x *SetLabelsResponse) Reset() {
 	*x = SetLabelsResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[136]
+	mi := &file_rafiki_v1_control_proto_msgTypes[143]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9275,7 +9609,7 @@ func (x *SetLabelsResponse) String() string {
 func (*SetLabelsResponse) ProtoMessage() {}
 
 func (x *SetLabelsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[136]
+	mi := &file_rafiki_v1_control_proto_msgTypes[143]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9288,7 +9622,7 @@ func (x *SetLabelsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLabelsResponse.ProtoReflect.Descriptor instead.
 func (*SetLabelsResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{136}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{143}
 }
 
 func (x *SetLabelsResponse) GetLabels() map[string]string {
@@ -9306,7 +9640,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[137]
+	mi := &file_rafiki_v1_control_proto_msgTypes[144]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9318,7 +9652,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[137]
+	mi := &file_rafiki_v1_control_proto_msgTypes[144]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9331,7 +9665,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{137}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{144}
 }
 
 // StatusResponse mirrors protocol.StatusResponseData.
@@ -9351,7 +9685,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[138]
+	mi := &file_rafiki_v1_control_proto_msgTypes[145]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9363,7 +9697,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[138]
+	mi := &file_rafiki_v1_control_proto_msgTypes[145]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9376,7 +9710,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{138}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{145}
 }
 
 func (x *StatusResponse) GetVersion() string {
@@ -9438,7 +9772,7 @@ type SearchRequest struct {
 
 func (x *SearchRequest) Reset() {
 	*x = SearchRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[139]
+	mi := &file_rafiki_v1_control_proto_msgTypes[146]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9450,7 +9784,7 @@ func (x *SearchRequest) String() string {
 func (*SearchRequest) ProtoMessage() {}
 
 func (x *SearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[139]
+	mi := &file_rafiki_v1_control_proto_msgTypes[146]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9463,7 +9797,7 @@ func (x *SearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
 func (*SearchRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{139}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{146}
 }
 
 func (x *SearchRequest) GetQuery() string {
@@ -9515,7 +9849,7 @@ type SearchResponse struct {
 
 func (x *SearchResponse) Reset() {
 	*x = SearchResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[140]
+	mi := &file_rafiki_v1_control_proto_msgTypes[147]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9527,7 +9861,7 @@ func (x *SearchResponse) String() string {
 func (*SearchResponse) ProtoMessage() {}
 
 func (x *SearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[140]
+	mi := &file_rafiki_v1_control_proto_msgTypes[147]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9540,7 +9874,7 @@ func (x *SearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
 func (*SearchResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{140}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{147}
 }
 
 func (x *SearchResponse) GetHits() []*SearchResponse_SearchHit {
@@ -9579,7 +9913,7 @@ type ShutdownDaemonRequest struct {
 
 func (x *ShutdownDaemonRequest) Reset() {
 	*x = ShutdownDaemonRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[141]
+	mi := &file_rafiki_v1_control_proto_msgTypes[148]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9591,7 +9925,7 @@ func (x *ShutdownDaemonRequest) String() string {
 func (*ShutdownDaemonRequest) ProtoMessage() {}
 
 func (x *ShutdownDaemonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[141]
+	mi := &file_rafiki_v1_control_proto_msgTypes[148]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9604,7 +9938,7 @@ func (x *ShutdownDaemonRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownDaemonRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownDaemonRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{141}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{148}
 }
 
 type ShutdownDaemonResponse struct {
@@ -9615,7 +9949,7 @@ type ShutdownDaemonResponse struct {
 
 func (x *ShutdownDaemonResponse) Reset() {
 	*x = ShutdownDaemonResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[142]
+	mi := &file_rafiki_v1_control_proto_msgTypes[149]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9627,7 +9961,7 @@ func (x *ShutdownDaemonResponse) String() string {
 func (*ShutdownDaemonResponse) ProtoMessage() {}
 
 func (x *ShutdownDaemonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[142]
+	mi := &file_rafiki_v1_control_proto_msgTypes[149]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9640,7 +9974,7 @@ func (x *ShutdownDaemonResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownDaemonResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownDaemonResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{142}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{149}
 }
 
 // ModelInfoRequest asks the daemon what it knows about one model, so the
@@ -9654,7 +9988,7 @@ type ModelInfoRequest struct {
 
 func (x *ModelInfoRequest) Reset() {
 	*x = ModelInfoRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[143]
+	mi := &file_rafiki_v1_control_proto_msgTypes[150]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9666,7 +10000,7 @@ func (x *ModelInfoRequest) String() string {
 func (*ModelInfoRequest) ProtoMessage() {}
 
 func (x *ModelInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[143]
+	mi := &file_rafiki_v1_control_proto_msgTypes[150]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9679,7 +10013,7 @@ func (x *ModelInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelInfoRequest.ProtoReflect.Descriptor instead.
 func (*ModelInfoRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{143}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{150}
 }
 
 func (x *ModelInfoRequest) GetModel() string {
@@ -9706,7 +10040,7 @@ type ModelInfoResponse struct {
 
 func (x *ModelInfoResponse) Reset() {
 	*x = ModelInfoResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[144]
+	mi := &file_rafiki_v1_control_proto_msgTypes[151]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9718,7 +10052,7 @@ func (x *ModelInfoResponse) String() string {
 func (*ModelInfoResponse) ProtoMessage() {}
 
 func (x *ModelInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[144]
+	mi := &file_rafiki_v1_control_proto_msgTypes[151]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9731,7 +10065,7 @@ func (x *ModelInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelInfoResponse.ProtoReflect.Descriptor instead.
 func (*ModelInfoResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{144}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{151}
 }
 
 func (x *ModelInfoResponse) GetModel() string {
@@ -9796,7 +10130,7 @@ type ConversationStatsRequest struct {
 
 func (x *ConversationStatsRequest) Reset() {
 	*x = ConversationStatsRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[145]
+	mi := &file_rafiki_v1_control_proto_msgTypes[152]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9808,7 +10142,7 @@ func (x *ConversationStatsRequest) String() string {
 func (*ConversationStatsRequest) ProtoMessage() {}
 
 func (x *ConversationStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[145]
+	mi := &file_rafiki_v1_control_proto_msgTypes[152]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9821,7 +10155,7 @@ func (x *ConversationStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConversationStatsRequest.ProtoReflect.Descriptor instead.
 func (*ConversationStatsRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{145}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{152}
 }
 
 func (x *ConversationStatsRequest) GetConversationId() string {
@@ -9891,7 +10225,7 @@ type ConversationStatsResponse struct {
 
 func (x *ConversationStatsResponse) Reset() {
 	*x = ConversationStatsResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[146]
+	mi := &file_rafiki_v1_control_proto_msgTypes[153]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9903,7 +10237,7 @@ func (x *ConversationStatsResponse) String() string {
 func (*ConversationStatsResponse) ProtoMessage() {}
 
 func (x *ConversationStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[146]
+	mi := &file_rafiki_v1_control_proto_msgTypes[153]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9916,7 +10250,7 @@ func (x *ConversationStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConversationStatsResponse.ProtoReflect.Descriptor instead.
 func (*ConversationStatsResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{146}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{153}
 }
 
 func (x *ConversationStatsResponse) GetStatsJson() string {
@@ -9949,7 +10283,7 @@ type EnrollExecutorRequest struct {
 
 func (x *EnrollExecutorRequest) Reset() {
 	*x = EnrollExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[147]
+	mi := &file_rafiki_v1_control_proto_msgTypes[154]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -9961,7 +10295,7 @@ func (x *EnrollExecutorRequest) String() string {
 func (*EnrollExecutorRequest) ProtoMessage() {}
 
 func (x *EnrollExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[147]
+	mi := &file_rafiki_v1_control_proto_msgTypes[154]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9974,7 +10308,7 @@ func (x *EnrollExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollExecutorRequest.ProtoReflect.Descriptor instead.
 func (*EnrollExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{147}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{154}
 }
 
 func (x *EnrollExecutorRequest) GetName() string {
@@ -10036,7 +10370,7 @@ type EnrollExecutorResponse struct {
 
 func (x *EnrollExecutorResponse) Reset() {
 	*x = EnrollExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[148]
+	mi := &file_rafiki_v1_control_proto_msgTypes[155]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10048,7 +10382,7 @@ func (x *EnrollExecutorResponse) String() string {
 func (*EnrollExecutorResponse) ProtoMessage() {}
 
 func (x *EnrollExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[148]
+	mi := &file_rafiki_v1_control_proto_msgTypes[155]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10061,7 +10395,7 @@ func (x *EnrollExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollExecutorResponse.ProtoReflect.Descriptor instead.
 func (*EnrollExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{148}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{155}
 }
 
 func (x *EnrollExecutorResponse) GetToken() string {
@@ -10088,7 +10422,7 @@ type CreateExecutorRequest struct {
 
 func (x *CreateExecutorRequest) Reset() {
 	*x = CreateExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[149]
+	mi := &file_rafiki_v1_control_proto_msgTypes[156]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10100,7 +10434,7 @@ func (x *CreateExecutorRequest) String() string {
 func (*CreateExecutorRequest) ProtoMessage() {}
 
 func (x *CreateExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[149]
+	mi := &file_rafiki_v1_control_proto_msgTypes[156]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10113,7 +10447,7 @@ func (x *CreateExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateExecutorRequest.ProtoReflect.Descriptor instead.
 func (*CreateExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{149}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{156}
 }
 
 func (x *CreateExecutorRequest) GetName() string {
@@ -10170,7 +10504,7 @@ type CreateExecutorResponse struct {
 
 func (x *CreateExecutorResponse) Reset() {
 	*x = CreateExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[150]
+	mi := &file_rafiki_v1_control_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10182,7 +10516,7 @@ func (x *CreateExecutorResponse) String() string {
 func (*CreateExecutorResponse) ProtoMessage() {}
 
 func (x *CreateExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[150]
+	mi := &file_rafiki_v1_control_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10195,7 +10529,7 @@ func (x *CreateExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateExecutorResponse.ProtoReflect.Descriptor instead.
 func (*CreateExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{150}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *CreateExecutorResponse) GetExecutorId() string {
@@ -10225,7 +10559,7 @@ type LabelExecutorRequest struct {
 
 func (x *LabelExecutorRequest) Reset() {
 	*x = LabelExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[151]
+	mi := &file_rafiki_v1_control_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10237,7 +10571,7 @@ func (x *LabelExecutorRequest) String() string {
 func (*LabelExecutorRequest) ProtoMessage() {}
 
 func (x *LabelExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[151]
+	mi := &file_rafiki_v1_control_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10250,7 +10584,7 @@ func (x *LabelExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LabelExecutorRequest.ProtoReflect.Descriptor instead.
 func (*LabelExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{151}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *LabelExecutorRequest) GetExecutorId() string {
@@ -10283,7 +10617,7 @@ type LabelExecutorResponse struct {
 
 func (x *LabelExecutorResponse) Reset() {
 	*x = LabelExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[152]
+	mi := &file_rafiki_v1_control_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10295,7 +10629,7 @@ func (x *LabelExecutorResponse) String() string {
 func (*LabelExecutorResponse) ProtoMessage() {}
 
 func (x *LabelExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[152]
+	mi := &file_rafiki_v1_control_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10308,7 +10642,7 @@ func (x *LabelExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LabelExecutorResponse.ProtoReflect.Descriptor instead.
 func (*LabelExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{152}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *LabelExecutorResponse) GetExecutor() *ExecutorRow {
@@ -10328,7 +10662,7 @@ type DisableExecutorRequest struct {
 
 func (x *DisableExecutorRequest) Reset() {
 	*x = DisableExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[153]
+	mi := &file_rafiki_v1_control_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10340,7 +10674,7 @@ func (x *DisableExecutorRequest) String() string {
 func (*DisableExecutorRequest) ProtoMessage() {}
 
 func (x *DisableExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[153]
+	mi := &file_rafiki_v1_control_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10353,7 +10687,7 @@ func (x *DisableExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableExecutorRequest.ProtoReflect.Descriptor instead.
 func (*DisableExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{153}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *DisableExecutorRequest) GetExecutorId() string {
@@ -10371,7 +10705,7 @@ type DisableExecutorResponse struct {
 
 func (x *DisableExecutorResponse) Reset() {
 	*x = DisableExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[154]
+	mi := &file_rafiki_v1_control_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10383,7 +10717,7 @@ func (x *DisableExecutorResponse) String() string {
 func (*DisableExecutorResponse) ProtoMessage() {}
 
 func (x *DisableExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[154]
+	mi := &file_rafiki_v1_control_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10396,7 +10730,7 @@ func (x *DisableExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisableExecutorResponse.ProtoReflect.Descriptor instead.
 func (*DisableExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{154}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{161}
 }
 
 // EnableExecutorRequest re-enables a disabled executor.
@@ -10409,7 +10743,7 @@ type EnableExecutorRequest struct {
 
 func (x *EnableExecutorRequest) Reset() {
 	*x = EnableExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[155]
+	mi := &file_rafiki_v1_control_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10421,7 +10755,7 @@ func (x *EnableExecutorRequest) String() string {
 func (*EnableExecutorRequest) ProtoMessage() {}
 
 func (x *EnableExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[155]
+	mi := &file_rafiki_v1_control_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10434,7 +10768,7 @@ func (x *EnableExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnableExecutorRequest.ProtoReflect.Descriptor instead.
 func (*EnableExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{155}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *EnableExecutorRequest) GetExecutorId() string {
@@ -10452,7 +10786,7 @@ type EnableExecutorResponse struct {
 
 func (x *EnableExecutorResponse) Reset() {
 	*x = EnableExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[156]
+	mi := &file_rafiki_v1_control_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10464,7 +10798,7 @@ func (x *EnableExecutorResponse) String() string {
 func (*EnableExecutorResponse) ProtoMessage() {}
 
 func (x *EnableExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[156]
+	mi := &file_rafiki_v1_control_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10477,7 +10811,7 @@ func (x *EnableExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnableExecutorResponse.ProtoReflect.Descriptor instead.
 func (*EnableExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{156}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{163}
 }
 
 // DeleteExecutorRequest permanently removes an executor row. Unlike disable,
@@ -10491,7 +10825,7 @@ type DeleteExecutorRequest struct {
 
 func (x *DeleteExecutorRequest) Reset() {
 	*x = DeleteExecutorRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[157]
+	mi := &file_rafiki_v1_control_proto_msgTypes[164]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10503,7 +10837,7 @@ func (x *DeleteExecutorRequest) String() string {
 func (*DeleteExecutorRequest) ProtoMessage() {}
 
 func (x *DeleteExecutorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[157]
+	mi := &file_rafiki_v1_control_proto_msgTypes[164]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10516,7 +10850,7 @@ func (x *DeleteExecutorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteExecutorRequest.ProtoReflect.Descriptor instead.
 func (*DeleteExecutorRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{157}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{164}
 }
 
 func (x *DeleteExecutorRequest) GetExecutorId() string {
@@ -10534,7 +10868,7 @@ type DeleteExecutorResponse struct {
 
 func (x *DeleteExecutorResponse) Reset() {
 	*x = DeleteExecutorResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[158]
+	mi := &file_rafiki_v1_control_proto_msgTypes[165]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10546,7 +10880,7 @@ func (x *DeleteExecutorResponse) String() string {
 func (*DeleteExecutorResponse) ProtoMessage() {}
 
 func (x *DeleteExecutorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[158]
+	mi := &file_rafiki_v1_control_proto_msgTypes[165]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10559,7 +10893,7 @@ func (x *DeleteExecutorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteExecutorResponse.ProtoReflect.Descriptor instead.
 func (*DeleteExecutorResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{158}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{165}
 }
 
 // ExecutorSessionRequest mirrors protocol.ExecutorSessionRequest: ask the
@@ -10583,7 +10917,7 @@ type ExecutorSessionRequest struct {
 
 func (x *ExecutorSessionRequest) Reset() {
 	*x = ExecutorSessionRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[159]
+	mi := &file_rafiki_v1_control_proto_msgTypes[166]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10595,7 +10929,7 @@ func (x *ExecutorSessionRequest) String() string {
 func (*ExecutorSessionRequest) ProtoMessage() {}
 
 func (x *ExecutorSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[159]
+	mi := &file_rafiki_v1_control_proto_msgTypes[166]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10608,7 +10942,7 @@ func (x *ExecutorSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutorSessionRequest.ProtoReflect.Descriptor instead.
 func (*ExecutorSessionRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{159}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{166}
 }
 
 func (x *ExecutorSessionRequest) GetName() string {
@@ -10639,7 +10973,7 @@ type ExecutorSessionEvent struct {
 
 func (x *ExecutorSessionEvent) Reset() {
 	*x = ExecutorSessionEvent{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[160]
+	mi := &file_rafiki_v1_control_proto_msgTypes[167]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10651,7 +10985,7 @@ func (x *ExecutorSessionEvent) String() string {
 func (*ExecutorSessionEvent) ProtoMessage() {}
 
 func (x *ExecutorSessionEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[160]
+	mi := &file_rafiki_v1_control_proto_msgTypes[167]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10664,7 +10998,7 @@ func (x *ExecutorSessionEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutorSessionEvent.ProtoReflect.Descriptor instead.
 func (*ExecutorSessionEvent) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{160}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{167}
 }
 
 func (x *ExecutorSessionEvent) GetEvent() isExecutorSessionEvent_Event {
@@ -10725,7 +11059,7 @@ type ExecutorSessionReady struct {
 
 func (x *ExecutorSessionReady) Reset() {
 	*x = ExecutorSessionReady{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[161]
+	mi := &file_rafiki_v1_control_proto_msgTypes[168]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10737,7 +11071,7 @@ func (x *ExecutorSessionReady) String() string {
 func (*ExecutorSessionReady) ProtoMessage() {}
 
 func (x *ExecutorSessionReady) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[161]
+	mi := &file_rafiki_v1_control_proto_msgTypes[168]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10750,7 +11084,7 @@ func (x *ExecutorSessionReady) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutorSessionReady.ProtoReflect.Descriptor instead.
 func (*ExecutorSessionReady) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{161}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{168}
 }
 
 func (x *ExecutorSessionReady) GetExecutorId() string {
@@ -10791,7 +11125,7 @@ type CreateUserRequest struct {
 
 func (x *CreateUserRequest) Reset() {
 	*x = CreateUserRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[162]
+	mi := &file_rafiki_v1_control_proto_msgTypes[169]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10803,7 +11137,7 @@ func (x *CreateUserRequest) String() string {
 func (*CreateUserRequest) ProtoMessage() {}
 
 func (x *CreateUserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[162]
+	mi := &file_rafiki_v1_control_proto_msgTypes[169]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10816,7 +11150,7 @@ func (x *CreateUserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateUserRequest.ProtoReflect.Descriptor instead.
 func (*CreateUserRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{162}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{169}
 }
 
 func (x *CreateUserRequest) GetUsername() string {
@@ -10844,7 +11178,7 @@ type CreateUserResponse struct {
 
 func (x *CreateUserResponse) Reset() {
 	*x = CreateUserResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[163]
+	mi := &file_rafiki_v1_control_proto_msgTypes[170]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10856,7 +11190,7 @@ func (x *CreateUserResponse) String() string {
 func (*CreateUserResponse) ProtoMessage() {}
 
 func (x *CreateUserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[163]
+	mi := &file_rafiki_v1_control_proto_msgTypes[170]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10869,7 +11203,7 @@ func (x *CreateUserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateUserResponse.ProtoReflect.Descriptor instead.
 func (*CreateUserResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{163}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{170}
 }
 
 func (x *CreateUserResponse) GetId() string {
@@ -10912,7 +11246,7 @@ type ListUsersRequest struct {
 
 func (x *ListUsersRequest) Reset() {
 	*x = ListUsersRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[164]
+	mi := &file_rafiki_v1_control_proto_msgTypes[171]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10924,7 +11258,7 @@ func (x *ListUsersRequest) String() string {
 func (*ListUsersRequest) ProtoMessage() {}
 
 func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[164]
+	mi := &file_rafiki_v1_control_proto_msgTypes[171]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10937,7 +11271,7 @@ func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListUsersRequest.ProtoReflect.Descriptor instead.
 func (*ListUsersRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{164}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{171}
 }
 
 func (x *ListUsersRequest) GetIncludeDeleted() bool {
@@ -10963,7 +11297,7 @@ type ListUsersResponse struct {
 
 func (x *ListUsersResponse) Reset() {
 	*x = ListUsersResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[165]
+	mi := &file_rafiki_v1_control_proto_msgTypes[172]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -10975,7 +11309,7 @@ func (x *ListUsersResponse) String() string {
 func (*ListUsersResponse) ProtoMessage() {}
 
 func (x *ListUsersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[165]
+	mi := &file_rafiki_v1_control_proto_msgTypes[172]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -10988,7 +11322,7 @@ func (x *ListUsersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListUsersResponse.ProtoReflect.Descriptor instead.
 func (*ListUsersResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{165}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{172}
 }
 
 func (x *ListUsersResponse) GetUsers() []*UserRow {
@@ -11017,7 +11351,7 @@ type UserRow struct {
 
 func (x *UserRow) Reset() {
 	*x = UserRow{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[166]
+	mi := &file_rafiki_v1_control_proto_msgTypes[173]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11029,7 +11363,7 @@ func (x *UserRow) String() string {
 func (*UserRow) ProtoMessage() {}
 
 func (x *UserRow) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[166]
+	mi := &file_rafiki_v1_control_proto_msgTypes[173]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11042,7 +11376,7 @@ func (x *UserRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserRow.ProtoReflect.Descriptor instead.
 func (*UserRow) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{166}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{173}
 }
 
 func (x *UserRow) GetId() string {
@@ -11091,7 +11425,7 @@ type RemoveUserRequest struct {
 
 func (x *RemoveUserRequest) Reset() {
 	*x = RemoveUserRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[167]
+	mi := &file_rafiki_v1_control_proto_msgTypes[174]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11103,7 +11437,7 @@ func (x *RemoveUserRequest) String() string {
 func (*RemoveUserRequest) ProtoMessage() {}
 
 func (x *RemoveUserRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[167]
+	mi := &file_rafiki_v1_control_proto_msgTypes[174]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11116,7 +11450,7 @@ func (x *RemoveUserRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveUserRequest.ProtoReflect.Descriptor instead.
 func (*RemoveUserRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{167}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{174}
 }
 
 func (x *RemoveUserRequest) GetUsername() string {
@@ -11134,7 +11468,7 @@ type RemoveUserResponse struct {
 
 func (x *RemoveUserResponse) Reset() {
 	*x = RemoveUserResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[168]
+	mi := &file_rafiki_v1_control_proto_msgTypes[175]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11146,7 +11480,7 @@ func (x *RemoveUserResponse) String() string {
 func (*RemoveUserResponse) ProtoMessage() {}
 
 func (x *RemoveUserResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[168]
+	mi := &file_rafiki_v1_control_proto_msgTypes[175]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11159,7 +11493,7 @@ func (x *RemoveUserResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoveUserResponse.ProtoReflect.Descriptor instead.
 func (*RemoveUserResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{168}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{175}
 }
 
 // GetStreamsRequest names a live child and which streams to read: "in",
@@ -11174,7 +11508,7 @@ type GetStreamsRequest struct {
 
 func (x *GetStreamsRequest) Reset() {
 	*x = GetStreamsRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[169]
+	mi := &file_rafiki_v1_control_proto_msgTypes[176]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11186,7 +11520,7 @@ func (x *GetStreamsRequest) String() string {
 func (*GetStreamsRequest) ProtoMessage() {}
 
 func (x *GetStreamsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[169]
+	mi := &file_rafiki_v1_control_proto_msgTypes[176]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11199,7 +11533,7 @@ func (x *GetStreamsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStreamsRequest.ProtoReflect.Descriptor instead.
 func (*GetStreamsRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{169}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{176}
 }
 
 func (x *GetStreamsRequest) GetChildId() string {
@@ -11234,7 +11568,7 @@ type GetStreamsResponse struct {
 
 func (x *GetStreamsResponse) Reset() {
 	*x = GetStreamsResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[170]
+	mi := &file_rafiki_v1_control_proto_msgTypes[177]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11246,7 +11580,7 @@ func (x *GetStreamsResponse) String() string {
 func (*GetStreamsResponse) ProtoMessage() {}
 
 func (x *GetStreamsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[170]
+	mi := &file_rafiki_v1_control_proto_msgTypes[177]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11259,7 +11593,7 @@ func (x *GetStreamsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStreamsResponse.ProtoReflect.Descriptor instead.
 func (*GetStreamsResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{170}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{177}
 }
 
 func (x *GetStreamsResponse) GetAlive() bool {
@@ -11296,7 +11630,7 @@ type SendFrameRequest struct {
 
 func (x *SendFrameRequest) Reset() {
 	*x = SendFrameRequest{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[171]
+	mi := &file_rafiki_v1_control_proto_msgTypes[178]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11308,7 +11642,7 @@ func (x *SendFrameRequest) String() string {
 func (*SendFrameRequest) ProtoMessage() {}
 
 func (x *SendFrameRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[171]
+	mi := &file_rafiki_v1_control_proto_msgTypes[178]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11321,7 +11655,7 @@ func (x *SendFrameRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendFrameRequest.ProtoReflect.Descriptor instead.
 func (*SendFrameRequest) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{171}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{178}
 }
 
 func (x *SendFrameRequest) GetChildId() string {
@@ -11346,7 +11680,7 @@ type SendFrameResponse struct {
 
 func (x *SendFrameResponse) Reset() {
 	*x = SendFrameResponse{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[172]
+	mi := &file_rafiki_v1_control_proto_msgTypes[179]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11358,7 +11692,7 @@ func (x *SendFrameResponse) String() string {
 func (*SendFrameResponse) ProtoMessage() {}
 
 func (x *SendFrameResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[172]
+	mi := &file_rafiki_v1_control_proto_msgTypes[179]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11371,7 +11705,7 @@ func (x *SendFrameResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendFrameResponse.ProtoReflect.Descriptor instead.
 func (*SendFrameResponse) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{172}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{179}
 }
 
 // Text is work delivered to the child's inbox: an agent_send (prompt or
@@ -11396,7 +11730,7 @@ type ScriptMessage_Text struct {
 
 func (x *ScriptMessage_Text) Reset() {
 	*x = ScriptMessage_Text{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[174]
+	mi := &file_rafiki_v1_control_proto_msgTypes[181]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11408,7 +11742,7 @@ func (x *ScriptMessage_Text) String() string {
 func (*ScriptMessage_Text) ProtoMessage() {}
 
 func (x *ScriptMessage_Text) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[174]
+	mi := &file_rafiki_v1_control_proto_msgTypes[181]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11469,7 +11803,7 @@ type ScriptMessage_Stop struct {
 
 func (x *ScriptMessage_Stop) Reset() {
 	*x = ScriptMessage_Stop{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[175]
+	mi := &file_rafiki_v1_control_proto_msgTypes[182]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11481,7 +11815,7 @@ func (x *ScriptMessage_Stop) String() string {
 func (*ScriptMessage_Stop) ProtoMessage() {}
 
 func (x *ScriptMessage_Stop) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[175]
+	mi := &file_rafiki_v1_control_proto_msgTypes[182]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11520,7 +11854,7 @@ type SpawnRequest_ScriptSpec struct {
 
 func (x *SpawnRequest_ScriptSpec) Reset() {
 	*x = SpawnRequest_ScriptSpec{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[179]
+	mi := &file_rafiki_v1_control_proto_msgTypes[186]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11532,7 +11866,7 @@ func (x *SpawnRequest_ScriptSpec) String() string {
 func (*SpawnRequest_ScriptSpec) ProtoMessage() {}
 
 func (x *SpawnRequest_ScriptSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[179]
+	mi := &file_rafiki_v1_control_proto_msgTypes[186]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11588,7 +11922,7 @@ type StatusResponse_ChildCounts struct {
 
 func (x *StatusResponse_ChildCounts) Reset() {
 	*x = StatusResponse_ChildCounts{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[185]
+	mi := &file_rafiki_v1_control_proto_msgTypes[192]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11600,7 +11934,7 @@ func (x *StatusResponse_ChildCounts) String() string {
 func (*StatusResponse_ChildCounts) ProtoMessage() {}
 
 func (x *StatusResponse_ChildCounts) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[185]
+	mi := &file_rafiki_v1_control_proto_msgTypes[192]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11613,7 +11947,7 @@ func (x *StatusResponse_ChildCounts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse_ChildCounts.ProtoReflect.Descriptor instead.
 func (*StatusResponse_ChildCounts) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{138, 0}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{145, 0}
 }
 
 func (x *StatusResponse_ChildCounts) GetLive() int32 {
@@ -11647,7 +11981,7 @@ type SearchRequest_SearchSessionFilter struct {
 
 func (x *SearchRequest_SearchSessionFilter) Reset() {
 	*x = SearchRequest_SearchSessionFilter{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[186]
+	mi := &file_rafiki_v1_control_proto_msgTypes[193]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11659,7 +11993,7 @@ func (x *SearchRequest_SearchSessionFilter) String() string {
 func (*SearchRequest_SearchSessionFilter) ProtoMessage() {}
 
 func (x *SearchRequest_SearchSessionFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[186]
+	mi := &file_rafiki_v1_control_proto_msgTypes[193]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11672,7 +12006,7 @@ func (x *SearchRequest_SearchSessionFilter) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use SearchRequest_SearchSessionFilter.ProtoReflect.Descriptor instead.
 func (*SearchRequest_SearchSessionFilter) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{139, 0}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{146, 0}
 }
 
 func (x *SearchRequest_SearchSessionFilter) GetCwdContains() string {
@@ -11730,7 +12064,7 @@ type SearchResponse_SearchHit struct {
 
 func (x *SearchResponse_SearchHit) Reset() {
 	*x = SearchResponse_SearchHit{}
-	mi := &file_rafiki_v1_control_proto_msgTypes[188]
+	mi := &file_rafiki_v1_control_proto_msgTypes[195]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -11742,7 +12076,7 @@ func (x *SearchResponse_SearchHit) String() string {
 func (*SearchResponse_SearchHit) ProtoMessage() {}
 
 func (x *SearchResponse_SearchHit) ProtoReflect() protoreflect.Message {
-	mi := &file_rafiki_v1_control_proto_msgTypes[188]
+	mi := &file_rafiki_v1_control_proto_msgTypes[195]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -11755,7 +12089,7 @@ func (x *SearchResponse_SearchHit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchResponse_SearchHit.ProtoReflect.Descriptor instead.
 func (*SearchResponse_SearchHit) Descriptor() ([]byte, []int) {
-	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{140, 0}
+	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{147, 0}
 }
 
 func (x *SearchResponse_SearchHit) GetChildId() string {
@@ -11887,7 +12221,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x10SetResultRequest\x12\x1f\n" +
 	"\vresult_json\x18\x01 \x01(\tR\n" +
 	"resultJson\"\x13\n" +
-	"\x11SetResultResponse\"\xb2\x06\n" +
+	"\x11SetResultResponse\"\xcc\x06\n" +
 	"\fChildSummary\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -11913,7 +12247,8 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\vexit_signal\x18\x13 \x01(\tR\n" +
 	"exitSignal\x12%\n" +
 	"\x0eslash_commands\x18\x14 \x03(\tR\rslashCommands\x122\n" +
-	"\x15max_completion_tokens\x18\x15 \x01(\x05R\x13maxCompletionTokens\x1a9\n" +
+	"\x15max_completion_tokens\x18\x15 \x01(\x05R\x13maxCompletionTokens\x12\x18\n" +
+	"\arouting\x18\x16 \x01(\tR\arouting\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x06\n" +
@@ -12563,7 +12898,26 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"persistent\"2\n" +
 	"\x14UnbanProviderRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\"\x17\n" +
-	"\x15UnbanProviderResponse\"C\n" +
+	"\x15UnbanProviderResponse\"\\\n" +
+	"\bRouteRow\x12\x1d\n" +
+	"\n" +
+	"model_line\x18\x01 \x01(\tR\tmodelLine\x12\x12\n" +
+	"\x04spec\x18\x02 \x01(\tR\x04spec\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\tR\tcreatedAt\"\x13\n" +
+	"\x11ListRoutesRequest\"=\n" +
+	"\x12ListRoutesResponse\x12'\n" +
+	"\x04rows\x18\x01 \x03(\v2\x13.rafiki.v1.RouteRowR\x04rows\"D\n" +
+	"\x0fSetRouteRequest\x12\x1d\n" +
+	"\n" +
+	"model_line\x18\x01 \x01(\tR\tmodelLine\x12\x12\n" +
+	"\x04spec\x18\x02 \x01(\tR\x04spec\"9\n" +
+	"\x10SetRouteResponse\x12%\n" +
+	"\x03row\x18\x01 \x01(\v2\x13.rafiki.v1.RouteRowR\x03row\"3\n" +
+	"\x12DeleteRouteRequest\x12\x1d\n" +
+	"\n" +
+	"model_line\x18\x01 \x01(\tR\tmodelLine\"\x15\n" +
+	"\x13DeleteRouteResponse\"C\n" +
 	"\rResumeRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x17\n" +
 	"\aapi_key\x18\x02 \x01(\tR\x06apiKey\"+\n" +
@@ -12773,7 +13127,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	" REVIEW_ACCEPT_STATUS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dREVIEW_ACCEPT_STATUS_ENQUEUED\x10\x01\x12(\n" +
 	"$REVIEW_ACCEPT_STATUS_ALREADY_RUNNING\x10\x02\x12#\n" +
-	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xa1-\n" +
+	"\x1fREVIEW_ACCEPT_STATUS_QUEUE_FULL\x10\x032\xff.\n" +
 	"\aControl\x12I\n" +
 	"\n" +
 	"GetHistory\x12\x1c.rafiki.v1.GetHistoryRequest\x1a\x1d.rafiki.v1.GetHistoryResponse\x12B\n" +
@@ -12828,7 +13182,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\vDarajaWatch\x12\x1d.rafiki.v1.DarajaWatchRequest\x1a\x1e.rafiki.v1.DarajaWatchResponse0\x01\x12[\n" +
 	"\x10ListProviderBans\x12\".rafiki.v1.ListProviderBansRequest\x1a#.rafiki.v1.ListProviderBansResponse\x12L\n" +
 	"\vBanProvider\x12\x1d.rafiki.v1.BanProviderRequest\x1a\x1e.rafiki.v1.BanProviderResponse\x12R\n" +
-	"\rUnbanProvider\x12\x1f.rafiki.v1.UnbanProviderRequest\x1a .rafiki.v1.UnbanProviderResponse\x12=\n" +
+	"\rUnbanProvider\x12\x1f.rafiki.v1.UnbanProviderRequest\x1a .rafiki.v1.UnbanProviderResponse\x12I\n" +
+	"\n" +
+	"ListRoutes\x12\x1c.rafiki.v1.ListRoutesRequest\x1a\x1d.rafiki.v1.ListRoutesResponse\x12C\n" +
+	"\bSetRoute\x12\x1a.rafiki.v1.SetRouteRequest\x1a\x1b.rafiki.v1.SetRouteResponse\x12L\n" +
+	"\vDeleteRoute\x12\x1d.rafiki.v1.DeleteRouteRequest\x1a\x1e.rafiki.v1.DeleteRouteResponse\x12=\n" +
 	"\x06Report\x12\x18.rafiki.v1.ReportRequest\x1a\x19.rafiki.v1.ReportResponse\x12@\n" +
 	"\aReceive\x12\x19.rafiki.v1.ReceiveRequest\x1a\x18.rafiki.v1.ScriptMessage0\x01\x12F\n" +
 	"\tSetResult\x12\x1b.rafiki.v1.SetResultRequest\x1a\x1c.rafiki.v1.SetResultResponse\x12=\n" +
@@ -12869,7 +13227,7 @@ func file_rafiki_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_rafiki_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 192)
+var file_rafiki_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 199)
 var file_rafiki_v1_control_proto_goTypes = []any{
 	(EventTier)(0),                            // 0: rafiki.v1.EventTier
 	(SendMode)(0),                             // 1: rafiki.v1.SendMode
@@ -13006,90 +13364,97 @@ var file_rafiki_v1_control_proto_goTypes = []any{
 	(*BanProviderResponse)(nil),               // 132: rafiki.v1.BanProviderResponse
 	(*UnbanProviderRequest)(nil),              // 133: rafiki.v1.UnbanProviderRequest
 	(*UnbanProviderResponse)(nil),             // 134: rafiki.v1.UnbanProviderResponse
-	(*ResumeRequest)(nil),                     // 135: rafiki.v1.ResumeRequest
-	(*ResumeResponse)(nil),                    // 136: rafiki.v1.ResumeResponse
-	(*CloseAllExitedRequest)(nil),             // 137: rafiki.v1.CloseAllExitedRequest
-	(*CloseAllExitedResponse)(nil),            // 138: rafiki.v1.CloseAllExitedResponse
-	(*SetLabelsRequest)(nil),                  // 139: rafiki.v1.SetLabelsRequest
-	(*SetLabelsResponse)(nil),                 // 140: rafiki.v1.SetLabelsResponse
-	(*StatusRequest)(nil),                     // 141: rafiki.v1.StatusRequest
-	(*StatusResponse)(nil),                    // 142: rafiki.v1.StatusResponse
-	(*SearchRequest)(nil),                     // 143: rafiki.v1.SearchRequest
-	(*SearchResponse)(nil),                    // 144: rafiki.v1.SearchResponse
-	(*ShutdownDaemonRequest)(nil),             // 145: rafiki.v1.ShutdownDaemonRequest
-	(*ShutdownDaemonResponse)(nil),            // 146: rafiki.v1.ShutdownDaemonResponse
-	(*ModelInfoRequest)(nil),                  // 147: rafiki.v1.ModelInfoRequest
-	(*ModelInfoResponse)(nil),                 // 148: rafiki.v1.ModelInfoResponse
-	(*ConversationStatsRequest)(nil),          // 149: rafiki.v1.ConversationStatsRequest
-	(*ConversationStatsResponse)(nil),         // 150: rafiki.v1.ConversationStatsResponse
-	(*EnrollExecutorRequest)(nil),             // 151: rafiki.v1.EnrollExecutorRequest
-	(*EnrollExecutorResponse)(nil),            // 152: rafiki.v1.EnrollExecutorResponse
-	(*CreateExecutorRequest)(nil),             // 153: rafiki.v1.CreateExecutorRequest
-	(*CreateExecutorResponse)(nil),            // 154: rafiki.v1.CreateExecutorResponse
-	(*LabelExecutorRequest)(nil),              // 155: rafiki.v1.LabelExecutorRequest
-	(*LabelExecutorResponse)(nil),             // 156: rafiki.v1.LabelExecutorResponse
-	(*DisableExecutorRequest)(nil),            // 157: rafiki.v1.DisableExecutorRequest
-	(*DisableExecutorResponse)(nil),           // 158: rafiki.v1.DisableExecutorResponse
-	(*EnableExecutorRequest)(nil),             // 159: rafiki.v1.EnableExecutorRequest
-	(*EnableExecutorResponse)(nil),            // 160: rafiki.v1.EnableExecutorResponse
-	(*DeleteExecutorRequest)(nil),             // 161: rafiki.v1.DeleteExecutorRequest
-	(*DeleteExecutorResponse)(nil),            // 162: rafiki.v1.DeleteExecutorResponse
-	(*ExecutorSessionRequest)(nil),            // 163: rafiki.v1.ExecutorSessionRequest
-	(*ExecutorSessionEvent)(nil),              // 164: rafiki.v1.ExecutorSessionEvent
-	(*ExecutorSessionReady)(nil),              // 165: rafiki.v1.ExecutorSessionReady
-	(*CreateUserRequest)(nil),                 // 166: rafiki.v1.CreateUserRequest
-	(*CreateUserResponse)(nil),                // 167: rafiki.v1.CreateUserResponse
-	(*ListUsersRequest)(nil),                  // 168: rafiki.v1.ListUsersRequest
-	(*ListUsersResponse)(nil),                 // 169: rafiki.v1.ListUsersResponse
-	(*UserRow)(nil),                           // 170: rafiki.v1.UserRow
-	(*RemoveUserRequest)(nil),                 // 171: rafiki.v1.RemoveUserRequest
-	(*RemoveUserResponse)(nil),                // 172: rafiki.v1.RemoveUserResponse
-	(*GetStreamsRequest)(nil),                 // 173: rafiki.v1.GetStreamsRequest
-	(*GetStreamsResponse)(nil),                // 174: rafiki.v1.GetStreamsResponse
-	(*SendFrameRequest)(nil),                  // 175: rafiki.v1.SendFrameRequest
-	(*SendFrameResponse)(nil),                 // 176: rafiki.v1.SendFrameResponse
-	nil,                                       // 177: rafiki.v1.EventCursor.OrdinalsEntry
-	(*ScriptMessage_Text)(nil),                // 178: rafiki.v1.ScriptMessage.Text
-	(*ScriptMessage_Stop)(nil),                // 179: rafiki.v1.ScriptMessage.Stop
-	nil,                                       // 180: rafiki.v1.ChildSummary.LabelsEntry
-	nil,                                       // 181: rafiki.v1.ListChildrenRequest.LabelsEntry
-	nil,                                       // 182: rafiki.v1.SpawnRequest.LabelsEntry
-	(*SpawnRequest_ScriptSpec)(nil),           // 183: rafiki.v1.SpawnRequest.ScriptSpec
-	nil,                                       // 184: rafiki.v1.SpawnRequest.EnvEntry
-	nil,                                       // 185: rafiki.v1.ExecutorRow.LabelsEntry
-	nil,                                       // 186: rafiki.v1.PresetRow.LabelsEntry
-	nil,                                       // 187: rafiki.v1.SetLabelsRequest.SetEntry
-	nil,                                       // 188: rafiki.v1.SetLabelsResponse.LabelsEntry
-	(*StatusResponse_ChildCounts)(nil),        // 189: rafiki.v1.StatusResponse.ChildCounts
-	(*SearchRequest_SearchSessionFilter)(nil), // 190: rafiki.v1.SearchRequest.SearchSessionFilter
-	nil,                              // 191: rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
-	(*SearchResponse_SearchHit)(nil), // 192: rafiki.v1.SearchResponse.SearchHit
-	nil,                              // 193: rafiki.v1.EnrollExecutorRequest.LabelsEntry
-	nil,                              // 194: rafiki.v1.CreateExecutorRequest.LabelsEntry
-	nil,                              // 195: rafiki.v1.LabelExecutorRequest.SetEntry
-	(*Event)(nil),                    // 196: rafiki.v1.Event
-	(*ContentBlock)(nil),             // 197: rafiki.v1.ContentBlock
-	(*darajapb.ChildSpec)(nil),       // 198: rafiki.daraja.v1.ChildSpec
-	(*ImageBlock)(nil),               // 199: rafiki.v1.ImageBlock
+	(*RouteRow)(nil),                          // 135: rafiki.v1.RouteRow
+	(*ListRoutesRequest)(nil),                 // 136: rafiki.v1.ListRoutesRequest
+	(*ListRoutesResponse)(nil),                // 137: rafiki.v1.ListRoutesResponse
+	(*SetRouteRequest)(nil),                   // 138: rafiki.v1.SetRouteRequest
+	(*SetRouteResponse)(nil),                  // 139: rafiki.v1.SetRouteResponse
+	(*DeleteRouteRequest)(nil),                // 140: rafiki.v1.DeleteRouteRequest
+	(*DeleteRouteResponse)(nil),               // 141: rafiki.v1.DeleteRouteResponse
+	(*ResumeRequest)(nil),                     // 142: rafiki.v1.ResumeRequest
+	(*ResumeResponse)(nil),                    // 143: rafiki.v1.ResumeResponse
+	(*CloseAllExitedRequest)(nil),             // 144: rafiki.v1.CloseAllExitedRequest
+	(*CloseAllExitedResponse)(nil),            // 145: rafiki.v1.CloseAllExitedResponse
+	(*SetLabelsRequest)(nil),                  // 146: rafiki.v1.SetLabelsRequest
+	(*SetLabelsResponse)(nil),                 // 147: rafiki.v1.SetLabelsResponse
+	(*StatusRequest)(nil),                     // 148: rafiki.v1.StatusRequest
+	(*StatusResponse)(nil),                    // 149: rafiki.v1.StatusResponse
+	(*SearchRequest)(nil),                     // 150: rafiki.v1.SearchRequest
+	(*SearchResponse)(nil),                    // 151: rafiki.v1.SearchResponse
+	(*ShutdownDaemonRequest)(nil),             // 152: rafiki.v1.ShutdownDaemonRequest
+	(*ShutdownDaemonResponse)(nil),            // 153: rafiki.v1.ShutdownDaemonResponse
+	(*ModelInfoRequest)(nil),                  // 154: rafiki.v1.ModelInfoRequest
+	(*ModelInfoResponse)(nil),                 // 155: rafiki.v1.ModelInfoResponse
+	(*ConversationStatsRequest)(nil),          // 156: rafiki.v1.ConversationStatsRequest
+	(*ConversationStatsResponse)(nil),         // 157: rafiki.v1.ConversationStatsResponse
+	(*EnrollExecutorRequest)(nil),             // 158: rafiki.v1.EnrollExecutorRequest
+	(*EnrollExecutorResponse)(nil),            // 159: rafiki.v1.EnrollExecutorResponse
+	(*CreateExecutorRequest)(nil),             // 160: rafiki.v1.CreateExecutorRequest
+	(*CreateExecutorResponse)(nil),            // 161: rafiki.v1.CreateExecutorResponse
+	(*LabelExecutorRequest)(nil),              // 162: rafiki.v1.LabelExecutorRequest
+	(*LabelExecutorResponse)(nil),             // 163: rafiki.v1.LabelExecutorResponse
+	(*DisableExecutorRequest)(nil),            // 164: rafiki.v1.DisableExecutorRequest
+	(*DisableExecutorResponse)(nil),           // 165: rafiki.v1.DisableExecutorResponse
+	(*EnableExecutorRequest)(nil),             // 166: rafiki.v1.EnableExecutorRequest
+	(*EnableExecutorResponse)(nil),            // 167: rafiki.v1.EnableExecutorResponse
+	(*DeleteExecutorRequest)(nil),             // 168: rafiki.v1.DeleteExecutorRequest
+	(*DeleteExecutorResponse)(nil),            // 169: rafiki.v1.DeleteExecutorResponse
+	(*ExecutorSessionRequest)(nil),            // 170: rafiki.v1.ExecutorSessionRequest
+	(*ExecutorSessionEvent)(nil),              // 171: rafiki.v1.ExecutorSessionEvent
+	(*ExecutorSessionReady)(nil),              // 172: rafiki.v1.ExecutorSessionReady
+	(*CreateUserRequest)(nil),                 // 173: rafiki.v1.CreateUserRequest
+	(*CreateUserResponse)(nil),                // 174: rafiki.v1.CreateUserResponse
+	(*ListUsersRequest)(nil),                  // 175: rafiki.v1.ListUsersRequest
+	(*ListUsersResponse)(nil),                 // 176: rafiki.v1.ListUsersResponse
+	(*UserRow)(nil),                           // 177: rafiki.v1.UserRow
+	(*RemoveUserRequest)(nil),                 // 178: rafiki.v1.RemoveUserRequest
+	(*RemoveUserResponse)(nil),                // 179: rafiki.v1.RemoveUserResponse
+	(*GetStreamsRequest)(nil),                 // 180: rafiki.v1.GetStreamsRequest
+	(*GetStreamsResponse)(nil),                // 181: rafiki.v1.GetStreamsResponse
+	(*SendFrameRequest)(nil),                  // 182: rafiki.v1.SendFrameRequest
+	(*SendFrameResponse)(nil),                 // 183: rafiki.v1.SendFrameResponse
+	nil,                                       // 184: rafiki.v1.EventCursor.OrdinalsEntry
+	(*ScriptMessage_Text)(nil),                // 185: rafiki.v1.ScriptMessage.Text
+	(*ScriptMessage_Stop)(nil),                // 186: rafiki.v1.ScriptMessage.Stop
+	nil,                                       // 187: rafiki.v1.ChildSummary.LabelsEntry
+	nil,                                       // 188: rafiki.v1.ListChildrenRequest.LabelsEntry
+	nil,                                       // 189: rafiki.v1.SpawnRequest.LabelsEntry
+	(*SpawnRequest_ScriptSpec)(nil),           // 190: rafiki.v1.SpawnRequest.ScriptSpec
+	nil,                                       // 191: rafiki.v1.SpawnRequest.EnvEntry
+	nil,                                       // 192: rafiki.v1.ExecutorRow.LabelsEntry
+	nil,                                       // 193: rafiki.v1.PresetRow.LabelsEntry
+	nil,                                       // 194: rafiki.v1.SetLabelsRequest.SetEntry
+	nil,                                       // 195: rafiki.v1.SetLabelsResponse.LabelsEntry
+	(*StatusResponse_ChildCounts)(nil),        // 196: rafiki.v1.StatusResponse.ChildCounts
+	(*SearchRequest_SearchSessionFilter)(nil), // 197: rafiki.v1.SearchRequest.SearchSessionFilter
+	nil,                              // 198: rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
+	(*SearchResponse_SearchHit)(nil), // 199: rafiki.v1.SearchResponse.SearchHit
+	nil,                              // 200: rafiki.v1.EnrollExecutorRequest.LabelsEntry
+	nil,                              // 201: rafiki.v1.CreateExecutorRequest.LabelsEntry
+	nil,                              // 202: rafiki.v1.LabelExecutorRequest.SetEntry
+	(*Event)(nil),                    // 203: rafiki.v1.Event
+	(*ContentBlock)(nil),             // 204: rafiki.v1.ContentBlock
+	(*darajapb.ChildSpec)(nil),       // 205: rafiki.daraja.v1.ChildSpec
+	(*ImageBlock)(nil),               // 206: rafiki.v1.ImageBlock
 }
 var file_rafiki_v1_control_proto_depIdxs = []int32{
-	196, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
-	177, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
+	203, // 0: rafiki.v1.GetHistoryResponse.events:type_name -> rafiki.v1.Event
+	184, // 1: rafiki.v1.EventCursor.ordinals:type_name -> rafiki.v1.EventCursor.OrdinalsEntry
 	6,   // 2: rafiki.v1.StreamEventsRequest.subject:type_name -> rafiki.v1.EventSubject
 	0,   // 3: rafiki.v1.StreamEventsRequest.tier:type_name -> rafiki.v1.EventTier
 	7,   // 4: rafiki.v1.StreamEventsRequest.cursor:type_name -> rafiki.v1.EventCursor
 	1,   // 5: rafiki.v1.SendRequest.mode:type_name -> rafiki.v1.SendMode
-	197, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
-	178, // 7: rafiki.v1.ScriptMessage.text:type_name -> rafiki.v1.ScriptMessage.Text
-	179, // 8: rafiki.v1.ScriptMessage.stop:type_name -> rafiki.v1.ScriptMessage.Stop
-	180, // 9: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
-	181, // 10: rafiki.v1.ListChildrenRequest.labels:type_name -> rafiki.v1.ListChildrenRequest.LabelsEntry
+	204, // 6: rafiki.v1.SendRequest.blocks:type_name -> rafiki.v1.ContentBlock
+	185, // 7: rafiki.v1.ScriptMessage.text:type_name -> rafiki.v1.ScriptMessage.Text
+	186, // 8: rafiki.v1.ScriptMessage.stop:type_name -> rafiki.v1.ScriptMessage.Stop
+	187, // 9: rafiki.v1.ChildSummary.labels:type_name -> rafiki.v1.ChildSummary.LabelsEntry
+	188, // 10: rafiki.v1.ListChildrenRequest.labels:type_name -> rafiki.v1.ListChildrenRequest.LabelsEntry
 	17,  // 11: rafiki.v1.ListChildrenResponse.children:type_name -> rafiki.v1.ChildSummary
 	17,  // 12: rafiki.v1.GetChildResponse.child:type_name -> rafiki.v1.ChildSummary
-	182, // 13: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
+	189, // 13: rafiki.v1.SpawnRequest.labels:type_name -> rafiki.v1.SpawnRequest.LabelsEntry
 	22,  // 14: rafiki.v1.SpawnRequest.prefill:type_name -> rafiki.v1.PrefillRead
-	183, // 15: rafiki.v1.SpawnRequest.script:type_name -> rafiki.v1.SpawnRequest.ScriptSpec
-	184, // 16: rafiki.v1.SpawnRequest.env:type_name -> rafiki.v1.SpawnRequest.EnvEntry
+	190, // 15: rafiki.v1.SpawnRequest.script:type_name -> rafiki.v1.SpawnRequest.ScriptSpec
+	191, // 16: rafiki.v1.SpawnRequest.env:type_name -> rafiki.v1.SpawnRequest.EnvEntry
 	31,  // 17: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
 	34,  // 18: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
 	38,  // 19: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
@@ -13102,9 +13467,9 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	49,  // 26: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
 	52,  // 27: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
 	53,  // 28: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
-	185, // 29: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
+	192, // 29: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
 	55,  // 30: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
-	198, // 31: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	205, // 31: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
 	64,  // 32: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
 	65,  // 33: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
 	66,  // 34: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
@@ -13119,7 +13484,7 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	89,  // 43: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
 	95,  // 44: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
 	96,  // 45: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
-	186, // 46: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
+	193, // 46: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
 	100, // 47: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
 	100, // 48: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
 	100, // 49: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
@@ -13133,169 +13498,177 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	115, // 57: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
 	128, // 58: rafiki.v1.ListProviderBansResponse.bans:type_name -> rafiki.v1.ProviderBan
 	128, // 59: rafiki.v1.BanProviderResponse.ban:type_name -> rafiki.v1.ProviderBan
-	187, // 60: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
-	188, // 61: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
-	189, // 62: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
-	190, // 63: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
-	192, // 64: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
-	193, // 65: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
-	194, // 66: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
-	195, // 67: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
-	55,  // 68: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
-	165, // 69: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
-	170, // 70: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
-	1,   // 71: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
-	199, // 72: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
-	191, // 73: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
-	4,   // 74: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	8,   // 75: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	9,   // 76: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	18,  // 77: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	20,  // 78: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	23,  // 79: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	25,  // 80: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	27,  // 81: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	29,  // 82: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
-	32,  // 83: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	35,  // 84: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	56,  // 85: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
-	67,  // 86: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	70,  // 87: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
-	72,  // 88: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
-	74,  // 89: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
-	76,  // 90: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
-	78,  // 91: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
-	81,  // 92: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
-	83,  // 93: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
-	85,  // 94: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
-	87,  // 95: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	90,  // 96: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
-	92,  // 97: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
-	94,  // 98: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
-	98,  // 99: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
-	102, // 100: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
-	104, // 101: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
-	106, // 102: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
-	108, // 103: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
-	111, // 104: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
-	113, // 105: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
-	116, // 106: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
-	118, // 107: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
-	120, // 108: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
-	122, // 109: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
-	124, // 110: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
-	126, // 111: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
-	37,  // 112: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
-	40,  // 113: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
-	43,  // 114: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
-	48,  // 115: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
-	51,  // 116: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
-	58,  // 117: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
-	60,  // 118: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
-	62,  // 119: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
-	129, // 120: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
-	131, // 121: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
-	133, // 122: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
-	11,  // 123: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
-	13,  // 124: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
-	15,  // 125: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
-	135, // 126: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
-	137, // 127: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
-	139, // 128: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
-	141, // 129: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
-	143, // 130: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
-	145, // 131: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
-	147, // 132: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
-	149, // 133: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
-	151, // 134: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
-	153, // 135: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
-	155, // 136: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
-	157, // 137: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
-	159, // 138: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
-	161, // 139: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
-	163, // 140: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
-	166, // 141: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
-	168, // 142: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
-	171, // 143: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
-	173, // 144: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
-	175, // 145: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
-	5,   // 146: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	196, // 147: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	10,  // 148: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	19,  // 149: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	21,  // 150: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	24,  // 151: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	26,  // 152: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	28,  // 153: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	30,  // 154: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
-	33,  // 155: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	36,  // 156: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	57,  // 157: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
-	68,  // 158: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	71,  // 159: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
-	73,  // 160: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
-	75,  // 161: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
-	77,  // 162: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
-	79,  // 163: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
-	82,  // 164: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
-	84,  // 165: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
-	86,  // 166: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
-	88,  // 167: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	91,  // 168: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
-	93,  // 169: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
-	97,  // 170: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
-	99,  // 171: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
-	103, // 172: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
-	105, // 173: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
-	107, // 174: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
-	109, // 175: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
-	112, // 176: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
-	114, // 177: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
-	117, // 178: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
-	119, // 179: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
-	121, // 180: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
-	123, // 181: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
-	125, // 182: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
-	127, // 183: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
-	39,  // 184: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
-	42,  // 185: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
-	47,  // 186: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
-	50,  // 187: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
-	54,  // 188: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
-	59,  // 189: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
-	61,  // 190: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
-	63,  // 191: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
-	130, // 192: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
-	132, // 193: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
-	134, // 194: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
-	12,  // 195: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
-	14,  // 196: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
-	16,  // 197: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
-	136, // 198: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
-	138, // 199: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
-	140, // 200: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
-	142, // 201: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
-	144, // 202: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
-	146, // 203: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
-	148, // 204: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
-	150, // 205: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
-	152, // 206: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
-	154, // 207: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
-	156, // 208: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
-	158, // 209: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
-	160, // 210: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
-	162, // 211: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
-	164, // 212: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
-	167, // 213: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
-	169, // 214: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
-	172, // 215: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
-	174, // 216: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
-	176, // 217: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
-	146, // [146:218] is the sub-list for method output_type
-	74,  // [74:146] is the sub-list for method input_type
-	74,  // [74:74] is the sub-list for extension type_name
-	74,  // [74:74] is the sub-list for extension extendee
-	0,   // [0:74] is the sub-list for field type_name
+	135, // 60: rafiki.v1.ListRoutesResponse.rows:type_name -> rafiki.v1.RouteRow
+	135, // 61: rafiki.v1.SetRouteResponse.row:type_name -> rafiki.v1.RouteRow
+	194, // 62: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
+	195, // 63: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
+	196, // 64: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
+	197, // 65: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
+	199, // 66: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
+	200, // 67: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
+	201, // 68: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
+	202, // 69: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
+	55,  // 70: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
+	172, // 71: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
+	177, // 72: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
+	1,   // 73: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
+	206, // 74: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
+	198, // 75: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
+	4,   // 76: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	8,   // 77: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	9,   // 78: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	18,  // 79: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	20,  // 80: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	23,  // 81: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	25,  // 82: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	27,  // 83: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	29,  // 84: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
+	32,  // 85: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	35,  // 86: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	56,  // 87: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
+	67,  // 88: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	70,  // 89: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
+	72,  // 90: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
+	74,  // 91: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
+	76,  // 92: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
+	78,  // 93: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
+	81,  // 94: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
+	83,  // 95: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
+	85,  // 96: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
+	87,  // 97: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
+	90,  // 98: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
+	92,  // 99: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
+	94,  // 100: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
+	98,  // 101: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
+	102, // 102: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
+	104, // 103: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
+	106, // 104: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
+	108, // 105: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
+	111, // 106: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
+	113, // 107: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
+	116, // 108: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
+	118, // 109: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
+	120, // 110: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
+	122, // 111: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
+	124, // 112: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
+	126, // 113: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
+	37,  // 114: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
+	40,  // 115: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
+	43,  // 116: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
+	48,  // 117: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
+	51,  // 118: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
+	58,  // 119: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	60,  // 120: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	62,  // 121: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	129, // 122: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
+	131, // 123: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
+	133, // 124: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
+	136, // 125: rafiki.v1.Control.ListRoutes:input_type -> rafiki.v1.ListRoutesRequest
+	138, // 126: rafiki.v1.Control.SetRoute:input_type -> rafiki.v1.SetRouteRequest
+	140, // 127: rafiki.v1.Control.DeleteRoute:input_type -> rafiki.v1.DeleteRouteRequest
+	11,  // 128: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
+	13,  // 129: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
+	15,  // 130: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
+	142, // 131: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
+	144, // 132: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
+	146, // 133: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
+	148, // 134: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
+	150, // 135: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
+	152, // 136: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
+	154, // 137: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
+	156, // 138: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
+	158, // 139: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
+	160, // 140: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
+	162, // 141: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
+	164, // 142: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
+	166, // 143: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
+	168, // 144: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
+	170, // 145: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
+	173, // 146: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
+	175, // 147: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
+	178, // 148: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
+	180, // 149: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
+	182, // 150: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
+	5,   // 151: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	203, // 152: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	10,  // 153: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	19,  // 154: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	21,  // 155: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	24,  // 156: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	26,  // 157: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	28,  // 158: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	30,  // 159: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
+	33,  // 160: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	36,  // 161: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	57,  // 162: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
+	68,  // 163: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	71,  // 164: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
+	73,  // 165: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
+	75,  // 166: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
+	77,  // 167: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
+	79,  // 168: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
+	82,  // 169: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
+	84,  // 170: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
+	86,  // 171: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
+	88,  // 172: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
+	91,  // 173: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
+	93,  // 174: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
+	97,  // 175: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
+	99,  // 176: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
+	103, // 177: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
+	105, // 178: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
+	107, // 179: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
+	109, // 180: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
+	112, // 181: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
+	114, // 182: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
+	117, // 183: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
+	119, // 184: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
+	121, // 185: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
+	123, // 186: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
+	125, // 187: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
+	127, // 188: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
+	39,  // 189: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
+	42,  // 190: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
+	47,  // 191: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
+	50,  // 192: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
+	54,  // 193: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
+	59,  // 194: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	61,  // 195: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	63,  // 196: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	130, // 197: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
+	132, // 198: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
+	134, // 199: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
+	137, // 200: rafiki.v1.Control.ListRoutes:output_type -> rafiki.v1.ListRoutesResponse
+	139, // 201: rafiki.v1.Control.SetRoute:output_type -> rafiki.v1.SetRouteResponse
+	141, // 202: rafiki.v1.Control.DeleteRoute:output_type -> rafiki.v1.DeleteRouteResponse
+	12,  // 203: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
+	14,  // 204: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
+	16,  // 205: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
+	143, // 206: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
+	145, // 207: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
+	147, // 208: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
+	149, // 209: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
+	151, // 210: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
+	153, // 211: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
+	155, // 212: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
+	157, // 213: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
+	159, // 214: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
+	161, // 215: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
+	163, // 216: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
+	165, // 217: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
+	167, // 218: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
+	169, // 219: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
+	171, // 220: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
+	174, // 221: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
+	176, // 222: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
+	179, // 223: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
+	181, // 224: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
+	183, // 225: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
+	151, // [151:226] is the sub-list for method output_type
+	76,  // [76:151] is the sub-list for method input_type
+	76,  // [76:76] is the sub-list for extension type_name
+	76,  // [76:76] is the sub-list for extension extendee
+	0,   // [0:76] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -13338,17 +13711,17 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[97].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[124].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[127].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[160].OneofWrappers = []any{
+	file_rafiki_v1_control_proto_msgTypes[167].OneofWrappers = []any{
 		(*ExecutorSessionEvent_Ready)(nil),
 	}
-	file_rafiki_v1_control_proto_msgTypes[166].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[173].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_rafiki_v1_control_proto_rawDesc), len(file_rafiki_v1_control_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   192,
+			NumMessages:   199,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
