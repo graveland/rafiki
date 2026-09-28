@@ -156,8 +156,11 @@ type scriptOutputCoalescer struct {
 // nil when the child has already exited (the abandon path: a late line racing
 // the exit), so no coalescer is ever registered after the take — the exited
 // check and the registration share ONE critical section, closing the
-// check-then-register window a two-step check would leave open.
-func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutputCoalescer {
+// check-then-register window a two-step check would leave open. The check
+// reads the closure's OWN state pointer, not the map: take deletes the map
+// entry, so a map lookup after the take finds nothing and would wrongly
+// register; the pointer is the only witness that survives the delete.
+func (c *Controller) registerScriptOutputCoalescer(childID string, state *scriptOutputHookState) *scriptOutputCoalescer {
 	co := &scriptOutputCoalescer{
 		c:       c,
 		childID: childID,
@@ -168,7 +171,7 @@ func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutput
 		stopped: make(chan struct{}),
 	}
 	c.scriptOutputsMu.Lock()
-	if st, ok := c.scriptOutputState[childID]; ok && st.exited {
+	if state.exited {
 		c.scriptOutputsMu.Unlock()
 		return nil
 	}
@@ -184,11 +187,14 @@ func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutput
 // takeScriptOutputCoalescer removes and returns the child's coalescer, or nil
 // when the child never produced output (and so never registered one). The
 // removal marks the per-spawn state exited IN THE SAME CRITICAL SECTION and
-// prunes it — the hook closure keeps its own pointer, so a late line racing
-// the exit (the abandon path) sees exited and drops rather than registering
-// a coalescer nobody would ever close; without the delete the map would gain
-// one entry per script spawn and never shrink. The removal is also what makes
-// re-registration safe on a later resume of the same child id.
+// prunes it — the hook closure keeps its own pointer and
+// registerScriptOutputCoalescer checks that pointer under the lock, so a late
+// line racing the exit (the abandon path) sees exited and drops rather than
+// registering a coalescer nobody would ever close; the delete is safe because
+// nothing reads the map for exit status any more. The removal is also what
+// makes re-registration safe on a later resume of the same child id: the old
+// spawn's hook drops its own late lines, so it can never clobber the resumed
+// spawn's registration.
 func (c *Controller) takeScriptOutputCoalescer(childID string) *scriptOutputCoalescer {
 	c.scriptOutputsMu.Lock()
 	co := c.scriptOutputs[childID]
@@ -204,8 +210,8 @@ func (c *Controller) takeScriptOutputCoalescer(childID string) *scriptOutputCoal
 // scriptOutputHookState is the per-spawn state scriptOutputHook closes over.
 // It exists so the exit is visible to the hook: takeScriptOutputCoalescer
 // flips exited in the same critical section it removes the registry entry.
-// The hook reads it only THROUGH registerScriptOutputCoalescer's critical
-// section, never on its own.
+// registerScriptOutputCoalescer reads it under scriptOutputsMu; nothing reads
+// it on its own.
 type scriptOutputHookState struct {
 	exited bool
 }
@@ -227,7 +233,7 @@ func (c *Controller) scriptOutputHook(childID string) func(stream, line string, 
 	c.scriptOutputState[childID] = state
 	c.scriptOutputsMu.Unlock()
 	return func(stream, line string, terminated bool) {
-		once.Do(func() { co = c.registerScriptOutputCoalescer(childID) })
+		once.Do(func() { co = c.registerScriptOutputCoalescer(childID, state) })
 		// co is nil when the child had already exited by the time the first
 		// line registered — including the take racing inside the registration's
 		// critical section (the abandon path). Drop the line: no registration

@@ -183,13 +183,76 @@ func TestScriptOutputFragmentsKeepMultiByteRunesIntact(t *testing.T) {
 	var termFrags int
 
 	dir := t.TempDir()
-	// 3000 × 中 = 9000 bytes, no newline: two full fragments plus an
-	// unterminated tail (which arrives terminated=true at EOF).
-	blob := strings.Repeat("中", 3000)
+	// "ab" + 3000 × 中 = 9002 bytes, no newline: the "ab" prefix puts a 3-byte
+	// rune's lead at cut-2 (4094) with a continuation at the exact bound, which
+	// an only-last-lead guard misses. Two full fragments plus an unterminated
+	// tail (which arrives terminated=true at EOF).
+	blob := "ab" + strings.Repeat("中", 3000)
 	blobPath := filepath.Join(dir, "blob")
 	ck.NoError(os.WriteFile(blobPath, []byte(blob), 0o600), "write blob fixture")
 	c, err := Spawn(context.Background(), SpawnSpec{
 		ChildID:  "c_script_cjkfrag",
+		Cwd:      dir,
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", "cat " + blobPath + " >&2"},
+		Provider: ScriptProvider{},
+		OnScriptOutput: func(stream, line string, terminated bool) {
+			mu.Lock()
+			frags = append(frags, line)
+			if terminated {
+				termFrags++
+			}
+			mu.Unlock()
+		},
+	})
+	ck.Require().NoError(err, "Spawn")
+	t.Cleanup(func() { _, _ = c.Shutdown(time.Second, time.Second) })
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := len(frags) > 0 && len(strings.Join(frags, "")) >= len(blob)
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	ck.Require().True(len(frags) >= 2, "got %d fragments for %d bytes", len(frags), len(blob))
+	var joined strings.Builder
+	for i, f := range frags {
+		joined.WriteString(f)
+		ck.True(utf8.ValidString(f), "fragment %d is invalid UTF-8 (cut mid-rune): len %d, head=% x tail=% x", i, len(f), f[:min(6, len(f))], f[max(0, len(f)-6):])
+	}
+	ck.Eq(blob, joined.String(), "fragments do not concatenate back to the input")
+	ck.True(termFrags >= 1, "the trailing partial fragment was never delivered terminated")
+}
+
+// N2: a 4-byte rune's lead sitting at cut-1 with continuations across the
+// exact bound must not split mid-rune either — a 1-byte emoji prefix puts a
+// lead at 4093. Every fragment is valid UTF-8 and the fragments concatenate
+// back to the input.
+func TestScriptOutputFragmentsKeepEmojiRunesIntact(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+
+	var mu sync.Mutex
+	var frags []string
+	var termFrags int
+
+	dir := t.TempDir()
+	// "a" + 2000 × 😀 = 8001 bytes, no newline: the lead of the emoji that
+	// straddles the bound sits at 4093, two continuations from the cut.
+	blob := "a" + strings.Repeat("\U0001F600", 2000)
+	blobPath := filepath.Join(dir, "blob")
+	ck.NoError(os.WriteFile(blobPath, []byte(blob), 0o600), "write blob fixture")
+	c, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:  "c_script_emojifrag",
 		Cwd:      dir,
 		PiBinary: "/bin/sh",
 		Argv:     []string{"-c", "cat " + blobPath + " >&2"},

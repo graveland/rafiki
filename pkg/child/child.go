@@ -1081,29 +1081,24 @@ func (c *Child) readStderr() {
 				// Bound the accumulator: a newline-free blob longer than the
 				// flush bound hands its first bound bytes off as an
 				// unterminated fragment, keeping pending below the bound.
-				for len(pending) >= stderrFragmentBytes {
+				for len(pending) > stderrFragmentBytes {
 					// Cut at a rune boundary: the byte AT the cut must start a
 					// rune, so the delivered prefix never ends mid-rune — the
-					// coalescer's own rule. Also step back when the rune that
-					// STARTS before the cut would extend PAST it (possible when
-					// pending is exactly the bound and no byte at the cut exists
-					// to inspect). The step-back is capped at 3 bytes (a rune is
-					// at most 4); the input here is RAW, so a run of ≥4096
-					// continuation bytes has no boundary within reach — cut at
-					// exactly the bound and let the coalescer's sanitize handle
-					// the invalid bytes rather than spinning with an empty cut.
+					// coalescer's own rule. Looping only while pending EXCEEDS
+					// the bound guarantees a byte at pending[cut] exists to
+					// inspect, so this rule is complete on its own; an
+					// exactly-full pending waits for the next read (or EOF,
+					// which delivers it terminated). The step-back is capped at
+					// 3 bytes (a rune is at most 4); the input here is RAW, so a
+					// run of ≥4096 continuation bytes has no boundary within
+					// reach — cut at exactly the bound and let the coalescer's
+					// sanitize handle the invalid bytes rather than spinning
+					// with an empty cut.
 					cut := stderrFragmentBytes
 					for i := 0; i < 3; i++ {
-						if cut < len(pending) && !utf8.RuneStart(pending[cut]) {
+						if !utf8.RuneStart(pending[cut]) {
 							// The byte at the cut continues a rune started
 							// earlier: cut would land mid-rune.
-							cut--
-							continue
-						}
-						// With no byte at the cut (pending is exactly the
-						// bound), a lead byte AT cut-1 whose rune extends past
-						// the cut means the cut lands mid-rune too.
-						if b := pending[cut-1]; cut == len(pending) && b >= 0xC0 {
 							cut--
 							continue
 						}

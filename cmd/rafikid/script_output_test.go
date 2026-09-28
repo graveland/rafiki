@@ -746,6 +746,54 @@ func TestScriptOutputHookDropsLinesAfterExit(t *testing.T) {
 	ck.Eq(0, n, "the exited state entry was never pruned")
 }
 
+// N1 regression: a hook whose FIRST line ever arrives after the exit's take.
+// The take deletes the state map entry, so the registration's check must read
+// the closure's own state pointer (the only surviving witness) — a map lookup
+// finds nothing and registers a coalescer that publishes after child_exited
+// and leaks its goroutine.
+func TestScriptOutputHookDropsFirstLineAfterTake(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+
+	hook := ctrl.scriptOutputHook("c_quiet")
+	// The child printed nothing in time: the exit takes nothing and marks the
+	// state exited.
+	ck.Nil(ctrl.takeScriptOutputCoalescer("c_quiet"), "nothing registered before the exit")
+
+	busCh, cancel := ctrl.native.Subscribe("c_quiet")
+	defer cancel()
+	hook("stderr", "late-first-line", true)
+	time.Sleep(400 * time.Millisecond)
+	ck.Eq(0, len(busCh), "published %d events after child exit: %+v", len(busCh), drainScriptBus(busCh))
+	ck.Nil(ctrl.takeScriptOutputCoalescer("c_quiet"),
+		"the late first line registered a coalescer after the exit (leaked goroutine)")
+}
+
+// N1 regression: a late FIRST line from an OLD spawn's hook must not clobber
+// a resumed spawn's registration. With the map-based exited check the old
+// hook finds the new spawn's non-exited entry, registers, and overwrites
+// scriptOutputs[childID] — take then returns the old coalescer and the
+// resumed spawn's is orphaned.
+func TestScriptOutputHookResumeNotClobbered(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+
+	oldHook := ctrl.scriptOutputHook("c_r")
+	_ = ctrl.takeScriptOutputCoalescer("c_r") // the old spawn exits silently
+
+	newHook := ctrl.scriptOutputHook("c_r") // the resume re-wires the same child id
+	newHook("stdout", "new-spawn", true)
+	oldHook("stderr", "old-spawn-late", true)
+
+	co := ctrl.takeScriptOutputCoalescer("c_r")
+	ck.Require().NotNil(co, "the resumed spawn's line registered no coalescer")
+	co.mu.Lock()
+	_, hasStdout := co.streams["stdout"]
+	co.mu.Unlock()
+	ck.True(hasStdout, "take returned the OLD spawn's coalescer; the resumed spawn's coalescer is orphaned")
+	co.Close()
+}
+
 // R3: a fragment must not publish ahead of earlier terminated lines on the
 // same stream. A terminated line goes into the open buffer (publishing only
 // at its 250 ms deadline); a fragment becomes a unit that publishes at once —
