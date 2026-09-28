@@ -36,7 +36,7 @@ func TestOpenRouterSubmit(t *testing.T) {
 	defer srv.Close()
 
 	o := NewOpenRouter(srv.URL, "sk-test", srv.Client())
-	batch, err := o.Submit(context.Background(), "vendor/m:batch", []BatchRequest{
+	batch, err := o.Submit(context.Background(), "vendor/m:batch", nil, []BatchRequest{
 		{CustomID: "conv-1", Body: json.RawMessage(`{"max_tokens":16}`)},
 	})
 	c.Require().NoError(err, "Submit")
@@ -62,7 +62,7 @@ func TestOpenRouterSubmitNon2xxCarriesBody(t *testing.T) {
 	defer srv.Close()
 
 	o := NewOpenRouter(srv.URL, "sk-test", srv.Client())
-	_, err := o.Submit(context.Background(), "vendor/m:batch", nil)
+	_, err := o.Submit(context.Background(), "vendor/m:batch", nil, nil)
 	var he *httpStatusError
 	c.Require().False(err == nil || !errors.As(err, &he), "Submit: want *httpStatusError, got %v", err)
 	c.False(he.Status != http.StatusTooManyRequests || !strings.Contains(he.Body, "slow down"), "httpStatusError = %+v", he)
@@ -113,4 +113,60 @@ func TestOpenRouterTerminalStatuses(t *testing.T) {
 	for _, st := range []string{"", "validating", "in_progress", "queued"} {
 		c.False((Batch{Status: st}).Terminal(), "status %q should not be terminal", st)
 	}
+}
+
+// TestBatchRoutingEnvelopeCarriesProviderOnly pins the parked call's wire
+// shape (Task 0.1's probe): the provider object rides the submit ENVELOPE's
+// top level — next to endpoint/model, BEFORE requests (the stream-parser
+// returns 400 when requests appears first) — narrowed to {"only": [...]},
+// never the live path's full prefs (sort, data_collection, zdr, ignore are
+// each a submit-time 400 "Unrecognized key"), and per-call bodies carry no
+// provider key. A nil provider omits the key entirely.
+func TestBatchRoutingEnvelopeCarriesProviderOnly(t *testing.T) {
+	c := assert.NewCollecting(t)
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"batch-1","status":"in_progress","created_at":1700000000}`))
+	}))
+	defer srv.Close()
+
+	o := NewOpenRouter(srv.URL, "sk-test", srv.Client())
+	batch, err := o.Submit(context.Background(), "vendor/m:batch", json.RawMessage(`{"only":["deepinfra"]}`), []BatchRequest{
+		{CustomID: "conv-1", Body: json.RawMessage(`{"max_tokens":16}`)},
+	})
+	c.Require().NoError(err, "Submit")
+	c.Eq("batch-1", batch.ID, "batch decoded")
+
+	// Key order: provider BEFORE requests, so the stream-parser never sees
+	// requests first.
+	raw := string(gotBody)
+	idxProvider := strings.Index(raw, `"provider"`)
+	idxRequests := strings.Index(raw, `"requests"`)
+	c.True(idxProvider >= 0 && idxRequests > idxProvider,
+		"provider must precede requests in the submit body: %s", raw)
+
+	var envelope struct {
+		Endpoint string         `json:"endpoint"`
+		Model    string         `json:"model"`
+		Provider map[string]any `json:"provider"`
+		Requests []BatchRequest `json:"requests"`
+	}
+	c.Require().NoError(json.Unmarshal(gotBody, &envelope), "decode submit envelope")
+	c.Len(envelope.Provider, 1, "provider carries exactly one key, got %v", envelope.Provider)
+	var onlyList []any
+	for _, v := range envelope.Provider["only"].([]any) {
+		onlyList = append(onlyList, v)
+	}
+	c.EqDiff([]any{"deepinfra"}, onlyList, "the only list")
+	c.False(strings.Contains(string(envelope.Requests[0].Body), "provider"),
+		"the per-call body must carry no provider key: %s", envelope.Requests[0].Body)
+
+	// Nil provider: the key is omitted, not an empty object.
+	_, err = o.Submit(context.Background(), "vendor/m:batch", nil, []BatchRequest{
+		{CustomID: "conv-2", Body: json.RawMessage(`{"max_tokens":16}`)},
+	})
+	c.Require().NoError(err, "Submit (nil provider)")
+	c.NotStrContains(string(gotBody), `"provider"`, "nil provider omits the key entirely: %s", gotBody)
 }

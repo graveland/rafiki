@@ -306,7 +306,7 @@ func (h *harness) parkParams(customID, model string, params anthropic.MessageNew
 func (h *harness) parkCtx(ctx context.Context, customID, model string, params anthropic.MessageNewParams) <-chan parkRes {
 	ch := make(chan parkRes, 1)
 	go func() {
-		msg, err := h.b.Park(ctx, customID, model, params)
+		msg, err := h.b.Park(ctx, customID, model, params, nil)
 		ch <- parkRes{msg: msg, err: err}
 	}()
 	return ch
@@ -570,7 +570,7 @@ func TestBatchAdoptCompleted(t *testing.T) {
 	row := h.seedSubmitted(t, "conv-1", "vendor/m:batch", "batch-9")
 	c.Require().NoError(h.ms.Complete(context.Background(), row.ID, msgBody("msg_9")), "seed Complete")
 	h.start()
-	msg, err := h.b.Park(h.ctx, "conv-1", "vendor/m:batch", testParams("vendor/m:batch"))
+	msg, err := h.b.Park(h.ctx, "conv-1", "vendor/m:batch", testParams("vendor/m:batch"), nil)
 	c.Require().NoError(err, "Park")
 	c.False(msg == nil || msg.ID != "msg_9", "Park returned %+v, want the stored message", msg)
 	c.Eq(0, h.submitCount(), "submits")
@@ -769,7 +769,7 @@ func TestBatchParkRejectsInvalidCustomID(t *testing.T) {
 	for _, id := range invalid {
 		// Park returns before any store interaction, so the call is
 		// synchronous and must fail fast with a plain *batch.Error.
-		msg, err := h.b.Park(h.ctx, id, "vendor/m:batch", testParams("vendor/m:batch"))
+		msg, err := h.b.Park(h.ctx, id, "vendor/m:batch", testParams("vendor/m:batch"), nil)
 		c.Require().Error(err, "Park(%q): expected a rejection, got msg=%v", id, msg)
 		var be *batch.Error
 		c.True(errors.As(err, &be), "Park(%q): err %v (%T) is not *batch.Error", id, err, err)

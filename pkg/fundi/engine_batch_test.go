@@ -31,7 +31,7 @@ func newBlockingBatcher() *blockingBatcher {
 	}
 }
 
-func (b *blockingBatcher) Park(ctx context.Context, _ string, _ string, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (b *blockingBatcher) Park(ctx context.Context, _ string, _ string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
 	b.mu.Lock()
 	b.parked++
 	b.mu.Unlock()
@@ -127,7 +127,7 @@ type recordPark struct {
 	parkFrom func() (*anthropic.Message, error)
 }
 
-func (r *recordPark) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (r *recordPark) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
 	r.mu.Lock()
 	r.ids = append(r.ids, customID)
 	r.models = append(r.models, model)

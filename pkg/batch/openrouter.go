@@ -119,14 +119,19 @@ func (e *httpStatusError) Error() string {
 }
 
 // Submit creates one batch from requests against batchModel (the `:batch`
-// model id) on the /v1/messages endpoint. A non-2xx response is returned as
-// an *httpStatusError carrying the response body text.
-func (o *OpenRouter) Submit(ctx context.Context, batchModel string, requests []BatchRequest) (Batch, error) {
+// model id) on the /v1/messages endpoint. provider is the raw JSON of the
+// NARROWED provider object at the batch envelope's TOP level — next to
+// endpoint/model, BEFORE requests — or nil to omit the key. It carries only
+// {"only": [...]}: OpenRouter's Batch wire rejects every other provider key
+// at submit with 400 "Unrecognized key(s)". A non-2xx response is returned
+// as an *httpStatusError carrying the response body text.
+func (o *OpenRouter) Submit(ctx context.Context, batchModel string, provider json.RawMessage, requests []BatchRequest) (Batch, error) {
 	payload, err := json.Marshal(struct {
-		Endpoint string         `json:"endpoint"`
-		Model    string         `json:"model"`
-		Requests []BatchRequest `json:"requests"`
-	}{Endpoint: messagesEndpoint, Model: batchModel, Requests: requests})
+		Endpoint string          `json:"endpoint"`
+		Model    string          `json:"model"`
+		Provider json.RawMessage `json:"provider,omitempty"`
+		Requests []BatchRequest  `json:"requests"`
+	}{Endpoint: messagesEndpoint, Model: batchModel, Provider: provider, Requests: requests})
 	if err != nil {
 		return Batch{}, fmt.Errorf("batch: marshal submit body: %w", err)
 	}

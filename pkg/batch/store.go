@@ -50,10 +50,16 @@ type Row struct {
 	State           State
 	ProviderBatchID string          // "" until submitted
 	Request         json.RawMessage // the call's request body (params JSON, model/stream/provider removed)
-	Response        json.RawMessage // nil until completed
-	Error           string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// Provider is the raw JSON of the batch envelope's narrowed provider
+	// object ({"only": [...]}) this call parked with, nil when none. It is
+	// carried per row so a submit window groups rows that all parked with the
+	// same pin and submits the object at the envelope's TOP level — never
+	// inside the per-call body, where the Batch API refuses it.
+	Provider  json.RawMessage
+	Response  json.RawMessage // nil until completed
+	Error     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Store persists parked-call rows. Implementations must keep custom_id unique

@@ -308,26 +308,32 @@ type SendMeta struct {
 // parks.**
 // The returned error is a resolution failure (unknown provider, empty model);
 // callers must abort the send on it.
-func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, anthropic.MessageNewParams, error) {
+func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, []string, anthropic.MessageNewParams, error) {
 	requested := string(params.Model)
 	if requested == "" {
 		requested = c.defaultModel
 	}
-	p, modelID, alias, err := c.set.Resolve(requested)
+	// A :batch suffix is not part of an alias name or a pin's model line: the
+	// parked call's alias and static-pin lookups must see the BASE id (aliases
+	// are exact-match, providerPins match by line — "glm-flash:batch" matches
+	// neither). Resolve against the stripped id and re-apply the suffix below
+	// exactly when this send parks; the park invariant is unchanged.
+	batched := IsBatchModel(requested)
+	p, modelID, alias, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
 	if err != nil {
-		return ctx, nil, "", nil, params, err
+		return ctx, nil, "", nil, nil, params, err
 	}
 	params.Model = anthropic.Model(modelID)
 
 	// The :batch routing rule, in one place. After this block: params.Model
 	// ends in ":batch" iff this send parks (the invariant SendParams,
 	// sendStreamingAttempt and everything downstream rely on).
-	if IsBatchModel(modelID) {
+	if batched {
 		if p.Kind != providers.KindAnthropicOpenRouter {
-			return ctx, nil, "", nil, params, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
+			return ctx, nil, "", nil, nil, params, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
 		}
-		if !firstCall(params) {
-			modelID = strings.TrimSuffix(modelID, BatchSuffix)
+		if firstCall(params) {
+			modelID += BatchSuffix
 			params.Model = anthropic.Model(modelID)
 		}
 	}
@@ -342,6 +348,15 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	}
 	c.mutateParams(p, alias, &params)
 
+	// The parked call's only-list, computed HERE while the alias is in hand —
+	// the same pinOnly rule applyProviderPrefs applies (spec Only > alias
+	// Only > static pin), against the model line WITHOUT the :batch suffix.
+	// nil = no pin: the batch envelope carries no provider key at all.
+	var batchOnly []string
+	if IsBatchModel(modelID) {
+		batchOnly = batchOnlyList(c.routingSpec, alias, strings.TrimSuffix(modelID, BatchSuffix))
+	}
+
 	attrs := []attribute.KeyValue{
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", primary),
@@ -353,7 +368,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
-	return ctx, span, primary, fallbacks, params, nil
+	return ctx, span, primary, fallbacks, batchOnly, params, nil
 }
 
 // mutateParams applies a kind's request-body mutation. Only
@@ -392,14 +407,14 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 // best-effort: a broken store degrades to pass-through, never blocks the
 // call. Every invocation inserts its own turn row and always resolves it.
 func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	ctx, span, primary, fallbacks, params, err := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, batchOnly, params, err := c.prepareSend(ctx, meta, params)
 	if err != nil {
 		return nil, err
 	}
 	defer span.End()
 
 	if IsBatchModel(string(params.Model)) {
-		return c.parkSend(ctx, span, meta, params, primary)
+		return c.parkSend(ctx, span, meta, params, primary, batchOnly)
 	}
 
 	if err := c.modelGate.beforeSend(ctx, string(params.Model)); err != nil {
@@ -576,7 +591,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 }
 
 func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
-	ctx, span, primary, fallbacks, params, err := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, _, params, err := c.prepareSend(ctx, meta, params)
 	if err != nil {
 		return nil, false, false, err
 	}

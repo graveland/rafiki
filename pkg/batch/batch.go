@@ -9,7 +9,7 @@
 // The package is pgx-free and must not import pkg/llm. pkg/llm holds the
 // Batcher through a single-method interface,
 //
-//	Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams) (*anthropic.Message, error)
+//	Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error)
 //
 // and the durable Store implementation lives in pkg/batchdb.
 package batch
@@ -163,6 +163,12 @@ func (b *Batcher) Start(ctx context.Context) {
 // Park parks one Messages-API call. It returns when the call's batch result
 // is delivered, or ctx is cancelled.
 //
+// provider is the raw JSON of the NARROWED provider object placed at the
+// batch envelope's TOP level — {"only": [...]}, the only key OpenRouter's
+// Batch wire accepts (sort, data_collection, zdr and ignore are each a
+// submit-time 400 "Unrecognized key") — or nil for no pin. It is passed
+// through to Submit and never stored inside the per-call body.
+//
 // A custom_id failing ^[A-Za-z0-9_-]{1,64}$ is refused at entry with a plain
 // *Error, before any store call or POST: the provider answers such an id
 // with a 422 that fails the WHOLE batch, taking every call coalesced into
@@ -174,7 +180,7 @@ func (b *Batcher) Start(ctx context.Context) {
 // replaced by a fresh queued row. On ctx cancellation the row stays and
 // completes later (a resumed child adopts it by custom_id); ctx.Err() is
 // returned raw, never wrapped in *Error.
-func (b *Batcher) Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (b *Batcher) Park(ctx context.Context, customID, model string, params anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error) {
 	if !validCustomID(customID) {
 		return nil, &Error{Msg: fmt.Sprintf("invalid custom_id %q: must match %s", customID, customIDPattern)}
 	}
@@ -188,7 +194,7 @@ func (b *Batcher) Park(ctx context.Context, customID, model string, params anthr
 	// out to be a failed one to tombstone first. Eight passes is already
 	// far beyond anything reachable.
 	for attempt := 0; attempt < 8; attempt++ {
-		waitCh, done, err := b.adoptOrInsert(ctx, customID, model, body)
+		waitCh, done, err := b.adoptOrInsert(ctx, customID, model, body, provider)
 		switch {
 		case err != nil:
 			return nil, err
@@ -204,7 +210,7 @@ func (b *Batcher) Park(ctx context.Context, customID, model string, params anthr
 // adoptOrInsert performs Park's decision under b.mu: return a resolved
 // outcome (done), a channel to wait on (waitCh), or neither (retry the
 // decision — the existing row was failed and needs tombstoning first).
-func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, body json.RawMessage) (<-chan parkOutcome, *parkOutcome, error) {
+func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, body, provider json.RawMessage) (<-chan parkOutcome, *parkOutcome, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	row, ok, err := b.store.Live(ctx, customID)
@@ -235,6 +241,7 @@ func (b *Batcher) adoptOrInsert(ctx context.Context, customID, model string, bod
 		Model:     model,
 		State:     StateQueued,
 		Request:   body,
+		Provider:  provider,
 		CreatedAt: b.now(),
 		UpdatedAt: b.now(),
 	})
@@ -304,6 +311,10 @@ func (b *Batcher) deliver(customID string, out parkOutcome) {
 // flushQueued coalesces every queued row into one batch per model: each
 // group is marked submitting BEFORE its POST, so a crash between POST and
 // MarkSubmitted lands in the recovery sweep instead of a blind resubmission.
+// The provider object comes from the group's rows — they all parked with the
+// same model, and the parked call's only-list is a function of the model line
+// plus the parking client's spec, so any row's provider stands for the group;
+// a nil (no row carried one) submits no provider key.
 func (b *Batcher) flushQueued(ctx context.Context) {
 	if b.api == nil {
 		return
@@ -337,7 +348,7 @@ func (b *Batcher) flushQueued(ctx context.Context) {
 		for i, r := range group {
 			requests[i] = BatchRequest{CustomID: r.CustomID, Body: r.Request}
 		}
-		batch, err := b.api.Submit(ctx, model, requests)
+		batch, err := b.api.Submit(ctx, model, group[0].Provider, requests)
 		if err != nil {
 			b.submitFailed(ctx, group, err)
 			if ctx.Err() != nil {
@@ -638,10 +649,14 @@ func idsOf(rows []Row) []int64 {
 
 // requestJSON marshals params to the per-call batch body: the Messages-API
 // params JSON with the keys the batch envelope carries elsewhere removed —
-// model (the batch-level model names it), stream (batches are
-// non-streaming) and provider (a routing hint the batch endpoint does not
-// accept). Values stay raw bytes, so nested message content survives the
-// round trip byte for byte.
+// model (the batch-level model names it) and stream (batches are
+// non-streaming). The params' "provider" field stays deleted from the call
+// body NOT because the key is unwelcome but because the provider object is
+// NOT a per-call field: OpenRouter's Batch API accepts it only at the
+// ENVELOPE's top level, next to endpoint/model, and only narrowed to its
+// only key — {"only": [...]} (Task 0.1's probe: sort, data_collection, zdr
+// and ignore are each a submit-time 400 "Unrecognized key"). The submitter
+// injects that envelope-level object from Park's provider argument.
 func requestJSON(params anthropic.MessageNewParams) (json.RawMessage, error) {
 	raw, err := json.Marshal(params)
 	if err != nil {

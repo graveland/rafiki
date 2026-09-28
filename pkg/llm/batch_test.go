@@ -4,6 +4,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -25,7 +26,7 @@ type fakeBatcher struct {
 	scripts  []func() (*anthropic.Message, error)
 }
 
-func (b *fakeBatcher) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams) (*anthropic.Message, error) {
+func (b *fakeBatcher) Park(_ context.Context, customID, model string, _ anthropic.MessageNewParams, _ json.RawMessage) (*anthropic.Message, error) {
 	b.mu.Lock()
 	b.calls++
 	b.lastIDs = append(b.lastIDs, customID)

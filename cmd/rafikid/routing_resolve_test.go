@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
@@ -393,4 +395,60 @@ func TestRoutingForPrefersStoredSession(t *testing.T) {
 	// panic (the database-less daemon shape).
 	bare := newTestController(t)
 	ck.True(bare.RoutingFor("", "m").IsZero(), "no policy: zero spec")
+}
+
+// TestRoutingBatchSpecRefused pins the :batch refusal (Task 0.1's probe): the
+// Batch wire accepts ONLY provider.only — sort/data_collection/zdr/ignore are
+// each a submit-time 400 — so a merged spec carrying any non-only key on a
+// :batch model is refused at spawn (never a silent fallback to unrouted),
+// while an only-only spec passes and a policy row filling a non-only key on a
+// :batch model refuses too.
+func TestRoutingBatchSpecRefused(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+
+	// A spec with sort on a :batch model is refused, naming the model.
+	_, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/z-ai/glm-5.3-flash:batch[sort=price]",
+	})
+	ck.Require().Error(err, "sort on a :batch model must be refused")
+	var ce *connectapi.ControllerError
+	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code)
+	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash:batch", "the refusal must name the model: %s", ce.Message)
+	ck.StrContains(ce.Message, "provider.only", "the refusal must name the wire's limit: %s", ce.Message)
+
+	// Each remaining non-only key refuses too (quant, nodata, zdr).
+	for _, spec := range []string{"quant=fp8+", "nodata", "zdr"} {
+		_, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+			Kind:  protocol.KindFundi,
+			Cwd:   "/tmp/w",
+			Model: "openrouter/z-ai/glm-5.3-flash:batch[" + spec + "]",
+		})
+		ck.Error(err, "%s on a :batch model must be refused", spec)
+	}
+
+	// An only-only spec passes and is the stored spec.
+	req, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/z-ai/glm-5.3-flash:batch[only=deepinfra]",
+	})
+	ck.Require().NoError(err, "only-only on a :batch model must pass")
+	ck.Eq("only=deepinfra", req.Routing, "the parked call pins its only")
+	ck.Eq("openrouter/z-ai/glm-5.3-flash:batch", req.Model, "the base id keeps the suffix")
+
+	// A policy row filling a non-only key on a :batch spawn refuses too: the
+	// merged spec, not the spawn's own brackets, is what rides (or cannot).
+	c.SetRoutePolicy(routingPolicy(t, routepolicy.Row{ModelLine: "*", Spec: "nodata"}))
+	_, err = resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/z-ai/glm-5.3-flash:batch",
+	})
+	ck.Require().Error(err, "a policy nodata on a :batch spawn must be refused")
+	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
+	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash:batch", "the refusal names the model: %s", ce.Message)
 }

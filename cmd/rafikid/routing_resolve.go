@@ -16,6 +16,10 @@ package main
 //
 // Data flags (nodata/zdr) are monotone: set at any level they hold.
 //
+// One spec is refused on the :batch leg: any key the OpenRouter Batch wire
+// cannot accept (sort/quant/nodata/zdr — the envelope carries only
+// provider.only). See the guard at the end of resolveRouting.
+//
 // What is deliberately NOT folded into the spec: a providers.toml alias's
 // `only` pin and the static providerPins. pkg/llm applies them at request
 // time as the pin — used only when the spec carries no `only` — and a pin
@@ -28,6 +32,7 @@ import (
 	"strings"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/routing"
@@ -105,6 +110,23 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	}
 
 	req.Routing = spawnSpec.Merge(presetSpec).Merge(policySpec).String()
+
+	// OpenRouter's Batch API accepts only provider.only on the batch envelope
+	// (Task 0.1's probe: sort, data_collection, zdr and ignore are each a
+	// submit-time 400 "Unrecognized key"), so a :batch model whose merged spec
+	// carries any key the batch wire cannot serve is refused at spawn — never
+	// a silent fallback to unrouted. A spec with ONLY only= (or a zero spec)
+	// passes: only rides the wire as {"only": [...]} (parkSend's batchOnly).
+	if llm.IsBatchModel(appliedBase) {
+		merged := spawnSpec.Merge(presetSpec).Merge(policySpec)
+		if merged.Sort != "" || merged.Quant != nil || merged.NoData || merged.ZDR {
+			return req, &connectapi.ControllerError{
+				Code: protocol.ErrInvalidArgs,
+				Message: fmt.Sprintf("a routing spec cannot apply to %s: OpenRouter's Batch API accepts only provider.only; drop the spec or the :batch suffix",
+					appliedBase),
+			}
+		}
+	}
 	return req, nil
 }
 
