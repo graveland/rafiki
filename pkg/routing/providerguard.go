@@ -248,8 +248,16 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 	g.mu.Unlock()
 
 	if !ok {
-		logger.Info("routing: ejection declined at cap",
-			"provider", key.provider, "model_line", key.modelLine, "cap", maxEjectedPerModelLine)
+		// The decline is Info once per provider — the miss that would have
+		// ejected it — and Debug for every repeat (the kept streak grows while
+		// a slot stays occupied), so a line parked at the cap under sustained
+		// traffic logs one line per provider, not one per miss.
+		attrs := []any{"provider", key.provider, "model_line", key.modelLine, "cap", maxEjectedPerModelLine}
+		if streak == missStreakToEject {
+			logger.Info("routing: ejection declined at cap", attrs...)
+		} else {
+			logger.Debug("routing: ejection declined at cap", attrs...)
+		}
 		return
 	}
 	logger.Warn("routing: provider ejected",
