@@ -414,6 +414,21 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody [
 	return resp, err
 }
 
+// routingSessionID is the session id the routing resolver is asked with: the
+// credential's bound child when the request carries a per-child token — that
+// token names exactly ONE child, and a caller-supplied X-Rafiki-Session must
+// not let it (or any other proxy caller) adopt another child's stored spec
+// (e.g. one predating a new "*" nodata row). Non-child callers — a user
+// token, anonymous, no authenticator — fall back to the header: that is the
+// daemon's own children on the per-boot credential (ChildID empty, the child
+// named in the header) and hand-configured clients.
+func routingSessionID(r *http.Request) string {
+	if id := IdentityFromContext(r.Context()); id != nil && id.Via == ProvenanceChildToken && id.ChildID != "" {
+		return id.ChildID
+	}
+	return r.Header.Get("X-Rafiki-Session")
+}
+
 // applyProviderRouting decides the OpenRouter provider-routing object for one
 // request, mutating payload in place. Three layers, weakest first:
 //
@@ -437,7 +452,25 @@ func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model strin
 	_, hasCaller := payload["provider"]
 
 	if p.routingResolver != nil {
-		spec := p.routingResolver.RoutingFor(r.Header.Get("X-Rafiki-Session"), model)
+		// A JSON null provider is OpenRouter's "no preferences": treat it
+		// exactly like an absent key so the spec's whole object (data policy
+		// included) is built rather than skipped. Any other non-object value
+		// (string, number, array) is malformed — OpenRouter would reject it,
+		// but data policy must hold regardless — so it is REPLACED with an
+		// empty map that then receives the forced keys, with a warning naming
+		// what it was.
+		if hasCaller {
+			switch payload["provider"].(type) {
+			case nil:
+				hasCaller = false
+			case map[string]any:
+			default:
+				p.logger.Warn("proxy: caller provider field is not an object; replacing it to hold data policy",
+					"provider", payload["provider"])
+				payload["provider"] = map[string]any{}
+			}
+		}
+		spec := p.routingResolver.RoutingFor(routingSessionID(r), model)
 		if !hasCaller {
 			// spec.Prefs owns the whole object — its only overrides the pin and
 			// drops the bans, the pin fills in otherwise, and the data flags are

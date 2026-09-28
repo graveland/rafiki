@@ -58,7 +58,7 @@ func validState(st batch.State) bool {
 
 // liveCols is the column list shared by every SELECT and RETURNING of a row,
 // in scanRow's order.
-const liveCols = `id, custom_id, model, state, provider_batch_id, request, response, error, created_at, updated_at`
+const liveCols = `id, custom_id, model, state, provider, provider_batch_id, request, response, error, created_at, updated_at`
 
 // Live returns the non-tombstoned row for customID.
 func (s *Store) Live(ctx context.Context, customID string) (batch.Row, bool, error) {
@@ -94,15 +94,19 @@ func (s *Store) Insert(ctx context.Context, r batch.Row) (batch.Row, error) {
 	}
 	var out batch.Row
 	var request, response []byte
+	var provider *[]byte
 	var providerBatchID, errText *string
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO conversations.batch_call (custom_id, model, state, request, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, now(), now())
+		INSERT INTO conversations.batch_call (custom_id, model, state, provider, request, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
 		RETURNING `+liveCols,
-		r.CustomID, r.Model, string(batch.StateQueued), jsonbArg(r.Request)).Scan(
-		&out.ID, &out.CustomID, &out.Model, (*stateScanner)(&out.State), &providerBatchID,
+		r.CustomID, r.Model, string(batch.StateQueued), jsonbArg(r.Provider), jsonbArg(r.Request)).Scan(
+		&out.ID, &out.CustomID, &out.Model, (*stateScanner)(&out.State), &provider, &providerBatchID,
 		&request, &response, &errText, &out.CreatedAt, &out.UpdatedAt)
 	if err == nil {
+		if provider != nil {
+			out.Provider = jsonRaw(*provider)
+		}
 		out.ProviderBatchID, out.Error = deref(providerBatchID), deref(errText)
 		setRaw(&out, request, response)
 	}
@@ -242,11 +246,15 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanRow(rs rowScanner, r *batch.Row) error {
 	var request, response []byte
+	var provider *[]byte
 	var providerBatchID, errText *string
 	if err := rs.Scan(
-		&r.ID, &r.CustomID, &r.Model, (*stateScanner)(&r.State), &providerBatchID,
+		&r.ID, &r.CustomID, &r.Model, (*stateScanner)(&r.State), &provider, &providerBatchID,
 		&request, &response, &errText, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return err
+	}
+	if provider != nil {
+		r.Provider = jsonRaw(*provider)
 	}
 	r.ProviderBatchID, r.Error = deref(providerBatchID), deref(errText)
 	setRaw(r, request, response)

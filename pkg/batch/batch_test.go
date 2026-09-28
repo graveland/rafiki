@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -823,4 +824,64 @@ func TestBatchContradictoryResultFails(t *testing.T) {
 	c.False(len(rows) != 1 || rows[0].CustomID != "conv-1", "InState(failed) = %+v, want conv-1 failed", rows)
 	completed, _ := h.ms.InState(context.Background(), batch.StateCompleted)
 	c.False(len(completed) != 1 || completed[0].CustomID != "conv-2", "InState(completed) = %+v, want conv-2 completed", completed)
+}
+
+// TestBatchGroupsByModelAndProvider pins the flushQueued group key: the
+// parked call's provider object (its only-list) is a function of the parking
+// CLIENT, so rows parking the same model with DIFFERENT providers must
+// submit as distinct batches — never one row's pin imposed on another's
+// calls. Rows with the same model and no provider still coalesce into one
+// batch.
+func TestBatchGroupsByModelAndProvider(t *testing.T) {
+	c := assert.NewCollecting(t)
+	h := newHarness(t)
+	const model = "vendor/m:batch"
+
+	// Two distinct pins and one nil, all on the same model.
+	for id, provider := range map[string]json.RawMessage{
+		"conv-a": json.RawMessage(`{"only":["a-host"]}`),
+		"conv-b": json.RawMessage(`{"only":["b-host"]}`),
+		"conv-c": nil,
+		"conv-d": nil,
+	} {
+		row, err := h.ms.Insert(h.ctx, batch.Row{
+			CustomID: id, Model: model, State: batch.StateQueued,
+			Request: json.RawMessage(`{"max_tokens":16}`), Provider: provider,
+			CreatedAt: h.clock.Now(), UpdatedAt: h.clock.Now(),
+		})
+		c.Require().NoError(err, "seed %s", id)
+		_ = row
+	}
+	h.waitInState(t, batch.StateQueued, 4, 5*time.Second)
+	h.start()
+
+	// Three groups -> three submits. The custom_ids are invalid-free
+	// ("conv-x" matches the charset), so nothing else splits them.
+	submits := h.waitSubmits(t, 3, 5*time.Second)
+	c.Require().Len(submits, 3, "submits, want 3 (one per distinct provider)")
+
+	var withProvider, without []submitRecord
+	var pins []string
+	for _, s := range submits {
+		var envelope struct {
+			Model    string          `json:"model"`
+			Provider json.RawMessage `json:"provider"`
+		}
+		c.Require().NoError(json.Unmarshal(s.raw, &envelope), "decode submit envelope")
+		if len(envelope.Provider) == 0 {
+			without = append(without, s)
+			continue
+		}
+		var obj struct {
+			Only []string `json:"only"`
+		}
+		c.Require().NoError(json.Unmarshal(envelope.Provider, &obj), "decode provider")
+		pins = append(pins, strings.Join(obj.Only, ","))
+		withProvider = append(withProvider, s)
+	}
+	c.Require().Len(withProvider, 2, "submits carrying a provider object")
+	c.Require().Len(without, 1, "submits without a provider object")
+	c.Eq(2, len(without[0].requests), "the nil-provider batch carries both unpinned rows")
+	sort.Strings(pins)
+	c.EqDiff([]string{"a-host", "b-host"}, pins, "each pinned row submitted with its OWN only-list")
 }

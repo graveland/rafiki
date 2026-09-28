@@ -94,3 +94,60 @@ func TestStaleClobberNoOps(t *testing.T) {
 		`SELECT count(*) FROM conversations.batch_call WHERE custom_id = 'conv-1'`).Scan(&n), "count")
 	c.Eq(1, n, "expected exactly one tombstoned row, found")
 }
+
+// TestProviderRoundTrip pins the parked call's only-list persistence: the
+// production store is this one, and a provider dropped on the first
+// round-trip silently submitted every batch unrouted. An insert with a
+// provider keeps it (through Live, InState and after the transitions the
+// submitter makes); an insert without one reads back nil.
+func TestProviderRoundTrip(t *testing.T) {
+	c := assert.NewAborting(t)
+	pool := testPool(t)
+	ctx := context.Background()
+	s := freshStore(t, pool)
+
+	pinned, err := s.Insert(ctx, batch.Row{
+		CustomID: "conv-pin", Model: "vendor/m:batch", State: batch.StateQueued,
+		Request:  json.RawMessage(`{"max_tokens":16}`),
+		Provider: json.RawMessage(`{"only": ["gmicloud"]}`),
+	})
+	c.NoError(err, "Insert with provider")
+	c.Eq(`{"only": ["gmicloud"]}`, string(pinned.Provider), "Insert returns the provider")
+
+	unpinned, err := s.Insert(ctx, batch.Row{
+		CustomID: "conv-bare", Model: "vendor/m:batch", State: batch.StateQueued,
+		Request: json.RawMessage(`{"max_tokens":16}`),
+	})
+	c.NoError(err, "Insert without provider")
+	c.Nil(unpinned.Provider, "a nil provider reads back nil, not JSON null")
+
+	for _, id := range []string{"conv-pin", "conv-bare"} {
+		row, ok, err := s.Live(ctx, id)
+		c.Require().False(err != nil || !ok, "Live %s: %v", id, err)
+		if id == "conv-pin" {
+			c.Eq(`{"only": ["gmicloud"]}`, string(row.Provider), "Live keeps the only-list")
+		} else {
+			c.Nil(row.Provider, "Live: unpinned stays nil")
+		}
+	}
+
+	queued, err := s.InState(ctx, batch.StateQueued)
+	c.Require().NoError(err, "InState (what flushQueued submits from)")
+	c.Require().Len(queued, 2, "queued rows")
+	for _, row := range queued {
+		if row.CustomID == "conv-pin" {
+			c.Eq(`{"only": ["gmicloud"]}`, string(row.Provider), "InState keeps the only-list")
+		} else {
+			c.Nil(row.Provider, "InState: unpinned stays nil")
+		}
+	}
+
+	// The submitter's transitions and the delivery outcome must not disturb
+	// the column while the row is live.
+	c.NoError(s.MarkSubmitting(ctx, []int64{pinned.ID}), "MarkSubmitting")
+	c.NoError(s.MarkSubmitted(ctx, []int64{pinned.ID}, "batch-1"), "MarkSubmitted")
+	c.NoError(s.Complete(ctx, pinned.ID, json.RawMessage(`{"id":"msg_1"}`)), "Complete")
+	row, ok, err := s.Live(ctx, "conv-pin")
+	c.Require().False(err != nil || !ok, "Live after outcome: %v", err)
+	c.Eq(`{"only": ["gmicloud"]}`, string(row.Provider), "the only-list survives a completed round-trip")
+}

@@ -318,11 +318,18 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// are exact-match, providerPins match by line — "glm-flash:batch" matches
 	// neither). Resolve against the stripped id and re-apply the suffix below
 	// exactly when this send parks; the park invariant is unchanged.
+	//
+	// batched is true when the suffix arrives on the REQUESTED string (a
+	// literal …:batch) OR on the alias-RESOLVED id: an alias whose id ends in
+	// :batch is a supported shape, and without the second arm batched would be
+	// false, the strip below would never run, and EVERY turn would park
+	// instead of only the first.
 	batched := IsBatchModel(requested)
 	p, modelID, alias, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
 	if err != nil {
 		return ctx, nil, "", nil, nil, params, err
 	}
+	batched = batched || IsBatchModel(modelID)
 	params.Model = anthropic.Model(modelID)
 
 	// The :batch routing rule, in one place. After this block: params.Model
@@ -334,8 +341,13 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 		}
 		if firstCall(params) {
 			modelID += BatchSuffix
-			params.Model = anthropic.Model(modelID)
+		} else {
+			// The alias-resolved id carries the suffix even on a later call:
+			// strip it so the send goes live (the literal case stripped by
+			// construction — its id never had the suffix).
+			modelID = strings.TrimSuffix(modelID, BatchSuffix)
 		}
+		params.Model = anthropic.Model(modelID)
 	}
 
 	primary := p.Name
@@ -353,7 +365,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// Only > static pin), against the model line WITHOUT the :batch suffix.
 	// nil = no pin: the batch envelope carries no provider key at all.
 	var batchOnly []string
-	if IsBatchModel(modelID) {
+	if batched {
 		batchOnly = batchOnlyList(c.routingSpec, alias, strings.TrimSuffix(modelID, BatchSuffix))
 	}
 

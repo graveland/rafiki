@@ -280,3 +280,22 @@ func TestPolicyLoadRefusesBadLineShape(t *testing.T) {
 		t.Fatalf("Resolve after failed Load = %q, want zero Spec (previous view intact)", got.String())
 	}
 }
+
+// TestPolicyResolveStripsBatchSuffix pins modelLineOf's :batch strip: the row
+// z-ai/glm-5.3-flash governs a parked call of z-ai/glm-5.3-flash:batch —
+// exact-equality and the -prefix family both see the base id's line, so the
+// refusal gate and the policy rows agree with the live path.
+func TestPolicyResolveStripsBatchSuffix(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := NewPolicy()
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3-flash", Spec: "quant=fp8+"}}), "Load")
+
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash:batch"), "exact line over a :batch id",
+		routing.SortInherit, []string{"fp8+"}, nil, false, false)
+	checkSpec(c, p.Resolve("openrouter/z-ai/glm-5.3-flash:batch"), "provider-prefixed :batch id",
+		routing.SortInherit, []string{"fp8+"}, nil, false, false)
+	// The family arm still works below the stripped suffix's base.
+	c.Require().NoError(p.Load([]Row{{ModelLine: "z-ai/glm-5.3", Spec: "sort=price"}}), "Load family")
+	checkSpec(c, p.Resolve("z-ai/glm-5.3-flash:batch"), "family line over a :batch id",
+		routing.SortPrice, nil, nil, false, false)
+}

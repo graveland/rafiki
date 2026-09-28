@@ -200,8 +200,11 @@ rafiki providers route delete 'z-ai/glm-5.3'
 ```
 
 Per-model-line routing defaults stored in the daemon
-(`openrouter.route_policy`, `pkg/routepolicy`), applied to every OpenRouter
-request that carries no stricter spec of its own. Reading the rows is open to
+(`openrouter.route_policy`, `pkg/routepolicy`). Resolution is per key: a row
+fills the keys a spawn/preset spec leaves unset (a spawn's `[...]` beats a
+preset's, which beats these rows), and `nodata`/`zdr` ALWAYS hold — they OR
+into whatever the spec says and reach running children too, so a row set
+after a spawn governs that child's later requests. Reading the rows is open to
 any caller; writing (set, delete) requires a user credential or the local
 socket. A `set` appends and takes effect immediately — no restart; a
 `delete` appends a tombstone.

@@ -452,3 +452,131 @@ func TestRoutingBatchSpecRefused(t *testing.T) {
 	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
 	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash:batch", "the refusal names the model: %s", ce.Message)
 }
+
+// TestRoutingPolicyResolvesThroughAlias pins the translated-id policy lookup:
+// a policy line is keyed by the REAL OpenRouter id, but the applied model may
+// name a providers.toml ALIAS — the row must reach alias-spawned children
+// (a nodata row that silently missed them was a data-policy gap). The alias's
+// own `only` pin still never folds into the stored spec, and req.Model stays
+// the applied base id.
+func TestRoutingPolicyResolvesThroughAlias(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.providers = &providers.Set{
+		DefaultProvider: "openrouter",
+		Providers: map[string]providers.Provider{
+			"openrouter": {
+				Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
+				Models: map[string]providers.ModelAlias{
+					"glm-flash@together": {ID: "z-ai/glm-5.3-flash", Only: []string{"together"}},
+				},
+			},
+		},
+	}
+	c.SetRoutePolicy(routingPolicy(t, routepolicy.Row{ModelLine: "z-ai/glm-5.3-flash", Spec: "nodata"}))
+
+	req, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/glm-flash@together",
+	})
+	ck.Require().NoError(err, "resolveRouting")
+	ck.Eq("nodata", req.Routing, "the line row must apply to the alias-spawned child")
+	ck.Eq("openrouter/glm-flash@together", req.Model, "req.Model stays the applied base id")
+}
+
+// TestRoutingBatchPolicyRowAppliesThroughSuffix pins modelLineOf's :batch
+// strip: the exact-line row z-ai/glm-5.3-flash governs a spawn of
+// z-ai/glm-5.3-flash:batch — the refusal gate (and the merged policy) must
+// see the same line the live path sees, else a nodata row would be silently
+// dropped on parked calls.
+func TestRoutingBatchPolicyRowAppliesThroughSuffix(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.SetRoutePolicy(routingPolicy(t, routepolicy.Row{ModelLine: "z-ai/glm-5.3-flash", Spec: "nodata"}))
+
+	// The row's nodata rides the :batch spawn -> the refusal fires (the batch
+	// wire cannot carry it), naming the model.
+	_, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/z-ai/glm-5.3-flash:batch",
+	})
+	ck.Require().Error(err, "the exact-line row must reach a :batch spawn")
+	var ce *connectapi.ControllerError
+	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
+	ck.StrContains(ce.Message, "z-ai/glm-5.3-flash", "the refusal names the model: %s", ce.Message)
+}
+
+// TestRoutingBatchRefusalThroughAlias pins the refusal's translated id: an
+// alias whose id ends in :batch is a supported shape, and spawning it with a
+// non-only spec is refused exactly like the literal :batch request — never
+// accepted to then park without its data policy.
+func TestRoutingBatchRefusalThroughAlias(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.providers = &providers.Set{
+		DefaultProvider: "openrouter",
+		Providers: map[string]providers.Provider{
+			"openrouter": {
+				Name: "openrouter", Kind: providers.KindAnthropicOpenRouter,
+				Models: map[string]providers.ModelAlias{
+					"glmb": {ID: "z-ai/glm-5.3-flash:batch"},
+				},
+			},
+		},
+	}
+
+	_, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/glmb[nodata]",
+	})
+	ck.Require().Error(err, "a non-only spec on an alias-to-:batch must be refused")
+	var ce *connectapi.ControllerError
+	ck.True(errors.As(err, &ce), "want a ControllerError, got %v", err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code)
+	ck.StrContains(ce.Message, "glmb", "the refusal names the model: %s", ce.Message)
+
+	// An only-only spec passes through the same alias.
+	req, err := resolveVia(t, c, "owner-1", protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   "/tmp/w",
+		Model: "openrouter/glmb[only=deepinfra]",
+	})
+	ck.Require().NoError(err, "an only-only spec on an alias-to-:batch passes")
+	ck.Eq("only=deepinfra", req.Routing, "the parked call pins its only")
+}
+
+// TestRoutingForOrsPolicyDataFlags pins RoutingFor's monotone flow: the
+// stored spec wins per key and is never REWRITTEN by a policy edit, but a
+// policy row's data flags OR on top — a `*` nodata added AFTER the spawn
+// governs that child's later requests (canonical order: sort, quant, only,
+// nodata, zdr).
+func TestRoutingForOrsPolicyDataFlags(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestController(t)
+	c.st.Insert(&childstore.Session{
+		ChildID: "c_rt_mono",
+		Kind:    protocol.KindFundi,
+		Cwd:     "/tmp/w",
+		Status:  protocol.StatusIdle,
+		Model:   "openrouter/z-ai/glm-5.3",
+		Routing: "sort=price",
+	})
+
+	// Before the row exists: the stored spec alone.
+	ck.Eq("sort=price", c.RoutingFor("c_rt_mono", "openrouter/z-ai/glm-5.3").String())
+
+	c.SetRoutePolicy(routingPolicy(t, routepolicy.Row{ModelLine: "*", Spec: "nodata"}))
+	ck.Eq("sort=price,nodata", c.RoutingFor("c_rt_mono", "openrouter/z-ai/glm-5.3").String(),
+		"the policy's nodata rides beside the stored sort")
+
+	// The stored value on the session is untouched — a policy edit never
+	// rewrites it.
+	if snap, ok := c.st.Get("c_rt_mono"); ok {
+		ck.Eq("sort=price", snap.Routing, "the stored spec must not be rewritten")
+	} else {
+		t.Fatal("session c_rt_mono vanished")
+	}
+}

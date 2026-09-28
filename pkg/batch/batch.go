@@ -308,13 +308,16 @@ func (b *Batcher) deliver(customID string, out parkOutcome) {
 	}
 }
 
-// flushQueued coalesces every queued row into one batch per model: each
-// group is marked submitting BEFORE its POST, so a crash between POST and
-// MarkSubmitted lands in the recovery sweep instead of a blind resubmission.
-// The provider object comes from the group's rows — they all parked with the
-// same model, and the parked call's only-list is a function of the model line
-// plus the parking client's spec, so any row's provider stands for the group;
-// a nil (no row carried one) submits no provider key.
+// flushQueued coalesces every queued row into one batch per (model, provider
+// JSON): each group is marked submitting BEFORE its POST, so a crash between
+// POST and MarkSubmitted lands in the recovery sweep instead of a blind
+// resubmission. The provider object is part of the GROUP KEY, not something
+// one row stands for: the only-list is a function of the parking CLIENT's
+// spec (and alias/pin), and two children parking the same model with
+// different only-lists inside one window must submit as distinct batches —
+// coalescing them would impose one caller's pin on another's calls (or 404
+// the whole batch at submit). A nil provider groups with nil and submits no
+// provider key.
 func (b *Batcher) flushQueued(ctx context.Context) {
 	if b.api == nil {
 		return
@@ -324,16 +327,28 @@ func (b *Batcher) flushQueued(ctx context.Context) {
 		return
 	}
 	groups := make(map[string][]Row)
+	keys := make(map[string][2]string)
 	for _, r := range rows {
-		groups[r.Model] = append(groups[r.Model], r)
+		// (model, provider JSON) is the group key: distinct pins must not
+		// share a batch (see the doc comment above).
+		key := r.Model + "\x00" + string(r.Provider)
+		if _, ok := groups[key]; !ok {
+			keys[key] = [2]string{r.Model, string(r.Provider)}
+		}
+		groups[key] = append(groups[key], r)
 	}
-	models := make([]string, 0, len(groups))
-	for m := range groups {
-		models = append(models, m)
+	groupKeys := make([]string, 0, len(groups))
+	for k := range groups {
+		groupKeys = append(groupKeys, k)
 	}
-	sort.Strings(models)
-	for _, model := range models {
-		group := groups[model]
+	sort.Strings(groupKeys)
+	for _, key := range groupKeys {
+		model, providerRaw := keys[key][0], keys[key][1]
+		var provider json.RawMessage
+		if providerRaw != "" {
+			provider = json.RawMessage(providerRaw)
+		}
+		group := groups[key]
 		ids := make([]int64, len(group))
 		for i, r := range group {
 			ids[i] = r.ID
@@ -348,7 +363,7 @@ func (b *Batcher) flushQueued(ctx context.Context) {
 		for i, r := range group {
 			requests[i] = BatchRequest{CustomID: r.CustomID, Body: r.Request}
 		}
-		batch, err := b.api.Submit(ctx, model, group[0].Provider, requests)
+		batch, err := b.api.Submit(ctx, model, provider, requests)
 		if err != nil {
 			b.submitFailed(ctx, group, err)
 			if ctx.Err() != nil {

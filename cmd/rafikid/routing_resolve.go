@@ -104,12 +104,25 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// pinning the global row's spec to a child whose model is not yet known
 	// would freeze a spec the actual model may not deserve (the proxy face's
 	// RoutingFor falls back to per-request policy resolution in that case).
+	//
+	// The lookup uses the TRANSLATED id: appliedBase may name a
+	// providers.toml ALIAS ("openrouter/glm-flash@together"), and the policy's
+	// lines are keyed by the real OpenRouter id — resolve through the provider
+	// set (the same translation the :batch/API-key guard below uses) so the
+	// row reaches alias-spawned children. Only the lookup translates; the
+	// alias's `only` pin still never folds into the stored spec, and
+	// req.Model stays the applied base id as spawned.
 	var policySpec routing.Spec
 	if c.routePolicy != nil && appliedBase != "" {
-		policySpec = c.routePolicy.Resolve(appliedBase)
+		policyBase := appliedBase
+		if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
+			policyBase = modelID
+		}
+		policySpec = c.routePolicy.Resolve(policyBase)
 	}
 
-	req.Routing = spawnSpec.Merge(presetSpec).Merge(policySpec).String()
+	merged := spawnSpec.Merge(presetSpec).Merge(policySpec)
+	req.Routing = merged.String()
 
 	// OpenRouter's Batch API accepts only provider.only on the batch envelope
 	// (Task 0.1's probe: sort, data_collection, zdr and ignore are each a
@@ -117,8 +130,14 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// carries any key the batch wire cannot serve is refused at spawn — never
 	// a silent fallback to unrouted. A spec with ONLY only= (or a zero spec)
 	// passes: only rides the wire as {"only": [...]} (parkSend's batchOnly).
-	if llm.IsBatchModel(appliedBase) {
-		merged := spawnSpec.Merge(presetSpec).Merge(policySpec)
+	// The refusal tests the TRANSLATED id: an alias whose id ends in :batch is
+	// a supported shape (see the :batch/API-key guard in controller.go), and
+	// the refusal must fire on it as on a literal :batch request.
+	refusalBase := appliedBase
+	if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
+		refusalBase = modelID
+	}
+	if llm.IsBatchModel(refusalBase) {
 		if merged.Sort != "" || merged.Quant != nil || merged.NoData || merged.ZDR {
 			return req, &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
@@ -147,19 +166,25 @@ func parseRoutingModel(s string) (string, routing.Spec, error) {
 
 // RoutingFor resolves the routing spec a proxied OpenRouter request must
 // carry. Satisfies pkg/server's RoutingResolver; wired by main.go via
-// proxyFace.SetController. sessionID is the request's X-Rafiki-Session — for
-// a daemon-spawned child that child's id; an interactive or hand-configured
+// proxyFace.SetController. sessionID is the request's X-Rafiki-Session (or,
+// for a child-credential caller, that credential's bound child id) — for a
+// daemon-spawned child that child's id; an interactive or hand-configured
 // client sends an id that resolves to no child, and an empty value is normal.
 //
 // A child whose session recorded a routing spec at spawn answers with that
-// stored spec, parsed: it resolved ONCE, and a policy edit after the spawn
-// must not rewrite a running child (the same rule the preset follows).
-// Unknown session, empty id, or no stored spec falls through to the policy's
-// per-request resolution — a client-driven session gets exactly what the
-// routing policy says for the model it named. A stored spec that no longer
-// parses (only reachable through corruption) logs and falls back the same
-// way, rather than failing the request.
+// stored spec merged over the policy's per-request row: the stored spec
+// resolved ONCE and a policy edit never rewrites its STORED value (the same
+// rule the preset follows), but the policy's data flags are monotone and
+// reach running children too — a nodata/zdr row set after the spawn holds on
+// every request it serves, filling the keys the stored spec leaves unset
+// (stored wins per key). Unknown session, empty id, or no stored spec falls
+// through to the policy's per-request resolution — a client-driven session
+// gets exactly what the routing policy says for the model it named. A stored
+// spec that no longer parses (only reachable through corruption) logs and
+// falls back the same way, rather than failing the request.
 func (c *Controller) RoutingFor(sessionID, modelID string) routing.Spec {
+	var stored routing.Spec
+	hasStored := false
 	if sessionID != "" {
 		if snap, ok := c.st.Get(sessionID); ok && snap.Routing != "" {
 			spec, err := routing.ParseSpec(snap.Routing)
@@ -167,12 +192,17 @@ func (c *Controller) RoutingFor(sessionID, modelID string) routing.Spec {
 				slog.Warn("routing: stored session spec no longer parses; falling back to policy",
 					"childId", sessionID, "routing", snap.Routing, "error", err)
 			} else {
-				return spec
+				stored, hasStored = spec, true
 			}
 		}
 	}
 	if c.routePolicy == nil {
+		if hasStored {
+			return stored
+		}
 		return routing.Spec{}
 	}
-	return c.routePolicy.Resolve(modelID)
+	// stored wins per key; the policy fills gaps and its data flags OR in
+	// (monotone). With no stored spec this is the plain per-request resolve.
+	return stored.Merge(c.routePolicy.Resolve(modelID))
 }

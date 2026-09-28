@@ -52,9 +52,11 @@ type Row struct {
 	Request         json.RawMessage // the call's request body (params JSON, model/stream/provider removed)
 	// Provider is the raw JSON of the batch envelope's narrowed provider
 	// object ({"only": [...]}) this call parked with, nil when none. It is
-	// carried per row so a submit window groups rows that all parked with the
-	// same pin and submits the object at the envelope's TOP level — never
-	// inside the per-call body, where the Batch API refuses it.
+	// carried per row and is part of the submit-time GROUP KEY (model +
+	// provider): rows with different pins submit as distinct batches, never
+	// one row's pin imposed on another's calls. The object rides at the
+	// envelope's TOP level — never inside the per-call body, where the Batch
+	// API refuses it.
 	Provider  json.RawMessage
 	Response  json.RawMessage // nil until completed
 	Error     string

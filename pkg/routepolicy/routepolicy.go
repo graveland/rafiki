@@ -235,8 +235,13 @@ func (p *Policy) Rows() []Row {
 // modelLineOf reduces a model id to the line policy rows are keyed by: when
 // the id has exactly three "/"-separated segments, the leading <provider>/
 // segment is stripped (openrouter/z-ai/glm-5.3-flash → z-ai/glm-5.3-flash);
-// otherwise the id passes through unchanged.
+// otherwise the id passes through unchanged. A ":batch" suffix is stripped
+// too: a parked call's line is its base id's line, so the row
+// z-ai/glm-5.3-flash governs the spawned z-ai/glm-5.3-flash:batch — the
+// refusal gate and the policy rows must both see the same line the live
+// path sees.
 func modelLineOf(modelID string) string {
+	modelID = strings.TrimSuffix(modelID, ":batch")
 	if segs := strings.Split(modelID, "/"); len(segs) == 3 {
 		return segs[1] + "/" + segs[2]
 	}

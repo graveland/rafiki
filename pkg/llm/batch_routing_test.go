@@ -149,3 +149,47 @@ func TestBatchRoutingOnParkedRequest(t *testing.T) {
 		ck.Nil(parkedProviders(t, c), "provider argument must be absent, not an empty object")
 	})
 }
+
+// TestBatchAliasToBatchIDParksFirstCallOnly pins fix-6's regression: an alias
+// whose ID ends in :batch is a supported shape, and it must behave exactly
+// like the literal :batch request — the FIRST call parks (params.Model keeps
+// the suffix), a LATER call goes live with the suffix stripped. The old code
+// tested only the pre-alias string, so batched stayed false, the strip never
+// ran, and every turn parked.
+func TestBatchAliasToBatchIDParksFirstCallOnly(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	set := routingOnlySet(nil)
+	set.Providers["openrouter"].Models["glmb"] = providers.ModelAlias{ID: "z-ai/glm-5.3-flash:batch"}
+	b := &routingFakeBatcher{}
+	sender := &scriptedSender{scripts: []func(anthropic.MessageNewParams) (*anthropic.Message, error){
+		respondText("live"),
+	}}
+	c, err := NewClient(
+		WithProviders(set),
+		WithProviderSender("openrouter", sender),
+		WithProviderSender("anthropic", sender),
+		WithBatcher(b),
+		WithCatalog(seededCatalog(t)),
+		WithLogger(testLogger(t)),
+	)
+	ck.Require().NoError(err, "NewClient")
+	meta := SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}
+
+	// First call: parks, model keeps :batch. The request names the ALIAS.
+	first := batchParams()
+	first.Model = "openrouter/glmb"
+	resp, err := c.SendParams(context.Background(), meta, first)
+	ck.Require().NoError(err, "first SendParams (alias to :batch) must park")
+	ck.Eq("batched", resp.Content[0].Text, "first call response from the batcher")
+	ck.Require().Eq(1, len(b.providers), "batcher calls after the first send")
+
+	// Later call: goes live, suffix stripped.
+	later := laterCallParams()
+	later.Model = "openrouter/glmb"
+	resp, err = c.SendParams(context.Background(), meta, later)
+	ck.Require().NoError(err, "later SendParams (alias to :batch) must go live")
+	ck.Eq("live", resp.Content[0].Text, "later call response from the live sender")
+	ck.Require().Eq(1, sender.calls, "live sender calls")
+	ck.Eq("z-ai/glm-5.3-flash", string(sender.lastReq[0].Model), "the :batch suffix must be stripped on the live call")
+	ck.Eq(1, len(b.providers), "the later call must not park again")
+}

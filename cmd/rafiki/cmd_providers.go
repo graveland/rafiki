@@ -30,9 +30,10 @@ func newProvidersRouteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "route",
 		Short: "Routing-policy rows: the OpenRouter provider spec each model line resolves to",
-		Long: `Per-model-line routing defaults, applied to every OpenRouter request that
-carries no stricter spec of its own (a spawn's "[...]" beats a preset's, which
-beats these rows).
+		Long: `Per-model-line routing defaults. Resolution is per key: a row fills the
+keys a spawn/preset spec leaves unset (a spawn's "[...]" beats a preset's,
+which beats these rows), and nodata/zdr ALWAYS hold — they reach running
+children too, so a row set after a spawn governs that child's later requests.
 
 A policy line is a "-" prefix FAMILY: a row's line matches a model id equal to
 it or extending it with "-" — "z-ai/glm-5.3" also governs "z-ai/glm-5.3-flash"

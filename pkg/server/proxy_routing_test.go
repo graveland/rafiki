@@ -259,3 +259,76 @@ func TestProxyRoutingNoResolverUnchanged(t *testing.T) {
 	prov = send(`{"model":"openai/gpt-4o","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	c.Nil(prov, "unpinned model must carry no provider object")
 }
+
+// TestProxyRoutingCallerDataPolicyForcedOnMalformed extends the data-policy
+// force to the non-object caller shapes: a JSON null provider is OpenRouter's
+// "no preferences" and must take the ABSENT path (the spec's whole object is
+// built, data policy included), and any other non-object value (string,
+// array, number) is malformed — OpenRouter would reject it, but data policy
+// must hold, so it is replaced with a map that then receives the forced keys.
+func TestProxyRoutingCallerDataPolicyForcedOnMalformed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	spec, err := routing.ParseSpec("nodata")
+	c.Require().NoError(err, "parse spec")
+	res := &recordingResolver{spec: spec}
+	p, bodies := newRoutingTestProxy(t, res)
+
+	send := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Rafiki-Session", "c_child7")
+		p.ServeHTTP(rec, req)
+		return providerOf(t, (*bodies)[len(*bodies)-1])
+	}
+
+	// "provider": null is "no preferences": the spec's whole object is built.
+	prov := send(`{"model":"openai/gpt-4o","provider":null,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Eq("deny", prov["data_collection"], "a null provider takes the absent path: spec.Prefs is injected")
+
+	// A string provider is malformed: replaced, then the data policy forced.
+	prov = send(`{"model":"openai/gpt-4o","provider":"x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Eq("deny", prov["data_collection"], "a string provider is replaced and forced")
+	_, hasSort := prov["sort"]
+	c.False(hasSort, "the replaced object carries only the forced keys, got %v", prov)
+
+	// An array provider likewise.
+	prov = send(`{"model":"openai/gpt-4o","provider":[1,2],"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Eq("deny", prov["data_collection"], "an array provider is replaced and forced")
+}
+
+// TestProxyRoutingChildCredentialSessionPinned pins the session-seam: when
+// the caller is a per-child credential (ProvenanceChildToken), the resolver
+// is asked with THAT child's id — not the spoofable X-Rafiki-Session header,
+// which would let any proxy caller adopt another child's stored spec.
+// Non-child callers fall back to the header.
+func TestProxyRoutingChildCredentialSessionPinned(t *testing.T) {
+	c := assert.NewCollecting(t)
+	res := &recordingResolver{}
+	p, _ := newRoutingTestProxy(t, res)
+
+	send := func(withIdentity bool) {
+		t.Helper()
+		res.sessions = nil
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+			`{"model":"openai/gpt-4o","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Rafiki-Session", "c_from_header")
+		if withIdentity {
+			req = req.WithContext(WithIdentity(req.Context(), &Identity{
+				Via: ProvenanceChildToken, ChildID: "c_bound", UserID: "u_owner",
+			}))
+		}
+		p.ServeHTTP(rec, req)
+	}
+
+	send(true)
+	c.Require().Len(res.sessions, 1, "resolver asked once")
+	c.Eq("c_bound", res.sessions[0], "a child credential pins the session to its own child")
+
+	send(false)
+	c.Require().Len(res.sessions, 1, "resolver asked once")
+	c.Eq("c_from_header", res.sessions[0], "a non-child caller falls back to the header")
+}

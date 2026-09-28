@@ -739,9 +739,13 @@ providers, not users — and reads the reloaded view. `ChildSummary.routing`
 reports a child's RESOLVED spec in canonical form (`routing.Spec.String()`),
 empty when none; the summary's `model` stays the base id. The resolution ran
 ONCE in `Controller.Spawn` (`resolveRouting`): the spawn spec merged over the
-preset spec over the policy row for the base id, stored on the session — a
-policy edit after the spawn never rewrites a running child, and resume reads
-the stored value back verbatim.
+preset spec over the policy row for the (alias-translated, `:batch`-stripped)
+base id, stored on the session — a policy edit never rewrites a running
+child's STORED spec, and resume reads that value back verbatim. The policy's
+data flags are monotone, though: on every proxied request `RoutingFor` ORs
+the model line's live row on top of the stored spec (stored wins per key,
+`nodata`/`zdr` always hold), so a row set after the spawn — e.g. a `*`
+`nodata` — governs that child's later requests by design.
 
 ### Presets (`ListPresets`, `GetPreset`, `PutPreset`, `DeletePreset`)
 
