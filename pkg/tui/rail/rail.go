@@ -38,13 +38,18 @@ func LiveStatuses() []string {
 	}
 }
 
-// Working reports whether a child is mid-turn: streaming a reply, executing a
-// tool, or compacting its context. batch_wait is deliberately absent: a child
+// Working reports whether a child is mid-flight: streaming a reply, executing
+// a tool, compacting its context, or — for a script child — its whole run.
+// "running" is a script's steady state between spawn and exit (a script never
+// streams; its whole life is one run) and IS working: the daemon set it once
+// at spawn and nothing moves it until the process ends, so the spinners and
+// every "is it working" predicate must treat it as one.
+// batch_wait is deliberately absent: a child
 // parked on a provider Batch API is waiting on hours-scale work that has
 // already been submitted, so it must not spin.
 func Working(status string) bool {
 	switch status {
-	case "streaming", "tool_running", "compacting":
+	case "streaming", "running", "tool_running", "compacting":
 		return true
 	}
 	return false
@@ -500,10 +505,20 @@ func (r *Rail) SubtreeCost(childID string) float64 {
 			return 0
 		}
 		seen[id] = true
-		total := 0.0
-		if n, ok := r.nodes[id]; ok {
-			total = n.TotalCost()
+		n, ok := r.nodes[id]
+		if !ok {
+			return 0
 		}
+		// A script node's cost IS its subtree's spend — the daemon prices the
+		// whole subtree in one rollup (mirroring output.go's subtreeCosts, the
+		// CLI half of the same rule) — so the walk stops there: recursing past
+		// it would add every descendant a second time. The tradeoff is
+		// liveness, not correctness: a script's number updates on re-seed, not
+		// on each descendant's turn_end.
+		if n.Kind == "script" {
+			return n.TotalCost()
+		}
+		total := n.TotalCost()
 		for _, kid := range children[id] {
 			total += walk(kid)
 		}

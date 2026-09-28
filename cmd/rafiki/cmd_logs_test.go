@@ -40,6 +40,7 @@ type stubControl struct {
 	streamErr       error             // what StreamEvents returns after sending
 	historyNotFound bool              // GetHistory answers NotFound (no conversation)
 	getChildOK      bool              // GetChild answers with a named child when set
+	scriptChild     bool              // GetChild answers kind=script when set
 
 	historyCalls int
 	streamCalls  int
@@ -95,6 +96,11 @@ func (s *stubControl) GetChild(
 	if s.getChildOK {
 		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
 			ChildId: req.Msg.GetChildId(), Name: "seeded-" + req.Msg.GetChildId(), Status: "idle",
+		}}), nil
+	}
+	if s.scriptChild {
+		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
+			ChildId: req.Msg.GetChildId(), Name: "seeded-" + req.Msg.GetChildId(), Kind: "script", Status: "running",
 		}}), nil
 	}
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("no child source in this stub"))
@@ -350,6 +356,68 @@ func TestTailChildBackfillsAndExitsOnChildExited(t *testing.T) {
 	for _, want := range []string{"hello", "again", "exit"} {
 		c.StrContains(out, want, "output missing")
 	}
+}
+
+// ── script children: the event log IS the transcript ────────────────────────
+
+func scriptOutputEvent(id string, ordinal int32, stream, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: id,
+		Ordinal: proto.Int32(ordinal),
+		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+			Stream: stream, Text: text,
+		}},
+	}
+}
+
+// A script child's output renders as its text, with stderr lines prefixed
+// `stderr| ` — plain, no colour.
+func TestLogsRendersScriptOutput(t *testing.T) {
+	c := assert.NewAborting(t)
+	r := newEventRenderer()
+	got := r.observe(withTS(scriptOutputEvent("c_s", 3, "stdout", "line one"), atClock(9, 0, 1.0)), atClock(9, 0, 1.0))
+	c.StrContains(got, "line one", "stdout line missing from the rendered view:\n")
+	c.NotStrContains(got, "stderr|", "stdout must not carry the stderr prefix:\n")
+
+	got = r.observe(withTS(scriptOutputEvent("c_s", 4, "stderr", "boom: no such file"), atClock(9, 0, 2.0)), atClock(9, 0, 2.0))
+	c.StrContains(got, "stderr| boom: no such file", "stderr line missing its stderr| prefix:\n")
+}
+
+// A script child has no conversation, so `logs` backfills from the DURABLE
+// EVENT LOG (StreamEvents replay from ordinal 0), never GetHistory — a script
+// has no conversation rows, and GetHistory's NotFound would otherwise land in
+// the "no history yet" dead end for a child whose whole output is in the log.
+func TestLogsScriptBackfillsFromEventLog(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &stubControl{
+		scriptChild:     true,
+		historyNotFound: true,
+		streamEvents: []*rafikiv1.Event{
+			scriptOutputEvent("c_s", 0, "stdout", "building..."),
+			scriptOutputEvent("c_s", 1, "stderr", "warn: slow disk"),
+			exitedFor("c_s", proto32(0), ""),
+		},
+	}
+	serveStubControl(t, stub)
+
+	cmd := newLogsCmd()
+	out, notes, err := runCmd(t, cmd, "c_s")
+	c.Require().NoError(err, "rafiki logs c_s")
+	c.Eq(0, stub.historyCalls, "GetHistory must never be dialled for a script child")
+	c.Eq(1, stub.streamCalls, "StreamEvents called once, for the replay")
+	c.StrContains(out, "building...", "script_output backfill missing from logs:\n")
+	c.StrContains(out, "stderr| warn: slow disk", "stderr output missing its prefix:\n")
+	c.NotStrContains(notes, "no history yet", "the script dead end leaked through:\n")
+
+	// The follow cursor is the last replay ordinal — the event-log space the
+	// live stream resumes in.
+	req := stub.streamReqs[len(stub.streamReqs)-1]
+	c.Eq(int32(-1), req.GetCursor().GetOrdinals()["c_s"], "replay must start at ordinal -1 (from the log head)")
+	for _, want := range []string{"script_output", "script_report", "child_exited"} {
+		c.StrContains(strings.Join(req.GetTypes(), ","), want, "replay types missing %q: %v", want, req.GetTypes())
+	}
+	c.Eq(rafikiv1.EventTier_EVENT_TIER_DURABLE, req.GetTier(), "replay tier")
+	c.Eq("c_s", req.GetSubject().GetChild(), "replay subject")
 }
 
 // ── completion ───────────────────────────────────────────────────────────────

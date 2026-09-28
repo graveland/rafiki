@@ -410,6 +410,23 @@ func (r *renderer) renderBlock(b session.Block) string {
 		return "\n" + strings.Join(rows, "\n")
 	case session.KindSystem:
 		return styleMeta.Render("⚙  ") + styleMeta.Render(b.Text)
+	case session.KindScriptOutput:
+		// A script's output IS the transcript's content, not commentary: raw,
+		// never markdown (the glamour-joins-paragraphs trap), gutter weight
+		// matching tool output. stderr is visually distinct — a `stderr| `
+		// prefix in the failure colour, so a run's diagnostics are findable at
+		// a glance without a second block stream.
+		prefix, text := styleToolResult.Render("│ "), styleToolResult
+		if b.Stream == "stderr" {
+			prefix = styleFailText.Render("stderr│ ")
+			text = styleFailText
+		}
+		var sb strings.Builder
+		lines := strings.Split(strings.TrimRight(sanitizeControlChars(b.Text), "\n"), "\n")
+		for _, line := range lines {
+			r.writeWrapped(&sb, prefix, text.Render(line))
+		}
+		return sb.String()
 	case session.KindAssistant:
 		return r.renderAssistant(b)
 	}

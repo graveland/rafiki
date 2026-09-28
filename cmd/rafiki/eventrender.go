@@ -238,6 +238,17 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		if data := sr.GetDataJson(); data != "" {
 			detail += " " + oneLine(data)
 		}
+	case *rafikiv1.Event_ScriptOutput:
+		// The script's raw output. stdout renders verbatim (one line per
+		// newline); stderr is prefixed `stderr| ` so a run's diagnostics are
+		// distinguishable from its real output in the same stream of lines.
+		// Pipes get plain text; the rendered view's styling rules carry no
+		// colour here.
+		text := p.ScriptOutput.GetText()
+		if p.ScriptOutput.GetStream() == "stderr" {
+			text = "stderr| " + text
+		}
+		detail = " " + oneLine(text)
 	default:
 		// An unrecognized payload still gets a line in the raw modes (which
 		// dump the event before this runs); in the human format a type with

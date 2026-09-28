@@ -65,10 +65,17 @@ func Glyph(n Node) string {
 		return "‼"
 	case "shutting_down":
 		return "◇"
+	case "running":
+		// A script child's steady state: the process is alive and (probably)
+		// producing output. U+25B6, single column, distinct from every other
+		// arm; AnimatedGlyph spins it anyway because Working("running") is
+		// true — a run IS progress, and a static arrow cannot say "still
+		// going".
+		return "▶"
 	case "exited":
 		return "✗"
 	default:
-		// protocol.Status is a closed set of nine, but it is a STRING on the
+		// protocol.Status is a closed set of ten, but it is a STRING on the
 		// wire so a newer daemon can add one without every client being
 		// regenerated. An unknown value must render something rather than
 		// leaving a hole in the rail.

@@ -29,23 +29,23 @@ func TestGlyphCoversEveryStatus(t *testing.T) {
 // Every live status must have its own glyph: two statuses sharing one is a
 // rail that cannot distinguish states the daemon distinguishes.
 //
-// "running" is temporarily exempt from the unknown-glyph check: the script
-// status has no glyph arm yet, and the render task that owns glyph.go will
-// add one (together with Working/workingLabel). Once that arm exists, remove
-// the exemption — a live status falling through to "·" is still a bug.
+// A live status falling through to "·" is a bug: the glyph vocabulary is
+// closed over LiveStatuses, so the arm must exist by the time the status
+// lands in the set.
 func TestEveryLiveStatusHasADistinctGlyph(t *testing.T) {
 	c := assert.NewCollecting(t)
 	seen := map[string]string{}
 	for _, st := range rail.LiveStatuses() {
 		g := rail.Glyph(rail.Node{Status: st})
-		if st == "running" && g == "·" {
-			continue // no running arm yet; owned by the render task, not this test
-		}
 		c.NotEq("·", g, "status %q falls through to the unknown glyph", st)
 		prev, dup := seen[g]
 		c.False(dup, "statuses %q and %q share glyph %q", prev, st, g)
 		seen[g] = st
 	}
+}
+
+func TestGlyphRunningIsTheScriptRun(t *testing.T) {
+	assert.NewCollecting(t).Eq("▶", rail.Glyph(rail.Node{Status: "running"}), "the script run's glyph")
 }
 
 func TestGlyphExitCodeDecidesTheMark(t *testing.T) {
@@ -75,7 +75,7 @@ func TestGlyphOfAnUnknownStatusIsNeverEmpty(t *testing.T) {
 
 func TestAnimatedGlyphSpinsOnlyWhileWorking(t *testing.T) {
 	c := assert.NewCollecting(t)
-	for _, status := range []string{"streaming", "tool_running", "compacting"} {
+	for _, status := range []string{"streaming", "running", "tool_running", "compacting"} {
 		n := rail.Node{Status: status}
 		f0, f1 := rail.AnimatedGlyph(n, 0), rail.AnimatedGlyph(n, 1)
 		c.NotEq(f1, f0, "status %q: AnimatedGlyph did not change between ticks (%q both)", status, f0)

@@ -1195,6 +1195,12 @@ see or one child when named. `rafiki logs <id> -f` is the same stream for
 one child with the full history first; `-r` on either emits raw protojson
 events.
 
+A SCRIPT child has no conversation, so its backfill reads the durable event
+log instead of GetHistory: its `script_output` events (stdout verbatim,
+stderr prefixed `stderr| `) and `script_report` events replay from ordinal 0
+and the live stream resumes from there — the same record the cockpit's pane
+replays for a script row.
+
 ### Keys
 
 Two focus targets — the input box and the agent rail — toggled with `⇥`.

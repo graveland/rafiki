@@ -30,6 +30,9 @@ const (
 	KindUser
 	KindAssistant
 	KindPendingUser
+	// KindScriptOutput is one chunk of a script child's stdout or stderr. Its
+	// Stream field says which; Text is the verbatim output.
+	KindScriptOutput
 )
 
 // ToolCall is one tool invocation inside an assistant turn.
@@ -61,6 +64,8 @@ type Block struct {
 	ToolCalls  []ToolCall
 	StopReason string
 	Final      bool // true when the turn has ended
+	// Stream marks a KindScriptOutput block's stream ("stdout"/"stderr").
+	Stream string
 }
 
 // Fingerprint returns a cheap content hash for cache-invalidation.
@@ -89,6 +94,9 @@ func (b Block) Fingerprint() string {
 		}
 	}
 	sb.WriteString(b.StopReason)
+	if b.Stream != "" {
+		sb.WriteString(b.Stream)
+	}
 	if b.Final {
 		sb.WriteString("final")
 	}
@@ -293,10 +301,44 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 				Final: true,
 			})
 		}
+	case *rafikiv1.Event_ScriptOutput:
+		// A script child's stdout/stderr. This is the script's WHOLE output
+		// record -- it has no conversation rows and no turns, so unlike an LLM
+		// child's events these land in the transcript as content, not as
+		// commentary. stderr is visually distinct: a `stderr| ` prefix keeps a
+		// run's diagnostics readable against its real output without inventing
+		// a second block stream. Applied through ApplyHistory or Apply alike --
+		// the payload carries no cursor semantics of its own.
+		s.Blocks = append(s.Blocks, Block{
+			Kind:   KindScriptOutput,
+			At:     time.Now(),
+			Text:   p.ScriptOutput.GetText(),
+			Stream: p.ScriptOutput.GetStream(),
+			Final:  true,
+		})
+		s.recomputeFinalized()
+	case *rafikiv1.Event_ScriptReport:
+		s.Blocks = append(s.Blocks, Block{
+			Kind:  KindSystem,
+			At:    time.Now(),
+			Text:  scriptReportText(p.ScriptReport),
+			Final: true,
+		})
+		s.recomputeFinalized()
 	case *rafikiv1.Event_ChildExited:
 		// A dead child answers no more tool calls.
 		s.settleAll()
 	}
+}
+
+// scriptReportText renders one ScriptReport as a system line: the caller's
+// own discriminator kind plus its JSON payload, folded to one line.
+func scriptReportText(sr *rafikiv1.ScriptReport) string {
+	text := "report: " + sr.GetKind()
+	if data := sr.GetDataJson(); data != "" {
+		text += " " + strings.Join(strings.Fields(data), " ")
+	}
+	return text
 }
 
 // retryScheduleText renders the will_retry=true schedule line. The fire

@@ -180,10 +180,12 @@ func TestSetMaxCostAssignsDirectly(t *testing.T) {
 
 func TestWorkingMatchesTheMidTurnStatuses(t *testing.T) {
 	c := assert.NewCollecting(t)
-	for _, st := range []string{"streaming", "tool_running", "compacting"} {
+	// "running" is a script's whole run: working for as long as the process
+	// is alive, every consumer that asks "is it working" included.
+	for _, st := range []string{"streaming", "running", "tool_running", "compacting"} {
 		c.True(rail.Working(st), "Working(%q) = false, want true", st)
 	}
-	for _, st := range []string{"spawning", "idle", "blocked_ui", "shutting_down", "exited", "running", ""} {
+	for _, st := range []string{"spawning", "idle", "blocked_ui", "shutting_down", "exited", ""} {
 		c.False(rail.Working(st), "Working(%q) = true, want false", st)
 	}
 }
@@ -360,6 +362,26 @@ func TestSubtreeCostIncludesLiveCost(t *testing.T) {
 	r.Apply(assistantMessageWithCost("c2", 1, 0.30))
 
 	assert.NewCollecting(t).Eq(1.30, r.SubtreeCost("c1"), "SubtreeCost(c1)")
+}
+
+// A script node's cost IS its subtree's spend -- the daemon prices the whole
+// subtree in one rollup -- so the walk must stop there, exactly as the CLI
+// half of the same rule (output.go's subtreeCosts) does. A script→fundi pair
+// at 1.0 each must total 1.0, not 2.0.
+func TestSubtreeCostStopsAtScriptNodes(t *testing.T) {
+	c := assert.NewCollecting(t)
+	r := rail.New()
+	r.Seed([]*rafikiv1.ChildSummary{
+		summary("c1", "root", "", "idle", 0),
+		{ChildId: "cs", Name: "run", Status: "running", Kind: "script",
+			Labels: map[string]string{rail.ParentLabel: "c1"}},
+		summary("cf", "inner", "cs", "idle", 0),
+	})
+	r.Apply(costTurnEnd("c1", 1, 2.0))
+	r.Apply(costTurnEnd("cs", 1, 1.0))
+	r.Apply(costTurnEnd("cf", 1, 1.0))
+	c.Eq(1.0, r.SubtreeCost("cs"), "SubtreeCost(script) = its own cost, not the sum with the fundi child")
+	c.Eq(3.0, r.SubtreeCost("c1"), "SubtreeCost(root) = its own + the script's subtree once")
 }
 
 // TurnEnd carries the cost of ONE turn (Emitter.AgentEnd resets its usage), so

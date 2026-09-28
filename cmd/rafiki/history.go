@@ -207,7 +207,21 @@ func runEventQuery(
 	// Backfill, and the resume cursor taken from where it ended.
 	var cursor *rafikiv1.EventCursor
 	if q.childID != "" && q.tailN != 0 {
-		evs, empty, err := fetchHistory(ctx, ep, client, q.childID)
+		// A script child has no conversation: backfill from the DURABLE EVENT
+		// LOG instead (StreamEvents replay from ordinal 0). Its events ARE the
+		// transcript -- script_output/script_report -- and they live in the
+		// same ordinal space the follow resumes from, so one watermark serves
+		// both. GetHistory would answer NotFound and fall into the "no history
+		// yet" dead end for a child whose whole output is in the log.
+		var evs []*rafikiv1.Event
+		empty := false
+		var err error
+		isScript := isScriptChild(ctx, client, q.childID)
+		if isScript {
+			evs, err = fetchScriptLog(ctx, ep, client, q.childID)
+		} else {
+			evs, empty, err = fetchHistory(ctx, ep, client, q.childID)
+		}
 		if err != nil {
 			return err
 		}
@@ -227,7 +241,14 @@ func runEventQuery(
 		if lastOrd >= 0 {
 			cursor = &rafikiv1.EventCursor{Ordinals: map[string]int32{q.childID: lastOrd}}
 		}
-		printed := filterByTypes(evs, q.types)
+		// The type filter applies client-side to the CONVERSATION backfill;
+		// a script replay's events are already exactly scriptLogReplayTypes,
+		// and filtering them through the conversation default would drop every
+		// script_output it just fetched.
+		printed := evs
+		if !isScript {
+			printed = filterByTypes(evs, q.types)
+		}
 		if q.tailN > 0 && len(printed) > q.tailN {
 			printed = printed[len(printed)-q.tailN:]
 		}
@@ -286,6 +307,59 @@ func fetchHistory(ctx context.Context, ep connectEndpoint, client rafikiv1connec
 		return nil, false, diagnoseConnectError(err, ep.describe)
 	}
 	return resp.Msg.GetEvents(), false, nil
+}
+
+// scriptLogReplayTypes is the durable set a script child's `logs`/`tail`
+// backfill reads from the event log. Mirrors the cockpit's scriptLogReplayTypes
+// (pkg/tui): one vocabulary, two consumers.
+var scriptLogReplayTypes = []string{
+	"script_output",
+	"script_report",
+	"agent_status",
+	"child_spawned",
+	"child_exited",
+	"error",
+}
+
+// isScriptChild reports whether childID's kind is "script", best-effort: an
+// unreachable or unknown child is NOT a script (the ordinary GetHistory path
+// then runs, and its own error handling reports whatever is actually wrong).
+func isScriptChild(ctx context.Context, client rafikiv1connect.ControlClient, childID string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
+	if err != nil {
+		return false
+	}
+	return resp.Msg.GetChild().GetKind() == "script"
+}
+
+// fetchScriptLog replays a script child's durable event log from ordinal 0 —
+// a script has no conversation rows, so GetHistory is not the record to read
+// (its NotFound fallback would fetch the same log through the sequential
+// error path and then print a misleading "no history yet"). The events come
+// back in ordinal order and carry their own ordinals, so the returned slice
+// is the backfill and its last ordinal is the follow's resume cursor.
+func fetchScriptLog(ctx context.Context, ep connectEndpoint, client rafikiv1connect.ControlClient, childID string) ([]*rafikiv1.Event, error) {
+	req := &rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
+		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
+		Types:   scriptLogReplayTypes,
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{childID: -1}},
+	}
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, diagnoseConnectError(err, ep.describe)
+	}
+	defer func() { _ = stream.Close() }()
+	var evs []*rafikiv1.Event
+	for stream.Receive() {
+		evs = append(evs, stream.Msg())
+	}
+	if err := stream.Err(); err != nil && ctx.Err() == nil {
+		return nil, diagnoseConnectError(err, ep.describe)
+	}
+	return evs, nil
 }
 
 // filterByTypes keeps the events whose wire type is in the filter; nil (or

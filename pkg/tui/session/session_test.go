@@ -559,3 +559,48 @@ func TestRetryNoticeDoesNotSettleRunningToolCalls(t *testing.T) {
 
 	assert.NewCollecting(t).NotEq(len(s.Blocks), s.Finalized, "Finalized")
 }
+
+// A script child's stdout lands as a KindScriptOutput block carrying its
+// stream name; stderr is distinguishable from stdout.
+func TestApplyScriptOutput(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_s")
+	s.Apply(&rafikiv1.Event{ChildId: "c_s", Payload: &rafikiv1.Event_ScriptOutput{
+		ScriptOutput: &rafikiv1.ScriptOutput{Stream: "stdout", Text: "step 1\n"},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_s", Payload: &rafikiv1.Event_ScriptOutput{
+		ScriptOutput: &rafikiv1.ScriptOutput{Stream: "stderr", Text: "warn\n"},
+	}})
+	c.Require().Len(s.Blocks, 2, "blocks")
+	c.Eq(session.KindScriptOutput, s.Blocks[0].Kind, "block[0] kind")
+	c.Eq("stdout", s.Blocks[0].Stream, "block[0] stream")
+	c.Eq("stderr", s.Blocks[1].Stream, "block[1] stream")
+}
+
+// ApplyHistory folds a script_output the same way, and — the invariant —
+// never touches the cursor: a replayed log event's ordinal is the EVENT log's,
+// and a session fed through ApplyHistory keeps whatever cursor its live feed
+// established.
+func TestApplyHistoryScriptOutputDoesNotMoveTheCursor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_s")
+	ord := int32(41)
+	s.ApplyHistory(&rafikiv1.Event{ChildId: "c_s", Ordinal: &ord,
+		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+			Stream: "stdout", Text: "from the log replay"}}})
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.False(s.HasCursor, "ApplyHistory set the cursor; the two ordinal spaces are unrelated")
+}
+
+// A ScriptReport renders as a system line naming the caller's kind.
+func TestApplyScriptReport(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_s")
+	s.Apply(&rafikiv1.Event{ChildId: "c_s", Payload: &rafikiv1.Event_ScriptReport{
+		ScriptReport: &rafikiv1.ScriptReport{Kind: "progress", DataJson: `{"step": 3}`},
+	}})
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq(session.KindSystem, s.Blocks[0].Kind, "block kind")
+	c.StrContains(s.Blocks[0].Text, "report: progress", "report text")
+	c.StrContains(s.Blocks[0].Text, `"step": 3`, "report payload")
+}

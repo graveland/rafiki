@@ -1497,7 +1497,13 @@ func (c *Cockpit) scrollFocused(msg tea.KeyPressMsg) tea.Cmd {
 // for callers that genuinely want queueing -- a coordinator's agent_send,
 // where the debounce and the per-(child, source) coalescing are the point.
 func sendModeFor(mode rafikiv1.SendMode, status string) rafikiv1.SendMode {
-	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && rail.Working(status) {
+	// "running" is deliberately NOT rewritten even though Working("running")
+	// is true: it is a script child's whole-run status, and a script has no
+	// turn to steer INTO. A STEER send at a script would be delivered on its
+	// Receive stream (connect_script.go's textMessage forwards the mode) as
+	// out-of-band input to a plain process, not injected into any turn --
+	// queue it as a prompt instead.
+	if mode == rafikiv1.SendMode_SEND_MODE_PROMPT && status != "running" && rail.Working(status) {
 		return rafikiv1.SendMode_SEND_MODE_STEER
 	}
 	return mode
@@ -1928,17 +1934,83 @@ func (c *Cockpit) previewSettle(seq int) tea.Cmd {
 	return nil
 }
 
-// fetchHistoryOnce issues GetHistory for childID unless one is already in
-// flight for it. History is not deduplicated -- ApplyHistory deliberately
-// bypasses the ordinal cursor because the two ordinal spaces are unrelated --
-// so two responses for one child would append every block twice. openFocus is
-// the only fetch issuer; historyMsg clears the flag on arrival.
+// fetchHistoryOnce issues the transcript fetch for childID unless one is
+// already in flight for it. History is not deduplicated -- ApplyHistory
+// deliberately bypasses the ordinal cursor because the two ordinal spaces are
+// unrelated -- so two responses for one child would append every block twice.
+// openFocus is the only fetch issuer; historyMsg clears the flag on arrival.
+//
+// A SCRIPT child has no conversation to read: GetHistory resolves its rows
+// through conversation_message, and a script has none, so the fetch is a
+// StreamEvents REPLAY of its durable event log instead (the same log the
+// focus stream resumes from -- one ordinal space, so the watermark carried in
+// historyMsg.after is the correct resume point). GetHistory is never dialled
+// for a script: on a child with no conversation it answers NotFound, and the
+// fallback it would then trigger replays the same log through the visibly
+// sequential error path.
 func (c *Cockpit) fetchHistoryOnce(childID string) tea.Cmd {
 	if c.historyInFlight[childID] {
 		return nil
 	}
 	c.historyInFlight[childID] = true
+	if n, ok := c.rail.Get(childID); ok && n.Kind == "script" {
+		return c.scriptLogCmd(childID)
+	}
 	return c.historyCmd(childID)
+}
+
+// scriptLogReplayTypes is the durable set a script child's pane is backfilled
+// from. script_output is the output itself; the lifecycle types give the pane
+// the same spawn/exit frame every transcript has, and agent_status carries
+// the session's Status line. Durable tier only: the pane is a replay, not a
+// live subscription (that is the focus stream's job once it opens).
+var scriptLogReplayTypes = []string{
+	"script_output",
+	"script_report",
+	"agent_status",
+	"child_spawned",
+	"child_exited",
+	"error",
+}
+
+// scriptLogCmd replays a script child's whole durable event log through one
+// StreamEvents call, folding it into a historyMsg shaped exactly like the
+// GetHistory path's -- same handler, same ApplyHistory fold, same
+// MarkRead-on-display. after is the replay's LAST ORDINAL (the event-log
+// watermark, captured after the replay: the focus stream that then opens
+// resumes from there and anything logged during the replay arrives live,
+// at worst one event late into the pane and never silently skipped).
+func (c *Cockpit) scriptLogCmd(childID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		req := &rafikiv1.StreamEventsRequest{
+			Subject: &rafikiv1.EventSubject{
+				Scope: &rafikiv1.EventSubject_Child{Child: childID},
+			},
+			Tier:   rafikiv1.EventTier_EVENT_TIER_DURABLE,
+			Types:  scriptLogReplayTypes,
+			Cursor: &rafikiv1.EventCursor{Ordinals: map[string]int32{childID: -1}},
+		}
+		stream, err := c.client.StreamEvents(ctx, connect.NewRequest(req))
+		if err != nil {
+			return historyMsg{childID: childID, after: -1, err: err}
+		}
+		defer func() { _ = stream.Close() }()
+		var evs []*rafikiv1.Event
+		var last int32 = -1
+		for stream.Receive() {
+			ev := stream.Msg()
+			evs = append(evs, ev)
+			if o := ev.GetOrdinal(); o > last {
+				last = o
+			}
+		}
+		if err := stream.Err(); err != nil {
+			return historyMsg{childID: childID, after: -1, err: err}
+		}
+		return historyMsg{childID: childID, events: evs, after: last}
+	}
 }
 
 func (c *Cockpit) neighbour(delta int) string {
@@ -2097,6 +2169,8 @@ func workingLabel(status string) string {
 	switch status {
 	case "streaming":
 		return "streaming…"
+	case "running":
+		return "running…"
 	case "tool_running":
 		return "running tool…"
 	case "compacting":

@@ -4,6 +4,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"google.golang.org/protobuf/proto"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/rail"
@@ -272,14 +274,20 @@ func TestStatusLineIdentityClipsToWidth(t *testing.T) {
 }
 
 func TestTranscriptShowsWorkingSpinnerWhenBusy(t *testing.T) {
-	c := newTestCockpit("c_1")
-	c.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	c.rail.Seed([]*rafikiv1.ChildSummary{
-		{ChildId: "c_1", Name: "scout", Status: "streaming", Labels: map[string]string{}},
-	})
-
-	got := ansi.Strip(c.View().Content)
-	assert.NewCollecting(t).StrContains(got, "streaming…", "transcript missing the working spinner line:\n")
+	c := assert.NewCollecting(t)
+	for _, status := range []string{"streaming", "running"} {
+		cc := newTestCockpit("c_1")
+		cc.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		cc.rail.Seed([]*rafikiv1.ChildSummary{
+			{ChildId: "c_1", Name: "scout", Status: status, Labels: map[string]string{}},
+		})
+		want := "streaming…"
+		if status == "running" {
+			want = "running…"
+		}
+		got := ansi.Strip(cc.View().Content)
+		c.StrContains(got, want, "status %q: transcript missing the working spinner line:\n", status)
+	}
 }
 
 func TestTranscriptHasNoWorkingSpinnerWhenIdle(t *testing.T) {
@@ -1373,6 +1381,100 @@ func TestHopBackDoesNotRefetchHistory(t *testing.T) {
 	assert.NewCollecting(t).Nil(c.hop("c_1"), "hopping back to a child whose transcript is already loaded must not re-fetch history")
 }
 
+// ── script children: the event log IS the transcript ───────────────────────
+
+// scriptOutputEventFor builds a durable script_output event.
+func scriptOutputEventFor(id string, ordinal int32, stream, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: id, Ordinal: &ordinal,
+		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+			Stream: stream, Text: text,
+		}},
+	}
+}
+
+func transcriptDump(c *Cockpit, id string) string {
+	s := c.sessions[id]
+	if s == nil {
+		return "<no session>"
+	}
+	var parts []string
+	for i, b := range s.Blocks {
+		parts = append(parts, fmt.Sprintf("block[%d] kind=%d stream=%q text=%q", i, b.Kind, b.Stream, b.Text))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// A script child's pane is backfilled from the EVENT LOG (StreamEvents
+// replay), not GetHistory — a script has no conversation rows. The fold is
+// ApplyHistory-shaped and must NOT move the cursor into a wrong space: the
+// resume point carried in historyMsg.after IS the event-log ordinal, the same
+// space the focus stream resumes from.
+func TestScriptChildPaneBackfillsFromTheEventLog(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestCockpit("c_s")
+	defer c.shutdown()
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		{ChildId: "c_s", Name: "nightly", Status: "running", Kind: "script",
+			Labels: map[string]string{}, LatestOrdinal: proto.Int32(7)},
+	}})
+
+	// The replay's shape, exactly as scriptLogCmd delivers it: stdout chunks,
+	// a stderr chunk, a report, and the exit frame — with the replay's last
+	// ordinal as the watermark.
+	c.Update(historyMsg{childID: "c_s", after: 7, events: []*rafikiv1.Event{
+		scriptOutputEventFor("c_s", 0, "stdout", "building..."),
+		scriptOutputEventFor("c_s", 1, "stderr", "warn: slow disk"),
+		{ChildId: "c_s", Ordinal: proto.Int32(2), Payload: &rafikiv1.Event_ScriptReport{
+			ScriptReport: &rafikiv1.ScriptReport{Kind: "progress", DataJson: `{"step": 3}`}},
+		},
+		{ChildId: "c_s", Ordinal: proto.Int32(3), Payload: &rafikiv1.Event_ChildExited{
+			ChildExited: &rafikiv1.ChildExited{ExitCode: proto.Int32(0)}},
+		},
+	}})
+
+	s := c.sessions["c_s"]
+	ck.Require().NotNil(s, "script session")
+	var stdout, stderr, report bool
+	for _, b := range s.Blocks {
+		switch {
+		case b.Kind == session.KindScriptOutput && b.Stream == "stdout" && strings.Contains(b.Text, "building..."):
+			stdout = true
+		case b.Kind == session.KindScriptOutput && b.Stream == "stderr" && strings.Contains(b.Text, "warn: slow disk"):
+			stderr = true
+		case b.Kind == session.KindSystem && strings.Contains(b.Text, "report: progress"):
+			report = true
+		}
+	}
+	ck.True(stdout, "stdout chunk missing from the pane\n%s", transcriptDump(c, "c_s"))
+	ck.True(stderr, "stderr chunk missing from the pane\n%s", transcriptDump(c, "c_s"))
+	ck.True(report, "script_report missing from the pane\n%s", transcriptDump(c, "c_s"))
+	ck.Eq(7, s.Cursor, "the cursor must take the EVENT-LOG watermark, never move into another ordinal space")
+	ck.True(c.stopFocus != nil, "the replay must have opened the focus stream (resume 7)")
+}
+
+// The script pane's RENDERED lines show the stdout text and mark stderr lines
+// with the distinct stderr gutter.
+func TestScriptPaneRendersStdoutAndStderr(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := newTestCockpit("c_s")
+	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
+		{ChildId: "c_s", Name: "nightly", Status: "running", Kind: "script",
+			Labels: map[string]string{}, LatestOrdinal: proto.Int32(3)},
+	}})
+	c.Update(historyMsg{childID: "c_s", after: 3, events: []*rafikiv1.Event{
+		scriptOutputEventFor("c_s", 0, "stdout", "step 1 ok"),
+		scriptOutputEventFor("c_s", 1, "stderr", "warn: retrying"),
+	}})
+
+	s := c.sessions["c_s"]
+	lines := c.pane("c_s").renderer.Lines(s.Blocks, s.Finalized, 80)
+	joined := strings.Join(lines, "\n")
+	ck.StrContains(joined, "step 1 ok", "stdout line missing from the rendered pane:\n%s", joined)
+	ck.StrContains(joined, "stderr│ ", "stderr line missing its distinct gutter:\n%s", joined)
+	ck.StrContains(joined, "warn: retrying", "stderr text missing:\n%s", joined)
+}
+
 // ── the session's single feed ──────────────────────────────────────────────
 
 // The pending echo must clear when the sent message comes back on the focus
@@ -2358,6 +2460,7 @@ func TestEnterSteersABusyAgent(t *testing.T) {
 		{"streaming", rafikiv1.SendMode_SEND_MODE_STEER},
 		{"tool_running", rafikiv1.SendMode_SEND_MODE_STEER},
 		{"compacting", rafikiv1.SendMode_SEND_MODE_STEER},
+		{"running", rafikiv1.SendMode_SEND_MODE_PROMPT},
 		{"idle", rafikiv1.SendMode_SEND_MODE_PROMPT},
 		{"spawning", rafikiv1.SendMode_SEND_MODE_PROMPT},
 		{"blocked_ui", rafikiv1.SendMode_SEND_MODE_PROMPT},
@@ -2374,6 +2477,16 @@ func TestExplicitModesAreNotRewritten(t *testing.T) {
 	c := assert.NewCollecting(t)
 	c.Eq(rafikiv1.SendMode_SEND_MODE_STEER, sendModeFor(rafikiv1.SendMode_SEND_MODE_STEER, "idle"), "an explicit steer at an idle agent became")
 	c.Eq(rafikiv1.SendMode_SEND_MODE_ABORT, sendModeFor(rafikiv1.SendMode_SEND_MODE_ABORT, "streaming"), "abort was rewritten to")
+}
+
+// A running SCRIPT has no turn to steer into: a STEER send would ride its
+// Receive stream (connect_script.go's textMessage forwards the mode) as
+// out-of-band input to a plain process. Working("running") is true, so this
+// exclusion must be sendModeFor's own deliberate decision.
+func TestRunningScriptIsNeverSteered(t *testing.T) {
+	assert.NewCollecting(t).Eq(rafikiv1.SendMode_SEND_MODE_PROMPT,
+		sendModeFor(rafikiv1.SendMode_SEND_MODE_PROMPT, "running"),
+		"a prompt at a running script was rewritten to STEER, which would reach the script's Receive stream instead of queueing")
 }
 
 // ^L must force a real repaint, not a cached one. The pane skips rebuilding
