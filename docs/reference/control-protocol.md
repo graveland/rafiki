@@ -644,6 +644,14 @@ the query fails, the field is left unset: absent means "not reported", and a
 reported zero would claim a subtree measured at nothing. Every other kind's
 `cost_usd` is still that child's own conversation rollup, unchanged.
 
+The subtree rule shapes the CLIENT walks, not just the daemon's number:
+`rafiki list`'s TOTAL column and the cockpit rail's `SubtreeCost` STOP
+recursion at a script node — the script's figure already IS its subtree's,
+so descending into the children it spawned would double-count them
+(`cmd/rafiki/output.go`, `pkg/tui/cockpit.go`). An unpriced script (its cost
+source missing) reports nil and its client-side subtree total is nil, not a
+partial sum of the priced children beneath it.
+
 **What a kill contains, and what it does not.** Killing a script child
 signals its process group: the script's own subprocesses die with it. Its
 DAEMON-MANAGED descendants — the fundi children it spawned through its
@@ -863,7 +871,50 @@ Every event payload is classified into a tier:
 | `AgentStatus` | durable | Status change from the daemon's closed vocabulary |
 | `Error` | durable | Turn or engine level error event |
 | `CompactionBoundary` | durable | Claude Code compacted this child's context (trigger, optional pre/post token counts) |
+| `ScriptOutput` | durable | One coalesced chunk of a script child's stdout or stderr. Fields: `stream` (`"stdout"`/`"stderr"`) and `text` — the newline-terminated lines or split pieces carried verbatim. Produced by the daemon's per-child coalescer (`cmd/rafikid/script_output.go`); see "Script output" below |
 | `ContentBlockDelta` | ephemeral | Live token/text streaming delta |
+
+Fourteen payload types today: thirteen above plus `ScriptReport` (the
+`Report` verb's stored payload — it reaches a child's own event log only
+when the top-level script has no parent to push to). The count is prose, not
+enforcement; the wire's `Event` oneof is.
+
+### Script output
+
+A script child's stdout and stderr are published as durable `ScriptOutput`
+events, coalesced per child per stream: one event per line would flood the
+event log at line rate. The contract (`cmd/rafikid/script_output.go`):
+
+- **Coalescing** — lines buffer per stream and flush at 4 KiB or 250 ms
+  after the stream's first unflushed line arrived, whichever first.
+- **Seal-before-append** — buffered units are SEALED at the size trigger, so
+  a size-triggered event is at most ~4097 bytes (a 4 KiB unit plus one line
+  that arrives before the seal) and no line is ever split by coalescing.
+- **Oversized lines split at exactly 4 KiB, at a rune boundary** — a lone
+  line longer than the bound becomes sequential pieces, each capped at 4 KiB
+  (the cap respects the UTF-8 rune, never cutting mid-rune), each carrying
+  no newline; the pieces concatenate byte-faithfully. A newline-free run on
+  stderr delivers unterminated 4 KiB FRAGMENTS past the bound, so a
+  `\r`-only progress bar cannot grow daemon memory without bound.
+- **UTF-8 fidelity, not byte fidelity** — every chunk is sanitized with
+  `strings.ToValidUTF8` at ingestion, because a mid-rune cut would otherwise
+  hand protobuf-go a string it refuses to marshal. The contract is
+  line-faithful for valid UTF-8 input; arbitrary bytes are not guaranteed.
+- **Concatenation reproduces the stream** — every `ScriptOutput` event for
+  one stream, in ordinal order, concatenated, reproduces that stream's
+  valid-UTF-8 output (each line carries its own `\n` terminator; split
+  pieces carry none).
+- **Flush-before-exit** — the final flush runs on child exit BEFORE
+  `child_exited` publishes, so the last output event's ordinal is strictly
+  below the exit's and a backfilling client sees the whole output before the
+  exit.
+
+Rendering: `rafiki logs`/`tail` render `ScriptOutput` text one-line-per-event
+(stdout verbatim, stderr prefixed `stderr| ` at the EVENT's granularity, the
+text flattened to that one-line form). The cockpit renders per rendered line
+with a `stderr│ ` failure-colour prefix, joining adjacent same-stream
+split-piece events so an oversized line stays whole on screen
+(`pkg/tui/session.applyScriptOutput`).
 
 `CompactionBoundary.pre_tokens`/`post_tokens` are both `optional`, and
 deliberately asymmetric across the two ways this event reaches a client.
@@ -880,10 +931,21 @@ bare one-sided format. A client renders the two-sided and one-sided cases
 differently for exactly this reason — see `pkg/tui/session`'s
 `formatCompactionBoundary`.
 
-`AgentStatus.state` is one of the nine `protocol.Status` values: `spawning`, `idle`,
-`streaming`, `tool_running`, `compacting`, `batch_wait`, `blocked_ui`, `shutting_down`,
+`AgentStatus.state` is one of the ten `protocol.Status` values: `spawning`, `idle`,
+`streaming`, `running`, `tool_running`, `compacting`, `batch_wait`, `blocked_ui`, `shutting_down`,
 `exited`. It is a string rather than an enum so a new daemon status does not require
 regenerating every client.
+
+`running` is the script child's status, and it behaves differently from every
+other state: a script child spawns DIRECTLY into it — the transition is
+recorded once at spawn, before the child's stdout is read — and output never
+moves it. A script has no turns, so the turn machinery
+(`idle`/`streaming`/`tool_running`/…) never applies; only the process exit
+replaces `running` (via `shutting_down` on a kill). It is a working status
+for every consumer that asks "is it working": attach's busy wait, the rail's
+live-set and animated glyph, and the CLI's status colour all include it.
+(`pkg/child.StateMachine.ForScript` is the enforcement point; the machine
+must be configured before the first event or the status is misreported.)
 
 `AssistantMessage.cost_usd` and `TurnEnd.cost_usd` carry **different**
 meanings despite sharing a name and a stream. `AssistantMessage.cost_usd` is
@@ -1440,6 +1502,14 @@ and the daemon's lifecycle actions.
 Every transition is published as an `AgentStatus` event, carrying both the
 new and previous state — that is what `GetChild`/`ListChildren` report and
 what `StreamEvents` delivers.
+
+**Script children bypass this table by design.** A `kind: script` child
+enters `running` at spawn (skipping `spawning` — the table's first row is
+the turn-based kinds' path), never passes through the turn states, and
+leaves only at exit (`running → shutting_down → exited` on a kill, `running
+→ exited` on its own exit). No output event is a transition trigger; the
+state machine is configured for the kind before the child's stdout is read
+(`pkg/child.StateMachine.ForScript`).
 
 ### Informational events (no transition)
 

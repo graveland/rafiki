@@ -737,9 +737,26 @@ Refusals:
 | Condition | Code |
 |---|---|
 | empty `childId` | `InvalidArgument` |
-| kind other than claude | `InvalidArgument` |
+| kind other than claude or script | `InvalidArgument` |
 | kind not declared with `--launch` | `FailedPrecondition` — the operator's declaration wins |
 | `childId` already hosted here | `AlreadyExists` |
+
+A `script` kind is hosted like a claude with a different payload: the spec
+carries the pymodule names, not resolved argv — the EXECUTOR resolves them
+against its own synced corpus before daraja starts, and the resolved
+interpreter and script path arrive as the daraja process's binary and
+positional args (there is no claude-style argv builder to reconcile). The
+host's drain differs by kind, and the difference is a script's last output:
+claude's stderr is drained and discarded (its protocol is stdout), but a
+script's stderr is relayed — its tail is what a failed settle carries — and
+the host waits (bounded by `pumpDrainGrace`, 500 ms, the same bounded-drain
+shape as the executor's `stderrDrainGrace`) for BOTH stdout and stderr pumps
+to reach EOF after the process is reaped BEFORE emitting `Exited`. Without
+the wait the host would emit `Exited` while the pumps still hold unread pipe
+data, and a relay consumer that stops reading on `Exited` would lose a hosted
+script's final output — typically a failure's traceback — and with it the
+settle's stderr tail. The bound keeps a wedged pump from delaying the exit
+forever.
 
 `pgid` is NEVER taken from the request: a process group id is recycled once its
 group empties, so signalling a number a peer handed over could reach an

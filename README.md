@@ -422,6 +422,18 @@ spawned through its socket) are NOT swept — the same boundary every kind
 has — so they keep running, keep their budget fence, and can be killed by
 name.
 
+A script child's output is published to its durable event log as coalesced
+`script_output` events (4 KiB/250 ms, whole lines — see
+`docs/reference/control-protocol.md` for the coalescing contract), which is
+what `rafiki logs`/`rafiki tail` and the cockpit replay — the record lives on
+the daemon, so watching works against a remote daemon, not just a local one.
+From spawn to exit the child's status is `running` (the rail's ▶ glyph;
+output never moves it — a script has no turns, so the idle/streaming
+machinery never applies), and its `cost_usd` is its SUBTREE's spend: the
+script drives no LLM turns of its own, but the children it spawned do, and
+client-side totals (`rafiki list`'s TOTAL, the cockpit rail) stop descending
+at a script node so the subtree is never counted twice.
+
 **Where scripts run.** When an executor pool is configured and one of its
 executors was started with `--launch script`, the child is hosted ON that
 executor under daraja: the executor resolves the pymodule from its own synced
@@ -1196,10 +1208,14 @@ one child with the full history first; `-r` on either emits raw protojson
 events.
 
 A SCRIPT child has no conversation, so its backfill reads the durable event
-log instead of GetHistory: its `script_output` events (stdout verbatim,
-stderr prefixed `stderr| `) and `script_report` events replay from ordinal 0
+log instead of GetHistory — which is why script output works against a
+REMOTE daemon too: the record is in the log, not in any local process. Its
+`script_output` events (stdout verbatim, stderr prefixed `stderr| `) and
+`script_report` events replay from ordinal 0
 and the live stream resumes from there — the same record the cockpit's pane
-replays for a script row.
+replays for a script row. A live script child's status is `running` from
+spawn to exit — output never moves it — and its `cost_usd` is its subtree's
+spend, the fundi and claude children it spawned priced into it.
 
 ### Keys
 
