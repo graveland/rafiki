@@ -126,13 +126,32 @@ func TestApplyProviderPrefsZeroSpecUnchanged(t *testing.T) {
 		{"extras + pin", "z-ai/glm-5.2", noAlias, nil, map[string]any{"top_k": float64(7)},
 			`{"max_tokens":16,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"z-ai/glm-5.2","top_k":7,"provider":{"only":["fireworks"]}}`},
 	}
+	// canonicalBody normalises a body through decode-to-map/encode, because
+	// the SDK marshals ExtraFields in MAP ORDER — nondeterministic whenever a
+	// body carries two or more extra top-level keys ("extras + pin" flips
+	// top_k/provider between runs). Identity is pinned on the canonical form:
+	// the same keys, values and nesting as the pre-spec client, not one
+	// particular random key order.
+	canonicalBody := func(t *testing.T, b []byte) string {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		out, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("re-marshal body: %v", err)
+		}
+		return string(out)
+	}
 	for _, tc := range cases {
 		params := anthropic.MessageNewParams{Model: anthropic.Model(tc.model), MaxTokens: 16,
 			Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("hi"))}}
 		applyProviderPrefs(&params, tc.alias, tc.guard, tc.extras, routing.Spec{})
 		b, err := json.Marshal(params)
 		ck.Require().NoError(err, "marshal %s", tc.name)
-		ck.Eq(tc.golden, string(b), "%s: body must be byte-identical to the pre-spec client", tc.name)
+		ck.Eq(canonicalBody(t, []byte(tc.golden)), canonicalBody(t, b),
+			"%s: body must be identical to the pre-spec client", tc.name)
 	}
 	ck.Require()
 }
