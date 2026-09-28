@@ -156,9 +156,7 @@ func TestBatchRoutingEnvelopeCarriesProviderOnly(t *testing.T) {
 	c.Require().NoError(json.Unmarshal(gotBody, &envelope), "decode submit envelope")
 	c.Len(envelope.Provider, 1, "provider carries exactly one key, got %v", envelope.Provider)
 	var onlyList []any
-	for _, v := range envelope.Provider["only"].([]any) {
-		onlyList = append(onlyList, v)
-	}
+	onlyList = append(onlyList, envelope.Provider["only"].([]any)...)
 	c.EqDiff([]any{"deepinfra"}, onlyList, "the only list")
 	c.False(strings.Contains(string(envelope.Requests[0].Body), "provider"),
 		"the per-call body must carry no provider key: %s", envelope.Requests[0].Body)
