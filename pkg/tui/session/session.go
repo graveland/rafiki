@@ -356,6 +356,7 @@ func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
 	s.recomputeFinalized()
 }
 
+// scriptReportText renders one ScriptReport as a system line: the caller's
 // own discriminator kind plus its JSON payload, folded to one line.
 func scriptReportText(sr *rafikiv1.ScriptReport) string {
 	text := "report: " + sr.GetKind()

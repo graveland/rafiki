@@ -152,7 +152,11 @@ type scriptOutputCoalescer struct {
 // registerScriptOutputCoalescer creates the coalescer for childID and
 // registers it, so handleChildExit can find and close it. Called lazily on a
 // script child's FIRST line of output — a spawn that fails or prints nothing
-// never creates one, so there is nothing to clean up on those paths.
+// never creates one, so there is nothing to clean up on those paths. Returns
+// nil when the child has already exited (the abandon path: a late line racing
+// the exit), so no coalescer is ever registered after the take — the exited
+// check and the registration share ONE critical section, closing the
+// check-then-register window a two-step check would leave open.
 func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutputCoalescer {
 	co := &scriptOutputCoalescer{
 		c:       c,
@@ -164,6 +168,10 @@ func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutput
 		stopped: make(chan struct{}),
 	}
 	c.scriptOutputsMu.Lock()
+	if st, ok := c.scriptOutputState[childID]; ok && st.exited {
+		c.scriptOutputsMu.Unlock()
+		return nil
+	}
 	if c.scriptOutputs == nil {
 		c.scriptOutputs = make(map[string]*scriptOutputCoalescer)
 	}
@@ -175,18 +183,19 @@ func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutput
 
 // takeScriptOutputCoalescer removes and returns the child's coalescer, or nil
 // when the child never produced output (and so never registered one). The
-// removal marks the per-spawn state exited IN THE SAME CRITICAL SECTION, so a
-// hook call that arrives after the exit (the abandon path: late stderr after
-// closeDone) sees it and drops its line instead of registering a coalescer
-// nobody would ever close — a leaked goroutine and a ScriptOutput published
-// after child_exited. The removal is also what makes re-registration safe on
-// a later resume of the same child id.
+// removal marks the per-spawn state exited IN THE SAME CRITICAL SECTION and
+// prunes it — the hook closure keeps its own pointer, so a late line racing
+// the exit (the abandon path) sees exited and drops rather than registering
+// a coalescer nobody would ever close; without the delete the map would gain
+// one entry per script spawn and never shrink. The removal is also what makes
+// re-registration safe on a later resume of the same child id.
 func (c *Controller) takeScriptOutputCoalescer(childID string) *scriptOutputCoalescer {
 	c.scriptOutputsMu.Lock()
 	co := c.scriptOutputs[childID]
 	delete(c.scriptOutputs, childID)
 	if st, ok := c.scriptOutputState[childID]; ok {
 		st.exited = true
+		delete(c.scriptOutputState, childID)
 	}
 	c.scriptOutputsMu.Unlock()
 	return co
@@ -195,6 +204,8 @@ func (c *Controller) takeScriptOutputCoalescer(childID string) *scriptOutputCoal
 // scriptOutputHookState is the per-spawn state scriptOutputHook closes over.
 // It exists so the exit is visible to the hook: takeScriptOutputCoalescer
 // flips exited in the same critical section it removes the registry entry.
+// The hook reads it only THROUGH registerScriptOutputCoalescer's critical
+// section, never on its own.
 type scriptOutputHookState struct {
 	exited bool
 }
@@ -216,13 +227,15 @@ func (c *Controller) scriptOutputHook(childID string) func(stream, line string, 
 	c.scriptOutputState[childID] = state
 	c.scriptOutputsMu.Unlock()
 	return func(stream, line string, terminated bool) {
-		c.scriptOutputsMu.Lock()
-		exited := state.exited
-		c.scriptOutputsMu.Unlock()
-		if exited {
+		once.Do(func() { co = c.registerScriptOutputCoalescer(childID) })
+		// co is nil when the child had already exited by the time the first
+		// line registered — including the take racing inside the registration's
+		// critical section (the abandon path). Drop the line: no registration
+		// after exit, no publish after child_exited, no goroutine parked on a
+		// done nobody closes.
+		if co == nil {
 			return
 		}
-		once.Do(func() { co = c.registerScriptOutputCoalescer(childID) })
 		co.Add(stream, line, terminated)
 	}
 }
@@ -265,7 +278,11 @@ func (s *scriptOutputCoalescer) Add(stream, line string, terminated bool) {
 	}
 	if !terminated {
 		// A fragment is its own sealed unit, byte-faithful, no '\n' added —
-		// the same shape an oversized split's pieces already had.
+		// the same shape an oversized split's pieces already had. The open
+		// buffer seals FIRST: units publish immediately while buf waits for
+		// its 250 ms deadline, so a fragment must not jump ahead of earlier
+		// terminated lines still waiting there.
+		st.sealLocked()
 		st.units = append(st.units, []byte(line))
 		s.mu.Unlock()
 		s.wakeNonblock()

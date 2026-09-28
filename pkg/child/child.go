@@ -92,7 +92,7 @@ type SpawnSpec struct {
 	// stream the protocol providers never parse). terminated reports whether
 	// the chunk ended at a line boundary: true for a full line (the receiver
 	// adds the '\n'), false for an unterminated FRAGMENT — readStderr's
-	// bounded accumulator hands off its first scriptOutputFlushBytes when a
+	// bounded accumulator hands off its first stderrFragmentBytes when a
 	// newline-less blob exceeds that, so daemon memory stays bounded no matter
 	// how much newline-free output a script produces; fragments of one blob
 	// arrive in sequence and concatenate back byte-faithfully. The daemon's
@@ -1039,7 +1039,15 @@ func (c *Child) readStderr() {
 	const maxErr = 4 << 20
 	var pending []byte // bounded line accumulator; used only when the hook is set
 	deliver := func(text []byte, terminated bool) {
-		c.onScriptOutput("stderr", string(trimCR(text)), terminated)
+		// trimCR only a TERMINATED line: a fragment's bytes are raw and must
+		// arrive byte-faithful (a '\r' at a fragment boundary stays literal;
+		// the next chunk starting with '\n' yields the empty terminated line,
+		// so the CRLF case still round-trips).
+		line := text
+		if terminated {
+			line = trimCR(text)
+		}
+		c.onScriptOutput("stderr", string(line), terminated)
 	}
 	for {
 		n, err := br.Read(buf)
@@ -1071,16 +1079,35 @@ func (c *Child) readStderr() {
 					pending = pending[i+1:]
 				}
 				// Bound the accumulator: a newline-free blob longer than the
-				// flush bound hands its first bound bytes (rune-cut) off as an
+				// flush bound hands its first bound bytes off as an
 				// unterminated fragment, keeping pending below the bound.
 				for len(pending) >= stderrFragmentBytes {
-					// Cut at a rune boundary: step back while the byte
-					// BEFORE the cut is a continuation byte (a rune that
-					// straddles — or is truncated at — the cut), so the
-					// delivered prefix never ends mid-rune.
+					// Cut at a rune boundary: the byte AT the cut must start a
+					// rune, so the delivered prefix never ends mid-rune — the
+					// coalescer's own rule. Also step back when the rune that
+					// STARTS before the cut would extend PAST it (possible when
+					// pending is exactly the bound and no byte at the cut exists
+					// to inspect). The step-back is capped at 3 bytes (a rune is
+					// at most 4); the input here is RAW, so a run of ≥4096
+					// continuation bytes has no boundary within reach — cut at
+					// exactly the bound and let the coalescer's sanitize handle
+					// the invalid bytes rather than spinning with an empty cut.
 					cut := stderrFragmentBytes
-					for cut > 0 && !utf8.RuneStart(pending[cut-1]) {
-						cut--
+					for i := 0; i < 3; i++ {
+						if cut < len(pending) && !utf8.RuneStart(pending[cut]) {
+							// The byte at the cut continues a rune started
+							// earlier: cut would land mid-rune.
+							cut--
+							continue
+						}
+						// With no byte at the cut (pending is exactly the
+						// bound), a lead byte AT cut-1 whose rune extends past
+						// the cut means the cut lands mid-rune too.
+						if b := pending[cut-1]; cut == len(pending) && b >= 0xC0 {
+							cut--
+							continue
+						}
+						break
 					}
 					deliver(pending[:cut], false)
 					pending = append(pending[:0], pending[cut:]...)

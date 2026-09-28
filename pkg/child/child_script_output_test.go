@@ -3,12 +3,16 @@
 package child
 
 import (
+	"bytes"
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -108,4 +112,119 @@ func waitForScriptLines(t *testing.T, mu *sync.Mutex, got *[]string, want []stri
 	mu.Lock()
 	defer mu.Unlock()
 	t.Fatalf("timed out waiting for hook lines %v; got %v", want, *got)
+}
+
+// R1/R2 regressions on the bounded fragment hand-off.
+//
+// R1: a newline-free run of ≥4096 continuation bytes (0x80–0xBF) has no rune
+// boundary within 3 bytes of the cut. The step-back must be capped there and
+// never deliver an empty fragment — uncapped, the loop cut to 0, delivered
+// nothing, left pending untouched and spun forever (744k hook calls in 1 s,
+// unbounded empty units, the script blocked on write).
+func TestScriptOutputFragmentsOfContinuationBytesDoNotSpin(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+
+	var mu sync.Mutex
+	var calls int
+	var total int
+
+	dir := t.TempDir()
+	blob := bytes.Repeat([]byte{0x80}, 5000)
+	blobPath := filepath.Join(dir, "blob")
+	ck.NoError(os.WriteFile(blobPath, blob, 0o600), "write blob fixture")
+	c, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:  "c_script_contspin",
+		Cwd:      dir,
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", "cat " + blobPath + " >&2"},
+		Provider: ScriptProvider{},
+		OnScriptOutput: func(stream, line string, terminated bool) {
+			mu.Lock()
+			calls++
+			total += len(line)
+			mu.Unlock()
+		},
+	})
+	ck.Require().NoError(err, "Spawn")
+	t.Cleanup(func() { _, _ = c.Shutdown(time.Second, time.Second) })
+
+	// Wait for the whole blob to drain through the hook — a spinning reader
+	// would never get there.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := total >= len(blob)
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	ck.True(total >= len(blob), "the drain stalled (spin): %d of %d bytes delivered after 10 s, %d calls", total, len(blob), calls)
+	ck.False(calls > 1000, "hook fired %d times for %d bytes: empty-fragment spin", calls, len(blob))
+}
+
+// R2: the rune cut must check the byte AT the cut (the coalescer's rule), so
+// valid multi-byte stderr is never split mid-rune: every fragment is valid
+// UTF-8 and the fragments concatenate back to the input.
+func TestScriptOutputFragmentsKeepMultiByteRunesIntact(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+
+	var mu sync.Mutex
+	var frags []string
+	var termFrags int
+
+	dir := t.TempDir()
+	// 3000 × 中 = 9000 bytes, no newline: two full fragments plus an
+	// unterminated tail (which arrives terminated=true at EOF).
+	blob := strings.Repeat("中", 3000)
+	blobPath := filepath.Join(dir, "blob")
+	ck.NoError(os.WriteFile(blobPath, []byte(blob), 0o600), "write blob fixture")
+	c, err := Spawn(context.Background(), SpawnSpec{
+		ChildID:  "c_script_cjkfrag",
+		Cwd:      dir,
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", "cat " + blobPath + " >&2"},
+		Provider: ScriptProvider{},
+		OnScriptOutput: func(stream, line string, terminated bool) {
+			mu.Lock()
+			frags = append(frags, line)
+			if terminated {
+				termFrags++
+			}
+			mu.Unlock()
+		},
+	})
+	ck.Require().NoError(err, "Spawn")
+	t.Cleanup(func() { _, _ = c.Shutdown(time.Second, time.Second) })
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := len(frags) > 0 && len(strings.Join(frags, "")) >= len(blob)
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	ck.Require().True(len(frags) >= 2, "got %d fragments for %d bytes", len(frags), len(blob))
+	var joined strings.Builder
+	for i, f := range frags {
+		joined.WriteString(f)
+		ck.True(utf8.ValidString(f), "fragment %d is invalid UTF-8 (cut mid-rune): len %d, head=% x tail=% x", i, len(f), f[:min(6, len(f))], f[max(0, len(f)-6):])
+	}
+	ck.Eq(blob, joined.String(), "fragments do not concatenate back to the input")
+	ck.True(termFrags >= 1, "the trailing partial fragment was never delivered terminated")
 }

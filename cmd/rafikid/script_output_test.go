@@ -553,9 +553,10 @@ func TestScriptOutputFragmentsBoundedPending(t *testing.T) {
 
 	var mu sync.Mutex
 	var frags []string
-	var maxPending atomic.Int64
+	var maxChunk atomic.Int64
+	termCount := 0
 
-	blob := strings.Repeat("x", 1<<20) // 1 MiB, no newline
+	blob := strings.Repeat("x", (1<<20)+1234) // 1 MiB + change, no newline, NOT a multiple of 4096
 	dir := t.TempDir()
 	blobPath := filepath.Join(dir, "blob")
 	ck.NoError(os.WriteFile(blobPath, []byte(blob), 0o600), "write blob fixture")
@@ -568,7 +569,10 @@ func TestScriptOutputFragmentsBoundedPending(t *testing.T) {
 		OnScriptOutput: func(stream, line string, terminated bool) {
 			mu.Lock()
 			frags = append(frags, line)
-			maxPending.Store(max(maxPending.Load(), int64(len(line))))
+			if terminated {
+				termCount++
+			}
+			maxChunk.Store(max(maxChunk.Load(), int64(len(line))))
 			mu.Unlock()
 		},
 	})
@@ -587,9 +591,10 @@ func TestScriptOutputFragmentsBoundedPending(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	ck.False(maxPending.Load() > 4096, "a hook chunk exceeded the fragment bound: %d", maxPending.Load())
+	ck.False(maxChunk.Load() > 4096, "a hook chunk exceeded the fragment bound: %d", maxChunk.Load())
 	mu.Lock()
 	joined := strings.Join(frags, "")
+	ck.True(termCount >= 1, "no terminated delivery: the trailing partial fragment at EOF never arrived")
 	mu.Unlock()
 	ck.Eq(len(blob), len(joined), "fragment concatenation lost bytes")
 	ck.Eq(blob, joined, "fragments do not concatenate back to the input")
@@ -624,6 +629,10 @@ func TestScriptOutputFragmentSealsAsItsOwnUnit(t *testing.T) {
 
 // A4: the 250 ms anchor resets when a size seal happens — lines arriving
 // after a seal flush 250 ms after THEIR arrival, not the sealed content's.
+// The discriminator: the seal and the next line land in the open buffer
+// WITHOUT the loop draining in between (small line at t=0; at t=200 a
+// ~4090-byte line triggers the A5 pre-seal), so the pre-fix code would keep
+// the t=0 anchor and flush at t=250.
 func TestScriptOutputAnchorResetsAfterSeal(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	ctrl := newScriptOutputTestController()
@@ -633,30 +642,42 @@ func TestScriptOutputAnchorResetsAfterSeal(t *testing.T) {
 	clock := newFakeScriptClock()
 	co := newTestScriptCoalescer(ctrl, "c_1", clock)
 
-	// Fill to exactly the trigger: the append seals.
-	co.Add("stdout", strings.Repeat("a", 4095), true)
-	waitUntil(t, "the size seal flush", func() bool { return len(busCh) > 0 })
-	drainScriptBus(busCh)
+	co.Add("stdout", "small", true)
+	waitUntil(t, "the flush timer", func() bool { return len(clock.pending()) == 1 })
 
-	// One more line 10 ms later: its deadline must be ITS arrival + 250 ms
-	// (t=460), not the sealed content's anchor (t=200).
-	clock.advance(10 * time.Millisecond)
-	co.Add("stdout", "after-seal", true)
+	// At t=200 the first line is still buffered (250 ms not yet elapsed).
+	clock.advance(200 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	ck.Eq(0, len(busCh), "flushed before the 250 ms deadline")
+
+	// This line pushes the open buffer past the trigger: the A5 pre-seal
+	// seals "small" as a unit, and the line itself opens the fresh buffer —
+	// with NO publish in between (the timer has not fired, and the loop only
+	// publishes on wake).
+	co.Add("stdout", strings.Repeat("b", 4090), true)
+	// The pre-seal makes "small" a ready unit, which the wake publishes at
+	// once (units are always ready); the new line anchors a fresh 250 ms
+	// deadline from ITS arrival.
+	waitUntil(t, "the sealed unit flush", func() bool { return len(busCh) >= 1 })
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(1, len(evs), "got %d events at the seal", len(evs))
+	ck.Eq("small\n", evs[0].text, "the sealed unit")
 	waitUntil(t, "the post-seal timer", func() bool { return len(clock.pending()) == 1 })
 	pend := clock.pending()
 	ck.Require().Eq(1, len(pend), "expected one outstanding timer")
-	ck.Eq(newFakeScriptClock().now.Add(10*time.Millisecond+250*time.Millisecond).UnixNano(),
-		pend[0].deadline.UnixNano(), "the post-seal anchor was not reset to the new line's arrival")
+	ck.Eq(newFakeScriptClock().now.Add(200*time.Millisecond+250*time.Millisecond).UnixNano(),
+		pend[0].deadline.UnixNano(),
+		"the post-seal anchor was not reset to the new line's arrival (t=450 wanted)")
 
-	// Before t=460 nothing flushes; at t=460 it does.
+	// Before t=450 nothing flushes; at t=450 it does.
 	clock.advance(249 * time.Millisecond)
 	time.Sleep(20 * time.Millisecond)
 	ck.Eq(0, len(busCh), "flushed before the post-seal line's own 250 ms elapsed")
 	clock.advance(1 * time.Millisecond)
-	waitUntil(t, "the post-seal timed flush", func() bool { return len(busCh) > 0 })
-	evs := drainScriptBus(busCh)
-	ck.Require().Eq(1, len(evs), "got %d events", len(evs))
-	ck.Eq("after-seal\n", evs[0].text, "post-seal flush text")
+	waitUntil(t, "the post-seal timed flush", func() bool { return len(busCh) >= 1 })
+	evs = drainScriptBus(busCh)
+	ck.Require().Eq(1, len(evs), "got %d events for the timed flush", len(evs))
+	ck.Eq(strings.Repeat("b", 4090)+"\n", evs[0].text, "the post-seal line")
 	co.Close()
 }
 
@@ -716,9 +737,35 @@ func TestScriptOutputHookDropsLinesAfterExit(t *testing.T) {
 	ck.Eq(0, len(busCh), "a line was published after the exit: %+v", drainScriptBus(busCh))
 	ck.Nil(ctrl.takeScriptOutputCoalescer("c_late"),
 		"the late line registered a coalescer after the exit")
-	// And the dropped registration left no registry state behind.
+	// And the dropped registration left no registry state behind: take pruned
+	// the entry, so the map does not grow once per script spawn over the
+	// daemon's lifetime.
 	ctrl.scriptOutputsMu.Lock()
 	n := len(ctrl.scriptOutputState)
 	ctrl.scriptOutputsMu.Unlock()
-	ck.Eq(1, n, "unexpected scriptOutputState entries")
+	ck.Eq(0, n, "the exited state entry was never pruned")
+}
+
+// R3: a fragment must not publish ahead of earlier terminated lines on the
+// same stream. A terminated line goes into the open buffer (publishing only
+// at its 250 ms deadline); a fragment becomes a unit that publishes at once —
+// so the fragment's Add must seal the buffer first, keeping stream order.
+func TestScriptOutputFragmentDoesNotPassBufferedLines(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
+	co.Add("stderr", "err A", true)
+	co.Add("stderr", strings.Repeat("f", 5000), false) // newline-free continuation
+
+	// The sealed buffer (with "err A") publishes before the fragment unit.
+	waitUntil(t, "the sealed line and fragment", func() bool { return len(busCh) >= 2 })
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(2, len(evs), "got %d events", len(evs))
+	ck.Eq("err A\n", evs[0].text, "the buffered line published after the fragment (out of order)")
+	ck.Eq("stderr", evs[0].stream, "stream")
+	ck.Eq(5000, len(evs[1].text), "the fragment's length")
+	co.Close()
 }

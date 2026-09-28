@@ -199,37 +199,46 @@ func TestScriptLastOutputArrivesBeforeExited(t *testing.T) {
 
 	deadline := time.After(10 * time.Second)
 	var out, errb []byte
-	var sawExited bool
-	for !sawExited {
+	var outAtExit, errbAtExit int
+	for {
 		select {
 		case ev, ok := <-h.Events():
 			c.True(ok, "event channel closed unexpectedly")
 			out = append(out, ev.Stdout...)
 			errb = append(errb, ev.Stderr...)
 			if ev.Exited != nil {
-				sawExited = true
+				// Record the byte counts AT the moment Exited is seen: this is
+				// the ordering pin. Pre-fix, the pumps were still emitting
+				// after Exited, so counting only after a further drain would
+				// pass on the buggy host too.
+				outAtExit, errbAtExit = len(out), len(errb)
+				goto exited
 			}
 		case <-deadline:
-			t.Fatalf("timeout: out=%d err=%d exited=%v", len(out), len(errb), sawExited)
+			t.Fatalf("timeout: out=%d err=%d", len(out), len(errb))
 		}
 	}
-	// drain-on-done: after Exited the host still finishes; keep reading the
-	// queue so nothing is left behind.
+exited:
+	c.True(errbAtExit >= 65536, "stderr lost bytes before Exited: %d of 65536 had arrived", errbAtExit)
+	c.True(outAtExit >= 65536, "stdout lost bytes before Exited: %d of 65536 had arrived", outAtExit)
+
+	// The drain-before-Exited wait means nothing follows Exited: a further
+	// drain must add ZERO bytes (it would mean a pump emitted after Exited —
+	// invisible to a relay consumer, which stops reading at Exited).
+	extra := 0
 	for {
 		select {
 		case ev, ok := <-h.Events():
 			if !ok {
-				return
+				goto drained
 			}
-			out = append(out, ev.Stdout...)
-			errb = append(errb, ev.Stderr...)
+			extra += len(ev.Stdout) + len(ev.Stderr)
 		case <-time.After(2 * time.Second):
 			goto drained
 		}
 	}
 drained:
-	c.True(len(errb) >= 65536, "stderr lost bytes: %d of 65536 arrived before Exited", len(errb))
-	c.True(len(out) >= 65536, "stdout lost bytes: %d of 65536 arrived before Exited", len(out))
+	c.Eq(0, extra, "%d bytes arrived after Exited; the pump drain did not hold", extra)
 	c.True(strings.Count(string(errb), "o") == len(errb), "stderr corrupted")
 	c.True(strings.Count(string(out), "s") == len(out), "stdout corrupted")
 }
