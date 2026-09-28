@@ -75,10 +75,15 @@ type Session struct {
 	Tools          []string
 	NoTools        bool
 	NoBuiltinTools bool
-	Extensions     []string
-	NoExtensions   bool
-	Skills         []string
-	NoSkills       bool
+	// Routing is the child's resolved routing spec (routing.Spec.String()),
+	// recorded at spawn and carried across resume verbatim — it resolves
+	// ONCE, like the preset (see SpawnRequest.Routing). Empty = no spec.
+	// Model carries the base id; the spec lives only here.
+	Routing      string
+	Extensions   []string
+	NoExtensions bool
+	Skills       []string
+	NoSkills     bool
 	// SkillsDirs are extra skill directories for an agent-kind child, so a
 	// resumed child rejoins with the same skill inventory it was spawned with.
 	SkillsDirs []string
@@ -199,13 +204,15 @@ type Snapshot struct {
 	ExitCode     *int
 	ExitSignal   string
 
-	NoSession          bool
-	SessionDir         string
-	ResumeSession      string
-	ForkSession        string
-	Tools              []string
-	NoTools            bool
-	NoBuiltinTools     bool
+	NoSession      bool
+	SessionDir     string
+	ResumeSession  string
+	ForkSession    string
+	Tools          []string
+	NoTools        bool
+	NoBuiltinTools bool
+	// Routing mirrors Session.Routing — see its doc comment.
+	Routing            string
 	Extensions         []string
 	NoExtensions       bool
 	Skills             []string
@@ -291,6 +298,7 @@ func (s *Session) Snapshot() Snapshot {
 		ResumeSession: s.ResumeSession, ForkSession: s.ForkSession,
 		Tools:   copyStrings(s.Tools),
 		NoTools: s.NoTools, NoBuiltinTools: s.NoBuiltinTools,
+		Routing:           s.Routing,
 		Extensions:        copyStrings(s.Extensions),
 		NoExtensions:      s.NoExtensions,
 		Skills:            copyStrings(s.Skills),

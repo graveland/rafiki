@@ -134,6 +134,15 @@ type Config struct {
 	// can never land on a provider the caller did not address.
 	APIKeyOverride string
 
+	// Routing is the resolved canonical routing spec (routing.Spec.String(),
+	// e.g. "sort=price,nodata") the daemon resolved ONCE at spawn and stamped
+	// on this child. clientOptions parses it (a parse failure is a config
+	// validation error — a child that cannot state its routing must not start
+	// half-configured) and hands the spec to the engine's llm.Client via
+	// llm.WithRouting. Empty = no spec: the client keeps the pre-spec
+	// provider-routing behaviour byte-for-byte.
+	Routing string
+
 	// Catalog is the shared model catalog handed to the engine's llm.Client
 	// via llm.WithCatalog — see RuntimeOptions.Catalog, whose doc comment
 	// carries the reasoning. nil means the client builds its own, which is
@@ -398,6 +407,22 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// operator who configures both; the same trade as the catalog above.
 	if c.Batcher != nil {
 		opts = append(opts, llm.WithBatcher(c.Batcher))
+	}
+
+	// The once-resolved routing spec, before the FakeTurns early-return below:
+	// a --fake-turns child must end up with the caller's spec just as it ends
+	// up with the caller's catalog and batcher (it does not reach the
+	// provider-routing code through the fake sender, but the client carries it
+	// the same way a real child would). Parse failure is a config validation
+	// error: the spec was canonical at spawn, so a spec that no longer parses
+	// means corrupted plumbing, which must fail loudly rather than start a
+	// child with silently-dropped routing.
+	if c.Routing != "" {
+		spec, err := routing.ParseSpec(c.Routing)
+		if err != nil {
+			return nil, fmt.Errorf("agent: routing spec %q: %w", c.Routing, err)
+		}
+		opts = append(opts, llm.WithRouting(spec))
 	}
 
 	if c.FakeTurns != "" {

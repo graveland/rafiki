@@ -128,6 +128,10 @@ func snapshotToSummary(snap childstore.Snapshot, contextWindow func(model string
 		LastActivity: snap.LastActivity.UnixMilli(),
 		ExitCode:     snap.ExitCode,
 		ExitSignal:   snap.ExitSignal,
+		// The once-resolved routing spec, mirrored from the session. Model is
+		// the BASE id — the spec lives only here and in the rafiki/routing
+		// label.
+		Routing: snap.Routing,
 	}
 	if len(snap.Labels) > 0 {
 		cs.Labels = snap.Labels

@@ -86,6 +86,12 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 		Status:  protocol.StatusIdle,
 		Cwd:     parent.Cwd,
 		Model:   parent.Model,
+		// The subagent inherits the parent's once-resolved routing spec the
+		// way it inherits Model: its own requests resolve against THIS row
+		// (RoutingFor), and a confidentiality flag the parent spawned under
+		// must not silently stop applying because the request came from a
+		// subagent.
+		Routing: parent.Routing,
 		Labels:  labels,
 	})
 

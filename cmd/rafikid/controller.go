@@ -56,6 +56,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
 	"go.graveland.dev/rafiki/pkg/ring"
+	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
@@ -178,6 +179,15 @@ type Controller struct {
 	// so SetBatcher can refuse a typed nil before it can ever reach an
 	// interface field — see that setter's doc comment.
 	batcher *batch.Batcher
+
+	// routePolicy is the daemon's in-memory routing-policy view (routepolicy.
+	// Policy), consulted by resolveRouting at spawn — it fills the gaps the
+	// spawn/preset specs leave — and by RoutingFor, the proxy face's per-
+	// session resolver. Set once at startup via SetRoutePolicy; nil means no
+	// policy is loaded (a database-less daemon, or a failed startup load,
+	// which is logged and absorbed): resolution degrades to spawn+preset
+	// only, never a refusal to start.
+	routePolicy *routepolicy.Policy
 
 	// reviewQ is the conversation-review worker's bounded queue. Non-nil
 	// only when pool is non-nil (main.go constructs and starts it there): a
@@ -457,6 +467,19 @@ func (c *Controller) SetCatalog(cat *routing.ModelCatalog) {
 			c.coster = insights.New(c.pool).WithPricer(cat.Pricing)
 		}
 	}
+}
+
+// SetRoutePolicy records the daemon's routing-policy view, consulted by
+// resolveRouting at spawn and by RoutingFor on the proxy face. Called once at
+// startup, before the socket accepts anything — mirrors SetCatalog. A nil
+// policy is refused and leaves the field nil (the same rule connectapi's
+// Set*Manager setters enforce): an absent policy must stay "absent", degrading
+// resolution to spawn+preset only, never a nil-panicking *routepolicy.Policy.
+func (c *Controller) SetRoutePolicy(p *routepolicy.Policy) {
+	if p == nil {
+		return
+	}
+	c.routePolicy = p
 }
 
 // SetBatcher records the daemon's parked-call batcher, consulted by
@@ -1537,11 +1560,26 @@ func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Sc
 }
 
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
+	// The model the REQUEST named, captured before applyPreset can replace it
+	// with the preset's: resolveRouting parses both and merges spawn over
+	// preset, so it needs the original spelled-out here.
+	spawnModel := req.Model
+
 	// Preset resolution runs FIRST, before anything reads req — notably
 	// checksCwdLocally below, which reads req.Kind, and every later step that
 	// overrides or narrows a preset-supplied field. The error is already a
 	// *connectapi.ControllerError.
 	req, presetRec, err := c.applyPreset(ctx, req, owner.UserID)
+	if err != nil {
+		return protocol.SpawnResponseData{}, err
+	}
+
+	// Routing resolves ONCE, immediately after the preset it merges under:
+	// the spawn/preset specs are parsed out of Model (brackets stripped into
+	// the base id), the policy row fills the gaps, and the merged spec rides
+	// req.Routing from here on — stored on the session, plumbed to the child,
+	// labelled, and kept verbatim across resume. Never re-resolved.
+	req, err = c.resolveRouting(spawnModel, presetRec, req)
 	if err != nil {
 		return protocol.SpawnResponseData{}, err
 	}
@@ -1768,6 +1806,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	initLabels["rafiki/cwd"] = req.Cwd
 	initLabels["rafiki/pid"] = strconv.Itoa(ch.PID())
 	initLabels["rafiki/kind"] = spawnKindLabel(req.Kind)
+	// The resolved routing spec mirrors the session's stored value (req.Routing
+	// below), the way rafiki/model mirrors the session's model. Daemon-written
+	// at spawn only; resume keeps the label the original spawn set.
+	if req.Routing != "" {
+		initLabels["rafiki/routing"] = req.Routing
+	}
 	stampPresetLabels(initLabels, presetRec)
 	if req.ConfigDir != "" {
 		initLabels["rafiki/config_dir"] = req.ConfigDir
@@ -1832,6 +1876,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Tools:              splitComma(req.Tools),
 		NoTools:            req.NoTools,
 		NoBuiltinTools:     req.NoBuiltinTools,
+		Routing:            req.Routing,
 		Extensions:         req.Extensions,
 		NoExtensions:       req.NoExtensions,
 		Skills:             req.Skills,
@@ -2113,6 +2158,7 @@ func (c *Controller) activateLiveChild(
 		Tools:              snap.Tools,
 		NoTools:            snap.NoTools,
 		NoBuiltinTools:     snap.NoBuiltinTools,
+		Routing:            snap.Routing, // resolved ONCE at the original spawn; never re-resolved
 		Extensions:         snap.Extensions,
 		NoExtensions:       snap.NoExtensions,
 		Skills:             snap.Skills,
@@ -2205,6 +2251,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		Tools:              strings.Join(snap.Tools, ","),
 		NoTools:            snap.NoTools,
 		NoBuiltinTools:     snap.NoBuiltinTools,
+		Routing:            snap.Routing, // resolved ONCE at the original spawn; resume never re-resolves
 		Extensions:         snap.Extensions,
 		NoExtensions:       snap.NoExtensions,
 		Skills:             snap.Skills,
@@ -4360,6 +4407,11 @@ func buildAgentArgv(req protocol.SpawnRequest, childID, stateDir string) []strin
 	}
 	if req.NoBuiltinTools {
 		argv = append(argv, "--no-builtin-tools")
+	}
+	// The resolved routing spec, as the child's llm.Client's WithRouting. The
+	// daemon resolved it once; the child never re-resolves.
+	if req.Routing != "" {
+		argv = append(argv, "--routing", req.Routing)
 	}
 	if req.NoContextFiles {
 		argv = append(argv, "--no-context-files")

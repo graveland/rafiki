@@ -111,6 +111,12 @@ type RuntimeOptions struct {
 	FakeTurns      string
 	Providers      *providers.Set
 	APIKeyOverride string
+	// Routing is the resolved canonical routing spec (routing.Spec.String())
+	// the daemon stamped at spawn. Carried verbatim into Config.Routing →
+	// llm.WithRouting; parsed once in clientOptions (a parse failure is a
+	// config validation error). Empty = no spec: the client's pre-spec
+	// provider-routing behaviour.
+	Routing string
 
 	// Catalog is the daemon's shared model catalog, passed to the child's
 	// llm.Client via llm.WithCatalog. nil = the client builds its own
@@ -724,6 +730,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		FakeTurns:              opts.FakeTurns,
 		Providers:              opts.Providers,
 		APIKeyOverride:         opts.APIKeyOverride,
+		Routing:                opts.Routing,
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
 		Batcher:                opts.Batcher,

@@ -67,6 +67,7 @@ func toProtoChild(c protocol.ChildSummary, elog eventlog.Store, ctx context.Cont
 	out.SessionFile = c.SessionFile
 	out.ExitSignal = c.ExitSignal
 	out.SlashCommands = c.SlashCommands
+	out.Routing = c.Routing
 	out.MaxCompletionTokens = int32(c.MaxCompletionTokens)
 	if elog != nil && ctx != nil {
 		if latest, err := elog.Latest(ctx, c.ChildID); err == nil {

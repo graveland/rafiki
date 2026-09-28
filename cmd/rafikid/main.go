@@ -40,6 +40,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/pymodulesdb"
 	"go.graveland.dev/rafiki/pkg/rawtrace"
+	"go.graveland.dev/rafiki/pkg/routepolicy"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/skillsdb"
@@ -454,6 +455,29 @@ func runDaemon(opts runDaemonOpts) error {
 	// so shutdown cancels it alongside the sweeper and the recall indexer.
 	batcher, batcherOK := newBatcher(prov, pool)
 
+	// The routing-policy store and the in-memory view the request paths
+	// consult. Built once, here: the Connect adapter (newConnectRoutes) writes
+	// through the store and refreshes the view; resolveRouting and the proxy
+	// face's RoutingResolver read the view. A load failure (unreadable
+	// database, or a stored spec that no longer parses — Load swaps nothing in
+	// that case) is logged and the daemon starts with an EMPTY policy: never
+	// refuses to start, the same degradation a failed provider-registry load
+	// keeps. A database-less daemon gets an empty view and no store, so the
+	// Connect route verbs answer Unavailable rather than nil-panic.
+	routePolicy := routepolicy.NewPolicy()
+	var routeStore routepolicy.Store
+	if pool != nil {
+		routeStore = routepolicy.NewPostgres(pool)
+		rows, err := routeStore.Active(baseCtx)
+		if err != nil {
+			slog.Warn("routing policy load failed; starting with an empty policy", "error", err)
+		} else if err := routePolicy.Load(rows); err != nil {
+			slog.Warn("routing policy load failed; starting with an empty policy", "error", err)
+		} else {
+			slog.Info("routing policy loaded", "lines", len(rows))
+		}
+	}
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:        pool,
 		Logger:      slog.Default(),
@@ -501,6 +525,7 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
+	ctrl.SetRoutePolicy(routePolicy)
 	if batcherOK {
 		ctrl.SetBatcher(batcher)
 		go batcher.Start(baseCtx)
@@ -622,6 +647,14 @@ func runDaemon(opts runDaemonOpts) error {
 			face.Control.SetConversationReviewer(connectReview{c: ctrl})
 			face.Control.SetConversationFindingsReader(connectFindingsReader{c: ctrl})
 			face.Control.SetExecutorLister(connectExecutors{c: ctrl})
+			// The route-policy RPCs' backend: writes go through the append-only
+			// store, and the same Policy instance the request paths resolve
+			// against is refreshed on every write. Gated on the store — with no
+			// database there is nothing to write through, and the verbs must
+			// answer Unavailable rather than nil-panic on the store.
+			if routeStore != nil {
+				face.Control.SetRouteManager(newConnectRoutes(routeStore, routePolicy))
+			}
 			// The new-seam backends: child ops, executor admin, user admin,
 			// raw child I/O and executor sessions. Each adapter is pure
 			// convert-and-delegate to the Controller; a seam left unwired

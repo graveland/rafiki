@@ -207,6 +207,15 @@ type SpawnRequest struct {
 	Thinking string `json:"thinking,omitempty"` // off|low|medium|high|xhigh
 	APIKey   string `json:"apiKey,omitempty"`
 
+	// Routing is the resolved canonical routing spec (routing.Spec.String(),
+	// e.g. "sort=price,nodata") this spawn runs under: spawn spec merged over
+	// preset spec over routing-policy row. The DAEMON sets it, once, in
+	// Controller.Spawn — a caller never does (a caller expresses routing
+	// inside Model, as a bracketed spec, which Spawn parses and strips into
+	// Model's base id plus this field). Resume keeps the stored value
+	// verbatim: routing resolves once, like the preset. Empty = no spec.
+	Routing string `json:"routing,omitempty"`
+
 	// Session flags.
 	NoSession     bool   `json:"noSession,omitempty"`
 	SessionDir    string `json:"sessionDir,omitempty"`
@@ -378,6 +387,12 @@ type ChildSummary struct {
 	// Result is the script child's final result (Connect SetResult): verbatim
 	// JSON, omitted when the child has not set one. See childstore.Session.Result.
 	Result string `json:"result,omitempty"`
+	// Routing is the child's resolved routing spec (routing.Spec.String()),
+	// mirrored from childstore.Session.Routing — the same value the daemon
+	// recorded on the session at spawn. Empty when the spawn carried and
+	// resolved to no spec. Session.Model, unlike this field, is the base id:
+	// the spec lives only here and in the rafiki/routing label.
+	Routing string `json:"routing,omitempty"`
 }
 
 // SpawnResponseData is the data payload of a Spawn/Resume answer (§6.3).

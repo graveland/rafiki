@@ -76,11 +76,15 @@ type ChildRecord struct {
 // ChildConfig is the spawn configuration that only matters on resume. It is
 // stored as the config JSONB column.
 type ChildConfig struct {
-	ResumeSession      string   `json:"resumeSession,omitempty"`
-	ForkSession        string   `json:"forkSession,omitempty"`
-	Tools              []string `json:"tools,omitempty"`
-	NoTools            bool     `json:"noTools,omitempty"`
-	NoBuiltinTools     bool     `json:"noBuiltinTools,omitempty"`
+	ResumeSession  string   `json:"resumeSession,omitempty"`
+	ForkSession    string   `json:"forkSession,omitempty"`
+	Tools          []string `json:"tools,omitempty"`
+	NoTools        bool     `json:"noTools,omitempty"`
+	NoBuiltinTools bool     `json:"noBuiltinTools,omitempty"`
+	// Routing is the resolved routing spec (routing.Spec.String()). It rides
+	// the config JSONB like Tools, so adding it costs no migration, and is
+	// carried across resume verbatim — the spec resolves ONCE, at spawn.
+	Routing            string   `json:"routing,omitempty"`
 	Extensions         []string `json:"extensions,omitempty"`
 	NoExtensions       bool     `json:"noExtensions,omitempty"`
 	Skills             []string `json:"skills,omitempty"`
@@ -166,6 +170,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 			Tools:              snap.Tools,
 			NoTools:            snap.NoTools,
 			NoBuiltinTools:     snap.NoBuiltinTools,
+			Routing:            snap.Routing,
 			Extensions:         snap.Extensions,
 			NoExtensions:       snap.NoExtensions,
 			Skills:             snap.Skills,
@@ -236,6 +241,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		Tools:              rec.Config.Tools,
 		NoTools:            rec.Config.NoTools,
 		NoBuiltinTools:     rec.Config.NoBuiltinTools,
+		Routing:            rec.Config.Routing,
 		Extensions:         rec.Config.Extensions,
 		NoExtensions:       rec.Config.NoExtensions,
 		Skills:             rec.Config.Skills,

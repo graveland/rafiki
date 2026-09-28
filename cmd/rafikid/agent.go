@@ -41,19 +41,23 @@ type agentFlags struct {
 	noSkills           bool
 	tools              string
 	noBuiltinTools     bool
-	mcpConfig          string
-	mcpServers         string
-	noMCP              bool
-	lspConfig          string
-	noLSP              bool
-	ref                string
-	db                 string
-	spillDir           string
-	name               string
-	fakeTurns          string
-	recordRequests     bool
-	bashRTK            string
-	toolsWeb           bool
+	// routing is the resolved canonical routing spec (routing.Spec.String())
+	// the daemon stamped at spawn — the child applies it verbatim via
+	// llm.WithRouting and never re-resolves. Empty = no spec.
+	routing        string
+	mcpConfig      string
+	mcpServers     string
+	noMCP          bool
+	lspConfig      string
+	noLSP          bool
+	ref            string
+	db             string
+	spillDir       string
+	name           string
+	fakeTurns      string
+	recordRequests bool
+	bashRTK        string
+	toolsWeb       bool
 	// toolsWebSet records whether --tools-web appeared in argv at all, which
 	// a bool's value alone cannot express. See toolsWebValue.
 	toolsWebSet bool
