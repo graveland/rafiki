@@ -88,6 +88,31 @@ func TestRenderList_CostColumnsUnknown(t *testing.T) {
 	c.StrContains(out, "-", "unknown cost should render as \"-\":\n")
 }
 
+// A script row's CostUSD is already its SUBTREE's spend (the daemon prices it
+// with one subtree query folding in the script's own conversations and its
+// descendants'), so the walk must stop at a script node: recursing past it
+// adds every descendant a second time. A script→fundi pair at 1.0 each must
+// report a TOTAL of 1.0, not 2.0 — and the script's own PARENT must not be
+// inflated by the double count either.
+func TestSubtreeCostsStopsAtScriptNodes(t *testing.T) {
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "coord", Kind: "claude", CostUsd: costPtr(2)},
+		{ChildId: "script", Kind: "script", Labels: map[string]string{"rafiki/parent": "coord"}, CostUsd: costPtr(1)},
+		{ChildId: "fundi", Kind: "fundi", Labels: map[string]string{"rafiki/parent": "script"}, CostUsd: costPtr(1)},
+		{ChildId: "claude2", Kind: "claude", Labels: map[string]string{"rafiki/parent": "fundi"}, CostUsd: costPtr(0.5)},
+	}
+	got := subtreeCosts(in)
+	if v := got["script"]; v == nil || *v != 1 {
+		t.Errorf("script's subtree total = %v, want 1 (its own cost already IS its subtree, not 2.5)", v)
+	}
+	if v := got["fundi"]; v == nil || *v != 1.5 {
+		t.Errorf("fundi's subtree total = %v, want 1.5 (the walk only stops at scripts)", v)
+	}
+	if v := got["coord"]; v == nil || *v != 3 {
+		t.Errorf("coord's subtree total = %v, want 3 (2 own + script's subtree 1, not double-counted)", v)
+	}
+}
+
 func TestSubtreeCosts(t *testing.T) {
 	in := []*rafikiv1.ChildSummary{
 		{ChildId: "a", CostUsd: costPtr(1)},

@@ -352,6 +352,13 @@ func effectiveParents(children []*rafikiv1.ChildSummary) map[string]string {
 // returns every child's own cost in one batched round trip, so summing it
 // down the tree costs nothing further.
 //
+// The walk STOPS at a node of kind "script": a script row's CostUSD is
+// already its SUBTREE's spend — the daemon prices it with one subtree query
+// that folds the script's own conversations in with its descendants' — so
+// recursing past it would add every descendant a second time. The tradeoff
+// is liveness, not correctness: the number only moves when the daemon
+// re-prices the row, not on each descendant's turn_end.
+//
 // A nil entry means no cost anywhere in that subtree is known (e.g. no agent
 // database configured) -- present-and-zero is a different, reportable fact.
 func subtreeCosts(children []*rafikiv1.ChildSummary) map[string]*float64 {
@@ -361,8 +368,10 @@ func subtreeCosts(children []*rafikiv1.ChildSummary) map[string]*float64 {
 		kids[p] = append(kids[p], id)
 	}
 	own := make(map[string]*float64, len(children))
+	kind := make(map[string]string, len(children))
 	for _, ch := range children {
 		own[ch.GetChildId()] = ch.CostUsd
+		kind[ch.GetChildId()] = ch.GetKind()
 	}
 
 	memo := make(map[string]*float64, len(children))
@@ -375,6 +384,14 @@ func subtreeCosts(children []*rafikiv1.ChildSummary) map[string]*float64 {
 			return nil // cycle guard: never re-enter a node on this path
 		}
 		seen[id] = true
+
+		// A script's own cost IS its subtree (see the function comment); when
+		// the daemon could not price it, the subtree total is unknown — nil,
+		// not a partial sum of the listed descendants.
+		if kind[id] == "script" {
+			memo[id] = own[id]
+			return own[id]
+		}
 
 		var total float64
 		known := false

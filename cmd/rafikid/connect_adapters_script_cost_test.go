@@ -3,10 +3,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
@@ -86,4 +88,49 @@ func TestScriptCostUnsetWithoutCoster(t *testing.T) {
 	if sum.CostUSD != nil {
 		ck.Errorf("GetChild: script CostUSD with a failing coster = %v, want unset", *sum.CostUSD)
 	}
+}
+
+// ctxRecordingCoster records the context each cost method was handed, so a
+// test can pin that a list's rollup and its per-script subtree queries share
+// ONE bounded window rather than stacking two sequential timeouts.
+type ctxRecordingCoster struct {
+	subtreeCtx context.Context
+	costsCtx   context.Context
+}
+
+func (c *ctxRecordingCoster) SubtreeCost(ctx context.Context, _ insights.SubtreeSelector) (float64, error) {
+	c.subtreeCtx = ctx
+	return 0.42, nil
+}
+
+func (c *ctxRecordingCoster) CostsByConversation(
+	ctx context.Context, _ insights.SubtreeSelector,
+) ([]insights.ConversationCost, error) {
+	c.costsCtx = ctx
+	return nil, nil
+}
+
+// One bounded window for a whole list's cost work. The rollup and the
+// per-script subtree queries run SEQUENTIALLY, so two independent timeout
+// windows would give one list a 2×costRollupTimeout latency bound. Both calls
+// must therefore observe the same deadline — equal deadlines are the
+// observable of one shared context.
+func TestSummariesForCostsShareOneBoundedContext(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st := childstore.New()
+	st.Insert(&childstore.Session{ChildID: "c_script", Kind: protocol.KindScript})
+	st.Insert(&childstore.Session{ChildID: "c_fundi", Kind: protocol.KindFundi})
+	coster := &ctxRecordingCoster{}
+	c := &Controller{coster: coster, st: st}
+
+	_ = c.ListChildren(nil)
+
+	ck.Require().NotNil(coster.costsCtx, "CostsByConversation never called")
+	ck.Require().NotNil(coster.subtreeCtx, "SubtreeCost never called")
+	subDL, hasSubDL := coster.subtreeCtx.Deadline()
+	costDL, hasCostDL := coster.costsCtx.Deadline()
+	ck.True(hasSubDL && hasCostDL, "the cost ctx carries no deadline — the list's cost work is unbounded")
+	ck.True(subDL.Equal(costDL),
+		"the rollup and the subtree query ran under different deadlines (%v vs %v) — two stacked timeout windows",
+		costDL, subDL)
 }

@@ -54,7 +54,7 @@ func TestCostsForCorrelatesExternalRefByChildID(t *testing.T) {
 	cap := &capturingCoster{}
 	c := &Controller{coster: cap}
 
-	c.costsFor([]childstore.Snapshot{
+	c.costsFor(context.Background(), []childstore.Snapshot{
 		{ChildID: "c_fundi", SessionID: "11111111-1111-1111-1111-111111111111"},
 		{ChildID: "c_proxy"},
 	})
@@ -75,7 +75,7 @@ func TestCostsForIssuesASingleRollup(t *testing.T) {
 	}}
 	c := &Controller{coster: cap}
 
-	got := c.costsFor([]childstore.Snapshot{
+	got := c.costsFor(context.Background(), []childstore.Snapshot{
 		{ChildID: "c_fundi", SessionID: "22222222-2222-2222-2222-222222222222"},
 		{ChildID: "c_proxy"},
 		{ChildID: "c_idle", SessionID: "44444444-4444-4444-4444-444444444444"},
@@ -99,7 +99,7 @@ func TestCostsForCountsOneConversationOnce(t *testing.T) {
 	}}
 	c := &Controller{coster: cap}
 
-	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_both", SessionID: conv}})
+	got := c.costsFor(context.Background(), []childstore.Snapshot{{ChildID: "c_both", SessionID: conv}})
 	assert.NewCollecting(t).Eq(4.0, got["c_both"], "c_both")
 }
 
@@ -124,7 +124,7 @@ func TestCostsForRollsUnclaimedBranchesIntoTheParent(t *testing.T) {
 
 	// The prefix route is what reaches those branches at all; without it the
 	// query never returns them and there is nothing to attribute.
-	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
+	got := c.costsFor(context.Background(), []childstore.Snapshot{{ChildID: "c_parent"}})
 	ck.Contains(cap.sel.ExternalRefPrefixes, "c_parent:", "ExternalRefPrefixes")
 	ck.Eq(2.0, got["c_parent"], "c_parent")
 }
@@ -146,7 +146,7 @@ func TestCostsForLeavesAClaimedBranchOnItsOwnChild(t *testing.T) {
 	st.Insert(&childstore.Session{ChildID: branch, Native: true})
 	c := &Controller{coster: cap, st: st}
 
-	got := c.costsFor([]childstore.Snapshot{
+	got := c.costsFor(context.Background(), []childstore.Snapshot{
 		{ChildID: "c_parent"},
 		{ChildID: branch},
 	})
@@ -169,7 +169,7 @@ func TestCostsForChecksClaimsAgainstTheStoreNotTheFilteredList(t *testing.T) {
 	c := &Controller{coster: cap, st: st}
 
 	// Only the parent is listed -- the subagent exists but was filtered out.
-	got := c.costsFor([]childstore.Snapshot{{ChildID: "c_parent"}})
+	got := c.costsFor(context.Background(), []childstore.Snapshot{{ChildID: "c_parent"}})
 	assert.NewCollecting(t).Eq(0, got["c_parent"], "c_parent")
 }
 
@@ -177,7 +177,7 @@ func TestCostsForChecksClaimsAgainstTheStoreNotTheFilteredList(t *testing.T) {
 // reporting a zero the rail would then adopt.
 func TestCostsForWithNoCosterIsAbsentNotZero(t *testing.T) {
 	c := &Controller{}
-	assert.NewCollecting(t).Nil(c.costsFor([]childstore.Snapshot{{ChildID: "c1"}}), "costsFor with no coster")
+	assert.NewCollecting(t).Nil(c.costsFor(context.Background(), []childstore.Snapshot{{ChildID: "c1"}}), "costsFor with no coster")
 }
 
 // ─── Conversation query adapters (Connect plane) ─────────────────────────────

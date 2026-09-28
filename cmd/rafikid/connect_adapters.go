@@ -66,31 +66,35 @@ func (c *Controller) ListChildren(statuses []string) []protocol.ChildSummary {
 // list go through it, so a child caller's ListChildren answers with the same
 // per-row facts an operator's does, minus the rows outside its subtree.
 func (c *Controller) summariesFor(kept []childstore.Snapshot) []protocol.ChildSummary {
-	// ONE rollup for the whole list. Pricing each child with its own
-	// SubtreeCost call meant N serial round trips, each with its own timeout,
-	// on the cockpit's seed path -- and the seed is re-run whenever an unknown
-	// child produces traffic, which is exactly the busy-fleet case where N is
-	// large. Script children are withheld from the rollup: their CostUSD is
-	// their SUBTREE's spend (scriptSpend), never a rollup of their own rows.
+	// ONE bounded context for the whole list's cost work, and ONE rollup for
+	// the whole list. Pricing each child with its own SubtreeCost call meant N
+	// serial round trips, each with its own timeout, on the cockpit's seed
+	// path -- and the seed is re-run whenever an unknown child produces
+	// traffic, which is exactly the busy-fleet case where N is large. The
+	// single ctx matters as much as the single rollup: the rollup and the
+	// per-script subtree queries run SEQUENTIALLY, so two separate timeout
+	// windows would give one list a 2×costRollupTimeout latency bound.
+	// Script children are withheld from the rollup: their CostUSD is their
+	// SUBTREE's spend (scriptSpend), never a rollup of their own rows.
+	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
+	defer cancel()
+
 	costSnaps := make([]childstore.Snapshot, 0, len(kept))
 	for _, s := range kept {
 		if s.Kind != protocol.KindScript {
 			costSnaps = append(costSnaps, s)
 		}
 	}
-	costs := c.costsFor(costSnaps)
+	costs := c.costsFor(ctx, costSnaps)
 
 	// The script children price one subtree query each, under the same batch
-	// bound as the rollup: both are display numbers that must not hold up the
-	// list they decorate.
-	spendCtx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
-	defer cancel()
-
+	// bound as the rollup — the SAME ctx, not a second window: both are
+	// display numbers that must not hold up the list they decorate.
 	out := make([]protocol.ChildSummary, 0, len(kept))
 	for _, s := range kept {
 		sum := snapshotToSummary(s, c.ContextWindow)
 		if s.Kind == protocol.KindScript {
-			sum.CostUSD = c.scriptSpend(spendCtx, s.ChildID)
+			sum.CostUSD = c.scriptSpend(ctx, s.ChildID)
 		} else if cost, ok := costs[s.ChildID]; ok {
 			sum.CostUSD = &cost
 		}
@@ -107,7 +111,9 @@ func (c *Controller) GetChild(childID string) (protocol.ChildSummary, bool) {
 	}
 	sum := snapshotToSummary(snap, c.ContextWindow)
 	if snap.Kind != protocol.KindScript {
-		if cost, ok := c.costsFor([]childstore.Snapshot{snap})[childID]; ok {
+		ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
+		defer cancel()
+		if cost, ok := c.costsFor(ctx, []childstore.Snapshot{snap})[childID]; ok {
 			sum.CostUSD = &cost
 		}
 		return sum, true
@@ -201,7 +207,9 @@ const costRollupTimeout = 3 * time.Second
 
 // costsFor prices every non-script child in one round trip, keyed by child
 // id. Callers pass only non-script snapshots: a script child's CostUSD is its
-// subtree's spend (scriptSpend), not a rollup of its own conversations.
+// subtree's spend (scriptSpend), not a rollup of its own conversations. The
+// context is the CALLER's — summariesFor shares one bounded window across its
+// rollup and its per-script subtree queries, rather than stacking two.
 //
 // The two correlation routes are NOT interchangeable and getting them the
 // wrong way round is silent. A conversation is found by UUID for a fundi child
@@ -215,7 +223,7 @@ const costRollupTimeout = 3 * time.Second
 // Absent from the map means NOT KNOWN (no cost source, or the rollup failed)
 // and leaves CostUSD nil. Present-and-zero means the query ran and found no
 // turns, which is a different fact and is allowed to be reported.
-func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
+func (c *Controller) costsFor(ctx context.Context, snaps []childstore.Snapshot) map[string]float64 {
 	if c.coster == nil || len(snaps) == 0 {
 		return nil
 	}
@@ -228,8 +236,6 @@ func (c *Controller) costsFor(snaps []childstore.Snapshot) map[string]float64 {
 		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, s.ChildID+threadRefSep)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), costRollupTimeout)
-	defer cancel()
 	rows, err := c.coster.CostsByConversation(ctx, sel)
 	if err != nil {
 		return nil
