@@ -509,25 +509,12 @@ def run():
         # CLI's providers route verbs ride, and the daemon is the table's one
         # writer. A row's line is a "-" prefix family, so this row would also
         # govern z-ai/glm-5.3-flash; it does not touch the children above.
-        # The route backend is wired in main.go (task 3.1's lane); a daemon
-        # built without that wiring answers unavailable ("routes backend not
-        # yet wired"), which this section reports as a NAMED skip rather than
-        # failing the whole lifecycle — any OTHER unavailable (the daemon
-        # restarting) still raises, as it should. Drop the guard once the
-        # wiring has merged.
-        try:
-            c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")
-            row = [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"]
-            assert row and row[0].spec == "sort=price,quant=fp8+", row
-            c.delete_route("z-ai/glm-5.3")
-            assert not [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"], c.list_routes()
-            note("routes OK")
-        except ConnectError as exc:
-            if exc.code == "unavailable" and "not yet wired" in exc.message:
-                note("routes SKIPPED: the daemon has no route backend wired yet (pending task 3.1's main.go wiring)")
-            else:
-                note(traceback.format_exc())
-                sys.exit(1)
+        c.set_route("z-ai/glm-5.3", "sort=price,quant=fp8+")
+        row = [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"]
+        assert row and row[0].spec == "sort=price,quant=fp8+", row
+        c.delete_route("z-ai/glm-5.3")
+        assert not [r for r in c.list_routes() if r.model_line == "z-ai/glm-5.3"], c.list_routes()
+        note("routes OK")
 
         # send lands an inbox row with a durable id.
         mid = c.send(cid, "a steer, unsteerable but durable")
