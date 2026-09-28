@@ -84,6 +84,17 @@ type SpawnSpec struct {
 	// so it does not earn the stalled-pipe risk OnMeta's comment describes.
 	// May fire many times per subagent; the implementation dedupes.
 	OnSubagent func(SubagentObservation)
+
+	// OnScriptOutput, when non-nil, receives one raw line of a SCRIPT child's
+	// output: the "stdout" lines come from handleFrame's script_output
+	// ParsedEvents, the "stderr" lines are split out of the stderr drain (a
+	// stream the protocol providers never parse). The daemon's hook feeds a
+	// per-child coalescer that publishes the output as durable ScriptOutput
+	// events; set it only for kind=script — any other kind's stderr must
+	// keep its existing paths. Buffering only, never a publish: safe to call
+	// from the readStdout and readStderr goroutines without stalling the
+	// pipes.
+	OnScriptOutput func(stream, line string)
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -266,11 +277,12 @@ type Child struct {
 	// production writer, and Shutdown its only reader.
 	abandonAfter time.Duration
 
-	sm         *StateMachine
-	provider   ProtocolProvider
-	nativeSink func(*rafikiv1.Event)
-	onMeta     func(SnifferMetadata)
-	onSubagent func(SubagentObservation)
+	sm             *StateMachine
+	provider       ProtocolProvider
+	nativeSink     func(*rafikiv1.Event)
+	onMeta         func(SnifferMetadata)
+	onSubagent     func(SubagentObservation)
+	onScriptOutput func(stream, line string)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
 	// streaming, etc.) rather than "shutting_down" which is an artifact of the
@@ -371,26 +383,27 @@ func Spawn(ctx context.Context, spec SpawnSpec) (*Child, error) {
 	}
 
 	c := &Child{
-		ID:           spec.ChildID,
-		spec:         spec,
-		runner:       r,
-		stdin:        stdin,
-		stdout:       stdout,
-		stderr:       stderr,
-		cmdCh:        make(chan []byte, 16),
-		ready:        make(chan struct{}),
-		done:         make(chan struct{}),
-		processDone:  make(chan struct{}),
-		bus:          bus.New[[]byte](bus.Options{}),
-		ring:         ring.New(ring.Options{}),
-		sm:           sm,
-		provider:     prov,
-		nativeSink:   spec.NativeSink,
-		onMeta:       spec.OnMeta,
-		onSubagent:   spec.OnSubagent,
-		transitionCh: make(chan struct{}, 1),
-		idle:         make(chan struct{}),
-		abandonAfter: abandonTimeout,
+		ID:             spec.ChildID,
+		spec:           spec,
+		runner:         r,
+		stdin:          stdin,
+		stdout:         stdout,
+		stderr:         stderr,
+		cmdCh:          make(chan []byte, 16),
+		ready:          make(chan struct{}),
+		done:           make(chan struct{}),
+		processDone:    make(chan struct{}),
+		bus:            bus.New[[]byte](bus.Options{}),
+		ring:           ring.New(ring.Options{}),
+		sm:             sm,
+		provider:       prov,
+		nativeSink:     spec.NativeSink,
+		onMeta:         spec.OnMeta,
+		onSubagent:     spec.OnSubagent,
+		onScriptOutput: spec.OnScriptOutput,
+		transitionCh:   make(chan struct{}, 1),
+		idle:           make(chan struct{}),
+		abandonAfter:   abandonTimeout,
 	}
 
 	if isScript {
@@ -947,7 +960,17 @@ func (c *Child) handleFrame(line []byte) {
 		sniffed = &md2
 	}
 
+	var scriptLines []string
 	for _, e := range res.Events {
+		if e.Type == "script_output" {
+			// A script child's raw stdout line: not a state-machine event (the
+			// machine is inert for scripts) — it rides out through the
+			// per-line hook, which feeds the daemon's coalescer. Collected and
+			// fired after metaMu is dropped: the hook must never run under a
+			// lock the coalescer's publish path could wait on.
+			scriptLines = append(scriptLines, e.Text)
+			continue
+		}
 		switch e.Type {
 		case "auto_retry_start":
 			// Informational only; OnAutoRetryStart makes no transition.
@@ -961,6 +984,12 @@ func (c *Child) handleFrame(line []byte) {
 
 	c.metaMu.Unlock()
 
+	if len(scriptLines) > 0 && c.onScriptOutput != nil {
+		for _, line := range scriptLines {
+			c.onScriptOutput("stdout", line)
+		}
+	}
+
 	if res.FirstResponse {
 		c.idleOnce.Do(func() { close(c.idle) })
 	}
@@ -972,10 +1001,20 @@ func (c *Child) handleFrame(line []byte) {
 
 // readStderr drains stderr into a bounded in-memory buffer. Oldest bytes are
 // dropped when the buffer would exceed 4 MiB.
+//
+// When the child carries a per-line script-output hook (script children
+// only), the drain ALSO splits what it reads into lines and hands each one to
+// the hook, so a script's stderr publishes through the same coalesced
+// ScriptOutput events its stdout does. The buffer is untouched: the settle's
+// stderr tail (≤ 4 KiB) and the log dumps still read StderrSnapshot. Lines
+// split across reads are accumulated until their '\n' arrives; a trailing
+// fragment at EOF is delivered as a final line, mirroring FrameReader's
+// partial-frame-at-EOF behavior.
 func (c *Child) readStderr() {
 	br := bufio.NewReader(c.stderr)
 	buf := make([]byte, 4096)
 	const maxErr = 4 << 20
+	var pending []byte // line accumulator; used only when the hook is set
 	for {
 		n, err := br.Read(buf)
 		if n > 0 {
@@ -991,11 +1030,41 @@ func (c *Child) readStderr() {
 			}
 			c.errBuf.Write(buf[:n])
 			c.errMu.Unlock()
+
+			if c.onScriptOutput != nil {
+				pending = append(pending, buf[:n]...)
+				for {
+					i := bytes.IndexByte(pending, '\n')
+					if i < 0 {
+						break
+					}
+					// An empty line is still a line: the coalescer's
+					// terminator handling turns it back into the blank line
+					// the child printed.
+					c.onScriptOutput("stderr", string(trimCR(pending[:i])))
+					pending = pending[i+1:]
+				}
+			}
 		}
 		if err != nil {
+			// EOF (or a read error): a trailing fragment without a newline is
+			// still a line.
+			if c.onScriptOutput != nil && len(pending) > 0 {
+				c.onScriptOutput("stderr", string(trimCR(pending)))
+			}
 			return
 		}
 	}
+}
+
+// trimCR strips one trailing carriage return, so a stderr line from a child
+// writing CRLF joins the coalesced output the same way FrameReader strips a
+// frame's trailing '\r' on the stdout side.
+func trimCR(line []byte) []byte {
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		return line[:n-1]
+	}
+	return line
 }
 
 // Shutdown attempts a graceful shutdown:

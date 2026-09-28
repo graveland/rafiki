@@ -241,6 +241,14 @@ type Controller struct {
 	boundMu sync.Mutex
 	bound   map[string]*boundExecutor
 
+	// scriptOutputs holds the per-child ScriptOutput coalescer of every live
+	// script child, keyed by child id. An entry is created lazily on the
+	// child's FIRST line of output (scriptOutputHook) and taken and closed by
+	// handleChildExit — before the exit event publishes, so the child's last
+	// output precedes child_exited in ordinal order.
+	scriptOutputsMu sync.Mutex
+	scriptOutputs   map[string]*scriptOutputCoalescer
+
 	// native fans rafiki-native events out per child, for the Connect
 	// control plane's StreamEvents.
 	native *nativebus.Registry
@@ -1770,6 +1778,12 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		Runner:      runner,
 	}
 	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
+	// A script child's raw output is published as coalesced durable
+	// ScriptOutput events (script_output.go). Every other kind leaves the
+	// hook nil — its output keeps the old paths and nothing else changes.
+	if req.Kind == protocol.KindScript {
+		spec.OnScriptOutput = c.scriptOutputHook(childID)
+	}
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -2534,6 +2548,12 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		Runner:      runner,
 	}
 	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
+	// A script child's raw output is published as coalesced durable
+	// ScriptOutput events (script_output.go). Every other kind leaves the
+	// hook nil — its output keeps the old paths and nothing else changes.
+	if req.Kind == protocol.KindScript {
+		spec.OnScriptOutput = c.scriptOutputHook(childID)
+	}
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -2667,6 +2687,12 @@ func (c *Controller) RespawnChild(ctx context.Context, childID, sessionPath stri
 		Runner:   runner,
 	}
 	spec.NativeSink, spec.OnMeta, spec.OnSubagent = c.childHooks(childID)
+	// A script child's raw output is published as coalesced durable
+	// ScriptOutput events (script_output.go). Every other kind leaves the
+	// hook nil — its output keeps the old paths and nothing else changes.
+	if req.Kind == protocol.KindScript {
+		spec.OnScriptOutput = c.scriptOutputHook(childID)
+	}
 	if runner != nil {
 		// The agent kind's argv is parsed into RuntimeOptions above, not
 		// executed; leave PiBinary/Argv empty so nothing accidentally execs it.
@@ -3955,6 +3981,11 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	if exitCode != nil {
 		c32 := int32(*exitCode)
 		exitCodePtr = &c32
+	}
+	// Durable, so it precedes the exit event below in ordinal order: the
+	// child's last output must not arrive after child_exited.
+	if co := c.takeScriptOutputCoalescer(childID); co != nil {
+		co.Close()
 	}
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
