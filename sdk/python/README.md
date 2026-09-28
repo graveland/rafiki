@@ -58,7 +58,9 @@ for settle in c.settled([child]):         # yields Settle(child_id, state)
 states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript
-c.stop(child)                             # graceful, then the kill ladder
+c.stop(child)                             # graceful, then the kill ladder;
+                                          # carries a per-call read timeout of
+                                          # shutdown+kill windows + 30s slack
 
 # Presets (owner-scoped; a child credential may read, only a user may put).
 # put_preset takes a PresetRow or `rafiki preset get -j`'s dict shape:

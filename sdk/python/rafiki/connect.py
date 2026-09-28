@@ -151,17 +151,29 @@ class ConnectClient:
 
     # ── unary ────────────────────────────────────────────────────────────────
 
-    def call(self, method: str, payload: dict, response_factory: "Callable[[dict], object]") -> object:
+    def call(
+        self,
+        method: str,
+        payload: dict,
+        response_factory: "Callable[[dict], object]",
+        timeout: "float | None" = None,
+    ) -> object:
         """One unary call, retried on Unavailable with bounded backoff.
 
         ``response_factory`` decodes the response body's dict into the
         generated class; pass a class with ``from_dict`` (or ``dict``) to get
         the shape the caller wants.
+
+        ``timeout`` is the per-call budget in SECONDS, overriding the client's
+        ``timeout`` for this call alone: a method whose server-side work can
+        outlive the default (Kill's graceful-shutdown window) passes one, so
+        the call never times out while the daemon is still doing what was
+        asked of it.
         """
         attempt = 0
         while True:
             try:
-                body = self._unary_once(method, payload)
+                body = self._unary_once(method, payload, timeout)
                 return response_factory(body)
             except ConnectError as exc:
                 if not exc.unavailable or attempt + 1 >= self._max_attempts:
@@ -183,10 +195,15 @@ class ConnectClient:
             headers["Authorization"] = "Bearer " + self._token
         return headers
 
-    def _unary_once(self, method: str, payload: dict) -> dict:
+    def _unary_once(self, method: str, payload: dict, timeout: "float | None" = None) -> dict:
         try:
             resp = self._http.post(
-                self._url(method), content=json.dumps(payload), headers=self._headers(CONTENT_UNARY)
+                self._url(method),
+                content=json.dumps(payload),
+                headers=self._headers(CONTENT_UNARY),
+                # Per-call budget: the sentinel keeps the client's default
+                # Timeout (httpx treats an explicit None as "no timeout").
+                timeout=httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
             )
         except httpx.HTTPError as exc:
             # A failed dial means the daemon is unreachable — the same state

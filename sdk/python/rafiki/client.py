@@ -46,6 +46,19 @@ from .errors import (
 # _settle_one.remaining.
 REMOTE_IDLE_CEILING = 60.0
 
+# The daemon's Kill-handler defaults (cmd/rafikid/controller.go: Kill passes
+# durOrDefault(shutdownTimeoutMs, 180*time.Second) and
+# durOrDefault(killTimeoutMs, 30*time.Second); pinned by
+# TestKillTimeoutDefaults in cmd/rafikid). stop() mirrors them so its per-call
+# read timeout covers exactly the work the daemon may do before answering.
+DEFAULT_SHUTDOWN_MS = 180_000
+DEFAULT_KILL_MS = 30_000
+
+# Slack on top of the two windows above: the daemon answers only after the
+# ladder completes AND the exit is persisted (waitForChildRemoval), so the
+# read timeout is the two windows plus headroom, not the windows exactly.
+STOP_TIMEOUT_SLACK_MS = 30_000
+
 # The states that mean "settled": a fundi child sits idle between turns
 # (agent_settled is pi's true-idle event; the daemon maps it to idle), and
 # exited is terminal. Everything else (spawning, streaming, tool_running,
@@ -182,8 +195,8 @@ class Client:
 
     # ── low-level ────────────────────────────────────────────────────────────
 
-    def _call(self, method: str, request, response_cls):
-        return self._conn.call(method, request.to_dict(), lambda d: response_cls.from_dict(d))
+    def _call(self, method: str, request, response_cls, timeout: "float | None" = None):
+        return self._conn.call(method, request.to_dict(), lambda d: response_cls.from_dict(d), timeout)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -288,13 +301,28 @@ class Client:
         """Stop a child: the graceful window first, then the SIGTERM/SIGKILL
         rungs of the kill ladder at the caller's timeouts. Returns the
         KillResponse (exit_code is None for a signalled child). The child's
-        own daemon-managed descendants are NOT swept."""
+        own daemon-managed descendants are NOT swept.
+
+        The call carries a per-call read timeout of
+        ``(shutdown_timeout_ms or DEFAULT_SHUTDOWN_MS) +
+        (kill_timeout_ms or DEFAULT_KILL_MS) + STOP_TIMEOUT_SLACK_MS`` — the
+        daemon may legitimately spend the whole graceful window on a child
+        that cannot answer the shutdown (a script that never reads its
+        Receive stream), then the kill rung, then the reap, before answering;
+        the default 30 s read timeout would fire while the stop was still
+        working.
+        """
         req = _gen.control_pb.KillRequest(
             child_id=child_id,
             shutdown_timeout_ms=shutdown_timeout_ms or 0,
             kill_timeout_ms=kill_timeout_ms or 0,
         )
-        return self._call("Kill", req, _gen.control_pb.KillResponse)
+        timeout_ms = (
+            (shutdown_timeout_ms or DEFAULT_SHUTDOWN_MS)
+            + (kill_timeout_ms or DEFAULT_KILL_MS)
+            + STOP_TIMEOUT_SLACK_MS
+        )
+        return self._call("Kill", req, _gen.control_pb.KillResponse, timeout_ms / 1000.0)
 
     def export(self, child_id: str) -> _gen.control_pb.ConversationExportResponse:
         """One child's decomposed transcript. ConversationExport speaks

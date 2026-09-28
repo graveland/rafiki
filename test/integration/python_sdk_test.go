@@ -296,6 +296,10 @@ class H(BaseHTTPRequestHandler):
             STATE["routes"].append(["delete", req.get("modelLine")])
             self._json({})
             return
+        if self.path.endswith("/Kill"):
+            req = json.loads(body)
+            self._json({"childId": req.get("childId", ""), "exitCode": 0, "durationMs": "12"})
+            return
         self._err(404, None, None)
 
     def _json(self, obj):
@@ -424,6 +428,23 @@ def run():
         ], STATE["routes"]
         assert STATE["requests"][-1][0].endswith("/DeleteRoute"), STATE["requests"][-1]
         note("8 routes OK")
+
+        # 9. stop(): the per-call read timeout covers the daemon's two kill
+        # windows plus slack — defaults included (180 s + 30 s + 30 s, the
+        # cmd/rafikid Kill-handler defaults) — and explicit budgets shrink it.
+        # The timeout is not on the wire, so it is spied on the transport.
+        captured_kill = {}
+        orig_unary = c._conn._unary_once
+        def spy_unary(method, payload, timeout=None):
+            captured_kill[method] = timeout
+            return orig_unary(method, payload, timeout)
+        c._conn._unary_once = spy_unary
+        kid = c.stop("c_stop")
+        assert kid.child_id == "c_stop" and kid.exit_code == 0 and kid.duration_ms == 12, kid
+        assert captured_kill["Kill"] == 240.0, captured_kill
+        kid = c.stop("c_stop", shutdown_timeout_ms=5000, kill_timeout_ms=3000)
+        assert captured_kill["Kill"] == 38.0, captured_kill
+        note("9 stop-timeout OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:
@@ -644,8 +665,18 @@ def run():
         time.sleep(1.5)
         c.send(wid2, "any work arrives first")
         time.sleep(0.5)                       # work-first: deliver the text
+        # stop() of a RUNNING script child: the per-call read timeout (the
+        # daemon's shutdown+kill windows plus slack) must cover the daemon's
+        # whole ladder, so the call RETURNS rather than timing out under the
+        # client's default 30 s budget. Assert both that it returned and that
+        # it returned promptly for a child that answers the shutdown.
+        t0 = time.time()
         kid = c.stop(wid2)
+        dt = time.time() - t0
         assert kid.child_id == wid2, kid
+        assert dt < 30, "stop() of a cooperative child took %.1fs" % dt
+        assert kid.duration_ms >= 0, kid.duration_ms
+        note("stopped: exit=%s duration_ms=%s wall=%.3fs" % (kid.exit_code, kid.duration_ms, dt))
         states = c.wait([wid2], timeout=30)
         note("stopped: %s" % (states,))
         child2 = c.get(wid2)
