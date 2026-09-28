@@ -737,7 +737,11 @@ in-memory `routepolicy.Policy` from `Store.Active`, so the very next request
 resolves by the new rows. `ListRoutes` is anyCaller — routing defaults name
 providers, not users — and reads the reloaded view. `ChildSummary.routing`
 reports a child's RESOLVED spec in canonical form (`routing.Spec.String()`),
-empty when none; the summary's `model` stays the base id.
+empty when none; the summary's `model` stays the base id. The resolution ran
+ONCE in `Controller.Spawn` (`resolveRouting`): the spawn spec merged over the
+preset spec over the policy row for the base id, stored on the session — a
+policy edit after the spawn never rewrites a running child, and resume reads
+the stored value back verbatim.
 
 ### Presets (`ListPresets`, `GetPreset`, `PutPreset`, `DeletePreset`)
 
