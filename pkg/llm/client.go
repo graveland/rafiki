@@ -650,7 +650,13 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// streaming again, instead of wastefully re-issuing to the same
 		// primary sender.
 		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
-		return nil, true, false, serr
+		// The breaker==nil branch is production's shape (daemon children run
+		// with no fallback chain), so THIS is the return a no-eligible routing
+		// rejection surfaces through on the streaming path — decorate it here,
+		// or decision 6's "error naming the spec and the model" only ever fired
+		// for non-streamed sends. The trace and turn rows above keep the raw
+		// upstream error; the decoration is for the caller.
+		return nil, true, false, c.noEligibleError(string(params.Model), serr)
 	}
 
 	acc := anthropic.Message{}
@@ -693,7 +699,12 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// exists to defer to): this IS the final result, so record it.
 		recordPrimaryResult(breaker, now, serr)
 		c.recordRawTrace(ctx, meta, ref.turnID, params, nil, 0, primary, int(time.Since(start).Milliseconds()), serr, hdrs)
-		return nil, true, delivered, serr
+		// The breaker==nil !delivered shape is production's child-send path,
+		// and the SDK's sender surfaces a pre-delivery HTTP failure through
+		// the STREAM (NewStreaming returns (stream, nil); the error arrives on
+		// the first Next) — so THIS is where a no-eligible routing rejection
+		// decorates for streamed sends. The trace keeps the raw error.
+		return nil, true, delivered, c.noEligibleError(string(params.Model), serr)
 	}
 
 	recordPrimaryResult(breaker, now, nil)

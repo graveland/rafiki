@@ -276,3 +276,46 @@ func TestRoutingNoEligibleClassification(t *testing.T) {
 	}
 	ck.Require()
 }
+
+// TestRoutingNoEligibleErrorNamesSpecStreaming pins the decoration on the
+// STREAMING path — production's child-send shape (a stream handler attached,
+// no fallback/breaker chain configured, so sendStreamingAttempt takes its
+// breaker==nil attempted=true return). Without the decoration there, decision
+// 6's "error naming the spec and the model" would only ever fire for
+// non-streamed sends.
+func TestRoutingNoEligibleErrorNamesSpecStreaming(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	spec := routing.Spec{Sort: routing.SortPrice}
+	c := newSpecClient(t, routingSet(t), spec, nil,
+		&fakeStreamingSender{scripts: []streamScript{
+			{openErr: noEligibleErr(http.StatusNotFound, "No endpoints found matching your data policy")},
+		}})
+	conv, err := c.Conversation(context.Background(),
+		NewConversation("", "test"), Model("openrouter/glmflash"), SystemText("sys"))
+	ck.Require().NoError(err, "Conversation")
+	_, err = conv.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	ck.Require().Error(err, "the no-endpoints rejection must surface")
+
+	ck.StrContains(err.Error(),
+		"no provider can serve z-ai/glm-5.3-flash under routing [sort=price]: ",
+		"the streaming error must name the model and the spec, got: %s", err)
+	var apiErr *anthropic.Error
+	ck.True(errors.As(err, &apiErr), "the SDK error must stay reachable through the wrap: %v", err)
+	ck.Eq(http.StatusNotFound, apiErr.StatusCode, "the wrapped status is preserved")
+	ck.False(routing.Retryable(err), "deterministic: never retried on the streaming path either")
+	ck.False(routing.FailoverWorthy(err), "not failover-worthy either")
+
+	// Zero-spec control on the same path: undecorated passthrough.
+	c0 := newSpecClient(t, routingSet(t), routing.Spec{}, nil,
+		&fakeStreamingSender{scripts: []streamScript{
+			{openErr: noEligibleErr(http.StatusNotFound, "No endpoints found matching your data policy")},
+		}})
+	conv0, err := c0.Conversation(context.Background(),
+		NewConversation("", "test"), Model("openrouter/glmflash"), SystemText("sys"))
+	ck.Require().NoError(err, "Conversation")
+	_, err0 := conv0.Send(context.Background(), UserText("hi"),
+		WithStreamHandler(func(anthropic.MessageStreamEventUnion) {}))
+	ck.Require().Error(err0, "the raw rejection must still surface")
+	ck.NotStrContains(err0.Error(), "under routing", "zero spec must not decorate, got: %s", err0)
+}
