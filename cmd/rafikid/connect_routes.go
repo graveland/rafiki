@@ -16,6 +16,12 @@ import (
 // then reloads the Policy from the store's Active rows, so the resolver the
 // request paths consult reflects the write immediately — the same
 // write-then-refresh contract the provider cache guard serves its bans with.
+//
+// The store's Set/Delete rely on this daemon being the TABLE'S SINGLE WRITER:
+// Delete is a check-then-insert pair, not a transaction, and a concurrent Set
+// squeezed between its SELECT and tombstone INSERT simply loses to the
+// tombstone's later id (newest-row-wins). This adapter is the only writer;
+// keep it that way or make the store's Delete transactional first.
 type connectRoutes struct {
 	store  routepolicy.Store
 	policy *routepolicy.Policy
