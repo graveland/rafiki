@@ -330,6 +330,11 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 		return ctx, nil, "", nil, nil, params, err
 	}
 	batched = batched || IsBatchModel(modelID)
+	// baseID is the suffix-free id every arm builds from: an alias's raw ID
+	// may itself end in :batch, so the first-call arm must STRIP before
+	// re-appending (adding a suffix to a suffixed id would park
+	// "…:batch:batch", a model no endpoint serves).
+	baseID := strings.TrimSuffix(modelID, BatchSuffix)
 	params.Model = anthropic.Model(modelID)
 
 	// The :batch routing rule, in one place. After this block: params.Model
@@ -340,12 +345,12 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 			return ctx, nil, "", nil, nil, params, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
 		}
 		if firstCall(params) {
-			modelID += BatchSuffix
+			modelID = baseID + BatchSuffix
 		} else {
-			// The alias-resolved id carries the suffix even on a later call:
-			// strip it so the send goes live (the literal case stripped by
-			// construction — its id never had the suffix).
-			modelID = strings.TrimSuffix(modelID, BatchSuffix)
+			// Later calls go live on the base id, for every batched shape (the
+			// literal case is stripped by construction; the alias case may have
+			// carried the suffix in its own id).
+			modelID = baseID
 		}
 		params.Model = anthropic.Model(modelID)
 	}

@@ -23,11 +23,13 @@ import (
 type routingFakeBatcher struct {
 	mu        sync.Mutex
 	providers []json.RawMessage
+	models    []string // Park's model argument — what the batch envelope would name
 }
 
-func (b *routingFakeBatcher) Park(_ context.Context, _ string, _ string, _ anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error) {
+func (b *routingFakeBatcher) Park(_ context.Context, _ string, model string, _ anthropic.MessageNewParams, provider json.RawMessage) (*anthropic.Message, error) {
 	b.mu.Lock()
 	b.providers = append(b.providers, provider)
+	b.models = append(b.models, model)
 	b.mu.Unlock()
 	return batchReply(), nil
 }
@@ -175,13 +177,16 @@ func TestBatchAliasToBatchIDParksFirstCallOnly(t *testing.T) {
 	ck.Require().NoError(err, "NewClient")
 	meta := SendMeta{ConversationID: "01a0d5e6-2636-7afa-b356-cf9441b16e31", Ordinal: 1}
 
-	// First call: parks, model keeps :batch. The request names the ALIAS.
+	// First call: parks, model keeps :batch — exactly ONE suffix. The request
+	// names the ALIAS whose id already ends in :batch; a doubled suffix would
+	// name a model no endpoint serves (review-fix R1).
 	first := batchParams()
 	first.Model = "openrouter/glmb"
 	resp, err := c.SendParams(context.Background(), meta, first)
 	ck.Require().NoError(err, "first SendParams (alias to :batch) must park")
 	ck.Eq("batched", resp.Content[0].Text, "first call response from the batcher")
 	ck.Require().Eq(1, len(b.providers), "batcher calls after the first send")
+	ck.Eq("z-ai/glm-5.3-flash:batch", b.models[0], "the parked call's model carries exactly one :batch")
 
 	// Later call: goes live, suffix stripped.
 	later := laterCallParams()

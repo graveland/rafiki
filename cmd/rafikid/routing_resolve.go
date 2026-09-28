@@ -105,20 +105,20 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// would freeze a spec the actual model may not deserve (the proxy face's
 	// RoutingFor falls back to per-request policy resolution in that case).
 	//
-	// The lookup uses the TRANSLATED id: appliedBase may name a
-	// providers.toml ALIAS ("openrouter/glm-flash@together"), and the policy's
-	// lines are keyed by the real OpenRouter id — resolve through the provider
-	// set (the same translation the :batch/API-key guard below uses) so the
-	// row reaches alias-spawned children. Only the lookup translates; the
-	// alias's `only` pin still never folds into the stored spec, and
-	// req.Model stays the applied base id as spawned.
+	// translatedBase is the applied base id resolved through the provider set:
+	// appliedBase may name a providers.toml ALIAS ("openrouter/glm-flash@together"),
+	// and the policy's lines are keyed by the real OpenRouter id. One
+	// translation serves both consumers below (the policy lookup and the :batch
+	// refusal) — two copies would be exactly the drift finding-10 fixed.
+	// Only the lookup translates; the alias's `only` pin still never folds into
+	// the stored spec, and req.Model stays the applied base id as spawned.
+	translatedBase := appliedBase
+	if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
+		translatedBase = modelID
+	}
 	var policySpec routing.Spec
 	if c.routePolicy != nil && appliedBase != "" {
-		policyBase := appliedBase
-		if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
-			policyBase = modelID
-		}
-		policySpec = c.routePolicy.Resolve(policyBase)
+		policySpec = c.routePolicy.Resolve(translatedBase)
 	}
 
 	merged := spawnSpec.Merge(presetSpec).Merge(policySpec)
@@ -133,11 +133,7 @@ func (c *Controller) resolveRouting(spawnModel string, preset *presets.Record, r
 	// The refusal tests the TRANSLATED id: an alias whose id ends in :batch is
 	// a supported shape (see the :batch/API-key guard in controller.go), and
 	// the refusal must fire on it as on a literal :batch request.
-	refusalBase := appliedBase
-	if _, modelID, err := providersOrDefault(c.providers).Split(appliedBase); err == nil {
-		refusalBase = modelID
-	}
-	if llm.IsBatchModel(refusalBase) {
+	if llm.IsBatchModel(translatedBase) {
 		if merged.Sort != "" || merged.Quant != nil || merged.NoData || merged.ZDR {
 			return req, &connectapi.ControllerError{
 				Code: protocol.ErrInvalidArgs,
