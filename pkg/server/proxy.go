@@ -96,6 +96,11 @@ type MessagesProxy struct {
 	// cmd/rafikid's ratelimit_resume.go). Optional; nil on the client-driven
 	// path. Calls are gated on cr.on, so a proxy without capture never notifies.
 	rateLimitObserver RateLimitObserver
+
+	// routingResolver resolves the routing spec a session's OpenRouter requests
+	// must carry (see RoutingResolver). Optional; nil on the client-driven
+	// path, which keeps the pre-spec provider-routing behaviour exactly.
+	routingResolver RoutingResolver
 }
 
 // SetMetrics attaches Prometheus instrumentation (optional).
@@ -138,6 +143,24 @@ type RateLimitObserver interface {
 // (optional). Same startup-once ordering guarantee as SetThreadObserver; not
 // synchronized.
 func (p *MessagesProxy) SetRateLimitObserver(o RateLimitObserver) { p.rateLimitObserver = o }
+
+// RoutingResolver resolves the routing spec carried by a session's OpenRouter
+// requests. sessionID is the X-Rafiki-Session value — for a daemon-spawned
+// child that child's id, for an interactive or hand-configured client an id
+// that resolves to no child; an empty value is normal, and implementations
+// must answer it with their policy-only resolution rather than filter on it
+// (the proxy passes the header through verbatim). modelID is the OpenRouter
+// model id the request is about to carry.
+//
+// Implemented by the daemon's Controller.
+type RoutingResolver interface {
+	RoutingFor(sessionID, modelID string) routing.Spec
+}
+
+// SetRoutingResolver attaches the daemon's per-session routing resolver
+// (optional). Same startup-once ordering guarantee as SetRateLimitObserver;
+// not synchronized.
+func (p *MessagesProxy) SetRoutingResolver(o RoutingResolver) { p.routingResolver = o }
 
 // SetQuotaStore enables capture of Anthropic's per-account subscription
 // rate-limit headers off OAuth-passthrough responses. Pass nil to disable
@@ -375,20 +398,13 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody [
 		p.logger.Warn("proxy: openrouter request has no string model; forwarding untranslated")
 	}
 	// Pinned model lines get their provider preferences injected; a
-	// caller-supplied provider object still wins for the pin.
-	//
-	// The guard's ignore list is different: it is merged in even when the
-	// caller supplied its own provider object. A budget guard that any caller
-	// can switch off by sending a provider block is not a guard.
+	// caller-supplied provider object still wins for the pin. The guard's
+	// ignore list is different: it is merged in even when the caller supplied
+	// its own provider object — a budget guard that any caller can switch off
+	// by sending a provider block is not a guard. A resolver (the daemon's
+	// Controller) layers the session's routing spec on top of all of it.
 	if m, ok := payload["model"].(string); ok {
-		if _, has := payload["provider"]; !has {
-			if prefs, pinned := routing.ProviderPrefsFor(m); pinned {
-				payload["provider"] = prefs
-			}
-		}
-		if ignore := p.guard.IgnoredFor(time.Now(), m); len(ignore) > 0 {
-			payload["provider"] = mergeIgnore(payload["provider"], ignore)
-		}
+		p.applyProviderRouting(payload, m, r)
 	}
 	rewritten, err := json.Marshal(payload)
 	if err != nil {
@@ -396,6 +412,77 @@ func (p *MessagesProxy) doOpenRouter(ctx context.Context, path string, reqBody [
 	}
 	resp, err := p.upstreamRequest(ctx, p.orURL, p.orKey, path, true /* bearer */, rewritten, r, convID)
 	return resp, err
+}
+
+// applyProviderRouting decides the OpenRouter provider-routing object for one
+// request, mutating payload in place. Three layers, weakest first:
+//
+//   - The static pin (routing.ProviderPrefsFor): injected when the caller sent
+//     no provider object at all; a caller-supplied object wins for the pin.
+//   - The guard's ignore list: merged in even over a caller-supplied object —
+//     a budget guard any caller can switch off by sending a provider block is
+//     not a guard — except when that object names a non-empty `only`: an
+//     explicit routing decision bypasses bans.
+//   - The session's routing spec (routingResolver, the daemon's Controller):
+//     the resolved spec builds the whole object for a request with no caller
+//     provider — spec.Prefs folds the pin and the guard's ignore in under its
+//     own rules, including dropping the ignore when the spec names an only —
+//     and on a caller-supplied object it forces the one boundary a spec exists
+//     to hold, data_collection "deny" and zdr, over whatever the caller asked
+//     for. No resolver means none of this runs: the pre-spec behaviour,
+//     exactly.
+func (p *MessagesProxy) applyProviderRouting(payload map[string]any, model string, r *http.Request) {
+	pinPrefs, pinned := routing.ProviderPrefsFor(model)
+	ignore := p.guard.IgnoredFor(time.Now(), model)
+	_, hasCaller := payload["provider"]
+
+	if p.routingResolver != nil {
+		spec := p.routingResolver.RoutingFor(r.Header.Get("X-Rafiki-Session"), model)
+		if !hasCaller {
+			// spec.Prefs owns the whole object — its only overrides the pin and
+			// drops the bans, the pin fills in otherwise, and the data flags are
+			// built in — so the separate guard merge must not run on top of it.
+			if prefs, send := spec.Prefs(pinPrefs.Only, ignore); send {
+				payload["provider"] = prefs
+			}
+			return
+		}
+		if !callerCarriesOnly(payload["provider"]) && len(ignore) > 0 {
+			payload["provider"] = mergeIgnore(payload["provider"], ignore)
+		}
+		// Data policy is the one boundary: a caller object must not clear it,
+		// so the spec's flags are SET over the caller's own values.
+		if obj, ok := payload["provider"].(map[string]any); ok {
+			if spec.NoData {
+				obj["data_collection"] = "deny"
+			}
+			if spec.ZDR {
+				obj["zdr"] = true
+			}
+		}
+		return
+	}
+
+	if !hasCaller {
+		if pinned {
+			payload["provider"] = pinPrefs
+		}
+	}
+	if len(ignore) > 0 {
+		payload["provider"] = mergeIgnore(payload["provider"], ignore)
+	}
+}
+
+// callerCarriesOnly reports whether a caller-supplied provider object names a
+// non-empty `only` list — an explicit routing decision, which skips the
+// guard's ignore merge the same way a spec only does.
+func callerCarriesOnly(v any) bool {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	only, ok := obj["only"].([]any)
+	return ok && len(only) > 0
 }
 
 // resolveAndAdapt rewrites the request body in one decode/marshal pass: it
