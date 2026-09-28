@@ -179,6 +179,42 @@ func TestProxyRoutingCallerOnlySkipsIgnore(t *testing.T) {
 	c.EqDiff([]any{"coreweave"}, listOf(t, prov, "ignore"), "no only on the caller object: the guard's ban is merged in")
 }
 
+// TestProxyRoutingCallerDataPolicyForced pins the OVERWRITE direction of the
+// data-policy force and its composition with a caller only: a caller object
+// that carries its own data_collection/zdr CANNOT clear them (a caller's
+// "allow" is overwritten to "deny", a "false" zdr to "true"), and an only
+// that bypasses bans does not bypass data policy — nodata still rides beside
+// the caller's only. (Waves-1-2 checkpoint review finding 3.)
+func TestProxyRoutingCallerDataPolicyForced(t *testing.T) {
+	c := assert.NewCollecting(t)
+	spec, err := routing.ParseSpec("nodata,zdr")
+	c.Require().NoError(err, "parse spec")
+	res := &recordingResolver{spec: spec}
+	p, bodies := newRoutingTestProxy(t, res)
+
+	send := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Rafiki-Session", "c_child7")
+		p.ServeHTTP(rec, req)
+		return providerOf(t, (*bodies)[len(*bodies)-1])
+	}
+
+	// The caller asks for the OPPOSITE policy: both keys are overwritten.
+	prov := send(`{"model":"openai/gpt-4o","provider":{"data_collection":"allow","zdr":false},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.Eq("deny", prov["data_collection"], "a caller's allow cannot clear the spec's nodata")
+	c.Eq(true, prov["zdr"], "a caller's zdr:false cannot clear the spec's zdr")
+
+	// An only bypasses bans — it does NOT bypass data policy (decision 5):
+	// the caller's only survives AND both forced keys ride beside it.
+	prov = send(`{"model":"openai/gpt-4o","provider":{"only":["novita"]},"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	c.EqDiff([]any{"novita"}, listOf(t, prov, "only"), "caller's only survives")
+	c.Eq("deny", prov["data_collection"], "nodata rides beside a caller only")
+	c.Eq(true, prov["zdr"], "zdr rides beside a caller only")
+}
+
 // TestProxyRoutingNoResolverUnchanged proves a proxy without a resolver keeps
 // the pre-spec behaviour exactly: the static pin is still injected (and only
 // the pin — no sort/quant/data fields appear), a caller object still wins for
