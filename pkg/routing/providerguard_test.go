@@ -106,19 +106,39 @@ func TestGuardEjectionExpires(t *testing.T) {
 	c.Empty(g.IgnoredFor(now.Add(25*time.Hour), "deepseek/deepseek-v4-pro"), "at 25h IgnoredFor")
 }
 
-// TestGuardIgnoreListCapped proves the safety valve: no matter how many
-// providers break, at most three are excluded for one model line, so the guard
-// cannot blacklist a model into unroutability.
-func TestGuardIgnoreListCapped(t *testing.T) {
+// TestGuardDeclinesNewEjectionAtCap proves the cap declines rather than
+// evicts: once a model line holds the cap of automatic ejections, a further
+// qualifying provider is neither ignored nor recorded — the existing ejections
+// stand, first-come — so under a fixed ranking (sort=price) the freed provider
+// cannot be cycled straight back into traffic.
+func TestGuardDeclinesNewEjectionAtCap(t *testing.T) {
+	c := assert.NewAborting(t)
 	g := testGuard()
+	sink := &fakeSink{}
+	g.SetSink(sink)
 	now := time.Now()
-	for i, p := range []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo"} {
+	for i, p := range []string{"Alpha", "Bravo", "Charlie", "Delta"} {
 		conv := string(rune('a' + i))
 		for range 6 {
 			g.Observe(now, miss(conv, p))
 		}
 	}
-	assert.NewCollecting(t).Len(g.IgnoredFor(now, "deepseek/deepseek-v4-pro"), 3, "IgnoredFor")
+	got := g.IgnoredFor(now, "deepseek/deepseek-v4-pro")
+	c.False(len(got) != 3 || got[0] != "alpha" || got[1] != "bravo" || got[2] != "charlie",
+		"IgnoredFor = %v, want [alpha bravo charlie] — Delta declined, first-come stands", got)
+	c.Len(sink.recs, 3, "sink rows: one per recorded ejection, none for the declined one")
+	for _, r := range sink.recs {
+		c.False(r.Provider == "delta", "sink recorded the declined ejection for %s", r.Provider)
+	}
+
+	// Declining is not forgetting: the declined provider's streak survives, so
+	// the moment room frees (here the three ejections expire together) its
+	// next miss ejects it without a fresh streak.
+	c.Empty(g.IgnoredFor(now.Add(25*time.Hour), "deepseek/deepseek-v4-pro"), "expired IgnoredFor")
+	g.Observe(now.Add(25*time.Hour), miss("d", "Delta"))
+	got = g.IgnoredFor(now.Add(25*time.Hour), "deepseek/deepseek-v4-pro")
+	c.False(len(got) != 1 || got[0] != "delta", "IgnoredFor after the cap freed = %v, want [delta]", got)
+	c.Len(sink.recs, 4, "sink rows after the cap freed")
 }
 
 // TestGuardScopedToModelLine proves an ejection blames one model line only: the

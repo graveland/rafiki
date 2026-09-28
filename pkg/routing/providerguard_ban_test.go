@@ -68,8 +68,9 @@ func TestBanWithTTLExpires(t *testing.T) {
 }
 
 // TestBanSurvivesPerLineCap proves operator bans are exempt from the cap: the
-// guard ejecting five providers on a line neither evicts the ban nor has the
-// ban count against the guard's own three.
+// guard recording its own ejections on a line — three land, the rest are
+// declined at the cap — neither evicts the ban nor has the ban count against
+// the guard's own three.
 func TestBanSurvivesPerLineCap(t *testing.T) {
 	c := assert.NewCollecting(t)
 	g := testGuard()

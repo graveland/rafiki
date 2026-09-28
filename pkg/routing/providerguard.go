@@ -52,7 +52,12 @@ const (
 	// cache is not evidence of anything.
 	minCacheableTokens = 4096
 	// maxEjectedPerModelLine bounds a pathological cascade: however many
-	// providers break, a model line never loses more than this many at once.
+	// providers break, a model line never loses more than this many automatic
+	// ejections at once. At the cap a NEW automatic ejection is declined — the
+	// line keeps the ones it has, first-come — rather than the oldest being
+	// evicted: under a fixed ranking (sort=price) evicting the oldest sends
+	// traffic straight back to the freed provider, which re-earns its ejection,
+	// forever. Operator bans are exempt.
 	maxEjectedPerModelLine = 3
 	// convMemoryLimit caps the per-conversation memory of the previous turn.
 	// Exceeding it prunes entries untouched for convMemoryTTL.
@@ -238,10 +243,15 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 		g.mu.Unlock()
 		return
 	}
-	rec := g.ejectLocked(now, key, ReasonNoCache, streak, obs)
+	rec, ok := g.ejectLocked(now, key, ReasonNoCache, streak, obs)
 	sink, onEject, logger := g.sink, g.onEject, g.logger
 	g.mu.Unlock()
 
+	if !ok {
+		logger.Info("routing: ejection declined at cap",
+			"provider", key.provider, "model_line", key.modelLine, "cap", maxEjectedPerModelLine)
+		return
+	}
 	logger.Warn("routing: provider ejected",
 		"provider", rec.Provider, "model_line", rec.ModelLine, "reason", string(rec.Reason),
 		"streak", streak, "expires_at", rec.ExpiresAt, "conversation", obs.Conversation)
@@ -258,12 +268,18 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 	}
 }
 
-// ejectLocked records the ejection in memory and returns the record to persist.
+// ejectLocked records the ejection in memory and returns the record to
+// persist, with ok true. When the model line already holds the cap of live
+// automatic ejections the new one is declined instead: ok is false, nothing
+// is recorded, the streak is kept, and the caller must not write the sink —
+// the provider stays routable and takes the freed slot on its next miss.
 // Caller holds g.mu.
-func (g *ProviderGuard) ejectLocked(now time.Time, key providerKey, reason EjectReason, streak int, obs Observation) EjectionRecord {
+func (g *ProviderGuard) ejectLocked(now time.Time, key providerKey, reason EjectReason, streak int, obs Observation) (rec EjectionRecord, ok bool) {
+	if g.capReachedLocked(now, key.modelLine) {
+		return EjectionRecord{}, false
+	}
 	g.ejected[key] = ejection{reason: reason, at: now, expiresAt: now.Add(g.ttl)}
 	delete(g.streaks, key)
-	g.enforceCapLocked(now, key.modelLine)
 	evidence, _ := json.Marshal(map[string]any{
 		"streak":            streak,
 		"conversation":      obs.Conversation,
@@ -277,11 +293,31 @@ func (g *ProviderGuard) ejectLocked(now time.Time, key providerKey, reason Eject
 		Reason:    reason,
 		ExpiresAt: now.Add(g.ttl),
 		Evidence:  evidence,
-	}
+	}, true
 }
 
-// enforceCapLocked drops the oldest ejections for a model line until at most
-// maxEjectedPerModelLine remain. Caller holds g.mu.
+// capReachedLocked reports whether the model line already holds
+// maxEjectedPerModelLine live automatic ejections, so recording another would
+// put it over the cap. Operator bans are neither counted nor capped: the cap
+// stops the automatic detector banning a line into unroutability, and a
+// human's ban is a deliberate choice that must never be silently dropped.
+// Caller holds g.mu.
+func (g *ProviderGuard) capReachedLocked(now time.Time, line string) bool {
+	n := 0
+	for k, e := range g.ejected {
+		if k.modelLine == line && e.reason != ReasonOperator && e.live(now) {
+			n++
+		}
+	}
+	return n >= maxEjectedPerModelLine
+}
+
+// enforceCapLocked drops the oldest live automatic ejections for a model line
+// until at most maxEjectedPerModelLine remain. Recording no longer calls it —
+// at the cap a new ejection is declined (see capReachedLocked) — so this
+// survives only as Rehydrate's backstop against history holding more live
+// automatic rows for one line than the cap allows (an older binary's log,
+// say). Caller holds g.mu.
 //
 // Operator bans are neither counted nor evicted: the cap stops the automatic
 // detector banning a line into unroutability, and a human's ban is a
