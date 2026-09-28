@@ -784,6 +784,16 @@ replaces the record; a refused Status poll (an old executor answers
 `Unimplemented`) is logged once and the wait continues on the connect signal
 and the timeout as before.
 
+The wait's timeout arm may overshoot by up to `statusCallTimeout` (2 s): the
+select blocks for the whole Status call, so a connect signal that lands (or
+the timeout itself) is only serviced once the in-flight poll returns. An
+already-landed dial can therefore be observed up to 2 s late; the launch
+timeout itself can run the same 2 s over. The tail errs the other way on
+purpose: the executor stamps `running=false` only after its stderr relay has
+drained the pipe (bounded — the daraja's claude can inherit the write end and
+hold EOF off), so the first exited answer already carries the daraja's last
+lines.
+
 ### The `socket` field is retired
 
 1b-i returned `LaunchResponse.socket` — a Unix path for the caller to dial

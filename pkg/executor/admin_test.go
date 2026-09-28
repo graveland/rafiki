@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 
@@ -227,10 +228,12 @@ func main() {
 }
 
 // buildExitingDarajaStub is buildSelfStub with the opposite lifetime: it logs
-// lines to stderr (what a daraja does with its connection-failure diagnostics)
-// and exits with a code, so a launch produces a daraja-shaped DEATH to ask
-// Status about. The stderr volume exceeds stderrTailMax, so the record's tail
-// is exercised at its cap: early lines must be evicted, late lines kept.
+// numbered lines to stderr (what a daraja does with its connection-failure
+// diagnostics) and exits with a code, so a launch produces a daraja-shaped
+// DEATH to ask Status about. The stderr volume exceeds stderrTailMax, so the
+// record's tail is exercised at its cap: early lines must be evicted, late
+// lines kept. The filler is numbered ("filler-000"…) so an eviction assertion
+// can name a line that actually exists.
 func buildExitingDarajaStub(t *testing.T) string {
 	t.Helper()
 	c := assert.NewAborting(t)
@@ -246,8 +249,37 @@ import (
 
 func main() {
 	for i := 0; i < 60; i++ {
-		fmt.Fprintln(os.Stderr, strings.Repeat("x", 99))
+		fmt.Fprintf(os.Stderr, "filler-%03d %s\n", i, strings.Repeat("x", 88))
 	}
+	fmt.Fprintln(os.Stderr, "daraja: connect failed: dial 127.0.0.1:1: connection refused")
+	os.Exit(3)
+}
+`), 0o600))
+	bin := filepath.Join(dir, "stub")
+	out, err := exec.Command("go", "build", "-o", bin, src).CombinedOutput()
+	c.NoError(err, "build stub: %v (output: %s)", err, out)
+	return bin
+}
+
+// buildLongLineDarajaStub writes ONE stderr line far longer than a Scanner's
+// default 64 KiB cap, then its marker and exit — the shape that used to stop
+// the stderr relay (ErrTooLong) and leave the pipe undrained, blocking the
+// daraja on stderr forever.
+func buildLongLineDarajaStub(t *testing.T) string {
+	t.Helper()
+	c := assert.NewAborting(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "main.go")
+	c.NoError(os.WriteFile(src, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+func main() {
+	fmt.Fprintln(os.Stderr, strings.Repeat("L", 200<<10))
 	fmt.Fprintln(os.Stderr, "daraja: connect failed: dial 127.0.0.1:1: connection refused")
 	os.Exit(3)
 }
@@ -896,13 +928,16 @@ func TestAdminStatusReportsExitAndStderr(t *testing.T) {
 	c.Empty(resp.Msg.GetStderrTail(), "unknown child carried a stderr tail")
 
 	// The launched daraja exits within moments; poll Status the way the
-	// daemon's launch wait does, until the exit AND the stderr tail have both
-	// landed (the tail's relay goroutine may finish a scan after Wait does).
+	// daemon's launch wait does, and pin the contract on the FIRST poll that
+	// reports running=false — that is the poll the wait fails fast on, so the
+	// tail must already be complete there. supervise drains the stderr relay
+	// (bounded by stderrDrainGrace) BEFORE stamping the exit; a first exited
+	// answer missing the daraja's last lines is exactly the race this pins.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		resp, err = a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-status"}))
 		c.Require().NoError(err, "Status")
-		if resp.Msg.GetKnown() && !resp.Msg.GetRunning() && strings.Contains(resp.Msg.GetStderrTail(), marker) {
+		if resp.Msg.GetKnown() && !resp.Msg.GetRunning() {
 			break
 		}
 		c.Require().False(time.Now().After(deadline), "Status never reported the exit; last: known=%v running=%v tail=%q",
@@ -915,12 +950,85 @@ func TestAdminStatusReportsExitAndStderr(t *testing.T) {
 	c.Eq(int32(3), *resp.Msg.ExitCode, "exit_code")
 
 	// The tail holds the END of the stderr, not the start: the stub wrote ~6KB
-	// of filler lines before the marker, so the early ones must be evicted and
-	// the tail must never exceed stderrTailMax bytes.
+	// of numbered filler lines before the marker, so the early ones must be
+	// evicted, the marker kept, and the tail must never exceed stderrTailMax
+	// bytes.
 	tail := resp.Msg.GetStderrTail()
 	c.StrContains(tail, marker, "stderr_tail")
 	c.NotStrContains(tail, "filler-000", "the tail must keep the LAST bytes; the first filler line survived")
 	c.False(len(tail) > stderrTailMax, "stderr_tail is %d bytes, want <= %d", len(tail), stderrTailMax)
+}
+
+// A stderr line longer than a Scanner's default 64 KiB cap must not stop the
+// stderr relay: a relay that dies at one oversized line leaves the pipe
+// undrained, so the daraja blocks on stderr and neither connects nor exits,
+// and the launch wait burns its full timeout. The relay truncates oversized
+// lines and keeps reading, so this daraja still exits with its marker in the
+// tail.
+func TestAdminStatusSurvivesAnOversizedStderrLine(t *testing.T) {
+	c := assert.NewCollecting(t)
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildLongLineDarajaStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	marker := "daraja: connect failed: dial 127.0.0.1:1: connection refused"
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId: "c-longline",
+		Cwd:     t.TempDir(),
+		Spec:    &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE},
+	}))
+	c.Require().NoError(err, "Launch")
+
+	var resp *connect.Response[adminpb.StatusResponse]
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err = a.Status(context.Background(), connect.NewRequest(&adminpb.StatusRequest{ChildId: "c-longline"}))
+		c.Require().NoError(err, "Status")
+		if resp.Msg.GetKnown() && !resp.Msg.GetRunning() {
+			break
+		}
+		c.Require().False(time.Now().After(deadline),
+			"the oversized stderr line stalled the relay: Status never reported the exit")
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.Require().NotNil(resp.Msg.ExitCode, "an exited daraja must carry its exit code")
+	c.Eq(int32(3), *resp.Msg.ExitCode, "exit_code")
+	c.StrContains(resp.Msg.GetStderrTail(), marker, "stderr_tail")
+}
+
+// appendStderrLine cuts the tail at a byte offset, which can split a
+// multi-byte rune, and a tail sanitised only at Status read time would then
+// re-expand (each invalid run becomes a three-byte replacement rune) past the
+// cap. The record sanitises at append time and skips a cut leading
+// continuation byte, so the tail Status carries stays valid UTF-8 and within
+// stderrTailMax by construction.
+func TestAppendStderrLineKeepsTheTailValidAndBounded(t *testing.T) {
+	c := assert.NewAborting(t)
+	// What Status does with the stored tail.
+	sanitise := func(b []byte) string { return strings.ToValidUTF8(string(b), "\uFFFD") }
+
+	// The cut lands mid-rune: 2-byte runes pushed past the cap.
+	rec := &launchRecord{}
+	rec.appendStderrLine(strings.Repeat("é", stderrTailMax/2))
+	rec.appendStderrLine(strings.Repeat("é", stderrTailMax/2))
+	tail := sanitise(rec.stderrTail)
+	c.False(len(tail) > stderrTailMax, "tail is %d bytes after sanitising, want <= %d", len(tail), stderrTailMax)
+	c.True(utf8.ValidString(tail), "tail is not valid UTF-8")
+	c.NotStrContains(tail, "\uFFFD", "a replacement rune means the stored tail was invalid: the cut split a rune")
+
+	// Invalid bytes near the cap must not survive the cut and re-expand on
+	// read either — sanitising happens at append time, before the cut.
+	rec = &launchRecord{}
+	rec.appendStderrLine(strings.Repeat("x", stderrTailMax-1))
+	rec.appendStderrLine("ok \xff\xfe\xff\xfe more \xff text")
+	tail = sanitise(rec.stderrTail)
+	c.False(len(tail) > stderrTailMax, "tail is %d bytes after sanitising, want <= %d", len(tail), stderrTailMax)
+	c.True(utf8.ValidString(tail), "tail is not valid UTF-8")
+	c.NotStrContains(tail, "\uFFFD", "a replacement rune means invalid bytes survived the append")
 }
 
 // A LIVE daraja answers known=true, running=true with the exit code left

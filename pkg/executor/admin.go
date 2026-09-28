@@ -19,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 
@@ -35,6 +36,14 @@ const defaultReapGrace = 3 * time.Second
 // stderrTailMax caps the stderr tail a launch record keeps for Status:
 // the daraja's own connection-failure diagnostics, never the whole pipe.
 const stderrTailMax = 4 * 1024
+
+// stderrDrainGrace bounds how long supervise waits for the stderr relay to
+// finish draining the pipe after the daraja's process exits, before the
+// record is stamped exited. The bound exists because the daraja's claude
+// inherits the stderr write end and can hold EOF off past the daraja's own
+// death; without it, an orphaned claude would hold up the exit stamp that
+// the daemon's fail-fast launch wait is polling for.
+const stderrDrainGrace = 500 * time.Millisecond
 
 // AdminOptions configures the machine-admin surface.
 type AdminOptions struct {
@@ -109,7 +118,12 @@ type launched struct {
 	cmd     *exec.Cmd
 	pgid    int
 	supDone chan struct{} // closed when supervise exits
-	status  *launchRecord
+	// stderrDone is closed by the stderr relay once it has finished reading
+	// the pipe; supervise waits on it (bounded by stderrDrainGrace) before
+	// stamping the record exited, so the tail Status carries is complete at
+	// the first running=false the daemon's launch wait acts on.
+	stderrDone chan struct{}
+	status     *launchRecord
 }
 
 // launchRecord is what Status answers from: whether the daraja is still
@@ -128,12 +142,21 @@ type launchRecord struct {
 
 // appendStderrLine folds one stderr line into the tail, keeping only the LAST
 // stderrTailMax bytes so the tail is bounded no matter how chatty the process.
-// Caller holds the server lock.
+// The line is sanitised HERE, not at Status read time: ToValidUTF8's
+// replacement rune is three bytes where an invalid run may have been one, so
+// sanitising only after the byte-offset cut could push the tail past
+// stderrTailMax. Caller holds the server lock.
 func (r *launchRecord) appendStderrLine(line string) {
-	b := append(r.stderrTail, line...)
+	b := append(r.stderrTail, strings.ToValidUTF8(line, "")...)
 	b = append(b, '\n')
 	if len(b) > stderrTailMax {
 		b = b[len(b)-stderrTailMax:]
+		// The byte-offset cut can land mid-rune and leave the tail starting
+		// on a continuation byte. Skip to the next rune start: at most three
+		// bytes are dropped, and the tail stays valid UTF-8 without growing.
+		for len(b) > 0 && !utf8.RuneStart(b[0]) {
+			b = b[1:]
+		}
 	}
 	r.stderrTail = b
 }
@@ -411,7 +434,14 @@ func (a *AdminServer) Launch(
 	// Unset Stdout/Stderr route to /dev/null, which silently swallowed daraja's
 	// own diagnostic output — including the connection-failure reason it logs
 	// on exit — leaving an operator with no way to tell why a launch failed.
-	stderr, err := cmd.StderrPipe()
+	//
+	// The pipe is built by hand rather than via cmd.StderrPipe: os/exec's Wait
+	// closes a StderrPipe's reader once the process exits, which can discard
+	// unread final lines and makes the exit stamp race the relay. With an
+	// explicit pipe the parent closes its write end right after Start (the
+	// child holds its own), Wait never touches the read end, and supervise
+	// decides when the tail has drained — see stderrDrainGrace.
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		a.mu.Lock()
 		if a.m[childID] == claim {
@@ -420,10 +450,13 @@ func (a *AdminServer) Launch(
 		a.mu.Unlock()
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("daraja stderr pipe: %w", err))
 	}
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
 		// Release the claim: the slot must not outlive a failed start, or every
 		// later Launch of this child is refused with AlreadyExists forever.
+		stderrR.Close()
+		stderrW.Close()
 		a.mu.Lock()
 		if a.m[childID] == claim {
 			delete(a.m, childID)
@@ -431,9 +464,16 @@ func (a *AdminServer) Launch(
 		a.mu.Unlock()
 		return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("start daraja: %w", err))
 	}
+	// The child now holds its own copy of the write end — and so does anything
+	// IT spawns, stderr being inherited, which is why EOF can lag the daraja's
+	// death. The parent's copy must go now: held open, it would keep the read
+	// end from ever reaching EOF.
+	stderrW.Close()
+
 	pid := cmd.Process.Pid
 	rec := &launchRecord{running: true}
-	go a.logDarajaStderr(rec, childID, stderr)
+	stderrDone := make(chan struct{})
+	go a.logDarajaStderr(rec, childID, stderrR, stderrDone)
 
 	// Swap the claim for the real entry. The entry is fully built BEFORE it
 	// enters the map and is never mutated after, so reap's read of l.pgid
@@ -442,7 +482,7 @@ func (a *AdminServer) Launch(
 	// replaces any left by an earlier daraja of this child id: Status must
 	// describe the daraja that is alive NOW.
 	done := make(chan struct{})
-	l := &launched{cmd: cmd, pgid: pid, supDone: done, status: rec}
+	l := &launched{cmd: cmd, pgid: pid, supDone: done, status: rec, stderrDone: stderrDone}
 	a.mu.Lock()
 	a.m[childID] = l
 	a.records[childID] = rec
@@ -575,6 +615,18 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 	code := l.cmd.ProcessState.ExitCode()
 	slog.Info("admin: daraja exited", "childID", childID, "pid", l.pgid, "exitCode", code, "error", err)
 
+	// Let the stderr relay drain before stamping. The daemon's launch wait
+	// fails fast on the FIRST Status that reports running=false, so a record
+	// stamped while the relay still has the daraja's last lines unread makes
+	// the fail-fast error carry an empty or truncated tail — exactly the
+	// diagnostics the tail exists to carry. stderrDone closes at the relay's
+	// EOF; the bound covers the daraja's claude inheriting the write end and
+	// holding EOF off past the daraja's own death (stderrDrainGrace).
+	select {
+	case <-l.stderrDone:
+	case <-time.After(stderrDrainGrace):
+	}
+
 	// Dropping the entry is what stops a recycled pgid from being signalled
 	// later: once the group is likely empty, this executor no longer claims it.
 	// The record deliberately survives the deletion — Status answers for an
@@ -630,15 +682,40 @@ func (a *AdminServer) kindFor(spec *darajapb.ChildSpec) (string, error) {
 // logDarajaStderr relays a launched daraja's stderr into the executor's own
 // log, line by line, so its connection-failure diagnostics reach an operator
 // instead of /dev/null, and folds each line into the launch record's tail so
-// Status can carry the same diagnostics back to the daemon. Ends when the
-// pipe closes (the process exited).
-func (a *AdminServer) logDarajaStderr(rec *launchRecord, childID string, stderr io.Reader) {
-	sc := bufio.NewScanner(stderr)
-	for sc.Scan() {
-		slog.Warn("daraja stderr", "childID", childID, "line", sc.Text())
-		a.mu.Lock()
-		rec.appendStderrLine(sc.Text())
-		a.mu.Unlock()
+// Status can carry the same diagnostics back to the daemon. Ends at EOF —
+// the process exited and nothing in its group still holds the write end — or
+// on a read error, closing done either way so supervise stops waiting on the
+// drain.
+func (a *AdminServer) logDarajaStderr(rec *launchRecord, childID string, stderr io.ReadCloser, done chan<- struct{}) {
+	defer close(done)
+	defer stderr.Close()
+	// ReadLine rather than Scanner: a Scanner stops unrecoverably at a line
+	// longer than its cap (64 KiB by default) and then nothing drains the
+	// pipe — a chatty daraja would block on stderr and neither connect nor
+	// exit. ReadLine has no line cap; it hands an oversized line back in
+	// buffer-sized fragments, of which the first is kept (truncated) and the
+	// rest are discarded so the pipe keeps draining.
+	br := bufio.NewReaderSize(stderr, 64<<10)
+	for {
+		line, isPrefix, err := br.ReadLine()
+		if isPrefix {
+			for isPrefix && err == nil {
+				_, isPrefix, err = br.ReadLine()
+			}
+			line = []byte(string(line) + " [truncated]")
+		}
+		if len(line) > 0 {
+			slog.Warn("daraja stderr", "childID", childID, "line", string(line))
+			a.mu.Lock()
+			rec.appendStderrLine(string(line))
+			a.mu.Unlock()
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				slog.Warn("admin: daraja stderr relay ended", "childID", childID, "error", err)
+			}
+			return
+		}
 	}
 }
 
@@ -663,8 +740,9 @@ func (a *AdminServer) Status(
 		code := rec.exitCode
 		resp.ExitCode = &code
 	}
-	// Valid UTF-8 only: the tail rides a proto string, and a daraja that wrote
-	// binary garbage to stderr must not poison the response's encoding.
+	// Valid UTF-8 only: the tail rides a proto string. appendStderrLine
+	// sanitises at append time, so this is defense in depth for a tail that
+	// reached the record any other way.
 	resp.StderrTail = strings.ToValidUTF8(string(rec.stderrTail), "\uFFFD")
 	a.mu.Unlock()
 	return connect.NewResponse(resp), nil
