@@ -3,13 +3,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"google.golang.org/protobuf/proto"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/childstore"
@@ -190,36 +197,39 @@ func TestScriptOutputCoalescesBySize(t *testing.T) {
 
 	line := strings.Repeat("a", 1024)
 	for i := 0; i < 3; i++ {
-		co.Add("stdout", fmt.Sprintf("%s-%d", line, i))
+		co.Add("stdout", fmt.Sprintf("%s-%d", line, i), true)
 	}
 	// Below the trigger, nothing is published — not on a wake, not on a
 	// (never fired) deadline.
 	time.Sleep(20 * time.Millisecond)
 	ck.Eq(0, len(busCh), "an event was published before the 4 KiB trigger: %+v", drainScriptBus(busCh))
 
-	co.Add("stdout", line+"-3")
+	// A5: the buffer seals BEFORE a line that would push it past the trigger,
+	// so three lines flush as one size-triggered event and the fourth stays
+	// open (its own append would exceed 4096).
+	co.Add("stdout", line+"-3", true)
 	waitUntil(t, "the size-triggered flush", func() bool { return len(busCh) > 0 })
 	evs := drainScriptBus(busCh)
 	ck.Require().Eq(1, len(evs), "got %d events for one 4 KiB flush", len(evs))
 	ck.Eq("stdout", evs[0].stream, "Stream")
 	want := ""
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 3; i++ {
 		want += fmt.Sprintf("%s-%d\n", line, i)
 	}
 	ck.Eq(want, evs[0].text, "coalesced text (lines, newline-terminated)")
 	ck.Eq(int32(0), evs[0].ordinal, "durable ordinal")
 
 	// The buffer reopens: more output stays buffered until its own trigger.
-	co.Add("stdout", "after")
+	co.Add("stdout", "after", true)
 	time.Sleep(20 * time.Millisecond)
 	ck.Eq(0, len(busCh), "post-flush output published without a trigger")
 
-	// Close flushes the remainder.
+	// Close flushes the remainder — the -3 line and "after" coalesce into it.
 	co.Close()
 	waitUntil(t, "the final flush", func() bool { return len(busCh) > 0 })
 	evs = drainScriptBus(busCh)
 	ck.Require().Eq(1, len(evs), "got %d events for the final flush", len(evs))
-	ck.Eq("after\n", evs[0].text, "final flush text")
+	ck.Eq(line+"-3\nafter\n", evs[0].text, "final flush text")
 }
 
 // The time trigger: 250 ms after a stream's first unflushed line, whatever is
@@ -233,7 +243,7 @@ func TestScriptOutputCoalescesByTime(t *testing.T) {
 	clock := newFakeScriptClock()
 	co := newTestScriptCoalescer(ctrl, "c_1", clock)
 
-	co.Add("stdout", "slow-line")
+	co.Add("stdout", "slow-line", true)
 
 	// The loop arms exactly one 250 ms timer anchored at the line's arrival.
 	waitUntil(t, "the flush timer", func() bool { return len(clock.pending()) == 1 })
@@ -251,7 +261,7 @@ func TestScriptOutputCoalescesByTime(t *testing.T) {
 	ck.Eq("slow-line\n", evs[0].text, "timed flush text")
 
 	// A line that arrives later anchors its own deadline.
-	co.Add("stdout", "second")
+	co.Add("stdout", "second", true)
 	waitUntil(t, "the second flush timer", func() bool { return len(clock.pending()) == 1 })
 	clock.advance(249 * time.Millisecond)
 	time.Sleep(10 * time.Millisecond)
@@ -277,7 +287,7 @@ func TestScriptOutputSplitsLongLine(t *testing.T) {
 	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
 
 	long := strings.Repeat("x", 10*1024)
-	co.Add("stdout", long)
+	co.Add("stdout", long, true)
 
 	// The two full 4 KiB pieces publish at once (size-triggered units); the
 	// 2 KiB remainder stays in the open buffer for the final flush.
@@ -292,7 +302,7 @@ func TestScriptOutputSplitsLongLine(t *testing.T) {
 
 	// A following line joins the remainder — and the whole stream
 	// concatenates back to the raw output.
-	co.Add("stdout", "next")
+	co.Add("stdout", "next", true)
 	co.Close()
 	waitUntil(t, "the remainder flush", func() bool { return len(busCh) >= 1 })
 	evs = append(evs, drainScriptBus(busCh)...)
@@ -314,8 +324,8 @@ func TestScriptOutputCloseStopsTimer(t *testing.T) {
 	clock := newFakeScriptClock()
 	co := newTestScriptCoalescer(ctrl, "c_1", clock)
 
-	co.Add("stdout", "out-1")
-	co.Add("stderr", "err-1")
+	co.Add("stdout", "out-1", true)
+	co.Add("stderr", "err-1", true)
 	waitUntil(t, "the flush timer", func() bool { return len(clock.pending()) == 1 })
 
 	// Close flushes BOTH streams (the brief: output precedes child_exited).
@@ -345,7 +355,7 @@ func TestScriptOutputCloseStopsTimer(t *testing.T) {
 
 	// Nothing publishes after Close, whatever the clock does: an Add is
 	// dropped, and firing the (stopped) timer emits nothing.
-	co.Add("stdout", "too-late")
+	co.Add("stdout", "too-late", true)
 	clock.advance(time.Hour)
 	time.Sleep(20 * time.Millisecond)
 	ck.Eq(0, len(busCh), "an event was published after Close: %+v", drainScriptBus(busCh))
@@ -455,4 +465,260 @@ func payloadText(t *testing.T, payload []byte) string {
 		return ""
 	}
 	return ev.ScriptOutput.Text
+}
+
+// ─── fix-round tests (A1, A2, A4, A5, A3) ─────────────────────────────────────
+
+// A1: an oversized line whose 4 KiB cut lands mid-rune must still marshal —
+// the split steps back to the last rune boundary and every published event is
+// valid proto3. Without the rune-boundary step the durable append fails and
+// the unordinaled event kills every live subscriber stream.
+func TestScriptOutputSplitsAtRuneBoundary(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
+
+	// "é" is two bytes; the second byte of the rune straddling byte 4096 sits
+	// at position 4097, so a byte cut at 4096 would split it.
+	body := strings.Repeat("a", 4095)
+	line := body + "é" + strings.Repeat("b", 1024)
+	ck.Eq(4097, len(body+"é"), "fixture: body+é must be 4097 bytes")
+	co.Add("stdout", line, true)
+
+	// The 4095-byte piece publishes immediately; the rune itself starts the
+	// remainder, which sits in the open buffer until Close.
+	waitUntil(t, "the rune-boundary split piece", func() bool { return len(busCh) >= 1 })
+	time.Sleep(20 * time.Millisecond)
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(1, len(evs), "got %d events before Close", len(evs))
+	co.Close()
+	waitUntil(t, "the remainder flush", func() bool { return len(busCh) >= 1 })
+	evs = append(evs, drainScriptBus(busCh)...)
+	ck.Require().Eq(2, len(evs), "got %d events for the split line", len(evs))
+	for i := range evs {
+		// proto.Marshal refuses invalid UTF-8 in a proto3 string: marshalling
+		// every published event IS the assertion.
+		mev := &rafikiv1.Event{
+			ChildId: "c_1",
+			Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+				Stream: evs[i].stream, Text: evs[i].text,
+			}},
+		}
+		_, err := proto.Marshal(mev)
+		ck.NoError(err, "event %d does not marshal (invalid UTF-8)", i)
+	}
+	// The first piece stopped before the split rune; the rune starts the next.
+	ck.Eq(4095, len(evs[0].text), "piece 0 cut mid-rune (len %d)", len(evs[0].text))
+	ck.True(strings.HasPrefix(evs[1].text, "\u00e9"), "the remainder does not start with the split rune")
+}
+
+// A1: any non-UTF-8 byte on stderr must not take down the durable append or
+// the subscriber streams: the line is sanitized to valid UTF-8 at Add entry.
+func TestScriptOutputSanitizesInvalidUTF8(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
+	co.Add("stderr", "bad \xff byte and \xc3 broken rune", true)
+	co.Close()
+
+	waitUntil(t, "the sanitized flush", func() bool { return len(busCh) > 0 })
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(1, len(evs), "got %d events", len(evs))
+	ev := &rafikiv1.Event{
+		ChildId: "c_1",
+		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+			Stream: evs[0].stream, Text: evs[0].text,
+		}},
+	}
+	_, err := proto.Marshal(ev)
+	ck.NoError(err, "the sanitized event does not marshal")
+	ck.True(utf8.ValidString(evs[0].text), "event text is still invalid UTF-8")
+	ck.StrContains(evs[0].text, "\uFFFD", "invalid bytes were not replaced with U+FFFD")
+}
+
+// A2: a newline-free stderr blob is handed off in bounded fragments, so the
+// child-side accumulator never exceeds the fragment bound and the fragments
+// concatenate back to the input (modulo the documented UTF-8 sanitization).
+func TestScriptOutputFragmentsBoundedPending(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not available: this test needs a real process")
+	}
+
+	var mu sync.Mutex
+	var frags []string
+	var maxPending atomic.Int64
+
+	blob := strings.Repeat("x", 1<<20) // 1 MiB, no newline
+	dir := t.TempDir()
+	blobPath := filepath.Join(dir, "blob")
+	ck.NoError(os.WriteFile(blobPath, []byte(blob), 0o600), "write blob fixture")
+	c, err := child.Spawn(context.Background(), child.SpawnSpec{
+		ChildID:  "c_script_fragbound",
+		Cwd:      dir,
+		PiBinary: "/bin/sh",
+		Argv:     []string{"-c", "cat " + blobPath + " >&2"},
+		Provider: child.ScriptProvider{},
+		OnScriptOutput: func(stream, line string, terminated bool) {
+			mu.Lock()
+			frags = append(frags, line)
+			maxPending.Store(max(maxPending.Load(), int64(len(line))))
+			mu.Unlock()
+		},
+	})
+	ck.Require().NoError(err, "Spawn")
+	t.Cleanup(func() { _, _ = c.Shutdown(time.Second, time.Second) })
+
+	var total int
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		total = len(strings.Join(frags, ""))
+		n := len(frags)
+		mu.Unlock()
+		if n > 0 && total >= len(blob) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ck.False(maxPending.Load() > 4096, "a hook chunk exceeded the fragment bound: %d", maxPending.Load())
+	mu.Lock()
+	joined := strings.Join(frags, "")
+	mu.Unlock()
+	ck.Eq(len(blob), len(joined), "fragment concatenation lost bytes")
+	ck.Eq(blob, joined, "fragments do not concatenate back to the input")
+}
+
+// A2 (coalescer side): a fragment seals as its own unit with NO '\n' added, so
+// terminated lines and fragments concatenate back to the raw stream.
+func TestScriptOutputFragmentSealsAsItsOwnUnit(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
+	co.Add("stderr", "frag-one", false)
+	co.Add("stderr", "frag-two", false)
+	co.Add("stderr", "a full line", true)
+	co.Close()
+
+	waitUntil(t, "the fragment flushes", func() bool { return len(busCh) >= 3 })
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(3, len(evs), "got %d events, want each fragment as its own unit", len(evs))
+	var joined string
+	for i, ev := range evs {
+		joined += ev.text
+		if i < 2 {
+			ck.False(strings.Contains(ev.text, "\n"), "fragment %d gained a newline", i)
+		}
+	}
+	ck.Eq("frag-onefrag-twoa full line\n", joined, "fragments+line concatenation")
+}
+
+// A4: the 250 ms anchor resets when a size seal happens — lines arriving
+// after a seal flush 250 ms after THEIR arrival, not the sealed content's.
+func TestScriptOutputAnchorResetsAfterSeal(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	clock := newFakeScriptClock()
+	co := newTestScriptCoalescer(ctrl, "c_1", clock)
+
+	// Fill to exactly the trigger: the append seals.
+	co.Add("stdout", strings.Repeat("a", 4095), true)
+	waitUntil(t, "the size seal flush", func() bool { return len(busCh) > 0 })
+	drainScriptBus(busCh)
+
+	// One more line 10 ms later: its deadline must be ITS arrival + 250 ms
+	// (t=460), not the sealed content's anchor (t=200).
+	clock.advance(10 * time.Millisecond)
+	co.Add("stdout", "after-seal", true)
+	waitUntil(t, "the post-seal timer", func() bool { return len(clock.pending()) == 1 })
+	pend := clock.pending()
+	ck.Require().Eq(1, len(pend), "expected one outstanding timer")
+	ck.Eq(newFakeScriptClock().now.Add(10*time.Millisecond+250*time.Millisecond).UnixNano(),
+		pend[0].deadline.UnixNano(), "the post-seal anchor was not reset to the new line's arrival")
+
+	// Before t=460 nothing flushes; at t=460 it does.
+	clock.advance(249 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	ck.Eq(0, len(busCh), "flushed before the post-seal line's own 250 ms elapsed")
+	clock.advance(1 * time.Millisecond)
+	waitUntil(t, "the post-seal timed flush", func() bool { return len(busCh) > 0 })
+	evs := drainScriptBus(busCh)
+	ck.Require().Eq(1, len(evs), "got %d events", len(evs))
+	ck.Eq("after-seal\n", evs[0].text, "post-seal flush text")
+	co.Close()
+}
+
+// A5: a size-triggered event stays ≤ 4 KiB + newline — the open buffer seals
+// BEFORE a line that would push it past the trigger, and a remainder append
+// that already meets the trigger seals too.
+func TestScriptOutputSizeSealBoundsEvent(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+	busCh, cancel := ctrl.native.Subscribe("c_1")
+	defer cancel()
+
+	co := newTestScriptCoalescer(ctrl, "c_1", newFakeScriptClock())
+
+	// 4095 + 1 (a line just over the trigger with this append) — the buffer
+	// seals first, so no event exceeds 4097 bytes.
+	co.Add("stdout", strings.Repeat("a", 4094), true)
+	co.Add("stdout", strings.Repeat("b", 4095), true)
+	co.Close()
+
+	waitUntil(t, "the bounded flushes", func() bool { return len(busCh) >= 1 })
+	var evs []scriptOutEvent
+	evs = append(evs, drainScriptBus(busCh)...)
+	for _, ev := range evs {
+		ck.False(len(ev.text) > 4097, "an event is %d bytes, want ≤ 4097", len(ev.text))
+	}
+	joined := ""
+	for _, ev := range evs {
+		joined += ev.text
+	}
+	ck.Eq(strings.Repeat("a", 4094)+"\n"+strings.Repeat("b", 4095)+"\n", joined,
+		"concatenation lost bytes across the pre-append seal")
+}
+
+// A3: a first line arriving AFTER the child's exit is dropped by the hook —
+// no coalescer registration, no publish after child_exited, no leaked
+// goroutine.
+func TestScriptOutputHookDropsLinesAfterExit(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ctrl := newScriptOutputTestController()
+
+	hook := ctrl.scriptOutputHook("c_late")
+	hook("stdout", "in-time", true)
+
+	// The exit path takes and closes the coalescer, marking the state exited
+	// in the same critical section.
+	co := ctrl.takeScriptOutputCoalescer("c_late")
+	ck.NotNil(co, "the in-time line registered no coalescer")
+	co.Close()
+
+	// The late (abandon-path) line: dropped, never registered.
+	busCh, cancel := ctrl.native.Subscribe("c_late")
+	defer cancel()
+	hook("stderr", "late-after-exit", true)
+	hook("stdout", "also-late", false)
+	time.Sleep(50 * time.Millisecond)
+	ck.Eq(0, len(busCh), "a line was published after the exit: %+v", drainScriptBus(busCh))
+	ck.Nil(ctrl.takeScriptOutputCoalescer("c_late"),
+		"the late line registered a coalescer after the exit")
+	// And the dropped registration left no registry state behind.
+	ctrl.scriptOutputsMu.Lock()
+	n := len(ctrl.scriptOutputState)
+	ctrl.scriptOutputsMu.Unlock()
+	ck.Eq(1, n, "unexpected scriptOutputState entries")
 }

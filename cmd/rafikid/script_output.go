@@ -3,8 +3,10 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -21,7 +23,9 @@ import (
 // Byte fidelity contract: every buffered line carries its own '\n' terminator
 // and an oversized line's split pieces carry none, so CONCATENATING a
 // stream's events in ordinal order reproduces the child's raw output on that
-// stream exactly.
+// stream — line-faithful for valid UTF-8 input. Fidelity holds for VALID UTF-8
+// only: every line is sanitized at Add entry (see Add), and a mid-rune split
+// would otherwise hand protobuf-go a proto3 string it refuses to marshal.
 
 const (
 	// scriptOutputFlushBytes is the buffered-size trigger: text buffered for
@@ -60,19 +64,26 @@ type scriptOutStream struct {
 	// buf is the open accumulator: complete lines, each with its '\n',
 	// coalescing toward the next seal.
 	buf []byte
-	// first is the arrival time of the stream's oldest unflushed line; zero
-	// when nothing is unflushed. It anchors the 250 ms deadline.
+	// first is the arrival time of the stream's oldest unflushed OPEN-buffer
+	// line; zero when nothing is unflushed (or when only sealed units remain —
+	// units are always ready and anchor nothing). It anchors the 250 ms
+	// deadline, and it is the OPEN buffer's anchor: a seal resets it, so the
+	// lines that follow the seal flush 250 ms after THEIR arrival, not the
+	// sealed content's.
 	first time.Time
 }
 
-// sealLocked moves buf into units as one sealed chunk. No-op when buf is
-// empty.
+// sealLocked moves buf into units as one sealed chunk, clearing the 250 ms
+// anchor with it: the anchor is the OPEN buffer's (units are always ready),
+// so the lines that follow a seal time their flush from their own arrival,
+// not the sealed content's. No-op when buf is empty.
 func (st *scriptOutStream) sealLocked() {
 	if len(st.buf) == 0 {
 		return
 	}
 	st.units = append(st.units, st.buf)
 	st.buf = make([]byte, 0, scriptOutputFlushBytes)
+	st.first = time.Time{}
 }
 
 // emptyLocked reports whether the stream holds nothing unflushed.
@@ -164,67 +175,136 @@ func (c *Controller) registerScriptOutputCoalescer(childID string) *scriptOutput
 
 // takeScriptOutputCoalescer removes and returns the child's coalescer, or nil
 // when the child never produced output (and so never registered one). The
-// removal is what makes re-registration safe on a later resume of the same
-// child id.
+// removal marks the per-spawn state exited IN THE SAME CRITICAL SECTION, so a
+// hook call that arrives after the exit (the abandon path: late stderr after
+// closeDone) sees it and drops its line instead of registering a coalescer
+// nobody would ever close — a leaked goroutine and a ScriptOutput published
+// after child_exited. The removal is also what makes re-registration safe on
+// a later resume of the same child id.
 func (c *Controller) takeScriptOutputCoalescer(childID string) *scriptOutputCoalescer {
 	c.scriptOutputsMu.Lock()
 	co := c.scriptOutputs[childID]
 	delete(c.scriptOutputs, childID)
+	if st, ok := c.scriptOutputState[childID]; ok {
+		st.exited = true
+	}
 	c.scriptOutputsMu.Unlock()
 	return co
+}
+
+// scriptOutputHookState is the per-spawn state scriptOutputHook closes over.
+// It exists so the exit is visible to the hook: takeScriptOutputCoalescer
+// flips exited in the same critical section it removes the registry entry.
+type scriptOutputHookState struct {
+	exited bool
 }
 
 // scriptOutputHook returns the per-line hook a script child's SpawnSpec
 // carries. The coalescer is created on the hook's first invocation, not at
 // wiring time: childHooks runs before child.Spawn, and a spawn that fails
-// there must leave nothing behind to clean up.
-func (c *Controller) scriptOutputHook(childID string) func(stream, line string) {
+// there must leave nothing behind to clean up. Once the child has exited, the
+// hook drops every line: no registration after exit, no publish after
+// child_exited, no goroutine parked on a done nobody closes.
+func (c *Controller) scriptOutputHook(childID string) func(stream, line string, terminated bool) {
 	var once sync.Once
 	var co *scriptOutputCoalescer
-	return func(stream, line string) {
+	state := &scriptOutputHookState{}
+	c.scriptOutputsMu.Lock()
+	if c.scriptOutputState == nil {
+		c.scriptOutputState = make(map[string]*scriptOutputHookState)
+	}
+	c.scriptOutputState[childID] = state
+	c.scriptOutputsMu.Unlock()
+	return func(stream, line string, terminated bool) {
+		c.scriptOutputsMu.Lock()
+		exited := state.exited
+		c.scriptOutputsMu.Unlock()
+		if exited {
+			return
+		}
 		once.Do(func() { co = c.registerScriptOutputCoalescer(childID) })
-		co.Add(stream, line)
+		co.Add(stream, line, terminated)
 	}
 }
 
 // Add buffers one raw line of a script child's output — the line WITHOUT its
-// terminator; the coalescer adds the '\n'. stream is "stdout" or "stderr";
-// the streams buffer independently.
+// terminator; the coalescer adds the '\n' when terminated. stream is
+// "stdout" or "stderr"; the streams buffer independently. terminated=false
+// (an unterminated FRAGMENT — an oversized line's piece, or readStderr's
+// bounded accumulator handing off its first 4 KiB) seals as its own unit
+// exactly like a split piece: no '\n' is added, so concatenating the events
+// in order reproduces the raw stream. Fragments of one pending buffer arrive
+// in sequence, so concatenation stays byte-faithful.
 //
-// A line alone longer than 4 KiB is split at 4 KiB — each piece becomes its
-// own sealed unit, so each publishes as its own event — and its trailing
-// remainder opens the buffer, to coalesce with the following lines. Any other
-// line appends to the open buffer, sealing the buffer as a unit once it
-// reaches the 4 KiB trigger. Lines are dropped after Close: there is no flush
-// after the final one.
-func (s *scriptOutputCoalescer) Add(stream, line string) {
+// The line is sanitized to valid UTF-8 at entry (strings.ToValidUTF8):
+// proto3 string fields refuse to marshal invalid UTF-8, which would fail the
+// durable append (the chunk lost) AND kill every live subscriber stream. Byte
+// fidelity therefore holds for valid UTF-8 input only; invalid bytes become
+// U+FFFD.
+//
+// A terminated line alone longer than 4 KiB is split at the last rune
+// boundary ≤ 4 KiB — each piece becomes its own sealed unit, so each
+// publishes as its own event — and its trailing remainder opens the buffer,
+// to coalesce with the following lines. Any other line appends to the open
+// buffer, sealing it BEFORE the append when the line would push it past the
+// 4 KiB trigger (so a size-triggered event stays ≤ 4 KiB + one newline), and
+// sealing it once it reaches the trigger after the append. Fragments are
+// sealed as units without appending at all. Lines are dropped after Close:
+// there is no flush after the final one.
+func (s *scriptOutputCoalescer) Add(stream, line string, terminated bool) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return
 	}
+	line = strings.ToValidUTF8(line, "\uFFFD")
 	st := s.streams[stream]
 	if st == nil {
 		st = &scriptOutStream{buf: make([]byte, 0, scriptOutputFlushBytes)}
 		s.streams[stream] = st
 	}
-	if st.first.IsZero() {
-		st.first = s.clock.Now()
+	if !terminated {
+		// A fragment is its own sealed unit, byte-faithful, no '\n' added —
+		// the same shape an oversized split's pieces already had.
+		st.units = append(st.units, []byte(line))
+		s.mu.Unlock()
+		s.wakeNonblock()
+		return
 	}
 	if len(line) > scriptOutputFlushBytes {
 		// Never merge an oversized line with anything else: seal whatever is
-		// open, then split the line at the threshold. The pieces carry no
-		// newline — they are fragments of one line — and the trailing
-		// remainder (which may be empty) lands in the open buffer with the
-		// line's terminator, ready to coalesce forward.
+		// open, then split the line at rune boundaries ≤ the threshold. The
+		// pieces carry no newline — they are fragments of one line — and the
+		// trailing remainder (1..4096 bytes, never empty) lands in the open
+		// buffer with the line's terminator, ready to coalesce forward — then
+		// the buffer is size-sealed if the remainder already meets the
+		// trigger, exactly as any other append is.
 		st.sealLocked()
 		for len(line) > scriptOutputFlushBytes {
-			st.units = append(st.units, []byte(line[:scriptOutputFlushBytes]))
-			line = line[scriptOutputFlushBytes:]
+			cut := scriptOutputFlushBytes
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			st.units = append(st.units, []byte(line[:cut]))
+			line = line[cut:]
 		}
 		st.buf = append(st.buf, line...)
 		st.buf = append(st.buf, '\n')
+		if len(st.buf) >= scriptOutputFlushBytes {
+			st.sealLocked()
+		}
 	} else {
+		// A line is never split by coalescing: seal the open buffer BEFORE
+		// appending when this line would push it past the trigger, so a
+		// size-triggered event is at most the trigger plus one newline.
+		if len(st.buf)+len(line)+1 > scriptOutputFlushBytes {
+			st.sealLocked()
+		}
+		if len(st.buf) == 0 {
+			// First line of the open buffer: it anchors the 250 ms deadline
+			// (a seal cleared any earlier anchor).
+			st.first = s.clock.Now()
+		}
 		st.buf = append(st.buf, line...)
 		st.buf = append(st.buf, '\n')
 		if len(st.buf) >= scriptOutputFlushBytes {
@@ -232,6 +312,12 @@ func (s *scriptOutputCoalescer) Add(stream, line string) {
 		}
 	}
 	s.mu.Unlock()
+	s.wakeNonblock()
+}
+
+// wakeNonblock signals the flush loop that buffered state changed.
+// Non-blocking: a pending signal covers any number of Adds.
+func (s *scriptOutputCoalescer) wakeNonblock() {
 	select {
 	case s.wake <- struct{}{}:
 	default:

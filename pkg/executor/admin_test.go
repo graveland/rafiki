@@ -279,7 +279,7 @@ import (
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, strings.Repeat("L", 200<<10))
+	fmt.Fprintln(os.Stderr, "LONG-START"+strings.Repeat("y", 200<<10))
 	fmt.Fprintln(os.Stderr, "daraja: connect failed: dial 127.0.0.1:1: connection refused")
 	os.Exit(3)
 }
@@ -997,7 +997,17 @@ func TestAdminStatusSurvivesAnOversizedStderrLine(t *testing.T) {
 	}
 	c.Require().NotNil(resp.Msg.ExitCode, "an exited daraja must carry its exit code")
 	c.Eq(int32(3), *resp.Msg.ExitCode, "exit_code")
-	c.StrContains(resp.Msg.GetStderrTail(), marker, "stderr_tail")
+	tail := resp.Msg.GetStderrTail()
+	c.StrContains(tail, marker, "stderr_tail")
+	// B1: the kept "first fragment" must be the oversized line's actual bytes,
+	// copied BEFORE the drain loop refilled ReadLine's buffer. The aliased
+	// buffer held whatever ReadLine returned LAST — the marker line itself —
+	// so the tail showed the marker twice, once wrongly tagged " [truncated]".
+	// The copy keeps one fragment per oversized line: exactly one truncation
+	// marker, and the real marker line exactly once, untagged.
+	c.Eq(1, strings.Count(tail, " [truncated]"), "the truncation marker does not appear exactly once (aliased kept fragment?): %q", tail)
+	c.Eq(1, strings.Count(tail, marker), "the marker line does not appear exactly once (aliased kept fragment?): %q", tail)
+	c.False(len(tail) > stderrTailMax, "stderr_tail is %d bytes, want <= %d", len(tail), stderrTailMax)
 }
 
 // appendStderrLine cuts the tail at a byte offset, which can split a

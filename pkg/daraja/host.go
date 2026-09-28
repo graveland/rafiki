@@ -222,34 +222,39 @@ func (h *Host) emit(ev Event) bool {
 // Start launches the process.
 func (h *Host) Start() error {
 	h.mu.Lock()
-	stdout, err := h.startLocked(h.spec)
+	stdout, stdoutDone, err := h.startLocked(h.spec)
 	h.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	go h.pump(stdout)
+	go h.pump(stdout, stdoutDone)
 	return nil
 }
 
-// startLocked launches a process and returns its stdout WITHOUT pumping it.
+// startLocked launches a process and returns its stdout WITHOUT pumping it,
+// plus the done channel the caller's pump must close when it finishes.
 //
 // The caller starts the pump, because Restart must emit its boundary marker
 // before the replacement's first byte can reach the consumer — and it cannot
 // emit while holding h.mu. Returning the pipe unread is what lets it do both.
+// The stdout pump's done channel is threaded back the same way: watch waits
+// on it (with the stderr pump's) after the process is reaped, so a hosted
+// script's LAST output is emitted before Exited instead of lost — the pump
+// goroutines may still hold unread pipe data when Wait returns.
 // h.mu must be held.
-func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
+func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, chan struct{}, error) {
 	if h.running {
-		return nil, errors.New("daraja: already running")
+		return nil, nil, errors.New("daraja: already running")
 	}
 	argv := spec.Argv(h.opts.MCPConfig, h.opts.ModelArgs)
 	if argv == nil {
-		return nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
+		return nil, nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}
 	if len(argv) == 0 {
 		// A resolved script with no positional argv (the executor did not hand
 		// daraja a script path) would exec the interpreter into its REPL with
 		// no script at all — visible as a hung child. Refuse instead.
-		return nil, fmt.Errorf("daraja: child kind %q resolved to an empty command line", spec.Kind)
+		return nil, nil, fmt.Errorf("daraja: child kind %q resolved to an empty command line", spec.Kind)
 	}
 	h.spec = spec
 	runner, err := child.NewProcessRunner(child.SpawnSpec{
@@ -265,35 +270,51 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, error) {
 		InheritProcessGroup: true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("daraja: build runner: %w", err)
+		return nil, nil, fmt.Errorf("daraja: build runner: %w", err)
 	}
 	stdin, stdout, stderr, err := runner.Start()
 	if err != nil {
-		return nil, fmt.Errorf("daraja: start: %w", err)
+		return nil, nil, fmt.Errorf("daraja: start: %w", err)
 	}
 	exitCh := make(chan ExitInfo, 1)
 	h.runner, h.stdin, h.exitCh, h.running = runner, stdin, exitCh, true
 
-	go h.watch(runner, exitCh)
+	// Each pump closes its own done when it reaches EOF (or a read error);
+	// watch drains BOTH before emitting Exited, bounded by pumpDrainGrace.
+	stdoutDone := make(chan struct{})
+	stderrDone := make(chan struct{})
+	go h.watch(runner, exitCh, stdoutDone, stderrDone)
 	if spec.Kind == KindScript {
 		// A script's stderr is load-bearing, not noise: its tail is what a
 		// failed run's settle carries when the script never reported a result
 		// (see the daemon-side script settle). Relay it. Claude's stderr stays
 		// discarded — its protocol is stdout and its stderr is engine chatter
 		// the controller cannot use.
-		go h.pumpStderr(stderr)
+		go h.pumpStderr(stderr, stderrDone)
 	} else {
 		// stderr is drained and discarded: the controller reads the child's
 		// protocol on stdout, and an undrained pipe eventually blocks the writer.
-		go func() { _, _ = io.Copy(io.Discard, stderr) }()
+		go func() {
+			_, _ = io.Copy(io.Discard, stderr)
+			close(stderrDone)
+		}()
 	}
-	return stdout, nil
+	return stdout, stdoutDone, nil
 }
+
+// pumpDrainGrace bounds how long watch waits for the stdout/stderr pumps to
+// drain after the process is reaped, before emitting Exited. Without the wait
+// the host emits Exited while the pumps may still hold unread pipe data — and
+// a relay consumer stops reading on Exited, so a hosted script's LAST output
+// (typically a failure's traceback) is lost. The bound keeps a wedged pump
+// from delaying the exit forever: the same bounded-drain shape as the
+// executor's stderrDrainGrace.
+const pumpDrainGrace = 500 * time.Millisecond
 
 // watch reaps the process exactly once and decides whether anybody asked for
 // it. There is ONE waiter per process: os.Process.Wait is not safe to call
 // twice, so stopLocked reads this outcome rather than waiting itself.
-func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo) {
+func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo, stdoutDone, stderrDone <-chan struct{}) {
 	code, sig := runner.Wait()
 	info := ExitInfo{ExitCode: code, Signal: sig}
 	exitCh <- info // buffered: a deliberate stop may or may not be reading
@@ -311,6 +332,25 @@ func (h *Host) watch(runner child.Runner, exitCh chan ExitInfo) {
 	if !unexpected {
 		return
 	}
+
+	// The pipes outlive the process: give the pumps a bounded chance to
+	// deliver everything they hold before Exited — the event a relay consumer
+	// stops reading at. Both done channels closing (or the grace expiring)
+	// releases this; a pump blocked on a FULL event channel is fine, because
+	// every event it emitted is already ordered before Exited on the channel.
+	timer := time.NewTimer(pumpDrainGrace)
+	defer timer.Stop()
+	for stdoutDone != nil || stderrDone != nil {
+		select {
+		case <-stdoutDone:
+			stdoutDone = nil
+		case <-stderrDone:
+			stderrDone = nil
+		case <-timer.C:
+			stdoutDone, stderrDone = nil, nil
+		}
+	}
+
 	h.emit(Event{Exited: &info})
 	h.respawn()
 }
@@ -366,8 +406,10 @@ func (h *Host) respawn() {
 	}
 }
 
-// pump copies stdout into the event stream until EOF or shutdown.
-func (h *Host) pump(stdout io.ReadCloser) {
+// pump copies stdout into the event stream until EOF or shutdown. done is
+// closed on return, releasing watch's bounded drain.
+func (h *Host) pump(stdout io.ReadCloser, done chan struct{}) {
+	defer close(done)
 	defer stdout.Close()
 	buf := make([]byte, stdoutChunk)
 	for {
@@ -386,8 +428,10 @@ func (h *Host) pump(stdout io.ReadCloser) {
 }
 
 // pumpStderr is pump for the stderr side, for the kinds whose stderr reaches
-// the controller (scripts). Same chunking, same shutdown discipline.
-func (h *Host) pumpStderr(stderr io.ReadCloser) {
+// the controller (scripts). Same chunking, same shutdown discipline, same
+// done contract.
+func (h *Host) pumpStderr(stderr io.ReadCloser, done chan struct{}) {
+	defer close(done)
 	defer stderr.Close()
 	buf := make([]byte, stdoutChunk)
 	for {
@@ -467,7 +511,7 @@ func (h *Host) restart(spec ChildSpec, grace time.Duration) (int, error) {
 	if h.running {
 		h.stopLocked(grace, true)
 	}
-	stdout, err := h.startLocked(spec)
+	stdout, stdoutDone, err := h.startLocked(spec)
 	if err != nil {
 		h.mu.Unlock()
 		return 0, err
@@ -480,7 +524,7 @@ func (h *Host) restart(spec ChildSpec, grace time.Duration) (int, error) {
 	// Shutdown behind a slow reader. Ordering still holds because the
 	// replacement's stdout is not pumped until after this returns.
 	h.emit(Event{Restarted: &pid})
-	go h.pump(stdout)
+	go h.pump(stdout, stdoutDone)
 	return pid, nil
 }
 

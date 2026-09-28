@@ -33,6 +33,10 @@ import (
 // daraja's own stopLocked rather than inventing a second policy.
 const defaultReapGrace = 3 * time.Second
 
+// truncateMarker is appended to an oversized stderr line's kept first
+// fragment, marking what the relay discarded.
+const truncateMarker = " [truncated]"
+
 // stderrTailMax caps the stderr tail a launch record keeps for Status:
 // the daraja's own connection-failure diagnostics, never the whole pipe.
 const stderrTailMax = 4 * 1024
@@ -699,10 +703,20 @@ func (a *AdminServer) logDarajaStderr(rec *launchRecord, childID string, stderr 
 	for {
 		line, isPrefix, err := br.ReadLine()
 		if isPrefix {
+			// ReadLine's returned buffer is only valid until the NEXT call, and
+			// the drain below refills the same buffer — copying the first
+			// fragment before draining, capped at the tail bound, is what keeps
+			// the kept text the oversized line's actual prefix rather than an
+			// aliased mix of later fragments.
+			// Capped below stderrTailMax by the marker's own length, so the
+			// folded line (" [truncated]" appended below) fits the tail cap
+			// whole — appendStderrLine keeps the LAST bytes, and a copy at the
+			// full cap would evict the prefix the copy exists to preserve.
+			first := append([]byte(nil), line[:min(len(line), stderrTailMax-len(truncateMarker))]...)
 			for isPrefix && err == nil {
 				_, isPrefix, err = br.ReadLine()
 			}
-			line = []byte(string(line) + " [truncated]")
+			line = append(first, truncateMarker...)
 		}
 		if len(line) > 0 {
 			slog.Warn("daraja stderr", "childID", childID, "line", string(line))

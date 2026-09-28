@@ -181,3 +181,55 @@ func TestRestartRefusesAScriptHost(t *testing.T) {
 	// The hosted script was never signalled: it is still running.
 	c.True(h.Running(), "the refused restart took the hosted script down")
 }
+
+// A hosted script's LAST output must reach the consumer BEFORE Exited: the
+// host's watch drains both pumps (bounded by pumpDrainGrace) after the process
+// is reaped and before emitting Exited. Without that wait, the pumps may still
+// hold unread pipe data when Exited is emitted — and a relay consumer stops
+// reading on Exited, so a failing script's traceback is lost from both the
+// ScriptOutput events and the settle's stderr tail.
+func TestScriptLastOutputArrivesBeforeExited(t *testing.T) {
+	c := assert.NewAborting(t)
+	// ~64 KiB on each stream, then exit — more than the OS pipe buffer, so the
+	// pumps genuinely lag the reap.
+	script := `head -c 65536 /dev/zero | tr '\0' 'o' >&2; head -c 65536 /dev/zero | tr '\0' 's'; exit 0`
+	bin := testChildBinary(t, script)
+	h := NewHost(HostOptions{Binary: bin, Spec: ChildSpec{Kind: KindScript, ExtraArgs: []string{bin}}})
+	c.NoError(h.Start(), "Start")
+
+	deadline := time.After(10 * time.Second)
+	var out, errb []byte
+	var sawExited bool
+	for !sawExited {
+		select {
+		case ev, ok := <-h.Events():
+			c.True(ok, "event channel closed unexpectedly")
+			out = append(out, ev.Stdout...)
+			errb = append(errb, ev.Stderr...)
+			if ev.Exited != nil {
+				sawExited = true
+			}
+		case <-deadline:
+			t.Fatalf("timeout: out=%d err=%d exited=%v", len(out), len(errb), sawExited)
+		}
+	}
+	// drain-on-done: after Exited the host still finishes; keep reading the
+	// queue so nothing is left behind.
+	for {
+		select {
+		case ev, ok := <-h.Events():
+			if !ok {
+				return
+			}
+			out = append(out, ev.Stdout...)
+			errb = append(errb, ev.Stderr...)
+		case <-time.After(2 * time.Second):
+			goto drained
+		}
+	}
+drained:
+	c.True(len(errb) >= 65536, "stderr lost bytes: %d of 65536 arrived before Exited", len(errb))
+	c.True(len(out) >= 65536, "stdout lost bytes: %d of 65536 arrived before Exited", len(out))
+	c.True(strings.Count(string(errb), "o") == len(errb), "stderr corrupted")
+	c.True(strings.Count(string(out), "s") == len(out), "stdout corrupted")
+}

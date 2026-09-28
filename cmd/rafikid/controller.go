@@ -245,9 +245,14 @@ type Controller struct {
 	// script child, keyed by child id. An entry is created lazily on the
 	// child's FIRST line of output (scriptOutputHook) and taken and closed by
 	// handleChildExit — before the exit event publishes, so the child's last
-	// output precedes child_exited in ordinal order.
-	scriptOutputsMu sync.Mutex
-	scriptOutputs   map[string]*scriptOutputCoalescer
+	// output precedes child_exited in ordinal order. scriptOutputState is the
+	// per-spawn hook state registered at wiring time; taking the coalescer
+	// marks its state exited in the same critical section, so a line arriving
+	// after the exit (the abandon path) is dropped rather than registering a
+	// coalescer nobody would ever close.
+	scriptOutputsMu   sync.Mutex
+	scriptOutputs     map[string]*scriptOutputCoalescer
+	scriptOutputState map[string]*scriptOutputHookState
 
 	// native fans rafiki-native events out per child, for the Connect
 	// control plane's StreamEvents.

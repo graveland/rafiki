@@ -35,7 +35,7 @@ func TestScriptOutputHookSeesBothStreams(t *testing.T) {
 		PiBinary: "/bin/sh",
 		Argv:     []string{"-c", "echo out-1; echo err-1 >&2; echo out-2"},
 		Provider: ScriptProvider{},
-		OnScriptOutput: func(stream, line string) {
+		OnScriptOutput: func(stream, line string, terminated bool) {
 			mu.Lock()
 			got = append(got, stream+"|"+line)
 			mu.Unlock()
@@ -73,7 +73,7 @@ func TestScriptOutputHookDeliversTrailingFragment(t *testing.T) {
 		PiBinary: "/bin/sh",
 		Argv:     []string{"-c", "printf 'no-newline-tail' >&2"},
 		Provider: ScriptProvider{},
-		OnScriptOutput: func(stream, line string) {
+		OnScriptOutput: func(stream, line string, terminated bool) {
 			mu.Lock()
 			got = append(got, stream+"|"+line)
 			mu.Unlock()

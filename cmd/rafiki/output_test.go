@@ -113,6 +113,28 @@ func TestSubtreeCostsStopsAtScriptNodes(t *testing.T) {
 	}
 }
 
+// B3: an UNPRICED script node stays nil — the walk does not partially price it
+// from its descendants — and its parent's total excludes those descendants
+// entirely (the daemon prices a script's subtree in one query; when that
+// failed, the client must not invent a partial sum).
+func TestSubtreeCostsStopsAtScriptNodesUnpriced(t *testing.T) {
+	in := []*rafikiv1.ChildSummary{
+		{ChildId: "coord", Kind: "claude", CostUsd: costPtr(2)},
+		{ChildId: "script", Kind: "script", Labels: map[string]string{"rafiki/parent": "coord"}}, // CostUsd nil
+		{ChildId: "fundi", Kind: "fundi", Labels: map[string]string{"rafiki/parent": "script"}, CostUsd: costPtr(1)},
+	}
+	got := subtreeCosts(in)
+	if v := got["script"]; v != nil {
+		t.Errorf("unpriced script's subtree total = %v, want nil (not a partial sum of its descendants)", v)
+	}
+	if v := got["fundi"]; v == nil || *v != 1 {
+		t.Errorf("fundi's subtree total = %v, want 1", v)
+	}
+	if v := got["coord"]; v == nil || *v != 2 {
+		t.Errorf("coord's subtree total = %v, want 2 (the unpriced script contributes nothing, so neither does its fundi)", v)
+	}
+}
+
 func TestSubtreeCosts(t *testing.T) {
 	in := []*rafikiv1.ChildSummary{
 		{ChildId: "a", CostUsd: costPtr(1)},

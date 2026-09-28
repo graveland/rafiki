@@ -604,3 +604,59 @@ func TestApplyScriptReport(t *testing.T) {
 	c.StrContains(s.Blocks[0].Text, "report: progress", "report text")
 	c.StrContains(s.Blocks[0].Text, `"step": 3`, "report payload")
 }
+
+// scriptOut builds one ScriptOutput event for a child's stream.
+func scriptOut(childID, stream, text string) *rafikiv1.Event {
+	return &rafikiv1.Event{
+		ChildId: childID,
+		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
+			Stream: stream, Text: text,
+		}},
+	}
+}
+
+// Adjacent ScriptOutput events of the SAME stream join when the prior block's
+// text does not end with '\n': the daemon's coalescer splits an oversized line
+// into pieces that carry no newline, and rendering those as separate blocks
+// breaks the line mid-way. A block ending in '\n' opens the next normally,
+// and a stderr event never joins a stdout block.
+func TestApplyScriptOutputJoinsSplitPieces(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_script")
+	// Shape 1: a single whole line.
+	s.Apply(scriptOut("c_script", "stdout", "line one\n"))
+	// Shapes 2+3: split piece 1, then split piece 2 + the remainder
+	// (coalesced with nothing — the pieces carry no newline).
+	s.Apply(scriptOut("c_script", "stdout", "a very long line, piece "))
+	s.Apply(scriptOut("c_script", "stdout", "two and the remainder\n"))
+	// A following whole line opens its own block.
+	s.Apply(scriptOut("c_script", "stdout", "after\n"))
+
+	c.Require().Len(s.Blocks, 3, "blocks = %d, want 3 (whole line, joined oversized line, after)", len(s.Blocks))
+	c.Eq("line one\n", s.Blocks[0].Text, "block 0")
+	c.Eq("a very long line, piece two and the remainder\n", s.Blocks[1].Text,
+		"the oversized line's pieces did not join into one whole line")
+	c.Eq("after\n", s.Blocks[2].Text, "block 2")
+
+	// The joined block keeps the FIRST fragment's shape (final, same stream).
+	c.True(s.Blocks[1].Final, "joined block not final")
+	c.Eq("stdout", s.Blocks[1].Stream, "joined block stream")
+
+	// Stream alternation never joins across streams, and a join never crosses
+	// a non-ScriptOutput block.
+	s2 := session.New("c_script2")
+	s2.Apply(scriptOut("c_script2", "stdout", "out mid-line"))
+	s2.Apply(scriptOut("c_script2", "stderr", "err line\n"))
+	s2.Apply(scriptOut("c_script2", "stdout", "out again\n"))
+	c.Require().Len(s2.Blocks, 3, "blocks = %d, want 3", len(s2.Blocks))
+	c.Eq("out mid-line", s2.Blocks[0].Text, "stdout block joined across streams")
+	c.Eq("err line\n", s2.Blocks[1].Text, "stderr block")
+	c.Eq("stdout", s2.Blocks[2].Stream, "third block stream")
+
+	// ApplyHistory folds through the same rule.
+	s3 := session.New("c_script3")
+	s3.ApplyHistory(scriptOut("c_script3", "stderr", "piece "))
+	s3.ApplyHistory(scriptOut("c_script3", "stderr", "joined\n"))
+	c.Require().Len(s3.Blocks, 1, "history blocks = %d, want 1", len(s3.Blocks))
+	c.Eq("piece joined\n", s3.Blocks[0].Text, "history join")
+}

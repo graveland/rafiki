@@ -309,14 +309,7 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 		// run's diagnostics readable against its real output without inventing
 		// a second block stream. Applied through ApplyHistory or Apply alike --
 		// the payload carries no cursor semantics of its own.
-		s.Blocks = append(s.Blocks, Block{
-			Kind:   KindScriptOutput,
-			At:     time.Now(),
-			Text:   p.ScriptOutput.GetText(),
-			Stream: p.ScriptOutput.GetStream(),
-			Final:  true,
-		})
-		s.recomputeFinalized()
+		s.applyScriptOutput(p.ScriptOutput)
 	case *rafikiv1.Event_ScriptReport:
 		s.Blocks = append(s.Blocks, Block{
 			Kind:  KindSystem,
@@ -331,7 +324,38 @@ func (s *Session) applyPayload(ev *rafikiv1.Event) {
 	}
 }
 
-// scriptReportText renders one ScriptReport as a system line: the caller's
+// applyScriptOutput folds one ScriptOutput event in, JOINING it into the
+// previous block when the output is mid-line: the daemon's coalescer splits
+// an oversized line into pieces that carry no trailing newline, and adjacent
+// events of the SAME stream whose predecessor does not end with '\n' are
+// fragments of one logical line — appending the new text to the prior block
+// renders the line whole instead of breaking it in two. A block whose text
+// ends with '\n' opens the next block normally, so a coalesced multi-line
+// event is untouched. Content-join only: no cursor or ordinal logic — the
+// event's ordinal was already consumed by Apply/ApplyHistory, and a joined
+// block's At stays the FIRST fragment's. Never joins across streams (a
+// stderr fragment following stdout stays its own block) or into a
+// non-ScriptOutput block.
+func (s *Session) applyScriptOutput(so *rafikiv1.ScriptOutput) {
+	if n := len(s.Blocks); n > 0 {
+		last := &s.Blocks[n-1]
+		if last.Kind == KindScriptOutput && last.Stream == so.GetStream() &&
+			!strings.HasSuffix(last.Text, "\n") {
+			last.Text += so.GetText()
+			s.recomputeFinalized()
+			return
+		}
+	}
+	s.Blocks = append(s.Blocks, Block{
+		Kind:   KindScriptOutput,
+		At:     time.Now(),
+		Text:   so.GetText(),
+		Stream: so.GetStream(),
+		Final:  true,
+	})
+	s.recomputeFinalized()
+}
+
 // own discriminator kind plus its JSON payload, folded to one line.
 func scriptReportText(sr *rafikiv1.ScriptReport) string {
 	text := "report: " + sr.GetKind()

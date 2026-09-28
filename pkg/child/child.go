@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.graveland.dev/rafiki/pkg/bus"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -85,16 +86,22 @@ type SpawnSpec struct {
 	// May fire many times per subagent; the implementation dedupes.
 	OnSubagent func(SubagentObservation)
 
-	// OnScriptOutput, when non-nil, receives one raw line of a SCRIPT child's
-	// output: the "stdout" lines come from handleFrame's script_output
-	// ParsedEvents, the "stderr" lines are split out of the stderr drain (a
-	// stream the protocol providers never parse). The daemon's hook feeds a
-	// per-child coalescer that publishes the output as durable ScriptOutput
-	// events; set it only for kind=script — any other kind's stderr must
-	// keep its existing paths. Buffering only, never a publish: safe to call
-	// from the readStdout and readStderr goroutines without stalling the
-	// pipes.
-	OnScriptOutput func(stream, line string)
+	// OnScriptOutput, when non-nil, receives one raw chunk of a SCRIPT child's
+	// output: the "stdout" chunks come from handleFrame's script_output
+	// ParsedEvents, the "stderr" chunks are split out of the stderr drain (a
+	// stream the protocol providers never parse). terminated reports whether
+	// the chunk ended at a line boundary: true for a full line (the receiver
+	// adds the '\n'), false for an unterminated FRAGMENT — readStderr's
+	// bounded accumulator hands off its first scriptOutputFlushBytes when a
+	// newline-less blob exceeds that, so daemon memory stays bounded no matter
+	// how much newline-free output a script produces; fragments of one blob
+	// arrive in sequence and concatenate back byte-faithfully. The daemon's
+	// hook feeds a per-child coalescer that publishes the output as durable
+	// ScriptOutput events; set it only for kind=script — any other kind's
+	// stderr must keep its existing paths. Buffering only, never a publish:
+	// safe to call from the readStdout and readStderr goroutines without
+	// stalling the pipes.
+	OnScriptOutput func(stream, line string, terminated bool)
 }
 
 // ShutdownResult records the outcome of a graceful-shutdown sequence.
@@ -182,6 +189,14 @@ const (
 	inBufMaxFrames = 1000
 	inBufMaxBytes  = 16 << 20 // 16 MiB
 )
+
+// stderrFragmentBytes bounds readStderr's newline-free line accumulator: when
+// pending reaches this with no '\n', its first stderrFragmentBytes (rune-cut)
+// bytes are delivered as an unterminated fragment, so a script writing a huge
+// newline-free blob cannot grow daemon memory without limit. It matches the
+// daemon-side coalescer's own flush bound, so a fragment is never split
+// again there.
+const stderrFragmentBytes = 4 * 1024
 
 // inBuffer is a bounded FIFO of raw stdin frames sent to the child. Oldest
 // entries are dropped when either the frame count or the total byte size
@@ -282,7 +297,7 @@ type Child struct {
 	nativeSink     func(*rafikiv1.Event)
 	onMeta         func(SnifferMetadata)
 	onSubagent     func(SubagentObservation)
-	onScriptOutput func(stream, line string)
+	onScriptOutput func(stream, line string, terminated bool)
 	// preShutdownStatus is the status before BeginShutdown was called, captured
 	// so handleChildExit can record the child's real pre-exit state (idle,
 	// streaming, etc.) rather than "shutting_down" which is an artifact of the
@@ -986,7 +1001,7 @@ func (c *Child) handleFrame(line []byte) {
 
 	if len(scriptLines) > 0 && c.onScriptOutput != nil {
 		for _, line := range scriptLines {
-			c.onScriptOutput("stdout", line)
+			c.onScriptOutput("stdout", line, true)
 		}
 	}
 
@@ -1010,11 +1025,22 @@ func (c *Child) handleFrame(line []byte) {
 // split across reads are accumulated until their '\n' arrives; a trailing
 // fragment at EOF is delivered as a final line, mirroring FrameReader's
 // partial-frame-at-EOF behavior.
+//
+// The accumulator is BOUNDED at stderrFragmentBytes: a script writing a
+// newline-free blob (a \r-only progress bar, a binary dump) would otherwise
+// grow daemon memory without limit. When pending reaches the bound with no
+// '\n' in sight, its first bound bytes — cut back to a rune boundary — are
+// delivered as an unterminated FRAGMENT (terminated=false) and the rest stays
+// pending; consecutive fragments of one blob arrive in sequence and
+// concatenate back byte-faithfully on the receiving side.
 func (c *Child) readStderr() {
 	br := bufio.NewReader(c.stderr)
 	buf := make([]byte, 4096)
 	const maxErr = 4 << 20
-	var pending []byte // line accumulator; used only when the hook is set
+	var pending []byte // bounded line accumulator; used only when the hook is set
+	deliver := func(text []byte, terminated bool) {
+		c.onScriptOutput("stderr", string(trimCR(text)), terminated)
+	}
 	for {
 		n, err := br.Read(buf)
 		if n > 0 {
@@ -1041,8 +1067,23 @@ func (c *Child) readStderr() {
 					// An empty line is still a line: the coalescer's
 					// terminator handling turns it back into the blank line
 					// the child printed.
-					c.onScriptOutput("stderr", string(trimCR(pending[:i])))
+					deliver(pending[:i], true)
 					pending = pending[i+1:]
+				}
+				// Bound the accumulator: a newline-free blob longer than the
+				// flush bound hands its first bound bytes (rune-cut) off as an
+				// unterminated fragment, keeping pending below the bound.
+				for len(pending) >= stderrFragmentBytes {
+					// Cut at a rune boundary: step back while the byte
+					// BEFORE the cut is a continuation byte (a rune that
+					// straddles — or is truncated at — the cut), so the
+					// delivered prefix never ends mid-rune.
+					cut := stderrFragmentBytes
+					for cut > 0 && !utf8.RuneStart(pending[cut-1]) {
+						cut--
+					}
+					deliver(pending[:cut], false)
+					pending = append(pending[:0], pending[cut:]...)
 				}
 			}
 		}
@@ -1050,7 +1091,7 @@ func (c *Child) readStderr() {
 			// EOF (or a read error): a trailing fragment without a newline is
 			// still a line.
 			if c.onScriptOutput != nil && len(pending) > 0 {
-				c.onScriptOutput("stderr", string(trimCR(pending)))
+				deliver(pending, true)
 			}
 			return
 		}
