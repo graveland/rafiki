@@ -10,6 +10,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/presets"
+	"go.graveland.dev/rafiki/pkg/server"
 )
 
 // presetBinding satisfies the fundi tools' PresetStore interface (the daemon
@@ -20,12 +21,12 @@ var _ tools.PresetStore = presetBinding{}
 
 // connectPresets adapts *Controller to connectapi.PresetManager, modelled on
 // connectPyModules: the owner comes from the request CONTEXT via spawnOwner —
-// never a request field. No per-request gate is applied here because the
-// route's policy interceptor (connect_policy.go) already applies one: these
-// verbs are userOnly, so a child credential is refused before this manager
-// runs, and what reaches it is a real user credential — or the anonymous
-// unix-socket caller, who writes the shared unattributed bucket, the same
-// owner its own children resolve to.
+// never a request field. The route's policy interceptor (connect_policy.go)
+// admits a real user credential, the anonymous unix-socket caller (who writes
+// the shared unattributed bucket, the same owner its own children resolve
+// to), and — on Put/Delete, which are childScoped — a per-child secret.
+// authoringChild then admits that child only when it is top-level, the same
+// rule the MCP face's presetStoreForChild applies.
 //
 // The manager never mutates a Spec handed to it: presets.ToProto aliases the
 // record's value-shaped data (Labels and the tri-state slices) into the proto
@@ -55,13 +56,31 @@ func (m connectPresets) GetPreset(ctx context.Context, name string, history bool
 	return []presets.Record{rec}, nil
 }
 
+// authoringChild returns the child id to stamp as a preset's writer — "" for
+// an operator caller — or an error wrapping connectapi.ErrPresetAuthoring
+// when the caller is a per-child credential for a parented child.
+func (m connectPresets) authoringChild(ctx context.Context) (string, error) {
+	id := server.IdentityFromContext(ctx)
+	if id == nil || id.Via != server.ProvenanceChildToken {
+		return "", nil
+	}
+	if !topLevelChild(m.c.st, id.ChildID) {
+		return "", fmt.Errorf("%w: %v", connectapi.ErrPresetAuthoring, errPresetChildAuthoring)
+	}
+	return id.ChildID, nil
+}
+
 // PutPreset validates and stores spec as a new version, attributed to the
-// operator (childID ""). A validation failure wraps connectapi.ErrInvalidPreset
-// — presetError maps that to CodeInvalidArgument rather than CodeInternal, so
-// a bad preset reads as the caller's fault — and every other failure surfaces
-// as the store error it is.
+// top-level child that wrote it or to the operator (childID ""). A validation
+// failure wraps connectapi.ErrInvalidPreset — presetError maps that to
+// CodeInvalidArgument rather than CodeInternal, so a bad preset reads as the
+// caller's fault — and every other failure surfaces as the store error it is.
 func (m connectPresets) PutPreset(ctx context.Context, spec presets.Spec) (presets.Record, error) {
-	rec, err := m.c.putPreset(ctx, spawnOwner(ctx).UserID, "", spec)
+	childID, err := m.authoringChild(ctx)
+	if err != nil {
+		return presets.Record{}, err
+	}
+	rec, err := m.c.putPreset(ctx, spawnOwner(ctx).UserID, childID, spec)
 	if err != nil {
 		if errors.Is(err, errPresetInvalid) {
 			return presets.Record{}, fmt.Errorf("%w: %v", connectapi.ErrInvalidPreset, err)
@@ -73,5 +92,8 @@ func (m connectPresets) PutPreset(ctx context.Context, spec presets.Spec) (prese
 
 // DeletePreset stamps deleted_at on every live row for name.
 func (m connectPresets) DeletePreset(ctx context.Context, name string) error {
+	if _, err := m.authoringChild(ctx); err != nil {
+		return err
+	}
 	return m.c.presetStore.Delete(ctx, spawnOwner(ctx).UserID, name)
 }

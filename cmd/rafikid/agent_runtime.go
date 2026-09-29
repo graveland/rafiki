@@ -479,9 +479,18 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// touching the other. The binding is per-owner like the adapters above,
 	// with the daemon-stamped child id as write attribution: a child that
 	// saves a preset stamps written_by_child with its own id, the operator's
-	// empty.
+	// empty. Only a top-level child authors; a parented one reads
+	// (childPresetBinding). The row may not be in the store yet on a fresh
+	// spawn, so the request's parent decides there and the stored label on a
+	// resume.
 	if c.pool != nil && c.presetStore != nil {
-		ro.Presets = newPresetBinding(c, ownerUserID, childID)
+		b := newPresetBinding(c, ownerUserID, childID)
+		_, parentedInStore := c.st.ParentOf(childID)
+		if req.ParentChildID != "" || parentedInStore {
+			ro.Presets = childPresetBinding{b}
+		} else {
+			ro.Presets = b
+		}
 	}
 	// Recall: same nil-means-decline family. The decline is daemon-wide
 	// (c.recall == nil), but newRecallBinding itself returns a nil INTERFACE on

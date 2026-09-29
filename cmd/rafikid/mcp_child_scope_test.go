@@ -93,27 +93,40 @@ func (s *recordingPresetStore) Delete(_ context.Context, owner, _ string) error 
 	return nil
 }
 
-// TestChildPyModuleStoreRefusesAuthoring pins the child caller's pymodule
-// store: put/delete refuse by rule; get delegates (the corpus it reads is
-// exactly the one the child's own executor binding can run).
-func TestChildPyModuleStoreRefusesAuthoring(t *testing.T) {
+// lineageStore holds a top-level child and one it spawned, for the preset
+// authoring rule: the operator's own session authors, an agent's child reads.
+func lineageStore() *childstore.Store {
+	st := childstore.New()
+	st.Insert(&childstore.Session{
+		ChildID: "c_root", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+	})
+	st.Insert(&childstore.Session{
+		ChildID: "c_kid", Status: protocol.StatusIdle,
+		Kind: protocol.KindClaude, StartedAt: time.Now(),
+		Labels: map[string]string{childstore.LabelParent: "c_root", childstore.LabelRoot: "c_root"},
+	})
+	return st
+}
+
+// TestPresetStoreForChildAuthorsOnlyAtTopLevel pins the child caller's preset
+// rule: a top-level child authors under its owner, stamped as the writer; a
+// parented child and an unknown id get the read-only childPresetBinding.
+func TestPresetStoreForChildAuthorsOnlyAtTopLevel(t *testing.T) {
 	c := assert.NewAborting(t)
-	ctrl := &Controller{}
-	w := &childPyModuleStore{newMCPPyModuleStore(ctrl, users.Identity{UserID: "u-owner"})}
+	ctx := context.Background()
+	ctrl := &Controller{st: lineageStore(), presetStore: newFakePresetStore("u-owner")}
 
-	if _, _, err := w.Put(context.Background(), "local", "m", "code", ""); !errors.Is(err, errPyModuleChildAuthoring) {
-		t.Fatalf("Put = %v, want errPyModuleChildAuthoring", err)
+	rec, err := ctrl.presetStoreForChild("u-owner", "c_root").Put(ctx, presets.Spec{Name: "p"})
+	c.NoError(err, "top-level Put")
+	c.Eq("c_root", rec.WrittenByChild, "WrittenByChild")
+	c.NoError(ctrl.presetStoreForChild("u-owner", "c_root").Delete(ctx, "p"), "top-level Delete")
+
+	for _, id := range []string{"c_kid", "c_gone", ""} {
+		_, err := ctrl.presetStoreForChild("u-owner", id).Put(ctx, presets.Spec{Name: "p"})
+		c.ErrorIs(err, errPresetChildAuthoring, "Put as %q", id)
+		c.ErrorIs(ctrl.presetStoreForChild("u-owner", id).Delete(ctx, "p"), errPresetChildAuthoring, "Delete as %q", id)
 	}
-	_, err := w.Delete(context.Background(), "local", "m")
-	c.ErrorIs(err, errPyModuleChildAuthoring, "Delete")
-
-	// Get delegates to the store. A nil pymoduleStore would panic, so prove
-	// the delegation with a stubbed Controller is impossible — instead prove
-	// the child store IS the wrapped store by construction: the same owner id
-	// rides through (a non-nil ctrl with a real store is DB territory, covered
-	// by the store's own tests).
-	c.Eq("u-owner", w.ownerUserID, "wrapped store owner")
-	var _ tools.PyModuleStore = w
 }
 
 // TestRecallBindingRefusesChildCaller pins the recall block's child rule:

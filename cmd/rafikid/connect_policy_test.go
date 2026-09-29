@@ -150,16 +150,16 @@ func childUsableVerbs(client rafikiv1connect.ControlClient) []struct {
 			_, err := client.SetBudget(ctx, req)
 			return err
 		}},
-		{"PutPreset", func(ctx context.Context, set func(h http.Header)) error {
-			req := connect.NewRequest(&rafikiv1.PutPresetRequest{Preset: &rafikiv1.PresetRow{Name: "p"}})
+		{"DeleteSkill", func(ctx context.Context, set func(h http.Header)) error {
+			req := connect.NewRequest(&rafikiv1.DeleteSkillRequest{Namespace: "user", Name: "s"})
 			set(req.Header())
-			_, err := client.PutPreset(ctx, req)
+			_, err := client.DeleteSkill(ctx, req)
 			return err
 		}},
-		{"PutPymodule", func(ctx context.Context, set func(h http.Header)) error {
-			req := connect.NewRequest(&rafikiv1.PutPymoduleRequest{Name: "m"})
+		{"BanProvider", func(ctx context.Context, set func(h http.Header)) error {
+			req := connect.NewRequest(&rafikiv1.BanProviderRequest{Provider: "p"})
 			set(req.Header())
-			_, err := client.PutPymodule(ctx, req)
+			_, err := client.BanProvider(ctx, req)
 			return err
 		}},
 		{"UpsertSkill", func(ctx context.Context, set func(h http.Header)) error {
@@ -330,7 +330,7 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 	for procedure, want := range map[string]controlPolicy{
 		controlProcedurePrefix + "Kill":        policyChildScoped,
 		controlProcedurePrefix + "ListModels":  policyAnyCaller,
-		controlProcedurePrefix + "PutPymodule": policyUserOnly,
+		controlProcedurePrefix + "UpsertSkill": policyUserOnly,
 		controlProcedurePrefix + "NoSuchRPC":   policyUserOnly,
 		"/other.v1.Service/Do":                 policyUserOnly,
 		"not-a-procedure":                      policyUserOnly,
@@ -359,7 +359,7 @@ func TestPolicyForDefaultsClosed(t *testing.T) {
 func TestAuthorizeControlProcedure(t *testing.T) {
 	c := assert.NewCollecting(t)
 	const (
-		userOnly   = controlProcedurePrefix + "PutPreset"
+		userOnly   = controlProcedurePrefix + "UpsertSkill"
 		anyCaller  = controlProcedurePrefix + "ListModels"
 		childScope = controlProcedurePrefix + "Kill"
 	)

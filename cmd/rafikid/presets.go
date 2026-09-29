@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/presets"
@@ -365,14 +366,13 @@ func (b presetBinding) Delete(ctx context.Context, name string) error {
 	return b.c.presetStore.Delete(ctx, b.owner, name)
 }
 
-// childPresetBinding is what a per-child MCP caller gets instead of the
-// owner's binding: the read verbs pass through — preset names and metadata
-// are the same read-only, non-scoped facts Connect's anyCaller grants a child
-// credential on ListPresets/GetPreset — but AUTHORING refuses. Review-0's F1:
-// the owner-scoped put/delete let a child shadow, latest-live-wins, whatever
-// preset the operator's next spawn would resolve. Attribution is not
-// authorization, so wave 1 removes the write rather than stamping it more
-// honestly.
+// childPresetBinding is what a PARENTED child gets instead of the owner's
+// binding: the read verbs pass through — preset names and metadata are the
+// same read-only, non-scoped facts Connect's anyCaller grants a child
+// credential on ListPresets/GetPreset — but AUTHORING refuses. Presets are the
+// operator's: the CLI, or a top-level child the operator launched and drives
+// (topLevelChild). A child spawned by another agent must never shadow,
+// latest-live-wins, whatever preset the operator's next spawn resolves.
 //
 // The refusal is an ERROR, not a declined tool: the tool stays listed so the
 // model reads the rule it violated, and every surface wrapping this binding
@@ -385,7 +385,7 @@ var _ tools.PresetStore = childPresetBinding{}
 
 // errPresetChildAuthoring is the child-caller refusal for preset
 // put/delete. It names the rule, never the caller's credential value.
-var errPresetChildAuthoring = errors.New("presets are operator-authored: a per-child credential may read presets but never put or delete them")
+var errPresetChildAuthoring = errors.New("presets are operator-authored: a child spawned by another agent may read presets but never put or delete them; only the CLI or a top-level session may")
 
 func (b childPresetBinding) Put(ctx context.Context, spec presets.Spec) (presets.Record, error) {
 	return presets.Record{}, errPresetChildAuthoring
@@ -393,4 +393,30 @@ func (b childPresetBinding) Put(ctx context.Context, spec presets.Spec) (presets
 
 func (b childPresetBinding) Delete(ctx context.Context, name string) error {
 	return errPresetChildAuthoring
+}
+
+// topLevelChild reports whether childID names a known child with no parent:
+// one the operator launched directly, which acts for its owner rather than
+// for another agent. An unknown id is not top-level — the question fails
+// closed onto the narrower binding.
+func topLevelChild(st *childstore.Store, childID string) bool {
+	if childID == "" {
+		return false
+	}
+	if _, ok := st.Get(childID); !ok {
+		return false
+	}
+	_, parented := st.ParentOf(childID)
+	return !parented
+}
+
+// presetStoreForChild is the preset binding a child caller gets: a top-level
+// child authors under its owner, stamped as the writer; a parented one gets
+// the read-only childPresetBinding.
+func (c *Controller) presetStoreForChild(ownerUserID, childID string) tools.PresetStore {
+	b := newPresetBinding(c, ownerUserID, childID)
+	if topLevelChild(c.st, childID) {
+		return b
+	}
+	return childPresetBinding{b}
 }

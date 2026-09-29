@@ -216,13 +216,12 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		return nil
 	}
 	owner := users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
-	// A per-child caller's authoring surfaces narrow here, once, and every
-	// binding below keys off it. This is review-0's F1 fix: the MCP face
-	// admitted a per-child credential and then bound every owner-scoped tool
-	// to owner.UserID — the owner's conversation corpus, memory namespace,
-	// preset namespace and pymodule bucket. The agent-control tools were
-	// always subtree-scoped (newControllerSpawner); the rest now are too, or
-	// refuse.
+	// A per-child caller's surfaces narrow here, once, and every binding
+	// below keys off it. This is review-0's F1 fix: the MCP face admitted a
+	// per-child credential and then bound every owner-scoped tool to
+	// owner.UserID — the owner's conversation corpus, memory namespace and
+	// preset namespace. The agent-control tools were always subtree-scoped
+	// (newControllerSpawner); the rest now are too, or refuse.
 	isChild := id.Via == server.ProvenanceChildToken
 	var spawner tools.AgentSpawner
 	switch {
@@ -260,12 +259,11 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	}
 	// Presets need only the database: unlike the pymodule tools they are the
 	// same for every caller and every executor state. A child-token caller
-	// gets the READ-only binding: put/delete refuse, because a child writing
-	// the owner's preset namespace shadows — latest-live-wins — whatever the
-	// operator's next spawn resolves.
+	// authors only when it is top-level (the operator's own session); a
+	// parented child gets the READ-only binding — see presetStoreForChild.
 	if ctrl.presetStore != nil {
 		if isChild {
-			opts.Presets = childPresetBinding{newPresetBinding(ctrl, owner.UserID, "")}
+			opts.Presets = ctrl.presetStoreForChild(owner.UserID, id.ChildID)
 		} else {
 			opts.Presets = newPresetBinding(ctrl, owner.UserID, "")
 		}
@@ -286,13 +284,11 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// no executor pool at all: no claude child can ever run one here, so
 	// put/get/delete/list would be a toolbox nobody can open. Unlike Quota
 	// (which degrades per-caller), this condition is the same for every
-	// caller of this daemon.
+	// caller of this daemon. Authoring is open to child callers too: a child
+	// that can already write and run scripts in its workspace gains nothing
+	// dangerous from saving one.
 	if ctrl.claudeExecutorRouted() {
-		store := tools.PyModuleStore(newMCPPyModuleStore(ctrl, owner))
-		if isChild {
-			store = &childPyModuleStore{newMCPPyModuleStore(ctrl, owner)}
-		}
-		opts.PyModules = store
+		opts.PyModules = newMCPPyModuleStore(ctrl, owner)
 		opts.PyModuleList = newMCPPyModuleLister(ctrl, owner)
 		// pymodule_run is scoped further: only a ProvenanceChildToken
 		// caller (a claude-kind child, never the interactive human) whose

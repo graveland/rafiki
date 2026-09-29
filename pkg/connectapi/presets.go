@@ -18,6 +18,11 @@ import (
 // CodeInternal, so a bad preset reads as a bad request.
 var ErrInvalidPreset = errors.New("invalid preset")
 
+// ErrPresetAuthoring marks a PutPreset/DeletePreset refused because the
+// caller may read presets but not author them (a child spawned by another
+// agent). presetError maps it to CodePermissionDenied.
+var ErrPresetAuthoring = errors.New("preset authoring refused")
+
 // PresetManager is the narrow slice of the daemon needed to manage the
 // caller's own presets. The owner is resolved INSIDE the implementation from
 // the request context -- no method takes one, the same rule as
@@ -68,6 +73,9 @@ func presetError(err error) error {
 	}
 	if errors.Is(err, ErrInvalidPreset) {
 		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if errors.Is(err, ErrPresetAuthoring) {
+		return connect.NewError(connect.CodePermissionDenied, err)
 	}
 	return connect.NewError(connect.CodeInternal, err)
 }

@@ -32,7 +32,7 @@ type controlPolicy uint8
 const (
 	// policyUserOnly requires a real user credential (or a nil identity, the
 	// unix socket's local trust). It is the DEFAULT: anything that acts with
-	// operator authority — budgets, presets, skills, pymodules, git sources,
+	// operator authority — budgets, skills, pymodule git sources,
 	// memory writes, the daraja verbs — is here, and a new RPC that misses the
 	// table lands here by the completeness test (TestControlPolicyTableCoversEveryProcedure).
 	policyUserOnly controlPolicy = iota
@@ -49,9 +49,10 @@ const (
 	// SetBudget, GetHistory, StreamEvents, ListChildren, GetChild, ListTasks;
 	// the three script-child verbs Report, Receive, SetResult; the
 	// conversation reads ConversationSearch/Export/Query, answered through the
-	// caller's subtree (childConversationScope); and the pymodule reads
-	// ListPymodules/GetPymodule, answered from the owner's corpus exactly as
-	// the MCP face's pymodule_get does. The gate admits a
+	// caller's subtree (childConversationScope); the pymodule verbs, read
+	// from and written to the owner's corpus exactly as the MCP face's
+	// pymodule tools do; and PutPreset/DeletePreset, which the handler admits
+	// only for a top-level child. The gate admits a
 	// ProvenanceChildToken caller on them, but a procedure name carries no
 	// target child id, so the gate cannot check the subtree itself: it admits
 	// and the HANDLER resolves the caller's subtree authority through
@@ -116,11 +117,17 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ConversationSearch": policyChildScoped,
 	"ConversationExport": policyChildScoped,
 	"ConversationQuery":  policyChildScoped,
-	// Owner-corpus pymodule READS: what the child's own executor can already
-	// run. Put/Delete stay userOnly — a child writing the corpus would change
-	// what every later spawn of the owner runs.
-	"ListPymodules": policyChildScoped,
-	"GetPymodule":   policyChildScoped,
+	// The owner's pymodule corpus: a child reads what its executor can run
+	// and authors into it, as the MCP face's pymodule tools let it.
+	"ListPymodules":  policyChildScoped,
+	"GetPymodule":    policyChildScoped,
+	"PutPymodule":    policyChildScoped,
+	"DeletePymodule": policyChildScoped,
+	// Preset authoring: the gate admits the per-child secret and the handler
+	// (connectPresets.authoringChild) refuses it unless the child is
+	// top-level — the MCP face's presetStoreForChild rule.
+	"PutPreset":    policyChildScoped,
+	"DeletePreset": policyChildScoped,
 	// Script children (Report / Receive / SetResult). Report acts OUTWARD on
 	// the caller's own parent; Receive and SetResult are self-only. All three
 	// resolve the caller's position from the credential — the request carries
@@ -148,14 +155,10 @@ var controlPolicyTable = map[string]controlPolicy{
 	"UpsertSkill":              policyUserOnly,
 	"DeleteSkill":              policyUserOnly,
 	"SetSkillEnabled":          policyUserOnly,
-	"PutPymodule":              policyUserOnly,
-	"DeletePymodule":           policyUserOnly,
 	"AddPymoduleGitSource":     policyUserOnly,
 	"ListPymoduleGitSources":   policyUserOnly,
 	"RefreshPymoduleGitSource": policyUserOnly,
 	"RemovePymoduleGitSource":  policyUserOnly,
-	"PutPreset":                policyUserOnly,
-	"DeletePreset":             policyUserOnly,
 	"Recall":                   policyUserOnly,
 	"RecallContext":            policyUserOnly,
 	"GetMemory":                policyUserOnly,
