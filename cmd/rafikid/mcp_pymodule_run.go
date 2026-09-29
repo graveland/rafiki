@@ -127,12 +127,19 @@ func (e *mcpPyModuleRunExecutor) Run(ctx context.Context, input json.RawMessage)
 	return resultText, nil
 }
 
-// bindCwd makes the input's `cwd` mean the CALLING CHILD's working directory
-// -- the "your working directory" the tool description promises -- instead of
-// the executor's root, which is what the executor-side implementation would
-// otherwise resolve against: its registry is materialized with Cwd = root for
-// every workspace-less caller, so a relative path and the empty default both
-// land there. Absent means the caller's cwd; relative means relative to it,
+// bindCwd makes the input's `cwd` mean the CALLING CHILD's working directory.
+// All of the work lives in bindCwdTo, the free function the send-step runner
+// reuses for its own cwd binding.
+func (e *mcpPyModuleRunExecutor) bindCwd(input json.RawMessage) json.RawMessage {
+	return bindCwdTo(e.callerCwd, input)
+}
+
+// bindCwdTo makes the input's `cwd` mean callerCwd -- the "your working
+// directory" the tool description promises -- instead of the executor's root,
+// which is what the executor-side implementation would otherwise resolve
+// against: its registry is materialized with Cwd = root for every
+// workspace-less caller, so a relative path and the empty default both land
+// there. Absent means the caller's cwd; relative means relative to it,
 // exactly like the file tools resolve against a workspace; absolute and
 // ~-prefixed pass through untouched, the executor expanding ~ against its own
 // home as it always did.
@@ -150,15 +157,15 @@ func (e *mcpPyModuleRunExecutor) Run(ctx context.Context, input json.RawMessage)
 // unmarshal treats it): the executor's own unmarshal then reports the
 // malformed input, so this proxy never invents a second diagnostic for the
 // same bytes.
-func (e *mcpPyModuleRunExecutor) bindCwd(input json.RawMessage) json.RawMessage {
-	if e.callerCwd == "" || !filepath.IsAbs(e.callerCwd) {
+func bindCwdTo(callerCwd string, input json.RawMessage) json.RawMessage {
+	if callerCwd == "" || !filepath.IsAbs(callerCwd) {
 		return input
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(input, &fields); err != nil {
 		return input
 	}
-	resolved := e.callerCwd
+	resolved := callerCwd
 	if raw, ok := fields["cwd"]; ok {
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
@@ -169,7 +176,7 @@ func (e *mcpPyModuleRunExecutor) bindCwd(input json.RawMessage) json.RawMessage 
 		} else if filepath.IsAbs(s) || strings.HasPrefix(s, "~") {
 			return input
 		} else {
-			resolved = filepath.Join(e.callerCwd, s)
+			resolved = filepath.Join(callerCwd, s)
 		}
 	}
 	cwd, err := json.Marshal(resolved)
