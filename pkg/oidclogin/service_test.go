@@ -80,8 +80,10 @@ type fakeIssuer struct {
 
 	mu         sync.Mutex
 	key        *rsa.PrivateKey
-	failNext   int // discovery GETs to answer 500 before serving the document
-	discoveryN int // total discovery GETs seen
+	rogueKey   *rsa.PrivateKey // never in the JWKS: signs the bad-signature test's token
+	rogueSign  bool            // true = the token endpoint signs with rogueKey
+	failNext   int             // discovery GETs to answer 500 before serving the document
+	discoveryN int             // total discovery GETs seen
 	claims     map[string]any
 
 	// recorded from the most recent token request:
@@ -96,6 +98,11 @@ func newFakeIssuer(t *testing.T) *fakeIssuer {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	f.key = key
+	rkey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rogue RSA key: %v", err)
+	}
+	f.rogueKey = rkey
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", f.serveDiscovery)
 	mux.HandleFunc("/jwks", f.serveJWKS)
@@ -201,7 +208,11 @@ func (f *fakeIssuer) sign(claims map[string]any) string {
 	signingInput := header + "." + body
 	sum := sha256.Sum256([]byte(signingInput))
 	f.mu.Lock()
-	sig, err := rsa.SignPKCS1v15(rand.Reader, f.key, crypto.SHA256, sum[:])
+	key := f.key
+	if f.rogueSign {
+		key = f.rogueKey
+	}
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, sum[:])
 	f.mu.Unlock()
 	if err != nil {
 		panic(err)
@@ -517,12 +528,36 @@ func TestCompleteSendsVerifierAndSameRedirect(t *testing.T) {
 	c.Eq(base64.RawURLEncoding.EncodeToString(sum[:]), au.Query().Get("code_challenge"),
 		"code_challenge must be S256(verifier)")
 	c.Eq("S256", au.Query().Get("code_challenge_method"), "challenge method")
-	c.NotEmpty(au.Query().Get("nonce"), "authorize nonce")
+	// Exactly the nonce stored (and checked at Complete), not merely present:
+	// a URL nonce that disagrees with the stored one would fail-closed in
+	// production but pass this suite otherwise.
+	c.Eq(p.nonce, au.Query().Get("nonce"), "authorize nonce")
 
 	// ...and the token request sent back that exact verifier and redirect.
 	c.Eq(p.verifier, iss.lastVerifier, "code_verifier sent to the token endpoint")
 	c.Eq(p.redirectURI, iss.lastRedirectURI, "redirect_uri sent to the token endpoint")
 	c.Eq("good-code", iss.lastCode, "authorization code sent")
+}
+
+// TestCompleteBadSignature pins the signature gate itself: a syntactically
+// valid ID token (right iss/aud/exp/nonce) signed by a key that is NOT in
+// the JWKS is refused. The aud/nonce/state refusals are pinned elsewhere, but
+// without this case a regression DELETING the verification would pass the
+// suite.
+func TestCompleteBadSignature(t *testing.T) {
+	c := assert.NewAborting(t)
+	iss := newFakeIssuer(t)
+	svc := newTestService(t, iss, nil)
+
+	iss.resetClaims(iss.standardClaims())
+	iss.mu.Lock()
+	iss.rogueSign = true
+	iss.mu.Unlock()
+	loginID, state, _ := beginLogin(t, svc, 8080, "laptop")
+	armNonce(svc, iss, loginID)
+	_, err := svc.Complete(context.Background(), loginID, "code=good-code&state="+state)
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "rogue-signed token")
+	c.StrContains(err.Error(), "invalid ID token", "signature message")
 }
 
 // TestCompleteWrongAudience pins the aud check: a token minted for a
@@ -615,10 +650,16 @@ func TestCompleteEmailVerifiedString(t *testing.T) {
 		resp := happyComplete(t, svc, iss, func() { iss.setClaims(map[string]any{"email_verified": "true"}) })
 		c.Eq("rfk_secret", resp.GetToken(), "token")
 	})
-	t.Run("other shape treated as absent", func(t *testing.T) {
+	t.Run("other shapes treated as absent", func(t *testing.T) {
 		c := assert.NewAborting(t)
+		// A number is neither boolean nor string.
 		resp := happyComplete(t, svc, iss, func() { iss.setClaims(map[string]any{"email_verified": 1}) })
-		c.Eq("rfk_secret", resp.GetToken(), "token")
+		c.Eq("rfk_secret", resp.GetToken(), "number shape")
+		// JSON null decodes into a plain bool as a no-op SUCCESS — as a present
+		// false it would refuse every login of an IdP that emits it. It must be
+		// absent, i.e. accepted.
+		resp = happyComplete(t, svc, iss, func() { iss.setClaims(map[string]any{"email_verified": nil}) })
+		c.Eq("rfk_secret", resp.GetToken(), "null shape")
 	})
 }
 

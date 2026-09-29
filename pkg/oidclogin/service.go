@@ -376,14 +376,20 @@ func (s *Service) refuse(reason string) error {
 
 // parseEmailVerified decodes email_verified: JSON true/false or the strings
 // "true"/"false". present is false for an absent claim and for any other
-// shape, both of which mean "not asserted".
+// shape, both of which mean "not asserted". JSON null decodes into *bool as
+// nil WITHOUT error — decoded into a plain bool it would read as a present
+// false and refuse every login of an IdP that emits it, so the pointer is
+// what keeps null on the absent path.
 func parseEmailVerified(raw json.RawMessage) (verified, present bool) {
 	if len(raw) == 0 {
 		return false, false
 	}
-	var b bool
-	if err := json.Unmarshal(raw, &b); err == nil {
-		return b, true
+	var bp *bool
+	if err := json.Unmarshal(raw, &bp); err == nil {
+		if bp == nil {
+			return false, false
+		}
+		return *bp, true
 	}
 	var str string
 	if err := json.Unmarshal(raw, &str); err == nil {
