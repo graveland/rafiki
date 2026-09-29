@@ -338,7 +338,7 @@ type SpawnRequest struct {
 	MaxCost *float64 `json:"maxCost,omitempty"`
 
 	// MaxChildren caps simultaneously LIVE descendants across the new child's
-	// subtree. Default 4. It is separate from cost because a runaway
+	// subtree. Default 10. It is separate from cost because a runaway
 	// recursion of cheap spawns exhausts the machine long before it exhausts
 	// a dollar budget.
 	MaxChildren *int `json:"maxChildren,omitempty"`

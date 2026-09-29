@@ -124,8 +124,8 @@ goes to the human with the numbers instead of being retried.
 
 ## Concurrency and seat hygiene
 
-`max_children` defaults to **4** live agents beneath you, and you cannot read
-your own value. Dispatch wider work in chunks of four; a refusal past the limit
+`max_children` defaults to **10** live agents beneath you, and you cannot read
+your own value. Dispatch wider work in chunks of ten; a refusal past the limit
 is a wasted turn.
 
 **A settled child still holds its slot.** Settled-but-unreaped children count

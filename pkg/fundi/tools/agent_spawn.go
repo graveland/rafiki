@@ -63,7 +63,7 @@ func (AgentSpawnBlueprint) InputSchema() Schema {
 			{Name: "max_cost", Type: "number",
 				Description: "USD budget for this agent and everything it spawns. Omit to inherit no limit — but if you are coordinating, set one."},
 			{Name: "max_children", Type: "integer",
-				Description: "How many agents may be alive beneath it at once. Default 4."},
+				Description: "How many agents may be alive beneath it at once. Default 10."},
 			{Name: "executor", Type: "string",
 				Description: "Where to run this agent: a label selector over machines " +
 					"(e.g. \"env=work,os=linux\"), or a bare machine name (e.g. \"greyshift\") " +
