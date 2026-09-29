@@ -25,7 +25,7 @@ const ParentLabel = "rafiki/parent"
 // proxy synthesized from a captured thread, rather than a child rafiki spawned.
 const NativeSubagentLabel = "rafiki/native-subagent"
 
-// LiveStatuses is every protocol.Status except "exited" -- ten values, of
+// LiveStatuses is every protocol.Status except "exited" -- nine values, of
 // which "running" is a script child's steady state between spawn and exit (a
 // script never streams; its whole life is one run). This is the list the
 // cockpit sends as ListChildrenRequest.Statuses, so a status missing here is

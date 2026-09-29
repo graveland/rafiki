@@ -201,9 +201,14 @@ class ConnectClient:
                 self._url(method),
                 content=json.dumps(payload),
                 headers=self._headers(CONTENT_UNARY),
-                # Per-call budget: the sentinel keeps the client's default
-                # Timeout (httpx treats an explicit None as "no timeout").
-                timeout=httpx.Timeout(timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                # Per-call budget: only the READ timeout is widened — a slow
+                # daemon-side answer is a read. Connect, write and pool keep
+                # the client's default, so a black-holed daemon still fails
+                # fast on the dial instead of waiting out the whole call
+                # budget to connect (× retries). The sentinel keeps the
+                # client's default Timeout when no budget is set (httpx
+                # treats an explicit None as "no timeout").
+                timeout=httpx.Timeout(self._timeout, read=timeout) if timeout is not None else httpx.USE_CLIENT_DEFAULT,
             )
         except httpx.HTTPError as exc:
             # A failed dial means the daemon is unreachable — the same state

@@ -3919,6 +3919,16 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// Rendered reads for an exited child are served from conversation_message.
 	renderEvents := ch.RenderRecent(ring.Query{})
 
+	// Flush the script coalescer BEFORE MarkExited: nothing between here and
+	// the final durable appends depends on the coalescer still being open, and
+	// MarkExited is what makes status "exited" visible to a polling client —
+	// which must not see "exited" until the child's last output is in the log.
+	// The flushed appends are durable, so they precede the child_exited event
+	// below in ordinal order.
+	if co := c.takeScriptOutputCoalescer(childID); co != nil {
+		co.Close()
+	}
+
 	// MarkExited sets Status, ExitedAt, ExitCode, ExitSignal, and ExitedRing
 	// atomically under one sess.mu hold so a concurrent Snapshot() cannot
 	// observe Status=Exited with ExitedRing still nil.
@@ -3988,10 +3998,8 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 		exitCodePtr = &c32
 	}
 	// Durable, so it precedes the exit event below in ordinal order: the
-	// child's last output must not arrive after child_exited.
-	if co := c.takeScriptOutputCoalescer(childID); co != nil {
-		co.Close()
-	}
+	// child's last output was flushed to the log at the top of this handler,
+	// before MarkExited made "exited" visible.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
 		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{

@@ -1271,10 +1271,13 @@ take away your terminal's own select-and-copy.
 ### Activity and attention
 
 ```
-◌ spawning   ○ idle        ◐ streaming   ⚒ running a tool
+◌ spawning   ○ idle        ◐ streaming   ▶ running     ⚒ running a tool
 ⊛ compacting ‼ needs you   ◇ stopping    ⟳ retrying    ✓/✗ exited
 ⧖ batch_wait (static — hours-scale work already submitted to the provider)
 ```
+
+`▶ running` is a script child's whole run: the process is alive from spawn to
+exit (a script never streams), and it spins while the run is going.
 
 The badge counts only events worth a human (a finished turn, going idle,
 blocking on you, an error, a child exiting) — an agent merely working shows a

@@ -30,7 +30,8 @@ import (
 const (
 	// scriptOutputFlushBytes is the buffered-size trigger: text buffered for
 	// one stream flushes once it reaches this. An oversized LINE is split at
-	// exactly this bound (see Add).
+	// the last rune boundary ≤ this bound (the cut steps back up to 3 bytes;
+	// see Add).
 	scriptOutputFlushBytes = 4 * 1024
 
 	// scriptOutputFlushAfter is the time trigger: 250 ms after a stream's
@@ -296,12 +297,14 @@ func (s *scriptOutputCoalescer) Add(stream, line string, terminated bool) {
 	}
 	if len(line) > scriptOutputFlushBytes {
 		// Never merge an oversized line with anything else: seal whatever is
-		// open, then split the line at rune boundaries ≤ the threshold. The
+		// open, then split the line at the last rune boundary ≤ the bound
+		// (each cut steps back up to 3 bytes to land on a rune start). The
 		// pieces carry no newline — they are fragments of one line — and the
 		// trailing remainder (1..4096 bytes, never empty) lands in the open
 		// buffer with the line's terminator, ready to coalesce forward — then
-		// the buffer is size-sealed if the remainder already meets the
-		// trigger, exactly as any other append is.
+		// the buffer is size-sealed if the remainder is ≥ 4096 bytes (the
+		// newline that lands with it is what reaches the bound), exactly as
+		// any other append is.
 		st.sealLocked()
 		for len(line) > scriptOutputFlushBytes {
 			cut := scriptOutputFlushBytes

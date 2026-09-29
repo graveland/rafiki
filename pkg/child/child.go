@@ -191,7 +191,7 @@ const (
 )
 
 // stderrFragmentBytes bounds readStderr's newline-free line accumulator: when
-// pending reaches this with no '\n', its first stderrFragmentBytes (rune-cut)
+// pending EXCEEDS this with no '\n', its first stderrFragmentBytes (rune-cut)
 // bytes are delivered as an unterminated fragment, so a script writing a huge
 // newline-free blob cannot grow daemon memory without limit. It matches the
 // daemon-side coalescer's own flush bound, so a fragment is never split
@@ -1028,7 +1028,7 @@ func (c *Child) handleFrame(line []byte) {
 //
 // The accumulator is BOUNDED at stderrFragmentBytes: a script writing a
 // newline-free blob (a \r-only progress bar, a binary dump) would otherwise
-// grow daemon memory without limit. When pending reaches the bound with no
+// grow daemon memory without limit. When pending EXCEEDS the bound with no
 // '\n' in sight, its first bound bytes — cut back to a rune boundary — are
 // delivered as an unterminated FRAGMENT (terminated=false) and the rest stays
 // pending; consecutive fragments of one blob arrive in sequence and
@@ -1091,7 +1091,8 @@ func (c *Child) readStderr() {
 					// which delivers it terminated). The step-back is capped at
 					// 3 bytes (a rune is at most 4); the input here is RAW, so a
 					// run of ≥4096 continuation bytes has no boundary within
-					// reach — cut at exactly the bound and let the coalescer's
+					// reach — cut at bound−3 (the cut ends at 4093 when no rune
+					// start is within 3 bytes) and let the coalescer's
 					// sanitize handle the invalid bytes rather than spinning
 					// with an empty cut.
 					cut := stderrFragmentBytes

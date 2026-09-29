@@ -445,6 +445,30 @@ def run():
         kid = c.stop("c_stop", shutdown_timeout_ms=5000, kill_timeout_ms=3000)
         assert captured_kill["Kill"] == 38.0, captured_kill
         note("9 stop-timeout OK")
+
+        # 10. the per-call timeout widens ONLY the read timeout on the wire:
+        # connect/write/pool keep the client's default, so a black-holed
+        # daemon fails fast on the dial instead of waiting out the whole call
+        # budget (× retries) to connect.
+        import httpx
+        captured_to = {}
+        inner_http = c._conn._http
+        class SpyHTTP:
+            def post(self, url, **kw):
+                captured_to["timeout"] = kw.get("timeout")
+                return inner_http.post(url, **kw)
+            def __getattr__(self, name):
+                return getattr(inner_http, name)
+        c._conn._http = SpyHTTP()
+        try:
+            c.stop("c_stop")
+        finally:
+            c._conn._http = inner_http
+        t = captured_to["timeout"]
+        assert isinstance(t, httpx.Timeout), t
+        assert t.connect == c._conn._timeout == 30.0, (t.connect, c._conn._timeout)
+        assert t.read == 240.0, t.read
+        note("10 connect-timeout-unchanged OK")
         srv.shutdown()
         note("TRANSPORT PASS")
     except Exception:

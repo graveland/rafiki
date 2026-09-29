@@ -179,6 +179,12 @@ type AdminServer struct {
 	// child id, surviving the process's exit (see launchRecord). Only Launch
 	// writes a key; supervise and the stderr relay mutate a record's fields.
 	records map[string]*launchRecord
+	// supDoneChannels is every supervise goroutine's done channel, appended at
+	// launch. The a.m entry is deleted by supervise right after Wait, so the
+	// map can no longer serve the join that Close needs; this slice can. One
+	// entry per launch, never pruned: a channel per hosted daraja, bounded by
+	// how many it ever launched.
+	supDoneChannels []chan struct{}
 }
 
 func NewAdminServer(o AdminOptions) *AdminServer {
@@ -490,6 +496,7 @@ func (a *AdminServer) Launch(
 	a.mu.Lock()
 	a.m[childID] = l
 	a.records[childID] = rec
+	a.supDoneChannels = append(a.supDoneChannels, done)
 	a.mu.Unlock()
 
 	go a.supervise(childID, l)
@@ -619,6 +626,20 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 	code := l.cmd.ProcessState.ExitCode()
 	slog.Info("admin: daraja exited", "childID", childID, "pid", l.pgid, "exitCode", code, "error", err)
 
+	// Drop the entry right after Wait, BEFORE the stderr drain: once the group
+	// is likely empty, this executor no longer claims its pgid, so a recycled
+	// pgid is never signalled later — and a same-id relaunch during the drain
+	// is not refused with AlreadyExists for stderrDrainGrace. The record
+	// deliberately survives the deletion — Status answers for an exited
+	// daraja, which is the whole point of the record — and the stamp below
+	// targets the RECORD POINTER, so a relaunch's fresh record is never
+	// clobbered by this drain.
+	a.mu.Lock()
+	if a.m[childID] == l {
+		delete(a.m, childID)
+	}
+	a.mu.Unlock()
+
 	// Let the stderr relay drain before stamping. The daemon's launch wait
 	// fails fast on the FIRST Status that reports running=false, so a record
 	// stamped while the relay still has the daraja's last lines unread makes
@@ -631,14 +652,7 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 	case <-time.After(stderrDrainGrace):
 	}
 
-	// Dropping the entry is what stops a recycled pgid from being signalled
-	// later: once the group is likely empty, this executor no longer claims it.
-	// The record deliberately survives the deletion — Status answers for an
-	// exited daraja, which is the whole point of the record.
 	a.mu.Lock()
-	if a.m[childID] == l {
-		delete(a.m, childID)
-	}
 	if rec := l.status; rec != nil {
 		rec.running = false
 		rec.exited = true
@@ -650,15 +664,19 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 
 // waitSupervise blocks until every supervise goroutine has exited.
 // Called by Close after all reaps have been issued; joins goroutines that hold
-// no locks, so they complete promptly. Skips nil entries (launch claims).
+// no locks, so they complete promptly. The channels are snapshotted under the
+// lock and waited on outside it: a supervise draining stderr may take up to
+// stderrDrainGrace, and holding the lock that long would block a concurrent
+// Launch or Status for the whole wait.
 func (a *AdminServer) waitSupervise() {
 	a.mu.Lock()
-	for _, l := range a.m {
-		if l != nil && l.supDone != nil {
-			<-l.supDone
+	dones := append([]chan struct{}(nil), a.supDoneChannels...)
+	a.mu.Unlock()
+	for _, done := range dones {
+		if done != nil {
+			<-done
 		}
 	}
-	a.mu.Unlock()
 }
 
 // kindFor validates the requested kind against the operator's declaration.
