@@ -39,22 +39,6 @@ func registryCount(reg *streamRegistry) int {
 	return n
 }
 
-// waitForCondition polls cond until it holds or the deadline passes. The stream tests
-// cannot know when the server-side handler has subscribed without it, and an
-// event sent before the subscription exists would be silently dropped —
-// exactly the false pass a deadline-free sleep is for.
-func waitForCondition(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("condition never held")
-}
-
 // fakeStreamConn is a minimal connect.StreamingHandlerConn for the direct
 // interceptor tests: the interceptor reads Spec and the identity from ctx,
 // and the handler underneath reads nothing.
