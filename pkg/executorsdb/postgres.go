@@ -105,11 +105,11 @@ func (s *pgStore) MintToken(ctx context.Context, t executors.NewToken) (string, 
 	_, err = s.pool.Exec(ctx,
 		`INSERT INTO conversations.executor_enrollment_token
 		   (token_hash, labels, roots, isolation, workspace_mode, admits,
-		    minted_by, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		    minted_by, expires_at, owner_user_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9,'')::uuid)`,
 		hashToken(plaintext), labelsJSON, roots,
 		isolation, wmode, t.Admits,
-		t.MintedBy, t.ExpiresAt)
+		t.MintedBy, t.ExpiresAt, t.OwnerUserID)
 	if err != nil {
 		return "", fmt.Errorf("mint token: %w", err)
 	}
@@ -126,9 +126,12 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 	hashed := hashToken(token)
 	var tr tokenRow
 	err = tx.QueryRow(ctx,
-		`SELECT labels, roots, isolation, workspace_mode, admits, expires_at, consumed_at
-		   FROM conversations.executor_enrollment_token WHERE token_hash = $1`,
-		hashed).Scan(&tr.labels, &tr.roots, &tr.isolation, &tr.workspaceMode, &tr.admits, &tr.expiresAt, &tr.consumedAt)
+		`SELECT t.labels, t.roots, t.isolation, t.workspace_mode, t.admits, t.expires_at, t.consumed_at,
+		        COALESCE(t.owner_user_id::text, ''), COALESCE(u.deleted_at IS NOT NULL, false)
+		   FROM conversations.executor_enrollment_token t
+		   LEFT JOIN conversations.users u ON u.id = t.owner_user_id
+		  WHERE t.token_hash = $1`,
+		hashed).Scan(&tr.labels, &tr.roots, &tr.isolation, &tr.workspaceMode, &tr.admits, &tr.expiresAt, &tr.consumedAt, &tr.ownerUserID, &tr.ownerDeleted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return executors.Executor{}, "", ErrTokenUnknown
 	}
@@ -139,6 +142,14 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 		// a dead connection into it told every executor enrolling during a
 		// database blip that its token was permanently invalid.
 		return executors.Executor{}, "", fmt.Errorf("look up enrollment token: %w", err)
+	}
+	if tr.ownerDeleted {
+		// The token was minted for a user whose row is now tombstoned. Not
+		// ErrTokenUnknown — the token exists; this is the enrollment-side twin
+		// of authenticateByHash's tombstoned-owner refusal, and it is
+		// ErrNotFound for the same reason: an ANSWER (the owner is gone,
+		// retrying cannot change that), while a store failure is wrapped above.
+		return executors.Executor{}, "", ErrNotFound
 	}
 	if tr.consumedAt != nil {
 		return executors.Executor{}, "", ErrTokenConsumed
@@ -164,10 +175,10 @@ func (s *pgStore) Enroll(ctx context.Context, token string, self map[string]stri
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO conversations.executors
-		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits, owner_user_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, NULLIF($8,'')::uuid) RETURNING id`,
 		hashToken(credential), tr.labels, selfJSON, tr.roots,
-		isolation, wmode, tr.admits).Scan(&id)
+		isolation, wmode, tr.admits, tr.ownerUserID).Scan(&id)
 	if err != nil {
 		if werr := s.checkWriteErr(err); werr != err {
 			return executors.Executor{}, "", werr
@@ -216,10 +227,10 @@ func (s *pgStore) Create(ctx context.Context, t executors.NewToken) (executors.E
 	var id string
 	err = s.pool.QueryRow(ctx,
 		`INSERT INTO conversations.executors
-		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+		   (credential_hash, labels, self_reported, roots, isolation, workspace_mode, admits, owner_user_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7, NULLIF($8,'')::uuid) RETURNING id`,
 		hashToken(credential), jsonMap(t.Labels), jsonMap(nil), roots,
-		isolation, wmode, t.Admits).Scan(&id)
+		isolation, wmode, t.Admits, t.OwnerUserID).Scan(&id)
 	if err != nil {
 		if werr := s.checkWriteErr(err); werr != err {
 			return executors.Executor{}, "", werr
@@ -240,15 +251,18 @@ func (s *pgStore) authenticateByHash(ctx context.Context, hashVal string) (execu
 	var labelsJSON, selfJSON, annotationsJSON []byte
 	var enrolledAt, lastSeenAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, labels, self_reported, annotations,
-		        roots, isolation, workspace_mode, admits, enabled,
-		        enrolled_at, last_seen_at
-		   FROM conversations.executors WHERE credential_hash = $1`,
+		`SELECT e.id, e.labels, e.self_reported, e.annotations,
+		        e.roots, e.isolation, e.workspace_mode, e.admits, e.enabled,
+		        e.enrolled_at, e.last_seen_at, COALESCE(e.owner_user_id::text, '')
+		   FROM conversations.executors e
+		   LEFT JOIN conversations.users u ON u.id = e.owner_user_id
+		  WHERE e.credential_hash = $1
+		    AND (e.owner_user_id IS NULL OR u.deleted_at IS NULL)`,
 		hashVal).Scan(
 		&e.ID,
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
-		&enrolledAt, &lastSeenAt)
+		&enrolledAt, &lastSeenAt, &e.OwnerUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return executors.Executor{}, ErrNotFound
 	}
@@ -285,13 +299,13 @@ func (s *pgStore) Get(ctx context.Context, id string) (executors.Executor, error
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
-		        enrolled_at, last_seen_at
+		        enrolled_at, last_seen_at, COALESCE(owner_user_id::text, '')
 		   FROM conversations.executors WHERE id = $1`,
 		id).Scan(
 		&e.ID,
 		&labelsJSON, &selfJSON, &annotationsJSON,
 		&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
-		&enrolledAt, &lastSeenAt)
+		&enrolledAt, &lastSeenAt, &e.OwnerUserID)
 	if err != nil {
 		return executors.Executor{}, ErrNotFound
 	}
@@ -311,7 +325,7 @@ func (s *pgStore) List(ctx context.Context) ([]executors.Executor, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, labels, self_reported, annotations,
 		        roots, isolation, workspace_mode, admits, enabled,
-		        enrolled_at, last_seen_at
+		        enrolled_at, last_seen_at, COALESCE(owner_user_id::text, '')
 		   FROM conversations.executors ORDER BY enrolled_at DESC`)
 	if err != nil {
 		return nil, err
@@ -443,6 +457,8 @@ type tokenRow struct {
 	admits        string
 	expiresAt     time.Time
 	consumedAt    *time.Time
+	ownerUserID   string
+	ownerDeleted  bool
 }
 
 func newToken() (string, error) {
@@ -476,7 +492,7 @@ func scanExecutors(rows pgx.Rows) ([]executors.Executor, error) {
 			&e.ID,
 			&labelsJSON, &selfJSON, &annotationsJSON,
 			&e.Roots, &e.Isolation, &e.WorkspaceMode, &e.Admits, &e.Enabled,
-			&enrolledAt, &lastSeenAt); err != nil {
+			&enrolledAt, &lastSeenAt, &e.OwnerUserID); err != nil {
 			return nil, err
 		}
 		json.Unmarshal(labelsJSON, &e.Labels)           //nolint:errcheck

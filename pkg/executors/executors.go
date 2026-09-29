@@ -20,9 +20,15 @@ type Executor struct {
 	Isolation     string
 	WorkspaceMode string
 	Admits        string
-	Enabled       bool
-	EnrolledAt    time.Time
-	LastSeenAt    time.Time
+	// OwnerUserID is the user this executor serves; "" = unowned, serving
+	// only unowned children. Selection matches it against the child's owner
+	// (empty on both sides counts as equal) in addition to Admits, and a
+	// tombstoned owner makes the credential refuse — the store decides that,
+	// not the caller.
+	OwnerUserID string
+	Enabled     bool
+	EnrolledAt  time.Time
+	LastSeenAt  time.Time
 
 	// Connected is a view field: true when the executor currently has a live
 	// connection in the pool. It is NOT persisted — the store leaves it false
@@ -45,8 +51,12 @@ type NewToken struct {
 	Isolation     string
 	WorkspaceMode string
 	Admits        string
-	MintedBy      string
-	ExpiresAt     time.Time
+	// OwnerUserID is the user the minted executor will serve; "" = unowned.
+	// It is copied onto the executor row at enrollment (Create inserts it
+	// directly), and a token whose owner is tombstoned cannot enroll.
+	OwnerUserID string
+	MintedBy    string
+	ExpiresAt   time.Time
 }
 
 // Store is the executor registry's persistence layer. The implementation
