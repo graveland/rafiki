@@ -122,6 +122,58 @@ type PrefillRead struct {
 	End   int    `json:"end,omitempty"`
 }
 
+// StepSite names whose authority, executor and working directory a send
+// step runs under. The empty string is refused, never defaulted: a
+// zero-valued SendStep must not silently run anywhere.
+type StepSite string
+
+const (
+	// StepSiteChild runs the step on the TARGET child's executor, in its
+	// workspace and working directory.
+	StepSiteChild StepSite = "child"
+	// StepSiteSender runs the step on the CALLER's executor, under the
+	// caller's own tool allowlist; only the output reaches the target.
+	StepSiteSender StepSite = "sender"
+)
+
+// SendStep is one tool call the daemon runs at send time, whose rendered
+// output is appended to the message. Exactly one of Read, Bash, PymoduleRun
+// is set.
+type SendStep struct {
+	Where       StepSite         `json:"where"`
+	Echo        bool             `json:"echo,omitempty"`
+	Read        *PrefillRead     `json:"read,omitempty"`
+	Bash        *BashStep        `json:"bash,omitempty"`
+	PymoduleRun *PymoduleRunStep `json:"pymodule_run,omitempty"`
+}
+
+// BashStep runs one shell command. TimeoutMs 0 means the send-step default.
+type BashStep struct {
+	Command   string `json:"command"`
+	TimeoutMs int    `json:"timeout_ms,omitempty"`
+}
+
+// PymoduleRunStep runs a saved pymodule, with pymodule_run's inputs.
+type PymoduleRunStep struct {
+	Repo    string   `json:"repo"`
+	Script  string   `json:"script"`
+	Modules []string `json:"modules,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
+}
+
+// StepSummary is what the sender learns about one step: never its output,
+// except the Echo prefix when the step asked for it.
+type StepSummary struct {
+	Index     int      `json:"index"`
+	Tool      string   `json:"tool"`
+	Where     StepSite `json:"where"`
+	Outcome   string   `json:"outcome"`
+	Bytes     int      `json:"bytes"`
+	Truncated bool     `json:"truncated,omitempty"`
+	Echo      string   `json:"echo,omitempty"`
+}
+
 // ScriptSpec, for kind=script, names the pymodule that IS the child's brain:
 // a saved Python module run as the child's process, with a per-child Connect
 // socket as its control channel (RAFIKI_CHILD_CONNECT). It is a pointer so
