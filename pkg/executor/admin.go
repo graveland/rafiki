@@ -658,17 +658,19 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 		rec.exited = true
 		rec.exitCode = int32(code)
 	}
-	// Prune this goroutine's done from the join slice now that it is closed,
-	// so the slice holds only channels a joiner could still be waiting on
-	// rather than one entry per launch for the executor's lifetime.
+	// Close this goroutine's done before dropping the lock, so the prune and
+	// the close are atomic with respect to waitSupervise's copy: nothing
+	// observes a closed channel that is still in the join slice, and the
+	// slice holds only channels a joiner could still be waiting on rather
+	// than one entry per launch for the executor's lifetime.
 	for i, d := range a.supDoneChannels {
 		if d == l.supDone {
 			a.supDoneChannels = append(a.supDoneChannels[:i], a.supDoneChannels[i+1:]...)
 			break
 		}
 	}
-	a.mu.Unlock()
 	close(l.supDone)
+	a.mu.Unlock()
 }
 
 // waitSupervise blocks until every supervise goroutine has exited.

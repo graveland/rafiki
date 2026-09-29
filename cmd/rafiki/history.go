@@ -286,9 +286,7 @@ func runEventQuery(
 		}
 		// The type filter applies client-side to the backfill's printed view:
 		// the conversation history through the query's filter, a script replay
-		// through the replay vocabulary — the replay observes EVERY ordinal up
-		// to the watermark (fetchScriptLog sends no server-side Types, so the
-		// event that reaches it is seen whatever its type) and the transcript
+		// through followTypes — and the transcript
 		// is cut here instead. Filtering a script replay through the
 		// conversation default would drop every script_output it just fetched.
 		printed := evs
@@ -313,13 +311,6 @@ func runEventQuery(
 	if !q.follow {
 		return nil
 	}
-	// The follow's type filter is the query's resolved filter — except that a
-	// script child under the DEFAULT filter follows the replay vocabulary:
-	// conversation types + lifecycle contains neither script_output nor
-	// script_report, so the server would drop every live script line and the
-	// command would show nothing after the backfill until the child exited.
-	// An explicit --types/--all-types wins; child_exited stays admitted either
-	// way, so the follow still ends when the script does.
 	req := &rafikiv1.StreamEventsRequest{
 		Subject: q.subject,
 		Tier:    q.tier,
