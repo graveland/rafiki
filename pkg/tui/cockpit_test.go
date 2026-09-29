@@ -1405,11 +1405,12 @@ func transcriptDump(c *Cockpit, id string) string {
 	return strings.Join(parts, "\n")
 }
 
-// A script child's pane is backfilled from the EVENT LOG (StreamEvents
-// replay), not GetHistory — a script has no conversation rows. The fold is
-// ApplyHistory-shaped and must NOT move the cursor into a wrong space: the
-// resume point carried in historyMsg.after IS the event-log ordinal, the same
-// space the focus stream resumes from.
+// A script child's pane is backfilled from the EVENT LOG via the FOCUS
+// REPLAY, not GetHistory — a script has no conversation rows, and the focus
+// stream is already reading the event-log ordinal space. fetchHistoryOnce
+// opens the subscription straight from ordinal -1 (replaying the log whole
+// before it follows live); the replayed events then arrive as focus events.
+// There is no historyMsg on this path and no GetHistory round trip.
 func TestScriptChildPaneBackfillsFromTheEventLog(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_s")
@@ -1419,10 +1420,14 @@ func TestScriptChildPaneBackfillsFromTheEventLog(t *testing.T) {
 			Labels: map[string]string{}, LatestOrdinal: proto.Int32(7)},
 	}})
 
-	// The replay's shape, exactly as scriptLogCmd delivers it: stdout chunks,
-	// a stderr chunk, a report, and the exit frame — with the replay's last
-	// ordinal as the watermark.
-	c.Update(historyMsg{childID: "c_s", after: 7, events: []*rafikiv1.Event{
+	// The script path opens the replay directly — no fetch, no historyMsg.
+	c.fetchHistoryOnce("c_s")
+	ck.True(c.stopFocus != nil, "the script path must open the focus replay itself, from ordinal -1")
+	ck.False(c.historyInFlight["c_s"], "no historyMsg will clear the flag on this path; a stuck one would keep a later visit from reopening the replay")
+
+	// The replay's shape, exactly as the focus stream delivers it: stdout
+	// chunks, a stderr chunk, a report, and the exit frame.
+	c.Update(eventMsg{evs: []*rafikiv1.Event{
 		scriptOutputEventFor("c_s", 0, "stdout", "building..."),
 		scriptOutputEventFor("c_s", 1, "stderr", "warn: slow disk"),
 		{ChildId: "c_s", Ordinal: proto.Int32(2), Payload: &rafikiv1.Event_ScriptReport{
@@ -1449,8 +1454,7 @@ func TestScriptChildPaneBackfillsFromTheEventLog(t *testing.T) {
 	ck.True(stdout, "stdout chunk missing from the pane\n%s", transcriptDump(c, "c_s"))
 	ck.True(stderr, "stderr chunk missing from the pane\n%s", transcriptDump(c, "c_s"))
 	ck.True(report, "script_report missing from the pane\n%s", transcriptDump(c, "c_s"))
-	ck.Eq(7, s.Cursor, "the cursor must take the EVENT-LOG watermark, never move into another ordinal space")
-	ck.True(c.stopFocus != nil, "the replay must have opened the focus stream (resume 7)")
+	ck.Eq(3, s.Cursor, "the cursor must stay in the event-log ordinal space (the replay's last delivered ordinal)")
 }
 
 // The script pane's RENDERED lines show the stdout text and mark stderr lines
@@ -1458,11 +1462,13 @@ func TestScriptChildPaneBackfillsFromTheEventLog(t *testing.T) {
 func TestScriptPaneRendersStdoutAndStderr(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := newTestCockpit("c_s")
+	defer c.shutdown()
 	c.Update(seedMsg{children: []*rafikiv1.ChildSummary{
 		{ChildId: "c_s", Name: "nightly", Status: "running", Kind: "script",
 			Labels: map[string]string{}, LatestOrdinal: proto.Int32(3)},
 	}})
-	c.Update(historyMsg{childID: "c_s", after: 3, events: []*rafikiv1.Event{
+	c.fetchHistoryOnce("c_s")
+	c.Update(eventMsg{evs: []*rafikiv1.Event{
 		scriptOutputEventFor("c_s", 0, "stdout", "step 1 ok"),
 		scriptOutputEventFor("c_s", 1, "stderr", "warn: retrying"),
 	}})

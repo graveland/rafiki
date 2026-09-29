@@ -216,9 +216,11 @@ func runEventQuery(
 		var evs []*rafikiv1.Event
 		empty := false
 		var err error
-		isScript := isScriptChild(ctx, client, q.childID)
-		if isScript {
-			evs, err = fetchScriptLog(ctx, ep, client, q.childID)
+		// A script child's summary also carries latest_ordinal, which bounds
+		// the replay below.
+		script := scriptChildSummary(ctx, client, q.childID)
+		if script != nil {
+			evs, err = fetchScriptLog(ctx, ep, client, q.childID, latestOrdinal(script))
 		} else {
 			evs, empty, err = fetchHistory(ctx, ep, client, q.childID)
 		}
@@ -246,7 +248,7 @@ func runEventQuery(
 		// and filtering them through the conversation default would drop every
 		// script_output it just fetched.
 		printed := evs
-		if !isScript {
+		if script == nil {
 			printed = filterByTypes(evs, q.types)
 		}
 		if q.tailN > 0 && len(printed) > q.tailN {
@@ -310,8 +312,10 @@ func fetchHistory(ctx context.Context, ep connectEndpoint, client rafikiv1connec
 }
 
 // scriptLogReplayTypes is the durable set a script child's `logs`/`tail`
-// backfill reads from the event log. Mirrors the cockpit's scriptLogReplayTypes
-// (pkg/tui): one vocabulary, two consumers.
+// backfill reads from the event log. The cockpit's script pane reads the same
+// log through the focus stream's replay (pkg/tui fetchHistoryOnce), so this
+// vocabulary must keep covering every type a script child's transcript is
+// made of.
 var scriptLogReplayTypes = []string{
 	"script_output",
 	"script_report",
@@ -321,17 +325,30 @@ var scriptLogReplayTypes = []string{
 	"error",
 }
 
-// isScriptChild reports whether childID's kind is "script", best-effort: an
-// unreachable or unknown child is NOT a script (the ordinary GetHistory path
-// then runs, and its own error handling reports whatever is actually wrong).
-func isScriptChild(ctx context.Context, client rafikiv1connect.ControlClient, childID string) bool {
+// scriptChildSummary resolves childID, best-effort: a script child returns
+// its ChildSummary (which carries latest_ordinal); an unreachable, unknown or
+// non-script child returns nil (the ordinary GetHistory path then runs, and
+// its own error handling reports whatever is actually wrong).
+func scriptChildSummary(ctx context.Context, client rafikiv1connect.ControlClient, childID string) *rafikiv1.ChildSummary {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	resp, err := client.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 	if err != nil {
-		return false
+		return nil
 	}
-	return resp.Msg.GetChild().GetKind() == "script"
+	if resp.Msg.GetChild().GetKind() != "script" {
+		return nil
+	}
+	return resp.Msg.GetChild()
+}
+
+// latestOrdinal reads the watermark off a script child's summary. An unset
+// latest_ordinal means the log has nothing to replay.
+func latestOrdinal(s *rafikiv1.ChildSummary) int32 {
+	if s == nil || s.LatestOrdinal == nil {
+		return 0
+	}
+	return *s.LatestOrdinal
 }
 
 // fetchScriptLog replays a script child's durable event log from ordinal 0 —
@@ -340,23 +357,55 @@ func isScriptChild(ctx context.Context, client rafikiv1connect.ControlClient, ch
 // error path and then print a misleading "no history yet"). The events come
 // back in ordinal order and carry their own ordinals, so the returned slice
 // is the backfill and its last ordinal is the follow's resume cursor.
-func fetchScriptLog(ctx context.Context, ep connectEndpoint, client rafikiv1connect.ControlClient, childID string) ([]*rafikiv1.Event, error) {
+//
+// StreamEvents REPLAYS the log and then FOLLOWS live — the server never ends
+// the stream on its own (for an exited script, Subscribe creates a fresh bus
+// nobody closes), so this loop stops itself: at this child's child_exited, or
+// once the ordinal reaches the summary's latest_ordinal watermark, whichever
+// comes first, and then cancels the stream context to end the server's
+// follow. Events logged after the watermark are left to the follow phase,
+// which resumes from the last ordinal. A watermark of 0 means there is
+// nothing to replay: the call is skipped entirely.
+func fetchScriptLog(ctx context.Context, ep connectEndpoint, client rafikiv1connect.ControlClient, childID string, watermark int32) ([]*rafikiv1.Event, error) {
+	if watermark <= 0 {
+		return nil, nil
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req := &rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
 		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
 		Types:   scriptLogReplayTypes,
 		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{childID: -1}},
 	}
-	stream, err := client.StreamEvents(ctx, connect.NewRequest(req))
+	stream, err := client.StreamEvents(streamCtx, connect.NewRequest(req))
 	if err != nil {
 		return nil, diagnoseConnectError(err, ep.describe)
 	}
 	defer func() { _ = stream.Close() }()
 	var evs []*rafikiv1.Event
 	for stream.Receive() {
-		evs = append(evs, stream.Msg())
+		ev := stream.Msg()
+		// An event logged after the watermark is not part of the replay: stop
+		// here and leave it to the follow phase, which resumes from the last
+		// ordinal.
+		if ev.Ordinal != nil && ev.GetOrdinal() > watermark {
+			cancel()
+			break
+		}
+		evs = append(evs, ev)
+		stop := ev.GetChildExited() != nil && ev.GetChildId() == childID
+		if !stop && ev.Ordinal != nil && ev.GetOrdinal() >= watermark {
+			stop = true
+		}
+		if stop {
+			cancel() // end the server's live follow
+			break
+		}
 	}
-	if err := stream.Err(); err != nil && ctx.Err() == nil {
+	// A stream ended by our own cancel reports context.Canceled; that is the
+	// normal exit, not an error.
+	if err := stream.Err(); err != nil && streamCtx.Err() == nil {
 		return nil, diagnoseConnectError(err, ep.describe)
 	}
 	return evs, nil

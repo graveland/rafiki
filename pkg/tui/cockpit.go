@@ -1941,76 +1941,26 @@ func (c *Cockpit) previewSettle(seq int) tea.Cmd {
 // openFocus is the only fetch issuer; historyMsg clears the flag on arrival.
 //
 // A SCRIPT child has no conversation to read: GetHistory resolves its rows
-// through conversation_message, and a script has none, so the fetch is a
-// StreamEvents REPLAY of its durable event log instead (the same log the
-// focus stream resumes from -- one ordinal space, so the watermark carried in
-// historyMsg.after is the correct resume point). GetHistory is never dialled
-// for a script: on a child with no conversation it answers NotFound, and the
-// fallback it would then trigger replays the same log through the visibly
-// sequential error path.
+// through conversation_message, and a script has none, so there is nothing to
+// fetch. Its pane backfills from the durable event log -- which the focus
+// stream is already reading in the same ordinal space -- by opening the
+// subscription from ordinal -1, replaying the log whole before it follows
+// live. That is the same fallback the ordinary path's error branch takes,
+// minus the pointless GetHistory round trip and its error status line. The
+// in-flight flag is cleared rather than left set: no historyMsg will arrive
+// to clear it, and a later visit to a still-empty script pane must be able to
+// reopen the replay.
 func (c *Cockpit) fetchHistoryOnce(childID string) tea.Cmd {
 	if c.historyInFlight[childID] {
 		return nil
 	}
 	c.historyInFlight[childID] = true
 	if n, ok := c.rail.Get(childID); ok && n.Kind == "script" {
-		return c.scriptLogCmd(childID)
+		delete(c.historyInFlight, childID)
+		c.startFocus(childID, -1)
+		return nil
 	}
 	return c.historyCmd(childID)
-}
-
-// scriptLogReplayTypes is the durable set a script child's pane is backfilled
-// from. script_output is the output itself; the lifecycle types give the pane
-// the same spawn/exit frame every transcript has, and agent_status carries
-// the session's Status line. Durable tier only: the pane is a replay, not a
-// live subscription (that is the focus stream's job once it opens).
-var scriptLogReplayTypes = []string{
-	"script_output",
-	"script_report",
-	"agent_status",
-	"child_spawned",
-	"child_exited",
-	"error",
-}
-
-// scriptLogCmd replays a script child's whole durable event log through one
-// StreamEvents call, folding it into a historyMsg shaped exactly like the
-// GetHistory path's -- same handler, same ApplyHistory fold, same
-// MarkRead-on-display. after is the replay's LAST ORDINAL (the event-log
-// watermark, captured after the replay: the focus stream that then opens
-// resumes from there and anything logged during the replay arrives live,
-// at worst one event late into the pane and never silently skipped).
-func (c *Cockpit) scriptLogCmd(childID string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		req := &rafikiv1.StreamEventsRequest{
-			Subject: &rafikiv1.EventSubject{
-				Scope: &rafikiv1.EventSubject_Child{Child: childID},
-			},
-			Tier:   rafikiv1.EventTier_EVENT_TIER_DURABLE,
-			Types:  scriptLogReplayTypes,
-			Cursor: &rafikiv1.EventCursor{Ordinals: map[string]int32{childID: -1}},
-		}
-		stream, err := c.client.StreamEvents(ctx, connect.NewRequest(req))
-		if err != nil {
-			return historyMsg{childID: childID, after: -1, err: err}
-		}
-		defer func() { _ = stream.Close() }()
-		var evs []*rafikiv1.Event
-		var last int32 = -1
-		for stream.Receive() {
-			ev := stream.Msg()
-			evs = append(evs, ev)
-			if o := ev.GetOrdinal(); o > last {
-				last = o
-			}
-		}
-		if err := stream.Err(); err != nil {
-			return historyMsg{childID: childID, after: -1, err: err}
-		}
-		return historyMsg{childID: childID, events: evs, after: last}
-	}
 }
 
 func (c *Cockpit) neighbour(delta int) string {

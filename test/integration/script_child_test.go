@@ -908,3 +908,63 @@ func TestScriptChildFromTheCLI(t *testing.T) {
 	want := []string{"--probe-out", probePath}
 	c.False(len(probe.Argv) != len(want) || probe.Argv[0] != want[0] || probe.Argv[1] != want[1], "script argv = %v, want %v (the after-`--` tail must reach the process verbatim)", probe.Argv, want)
 }
+
+// logsExitProbeCode prints one line and exits 0 — the exited-script fixture
+// the logs probe reads back from the event log.
+const logsExitProbeCode = `
+print("hello from the exit probe", flush=True)
+`
+
+// TestLogsExitedScriptMustReturn pins the repro of the X1 hang: `rafiki logs
+// <script>` on a child that has EXITED must return, and print the backfill.
+// The daemon's StreamEvents replays the log and then FOLLOWS live — for an
+// exited script nobody ever closes that stream — so the client must bound its
+// replay at the child's latest_ordinal watermark. Before the fix this
+// command hung forever printing nothing, having regressed the "no history
+// yet" dead end into a hang.
+func TestLogsExitedScriptMustReturn(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	if _, err := lookPython3(); err != nil {
+		t.Skip("python3 not available: script children need an interpreter")
+	}
+	sd := bootScriptDaemon(t)
+	d := sd.daemon
+	token, configDir := scriptUser(t, d)
+	opClient := faceClient(t, d, token)
+
+	putPymodule(t, d, configDir, "logs_exit_probe_it", logsExitProbeCode)
+	scriptID := d.scriptChildSpawn(t, opClient, &rafikiv1.SpawnRequest{
+		Cwd:    "/tmp",
+		Kind:   "script",
+		Script: &rafikiv1.SpawnRequest_ScriptSpec{Repo: "local", Script: "logs_exit_probe_it"},
+	})
+	sum := waitChildExited(t, opClient, scriptID, 60*time.Second)
+	c.Eq(int32(0), sum.GetExitCode(), "the probe exits 0")
+
+	// rafiki logs on the exited script, under a watchdog: a regression to the
+	// hang fails the test instead of wedging the suite.
+	cmd := cliCmdIn(t, d, configDir, "logs", scriptID)
+	type logsResult struct {
+		out []byte
+		err error
+	}
+	ch := make(chan logsResult, 1)
+	go func() {
+		out, err := cmd.CombinedOutput()
+		ch <- logsResult{out, err}
+	}()
+	select {
+	case r := <-ch:
+		c.NoError(r.err, "logs on an exited script must succeed:\n%s", r.out)
+		c.StrContains(string(r.out), "hello from the exit probe",
+			"the backfill must carry the script's output:\n%s", r.out)
+		c.NotStrContains(string(r.out), "no history yet",
+			"the script dead end must not return:\n%s", r.out)
+	case <-time.After(60 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		t.Fatal("rafiki logs on an exited script HUNG — the replay was never bounded")
+	}
+}

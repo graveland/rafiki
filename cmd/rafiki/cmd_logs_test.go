@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -36,11 +37,15 @@ type stubControl struct {
 	mu sync.Mutex
 
 	events          []*rafikiv1.Event // GetHistory's response
-	streamEvents    []*rafikiv1.Event // what StreamEvents sends before ending
+	streamEvents    []*rafikiv1.Event // what StreamEvents sends before its follow
 	streamErr       error             // what StreamEvents returns after sending
+	streamBlocks    bool              // after its events, StreamEvents blocks until the caller's ctx is cancelled — the real server's contract (it replays, then follows live)
+	scriptLatest    *int32            // GetChild's latest_ordinal for a script child (nil = unset)
 	historyNotFound bool              // GetHistory answers NotFound (no conversation)
 	getChildOK      bool              // GetChild answers with a named child when set
 	scriptChild     bool              // GetChild answers kind=script when set
+
+	streamCtxDone int // StreamEvents invocations ended by the caller cancelling the stream ctx
 
 	historyCalls int
 	streamCalls  int
@@ -65,7 +70,7 @@ func (s *stubControl) GetHistory(
 }
 
 func (s *stubControl) StreamEvents(
-	_ context.Context,
+	ctx context.Context,
 	req *connect.Request[rafikiv1.StreamEventsRequest],
 	stream *connect.ServerStream[rafikiv1.Event],
 ) error {
@@ -74,12 +79,24 @@ func (s *stubControl) StreamEvents(
 	s.streamReqs = append(s.streamReqs, req.Msg)
 	events := append([]*rafikiv1.Event(nil), s.streamEvents...)
 	streamErr := s.streamErr
+	blocks := s.streamBlocks
 	s.mu.Unlock()
 
 	for _, ev := range events {
 		if err := stream.Send(ev); err != nil {
 			return err
 		}
+	}
+	if blocks {
+		// The real server replays, then FOLLOWS live until the stream ctx is
+		// cancelled — it never ends the stream on its own (for an exited script
+		// Subscribe creates a fresh bus nobody closes). A stub that ends here
+		// gives the client a contract the server does not.
+		<-ctx.Done()
+		s.mu.Lock()
+		s.streamCtxDone++
+		s.mu.Unlock()
+		return ctx.Err()
 	}
 	if streamErr != nil {
 		return streamErr
@@ -101,6 +118,7 @@ func (s *stubControl) GetChild(
 	if s.scriptChild {
 		return connect.NewResponse(&rafikiv1.GetChildResponse{Child: &rafikiv1.ChildSummary{
 			ChildId: req.Msg.GetChildId(), Name: "seeded-" + req.Msg.GetChildId(), Kind: "script", Status: "running",
+			LatestOrdinal: s.scriptLatest,
 		}}), nil
 	}
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("no child source in this stub"))
@@ -171,6 +189,53 @@ func serveConnectOnUnixSocket(t *testing.T, path string, handlerPath string, han
 	t.Cleanup(func() {
 		_ = srv.Close()
 	})
+}
+
+// runBounded runs a command with its production context (Background — no
+// deadline) and fails the test if it has not returned within the bound: the
+// script replay tests pin a HANG, so a deadline on the command's own context
+// would mask the bug by "returning" at the deadline with everything collected.
+func runBounded(t *testing.T, cmd *cobra.Command, args ...string) (out, notes string) {
+	t.Helper()
+	type result struct {
+		out, notes string
+		err        error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		out, notes, err := runCmd(t, cmd, args...)
+		ch <- result{out, notes, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("command failed: %v\nstdout:\n%s\nnotes:\n%s", r.err, r.out, r.notes)
+		}
+		return r.out, r.notes
+	case <-time.After(10 * time.Second):
+		t.Fatal("the command hung — the replay was never bounded")
+		return "", ""
+	}
+}
+
+// waitStreamCancel waits for a blocking stub's StreamEvents handler to observe
+// the client's ctx cancel and return — the client's cancel races the test's
+// assertions.
+func waitStreamCancel(t *testing.T, stub *stubControl) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stub.mu.Lock()
+		done := stub.streamCtxDone
+		stub.mu.Unlock()
+		if done > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stub StreamEvents was never cancelled by the caller")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // runCmd executes a command in-process and returns what it wrote to its
@@ -387,27 +452,36 @@ func TestLogsRendersScriptOutput(t *testing.T) {
 // EVENT LOG (StreamEvents replay from ordinal 0), never GetHistory — a script
 // has no conversation rows, and GetHistory's NotFound would otherwise land in
 // the "no history yet" dead end for a child whose whole output is in the log.
+// The stub's StreamEvents BLOCKS after its events until the caller cancels,
+// the real server's contract — so a client that reads until the stream ends
+// hangs, and this test can only pass if the replay is bounded by the child's
+// latest_ordinal watermark.
 func TestLogsScriptBackfillsFromEventLog(t *testing.T) {
 	c := assert.NewAborting(t)
 	stub := &stubControl{
 		scriptChild:     true,
 		historyNotFound: true,
+		scriptLatest:    proto.Int32(2),
+		streamBlocks:    true,
 		streamEvents: []*rafikiv1.Event{
 			scriptOutputEvent("c_s", 0, "stdout", "building..."),
 			scriptOutputEvent("c_s", 1, "stderr", "warn: slow disk"),
-			exitedFor("c_s", proto32(0), ""),
+			exitedFor("c_s", proto32(2), ""),
 		},
 	}
 	serveStubControl(t, stub)
 
-	cmd := newLogsCmd()
-	out, notes, err := runCmd(t, cmd, "c_s")
-	c.Require().NoError(err, "rafiki logs c_s")
+	out, notes := runBounded(t, newLogsCmd(), "c_s")
 	c.Eq(0, stub.historyCalls, "GetHistory must never be dialled for a script child")
 	c.Eq(1, stub.streamCalls, "StreamEvents called once, for the replay")
 	c.StrContains(out, "building...", "script_output backfill missing from logs:\n")
 	c.StrContains(out, "stderr| warn: slow disk", "stderr output missing its prefix:\n")
 	c.NotStrContains(notes, "no history yet", "the script dead end leaked through:\n")
+
+	// The replay read until the watermark, then the client cancelled the
+	// stream — the server was following live and would never end it itself.
+	waitStreamCancel(t, stub)
+	c.Eq(1, stub.streamCtxDone, "the replay stream must be cancelled once the watermark is reached")
 
 	// The follow cursor is the last replay ordinal — the event-log space the
 	// live stream resumes in.
@@ -418,6 +492,48 @@ func TestLogsScriptBackfillsFromEventLog(t *testing.T) {
 	}
 	c.Eq(rafikiv1.EventTier_EVENT_TIER_DURABLE, req.GetTier(), "replay tier")
 	c.Eq("c_s", req.GetSubject().GetChild(), "replay subject")
+}
+
+// A running script (no child_exited yet) stops its replay at the watermark —
+// latest_ordinal — rather than reading forever, and the client cancels the
+// stream once there.
+func TestLogsScriptReplayStopsAtWatermarkWhileRunning(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := &stubControl{
+		scriptChild:  true,
+		scriptLatest: proto.Int32(2),
+		streamBlocks: true,
+		streamEvents: []*rafikiv1.Event{
+			scriptOutputEvent("c_s", 0, "stdout", "building..."),
+			scriptOutputEvent("c_s", 1, "stdout", "still going"),
+			// An event past the watermark: the replay must stop at 2, before
+			// reading this, and leave it to the follow phase.
+			scriptOutputEvent("c_s", 3, "stdout", "past the watermark"),
+		},
+	}
+	serveStubControl(t, st)
+
+	out, _ := runBounded(t, newLogsCmd(), "c_s")
+	c.StrContains(out, "building...", "replay missing")
+	c.NotStrContains(out, "past the watermark", "events past the watermark belong to the follow, not the backfill\n")
+	waitStreamCancel(t, st)
+	c.Eq(1, st.streamCtxDone, "the replay stream must be cancelled at the watermark")
+}
+
+// A script child with NO latest_ordinal has nothing to replay: the replay
+// call is skipped entirely, and `logs` returns instead of hanging.
+func TestLogsScriptWithoutLatestOrdinalSkipsTheReplay(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &stubControl{
+		scriptChild:  true,
+		streamBlocks: true,
+		streamEvents: []*rafikiv1.Event{scriptOutputEvent("c_s", 0, "stdout", "late output")},
+	}
+	serveStubControl(t, stub)
+
+	out, _ := runBounded(t, newLogsCmd(), "c_s")
+	c.Eq(0, stub.streamCalls, "nothing to replay — StreamEvents must not be dialled")
+	c.Eq("", out, "no replay, no output")
 }
 
 // ── completion ───────────────────────────────────────────────────────────────
