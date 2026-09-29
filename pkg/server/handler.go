@@ -22,6 +22,11 @@ type Handler struct {
 	// because ServeMux prefers the longer pattern.
 	MCPPath string
 	MCP     http.Handler
+
+	// LoginPath and Login mount the OIDC login engine, registered WITHOUT
+	// wrap by Mount — see the comment there.
+	LoginPath string
+	Login     http.Handler
 }
 
 // Mount registers the faces on mux, each wrapped by wrap (identity when nil).
@@ -38,6 +43,16 @@ func (h *Handler) Mount(mux *http.ServeMux, wrap func(http.Handler) http.Handler
 	}
 	if h.Control != nil && h.ControlPath != "" {
 		mux.Handle(h.ControlPath, wrap(h.Control))
+	}
+	// Login is how a caller without a valid credential gets one, so it must
+	// not sit behind wrap — every other face is wrapped by the caller's auth
+	// middleware, which 401s exactly the caller Login exists to serve. A
+	// credential-less caller reaches Login unwrapped; everything the Login
+	// service itself must not answer is guarded inside the engine (its routes
+	// come from connectapi.Server.LoginRoutes, which mounts no identity
+	// resolution of its own).
+	if h.Login != nil && h.LoginPath != "" {
+		mux.Handle(h.LoginPath, h.Login)
 	}
 	if h.MCP != nil && h.MCPPath != "" {
 		mux.Handle(h.MCPPath, wrap(h.MCP))

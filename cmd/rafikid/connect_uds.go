@@ -80,6 +80,16 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	routePath, handler := connectControlRoute(srv, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
 	mux.Handle(routePath, handler)
 
+	// Login mounts with NO interceptors — deliberately NOT through
+	// connectControlRoute: the policy gate fail-closes every non-Control
+	// procedure to userOnly, which would refuse exactly the credential-less
+	// callers Login exists for (an unknown bearer on Login must reach
+	// BeginLogin, not die as Unauthenticated — pinned by the UDS test). The
+	// socket's filesystem trust is admission enough; Login itself reads no
+	// identity.
+	loginPath, loginHandler := srv.LoginRoutes()
+	mux.Handle(loginPath, loginHandler)
+
 	// h2c AND HTTP/1.1, per pkg/childsock's rule for the same situation: a
 	// non-nil Protocols lists ONLY the supported protocols, so HTTP/1 must be
 	// set explicitly alongside h2c — a plain-httpx/curl client (the Python

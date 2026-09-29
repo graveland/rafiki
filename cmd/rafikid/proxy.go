@@ -201,7 +201,8 @@ func unroutedHandler(logger *slog.Logger, seen *sync.Map) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, already := seen.LoadOrStore(r.Method+" "+r.URL.Path, struct{}{}); !already {
 			logger.Warn("proxy: unrouted request; this face serves /v1/messages, "+
-				"/v1/messages/count_tokens, /v1/chat/completions, /api/hello, /healthz and /metrics",
+				"/v1/messages/count_tokens, /v1/chat/completions, /rafiki.v1.Login/, "+
+				"/api/hello, /healthz and /metrics",
 				"method", r.Method, "path", r.URL.Path)
 		}
 		http.NotFound(w, r)
@@ -349,6 +350,12 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// child holds, the per-child MCP secrets), and the policy table is what
 	// stops them at operator verbs.
 	h.ControlPath, h.Control = connectControlRoute(connectServer)
+	// Login mounts OUTSIDE the token middleware — Handler.Mount registers it
+	// without wrap, and here WITHOUT any interceptor either: Login is how a
+	// caller without a valid credential gets one, and wrap would 401 exactly
+	// that caller. The engine's own guards bound the surface (single-use
+	// logins, the pending cap, constant-time state/nonce compares).
+	h.LoginPath, h.Login = connectServer.LoginRoutes()
 	mcpFace := newMCPFace(logger, captureStore, quotaStore, version.String())
 	h.MCPPath, h.MCP = mcpFace.Routes()
 	h.Mount(mux, func(next http.Handler) http.Handler {

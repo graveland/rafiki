@@ -57,3 +57,35 @@ func TestMountSkipsMCPWhenUnset(t *testing.T) {
 		})
 	}
 }
+
+// TestMountLoginBypassesWrap pins the one unwrapped mount: Login answers
+// callers with no credential — exactly the caller wrap's auth middleware
+// 401s — while every other face (Control here) still goes through wrap.
+func TestMountLoginBypassesWrap(t *testing.T) {
+	c := assert.NewAborting(t)
+	deny := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+	}
+	h := Handler{
+		ControlPath: "/control/",
+		Control: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+		LoginPath: "/rafiki.v1.Login/",
+		Login: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	mux := http.NewServeMux()
+	h.Mount(mux, deny)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rafiki.v1.Login/BeginLogin", nil))
+	c.Eq(http.StatusOK, rec.Code, "Login must answer without a credential")
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/control/GetChild", nil))
+	c.Eq(http.StatusUnauthorized, rec.Code, "Control must still sit behind wrap")
+}

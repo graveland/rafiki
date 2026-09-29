@@ -164,6 +164,12 @@ func ProvidersFile() string {
 	return filepath.Join(ConfigDir(), "providers.toml")
 }
 
+// OIDCFile is the OIDC login configuration: <ConfigDir>/oidc.toml. Its
+// contents are by definition the contents of the future rafikid.toml [oidc]
+// section, so the eventual merge is a lift with no key renamed — the same
+// arrangement as ProvidersFile.
+func OIDCFile() string { return filepath.Join(ConfigDir(), "oidc.toml") }
+
 // SkillsDirs is the ordered skill search path: $RAFIKI_SKILLS_DIRS split on the
 // OS path-list separator, else [<ConfigDir>/skills]. Order is
 // lowest-to-highest precedence, matching skills.DiscoverSkills. Empty segments

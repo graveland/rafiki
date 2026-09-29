@@ -273,3 +273,44 @@ func TestServeConnectUDSRefusesALiveSocket(t *testing.T) {
 		t.Fatal("want the second bind on a live socket to be refused")
 	}
 }
+
+// TestServeConnectUDSLoginReachesBeginLoginWithUnknownBearer pins the mount
+// decision: Login is wired on the UDS with NO interceptors — not through
+// connectControlRoute, whose policy gate fail-closes every non-Control
+// procedure to userOnly. So a request carrying an UNKNOWN bearer (refused as
+// Unauthenticated on any Control verb) reaches BeginLogin and gets its own
+// answer — FailedPrecondition while login is unconfigured, never
+// Unauthenticated: Login exists for exactly the credential-less caller.
+func TestServeConnectUDSLoginReachesBeginLoginWithUnknownBearer(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// No login backend wired: BeginLogin must answer FailedPrecondition —
+	// the error proves the call reached the handler (a missing route would be
+	// CodeUnimplemented and a dropped interceptor CodeUnauthenticated).
+	srv := connectapi.NewServer(nil)
+	auth := server.NewUserTokenAuth(nil, "unused-child-secret", time.Minute)
+
+	sock := filepath.Join(shortTempDir(t), "s")
+	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	c.NoError(err, "serveConnectUDS")
+	defer ln.Close()
+
+	client := rafikiv1connect.NewLoginClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
+	req := connect.NewRequest(&rafikiv1.BeginLoginRequest{RedirectPort: 8080, ClientHost: "laptop"})
+	req.Header().Set("Authorization", "Bearer definitely-not-a-token")
+	_, err = client.BeginLogin(ctx, req)
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err),
+		"an unknown bearer must reach BeginLogin: %v", err)
+	c.StrContains(err.Error(), "OIDC login is not configured", "BeginLogin message")
+
+	// The interceptors were not dropped from the plane: the SAME unknown
+	// bearer on a Control verb is still refused as Unauthenticated.
+	ctrl := rafikiv1connect.NewControlClient(udsHTTPClient(sock), "http://connect.rafiki.invalid")
+	creq := connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: "c_nope"})
+	creq.Header().Set("Authorization", "Bearer definitely-not-a-token")
+	_, cerr := ctrl.GetChild(ctx, creq)
+	c.Eq(connect.CodeUnauthenticated, connect.CodeOf(cerr),
+		"the same unknown bearer on Control: %v", cerr)
+}

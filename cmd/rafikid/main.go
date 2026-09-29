@@ -32,6 +32,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/gitpymodules"
 	"go.graveland.dev/rafiki/pkg/gitpymodulesdb"
 	"go.graveland.dev/rafiki/pkg/llm"
+	"go.graveland.dev/rafiki/pkg/oidclogin"
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/presetsdb"
@@ -447,6 +448,25 @@ func runDaemon(opts runDaemonOpts) error {
 		slog.Info("provider registry loaded", "providers", prov.Names())
 	}
 
+	// OIDC login configuration (oidc.toml). A broken file must not stop the
+	// daemon: log it and run with login unconfigured — `rafiki login` then
+	// answers FailedPrecondition, and nothing else is affected. A missing
+	// file is the ordinary state and logs once at Info.
+	oidcCfg, oidcErr := oidclogin.LoadConfig(paths.OIDCFile())
+	var oidcSvc *oidclogin.Service
+	switch {
+	case oidcErr != nil:
+		slog.Error("could not load OIDC login configuration; login disabled", "file", paths.OIDCFile(), "error", oidcErr)
+	case oidcCfg == nil:
+		slog.Info("OIDC login not configured")
+	case pool == nil || userStore == nil:
+		// Login resolves users and mints tokens against the database; without
+		// one every login would die at mint time, so do not advertise it.
+		slog.Warn("OIDC login is configured but the daemon has no user database; login disabled", "file", paths.OIDCFile())
+	default:
+		oidcSvc = oidclogin.New(oidcCfg, usersdb.NewOIDCResolver(pool), userStore)
+	}
+
 	// The parked-call batcher, built once right after the provider registry
 	// it submits through. ok=false (no usable openrouter provider, or a
 	// DB-less daemon) leaves the daemon without batch transport: :batch first
@@ -649,6 +669,17 @@ func runDaemon(opts runDaemonOpts) error {
 			face.TokenAuth.SetChildTokenLookup(ctrl.ChildForMCPToken)
 		}
 		if face.Control != nil {
+			// The OIDC login engine — wired BEFORE SetUserAdmin below, which
+			// captures LoginConfigured at construction. One Server instance
+			// serves both Connect mounts (the proxy face's Control route and
+			// the UDS listener, via serveConnectUDS), so one SetLoginBackend
+			// covers both; the mounts themselves live in proxy.go and
+			// connect_uds.go, both outside authentication.
+			if oidcSvc != nil {
+				face.Control.SetLoginBackend(oidcSvc)
+				slog.Info("OIDC login enabled", "issuer", oidcCfg.Issuer,
+					"session_ttl", time.Duration(oidcCfg.SessionTTL).String())
+			}
 			face.Control.SetChildResolver(ctrl)
 			face.Control.SetEventSource(ctrl.nativeEventSource())
 			face.Control.SetLineage(ctrl)
