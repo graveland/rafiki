@@ -23,6 +23,8 @@ const _ = connect.IsAtLeastVersion1_13_0
 const (
 	// ControlName is the fully-qualified name of the Control service.
 	ControlName = "rafiki.v1.Control"
+	// LoginName is the fully-qualified name of the Login service.
+	LoginName = "rafiki.v1.Login"
 )
 
 // These constants are the fully-qualified names of the RPCs defined in this package. They're
@@ -191,10 +193,22 @@ const (
 	ControlListUsersProcedure = "/rafiki.v1.Control/ListUsers"
 	// ControlRemoveUserProcedure is the fully-qualified name of the Control's RemoveUser RPC.
 	ControlRemoveUserProcedure = "/rafiki.v1.Control/RemoveUser"
+	// ControlUpdateUserProcedure is the fully-qualified name of the Control's UpdateUser RPC.
+	ControlUpdateUserProcedure = "/rafiki.v1.Control/UpdateUser"
+	// ControlMintTokenProcedure is the fully-qualified name of the Control's MintToken RPC.
+	ControlMintTokenProcedure = "/rafiki.v1.Control/MintToken"
+	// ControlListTokensProcedure is the fully-qualified name of the Control's ListTokens RPC.
+	ControlListTokensProcedure = "/rafiki.v1.Control/ListTokens"
+	// ControlRevokeTokenProcedure is the fully-qualified name of the Control's RevokeToken RPC.
+	ControlRevokeTokenProcedure = "/rafiki.v1.Control/RevokeToken"
 	// ControlGetStreamsProcedure is the fully-qualified name of the Control's GetStreams RPC.
 	ControlGetStreamsProcedure = "/rafiki.v1.Control/GetStreams"
 	// ControlSendFrameProcedure is the fully-qualified name of the Control's SendFrame RPC.
 	ControlSendFrameProcedure = "/rafiki.v1.Control/SendFrame"
+	// LoginBeginLoginProcedure is the fully-qualified name of the Login's BeginLogin RPC.
+	LoginBeginLoginProcedure = "/rafiki.v1.Login/BeginLogin"
+	// LoginCompleteLoginProcedure is the fully-qualified name of the Login's CompleteLogin RPC.
+	LoginCompleteLoginProcedure = "/rafiki.v1.Login/CompleteLogin"
 )
 
 // ControlClient is a client for the rafiki.v1.Control service.
@@ -290,6 +304,10 @@ type ControlClient interface {
 	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
 	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
 	RemoveUser(context.Context, *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error)
+	UpdateUser(context.Context, *connect.Request[v1.UpdateUserRequest]) (*connect.Response[v1.UpdateUserResponse], error)
+	MintToken(context.Context, *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error)
+	ListTokens(context.Context, *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error)
+	RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -745,6 +763,30 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("RemoveUser")),
 			connect.WithClientOptions(opts...),
 		),
+		updateUser: connect.NewClient[v1.UpdateUserRequest, v1.UpdateUserResponse](
+			httpClient,
+			baseURL+ControlUpdateUserProcedure,
+			connect.WithSchema(controlMethods.ByName("UpdateUser")),
+			connect.WithClientOptions(opts...),
+		),
+		mintToken: connect.NewClient[v1.MintTokenRequest, v1.MintTokenResponse](
+			httpClient,
+			baseURL+ControlMintTokenProcedure,
+			connect.WithSchema(controlMethods.ByName("MintToken")),
+			connect.WithClientOptions(opts...),
+		),
+		listTokens: connect.NewClient[v1.ListTokensRequest, v1.ListTokensResponse](
+			httpClient,
+			baseURL+ControlListTokensProcedure,
+			connect.WithSchema(controlMethods.ByName("ListTokens")),
+			connect.WithClientOptions(opts...),
+		),
+		revokeToken: connect.NewClient[v1.RevokeTokenRequest, v1.RevokeTokenResponse](
+			httpClient,
+			baseURL+ControlRevokeTokenProcedure,
+			connect.WithSchema(controlMethods.ByName("RevokeToken")),
+			connect.WithClientOptions(opts...),
+		),
 		getStreams: connect.NewClient[v1.GetStreamsRequest, v1.GetStreamsResponse](
 			httpClient,
 			baseURL+ControlGetStreamsProcedure,
@@ -835,6 +877,10 @@ type controlClient struct {
 	createUser               *connect.Client[v1.CreateUserRequest, v1.CreateUserResponse]
 	listUsers                *connect.Client[v1.ListUsersRequest, v1.ListUsersResponse]
 	removeUser               *connect.Client[v1.RemoveUserRequest, v1.RemoveUserResponse]
+	updateUser               *connect.Client[v1.UpdateUserRequest, v1.UpdateUserResponse]
+	mintToken                *connect.Client[v1.MintTokenRequest, v1.MintTokenResponse]
+	listTokens               *connect.Client[v1.ListTokensRequest, v1.ListTokensResponse]
+	revokeToken              *connect.Client[v1.RevokeTokenRequest, v1.RevokeTokenResponse]
 	getStreams               *connect.Client[v1.GetStreamsRequest, v1.GetStreamsResponse]
 	sendFrame                *connect.Client[v1.SendFrameRequest, v1.SendFrameResponse]
 }
@@ -1204,6 +1250,26 @@ func (c *controlClient) RemoveUser(ctx context.Context, req *connect.Request[v1.
 	return c.removeUser.CallUnary(ctx, req)
 }
 
+// UpdateUser calls rafiki.v1.Control.UpdateUser.
+func (c *controlClient) UpdateUser(ctx context.Context, req *connect.Request[v1.UpdateUserRequest]) (*connect.Response[v1.UpdateUserResponse], error) {
+	return c.updateUser.CallUnary(ctx, req)
+}
+
+// MintToken calls rafiki.v1.Control.MintToken.
+func (c *controlClient) MintToken(ctx context.Context, req *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error) {
+	return c.mintToken.CallUnary(ctx, req)
+}
+
+// ListTokens calls rafiki.v1.Control.ListTokens.
+func (c *controlClient) ListTokens(ctx context.Context, req *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error) {
+	return c.listTokens.CallUnary(ctx, req)
+}
+
+// RevokeToken calls rafiki.v1.Control.RevokeToken.
+func (c *controlClient) RevokeToken(ctx context.Context, req *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error) {
+	return c.revokeToken.CallUnary(ctx, req)
+}
+
 // GetStreams calls rafiki.v1.Control.GetStreams.
 func (c *controlClient) GetStreams(ctx context.Context, req *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
 	return c.getStreams.CallUnary(ctx, req)
@@ -1307,6 +1373,10 @@ type ControlHandler interface {
 	CreateUser(context.Context, *connect.Request[v1.CreateUserRequest]) (*connect.Response[v1.CreateUserResponse], error)
 	ListUsers(context.Context, *connect.Request[v1.ListUsersRequest]) (*connect.Response[v1.ListUsersResponse], error)
 	RemoveUser(context.Context, *connect.Request[v1.RemoveUserRequest]) (*connect.Response[v1.RemoveUserResponse], error)
+	UpdateUser(context.Context, *connect.Request[v1.UpdateUserRequest]) (*connect.Response[v1.UpdateUserResponse], error)
+	MintToken(context.Context, *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error)
+	ListTokens(context.Context, *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error)
+	RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error)
 	GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error)
 	// A raw child-protocol frame, for debugging/scripting. userOnly: children
 	// use Send.
@@ -1758,6 +1828,30 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("RemoveUser")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlUpdateUserHandler := connect.NewUnaryHandler(
+		ControlUpdateUserProcedure,
+		svc.UpdateUser,
+		connect.WithSchema(controlMethods.ByName("UpdateUser")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlMintTokenHandler := connect.NewUnaryHandler(
+		ControlMintTokenProcedure,
+		svc.MintToken,
+		connect.WithSchema(controlMethods.ByName("MintToken")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlListTokensHandler := connect.NewUnaryHandler(
+		ControlListTokensProcedure,
+		svc.ListTokens,
+		connect.WithSchema(controlMethods.ByName("ListTokens")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlRevokeTokenHandler := connect.NewUnaryHandler(
+		ControlRevokeTokenProcedure,
+		svc.RevokeToken,
+		connect.WithSchema(controlMethods.ByName("RevokeToken")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlGetStreamsHandler := connect.NewUnaryHandler(
 		ControlGetStreamsProcedure,
 		svc.GetStreams,
@@ -1918,6 +2012,14 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlListUsersHandler.ServeHTTP(w, r)
 		case ControlRemoveUserProcedure:
 			controlRemoveUserHandler.ServeHTTP(w, r)
+		case ControlUpdateUserProcedure:
+			controlUpdateUserHandler.ServeHTTP(w, r)
+		case ControlMintTokenProcedure:
+			controlMintTokenHandler.ServeHTTP(w, r)
+		case ControlListTokensProcedure:
+			controlListTokensHandler.ServeHTTP(w, r)
+		case ControlRevokeTokenProcedure:
+			controlRevokeTokenHandler.ServeHTTP(w, r)
 		case ControlGetStreamsProcedure:
 			controlGetStreamsHandler.ServeHTTP(w, r)
 		case ControlSendFrameProcedure:
@@ -2223,10 +2325,122 @@ func (UnimplementedControlHandler) RemoveUser(context.Context, *connect.Request[
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RemoveUser is not implemented"))
 }
 
+func (UnimplementedControlHandler) UpdateUser(context.Context, *connect.Request[v1.UpdateUserRequest]) (*connect.Response[v1.UpdateUserResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.UpdateUser is not implemented"))
+}
+
+func (UnimplementedControlHandler) MintToken(context.Context, *connect.Request[v1.MintTokenRequest]) (*connect.Response[v1.MintTokenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.MintToken is not implemented"))
+}
+
+func (UnimplementedControlHandler) ListTokens(context.Context, *connect.Request[v1.ListTokensRequest]) (*connect.Response[v1.ListTokensResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ListTokens is not implemented"))
+}
+
+func (UnimplementedControlHandler) RevokeToken(context.Context, *connect.Request[v1.RevokeTokenRequest]) (*connect.Response[v1.RevokeTokenResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.RevokeToken is not implemented"))
+}
+
 func (UnimplementedControlHandler) GetStreams(context.Context, *connect.Request[v1.GetStreamsRequest]) (*connect.Response[v1.GetStreamsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.GetStreams is not implemented"))
 }
 
 func (UnimplementedControlHandler) SendFrame(context.Context, *connect.Request[v1.SendFrameRequest]) (*connect.Response[v1.SendFrameResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SendFrame is not implemented"))
+}
+
+// LoginClient is a client for the rafiki.v1.Login service.
+type LoginClient interface {
+	BeginLogin(context.Context, *connect.Request[v1.BeginLoginRequest]) (*connect.Response[v1.BeginLoginResponse], error)
+	CompleteLogin(context.Context, *connect.Request[v1.CompleteLoginRequest]) (*connect.Response[v1.CompleteLoginResponse], error)
+}
+
+// NewLoginClient constructs a client for the rafiki.v1.Login service. By default, it uses the
+// Connect protocol with the binary Protobuf Codec, asks for gzipped responses, and sends
+// uncompressed requests. To use the gRPC or gRPC-Web protocols, supply the connect.WithGRPC() or
+// connect.WithGRPCWeb() options.
+//
+// The URL supplied here should be the base URL for the Connect or gRPC server (for example,
+// http://api.acme.com or https://acme.com/grpc).
+func NewLoginClient(httpClient connect.HTTPClient, baseURL string, opts ...connect.ClientOption) LoginClient {
+	baseURL = strings.TrimRight(baseURL, "/")
+	loginMethods := v1.File_rafiki_v1_control_proto.Services().ByName("Login").Methods()
+	return &loginClient{
+		beginLogin: connect.NewClient[v1.BeginLoginRequest, v1.BeginLoginResponse](
+			httpClient,
+			baseURL+LoginBeginLoginProcedure,
+			connect.WithSchema(loginMethods.ByName("BeginLogin")),
+			connect.WithClientOptions(opts...),
+		),
+		completeLogin: connect.NewClient[v1.CompleteLoginRequest, v1.CompleteLoginResponse](
+			httpClient,
+			baseURL+LoginCompleteLoginProcedure,
+			connect.WithSchema(loginMethods.ByName("CompleteLogin")),
+			connect.WithClientOptions(opts...),
+		),
+	}
+}
+
+// loginClient implements LoginClient.
+type loginClient struct {
+	beginLogin    *connect.Client[v1.BeginLoginRequest, v1.BeginLoginResponse]
+	completeLogin *connect.Client[v1.CompleteLoginRequest, v1.CompleteLoginResponse]
+}
+
+// BeginLogin calls rafiki.v1.Login.BeginLogin.
+func (c *loginClient) BeginLogin(ctx context.Context, req *connect.Request[v1.BeginLoginRequest]) (*connect.Response[v1.BeginLoginResponse], error) {
+	return c.beginLogin.CallUnary(ctx, req)
+}
+
+// CompleteLogin calls rafiki.v1.Login.CompleteLogin.
+func (c *loginClient) CompleteLogin(ctx context.Context, req *connect.Request[v1.CompleteLoginRequest]) (*connect.Response[v1.CompleteLoginResponse], error) {
+	return c.completeLogin.CallUnary(ctx, req)
+}
+
+// LoginHandler is an implementation of the rafiki.v1.Login service.
+type LoginHandler interface {
+	BeginLogin(context.Context, *connect.Request[v1.BeginLoginRequest]) (*connect.Response[v1.BeginLoginResponse], error)
+	CompleteLogin(context.Context, *connect.Request[v1.CompleteLoginRequest]) (*connect.Response[v1.CompleteLoginResponse], error)
+}
+
+// NewLoginHandler builds an HTTP handler from the service implementation. It returns the path on
+// which to mount the handler and the handler itself.
+//
+// By default, handlers support the Connect, gRPC, and gRPC-Web protocols with the binary Protobuf
+// and JSON codecs. They also support gzip compression.
+func NewLoginHandler(svc LoginHandler, opts ...connect.HandlerOption) (string, http.Handler) {
+	loginMethods := v1.File_rafiki_v1_control_proto.Services().ByName("Login").Methods()
+	loginBeginLoginHandler := connect.NewUnaryHandler(
+		LoginBeginLoginProcedure,
+		svc.BeginLogin,
+		connect.WithSchema(loginMethods.ByName("BeginLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	loginCompleteLoginHandler := connect.NewUnaryHandler(
+		LoginCompleteLoginProcedure,
+		svc.CompleteLogin,
+		connect.WithSchema(loginMethods.ByName("CompleteLogin")),
+		connect.WithHandlerOptions(opts...),
+	)
+	return "/rafiki.v1.Login/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case LoginBeginLoginProcedure:
+			loginBeginLoginHandler.ServeHTTP(w, r)
+		case LoginCompleteLoginProcedure:
+			loginCompleteLoginHandler.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// UnimplementedLoginHandler returns CodeUnimplemented from all methods.
+type UnimplementedLoginHandler struct{}
+
+func (UnimplementedLoginHandler) BeginLogin(context.Context, *connect.Request[v1.BeginLoginRequest]) (*connect.Response[v1.BeginLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Login.BeginLogin is not implemented"))
+}
+
+func (UnimplementedLoginHandler) CompleteLogin(context.Context, *connect.Request[v1.CompleteLoginRequest]) (*connect.Response[v1.CompleteLoginResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Login.CompleteLogin is not implemented"))
 }

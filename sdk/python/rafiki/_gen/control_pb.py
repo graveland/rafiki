@@ -17,6 +17,7 @@ from . import daraja_pb
 from . import event_pb
 
 SERVICE_CONTROL = "rafiki.v1.Control"
+SERVICE_LOGIN = "rafiki.v1.Login"
 
 class EventTier:
     EVENT_TIER_UNSPECIFIED = "EVENT_TIER_UNSPECIFIED"
@@ -5311,11 +5312,17 @@ class ExecutorSessionReady:
 @dataclasses.dataclass
 class CreateUserRequest:
     username: str = ""
+    email: str = ""
+    mint_token: Optional[bool] = None
 
     def to_dict(self) -> dict:
         out = {}
         if self.username != "":
             out["username"] = self.username
+        if self.email != "":
+            out["email"] = self.email
+        if self.mint_token is not None:
+            out["mintToken"] = self.mint_token
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CreateUserRequest":
@@ -5323,6 +5330,12 @@ class CreateUserRequest:
         _v = _d.get("username")
         if _v is not None:
             obj.username = _v
+        _v = _d.get("email")
+        if _v is not None:
+            obj.email = _v
+        _v = _d.get("mintToken")
+        if _v is not None:
+            obj.mint_token = _v
         return obj
 
 @dataclasses.dataclass
@@ -5331,6 +5344,8 @@ class CreateUserResponse:
     username: str = ""
     token: str = ""
     created_at_unix: int = 0
+    token_reason: str = ""
+    login_configured: bool = False
 
     def to_dict(self) -> dict:
         out = {}
@@ -5342,6 +5357,10 @@ class CreateUserResponse:
             out["token"] = self.token
         if self.created_at_unix != 0:
             out["createdAtUnix"] = str(self.created_at_unix)
+        if self.token_reason != "":
+            out["tokenReason"] = self.token_reason
+        if self.login_configured != False:
+            out["loginConfigured"] = self.login_configured
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CreateUserResponse":
@@ -5358,6 +5377,12 @@ class CreateUserResponse:
         _v = _d.get("createdAtUnix")
         if _v is not None:
             obj.created_at_unix = _int_in(_v)
+        _v = _d.get("tokenReason")
+        if _v is not None:
+            obj.token_reason = _v
+        _v = _d.get("loginConfigured")
+        if _v is not None:
+            obj.login_configured = _v
         return obj
 
 @dataclasses.dataclass
@@ -5407,6 +5432,7 @@ class UserRow:
     is_admin: bool = False
     created_at_unix: int = 0
     deleted_at_unix: Optional[int] = None
+    email: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -5420,6 +5446,8 @@ class UserRow:
             out["createdAtUnix"] = str(self.created_at_unix)
         if self.deleted_at_unix is not None:
             out["deletedAtUnix"] = str(self.deleted_at_unix)
+        if self.email != "":
+            out["email"] = self.email
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "UserRow":
@@ -5439,6 +5467,9 @@ class UserRow:
         _v = _d.get("deletedAtUnix")
         if _v is not None:
             obj.deleted_at_unix = _int_in(_v)
+        _v = _d.get("email")
+        if _v is not None:
+            obj.email = _v
         return obj
 
 @dataclasses.dataclass
@@ -5468,6 +5499,335 @@ class RemoveUserResponse:
     @classmethod
     def from_dict(cls, _d: dict) -> "RemoveUserResponse":
         obj = cls()
+        return obj
+
+@dataclasses.dataclass
+class UpdateUserRequest:
+    username: str = ""
+    email: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.username != "":
+            out["username"] = self.username
+        if self.email is not None:
+            out["email"] = self.email
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UpdateUserRequest":
+        obj = cls()
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("email")
+        if _v is not None:
+            obj.email = _v
+        return obj
+
+@dataclasses.dataclass
+class UpdateUserResponse:
+    user: Optional[UserRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.user is not None:
+            out["user"] = self.user.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "UpdateUserResponse":
+        obj = cls()
+        _v = _d.get("user")
+        if _v is not None:
+            obj.user = UserRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class TokenRow:
+    id: str = ""
+    username: str = ""
+    name: str = ""
+    origin: str = ""
+    created_at_unix: int = 0
+    expires_at_unix: Optional[int] = None
+    revoked_at_unix: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        if self.username != "":
+            out["username"] = self.username
+        if self.name != "":
+            out["name"] = self.name
+        if self.origin != "":
+            out["origin"] = self.origin
+        if self.created_at_unix != 0:
+            out["createdAtUnix"] = str(self.created_at_unix)
+        if self.expires_at_unix is not None:
+            out["expiresAtUnix"] = str(self.expires_at_unix)
+        if self.revoked_at_unix is not None:
+            out["revokedAtUnix"] = str(self.revoked_at_unix)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "TokenRow":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("origin")
+        if _v is not None:
+            obj.origin = _v
+        _v = _d.get("createdAtUnix")
+        if _v is not None:
+            obj.created_at_unix = _int_in(_v)
+        _v = _d.get("expiresAtUnix")
+        if _v is not None:
+            obj.expires_at_unix = _int_in(_v)
+        _v = _d.get("revokedAtUnix")
+        if _v is not None:
+            obj.revoked_at_unix = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class MintTokenRequest:
+    name: str = ""
+    ttl_seconds: int = 0
+    username: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.name != "":
+            out["name"] = self.name
+        if self.ttl_seconds != 0:
+            out["ttlSeconds"] = str(self.ttl_seconds)
+        if self.username != "":
+            out["username"] = self.username
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "MintTokenRequest":
+        obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
+        _v = _d.get("ttlSeconds")
+        if _v is not None:
+            obj.ttl_seconds = _int_in(_v)
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        return obj
+
+@dataclasses.dataclass
+class MintTokenResponse:
+    info: Optional[TokenRow] = None
+    token: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.info is not None:
+            out["info"] = self.info.to_dict()
+        if self.token != "":
+            out["token"] = self.token
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "MintTokenResponse":
+        obj = cls()
+        _v = _d.get("info")
+        if _v is not None:
+            obj.info = TokenRow.from_dict(_v)
+        _v = _d.get("token")
+        if _v is not None:
+            obj.token = _v
+        return obj
+
+@dataclasses.dataclass
+class ListTokensRequest:
+    username: str = ""
+    include_revoked: bool = False
+    all_users: bool = False
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.username != "":
+            out["username"] = self.username
+        if self.include_revoked != False:
+            out["includeRevoked"] = self.include_revoked
+        if self.all_users != False:
+            out["allUsers"] = self.all_users
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListTokensRequest":
+        obj = cls()
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("includeRevoked")
+        if _v is not None:
+            obj.include_revoked = _v
+        _v = _d.get("allUsers")
+        if _v is not None:
+            obj.all_users = _v
+        return obj
+
+@dataclasses.dataclass
+class ListTokensResponse:
+    tokens: list[TokenRow] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.tokens:
+            out["tokens"] = [x.to_dict() for x in self.tokens]
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ListTokensResponse":
+        obj = cls()
+        _v = _d.get("tokens")
+        if _v is not None:
+            obj.tokens = [TokenRow.from_dict(x) for x in _v]
+        return obj
+
+@dataclasses.dataclass
+class RevokeTokenRequest:
+    id: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.id != "":
+            out["id"] = self.id
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RevokeTokenRequest":
+        obj = cls()
+        _v = _d.get("id")
+        if _v is not None:
+            obj.id = _v
+        return obj
+
+@dataclasses.dataclass
+class RevokeTokenResponse:
+    info: Optional[TokenRow] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.info is not None:
+            out["info"] = self.info.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RevokeTokenResponse":
+        obj = cls()
+        _v = _d.get("info")
+        if _v is not None:
+            obj.info = TokenRow.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class BeginLoginRequest:
+    redirect_port: int = 0
+    client_host: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.redirect_port != 0:
+            out["redirectPort"] = self.redirect_port
+        if self.client_host != "":
+            out["clientHost"] = self.client_host
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginLoginRequest":
+        obj = cls()
+        _v = _d.get("redirectPort")
+        if _v is not None:
+            obj.redirect_port = _int_in(_v)
+        _v = _d.get("clientHost")
+        if _v is not None:
+            obj.client_host = _v
+        return obj
+
+@dataclasses.dataclass
+class BeginLoginResponse:
+    login_id: str = ""
+    authorize_url: str = ""
+    redirect_port: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.authorize_url != "":
+            out["authorizeUrl"] = self.authorize_url
+        if self.redirect_port != 0:
+            out["redirectPort"] = self.redirect_port
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BeginLoginResponse":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("authorizeUrl")
+        if _v is not None:
+            obj.authorize_url = _v
+        _v = _d.get("redirectPort")
+        if _v is not None:
+            obj.redirect_port = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class CompleteLoginRequest:
+    login_id: str = ""
+    callback_query: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.login_id != "":
+            out["loginId"] = self.login_id
+        if self.callback_query != "":
+            out["callbackQuery"] = self.callback_query
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteLoginRequest":
+        obj = cls()
+        _v = _d.get("loginId")
+        if _v is not None:
+            obj.login_id = _v
+        _v = _d.get("callbackQuery")
+        if _v is not None:
+            obj.callback_query = _v
+        return obj
+
+@dataclasses.dataclass
+class CompleteLoginResponse:
+    token: str = ""
+    username: str = ""
+    expires_at_unix: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.token != "":
+            out["token"] = self.token
+        if self.username != "":
+            out["username"] = self.username
+        if self.expires_at_unix != 0:
+            out["expiresAtUnix"] = str(self.expires_at_unix)
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "CompleteLoginResponse":
+        obj = cls()
+        _v = _d.get("token")
+        if _v is not None:
+            obj.token = _v
+        _v = _d.get("username")
+        if _v is not None:
+            obj.username = _v
+        _v = _d.get("expiresAtUnix")
+        if _v is not None:
+            obj.expires_at_unix = _int_in(_v)
         return obj
 
 @dataclasses.dataclass

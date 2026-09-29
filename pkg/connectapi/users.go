@@ -13,13 +13,21 @@ import (
 )
 
 // UserAdmin is the operator-side slice of the daemon behind the user
-// create / list / remove RPCs. Create here NEVER
+// create / update / list / remove and token RPCs. Create here NEVER
 // mints an admin — admins come only from rafikid user create --admin's
 // bootstrap path.
+//
+// Create's mintToken is tri-state: nil means the daemon decides (it mints
+// iff OIDC login is NOT configured on it, so the user can authenticate at
+// all); present, it is honoured as given.
 type UserAdmin interface {
-	Create(ctx context.Context, username string) (*rafikiv1.CreateUserResponse, error) // never admin
+	Create(ctx context.Context, username, email string, mintToken *bool) (*rafikiv1.CreateUserResponse, error) // never admin; nil = daemon decides
 	List(ctx context.Context, includeDeleted bool, limit int32) ([]*rafikiv1.UserRow, error)
 	Remove(ctx context.Context, username string) error
+	Update(ctx context.Context, username string, email *string) (*rafikiv1.UserRow, error)
+	MintToken(ctx context.Context, username, name string, ttlSeconds int64) (*rafikiv1.MintTokenResponse, error)
+	ListTokens(ctx context.Context, username string, includeRevoked, allUsers bool) ([]*rafikiv1.TokenRow, error)
+	RevokeToken(ctx context.Context, id string) (*rafikiv1.TokenRow, error)
 }
 
 // SetUserAdmin attaches the user-admin backend. Post-construction setter for
@@ -74,11 +82,79 @@ func (s *Server) CreateUser(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := backend.Create(ctx, req.Msg.GetUsername())
+	// MintToken is read as the raw pointer, not GetMintToken(): nil and false
+	// are different requests the backend resolves differently.
+	resp, err := backend.Create(ctx, req.Msg.GetUsername(), req.Msg.GetEmail(), req.Msg.MintToken)
 	if err != nil {
 		return nil, userAdminErr(err)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// UpdateUser serves the UpdateUser RPC: edit a user's email (the admin bit
+// is not editable over Connect).
+func (s *Server) UpdateUser(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.UpdateUserRequest],
+) (*connect.Response[rafikiv1.UpdateUserResponse], error) {
+	backend, err := s.userAdminBackend()
+	if err != nil {
+		return nil, err
+	}
+	row, err := backend.Update(ctx, req.Msg.GetUsername(), req.Msg.Email)
+	if err != nil {
+		return nil, userAdminErr(err)
+	}
+	return connect.NewResponse(&rafikiv1.UpdateUserResponse{User: row}), nil
+}
+
+// MintToken serves the MintToken RPC. The plaintext token rides the response
+// exactly once, like CreateUser's.
+func (s *Server) MintToken(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.MintTokenRequest],
+) (*connect.Response[rafikiv1.MintTokenResponse], error) {
+	backend, err := s.userAdminBackend()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := backend.MintToken(ctx, req.Msg.GetUsername(), req.Msg.GetName(), req.Msg.GetTtlSeconds())
+	if err != nil {
+		return nil, userAdminErr(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// ListTokens serves the ListTokens RPC: credentials only, never secrets.
+func (s *Server) ListTokens(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.ListTokensRequest],
+) (*connect.Response[rafikiv1.ListTokensResponse], error) {
+	backend, err := s.userAdminBackend()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := backend.ListTokens(ctx, req.Msg.GetUsername(), req.Msg.GetIncludeRevoked(), req.Msg.GetAllUsers())
+	if err != nil {
+		return nil, userAdminErr(err)
+	}
+	return connect.NewResponse(&rafikiv1.ListTokensResponse{Tokens: rows}), nil
+}
+
+// RevokeToken serves the RevokeToken RPC: tombstone one credential.
+func (s *Server) RevokeToken(
+	ctx context.Context,
+	req *connect.Request[rafikiv1.RevokeTokenRequest],
+) (*connect.Response[rafikiv1.RevokeTokenResponse], error) {
+	backend, err := s.userAdminBackend()
+	if err != nil {
+		return nil, err
+	}
+	row, err := backend.RevokeToken(ctx, req.Msg.GetId())
+	if err != nil {
+		return nil, userAdminErr(err)
+	}
+	return connect.NewResponse(&rafikiv1.RevokeTokenResponse{Info: row}), nil
 }
 
 // ListUsers serves the ListUsers RPC. Tokens are never returned.

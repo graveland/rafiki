@@ -201,7 +201,7 @@ func TestRenderUserCreate_PrintsCanonicalProtojsonInEveryMode(t *testing.T) {
 func sampleUserRows() []*rafikiv1.UserRow {
 	removed := int64(1800000100)
 	return []*rafikiv1.UserRow{
-		{Id: "usr_1", Username: "alice", IsAdmin: true, CreatedAtUnix: 1800000000},
+		{Id: "usr_1", Username: "alice", IsAdmin: true, Email: "alice@x.dev", CreatedAtUnix: 1800000000},
 		{Id: "usr_2", Username: "bob", CreatedAtUnix: 1800000050, DeletedAtUnix: &removed},
 	}
 }
@@ -216,18 +216,18 @@ func TestEmitUserList_TableShowsAdminAndRemoval(t *testing.T) {
 	var out bytes.Buffer
 	c.NoError(emitUserList(&out, sampleUserRows(), outputTable, false), "emitUserList")
 	got := out.String()
-	for _, want := range []string{"ID", "USER", "ADMIN", "CREATED", "REMOVED", "usr_1", "usr_2"} {
+	for _, want := range []string{"ID", "USER", "EMAIL", "ADMIN", "CREATED", "REMOVED", "usr_1", "usr_2", "alice@x.dev"} {
 		c.StrContains(got, want, "table output missing")
 	}
 
 	alice := tableRowFor(t, got, "usr_1")
-	c.Len(alice, 5, "alice's row")
-	c.False(alice[1] != "alice" || alice[2] != "yes", "alice's row = %v, want the admin marked", alice)
-	c.Eq("-", alice[4], "alice's REMOVED cell = %q, want \"-\" (she is active)", alice[4])
+	c.Len(alice, 6, "alice's row")
+	c.False(alice[1] != "alice" || alice[2] != "alice@x.dev" || alice[3] != "yes", "alice's row = %v, want the email and the admin marked", alice)
+	c.Eq("-", alice[5], "alice's REMOVED cell = %q, want \"-\" (she is active)", alice[5])
 
 	bob := tableRowFor(t, got, "usr_2")
-	c.False(bob[1] != "bob" || bob[2] != "-", "bob's row = %v, want a non-admin", bob)
-	c.NotEq("-", bob[4], "bob's REMOVED cell")
+	c.False(bob[1] != "bob" || bob[2] != "-" || bob[3] != "-", "bob's row = %v, want an email-less non-admin", bob)
+	c.NotEq("-", bob[5], "bob's REMOVED cell")
 }
 
 // tableRowFor finds the bordered table row carrying id and returns its
@@ -338,12 +338,20 @@ func TestUserConnectErr_NonConnectErrorPassesThrough(t *testing.T) {
 // pinned.
 type userStubControl struct {
 	rafikiv1connect.UnimplementedControlHandler
-	mu         sync.Mutex
-	createReqs []*connect.Request[rafikiv1.CreateUserRequest]
-	listReqs   []*connect.Request[rafikiv1.ListUsersRequest]
-	rmReqs     []*connect.Request[rafikiv1.RemoveUserRequest]
-	rows       []*rafikiv1.UserRow
-	created    *rafikiv1.CreateUserResponse
+	mu          sync.Mutex
+	createReqs  []*connect.Request[rafikiv1.CreateUserRequest]
+	listReqs    []*connect.Request[rafikiv1.ListUsersRequest]
+	rmReqs      []*connect.Request[rafikiv1.RemoveUserRequest]
+	updateReqs  []*connect.Request[rafikiv1.UpdateUserRequest]
+	mintReqs    []*connect.Request[rafikiv1.MintTokenRequest]
+	listTokReqs []*connect.Request[rafikiv1.ListTokensRequest]
+	revokeReqs  []*connect.Request[rafikiv1.RevokeTokenRequest]
+	rows        []*rafikiv1.UserRow
+	created     *rafikiv1.CreateUserResponse
+	updated     *rafikiv1.UserRow
+	minted      *rafikiv1.MintTokenResponse
+	tokenRows   []*rafikiv1.TokenRow
+	revoked     *rafikiv1.TokenRow
 }
 
 func (s *userStubControl) CreateUser(
@@ -361,6 +369,57 @@ func (s *userStubControl) CreateUser(
 		}
 	}
 	return connect.NewResponse(resp), nil
+}
+
+func (s *userStubControl) UpdateUser(
+	_ context.Context,
+	req *connect.Request[rafikiv1.UpdateUserRequest],
+) (*connect.Response[rafikiv1.UpdateUserResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateReqs = append(s.updateReqs, req)
+	row := s.updated
+	if row == nil {
+		row = &rafikiv1.UserRow{Id: "usr_1", Username: req.Msg.GetUsername(), Email: req.Msg.GetEmail(), CreatedAtUnix: 1800000000}
+	}
+	return connect.NewResponse(&rafikiv1.UpdateUserResponse{User: row}), nil
+}
+
+func (s *userStubControl) MintToken(
+	_ context.Context,
+	req *connect.Request[rafikiv1.MintTokenRequest],
+) (*connect.Response[rafikiv1.MintTokenResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mintReqs = append(s.mintReqs, req)
+	resp := s.minted
+	if resp == nil {
+		resp = &rafikiv1.MintTokenResponse{
+			Info:  &rafikiv1.TokenRow{Id: "tok_1", Username: req.Msg.GetUsername(), Name: req.Msg.GetName()},
+			Token: "rfk_fresh",
+		}
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func (s *userStubControl) ListTokens(
+	_ context.Context,
+	req *connect.Request[rafikiv1.ListTokensRequest],
+) (*connect.Response[rafikiv1.ListTokensResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listTokReqs = append(s.listTokReqs, req)
+	return connect.NewResponse(&rafikiv1.ListTokensResponse{Tokens: s.tokenRows}), nil
+}
+
+func (s *userStubControl) RevokeToken(
+	_ context.Context,
+	req *connect.Request[rafikiv1.RevokeTokenRequest],
+) (*connect.Response[rafikiv1.RevokeTokenResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revokeReqs = append(s.revokeReqs, req)
+	return connect.NewResponse(&rafikiv1.RevokeTokenResponse{Info: s.revoked}), nil
 }
 
 func (s *userStubControl) ListUsers(
@@ -408,6 +467,42 @@ func (s *userStubControl) lastRm() *connect.Request[rafikiv1.RemoveUserRequest] 
 		return nil
 	}
 	return s.rmReqs[len(s.rmReqs)-1]
+}
+
+func (s *userStubControl) lastUpdate() *connect.Request[rafikiv1.UpdateUserRequest] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.updateReqs) == 0 {
+		return nil
+	}
+	return s.updateReqs[len(s.updateReqs)-1]
+}
+
+func (s *userStubControl) lastMint() *connect.Request[rafikiv1.MintTokenRequest] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.mintReqs) == 0 {
+		return nil
+	}
+	return s.mintReqs[len(s.mintReqs)-1]
+}
+
+func (s *userStubControl) lastListTokens() *connect.Request[rafikiv1.ListTokensRequest] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.listTokReqs) == 0 {
+		return nil
+	}
+	return s.listTokReqs[len(s.listTokReqs)-1]
+}
+
+func (s *userStubControl) lastRevoke() *connect.Request[rafikiv1.RevokeTokenRequest] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.revokeReqs) == 0 {
+		return nil
+	}
+	return s.revokeReqs[len(s.revokeReqs)-1]
 }
 
 // serveUserConnect serves the stub on connectSock — the SIBLING of the
@@ -600,5 +695,146 @@ func TestUserCreateHelpPinsNonAdminAndRafikidAdminRecovery(t *testing.T) {
 		"rafikid user create --admin",
 	} {
 		assert.NewCollecting(t).StrContains(long, phrase, "user create help is missing pinned phrase")
+	}
+}
+
+// ─── user create: the tri-state mint flag and the hints ────────────────────
+
+// TestUserCreateMintFlagMapsToTheWire pins every flag state against the
+// request the stub received: no flag → mint_token UNSET (the daemon decides);
+// --token → true; --no-token → false; both → a usage error and no request.
+func TestUserCreateMintFlagMapsToTheWire(t *testing.T) {
+	c := assert.NewAborting(t)
+	run := func(args ...string) (*connect.Request[rafikiv1.CreateUserRequest], string, error) {
+		stub := &userStubControl{}
+		serveUserScratch(t, stub, "rfk_tok")
+		root, out := userTestRoot(t, newUserCreateCmd(), args...)
+		err := root.Execute()
+		return stub.lastCreate(), out.String(), err
+	}
+
+	req, _, err := run("create", "alice")
+	c.Require().NoError(err, "no flag")
+	c.Nil(req.Msg.MintToken, "no flag must leave mint_token unset")
+
+	req, _, err = run("create", "alice", "--token")
+	c.Require().NoError(err, "--token")
+	c.NotNil(req.Msg.MintToken, "--token must set mint_token")
+	c.True(req.Msg.GetMintToken(), "--token must set mint_token true")
+
+	req, _, err = run("create", "alice", "--no-token")
+	c.Require().NoError(err, "--no-token")
+	c.NotNil(req.Msg.MintToken, "--no-token must set mint_token")
+	c.False(req.Msg.GetMintToken(), "--no-token must set mint_token false")
+
+	_, _, err = run("create", "alice", "--token", "--no-token")
+	c.Error(err, "--token --no-token must be refused")
+}
+
+// TestUserCreateEmailMapsToTheWire pins --email's wire form.
+func TestUserCreateEmailMapsToTheWire(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &userStubControl{}
+	serveUserScratch(t, stub, "rfk_tok")
+
+	root, out := userTestRoot(t, newUserCreateCmd(), "create", "alice", "--email", "Alice@X.dev")
+	if err := root.Execute(); err != nil {
+		t.Fatalf("user create --email failed: %v\n%s", err, out.String())
+	}
+	req := stub.lastCreate()
+	c.NotNil(req, "the stub never saw a CreateUser request")
+	c.Eq("Alice@X.dev", req.Msg.GetEmail(), "email")
+}
+
+// TestRenderUserCreate_Hints pins the four stderr states that explain the
+// mint decision: a token minted only because OIDC login is unconfigured, a
+// token minted as requested, a user who logs in with `rafiki login`, and a
+// user who cannot authenticate until someone mints for them.
+func TestRenderUserCreate_Hints(t *testing.T) {
+	c := assert.NewAborting(t)
+	writeOK := func(string, string) error { return nil }
+	render := func(resp *rafikiv1.CreateUserResponse) (string, string) {
+		var stdout, stderr bytes.Buffer
+		if err := renderUserCreate(&stdout, &stderr, resp, "/tok", true, writeOK, outputAuto); err != nil {
+			t.Fatalf("renderUserCreate: %v", err)
+		}
+		return stdout.String(), stderr.String()
+	}
+
+	// Absent mint_token on an unconfigured daemon → token + reason note.
+	_, stderr := render(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice", Token: "rfk_x", TokenReason: "oidc not configured"})
+	c.StrContains(stderr, "OIDC login is not configured on this daemon, so a token was minted", "unconfigured reason note")
+
+	// Explicitly requested token → no oidc note.
+	_, stderr = render(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice", Token: "rfk_x", TokenReason: "requested", LoginConfigured: true})
+	c.False(strings.Contains(stderr, "OIDC login is not configured on this daemon, so a token was minted"),
+		"requested reason must not carry the unconfigured note: %s", stderr)
+
+	// No token on a configured daemon → the login hint.
+	_, stderr = render(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice", LoginConfigured: true})
+	c.StrContains(stderr, "no token minted; alice logs in with 'rafiki login'", "login hint")
+
+	// No token on an unconfigured daemon → the recovery hint.
+	_, stderr = render(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice"})
+	c.StrContains(stderr, "no token minted and OIDC login is not configured on this daemon: alice cannot authenticate until you run 'rafiki token mint --user alice'", "recovery hint")
+}
+
+// TestUserCreateHintsOverTheWire pins the two no-token hints end to end
+// against a fake daemon, so the response fields the hint reads
+// (token_reason, login_configured) are the ones the daemon actually sends.
+func TestUserCreateHintsOverTheWire(t *testing.T) {
+	run := func(resp *rafikiv1.CreateUserResponse) string {
+		stub := &userStubControl{created: resp}
+		serveUserScratch(t, stub, "rfk_tok")
+		root, out := userTestRoot(t, newUserCreateCmd(), "create", "alice")
+		if err := root.Execute(); err != nil {
+			t.Fatalf("user create failed: %v\n%s", err, out.String())
+		}
+		return out.String()
+	}
+	if got := run(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice", LoginConfigured: true}); !strings.Contains(got, "no token minted; alice logs in with 'rafiki login'") {
+		t.Fatalf("configured hint missing over the wire:\n%s", got)
+	}
+	if got := run(&rafikiv1.CreateUserResponse{Id: "u", Username: "alice"}); !strings.Contains(got, "cannot authenticate until you run 'rafiki token mint --user alice'") {
+		t.Fatalf("unconfigured hint missing over the wire:\n%s", got)
+	}
+}
+
+// ─── user update ────────────────────────────────────────────────────────────
+
+// TestUserUpdateSendsTheEmail pins the update verb's wire form and that it
+// prints the updated row.
+func TestUserUpdateSendsTheEmail(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &userStubControl{}
+	serveUserScratch(t, stub, "rfk_tok")
+
+	root, out := userTestRoot(t, newUserUpdateCmd(), "update", "alice", "--email", "alice@x.dev")
+	if err := root.Execute(); err != nil {
+		t.Fatalf("user update failed: %v\n%s", err, out.String())
+	}
+	req := stub.lastUpdate()
+	c.NotNil(req, "the stub never saw an UpdateUser request")
+	c.Eq("alice", req.Msg.GetUsername(), "username")
+	c.NotNil(req.Msg.Email, "email must be present, not merely empty")
+	c.Eq("alice@x.dev", *req.Msg.Email, "email")
+
+	c.StrContains(out.String(), "alice", "the updated row was not printed")
+	c.StrContains(out.String(), "alice@x.dev", "the updated email was not printed")
+}
+
+// TestUserUpdateRequiresTheEmailFlag pins --email as required: the CLI never
+// sends an UpdateUser with no optional email set, which the daemon would
+// refuse.
+func TestUserUpdateRequiresTheEmailFlag(t *testing.T) {
+	stub := &userStubControl{}
+	serveUserScratch(t, stub, "rfk_tok")
+
+	root, out := userTestRoot(t, newUserUpdateCmd(), "update", "alice")
+	if err := root.Execute(); err == nil {
+		t.Fatalf("user update without --email must fail\n%s", out.String())
+	}
+	if stub.lastUpdate() != nil {
+		t.Fatalf("a flag-less update reached the daemon")
 	}
 }

@@ -685,7 +685,7 @@ func runDaemon(opts runDaemonOpts) error {
 			// TestConnectNewRPCsWired in test/integration).
 			face.Control.SetChildOps(connectChildOps{c: ctrl})
 			face.Control.SetExecutorAdmin(connectExecutorAdmin{c: ctrl})
-			face.Control.SetUserAdmin(connectUserAdmin{c: ctrl})
+			face.Control.SetUserAdmin(connectUserAdmin{c: ctrl, loginConfigured: face.Control.LoginConfigured})
 			face.Control.SetRawChildIO(connectRawChildIO{c: ctrl})
 			face.Control.SetExecutorSessions(connectExecutorSessions{c: ctrl})
 			if skillStore != nil {

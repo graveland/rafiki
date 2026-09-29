@@ -205,8 +205,16 @@ var controlPolicyTable = map[string]controlPolicy{
 	"CreateUser":        policyUserOnly,
 	"ListUsers":         policyUserOnly,
 	"RemoveUser":        policyUserOnly,
-	"GetStreams":        policyUserOnly,
-	"SendFrame":         policyUserOnly,
+	// The token RPCs are userOnly at the gate but NOT admin-gated in the
+	// handler: a user manages its own credentials (MintToken for self,
+	// ListTokens of self, RevokeToken of own). Create/Update keep the admin
+	// check in the handler (connect_users.go).
+	"UpdateUser":  policyUserOnly,
+	"MintToken":   policyUserOnly,
+	"ListTokens":  policyUserOnly,
+	"RevokeToken": policyUserOnly,
+	"GetStreams":  policyUserOnly,
+	"SendFrame":   policyUserOnly,
 }
 
 // policyFor resolves a Connect procedure path to its policy. A path that is

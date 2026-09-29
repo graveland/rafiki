@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,7 @@ startup and names ` + "`rafikid user create`" + `, which mints the first user by
 the database directly on the daemon host.`,
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newUserCreateCmd(), newUserListCmd(), newUserRmCmd())
+	cmd.AddCommand(newUserCreateCmd(), newUserUpdateCmd(), newUserListCmd(), newUserRmCmd())
 	return cmd
 }
 
@@ -40,37 +41,73 @@ func newUserCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a NON-admin user and print its token once",
-		Long: `Create a NON-admin user. The daemon mints a token, stores only its
-digest, and returns the plaintext ONCE — it cannot be shown again. The token
-is written to the current profile's token file (see ` + "`rafiki profile show`" + `)
-(mode 0600) unless --no-write is given, so creating a user also logs this
-machine in.
+		Long: `Create a NON-admin user. By default the daemon decides whether to mint a
+bearer token: on a daemon with OIDC login configured the user authenticates
+against its IdP and no token is needed; otherwise one is minted so the user
+can authenticate at all. --token / --no-token override that decision.
+
+The daemon returns the plaintext token ONCE — it stores only its digest and
+cannot reproduce it. The token is written to the current profile's token file
+(see ` + "`rafiki profile show`" + `) (mode 0600) unless --no-write is given, so creating a
+user also logs this machine in.
 
 This verb never mints an admin: admins come only from
 ` + "`rafikid user create --admin`" + ` run on the daemon host.`,
 		Args: cobra.ExactArgs(1),
 		RunE: runUserCreate,
 	}
+	cmd.Flags().String("email", "", "Optional email for the user")
+	cmd.Flags().Bool("token", false, "Mint a bearer token for the new user")
+	cmd.Flags().Bool("no-token", false, "Do not mint a bearer token")
 	cmd.Flags().Bool("no-write", false, "Print the token but do not write it to the token file")
 	return cmd
 }
 
+// createMintFlag resolves the tri-state mint decision from the flags: unset
+// unless one of --token/--no-token was given, because absent and false mean
+// different things on the wire and the flag's zero value must not stand in
+// for "the operator chose no token". WHICH flag was named decides — not its
+// value, because cobra sets a bool flag's value to true on mere presence
+// (--no-token would otherwise read as "mint").
+func createMintFlag(cmd *cobra.Command) (*bool, error) {
+	tokenChanged := cmd.Flags().Changed("token")
+	noTokenChanged := cmd.Flags().Changed("no-token")
+	if tokenChanged && noTokenChanged {
+		return nil, errors.New("--token and --no-token are mutually exclusive")
+	}
+	switch {
+	case tokenChanged:
+		mint := true
+		return &mint, nil
+	case noTokenChanged:
+		mint := false
+		return &mint, nil
+	default:
+		return nil, nil
+	}
+}
+
 func runUserCreate(cmd *cobra.Command, args []string) error {
-	// Resolve the mode before dialing: a malformed combination (-j -J) is a
-	// user-input error and must not cost a connection (same rule runStatus
-	// applies).
+	// Resolve the mode and the flag conflict before dialing: a malformed
+	// combination (-j -J, --token --no-token) is a user-input error and must
+	// not cost a connection (same rule runStatus applies).
 	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	mint, err := createMintFlag(cmd)
 	if err != nil {
 		return err
 	}
 	defer dropUserCompletionCache(cmd)
 
+	email, _ := cmd.Flags().GetString("email")
 	ep, err := newConnectEndpoint(cmd)
 	if err != nil {
 		return err
 	}
 	resp, err := ep.control().CreateUser(cmdCtx(cmd),
-		connect.NewRequest(&rafikiv1.CreateUserRequest{Username: args[0]}))
+		connect.NewRequest(&rafikiv1.CreateUserRequest{Username: args[0], Email: email, MintToken: mint}))
 	if err != nil {
 		return userConnectErr(err, ep.describe)
 	}
@@ -93,14 +130,29 @@ func runUserCreate(cmd *cobra.Command, args []string) error {
 // the canonical protojson of the Connect response; JSONL renders it as one
 // compact line, every other mode as the pretty re-indent (emitProto's
 // contract). No mode reduces it to a table that could lose the token.
+//
+// stderr explains the mint decision so a scripted operator can tell the four
+// states apart: a token minted only because OIDC login is unconfigured, a
+// token written to disk, a user who logs in with `rafiki login`, and a user
+// who cannot authenticate until someone mints for them.
 func renderUserCreate(stdout, stderr io.Writer, resp *rafikiv1.CreateUserResponse, tokenPath string, shouldWrite bool, writeFn func(path, token string) error, mode outputMode) error {
-	if shouldWrite {
-		if err := writeFn(tokenPath, resp.GetToken()); err != nil {
-			fmt.Fprintf(stderr, "warning: could not write %s: %v\n", tokenPath, err)
-			fmt.Fprintln(stderr, "save the token below yourself — it cannot be shown again")
-		} else {
-			fmt.Fprintf(stderr, "token written to %s\n", tokenPath)
+	if resp.GetToken() != "" {
+		if shouldWrite {
+			if err := writeFn(tokenPath, resp.GetToken()); err != nil {
+				fmt.Fprintf(stderr, "warning: could not write %s: %v\n", tokenPath, err)
+				fmt.Fprintln(stderr, "save the token below yourself — it cannot be shown again")
+			} else {
+				fmt.Fprintf(stderr, "token written to %s\n", tokenPath)
+			}
 		}
+		if resp.GetTokenReason() == "oidc not configured" {
+			fmt.Fprintln(stderr, "OIDC login is not configured on this daemon, so a token was minted")
+		}
+	} else if resp.GetLoginConfigured() {
+		fmt.Fprintf(stderr, "no token minted; %s logs in with 'rafiki login'\n", resp.GetUsername())
+	} else {
+		fmt.Fprintf(stderr, "no token minted and OIDC login is not configured on this daemon: %s cannot authenticate until you run 'rafiki token mint --user %s'\n",
+			resp.GetUsername(), resp.GetUsername())
 	}
 	return emitProto(stdout, resp, mode)
 }
@@ -142,6 +194,47 @@ func newUserListCmd() *cobra.Command {
 	return cmd
 }
 
+// newUserUpdateCmd edits a user's email. The flag is required rather than
+// optional-on-the-wire: a request with no optional email set is refused by
+// the daemon ("nothing to update"), so there is no legitimate empty call.
+// `--email ""` clears the address.
+func newUserUpdateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "update <name>",
+		Short: "Set a user's email",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runUserUpdate,
+	}
+	cmd.Flags().String("email", "", "Email to set (empty clears it)")
+	_ = cmd.MarkFlagRequired("email")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeUsers(cmd, toComplete), cobra.ShellCompDirectiveNoFileComp
+	}
+	return cmd
+}
+
+func runUserUpdate(cmd *cobra.Command, args []string) error {
+	defer dropUserCompletionCache(cmd)
+	mode, useColor, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	email, _ := cmd.Flags().GetString("email")
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	resp, err := ep.control().UpdateUser(cmdCtx(cmd),
+		connect.NewRequest(&rafikiv1.UpdateUserRequest{Username: args[0], Email: &email}))
+	if err != nil {
+		return userConnectErr(err, ep.describe)
+	}
+	return emitUserList(cmd.OutOrStdout(), []*rafikiv1.UserRow{resp.Msg.GetUser()}, mode, useColor)
+}
+
 func runUserList(cmd *cobra.Command, _ []string) error {
 	mode, useColor, err := outputOpts(cmd)
 	if err != nil {
@@ -170,9 +263,9 @@ func emitUserList(w io.Writer, rows []*rafikiv1.UserRow, mode outputMode, useCol
 		return emitProtoRows(w, rows, mode)
 	default:
 		tb := table.New(w, table.Options{Color: useColor})
-		tb.Header(dimHeader(useColor, "ID", "USER", "ADMIN", "CREATED", "REMOVED")...)
+		tb.Header(dimHeader(useColor, "ID", "USER", "EMAIL", "ADMIN", "CREATED", "REMOVED")...)
 		for _, r := range rows {
-			tb.Row(r.GetId(), r.GetUsername(), adminCell(r.GetIsAdmin()),
+			tb.Row(r.GetId(), r.GetUsername(), defaultDash(r.GetEmail()), adminCell(r.GetIsAdmin()),
 				unixDateCell(r.GetCreatedAtUnix()), removedCell(r.DeletedAtUnix))
 		}
 		return tb.Render()

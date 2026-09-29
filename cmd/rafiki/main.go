@@ -151,6 +151,7 @@ func newRootCmd() *cobra.Command {
 		newExecutorCmd(),
 		newDarajaCmd(),
 		newUserCmd(),
+		newTokenCmd(),
 		newConfigCmd(),
 		newSkillsCmd(),
 		newPythonCmd(),

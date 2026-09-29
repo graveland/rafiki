@@ -79,6 +79,7 @@ type Server struct {
 	childOps       atomic.Pointer[ChildOps]
 	execAdmin      atomic.Pointer[ExecutorAdmin]
 	userAdmin      atomic.Pointer[UserAdmin]
+	login          atomic.Pointer[LoginBackend]
 	rawIO          atomic.Pointer[RawChildIO]
 	execSessions   atomic.Pointer[ExecutorSessions]
 

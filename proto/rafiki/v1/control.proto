@@ -982,6 +982,10 @@ service Control {
   rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
   rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
   rpc RemoveUser(RemoveUserRequest) returns (RemoveUserResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  rpc MintToken(MintTokenRequest) returns (MintTokenResponse);
+  rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
   rpc GetStreams(GetStreamsRequest) returns (GetStreamsResponse);
   // A raw child-protocol frame, for debugging/scripting. userOnly: children
   // use Send.
@@ -1601,6 +1605,12 @@ message ExecutorSessionReady {
 // CreateUserRequest mints a user and its bearer token.
 message CreateUserRequest {
   string username = 1;
+  string email = 2;
+  // mint_token absent: the daemon mints a token iff OIDC login is
+  // NOT configured on it (so the user can authenticate at all). Present:
+  // honoured as given. `optional`, not a bare bool, because absent and false
+  // mean different things.
+  optional bool mint_token = 3;
 }
 
 // CreateUserResponse mirrors protocol.UserCreateResponseData: the plaintext
@@ -1612,8 +1622,15 @@ message CreateUserRequest {
 message CreateUserResponse {
   string id = 1;
   string username = 2;
+  // empty when no token was minted; see token_reason.
   string token = 3;
   int64 created_at_unix = 4;
+  // "requested" (mint_token true), "oidc not configured" (absent, no OIDC),
+  // "" (no token: "not requested" is implied by an empty token).
+  string token_reason = 5;
+  // whether this daemon has OIDC login configured, so the client can word
+  // its hint.
+  bool login_configured = 6;
 }
 
 // ListUsersRequest mirrors protocol.UserListRequest. Tokens are never
@@ -1639,6 +1656,7 @@ message UserRow {
   bool is_admin = 3;
   int64 created_at_unix = 4;
   optional int64 deleted_at_unix = 5;
+  string email = 6;
 }
 
 // RemoveUserRequest tombstones a user: the token stops working, history
@@ -1647,6 +1665,45 @@ message RemoveUserRequest {
   string username = 1;
 }
 message RemoveUserResponse {}
+
+// UpdateUserRequest edits a user. Admin authority. The admin bit is NOT
+// editable here — it comes only from `rafikid user create --admin`.
+message UpdateUserRequest { string username = 1; optional string email = 2; }
+message UpdateUserResponse { UserRow user = 1; }
+
+// TokenRow is one credential, never its secret.
+message TokenRow {
+  string id = 1; string username = 2; string name = 3; string origin = 4;
+  int64 created_at_unix = 5; optional int64 expires_at_unix = 6; optional int64 revoked_at_unix = 7;
+}
+// MintTokenRequest mints a service token. username empty = the caller.
+// ttl_seconds 0 = never expires.
+message MintTokenRequest { string name = 1; int64 ttl_seconds = 2; string username = 3; }
+message MintTokenResponse { TokenRow info = 1; string token = 2; }
+// ListTokensRequest: username empty = the caller; all_users = every user (admin).
+message ListTokensRequest { string username = 1; bool include_revoked = 2; bool all_users = 3; }
+message ListTokensResponse { repeated TokenRow tokens = 1; }
+message RevokeTokenRequest { string id = 1; }
+message RevokeTokenResponse { TokenRow info = 1; }
+
+// ─── OIDC login service ───────────────────────────────────────────────────
+
+// Login is served OUTSIDE authentication on every mount: it is how a
+// caller with no credential, or an expired one, obtains one. It never
+// reads caller identity.
+service Login {
+  rpc BeginLogin(BeginLoginRequest) returns (BeginLoginResponse);
+  rpc CompleteLogin(CompleteLoginRequest) returns (CompleteLoginResponse);
+}
+// redirect_port: the loopback port the client bound. client_host names the
+// token ("login <client_host> <date>").
+message BeginLoginRequest { uint32 redirect_port = 1; string client_host = 2; }
+// redirect_port: the port authorize_url redirects to. Differs from the
+// request's when the daemon pins a port; the client must then listen there.
+message BeginLoginResponse { string login_id = 1; string authorize_url = 2; uint32 redirect_port = 3; }
+// callback_query: the raw query string the IdP redirected to the loopback with.
+message CompleteLoginRequest { string login_id = 1; string callback_query = 2; }
+message CompleteLoginResponse { string token = 1; string username = 2; int64 expires_at_unix = 3; }
 
 // ─── Raw child I/O (GetStreams / SendFrame) ───────────────────────────────
 
