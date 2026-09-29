@@ -166,6 +166,39 @@ func TestGitSourceAddRestoresRepointOnFailedRefresh(t *testing.T) {
 	c.Eq(2, f.clients["exec-alice"].callCount(), "exec-alice received (once per add)")
 }
 
+// TestGitSourceAddRollsBackWhenCallerCancels: the most likely way a first
+// refresh fails is the CALLER disconnecting (Ctrl-C on a long clone), which
+// cancels the handler ctx — and the rollback must survive exactly that: it
+// runs on context.WithoutCancel, so the bad row is still deleted when the
+// fake refresh cancels ctx and then fails.
+func TestGitSourceAddRollsBackWhenCallerCancels(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f, m := newGitAdapterFixture()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cl := &fakeGitSourceClient{
+		err: errors.New("git clone failed: context canceled"),
+		// The onCall hook runs before the failure is produced: cancel the
+		// request ctx first, exactly as a disconnecting caller would.
+		onCall: cancel,
+	}
+	f.pool.clients["exec-alice"] = cl
+	f.clients["exec-alice"] = cl
+	alice := server.WithIdentity(ctx, &server.Identity{UserID: "u_alice"})
+
+	_, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
+	c.Require().Error(err, "AddGitSource whose refresh cancels ctx then fails")
+
+	// The delete STILL happened, on the uncancelled rollback context.
+	c.Require().Len(f.store.deleted, 1, "deletes after the cancelled refresh")
+	c.Eq([2]string{"u_alice", "fresh_tools"}, f.store.deleted[0], "the delete")
+	rows, lerr := m.ListGitSources(context.Background())
+	c.Require().NoError(lerr, "ListGitSources after the cancelled refresh")
+	for _, r := range rows {
+		c.NotEq("fresh_tools", r.Name, "a rolled-back registration survived a caller-cancelled add")
+	}
+}
+
 // TestConnectGitSourcesNilPusherStillRegisters pins the nil guard: a daemon
 // with a database but no executor pool constructs no pusher, and registering
 // must still succeed — the write is the durable part; there is just nothing

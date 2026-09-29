@@ -609,11 +609,18 @@ func runDaemon(opts runDaemonOpts) error {
 		gitpymoduleStore = gitpymodulesdb.NewPostgresStore(pool)
 	}
 	ctrl.gitpymoduleStore = gitpymoduleStore
+	var gitPymoduleOSUser string
+	if u, err := osUser(); err == nil {
+		gitPymoduleOSUser = u
+	} else {
+		slog.Warn("git pymodule source refresh: cannot determine the daemon's OS user; unresolvable owner labels will never be treated as unattributed", "error", err)
+	}
 	if gitpymoduleStore != nil && execPool != nil {
 		// The git pusher takes the 3-value resolver directly: only a genuine
-		// miss (found=false, err=nil) is the unattributed owner; a resolver
-		// error skips the executor.
-		ctrl.gitpymodulePusher = newGitPymodulePusher(execPool, gitpymoduleStore, ctrl.resolveUsernameToUserID)
+		// miss (found=false, err=nil) whose label IS the daemon's OS user is
+		// the unattributed owner; any other miss, or a resolver error, skips
+		// the executor.
+		ctrl.gitpymodulePusher = newGitPymodulePusher(execPool, gitpymoduleStore, ctrl.resolveUsernameToUserID, gitPymoduleOSUser)
 	}
 	if execPool != nil {
 		// An executor that has just connected has an empty or stale tree, so

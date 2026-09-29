@@ -46,7 +46,12 @@ func (m connectGitSources) AddGitSource(ctx context.Context, name, url, ref stri
 	}
 	if m.c.gitpymodulePusher != nil {
 		if _, rerr := m.c.gitpymodulePusher.refresh(ctx, owner, rec.Name, rec.URL, rec.Ref); rerr != nil {
-			m.rollbackGitSource(ctx, owner, name, prior, rerr)
+			// Rollback on a context that outlives the request: the most likely
+			// way a first refresh fails is the CALLER disconnecting (Ctrl-C on
+			// a long clone), which cancels ctx — a rollback on that dead ctx
+			// would fail on every store call and leave the bad row (or the
+			// known-good repoint overwritten) in place.
+			m.rollbackGitSource(context.WithoutCancel(ctx), owner, name, prior, rerr)
 			return connectapi.GitSourceRow{}, rerr
 		}
 	}
@@ -89,7 +94,7 @@ func (m connectGitSources) rollbackGitSource(ctx context.Context, owner, name st
 	}
 	if err != nil {
 		slog.Error("git source add: rollback after a failed first refresh failed",
-			"name", name, "owner", owner, "error", err)
+			"name", name, "owner", owner, "error", err, "refresh_error", refreshErr)
 	}
 }
 

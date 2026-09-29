@@ -87,6 +87,7 @@ type fakeGitSourceClient struct {
 	err      error
 	entered  chan struct{}
 	release  chan struct{}
+	onCall   func() // invoked once, before the response/err is produced
 }
 
 func (c *fakeGitSourceClient) SyncPyModuleGitSource(ctx context.Context, req *connect.Request[executorpb.SyncPyModuleGitSourceRequest]) (*connect.Response[executorpb.SyncPyModuleGitSourceResponse], error) {
@@ -102,6 +103,9 @@ func (c *fakeGitSourceClient) SyncPyModuleGitSource(ctx context.Context, req *co
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if c.onCall != nil {
+		c.onCall()
 	}
 	if c.err != nil {
 		return nil, c.err
@@ -159,10 +163,13 @@ func newGitSourceFixture() *gitSourceFixture {
 	for id, c := range clients {
 		pool.clients[id] = c
 	}
+	// osUser is "ghost": the fixture's ghost executor carries the daemon's OS
+	// username as its owner label, so it is the anonymous-enrolled case and the
+	// ONLY unresolvable label that maps to the unattributed owner.
 	gp := newGitPymodulePusher(pool, store, func(_ context.Context, username string) (string, bool, error) {
 		id, ok := map[string]string{"alice": "u_alice", "bob": "u_bob"}[username]
 		return id, ok, nil
-	})
+	}, "ghost")
 	return &gitSourceFixture{gp: gp, pool: pool, store: store, clients: clients}
 }
 
@@ -499,6 +506,22 @@ func TestGitPymoduleRefreshUnattributedExecutor(t *testing.T) {
 	c.Require().Error(err, "refresh with an erroring owner lookup: succeeded, want no eligible executor")
 	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s git sources`, "refresh error")
 	c.Eq(1, f.clients["exec-ghost"].callCount(), "exec-ghost received after the resolver outage")
+
+	// A label naming a NON-OS, unresolvable user is skipped, never treated as
+	// unattributed: a removed user's executor (whose session was never
+	// evicted) must not become the anonymous bucket and receive sources that
+	// may embed credentials. A fifth executor whose label resolves to nothing
+	// and is not the OS user gets nothing, and the anonymous refresh fails
+	// because the only unattributed executor (ghost) is currently erroring.
+	f.pool.live = append(f.pool.live, execpool.LiveExecutor{
+		Executor: executors.Executor{ID: "exec-tombstone", Labels: map[string]string{"owner": "removed_user"}},
+		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+	})
+	f.clients["exec-tombstone"] = &fakeGitSourceClient{}
+	f.pool.clients["exec-tombstone"] = f.clients["exec-tombstone"]
+	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
+	c.Require().Error(err, "anonymous refresh with only a non-OS unresolvable executor: succeeded, want no eligible executor")
+	c.Eq(0, f.clients["exec-tombstone"].callCount(), "exec-tombstone received")
 }
 
 // TestGitPymoduleRefreshNoEligibleNamesExecutors pins the no-eligible error's

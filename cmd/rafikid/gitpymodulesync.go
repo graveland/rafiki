@@ -40,17 +40,24 @@ type gitPymoduleInventory struct {
 // refreshed for at all, and the label's USERNAME is resolved through
 // resolveOwnerID (Controller.resolveUsernameToUserID). A label that names an
 // active user must match the refresh's owner, exactly as pymodulePusher
-// scopes its blob pushes. A label that names NO user — a session executor
-// labelled with the daemon's OS user, or one naming a since-deleted user —
-// makes the executor UNATTRIBUTED (owner ""), the same rule the anonymous
-// unix-socket caller follows, so an anonymous registration syncs to an
-// anonymously-operated executor. A resolver ERROR is not a miss: the
-// executor is skipped and logged, because a store outage must never be read
-// as unattributed and hand anonymous sources to a user's executor.
+// scopes its blob pushes. A label that names NO user makes the executor
+// UNATTRIBUTED (owner "") ONLY when that label IS the daemon's OS user (osUser
+// — the same fallback sessionOwner and attestOwner stamp): that is exactly
+// the anonymous-enrolled set, and it is what an anonymous registration syncs
+// to. Any OTHER unresolvable label — a since-removed user's executor, whose
+// session was never evicted — is skipped with a warn: handing that machine
+// anonymous sources (which may embed credentials) would widen the rule to a
+// principal the operator deliberately removed. A resolver ERROR is also not a
+// miss: the executor is skipped and logged, because a store outage must never
+// be read as unattributed and hand anonymous sources to a user's executor.
 type gitPymodulePusher struct {
 	pool           pymodulePool
 	store          gitpymodules.Store
 	resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error)
+	// osUser is the daemon's own OS username — the only unresolvable label
+	// that maps to the unattributed owner. Empty when osUser() failed, which
+	// disables the unattributed rule entirely (no label equals "").
+	osUser string
 
 	mu    sync.Mutex
 	cache map[string]gitPymoduleInventory // keyed by gitSourceKey(ownerUserID, name)
@@ -63,11 +70,12 @@ func gitSourceKey(ownerUserID, name string) string {
 	return ownerUserID + "\x00" + name
 }
 
-func newGitPymodulePusher(pool pymodulePool, store gitpymodules.Store, resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error)) *gitPymodulePusher {
+func newGitPymodulePusher(pool pymodulePool, store gitpymodules.Store, resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error), osUser string) *gitPymodulePusher {
 	return &gitPymodulePusher{
 		pool:           pool,
 		store:          store,
 		resolveOwnerID: resolveOwnerID,
+		osUser:         osUser,
 		cache:          make(map[string]gitPymoduleInventory),
 	}
 }
@@ -123,7 +131,15 @@ func (gp *gitPymodulePusher) refresh(ctx context.Context, ownerUserID, name, url
 			continue
 		}
 		if !found {
-			ownerID = "" // no user behind the label: the unattributed owner
+			if label := le.Executor.Labels["owner"]; label == gp.osUser {
+				// The label IS the daemon's OS user but resolves to no row: an
+				// anonymous-enrolled executor, the unattributed owner.
+				ownerID = ""
+			} else {
+				slog.Warn("git pymodule source refresh: owner label does not resolve to an active user and is not the daemon's OS user; skipping executor",
+					"executor", le.Executor.ID, "owner", label)
+				continue
+			}
 		}
 		if ownerID != ownerUserID {
 			continue
