@@ -2418,23 +2418,27 @@ func (c *Controller) resumeOwnerUserID(ctx context.Context, childID string, snap
 }
 
 // resolveUsernameToUserID resolves a username to a conversations.users id for
-// pymodulePusher's owner attribution, using the same users-store lookup
+// the pymodule pushers' owner attribution, using the same users-store lookup
 // resumeOwnerUserID performs (active rows only — a tombstone must never
-// receive an attribution). It returns ("", false) on an empty name, a nil
-// store, any error or not-found: the pusher's rule is "unknown means push
-// nothing", because a wrong guess about ownership would hand one user's
-// private pymodule corpus to another user's executor.
-func (c *Controller) resolveUsernameToUserID(ctx context.Context, username string) (string, bool) {
+// receive an attribution). It returns (id, found, err): found=false with a
+// NIL error means the label names no active user (empty name, no store, or
+// users.ErrNotFound) — the git pusher reads that as the UNATTRIBUTED owner,
+// the blob pusher as "push nothing". found=false with an ERROR means the
+// store itself failed: a caller must skip on that, never read it as
+// unattributed, or a store outage would hand anonymous sources to a user's
+// executor.
+func (c *Controller) resolveUsernameToUserID(ctx context.Context, username string) (string, bool, error) {
 	if username == "" || c.users == nil {
-		return "", false
+		return "", false, nil
 	}
 	id, err := c.users.LookupUsername(ctx, username)
 	if err != nil {
-		slog.Warn("pymodule sync: owner label does not resolve to an active user; pushing nothing",
-			"owner", username, "error", err)
-		return "", false
+		if errors.Is(err, users.ErrNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	return id, true
+	return id, true, nil
 }
 
 func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) (protocol.SpawnResponseData, error) {

@@ -5,9 +5,11 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	executorpb "go.graveland.dev/rafiki/pkg/executorpb"
+	"go.graveland.dev/rafiki/pkg/gitpymodules"
 )
 
 // connectGitSources adapts *Controller to connectapi.GitSourceManager. The
@@ -26,21 +28,69 @@ type connectGitSources struct{ c *Controller }
 // refresh synchronously as part of registration: `rafiki python repo add`
 // reports the discovered inventory — or a clear failure — immediately, not
 // an empty list the caller has to separately refresh to populate. A failed
-// first refresh fails the call (the row stays registered; a retry is
-// `python repo refresh`), because an operator who just typed a URL should
-// hear about a bad clone right away, not on the first run that needs it.
+// first refresh fails the call AND leaves the registration as it was before
+// the call: a source whose first refresh never succeeded must not linger as
+// a registration with a known-bad clone (a retry is another add, not
+// `python repo remove` first). No prior row → the registration is deleted
+// outright; a prior row → it is Put back with its previous url/ref. A
+// rollback failure is logged and never masks the refresh error.
 func (m connectGitSources) AddGitSource(ctx context.Context, name, url, ref string) (connectapi.GitSourceRow, error) {
 	owner := spawnOwner(ctx).UserID
+	prior, err := priorGitSource(ctx, m.c.gitpymoduleStore, owner, name)
+	if err != nil {
+		return connectapi.GitSourceRow{}, err
+	}
 	rec, err := m.c.gitpymoduleStore.Put(ctx, owner, name, url, ref)
 	if err != nil {
 		return connectapi.GitSourceRow{}, err // gitpymodules.ErrNotFound is impossible here
 	}
 	if m.c.gitpymodulePusher != nil {
-		if _, err := m.c.gitpymodulePusher.refresh(ctx, owner, rec.Name, rec.URL, rec.Ref); err != nil {
-			return connectapi.GitSourceRow{}, err
+		if _, rerr := m.c.gitpymodulePusher.refresh(ctx, owner, rec.Name, rec.URL, rec.Ref); rerr != nil {
+			m.rollbackGitSource(ctx, owner, name, prior, rerr)
+			return connectapi.GitSourceRow{}, rerr
 		}
 	}
 	return connectapi.GitSourceRow{Name: rec.Name, URL: rec.URL, Ref: rec.Ref}, nil
+}
+
+// priorGitSource returns the owner's existing registration for name, if any —
+// the rollback anchor for a failed first refresh. The store has no Get; List
+// is the only read it exposes (the same shape recordFor uses). A List error
+// fails the add BEFORE any write: without the anchor a rollback could not
+// tell a new source from a repointed one, and might delete a pre-existing
+// registration it only meant to restore.
+func priorGitSource(ctx context.Context, store gitpymodules.Store, ownerUserID, name string) (*gitpymodules.GitSourceRecord, error) {
+	recs, err := store.List(ctx, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range recs {
+		if r.Name == name {
+			rec := r
+			return &rec, nil
+		}
+	}
+	return nil, nil
+}
+
+// rollbackGitSource undoes a failed first refresh's write, restoring the
+// registration to what it was before the call: no prior row → delete the
+// registration; a prior row → Put its previous url/ref back (this git-source
+// table is a pointer to repoint, not an append-only history — no other table
+// is touched). A rollback failure is only logged: the caller already gets
+// the refresh error, and a half-rolled-back registration is one
+// `python repo remove` away, not a reason to mask the real failure.
+func (m connectGitSources) rollbackGitSource(ctx context.Context, owner, name string, prior *gitpymodules.GitSourceRecord, refreshErr error) {
+	var err error
+	if prior == nil {
+		err = m.c.gitpymoduleStore.Delete(ctx, owner, name)
+	} else {
+		_, err = m.c.gitpymoduleStore.Put(ctx, owner, name, prior.URL, prior.Ref)
+	}
+	if err != nil {
+		slog.Error("git source add: rollback after a failed first refresh failed",
+			"name", name, "owner", owner, "error", err)
+	}
 }
 
 func (m connectGitSources) ListGitSources(ctx context.Context) ([]connectapi.GitSourceRow, error) {

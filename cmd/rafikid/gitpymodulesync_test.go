@@ -159,9 +159,9 @@ func newGitSourceFixture() *gitSourceFixture {
 	for id, c := range clients {
 		pool.clients[id] = c
 	}
-	gp := newGitPymodulePusher(pool, store, func(_ context.Context, username string) (string, bool) {
+	gp := newGitPymodulePusher(pool, store, func(_ context.Context, username string) (string, bool, error) {
 		id, ok := map[string]string{"alice": "u_alice", "bob": "u_bob"}[username]
-		return id, ok
+		return id, ok, nil
 	})
 	return &gitSourceFixture{gp: gp, pool: pool, store: store, clients: clients}
 }
@@ -397,10 +397,12 @@ func TestGitPymodulePusherRefreshSurvivesOneFailingExecutor(t *testing.T) {
 }
 
 // TestGitPymodulePusherRefreshSkipsIneligibleExecutors: the Describe flag and
-// the owner label are both gates. An executor without the git-sync flag, one
-// without an owner label, and one whose owner does not resolve receive
-// nothing — and a refresh with no eligible executor at all fails loudly
-// rather than silently succeeding with an empty inventory.
+// the owner label are both gates. An executor without the git-sync flag and
+// one whose owner label names no active user receive nothing for a USER's
+// refresh — the latter is unattributed and serves only owner ""'s sources
+// (see TestGitPymoduleRefreshUnattributedExecutor) — and a refresh with no
+// eligible executor at all fails loudly rather than silently succeeding with
+// an empty inventory.
 func TestGitPymodulePusherRefreshSkipsIneligibleExecutors(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	f := newGitSourceFixture()
@@ -443,4 +445,102 @@ func TestGitPymodulePusherRefreshCachesVenvFailure(t *testing.T) {
 	inv, ok := f.gp.inventoryFor("u_alice", "ops_tools")
 	c.Require().True(ok, "inventoryFor found nothing")
 	c.False(inv.VenvReady || inv.VenvError != "uv sync failed: no solution", "cached venv state = ready %v error %q, want false + the executor's error", inv.VenvReady, inv.VenvError)
+}
+
+// TestGitPymoduleRefreshUnattributedExecutor pins the unattributed rule: a
+// live executor whose owner label resolves to NO user (the fixture's ghost)
+// is the UNATTRIBUTED owner "" — the same rule the anonymous unix-socket
+// caller follows — so an anonymous registration (owner "") syncs to it, while
+// a user's refresh still never reaches it. A resolver ERROR is not a miss:
+// the executor is skipped, so an outage never hands anonymous sources to an
+// executor whose ownership the store could not settle.
+func TestGitPymoduleRefreshUnattributedExecutor(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newGitSourceFixture()
+
+	// The anonymous refresh reaches ONLY the unresolvable ghost, and the RPC
+	// carries the registration verbatim.
+	inv, err := f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
+	c.Require().NoError(err, "refresh for the unattributed owner")
+	c.Eq(1, f.clients["exec-ghost"].callCount(), "exec-ghost received")
+	c.Eq(0, f.clients["exec-alice"].callCount(), "exec-alice received")
+	c.Eq(0, f.clients["exec-bob"].callCount(), "exec-bob received")
+	c.Require().Len(f.clients["exec-ghost"].requests, 1, "exec-ghost's requests")
+	req := f.clients["exec-ghost"].requests[0]
+	c.False(req.GetName() != "anon_repo" || req.GetUrl() != "https://example.net/anon.git" || req.GetRef() != "main",
+		"the anonymous refresh payload = name %q url %q ref %q", req.GetName(), req.GetUrl(), req.GetRef())
+	c.Len(inv.Scripts, 0, "the returned inventory's scripts")
+	c.Len(inv.Packages, 0, "the returned inventory's packages")
+
+	// The snapshot is cached under the unattributed owner, and only there.
+	if _, ok := f.gp.inventoryFor("", "anon_repo"); !ok {
+		t.Error("the anonymous refresh left no cache entry under the unattributed owner")
+	}
+	if _, ok := f.gp.inventoryFor("u_alice", "anon_repo"); ok {
+		t.Error("the anonymous refresh's inventory leaked under alice's owner")
+	}
+
+	// A user's refresh still never reaches the unattributed executor.
+	_, err = f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().NoError(err, "refresh for alice")
+	c.Eq(1, f.clients["exec-ghost"].callCount(), "exec-ghost received after alice's refresh")
+	c.Eq(1, f.clients["exec-alice"].callCount(), "exec-alice received after alice's refresh")
+
+	// A resolver ERROR (store outage) skips the executor instead of marking it
+	// unattributed: the anonymous refresh fails, and the executor got nothing.
+	f.gp.resolveOwnerID = func(_ context.Context, username string) (string, bool, error) {
+		if username == "ghost" {
+			return "", false, errors.New("users store unavailable")
+		}
+		id, ok := map[string]string{"alice": "u_alice", "bob": "u_bob"}[username]
+		return id, ok, nil
+	}
+	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
+	c.Require().Error(err, "refresh with an erroring owner lookup: succeeded, want no eligible executor")
+	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s git sources`, "refresh error")
+	c.Eq(1, f.clients["exec-ghost"].callCount(), "exec-ghost received after the resolver outage")
+}
+
+// TestGitPymoduleRefreshNoEligibleNamesExecutors pins the no-eligible error's
+// content: it names the owner the refresh was for (unattributed included) and
+// lists EVERY live executor with its id prefix, owner label and git-sync
+// flag, so an operator can see why their executor was passed over.
+func TestGitPymoduleRefreshNoEligibleNamesExecutors(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := newGitSourceFixture()
+	// A fourth live executor with a long id: the id renders as a prefix.
+	f.pool.live = append(f.pool.live, execpool.LiveExecutor{
+		Executor: executors.Executor{ID: "0123456789abcdef", Labels: map[string]string{"owner": "longowner"}},
+		Describe: &executorpb.DescribeResponse{PymoduleGitSync: true},
+	})
+
+	// Alice's executor loses the flag: nothing is eligible for her source, and
+	// the error must name the pool it saw — every live executor, flagged.
+	f.pool.live[0].Describe = &executorpb.DescribeResponse{}
+	_, err := f.gp.refresh(context.Background(), "u_alice", "ops_tools", "https://example.net/ops.git", "main")
+	c.Require().Error(err, "refresh with no eligible executor")
+	c.StrContains(err.Error(), `no eligible executor for owner "u_alice"'s git sources: 4 live executor(s):`, "refresh error")
+	c.StrContains(err.Error(), `exec-alice owner="alice" git-sync=false`, "refresh error")
+	c.StrContains(err.Error(), `exec-bob owner="bob" git-sync=true`, "refresh error")
+	c.StrContains(err.Error(), `exec-ghost owner="ghost" git-sync=true`, "refresh error")
+	c.StrContains(err.Error(), `0123456789ab owner="longowner" git-sync=true`, "refresh error")
+	c.NotStrContains(err.Error(), "0123456789abcdef", "the long id was not truncated to a prefix")
+
+	// The unattributed owner is named rather than printed as an empty id. With
+	// every flag off nothing is eligible even for owner "".
+	for i := range f.pool.live {
+		f.pool.live[i].Describe = &executorpb.DescribeResponse{}
+	}
+	_, err = f.gp.refresh(context.Background(), "", "anon_repo", "https://example.net/anon.git", "main")
+	c.Require().Error(err, "unattributed refresh with no eligible executor")
+	c.StrContains(err.Error(), `no eligible executor for owner "(unattributed)"'s git sources: 4 live executor(s):`, "refresh error")
+
+	// No executor received anything, and no cache entry was left behind.
+	for id, cl := range f.clients {
+		c.Eq(0, cl.callCount(), "%s received", id)
+	}
+	_, ok := f.gp.inventoryFor("u_alice", "ops_tools")
+	c.False(ok, "a failed refresh left a cache entry behind")
+	_, ok = f.gp.inventoryFor("", "anon_repo")
+	c.False(ok, "a failed refresh left a cache entry behind")
 }

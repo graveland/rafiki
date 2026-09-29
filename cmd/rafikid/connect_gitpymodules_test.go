@@ -104,30 +104,66 @@ func TestConnectGitSourcesAddRefreshesFirstAndRefreshReusesStored(t *testing.T) 
 	}
 }
 
-// TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow pins what a failing
-// first refresh does to a registration: the add fails loudly with the refresh
-// error — the operator hears about the bad clone immediately — and the row
-// still survives in the store, so the retry is `python repo refresh`, not a
-// second add.
-func TestConnectGitSourcesAddReturnsRefreshErrorAndKeepsRow(t *testing.T) {
-	c := assert.NewAborting(t)
+// TestGitSourceAddRollsBackNewOnFailedRefresh: a failed FIRST refresh on a
+// brand-new name fails the add AND undoes the registration — the store is
+// left without the row, exactly as before the call, via the store's own
+// Delete (that table is a pointer to repoint, not an append-only history),
+// and the caller gets the refresh error, never a rollback error masking it.
+func TestGitSourceAddRollsBackNewOnFailedRefresh(t *testing.T) {
+	c := assert.NewCollecting(t)
 	f, m := newGitAdapterFixture()
 	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
 	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
 
-	if _, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/fresh.git", "develop"); err == nil {
-		t.Fatal("AddGitSource with a failing first refresh: succeeded, want the refresh error")
-	}
+	row, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/fresh.git", "develop")
+	c.Require().Error(err, "AddGitSource with a failing first refresh")
+	c.False(row.Name != "" || row.URL != "" || row.Ref != "", "AddGitSource row = %+v, want the zero row on failure", row)
+	// The add's error is the refresh error — not a rollback failure masking it.
+	c.StrContains(err.Error(), "every eligible executor failed", "AddGitSource's error")
 
 	rows, err := m.ListGitSources(alice)
-	c.NoError(err, "ListGitSources after the failed add")
+	c.Require().NoError(err, "ListGitSources after the failed add")
+	c.Len(rows, 2, "rows after the failed add (the two pre-existing sources only)")
+	for _, r := range rows {
+		c.NotEq("fresh_tools", r.Name, "a rolled-back registration survived the failed add")
+	}
+	// The undo went through the store's own Delete — and touched nothing else.
+	c.Require().Len(f.store.deleted, 1, "deletes after the failed add")
+	c.Eq([2]string{"u_alice", "fresh_tools"}, f.store.deleted[0], "the delete")
+}
+
+// TestGitSourceAddRestoresRepointOnFailedRefresh: a failed FIRST refresh on a
+// RE-ADDED name fails the add AND restores the previous registration — the
+// row is back at its old url/ref, nothing was deleted, and the caller gets
+// the refresh error.
+func TestGitSourceAddRestoresRepointOnFailedRefresh(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f, m := newGitAdapterFixture()
+	alice := server.WithIdentity(context.Background(), &server.Identity{UserID: "u_alice"})
+
+	// A successful add first: fresh_tools registers at url/ref A.
+	row, err := m.AddGitSource(alice, "fresh_tools", "https://example.net/old.git", "main")
+	c.Require().NoError(err, "the first, succeeding add")
+	c.Require().False(row.URL != "https://example.net/old.git" || row.Ref != "main", "first add row = %+v", row)
+
+	// Now the clone breaks, and the source is re-added at url/ref B.
+	f.clients["exec-alice"].err = errors.New("git clone failed: authentication failed")
+	_, err = m.AddGitSource(alice, "fresh_tools", "https://example.net/new.git", "develop")
+	c.Require().Error(err, "the re-add with a failing first refresh")
+	c.StrContains(err.Error(), "every eligible executor failed", "AddGitSource's error")
+
+	rows, err := m.ListGitSources(alice)
+	c.Require().NoError(err, "ListGitSources after the failed re-add")
 	survived := false
 	for _, r := range rows {
 		if r.Name == "fresh_tools" {
-			survived = r.URL == "https://example.net/fresh.git" && r.Ref == "develop"
+			survived = r.URL == "https://example.net/old.git" && r.Ref == "main"
 		}
 	}
-	c.True(survived, "rows after a failed first refresh = %+v, want fresh_tools to have survived the failed refresh", rows)
+	c.True(survived, "rows after the failed re-add = %+v, want fresh_tools restored to its PREVIOUS url/ref", rows)
+	// A repoint is restored, never deleted.
+	c.Len(f.store.deleted, 0, "deletes after the failed re-add")
+	c.Eq(2, f.clients["exec-alice"].callCount(), "exec-alice received (once per add)")
 }
 
 // TestConnectGitSourcesNilPusherStillRegisters pins the nil guard: a daemon

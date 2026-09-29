@@ -589,7 +589,19 @@ func runDaemon(opts runDaemonOpts) error {
 	if pymoduleStore != nil && execPool != nil {
 		ctrl.pymodulePusher = &pymodulePusher{
 			pool: execPool, store: pymoduleStore, version: version.String(),
-			resolveOwnerID: ctrl.resolveUsernameToUserID,
+			// The blob pusher's rule is "unknown means push nothing" — found
+			// =false for ANY reason, a store error included — because a wrong
+			// guess about ownership hands one user's private pymodule corpus to
+			// another user's executor. (The git pusher takes the 3-value
+			// resolver directly: there, only a genuine miss is unattributed.)
+			resolveOwnerID: func(ctx context.Context, username string) (string, bool) {
+				id, found, err := ctrl.resolveUsernameToUserID(ctx, username)
+				if !found || err != nil {
+					slog.Warn("pymodule sync: owner label does not resolve to an active user; pushing nothing",
+						"owner", username, "error", err)
+				}
+				return id, found
+			},
 		}
 	}
 	var gitpymoduleStore gitpymodules.Store
@@ -598,6 +610,9 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 	ctrl.gitpymoduleStore = gitpymoduleStore
 	if gitpymoduleStore != nil && execPool != nil {
+		// The git pusher takes the 3-value resolver directly: only a genuine
+		// miss (found=false, err=nil) is the unattributed owner; a resolver
+		// error skips the executor.
 		ctrl.gitpymodulePusher = newGitPymodulePusher(execPool, gitpymoduleStore, ctrl.resolveUsernameToUserID)
 	}
 	if execPool != nil {

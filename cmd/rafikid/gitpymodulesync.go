@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,14 +36,21 @@ type gitPymoduleInventory struct {
 // a git source's own history is already its versioning mechanism — so the
 // pusher's job is exactly fan-out, caching and disagreement reporting.
 //
-// Owner scoping is the same as pymodulePusher's: an executor's
-// Labels["owner"] gates what it may be refreshed for at all, and the label's
-// USERNAME is resolved through resolveOwnerID (the same lookup
-// resolveUsernameToUserID performs) and must match the refresh's owner.
+// Owner scoping: an executor's Labels["owner"] gates what it may be
+// refreshed for at all, and the label's USERNAME is resolved through
+// resolveOwnerID (Controller.resolveUsernameToUserID). A label that names an
+// active user must match the refresh's owner, exactly as pymodulePusher
+// scopes its blob pushes. A label that names NO user — a session executor
+// labelled with the daemon's OS user, or one naming a since-deleted user —
+// makes the executor UNATTRIBUTED (owner ""), the same rule the anonymous
+// unix-socket caller follows, so an anonymous registration syncs to an
+// anonymously-operated executor. A resolver ERROR is not a miss: the
+// executor is skipped and logged, because a store outage must never be read
+// as unattributed and hand anonymous sources to a user's executor.
 type gitPymodulePusher struct {
 	pool           pymodulePool
 	store          gitpymodules.Store
-	resolveOwnerID func(ctx context.Context, username string) (string, bool)
+	resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error)
 
 	mu    sync.Mutex
 	cache map[string]gitPymoduleInventory // keyed by gitSourceKey(ownerUserID, name)
@@ -57,7 +63,7 @@ func gitSourceKey(ownerUserID, name string) string {
 	return ownerUserID + "\x00" + name
 }
 
-func newGitPymodulePusher(pool pymodulePool, store gitpymodules.Store, resolveOwnerID func(ctx context.Context, username string) (string, bool)) *gitPymodulePusher {
+func newGitPymodulePusher(pool pymodulePool, store gitpymodules.Store, resolveOwnerID func(ctx context.Context, username string) (id string, found bool, err error)) *gitPymodulePusher {
 	return &gitPymodulePusher{
 		pool:           pool,
 		store:          store,
@@ -85,6 +91,11 @@ func (gp *gitPymodulePusher) eligible(le execpool.LiveExecutor) bool {
 // nothing and leaves any prior snapshot in place; the returned error is nil
 // whenever at least one executor responded, because the cache is populated
 // by definition in that case.
+//
+// When nothing was eligible and nothing failed, the error names what the
+// pool looked like — every live executor with its owner label and git-sync
+// flag — so an operator can see why their executor was passed over without
+// grepping the daemon log.
 func (gp *gitPymodulePusher) refresh(ctx context.Context, ownerUserID, name, url, ref string) (gitPymoduleInventory, error) {
 	var (
 		wg       sync.WaitGroup
@@ -94,13 +105,27 @@ func (gp *gitPymodulePusher) refresh(ctx context.Context, ownerUserID, name, url
 		firstSet bool
 		last     gitPymoduleInventory
 		failed   int
+		live     = gp.pool.Live()
+		summary  = make([]string, 0, len(live)) // built on this goroutine only; read after wg.Wait
 	)
-	for _, le := range gp.pool.Live() {
+	for _, le := range live {
+		summary = append(summary, gitExecutorSummary(le))
 		if !gp.eligible(le) {
 			continue
 		}
-		ownerID, ok := gp.resolveOwnerID(ctx, le.Executor.Labels["owner"])
-		if !ok || ownerID != ownerUserID {
+		ownerID, found, err := gp.resolveOwnerID(ctx, le.Executor.Labels["owner"])
+		if err != nil {
+			// A resolver error is a store outage, not a miss: skip the
+			// executor rather than read it as unattributed — an outage must
+			// never hand anonymous sources to a user's executor.
+			slog.Warn("git pymodule source refresh: owner lookup failed; skipping executor",
+				"executor", le.Executor.ID, "owner", le.Executor.Labels["owner"], "error", err)
+			continue
+		}
+		if !found {
+			ownerID = "" // no user behind the label: the unattributed owner
+		}
+		if ownerID != ownerUserID {
 			continue
 		}
 		wg.Add(1)
@@ -139,9 +164,28 @@ func (gp *gitPymodulePusher) refresh(ctx context.Context, ownerUserID, name, url
 		if failed > 0 {
 			return gitPymoduleInventory{}, fmt.Errorf("refresh %q: every eligible executor failed (%d)", name, failed)
 		}
-		return gitPymoduleInventory{}, errors.New("no eligible executor for this owner's git sources")
+		return gitPymoduleInventory{}, fmt.Errorf("no eligible executor for owner %q's git sources: %d live executor(s): %s",
+			gitOwnerDisplay(ownerUserID), len(live), strings.Join(summary, "; "))
 	}
 	return last, nil
+}
+
+// gitOwnerDisplay renders an owner id for the no-eligible-executor error: the
+// unattributed bucket has no id to print, so it gets a name instead.
+func gitOwnerDisplay(ownerUserID string) string {
+	if ownerUserID == "" {
+		return "(unattributed)"
+	}
+	return ownerUserID
+}
+
+// gitExecutorSummary renders one live executor for the no-eligible-executor
+// error: its id prefix, the owner label it advertises (a USERNAME, possibly
+// one that resolves to no active user — the unattributed case) and whether it
+// can sync git sources at all.
+func gitExecutorSummary(le execpool.LiveExecutor) string {
+	return fmt.Sprintf("%s owner=%q git-sync=%t",
+		shortID(le.Executor.ID), le.Executor.Labels["owner"], le.Describe.GetPymoduleGitSync())
 }
 
 // gitInventoryDiffers reports whether two reported inventories name
