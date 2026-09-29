@@ -113,7 +113,7 @@ func TestResultNotClearedBetweenWorkingStatuses(t *testing.T) {
 // TestResultSetDuringTurnRidesThatTurnsSettle pins the ordering the clear
 // depends on: a result set DURING a turn rides THAT turn's settle. The
 // turn-start clear removes only what an earlier turn stored; SetResult
-// mid-turn re-stores, and the running → idle settle carries it.
+// mid-turn re-stores, and the streaming → idle settle carries it.
 func TestResultSetDuringTurnRidesThatTurnsSettle(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c, _, clk, cap := prResultFixture(t)
