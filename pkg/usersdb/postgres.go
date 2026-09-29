@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,44 +28,90 @@ type pgStore struct {
 // uniqueViolation is Postgres SQLSTATE 23505.
 const uniqueViolation = "23505"
 
-func (s *pgStore) Create(ctx context.Context, username string, isAdmin bool) (users.User, string, error) {
-	username, err := users.NormalizeUsername(username)
+// taken maps the unique violations a users write can hit onto their
+// sentinels. The indexes are partial (active rows only), so each is also
+// what makes a tombstoned name or address reusable rather than a special
+// case here. Only USERNAME and EMAIL mean "taken" — token_sha256 is UNIQUE
+// too, and while a digest collision is unreachable (2^-256), reporting one
+// as "already taken" would be maximally confusing for the one person who
+// ever saw it. nil means the error is not a refusal and must stay wrapped.
+func taken(err error) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolation {
+		return nil
+	}
+	switch pgErr.ConstraintName {
+	case "users_username_active":
+		return users.ErrUsernameTaken
+	case "users_email_active":
+		return users.ErrEmailTaken
+	default:
+		return nil
+	}
+}
+
+func (s *pgStore) Create(ctx context.Context, u users.NewUser) (users.User, string, error) {
+	username, err := users.NormalizeUsername(u.Username)
 	if err != nil {
 		return users.User{}, "", err
 	}
-	token, err := users.NewToken()
+	email, err := users.NormalizeEmail(u.Email)
 	if err != nil {
-		return users.User{}, "", fmt.Errorf("mint token: %w", err)
+		return users.User{}, "", err
 	}
-	var u users.User
-	err = s.pool.QueryRow(ctx,
-		`INSERT INTO conversations.users (username, token_sha256, is_admin)
-		 VALUES ($1,$2,$3) RETURNING id::text, username, created_at, is_admin`,
-		username, users.HashToken(token), isAdmin).Scan(&u.ID, &u.Username, &u.CreatedAt, &u.IsAdmin)
+	var token string
+	if u.MintToken {
+		if token, err = users.NewBearerToken(); err != nil {
+			return users.User{}, "", fmt.Errorf("mint token: %w", err)
+		}
+	}
+
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		// The partial unique index is the ONLY thing enforcing name
-		// uniqueness, and it covers active rows only — so this is also what
-		// makes a tombstoned name reusable rather than a special case here.
-		// Only the USERNAME index means "taken". token_sha256 is UNIQUE too,
-		// and while a digest collision is unreachable (2^-256), reporting one
-		// as "username already taken" would be maximally confusing for the one
-		// person who ever saw it.
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation &&
-			pgErr.ConstraintName == "users_username_active" {
-			return users.User{}, "", users.ErrUsernameTaken
+		return users.User{}, "", fmt.Errorf("begin create user: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op once Commit has run
+
+	var created users.User
+	// token_sha256 stays NULL: credentials live in user_token since 0044.
+	err = tx.QueryRow(ctx,
+		`INSERT INTO conversations.users (username, email, is_admin)
+		 VALUES ($1, NULLIF($2,''), $3)
+		 RETURNING id::text, username, is_admin, created_at, COALESCE(email,'')`,
+		username, email, u.IsAdmin).Scan(&created.ID, &created.Username, &created.IsAdmin, &created.CreatedAt, &created.Email)
+	if err != nil {
+		if refuse := taken(err); refuse != nil {
+			return users.User{}, "", refuse
 		}
 		return users.User{}, "", fmt.Errorf("insert user: %w", err)
 	}
-	return u, token, nil
+	if token != "" {
+		// Same transaction as the users row: a create that mints its
+		// credential is atomic — never a user without its initial token.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO conversations.user_token (user_id, token_sha256, name, origin)
+			 VALUES ($1, $2, 'initial', $3)`,
+			created.ID, users.HashToken(token), users.OriginService); err != nil {
+			return users.User{}, "", fmt.Errorf("insert initial token: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return users.User{}, "", fmt.Errorf("commit create user: %w", err)
+	}
+	return created, token, nil
 }
 
 func (s *pgStore) Authenticate(ctx context.Context, token string) (users.Identity, error) {
 	var id users.Identity
 	err := s.pool.QueryRow(ctx,
-		`SELECT id::text, username, is_admin FROM conversations.users
-		  WHERE token_sha256 = $1 AND deleted_at IS NULL`,
-		users.HashToken(token)).Scan(&id.UserID, &id.Username, &id.IsAdmin)
+		`SELECT u.id::text, u.username, u.is_admin, t.id::text
+		   FROM conversations.user_token t
+		   JOIN conversations.users u ON u.id = t.user_id
+		  WHERE t.token_sha256 = $1
+		    AND t.revoked_at IS NULL
+		    AND (t.expires_at IS NULL OR t.expires_at > now())
+		    AND u.deleted_at IS NULL`,
+		users.HashToken(token)).Scan(&id.UserID, &id.Username, &id.IsAdmin, &id.TokenID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.Identity{}, users.ErrNotFound
 	}
@@ -80,7 +127,7 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 	if limit <= 0 {
 		limit = 100
 	}
-	q := `SELECT id::text, username, is_admin, created_at, deleted_at
+	q := `SELECT id::text, username, is_admin, created_at, deleted_at, COALESCE(email,'')
 	        FROM conversations.users`
 	if !includeDeleted {
 		q += ` WHERE deleted_at IS NULL`
@@ -99,7 +146,7 @@ func (s *pgStore) List(ctx context.Context, includeDeleted bool, limit int) ([]u
 	for rows.Next() {
 		var u users.User
 		var deletedAt *time.Time
-		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt, &u.Email); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		u.DeletedAt = deletedAt
@@ -131,6 +178,171 @@ func (s *pgStore) CountActive(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("count active users: %w", err)
 	}
 	return n, nil
+}
+
+// SetEmail stores a normalized address on the named ACTIVE user; "" clears
+// it. ErrNotFound and ErrEmailTaken are answers; anything else is an outage.
+func (s *pgStore) SetEmail(ctx context.Context, username, email string) (users.User, error) {
+	username, err := users.NormalizeUsername(username)
+	if err != nil {
+		return users.User{}, err
+	}
+	email, err = users.NormalizeEmail(email)
+	if err != nil {
+		return users.User{}, err
+	}
+	var u users.User
+	var deletedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`UPDATE conversations.users SET email = NULLIF($2,'')
+		  WHERE username = $1 AND deleted_at IS NULL
+		  RETURNING id::text, username, is_admin, created_at, deleted_at, COALESCE(email,'')`,
+		username, email).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt, &u.Email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return users.User{}, users.ErrNotFound
+	}
+	if err != nil {
+		if refuse := taken(err); refuse != nil {
+			return users.User{}, refuse
+		}
+		return users.User{}, fmt.Errorf("set email for %q: %w", username, err)
+	}
+	u.DeletedAt = deletedAt
+	return u, nil
+}
+
+// MintToken adds a credential to an existing user. The INSERT..SELECT only
+// yields rows for an ACTIVE user, so an unknown or tombstoned userID inserts
+// nothing and surfaces as ErrNoRows — the answer. The CTE carries the
+// username out with the token row, which plain RETURNING cannot do (it sees
+// the target table only).
+func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken) (users.Token, string, error) {
+	if t.Name == "" {
+		return users.Token{}, "", fmt.Errorf("users: token name must not be empty")
+	}
+	if t.Origin != users.OriginService && t.Origin != users.OriginOIDC {
+		return users.Token{}, "", fmt.Errorf("users: unknown token origin %q", t.Origin)
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return users.Token{}, "", users.ErrNotFound
+	}
+	token, err := users.NewBearerToken()
+	if err != nil {
+		return users.Token{}, "", fmt.Errorf("mint token: %w", err)
+	}
+	var tok users.Token
+	var expiresAt *time.Time
+	err = s.pool.QueryRow(ctx, `
+		WITH target AS (
+			SELECT id, username FROM conversations.users
+			 WHERE id = $1::uuid AND deleted_at IS NULL
+		), inserted AS (
+			INSERT INTO conversations.user_token
+			       (user_id, token_sha256, name, origin, expires_at)
+			SELECT target.id, $2, $3, $4,
+			       CASE WHEN $5 > 0
+			            THEN now() + ($5::bigint * interval '1 second')
+			            ELSE NULL END
+			  FROM target
+			RETURNING id::text, user_id::text, name, origin, created_at, expires_at
+		)
+		SELECT inserted.id, inserted.user_id, target.username, inserted.name,
+		       inserted.origin, inserted.created_at, inserted.expires_at
+		  FROM inserted CROSS JOIN target`,
+		userID, users.HashToken(token), t.Name, string(t.Origin),
+		int64(t.TTL/time.Second)).Scan(
+		&tok.ID, &tok.UserID, &tok.Username, &tok.Name, &tok.Origin,
+		&tok.CreatedAt, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return users.Token{}, "", users.ErrNotFound
+	}
+	if err != nil {
+		return users.Token{}, "", fmt.Errorf("mint token for user %s: %w", userID, err)
+	}
+	tok.ExpiresAt = expiresAt
+	return tok, token, nil
+}
+
+// tokenColumns is the projection every token query shares; ListTokens and
+// GetToken join users for Username, since a Token names its owner.
+const tokenColumns = `t.id::text, t.user_id::text, u.username, t.name, t.origin,
+	t.created_at, t.expires_at, t.revoked_at`
+
+func scanToken(row pgx.Row) (users.Token, error) {
+	var t users.Token
+	var expiresAt, revokedAt *time.Time
+	if err := row.Scan(&t.ID, &t.UserID, &t.Username, &t.Name, &t.Origin,
+		&t.CreatedAt, &expiresAt, &revokedAt); err != nil {
+		return users.Token{}, err
+	}
+	t.ExpiresAt = expiresAt
+	t.RevokedAt = revokedAt
+	return t, nil
+}
+
+func (s *pgStore) ListTokens(ctx context.Context, userID string, includeRevoked bool) ([]users.Token, error) {
+	// A malformed userID names nobody: an empty list, not a 22P02 outage.
+	if userID != "" {
+		if _, err := uuid.Parse(userID); err != nil {
+			return nil, nil
+		}
+	}
+	// The parameter cast (not a column cast) keeps user_token_user_idx
+	// usable for the per-user listing.
+	q := `SELECT ` + tokenColumns + `
+	        FROM conversations.user_token t
+	        JOIN conversations.users u ON u.id = t.user_id
+	       WHERE ($1 = '' OR t.user_id = $1::uuid)
+	         AND ($2::bool OR t.revoked_at IS NULL)
+	       ORDER BY t.created_at DESC, t.id DESC`
+	rows, err := s.pool.Query(ctx, q, userID, includeRevoked)
+	if err != nil {
+		return nil, fmt.Errorf("list tokens: %w", err)
+	}
+	defer rows.Close()
+	var out []users.Token
+	for rows.Next() {
+		t, err := scanToken(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan token: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *pgStore) GetToken(ctx context.Context, id string) (users.Token, error) {
+	// A malformed id is no token: an answer, not a 22P02 outage.
+	if _, err := uuid.Parse(id); err != nil {
+		return users.Token{}, users.ErrNotFound
+	}
+	t, err := scanToken(s.pool.QueryRow(ctx, `SELECT `+tokenColumns+`
+	        FROM conversations.user_token t
+	        JOIN conversations.users u ON u.id = t.user_id
+	       WHERE t.id = $1::uuid`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return users.Token{}, users.ErrNotFound
+	}
+	if err != nil {
+		return users.Token{}, fmt.Errorf("get token %s: %w", id, err)
+	}
+	return t, nil
+}
+
+// RevokeToken tombstones one credential. The row is never hard-deleted, so a
+// second revoke changes nothing and falls through to GetToken, which returns
+// the existing tombstone — revocation is idempotent. An unknown id is
+// ErrNotFound via the same GetToken miss.
+func (s *pgStore) RevokeToken(ctx context.Context, id string) (users.Token, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return users.Token{}, users.ErrNotFound
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE conversations.user_token SET revoked_at = now()
+		  WHERE id = $1::uuid AND revoked_at IS NULL`, id); err != nil {
+		return users.Token{}, fmt.Errorf("revoke token %s: %w", id, err)
+	}
+	return s.GetToken(ctx, id)
 }
 
 // LookupUsername resolves an active username to its id. The WHERE clause

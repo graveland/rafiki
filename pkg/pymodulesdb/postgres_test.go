@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/pymodules"
 	"go.graveland.dev/rafiki/pkg/store"
+	"go.graveland.dev/rafiki/pkg/users"
 	"go.graveland.dev/rafiki/pkg/usersdb"
 
 	"github.com/multigres/testkit/assert"
@@ -59,7 +60,7 @@ func testStore(t *testing.T) (pymodules.Store, *pgxpool.Pool) {
 // real users, exactly as production callers resolve it.
 func newOwner(t *testing.T, pool *pgxpool.Pool, username string) string {
 	t.Helper()
-	u, _, err := usersdb.NewPostgresStore(pool).Create(context.Background(), username, false)
+	u, _, err := usersdb.NewPostgresStore(pool).Create(context.Background(), users.NewUser{Username: username})
 	assert.NewAborting(t).NoError(err, "create user %s", username)
 	return u.ID
 }

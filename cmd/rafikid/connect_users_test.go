@@ -30,13 +30,16 @@ type userAdminFakeStore struct {
 	listLimit int // the limit the store actually received
 }
 
-func (f *userAdminFakeStore) Create(_ context.Context, username string, isAdmin bool) (users.User, string, error) {
+func (f *userAdminFakeStore) Create(_ context.Context, u users.NewUser) (users.User, string, error) {
 	if f.createErr != nil {
 		return users.User{}, "", f.createErr
 	}
-	u := users.User{ID: "u_" + username, Username: username, IsAdmin: isAdmin, CreatedAt: time.Unix(100, 0).UTC()}
-	f.rows = append(f.rows, u)
-	return u, "rfk_tok", nil
+	created := users.User{ID: "u_" + u.Username, Username: u.Username, IsAdmin: u.IsAdmin, CreatedAt: time.Unix(100, 0).UTC()}
+	f.rows = append(f.rows, created)
+	if !u.MintToken {
+		return created, "", nil
+	}
+	return created, "rfk_tok", nil
 }
 
 func (f *userAdminFakeStore) List(_ context.Context, _ bool, limit int) ([]users.User, error) {
@@ -57,6 +60,21 @@ func (f *userAdminFakeStore) Authenticate(context.Context, string) (users.Identi
 }
 func (f *userAdminFakeStore) CountActive(context.Context) (int, error) { panic("unused") }
 func (f *userAdminFakeStore) LookupUsername(context.Context, string) (string, error) {
+	panic("unused")
+}
+func (f *userAdminFakeStore) SetEmail(context.Context, string, string) (users.User, error) {
+	panic("unused")
+}
+func (f *userAdminFakeStore) MintToken(context.Context, string, users.NewToken) (users.Token, string, error) {
+	panic("unused")
+}
+func (f *userAdminFakeStore) ListTokens(context.Context, string, bool) ([]users.Token, error) {
+	panic("unused")
+}
+func (f *userAdminFakeStore) GetToken(context.Context, string) (users.Token, error) {
+	panic("unused")
+}
+func (f *userAdminFakeStore) RevokeToken(context.Context, string) (users.Token, error) {
 	panic("unused")
 }
 

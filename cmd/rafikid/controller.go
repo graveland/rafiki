@@ -5210,7 +5210,7 @@ func (c *Controller) createUser(ctx context.Context, username string, isAdmin bo
 	if c.users == nil {
 		return protocol.UserCreateResponseData{}, errNoUserStore
 	}
-	u, token, err := c.users.Create(ctx, username, isAdmin)
+	u, token, err := c.users.Create(ctx, users.NewUser{Username: username, IsAdmin: isAdmin, MintToken: true})
 	if err != nil {
 		return protocol.UserCreateResponseData{}, err
 	}

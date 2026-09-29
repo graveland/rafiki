@@ -50,7 +50,7 @@ func (s oneUserStore) Authenticate(_ context.Context, token string) (users.Ident
 	}
 	return users.Identity{}, users.ErrNotFound
 }
-func (s oneUserStore) Create(context.Context, string, bool) (users.User, string, error) {
+func (s oneUserStore) Create(context.Context, users.NewUser) (users.User, string, error) {
 	return users.User{}, "", users.ErrNotFound
 }
 func (s oneUserStore) List(context.Context, bool, int) ([]users.User, error) { return nil, nil }
@@ -58,6 +58,21 @@ func (s oneUserStore) Delete(context.Context, string) error                  { r
 func (s oneUserStore) CountActive(context.Context) (int, error)              { return 1, nil }
 func (s oneUserStore) LookupUsername(context.Context, string) (string, error) {
 	panic("unused")
+}
+func (s oneUserStore) SetEmail(context.Context, string, string) (users.User, error) {
+	return users.User{}, users.ErrNotFound
+}
+func (s oneUserStore) MintToken(context.Context, string, users.NewToken) (users.Token, string, error) {
+	return users.Token{}, "", users.ErrNotFound
+}
+func (s oneUserStore) ListTokens(context.Context, string, bool) ([]users.Token, error) {
+	return nil, nil
+}
+func (s oneUserStore) GetToken(context.Context, string) (users.Token, error) {
+	return users.Token{}, users.ErrNotFound
+}
+func (s oneUserStore) RevokeToken(context.Context, string) (users.Token, error) {
+	return users.Token{}, users.ErrNotFound
 }
 
 // identityLifecycle records the identity the face's middleware put on the

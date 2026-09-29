@@ -80,7 +80,7 @@ The token is printed exactly once and cannot be recovered afterward.`,
 // be logged, since it authenticates both faces of the daemon exactly like any
 // other user token.
 func runUserCreateCLI(ctx context.Context, out io.Writer, store users.Store, name string, admin bool) error {
-	u, token, err := store.Create(ctx, name, admin)
+	u, token, err := store.Create(ctx, users.NewUser{Username: name, IsAdmin: admin, MintToken: true})
 	if err != nil {
 		if errors.Is(err, users.ErrUsernameTaken) {
 			return fmt.Errorf("user %q already exists", name)
