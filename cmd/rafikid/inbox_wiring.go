@@ -85,7 +85,17 @@ func (c *Controller) validateSendTarget(childID string) error {
 	case protocol.StatusShuttingDown:
 		return &connectapi.ControllerError{Code: protocol.ErrChildShuttingDown, Message: "child is shutting down"}
 	case protocol.StatusExited:
-		return &connectapi.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		// A resume/respawn claim in flight means this is not really a dead
+		// child, just one whose stored status has not caught up yet (see
+		// childClaimSet.isClaimed). Rejecting here used to fail the durable
+		// Accept for anything pushed at a child mid-crash-recovery, degrading
+		// it to an in-memory orphan whose one retry hit this exact same
+		// rejection a moment later and lost the message for good. Falling
+		// through lets it queue durably instead, so replayInbox's post-resume
+		// drain can still deliver it once the child is live again.
+		if !c.spawnClaims.isClaimed(childID) {
+			return &connectapi.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+		}
 	}
 	return nil
 }

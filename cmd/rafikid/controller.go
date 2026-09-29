@@ -2379,6 +2379,19 @@ func (s *childClaimSet) release(id string) {
 	s.mu.Unlock()
 }
 
+// isClaimed reports whether id has a resume/respawn in flight. The stored
+// snapshot reads exited for the child's whole claimed window (recoverOne, and
+// Resume/RespawnChild's own check-then-act sequence, both write that status
+// before the claim is taken and only replace it once the new engine is fully
+// live) — so this is what lets a caller tell "exited" from "about to be
+// live again" apart. See validateSendTarget's use.
+func (s *childClaimSet) isClaimed(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.ids[id]
+	return ok
+}
+
 // resumeOwnerUserID resolves the owner's user id for a resumed child.
 //
 // snap.OwnerUserID is authoritative when present: it was written at the
