@@ -71,8 +71,9 @@ const (
 	OriginOIDC    TokenOrigin = "oidc"
 )
 
-// NewToken is the input to Store.MintToken. TTL zero (or negative) means the
-// token never expires; a positive TTL sets expires_at = now() + TTL.
+// NewToken is the input to Store.MintToken. TTL zero means the token never
+// expires; a positive TTL sets expires_at = now() + TTL, exact to the
+// microsecond. A negative TTL is refused.
 type NewToken struct {
 	Name   string
 	Origin TokenOrigin

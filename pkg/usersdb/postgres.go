@@ -159,14 +159,35 @@ func (s *pgStore) Delete(ctx context.Context, username string) error {
 	// A tombstone, never a DELETE: hard-deleting would cascade an UPDATE
 	// across every historical turn's author_user_id, inside compressed
 	// hypertable chunks. See the design doc, Decision 6.
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete user: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var userID string
+	err = tx.QueryRow(ctx,
 		`UPDATE conversations.users SET deleted_at = now()
-		  WHERE username = $1 AND deleted_at IS NULL`, username)
+		  WHERE username = $1 AND deleted_at IS NULL
+		  RETURNING id::text`, username).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return users.ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return users.ErrNotFound
+
+	// Nothing else revokes a user_identity row. Without this, a recreated
+	// user with the same email could never rebind: ResolveOIDC's step 1
+	// would keep finding the tombstoned owner's stale active binding.
+	if _, err := tx.Exec(ctx,
+		`UPDATE conversations.user_identity SET revoked_at = now()
+		  WHERE user_id = $1 AND revoked_at IS NULL`, userID); err != nil {
+		return fmt.Errorf("revoke user identities: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete user: %w", err)
 	}
 	return nil
 }
@@ -223,6 +244,9 @@ func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken
 	if t.Origin != users.OriginService && t.Origin != users.OriginOIDC {
 		return users.Token{}, "", fmt.Errorf("users: unknown token origin %q", t.Origin)
 	}
+	if t.TTL < 0 {
+		return users.Token{}, "", fmt.Errorf("users: token TTL must not be negative")
+	}
 	if _, err := uuid.Parse(userID); err != nil {
 		return users.Token{}, "", users.ErrNotFound
 	}
@@ -240,8 +264,8 @@ func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken
 			INSERT INTO conversations.user_token
 			       (user_id, token_sha256, name, origin, expires_at)
 			SELECT target.id, $2, $3, $4,
-			       CASE WHEN $5 > 0
-			            THEN now() + ($5::bigint * interval '1 second')
+			       CASE WHEN $5::bigint > 0
+			            THEN now() + ($5::bigint * interval '1 microsecond')
 			            ELSE NULL END
 			  FROM target
 			RETURNING id::text, user_id::text, name, origin, created_at, expires_at
@@ -250,7 +274,7 @@ func (s *pgStore) MintToken(ctx context.Context, userID string, t users.NewToken
 		       inserted.origin, inserted.created_at, inserted.expires_at
 		  FROM inserted CROSS JOIN target`,
 		userID, users.HashToken(token), t.Name, string(t.Origin),
-		int64(t.TTL/time.Second)).Scan(
+		t.TTL.Microseconds()).Scan(
 		&tok.ID, &tok.UserID, &tok.Username, &tok.Name, &tok.Origin,
 		&tok.CreatedAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {

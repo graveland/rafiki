@@ -608,6 +608,44 @@ func TestMintTokenRejectsBadNameAndOrigin(t *testing.T) {
 	}
 }
 
+// W2-M4 regression: a sub-second TTL must not truncate to "never expires",
+// and the expiry must be exact to the microsecond rather than the nearest
+// second.
+func TestMintTokenSubSecondTTLIsExact(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx := context.Background()
+	s, _ := testStore(t)
+
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent", MintToken: true})
+	c.Require().NoError(err, "create")
+
+	before := time.Now()
+	tok, _, err := s.MintToken(ctx, u.ID, users.NewToken{Name: "ephemeral", Origin: users.OriginService, TTL: 500 * time.Millisecond})
+	c.Require().NoError(err, "mint")
+	c.Require().NotNil(tok.ExpiresAt, "a 500ms TTL must not be treated as never-expiring")
+
+	want := before.Add(500 * time.Millisecond)
+	delta := tok.ExpiresAt.Sub(want)
+	if delta < -100*time.Millisecond || delta > 100*time.Millisecond {
+		t.Fatalf("expires_at = %v, want within 100ms of %v (delta %v)", tok.ExpiresAt, want, delta)
+	}
+}
+
+// W2-M4 regression: a negative TTL is refused rather than silently minting a
+// never-expiring token.
+func TestMintTokenNegativeTTLIsRejected(t *testing.T) {
+	ctx := context.Background()
+	s, _ := testStore(t)
+	c := assert.NewAborting(t)
+
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent", MintToken: true})
+	c.Require().NoError(err, "create")
+
+	_, _, err = s.MintToken(ctx, u.ID, users.NewToken{Name: "x", Origin: users.OriginService, TTL: -time.Second})
+	c.Error(err, "negative TTL")
+	c.False(errors.Is(err, users.ErrNotFound), "negative TTL must be a plain error, not ErrNotFound")
+}
+
 // ListTokens filters by user and by revocation, orders newest first, and an
 // empty userID means every user's tokens — including a tombstoned user's,
 // since credentials are filtered, never deleted.

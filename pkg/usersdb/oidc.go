@@ -88,11 +88,15 @@ func (s *oidcResolver) resolveOnce(ctx context.Context, c users.OIDCClaims) (u u
 		return users.User{}, false, fmt.Errorf("resolve oidc: lookup binding: %w", err)
 	}
 
-	// Step 2: no binding yet. Find the active user this email belongs to.
+	// Step 2: no binding yet. Find the active user this email belongs to,
+	// locking the row: two concurrent first logins for the same email but
+	// different subjects must serialize here, or both can pass the step-3
+	// conflict check before either has inserted its binding.
 	err = tx.QueryRow(ctx,
-		`SELECT id::text, username, is_admin, created_at FROM conversations.users
-		  WHERE email = $1 AND deleted_at IS NULL`,
-		c.Email).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt)
+		`SELECT id::text, username, is_admin, created_at, COALESCE(email,'') FROM conversations.users
+		  WHERE email = $1 AND deleted_at IS NULL
+		  FOR UPDATE`,
+		c.Email).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &u.Email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.User{}, false, users.ErrOIDCNoUser
 	}
@@ -142,15 +146,13 @@ func (s *oidcResolver) resolveOnce(ctx context.Context, c users.OIDCClaims) (u u
 }
 
 // loadUser reads a user by id within tx, reporting separately whether it is
-// tombstoned. It fills only ID, Username, IsAdmin and CreatedAt: task 2.1
-// adds users.User.Email in a parallel worktree and this package must not
-// reference it yet.
+// tombstoned.
 func (s *oidcResolver) loadUser(ctx context.Context, tx pgx.Tx, id string) (users.User, bool, error) {
 	var u users.User
 	var deletedAt *time.Time
 	err := tx.QueryRow(ctx,
-		`SELECT id::text, username, is_admin, created_at, deleted_at FROM conversations.users
-		  WHERE id = $1`, id).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt)
+		`SELECT id::text, username, is_admin, created_at, deleted_at, COALESCE(email,'') FROM conversations.users
+		  WHERE id = $1`, id).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &deletedAt, &u.Email)
 	if err != nil {
 		return users.User{}, false, err
 	}
