@@ -3832,17 +3832,19 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// whatever Result is stored at settle time). Clear it when a new turn
 	// starts — the transition out of a non-working status into a working one.
 	// Script children are exempt: their result is the work product of the whole
-	// run, not of one turn. The clear fires only when a result is present, so
-	// the ordinary per-turn status churn costs no extra row write.
+	// run, not of one turn. The check lives inside the Update closure, not in a
+	// preceding Get: SetResult runs on a Connect handler goroutine, and a result
+	// landing between a Get and the Update would otherwise be wiped. The guard
+	// means the clear mutates only when a result was actually present, so the
+	// ordinary per-turn status churn costs no extra row write — persistence is
+	// this function's unconditional tail writeRecord, not a second one here.
 	if ok && !isWorkingStatus(storePrev) && isWorkingStatus(newStatus) {
-		if snap, found := c.st.Get(childID); found && snap.Kind != protocol.KindScript && snap.Result != "" {
-			err := c.st.Update(childID, func(s *childstore.Session) { s.Result = "" })
-			if err == nil {
-				err = c.writeRecord(childID)
+		if err := c.st.Update(childID, func(s *childstore.Session) {
+			if s.Kind != protocol.KindScript && s.Result != "" {
+				s.Result = ""
 			}
-			if err != nil {
-				slog.Warn("clear turn result", "childId", childID, "error", err)
-			}
+		}); err != nil {
+			slog.Warn("clear turn result", "childId", childID, "error", err)
 		}
 	}
 	// Release any event batches deferred while this child was mid-turn.

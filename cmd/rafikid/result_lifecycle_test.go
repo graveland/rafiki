@@ -48,9 +48,11 @@ func prInsertChild(t *testing.T, c *Controller, id, kind string) {
 }
 
 // TestResultClearedWhenLLMChildStartsTurn pins the per-turn rule for every
-// LLM child kind: idle → running clears a stored result — an earlier turn's
+// LLM child kind: idle → streaming clears a stored result — an earlier turn's
 // result must not ride a later settle fragment — and the persisted record is
-// rewritten with the cleared value.
+// rewritten with the cleared value. The transition is the one those kinds
+// actually emit (the state machine's agent_start case), not a nominal
+// running.
 func TestResultClearedWhenLLMChildStartsTurn(t *testing.T) {
 	ck := assert.NewAborting(t)
 	for _, kind := range []string{protocol.KindFundi, protocol.KindClaude} {
@@ -59,7 +61,7 @@ func TestResultClearedWhenLLMChildStartsTurn(t *testing.T) {
 		prInsertChild(t, c, id, kind)
 		_ = c.st.Update(id, func(s *childstore.Session) { s.Result = `{"stale":true}` })
 
-		c.handleStatusChange(id, protocol.StatusRunning, protocol.StatusIdle)
+		c.handleStatusChange(id, protocol.StatusStreaming, protocol.StatusIdle)
 
 		snap, ok := c.st.Get(id)
 		ck.Require().True(ok, kind+": child vanished")
@@ -67,7 +69,7 @@ func TestResultClearedWhenLLMChildStartsTurn(t *testing.T) {
 		up, found := rec.lastUpsertFor(id)
 		ck.Require().True(found, kind+": the clear must rewrite the persisted record")
 		ck.Eq("", up.Result, kind+": the persisted record must carry the cleared result")
-		ck.Eq(string(protocol.StatusRunning), up.Status, kind+": persisted record status")
+		ck.Eq(string(protocol.StatusStreaming), up.Status, kind+": persisted record status")
 	}
 }
 
@@ -91,16 +93,17 @@ func TestResultSurvivesForScriptChildren(t *testing.T) {
 }
 
 // TestResultNotClearedBetweenWorkingStatuses pins the guard on the
-// transition, not on the destination: running → tool_running is working →
-// working, so a result set mid-turn survives the status churn inside a turn.
+// transition, not on the destination: streaming → tool_running is working →
+// working (the in-turn churn the state machine actually produces, via
+// tool_execution_start/end), so a result set mid-turn survives it.
 func TestResultNotClearedBetweenWorkingStatuses(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c, _, _, _ := prResultFixture(t)
 	prInsertChild(t, c, "c_w1", protocol.KindFundi)
-	_, _ = c.st.SetStatus("c_w1", protocol.StatusRunning)
+	_, _ = c.st.SetStatus("c_w1", protocol.StatusStreaming)
 	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.Result = `{"mid":true}` })
 
-	c.handleStatusChange("c_w1", protocol.StatusToolRunning, protocol.StatusRunning)
+	c.handleStatusChange("c_w1", protocol.StatusToolRunning, protocol.StatusStreaming)
 
 	snap, ok := c.st.Get("c_w1")
 	ck.Require().True(ok, "child vanished")
@@ -117,13 +120,13 @@ func TestResultSetDuringTurnRidesThatTurnsSettle(t *testing.T) {
 	prInsertChild(t, c, "c_w1", protocol.KindFundi)
 	_ = c.st.Update("c_w1", func(s *childstore.Session) { s.Result = `{"stale":1}` })
 
-	c.handleStatusChange("c_w1", protocol.StatusRunning, protocol.StatusIdle)
+	c.handleStatusChange("c_w1", protocol.StatusStreaming, protocol.StatusIdle)
 	ck.Empty(cap.batches(), "a turn start must not settle anything")
 
 	hub := c.connectScriptHub()
 	ck.NoError(hub.SetResult(context.Background(), "c_w1", `"MID-TURN"`), "mid-turn SetResult")
 
-	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusRunning)
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
 	clk.Advance(6 * time.Second)
 
 	batches := cap.batches()

@@ -43,11 +43,17 @@ func isWorkingStatus(s protocol.Status) bool {
 
 // renderJSONPayload renders a report payload or stored result for a
 // parent's fragment: a JSON string is shown decoded (so newlines are
-// newlines), any other JSON value verbatim.
+// newlines), any other JSON value — null included — verbatim.
+//
+// The leading-quote guard is what keeps null verbatim: unmarshalling JSON
+// null into a plain string is a Go no-op (no error, value untouched), so an
+// unguarded decode would silently render a null payload as the empty string.
 func renderJSONPayload(s string) string {
-	var decoded string
-	if err := json.Unmarshal([]byte(s), &decoded); err == nil {
-		return decoded
+	if len(s) > 0 && s[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal([]byte(s), &decoded); err == nil {
+			return decoded
+		}
 	}
 	return s
 }

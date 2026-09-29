@@ -163,6 +163,12 @@ func TestReportFragmentWording(t *testing.T) {
 	ck.Eq(`agent c_x (nm) reported message: {"a":1}`,
 		scriptReportFragment("c_x", "nm", "message", `{"a":1}`),
 		"a non-string JSON value must stay verbatim")
+	// null too: unmarshalling null into a string is a Go no-op (no error,
+	// value untouched), so an unguarded decode would render it as "" and
+	// silently drop the payload.
+	ck.Eq("agent c_x (nm) reported done: null",
+		scriptReportFragment("c_x", "nm", "done", `null`),
+		"a null payload must stay verbatim, not vanish")
 }
 
 // TestSetResultStoresLastWriteWins pins 2.3's storage half: the result lands
