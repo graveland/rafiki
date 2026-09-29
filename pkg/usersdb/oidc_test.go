@@ -153,10 +153,18 @@ func TestResolveOIDCOtherIssuerIgnored(t *testing.T) {
 }
 
 // Two concurrent first logins for the SAME (issuer, subject) must resolve to
-// one binding. Since the step-2 email lookup now takes FOR UPDATE, the two
-// attempts serialize there and the second one's step 1 finds the row the
-// first committed — the 23505-on-insert retry branch is defense-in-depth for
-// a race this lock already closes, not the primary mechanism.
+// one binding. Both goroutines reach step 1 before either has committed, so
+// both miss it and both reach step 2, where the FOR [NO KEY] UPDATE lock
+// only serializes them — it doesn't make the loser re-see the winner's row,
+// since the loser's row is unchanged (same user, same email). The loser's
+// step 3 then passes too: the only binding at that point is its own
+// (issuer, subject), which `subject <> $3` excludes. It's the loser's
+// step-4 INSERT that hits 23505 on user_identity_active, and THAT is what
+// triggers the retry back to step 1 — which now finds the winner's
+// committed row. So for this SAME-subject race, the 23505 retry remains
+// the primary mechanism, not defense-in-depth; the row lock only closes
+// the DIFFERENT-subject double-bind race exercised by
+// TestResolveOIDCSameEmailDifferentSubjects below.
 func TestResolveOIDCConcurrentFirstLogin(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()

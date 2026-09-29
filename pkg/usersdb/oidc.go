@@ -91,11 +91,15 @@ func (s *oidcResolver) resolveOnce(ctx context.Context, c users.OIDCClaims) (u u
 	// Step 2: no binding yet. Find the active user this email belongs to,
 	// locking the row: two concurrent first logins for the same email but
 	// different subjects must serialize here, or both can pass the step-3
-	// conflict check before either has inserted its binding.
+	// conflict check before either has inserted its binding. FOR NO KEY
+	// UPDATE rather than FOR UPDATE: it still self-conflicts (so two
+	// Resolves serialize) and still conflicts with Delete's own FOR NO KEY
+	// UPDATE, but it doesn't block an unrelated FK insert that merely
+	// references this user (a new conversation, turn, or child).
 	err = tx.QueryRow(ctx,
 		`SELECT id::text, username, is_admin, created_at, COALESCE(email,'') FROM conversations.users
 		  WHERE email = $1 AND deleted_at IS NULL
-		  FOR UPDATE`,
+		  FOR NO KEY UPDATE`,
 		c.Email).Scan(&u.ID, &u.Username, &u.IsAdmin, &u.CreatedAt, &u.Email)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return users.User{}, false, users.ErrOIDCNoUser

@@ -73,7 +73,7 @@ const (
 
 // NewToken is the input to Store.MintToken. TTL zero means the token never
 // expires; a positive TTL sets expires_at = now() + TTL, exact to the
-// microsecond. A negative TTL is refused.
+// microsecond for any practical TTL. A negative TTL is refused.
 type NewToken struct {
 	Name   string
 	Origin TokenOrigin
@@ -116,6 +116,12 @@ type Store interface {
 	Create(ctx context.Context, u NewUser) (User, string, error)
 	Authenticate(ctx context.Context, token string) (Identity, error)
 	List(ctx context.Context, includeDeleted bool, limit int) ([]User, error)
+	// Delete tombstones the named ACTIVE user and, in the same transaction,
+	// revokes (stamps revoked_at on) that user's active OIDC identity
+	// bindings. Without that, a binding surviving the tombstone would let a
+	// recreated user with the same email never rebind: ResolveOIDC's step 1
+	// would keep finding the stale binding first. Unknown or already-
+	// tombstoned username is ErrNotFound.
 	Delete(ctx context.Context, username string) error
 	CountActive(ctx context.Context) (int, error)
 	// SetEmail normalizes email and stores it on the named ACTIVE user — ""
