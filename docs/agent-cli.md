@@ -104,7 +104,9 @@ cannot resolve fails `unauthenticated`. `newConnectEndpoint`
 and fails before the round trip when a remote profile has no token at all. If
 `rafiki user create` refuses against a remote daemon, check that profile's
 token file before suspecting the daemon — and mint the replacement with
-`rafikid user create` on the daemon host, which never authenticates at all.
+`rafikid user token mint <name>` on the daemon host (for an existing user,
+`rafikid user create` answers "already exists"); the host CLI never
+authenticates at all.
 
 ## `stats`
 
