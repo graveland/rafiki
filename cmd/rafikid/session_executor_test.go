@@ -308,3 +308,33 @@ func TestExecutorSessionConnectNilIdentityFallsBackToUDSTrust(t *testing.T) {
 	ck.NoError(err)
 	ck.Eq("owner="+wantOwner+",machine=m1", ready.GetSelector(), "selector = %q, want owner=%s,machine=m1", ready.GetSelector(), wantOwner)
 }
+
+// TestSessionExecutorCarriesOwner pins the session half of the ownership
+// rule: the ticket minted for a session executor carries the identity's
+// durable UserID — what selection's ownership rule compares against the
+// child's OwnerUserID — while Owner (the "owner" label and the Admits
+// selector) stays the display name. An identity with no UserID (the UDS's
+// nil-identity shape after connectIdentity maps it) mints an UNOWNED
+// executor: "" on both sides is the only thing it matches, exactly like a
+// child it spawns.
+func TestSessionExecutorCarriesOwner(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newSessionTestController(t)
+
+	got, err := c.executorSession(context.Background(), nil, users.Identity{UserID: "u1", Username: "brent"},
+		protocol.ExecutorSessionRequest{Name: "m-abc"})
+	ck.Require().NoError(err)
+	grant, ok := c.execPool.(*fakePool).Tickets().Redeem(got.Ticket)
+	ck.Require().True(ok, "the minted ticket must redeem back to its grant")
+	ck.Eq("u1", grant.OwnerUserID, "the ticket grant's OwnerUserID")
+	ck.Eq("u1", grant.Executor().OwnerUserID, "the transient row the grant synthesises")
+	ck.Eq("brent", grant.Owner, "Owner must stay the DISPLAY name, not the id")
+
+	anon := newSessionTestController(t)
+	unowned, err := anon.executorSession(context.Background(), "anon", users.Identity{},
+		protocol.ExecutorSessionRequest{Name: "m-abc"})
+	ck.Require().NoError(err)
+	anonGrant, ok := anon.execPool.(*fakePool).Tickets().Redeem(unowned.Ticket)
+	ck.Require().True(ok, "the anonymous ticket must redeem back to its grant")
+	ck.Empty(anonGrant.OwnerUserID, "a session executor minted for an identity with no id must be unowned, got %q", anonGrant.OwnerUserID)
+}

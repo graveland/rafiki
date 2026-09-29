@@ -65,6 +65,13 @@ func ex(id string, labels map[string]string, admits string) execpool.LiveExecuto
 	}}
 }
 
+// exOwned is ex plus an OwnerUserID, for the ownership-selection tests.
+func exOwned(id string, labels map[string]string, admits, ownerUserID string) execpool.LiveExecutor {
+	le := ex(id, labels, admits)
+	le.Executor.OwnerUserID = ownerUserID
+	return le
+}
+
 // selectFixture: a coordinator that landed on the `env=home` set, and a child
 // beneath it.
 func selectFixture(t *testing.T, parentSelector string, live ...execpool.LiveExecutor) *Controller {
@@ -97,7 +104,7 @@ func TestChildCannotReachAnExecutorItsParentCouldNot(t *testing.T) {
 	)
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
-	}, "")
+	}, executorOwner{})
 	ck.Require().Error(err, "a child reached outside its parent's effective set")
 	ck.False(!strings.Contains(err.Error(), "parent") && !strings.Contains(err.Error(), "PARENT"), "the refusal must say the parent's set is why: %v", err)
 }
@@ -159,7 +166,7 @@ func TestNoMatchNamesTheExcludingPredicatePerExecutor(t *testing.T) {
 	)
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work,os=linux",
-	}, "")
+	}, executorOwner{})
 	ck.Require().Error(err, "want a refusal")
 	msg := err.Error()
 	for _, want := range []string{
@@ -178,7 +185,7 @@ func TestNoMatchFailsImmediatelyRatherThanQueueing(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := selectFixture(t, "")
 	start := time.Now()
-	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, "")
+	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=nowhere"}, executorOwner{})
 	ck.Error(err, "want a refusal")
 	ck.LessOrEqual(time.Second, time.Since(start), "selection took")
 }
@@ -248,14 +255,95 @@ func TestTopLevelSpawnIsAdmittedByItsAttestedOwner(t *testing.T) {
 	c := selectFixture(t, "", ex("laptop", map[string]string{"kind": "client", "owner": "brent"}, "owner=brent"))
 	req := protocol.SpawnRequest{ExecutorSelector: "owner=brent,kind=client"}
 
-	chosen, err := c.chooseExecutor(req, "brent")
+	chosen, err := c.chooseExecutor(req, executorOwner{Name: "brent"})
 	ck.NoError(err, "a top-level spawn with its owner attested must reach the laptop executor")
 	ck.Eq("laptop", chosen.ID, "chose")
 
 	// And the failure mode this guards against: an unattested (or wrong)
 	// owner must still be refused, not silently admitted some other way —
 	// proving the fix checks the right thing rather than always succeeding.
-	if _, err := c.chooseExecutor(req, ""); err == nil {
+	if _, err := c.chooseExecutor(req, executorOwner{}); err == nil {
 		t.Fatal("a top-level spawn with no attested owner reached an owner-scoped executor")
 	}
+}
+
+// The ownership rule (verbatim from the design): "Selection requires
+// executor.owner_user_id = child.owner_user_id IN ADDITION to Admits ...
+// No admin exception." These four tests pin the pieces that rule needs to
+// hold, independent of Admits, which the tests above already cover.
+
+// TestSelectRefusesOtherUsersExecutor: A's executor, empty Admits, B's
+// top-level child — no match. Admits alone would admit everyone; ownership
+// must still refuse.
+func TestSelectRefusesOtherUsersExecutor(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := selectFixture(t, "", exOwned("a-exec", map[string]string{"env": "home"}, "", "u_A"))
+	_, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{UserID: "u_B", Name: "bob"})
+	ck.Error(err, "B must not reach A's executor even though Admits is empty")
+	// The refusal must name the ownership rule, so the reason is legible —
+	// and must never name the other user.
+	ck.StrContains(err.Error(), "belongs to another user", "the refusal does not name the owner mismatch: %v", err)
+	ck.False(strings.Contains(err.Error(), "u_A"), "the refusal names the other user's id: %v", err)
+}
+
+// TestSelectUnownedServesOnlyUnowned: an unowned executor serves an unowned
+// child, and never a user's child — with no admin exception. executorOwner
+// carries no IsAdmin bit at all, which is what makes an admin exception
+// structurally impossible here; "admin" is just another non-empty UserID.
+func TestSelectUnownedServesOnlyUnowned(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := selectFixture(t, "", exOwned("unowned-exec", map[string]string{"env": "home"}, "", ""))
+
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{})
+	ck.Require().NoError(err, "an unowned executor must serve an unowned child")
+	ck.Eq("unowned-exec", chosen.ID, "chose")
+
+	_, err = c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: "env=home"}, executorOwner{UserID: "u_admin", Name: "admin"})
+	ck.Error(err, "an admin user's child must not reach an unowned executor — no admin exception")
+}
+
+// TestExecutorSelectionUnownedServesOnlyUnowned is a -run shim, not a second
+// test: the brief's verify command matches the UNANCHORED substrings
+// Executor|Owner|Session|Ticket, and "TestSelectUnownedServesOnlyUnowned"
+// contains none of them (no "Executor", and "Unowned" does not contain
+// "Owner"), so without this wrapper the pinned body silently never ran under
+// that command. The subtest calls the pinned body by name, exactly as the
+// repo's other pattern shims do.
+func TestExecutorSelectionUnownedServesOnlyUnowned(t *testing.T) {
+	t.Run("unowned-serves-only-unowned", TestSelectUnownedServesOnlyUnowned)
+}
+
+// TestSelectChildInheritsParentOwner: a sub-agent of A's child can use A's
+// executor; B's cannot. Mirrors how Controller.Spawn actually threads
+// ownership for a subagent (controllerSpawner.Spawn passes the PARENT's own
+// OwnerUserID, not a re-derivation) by supplying owner.UserID directly at
+// the ParentChildID call site, the same way that real path does.
+func TestSelectChildInheritsParentOwner(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := selectFixture(t, "", exOwned("a-exec", map[string]string{"env": "home"}, "", "u_A"))
+
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{
+		ParentChildID: "c_parent", ExecutorSelector: "env=home",
+	}, executorOwner{UserID: "u_A"})
+	ck.Require().NoError(err, "a sub-agent of A's child must reach A's executor")
+	ck.Eq("a-exec", chosen.ID, "chose")
+
+	_, err = c.chooseExecutor(protocol.SpawnRequest{
+		ParentChildID: "c_parent", ExecutorSelector: "env=home",
+	}, executorOwner{UserID: "u_B"})
+	ck.Error(err, "B's sub-agent must not reach A's executor")
+}
+
+// TestSelectOwnerCheckBeforeAdmits: an Admits selector that would match B's
+// labels still refuses B — the owner check is not something Admits can route
+// around. B's own labels ("rafiki/kind=fundi") satisfy a-exec's Admits
+// selector exactly, so if the owner check ran after Admits (or not at all),
+// this spawn would wrongly succeed.
+func TestSelectOwnerCheckBeforeAdmits(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := selectFixture(t, "", exOwned("a-exec", nil, "rafiki/kind=fundi", "u_A"))
+	req := protocol.SpawnRequest{Labels: map[string]string{"rafiki/kind": "fundi"}}
+
+	_, err := c.chooseExecutor(req, executorOwner{UserID: "u_B", Name: "bob"})
+	ck.Error(err, "B's labels satisfy a-exec's Admits selector, but the owner mismatch must still refuse it")
 }

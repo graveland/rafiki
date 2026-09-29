@@ -65,3 +65,19 @@ func TestGrantBuildsADaemonWrittenExecutorRow(t *testing.T) {
 	c.Empty(e.SelfReported, "NOTHING about a transient executor is self-reported; every "+
 		"field here is written by the daemon from the authenticated connection")
 }
+
+// TestTicketGrantExecutorCarriesOwner pins the ownership half of the grant:
+// the transient row a ticket stands for carries the grant's durable
+// OwnerUserID — what selection's ownership rule compares — while the "owner"
+// label and the Admits selector stay the display name. An empty id stays
+// empty: the UDS's session executor is unowned, exactly like a child it
+// spawns.
+func TestTicketGrantExecutorCarriesOwner(t *testing.T) {
+	c := assert.NewAborting(t)
+	e := TicketGrant{ExecutorID: "e1", Owner: "brent", OwnerUserID: "u_brent"}.Executor()
+	c.Eq("u_brent", e.OwnerUserID, "the transient row must carry the grant's OwnerUserID, got")
+	c.Eq("owner=brent", e.Admits, "Admits must stay the DISPLAY name, got")
+
+	unowned := TicketGrant{ExecutorID: "e2", Owner: "root"}.Executor()
+	c.Empty(unowned.OwnerUserID, "a grant without an owner id must synthesise an unowned row, got %q", unowned.OwnerUserID)
+}

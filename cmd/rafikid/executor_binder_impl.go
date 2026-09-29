@@ -19,13 +19,13 @@ import (
 // asked to act for a different one, and selection here is a confinement
 // decision.
 type controllerBinder struct {
-	c         *Controller
-	req       protocol.SpawnRequest
-	ownerName string
+	c     *Controller
+	req   protocol.SpawnRequest
+	owner executorOwner
 }
 
-func (c *Controller) binderFor(req protocol.SpawnRequest, ownerName string) executorBinder {
-	return &controllerBinder{c: c, req: req, ownerName: ownerName}
+func (c *Controller) binderFor(req protocol.SpawnRequest, owner executorOwner) executorBinder {
+	return &controllerBinder{c: c, req: req, owner: owner}
 }
 
 // ChooseFor re-runs full selection. It is NOT a cached decision: the effective
@@ -35,7 +35,7 @@ func (c *Controller) binderFor(req protocol.SpawnRequest, ownerName string) exec
 // The error is explainNoMatch's per-candidate diagnostic, which boundExecutor
 // surfaces to the agent verbatim.
 func (b *controllerBinder) ChooseFor(string) (string, error) {
-	chosen, err := b.c.chooseExecutor(b.req, b.ownerName)
+	chosen, err := b.c.chooseExecutor(b.req, b.owner)
 	if err != nil {
 		return "", err
 	}

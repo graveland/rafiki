@@ -65,20 +65,30 @@ func promoteBareExecutorRef(req protocol.SpawnRequest) protocol.SpawnRequest {
 	return req
 }
 
+// executorOwner is the spawning identity's display name and durable id,
+// threaded through executor selection so the two can never be confused: Name
+// is what admissionLabels stamps into the child's "owner" label (matched by
+// an executor's Admits selector), and UserID is the value that becomes
+// childstore.Session.OwnerUserID for this spawn — sourced by the caller
+// (Controller.Spawn for a fresh spawn, resumeOwnerUserID for a resume) and
+// never re-derived here. effectiveExecutorSetFor compares UserID against
+// each live executor's own OwnerUserID; Name never enters that comparison.
+type executorOwner struct{ Name, UserID string }
+
 // chooseExecutor returns the executor the request's selector admits, computed
 // by narrowing the parent's effective set. It is the single place the choice
 // is made, so selectExecutor (client) and selectExecutorID (provisioning,
 // prompt visibility) can never disagree about which executor won.
-func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string) (executors.Executor, error) {
-	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
+func (c *Controller) chooseExecutor(req protocol.SpawnRequest, owner executorOwner) (executors.Executor, error) {
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, owner)
 	if err != nil {
 		return executors.Executor{}, err
 	}
 	if req.ExecutorRef != "" {
-		return c.resolveRef(req, req.ExecutorRef, candidates, nil, "", sel, childLabels, parentSet)
+		return c.resolveRef(req, req.ExecutorRef, candidates, nil, "", sel, childLabels, parentSet, owner.UserID)
 	}
 	if len(candidates) == 0 {
-		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels)
+		return executors.Executor{}, c.explainNoMatch(req, sel, parentSet, childLabels, owner.UserID)
 	}
 	return candidates[0], nil
 }
@@ -87,7 +97,7 @@ func (c *Controller) chooseExecutor(req protocol.SpawnRequest, ownerName string)
 // picking a winner or explaining a failure — chooseLaunchExecutor narrows
 // this further by launch kind before doing either, so a change to admission
 // or lineage narrowing can never happen in only one of the two callers.
-func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, ownerName string) (
+func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner executorOwner) (
 	candidates []executors.Executor, parentSet []executors.Executor, childLabels map[string]string, sel executors.Selector, err error,
 ) {
 	sel, err = executors.ParseSelector(req.ExecutorSelector)
@@ -98,8 +108,8 @@ func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner
 	// The child does not exist yet, so evaluate the PARENT's set and narrow
 	// with the request's selector — which is exactly what
 	// effectiveExecutorSet will compute for the child once it is stored.
-	childLabels = c.admissionLabels(req, ownerName)
-	parentSet, err = c.effectiveExecutorSetFor(req.ParentChildID, childLabels)
+	childLabels = c.admissionLabels(req, owner)
+	parentSet, err = c.effectiveExecutorSetFor(req.ParentChildID, childLabels, owner.UserID)
 	if err != nil {
 		return nil, nil, nil, executors.Selector{}, err
 	}
@@ -120,8 +130,8 @@ func (c *Controller) narrowedExecutorCandidates(req protocol.SpawnRequest, owner
 // LiveExecutor.Proxies more generally): it only ever NARROWS what the
 // executor will accept, so a lying executor can only be chosen from a set its
 // admission selector already admitted — never a way to widen it.
-func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, ownerName, launchKind string) (executors.Executor, error) {
-	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
+func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, owner executorOwner, launchKind string) (executors.Executor, error) {
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, owner)
 	if err != nil {
 		return executors.Executor{}, err
 	}
@@ -133,10 +143,10 @@ func (c *Controller) chooseLaunchExecutor(req protocol.SpawnRequest, ownerName, 
 		}
 	}
 	if req.ExecutorRef != "" {
-		return c.resolveRef(req, req.ExecutorRef, kept, launchable, launchKind, sel, childLabels, parentSet)
+		return c.resolveRef(req, req.ExecutorRef, kept, launchable, launchKind, sel, childLabels, parentSet, owner.UserID)
 	}
 	if len(kept) == 0 {
-		return executors.Executor{}, c.explainNoLaunchMatch(req, sel, parentSet, childLabels, launchKind)
+		return executors.Executor{}, c.explainNoLaunchMatch(req, sel, parentSet, childLabels, launchKind, owner.UserID)
 	}
 	return kept[0], nil
 }
@@ -159,14 +169,14 @@ func launchKindSet(live []execpool.LiveExecutor, launchKind string) map[string]b
 // explainNoLaunchMatch mirrors explainNoMatch, adding "does not support
 // launching <kind>" as a fourth exclusion reason alongside disabled/
 // admission/workspace-mode/selector.
-func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string, launchKind string) error {
+func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string, launchKind, ownerUserID string) error {
 	launchable := launchKindSet(c.execPool.Live(), launchKind)
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "spawn refused: no executor can launch a %q child for selector %q.\n", launchKind, req.ExecutorSelector)
 	fmt.Fprintf(&sb, "  %d live executor(s), %d in your parent's set:\n", len(c.execPool.Live()), len(parentSet))
 	for _, le := range c.execPool.Live() {
 		e := le.Executor
-		reason := executorReason(e, req, launchable, launchKind, childSel, childLabels, parentSet)
+		reason := executorReason(e, req, launchable, launchKind, childSel, childLabels, parentSet, ownerUserID)
 		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
 	}
 	return errors.New(sb.String())
@@ -184,7 +194,7 @@ func (c *Controller) explainNoLaunchMatch(req protocol.SpawnRequest, childSel ex
 // enrolled with Admits "owner=<name>" (every session executor — see
 // ExecutorSession) would refuse EVERY top-level spawn, since the fallback of
 // an empty label map can never match a non-empty Admits selector.
-func (c *Controller) admissionLabels(req protocol.SpawnRequest, ownerName string) map[string]string {
+func (c *Controller) admissionLabels(req protocol.SpawnRequest, owner executorOwner) map[string]string {
 	if req.ParentChildID != "" {
 		if snap, ok := c.st.Get(req.ParentChildID); ok {
 			return snap.Labels
@@ -195,8 +205,8 @@ func (c *Controller) admissionLabels(req protocol.SpawnRequest, ownerName string
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	if ownerName != "" {
-		labels["owner"] = ownerName
+	if owner.Name != "" {
+		labels["owner"] = owner.Name
 	}
 	return labels
 }
@@ -245,17 +255,23 @@ func narrowByWorkspaceMode(candidates []executors.Executor, want string) []execu
 // authority decision.
 func (c *Controller) effectiveExecutorSet(childID string) ([]executors.Executor, error) {
 	childLabels := map[string]string{}
+	ownerUserID := ""
 	if snap, ok := c.st.Get(childID); ok {
 		childLabels = snap.Labels
+		ownerUserID = snap.OwnerUserID
 	}
-	return c.effectiveExecutorSetFor(childID, childLabels)
+	return c.effectiveExecutorSetFor(childID, childLabels, ownerUserID)
 }
 
 // effectiveExecutorSetFor is effectiveExecutorSet with the admission labels
 // supplied by the caller instead of read from the childstore — the case
 // chooseExecutor needs for a top-level spawn, whose childstore entry does not
-// exist yet (see admissionLabels).
-func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[string]string) ([]executors.Executor, error) {
+// exist yet (see admissionLabels). ownerUserID is the value that becomes
+// childstore.Session.OwnerUserID for the child this set is being computed
+// for; effectiveExecutorSet reads it back from the stored snapshot, and
+// narrowedExecutorCandidates carries the caller's own executorOwner.UserID
+// for a child that has no row yet.
+func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[string]string, ownerUserID string) ([]executors.Executor, error) {
 	if c.execPool == nil {
 		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 	}
@@ -267,6 +283,14 @@ func (c *Controller) effectiveExecutorSetFor(childID string, childLabels map[str
 	var set []executors.Executor
 	for _, le := range c.execPool.Live() {
 		if !le.Executor.Enabled {
+			continue
+		}
+		// Ownership is checked BEFORE Admits, and in addition to it, never
+		// instead of it: an executor's owner_user_id must equal the child's
+		// own (empty on both sides counts as equal — an unowned executor
+		// serves only unowned children), with no admin exception. Admits can
+		// only narrow this further, never widen past it.
+		if le.Executor.OwnerUserID != ownerUserID {
 			continue
 		}
 		admits, err := executors.ParseSelector(le.Executor.Admits)
@@ -381,11 +405,11 @@ func (c *Controller) inheritExecutorGrant(req protocol.SpawnRequest) protocol.Sp
 // without machine labels are operator errors the enrollment flow warns about;
 // refusing the spawn for them would trade a documented edge for a new
 // failure mode.
-func (c *Controller) persistRefAsSelector(req protocol.SpawnRequest, ownerName string) (protocol.SpawnRequest, error) {
+func (c *Controller) persistRefAsSelector(req protocol.SpawnRequest, owner executorOwner) (protocol.SpawnRequest, error) {
 	if req.ExecutorRef == "" || req.ExecutorSelector != "" || c.execPool == nil {
 		return req, nil
 	}
-	chosen, err := c.chooseExecutor(req, ownerName)
+	chosen, err := c.chooseExecutor(req, owner)
 	if err != nil {
 		return protocol.SpawnRequest{}, err
 	}
@@ -438,6 +462,13 @@ const maxLineageWalk = 64
 // no separate "excluded by your PARENT's set" message (an existing,
 // preserved asymmetry — not something this refactor corrects), and the
 // non-launch path checks workspace_mode, which the launch path never has.
+//
+// ownerUserID is the spawning identity's durable id — the same value
+// effectiveExecutorSetFor compared against e.OwnerUserID, which is why the
+// owner branch runs before the admission one in BOTH branches here too: an
+// executor owned by someone else is excluded by the ownership rule before
+// its Admits selector is ever consulted. The message deliberately names no
+// other user.
 func executorReason(
 	e executors.Executor,
 	req protocol.SpawnRequest,
@@ -446,11 +477,14 @@ func executorReason(
 	childSel executors.Selector,
 	childLabels map[string]string,
 	parentSet []executors.Executor,
+	ownerUserID string,
 ) string {
 	if launchKind != "" {
 		switch {
 		case !e.Enabled:
 			return "disabled"
+		case e.OwnerUserID != ownerUserID:
+			return "belongs to another user"
 		case !launchable[e.ID]:
 			return fmt.Sprintf("does not support launching %q children", launchKind)
 		}
@@ -503,6 +537,9 @@ func executorReason(
 	if !e.Enabled {
 		return "disabled"
 	}
+	if e.OwnerUserID != ownerUserID {
+		return "belongs to another user"
+	}
 	admitsSel, aerr := executors.ParseSelector(e.Admits)
 	if aerr != nil {
 		return fmt.Sprintf("unparseable admission selector %q", e.Admits)
@@ -534,7 +571,9 @@ func executorReason(
 // explainNoMatch builds a refusal message naming the excluding predicate per
 // candidate, so the reason is legible to the caller.
 //
-// Four exclusion reasons are distinguished:
+// Five exclusion reasons are distinguished:
+//   - The executor is owned by a different user (the ownership rule — the
+//     message never names the other user).
 //   - The child's own selector excludes the executor (the parent's set would
 //     have allowed it).
 //   - The parent's set excludes the executor (the child never got to evaluate
@@ -547,7 +586,7 @@ func executorReason(
 // spawn's refusal names the labels it was ACTUALLY evaluated against (its own
 // request labels plus the attested owner), not an empty childstore lookup
 // that no longer reflects what chooseExecutor used.
-func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string) error {
+func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executors.Selector, parentSet []executors.Executor, childLabels map[string]string, ownerUserID string) error {
 	var sb strings.Builder
 	if req.WorkspaceMode != "" {
 		fmt.Fprintf(&sb, "spawn refused: no executor satisfies %q with workspace_mode=%s.\n",
@@ -561,7 +600,7 @@ func (c *Controller) explainNoMatch(req protocol.SpawnRequest, childSel executor
 	// Report each live executor with the reason it was excluded.
 	for _, le := range c.execPool.Live() {
 		e := le.Executor
-		reason := executorReason(e, req, nil, "", childSel, childLabels, parentSet)
+		reason := executorReason(e, req, nil, "", childSel, childLabels, parentSet, ownerUserID)
 		fmt.Fprintf(&sb, "    %-12s  %s\n", shortID(e.ID), reason)
 	}
 	return fmt.Errorf("%s", sb.String())
@@ -581,6 +620,7 @@ func (c *Controller) resolveRef(
 	sel executors.Selector,
 	childLabels map[string]string,
 	parentSet []executors.Executor,
+	ownerUserID string,
 ) (executors.Executor, error) {
 	if e, ok := matchExecutorRef(ref, eligible); ok {
 		return e, nil
@@ -590,7 +630,7 @@ func (c *Controller) resolveRef(
 		if e.Labels["machine"] != ref && e.ID != ref {
 			continue
 		}
-		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet)
+		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet, ownerUserID)
 		if reason == "" {
 			reason = "excluded for an unknown reason" // unreachable in practice: a match with no reason would already be in `eligible`
 		}

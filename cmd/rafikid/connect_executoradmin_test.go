@@ -291,3 +291,180 @@ func TestExecutorAdminErrorsPassThroughUnmapped(t *testing.T) {
 	_, ok := s.execs["exec-1"]
 	c.False(ok, "delete did not reach the store")
 }
+
+// ─── Ownership scoping (task 3.3) ──────────────────────────────────────────
+
+// ownedFixture builds the adapter over a Controller whose store is
+// pre-seeded with rows of three provenances — the caller's own, another
+// user's, and unowned (the daemon operator's) — the shapes every scoped
+// listing and mutation must tell apart.
+func ownedFixture() (connectExecutorAdmin, *fakeExecStore) {
+	s := newFakeExecStore()
+	s.execs["exec-mine"] = executors.Executor{ID: "exec-mine", Enabled: true, OwnerUserID: "u_me"}
+	s.execs["exec-theirs"] = executors.Executor{
+		ID: "exec-theirs", Labels: map[string]string{"env": "x"}, Enabled: true, OwnerUserID: "u_other",
+	}
+	s.execs["exec-unowned"] = executors.Executor{ID: "exec-unowned", Enabled: true}
+	return connectExecutorAdmin{c: &Controller{execStore: s}}, s
+}
+
+func userCtx(userID string) context.Context {
+	return server.WithIdentity(context.Background(),
+		&server.Identity{UserID: userID, Username: "user-" + userID, Via: server.ProvenanceUser})
+}
+
+func adminCtx() context.Context {
+	return server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u_admin", Username: "admin", Via: server.ProvenanceUser, IsAdmin: true})
+}
+
+// TestExecutorEnrollCarriesOwner pins the mint half of the ownership rule:
+// the enrollment token records the caller's durable UserID, which is what
+// makes the executor the token creates owned by that user — while the "owner"
+// LABEL stays the display username (display-only, matched by Admits, never
+// compared for identity).
+func TestExecutorEnrollCarriesOwner(t *testing.T) {
+	c := assert.NewAborting(t)
+	a, s := adminFixture()
+	ctx := server.WithIdentity(context.Background(),
+		&server.Identity{UserID: "u1", Username: "brent", Via: server.ProvenanceUser})
+
+	_, err := a.Enroll(ctx, &rafikiv1.EnrollExecutorRequest{Name: "laptop", TtlSeconds: 3600})
+	c.Require().NoError(err)
+	c.Require().Len(s.minted, 1, "want one minted token, got %d", len(s.minted))
+	c.Eq("u1", s.minted[0].OwnerUserID, "the minted token must carry the caller's durable user id, got")
+	c.Eq("brent", s.minted[0].Labels["owner"], `the "owner" label must stay the display name, got %q`, s.minted[0].Labels["owner"])
+}
+
+// TestExecutorEnrollNilIdentityUnowned pins the UDS half: an enrollment with
+// no identity on the connection (the unix socket's local trust) owns NOTHING
+// — OwnerUserID stays "" — so the executor it creates serves only unowned
+// children, the same rule its spawns fall under. Defaulting nil to some
+// implicitly-derived owner here would silently widen what the socket's
+// executors serve.
+func TestExecutorEnrollNilIdentityUnowned(t *testing.T) {
+	c := assert.NewAborting(t)
+	a, s := adminFixture()
+
+	if _, err := a.Enroll(context.Background(), &rafikiv1.EnrollExecutorRequest{TtlSeconds: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	c.Require().Len(s.minted, 1, "want one minted token, got %d", len(s.minted))
+	c.Empty(s.minted[0].OwnerUserID, "a nil-identity enrollment must mint an UNOWNED token, got %q", s.minted[0].OwnerUserID)
+}
+
+// TestExecutorListScopedToOwner pins the listing's scoping: a plain user
+// credential sees exactly the rows it owns — not another user's, and not the
+// unowned rows the daemon operator holds. The listing merges live transient
+// executors into the store rows, and the filter runs over that merged set, so
+// a session executor is visible only to the identity whose stream minted it.
+func TestExecutorListScopedToOwner(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	a, _ := ownedFixture()
+
+	rows, err := a.List(userCtx("u_me"), "", 0)
+	ck.Require().NoError(err)
+	ids := map[string]bool{}
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	ck.True(ids["exec-mine"], "the caller's own row must be listed, got %v", ids)
+	ck.False(ids["exec-theirs"], "another user's row leaked into a scoped listing: %v", ids)
+	ck.False(ids["exec-unowned"], "an unowned row leaked into a scoped listing: %v", ids)
+}
+
+// TestExecutorListAdminSeesAll pins the admin branch of executorAuthority: an
+// admin user credential is scoped to NOTHING — every row, owned or not, is
+// listed. (The nil-identity operator socket is pinned by the existing List
+// tests, which call with no identity and expect the full store.)
+func TestExecutorListAdminSeesAll(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	a, _ := ownedFixture()
+
+	rows, err := a.List(adminCtx(), "", 0)
+	ck.Require().NoError(err)
+	ids := map[string]bool{}
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	ck.False(!ids["exec-mine"] || !ids["exec-theirs"] || !ids["exec-unowned"],
+		"an admin listing must see all three rows, got %v", ids)
+}
+
+// TestExecutorMutateOthersRefused pins the mutation guard, one subtest per
+// verb: a scoped caller resolving ANOTHER user's executor is refused
+// CodePermissionDenied ("executor <short id> belongs to another user") BEFORE
+// the Controller method runs, and the row is untouched. The transient subtest
+// is the no-row arm: a session executor exists only in the live pool, so the
+// same check runs against its in-memory OwnerUserID.
+func TestExecutorMutateOthersRefused(t *testing.T) {
+	mutations := map[string]func(connectExecutorAdmin) error{
+		"label": func(a connectExecutorAdmin) error {
+			_, err := a.Label(userCtx("u_me"), &rafikiv1.LabelExecutorRequest{
+				ExecutorId: "exec-theirs", Set: map[string]string{"rack": "r1"},
+			})
+			return err
+		},
+		"disable": func(a connectExecutorAdmin) error { return a.Disable(userCtx("u_me"), "exec-theirs") },
+		"enable":  func(a connectExecutorAdmin) error { return a.Enable(userCtx("u_me"), "exec-theirs") },
+		"delete":  func(a connectExecutorAdmin) error { return a.Delete(userCtx("u_me"), "exec-theirs") },
+	}
+	for name, mut := range mutations {
+		t.Run(name, func(t *testing.T) {
+			ck := assert.NewAborting(t)
+			a, s := ownedFixture()
+			err := mut(a)
+			var ce *connectapi.ControllerError
+			if !errors.As(err, &ce) {
+				t.Fatalf("got %v, want a ControllerError", err)
+			}
+			ck.Eq(protocol.ErrPermissionDenied, ce.Code, "code")
+			ck.StrContains(ce.Message, "belongs to another user", "the refusal does not name the owner mismatch: %v", err)
+			ck.StrContains(ce.Message, "exec-theirs", "the refusal does not name the executor: %v", err)
+			// The row must be untouched: label did not relabel it, disable
+			// did not record a disable, delete did not remove it.
+			row, ok := s.execs["exec-theirs"]
+			ck.True(ok, "a refused delete removed the row anyway")
+			ck.False(row.Labels["rack"] == "r1", "a refused label relabelled the row anyway")
+			ck.Empty(s.disabled, "a refused disable reached the store anyway: %v", s.disabled)
+		})
+	}
+
+	t.Run("transient-in-memory-owner", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		a := connectExecutorAdmin{c: &Controller{
+			execPool: &fakePool{live: []execpool.LiveExecutor{
+				exOwned("sess-theirs", nil, "", "u_other"),
+			}},
+		}}
+		err := a.Disable(userCtx("u_me"), "sess-theirs")
+		var ce *connectapi.ControllerError
+		if !errors.As(err, &ce) {
+			t.Fatalf("got %v, want a ControllerError", err)
+		}
+		ck.Eq(protocol.ErrPermissionDenied, ce.Code, "a foreign transient must be refused by its in-memory OwnerUserID")
+		ck.StrContains(ce.Message, "belongs to another user", "the refusal does not name the owner mismatch: %v", err)
+	})
+}
+
+// TestExecutorMutateNilIdentityAllowed pins that the guard ADDS scoping
+// without removing the operator socket's authority: with no identity on the
+// connection (the unix socket's local trust — executorAuthority's all
+// branch), every mutation still reaches the store, exactly as before the
+// guard existed.
+func TestExecutorMutateNilIdentityAllowed(t *testing.T) {
+	ck := assert.NewAborting(t)
+	a, s := ownedFixture()
+
+	row, err := a.Label(context.Background(), &rafikiv1.LabelExecutorRequest{
+		ExecutorId: "exec-mine", Set: map[string]string{"rack": "r1"},
+	})
+	ck.Require().NoError(err)
+	ck.Eq("r1", row.Labels["rack"], "the label did not reach the store, got")
+	ck.NoError(a.Disable(context.Background(), "exec-mine"))
+	ck.False(len(s.disabled) != 1 || s.disabled[0] != "exec-mine", "disable did not reach the store: %v", s.disabled)
+	ck.NoError(a.Enable(context.Background(), "exec-mine"))
+	ck.NoError(a.Delete(context.Background(), "exec-mine"))
+	_, ok := s.execs["exec-mine"]
+	ck.False(ok, "delete did not reach the store")
+}

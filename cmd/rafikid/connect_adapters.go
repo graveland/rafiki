@@ -419,8 +419,11 @@ func (e connectExecutors) ListExecutors(ctx context.Context, kind string) ([]con
 	// owner could spawn onto" — so a child-attributed caller would be reading
 	// its owner's fleet, the same borrowed identity Spawn refuses. The
 	// refusal itself lives on the route's policy interceptor (userOnly), not
-	// here.
-	return e.c.ListExecutorRows(ctx, kind, spawnOwner(ctx).Username)
+	// here. Both halves of the identity ride along: Username is the "owner"
+	// label Admits matches, UserID is what the ownership rule compares —
+	// the exact pair a real top-level spawn would carry.
+	o := spawnOwner(ctx)
+	return e.c.ListExecutorRows(ctx, kind, o.Username, o.UserID)
 }
 
 // connectSkills adapts the daemon's skills.Store to connectapi.SkillManager.

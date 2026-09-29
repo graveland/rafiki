@@ -70,6 +70,12 @@ const (
 	ErrAuthInvalid = "auth_invalid"
 	// ErrNotFound is the generic not-found error.
 	ErrNotFound = "not_found"
+	// ErrPermissionDenied is returned when an authenticated caller addresses
+	// a resource that belongs to a different user (executor ownership and
+	// the like): the request is well-formed, the target is simply not
+	// theirs. Distinct from the credential-shaped refusals (auth_required /
+	// auth_invalid) and from not_found, which would leak existence.
+	ErrPermissionDenied = "permission_denied"
 	// ErrInternal is returned on unexpected controller-side errors.
 	ErrInternal = "internal"
 	// ErrNoAgentDB is returned by the conversation-insight queries when the

@@ -58,7 +58,7 @@ func refFixture(t *testing.T, live ...execpool.LiveExecutor) *Controller {
 func TestPersistRefAsSelectorFoldsAMachineName(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := refFixture(t, ex("exec-1", map[string]string{"machine": "greyshift", "owner": "brent"}, ""))
-	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "greyshift"}, "brent")
+	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "greyshift"}, executorOwner{Name: "brent"})
 	ck.NoError(err, "persistRefAsSelector")
 	ck.Eq("machine=greyshift", got.ExecutorSelector, "selector")
 	ck.Eq("", got.ExecutorRef, "ref")
@@ -66,7 +66,7 @@ func TestPersistRefAsSelectorFoldsAMachineName(t *testing.T) {
 	// The folded selector must resolve to the same row the ref did, so the
 	// binder's later re-selection (ChooseFor re-runs chooseExecutor) lands on
 	// the same machine instead of re-running the ref search.
-	chosen, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: got.ExecutorSelector}, "brent")
+	chosen, err := c.chooseExecutor(protocol.SpawnRequest{ExecutorSelector: got.ExecutorSelector}, executorOwner{Name: "brent"})
 	ck.NoError(err, "the folded selector must resolve")
 	ck.Eq("exec-1", chosen.ID, "folded selector chose")
 }
@@ -76,7 +76,7 @@ func TestPersistRefAsSelectorFoldsAMachineName(t *testing.T) {
 func TestPersistRefAsSelectorFoldsAnExecutorID(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := refFixture(t, ex("exec-1", map[string]string{"machine": "greyshift"}, ""))
-	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "exec-1"}, "brent")
+	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "exec-1"}, executorOwner{Name: "brent"})
 	ck.NoError(err, "persistRefAsSelector")
 	ck.False(got.ExecutorSelector != "machine=greyshift" || got.ExecutorRef != "", "got (ref=%q, selector=%q), want (ref=\"\", selector=\"machine=greyshift\")", got.ExecutorRef, got.ExecutorSelector)
 }
@@ -87,7 +87,7 @@ func TestPersistRefAsSelectorFoldsAnExecutorID(t *testing.T) {
 func TestPersistRefAsSelectorKeepsTheRefWithoutAMachineLabel(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := refFixture(t, ex("exec-2", map[string]string{"env": "x"}, ""))
-	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "exec-2"}, "brent")
+	got, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "exec-2"}, executorOwner{Name: "brent"})
 	ck.NoError(err, "persistRefAsSelector")
 	ck.False(got.ExecutorRef != "exec-2" || got.ExecutorSelector != "", "got (ref=%q, selector=%q), want the ref kept as-is", got.ExecutorRef, got.ExecutorSelector)
 }
@@ -104,7 +104,7 @@ func TestPersistRefAsSelectorRefusesAMachineOutsideTheParentsSet(t *testing.T) {
 	_, err := c.persistRefAsSelector(protocol.SpawnRequest{
 		ParentChildID: "c_parent",
 		ExecutorRef:   "workbox",
-	}, "brent")
+	}, executorOwner{Name: "brent"})
 	ck.Error(err, "a ref reached a machine the parent's set excludes")
 	ck.StrContains(err.Error(), "not usable", "the refusal must say why the named machine is unusable: %v", err)
 }
@@ -112,7 +112,7 @@ func TestPersistRefAsSelectorRefusesAMachineOutsideTheParentsSet(t *testing.T) {
 func TestPersistRefAsSelectorNamesAMissingMachine(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := refFixture(t, ex("exec-1", map[string]string{"machine": "greyshift"}, ""))
-	_, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "silvershift"}, "brent")
+	_, err := c.persistRefAsSelector(protocol.SpawnRequest{ExecutorRef: "silvershift"}, executorOwner{Name: "brent"})
 	ck.Error(err, "want a refusal for an unknown machine name")
 	ck.StrContains(err.Error(), `no executor named "silvershift"`, "the refusal must name the missing machine: %v", err)
 }
@@ -125,7 +125,7 @@ func TestPersistRefAsSelectorIsSkippedWithoutAPool(t *testing.T) {
 	c := refFixture(t)
 	c.execPool = nil
 	req := protocol.SpawnRequest{ExecutorRef: "greyshift"}
-	got, err := c.persistRefAsSelector(req, "brent")
+	got, err := c.persistRefAsSelector(req, executorOwner{Name: "brent"})
 	ck.NoError(err, "persistRefAsSelector without a pool must be a no-op, got")
 	ck.False(got.ExecutorRef != "greyshift" || got.ExecutorSelector != "", "request was mutated without a pool: (ref=%q, selector=%q)", got.ExecutorRef, got.ExecutorSelector)
 }
@@ -136,7 +136,7 @@ func TestPersistRefAsSelectorSkipsWhenASelectorIsAlreadyPresent(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := refFixture(t, ex("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, ""))
 	req := protocol.SpawnRequest{ExecutorRef: "greyshift", ExecutorSelector: "env=home"}
-	got, err := c.persistRefAsSelector(req, "brent")
+	got, err := c.persistRefAsSelector(req, executorOwner{Name: "brent"})
 	ck.NoError(err, "persistRefAsSelector")
 	ck.False(got.ExecutorSelector != "env=home" || got.ExecutorRef != "greyshift", "got (ref=%q, selector=%q), want both left alone", got.ExecutorRef, got.ExecutorSelector)
 }

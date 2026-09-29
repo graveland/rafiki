@@ -15,7 +15,7 @@ func TestListExecutorRowsMarksLaunchEligibility(t *testing.T) {
 		exWithLaunch("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, "", "claude"),
 		ex("exec-2", map[string]string{"machine": "silvershift", "env": "home"}, ""),
 	)
-	rows, err := c.ListExecutorRows(context.Background(), "claude", "")
+	rows, err := c.ListExecutorRows(context.Background(), "claude", "", "")
 	ck.Require().NoError(err)
 	ck.Require().Len(rows, 2, "want 2 rows, got %d", len(rows))
 	byID := map[string]bool{}
@@ -31,7 +31,7 @@ func TestListExecutorRowsFundiKindIgnoresLaunchSupport(t *testing.T) {
 	c := selectFixture(t, "",
 		ex("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, ""),
 	)
-	rows, err := c.ListExecutorRows(context.Background(), protocol.KindFundi, "")
+	rows, err := c.ListExecutorRows(context.Background(), protocol.KindFundi, "", "")
 	ck.NoError(err)
 	ck.False(len(rows) != 1 || !rows[0].Eligible, "a fundi listing must not require launch-kind support: %+v", rows)
 }
@@ -41,7 +41,7 @@ func TestListExecutorRowsRespectsAdmission(t *testing.T) {
 	c := selectFixture(t, "",
 		exWithLaunch("exec-1", map[string]string{"machine": "greyshift"}, "owner=someone-else", "claude"),
 	)
-	rows, err := c.ListExecutorRows(context.Background(), "claude", "brent")
+	rows, err := c.ListExecutorRows(context.Background(), "claude", "brent", "")
 	ck.Require().NoError(err)
 	ck.Require().False(len(rows) != 1 || rows[0].Eligible, "owner mismatch must be ineligible: %+v", rows)
 	ck.NotEq("", rows[0].Reason, "an ineligible row must carry a reason")

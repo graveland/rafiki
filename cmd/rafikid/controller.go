@@ -1718,7 +1718,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// stored session: lineage narrowing would see "" and the whole subtree
 	// would escape the pin, and resume/respawn would rebuild without it.
 	// Runs while nothing is minted, so a refusal starts no process.
-	req, err = c.persistRefAsSelector(req, ownerName)
+	req, err = c.persistRefAsSelector(req, executorOwner{Name: ownerName, UserID: owner.UserID})
 	if err != nil {
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{
 			Code:    protocol.ErrInvalidArgs,
@@ -4925,6 +4925,7 @@ func (c *Controller) ExecutorCreate(id users.Identity, req protocol.ExecutorCrea
 		Isolation:     req.Isolation,
 		WorkspaceMode: req.WorkspaceMode,
 		Admits:        req.Admits,
+		OwnerUserID:   id.UserID,
 	})
 	if err != nil {
 		return protocol.ExecutorCreateResponseData{}, translateExecutorErr(fmt.Errorf("create executor: %w", err))
@@ -4950,6 +4951,7 @@ func (c *Controller) ExecutorEnroll(id users.Identity, req protocol.ExecutorEnro
 		Isolation:     req.Isolation,
 		WorkspaceMode: req.WorkspaceMode,
 		Admits:        req.Admits,
+		OwnerUserID:   id.UserID,
 		ExpiresAt:     time.Now().Add(ttl),
 	})
 	if err != nil {
@@ -5022,7 +5024,7 @@ func (c *Controller) ExecutorList(req protocol.ExecutorListRequest) ([]executors
 // ExecutorList is: an offline durable executor cannot serve a fresh spawn
 // either, so this answers exactly what a spawn attempt would see. `rafiki
 // executor list` remains the place to see the full management-table view.
-func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName string) ([]connectapi.ExecutorRow, error) {
+func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName, ownerUserID string) ([]connectapi.ExecutorRow, error) {
 	if c.execPool == nil {
 		return nil, errors.New("no executor pool is configured (requires RAFIKI_DB; also requires RAFIKI_EXECUTORS_ENABLED=1 when RAFIKI_CONTROL_LISTEN is set)")
 	}
@@ -5031,7 +5033,15 @@ func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName strin
 	if kind == "" || kind == protocol.KindFundi {
 		launchKind = ""
 	}
-	_, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, ownerName)
+	// ownerName is the display label Admits selectors match against (only
+	// ever matched, never compared for identity) and ownerUserID the durable
+	// id the ownership rule compares. Both come from the caller's connection
+	// identity — the same pair Controller.Spawn would carry into a real
+	// top-level spawn, so the preview cannot disagree with one. A nil
+	// identity (the unix socket) arrives as ""/"": an unowned caller, whose
+	// spawns are unowned, sees exactly the unowned executors — the same
+	// match-both-empty rule selection applies.
+	_, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, executorOwner{Name: ownerName, UserID: ownerUserID})
 	if err != nil {
 		return nil, err
 	}
@@ -5041,7 +5051,7 @@ func (c *Controller) ListExecutorRows(ctx context.Context, kind, ownerName strin
 	out := make([]connectapi.ExecutorRow, 0, len(live))
 	for _, le := range live {
 		e := le.Executor
-		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet)
+		reason := executorReason(e, req, launchable, launchKind, sel, childLabels, parentSet, ownerUserID)
 		out = append(out, connectapi.ExecutorRow{
 			ID:            e.ID,
 			Machine:       e.Labels["machine"],
@@ -5187,6 +5197,30 @@ func (c *Controller) resolveExecutorRef(ctx context.Context, ref string) (execut
 		Code:    protocol.ErrInvalidArgs,
 		Message: msg,
 	}
+}
+
+// executorForOwnerCheck resolves ref to a row for connect_executoradmin.go's
+// RPC-scoping check ahead of a mutation: the durable store first, through the
+// same exact-or-suffix resolution ExecutorLabel/Disable/Enable/Delete
+// themselves use (resolveExecutorRef), then the live pool for a transient
+// session executor, which carries no row at all. ok is false when ref
+// resolves to nothing — the caller lets the request through in that case, so
+// the downstream Controller call reports its own not-found rather than this
+// helper inventing one.
+func (c *Controller) executorForOwnerCheck(ctx context.Context, ref string) (executors.Executor, bool) {
+	if c.execStore != nil {
+		if e, err := c.resolveExecutorRef(ctx, ref); err == nil {
+			return e, true
+		}
+	}
+	if c.execPool != nil {
+		for _, le := range c.execPool.Live() {
+			if le.Executor.ID == ref {
+				return le.Executor, true
+			}
+		}
+	}
+	return executors.Executor{}, false
 }
 
 // ─── Identity ──────────────────────────────────────────────────────────────

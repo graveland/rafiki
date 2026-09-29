@@ -33,7 +33,7 @@ func TestOmittedSelectorInheritsTheParentsConfinement(t *testing.T) {
 	ck.Eq("env=home", req.ExecutorSelector, "selector")
 
 	// And the inherited selector must actually CONFINE, not merely be stored.
-	chosen, err := c.chooseExecutor(req, "")
+	chosen, err := c.chooseExecutor(req, executorOwner{})
 	ck.NoError(err, "the child was not placed on an executor at all")
 	ck.Eq("exec-home", chosen.ID, "child placed on")
 }
@@ -99,7 +99,7 @@ func TestExplicitSelectorIsNotOverwrittenByInheritance(t *testing.T) {
 	)
 	_, err := c2.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "gpu=yes",
-	}, "")
+	}, executorOwner{})
 	ck.Error(err, "naming a selector must not escape the parent's set")
 }
 
@@ -149,7 +149,7 @@ func TestInheritanceReadsTheStoreNotTheRequest(t *testing.T) {
 
 	req := c.inheritExecutorGrant(protocol.SpawnRequest{ParentChildID: "c_grand"})
 	ck.Eq("env=home", req.ExecutorSelector, "selector")
-	chosen, err := c.chooseExecutor(req, "")
+	chosen, err := c.chooseExecutor(req, executorOwner{})
 	ck.NoError(err, "chooseExecutor")
 	ck.Eq("exec-home", chosen.ID, "a third-generation child reached")
 }

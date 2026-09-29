@@ -99,9 +99,13 @@ except Exception:
 `
 
 // enrollScriptExecutor is enrollExecutor with --launch script and an isolated
-// pymodule cache the test can watch. Returns the enrolled executor's id and
-// the cache root its subprocess resolves pymodules from.
-func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName string) (executorID, cacheRoot string) {
+// pymodule cache the test can watch. ownerName is the display "owner" label;
+// ownerUserID is the durable id the executor is OWNED by — the same id the
+// spawning user carries, since selection requires executor.owner_user_id =
+// child.owner_user_id and an unowned executor never serves a user's child.
+// Returns the enrolled executor's id and the cache root its subprocess
+// resolves pymodules from.
+func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName, ownerUserID string) (executorID, cacheRoot string) {
 	t.Helper()
 	c := assert.NewAborting(t)
 
@@ -115,6 +119,7 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName string) (execu
 		Labels:        labels,
 		Isolation:     "none",
 		WorkspaceMode: "pinned",
+		OwnerUserID:   ownerUserID,
 		ExpiresAt:     time.Now().Add(time.Hour),
 	})
 	c.NoError(err, "mint token")
@@ -205,6 +210,16 @@ func TestScriptChildOnExecutor(t *testing.T) {
 	userCmd.Stderr = &userStderr
 	userOut, err := userCmd.Output()
 	c.NoError(err, "user create failed: %v\nstdout: %s\nstderr: %s", err, userOut, userStderr.String())
+	// The created user's durable id: the executor is enrolled AS this user
+	// (enrollScriptExecutor stamps it as the token's OwnerUserID), because
+	// selection requires executor.owner_user_id = child.owner_user_id — the
+	// spawn below runs under this user's token, so an unowned executor
+	// could never serve it.
+	var createdUser struct {
+		ID string `json:"id"`
+	}
+	c.NoError(json.Unmarshal(userOut, &createdUser), "user create output was not the CreateUser response's protojson: %s", userOut)
+	c.NotEq("", createdUser.ID, "user create returned no id: %s", userOut)
 	tokenPath := filepath.Join(configDir, "rafiki", "profiles", "it", "token")
 	tokenBytes, err := os.ReadFile(tokenPath)
 	c.False(err != nil || len(strings.TrimSpace(string(tokenBytes))) == 0, "user create did not leave a token at %s: %v", tokenPath, err)
@@ -213,7 +228,7 @@ func TestScriptChildOnExecutor(t *testing.T) {
 
 	// Enroll FIRST (its connect fires the pusher), then put, then wait for
 	// the corpus to land on the executor's cache.
-	executorID, execCache := enrollScriptExecutor(t, g, username)
+	executorID, execCache := enrollScriptExecutor(t, g, username, createdUser.ID)
 	putPymodule(t, d, configDir, "script_executor_driver_it", scriptExecutorDriverCode)
 	waitExecutorCache(t, execCache, "script_executor_driver_it")
 

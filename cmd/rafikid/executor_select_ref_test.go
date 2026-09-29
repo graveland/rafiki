@@ -49,7 +49,7 @@ func TestChooseExecutorHonoursExecutorRef(t *testing.T) {
 		ex("exec-1", map[string]string{"machine": "greyshift", "env": "home"}, ""),
 		ex("exec-2", map[string]string{"machine": "silvershift", "env": "home"}, ""),
 	)
-	exec, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "")
+	exec, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, executorOwner{})
 	ck.NoError(err)
 	ck.Eq("exec-1", exec.ID, "want exec-1, got")
 }
@@ -60,13 +60,13 @@ func TestChooseExecutorExecutorRefStillConfinementChecked(t *testing.T) {
 	c := selectFixture(t, "",
 		ex("exec-1", map[string]string{"machine": "greyshift"}, "owner=someone-else"),
 	)
-	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "brent")
+	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, executorOwner{Name: "brent"})
 	assert.NewAborting(t).Error(err, "want a refusal — the named executor exists but does not admit this child")
 }
 
 func TestChooseExecutorExecutorRefNotFound(t *testing.T) {
 	c := selectFixture(t, "", ex("exec-1", map[string]string{"machine": "greyshift"}, ""))
-	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "nonexistent"}, "")
+	_, err := c.chooseExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "nonexistent"}, executorOwner{})
 	assert.NewAborting(t).Error(err, "want a refusal naming the unknown ref")
 }
 
@@ -78,9 +78,9 @@ func TestChooseLaunchExecutorHonoursExecutorRefAndRequiresLaunchKind(t *testing.
 	)
 	// Pinning to the one WITHOUT launch support must fail even though the ref
 	// matches — an explicit pin still has to clear every other check.
-	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "silvershift"}, "", "claude")
+	_, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "silvershift"}, executorOwner{}, "claude")
 	ck.Error(err, "want a refusal — silvershift does not support launching claude")
-	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, "", "claude")
+	exec, err := c.chooseLaunchExecutor(protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorRef: "greyshift"}, executorOwner{}, "claude")
 	ck.NoError(err)
 	ck.Eq("exec-1", exec.ID, "want exec-1, got")
 }
@@ -112,7 +112,7 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 	req := protocol.SpawnRequest{ParentChildID: "c_parent"}
 
 	// Sanity: the end-to-end refusal is correct (and stays correct) either way.
-	if _, err := c.chooseLaunchExecutor(req, "", "claude"); err == nil {
+	if _, err := c.chooseLaunchExecutor(req, executorOwner{}, "claude"); err == nil {
 		t.Fatal("want a refusal — work is excluded by the parent's lineage selector")
 	}
 
@@ -120,7 +120,7 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 	// explainNoLaunchMatch and ListExecutorRows do, whether "work" is
 	// excluded. Before the fix this returns "" (claims eligible) because the
 	// launch branch never checks parentSet membership.
-	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, "")
+	candidates, parentSet, childLabels, sel, err := c.narrowedExecutorCandidates(req, executorOwner{})
 	ck.NoError(err)
 	ck.Empty(candidates, "want zero post-selector candidates (lineage already excluded work), got")
 	ck.Empty(parentSet, "want work excluded from parentSet by the lineage narrowing, got")
@@ -131,6 +131,6 @@ func TestExecutorReasonLaunchBranchDetectsLineageExclusion(t *testing.T) {
 			work = le.Executor
 		}
 	}
-	reason := executorReason(work, req, launchable, "claude", sel, childLabels, parentSet)
+	reason := executorReason(work, req, launchable, "claude", sel, childLabels, parentSet, "")
 	ck.NotEq("", reason, "executorReason claims work is eligible, but it is excluded by the parent's lineage selector")
 }

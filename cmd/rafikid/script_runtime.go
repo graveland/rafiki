@@ -145,7 +145,7 @@ func scriptInterpreter() string {
 // widening the kind-narrowing guard exists to prevent.
 func (c *Controller) scriptRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string) (child.Runner, error) {
 	if c.scriptExecutorRouted() {
-		return c.darajaScriptRunner(req, childID, ownerName)
+		return c.darajaScriptRunner(req, childID, ownerName, ownerUserID)
 	}
 	return c.localScriptRunner(req, childID, ownerUserID)
 }
@@ -172,11 +172,11 @@ func (c *Controller) scriptExecutorRouted() bool {
 // was configured, and serves the child's per-child Connect socket against the
 // daemon's face. The daemon-side side of the launch is deliberately thin:
 // choose the executor, send the spec, take the relay-backed Runner.
-func (c *Controller) darajaScriptRunner(req protocol.SpawnRequest, childID, ownerName string) (child.Runner, error) {
+func (c *Controller) darajaScriptRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string) (child.Runner, error) {
 	if req.Script == nil {
 		return nil, errors.New("script kind requires a script spec (repo + script)")
 	}
-	exec, err := c.chooseLaunchExecutor(req, ownerName, protocol.KindScript)
+	exec, err := c.chooseLaunchExecutor(req, executorOwner{Name: ownerName, UserID: ownerUserID}, protocol.KindScript)
 	if err != nil {
 		return nil, err
 	}

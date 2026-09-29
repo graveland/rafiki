@@ -133,7 +133,7 @@ func (c *Controller) agentRunner(req protocol.SpawnRequest, childID string, auto
 			Runtime: ro,
 		}), nil
 	case protocol.KindClaude:
-		return c.claudeRunner(req, childID, ownerName, snap)
+		return c.claudeRunner(req, childID, ownerName, ownerUserID, snap)
 	case protocol.KindScript:
 		return c.scriptRunner(req, childID, ownerName, ownerUserID)
 	default:
@@ -157,11 +157,11 @@ func (c *Controller) claudeExecutorRouted() bool {
 // laptop with no RAFIKI_EXECUTORS_ENABLED). Once an executor pool exists,
 // every claude spawn goes through daraja, proxied and passthrough-billed per
 // darajaClaudeParams (Phase 2).
-func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName string, snap *childstore.Snapshot) (child.Runner, error) {
+func (c *Controller) claudeRunner(req protocol.SpawnRequest, childID, ownerName, ownerUserID string, snap *childstore.Snapshot) (child.Runner, error) {
 	if !c.claudeExecutorRouted() {
 		return nil, nil
 	}
-	exec, err := c.darajaLaunchExecutor(req, ownerName, snap)
+	exec, err := c.darajaLaunchExecutor(req, executorOwner{Name: ownerName, UserID: ownerUserID}, snap)
 	if err != nil {
 		return nil, err
 	}
@@ -252,9 +252,9 @@ func (c *Controller) darajaClaudeParams(req protocol.SpawnRequest, childID strin
 // living on that machine's filesystem, which a fresh selector match cannot
 // guarantee lands on the same one twice, since two live executors can
 // satisfy the same selector. A fresh spawn (snap == nil) selects normally.
-func (c *Controller) darajaLaunchExecutor(req protocol.SpawnRequest, ownerName string, snap *childstore.Snapshot) (executors.Executor, error) {
+func (c *Controller) darajaLaunchExecutor(req protocol.SpawnRequest, owner executorOwner, snap *childstore.Snapshot) (executors.Executor, error) {
 	if snap == nil {
-		return c.chooseLaunchExecutor(req, ownerName, "claude")
+		return c.chooseLaunchExecutor(req, owner, "claude")
 	}
 	pinnedID := snap.Labels["rafiki/executor"]
 	if pinnedID == "" {
@@ -525,7 +525,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// later needs no tools[] change and no prompt-cache break.
 	var exec tools.ExecutorClient
 	if c.execPool != nil {
-		be := newBoundExecutor(childID, c.binderFor(req, ownerName))
+		be := newBoundExecutor(childID, c.binderFor(req, executorOwner{Name: ownerName, UserID: ownerUserID}))
 		exec = be
 		// Retain for the job watcher: a watch needs to poll JobOutput through
 		// the binding that started the job, and this is the only place the
@@ -587,7 +587,7 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		var row executors.Executor
 		if execID, _, bound := be.Current(); bound {
 			row, _ = c.executorRow(execID)
-		} else if chosen, cErr := c.chooseExecutorCandidate(req, ownerName); cErr == nil {
+		} else if chosen, cErr := c.chooseExecutorCandidate(req, executorOwner{Name: ownerName, UserID: ownerUserID}); cErr == nil {
 			row = chosen
 		}
 		if row.ID != "" {

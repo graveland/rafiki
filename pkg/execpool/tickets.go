@@ -24,6 +24,11 @@ type TicketGrant struct {
 	Owner       string
 	MachineName string
 	Roots       []string
+	// OwnerUserID is the durable id of the identity this session executor
+	// serves — "" for the UDS's unowned fallback, exactly like a child's own
+	// OwnerUserID. It is what selection's ownership check compares against,
+	// separate from Owner (the display name stamped into the "owner" label).
+	OwnerUserID string
 }
 
 // Executor synthesises the in-memory row this grant stands for.
@@ -45,10 +50,11 @@ func (g TicketGrant) Executor() executors.Executor {
 		Isolation:     "none",
 		WorkspaceMode: "pinned",
 		// Nobody else's children land on this operator's terminal.
-		Admits:     "owner=" + g.Owner,
-		Enabled:    true,
-		EnrolledAt: time.Now(),
-		LastSeenAt: time.Now(),
+		Admits:      "owner=" + g.Owner,
+		OwnerUserID: g.OwnerUserID,
+		Enabled:     true,
+		EnrolledAt:  time.Now(),
+		LastSeenAt:  time.Now(),
 	}
 }
 

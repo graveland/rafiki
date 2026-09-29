@@ -97,7 +97,7 @@ func TestChooseExecutorStillEnforcesParentConfinement(t *testing.T) {
 	)
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=work",
-	}, "")
+	}, executorOwner{})
 	ck.Require().Error(err, "chooseExecutor must still refuse a selector the parent's set excludes")
 	ck.StrContains(err.Error(), "PARENT", "the refusal must name the parent's set: %v", err)
 }

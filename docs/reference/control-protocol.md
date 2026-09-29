@@ -263,7 +263,7 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 | `SetBudget` | unary · childScoped | Change one child's `max_cost` (0 = unlimited). A user credential acts with operator authority — any child, no lineage or remaining-grant check; a per-child credential gets `agent_set_budget`'s rule — a direct child only, bounded by the caller's own remaining grant |
 | `ListModels` | unary · anyCaller | The daemon's model rows: one per id the daemon can resolve for a kind, with source and — when the catalog knows the id — optional context window, per-token USD prices and input modalities. `kind` scopes the sources (`claude` resolves only Anthropic ids; empty means the fundi default), `provider` filters by provider. This is what `rafiki models` and `--model` completion read |
 | `ModelInfo` | unary · anyCaller | The daemon's own catalog answer for ONE model, so a client never reads the OpenRouter catalog itself. `model` is required (`CodeInvalidArgument` otherwise). Never an error for an unknown model: `known=false` is an ordinary answer, and every caller degrades by leaving the model's own defaults alone — an unconfigured catalog answers the same way |
-| `ListExecutors` | unary · userOnly | The executors in the daemon's pool **right now**, scoped to the caller. `kind` scopes eligibility the way ListModels' `kind` scopes sources: each row carries `id`, `machine` (the `machine` trust label), `labels`, `isolation`, `workspace_mode`, `roots`, `admits`, `enabled`, `connected`, `connected_at_ms` and `last_seen_ms` (unix ms of the current connection's join time and of the row's last pool sighting — 0 means not connected / never seen; the empty-kind management listing populates both, the kind-scoped rows leave both 0), `launch_kinds` and — when `kind` was given — `eligible` plus the `reason` it is not, computed by the SAME per-row reasoning a spawn attempt would produce (a hypothetical top-level spawn, which is what a human picking an executor is actually asking). Deliberately **live-only**: an offline durable executor cannot serve a fresh spawn either, so this answers exactly what `Spawn` would see, and is what `--executor` completion and the cockpit's executor picker read. The **empty-kind** branch is the full management listing (offline rows included, eligibility unevaluated) |
+| `ListExecutors` | unary · userOnly | The executors in the daemon's pool **right now**, scoped to the caller. `kind` scopes eligibility the way ListModels' `kind` scopes sources: each row carries `id`, `machine` (the `machine` trust label), `labels`, `isolation`, `workspace_mode`, `roots`, `admits`, `enabled`, `connected`, `connected_at_ms` and `last_seen_ms` (unix ms of the current connection's join time and of the row's last pool sighting — 0 means not connected / never seen; the empty-kind management listing populates both, the kind-scoped rows leave both 0), `launch_kinds` and — when `kind` was given — `eligible` plus the `reason` it is not, computed by the SAME per-row reasoning a spawn attempt would produce (a hypothetical top-level spawn, which is what a human picking an executor is actually asking). Deliberately **live-only**: an offline durable executor cannot serve a fresh spawn either, so this answers exactly what `Spawn` would see, and is what `--executor` completion and the cockpit's executor picker read. The **empty-kind** branch is the full management listing (offline rows included, eligibility unevaluated), itself ownership-scoped: the anonymous unix socket and an admin user credential see every row, any other user credential sees only rows whose `owner_user_id` equals its own — durable rows and live transient session executors alike |
 | `ListTasks` | unary · childScoped | One conversation's task ledger, mapped from `Controller.TaskList`. `conversation_id` empty means every conversation; `include_dropped` (or `all`) surfaces rows an agent abandoned, hidden by default; `child_id`, `status` and `limit` narrow further. rafiki requires a database, so a ledger that cannot answer is a real failure and surfaces as `CodeInternal` rather than as an empty list; the cockpit chooses to hide the box rather than surface it. Rows are clamped to 2000 — `tasks.ListFilter.Limit == 0` means unlimited. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee`, `drop_reason` and `conversation_id` (the row's owning conversation — a conversation id, not a child id; the child working the row is `assignee`) |
 | `GetRateLimitStatus` | unary · anyCaller | The CALLER's own latest captured Anthropic subscription rate-limit snapshot (`anthropic-ratelimit-unified-*` response headers, captured by the proxy off genuine OAuth-passthrough traffic to `api.anthropic.com` — never OpenRouter-routed traffic, and never API-token usage, which has its own separate usage endpoint). Takes no request fields; the daemon resolves identity from the authenticated connection, the same as `Spawn`'s owner attribution — there is no way to ask for another user's usage. Returns `CodeNotFound` (not an empty message) when this user has never made a passthrough call, which is the expected state for anyone who has not used `rafiki claude --passthrough-auth`. `rafiki claude --limits` and the cockpit's status-line quota readout both poll this |
 | `ListSkills` | unary · userOnly | The daemon's database-backed skill corpus (§"Skill management verbs") |
@@ -315,11 +315,11 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 | `Search` | unary · userOnly | In-memory content search across live children's session buffers. `query` is required (`CodeInvalidArgument`); `regex`, `limit`, `context` and an optional `session_filter` narrow the scan (`cwd_contains`, `name_contains`, `since` unix ms with 0 unbounded, AND-matched `labels`, key-presence `has_label`). Each hit carries the child id, entry id, timestamp (unix ms), role, snippet and match span, plus `total_hits`/`scanned`/`elapsed` (ms) |
 | `ShutdownDaemon` | unary · userOnly | Trigger the daemon's own shutdown path as a remote operator: the same sequence a SIGTERM runs — a shutdown notice broadcast to connected clients, live children drained through the graceful ladder, listeners closed, process exit. It terminates the daemon process (a drain alone would poison the stopping latch and resurrect children on the next start); the refusal to do this from an RPC-shaped half-measure is why the verb landed only with the daemon shutdown path itself. `CodeUnavailable` until the daemon wires it |
 | `ConversationStats` | unary · userOnly | Global (filtered) stats when `conversation_id` is empty, scoped to one conversation otherwise — in which case the filter fields are ignored. `since_unix`/`until_unix` are Unix seconds; 0 means unbounded. The stats ride as the daemon's own `insights.Stats` JSON in `stats_json`, opaque by design (precedent: `ToolUse.input_json`) — the caller asked for an aggregate, not a schema |
-| `EnrollExecutor` | unary · userOnly | Mint a one-time enrollment token for a remote executor (§"Executor administration") |
-| `CreateExecutor` | unary · userOnly | Mint an executor row and its durable credential in one step, with no enrollment handshake (§"Executor administration") |
-| `LabelExecutor` | unary · userOnly | Set or remove labels on an executor's row; `executor_id` may be the full id or a unique trailing fragment (§"Executor administration") |
-| `DisableExecutor` / `EnableExecutor` | unary · userOnly | Disable (its credential stops authenticating) or re-enable an executor |
-| `DeleteExecutor` | unary · userOnly | Permanently remove an executor row — no tombstone; a connected row is evicted from the live pool within one health interval |
+| `EnrollExecutor` | unary · userOnly | Mint a one-time enrollment token for a remote executor. The executor it creates is OWNED by the caller: the token carries the connection identity's durable user id ("" for the anonymous unix socket — unowned), and the `owner` LABEL stays the display username (§"Executor administration") |
+| `CreateExecutor` | unary · userOnly | Mint an executor row and its durable credential in one step, with no enrollment handshake. Same ownership rule as `EnrollExecutor` (§"Executor administration") |
+| `LabelExecutor` | unary · userOnly | Set or remove labels on an executor's row; `executor_id` may be the full id or a unique trailing fragment. Ownership-scoped: a non-admin user credential is refused `CodePermissionDenied` (`permission_denied`) when the row belongs to another user (§"Executor administration") |
+| `DisableExecutor` / `EnableExecutor` | unary · userOnly | Disable (its credential stops authenticating) or re-enable an executor. Ownership-scoped like `LabelExecutor` |
+| `DeleteExecutor` | unary · userOnly | Permanently remove an executor row — no tombstone; a connected row is evicted from the live pool within one health interval. Ownership-scoped like `LabelExecutor` |
 | `ExecutorSession` | server-streaming · userOnly | The session-executor stream: mint or find the caller's own executor for this machine (§"ExecutorSession" below) |
 | `CreateUser` | unary · userOnly (admin-gated) | Mint a user row and its bearer token. NEVER mints an admin — admins come only from `rafikid user create --admin` (§"User administration") |
 | `ListUsers` | unary · userOnly (admin-gated) | Enumerate users. Tokens are never returned |
@@ -995,6 +995,37 @@ not in `executors`), so the index fires later, at REDEMPTION, as a terminal
 401 on the executor's upgrade request — while `CreateExecutor`, which writes
 the row immediately, answers the collision inline with `CodeInvalidArgument`.
 
+**Ownership.** Every executor carries a durable `owner_user_id` beside its
+labels, and selection requires `executor.owner_user_id = child.owner_user_id`
+IN ADDITION to `Admits`, with NULL/empty on both sides counting as equal: an
+unowned executor serves only unowned children — and never a user's child,
+however permissive its `Admits` selector — while a user's executor serves
+that user's children (their sub-agents inherit it) and nobody else's. There
+is NO admin exception. `Admits` can only narrow, never widen; the `owner`
+LABEL stays display-only, matched by an `Admits` selector and never compared
+for identity. The id is set at mint time from the connection's identity
+(`EnrollExecutor`, `CreateExecutor`; the anonymous unix socket owns nothing,
+`""`), copied from the enrollment token at redemption, and stamped onto a
+transient session executor's ticket from the session's identity; a resumed
+child keeps the `owner_user_id` its stored session carries. An executor that
+already carried an `owner=<name>` label was backfilled to that user's id by
+migration 0044, which is a behaviour change: such an executor no longer
+serves token-less unix-socket children.
+
+The management RPCs on this face are scoped the same way
+(`executorAuthority` in `cmd/rafikid/connect_executoradmin.go`): the
+anonymous unix socket and an admin user credential see and mutate
+everything; any other user credential sees only rows it owns — the
+`ListExecutors` empty-kind listing filters to them — and
+`LabelExecutor`/`DisableExecutor`/`EnableExecutor`/`DeleteExecutor` resolve
+the target first and refuse a foreign one with `CodePermissionDenied`
+(reason `permission_denied`, "executor <short id> belongs to another user"),
+which names the executor but never the other user. An unknown executor stays
+a not-found answer from the Controller, not a permission refusal. A transient
+session executor has no row at all, so the same check runs against its
+in-memory owner. Pinned by the `TestSelect*`/`TestExecutor*` ownership tests
+in `cmd/rafikid`.
+
 `LabelExecutor` is how `owner` and `machine` are changed after the fact —
 they cannot be set through the mint verbs, but they are ordinary labels on
 the row once written. Setting `machine` to a name this owner already uses is
@@ -1398,6 +1429,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `spawn_failed` | `internal` | The child subprocess failed to start or exited immediately. |
 | `auth_required` / `auth_invalid` | `unauthenticated` | The presented credential names no active user; identity failures are `unauthenticated`, never a silent downgrade. |
 | `not_found` | `not_found` | Generic; e.g. `Resume` against an unknown id. |
+| `permission_denied` | `permission_denied` | The authenticated caller addressed a resource that belongs to a different user — executor ownership scoping (`LabelExecutor`/`DisableExecutor`/`EnableExecutor`/`DeleteExecutor` against another user's executor). A MISSING row is `not_found`, never this; this code says "it exists and is not yours". |
 | `internal` | `internal` | Unexpected daemon-side error. |
 | `no_agent_db` | `unavailable` | The conversation/recall/pymodule backend is unwired (`RAFIKI_DB` unset). |
 | `payload_too_large` | `invalid_argument` | A transcript or report exceeds its size cap. |

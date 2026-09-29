@@ -140,6 +140,7 @@ func (c *Controller) executorSession(
 	ticket, err := c.execPool.Tickets().Mint(execpool.TicketGrant{
 		ExecutorID:  execID,
 		Owner:       owner,
+		OwnerUserID: id.UserID,
 		MachineName: req.Name,
 		Roots:       req.Roots,
 	})

@@ -50,6 +50,7 @@ var errCodeTable = map[string]connect.Code{
 	protocol.ErrPayloadTooLarge:    connect.CodeInvalidArgument,
 	protocol.ErrChildNotFound:      connect.CodeNotFound,
 	protocol.ErrNotFound:           connect.CodeNotFound,
+	protocol.ErrPermissionDenied:   connect.CodePermissionDenied,
 	protocol.ErrSessionFileMissing: connect.CodeNotFound,
 	protocol.ErrChildExited:        connect.CodeFailedPrecondition,
 	protocol.ErrChildInGrace:       connect.CodeFailedPrecondition,

@@ -70,14 +70,14 @@ func TestWorkspaceModeNarrowsSelection(t *testing.T) {
 	req := protocol.SpawnRequest{ParentChildID: "c_parent", ExecutorSelector: "env=home"}
 
 	req.WorkspaceMode = "ephemeral"
-	chosen, err := c.chooseExecutor(req, "")
+	chosen, err := c.chooseExecutor(req, executorOwner{})
 	ck.Require().NoError(err, "an ephemeral request found no executor though one offers it")
 	ck.Require().Eq("exec-ephemeral", chosen.ID, "placed on")
 
 	// And with no ephemeral executor live, the spawn is REFUSED rather than
 	// quietly downgraded to a pinned machine.
 	c = selectFixture(t, "env=home", pinned)
-	_, err = c.chooseExecutor(req, "")
+	_, err = c.chooseExecutor(req, executorOwner{})
 	ck.Require().Error(err, "an ephemeral request was satisfied by a pinned executor; the grant widened silently")
 	ck.StrContains(err.Error(), "workspace_mode", "the refusal does not name the mode that excluded every candidate: %v", err)
 }
@@ -90,7 +90,7 @@ func TestSelectionIgnoresTheSelfReportedWorkspaceMode(t *testing.T) {
 	c := selectFixture(t, "env=home", liar)
 	_, err := c.chooseExecutor(protocol.SpawnRequest{
 		ParentChildID: "c_parent", ExecutorSelector: "env=home", WorkspaceMode: "ephemeral",
-	}, "")
+	}, executorOwner{})
 	assert.NewAborting(t).Error(err, "an executor whose ROW says pinned attracted an ephemeral child by claiming ephemeral in Describe")
 }
 

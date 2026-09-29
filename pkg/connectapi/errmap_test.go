@@ -40,6 +40,7 @@ var errCodeByName = map[string]connect.Code{
 	"ErrAuthRequired":       connect.CodeUnauthenticated,
 	"ErrAuthInvalid":        connect.CodeUnauthenticated,
 	"ErrNotFound":           connect.CodeNotFound,
+	"ErrPermissionDenied":   connect.CodePermissionDenied,
 	"ErrInternal":           connect.CodeInternal,
 	"ErrNoAgentDB":          connect.CodeUnavailable,
 	"ErrPayloadTooLarge":    connect.CodeInvalidArgument,

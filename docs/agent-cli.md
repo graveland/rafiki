@@ -405,8 +405,9 @@ the question for every kind in one vocabulary:
 
 Tab-completion: `--executor` completes machine names (ids for unlabeled
 executors) from the daemon's `ListExecutors` RPC, scoped to the resolved
-`--kind` — the same kind-scoping rule `--model` completion applies. Answers
-are cached briefly, like `--model` completion's cache.
+`--kind` and to the caller's own executors (executor ownership scoping — a
+non-admin user credential is offered only rows it owns). Answers are cached
+briefly, like `--model` completion's cache.
 
 The default depends on the kind:
 
