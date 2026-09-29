@@ -76,7 +76,8 @@ served on two listeners:
 - **What it serves:** the same Connect control plane (below), the executor
   link at `/executor/connect` (upgraded out of HTTP/1.1), the daraja link at
   `/daraja/connect`, and the proxy faces (`/v1/messages`,
-  `/v1/chat/completions`, `/mcp`, `/healthz`, `/metrics`) — one hostname on
+  `/v1/chat/completions`, `/mcp`, `/rafiki.v1.Login/`, `/healthz`,
+  `/metrics`) — one hostname on
   one port serves all of it. The face keeps its loopback listener too;
   children talk to their own daemon over 127.0.0.1 and need no certificate.
 - **Authentication:** per-user bearer tokens, mandatory —
@@ -96,8 +97,11 @@ served on two listeners:
   startup**: `no users exist: create one on this host with rafikid user
   create <name> --admin`. `rafikid user create` opens the database directly —
   no running daemon needed — and `--admin` is never inferred; it must be
-  passed explicitly or the created user is an ordinary non-admin user. The
-  plaintext token is printed exactly once; the daemon stores only its digest.
+  passed explicitly or the created user is an ordinary non-admin user. A
+  plaintext token is printed exactly once when one is minted (`--token`, or
+  later `rafikid user token mint`); with no `--token` the user has no
+  credential and logs in through OIDC (`rafiki login`) when the daemon has it
+  configured. The daemon stores only a digest either way.
 - An unauthenticated peer never receives an underlying error's text: an
   infrastructure failure on this listener carries a fixed message and the
   real error goes to the daemon log — the same redaction rule every Connect
@@ -263,7 +267,7 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 | `SetBudget` | unary · childScoped | Change one child's `max_cost` (0 = unlimited). A user credential acts with operator authority — any child, no lineage or remaining-grant check; a per-child credential gets `agent_set_budget`'s rule — a direct child only, bounded by the caller's own remaining grant |
 | `ListModels` | unary · anyCaller | The daemon's model rows: one per id the daemon can resolve for a kind, with source and — when the catalog knows the id — optional context window, per-token USD prices and input modalities. `kind` scopes the sources (`claude` resolves only Anthropic ids; empty means the fundi default), `provider` filters by provider. This is what `rafiki models` and `--model` completion read |
 | `ModelInfo` | unary · anyCaller | The daemon's own catalog answer for ONE model, so a client never reads the OpenRouter catalog itself. `model` is required (`CodeInvalidArgument` otherwise). Never an error for an unknown model: `known=false` is an ordinary answer, and every caller degrades by leaving the model's own defaults alone — an unconfigured catalog answers the same way |
-| `ListExecutors` | unary · userOnly | The executors in the daemon's pool **right now**, scoped to the caller. `kind` scopes eligibility the way ListModels' `kind` scopes sources: each row carries `id`, `machine` (the `machine` trust label), `labels`, `isolation`, `workspace_mode`, `roots`, `admits`, `enabled`, `connected`, `connected_at_ms` and `last_seen_ms` (unix ms of the current connection's join time and of the row's last pool sighting — 0 means not connected / never seen; the empty-kind management listing populates both, the kind-scoped rows leave both 0), `launch_kinds` and — when `kind` was given — `eligible` plus the `reason` it is not, computed by the SAME per-row reasoning a spawn attempt would produce (a hypothetical top-level spawn, which is what a human picking an executor is actually asking). Deliberately **live-only**: an offline durable executor cannot serve a fresh spawn either, so this answers exactly what `Spawn` would see, and is what `--executor` completion and the cockpit's executor picker read. The **empty-kind** branch is the full management listing (offline rows included, eligibility unevaluated), itself ownership-scoped: the anonymous unix socket and an admin user credential see every row, any other user credential sees only rows whose `owner_user_id` equals its own — durable rows and live transient session executors alike |
+| `ListExecutors` | unary · userOnly | The executors in the daemon's pool **right now**, scoped to the caller. `kind` scopes eligibility the way ListModels' `kind` scopes sources: each row carries `id`, `machine` (the `machine` trust label), `labels`, `isolation`, `workspace_mode`, `roots`, `admits`, `enabled`, `connected`, `connected_at_ms` and `last_seen_ms` (unix ms of the current connection's join time and of the row's last pool sighting — 0 means not connected / never seen; the empty-kind management listing populates both, the kind-scoped rows leave both 0), `launch_kinds` and — when `kind` was given — `eligible` plus the `reason` it is not, computed by the SAME per-row reasoning a spawn attempt would produce (a hypothetical top-level spawn, which is what a human picking an executor is actually asking). The kind-scoped preview deliberately enumerates the WHOLE live pool — a foreign-owned row appears with its refusal `reason` rather than disappearing: the explanation names facts (labels, machine, admits) the row itself already displays, so hiding it buys nothing, while `eligible` never over-reports (eligible ⟺ an empty reason). Deliberately **live-only**: an offline durable executor cannot serve a fresh spawn either, so this answers exactly what `Spawn` would see, and is what `--executor` completion and the cockpit's executor picker read. The **empty-kind** branch is the full management listing (offline rows included, eligibility unevaluated), itself ownership-scoped: the anonymous unix socket and an admin user credential see every row, any other user credential sees only rows whose `owner_user_id` equals its own — durable rows and live transient session executors alike |
 | `ListTasks` | unary · childScoped | One conversation's task ledger, mapped from `Controller.TaskList`. `conversation_id` empty means every conversation; `include_dropped` (or `all`) surfaces rows an agent abandoned, hidden by default; `child_id`, `status` and `limit` narrow further. rafiki requires a database, so a ledger that cannot answer is a real failure and surfaces as `CodeInternal` rather than as an empty list; the cockpit chooses to hide the box rather than surface it. Rows are clamped to 2000 — `tasks.ListFilter.Limit == 0` means unlimited. Each `TaskRow` carries `handle` — the dotted ordinal path ("2.1"), computed on read and never persisted — plus `content`, `active_form`, `status`, `assignee`, `drop_reason` and `conversation_id` (the row's owning conversation — a conversation id, not a child id; the child working the row is `assignee`) |
 | `GetRateLimitStatus` | unary · anyCaller | The CALLER's own latest captured Anthropic subscription rate-limit snapshot (`anthropic-ratelimit-unified-*` response headers, captured by the proxy off genuine OAuth-passthrough traffic to `api.anthropic.com` — never OpenRouter-routed traffic, and never API-token usage, which has its own separate usage endpoint). Takes no request fields; the daemon resolves identity from the authenticated connection, the same as `Spawn`'s owner attribution — there is no way to ask for another user's usage. Returns `CodeNotFound` (not an empty message) when this user has never made a passthrough call, which is the expected state for anyone who has not used `rafiki claude --passthrough-auth`. `rafiki claude --limits` and the cockpit's status-line quota readout both poll this |
 | `ListSkills` | unary · userOnly | The daemon's database-backed skill corpus (§"Skill management verbs") |
@@ -321,9 +325,13 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 | `DisableExecutor` / `EnableExecutor` | unary · userOnly | Disable (its credential stops authenticating) or re-enable an executor. Ownership-scoped like `LabelExecutor` |
 | `DeleteExecutor` | unary · userOnly | Permanently remove an executor row — no tombstone; a connected row is evicted from the live pool within one health interval. Ownership-scoped like `LabelExecutor` |
 | `ExecutorSession` | server-streaming · userOnly | The session-executor stream: mint or find the caller's own executor for this machine (§"ExecutorSession" below) |
-| `CreateUser` | unary · userOnly (admin-gated) | Mint a user row and its bearer token. NEVER mints an admin — admins come only from `rafikid user create --admin` (§"User administration") |
+| `CreateUser` | unary · userOnly (admin-gated) | Mint a user row and, conditionally, a bearer token: `mint_token` ABSENT means the daemon mints iff OIDC login is NOT configured on it (so the user can authenticate at all); PRESENT is honoured as given. `email` stores a normalized, unique-among-active-users address. The response carries `token` (empty when none), `token_reason` ("requested" / "oidc not configured" / "") and `login_configured`, so a client can word its hint without guessing. NEVER mints an admin — admins come only from `rafikid user create --admin` (§"User administration") |
 | `ListUsers` | unary · userOnly (admin-gated) | Enumerate users. Tokens are never returned |
 | `RemoveUser` | unary · userOnly (admin-gated) | Tombstone a user: its token stops authenticating, but history keeps resolving the username |
+| `UpdateUser` | unary · userOnly (admin-gated) | Edit a user: `email` is the only editable field (`optional` — an unset request is refused "nothing to update"; empty clears the address). The admin bit is deliberately NOT editable here — it comes only from `rafikid user create --admin` (§"User administration") |
+| `MintToken` | unary · userOnly | Mint a service token (`origin "service"`) for the target user — the caller by default, another user with admin authority; `ttl_seconds` 0 = never expires. The plaintext rides the response exactly once (§"User administration") |
+| `ListTokens` | unary · userOnly | The target's credential rows — metadata only, never secrets. `username` empty = the caller; `all_users` (every user) requires admin authority (§"User administration") |
+| `RevokeToken` | unary · userOnly | Tombstone one credential by id (`revoked_at`); already-revoked answers the unchanged row. Owner or admin; on a live daemon the revocation also cuts that token's open streams (§"Token revocation and open streams") |
 | `GetStreams` | unary · userOnly | A live child's raw, uncompressed stdin/stderr capture, for debugging (§"The raw child channel") |
 | `SendFrame` | unary · userOnly | Forward a raw child-protocol frame to a live child's stdin, verbatim and uninspected, for debugging and scripting (§"The raw child channel"). userOnly — children use `Send` |
 
@@ -361,7 +369,7 @@ expiry does not), and new requests stop within the auth cache's ≤5s window
 
 | Policy | Meaning | Procedures |
 |---|---|---|
-| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `GetStreams`, `SendFrame` |
+| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
 | `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus`, `ListProviderBans`, `ListRoutes`, `ModelInfo` |
 | `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it — and a credential that names no child cannot spawn at all, since an empty forced parent would be the top-level spawn shape. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused. The source never resolves nil (the operator path) for a child-shaped credential — the empty-ChildID and vanished-row shapes resolve an always-refusing scope — and the daemon wiring is pinned end to end by `TestConnectChildScopedOnTheConnectPlane` (`test/integration`). The three SCRIPT verbs (`Report`/`Receive`/`SetResult`) resolve the caller's position from the credential rather than authorizing a target: `Report` acts outward on the caller's own parent (a top-level script appends to its own event log), `Receive` and `SetResult` are strictly self-only — `Receive`'s `child_id` is an identity self-check, not a subtree call, and both verbs refuse any caller that resolves to no child scope (a user credential has no position in the tree for a self-position verb to act on). `SetBudget` from a per-child credential is NOT operator authority: after the subtree check it applies `agent_set_budget`'s rule (`Controller.SetChildBudget` — direct parentage, bounded by the caller's own remaining grant). The conversation reads `ConversationSearch`/`ConversationExport`/`ConversationQuery` answer a per-child credential from its own subtree (`insights.ScopeSubtree`, the MCP face's `conversation_*` boundary) — never its owner's corpus; a conversation outside it answers not-found. `ListPymodules`/`GetPymodule`/`PutPymodule`/`DeletePymodule` read and write the owner's corpus, exactly as the MCP face's pymodule tools do. `PutPreset`/`DeletePreset` admit only a TOP-LEVEL child (no parent — the operator's own session); a parented or unknown child is refused `CodePermissionDenied` by `connectPresets.authoringChild` | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `SetBudget`, `ListTasks`, `Report`, `Receive`, `SetResult`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `PutPreset`, `DeletePreset` |
 
@@ -395,13 +403,19 @@ preset authoring limited to top-level children — see `mcp_face.go`'s
 `getServer`.
 
 Admin gates ride ON TOP of the policy table, in the handler: `CreateUser`,
-`ListUsers`, `RemoveUser` and the provider-ban mutations require an admin
+`UpdateUser`, `ListUsers`, `RemoveUser` and the provider-ban mutations
+require an admin
 user credential (or the anonymous local socket, where the socket itself is
 the credential) — `requireUserAdmin` / `requireBanAuthority`
 (`cmd/rafikid/connect_users.go`, `connect_providerbans.go`) refuse before any
 store call, so the ordering is pinned (`TestUserRPCsRefuseNonAdmin`) and a
 non-admin user, a child-attributed identity and a per-child token are all
-refused `CodePermissionDenied`.
+refused `CodePermissionDenied`. The token RPCs (`MintToken`, `ListTokens`,
+`RevokeToken`) are userOnly at the gate but deliberately NOT admin-gated in
+the handler: a user manages its OWN credentials — another user's name on any
+of them requires admin (`resolveTokenTarget`, `cmd/rafikid/connect_users.go`),
+and on the anonymous local socket a target username is required, since there
+is no caller to default to.
 
 #### Spawn's operator-only fields (15–29)
 
@@ -1025,7 +1039,12 @@ for identity. The id is set at mint time from the connection's identity
 (`EnrollExecutor`, `CreateExecutor`; the anonymous unix socket owns nothing,
 `""`), copied from the enrollment token at redemption, and stamped onto a
 transient session executor's ticket from the session's identity; a resumed
-child keeps the `owner_user_id` its stored session carries. An executor that
+child keeps the `owner_user_id` its stored session carries, and the binder's
+pinned-return arm (`boundExecutor.doRecover`'s re-provision-in-place on a
+still-live executor) is exempt from re-selection for the same reason: the pin
+was written by the daemon under this rule at original launch,
+`owner_user_id` has no post-mint setter, and the child's transcript lives on
+that machine's workspace. An executor that
 already carried an `owner=<name>` label was backfilled to that user's id by
 migration 0044, which is a behaviour change: such an executor no longer
 serves token-less unix-socket children.
@@ -1085,8 +1104,34 @@ ordering is pinned by `TestUserRPCsRefuseNonAdmin`.
   authenticate an RPC caller, so Connect's `CreateUser` is unreachable until
   one does), and a stale profile token (a credential that no longer resolves
   cannot refuse the verb that mints its replacement, because
-  `rafikid user create` never contacts the daemon at all). The plaintext
-  token is printed exactly once; the daemon stores only its digest.
+  `rafikid user create` never contacts the daemon at all). The token mint is
+  CONDITIONAL: `mint_token` ABSENT means the daemon mints iff OIDC login is
+  NOT configured on it (a user on a daemon with no IdP would otherwise be
+  unable to authenticate at all); PRESENT is honoured as given — absent and
+  false mean different things, which is why the field is proto3 `optional`.
+  When a token is minted its plaintext is printed exactly once; the daemon
+  stores only its digest.
+- **`UpdateUser`** edits a user's email (`SetEmail`). `email` is the only
+  editable field, and the admin bit is deliberately absent from the request
+  type: it comes only from `rafikid user create --admin` — no Connect call,
+  and no direct-DSN verb, can grant or revoke it after create.
+  `users.User.email` rides `UserRow.email`: lowercased by
+  `users.NormalizeEmail`, empty when none, unique among active users
+  (`ErrEmailTaken`).
+- **`MintToken` / `ListTokens` / `RevokeToken`** manage a user's credentials
+  and are deliberately NOT admin-gated: a user manages its OWN. The target
+  resolves through `resolveTokenTarget` — the caller by default; another
+  username requires admin authority; on the anonymous local socket a username
+  is REQUIRED (`--user is required on an unauthenticated socket`), since
+  there is no caller to default to. `MintToken` mints an `origin "service"`
+  token (`ttl_seconds` 0 = never expires) whose plaintext rides the response
+  exactly once; `ListTokens` returns metadata rows only, `include_revoked`
+  adding tombstoned credentials (revocation is a filter, never a deletion);
+  `RevokeToken` stamps `revoked_at` — an unknown id answers `CodeNotFound`,
+  an already-revoked id the unchanged row, and the ownership check needs the
+  row (`GetToken` first), so a foreign id answers `CodePermissionDenied` and
+  a missing one `CodeNotFound` — a token id is a random UUID and the two
+  leak nothing.
 - **`ListUsers`** returns rows WITHOUT tokens, `include_deleted` adding
   tombstoned rows. `limit` collapses to 500 whenever it is zero, negative or
   above 500 — one clamp, no default-vs-ceiling distinction (unlike
@@ -1101,6 +1146,78 @@ ordering is pinned by `TestUserRPCsRefuseNonAdmin`.
 All three answer `unavailable` (`no_agent_db` as the `ErrorInfo` reason) when
 the daemon has no database pool — there is no in-memory fallback for
 identity.
+
+### The Login service (`rafiki.v1.Login`: `BeginLogin`, `CompleteLogin`)
+
+A separate Connect service on the same proto file, served OUTSIDE
+authentication on BOTH mounts: on the proxy face `server.Handler.Login`
+(`pkg/server/handler.go`, registered by `Mount` WITHOUT the caller's auth
+wrap — every other face is wrapped by middleware that 401s exactly the caller
+Login exists to serve), and on the unix socket the login route
+(`cmd/rafikid/connect_uds.go`) with NO interceptors at all — deliberately not
+through `connectControlRoute`, whose policy gate fail-closes to `userOnly`
+and would refuse exactly the credential-less caller. It is therefore not in
+`connectPolicyTable`: that gate scopes `/rafiki.v1.Control/` only, and Login
+is a different service whose whole job is minting a first or replacement
+credential — an unknown bearer on `/rafiki.v1.Login/` reaches `BeginLogin`,
+never `Unauthenticated` (pinned by
+`TestServeConnectUDSLoginReachesBeginLoginWithUnknownBearer`, `cmd/rafikid`).
+The handlers (`pkg/connectapi/login.go`) never read caller identity; the
+engine is wired post-construction via `Server.SetLoginBackend` (a nil backend
+is refused, the same rule as every `Set*` setter), and an unwired engine
+answers `CodeFailedPrecondition` ("OIDC login is not configured on this
+daemon") — the one state an unauthenticated caller can act on, so it must be
+legible. `loginErr` passes an already-coded error through and redacts
+everything else to `CodeInternal`: Login answers callers with NO valid
+credential, so anything naming the IdP or database stays off the wire.
+
+`BeginLogin` takes the loopback port the client bound and a `client_host` for
+the token name, and returns `login_id` plus the `authorize_url`. The
+response's `redirect_port` names the port the IdP redirects to — the client's
+own unless the daemon PINS one (`oidc.toml`'s `redirect_port`), in which case
+the client must rebind there. `CompleteLogin` takes the `login_id` and the
+raw callback query string the IdP redirected with, and returns the minted
+token (`origin "oidc"`, the config's `session_ttl` as its TTL, named
+`"login <client_host> <date>"`), the username, and the expiry. A login is
+SINGLE-USE: the pending entry is removed first, success or failure.
+
+The pending-login surface is bounded by the engine's own guards
+(`pkg/oidclogin/service.go`): **1024 global pending slots** and a **10-minute
+TTL** per pending login — a pending login is unauthenticated surface holding
+a live PKCE verifier, so the TTL is short on purpose. The next `Begin`
+after the TTL sweeps every expired entry; with all 1024 slots held, every
+`Begin` answers resource-exhausted and ALL logins are deferred until slots
+free — an accepted limitation, not a per-caller queue.
+
+OIDC identity resolution: the verified login's claims resolve through
+`usersdb.ResolveOIDC` — an identity binds once by email (the first login at
+an issuer looks the active user up by the verified email and inserts the
+binding; no active user for that email is `ErrOIDCNoUser`) and resolves by
+`(issuer, subject)` afterward — the claim's email is never consulted once a
+binding exists, so an email change at the IdP cannot re-point it. Lookups
+are scoped to the configured issuer: an identity is only valid at the IdP
+that issued it. `ErrOIDCConflict` (the email is bound to a different subject
+at this issuer) is an answer, not an outage.
+
+### Token revocation and open streams
+
+Revocation through the daemon's own paths is a security act and CUTS:
+`RevokeToken` (`cmd/rafikid/connect_users.go`) and `Controller.UserRm` end
+every server stream the revoked token or user held open, through the
+per-daemon stream registry (`cmd/rafikid/stream_revoke.go`), keyed by the
+caller's `user_token` id and wired behind the policy gate on both Control
+mounts — a refused call never registers. Every Control server-streaming
+handler returns on context cancellation, so a revoked stream ends as
+`Canceled`, never a bare EOF. `UserRm` also disconnects every live executor
+whose `owner_user_id` matches (`execpool.Pool.DisconnectOwner`; an empty id
+is a no-op, so unowned executors are never mass-disconnected).
+
+What is deliberately NOT cut: revocation from the HOST CLI (`rafikid user
+token revoke`, pure database) cannot reach a running daemon's in-memory
+registry, so on such a token open streams run on and only NEW requests stop —
+within the ≤5s auth-cache window (`server.DefaultAuthCacheTTL`); use `rafiki
+token revoke` against the daemon for an immediate cut. Token EXPIRY never
+cuts a stream — expiry is a property of time, not an act.
 
 ## 2.4 MCP agent-control surface (HTTP)
 
