@@ -54,7 +54,7 @@ func ownerUser(t *testing.T, us users.Store) users.User {
 	_, err := rand.Read(b[:])
 	assert.NewAborting(t).NoError(err, "rand")
 	name := "owner-" + hex.EncodeToString(b[:])
-	u, _, err := us.Create(context.Background(), name, false)
+	u, _, err := us.Create(context.Background(), users.NewUser{Username: name})
 	assert.NewAborting(t).NoError(err, "create owner user")
 	t.Cleanup(func() { _ = us.Delete(context.Background(), name) })
 	return u

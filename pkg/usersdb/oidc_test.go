@@ -45,7 +45,7 @@ func TestResolveOIDCBindsByEmailOnFirstLogin(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 
@@ -61,7 +61,7 @@ func TestResolveOIDCResolvesBySubjectAfterEmailChange(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 
@@ -91,7 +91,7 @@ func TestResolveOIDCTombstonedBoundUser(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 	_, err = resolver.ResolveOIDC(ctx, users.OIDCClaims{Issuer: "https://idp.example", Subject: "sub-1", Email: "brent@example.com"})
@@ -109,7 +109,7 @@ func TestResolveOIDCTombstonedEmailUser(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 	c.NoError(s.Delete(ctx, "brent"), "delete")
@@ -126,7 +126,7 @@ func TestResolveOIDCSameIssuerConflict(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 	_, err = resolver.ResolveOIDC(ctx, users.OIDCClaims{Issuer: "https://idp.example", Subject: "sub-1", Email: "brent@example.com"})
@@ -143,7 +143,7 @@ func TestResolveOIDCOtherIssuerIgnored(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 	_, err = resolver.ResolveOIDC(ctx, users.OIDCClaims{Issuer: "https://idp-a.example", Subject: "sub-1", Email: "brent@example.com"})
@@ -161,7 +161,7 @@ func TestResolveOIDCConcurrentFirstLogin(t *testing.T) {
 	s, pool := testStore(t)
 	resolver := NewOIDCResolver(pool)
 
-	u, _, err := s.Create(ctx, "brent", false)
+	u, _, err := s.Create(ctx, users.NewUser{Username: "brent"})
 	c.NoError(err, "create")
 	setEmail(t, ctx, pool, u.ID, "brent@example.com")
 
