@@ -50,9 +50,10 @@ type keyMap struct {
 	Abort         key.Binding
 
 	// Input pane.
-	Send    key.Binding
-	Steer   key.Binding
-	Newline key.Binding
+	Send           key.Binding
+	Steer          key.Binding
+	Newline        key.Binding
+	ClipboardPaste key.Binding
 
 	// Input pane.
 	ClearInput key.Binding
@@ -125,6 +126,15 @@ func defaultKeyMap() keyMap {
 		// binding must never have. ^J is LF, distinct from ^M everywhere, and
 		// is claimed by neither the textarea's keymap nor any cockpit global.
 		Newline: key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("⇧⏎", "newline")),
+
+		// ^V reads the system clipboard: image bytes stage as an attachment,
+		// text falls through to the ordinary paste path. The reflex Claude
+		// Code taught everyone, and the only way a clipboard IMAGE can reach
+		// the box — a terminal's Cmd+V transmits text only, which is why
+		// iTerm2 interposes its save-to-file dialog. Scoped to the input
+		// pane: the spawn form's ^V (vision filter) keeps its own meaning,
+		// the way ⏎ already means commit on the rail and send in the input.
+		ClipboardPaste: key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("^V", "paste image")),
 
 		// ^U rather than ^Z. The textarea already binds ^U to
 		// DeleteBeforeCursor, which for the common case — one line, cursor at

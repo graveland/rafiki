@@ -914,6 +914,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.PasteMsg:
 		return c, c.handlePaste(msg.Content)
 
+	case clipboardPasteMsg:
+		return c, c.applyClipboardPaste(msg)
+
 	case tea.KeyPressMsg:
 		return c.handleKey(msg)
 	}
@@ -1276,6 +1279,9 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		c.attachments = nil
 		return c, nil
 	}
+	if key.Matches(msg, k.ClipboardPaste) {
+		return c, clipboardPasteCmd()
+	}
 	switch {
 	case key.Matches(msg, k.ScrollTop):
 		// home/end were transcript-pane-only and so appeared not to work at
@@ -1331,6 +1337,39 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	c.ta, cmd = c.ta.Update(msg)
 	return c, cmd
+}
+
+// applyClipboardPaste stages what ^V read. An image stages exactly like a
+// pasted path — same stagedAttachment, same cap, same notice shape — and the
+// token is what the model reads naming the bytes beside it. Tokens NUMBER
+// across pastes ([Image #1], [Image #2]) so a model can be told "the second
+// image" — two identical [clipboard.png] tokens could not be told apart.
+// Text re-enters handlePaste so CRLF normalization and folding apply
+// unchanged. A failed read is a notice, never an error dialog: ^V must be
+// safe to press on spec.
+func (c *Cockpit) applyClipboardPaste(msg clipboardPasteMsg) tea.Cmd {
+	if msg.err != nil {
+		c.setNotice("clipboard: " + msg.err.Error())
+		return nil
+	}
+	if len(msg.data) > 0 {
+		if len(msg.data) > maxAttachmentBytes {
+			c.setNotice("clipboard image is " + humanBytes(int64(len(msg.data))) +
+				"; the limit is " + humanBytes(maxAttachmentBytes))
+			return nil
+		}
+		att := stagedAttachment{
+			token:     "[Image #" + itoa(int64(len(c.attachments)+1)) + "]",
+			notice:    "attached image #" + itoa(int64(len(c.attachments)+1)) + " (" + humanBytes(int64(len(msg.data))) + ")",
+			mediaType: msg.mediaType,
+			data:      msg.data,
+		}
+		c.attachments = append(c.attachments, att)
+		c.ta.InsertString(att.token)
+		c.setNotice(att.notice)
+		return nil
+	}
+	return c.handlePaste(msg.text)
 }
 
 // handlePaste folds a large paste into a token rather than unrolling it.
