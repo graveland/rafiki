@@ -146,7 +146,7 @@ func bootGrantDaemon(t *testing.T, dsn string) *grantDaemon {
 	// listen is an ephemeral loopback port (the daemon logs the real port),
 	// so two grant daemons in one suite never fight over the fixed default.
 	stderr := &stderrBuf{}
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
@@ -243,7 +243,7 @@ func (g *grantDaemon) enrollExecutor(t *testing.T, labels map[string]string) str
 
 	root := t.TempDir()
 	credFile := filepath.Join(t.TempDir(), "cred")
-	cmd := exec.Command(cliPath, "executor", "serve",
+	cmd := exec.Command(cliBinary(), "executor", "serve",
 		"--connect", g.listenAddr,
 		"--enroll-token", token,
 		"--credential-file", credFile,

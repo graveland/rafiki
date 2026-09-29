@@ -58,10 +58,11 @@ func TestMain(m *testing.M) {
 	// Both binaries land in the same directory, so their names must differ:
 	// rafikid is the daemon, rafiki the client — and, since the executor folded
 	// into it, also the executor via `rafiki executor serve`.
-	for _, cmd := range []struct{ bin, pkg string }{
+	pkgs := []struct{ bin, pkg string }{
 		{"rafikid", "./cmd/rafikid"},
 		{"rafiki", "./cmd/rafiki"},
-	} {
+	}
+	for _, cmd := range pkgs {
 		out := filepath.Join(binDir, cmd.bin)
 		build := exec.Command("go", "build", "-o", out, cmd.pkg)
 		build.Dir = root
@@ -75,6 +76,11 @@ func TestMain(m *testing.M) {
 		case "rafiki":
 			cliPath = out
 		}
+	}
+
+	buildInputs, err = listBuildInputs(root, pkgs[0].pkg, pkgs[1].pkg)
+	if err != nil {
+		log.Fatalf("list build inputs: %v", err)
 	}
 
 	os.Exit(m.Run())
@@ -151,7 +157,7 @@ func bootDaemon(t *testing.T) *daemon {
 	daemonID := nextDaemonID()
 	dropDaemonRows(t, daemonID)
 
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
 		"XDG_RUNTIME_DIR="+homeDir,

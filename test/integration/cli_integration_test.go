@@ -86,7 +86,7 @@ func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.C
 	if d != nil {
 		writeCliProfile(t, configDir, d.socketPath)
 	}
-	cmd := exec.Command(cliPath, args...)
+	cmd := exec.Command(cliBinary(), args...)
 	// XDG_STATE_HOME too: `rafiki create` records the model it spawned into
 	// the client state file, so an un-isolated run writes a remembered model
 	// into the DEVELOPER's real preferences from a test daemon's fixture.

@@ -100,7 +100,7 @@ func createOIDCUser(t *testing.T, name, email string) {
 	c := assert.NewAborting(t)
 	dsn := os.Getenv("RAFIKI_TEST_DSN")
 	c.NotEq("", dsn, "RAFIKI_TEST_DSN is required: rafikid user create opens the database directly")
-	cmd := exec.Command(binaryPath, "user", "--db", dsn, "create", name, "--email", email)
+	cmd := exec.Command(daemonBinary(), "user", "--db", dsn, "create", name, "--email", email)
 	out, err := cmd.CombinedOutput()
 	c.NoError(err, "rafikid user create %s --email %s failed: %s", name, email, out)
 }

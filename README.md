@@ -1163,14 +1163,26 @@ make help     # every target
 ```
 
 Integration tests (migrator, capture store) need TimescaleDB >= 2.22 on
-PostgreSQL 18:
+PostgreSQL 18 with `vector` and `pg_textsearch`. Run a dedicated, disposable
+server for them: every DB-backed test creates and drops its own scratch
+database, and with durability off a drop costs ~20ms instead of ~1s.
 
 ```bash
-docker run -d --name rafiki-test-db -p 5433:5432 \
-  -e POSTGRES_PASSWORD=postgres timescale/timescaledb:2.28.2-pg18
-RAFIKI_TEST_DSN='postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable' \
+docker run -d --name pg-test --restart unless-stopped \
+  -p 127.0.0.1:5433:5432 \
+  --tmpfs /home/postgres/pgdata:rw,uid=1000,gid=1000,size=4g --shm-size=1g \
+  -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=rafiki_test \
+  timescale/timescaledb-ha:pg18 postgres \
+  -c shared_preload_libraries=timescaledb,pg_textsearch \
+  -c fsync=off -c synchronous_commit=off -c full_page_writes=off \
+  -c wal_level=minimal -c max_wal_senders=0 -c archive_mode=off \
+  -c checkpoint_timeout=1d -c max_wal_size=8GB \
+  -c max_connections=500 -c shared_buffers=1GB -c timescaledb.telemetry_level=off
+RAFIKI_TEST_DSN='postgres://postgres@127.0.0.1:5433/rafiki_test?sslmode=disable' \
   make test
 ```
+
+Never point `RAFIKI_TEST_DSN` at a server holding data you care about.
 
 `make test` sources a gitignored `.env` and warns loudly when
 `RAFIKI_TEST_DSN` is unset — without it every DB-backed test *skips* while

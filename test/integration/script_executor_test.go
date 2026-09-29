@@ -134,7 +134,7 @@ func enrollScriptExecutor(t *testing.T, g *grantDaemon, ownerName, ownerUserID s
 
 	root := t.TempDir()
 	credFile := filepath.Join(t.TempDir(), "cred")
-	cmd := exec.Command(cliPath, "executor", "serve",
+	cmd := exec.Command(cliBinary(), "executor", "serve",
 		"--connect", g.listenAddr,
 		"--enroll-token", token,
 		"--credential-file", credFile,

@@ -126,7 +126,7 @@ func bootSDKDaemon(t *testing.T, python string) *scriptDaemon {
 func sdkBinDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	assert.NewAborting(t).NoError(os.Symlink(cliPath, filepath.Join(dir, "rafiki")), "symlink rafiki")
+	assert.NewAborting(t).NoError(os.Symlink(cliBinary(), filepath.Join(dir, "rafiki")), "symlink rafiki")
 	return dir
 }
 

@@ -254,9 +254,10 @@ lint: ## Run golangci-lint.
 # run, which is indistinguishable from a clean pass. The guard below makes that
 # state loud instead: an unset DSN is announced, not inferred from a test count
 # nobody checks. Use test-nodb when you deliberately want the short run.
-# -count=1 is not optional: test/integration builds the daemon binary in a
-# subprocess inside TestMain, so its import graph is only pkg/protocol and a
-# cached PASS survives any change to the daemon.
+# No -count=1: the test cache is sound here, including test/integration, whose
+# tests open the sources of the binaries TestMain builds so that the cache key
+# covers them (test/integration/buildinputs_test.go). Force a rerun with
+# `go clean -testcache` when a test depends on something outside the repo.
 .PHONY: test
 test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 	@set -a; [ -f .env ] && . ./.env; set +a; \
@@ -269,11 +270,11 @@ test: ## Run tests with -race, sourcing .env so DB-backed tests run.
 		echo "         They build their interpreter with uv from sdk/python/pyproject.toml; install uv"; \
 		echo "         (or set RAFIKI_TEST_SDK_PYTHON to an interpreter with httpx)."; \
 	fi; \
-	go test -race -count=1 ./...
+	go test -race ./...
 
 .PHONY: test-nodb
 test-nodb: ## Run only the DSN-free tests (explicitly skips DB-backed ones).
-	RAFIKI_TEST_DSN= go test -race -count=1 ./...
+	RAFIKI_TEST_DSN= go test -race ./...
 
 .PHONY: fmt
 fmt: ## gofmt all Go sources.

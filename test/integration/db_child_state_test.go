@@ -137,7 +137,7 @@ func bootDaemonDB(t *testing.T, daemonID string, extraEnv ...string) *daemon {
 	// announces its port, and the only place a degraded boot's real cause is
 	// written — the failure messages below carry its tail.
 	stderr := &stderrBuf{}
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(),
 		"HOME="+homeDir,
@@ -233,7 +233,7 @@ func TestDBChildState_RestartSurvivesWipedStateDir(t *testing.T) {
 	ck.NoError(os.RemoveAll(stateDir), "remove state dir")
 
 	// 4. Restart with the same daemon id and home dir.
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Env = append(os.Environ(),
 		"HOME="+d1.homeDir,
 		"XDG_RUNTIME_DIR="+d1.homeDir,
@@ -529,7 +529,7 @@ func TestDBChildState_ResumesAfterDaemonCrash(t *testing.T) {
 	}
 
 	// Restart with the same daemon id and home dir.
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Env = append(os.Environ(),
 		"HOME="+d1.homeDir,
 		"XDG_RUNTIME_DIR="+d1.homeDir,
@@ -658,7 +658,7 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 
 	// Restart with the same daemon id and home dir — the recovery path under
 	// test.
-	cmd := exec.Command(binaryPath)
+	cmd := exec.Command(daemonBinary())
 	cmd.Env = append(os.Environ(),
 		"HOME="+d1.homeDir,
 		"XDG_RUNTIME_DIR="+d1.homeDir,
