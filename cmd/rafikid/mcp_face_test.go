@@ -866,3 +866,35 @@ func TestMCPEntitlementIsOneSpelling(t *testing.T) {
 		assert.NewCollecting(t).Eq(tc.want, got, "%s: mcpEntitled = %v, want", tc.name, got)
 	}
 }
+
+// TestMCPFaceChildCallerGetsParentTools pins the MCP face's half of the
+// child→parent verbs: a child-token caller's tool list carries agent_report
+// and agent_result — a child credential gets exactly what the Connect verbs
+// admit it, so the MCP face must offer them. The binding is per-child
+// (newParentReporter), so the tools report from the caller's own position.
+func TestMCPFaceChildCallerGetsParentTools(t *testing.T) {
+	c := assert.NewCollecting(t)
+	face, _ := mcpFaceFixture(t)
+	child := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	child = child.WithContext(server.WithIdentity(child.Context(), &server.Identity{
+		UserID: "u-alice", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	}))
+
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(child)))
+	for _, name := range []string{"agent_report", "agent_result"} {
+		c.Contains(names, name, "child caller's tool list is missing")
+	}
+}
+
+// TestMCPFaceUserCallerHasNoParentTools pins the boundary: a user credential
+// has no position in the agent tree to report from, so Parent stays nil and
+// both blueprints decline — the same nil-means-decline rule the agent_*
+// spawner tools follow without a spawner.
+func TestMCPFaceUserCallerHasNoParentTools(t *testing.T) {
+	face, _ := mcpFaceFixture(t)
+
+	names := mcpToolNames(t, mcpConnect(t, face.getServer(mcpRequestFor("u-alice"))))
+	for _, name := range []string{"agent_report", "agent_result"} {
+		assert.NewCollecting(t).NotContains(names, name, "user credential unexpectedly exposes")
+	}
+}

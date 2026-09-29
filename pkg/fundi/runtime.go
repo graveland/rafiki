@@ -226,6 +226,12 @@ type RuntimeOptions struct {
 	// subtree to steer.
 	Agents tools.AgentSpawner
 
+	// Parent, when non-nil, gives this child agent_report and agent_result.
+	// Supplied by the daemon as a per-child adapter over the same hub the
+	// Connect Report/SetResult verbs run; nil for the standalone `rafikid
+	// fundi` process, which has no parent to report to.
+	Parent tools.ParentReporter
+
 	// Quota, when non-nil, gives this child the quota_status tool -- its own
 	// captured Anthropic subscription rate-limit snapshot. Supplied by the
 	// daemon as a per-user adapter; nil when no quota source is configured
@@ -631,6 +637,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Tasks:              taskStore,
 		ChildID:            opts.Ref,
 		Agents:             opts.Agents,
+		Parent:             opts.Parent,
 		Quota:              opts.Quota,
 		Conversations:      opts.Conversations,
 		PyModules:          opts.PyModules,

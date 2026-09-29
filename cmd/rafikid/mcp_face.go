@@ -257,6 +257,15 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 		Quota:         quotaReader,
 		Conversations: conversations,
 	}
+	// The child→parent verbs: a per-child caller reports to its own parent
+	// and stores its own result, through the same hub the Connect Report/
+	// SetResult verbs run — a child credential gets exactly what Connect
+	// admits it, never more. A user credential has no position in the tree
+	// to report from, so Parent stays nil and both blueprints decline (the
+	// same nil-means-decline rule Agents follows).
+	if isChild {
+		opts.Parent = newParentReporter(ctrl, id.ChildID)
+	}
 	// Presets need only the database: unlike the pymodule tools they are the
 	// same for every caller and every executor state. A child-token caller
 	// authors only when it is top-level (the operator's own session); a
@@ -389,6 +398,8 @@ var mcpBlueprints = []tools.Tool{
 	&tools.AgentKillBlueprint{},
 	&tools.AgentSetBudgetBlueprint{},
 	&tools.AgentModelsBlueprint{},
+	&tools.AgentReportBlueprint{},
+	&tools.AgentResultBlueprint{},
 	&tools.TaskAddBlueprint{},
 	&tools.TaskUpdateBlueprint{},
 	&tools.TaskDropBlueprint{},
@@ -533,6 +544,8 @@ var mcpToolDescriptions = func() map[string]string {
 	put := &tools.PyModulePutBlueprint{}
 	get := &tools.PyModuleGetBlueprint{}
 	del := &tools.PyModuleDeleteBlueprint{}
+	report := &tools.AgentReportBlueprint{}
+	result := &tools.AgentResultBlueprint{}
 	// Note and the remainder of the blueprint text stay verbatim; the
 	// fundi-only ownership sentence (from mcpSearchScopeStart to the end) is
 	// excised, the same composition the spawn override performs.
@@ -567,8 +580,10 @@ var mcpToolDescriptions = func() map[string]string {
 			"not as a polling loop. " + mcpNotificationNote + " For \"what is it actually " +
 			"working on\", prefer task_list with assignee set — that is one indexed read of " +
 			"what the agent decided, where this is a wall of transcript you have to interpret.",
-		"agent_send": mcpSurfacePrefix + send.Description(),
-		"agent_kill": mcpSurfacePrefix + kill.Description(),
+		"agent_send":   mcpSurfacePrefix + send.Description(),
+		"agent_kill":   mcpSurfacePrefix + kill.Description(),
+		"agent_report": mcpSurfacePrefix + report.Description(),
+		"agent_result": mcpSurfacePrefix + result.Description(),
 		// conversation_search/export DO get overrides: their blueprint texts
 		// state an absolute ownership scope that is false for an admin caller
 		// here (ScopeAll), unlike on a fundi child. See

@@ -433,6 +433,10 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// because the binding is what makes a self id unspoofable — a shared
 	// spawner would have to take one as an argument.
 	ro.Agents = newControllerSpawner(c, childID)
+	// Same binding rule for the child→parent verbs: agent_report and
+	// agent_result report from THIS child's position in the tree, through the
+	// same hub the Connect verbs run.
+	ro.Parent = newParentReporter(c, childID)
 	// The owner's user id, resolved by the caller: owner.UserID at a fresh
 	// spawn (from the authenticated caller's users.Identity), and on resume
 	// snap.OwnerUserID — or, for rows predating that column, the owner's
