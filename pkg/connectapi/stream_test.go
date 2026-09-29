@@ -295,6 +295,50 @@ func TestStreamEventsEndsAfterReplayWithoutEventSource(t *testing.T) {
 // Dummy use of proto package to avoid unused import if needed
 var _ = proto.Marshal
 
+// The replay must page until the log is drained, not stop at one Read's page
+// size: an exited script with more than replayPageSize events replays
+// ordinals 0..N and ENDS, where a capped replay switched to a live follow no
+// one would ever satisfy — `rafiki logs` on such a child hung until
+// interrupted.
+func TestStreamEventsReplayPagesPastPageSize(t *testing.T) {
+	c := assert.NewAborting(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const total = 2500
+	elog := eventlog.NewMemory()
+	for i := 0; i < total; i++ {
+		if _, err := elog.Append(ctx, "c_1", statusEvent("c_1", "s")); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	client := setupStreamServer(t, &fakeLineage{}, elog, nil)
+	stream, err := client.StreamEvents(ctx, connect.NewRequest(&rafikiv1.StreamEventsRequest{
+		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: "c_1"}},
+		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{"c_1": -1}},
+	}))
+	c.NoError(err, "StreamEvents")
+
+	got := 0
+	lastOrd := int32(-1)
+	for stream.Receive() {
+		ord := stream.Msg().GetOrdinal()
+		if ord <= lastOrd {
+			t.Fatalf("ordinal went backwards: %d after %d", ord, lastOrd)
+		}
+		lastOrd = ord
+		got++
+	}
+	c.NoError(stream.Err(), "stream ended with error")
+	if got != total {
+		t.Fatalf("replayed %d events, want %d (last ordinal %d)", got, total, lastOrd)
+	}
+	if lastOrd != int32(total-1) {
+		t.Fatalf("last ordinal %d, want %d", lastOrd, total-1)
+	}
+}
+
 // A cockpit attached to a child subscribes to its subtree PLUS itself. Without
 // include_self the attached child is the one row the rail never hears about,
 // and the focus stream (ScopeChild) hides that until the user hops away.

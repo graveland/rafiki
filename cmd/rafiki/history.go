@@ -230,6 +230,19 @@ func runEventQuery(
 		script = scriptChildSummary(ctx, client, q.childID)
 	}
 
+	// The follow's type filter is the query's resolved filter — except that a
+	// script child under the DEFAULT filter follows the replay vocabulary:
+	// conversation types + lifecycle contains neither script_output nor
+	// script_report, so the server would drop every live script line and the
+	// command would show nothing after the backfill until the child exited.
+	// An explicit --types/--all-types wins. An explicit list that omits
+	// child_exited never sees the exit, so that follow does not end on its
+	// own (true for every child kind, not just scripts).
+	followTypes := q.types
+	if script != nil && !q.typesExplicit() {
+		followTypes = scriptLogReplayTypes
+	}
+
 	// Backfill, and the resume cursor taken from where it ended.
 	var cursor *rafikiv1.EventCursor
 	if q.childID != "" && q.tailN != 0 {
@@ -282,7 +295,7 @@ func runEventQuery(
 		if script == nil {
 			printed = filterByTypes(evs, q.types)
 		} else {
-			printed = filterByTypes(evs, scriptLogReplayTypes)
+			printed = filterByTypes(evs, followTypes)
 		}
 		if q.tailN > 0 && len(printed) > q.tailN {
 			printed = printed[len(printed)-q.tailN:]
@@ -307,10 +320,6 @@ func runEventQuery(
 	// command would show nothing after the backfill until the child exited.
 	// An explicit --types/--all-types wins; child_exited stays admitted either
 	// way, so the follow still ends when the script does.
-	followTypes := q.types
-	if script != nil && !q.typesExplicit() {
-		followTypes = scriptLogReplayTypes
-	}
 	req := &rafikiv1.StreamEventsRequest{
 		Subject: q.subject,
 		Tier:    q.tier,

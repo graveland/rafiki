@@ -139,6 +139,10 @@ func (s *Server) StreamEvents(
 	}
 }
 
+// replayPageSize is the per-Read page size for replay; the loop keeps reading
+// until a page comes back short, so a log of any length replays fully.
+const replayPageSize = 1000
+
 func (s *Server) replay(
 	ctx context.Context,
 	filter eventlog.Filter,
@@ -173,24 +177,33 @@ func (s *Server) replay(
 
 	for cid, lastOrd := range childrenToReplay {
 		afterOrd := lastOrd
-		recs, err := elog.Read(ctx, cid, afterOrd, 1000)
-		if err != nil {
-			return connect.NewError(connect.CodeInternal, fmt.Errorf("replay read child %s: %w", cid, err))
-		}
-		for _, rec := range recs {
-			if !floorTime.IsZero() && rec.CreatedAt.Before(floorTime) {
-				continue
+		for {
+			recs, err := elog.Read(ctx, cid, afterOrd, replayPageSize)
+			if err != nil {
+				return connect.NewError(connect.CodeInternal, fmt.Errorf("replay read child %s: %w", cid, err))
 			}
-			var ev rafikiv1.Event
-			if err := protojson.Unmarshal(rec.Payload, &ev); err != nil {
-				return connect.NewError(connect.CodeInternal, fmt.Errorf("unmarshal event %s:%d: %w", cid, rec.Ordinal, err))
+			for _, rec := range recs {
+				afterOrd = rec.Ordinal
+				if !floorTime.IsZero() && rec.CreatedAt.Before(floorTime) {
+					continue
+				}
+				var ev rafikiv1.Event
+				if err := protojson.Unmarshal(rec.Payload, &ev); err != nil {
+					return connect.NewError(connect.CodeInternal, fmt.Errorf("unmarshal event %s:%d: %w", cid, rec.Ordinal, err))
+				}
+				ev.Ordinal = &rec.Ordinal
+				if !filter.Match(&ev, ln) {
+					continue
+				}
+				if err := stream.Send(&ev); err != nil {
+					return err
+				}
 			}
-			ev.Ordinal = &rec.Ordinal
-			if !filter.Match(&ev, ln) {
-				continue
-			}
-			if err := stream.Send(&ev); err != nil {
-				return err
+			// A short page means the log is drained. A full page loops again;
+			// the next Read simply starts past the last ordinal seen, so an
+			// empty log tail can never spin the loop.
+			if len(recs) < replayPageSize {
+				break
 			}
 		}
 	}

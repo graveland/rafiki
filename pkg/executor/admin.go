@@ -179,11 +179,11 @@ type AdminServer struct {
 	// child id, surviving the process's exit (see launchRecord). Only Launch
 	// writes a key; supervise and the stderr relay mutate a record's fields.
 	records map[string]*launchRecord
-	// supDoneChannels is every supervise goroutine's done channel, appended at
-	// launch. The a.m entry is deleted by supervise right after Wait, so the
-	// map can no longer serve the join that Close needs; this slice can. One
-	// entry per launch, never pruned: a channel per hosted daraja, bounded by
-	// how many it ever launched.
+	// supDoneChannels is every LIVE supervise goroutine's done channel,
+	// appended at launch. The a.m entry is deleted by supervise right after
+	// Wait, so the map can no longer serve the join that Close needs; this
+	// slice can. supervise removes its own entry when it closes its channel,
+	// so the slice holds only channels still worth waiting on.
 	supDoneChannels []chan struct{}
 }
 
@@ -657,6 +657,15 @@ func (a *AdminServer) supervise(childID string, l *launched) {
 		rec.running = false
 		rec.exited = true
 		rec.exitCode = int32(code)
+	}
+	// Prune this goroutine's done from the join slice now that it is closed,
+	// so the slice holds only channels a joiner could still be waiting on
+	// rather than one entry per launch for the executor's lifetime.
+	for i, d := range a.supDoneChannels {
+		if d == l.supDone {
+			a.supDoneChannels = append(a.supDoneChannels[:i], a.supDoneChannels[i+1:]...)
+			break
+		}
 	}
 	a.mu.Unlock()
 	close(l.supDone)
