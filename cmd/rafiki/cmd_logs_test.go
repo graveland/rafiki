@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/proto"
 
+	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/profile"
@@ -37,9 +38,11 @@ type stubControl struct {
 	mu sync.Mutex
 
 	events          []*rafikiv1.Event // GetHistory's response
-	streamEvents    []*rafikiv1.Event // what StreamEvents sends before its follow
+	streamEvents    []*rafikiv1.Event // what the FIRST StreamEvents call (the replay) sends
+	followEvents    []*rafikiv1.Event // what the SECOND call (the follow) sends; nil = streamEvents again
 	streamErr       error             // what StreamEvents returns after sending
-	streamBlocks    bool              // after its events, StreamEvents blocks until the caller's ctx is cancelled — the real server's contract (it replays, then follows live)
+	streamBlocks    bool              // the replay call blocks until the caller's ctx is cancelled — the real server's contract (it replays, then follows live)
+	followBlocks    bool              // the follow call blocks too (by default it ends after its events: the client ends the command on the child's own child_exited)
 	scriptLatest    *int32            // GetChild's latest_ordinal for a script child (nil = unset)
 	historyNotFound bool              // GetHistory answers NotFound (no conversation)
 	getChildOK      bool              // GetChild answers with a named child when set
@@ -80,7 +83,29 @@ func (s *stubControl) StreamEvents(
 	events := append([]*rafikiv1.Event(nil), s.streamEvents...)
 	streamErr := s.streamErr
 	blocks := s.streamBlocks
+	if s.streamCalls > 1 && s.followEvents != nil {
+		events = append([]*rafikiv1.Event(nil), s.followEvents...)
+		blocks = s.followBlocks
+	}
 	s.mu.Unlock()
+
+	// The server applies the request's Types server-side (filter.Match in the
+	// stream's follow loop): an event of a type the request did not ask for
+	// is never sent. Simulating that is what makes a wrong type filter drop
+	// lines here the way the real daemon does.
+	if len(req.Msg.GetTypes()) > 0 {
+		want := make(map[string]bool, len(req.Msg.GetTypes()))
+		for _, t := range req.Msg.GetTypes() {
+			want[t] = true
+		}
+		filtered := make([]*rafikiv1.Event, 0, len(events))
+		for _, ev := range events {
+			if want[eventlog.TypeName(ev)] {
+				filtered = append(filtered, ev)
+			}
+		}
+		events = filtered
+	}
 
 	for _, ev := range events {
 		if err := stream.Send(ev); err != nil {
@@ -483,15 +508,70 @@ func TestLogsScriptBackfillsFromEventLog(t *testing.T) {
 	waitStreamCancel(t, stub)
 	c.Eq(1, stub.streamCtxDone, "the replay stream must be cancelled once the watermark is reached")
 
-	// The follow cursor is the last replay ordinal — the event-log space the
-	// live stream resumes in.
-	req := stub.streamReqs[len(stub.streamReqs)-1]
+	// The replay request: from the log head at DURABLE tier, and NO Types —
+	// latest_ordinal is the highest ordinal of ANY durable type, so a
+	// server-side filter could hide the event that reaches the watermark and
+	// hang the replay; the transcript cut is client-side instead. (The stub
+	// applies Types server-side like the real daemon, so the empty Types is
+	// also what lets this replay see all three events.)
+	req := stub.streamReqs[0]
 	c.Eq(int32(-1), req.GetCursor().GetOrdinals()["c_s"], "replay must start at ordinal -1 (from the log head)")
-	for _, want := range []string{"script_output", "script_report", "child_exited"} {
-		c.StrContains(strings.Join(req.GetTypes(), ","), want, "replay types missing %q: %v", want, req.GetTypes())
-	}
+	c.Eq(0, len(req.GetTypes()), "the replay must not filter server-side, got %v", req.GetTypes())
 	c.Eq(rafikiv1.EventTier_EVENT_TIER_DURABLE, req.GetTier(), "replay tier")
 	c.Eq("c_s", req.GetSubject().GetChild(), "replay subject")
+}
+
+// The follow phase of a script child's logs/tail must be able to show LIVE
+// script output: the subject-shaped default filter (conversation types +
+// lifecycle) contains neither script_output nor script_report, so with it on
+// the follow request the server drops every live script line and the command
+// shows nothing after the backfill until the child exits. With no explicit
+// --types/--all-types the follow therefore carries the replay vocabulary —
+// the types a script child actually produces — and child_exited with them,
+// so the follow still ends when the script does.
+func TestLogsScriptFollowCarriesTheReplayTypes(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &stubControl{
+		scriptChild:  true,
+		scriptLatest: proto.Int32(1),
+		streamBlocks: true,
+		streamEvents: []*rafikiv1.Event{
+			scriptOutputEvent("c_s", 0, "stdout", "backfill line"),
+			scriptOutputEvent("c_s", 1, "stdout", "watermark line"),
+		},
+		followEvents: []*rafikiv1.Event{
+			// Live, past the watermark: only a follow whose Types admit
+			// script_output can show it — the stub filters server-side.
+			scriptOutputEvent("c_s", 2, "stdout", "live line"),
+			exitedFor("c_s", proto32(0), ""),
+		},
+	}
+	serveStubControl(t, stub)
+
+	out, notes := runBounded(t, newLogsCmd(), "-f", "c_s")
+	c.StrContains(out, "backfill line", "backfill missing from logs -f:\n")
+	c.StrContains(out, "live line", "the follow dropped the live script_output — its Types cannot show a script transcript:\n")
+	c.NotStrContains(notes, "no history yet", "the script dead end leaked through:\n")
+
+	// The follow request's Types admit the transcript — and carry neither of
+	// the conversation types that would have dropped it.
+	c.Require().Eq(2, stub.streamCalls, "calls = replay + follow")
+	follow := stub.streamReqs[1]
+	for _, want := range []string{"script_output", "script_report"} {
+		c.StrContains(strings.Join(follow.GetTypes(), ","), want, "follow types missing %q: %v", want, follow.GetTypes())
+	}
+	for _, banned := range []string{"user_message", "assistant_message", "compaction_boundary"} {
+		for _, got := range follow.GetTypes() {
+			c.NotEq(banned, got, "the script follow must not carry the conversation default")
+		}
+	}
+	c.Eq(int32(1), follow.GetCursor().GetOrdinals()["c_s"], "the follow resumes from the watermark")
+	c.Eq(rafikiv1.EventTier_EVENT_TIER_DURABLE, follow.GetTier(), "follow tier")
+
+	// The replay was bounded by the watermark and cancelled; the follow ended
+	// on the child's own child_exited (the command returned above).
+	waitStreamCancel(t, stub)
+	c.Eq(1, stub.streamCtxDone, "the replay stream must be cancelled once the watermark is reached")
 }
 
 // A running script (no child_exited yet) stops its replay at the watermark —
@@ -534,6 +614,87 @@ func TestLogsScriptWithoutLatestOrdinalSkipsTheReplay(t *testing.T) {
 	out, _ := runBounded(t, newLogsCmd(), "c_s")
 	c.Eq(0, stub.streamCalls, "nothing to replay — StreamEvents must not be dialled")
 	c.Eq("", out, "no replay, no output")
+}
+
+// latest_ordinal 0 is a SET watermark, not an unset one: ordinals start at 0
+// (the eventlog.Store contract), so a log whose only event is ordinal 0 is a
+// real log. Conflating 0 with "unset" skips the replay entirely, leaves the
+// cursor nil, and the event is lost. (The stub blocks after its events, so
+// the replay is only bounded if the watermark stop runs.)
+func TestLogsScriptZeroOrdinalReplays(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &stubControl{
+		scriptChild:  true,
+		scriptLatest: proto.Int32(0),
+		streamBlocks: true,
+		streamEvents: []*rafikiv1.Event{scriptOutputEvent("c_s", 0, "stdout", "the only event")},
+	}
+	serveStubControl(t, stub)
+
+	out, notes := runBounded(t, newLogsCmd(), "c_s")
+	c.Eq(1, stub.streamCalls, "a SET latest_ordinal of 0 must still run the replay")
+	c.StrContains(out, "the only event", "ordinal 0 is missing from the replay:\n")
+	c.NotStrContains(notes, "no history yet", "a one-event log is not an empty one:\n")
+	waitStreamCancel(t, stub)
+	c.Eq(1, stub.streamCtxDone, "the replay must still be bounded at the watermark")
+}
+
+// The replay must observe every ordinal up to the watermark, whatever type
+// the events carry: latest_ordinal is the highest ordinal of ANY durable
+// type, so a replay that filters server-side to the transcript vocabulary
+// would never see the event that reaches the watermark on a log whose newest
+// entry is another durable type — and would hang reading live forever. The
+// client-side cut still keeps that type out of the printed view.
+func TestLogsScriptReplaySeesANonScriptWatermarkEvent(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &stubControl{
+		scriptChild:  true,
+		scriptLatest: proto.Int32(2),
+		streamBlocks: true,
+		streamEvents: []*rafikiv1.Event{
+			scriptOutputEvent("c_s", 0, "stdout", "building..."),
+			scriptOutputEvent("c_s", 1, "stdout", "still going"),
+			// A durable type outside the replay vocabulary, AT the
+			// watermark: the replay must stop here and must not print it.
+			userMessageEvent("c_s", 2, "a conversation line at the watermark"),
+		},
+	}
+	serveStubControl(t, stub)
+
+	out, _ := runBounded(t, newLogsCmd(), "c_s")
+	c.Eq(0, len(stub.streamReqs[0].GetTypes()), "the replay must not filter server-side, got %v", stub.streamReqs[0].GetTypes())
+	c.StrContains(out, "building...", "replay missing:\n")
+	c.NotStrContains(out, "a conversation line at the watermark", "a non-transcript type must not print:\n")
+	waitStreamCancel(t, stub)
+	c.Eq(1, stub.streamCtxDone, "the replay must be bounded at the watermark, not left reading live")
+}
+
+// The script follow's type override keys off "the user declared a filter",
+// derived by equality with the subject-shaped default (there is no flag to
+// carry on eventQuery — the commands resolve the filter before the engine
+// runs). Pin the derivation: the defaults read as NOT explicit, every
+// declared shape as explicit.
+func TestEventQueryTypesExplicit(t *testing.T) {
+	single := eventQuery{childID: "c_1", types: defaultTypeSet(true)}
+	if single.typesExplicit() {
+		t.Errorf("the single-child default must not read as explicit: %v", single.types)
+	}
+	multi := eventQuery{types: defaultTypeSet(false)}
+	if multi.typesExplicit() {
+		t.Errorf("the multi-child default must not read as explicit: %v", multi.types)
+	}
+	for _, tc := range []struct {
+		name string
+		q    eventQuery
+	}{
+		{"all-types (nil types)", eventQuery{childID: "c_1"}},
+		{"--types script_output", eventQuery{childID: "c_1", types: []string{"script_output"}}},
+		{"--types a subset of the default", eventQuery{childID: "c_1", types: []string{"user_message", "agent_status", "child_exited"}}},
+	} {
+		if !tc.q.typesExplicit() {
+			t.Errorf("%s must read as explicit", tc.name)
+		}
+	}
 }
 
 // ── completion ───────────────────────────────────────────────────────────────

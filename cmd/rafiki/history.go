@@ -143,6 +143,19 @@ type eventQuery struct {
 	mode    outputMode
 }
 
+// typesExplicit reports whether the query's type filter was DECLARED —
+// --types or --all-types — rather than resolved by subject shape; a declared
+// filter wins over the script default in the follow below. There is no flag
+// to carry here (the commands resolve the filter before this engine runs),
+// so the default is detected by equality: resolveTypeFilter's neither-flag
+// branch produces exactly defaultTypeSet for the query's subject shape, the
+// same deterministic set this comparison checks. The one misread — a user
+// who names that whole set via --types — only swaps a script child's follow
+// to the replay vocabulary, the types the child actually produces.
+func (q eventQuery) typesExplicit() bool {
+	return !slices.Equal(q.types, defaultTypeSet(q.childID != ""))
+}
+
 // eventPrinter renders one event per line in the query's mode. The machine
 // modes (-j, -J, -r) emit the canonical protojson of the Event — pretty for
 // -j, one compact line per event for -J, and for -r too (raw means protojson
@@ -182,10 +195,13 @@ func (p *eventPrinter) emit(ev *rafikiv1.Event) error {
 // is the last history ordinal, so the stream resumes from where the history
 // ended rather than from now.
 //
-// Follow: StreamEvents with the query's subject, tier and types. The stream
-// ends the command except on the named child's own child_exited, which is the
-// `logs`/`tail <id>` completion signal (a multi-child stream never exits on
-// one child's exit — others may still be running).
+// Follow: StreamEvents with the query's subject, tier and type filter — the
+// query's resolved filter, except that a script child under the default
+// filter follows the replay vocabulary instead (the subject-shaped default
+// shows no script types; see followTypes below). The stream ends the command
+// except on the named child's own child_exited, which is the `logs`/`tail
+// <id>` completion signal (a multi-child stream never exits on one child's
+// exit — others may still be running).
 func runEventQuery(
 	ctx context.Context,
 	ep connectEndpoint,
@@ -204,6 +220,16 @@ func runEventQuery(
 		printer.r.seed(ctx, notes, client, ep.describe)
 	}
 
+	// A script child is recognised by its summary, best-effort like the
+	// seeding above: an unreachable, unknown or non-script answer leaves the
+	// ordinary conversation path. The summary decides the backfill's source
+	// below AND the follow's type filter at the bottom, so probe whenever
+	// either phase will run.
+	var script *rafikiv1.ChildSummary
+	if q.childID != "" && (q.tailN != 0 || q.follow) {
+		script = scriptChildSummary(ctx, client, q.childID)
+	}
+
 	// Backfill, and the resume cursor taken from where it ended.
 	var cursor *rafikiv1.EventCursor
 	if q.childID != "" && q.tailN != 0 {
@@ -216,11 +242,13 @@ func runEventQuery(
 		var evs []*rafikiv1.Event
 		empty := false
 		var err error
-		// A script child's summary also carries latest_ordinal, which bounds
-		// the replay below.
-		script := scriptChildSummary(ctx, client, q.childID)
+		// The summary's latest_ordinal bounds the replay above. An UNSET one
+		// skips the replay — nothing is logged yet; a SET one runs it, 0
+		// included (ordinals start at 0, so set-0 is a real log).
 		if script != nil {
-			evs, err = fetchScriptLog(ctx, ep, client, q.childID, latestOrdinal(script))
+			if wm, ok := latestOrdinal(script); ok {
+				evs, err = fetchScriptLog(ctx, ep, client, q.childID, wm)
+			}
 		} else {
 			evs, empty, err = fetchHistory(ctx, ep, client, q.childID)
 		}
@@ -243,13 +271,18 @@ func runEventQuery(
 		if lastOrd >= 0 {
 			cursor = &rafikiv1.EventCursor{Ordinals: map[string]int32{q.childID: lastOrd}}
 		}
-		// The type filter applies client-side to the CONVERSATION backfill;
-		// a script replay's events are already exactly scriptLogReplayTypes,
-		// and filtering them through the conversation default would drop every
-		// script_output it just fetched.
+		// The type filter applies client-side to the backfill's printed view:
+		// the conversation history through the query's filter, a script replay
+		// through the replay vocabulary — the replay observes EVERY ordinal up
+		// to the watermark (fetchScriptLog sends no server-side Types, so the
+		// event that reaches it is seen whatever its type) and the transcript
+		// is cut here instead. Filtering a script replay through the
+		// conversation default would drop every script_output it just fetched.
 		printed := evs
 		if script == nil {
 			printed = filterByTypes(evs, q.types)
+		} else {
+			printed = filterByTypes(evs, scriptLogReplayTypes)
 		}
 		if q.tailN > 0 && len(printed) > q.tailN {
 			printed = printed[len(printed)-q.tailN:]
@@ -267,10 +300,21 @@ func runEventQuery(
 	if !q.follow {
 		return nil
 	}
+	// The follow's type filter is the query's resolved filter — except that a
+	// script child under the DEFAULT filter follows the replay vocabulary:
+	// conversation types + lifecycle contains neither script_output nor
+	// script_report, so the server would drop every live script line and the
+	// command would show nothing after the backfill until the child exited.
+	// An explicit --types/--all-types wins; child_exited stays admitted either
+	// way, so the follow still ends when the script does.
+	followTypes := q.types
+	if script != nil && !q.typesExplicit() {
+		followTypes = scriptLogReplayTypes
+	}
 	req := &rafikiv1.StreamEventsRequest{
 		Subject: q.subject,
 		Tier:    q.tier,
-		Types:   q.types,
+		Types:   followTypes,
 	}
 	if cursor != nil {
 		req.Cursor = cursor
@@ -342,21 +386,28 @@ func scriptChildSummary(ctx context.Context, client rafikiv1connect.ControlClien
 	return resp.Msg.GetChild()
 }
 
-// latestOrdinal reads the watermark off a script child's summary. An unset
-// latest_ordinal means the log has nothing to replay.
-func latestOrdinal(s *rafikiv1.ChildSummary) int32 {
+// latestOrdinal reads the watermark off a script child's summary. The bool
+// separates an UNSET latest_ordinal (nothing to replay; the caller skips the
+// call) from a SET one — 0 included, since ordinals start at 0 and a log
+// whose only event is ordinal 0 is a real log. Conflating the two would
+// silently drop that event.
+func latestOrdinal(s *rafikiv1.ChildSummary) (int32, bool) {
 	if s == nil || s.LatestOrdinal == nil {
-		return 0
+		return 0, false
 	}
-	return *s.LatestOrdinal
+	return *s.LatestOrdinal, true
 }
 
 // fetchScriptLog replays a script child's durable event log from ordinal 0 —
 // a script has no conversation rows, so GetHistory is not the record to read
 // (its NotFound fallback would fetch the same log through the sequential
-// error path and then print a misleading "no history yet"). The events come
-// back in ordinal order and carry their own ordinals, so the returned slice
-// is the backfill and its last ordinal is the follow's resume cursor.
+// error path and then print a misleading "no history yet"). The request
+// carries NO Types filter: latest_ordinal is the highest ordinal of ANY
+// durable type, so filtering server-side to the replay vocabulary could hide
+// the very event that reaches the watermark and hang the replay on a log
+// whose newest entry is another durable type. Every ordinal up to the
+// watermark is observed here; the caller cuts the printed view to
+// scriptLogReplayTypes and reads the resume cursor off this raw read.
 //
 // StreamEvents REPLAYS the log and then FOLLOWS live — the server never ends
 // the stream on its own (for an exited script, Subscribe creates a fresh bus
@@ -364,18 +415,14 @@ func latestOrdinal(s *rafikiv1.ChildSummary) int32 {
 // once the ordinal reaches the summary's latest_ordinal watermark, whichever
 // comes first, and then cancels the stream context to end the server's
 // follow. Events logged after the watermark are left to the follow phase,
-// which resumes from the last ordinal. A watermark of 0 means there is
-// nothing to replay: the call is skipped entirely.
+// which resumes from the last ordinal. The watermark is the SET
+// latest_ordinal — the caller skips this call entirely when that is unset.
 func fetchScriptLog(ctx context.Context, ep connectEndpoint, client rafikiv1connect.ControlClient, childID string, watermark int32) ([]*rafikiv1.Event, error) {
-	if watermark <= 0 {
-		return nil, nil
-	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req := &rafikiv1.StreamEventsRequest{
 		Subject: &rafikiv1.EventSubject{Scope: &rafikiv1.EventSubject_Child{Child: childID}},
 		Tier:    rafikiv1.EventTier_EVENT_TIER_DURABLE,
-		Types:   scriptLogReplayTypes,
 		Cursor:  &rafikiv1.EventCursor{Ordinals: map[string]int32{childID: -1}},
 	}
 	stream, err := client.StreamEvents(streamCtx, connect.NewRequest(req))
