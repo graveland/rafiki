@@ -177,9 +177,54 @@ func newConnectEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
 	}, nil
 }
 
+// newLoginEndpoint resolves where the Login service lives: the same profile
+// resolution as newConnectEndpoint, minus the credential.
+//
+// The difference is deliberate, not sloppy. The Login service is served
+// OUTSIDE authentication on both planes (the UDS and the remote https URL) —
+// it exists to mint a credential for a caller that has none — so:
+//
+//   - a tokenless REMOTE profile is the normal state of a machine that has not
+//     logged in yet, and is accepted here (newConnectEndpoint refuses it,
+//     because every other verb needs the credential);
+//   - a token that IS present is never attached: an expired credential riding
+//     the login round trip could only confuse the one service that must not
+//     care about credentials.
+func newLoginEndpoint(cmd *cobra.Command) (connectEndpoint, error) {
+	p, err := resolveProfile(cmd)
+	if err != nil {
+		return connectEndpoint{}, err
+	}
+
+	if p.URL == "" {
+		sock := p.Socket
+		return connectEndpoint{
+			httpClient: connectHTTPClient(sock),
+			baseURL:    connectUDSBaseURL,
+			describe:   sock,
+			identity:   "unix:" + sock,
+		}, nil
+	}
+
+	return connectEndpoint{
+		httpClient: &http.Client{Transport: http.DefaultTransport},
+		baseURL:    p.URL,
+		describe:   p.URL,
+		identity:   p.URL,
+	}, nil
+}
+
 // control returns a Connect client for the endpoint.
 func (e connectEndpoint) control() rafikiv1connect.ControlClient {
 	return rafikiv1connect.NewControlClient(e.httpClient, e.baseURL)
+}
+
+// login returns a Login client for the endpoint. The Login service rides the
+// same transports as the control plane — h2c on the profile's socket, https on
+// a remote URL — but answers tokenless callers, so the endpoint behind it is
+// newLoginEndpoint's.
+func (e connectEndpoint) login() rafikiv1connect.LoginClient {
+	return rafikiv1connect.NewLoginClient(e.httpClient, e.baseURL)
 }
 
 // diagnoseConnectError turns a Connect failure into something that names the
@@ -205,7 +250,7 @@ func diagnoseConnectError(err error, endpoint string) error {
 			endpoint, err)
 	case connect.CodeUnauthenticated:
 		return fmt.Errorf(
-			"the rafiki daemon at %s rejected the profile's credential — check its token file: %w",
+			"the rafiki daemon at %s rejected the profile's credential: your token is invalid or expired; run 'rafiki login' to mint a new one, or check its token file: %w",
 			endpoint, err)
 	case connect.CodeUnavailable:
 		return fmt.Errorf(

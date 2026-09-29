@@ -45,3 +45,19 @@ func TestDiagnoseNotFoundPassesThrough(t *testing.T) {
 func TestConnectHTTPClientIsNotNil(t *testing.T) {
 	assert.NewAborting(t).NotNil(connectHTTPClient("/tmp/nope.sock"), "connectHTTPClient returned nil")
 }
+
+// An Unauthenticated carries the recovery path for the one case it now names:
+// a token the daemon refuses may be stale — or the machine may never have
+// logged in — and `rafiki login` mints a new one. (The verb predates this
+// diagnostic; the hint rides the shared error path so every verb advertises it.)
+func TestDiagnoseUnauthenticatedSuggestsLogin(t *testing.T) {
+	err := diagnoseConnectError(
+		connect.NewError(connect.CodeUnauthenticated, errors.New("invalid auth token")),
+		"https://rafiki.example.net",
+	)
+	msg := err.Error()
+	c := assert.NewAborting(t)
+	c.StrContains(msg, "rafiki login", "want the login hint in the message, got: %s", msg)
+	c.StrContains(msg, "https://rafiki.example.net", "want the endpoint named, got: %s", msg)
+	c.StrContains(msg, "invalid auth token", "want the daemon's reason preserved, got: %s", msg)
+}

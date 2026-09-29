@@ -157,6 +157,7 @@ func newRootCmd() *cobra.Command {
 		newPythonCmd(),
 		newProfileCmd(),
 		newBudgetCmd(),
+		newLoginCmd(),
 	)
 
 	return root
