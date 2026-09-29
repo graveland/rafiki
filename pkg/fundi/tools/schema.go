@@ -12,7 +12,7 @@ import (
 //
 // The builder covers the subset of JSON Schema draft 2020-12 that the Anthropic
 // API accepts: top-level "type", "properties", "required", and per-property
-// "type", "description", "items", and nested "properties"/"required".
+// "type", "description", "items", "enum", and nested "properties"/"required".
 //
 // When raw is non-nil, JSON() returns it verbatim. This is used by MCP tools
 // whose input schemas are third-party JSON. All exported fields are ignored
@@ -42,6 +42,9 @@ type SchemaProperty struct {
 	Items       *Schema
 	Properties  []SchemaProperty
 	Required    []string
+	// Enum restricts the value to exactly these strings, rendered as the
+	// JSON Schema "enum" keyword. Empty means unrestricted.
+	Enum []string
 }
 
 // JSON serialises this Schema to a JSON Schema object ready for the Anthropic
@@ -92,6 +95,9 @@ func jsonSchemaProperty(p SchemaProperty) map[string]any {
 	}
 	if p.Items != nil {
 		out["items"] = jsonSchemaValue(*p.Items)
+	}
+	if len(p.Enum) > 0 {
+		out["enum"] = p.Enum
 	}
 	if len(p.Properties) > 0 || len(p.Required) > 0 {
 		nested := jsonSchemaValue(Schema{Properties: p.Properties, Required: p.Required})

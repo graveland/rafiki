@@ -172,7 +172,7 @@ func TestUserSpawnerViewSendKillRejectUnknownChild(t *testing.T) {
 	if _, err := sp.View(ctx, "c_missing", 0); err == nil || !strings.Contains(err.Error(), "is not registered") {
 		t.Errorf("View(c_missing) must reject an unregistered id; got %v", err)
 	}
-	if err := sp.Send(ctx, "c_missing", "hi"); err == nil || !strings.Contains(err.Error(), "is not registered") {
+	if _, err := sp.Send(ctx, tools.SendSpec{ChildID: "c_missing", Message: "hi"}); err == nil || !strings.Contains(err.Error(), "is not registered") {
 		t.Errorf("Send(c_missing) must reject an unregistered id; got %v", err)
 	}
 	if err := sp.Kill(ctx, "c_missing"); err == nil || !strings.Contains(err.Error(), "is not registered") {

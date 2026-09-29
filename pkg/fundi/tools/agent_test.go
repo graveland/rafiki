@@ -20,7 +20,7 @@ type fakeSpawner struct {
 	view     string
 
 	spawned   []SpawnSpec
-	sent      []struct{ ChildID, Message string }
+	sent      []SendSpec
 	killed    []string
 	nextID    string
 	budgetSet []struct {
@@ -29,6 +29,7 @@ type fakeSpawner struct {
 	}
 	spawnErr     error
 	sendErr      error
+	sendResult   SendResult
 	killErr      error
 	setBudgetErr error
 	viewErr      error
@@ -64,12 +65,12 @@ func (f *fakeSpawner) View(_ context.Context, childID string, limit int) (string
 	return f.view, nil
 }
 
-func (f *fakeSpawner) Send(_ context.Context, childID, message string) error {
+func (f *fakeSpawner) Send(_ context.Context, spec SendSpec) (SendResult, error) {
 	if f.sendErr != nil {
-		return f.sendErr
+		return SendResult{}, f.sendErr
 	}
-	f.sent = append(f.sent, struct{ ChildID, Message string }{childID, message})
-	return nil
+	f.sent = append(f.sent, spec)
+	return f.sendResult, nil
 }
 
 func (f *fakeSpawner) Kill(_ context.Context, childID string) error {

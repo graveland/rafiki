@@ -31,9 +31,11 @@ func (s *recordingSpawner) Spawn(_ context.Context, spec tools.SpawnSpec) (tools
 	return tools.AgentInfo{ChildID: "c_new", Name: spec.Name, Kind: spec.Kind, Status: "idle"}, nil
 }
 func (s *recordingSpawner) View(context.Context, string, int) (string, error) { return "", nil }
-func (s *recordingSpawner) Send(context.Context, string, string) error        { return nil }
-func (s *recordingSpawner) Kill(context.Context, string) error                { return nil }
-func (s *recordingSpawner) SetBudget(context.Context, string, float64) error  { return nil }
+func (s *recordingSpawner) Send(context.Context, tools.SendSpec) (tools.SendResult, error) {
+	return tools.SendResult{}, nil
+}
+func (s *recordingSpawner) Kill(context.Context, string) error               { return nil }
+func (s *recordingSpawner) SetBudget(context.Context, string, float64) error { return nil }
 
 // The gate mirrors pymodule_run's: nil PyModuleStarter declines, and the
 // materialized tool is bound to PyModuleStarter — never to Agents — so the

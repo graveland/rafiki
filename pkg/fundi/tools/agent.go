@@ -93,6 +93,20 @@ type SpawnSpec struct {
 	Prefill []protocol.PrefillRead
 }
 
+// SendSpec is one agent_send: the message and the steps the daemon runs at
+// send time, their output appended to the message.
+type SendSpec struct {
+	ChildID string
+	Message string
+	Steps   []protocol.SendStep
+}
+
+// SendResult reports each step to the sender (never its output, except
+// an echo the step asked for).
+type SendResult struct {
+	Steps []protocol.StepSummary
+}
+
 // AgentSpawner is the daemon-side capability behind the agent_* tools.
 //
 // Every method is scoped to the ONE binding this value was constructed for,
@@ -114,8 +128,8 @@ type AgentSpawner interface {
 	// View returns the tail of a descendant's transcript as plain text.
 	// limit caps the number of transcript entries; 0 means the default.
 	View(ctx context.Context, childID string, limit int) (string, error)
-	// Send delivers a prompt to a descendant.
-	Send(ctx context.Context, childID, message string) error
+	// Send delivers a prompt to a descendant, running spec.Steps first.
+	Send(ctx context.Context, spec SendSpec) (SendResult, error)
 	// Kill shuts a descendant down and waits for the exit to be recorded.
 	Kill(ctx context.Context, childID string) error
 	// SetBudget changes a child's MaxCost, in USD — the same units

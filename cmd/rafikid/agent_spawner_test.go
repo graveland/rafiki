@@ -64,7 +64,8 @@ func TestSpawnerRefusesNonDescendantOnEveryVerb(t *testing.T) {
 		if _, err := sp.View(ctx, target, 0); err == nil {
 			t.Errorf("View(%s) must refuse", target)
 		}
-		c.Error(sp.Send(ctx, target, "hi"), "Send(%s) must refuse", target)
+		_, sErr := sp.Send(ctx, tools.SendSpec{ChildID: target, Message: "hi"})
+		c.Error(sErr, "Send(%s) must refuse", target)
 		c.Error(sp.Kill(ctx, target), "Kill(%s) must refuse", target)
 	}
 }
@@ -72,7 +73,7 @@ func TestSpawnerRefusesNonDescendantOnEveryVerb(t *testing.T) {
 func TestSpawnerRefusalNamesTheTarget(t *testing.T) {
 	c := assert.NewCollecting(t)
 	sp := newControllerSpawner(spawnerFixture(t), "c_mine")
-	err := sp.Send(context.Background(), "c_stranger", "hi")
+	_, err := sp.Send(context.Background(), tools.SendSpec{ChildID: "c_stranger", Message: "hi"})
 	c.Require().Error(err, "want a refusal")
 	// An error message is a prompt that is only paid when it is needed
 	// (prompting.md). It must say which id was rejected and why.

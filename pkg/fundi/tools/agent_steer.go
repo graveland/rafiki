@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+
+	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
 func init() {
@@ -27,6 +30,20 @@ const (
 		"worker mid-flight (\"also cover the error path\"), to answer something it is " +
 		"blocked on, or to give it the next piece of work when it has settled. The " +
 		"message is queued and picked up on its next turn."
+
+	// agentSendStepsDescription is the `steps` property's description, verbatim
+	// from the send-steps design: it is the contract the model authors steps
+	// against, so it is pinned by TestAgentSendStepsSchemaShape rather than
+	// left to drift.
+	agentSendStepsDescription = "Optional tool calls the daemon runs when the message is sent, in order, " +
+		"their output appended to the message so the agent starts with it. Each step is " +
+		"exactly one of read, bash, pymodule_run. where: \"child\" (default) runs it in " +
+		"the agent's own workspace; \"sender\" runs it in yours, under your tool " +
+		"allowlist, and only the output reaches the agent — use that to hand over " +
+		"content the agent cannot or should not fetch itself. echo: true also returns " +
+		"the first 2 KiB of the output to you. Steps are for gathering context (reading " +
+		"a report file, git status); never put state-changing or long-running commands " +
+		"(test suites) in them — the send waits for them."
 
 	agentKillDescription = "Stop an agent you spawned and everything it spawned in " +
 		"turn. Returns once the shutdown is complete and recorded. Its unfinished " +
@@ -114,10 +131,60 @@ type AgentSendBlueprint struct{}
 func (AgentSendBlueprint) Name() string        { return "agent_send" }
 func (AgentSendBlueprint) Description() string { return agentSendDescription }
 func (AgentSendBlueprint) InputSchema() Schema {
-	return agentIDSchema(SchemaProperty{
-		Name: "message", Type: "string",
-		Description: "The message to deliver.",
-	})
+	return agentIDSchema(
+		SchemaProperty{
+			Name: "message", Type: "string",
+			Description: "The message to deliver.",
+		},
+		SchemaProperty{
+			Name: "steps", Type: "array",
+			Description: agentSendStepsDescription,
+			Items: &Schema{
+				Type: "object",
+				Properties: []SchemaProperty{
+					{
+						Name: "where", Type: "string",
+						Enum:        []string{"child", "sender"},
+						Description: "Which workspace runs this step: \"child\" (the agent's own) or \"sender\" (yours).",
+					},
+					{
+						Name: "echo", Type: "boolean",
+						Description: "Also return the first 2 KiB of this step's output to you.",
+					},
+					{
+						Name: "read", Type: "object",
+						Description: "Read a file in the step's workspace.",
+						Properties: []SchemaProperty{
+							{Name: "path", Type: "string", Description: "File to read."},
+							{Name: "start", Type: "integer", Description: "First line (1-based)."},
+							{Name: "end", Type: "integer", Description: "Last line."},
+						},
+					},
+					{
+						Name: "bash", Type: "object",
+						Description: "Run one shell command in the step's workspace.",
+						Properties: []SchemaProperty{
+							{Name: "command", Type: "string", Description: "Command to run."},
+							{Name: "timeout_ms", Type: "integer", Description: "Kill the command after this many milliseconds."},
+						},
+					},
+					{
+						Name: "pymodule_run", Type: "object",
+						Description: "Run a saved pymodule, with pymodule_run's inputs.",
+						Properties: []SchemaProperty{
+							{Name: "repo", Type: "string", Description: "Pymodule source: \"local\" or a registered git source's name."},
+							{Name: "script", Type: "string", Description: "Entry module, as saved."},
+							{Name: "cwd", Type: "string", Description: "Working directory for the run."},
+							{Name: "modules", Type: "array", Items: &Schema{Type: "string"},
+								Description: "Further pymodules the script imports."},
+							{Name: "args", Type: "array", Items: &Schema{Type: "string"},
+								Description: "Extra command-line arguments."},
+						},
+					},
+				},
+			},
+		},
+	)
 }
 
 func (AgentSendBlueprint) Execute(context.Context, ToolInput) (ToolResult, error) {
@@ -138,8 +205,9 @@ type agentSendTool struct {
 
 func (t *agentSendTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
 	var params struct {
-		Agent   string `json:"agent"`
-		Message string `json:"message"`
+		Agent   string              `json:"agent"`
+		Message string              `json:"message"`
+		Steps   []protocol.SendStep `json:"steps"`
 	}
 	if err := input.Unmarshal(&params); err != nil {
 		return ToolResult{}, fmt.Errorf("agent_send: invalid input: %w", err)
@@ -153,10 +221,39 @@ func (t *agentSendTool) Execute(ctx context.Context, input ToolInput) (ToolResul
 	if params.Message == "" {
 		return ToolResult{}, errors.New("agent_send: message is required")
 	}
-	if err := t.agents.Send(ctx, params.Agent, params.Message); err != nil {
+	// The ONE place a step's site is defaulted: protocol.StepSite's zero
+	// value is refused, never guessed, so an author who leaves `where` out
+	// means "child" — the target's own workspace — and says so exactly here.
+	for i := range params.Steps {
+		if params.Steps[i].Where == "" {
+			params.Steps[i].Where = protocol.StepSiteChild
+		}
+	}
+	res, err := t.agents.Send(ctx, SendSpec{
+		ChildID: params.Agent,
+		Message: params.Message,
+		Steps:   params.Steps,
+	})
+	if err != nil {
 		return ToolResult{}, fmt.Errorf("agent_send: %w", err)
 	}
-	return NewTextResult("delivered to " + params.Agent + "\n"), nil
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "delivered to %s\n", params.Agent)
+	for _, s := range res.Steps {
+		fmt.Fprintf(&sb, "step %d %s (%s): %s, %d bytes", s.Index, s.Tool, s.Where, s.Outcome, s.Bytes)
+		if s.Truncated {
+			sb.WriteString(" (truncated)")
+		}
+		sb.WriteString("\n")
+		if s.Echo != "" {
+			for _, line := range strings.Split(strings.TrimSuffix(s.Echo, "\n"), "\n") {
+				sb.WriteString("  ")
+				sb.WriteString(line)
+				sb.WriteString("\n")
+			}
+		}
+	}
+	return NewTextResult(sb.String()), nil
 }
 
 // --- agent_kill ---

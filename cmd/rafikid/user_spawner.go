@@ -118,21 +118,27 @@ func (s *userSpawner) View(_ context.Context, childID string, limit int) (string
 	return renderTranscript(res.Events, viewMaxBytes), nil
 }
 
-func (s *userSpawner) Send(_ context.Context, childID, message string) error {
-	if childID == "" {
-		return errors.New("agent id is required")
+func (s *userSpawner) Send(_ context.Context, spec tools.SendSpec) (tools.SendResult, error) {
+	if spec.ChildID == "" {
+		return tools.SendResult{}, errors.New("agent id is required")
 	}
-	if message == "" {
-		return errors.New("message is required")
+	if spec.Message == "" {
+		return tools.SendResult{}, errors.New("message is required")
 	}
-	if _, ok := s.c.st.Get(childID); !ok {
-		return fmt.Errorf("agent %s is not registered", childID)
+	if _, ok := s.c.st.Get(spec.ChildID); !ok {
+		return tools.SendResult{}, fmt.Errorf("agent %s is not registered", spec.ChildID)
 	}
-	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": message})
+	if len(spec.Steps) > 0 {
+		return tools.SendResult{}, errors.New("send steps are not wired yet")
+	}
+	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": spec.Message})
 	if err != nil {
-		return err
+		return tools.SendResult{}, err
 	}
-	return s.c.Send(childID, frame)
+	if err := s.c.Send(spec.ChildID, frame); err != nil {
+		return tools.SendResult{}, err
+	}
+	return tools.SendResult{}, nil
 }
 
 // Kill shuts a child down and waits for the exit to be recorded.

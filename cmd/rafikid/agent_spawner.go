@@ -273,18 +273,24 @@ func (s *controllerSpawner) View(ctx context.Context, childID string, limit int)
 	return renderTranscript(res.Events, viewMaxBytes), nil
 }
 
-func (s *controllerSpawner) Send(ctx context.Context, childID, message string) error {
-	if err := s.authorize(childID); err != nil {
-		return err
+func (s *controllerSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {
+	if err := s.authorize(spec.ChildID); err != nil {
+		return tools.SendResult{}, err
 	}
-	if message == "" {
-		return errors.New("message is required")
+	if spec.Message == "" {
+		return tools.SendResult{}, errors.New("message is required")
 	}
-	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": message})
+	if len(spec.Steps) > 0 {
+		return tools.SendResult{}, errors.New("send steps are not wired yet")
+	}
+	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": spec.Message})
 	if err != nil {
-		return err
+		return tools.SendResult{}, err
 	}
-	return s.c.Send(childID, frame)
+	if err := s.c.Send(spec.ChildID, frame); err != nil {
+		return tools.SendResult{}, err
+	}
+	return tools.SendResult{}, nil
 }
 
 func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {
