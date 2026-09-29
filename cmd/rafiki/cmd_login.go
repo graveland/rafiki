@@ -31,6 +31,11 @@ import (
 // and holds the terminal open with no way out but the signal.
 const loginCallbackDeadline = 10 * time.Minute
 
+// loginShutdownGrace bounds the graceful stop of the callback server: long
+// enough for the confirmation page's handler to finish and its connection to
+// go idle, short enough that a wedged client cannot stall the flow's exit.
+const loginShutdownGrace = 2 * time.Second
+
 // loginCallbackPath is the path the daemon builds into the IdP's redirect_uri.
 const loginCallbackPath = "/oidc/callback"
 
@@ -99,9 +104,11 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 //
 // Shutdown: before the HTTP server starts there are two exits (BeginLogin
 // error, pinned-port rebind failure) and the bare listener is closed on both;
-// after it starts, loginFlow closes the server immediately when the wait for
-// the callback ends — before CompleteLogin, WriteToken or the success message —
-// so every later exit path inherits a shut-down server.
+// after it starts, loginFlow stops the server unconditionally the moment the
+// wait for the callback ends — before CompleteLogin, WriteToken or the success
+// message — so every later exit path inherits a stopped server. The stop is
+// graceful with a bounded grace (see shutdownLoginServer), falling back to a
+// hard Close, so the guarantee holds on every path without ever hanging.
 func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui loginIO) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -150,7 +157,7 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 	fmt.Fprintln(ui.stderr, loginPastePrompt)
 
 	query, err := awaitCallback(ctx, queries, ui.stdin, serveErr, ui.stderr)
-	_ = srv.Close()
+	shutdownLoginServer(srv)
 	if err != nil {
 		return err
 	}
@@ -171,6 +178,22 @@ func loginFlow(ctx context.Context, ep connectEndpoint, p profile.Resolved, ui l
 	fmt.Fprintf(ui.stderr, "logged in as %s (profile %s), token expires %s\n",
 		complete.Msg.GetUsername(), p.Name, tokenExpiryText(complete.Msg.GetExpiresAtUnix()))
 	return nil
+}
+
+// shutdownLoginServer stops the callback server. Shutdown is preferred over a
+// bare Close: it closes the listener at once (new connections refused) but
+// lets the in-flight confirmation page finish, so the browser actually sees
+// "you can close this tab" instead of a reset connection. The grace is
+// bounded, and anything still active when it expires is hard-closed — the
+// guarantee the flow relies on (nothing left listening once the wait is over)
+// holds either way. Errors are deliberately dropped: the server's only job is
+// done, or the flow is leaving regardless.
+func shutdownLoginServer(srv *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), loginShutdownGrace)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		_ = srv.Close()
+	}
 }
 
 // awaitCallback waits for the redirect query to arrive: over the local
@@ -231,12 +254,19 @@ func loginCallbackHandler(queries chan<- string) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// The confirmation page is written AND flushed before the query is
+		// handed to the flow: the flow stops the server the moment it receives
+		// the query, and a signal written before the response could let that
+		// stop truncate the page the browser is still reading.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<html><body><p>rafiki: login received — you can close this tab.</p></body></html>")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		select {
 		case queries <- r.URL.RawQuery:
 		default:
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, "<html><body><p>rafiki: login received — you can close this tab.</p></body></html>")
 	})
 }
 

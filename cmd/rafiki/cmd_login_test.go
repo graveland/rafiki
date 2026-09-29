@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -189,14 +191,18 @@ func saveProfile(t *testing.T, p profile.Profile) {
 }
 
 // runLoginAsync starts the flow the way a browser login runs: stdin at EOF (no
-// paste will come) so only the listener can answer.
+// paste will come) so only the listener can answer. noBrowser is ALWAYS true:
+// these tests drive the listener path themselves and must never exec the
+// platform opener — a real browser opening per `go test` on a dev machine is
+// exactly the failure the shadowed-opener probe caught once.
 func runLoginAsync(t *testing.T, ep connectEndpoint, stderr *bytes.Buffer) chan error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() {
 		done <- loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-			stdin:  strings.NewReader(""),
-			stderr: stderr,
+			noBrowser: true,
+			stdin:     strings.NewReader(""),
+			stderr:    stderr,
 		})
 	}()
 	return done
@@ -317,6 +323,17 @@ func TestLoginRebindsToTheDaemonPinnedPort(t *testing.T) {
 	c.Eq("code=pin1&state=s", calls[0].GetCallbackQuery(), "query delivered via the pinned port")
 	c.Eq("sk-oidc-pin", profile.ReadToken("test"), "token")
 	c.StrContains(stderr.String(), "token expires never", "zero expiry renders as never")
+
+	// The FIRST listener must be gone: an implementation that skipped ln.Close()
+	// and served only the pinned listener passes everything above identically.
+	// A leaked (bound but never served) listener would connect into the kernel
+	// backlog and hang, so a plain timeout is not enough — the pin is
+	// specifically connection refused.
+	stale := &http.Client{Timeout: time.Second}
+	_, err := stale.Get(fmt.Sprintf("http://127.0.0.1:%d/oidc/callback?code=stale", bound))
+	c.Require().Error(err, "the flow's first listener must not answer after the rebind")
+	c.True(errors.Is(err, syscall.ECONNREFUSED),
+		"want connection refused on the original port %d (err = %v) — the flow must have closed its first listener", bound, err)
 }
 
 // When the pinned port is taken the flow must fail naming the port, why it is
@@ -338,8 +355,9 @@ func TestLoginPinnedPortInUseNamesThePort(t *testing.T) {
 
 	var stderr bytes.Buffer
 	err = loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-		stdin:  strings.NewReader(""),
-		stderr: &stderr,
+		noBrowser: true, // the rebind fails before any open; never rely on that
+		stdin:     strings.NewReader(""),
+		stderr:    &stderr,
 	})
 	c.Require().Error(err, "rebinding to an occupied port must fail")
 	msg := err.Error()
@@ -364,8 +382,9 @@ func TestLoginPastePathEndToEnd(t *testing.T) {
 
 	var stderr bytes.Buffer
 	err := loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-		stdin:  strings.NewReader("http://localhost:9876/oidc/callback?code=pasted&state=xyz\n"),
-		stderr: &stderr,
+		noBrowser: true, // paste-driven; the platform opener must not run
+		stdin:     strings.NewReader("http://localhost:9876/oidc/callback?code=pasted&state=xyz\n"),
+		stderr:    &stderr,
 	})
 	c.Require().NoError(err, "loginFlow")
 
@@ -392,8 +411,9 @@ func TestLoginIgnoresAMalformedPaste(t *testing.T) {
 
 	var stderr bytes.Buffer
 	err := loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
-		stdin:  strings.NewReader("not a url\nhttp://x/oidc/callback?code=ok\n"),
-		stderr: &stderr,
+		noBrowser: true, // paste-driven; the platform opener must not run
+		stdin:     strings.NewReader("not a url\nhttp://x/oidc/callback?code=ok\n"),
+		stderr:    &stderr,
 	})
 	c.Require().NoError(err, "loginFlow")
 
@@ -401,6 +421,82 @@ func TestLoginIgnoresAMalformedPaste(t *testing.T) {
 	c.Len(calls, 1, "CompleteLogin calls")
 	c.Eq("code=ok", calls[0].GetCallbackQuery(), "the good paste supplied the query")
 	c.StrContains(stderr.String(), "not a login redirect URL", "the bad paste was warned about")
+}
+
+// The browser branch is pinned in both directions WITHOUT ever opening a real
+// browser: a logging stub shadows `open`/`xdg-open` at the front of PATH, so
+// without --no-browser the opener really runs (and its argv is the authorize
+// URL), and with --no-browser nothing is exec'd. This is what makes the
+// noBrowser: true in every other flow test meaningful rather than decorative.
+func TestLoginBrowserOpeningHonorsNoBrowser(t *testing.T) {
+	c := assert.NewAborting(t)
+	isolateProfiles(t)
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "open.log")
+	script := fmt.Sprintf("#!/bin/sh\necho \"OPEN-CALLED: $*\" >> %q\n", logPath)
+	for _, name := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fake := newFakeLogin(
+		&rafikiv1.BeginLoginResponse{LoginId: "l-8", AuthorizeUrl: "https://idp.example.net/authorize?client_id=rafiki"},
+		&rafikiv1.CompleteLoginResponse{Token: "sk-oidc-browser", Username: "ada"},
+	)
+	ep := loginEndpointFor(t, fake)
+	paste := "http://localhost:1/oidc/callback?code=b&state=s\n"
+
+	// Without --no-browser the opener runs, with the authorize URL as argv.
+	var stderr bytes.Buffer
+	err := loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
+		stdin:  strings.NewReader(paste),
+		stderr: &stderr,
+	})
+	c.Require().NoError(err, "loginFlow without --no-browser")
+	c.True(waitForLog(t, logPath, "OPEN-CALLED: https://idp.example.net/authorize?client_id=rafiki"),
+		"the opener must run without --no-browser (log = %q)", readStubLog(t, logPath))
+
+	// With --no-browser nothing is exec'd.
+	_ = os.Remove(logPath)
+	err = loginFlow(context.Background(), ep, profile.Resolved{Profile: profile.Profile{Name: "test"}}, loginIO{
+		noBrowser: true,
+		stdin:     strings.NewReader(paste),
+		stderr:    &stderr,
+	})
+	c.Require().NoError(err, "loginFlow with --no-browser")
+	// A stray exec would lag the flow's return (Start() does not wait); give it
+	// a settle window before declaring absence.
+	time.Sleep(time.Second)
+	c.False(strings.Contains(readStubLog(t, logPath), "OPEN-CALLED"),
+		"the opener must NOT run with --no-browser (log = %q)", readStubLog(t, logPath))
+}
+
+// waitForLog polls until the stub log contains sub or the deadline passes.
+func waitForLog(t *testing.T, path, sub string) bool {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if strings.Contains(readStubLog(t, path), sub) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// readStubLog reads the stub's log; a missing file is an empty log.
+func readStubLog(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // First request only: a refresh answers 200 but must not overwrite the query
