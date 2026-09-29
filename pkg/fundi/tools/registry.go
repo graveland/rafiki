@@ -279,6 +279,9 @@ type ToolOpts struct {
 	// LLM that can be prompt-injected into naming somebody else.
 	Agents AgentSpawner
 
+	// Parent, when non-nil, gives this caller agent_report and agent_result.
+	Parent ParentReporter
+
 	// RemoteSkillBody fetches a skill body from the child's executor. nil when
 	// the child has no executor, in which case no SkillMeta carries Remote.
 	//
