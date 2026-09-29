@@ -313,7 +313,7 @@ func userCtx(userID string) context.Context {
 		&server.Identity{UserID: userID, Username: "user-" + userID, Via: server.ProvenanceUser})
 }
 
-func adminCtx() context.Context {
+func adminCtxExec() context.Context {
 	return server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u_admin", Username: "admin", Via: server.ProvenanceUser, IsAdmin: true})
 }
@@ -381,7 +381,7 @@ func TestExecutorListAdminSeesAll(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	a, _ := ownedFixture()
 
-	rows, err := a.List(adminCtx(), "", 0)
+	rows, err := a.List(adminCtxExec(), "", 0)
 	ck.Require().NoError(err)
 	ids := map[string]bool{}
 	for _, r := range rows {
