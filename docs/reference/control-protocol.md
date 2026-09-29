@@ -95,7 +95,7 @@ served on two listeners:
   a credential is always required, and the Connect plane has no RPC that
   mints an admin. With zero active users the daemon logs **once, at
   startup**: `no users exist: create one on this host with rafikid user
-  create <name> --admin`. `rafikid user create` opens the database directly —
+  create <name> --admin --token`. `rafikid user create` opens the database directly —
   no running daemon needed — and `--admin` is never inferred; it must be
   passed explicitly or the created user is an ordinary non-admin user. A
   plaintext token is printed exactly once when one is minted (`--token`, or
@@ -360,12 +360,23 @@ neither a child credential nor an anonymous local-socket caller does — a
 child's streams already die with its control connection. Revocation through
 the daemon's own paths (`RevokeToken`, `RemoveUser`/`UserRm`) cancels the
 matching streams immediately, and the client whose stream was cut sees
-`canceled` rather than a bare EOF. What the registry cannot see is revocation
-written to the database behind the daemon's back — `rafikid user token
-revoke` on the host: on such a token open streams run on (deliberately —
-revocation is a security act, so the daemon's own revocations cut, but
-expiry does not), and new requests stop within the auth cache's ≤5s window
-(`server.DefaultAuthCacheTTL`).
+`canceled` rather than a bare EOF. It is immediate for NEW requests too: the
+registry's revocation paths purge the daemon's auth cache
+(`UserTokenAuth.ForgetToken`/`ForgetUser`) BEFORE the cut, so a stream
+re-opened in the same instant re-authenticates against the store — where the
+revocation is already committed — and is refused, instead of re-registering
+under an identity still cached from the revoked credential. The residual is
+a request whose store read predates the revoke's commit: it can re-insert a
+warm entry for one TTL, but only for the span of that single in-flight read —
+the same class of race a stream registration already has against the cut.
+What the registry cannot see is revocation written to the database behind
+the daemon's back — `rafikid user token revoke` on the host — so on such a
+token open streams run on (a documented limitation, not a deliberate choice:
+the host CLI has no channel to the running daemon) and new requests stop
+within the auth cache's ≤5s window (`server.DefaultAuthCacheTTL`). Token
+expiry does not cut an open stream, deliberately — expiry is a property of
+time, not an act by anyone; the expired token's next request re-checks the
+store and is refused.
 
 | Policy | Meaning | Procedures |
 |---|---|---|
@@ -1040,14 +1051,16 @@ for identity. The id is set at mint time from the connection's identity
 `""`), copied from the enrollment token at redemption, and stamped onto a
 transient session executor's ticket from the session's identity; a resumed
 child keeps the `owner_user_id` its stored session carries, and the binder's
-pinned-return arm (`boundExecutor.doRecover`'s re-provision-in-place on a
-still-live executor) is exempt from re-selection for the same reason: the pin
-was written by the daemon under this rule at original launch,
-`owner_user_id` has no post-mint setter, and the child's transcript lives on
-that machine's workspace. An executor that
-already carried an `owner=<name>` label was backfilled to that user's id by
-migration 0044, which is a behaviour change: such an executor no longer
-serves token-less unix-socket children.
+TWO pinned-return arms are exempt from re-selection for the same reason: the
+fundi re-provision-in-place arm (`boundExecutor.doRecover` on a still-live
+executor) and the claude resume-snap arm (`darajaLaunchExecutor` returning
+the executor pinned in the snapshot's `rafiki/executor` label from
+`Live()`, with no owner check). In both, the pin was written by the daemon
+under this rule at original launch, `owner_user_id` has no post-mint
+setter, and the child's transcript lives on that machine's workspace. An
+executor that already carried an `owner=<name>` label was backfilled to
+that user's id by migration 0044, which is a behaviour change: such an
+executor no longer serves token-less unix-socket children.
 
 The management RPCs on this face are scoped the same way
 (`executorAuthority` in `cmd/rafikid/connect_executoradmin.go`): the
@@ -1206,18 +1219,24 @@ Revocation through the daemon's own paths is a security act and CUTS:
 every server stream the revoked token or user held open, through the
 per-daemon stream registry (`cmd/rafikid/stream_revoke.go`), keyed by the
 caller's `user_token` id and wired behind the policy gate on both Control
-mounts — a refused call never registers. Every Control server-streaming
-handler returns on context cancellation, so a revoked stream ends as
-`Canceled`, never a bare EOF. `UserRm` also disconnects every live executor
-whose `owner_user_id` matches (`execpool.Pool.DisconnectOwner`; an empty id
-is a no-op, so unowned executors are never mass-disconnected).
+mounts — a refused call never registers. The same revocations purge the
+auth cache (`UserTokenAuth.ForgetToken`/`ForgetUser`, called before the
+cut), so the revoked credential's NEXT request is refused immediately
+rather than within the cache TTL. Every Control server-streaming handler
+returns on context cancellation, so a revoked stream ends as `Canceled`,
+never a bare EOF. `UserRm` also disconnects every live executor whose
+`owner_user_id` matches (`execpool.Pool.DisconnectOwner`; an empty id is a
+no-op, so unowned executors are never mass-disconnected).
 
-What is deliberately NOT cut: revocation from the HOST CLI (`rafikid user
-token revoke`, pure database) cannot reach a running daemon's in-memory
-registry, so on such a token open streams run on and only NEW requests stop —
-within the ≤5s auth-cache window (`server.DefaultAuthCacheTTL`); use `rafiki
-token revoke` against the daemon for an immediate cut. Token EXPIRY never
-cuts a stream — expiry is a property of time, not an act.
+What is NOT cut: revocation from the HOST CLI (`rafikid user token revoke`,
+pure database) cannot reach a running daemon's in-memory registry or its
+auth cache — a documented limitation, not a deliberate choice (the host CLI
+has no channel to the daemon) — so on such a token open streams run on and
+new requests stop only within the ≤5s auth-cache window
+(`server.DefaultAuthCacheTTL`); use `rafiki token revoke` against the daemon
+for an immediate cut. Token EXPIRY never cuts a stream, deliberately —
+expiry is a property of time, not an act; the expired token's next request
+re-checks the store and is refused.
 
 ## 2.4 MCP agent-control surface (HTTP)
 

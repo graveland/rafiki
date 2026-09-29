@@ -647,14 +647,15 @@ func TestMintTokenNegativeTTLIsRejected(t *testing.T) {
 }
 
 // ListTokens filters by user and by revocation, orders newest first, and an
-// empty userID means every user's tokens — including a tombstoned user's,
-// since credentials are filtered, never deleted.
+// empty userID means every user's tokens. The default view lists only live
+// credentials — a tombstoned user's unrevoked token is dead with its owner
+// and answers only in the includeRevoked audit view, which shows everything.
 func TestListTokensFiltersAndOrders(t *testing.T) {
 	c := assert.NewAborting(t)
 	ctx := context.Background()
 	s, _ := testStore(t)
 
-	_, _, err := s.Create(ctx, users.NewUser{Username: "alice", MintToken: true})
+	u1, _, err := s.Create(ctx, users.NewUser{Username: "alice", MintToken: true})
 	c.Require().NoError(err, "create alice")
 	u2, _, err := s.Create(ctx, users.NewUser{Username: "bob", MintToken: true})
 	c.Require().NoError(err, "create bob")
@@ -667,6 +668,18 @@ func TestListTokensFiltersAndOrders(t *testing.T) {
 	c.Require().NoError(err, "list bob's active tokens")
 	c.Require().Len(mine, 1, "bob's active tokens = %v, want just his initial", mine)
 	c.Eq(u2.ID, mine[0].UserID, "token owner")
+
+	// A tombstoned user's unrevoked token is out of the default view — both
+	// scoped to her id and in the all-users listing — but stays in the audit
+	// view: rows are filtered, never deleted.
+	afterTombstone, err := s.ListTokens(ctx, u1.ID, false)
+	c.Require().NoError(err, "list a tombstoned user's default view")
+	c.Len(afterTombstone, 0, "a tombstoned user's tokens are not live: %v", afterTombstone)
+	live, err := s.ListTokens(ctx, "", false)
+	c.Require().NoError(err, "all-users default view")
+	for _, tok := range live {
+		c.NotEq(u1.ID, tok.UserID, "a tombstoned user's token must not be live: %v", tok)
+	}
 
 	withRevoked, err := s.ListTokens(ctx, u2.ID, true)
 	c.Require().NoError(err, "list bob's tokens including revoked")

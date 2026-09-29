@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,8 +155,18 @@ func TestStreamRegistryConcurrent(t *testing.T) {
 				remove := reg.add(tokenID, fmt.Sprintf("u-%c", 'a'+i%6), func() { fired.Store(true) })
 				if j%3 == 0 {
 					reg.revokeToken(tokenID)
+					// A concurrent revokeUser may have consumed this very entry
+					// between the add and revokeToken's scan, so revokeToken can
+					// legitimately return 0 here — and whoever removes the entry
+					// fires the cancel. remove() is the only non-firing remover
+					// and it runs below, so the cancel MUST fire, just not
+					// necessarily before revokeToken returns.
+					deadline := time.Now().Add(time.Second)
+					for !fired.Load() && time.Now().Before(deadline) {
+						runtime.Gosched()
+					}
 					if !fired.Load() {
-						t.Errorf("revokeToken returned without cancelling the stream it counted")
+						t.Errorf("the registered stream was never cancelled by any revocation path")
 					}
 				}
 				remove()

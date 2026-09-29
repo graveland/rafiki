@@ -727,8 +727,12 @@ func TestUserCreateMintFlagMapsToTheWire(t *testing.T) {
 	c.NotNil(req.Msg.MintToken, "--no-token must set mint_token")
 	c.False(req.Msg.GetMintToken(), "--no-token must set mint_token false")
 
-	_, _, err = run("create", "alice", "--token", "--no-token")
+	req, _, err = run("create", "alice", "--token", "--no-token")
 	c.Error(err, "--token --no-token must be refused")
+	// run builds a fresh stub per call, so a nil request is exactly "no
+	// request reached the daemon": the flag conflict is caught client-side,
+	// before the connect endpoint is even resolved.
+	c.Nil(req, "--token --no-token must not reach the daemon")
 }
 
 // TestUserCreateEmailMapsToTheWire pins --email's wire form.

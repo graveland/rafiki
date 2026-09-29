@@ -345,9 +345,10 @@ above all) resolves against the connection's owner. A token-less profile
 stays anonymous on the local socket (local trust), and a token that no
 longer resolves is refused (`unauthenticated`) with the same recovery:
 delete the profile's token file, run `rafiki login` (below, when the daemon
-has SSO configured), or run `rafikid user create <name>` on the
-daemon host — it opens the database directly, so it works when nothing can
-authenticate. What the daemon adds beyond hosting a process is a
+has SSO configured), or mint a replacement for the existing user with
+`rafikid user token mint <name>` on the daemon host — it opens the database
+directly, so it works when nothing can authenticate. What the daemon adds
+beyond hosting a process is a
 **native agent runtime**: the `fundi` child kind drives the Anthropic API
 through `pkg/llm`/`pkg/agentloop` directly.
 
@@ -1027,21 +1028,23 @@ DAEMON HOST — it opens `RAFIKI_DB` directly, so it needs no running daemon,
 no socket and no token:
 
 ```sh
-rafikid user create brent --admin   # on the machine that can reach the database
+rafikid user create brent --admin --token   # on the machine that can reach the database
 ```
 
 The daemon with zero users logs this once at startup:
 `no users exist: create one on this host with rafikid user create <name>
---admin`. With `--token` the plaintext token is printed exactly once (the
+--admin --token`. With `--token` the plaintext token is printed exactly once (the
 daemon stores only its digest) and cannot be recovered afterward; write it
 into the operator profile's token file (`rafiki profile add <name> --url …
 --token …` for a remote daemon). Without `--token` the user has no credential
 until it logs in with `rafiki login` (below) or someone runs `rafikid user
 token mint <name>`. `rafiki user create` over Connect mints only ordinary
 non-admin users and requires an admin credential — so a fresh pod has no
-self-service claim path, by design. `rafikid user create` without `--admin`
-is also the stale-token recovery path: it never authenticates to a daemon,
-so a stale credential cannot block minting its replacement.
+self-service claim path, by design. The stale-token recovery path for an
+EXISTING user is `rafikid user token mint <name>` — it never authenticates
+to a daemon, so a stale credential cannot block minting its replacement
+(`rafikid user create` answers "already exists" for a user that is still
+there).
 
 ### Single sign-on (`rafiki login`)
 
@@ -1192,11 +1195,13 @@ The face binds all interfaces by default (`RAFIKI_PROXY_LISTEN`, default
 daemon host (above), so while `make run` is up:
 
 ```bash
-go run ./cmd/rafikid user create dev --admin
+go run ./cmd/rafikid user create dev --admin --token
 ```
 
-That mints a token into the resolved profile's token file; `rafiki claude`
-picks it up with nothing further to export.
+The host CLI prints the plaintext token to stdout exactly once and writes no
+profile of its own; copy it into the client profile's token file (`rafiki
+profile add <name> --url … --token …`, or paste it where the profile's token
+file lives), and `rafiki claude` picks it up with nothing further to export.
 
 ```bash
 make claude                                   # Claude Code through the local proxy

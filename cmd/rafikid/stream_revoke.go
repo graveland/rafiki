@@ -37,13 +37,31 @@ import (
 // add/remove waits on the mutex); and remove is idempotent, because a stream
 // can be torn down by revocation and its own deferred remove in either order.
 //
-// A nil *streamRegistry is inert: every method returns a zero. Controllers
+// A nil *streamRegistry's revoke methods are inert (return 0); add is only
+// reached through the interceptor, which checks for nil first. Controllers
 // built by hand in tests (and any wiring path that predates the field) then
 // behave as if no streams were ever registered, rather than panicking.
 type streamRegistry struct {
 	mu      sync.Mutex
 	next    uint64
 	byToken map[string]map[uint64]streamEntry
+
+	// forget purges the daemon's auth cache when wired (main.go sets it to the
+	// face's *server.UserTokenAuth). revokeToken/revokeUser call it BEFORE the
+	// registry cut, so a stream the client immediately re-opens cannot
+	// re-register from an identity still cached under the revoked credential.
+	// Nil (test wiring that never had a face) leaves revocation cutting open
+	// streams without touching any cache — the same cut that predates the
+	// hook.
+	forget authCacheForgetter
+}
+
+// authCacheForgetter is the auth-cache purge the revocation paths need: the
+// two methods of *server.UserTokenAuth, taken as an interface so the registry
+// stays testable without a face.
+type authCacheForgetter interface {
+	ForgetToken(tokenID string)
+	ForgetUser(userID string)
 }
 
 // streamEntry is one registered stream.
@@ -98,6 +116,14 @@ func (r *streamRegistry) revokeToken(tokenID string) int {
 	if r == nil {
 		return 0
 	}
+	// Purge the auth cache FIRST, before the cut: a client that re-opens its
+	// stream the instant it is cut must authenticate against the store again
+	// (where the revocation is already committed) rather than re-register
+	// from an identity still cached under the revoked credential. Called
+	// outside r.mu — the forget hook takes the auth cache's own lock.
+	if r.forget != nil {
+		r.forget.ForgetToken(tokenID)
+	}
 	r.mu.Lock()
 	byToken := r.byToken[tokenID]
 	delete(r.byToken, tokenID)
@@ -124,6 +150,10 @@ func (r *streamRegistry) revokeToken(tokenID string) int {
 func (r *streamRegistry) revokeUser(userID string) int {
 	if r == nil || userID == "" {
 		return 0
+	}
+	// Cache purge before the cut, for the same reason as revokeToken's.
+	if r.forget != nil {
+		r.forget.ForgetUser(userID)
 	}
 	r.mu.Lock()
 	var cancels []context.CancelFunc

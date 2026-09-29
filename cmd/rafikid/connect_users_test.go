@@ -529,6 +529,23 @@ func TestListTokensAuthority(t *testing.T) {
 			})
 		}
 	})
+	// Naming a user AND all_users is a contradictory request: refused before
+	// any authority or store work, so it can never silently widen to the
+	// all-users listing (rafiki-py gets the same answer over the same wire).
+	t.Run("username with all_users is invalid", func(t *testing.T) {
+		ck := assert.NewCollecting(t)
+		st := &userAdminFakeStore{tokens: rows}
+		a := connectUserAdmin{c: &Controller{users: st}}
+		for name, ctx := range map[string]context.Context{
+			"admin":         adminCtx(),
+			"anonymous UDS": context.Background(),
+		} {
+			_, err := a.ListTokens(ctx, "alice", false, true)
+			ck.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: code", name)
+			ck.Eq("all_users and username are mutually exclusive", connectErrMsg(t, err), "%s: message", name)
+		}
+		ck.Eq("", st.listTokUserID, "the contradictory request reached ListTokens with a target")
+	})
 }
 
 // TestRevokeTokenAuthority pins the revoke rules: unknown id is NotFound, a
@@ -660,21 +677,45 @@ func TestCreateUserNoStore(t *testing.T) {
 }
 
 // cutUserStore answers Authenticate, GetToken and RevokeToken for the
-// revoke-cuts-stream test: the SAME token authenticates the stream and is
+// revoke-cuts-stream tests: the SAME token authenticates the stream and is
 // then revoked through the Connect surface, so one identity and one row cover
-// both halves.
+// both halves. Authenticate is faithful about the tombstones: a revoked token
+// or a removed user is ErrNotFound, exactly like the real store's
+// revoked_at/deleted_at join — the cache-purge tests lean on that to prove a
+// re-opened request re-checks the store after revocation.
 type cutUserStore struct {
 	users.Store
 	token string
 	id    users.Identity
 	rows  map[string]users.Token
+
+	revoked   bool // RevokeToken was called
+	deleted   bool // Delete (UserRm) was called
+	authCalls int  // Authenticate invocations — a warm cache keeps this flat
 }
 
 func (s *cutUserStore) Authenticate(_ context.Context, token string) (users.Identity, error) {
-	if token != s.token {
+	s.authCalls++
+	if token != s.token || s.revoked || s.deleted {
 		return users.Identity{}, users.ErrNotFound
 	}
 	return s.id, nil
+}
+
+// LookupUsername and Delete back Controller.UserRm's remove path.
+func (s *cutUserStore) LookupUsername(_ context.Context, username string) (string, error) {
+	if s.deleted || username != s.id.Username {
+		return "", users.ErrNotFound
+	}
+	return s.id.UserID, nil
+}
+
+func (s *cutUserStore) Delete(_ context.Context, username string) error {
+	if s.deleted || username != s.id.Username {
+		return users.ErrNotFound
+	}
+	s.deleted = true
+	return nil
 }
 
 func (s *cutUserStore) GetToken(_ context.Context, id string) (users.Token, error) {
@@ -693,6 +734,7 @@ func (s *cutUserStore) RevokeToken(_ context.Context, id string) (users.Token, e
 	now := time.Now()
 	t.RevokedAt = &now
 	s.rows[id] = t
+	s.revoked = true
 	return t, nil
 }
 
@@ -767,4 +809,164 @@ func TestRevokeTokenCancelsOpenStream(t *testing.T) {
 		t.Error("the revoked stream never ended")
 	}
 	c.Eq(0, registryCount(reg), "the cut stream deregisters itself")
+}
+
+// cutMount is the TestRevokeTokenCancelsOpenStream mount, parameterised: the
+// auth resolver is returned so a test can wire it as the registry's forget
+// hook (main.go's wiring) while the mount keeps using the same instance — the
+// cache-purge contract is about THAT instance, not an interchangeable one.
+func cutMount(t *testing.T, ustore *cutUserStore, reg *streamRegistry, auth *server.UserTokenAuth) rafikiv1connect.ControlClient {
+	t.Helper()
+	ctrl := &Controller{users: ustore, streamRevoke: reg}
+	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv.SetExecutorSessions(stubSessions{})
+	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
+	h := &server.Handler{}
+	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	mux := http.NewServeMux()
+	h.Mount(mux, auth.Middleware)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+}
+
+// openExecutorSession opens the stub's executor-session stream under the cut
+// store's token and returns it after the ready message — receiving it proves
+// the stream is open AND registered, with no timing window to poll.
+func openExecutorSession(t *testing.T, client rafikiv1connect.ControlClient) *connect.ServerStreamForClient[rafikiv1.ExecutorSessionEvent] {
+	t.Helper()
+	req := connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "laptop"})
+	req.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	stream, err := client.ExecutorSession(context.Background(), req)
+	if err != nil {
+		t.Fatalf("open executor session: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("ready: %v", stream.Err())
+	}
+	return stream
+}
+
+// revokedStreamEndsCanceled drains a server stream cut by revocation and
+// pins the deliberate-cut code (connect maps a nil handler return on a
+// cancelled context to a bare EOF unless the interceptor reports Canceled).
+func revokedStreamEndsCanceled(t *testing.T, stream *connect.ServerStreamForClient[rafikiv1.ExecutorSessionEvent]) {
+	t.Helper()
+	got := make(chan error, 1)
+	go func() {
+		for stream.Receive() {
+		}
+		got <- stream.Err()
+	}()
+	select {
+	case err := <-got:
+		if connect.CodeOf(err) != connect.CodeCanceled {
+			t.Errorf("the revoked stream must end Canceled, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the revoked stream never ended")
+	}
+}
+
+// refusedReopen re-opens the executor-session stream and returns the error
+// the refusal carries: a connect streaming call returns the stream object
+// before the server has answered, so the HTTP-level refusal surfaces on the
+// first Receive. Receiving anything means the stream was ADMITTED, which is
+// the bug this suite exists to catch.
+func refusedReopen(t *testing.T, client rafikiv1connect.ControlClient) error {
+	t.Helper()
+	req := connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "laptop"})
+	req.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	stream, err := client.ExecutorSession(context.Background(), req)
+	if err != nil {
+		return err
+	}
+	if stream.Receive() {
+		t.Fatal("the re-opened stream was admitted; revocation did not refuse it")
+	}
+	return stream.Err()
+}
+
+// TestRevokeTokenPurgesAuthCacheForNewRequests pins the OTHER half of
+// daemon-side revocation: the cut cancels open streams, and the auth-cache
+// purge makes the NEXT request refuse — without the purge, a stream
+// re-opened inside the cache's TTL re-authenticates from a warm entry and
+// re-registers under the already-revoked token id, which nothing will ever
+// fire for again. The store's authCalls counter is the proof of re-checking:
+// warm (1) through the whole revoke, then 2 on the re-open.
+func TestRevokeTokenPurgesAuthCacheForNewRequests(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := newStreamRegistry()
+	ustore := &cutUserStore{
+		token: proxyUserToken,
+		id:    users.Identity{UserID: "u1", Username: "brent", TokenID: "tok-1"},
+		rows: map[string]users.Token{
+			"tok-1": {ID: "tok-1", UserID: "u1", Username: "brent", Name: "primary", Origin: users.OriginService},
+		},
+	}
+	// A TTL far beyond the test's runtime, so a passing refusal can only be
+	// the purge — never the entry expiring underneath it.
+	auth := server.NewUserTokenAuth(ustore, proxyBootToken, time.Minute)
+	reg.forget = auth
+	client := cutMount(t, ustore, reg, auth)
+
+	stream := openExecutorSession(t, client)
+	c.Eq(1, registryCount(reg), "the open stream must be registered under the credential that opened it")
+	c.Eq(1, ustore.authCalls, "the stream's middleware call must have warmed the cache")
+
+	rev := connect.NewRequest(&rafikiv1.RevokeTokenRequest{Id: "tok-1"})
+	rev.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	if _, err := client.RevokeToken(context.Background(), rev); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	revokedStreamEndsCanceled(t, stream)
+
+	// The re-open: refused BEFORE registering, because the middleware had to
+	// re-check the store (where the token is now revoked) instead of
+	// answering from the still-warm cache. connect reports a streaming call's
+	// HTTP-level refusal on the first Receive, not on the call.
+	refused := refusedReopen(t, client)
+	c.Require().Error(refused, "a revoked token must not open a stream")
+	c.Eq(connect.CodeUnauthenticated, connect.CodeOf(refused), "code")
+	c.Eq(2, ustore.authCalls, "the re-open must have re-checked the store, not the warm cache")
+	c.Eq(0, registryCount(reg), "the refused re-open must not have registered")
+}
+
+// TestUserRmPurgesAuthCacheForNewRequests pins the user-removal half: UserRm
+// cuts the user's open stream AND forgets the user's cached identity, so the
+// same token is refused on its next request even though the middleware saw
+// it moments before.
+func TestUserRmPurgesAuthCacheForNewRequests(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := newStreamRegistry()
+	ustore := &cutUserStore{
+		token: proxyUserToken,
+		id:    users.Identity{UserID: "u1", Username: "brent", TokenID: "tok-1", IsAdmin: true},
+		rows: map[string]users.Token{
+			"tok-1": {ID: "tok-1", UserID: "u1", Username: "brent", Name: "primary", Origin: users.OriginService},
+		},
+	}
+	auth := server.NewUserTokenAuth(ustore, proxyBootToken, time.Minute)
+	reg.forget = auth
+	client := cutMount(t, ustore, reg, auth)
+
+	stream := openExecutorSession(t, client)
+	c.Eq(1, ustore.authCalls, "the stream's middleware call must have warmed the cache")
+
+	rm := connect.NewRequest(&rafikiv1.RemoveUserRequest{Username: "brent"})
+	rm.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	if _, err := client.RemoveUser(context.Background(), rm); err != nil {
+		t.Fatalf("user rm: %v", err)
+	}
+
+	revokedStreamEndsCanceled(t, stream)
+
+	// Same refusal shape as the token revoke, with the purge keyed by the
+	// USER: the store's Authenticate now tombstones the whole user.
+	refused := refusedReopen(t, client)
+	c.Require().Error(refused, "a removed user's token must not open a stream")
+	c.Eq(connect.CodeUnauthenticated, connect.CodeOf(refused), "code")
+	c.Eq(2, ustore.authCalls, "the re-open must have re-checked the store, not the warm cache")
+	c.Eq(0, registryCount(reg), "the refused re-open must not have registered")
 }

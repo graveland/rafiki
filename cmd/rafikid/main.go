@@ -528,6 +528,15 @@ func runDaemon(opts runDaemonOpts) error {
 			"error", err)
 	}
 
+	// Daemon-side revocation must refuse the NEXT request, not the one after
+	// the auth cache's TTL: revokeToken/revokeUser purge the face's identity
+	// cache before cutting open streams. The face holds the one UserTokenAuth
+	// both Control mounts resolve through (proxy.go; the UDS mount via
+	// IdentifyStrict), so this hook is the whole wiring.
+	if face != nil {
+		streamRevoke.forget = face.TokenAuth
+	}
+
 	// OpenRouter OTLP broadcast receiver (opt-in, separate port).
 	broadcastSrv, err := startBroadcastListener(baseCtx, pool, slog.Default())
 	if err != nil {
@@ -914,7 +923,7 @@ func runDaemon(opts runDaemonOpts) error {
 		// `rafikid user create` opens the database directly, bypassing this
 		// listener and everything else on the host.
 		if n, err := userStore.CountActive(ctx); err == nil && n == 0 {
-			slog.Warn("no users exist: create one on this host with rafikid user create <name> --admin",
+			slog.Warn("no users exist: create one on this host with rafikid user create <name> --admin --token",
 				"addr", addr)
 		}
 

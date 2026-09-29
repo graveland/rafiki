@@ -233,8 +233,14 @@ func (a connectUserAdmin) MintToken(ctx context.Context, username, name string, 
 
 // ListTokens lists credentials, never secrets. all_users is admin (or the
 // anonymous local socket) authority; otherwise the target resolves through
-// resolveTokenTarget — self by default.
+// resolveTokenTarget — self by default. Naming both a username and all_users
+// is refused before any authority check: silently widening to all users would
+// answer a scoped question with the whole fleet's rows.
 func (a connectUserAdmin) ListTokens(ctx context.Context, username string, includeRevoked, allUsers bool) ([]*rafikiv1.TokenRow, error) {
+	if allUsers && username != "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("all_users and username are mutually exclusive"))
+	}
 	var userID string
 	if allUsers {
 		id := server.IdentityFromContext(ctx)

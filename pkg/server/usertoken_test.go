@@ -611,3 +611,62 @@ func TestResolveCarriesTokenID(t *testing.T) {
 	c.False(id2 == nil || id2.TokenID != "tok-1", "cached identity = %+v, want TokenID tok-1", id2)
 	c.Eq(int64(1), st.calls.Load(), "the second request must be served from the cache, not re-authenticated")
 }
+
+// ForgetToken/ForgetUser are the daemon-side revocation purge: after one, a
+// credential whose identity was cached is re-checked against the store on its
+// NEXT request instead of being answered from the warm entry. Only the
+// matching entries go — another user's token keeps its cache — and an empty
+// argument purges nothing.
+func TestForgetPurgesTheCache(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := &stubStore{tokens: map[string]users.Identity{
+		"rfk_tok":   {UserID: "u1", Username: "brent", TokenID: "tok-1"},
+		"rfk_other": {UserID: "u2", Username: "alice", TokenID: "tok-2"},
+	}}
+	a := NewUserTokenAuth(st, "childsecret", time.Minute)
+
+	getID := func(token string) *Identity {
+		req := httptest.NewRequest("POST", "/v1/messages", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec, id := serve(a, req)
+		c.Eq(200, rec.Code, "status for %s: %d %s", token, rec.Code, rec.Body.String())
+		return id
+	}
+	c.Require().NotNil(getID("rfk_tok"), "warm tok-1")
+	c.Require().NotNil(getID("rfk_other"), "warm tok-2")
+	c.Eq(int64(2), st.calls.Load(), "both identities cached after one request each")
+
+	// Warm cache answers for a DIFFERENT token id: ForgetToken("tok-1")
+	// leaves tok-2's entry alone.
+	a.ForgetToken("tok-1")
+	c.NotNil(getID("rfk_other"), "an unaffected token survives the purge")
+	c.Eq(int64(2), st.calls.Load(), "the unaffected token must still be served from cache")
+
+	// The purged credential is re-checked — and refused, because the store
+	// no longer knows it (the revocation that preceded the forget).
+	delete(st.tokens, "rfk_tok")
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer rfk_tok")
+	rec, _ := serve(a, req)
+	c.Eq(http.StatusUnauthorized, rec.Code, "a forgotten token must re-check the store, not answer from cache")
+	c.Eq(int64(3), st.calls.Load(), "the forgotten token must have re-checked the store")
+
+	// ForgetUser removes every entry of the user, so removing a user forgets
+	// all their credentials at once.
+	st.tokens["rfk_tok"] = users.Identity{UserID: "u1", Username: "brent", TokenID: "tok-1"}
+	getID("rfk_tok")
+	c.Eq(int64(4), st.calls.Load(), "re-warmed tok-1")
+	a.ForgetUser("u1")
+	delete(st.tokens, "rfk_tok")
+	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer rfk_tok")
+	rec2, _ := serve(a, req2)
+	c.Eq(http.StatusUnauthorized, rec2.Code, "a forgotten user's token must re-check the store")
+
+	// Empty arguments are a no-op, not a flush: an unresolved target must
+	// purge nothing rather than every identity in the cache.
+	a.ForgetToken("")
+	a.ForgetUser("")
+	c.NotNil(getID("rfk_other"), "an empty argument must not flush the cache")
+	c.Eq(int64(5), st.calls.Load(), "no extra store call after the empty-argument forgets")
+}

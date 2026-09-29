@@ -361,3 +361,94 @@ func TestSelectOwnerCheckBeforeAdmits(t *testing.T) {
 	_, err := c.chooseExecutor(req, executorOwner{UserID: "u_B", Name: "bob"})
 	ck.Error(err, "B's labels satisfy a-exec's Admits selector, but the owner mismatch must still refuse it")
 }
+
+// TestAgentRunnerScopesTheResumedFundiBinderToItsOwner pins the owner
+// threading the resume call sites depend on: agentRunner builds the fundi
+// binder from the owner it is HANDED (both call sites pass snap.Labels["owner"]
+// and resumeOwnerUserID), and selection consults that owner. A resumed user
+// child therefore re-binds only to an executor that user owns — never to an
+// unowned one, never to another user's. The regression shape is any call site
+// that stops threading resumeOwnerUserID's result into agentRunner: an empty
+// owner lands here as a resumed child whose binder selects the UNOWNED
+// executor instead of its own, silently widening the child's machines.
+func TestAgentRunnerScopesTheResumedFundiBinderToItsOwner(t *testing.T) {
+	newResumed := func(live ...execpool.LiveExecutor) (*Controller, *childstore.Snapshot) {
+		t.Helper()
+		ctrl := &Controller{
+			st: childstore.New(), cm: newChildManager(), native: nativebus.New(),
+			execPool: &fakePool{live: live}, stateDir: t.TempDir(),
+		}
+		stored := &childstore.Session{
+			ChildID:          "c_resumed",
+			Status:           protocol.StatusExited,
+			StartedAt:        time.Now(),
+			Kind:             protocol.KindFundi,
+			Cwd:              t.TempDir(),
+			Model:            "anthropic/sonnet-latest",
+			ExecutorSelector: "env=home",
+			WorkspaceMode:    "pinned",
+			OwnerUserID:      "u-bob",
+			MaxDepth:         1,
+			MaxChildren:      8,
+			Labels:           map[string]string{"owner": "bob"},
+		}
+		ctrl.st.Insert(stored)
+		snap, ok := ctrl.st.Get("c_resumed")
+		if !ok {
+			t.Fatal("the inserted session did not read back")
+		}
+		return ctrl, &snap
+	}
+
+	// The resume request is built exactly as the resume paths build it, and
+	// agentRunner receives exactly the arguments the call sites pass.
+	drive := func(ctrl *Controller, snap *childstore.Snapshot) *boundExecutor {
+		t.Helper()
+		req := resumeRequestFromSnapshot(*snap, "")
+		req.Kind = protocol.KindFundi
+		runner, err := ctrl.agentRunner(req, "c_resumed", true, snap.Labels["owner"], snap.OwnerUserID, snap)
+		if err != nil {
+			t.Fatalf("agentRunner for a resumed fundi child: %v", err)
+		}
+		if runner == nil {
+			t.Fatal("a fundi resume returns an in-process runner")
+		}
+		ctrl.boundMu.Lock()
+		be := ctrl.bound["c_resumed"]
+		ctrl.boundMu.Unlock()
+		if be == nil {
+			t.Fatal("the resumed child's binder must be retained")
+		}
+		return be
+	}
+
+	t.Run("owned executor live re-binds to it", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		ctrl, snap := newResumed(
+			exOwned("exec-owned", map[string]string{"env": "home"}, "", "u-bob"),
+			ex("exec-free", map[string]string{"env": "home"}, ""), // unowned
+			exOwned("exec-other", map[string]string{"env": "home"}, "", "u-alice"),
+		)
+		be := drive(ctrl, snap)
+		binder, ok := be.binder.(*controllerBinder)
+		ck.Require().True(ok, "the fundi binder is the controller's own")
+		ck.Eq("u-bob", binder.owner.UserID, "the binder must carry the owner agentRunner was handed")
+		got, err := binder.ChooseFor("c_resumed")
+		ck.Require().NoError(err, "an owned executor is live and admits the child")
+		ck.Eq("exec-owned", got, "the resumed child must bind its OWN executor, got %q", got)
+	})
+
+	t.Run("only a foreign-owned executor live is refused", func(t *testing.T) {
+		ck := assert.NewAborting(t)
+		ctrl, snap := newResumed(
+			exOwned("exec-other", map[string]string{"env": "home"}, "", "u-alice"),
+		)
+		be := drive(ctrl, snap)
+		binder, ok := be.binder.(*controllerBinder)
+		ck.Require().True(ok, "the fundi binder is the controller's own")
+		ck.Eq("u-bob", binder.owner.UserID, "the binder must carry the owner agentRunner was handed")
+		_, err := binder.ChooseFor("c_resumed")
+		ck.Require().Error(err, "another user's executor must never serve the resumed child")
+		ck.StrContains(err.Error(), "exec-other", "the refusal should explain itself: %v", err)
+	})
+}

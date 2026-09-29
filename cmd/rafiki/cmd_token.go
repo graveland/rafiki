@@ -50,7 +50,11 @@ func newTokenMintCmd() *cobra.Command {
 }
 
 // tokenTTLSeconds parses --ttl into whole seconds; empty means 0 = never
-// expires.
+// expires. A POSITIVE duration under a second is refused client-side rather
+// than truncated: int64(d/time.Second) would round 500ms down to 0, which on
+// the wire means "never expires" — the user asked for a short-lived token and
+// would silently get a permanent one. Negative durations are not caught here;
+// the daemon answers them with InvalidArgument.
 func tokenTTLSeconds(flag string) (int64, error) {
 	if flag == "" {
 		return 0, nil
@@ -58,6 +62,9 @@ func tokenTTLSeconds(flag string) (int64, error) {
 	d, err := time.ParseDuration(flag)
 	if err != nil {
 		return 0, fmt.Errorf("invalid --ttl %q: %w", flag, err)
+	}
+	if d > 0 && d < time.Second {
+		return 0, fmt.Errorf("invalid --ttl %q: must be at least 1s", flag)
 	}
 	return int64(d / time.Second), nil
 }

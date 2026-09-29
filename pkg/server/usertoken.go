@@ -26,10 +26,14 @@ type ChildOwnerLookup func(childID string) (userID string, ok bool)
 type ChildTokenLookup func(token string) (childID, ownerUserID string, ok bool)
 
 // DefaultAuthCacheTTL bounds how long a verified token is trusted without
-// re-checking the store. It is also exactly the revocation lag: `user rm`
-// takes effect on the face within this window. It bounds NEW requests only —
-// it says nothing about a stream already open. What cuts an open stream, and
-// deliberately what does not, is documented on streamRegistry
+// re-checking the store. Daemon-side revocation (Connect's RevokeToken,
+// Controller.UserRm) purges the cache through the forget hook on the stream
+// registry (cmd/rafikid/stream_revoke.go), so it takes effect on NEW requests
+// immediately; the remaining lag is the span of a single store read, not the
+// TTL. The TTL therefore bounds only revocation written to the store behind
+// the daemon's back (the host CLI), whose next request re-checks within this
+// window. It says nothing about a stream already open. What cuts an open
+// stream, and deliberately what does not, is documented on streamRegistry
 // (cmd/rafikid/stream_revoke.go).
 const DefaultAuthCacheTTL = 5 * time.Second
 
@@ -184,6 +188,48 @@ func (a *UserTokenAuth) IdentifyStrict(ctx context.Context, h http.Header) (*Ide
 		return nil, err
 	}
 	return &id, nil
+}
+
+// ForgetToken purges every cached identity that authenticated under tokenID,
+// and ForgetUser every identity of userID. Revocation is a security act, so
+// it must refuse the NEXT request, not merely the one after the TTL — these
+// are what make a daemon-side revocation (streamRegistry.revokeToken /
+// revokeUser, via the registry's forget hook) refuse new requests immediately
+// instead of answering a revoked credential from cache for up to the TTL.
+// Call them AFTER the store row is tombstoned and BEFORE cutting open
+// streams: a stream cut and re-opened in the same instant must not
+// re-register under an identity re-forged from a warm cache.
+//
+// An empty argument is a no-op — it matches nothing (the cache only ever
+// holds identities with a non-empty TokenID and UserID), so an unresolved
+// target must purge nothing rather than everything.
+func (a *UserTokenAuth) ForgetToken(tokenID string) {
+	if tokenID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key, e := range a.cache {
+		if e.id.TokenID == tokenID {
+			delete(a.cache, key)
+		}
+	}
+}
+
+// ForgetUser is the user-removal half of ForgetToken: every credential the
+// user held is dead, so every cached identity of theirs goes with it.
+// See ForgetToken for the contract.
+func (a *UserTokenAuth) ForgetUser(userID string) {
+	if userID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key, e := range a.cache {
+		if e.id.UserID == userID {
+			delete(a.cache, key)
+		}
+	}
 }
 
 // resolve returns the identity for token; the per-child and per-boot child

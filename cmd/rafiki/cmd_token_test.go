@@ -82,6 +82,27 @@ func TestTokenMintRefusesABadTTL(t *testing.T) {
 	}
 }
 
+// TestTokenMintRefusesASubSecondTTL pins the truncation guard: whole-second
+// conversion would round 0.5s down to 0, which the wire reads as "never
+// expires" — a fail-open that turns a short-lived credential into a permanent
+// one. The error must name the flag, and nothing may reach the daemon.
+func TestTokenMintRefusesASubSecondTTL(t *testing.T) {
+	stub := &userStubControl{}
+	serveUserScratch(t, stub, "rfk_tok")
+
+	root, out := userTestRoot(t, newTokenMintCmd(), "mint", "--ttl", "0.5s")
+	err := root.Execute()
+	if err == nil {
+		t.Fatalf("a sub-second --ttl must fail\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "--ttl") {
+		t.Fatalf("the error must name the flag, got: %v", err)
+	}
+	if stub.lastMint() != nil {
+		t.Fatalf("a sub-second --ttl reached the daemon")
+	}
+}
+
 // TestTokenMintJSONCarriesTheToken pins -j/-J: the canonical protojson of the
 // response, token included — the plaintext is the response's payload and the
 // JSON modes are its other rendering, not a redaction.
