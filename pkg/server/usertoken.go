@@ -27,7 +27,10 @@ type ChildTokenLookup func(token string) (childID, ownerUserID string, ok bool)
 
 // DefaultAuthCacheTTL bounds how long a verified token is trusted without
 // re-checking the store. It is also exactly the revocation lag: `user rm`
-// takes effect on the face within this window.
+// takes effect on the face within this window. It bounds NEW requests only —
+// it says nothing about a stream already open. What cuts an open stream, and
+// deliberately what does not, is documented on streamRegistry
+// (cmd/rafikid/stream_revoke.go).
 const DefaultAuthCacheTTL = 5 * time.Second
 
 // UserTokenAuth authenticates proxy-face requests against the users table,
@@ -240,7 +243,7 @@ func (a *UserTokenAuth) resolve(ctx context.Context, token string, childID strin
 		return Identity{}, ErrAuthUnavailable
 	}
 
-	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser, IsAdmin: uid.IsAdmin}
+	id := Identity{UserID: uid.UserID, Username: uid.Username, Via: ProvenanceUser, IsAdmin: uid.IsAdmin, TokenID: uid.TokenID}
 	a.mu.Lock()
 	a.cache[key] = cachedIdentity{id: id, expires: now.Add(a.ttl)}
 	// Opportunistic sweep: entries are tiny and the population is the number

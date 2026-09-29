@@ -471,6 +471,39 @@ func (p *Pool) serve(conn *upgradeconn.Conn, a admission) {
 	slog.Info("execpool: executor left", "id", e.ID)
 }
 
+// DisconnectOwner tears down every live connection — durable and transient —
+// whose executor names userID as its owner, returning how many were cut.
+// It is the user-removal hook: revocation is a security act, so it cuts
+// rather than waiting for the connection to notice on its own. Evict is the
+// close path on purpose: the entry leaves the pool immediately (no client is
+// handed out for a connection being torn down) and the ordinary teardown
+// bookkeeping — removal from the parked set, the conn close, handleConn's
+// exit logging — runs unchanged.
+//
+// An empty userID is a no-op returning 0, never a mass-disconnect of every
+// unowned executor: "" means "unowned" on the executor row, so a bug that
+// routed an unresolved owner here must cut nothing.
+func (p *Pool) DisconnectOwner(userID string) int {
+	if p == nil || userID == "" {
+		return 0
+	}
+	p.mu.RLock()
+	var owned []string
+	for id, lc := range p.live {
+		if lc.executor.OwnerUserID == userID {
+			owned = append(owned, id)
+		}
+	}
+	p.mu.RUnlock()
+	// Evicted outside the lock: Evict takes p.mu itself, and sync.RWMutex is
+	// not reentrant — collecting under RLock and cutting after it is the same
+	// discipline onHealthFailure uses for Park.
+	for _, id := range owned {
+		p.Evict(id)
+	}
+	return len(owned)
+}
+
 // Live returns all currently connected executors with their last Describe info.
 func (p *Pool) Live() []LiveExecutor {
 	p.mu.RLock()

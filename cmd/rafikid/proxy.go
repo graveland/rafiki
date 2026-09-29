@@ -172,6 +172,10 @@ type faceOptions struct {
 	RawTraceAll bool                    // RAFIKI_RECORD_REQUESTS=1: record all sessions unconditionally
 	Users       users.Store             // nil = RAFIKI_DB unset; only the per-boot child token authenticates
 	Providers   *providers.Set          // loaded once from providers.toml; nil falls back to providers.Default()
+	// StreamRevoke is the daemon's one stream-revocation registry, built in
+	// main.go before the face and shared with the UDS mount and the
+	// Controller. Nil = this face's admitted streams are never cut (tests).
+	StreamRevoke *streamRegistry
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -345,11 +349,13 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	// Connect reports as CodeUnimplemented.
 	connectServer := connectapi.NewServer(store.NewMessages(pool))
 	connectServer.SetProviderBanManager(connectProviderBans{g: guard})
-	// connectControlRoute adds the policy interceptor: the proxy face's
-	// Connect route accepts child credentials (the per-boot secret every
-	// child holds, the per-child MCP secrets), and the policy table is what
-	// stops them at operator verbs.
-	h.ControlPath, h.Control = connectControlRoute(connectServer)
+	// connectControlRoute adds the policy interceptor and, innermost behind
+	// it, the stream-revocation interceptor: the proxy face's Connect route
+	// accepts child credentials (the per-boot secret every child holds, the
+	// per-child MCP secrets), and the policy table is what stops them at
+	// operator verbs; the registry is what lets a revocation cut an admitted
+	// stream.
+	h.ControlPath, h.Control = connectControlRoute(connectServer, opts.StreamRevoke)
 	// Login mounts OUTSIDE the token middleware — Handler.Mount registers it
 	// without wrap, and here WITHOUT any interceptor either: Login is how a
 	// caller without a valid credential gets one, and wrap would 401 exactly

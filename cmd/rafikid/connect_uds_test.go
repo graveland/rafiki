@@ -59,7 +59,7 @@ func TestServeConnectUDSAnswersRPCs(t *testing.T) {
 	// error we assert on — proving the ROUTE exists, which is the point.
 	srv := connectapi.NewServer(nil)
 
-	ln, err := serveConnectUDS(ctx, srv, nil, sock)
+	ln, err := serveConnectUDS(ctx, srv, nil, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
@@ -131,7 +131,7 @@ func TestServeConnectUDSResolvesIdentity(t *testing.T) {
 	// os.MkdirTemp, not t.TempDir: macOS caps UDS paths at 104 bytes and this
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
@@ -173,7 +173,7 @@ func TestServeConnectUDSUnknownTokenIsRefused(t *testing.T) {
 	// os.MkdirTemp, not t.TempDir: macOS caps UDS paths at 104 bytes and this
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
@@ -209,7 +209,7 @@ func TestServeConnectUDSStoreOutageIsUnavailable(t *testing.T) {
 	// os.MkdirTemp, not t.TempDir: macOS caps UDS paths at 104 bytes and this
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
@@ -244,7 +244,7 @@ func TestServeConnectUDSNoCredentialIsAnonymous(t *testing.T) {
 	// os.MkdirTemp, not t.TempDir: macOS caps UDS paths at 104 bytes and this
 	// test name pushes t.TempDir over it.
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 
@@ -265,11 +265,11 @@ func TestServeConnectUDSRefusesALiveSocket(t *testing.T) {
 	defer cancel()
 
 	sock := filepath.Join(t.TempDir(), "s")
-	ln, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, sock)
+	ln, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, newStreamRegistry(), sock)
 	assert.NewAborting(t).NoError(err, "first serveConnectUDS")
 	defer ln.Close()
 
-	if _, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, sock); err == nil {
+	if _, err := serveConnectUDS(ctx, connectapi.NewServer(nil), nil, newStreamRegistry(), sock); err == nil {
 		t.Fatal("want the second bind on a live socket to be refused")
 	}
 }
@@ -293,7 +293,7 @@ func TestServeConnectUDSLoginReachesBeginLoginWithUnknownBearer(t *testing.T) {
 	auth := server.NewUserTokenAuth(nil, "unused-child-secret", time.Minute)
 
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 

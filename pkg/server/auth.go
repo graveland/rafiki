@@ -53,6 +53,13 @@ type Identity struct {
 	// only alongside IsUserCredential(): a child-attributed identity is never
 	// treated as admin regardless of this bit.
 	IsAdmin bool
+	// TokenID names the user_token row that authenticated, copied from
+	// users.Identity by resolve() and carried through the auth cache. It is
+	// what lets a credential be revoked precisely — and what the Connect
+	// plane's stream registry keys an open stream by, so revoking the token
+	// cuts that stream. Empty for every credential that is not a user token:
+	// the per-boot and per-child secrets have no token row.
+	TokenID string
 	// ChildID names the ONE child this identity is bound to. Set only for
 	// ProvenanceChildToken; empty for every other provenance, including a
 	// real user credential, which is what marks the interactive caller as

@@ -165,6 +165,23 @@ func (p *syncEvictPool) Evict(id string) {
 	p.evicted[id] = true
 }
 
+// DisconnectOwner mirrors the real pool's rule on the fake's live list, so
+// the interface stays satisfied and user-rm tests can assert the cut.
+func (p *syncEvictPool) DisconnectOwner(userID string) int {
+	p.mu.Lock()
+	var owned []string
+	for _, le := range p.live {
+		if le.Executor.OwnerUserID == userID {
+			owned = append(owned, le.Executor.ID)
+		}
+	}
+	for _, id := range owned {
+		p.evicted[id] = true
+	}
+	p.mu.Unlock()
+	return len(owned)
+}
+
 func (p *syncEvictPool) wasEvicted(id string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

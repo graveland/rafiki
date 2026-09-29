@@ -45,6 +45,20 @@ func (f *fakePool) Evict(id string) {
 	}
 }
 
+// DisconnectOwner mirrors the real pool's rule — cut what the user owns, on
+// the SAME Live() list the selection tests populate — so the selection tests
+// keep compiling and the user-rm test drives the whole cut through one fake.
+func (f *fakePool) DisconnectOwner(userID string) int {
+	cut := 0
+	for _, le := range f.live {
+		if le.Executor.OwnerUserID == userID {
+			f.Evict(le.Executor.ID)
+			cut++
+		}
+	}
+	return cut
+}
+
 // stubExecutorClient satisfies tools.ExecutorClient for selection tests, which
 // never dispatch a tool call.
 type stubExecutorClient struct{}

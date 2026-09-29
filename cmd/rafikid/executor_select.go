@@ -19,12 +19,14 @@ import (
 type executorPool interface {
 	Live() []execpool.LiveExecutor
 	ClientFor(executorID string) (tools.ExecutorClient, error)
-	// Tickets and Evict serve transient executors: mint a one-shot ticket,
-	// and take the executor down when the control connection that owns it
-	// closes. On the interface rather than reached by type assertion so the
-	// selection tests' fake pool can satisfy them.
+	// Tickets, Evict and DisconnectOwner serve transient executors and the
+	// user-removal cut: mint a one-shot ticket, take an executor down when
+	// the control connection that owns it closes, and disconnect every
+	// executor a removed user owns. On the interface rather than reached by
+	// type assertion so the selection tests' fake pool can satisfy them.
 	Tickets() *execpool.TicketRegistry
 	Evict(executorID string)
+	DisconnectOwner(userID string) int
 }
 
 // isBareExecutorRef reports whether s is a bare word — a machine name or an

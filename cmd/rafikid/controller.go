@@ -321,6 +321,14 @@ type Controller struct {
 	// executor listener is not configured.
 	execPool executorPool
 
+	// streamRevoke is the daemon's one stream-revocation registry, shared
+	// with both Connect mounts (see connectControlRoute). Revocation through
+	// the daemon's own paths — connectUserAdmin.RevokeToken, UserRm below —
+	// cuts the open streams it names; revocation written to the database
+	// behind a running daemon's back cannot reach it and is not attempted.
+	// Nil in hand-built test Controllers, where every method is inert.
+	streamRevoke *streamRegistry
+
 	// execPoolConn is the SAME pool as execPool, at its concrete type.
 	// relayTransport needs execpool.NewProxyTransport, which only the
 	// concrete *execpool.Pool can build (it reaches a private method,
@@ -5266,9 +5274,29 @@ func (c *Controller) UserRm(ctx context.Context, username string) error {
 	if c.users == nil {
 		return errNoUserStore
 	}
+	// The user id is resolved BEFORE the tombstone: after Delete the row is
+	// gone and LookupUsername would answer ErrNotFound for a user that
+	// existed a moment ago. Both calls return ErrNotFound for the same
+	// unknown-or-tombstoned shapes, so the error the caller sees is unchanged.
+	userID, err := c.users.LookupUsername(ctx, username)
+	if err != nil {
+		return err
+	}
 	if err := c.users.Delete(ctx, username); err != nil {
 		return err
 	}
-	slog.Info("user removed", "username", username)
+	// The cut: every stream any of the user's tokens held open ends, and
+	// every executor serving that user's children is disconnected — revocation
+	// is a security act, so it cuts rather than waiting for the connections
+	// to notice. Stream counts are logged by the registry; the executor count
+	// rides this line. The pool is nil when no executor listener is
+	// configured; the registry is inert on a nil receiver, so only the
+	// interface value needs the guard.
+	streams := c.streamRevoke.revokeUser(userID)
+	var disconnected int
+	if c.execPool != nil {
+		disconnected = c.execPool.DisconnectOwner(userID)
+	}
+	slog.Info("user removed", "username", username, "streams_cancelled", streams, "executors_disconnected", disconnected)
 	return nil
 }

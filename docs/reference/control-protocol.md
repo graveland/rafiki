@@ -332,14 +332,32 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 Every Connect mount of the Control service — the proxy face's route and the
 local socket — composes its interceptors through `connectControlRoute`
 (`cmd/rafikid/connect_policy.go`), which appends ONE policy interceptor,
-`connectPolicyInterceptor`. It resolves each procedure's policy from a
-`procedure → policy` table (`controlPolicyTable`) whose coverage over the
-generated Control service descriptor is pinned by
+`connectPolicyInterceptor`, and then ONE stream-revocation interceptor,
+`streamRevocationInterceptor` (`cmd/rafikid/stream_revoke.go`) — innermost,
+behind the policy gate, so a call the gate refuses never registers. The
+policy interceptor resolves each procedure's policy from a `procedure →
+policy` table (`controlPolicyTable`) whose coverage over the generated
+Control service descriptor is pinned by
 `TestControlPolicyTableCoversEveryProcedure` (`cmd/rafikid`): a new RPC
 cannot land unclassified, because the test fails until the table gains an
 entry, and a name the table holds that the descriptor does not fails too.
 The table's miss-default is `userOnly`, so a gap can only over-refuse, never
 admit.
+
+The stream-revocation interceptor is the cut side of the policy gate. Every
+ADMITTED server-streaming handler whose caller presented a real user token
+registers under that token's id in one per-daemon registry; a unary call
+registers nothing (it is bounded and re-authenticates next time), and
+neither a child credential nor an anonymous local-socket caller does — a
+child's streams already die with its control connection. Revocation through
+the daemon's own paths (`RevokeToken`, `RemoveUser`/`UserRm`) cancels the
+matching streams immediately, and the client whose stream was cut sees
+`canceled` rather than a bare EOF. What the registry cannot see is revocation
+written to the database behind the daemon's back — `rafikid user token
+revoke` on the host: on such a token open streams run on (deliberately —
+revocation is a security act, so the daemon's own revocations cut, but
+expiry does not), and new requests stop within the auth cache's ≤5s window
+(`server.DefaultAuthCacheTTL`).
 
 | Policy | Meaning | Procedures |
 |---|---|---|

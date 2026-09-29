@@ -6,12 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
 	"go.graveland.dev/rafiki/pkg/server"
+	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
@@ -651,4 +657,114 @@ func TestCreateUserNoStore(t *testing.T) {
 	a := connectUserAdmin{c: &Controller{}}
 	_, err := a.Create(context.Background(), "alice", "", nil)
 	assert.NewAborting(t).Error(err, "Create succeeded with no user store configured")
+}
+
+// cutUserStore answers Authenticate, GetToken and RevokeToken for the
+// revoke-cuts-stream test: the SAME token authenticates the stream and is
+// then revoked through the Connect surface, so one identity and one row cover
+// both halves.
+type cutUserStore struct {
+	users.Store
+	token string
+	id    users.Identity
+	rows  map[string]users.Token
+}
+
+func (s *cutUserStore) Authenticate(_ context.Context, token string) (users.Identity, error) {
+	if token != s.token {
+		return users.Identity{}, users.ErrNotFound
+	}
+	return s.id, nil
+}
+
+func (s *cutUserStore) GetToken(_ context.Context, id string) (users.Token, error) {
+	t, ok := s.rows[id]
+	if !ok {
+		return users.Token{}, users.ErrNotFound
+	}
+	return t, nil
+}
+
+func (s *cutUserStore) RevokeToken(_ context.Context, id string) (users.Token, error) {
+	t, ok := s.rows[id]
+	if !ok {
+		return users.Token{}, users.ErrNotFound
+	}
+	now := time.Now()
+	t.RevokedAt = &now
+	s.rows[id] = t
+	return t, nil
+}
+
+// stubSessions is the ExecutorSessions backend for the stream tests: it opens
+// instantly and the handler then blocks until its context ends.
+type stubSessions struct{}
+
+func (stubSessions) Open(_ context.Context, _ *rafikiv1.ExecutorSessionRequest) (*rafikiv1.ExecutorSessionReady, error) {
+	return &rafikiv1.ExecutorSessionReady{ExecutorId: "sess-test"}, nil
+}
+
+// TestRevokeTokenCancelsOpenStream pins the whole cut over a real Connect
+// mount: a user opens ExecutorSession — a real server-streaming RPC through
+// connectControlRoute's composition — then revokes the very token the stream
+// rides. connectUserAdmin.RevokeToken must tombstone the row AND cut the open
+// stream, which the still-connected client observes as Canceled: connect maps
+// a handler that returns nil on a cancelled context to a clean end of stream,
+// so the interceptor reports the deliberate cut as Canceled rather than
+// leaving the client to guess at a bare EOF.
+func TestRevokeTokenCancelsOpenStream(t *testing.T) {
+	c := assert.NewAborting(t)
+	reg := newStreamRegistry()
+	ustore := &cutUserStore{
+		token: proxyUserToken,
+		id:    users.Identity{UserID: "u1", Username: "brent", TokenID: "tok-1"},
+		rows: map[string]users.Token{
+			"tok-1": {ID: "tok-1", UserID: "u1", Username: "brent", Name: "primary", Origin: users.OriginService},
+		},
+	}
+	ctrl := &Controller{users: ustore, streamRevoke: reg}
+	srv := connectapi.NewServer(store.NewMessages(nil))
+	srv.SetExecutorSessions(stubSessions{})
+	srv.SetUserAdmin(connectUserAdmin{c: ctrl})
+	h := &server.Handler{}
+	h.ControlPath, h.Control = connectControlRoute(srv, reg)
+	mux := http.NewServeMux()
+	h.Mount(mux, server.NewUserTokenAuth(ustore, proxyBootToken, server.DefaultAuthCacheTTL).Middleware)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	client := rafikiv1connect.NewControlClient(ts.Client(), ts.URL)
+
+	// The ready message is sent by the handler, which runs strictly after the
+	// interceptor registered the stream — receiving it proves the stream is
+	// open AND registered, with no timing window to poll.
+	req := connect.NewRequest(&rafikiv1.ExecutorSessionRequest{Name: "laptop"})
+	req.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	stream, err := client.ExecutorSession(context.Background(), req)
+	if err != nil {
+		t.Fatalf("open executor session: %v", err)
+	}
+	if !stream.Receive() {
+		t.Fatalf("ready: %v", stream.Err())
+	}
+	c.Eq(1, registryCount(reg), "the open stream must be registered under the credential that opened it")
+
+	rev := connect.NewRequest(&rafikiv1.RevokeTokenRequest{Id: "tok-1"})
+	rev.Header().Set("Authorization", "Bearer "+proxyUserToken)
+	if _, err := client.RevokeToken(context.Background(), rev); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	got := make(chan error, 1)
+	go func() {
+		for stream.Receive() {
+		}
+		got <- stream.Err()
+	}()
+	select {
+	case err := <-got:
+		c.Eq(connect.CodeCanceled, connect.CodeOf(err), "the revoked stream must end Canceled, got %v", err)
+	case <-time.After(5 * time.Second):
+		t.Error("the revoked stream never ended")
+	}
+	c.Eq(0, registryCount(reg), "the cut stream deregisters itself")
 }

@@ -181,7 +181,7 @@ func mountChildScope(t *testing.T) *childScopeFixture {
 	srv.SetChildLifecycle(fx.lifecycle)
 
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv)
+	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry())
 	mux := http.NewServeMux()
 	h.Mount(mux, auth.Middleware)
 	ts := httptest.NewServer(mux)

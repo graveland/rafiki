@@ -582,3 +582,32 @@ func TestPerBootSecretStillChildAttributed(t *testing.T) {
 	c.Eq(200, rec.Code, "status")
 	c.False(id == nil || id.UserID != "u_owner1" || id.Via != ProvenanceChildAttributed, "identity = %+v, want Via ProvenanceChildAttributed with UserID u_owner1", id)
 }
+
+// TokenID rides resolve() the way UserID and IsAdmin do, and the auth cache
+// carries it: the Connect plane's stream registry keys an open stream by the
+// TokenID of the credential that opened it, so a cached identity that lost
+// the field would silently unregister every stream from its second request
+// onward and revocation would cut nothing.
+func TestResolveCarriesTokenID(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := &stubStore{tokens: map[string]users.Identity{
+		"rfk_tok": {UserID: "u1", Username: "brent", TokenID: "tok-1"},
+	}}
+	a := NewUserTokenAuth(st, "childsecret", time.Minute)
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer rfk_tok")
+	rec, id := serve(a, req)
+
+	c.Eq(200, rec.Code, "status = %d, want 200: %s", rec.Code, rec.Body.String())
+	c.False(id == nil || id.TokenID != "tok-1", "identity = %+v, want TokenID tok-1", id)
+
+	// Served from the cache within the TTL, and still naming the credential.
+	req2 := httptest.NewRequest("POST", "/v1/messages", nil)
+	req2.Header.Set("Authorization", "Bearer rfk_tok")
+	rec2, id2 := serve(a, req2)
+
+	c.Eq(200, rec2.Code, "cached status")
+	c.False(id2 == nil || id2.TokenID != "tok-1", "cached identity = %+v, want TokenID tok-1", id2)
+	c.Eq(int64(1), st.calls.Load(), "the second request must be served from the cache, not re-authenticated")
+}

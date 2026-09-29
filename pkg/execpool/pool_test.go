@@ -256,3 +256,72 @@ func TestOnConnectIsOptional(t *testing.T) {
 	p := New(nil)
 	p.fireOnConnect("exec-1") // must not panic with no callback set
 }
+
+// DisconnectOwner is the user-removal cut: every connection the removed user
+// owns — durable or transient — is torn down through Evict, the pool's own
+// close path, so the ordinary bookkeeping (removal from the parked set, the
+// conn close, handleConn's exit) runs. Anyone else's executor, and above all
+// every unowned one, must be untouched.
+func TestDisconnectOwnerCutsOwnedExecutors(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := New(nil)
+	owned := &liveConn{executor: executors.Executor{ID: "exec-owned", OwnerUserID: "u1"}, done: make(chan struct{})}
+	transient := &liveConn{executor: executors.Executor{ID: "sess-transient", OwnerUserID: "u1"}, done: make(chan struct{})}
+	other := &liveConn{executor: executors.Executor{ID: "exec-other", OwnerUserID: "u2"}, done: make(chan struct{})}
+	unowned := &liveConn{executor: executors.Executor{ID: "exec-free"}, done: make(chan struct{})}
+	p.installLive("exec-owned", owned)
+	p.installLive("sess-transient", transient)
+	p.installLive("exec-other", other)
+	p.installLive("exec-free", unowned)
+
+	c.Eq(2, p.DisconnectOwner("u1"), "both of u1's connections must be counted, other owners not")
+
+	for name, lc := range map[string]*liveConn{"owned": owned, "transient": transient} {
+		select {
+		case <-lc.done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("the %s connection was counted but never torn down", name)
+		}
+	}
+	p.mu.RLock()
+	_, ownedLive := p.live["exec-owned"]
+	_, transientLive := p.live["sess-transient"]
+	p.mu.RUnlock()
+	c.False(ownedLive || transientLive, "cut connections must leave the live set, not linger half-dead")
+
+	for name, lc := range map[string]*liveConn{"other": other, "unowned": unowned} {
+		select {
+		case <-lc.done:
+			t.Errorf("the %s connection must survive a foreign owner's removal", name)
+		default:
+		}
+	}
+}
+
+// An empty userID means "unowned" on the executor row, so it must cut
+// nothing — a bug that routed an unresolved owner here must not mass-
+// disconnect every unowned executor in the pool. A nil pool cuts nothing
+// either: a Controller built without one must not panic.
+func TestDisconnectOwnerEmptyIsNoop(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := New(nil)
+	unowned := &liveConn{executor: executors.Executor{ID: "exec-free"}, done: make(chan struct{})}
+	owned := &liveConn{executor: executors.Executor{ID: "exec-owned", OwnerUserID: "u1"}, done: make(chan struct{})}
+	p.installLive("exec-free", unowned)
+	p.installLive("exec-owned", owned)
+
+	c.Eq(0, p.DisconnectOwner(""), "an empty owner must never cut")
+	select {
+	case <-unowned.done:
+		t.Error("DisconnectOwner(\"\") closed an unowned executor")
+	default:
+	}
+	select {
+	case <-owned.done:
+		t.Error("DisconnectOwner(\"\") closed an owned executor")
+	default:
+	}
+
+	var nilPool *Pool
+	c.Eq(0, nilPool.DisconnectOwner("u1"), "a nil pool is a no-op, not a panic")
+}

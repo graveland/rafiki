@@ -80,7 +80,7 @@ func proxyFaceConnectRoute(t *testing.T) rafikiv1connect.ControlClient {
 	srv := connectapi.NewServer(store.NewMessages(nil))
 	srv.SetChildScopeSource(ctrl.childScopeFor)
 	h := &server.Handler{}
-	h.ControlPath, h.Control = connectControlRoute(srv)
+	h.ControlPath, h.Control = connectControlRoute(srv, newStreamRegistry())
 
 	mux := http.NewServeMux()
 	h.Mount(mux, auth.Middleware)
@@ -444,7 +444,7 @@ func TestServeConnectUDSRefusesChildCredentialsOnOperatorVerbs(t *testing.T) {
 	srv := connectapi.NewServer(nil)
 	srv.SetChildScopeSource(ctrl.childScopeFor)
 	sock := filepath.Join(shortTempDir(t), "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	c.Require().NoError(err, "serveConnectUDS")
 	defer ln.Close()
 

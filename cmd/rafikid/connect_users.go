@@ -290,6 +290,12 @@ func (a connectUserAdmin) RevokeToken(ctx context.Context, id string) (*rafikiv1
 	if err != nil {
 		return nil, err
 	}
+	// The cut, not just the tombstone: any stream this token still holds open
+	// ends now. Already-revoked tokens reach here too — the store answers nil
+	// for them and the registry has nothing registered, so the call is
+	// idempotent and harmless. The count (when nonzero) is logged by the
+	// registry itself.
+	a.c.streamRevoke.revokeToken(id)
 	return newTokenRow(t), nil
 }
 

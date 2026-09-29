@@ -408,7 +408,7 @@ func TestConversationSearchOverUDSRefusesAChildAttributedCredential(t *testing.T
 	ck.NoError(err, "MkdirTemp")
 	defer os.RemoveAll(dir)
 	sock := filepath.Join(dir, "s")
-	ln, err := serveConnectUDS(ctx, srv, auth, sock)
+	ln, err := serveConnectUDS(ctx, srv, auth, newStreamRegistry(), sock)
 	ck.NoError(err, "serveConnectUDS")
 	defer ln.Close()
 

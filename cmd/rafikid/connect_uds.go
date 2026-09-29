@@ -48,7 +48,7 @@ import (
 // server-streaming (StreamEvents) wants HTTP/2. HTTP/1.1 rides the same
 // listener for plain clients (see the Protocols setup below). The Go client
 // half is in cmd/rafiki/connectclient.go and must match.
-func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.UserTokenAuth, path string) (net.Listener, error) {
+func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.UserTokenAuth, reg *streamRegistry, path string) (net.Listener, error) {
 	// Refuse rather than clobber. Two daemons serving one path means the
 	// second bind silently wins and the first's clients connect into a void.
 	if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
@@ -74,10 +74,11 @@ func serveConnectUDS(ctx context.Context, srv *connectapi.Server, auth *server.U
 	mux := http.NewServeMux()
 	// Empty token: the socket IS the credential for ADMISSION. The optional
 	// identity interceptor rides behind it, and connectControlRoute puts the
-	// policy gate innermost, behind identity resolution — the same table the
-	// proxy face serves, so a child credential presented to the local socket
-	// is refused on operator verbs exactly as it is remotely.
-	routePath, handler := connectControlRoute(srv, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
+	// policy gate and the stream-revocation interceptor innermost, behind
+	// identity resolution — the same table the proxy face serves, so a child
+	// credential presented to the local socket is refused on operator verbs
+	// exactly as it is remotely.
+	routePath, handler := connectControlRoute(srv, reg, connectapi.NewAuthInterceptor(""), optionalIdentityInterceptor(auth))
 	mux.Handle(routePath, handler)
 
 	// Login mounts with NO interceptors — deliberately NOT through

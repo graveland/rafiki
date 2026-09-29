@@ -498,18 +498,27 @@ func runDaemon(opts runDaemonOpts) error {
 		}
 	}
 
+	// One stream-revocation registry per daemon, built before anything that
+	// mounts or cuts streams: both Connect mounts register their admitted
+	// streams in it (connectControlRoute), and the Controller's revocation
+	// hooks (connectUserAdmin.RevokeToken, UserRm) cut through it. The face
+	// is constructed before the Controller, so the registry is built before
+	// the face and handed to the Controller after it.
+	streamRevoke := newStreamRegistry()
+
 	face, err := startProxyFace(baseCtx, faceOptions{
-		Pool:        pool,
-		Logger:      slog.Default(),
-		Tracer:      tp,
-		Registry:    reg,
-		Config:      opts.Config,
-		Listen:      opts.Listen,
-		Catalog:     catalog,
-		RawTrace:    rawTrace,
-		RawTraceAll: rawTraceAll,
-		Users:       userStore,
-		Providers:   prov,
+		Pool:         pool,
+		Logger:       slog.Default(),
+		Tracer:       tp,
+		Registry:     reg,
+		Config:       opts.Config,
+		Listen:       opts.Listen,
+		Catalog:      catalog,
+		RawTrace:     rawTrace,
+		RawTraceAll:  rawTraceAll,
+		Users:        userStore,
+		Providers:    prov,
+		StreamRevoke: streamRevoke,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are
@@ -543,6 +552,7 @@ func runDaemon(opts runDaemonOpts) error {
 	}
 
 	ctrl := NewController(st, stateDir, logsDir, socketPath, dumper, pool, rawTrace, rawTraceAll, baseCtx, execStore, userStore, skillStore, prov)
+	ctrl.streamRevoke = streamRevoke
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
 	ctrl.SetRoutePolicy(routePolicy)
@@ -809,7 +819,7 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.loadChildren(baseCtx)
 
 	if face != nil && face.Control != nil {
-		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, socketPath); err != nil {
+		if ln, err := serveConnectUDS(ctx, face.Control, face.TokenAuth, streamRevoke, socketPath); err != nil {
 			// Fatal. This socket is how every local client reaches the daemon;
 			// a daemon serving no control plane looks alive and answers nothing.
 			slog.Error("cannot serve the local Connect control plane",
