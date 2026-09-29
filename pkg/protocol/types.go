@@ -56,6 +56,9 @@ const (
 	ErrSessionFileMissing = "session_file_missing"
 	// ErrBackpressure is returned when the child's command channel is full.
 	ErrBackpressure = "backpressure"
+	// ErrAtCapacity is a spawn refused because the parent's subtree is at
+	// its live-children cap: transient — retry once a child settles.
+	ErrAtCapacity = "at_capacity"
 	// ErrInvalidArgs is returned when request fields fail validation.
 	ErrInvalidArgs = "invalid_args"
 	// ErrSpawnFailed is returned when the child subprocess fails to start.

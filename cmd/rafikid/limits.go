@@ -19,7 +19,7 @@ const (
 	// enough to delegate once, not enough to build a tree by accident.
 	defaultSpawnDepth = 1
 	// defaultMaxChildren bounds live descendants across a subtree.
-	defaultMaxChildren = 4
+	defaultMaxChildren = 10
 	// defaultAbsoluteDepthCeiling is RAFIKI_MAX_DEPTH's fallback.
 	defaultAbsoluteDepthCeiling = 3
 )
@@ -169,9 +169,18 @@ func (c *Controller) checkConcurrency(req protocol.SpawnRequest) error {
 	}
 	live := c.st.LiveDescendantCount(req.ParentChildID)
 	if live >= limit {
-		return limitError(
-			"spawn refused: %d live agent(s) already running beneath %s, at its cap of %d. Wait for one to finish, or stop one with agent_kill",
-			live, req.ParentChildID, limit)
+		// This is the one TRANSIENT refusal in the gate: the cap frees up the
+		// moment a descendant settles, so the caller can retry — unlike the
+		// depth and zero-cap refusals, which are permanent properties of the
+		// parent's grant. Classifying it at_capacity (resource_exhausted)
+		// rather than invalid_args is what tells a client to back off and
+		// retry instead of rewriting the request.
+		return &connectapi.ControllerError{
+			Code: protocol.ErrAtCapacity,
+			Message: fmt.Sprintf(
+				"spawn refused: %d live agent(s) already running beneath %s, at its cap of %d. Wait for one to finish, or stop one with agent_kill",
+				live, req.ParentChildID, limit),
+		}
 	}
 	return nil
 }

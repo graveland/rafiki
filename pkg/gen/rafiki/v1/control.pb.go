@@ -1616,7 +1616,7 @@ type SpawnRequest struct {
 	// The three budgets are optional because zero and unset differ, in OPPOSITE
 	// directions per field: unset max_depth means 1 and zero means "may not
 	// spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
-	// unset max_children means 4. Collapsing any of them to a plain value
+	// unset max_children means 10. Collapsing any of them to a plain value
 	// silently converts one meaning into the other.
 	MaxDepth      *int32   `protobuf:"varint,8,opt,name=max_depth,json=maxDepth,proto3,oneof" json:"max_depth,omitempty"`
 	MaxCost       *float64 `protobuf:"fixed64,9,opt,name=max_cost,json=maxCost,proto3,oneof" json:"max_cost,omitempty"`

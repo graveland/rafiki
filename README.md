@@ -853,7 +853,7 @@ never against a value in the request asking for them.
 |---|---|---|---|
 | **depth** | `--max-depth`, `agent_spawn(max_depth=…)` | `1` | `RAFIKI_MAX_DEPTH` (default `3`) |
 | **cost** | `--max-cost`, `agent_spawn(max_cost=…)` | unlimited | the parent's remaining budget |
-| **concurrency** | `--max-children`, `agent_spawn(max_children=…)` | `4` | — |
+| **concurrency** | `--max-children`, `agent_spawn(max_children=…)` | `10` | — |
 
 Depth is granted locally per hop (a coordinator granting `1` means its
 workers grant `0`) but bounded absolutely by `RAFIKI_MAX_DEPTH` regardless of

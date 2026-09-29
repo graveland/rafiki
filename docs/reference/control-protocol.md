@@ -1390,6 +1390,7 @@ rafiki's reasons, so the precise reason also rides the error.
 | `not_exited` | `failed_precondition` | `Close` against a still-live child. |
 | `session_file_missing` | `not_found` | `Resume` cannot find the recorded session. |
 | `backpressure` | `resource_exhausted` | The child's command channel is full; client should retry. |
+| `at_capacity` | `resource_exhausted` | A spawn refused because the parent's subtree is at its live-children cap (default 10); transient — retry once a child settles. The permanent limit refusals (depth, a zero cap) stay `invalid_args`. |
 | `invalid_args` | `invalid_argument` | Request fields failed validation. |
 | `spawn_failed` | `internal` | The child subprocess failed to start or exited immediately. |
 | `auth_required` / `auth_invalid` | `unauthenticated` | The presented credential names no active user; identity failures are `unauthenticated`, never a silent downgrade. |

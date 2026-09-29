@@ -160,7 +160,7 @@ func addSpawnFlags(cmd *cobra.Command) {
 			cur.Code)
 	}
 	cmd.Flags().Float64("max-cost", -1, maxCostHelp)
-	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 4)")
+	cmd.Flags().Int("max-children", -1, "simultaneously live agents allowed beneath this child (default 10)")
 	cmd.Flags().String("executor-selector", paths.Get(paths.ExecutorSelector),
 		"label selector choosing an executor from the daemon's pool to run this agent's filesystem and shell tools on (e.g. owner=brent,env=home); also see RAFIKI_EXECUTOR_SELECTOR")
 	cmd.Flags().String("executor", paths.Get(paths.Executor),

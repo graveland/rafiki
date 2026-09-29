@@ -34,6 +34,7 @@ var errCodeByName = map[string]connect.Code{
 	"ErrNotExited":          connect.CodeFailedPrecondition,
 	"ErrSessionFileMissing": connect.CodeNotFound,
 	"ErrBackpressure":       connect.CodeResourceExhausted,
+	"ErrAtCapacity":         connect.CodeResourceExhausted,
 	"ErrInvalidArgs":        connect.CodeInvalidArgument,
 	"ErrSpawnFailed":        connect.CodeInternal,
 	"ErrAuthRequired":       connect.CodeUnauthenticated,
@@ -146,6 +147,16 @@ func TestConnectErrPlainErrorIsInternalNoReason(t *testing.T) {
 
 func TestConnectErrNilIsNil(t *testing.T) {
 	assert.NewCollecting(t).NoError(ConnectErr(nil), "ConnectErr(nil)")
+}
+
+// The live-children-cap refusal is transient (the cap frees when a descendant
+// settles), so it must classify as resource_exhausted like backpressure — not
+// invalid_argument like the permanent limit refusals (zero cap, depth).
+func TestErrCodeAtCapacityMapsToResourceExhausted(t *testing.T) {
+	c := assert.NewAborting(t)
+	err := ConnectErr(&ControllerError{Code: protocol.ErrAtCapacity, Message: "spawn refused: at its cap"})
+	c.Eq(connect.CodeResourceExhausted, connect.CodeOf(err), "code")
+	c.Eq(protocol.ErrAtCapacity, rpcreason.Reason(err), "Reason")
 }
 
 func TestConnectErrUnknownReasonStillAttached(t *testing.T) {

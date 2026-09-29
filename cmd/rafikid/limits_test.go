@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/insights"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
@@ -234,6 +235,58 @@ func TestZeroMaxChildrenBlocksEverySpawn(t *testing.T) {
 	c := limitsFixture(t, 3)
 	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxChildren = 0 })
 	assert.NewAborting(t).Error(c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"}), "max-children 0 must refuse")
+}
+
+// The live-cap refusal is the one TRANSIENT refusal in the gate: the cap
+// frees the moment a descendant settles, so it must answer at_capacity
+// (resource_exhausted — retryable) rather than the invalid_args its
+// permanent siblings keep. The message is read by agents and must not drift.
+func TestLiveCapRefusalIsAtCapacity(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := limitsFixture(t, 3) // c_d0, MaxChildren 4
+	for _, id := range []string{"c_w1", "c_w2", "c_w3", "c_w4"} {
+		insertChild(c, id, "c_d0", "c_d0", protocol.StatusIdle)
+	}
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"})
+	ck.Require().Error(err, "the fifth live child must be refused at the cap")
+	var ce *connectapi.ControllerError
+	ck.Require().True(errors.As(err, &ce), "the refusal must be a *connectapi.ControllerError: %v", err)
+	ck.Eq(protocol.ErrAtCapacity, ce.Code, "a live-cap refusal is transient, so it must answer at_capacity, got %q", ce.Code)
+	ck.Eq(
+		"spawn refused: 4 live agent(s) already running beneath c_d0, at its cap of 4. Wait for one to finish, or stop one with agent_kill",
+		err.Error(), "the live-cap refusal's message changed: %v", err)
+}
+
+// The zero-cap branch is a PERMANENT property of the parent's grant — an
+// agent granted 0 children cannot spawn until re-granted — so it must stay
+// invalid_args even though its sibling branch (live >= limit) now answers
+// at_capacity. Collapsing the two would tell a client to retry a refusal
+// no retry can satisfy.
+func TestZeroCapRefusalStaysInvalidArgs(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := limitsFixture(t, 3)
+	_ = c.st.Update("c_d0", func(s *childstore.Session) { s.MaxChildren = 0 })
+	err := c.checkSpawnLimits(protocol.SpawnRequest{ParentChildID: "c_d0"})
+	ck.Require().Error(err, "max-children 0 must refuse")
+	var ce *connectapi.ControllerError
+	ck.Require().True(errors.As(err, &ce), "the refusal must be a *connectapi.ControllerError: %v", err)
+	ck.Eq(protocol.ErrInvalidArgs, ce.Code, "a zero cap is a permanent refusal, so it must stay invalid_args, got %q", ce.Code)
+}
+
+// Pattern-prefixed shim: the plan's verify filter
+// (TestSpawnLimit|TestLiveCap|TestErrCode|TestGranted) matches no alternative
+// of TestZeroCapRefusalStaysInvalidArgs, whose name is pinned by the plan —
+// this shim's subtest calls the pinned body so the filter reaches it.
+func TestSpawnLimitRefusalsAreClassified(t *testing.T) {
+	t.Run("zero-cap-stays-invalid-args", TestZeroCapRefusalStaysInvalidArgs)
+}
+
+// The unset grant resolves to defaultMaxChildren — raised from 4 to 10 so a
+// coordinator's default seat fits a realistic fleet. Nil means the default;
+// the negative clamp below it stays fail-closed (0 means "may not spawn").
+func TestGrantedChildrenDefaultIsTen(t *testing.T) {
+	c := assert.NewAborting(t)
+	c.Eq(10, grantedChildren(protocol.SpawnRequest{}), "grantedChildren(nil) must resolve to the default cap, got")
 }
 
 // fakeCoster stands in for insights so the admission logic is testable

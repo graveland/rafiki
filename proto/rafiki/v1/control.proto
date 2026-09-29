@@ -353,7 +353,7 @@ message SpawnRequest {
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";
-  // unset max_children means 4. Collapsing any of them to a plain value
+  // unset max_children means 10. Collapsing any of them to a plain value
   // silently converts one meaning into the other.
   optional int32 max_depth = 8;
   optional double max_cost = 9;
