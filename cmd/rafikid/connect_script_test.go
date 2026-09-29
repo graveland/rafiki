@@ -105,6 +105,66 @@ func TestScriptReportTopLevelWritesItsOwnDurableLog(t *testing.T) {
 	ck.Eq(0, recs[0].Ordinal, "durable report has ordinal")
 }
 
+// TestReportProgressIsLastWriteWins pins the coalescing rule by kind: two
+// progress reports between the parent's turns are ONE fragment — the latest —
+// because a progress tick supersedes the last rather than accumulating.
+func TestReportProgressIsLastWriteWins(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, cap, _, clk := scriptHubFixture(t)
+	scriptParented(c)
+	hub := c.connectScriptHub()
+	ctx := context.Background()
+
+	ck.NoError(hub.Report(ctx, "c_script", "progress", `{"step":1}`), "first progress report")
+	ck.NoError(hub.Report(ctx, "c_script", "progress", `{"step":2}`), "second progress report")
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	ck.False(len(batches) != 1 || len(batches[0].fragments) != 1, "want 1 batch of 1 fragment, got %+v", batches)
+	ck.StrContains(batches[0].fragments[0], `{"step":2}`, "the surviving fragment must be the LATEST progress report")
+	ck.False(strings.Contains(batches[0].fragments[0], `{"step":1}`), "the superseded report must be gone; got %q", batches[0].fragments[0])
+}
+
+// TestReportOtherKindsAccumulate pins the other half of the coalescing rule:
+// every non-progress kind is a message that must not be overwritten, so
+// warning, progress and message arriving between two drains ALL reach the
+// parent — the progress note does not swallow the others.
+func TestReportOtherKindsAccumulate(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, cap, _, clk := scriptHubFixture(t)
+	scriptParented(c)
+	hub := c.connectScriptHub()
+	ctx := context.Background()
+
+	ck.NoError(hub.Report(ctx, "c_script", "warning", `"disk almost full"`), "warning")
+	ck.NoError(hub.Report(ctx, "c_script", "progress", `{"step":7}`), "progress")
+	ck.NoError(hub.Report(ctx, "c_script", "message", `"handing off"`), "message")
+	clk.Advance(6 * time.Second)
+
+	batches := cap.batches()
+	ck.False(len(batches) != 1 || len(batches[0].fragments) != 3, "want 1 batch of 3 fragments, got %+v", batches)
+	joined := strings.Join(batches[0].fragments, "\n")
+	ck.StrContains(joined, "disk almost full", "the warning must arrive")
+	ck.StrContains(joined, "handing off", "the message must arrive")
+	ck.StrContains(joined, `{"step":7}`, "the progress note must arrive too")
+}
+
+// TestReportFragmentWording pins the exact fragment wording and payload
+// rendering: a JSON-string payload is shown decoded (newlines are newlines),
+// any other JSON value verbatim, and the wording is kind-neutral ("agent",
+// not "script" — any child may report).
+func TestReportFragmentWording(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	// A JSON string decodes: the escaped newline becomes a real newline.
+	ck.Eq("agent c_x (nm) reported warning: line1\nline2",
+		scriptReportFragment("c_x", "nm", "warning", "\"line1\\nline2\""),
+		"a JSON-string payload must be shown decoded")
+	// Any other JSON value stays verbatim.
+	ck.Eq(`agent c_x (nm) reported message: {"a":1}`,
+		scriptReportFragment("c_x", "nm", "message", `{"a":1}`),
+		"a non-string JSON value must stay verbatim")
+}
+
 // TestSetResultStoresLastWriteWins pins 2.3's storage half: the result lands
 // on the calling child's session, the durable write is attempted, and a
 // second call replaces the first.

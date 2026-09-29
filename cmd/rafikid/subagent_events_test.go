@@ -240,6 +240,23 @@ func TestCleanSettleIsNotNudged(t *testing.T) {
 	}
 }
 
+// TestSettleFragmentDecodesStringResult pins the settle side of payload
+// rendering: a stored result that is a JSON string is shown decoded — the
+// parent reads two lines, not an escaped JSON literal.
+func TestSettleFragmentDecodesStringResult(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c, clk, cap := settleFixture(t)
+	_ = c.st.Update("c_w1", func(s *childstore.Session) {
+		s.Result = "\"DONE\\nF1 x.go:40\""
+	})
+	c.handleStatusChange("c_w1", protocol.StatusIdle, protocol.StatusStreaming)
+	clk.Advance(6 * time.Second)
+
+	frag := cap.batches()[0].fragments[0]
+	ck.StrContains(frag, "final result of c_w1: DONE\nF1 x.go:40",
+		"a JSON-string result must render decoded, as two lines; got %q", frag)
+}
+
 func TestSettleFragmentNamesTheGuardrailReasonWhenPresent(t *testing.T) {
 	c, clk, cap := settleFixture(t)
 	c.turnOutcomes.set("c_w1", fundi.TurnOutcome{LimitReason: "agent's own cost budget ($5.00 of $5.00) exhausted"})

@@ -167,10 +167,14 @@ type Session struct {
 	// captured from its init frame. Empty for pi children.
 	SlashCommands []string
 
-	// Result is the script child's final result (Connect SetResult): verbatim
-	// JSON, last write wins. Empty when the child has not set one — a stored
-	// result is always non-empty, because SetResult validates that it parses
-	// as a complete JSON value. Carried in the settle fragment and GetChild.
+	// Result is the child's final result (Connect SetResult): verbatim JSON,
+	// last write wins. Empty when the child has not set one — a stored result
+	// is always non-empty, because SetResult validates that it parses as a
+	// complete JSON value. Carried in the settle fragment and GetChild. For a
+	// NON-SCRIPT child the result is per turn: the daemon clears it when the
+	// child's next turn starts (handleStatusChange), so an earlier turn's
+	// result never rides a later settle fragment; a script child's result is
+	// the work product of its whole run and is never cleared this way.
 	Result string
 }
 

@@ -52,14 +52,17 @@ type scriptHub struct{ c *Controller }
 
 var _ connectapi.ScriptHub = scriptHub{}
 
-// Report publishes one progress report from script child callerID.
+// Report publishes one progress report from child callerID — any child may
+// report, not only a script.
 //
-// A PARENTED script's report is pushed into its parent's event buffer, keyed
-// on callerID, so it coalesces and defers exactly like a subagent settle
-// (notifySubagentSettled): five reports between the parent's turns cost one
-// injected frame, not five. The push is fire-and-forget — the parent reads the
-// coalesced frame on its next turn boundary, and nothing in the Report round
-// trip waits for that.
+// A PARENTED child's report is pushed into its parent's event buffer: a
+// `progress` report is keyed on callerID, so each tick supersedes the last
+// (last write wins), while every other kind accumulates — see the push site
+// below. Either way it coalesces and defers exactly like a subagent settle
+// (notifySubagentSettled): several reports between the parent's turns cost one
+// injected frame, not one per report. The push is fire-and-forget — the parent
+// reads the coalesced frame on its next turn boundary, and nothing in the
+// Report round trip waits for that.
 //
 // A TOP-LEVEL script (no parent) has nobody to push to, so its report is
 // appended to its OWN durable event log instead (script_report is a durable
@@ -74,7 +77,18 @@ func (h scriptHub) Report(ctx context.Context, callerID, kind, dataJSON string) 
 	}
 	parent, hasParent := h.c.st.ParentOf(callerID)
 	if hasParent && parent != "" && h.c.evbuf != nil {
-		h.c.evbuf.Push(parent, scriptEventSource, callerID,
+		// A progress report is a tick on work the parent already knows is
+		// running: keyed on the caller, each new tick supersedes the last, so a
+		// chatty reporter costs one fragment rather than one per tick. Every
+		// other kind is a message — a warning, an error, a result — that must
+		// not be overwritten by whatever reports next, so it accumulates
+		// (key "" — eventbuf.Buffer.Push: "key is last-write-wins WITHIN
+		// (childID, source); key == \"\" accumulates").
+		pushKey := ""
+		if kind == "progress" {
+			pushKey = callerID
+		}
+		h.c.evbuf.Push(parent, scriptEventSource, pushKey,
 			scriptReportFragment(callerID, snap.Name, kind, dataJSON))
 		return nil
 	}
@@ -90,20 +104,27 @@ func (h scriptHub) Report(ctx context.Context, callerID, kind, dataJSON string) 
 }
 
 // scriptReportFragment is the wording a parent's injected frame carries for
-// one script report. The fragment deliberately does NOT summarise the payload:
-// like settleFragment, it says what happened and quotes the source verbatim —
-// a digest that tried to interpret a JSON payload it knows nothing about would
-// be a lossy copy of it.
+// one report. ANY child may report through the Report verb — a script's
+// progress tick, a subagent's warning, a note from any child in the tree — so
+// the wording is kind-neutral ("agent", not "script"). The fragment
+// deliberately does NOT summarise the payload: like settleFragment, it says
+// what happened and renders the source through renderJSONPayload (a JSON
+// string decoded, any other JSON value verbatim) — a digest that tried to
+// interpret a JSON payload it knows nothing about would be a lossy copy of it.
 func scriptReportFragment(childID, name, kind, dataJSON string) string {
 	if name == "" {
 		name = "unnamed"
 	}
-	return fmt.Sprintf("script %s (%s) reported %s: %s", childID, name, kind, dataJSON)
+	return fmt.Sprintf("agent %s (%s) reported %s: %s", childID, name, kind, renderJSONPayload(dataJSON))
 }
 
-// SetResult stores the calling script child's final result. Last write wins:
+// SetResult stores the calling child's final result. Last write wins:
 // every call replaces the stored value, and the value present when the child
 // settles rides the settle fragment (notifySubagentSettled) and GetChild.
+// For a NON-SCRIPT child the stored result is per turn: when its next turn
+// starts, handleStatusChange clears it, so a result from an earlier turn never
+// rides a later settle fragment. A script child's result is the work product
+// of its whole run and is never cleared this way.
 //
 // The in-memory session is updated first, then the durable row is written from
 // the same snapshot — the same order every other persistent field write uses,

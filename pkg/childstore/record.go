@@ -68,8 +68,8 @@ type ChildRecord struct {
 	Config ChildConfig
 	Labels map[string]string
 
-	// Result is the script child's final result (Connect SetResult): verbatim
-	// JSON, empty when unset. See childstore.Session.Result.
+	// Result is the child's final result (Connect SetResult): verbatim JSON,
+	// empty when unset. See childstore.Session.Result for the per-turn rule.
 	Result string
 }
 

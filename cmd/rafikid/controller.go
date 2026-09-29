@@ -3827,6 +3827,24 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 			Payload:  &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: string(newStatus)}},
 		})
 	}
+	// An LLM child settles every turn, so a result set by an EARLIER turn would
+	// otherwise ride a later settle fragment (notifySubagentSettled carries
+	// whatever Result is stored at settle time). Clear it when a new turn
+	// starts — the transition out of a non-working status into a working one.
+	// Script children are exempt: their result is the work product of the whole
+	// run, not of one turn. The clear fires only when a result is present, so
+	// the ordinary per-turn status churn costs no extra row write.
+	if ok && !isWorkingStatus(storePrev) && isWorkingStatus(newStatus) {
+		if snap, found := c.st.Get(childID); found && snap.Kind != protocol.KindScript && snap.Result != "" {
+			err := c.st.Update(childID, func(s *childstore.Session) { s.Result = "" })
+			if err == nil {
+				err = c.writeRecord(childID)
+			}
+			if err != nil {
+				slog.Warn("clear turn result", "childId", childID, "error", err)
+			}
+		}
+	}
 	// Release any event batches deferred while this child was mid-turn.
 	// This is rafiki's turn-end drain; it is why no busy-poller is needed.
 	if ok && newStatus == protocol.StatusIdle && storePrev != protocol.StatusIdle {

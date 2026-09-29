@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -38,6 +39,17 @@ func isWorkingStatus(s protocol.Status) bool {
 		return true
 	}
 	return false
+}
+
+// renderJSONPayload renders a report payload or stored result for a
+// parent's fragment: a JSON string is shown decoded (so newlines are
+// newlines), any other JSON value verbatim.
+func renderJSONPayload(s string) string {
+	var decoded string
+	if err := json.Unmarshal([]byte(s), &decoded); err == nil {
+		return decoded
+	}
+	return s
 }
 
 // notifySubagentSettled announces that childID settled. It fans out to every
@@ -85,15 +97,17 @@ func (c *Controller) notifySubagentSettled(childID, reason, stderrTail, excludeM
 		return
 	}
 	// The settle fragment carries the child's final result (Connect SetResult)
-	// verbatim when it has one: for a script child the result IS the work
-	// product, and the parent reading the injected frame should not need a
-	// second verb call to learn what the script concluded. Last write wins —
-	// this is whatever was stored at settle time. A script that never said what
-	// it concluded settles with its stderr tail instead (scriptSettleFor's
-	// contract: diagnostics for a failed script, carried rather than dropped).
+	// rendered through renderJSONPayload when it has one — a JSON string shown
+	// decoded, any other JSON value verbatim: for a script child the result IS
+	// the work product, and the parent reading the injected frame should not
+	// need a second verb call to learn what the script concluded. Last write
+	// wins — this is whatever was stored at settle time. A script that never
+	// said what it concluded settles with its stderr tail instead
+	// (scriptSettleFor's contract: diagnostics for a failed script, carried
+	// rather than dropped).
 	fragment := settleFragment(childID, snap.Name, reason)
 	if res := snap.Result; res != "" {
-		fragment += "\nfinal result of " + childID + ": " + res
+		fragment += "\nfinal result of " + childID + ": " + renderJSONPayload(res)
 	} else if stderrTail != "" {
 		fragment += "\n" + childID + " stderr tail:\n" + stderrTail
 	}
