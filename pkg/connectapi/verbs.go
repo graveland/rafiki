@@ -73,6 +73,42 @@ func (s *Server) Send(
 		}
 	}
 
+	// Send steps run BEFORE the message is queued, and their rendered output
+	// becomes part of the text the child reads. ABORT carries no content by
+	// design, so steps with it are a caller error rather than something to
+	// ignore. The runner's errors are already *connect.Error and pass through
+	// unchanged; an unwired runner fails closed (Unavailable) rather than
+	// delivering the message without the output the sender asked for.
+	var summaries []protocol.StepSummary
+	if len(req.Msg.GetSteps()) > 0 {
+		if mode == inbox.ModeAbort {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				errors.New("steps cannot be sent with ABORT"))
+		}
+		steps, err := sendStepsFromWire(req.Msg.GetSteps())
+		if err != nil {
+			return nil, err
+		}
+		runner := s.sendStepRunner()
+		if runner == nil {
+			return nil, errSendStepsUnwired
+		}
+		callerID := ""
+		if sc := s.childScope(ctx); sc != nil {
+			callerID = sc.ChildID()
+		}
+		rendered, stepSummaries, err := runner.RunSendSteps(ctx, callerID, childID, steps)
+		if err != nil {
+			return nil, err
+		}
+		summaries = stepSummaries
+		if text == "" {
+			text = rendered
+		} else {
+			text = text + "\n\n" + rendered
+		}
+	}
+
 	id, err := (*inboxP).Accept(ctx, inbox.Inbound{
 		ChildID:     childID,
 		Mode:        mode,
@@ -87,7 +123,7 @@ func (s *Server) Send(
 		}
 		return nil, ConnectErr(err)
 	}
-	return connect.NewResponse(&rafikiv1.SendResponse{MessageId: id}), nil
+	return connect.NewResponse(&rafikiv1.SendResponse{MessageId: id, Steps: stepSummariesToWire(summaries)}), nil
 }
 
 // contentFromBlocks splits content blocks into the text and the attachments the

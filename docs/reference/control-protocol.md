@@ -258,7 +258,7 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 |---|---|---|
 | `GetHistory` | unary · childScoped | Durable events for one child, after an optional ordinal |
 | `StreamEvents` | server-streaming · childScoped | Follows events matching an `EventSubject` predicate (child; subtree with `max_depth` and optional `include_self`; or all) and `EventTier` (`DURABLE` or `ALL`), with optional replay from `EventCursor` |
-| `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see "`Send` and the durable inbox" below) |
+| `Send` | unary · childScoped | Submit a prompt, steer, or abort to a child via the inbox seam; `message_id` is the durable row id, and is **empty** for an abort to a `claude` child (see "`Send` and the durable inbox" below). Optional `steps` run at send time and their rendered output is appended to the text; refused with `ABORT` (see "`Send` steps" below) |
 | `ListChildren` | unary · childScoped | List children, optionally filtered by status (reports `latest_ordinal`, `cost_usd` and `max_cost` per child); answers only the caller's own subtree |
 | `GetChild` | unary · childScoped | Get one child's summary by id (reports `latest_ordinal`, `cost_usd` and `max_cost`). Post-spawn state is observable here: `Spawn` is unary and returns as soon as the child is registered, so state is read back through `GetChild`, not through the spawn call |
 | `Spawn` | unary · childScoped | Create a child with budget, executor, and label options. `kind` selects the child: `fundi` (default), `claude`, or `script` — a saved pymodule run as the child's process (§"Script children" below). For `kind: script` the request carries `script` (`ScriptSpec{repo, script, modules, args}`); every fundi/claude-only field is refused on a script spawn, and `prefill` with them. Fields 15–29 are operator-only (§"Spawn's operator-only fields" below) |
@@ -896,6 +896,23 @@ rather than a message, and it is never persisted. It still aborts; the RPC
 returns success with an **empty `message_id`**, because there is no row to
 name and an invented id would resolve to nothing. Storing it would risk
 replaying a cancellation into an unrelated later turn.
+
+### `Send` steps
+
+`SendRequest.steps` (a repeated `SendStep`) names tool calls the daemon runs
+at send time, BEFORE the message is queued; each step's rendered output is
+appended to the message text the child reads ("text\n\nrendered", or the
+rendered output alone when the request carried no text blocks). Every step
+carries `where` (`StepSite`: `CHILD` runs on the target child's executor and
+workspace, `SENDER` on the caller's own) and at most one of `read`, `bash`,
+`pymodule_run`. An unspecified site or an absent kind is refused
+`invalid_argument` per step, never defaulted; steps with `ABORT` are refused
+the same way, because an abort carries no content. The response carries one
+`StepSummary` per step — index, tool, where, outcome, byte count, truncated
+flag — and NEVER a step's output, except the `echo` prefix a step asked for.
+The handler runs the steps through the wired `SendStepRunner`
+(`pkg/connectapi/send_steps.go`); until the daemon attaches one, a send with
+steps fails `unavailable` while a stepless send is unaffected.
 
 ### Event vocabulary
 

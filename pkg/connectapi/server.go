@@ -63,6 +63,7 @@ type Server struct {
 	modelLister    atomic.Pointer[ModelLister]
 	execLister     atomic.Pointer[ExecutorLister]
 	skills         atomic.Pointer[SkillManager]
+	sendSteps      atomic.Pointer[SendStepRunner]
 	pymodules      atomic.Pointer[PymoduleManager]
 	presets        atomic.Pointer[PresetManager]
 	recall         atomic.Pointer[RecallManager]

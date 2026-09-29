@@ -30,6 +30,11 @@ class SendMode:
     SEND_MODE_STEER = "SEND_MODE_STEER"
     SEND_MODE_ABORT = "SEND_MODE_ABORT"
 
+class StepSite:
+    STEP_SITE_UNSPECIFIED = "STEP_SITE_UNSPECIFIED"
+    STEP_SITE_CHILD = "STEP_SITE_CHILD"
+    STEP_SITE_SENDER = "STEP_SITE_SENDER"
+
 class ReviewStage:
     REVIEW_STAGE_UNSPECIFIED = "REVIEW_STAGE_UNSPECIFIED"
     REVIEW_STAGE_DETECT = "REVIEW_STAGE_DETECT"
@@ -190,10 +195,201 @@ class StreamEventsRequest:
         return obj
 
 @dataclasses.dataclass
+class ReadStep:
+    path: str = ""
+    start: int = 0
+    end: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.path != "":
+            out["path"] = self.path
+        if self.start != 0:
+            out["start"] = self.start
+        if self.end != 0:
+            out["end"] = self.end
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ReadStep":
+        obj = cls()
+        _v = _d.get("path")
+        if _v is not None:
+            obj.path = _v
+        _v = _d.get("start")
+        if _v is not None:
+            obj.start = _int_in(_v)
+        _v = _d.get("end")
+        if _v is not None:
+            obj.end = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class BashStep:
+    command: str = ""
+    timeout_ms: int = 0
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.command != "":
+            out["command"] = self.command
+        if self.timeout_ms != 0:
+            out["timeoutMs"] = self.timeout_ms
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "BashStep":
+        obj = cls()
+        _v = _d.get("command")
+        if _v is not None:
+            obj.command = _v
+        _v = _d.get("timeoutMs")
+        if _v is not None:
+            obj.timeout_ms = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class PymoduleRunStep:
+    repo: str = ""
+    script: str = ""
+    modules: list[str] = dataclasses.field(default_factory=list)
+    args: list[str] = dataclasses.field(default_factory=list)
+    cwd: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.repo != "":
+            out["repo"] = self.repo
+        if self.script != "":
+            out["script"] = self.script
+        if self.modules:
+            out["modules"] = [x for x in self.modules]
+        if self.args:
+            out["args"] = [x for x in self.args]
+        if self.cwd != "":
+            out["cwd"] = self.cwd
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "PymoduleRunStep":
+        obj = cls()
+        _v = _d.get("repo")
+        if _v is not None:
+            obj.repo = _v
+        _v = _d.get("script")
+        if _v is not None:
+            obj.script = _v
+        _v = _d.get("modules")
+        if _v is not None:
+            obj.modules = [x for x in _v]
+        _v = _d.get("args")
+        if _v is not None:
+            obj.args = [x for x in _v]
+        _v = _d.get("cwd")
+        if _v is not None:
+            obj.cwd = _v
+        return obj
+
+@dataclasses.dataclass
+class SendStep:
+    where: str = "STEP_SITE_UNSPECIFIED"
+    echo: bool = False
+    read: Optional[ReadStep] = None
+    bash: Optional[BashStep] = None
+    pymodule_run: Optional[PymoduleRunStep] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.where != "STEP_SITE_UNSPECIFIED":
+            out["where"] = self.where
+        if self.echo != False:
+            out["echo"] = self.echo
+        _set_kind = [x for x in (self.read, self.bash, self.pymodule_run) if x is not None]
+        if len(_set_kind) > 1:
+            raise ValueError("SendStep: at most one arm of oneof 'kind' may be set")
+        if self.read is not None:
+            out["read"] = self.read.to_dict()
+        if self.bash is not None:
+            out["bash"] = self.bash.to_dict()
+        if self.pymodule_run is not None:
+            out["pymoduleRun"] = self.pymodule_run.to_dict()
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SendStep":
+        obj = cls()
+        _v = _d.get("where")
+        if _v is not None:
+            obj.where = _v
+        _v = _d.get("echo")
+        if _v is not None:
+            obj.echo = _v
+        _v = _d.get("read")
+        if _v is not None:
+            obj.read = ReadStep.from_dict(_v)
+        _v = _d.get("bash")
+        if _v is not None:
+            obj.bash = BashStep.from_dict(_v)
+        _v = _d.get("pymoduleRun")
+        if _v is not None:
+            obj.pymodule_run = PymoduleRunStep.from_dict(_v)
+        return obj
+
+@dataclasses.dataclass
+class StepSummary:
+    index: int = 0
+    tool: str = ""
+    where: str = "STEP_SITE_UNSPECIFIED"
+    outcome: str = ""
+    bytes: int = 0
+    truncated: bool = False
+    echo: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.index != 0:
+            out["index"] = self.index
+        if self.tool != "":
+            out["tool"] = self.tool
+        if self.where != "STEP_SITE_UNSPECIFIED":
+            out["where"] = self.where
+        if self.outcome != "":
+            out["outcome"] = self.outcome
+        if self.bytes != 0:
+            out["bytes"] = str(self.bytes)
+        if self.truncated != False:
+            out["truncated"] = self.truncated
+        if self.echo != "":
+            out["echo"] = self.echo
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "StepSummary":
+        obj = cls()
+        _v = _d.get("index")
+        if _v is not None:
+            obj.index = _int_in(_v)
+        _v = _d.get("tool")
+        if _v is not None:
+            obj.tool = _v
+        _v = _d.get("where")
+        if _v is not None:
+            obj.where = _v
+        _v = _d.get("outcome")
+        if _v is not None:
+            obj.outcome = _v
+        _v = _d.get("bytes")
+        if _v is not None:
+            obj.bytes = _int_in(_v)
+        _v = _d.get("truncated")
+        if _v is not None:
+            obj.truncated = _v
+        _v = _d.get("echo")
+        if _v is not None:
+            obj.echo = _v
+        return obj
+
+@dataclasses.dataclass
 class SendRequest:
     child_id: str = ""
     mode: str = "SEND_MODE_UNSPECIFIED"
     blocks: list[event_pb.ContentBlock] = dataclasses.field(default_factory=list)
+    steps: list[SendStep] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
@@ -203,6 +399,8 @@ class SendRequest:
             out["mode"] = self.mode
         if self.blocks:
             out["blocks"] = [x.to_dict() for x in self.blocks]
+        if self.steps:
+            out["steps"] = [x.to_dict() for x in self.steps]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "SendRequest":
@@ -216,16 +414,22 @@ class SendRequest:
         _v = _d.get("blocks")
         if _v is not None:
             obj.blocks = [event_pb.ContentBlock.from_dict(x) for x in _v]
+        _v = _d.get("steps")
+        if _v is not None:
+            obj.steps = [SendStep.from_dict(x) for x in _v]
         return obj
 
 @dataclasses.dataclass
 class SendResponse:
     message_id: str = ""
+    steps: list[StepSummary] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.message_id != "":
             out["messageId"] = self.message_id
+        if self.steps:
+            out["steps"] = [x.to_dict() for x in self.steps]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "SendResponse":
@@ -233,6 +437,9 @@ class SendResponse:
         _v = _d.get("messageId")
         if _v is not None:
             obj.message_id = _v
+        _v = _d.get("steps")
+        if _v is not None:
+            obj.steps = [StepSummary.from_dict(x) for x in _v]
         return obj
 
 @dataclasses.dataclass

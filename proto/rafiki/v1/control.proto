@@ -85,17 +85,64 @@ enum SendMode {
   SEND_MODE_ABORT = 3;
 }
 
+// StepSite names whose authority a send step runs under. UNSPECIFIED is
+// refused, never defaulted.
+enum StepSite {
+  STEP_SITE_UNSPECIFIED = 0;
+  STEP_SITE_CHILD = 1;
+  STEP_SITE_SENDER = 2;
+}
+
+message ReadStep { string path = 1; int32 start = 2; int32 end = 3; }
+message BashStep { string command = 1; int32 timeout_ms = 2; }
+message PymoduleRunStep {
+  string repo = 1;
+  string script = 2;
+  repeated string modules = 3;
+  repeated string args = 4;
+  string cwd = 5;
+}
+
+// SendStep is one tool call the daemon runs at send time; its rendered
+// output is appended to the message text.
+message SendStep {
+  StepSite where = 1;
+  bool echo = 2;
+  oneof kind {
+    ReadStep read = 3;
+    BashStep bash = 4;
+    PymoduleRunStep pymodule_run = 5;
+  }
+}
+
+// StepSummary reports one step to the sender: never its output, except
+// echo when the step asked for it.
+message StepSummary {
+  int32 index = 1;
+  string tool = 2;
+  StepSite where = 3;
+  string outcome = 4;
+  int64 bytes = 5;
+  bool truncated = 6;
+  string echo = 7;
+}
+
 // SendRequest carries content BLOCKS rather than a string so a pasted image
 // needs no breaking change later. For ABORT, blocks is ignored.
 message SendRequest {
   string child_id = 1;
   SendMode mode = 2;
   repeated ContentBlock blocks = 3;
+  // Steps run at send time before the message is queued; their rendered
+  // output is appended to the text. Refused with ABORT.
+  repeated SendStep steps = 4;
 }
 
 message SendResponse {
   // Server-assigned id for the accepted message.
   string message_id = 1;
+  // One summary per step, in order: never a step's output, except echo.
+  repeated StepSummary steps = 2;
 }
 
 // ─── Script children (Report / Receive / SetResult) ─────────────────────────
