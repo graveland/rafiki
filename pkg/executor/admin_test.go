@@ -23,6 +23,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/executorpb"
 
 	"github.com/multigres/testkit/assert"
+
+	"go.graveland.dev/rafiki/pkg/fundi/tools"
 )
 
 func TestDescribeAdvertisesLaunchKinds(t *testing.T) {
@@ -1082,4 +1084,16 @@ func TestAdminStatusReportsALiveDaraja(t *testing.T) {
 	c.Require().NotNil(resp.Msg.ExitCode, "an exited daraja must carry its exit code")
 	code := *resp.Msg.ExitCode
 	c.False(code != 0 && code != -1, "exit_code = %d, want 0 (caught the SIGTERM) or -1 (signalled mid-boot)", code)
+}
+
+// TestEnvironBaseNilFallsBackToProcess pins AdminOptions.environBase's nil
+// rule: an AdminServer built without a pinned env (every existing test) keeps
+// the pre-pinning behavior — the process environment at launch time.
+func TestEnvironBaseNilFallsBackToProcess(t *testing.T) {
+	t.Setenv("ENVBASE_PROBE", "process")
+	o := AdminOptions{Env: []string{"ENVBASE_PROBE=pinned"}}
+	pinned := AdminOptions{}
+	c := assert.NewCollecting(t)
+	c.Eq("pinned", tools.EnvGet(o.environBase(), "ENVBASE_PROBE"), "pinned env wins")
+	c.Eq("process", tools.EnvGet(pinned.environBase(), "ENVBASE_PROBE"), "nil pinned env = process environment")
 }

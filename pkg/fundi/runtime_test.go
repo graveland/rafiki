@@ -569,3 +569,51 @@ func TestInlineSkillsAreTheLowestTier(t *testing.T) {
 	c.Require().Len(got, 1, "got %d, want 1", len(got))
 	c.Eq("from project", got[0].Description, "got")
 }
+
+// TestChildEnvForwardsOverlayPerChild pins the per-child environment join:
+// the forwarded caller env overlays the serving process's environment for
+// THIS child's ToolOpts.Env, each child's join is independent, and — because
+// the result rides exec.Cmd instead of os.Setenv — the serving process's OWN
+// environment is never the vehicle. The old implementation Setenv'd the
+// forwarded map into the process, which made the last-spawned child's values
+// global, leaked one child's variables into another's subprocesses, and
+// silently replaced what the operator's environment files deliberately set.
+func TestChildEnvForwardsOverlayPerChild(t *testing.T) {
+	base := []string{"PATH=/opt/daemon/bin", "HOME=/home/op"}
+
+	first := childEnv(base, map[string]string{"FORWARDED_PROBE": "first", "PATH": "/first/bin"})
+	second := childEnv(base, map[string]string{"OTHER_PROBE": "second"})
+
+	c := assert.NewAborting(t)
+	c.Eq("/first/bin", tools.EnvGet(first, "PATH"), "forwarded PATH wins for its child")
+	c.Eq("first", tools.EnvGet(first, "FORWARDED_PROBE"), "forwarded key lands")
+	c.Eq("/home/op", tools.EnvGet(first, "HOME"), "base-only keys pass through")
+	c.Eq("/opt/daemon/bin", tools.EnvGet(second, "PATH"), "a sibling without the overlay keeps the base PATH")
+	c.Eq("", tools.EnvGet(second, "FORWARDED_PROBE"), "one child's forwarded key never reaches another's env")
+	c.Eq("/opt/daemon/bin", tools.EnvGet(base, "PATH"), "the base itself is never mutated")
+}
+
+// TestBuildRuntimeLeavesProcessEnvUntouched pins the no-Setenv half of the
+// contract at the construction level: building an engine with a forwarded env
+// must not change the serving process's environment.
+func TestBuildRuntimeLeavesProcessEnvUntouched(t *testing.T) {
+	c := assert.NewAborting(t)
+	before := os.Environ()
+
+	opts := fakeRuntimeOptions(t, t.TempDir())
+	opts.Env = map[string]string{"FORWARDED_PROBE": "child"}
+
+	fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+	eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+	c.NoError(err, "BuildRuntime")
+	t.Cleanup(shutdown)
+	c.NotNil(eng, "nil engine")
+
+	after := os.Environ()
+	c.Eq(len(before), len(after), "process environ length unchanged")
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("process environ changed at %d: %q -> %q", i, before[i], after[i])
+		}
+	}
+}

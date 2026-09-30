@@ -60,6 +60,17 @@ func (BashBlueprint) Materialize(opts ToolOpts) (Tool, error) {
 		p:             opts.OutputPolicy,
 		cwd:           opts.Cwd,
 		rtkMode:       opts.RTK,
+		env:           opts.Env,
+	}
+	// Resolve the interpreter NOW, against the environment as it stands when
+	// the registry is built. exec.Command resolves a bare name against the
+	// PROCESS's PATH at every call, so a pinned child environment is not
+	// enough to make spawning drift-proof: the lookup itself must be pinned
+	// too. Unresolvable keeps the bare name, so Execute fails with the same
+	// "executable file not found in $PATH" it always has instead of failing
+	// the whole registry build.
+	if p, err := exec.LookPath("bash"); err == nil {
+		bt.bashPath = p
 	}
 	return bt, nil
 }
@@ -69,6 +80,8 @@ type bashTool struct {
 	p        OutputPolicy
 	cwd      string
 	rtkMode  RTKMode
+	env      []string
+	bashPath string
 	fallback atomic.Int64
 }
 
@@ -94,7 +107,7 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	if rtkApplied {
 		argv0, argvRest = rtkArgv[0], rtkArgv[1:]
 	} else {
-		argv0, argvRest = "bash", []string{"-c", in.Command}
+		argv0, argvRest = bt.interpreter(), []string{"-c", in.Command}
 	}
 
 	out, stderrText, runErr := bt.run(cctx, argv0, argvRest)
@@ -125,7 +138,7 @@ func (bt *bashTool) Execute(ctx context.Context, input ToolInput) (ToolResult, e
 	if rtkApplied && isNonZeroExit(runErr) && rtkRefused(stderrText) {
 		slog.Warn("agent/tools: bash: rtk refused the rewritten command, falling back to plain bash",
 			"command", in.Command, "rtk_stderr", stderrText)
-		out, _, runErr = bt.run(cctx, "bash", []string{"-c", in.Command})
+		out, _, runErr = bt.run(cctx, bt.interpreter(), []string{"-c", in.Command})
 	}
 
 	if runErr != nil {
@@ -231,11 +244,23 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 	return combinedBuf.String(), stderrBuf.String(), err
 }
 
+// interpreter is the bash binary this tool spawns: the absolute path resolved
+// at Materialize time, or the bare name when that resolution failed (Execute
+// then produces the same not-found error it always has).
+func (bt *bashTool) interpreter() string {
+	if bt.bashPath != "" {
+		return bt.bashPath
+	}
+	return "bash"
+}
+
 // run execs name(args...) under this tool's cwd and WaitDelay, identically
 // regardless of whether the caller is running the rtk-rewritten argv or a
-// plain `bash -c`.
+// plain `bash -c`. The child runs under this tool's pinned environment (see
+// ToolOpts.Env) — exactly that slice, never a merge with whatever the serving
+// process's environment has drifted to since the registry was built.
 func (bt *bashTool) run(ctx context.Context, name string, args []string) (string, string, error) {
-	return runSubprocess(ctx, bt.cwd, bashWaitDelay, name, args, nil)
+	return runSubprocess(ctx, bt.cwd, bashWaitDelay, name, args, bt.env)
 }
 
 // rtkRefused reports whether stderr looks like RTK ITSELF refusing to run

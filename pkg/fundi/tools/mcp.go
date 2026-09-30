@@ -94,7 +94,7 @@ func LoadMCPConfig(path string) (MCPConfig, error) {
 // The returned shutdown func closes every session that was successfully
 // connected. It is always non-nil and safe to call even if every server was
 // skipped.
-func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy) (func(), error) {
+func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy, env []string) (func(), error) {
 	var refs []*mcpServerSession
 
 	// registeredNames tracks every mcp__server__tool name registered so far
@@ -108,14 +108,14 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy)
 	registeredNames := make(map[string]string)
 
 	for name, sc := range cfg.MCPServers {
-		session, err := dialMCPServer(ctx, name, sc)
+		session, err := dialMCPServer(ctx, name, sc, env)
 		if err != nil {
 			slog.Error("agent/tools: mcp: failed to connect to server, skipping", "server", name, "error", err)
 			continue
 		}
 
 		ref := &mcpServerSession{name: name, sess: session, dial: func(ctx context.Context) (*mcp.ClientSession, error) {
-			return dialMCPServer(ctx, name, sc)
+			return dialMCPServer(ctx, name, sc, env)
 		}}
 
 		if err := registerMCPServerTools(ctx, r, name, ref, p, registeredNames); err != nil {
@@ -136,13 +136,15 @@ func ConnectMCP(ctx context.Context, r *Registry, cfg MCPConfig, p OutputPolicy)
 }
 
 // dialMCPServer connects to a single configured server, choosing a stdio or
-// HTTP transport based on which of Command/URL is set.
-func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig) (*mcp.ClientSession, error) {
+// HTTP transport based on which of Command/URL is set. A stdio server is
+// spawned under env (ToolOpts.Env) when one is pinned, else the process
+// environment — the same base every other subprocess-spawning tool uses.
+func dialMCPServer(ctx context.Context, name string, sc MCPServerConfig, env []string) (*mcp.ClientSession, error) {
 	var transport mcp.Transport
 	switch {
 	case sc.Command != "":
 		cmd := exec.Command(sc.Command, sc.Args...)
-		cmd.Env = mcpServerEnv(sc.Env)
+		cmd.Env = mcpServerEnv(env, sc.Env)
 		transport = &mcp.CommandTransport{Command: cmd}
 	case sc.URL != "":
 		httpClient := http.DefaultClient
@@ -473,8 +475,10 @@ func normalizeMCPName(s string) string {
 // Configured values are appended last so they win: exec resolves duplicates to
 // the final occurrence, which lets an operator point one server at a different
 // account without touching the daemon's environment.
-func mcpServerEnv(extra map[string]string) []string {
-	base := os.Environ()
+func mcpServerEnv(base []string, extra map[string]string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
 	out := make([]string, 0, len(base)+len(extra))
 	for _, kv := range base {
 		eq := strings.IndexByte(kv, '=')

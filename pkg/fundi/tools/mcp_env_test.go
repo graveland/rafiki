@@ -29,7 +29,7 @@ func TestMCPServerEnvStripsWhatRafikiOwns(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	c := assert.NewCollecting(t)
 
-	got := envMap(mcpServerEnv(nil))
+	got := envMap(mcpServerEnv(nil, nil))
 
 	for _, k := range []string{"RAFIKI_DB", "RAFIKI_TOKEN", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"} {
 		v, ok := got[k]
@@ -44,16 +44,16 @@ func TestMCPServerEnvStripsWhatRafikiOwns(t *testing.T) {
 func TestMCPServerEnvFiltersEvenWithNoConfiguredEnv(t *testing.T) {
 	t.Setenv("RAFIKI_DB", "postgres://user:pw@host/db")
 
-	if _, leaked := envMap(mcpServerEnv(nil))["RAFIKI_DB"]; leaked {
+	if _, leaked := envMap(mcpServerEnv(nil, nil))["RAFIKI_DB"]; leaked {
 		t.Error("RAFIKI_DB leaked when the server config set no env of its own")
 	}
-	_, leaked := envMap(mcpServerEnv(map[string]string{}))["RAFIKI_DB"]
+	_, leaked := envMap(mcpServerEnv(nil, map[string]string{}))["RAFIKI_DB"]
 	assert.NewCollecting(t).False(leaked, "RAFIKI_DB leaked for an empty (non-nil) env map")
 }
 
 // The server's own configured credentials must still arrive.
 func TestMCPServerEnvCarriesConfiguredValues(t *testing.T) {
-	got := envMap(mcpServerEnv(map[string]string{"GITHUB_TOKEN": "ghp_x"}))
+	got := envMap(mcpServerEnv(nil, map[string]string{"GITHUB_TOKEN": "ghp_x"}))
 	assert.NewCollecting(t).Eq("ghp_x", got["GITHUB_TOKEN"], "GITHUB_TOKEN")
 }
 
@@ -62,6 +62,6 @@ func TestMCPServerEnvCarriesConfiguredValues(t *testing.T) {
 func TestMCPServerEnvConfiguredValueWins(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_daemon")
 
-	kv := mcpServerEnv(map[string]string{"GITHUB_TOKEN": "ghp_configured"})
+	kv := mcpServerEnv(nil, map[string]string{"GITHUB_TOKEN": "ghp_configured"})
 	assert.NewCollecting(t).Eq("ghp_configured", envMap(kv)["GITHUB_TOKEN"], "GITHUB_TOKEN")
 }

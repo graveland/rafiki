@@ -394,18 +394,19 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		c.turnOutcomes.set(childID, outcome)
 	}
 
-	// req.Env is buildEnv's second payload for the subprocess path (alongside
-	// the API key handled below) - forwarded-caller-environment, default-on
-	// via `rafiki create --forward-env` (cmd/rafiki/cmd_create.go). An
-	// in-process child cannot receive a per-goroutine environment (Go has
-	// none), but it CAN forward the caller's env vars through os.Setenv at
-	// engine startup: the caller's shell env is identical across all of that
-	// caller's children, and the tools that spawn subprocesses (bash, MCP)
-	// inherit them from the daemon process environment.
+	// req.Env is forwarded-caller-environment, default-on via
+	// `rafiki create --forward-env` (cmd/rafiki/cmd_create.go). An in-process
+	// child cannot receive a per-goroutine environment (Go has none), so
+	// BuildRuntime overlays it onto the daemon's environment into the child's
+	// ToolOpts.Env — the environment its tools' subprocesses (bash, MCP) run
+	// under. The overlay is per-Command, not os.Setenv: the daemon hosts many
+	// children, and a process global would make the last spawner win on
+	// duplicated variables and leak one child's forwarded values into
+	// another's subprocesses.
 	//
-	// API keys are deliberately NOT forwarded through os.Setenv — the
-	// per-spawn key is carried as APIKeyOverride and applied only to the
-	// provider the child's model names. Daemon env < forwarded env < explicit key.
+	// API keys are deliberately NOT forwarded — the per-spawn key is carried
+	// as APIKeyOverride and applied only to the provider the child's model
+	// names. Daemon env < forwarded env < explicit key.
 	ro.Env = make(map[string]string, len(req.Env))
 	for k, v := range req.Env {
 		switch k {

@@ -47,6 +47,19 @@ func TestTheExecutorsRTKModeIsAChoiceAndNotAZeroValue(t *testing.T) {
 	assert.NewCollecting(t).Eq(tools.RTKOff, toolOptsFor(off, "/x").RTK, "RTK")
 }
 
+// TestToolOptsCarryPinnedEnv pins that Options.Env reaches the tool registry:
+// ToolOpts.Env is what the bash tool (and every other subprocess-spawning
+// tool) runs children under, so a missing mapping here would silently revert
+// every child to the process environment.
+func TestToolOptsCarryPinnedEnv(t *testing.T) {
+	s := NewServer(Options{Root: "/x", Env: []string{"PATH=/pinned/bin", "A=1"}})
+	env := toolOptsFor(s.opts, "/x").Env
+	c := assert.NewCollecting(t)
+	c.NotNil(env, "pinned env must reach ToolOpts")
+	c.Eq("/pinned/bin", tools.EnvGet(env, "PATH"), "PATH")
+	c.Eq("1", tools.EnvGet(env, "A"), "other pinned keys")
+}
+
 // Oversized foreground results and background job output land in the same
 // place, and it is a chosen place. OutputPolicy.SpillDir was unset, so foreground
 // spills went to os.TempDir() by default rather than by decision — harmless

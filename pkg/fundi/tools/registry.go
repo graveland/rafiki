@@ -216,7 +216,24 @@ type ToolOpts struct {
 	Cwd          string
 	FileTracker  *FileTracker
 	OutputPolicy OutputPolicy
-	Skills       []skillspkg.SkillMeta
+
+	// Env is the environment subprocess-spawning tools run children under:
+	// bash (and its rtk rewrites), pymodule_run, and the stdio MCP servers
+	// this registry itself connects to. Each spawn sets cmd.Env to exactly
+	// this slice; nil means inherit the process environment, which is what a
+	// bare ToolOpts{} — every test constructing one, and any caller that has
+	// not thought about environments — gets.
+	//
+	// The point of setting it is PINNING: a long-lived process serving many
+	// children builds this once, at startup, after its environment files are
+	// applied — so a variable the environment files deliberately set (the
+	// executor's executor-overrides.env beats the service manager's PATH)
+	// keeps winning over anything that later mutates the process environment,
+	// and children of different callers cannot see each other's forwarded
+	// variables. See cmd/rafiki/cmd_executor_serve.go's loadExecutorEnv for
+	// the executor-side construction.
+	Env    []string
+	Skills []skillspkg.SkillMeta
 	// InlineSkillBody fetches a database-backed skill's body by namespace and
 	// name, on the turn the model asks for it. nil means no inline skill can
 	// be served — which is correct when the daemon has no skills store.

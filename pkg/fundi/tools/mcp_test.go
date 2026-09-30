@@ -239,7 +239,7 @@ func TestConnectMCPSkipsServerThatFailsToConnect(t *testing.T) {
 	}}
 
 	r := NewRegistry()
-	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{})
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil)
 	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 
@@ -255,7 +255,7 @@ func TestConnectMCPSkipsServerWithNoCommandOrURL(t *testing.T) {
 	cfg := MCPConfig{MCPServers: map[string]MCPServerConfig{"empty": {}}}
 
 	r := NewRegistry()
-	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{})
+	shutdown, err := ConnectMCP(context.Background(), r, cfg, OutputPolicy{}, nil)
 	c.NoError(err, "ConnectMCP")
 	defer shutdown()
 

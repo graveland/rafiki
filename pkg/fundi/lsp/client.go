@@ -128,6 +128,9 @@ type ClientConfig struct {
 	Args []string
 	// Cwd is the working directory (project root) for the server.
 	Cwd string
+	// Env is the environment the server process runs under; nil inherits the
+	// caller's process environment (see ToolOpts.Env for why a caller pins).
+	Env []string
 }
 
 // NewClient starts a new LSP server process and returns a Client connected to it.
@@ -147,6 +150,9 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 
 	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
 	cmd.Dir = cfg.Cwd
+	if cfg.Env != nil {
+		cmd.Env = cfg.Env
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

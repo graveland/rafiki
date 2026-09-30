@@ -57,6 +57,17 @@ type Options struct {
 
 	// NoLSP disables language servers entirely on this executor.
 	NoLSP bool
+	// Env is the environment EVERYTHING this executor spawns runs under:
+	// tool subprocesses (ToolOpts.Env), language servers, and the daraja and
+	// script children Launch hosts. nil means os.Environ() at each spawn —
+	// the legacy behavior, which a long-lived process should not rely on:
+	// serve builds this ONCE, as a snapshot of the process environment taken
+	// right after the environment files are applied, so the overrides file's
+	// values (PATH above all — launchd seeds its own and the operator's
+	// executor-overrides.env is the sanctioned way to fix it) keep winning
+	// over anything that later mutates the process environment, however that
+	// mutation happens.
+	Env []string
 
 	// Proxies is the LLM-endpoint allowlist: name -> base URL, from repeated
 	// --proxy flags. Empty means this executor forwards nothing, which is the
@@ -183,7 +194,7 @@ func newLSPManager(opts Options, root string) *lsp.Manager {
 		return nil
 	}
 
-	mgr := lsp.NewManager(cfg, root)
+	mgr := lsp.NewManager(cfg, root, opts.Env)
 	if !mgr.HasInstalledServer() {
 		slog.Warn("executor: no configured language server found on PATH; lsp tools disabled",
 			"config", opts.LSPConfig)
@@ -221,6 +232,7 @@ func toolOptsFor(opts Options, root string) tools.ToolOpts {
 		Cwd:          root,
 		RTK:          opts.RTK,
 		OutputPolicy: tools.OutputPolicy{SpillDir: opts.SpillDir},
+		Env:          opts.Env,
 	}
 }
 

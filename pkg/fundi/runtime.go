@@ -177,11 +177,15 @@ type RuntimeOptions struct {
 
 	// Env carries per-child environment variables forwarded from the caller's
 	// shell (via `rafiki create --forward-env` / SpawnRequest.Env). BuildRuntime
-	// sets each via os.Setenv before constructing the engine, so tools that
-	// spawn subprocesses (bash, MCP) inherit them. Keys that the runtime itself
-	// reads (AnthropicAPIKey, OpenRouterAPIKey) are extracted into the named
-	// fields above rather than relying on the process environment; they still
-	// appear in Env as well so subprocesses can see them.
+	// overlays them ON TOP of the serving process's environment into this
+	// child's ToolOpts.Env (tools.MergeEnv), so the subprocesses this child's
+	// tools spawn see them — and ONLY this child's: the serving process's own
+	// environment is never mutated, so a sibling child forwarded different
+	// values cannot see these, and nothing leaks after this child closes.
+	// Keys that the runtime itself reads (AnthropicAPIKey, OpenRouterAPIKey)
+	// are extracted into the named fields above rather than relying on the
+	// environment; they still appear in Env as well so subprocesses can see
+	// them.
 	Env map[string]string
 
 	// OnFatal is the owner's hook for ending this child when a turn panics. It
@@ -529,6 +533,39 @@ func splitToolList(s string) []string {
 	return out
 }
 
+// childEnv joins the serving process's environment with one child's
+// forwarded environment (RuntimeOptions.Env): the process env is the base,
+// the forwarded map overlays it (forwarded wins per key), and the result
+// rides exec.Cmd per spawn via ToolOpts.Env — never os.Setenv. The
+// difference matters because a long-lived process hosts MANY children: a
+// process global would make the last spawner win on every duplicated
+// variable, leak one child's forwarded variables into another child's
+// subprocesses, and silently replace what the operator's environment files
+// deliberately set. Pure so tests can pin the join without an engine.
+func childEnv(base []string, forwarded map[string]string) []string {
+	return tools.MergeEnv(base, envSlice(forwarded))
+}
+
+// envSlice renders a forwarded-env map as an environ slice in KEY order.
+// Deterministic because the map feeds exec.Cmd.Environ where duplicates are
+// resolved last-wins and the operator reading a child's environment should
+// not see the join order flatter with Go's map iteration.
+func envSlice(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+env[k])
+	}
+	return out
+}
+
 // BuildRuntime assembles the tool registry, skills, MCP connections, and the
 // Engine. The returned shutdown func releases MCP connections and engine
 // resources; call it exactly once.
@@ -549,15 +586,19 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		return nil, nil, err
 	}
 
-	// Forward the caller's environment into the daemon process so subprocesses
-	// spawned by tools (bash, MCP) inherit it. os.Setenv is process-global, but
-	// the caller's shell env vars are identical across all of that caller's
-	// children — and the only alternative (per-Command.Env on every exec) would
-	// require threading this map through every tool, which is more invasive and
-	// error-prone.
-	for k, v := range opts.Env {
-		os.Setenv(k, v)
-	}
+	// Build THIS child's environment for the subprocesses its tools spawn
+	// (bash, rtk, pymodule_run, stdio MCP servers, language servers): the
+	// serving process's environment as the base, the caller's forwarded env
+	// (RuntimeOptions.Env — the daemon env < forwarded env precedence
+	// agent_runtime.go documents) overlaid on top. The merge rides each
+	// exec.Cmd via ToolOpts.Env instead of os.Setenv, and that difference is
+	// the point: a long-lived process hosts MANY children, and a process
+	// global would make the last spawner win on every duplicated variable,
+	// leak one child's forwarded variables into another child's subprocesses
+	// (nothing un-applies them), and silently replace what the operator's
+	// environment files deliberately set. Per-Command env keeps each child's
+	// view independent and the process's own environment untouched.
+	mergedEnv := childEnv(os.Environ(), opts.Env)
 
 	spillDir := opts.SpillDir
 	if spillDir == "" {
@@ -612,7 +653,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		}
 
 		if len(lspCfg.Servers) > 0 {
-			lspMgr := lsp.NewManager(lspCfg, opts.Cwd)
+			lspMgr := lsp.NewManager(lspCfg, opts.Cwd, mergedEnv)
 			// A config naming a server that is not installed (or an empty
 			// {"servers":{}}) would otherwise put eight tools in tools[] that can
 			// only fail with `executable file not found in $PATH`, burning a turn
@@ -634,6 +675,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	}
 
 	toolOpts := tools.ToolOpts{
+		Env:                mergedEnv,
 		Cwd:                opts.Cwd,
 		FileTracker:        fileTracker,
 		OutputPolicy:       outputPolicy,
@@ -721,7 +763,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		// Filter before ConnectMCP dials anything, so a restricted server is
 		// never even attempted, not merely hidden after connecting.
 		mcpCfg.MCPServers = filterMCPServers(mcpCfg.MCPServers, opts.MCPServers)
-		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy)
+		mcpShutdown, err = tools.ConnectMCP(ctx, registry, mcpCfg, outputPolicy, mergedEnv)
 		if err != nil {
 			return nil, nil, fmt.Errorf("runtime: connect mcp: %w", err)
 		}

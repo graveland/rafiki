@@ -51,7 +51,7 @@ func TestIntegration_RenameAgainstGopls(t *testing.T) {
 		Servers: map[string]lsp.ServerConfig{
 			"go": {Command: goplsPath, Extensions: []string{".go"}},
 		},
-	}, dir)
+	}, dir, nil)
 	defer mgr.Shutdown(context.Background())
 
 	adapter := lspadapter.New(mgr, tools.NewFileTracker())

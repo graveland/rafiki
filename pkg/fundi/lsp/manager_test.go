@@ -20,7 +20,7 @@ func TestManager_For_NoMatch(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"go": {Command: "gopls", Extensions: []string{".go"}},
 		},
-	}, "/tmp")
+	}, "/tmp", nil)
 
 	ctx := context.Background()
 	client, err := mgr.For(ctx, "/tmp/foo.py")
@@ -45,7 +45,7 @@ func TestManager_For_Match(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"go": {Command: goplsPath, Extensions: []string{".go"}},
 		},
-	}, dir)
+	}, dir, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -70,7 +70,7 @@ func TestManager_ServerFor(t *testing.T) {
 			"go":     {Command: "gopls", Extensions: []string{".go"}},
 			"python": {Command: "pyright", Extensions: []string{".py"}},
 		},
-	}, "/tmp")
+	}, "/tmp", nil)
 
 	tests := []struct {
 		path   string
@@ -106,7 +106,7 @@ func TestManager_NotifyChange(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"go": {Command: goplsPath, Extensions: []string{".go"}},
 		},
-	}, dir)
+	}, dir, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -122,7 +122,7 @@ func TestManager_Shutdown(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"go": {Command: "gopls", Extensions: []string{".go"}},
 		},
-	}, "/tmp")
+	}, "/tmp", nil)
 	ctx := context.Background()
 	mgr.Shutdown(ctx)
 
@@ -252,7 +252,7 @@ func TestManager_RestartDoesNotConsumeBudget(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"fake": fakeLSPServerCmd(t, "healthy"),
 		},
-	}, dir)
+	}, dir, nil)
 	defer mgr.Shutdown(context.Background())
 
 	path := filepath.Join(dir, "main.fake")
@@ -287,7 +287,7 @@ func TestManager_CrashLoopStillTrips(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"fake": fakeLSPServerCmd(t, "crash"),
 		},
-	}, dir)
+	}, dir, nil)
 	defer mgr.Shutdown(context.Background())
 
 	path := filepath.Join(dir, "main.fake")
@@ -333,7 +333,7 @@ func TestManager_HealthyUptimeForgivesCrashBudget(t *testing.T) {
 		Servers: map[string]ServerConfig{
 			"fake": fakeLSPServerCmd(t, "delayed-crash:80ms"),
 		},
-	}, dir)
+	}, dir, nil)
 	defer mgr.Shutdown(context.Background())
 
 	path := filepath.Join(dir, "main.fake")

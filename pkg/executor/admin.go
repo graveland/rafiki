@@ -62,6 +62,12 @@ type AdminOptions struct {
 	// SocketDir is where daraja's unix sockets are created.
 	SocketDir string
 
+	// Env is the pinned environment the launched child runs under — the
+	// executor's startup snapshot (Options.Env), NOT the process environment
+	// at launch time: a child spawned hours into the executor's life must not
+	// inherit whatever has drifted in since. nil means os.Environ() (a test
+	// or a caller that did not pin).
+	Env []string
 	// ConnectAddr/ConnectSocket are THIS executor's own, already-working
 	// reverse-dial target — exactly what it resolved from --connect/
 	// --connect-socket to reach the daemon currently issuing this Launch.
@@ -189,6 +195,16 @@ type AdminServer struct {
 
 func NewAdminServer(o AdminOptions) *AdminServer {
 	return &AdminServer{opts: o, m: map[string]*launched{}, records: map[string]*launchRecord{}}
+}
+
+// environBase is the environment a launched child inherits from this process
+// (before the per-child scrub and additions): the pinned snapshot when
+// AdminOptions.Env carries one, else the process environment at launch time.
+func (o AdminOptions) environBase() []string {
+	if o.Env != nil {
+		return o.Env
+	}
+	return os.Environ()
 }
 
 func (a *AdminServer) Routes() (string, http.Handler) {
@@ -434,7 +450,7 @@ func (a *AdminServer) Launch(
 	// rafiki credentials are credentials whose inherited copies are stale by
 	// definition — this executor's copy belongs to whatever process launched
 	// IT. Everything else (PATH, HOME, ...) passes through unchanged.
-	cmd.Env = append(scrubEnvNames(scrubRafikiCredentialEnv(os.Environ()), scrubNames...), envVars...)
+	cmd.Env = append(scrubEnvNames(scrubRafikiCredentialEnv(a.opts.environBase()), scrubNames...), envVars...)
 	// daraja LEADS a new group and its claude joins it, so this pgid is the one
 	// handle that reaches the whole child — and keeps reaching claude after a
 	// SIGKILLed daraja orphans it to launchd. Without Setpgid, daraja would sit

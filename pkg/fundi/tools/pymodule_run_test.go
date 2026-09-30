@@ -570,7 +570,7 @@ func TestEnvWithPythonPath(t *testing.T) {
 	t.Setenv("PYTHONPATH", "stale/entry")
 	t.Setenv("RAFIKI_TEST_PYMODULE_KEPT", "preserved")
 	c := assert.NewAborting(t)
-	env := envWithPythonPath("computed/dir")
+	env := envWithPythonPath(nil, "computed/dir")
 
 	var pp []string
 	for _, e := range env {

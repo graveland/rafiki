@@ -180,6 +180,18 @@ func loadExecutorEnv() {
 	}
 }
 
+// executorPinnedEnv applies the executor's environment files and returns the
+// result as THE environment every subprocess this executor ever spawns runs
+// under — tools (ToolOpts.Env), language servers, and the daraja and script
+// children Launch hosts. Taken immediately after the files are applied and
+// before anything else resolves a default from the environment, so the
+// overrides file's values keep winning over whatever later mutates the
+// process environment, however that mutation happens.
+func executorPinnedEnv() []string {
+	loadExecutorEnv()
+	return os.Environ()
+}
+
 // skillsSyncEnabled resolves the effective --skills-sync value from the flag,
 // its environment form, and the --launch list. The environment is read HERE
 // rather than as the flag's default for two reasons: flag registration runs
@@ -299,7 +311,7 @@ Two transports, exactly one of which is used:
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmd.SilenceUsage = true
 
-			loadExecutorEnv()
+			pinnedEnv := executorPinnedEnv()
 
 			resolvedConnect, resolvedSocket, err := resolveExecutorConnectFlags(connectAddr, connectSocket)
 			if err != nil {
@@ -330,6 +342,7 @@ Two transports, exactly one of which is used:
 				PymoduleGitSync: pymoduleGitSyncEnabled(cmd, pymoduleGitSync, launchKinds),
 				Proxies:         proxies,
 				LaunchKinds:     launchKinds,
+				Env:             pinnedEnv,
 			})
 			defer func() { _ = srv.Close() }()
 
@@ -377,6 +390,7 @@ Two transports, exactly one of which is used:
 				// executor dials, by the same pinned fingerprint.
 				PinCert:    pinnedFingerprint,
 				ServerName: serverName,
+				Env:        pinnedEnv,
 			})
 			defer admin.Close()
 			handler := executorHandler(srv, admin)

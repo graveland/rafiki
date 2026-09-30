@@ -27,8 +27,11 @@ type Config struct {
 // Manager owns the lifecycle of LSP clients: one client per language server,
 // started lazily on first use, shut down with the runtime.
 type Manager struct {
-	cfg     Config
-	cwd     string
+	cfg Config
+	cwd string
+	// env is the environment server processes spawn under (ToolOpts.Env on
+	// the caller's side), or nil to inherit the manager's process environment.
+	env     []string
 	clients map[string]*Client // language name -> client
 	// starting holds an in-flight start per language so concurrent callers
 	// await one spawn instead of racing. Without it, a first turn issuing
@@ -91,11 +94,12 @@ const maxServerStarts = 5
 var healthyUptime = 2 * time.Minute
 
 // NewManager creates a Manager from the given configuration and working directory.
-func NewManager(cfg Config, cwd string) *Manager {
+func NewManager(cfg Config, cwd string, env []string) *Manager {
 	procCtx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		cfg:            cfg,
 		cwd:            cwd,
+		env:            env,
 		clients:        make(map[string]*Client),
 		starting:       make(map[string]*startInFlight),
 		restarts:       make(map[string]int),
@@ -265,6 +269,7 @@ func (m *Manager) start(name string, cfg ServerConfig) (*Client, error) {
 		Command: cfg.Command,
 		Args:    cfg.Args,
 		Cwd:     m.cwd,
+		Env:     m.env,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lsp: start %s: %w", name, err)

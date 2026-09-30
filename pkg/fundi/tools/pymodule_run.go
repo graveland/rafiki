@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -54,15 +55,27 @@ func (PyModuleRunBlueprint) Execute(context.Context, ToolInput) (ToolResult, err
 	panic("blueprint: call Materialize first")
 }
 func (PyModuleRunBlueprint) Materialize(opts ToolOpts) (Tool, error) {
-	interp := os.Getenv("RAFIKI_PYMODULE_PYTHON")
+	interp := getenv(opts.Env, "RAFIKI_PYMODULE_PYTHON")
 	if interp == "" {
 		interp = "python3"
+	}
+	// Pin the LOOKUP as well as the environment: exec.Command resolves a bare
+	// interpreter name against the process PATH at every call, so a drifted
+	// process PATH would break spawning even under a pinned child env. A
+	// slash-bearing interpreter (a venv's python) is used as written, exactly
+	// as exec.Command treats it; an unresolvable bare name keeps the bare
+	// name and Execute fails with the legacy not-found error.
+	if !strings.Contains(interp, "/") {
+		if p, err := exec.LookPath(interp); err == nil {
+			interp = p
+		}
 	}
 	return &pymoduleRunTool{
 		PyModuleRunBlueprint: PyModuleRunBlueprint{},
 		cwd:                  opts.Cwd,
 		interpreter:          interp,
 		p:                    opts.OutputPolicy,
+		env:                  opts.Env,
 	}, nil
 }
 
@@ -71,6 +84,7 @@ type pymoduleRunTool struct {
 	cwd         string
 	interpreter string
 	p           OutputPolicy
+	env         []string
 }
 
 type pymoduleRunInput struct {
@@ -194,13 +208,15 @@ func (rt *pymoduleRunTool) Execute(ctx context.Context, input ToolInput) (ToolRe
 			}
 		}
 	}
-	var env []string
+	// The child runs under the tool's pinned environment; a PYTHONPATH to
+	// fold in replaces it with the same base plus the computed PYTHONPATH.
+	env := rt.env
 	if len(ppEntries) > 0 {
 		pp := strings.Join(ppEntries, string(os.PathListSeparator))
-		if existing := os.Getenv("PYTHONPATH"); existing != "" {
+		if existing := getenv(rt.env, "PYTHONPATH"); existing != "" {
 			pp += string(os.PathListSeparator) + existing
 		}
-		env = envWithPythonPath(pp)
+		env = envWithPythonPath(rt.env, pp)
 	}
 
 	// Default cwd is the calling agent's workspace. An explicit cwd stands
@@ -319,10 +335,10 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 		ppEntries = append(ppEntries, dir)
 	}
 	pp := strings.Join(ppEntries, string(os.PathListSeparator))
-	if existing := os.Getenv("PYTHONPATH"); existing != "" {
+	if existing := getenv(rt.env, "PYTHONPATH"); existing != "" {
 		pp += string(os.PathListSeparator) + existing
 	}
-	env := envWithPythonPath(pp)
+	env := envWithPythonPath(rt.env, pp)
 
 	// cwd resolution and the run itself are the blob path's mechanics
 	// unchanged: the repo argument decides WHAT runs, never WHERE.
@@ -355,18 +371,22 @@ func (rt *pymoduleRunTool) executeGitRepo(ctx context.Context, in pymoduleRunInp
 	return NewTextResult(rt.p.Clip(out, spillName)), nil
 }
 
-// envWithPythonPath builds a subprocess environment from the FULL process
-// environment with PYTHONPATH set to pp. runSubprocess replaces the child's
-// env with whatever it is handed, so pymodule_run -- the one caller that
-// passes a non-nil env -- must carry the whole environment: an env of only
-// PYTHONPATH would strip PATH, HOME and everything else and break any script
-// that shells out or reads the caller's environment. pp is the fully
-// computed value (the callers fold any pre-existing PYTHONPATH into it); any
-// PYTHONPATH entry already present is dropped here so the key appears
-// exactly once.
-func envWithPythonPath(pp string) []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, e := range os.Environ() {
+// envWithPythonPath builds a subprocess environment from the base
+// environment — the tool's pinned env (ToolOpts.Env), or the process
+// environment when none is pinned — with PYTHONPATH set to pp.
+// runSubprocess replaces the child's env with whatever it is handed, so
+// pymodule_run -- the one caller that passes a non-nil env -- must carry the
+// whole environment: an env of only PYTHONPATH would strip PATH, HOME and
+// everything else and break any script that shells out or reads the caller's
+// environment. pp is the fully computed value (the callers fold any
+// pre-existing PYTHONPATH into it); any PYTHONPATH entry already present is
+// dropped here so the key appears exactly once.
+func envWithPythonPath(base []string, pp string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
+	env := make([]string, 0, len(base)+1)
+	for _, e := range base {
 		if strings.HasPrefix(e, "PYTHONPATH=") {
 			continue
 		}

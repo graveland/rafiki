@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"strings"
+
 	"go.graveland.dev/rafiki/pkg/paths"
 
 	"github.com/multigres/testkit/assert"
@@ -122,4 +124,45 @@ func TestLoadExecutorEnvAppliesFileWithoutOverridingProcess(t *testing.T) {
 
 	c.Eq("filevalue", os.Getenv("EXECUTOR_ENV_TEST_FILEVAR"), "file var not applied: got")
 	c.Eq("processvalue", os.Getenv("EXECUTOR_ENV_TEST_PROCVAR"), "process env must win over the file: got")
+}
+
+// TestExecutorPinnedEnvCarriesOverridesAndShrugsOffDrift pins the snapshot
+// contract: executorPinnedEnv applies the environment files and snapshots the
+// result, so the overrides file's values — PATH above all, the variable
+// launchd seeds itself and executor-overrides.env exists to fix — are in the
+// snapshot even when the process environment LATER drifts to something else.
+// Every subprocess the executor spawns (tools via ToolOpts.Env, language
+// servers, launched children) runs under that snapshot, never under the
+// drifted process environment.
+func TestExecutorPinnedEnvCarriesOverridesAndShrugsOffDrift(t *testing.T) {
+	dir := t.TempDir()
+
+	overrides := filepath.Join(dir, "executor-overrides.env")
+	c := assert.NewCollecting(t)
+	c.Require().NoError(os.WriteFile(overrides,
+		[]byte("PATH=/pinned/bin\nEXECUTOR_PIN_TEST_VAR=pinned\n"), 0o600))
+	t.Setenv(paths.ExecutorOverridesFileEnv, overrides)
+	// Keep the fill-gaps file out of the way for a deterministic environ.
+	t.Setenv(paths.ExecutorEnvFileEnv, filepath.Join(dir, "absent-executor.env"))
+
+	pinned := executorPinnedEnv()
+	c.Eq("/pinned/bin", envValue(pinned, "PATH"), "overrides PATH must be in the snapshot")
+	c.Eq("pinned", envValue(pinned, "EXECUTOR_PIN_TEST_VAR"), "overrides var must be in the snapshot")
+
+	// Whatever mutates a long-lived process's environment later, the
+	// snapshot — and therefore every child spawned from it — is unaffected.
+	c.Require().NoError(os.Setenv("PATH", "/drifted/bin"))
+	c.Require().NoError(os.Setenv("EXECUTOR_PIN_TEST_VAR", "drifted"))
+	c.Eq("/pinned/bin", envValue(pinned, "PATH"), "later drift must not touch the snapshot")
+	c.Eq("pinned", envValue(pinned, "EXECUTOR_PIN_TEST_VAR"), "later drift must not touch the snapshot")
+}
+
+// envValue reads a KEY=VALUE slice like exec.Cmd.Env.
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v
+		}
+	}
+	return ""
 }
