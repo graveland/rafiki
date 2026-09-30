@@ -115,6 +115,19 @@ Every dispatch carries the isolation block from `coordinating-agents` verbatim.
 `cwd:` does not enforce the worktree on its own, and the failure is split-brain
 rather than loud.
 
+Every dispatch also carries the child reporting contract, and every child
+follows it:
+
+- **Set `agent_result` before stopping.** Its text is the report's header: the
+  verdict line (`DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, `BLOCKED` for an
+  implementer; the review verdict for a reviewer), then one line per finding or
+  concern, each tagged `needs-ruling: yes|no`. This is what your parent sees in
+  the settle notification without opening anything.
+- **`agent_report` only for what changes the parent's next decision** — a plan
+  or interface problem affecting sibling work, a shared-file conflict, an
+  assumption they may want to overrule, a blocking finding. Never routine
+  progress and never your final summary (that is `agent_result`).
+
 Record before each spawn — `base` is not recoverable afterwards:
 
 ```
@@ -129,8 +142,11 @@ returned report. Never poll.
 
 ## Handling a settle
 
-- **`settled (idle)`** — the turn ended; not a claim of completion. Read the
-  report file: DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED. Concerns
+- **`settled (idle)`** — the turn ended; not a claim of completion. The settle
+  fragment carries the child's `agent_result` header — act on it first: the
+  verdict and the per-finding lines usually decide the next step, and you open
+  the report body only for a finding tagged `needs-ruling: yes` or one you
+  dispute. A body with no such findings needs no read. Concerns
   about correctness or scope get addressed before review; observations get
   noted. NEEDS_CONTEXT gets the missing context and a re-dispatch. BLOCKED
   gets a *change* — more context, a smaller task, a scope ruling, or the plan
@@ -169,6 +185,11 @@ cannot converge within its budget is a failure — evidence, then ask.
 - Hand the reviewer the diff as a **file** (`git diff -U10 <base>..HEAD`
   redirected), plus the brief path, the report path, and the Global Constraints
   block verbatim. Never dispatch a reviewer without a diff file.
+- The reviewer's report leads with a **fixed header**: the verdict line, then
+  one line per finding with `needs-ruling: yes|no`. That header is what the
+  reviewer sets as its `agent_result`, so the coordinator triages from the
+  settle fragment and opens the body only for `needs-ruling` or disputed
+  findings.
 - Do not ask it to re-run tests the implementer already ran; the report carries
   that evidence.
 - **Never pre-judge.** If your prompt contains "do not flag", "at most minor",
