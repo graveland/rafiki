@@ -180,6 +180,13 @@ type Controller struct {
 	// interface field — see that setter's doc comment.
 	batcher *batch.Batcher
 
+	// providerGuard is the daemon's ONE provider cache guard (operator bans
+	// plus cache ejections), set once at startup via SetProviderGuard — the
+	// same instance the proxy face routes through. agentRuntimeOptions hands
+	// it to every in-process child; nil means their requests carry no
+	// provider.ignore at all.
+	providerGuard *routing.ProviderGuard
+
 	// routePolicy is the daemon's in-memory routing-policy view (routepolicy.
 	// Policy), consulted by resolveRouting at spawn — it fills the gaps the
 	// spawn/preset specs leave — and by RoutingFor, the proxy face's per-
@@ -518,6 +525,13 @@ func (c *Controller) SetBatcher(b *batch.Batcher) {
 		return
 	}
 	c.batcher = b
+}
+
+// SetProviderGuard records the daemon's provider cache guard, consulted by
+// agentRuntimeOptions (ro.ProviderGuard). Called once at startup, before the
+// socket accepts anything — mirrors SetCatalog.
+func (c *Controller) SetProviderGuard(g *routing.ProviderGuard) {
+	c.providerGuard = g
 }
 
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, rawTraceAll bool, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {

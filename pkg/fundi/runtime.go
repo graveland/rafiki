@@ -144,6 +144,14 @@ type RuntimeOptions struct {
 	// this field is nil ONLY when there is genuinely no batcher.
 	Batcher llm.Batcher
 
+	// ProviderGuard is the daemon's ONE provider cache guard, passed to the
+	// child's llm.Client via llm.WithProviderGuard. It carries the operator's
+	// provider bans and the guard's cache ejections, merged into every
+	// OpenRouter request as provider.ignore, and observes the child's turns
+	// so a provider that stops caching for it gets ejected. nil (standalone
+	// `rafikid fundi`) sends no ignore list at all.
+	ProviderGuard *routing.ProviderGuard
+
 	// ProviderSenders overrides the sender for specific providers, keyed by
 	// provider name. The daemon populates this for every provider with a
 	// via_executor table — it has already resolved the executor and built
@@ -741,6 +749,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
 		Batcher:                opts.Batcher,
+		ProviderGuard:          opts.ProviderGuard,
 		Pool:                   opts.Pool,
 		Tools:                  registry,
 		AutoResume:             opts.AutoResume,

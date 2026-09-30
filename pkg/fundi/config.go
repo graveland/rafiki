@@ -159,6 +159,12 @@ type Config struct {
 	// doc comment for why the concrete-pointer route is a trap here.
 	Batcher llm.Batcher
 
+	// ProviderGuard is the daemon's provider cache guard, handed to the
+	// engine's llm.Client via llm.WithProviderGuard — see
+	// RuntimeOptions.ProviderGuard. nil means no operator bans and no
+	// ejections reach this child's requests.
+	ProviderGuard *routing.ProviderGuard
+
 	// Tools is the assembled tool registry (file tools + bash + skills +
 	// MCP), built by cmd/rafikid before calling BuildEngine.
 	Tools agentloop.ToolSet
@@ -407,6 +413,9 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// operator who configures both; the same trade as the catalog above.
 	if c.Batcher != nil {
 		opts = append(opts, llm.WithBatcher(c.Batcher))
+	}
+	if c.ProviderGuard != nil {
+		opts = append(opts, llm.WithProviderGuard(c.ProviderGuard))
 	}
 
 	// The once-resolved routing spec, before the FakeTurns early-return below:

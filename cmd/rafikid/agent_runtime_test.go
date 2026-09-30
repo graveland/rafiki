@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,6 +328,26 @@ func TestAgentRuntimeOptionsSharesControllerCatalog(t *testing.T) {
 	ro, err := c.agentRuntimeOptions(req, "c_shared_catalog", false, "", "")
 	ck.Require().NoError(err, "agentRuntimeOptions")
 	ck.Eq(cat, ro.Catalog, "ro.Catalog")
+}
+
+// TestAgentRuntimeOptionsSharesProviderGuard proves every in-process agent
+// child gets the daemon's provider guard: without it the child's llm.Client
+// sends no provider.ignore, so operator bans (`rafiki providers ban`) and
+// cache ejections never reach fundi children at all.
+func TestAgentRuntimeOptionsSharesProviderGuard(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestController(t)
+	g := routing.NewProviderGuard(routing.DefaultEjectTTL, slog.New(slog.DiscardHandler))
+	c.SetProviderGuard(g)
+
+	req := protocol.SpawnRequest{
+		Kind:  protocol.KindFundi,
+		Cwd:   t.TempDir(),
+		Model: "anthropic/claude-sonnet-4-5",
+	}
+	ro, err := c.agentRuntimeOptions(req, "c_shared_guard", false, "", "")
+	ck.Require().NoError(err, "agentRuntimeOptions")
+	ck.True(ro.ProviderGuard == g, "ro.ProviderGuard is not the controller's guard")
 }
 
 // TestAgentRunnerIgnoresEnvDefaultedDB proves the daemon's own

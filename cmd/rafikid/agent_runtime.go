@@ -345,6 +345,11 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	// (catalog-less daemon) keeps the client building its own.
 	ro.Catalog = c.catalog
 
+	// The daemon's one provider guard, so an operator ban or a cache ejection
+	// reaches this child's OpenRouter requests exactly as it reaches the proxy
+	// face's — and the child's turns feed the guard's ejection evidence.
+	ro.ProviderGuard = c.providerGuard
+
 	// Same nil-means-decline guard as Quota above, and for the same reason:
 	// c.batcher is a *batch.Batcher, and ro.Batcher an llm.Batcher — a typed
 	// nil c.batcher would widen into a NON-nil interface here. SetBatcher

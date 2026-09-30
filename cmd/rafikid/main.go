@@ -506,6 +506,12 @@ func runDaemon(opts runDaemonOpts) error {
 	// the face and handed to the Controller after it.
 	streamRevoke := newStreamRegistry()
 
+	// One provider guard for the whole daemon: the face's routing and every
+	// in-process child's llm.Client read the same bans and ejections. Built
+	// here rather than inside the face so a face that fails to start does not
+	// take the children's bans down with it.
+	guard := buildProviderGuard(baseCtx, pool, slog.Default())
+
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:         pool,
 		Logger:       slog.Default(),
@@ -519,6 +525,7 @@ func runDaemon(opts runDaemonOpts) error {
 		Users:        userStore,
 		Providers:    prov,
 		StreamRevoke: streamRevoke,
+		Guard:        guard,
 	})
 	if err != nil {
 		// Not fatal: agent children reach the library in-process and are
@@ -564,6 +571,7 @@ func runDaemon(opts runDaemonOpts) error {
 	ctrl.streamRevoke = streamRevoke
 	ctrl.wireEventBuffer()
 	ctrl.SetCatalog(catalog)
+	ctrl.SetProviderGuard(guard)
 	ctrl.SetRoutePolicy(routePolicy)
 	if batcherOK {
 		ctrl.SetBatcher(batcher)

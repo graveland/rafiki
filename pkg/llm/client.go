@@ -254,6 +254,13 @@ func (c *Client) ConversationCost(ctx context.Context, convID string) float64 {
 // Pass nil to disable; a nil guard is inert at every call site.
 func (c *Client) SetProviderGuard(g *routing.ProviderGuard) { c.guard = g }
 
+// WithProviderGuard is SetProviderGuard as a construction option, for hosts
+// that assemble a ClientOption list (pkg/fundi's in-process children share the
+// daemon's one guard this way).
+func WithProviderGuard(g *routing.ProviderGuard) ClientOption {
+	return func(c *Client) { c.guard = g }
+}
+
 // SendMeta carries per-send capture attribution and routing selection, used
 // by hosts that build their own params (sc's core-dump analyzer) and
 // internally by Conversation.Send.

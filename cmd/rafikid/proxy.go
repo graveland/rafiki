@@ -176,6 +176,10 @@ type faceOptions struct {
 	// main.go before the face and shared with the UDS mount and the
 	// Controller. Nil = this face's admitted streams are never cut (tests).
 	StreamRevoke *streamRegistry
+	// Guard is the daemon's one provider cache guard (buildProviderGuard),
+	// built in main.go and shared with the Controller so in-process children
+	// carry the same bans and ejections. Nil = the face builds its own (tests).
+	Guard *routing.ProviderGuard
 }
 
 // startProxyFace binds the proxy face and serves it.
@@ -280,12 +284,14 @@ func startProxyFace(ctx context.Context, opts faceOptions) (*proxyFace, error) {
 	}
 	go client.Catalog().Warm()
 
-	// The provider cache guard is shared by both request paths — the proxy face
-	// below and the llm client above — because OpenRouter routes them both and
-	// either can be the one that notices a provider has stopped caching. A nil
-	// guard is inert at every call site, so the disabled case needs no branching
-	// past this point.
-	guard := buildProviderGuard(ctx, pool, logger)
+	// The provider cache guard is shared by every request path — the proxy face
+	// below, the llm client above, and (via the Controller) every in-process
+	// child — because OpenRouter routes them all and any can be the one that
+	// notices a provider has stopped caching.
+	guard := opts.Guard
+	if guard == nil {
+		guard = buildProviderGuard(ctx, pool, logger)
+	}
 	client.SetProviderGuard(guard)
 
 	auth := server.ContextAuthenticator{}
