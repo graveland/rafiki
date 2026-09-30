@@ -308,6 +308,9 @@ func translateOpenAIAssistantMessage(mp *anthropic.MessageParam) ([]openAIMessag
 // limitation to fail on, not to hide.
 // ToolResultBlockParam.IsError has no OpenAI equivalent and is dropped; the
 // failure text itself still reaches the model.
+// KNOWN DEFECT: image blocks inside a tool_result are silently dropped, since
+// a role:"tool" message carries text only. The fix is to hoist them into the
+// trailing user message (legal: it follows every tool message).
 func translateOpenAIUserMessage(mp *anthropic.MessageParam) ([]openAIMessage, error) {
 	var text strings.Builder
 	var toolMsgs []openAIMessage
