@@ -20,6 +20,7 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/prefill"
@@ -61,6 +62,10 @@ type sendStepRunner struct {
 	pool  pymodulePool // nil: daemon has no executor pool
 	snap  func(childID string) (childstore.Snapshot, bool)
 	nonce func() string // 16 hex chars; crypto/rand in production
+	// deliverable refuses a target the send could not reach (unknown, exited,
+	// shutting down) so no step runs for a send that then fails delivery. Nil
+	// skips the check.
+	deliverable func(targetID string) error
 }
 
 // newSendStepRunner builds the daemon's SendStepRunner from a Controller.
@@ -70,7 +75,7 @@ type sendStepRunner struct {
 // silently defeat the no-pool refusal below — the same nil-into-interface
 // trap the connectapi Set* setters refuse.
 func newSendStepRunner(c *Controller) *sendStepRunner {
-	r := &sendStepRunner{snap: c.st.Get, nonce: randomStepNonce}
+	r := &sendStepRunner{snap: c.st.Get, nonce: randomStepNonce, deliverable: c.validateSendTarget}
 	if c.execPoolConn != nil {
 		r.pool = c.execPoolConn
 	}
@@ -122,6 +127,16 @@ func (r *sendStepRunner) validateSteps(callerID, targetID string, steps []protoc
 	if r.pool == nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition,
 			errors.New("send steps need an executor pool; this daemon has none"))
+	}
+	if r.deliverable != nil {
+		if err := r.deliverable(targetID); err != nil {
+			code := connect.CodeFailedPrecondition
+			var ce *connectapi.ControllerError
+			if errors.As(err, &ce) && ce.Code == protocol.ErrChildNotFound {
+				code = connect.CodeNotFound
+			}
+			return nil, connect.NewError(code, err)
+		}
 	}
 	live := r.pool.Live()
 	plans := make([]ssStepPlan, len(steps))

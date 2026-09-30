@@ -919,7 +919,7 @@ credential gets on the MCP face) and the operator MCP path (`userSpawner`).
 
 **Execution.** All steps are validated before the first one runs, so a
 refused send has no side effects; then they run sequentially in request order
-under one 120 s deadline. A refusal during validation runs nothing. A failure
+under one 120 s deadline. The target must be deliverable (known, not exited, not shutting down) or the send is refused before any step runs. A refusal during validation runs nothing. A failure
 during execution (`CODE_DENIED`, a lost executor, the deadline, the rendered
 cap) leaves the side effects of earlier steps in place; the send still
 enqueues nothing.
@@ -934,7 +934,7 @@ position in the agent tree (the operator and MCP face have none), and
 `permission_denied` when the caller's own tool allowlist does not include the
 step's tool: a fundi child needs `read`/`bash`/`pymodule_run` admitted by its
 `tools` (nil admits all, `no_tools`/`no_builtin_tools` admit none); a claude
-child needs no tool restriction at all; a script never qualifies.
+child needs no `tools` restriction at all (restrictions carried in its launch args or permission mode are NOT consulted, so the gate is coarse for claude callers); a script never qualifies.
 
 **Limits.**
 

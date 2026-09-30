@@ -16,6 +16,7 @@ import (
 	"connectrpc.com/connect"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/execpool"
 	"go.graveland.dev/rafiki/pkg/executorpb"
 	"go.graveland.dev/rafiki/pkg/executorpb/executorpbconnect"
@@ -904,4 +905,22 @@ func TestSendStepsEmptyStreamIsUnavailable(t *testing.T) {
 	_, _, err := r.RunSendSteps(context.Background(), "", "t-1", []protocol.SendStep{ssBashStep(protocol.StepSiteChild, "id")})
 	c.Error(err, "a stream with no result")
 	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
+}
+
+// A target the send could not reach is refused before any step runs.
+func TestSendStepsUndeliverableTargetRunsNothing(t *testing.T) {
+	c := assert.NewCollecting(t)
+	exec, client := ssScriptedServer(t, ssRun(ssResultText("must not run")))
+	pool := &ssFakePool{
+		live:    ssLive("e-1"),
+		clients: map[string]executorpbconnect.ExecutorServiceClient{"e-1": client},
+	}
+	r := ssRunner(pool, map[string]childstore.Snapshot{"t-1": ssFundi("/w", "e-1", "")})
+	r.deliverable = func(string) error {
+		return &connectapi.ControllerError{Code: protocol.ErrChildExited, Message: "child has exited"}
+	}
+	_, _, err := r.RunSendSteps(context.Background(), "", "t-1", []protocol.SendStep{ssBashStep(protocol.StepSiteChild, "id")})
+	c.Error(err, "exited target")
+	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
+	c.Empty(exec.calls(), "no step may run")
 }
