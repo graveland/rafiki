@@ -156,3 +156,31 @@ func TestClaudeProvider_EncodeUnknownDropped(t *testing.T) {
 func TestClaudeProvider_EncodeGarbageDropped(t *testing.T) {
 	assert.NewAborting(t).Nil((ClaudeProvider{}).EncodeOutbound([]byte(`not json`)), "garbage should be dropped (nil), got")
 }
+
+func TestClaudeProvider_EncodePromptCarriesAttachments(t *testing.T) {
+	c := assert.NewAborting(t)
+	frame := []byte(`{"type":"prompt","message":"what is this","attachments":[{"media_type":"image/png","data":"AQID"}]}`)
+	got := ClaudeProvider{}.EncodeOutbound(frame)
+	c.NotNil(got, "prompt with attachments must encode")
+	var env struct {
+		Message struct {
+			Content []struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				Source struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					Data      string `json:"data"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	c.NoError(json.Unmarshal(got, &env), "bad frame: %s", got)
+	c.Eq(2, len(env.Message.Content), "image then text: %s", got)
+	c.Eq("image", env.Message.Content[0].Type, "image must precede text")
+	c.Eq("base64", env.Message.Content[0].Source.Type, "source type")
+	c.Eq("image/png", env.Message.Content[0].Source.MediaType, "media type")
+	c.Eq("AQID", env.Message.Content[0].Source.Data, "data must stay base64 of the raw bytes")
+	c.Eq("text", env.Message.Content[1].Type, "text block")
+	c.Eq("what is this", env.Message.Content[1].Text, "text")
+}

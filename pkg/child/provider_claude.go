@@ -1,6 +1,9 @@
 package child
 
-import "encoding/json"
+import (
+	"encoding/base64"
+	"encoding/json"
+)
 
 // ClaudeProvider implements ProtocolProvider for Claude Code's stream-json stdio
 // protocol (claude -p --input-format stream-json --output-format stream-json
@@ -126,8 +129,12 @@ func (ClaudeProvider) Parse(line []byte) ParseResult {
 // has no equivalent and silently writing them would corrupt the input stream.
 func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
 	var in struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
+		Type        string `json:"type"`
+		Message     string `json:"message"`
+		Attachments []struct {
+			MediaType string `json:"media_type"`
+			Data      []byte `json:"data"`
+		} `json:"attachments"`
 	}
 	if err := json.Unmarshal(frame, &in); err != nil {
 		return nil
@@ -136,17 +143,40 @@ func (ClaudeProvider) EncodeOutbound(frame []byte) []byte {
 	case "prompt", "steer":
 		// claude -p --input-format stream-json accepts a user message with the
 		// Anthropic message shape. String content is accepted (confirmed in
-		// Task 0 Step 3.7); switch to a [{type:text,text:...}] block array here
-		// if your capture required block content.
+		// Task 0 Step 3.7), so a text-only prompt keeps that form; a prompt
+		// carrying images needs the block array, images first to match
+		// llm.UserContent.
 		env := struct {
 			Type    string `json:"type"`
 			Message struct {
 				Role    string `json:"role"`
-				Content string `json:"content"`
+				Content any    `json:"content"`
 			} `json:"message"`
 		}{Type: "user"}
 		env.Message.Role = "user"
 		env.Message.Content = in.Message
+		if len(in.Attachments) > 0 {
+			type source struct {
+				Type      string `json:"type"`
+				MediaType string `json:"media_type"`
+				Data      string `json:"data"`
+			}
+			type block struct {
+				Type   string  `json:"type"`
+				Text   string  `json:"text,omitempty"`
+				Source *source `json:"source,omitempty"`
+			}
+			blocks := make([]block, 0, len(in.Attachments)+1)
+			for _, a := range in.Attachments {
+				blocks = append(blocks, block{Type: "image", Source: &source{
+					Type: "base64", MediaType: a.MediaType, Data: base64.StdEncoding.EncodeToString(a.Data),
+				}})
+			}
+			if in.Message != "" {
+				blocks = append(blocks, block{Type: "text", Text: in.Message})
+			}
+			env.Message.Content = blocks
+		}
 		out, err := json.Marshal(env)
 		if err != nil {
 			return nil
