@@ -49,7 +49,13 @@ func runClipboardBytes(name string, args ...string) ([]byte, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, name, args...).Output()
 	if err != nil {
-		return nil, err
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if msg := strings.TrimSpace(string(ee.Stderr)); msg != "" {
+				return nil, fmt.Errorf("%s: %s", name, msg)
+			}
+		}
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	return out, nil
 }
@@ -73,7 +79,7 @@ func runClipboardText(name string, args ...string) (string, error) {
 var darwinPNGScript = []string{
 	`use framework "Foundation"`,
 	`set pb to current application's NSPasteboard's generalPasteboard()`,
-	`set d to pb's dataForType(current application's NSPasteboardTypePNG)`,
+	`set d to pb's dataForType:(current application's NSPasteboardTypePNG)`,
 	`if d is missing value then return ""`,
 	`return ((d's base64EncodedStringWithOptions:0) as text)`,
 }
@@ -102,30 +108,57 @@ var linuxTextProbes = []struct {
 func readClipboardImageOrText() (mediaType string, data []byte, text string, err error) {
 	switch runtime.GOOS {
 	case "darwin":
-		if b64, e := runClipboardText("osascript", osascriptArgs(darwinPNGScript)...); e == nil && b64 != "" {
-			if raw, dec := base64.StdEncoding.DecodeString(b64); dec == nil && len(raw) > 0 {
+		var probeErrs []error
+		b64, e := runClipboardText("osascript", osascriptArgs(darwinPNGScript)...)
+		if e != nil {
+			probeErrs = append(probeErrs, e)
+		} else if b64 != "" {
+			raw, dec := base64.StdEncoding.DecodeString(b64)
+			if dec == nil && len(raw) > 0 {
 				return "image/png", raw, "", nil
 			}
+			probeErrs = append(probeErrs, fmt.Errorf("osascript: undecodable image data: %v", dec))
 		}
-		if text, e := runClipboardText("pbpaste"); e == nil && text != "" {
+		text, e := runClipboardText("pbpaste")
+		if e != nil {
+			probeErrs = append(probeErrs, e)
+		} else if text != "" {
 			return "", nil, text, nil
 		}
-		return "", nil, "", errors.New("clipboard holds no image or text")
+		return "", nil, "", noClipboardContent("", probeErrs)
 	case "linux":
+		var probeErrs []error
 		for _, probe := range linuxImageProbes {
-			if raw, e := runClipboardBytes(probe.name, probe.args...); e == nil && len(raw) > 0 {
+			raw, e := runClipboardBytes(probe.name, probe.args...)
+			if e != nil {
+				probeErrs = append(probeErrs, e)
+			} else if len(raw) > 0 {
 				return "image/png", raw, "", nil
 			}
 		}
 		for _, probe := range linuxTextProbes {
-			if text, e := runClipboardText(probe.name, probe.args...); e == nil && text != "" {
+			text, e := runClipboardText(probe.name, probe.args...)
+			if e != nil {
+				probeErrs = append(probeErrs, e)
+			} else if text != "" {
 				return "", nil, text, nil
 			}
 		}
-		return "", nil, "", errors.New("clipboard holds no image or text (need wl-paste or xclip)")
+		return "", nil, "", noClipboardContent(" (need wl-paste or xclip)", probeErrs)
 	default:
 		return "", nil, "", fmt.Errorf("clipboard read unsupported on %s", runtime.GOOS)
 	}
+}
+
+// noClipboardContent is the "nothing to paste" error. Probes that failed
+// outright are named in it: an empty clipboard and a broken probe are
+// different problems and must not read alike.
+func noClipboardContent(hint string, probeErrs []error) error {
+	msg := "clipboard holds no image or text" + hint
+	if len(probeErrs) == 0 {
+		return errors.New(msg)
+	}
+	return fmt.Errorf("%s: %w", msg, errors.Join(probeErrs...))
 }
 
 // osascriptArgs renders script lines as one -e argument per line, the only
