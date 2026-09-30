@@ -150,17 +150,37 @@ func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.
 	if !ok {
 		return nil
 	}
+	blocks := echoImageBlocks(frame)
+	blocks = append(blocks, &rafikiv1.ContentBlock{
+		Index: int32(len(blocks)),
+		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+	})
 	return []*rafikiv1.Event{{
 		TsUnixMs: ts,
-		Payload: &rafikiv1.Event_UserMessage{
-			UserMessage: &rafikiv1.UserMessage{
-				Content: []*rafikiv1.ContentBlock{{
-					Index: 0,
-					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
-				}},
-			},
-		},
+		Payload:  &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{Content: blocks}},
 	}}
+}
+
+// echoImageBlocks returns the frame's attachments as image blocks, in frame
+// order, so the echoed user message shows what EncodeOutbound actually sent.
+func echoImageBlocks(frame []byte) []*rafikiv1.ContentBlock {
+	var in struct {
+		Attachments []struct {
+			MediaType string `json:"media_type"`
+			Data      []byte `json:"data"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(frame, &in); err != nil {
+		return nil
+	}
+	blocks := make([]*rafikiv1.ContentBlock, 0, len(in.Attachments)+1)
+	for _, a := range in.Attachments {
+		blocks = append(blocks, &rafikiv1.ContentBlock{
+			Index: int32(len(blocks)),
+			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: a.MediaType, Data: a.Data}},
+		})
+	}
+	return blocks
 }
 
 // claudeStreamFrame is the full claude stream-json envelope BusFrames needs to

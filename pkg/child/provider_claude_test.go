@@ -184,3 +184,16 @@ func TestClaudeProvider_EncodePromptCarriesAttachments(t *testing.T) {
 	c.Eq("text", env.Message.Content[1].Type, "text block")
 	c.Eq("what is this", env.Message.Content[1].Text, "text")
 }
+
+func TestClaudeProvider_OutboundEchoNativeCarriesImages(t *testing.T) {
+	c := assert.NewAborting(t)
+	frame := []byte(`{"type":"prompt","message":"what is this","attachments":[{"media_type":"image/png","data":"AQID"}]}`)
+	evs := newClaudeProvider().OutboundEchoNative(frame, 1)
+	c.Eq(1, len(evs), "one user message event")
+	blocks := evs[0].GetUserMessage().GetContent()
+	c.Eq(2, len(blocks), "image then text")
+	c.EqDeep([]byte{1, 2, 3}, blocks[0].GetImage().GetData(), "image bytes")
+	c.Eq("image/png", blocks[0].GetImage().GetMediaType(), "media type")
+	c.Eq(int32(1), blocks[1].GetIndex(), "text index follows the image")
+	c.Eq("what is this", blocks[1].GetText().GetText(), "text")
+}
