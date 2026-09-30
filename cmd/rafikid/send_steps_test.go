@@ -140,6 +140,11 @@ func (f *ssFakePool) ConnectClientFor(executorID string) (executorpbconnect.Exec
 func ssSnapshots(m map[string]childstore.Snapshot) func(string) (childstore.Snapshot, bool) {
 	return func(id string) (childstore.Snapshot, bool) {
 		s, ok := m[id]
+		if !ok && id == "c-1" {
+			// The default calling agent of these tests is unrestricted, so a
+			// child step is never gated on a snapshot the test didn't write.
+			return ssSnap("/w/caller", protocol.KindFundi, nil, false, false), true
+		}
 		return s, ok
 	}
 }
@@ -485,7 +490,7 @@ func TestSendStepsCwdBinding(t *testing.T) {
 		TimeoutMs int    `json:"timeout_ms"`
 	}
 	c.Require().NoError(json.Unmarshal(calls[1].GetInputJson(), &bash), "bash input")
-	c.Eq(`cd '/w/it'"'"'s' && git status`, bash.Command, "bash cd prefix")
+	c.Eq("cd '/w/it'\"'\"'s' || exit 1\ngit status", bash.Command, "bash cd prefix")
 	c.Eq(30000, bash.TimeoutMs, "bash default timeout_ms")
 
 	var pm struct {
@@ -749,7 +754,7 @@ rotated`
 		Command string `json:"command"`
 	}
 	c.Require().NoError(json.Unmarshal(calls[1].GetInputJson(), &bash), "bash input")
-	c.Eq("cd '/w' && git status\ngit log -1 --oneline", bash.Command, "bash wire command")
+	c.Eq("cd '/w' || exit 1\ngit status\ngit log -1 --oneline", bash.Command, "bash wire command")
 	var read struct {
 		Path   string `json:"path"`
 		Offset int    `json:"offset"`
@@ -850,4 +855,53 @@ func TestSendStepsNilExecPoolIsNotANonNilInterface(t *testing.T) {
 	c.Error(err, "RunSendSteps error")
 	c.Eq(connect.CodeFailedPrecondition, connect.CodeOf(err), "code")
 	c.Eq("send steps need an executor pool; this daemon has none", ssErrMessage(err), "message")
+}
+
+// A caller whose own allowlist excludes bash cannot reach it through a
+// descendant; the operator (no caller) is ungated.
+func TestSendStepsChildStepsHonourCallerAllowlist(t *testing.T) {
+	c := assert.NewCollecting(t)
+	exec, client := ssScriptedServer(t, ssRun(ssResultText("ok")))
+	pool := &ssFakePool{
+		live:    ssLive("e-1"),
+		clients: map[string]executorpbconnect.ExecutorServiceClient{"e-1": client},
+	}
+	caller := ssFundi("/w", "e-1", "")
+	caller.Tools = []string{"read"}
+	snaps := map[string]childstore.Snapshot{"c-2": caller, "t-1": ssFundi("/w", "e-1", "")}
+	r := ssRunner(pool, snaps)
+	steps := []protocol.SendStep{ssBashStep(protocol.StepSiteChild, "id")}
+
+	_, _, err := r.RunSendSteps(context.Background(), "c-2", "t-1", steps)
+	c.Error(err, "restricted caller")
+	c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "code")
+	c.Empty(exec.calls(), "nothing may run")
+
+	_, _, err = r.RunSendSteps(context.Background(), "", "t-1", steps)
+	c.NoError(err, "operator is ungated")
+}
+
+func TestSendStepsHeaderSubjectStaysOnOneLine(t *testing.T) {
+	c := assert.NewCollecting(t)
+	p := ssStepPlan{step: protocol.SendStep{Read: &protocol.PrefillRead{Path: "a\nb\rc"}}}
+	c.Eq("a b c", ssStepSubject(p), "read subject")
+}
+
+func TestSendStepsTruncateUTF8BackoffIsBounded(t *testing.T) {
+	c := assert.NewCollecting(t)
+	got := ssTruncateUTF8(strings.Repeat("\x80", 100), 50)
+	c.Eq(50, len(got), "binary run is cut at the limit, not walked back")
+}
+
+func TestSendStepsEmptyStreamIsUnavailable(t *testing.T) {
+	c := assert.NewCollecting(t)
+	_, client := ssScriptedServer(t, ssRun())
+	pool := &ssFakePool{
+		live:    ssLive("e-1"),
+		clients: map[string]executorpbconnect.ExecutorServiceClient{"e-1": client},
+	}
+	r := ssRunner(pool, map[string]childstore.Snapshot{"t-1": ssFundi("/w", "e-1", "")})
+	_, _, err := r.RunSendSteps(context.Background(), "", "t-1", []protocol.SendStep{ssBashStep(protocol.StepSiteChild, "id")})
+	c.Error(err, "a stream with no result")
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "code")
 }

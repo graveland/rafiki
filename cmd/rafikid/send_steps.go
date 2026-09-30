@@ -162,6 +162,21 @@ func (r *sendStepRunner) validateSteps(callerID, targetID string, steps []protoc
 			return nil, connect.NewError(connect.CodePermissionDenied,
 				fmt.Errorf("step %d: your tool allowlist does not include %s", index, tool))
 		}
+		// A child step runs with the target's authority, but it is still the
+		// caller's action: a caller whose own allowlist excludes the tool must
+		// not reach it by way of a descendant. The operator (no caller) is
+		// ungated.
+		if step.Where == protocol.StepSiteChild && callerID != "" {
+			callerSnap, ok := r.snap(callerID)
+			if !ok {
+				return nil, connect.NewError(connect.CodeNotFound,
+					fmt.Errorf("step %d: unknown agent %s", index, callerID))
+			}
+			if !ssSenderAllows(callerSnap, tool) {
+				return nil, connect.NewError(connect.CodePermissionDenied,
+					fmt.Errorf("step %d: your tool allowlist does not include %s", index, tool))
+			}
+		}
 		plans[i] = ssStepPlan{
 			step:        step,
 			tool:        tool,
@@ -384,7 +399,7 @@ func ssExecuteRequest(p ssStepPlan) (*executorpb.ExecuteRequest, error) {
 	case p.step.Bash != nil:
 		command := p.step.Bash.Command
 		if p.workspaceID == "" && p.cwd != "" {
-			command = "cd " + shellSingleQuote(p.cwd) + " && " + command
+			command = "cd " + shellSingleQuote(p.cwd) + " || exit 1\n" + command
 		}
 		timeout := p.step.Bash.TimeoutMs
 		if timeout == 0 {
@@ -439,9 +454,11 @@ func ssReadStepInput(p ssStepPlan) ssReadInput {
 // stream is always closed; err is stream.Err() after the loop.
 func ssDrainExecute(stream *connect.ServerStreamForClient[executorpb.ExecuteResponse]) (text string, failure *executorpb.Failure, err error) {
 	defer stream.Close()
+	sawResult := false
 	for stream.Receive() {
 		switch ev := stream.Msg().Event.(type) {
 		case *executorpb.ExecuteResponse_Result:
+			sawResult = true
 			for _, c := range ev.Result.Content {
 				if t := c.GetText(); t != "" {
 					text += t
@@ -451,7 +468,13 @@ func ssDrainExecute(stream *connect.ServerStreamForClient[executorpb.ExecuteResp
 			failure = ev.Failed
 		}
 	}
-	return text, failure, stream.Err()
+	if err := stream.Err(); err != nil {
+		return text, failure, err
+	}
+	if !sawResult && failure == nil {
+		return text, failure, errors.New("executor returned no result")
+	}
+	return text, failure, nil
 }
 
 // ssStepSubject renders a header's subject. Read shows the path AS GIVEN
@@ -473,17 +496,16 @@ func ssStepSubject(p ssStepPlan) string {
 			}
 			subject += ":" + start + "-" + end
 		}
-		return subject
+		return ssTruncateUTF8(ssFlatten(subject), sendStepHeaderSubjectMax)
 	case p.step.Bash != nil:
-		flat := strings.ReplaceAll(p.step.Bash.Command, "\n", " ")
-		return ssTruncateUTF8(flat, sendStepHeaderSubjectMax)
+		return ssTruncateUTF8(ssFlatten(p.step.Bash.Command), sendStepHeaderSubjectMax)
 	case p.step.PymoduleRun != nil:
 		pm := p.step.PymoduleRun
 		subject := pm.Repo + "/" + pm.Script
 		if len(pm.Args) > 0 {
 			subject += " " + strings.Join(pm.Args, " ")
 		}
-		return subject
+		return ssTruncateUTF8(ssFlatten(subject), sendStepHeaderSubjectMax)
 	}
 	return ""
 }
@@ -516,6 +538,12 @@ func ssLargestSteps(plans []ssStepPlan, outcomes []ssRunOutcome) string {
 	return strings.Join(parts, ", ")
 }
 
+// ssLineBreaks replaces every character that could end a header line.
+var ssLineBreaks = strings.NewReplacer("\r", " ", "\n", " ", "\u2028", " ", "\u2029", " ", "\u0085", " ")
+
+// ssFlatten keeps a header subject on one line.
+func ssFlatten(s string) string { return ssLineBreaks.Replace(s) }
+
 // ssTruncateUTF8 cuts s to at most max bytes, backing off to a UTF-8 rune
 // boundary so the result is always valid UTF-8.
 func ssTruncateUTF8(s string, max int) string {
@@ -523,8 +551,11 @@ func ssTruncateUTF8(s string, max int) string {
 		return s
 	}
 	k := max
-	for k > 0 && !utf8.RuneStart(s[k]) {
+	for back := 0; back < utf8.UTFMax && k > 0 && !utf8.RuneStart(s[k]); back++ {
 		k--
+	}
+	if !utf8.RuneStart(s[k]) {
+		k = max
 	}
 	return s[:k]
 }
@@ -536,13 +567,12 @@ func shellSingleQuote(s string) string {
 }
 
 // randomStepNonce draws the rendered block's delimiter nonce: 8 bytes of
-// crypto/rand as 16 hex chars. crypto/rand failing means the OS CSPRNG is
-// broken; the nonce only delimits rendered output, so degrading to a
-// time-based value keeps the send working rather than failing it.
+// crypto/rand as 16 hex chars. A failing CSPRNG is unrecoverable; there is no
+// weaker fallback, since a guessable nonce defeats the delimiter.
 func randomStepNonce() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%016x", time.Now().UnixNano())
+		panic(fmt.Sprintf("send steps: crypto/rand: %v", err))
 	}
 	return hex.EncodeToString(b)
 }

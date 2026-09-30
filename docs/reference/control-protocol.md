@@ -904,7 +904,7 @@ at send time, BEFORE the message is queued; each step's rendered output is
 appended to the message text the child reads ("text\n\nrendered", or the
 rendered output alone when the request carried no text blocks). Every step
 carries `where` (`StepSite`: `CHILD` runs on the target child's executor and
-workspace, `SENDER` on the caller's own) and at most one of `read`, `bash`,
+workspace, `SENDER` on the caller's own) and exactly one of `read`, `bash`,
 `pymodule_run`. An unspecified site or an absent kind is refused
 `invalid_argument` per step, never defaulted; steps with `ABORT` are refused
 the same way, because an abort carries no content. The response carries one
@@ -914,17 +914,22 @@ The handler runs the steps through the wired `SendStepRunner`
 (`pkg/connectapi/send_steps.go`); until the daemon attaches one, a send with
 steps fails `unavailable` while a stepless send is unaffected. The daemon's
 runner is `cmd/rafikid/send_steps.go`, shared by the Connect `Send`, the
-child-bound `agent_send` tool (`controllerSpawner`) and the MCP face's
-(`userSpawner`).
+child-bound `agent_send` tool (`controllerSpawner`, also what a child
+credential gets on the MCP face) and the operator MCP path (`userSpawner`).
 
 **Execution.** All steps are validated before the first one runs, so a
 refused send has no side effects; then they run sequentially in request order
-under one 120 s deadline. A refused or failed send enqueues nothing.
+under one 120 s deadline. A refusal during validation runs nothing. A failure
+during execution (`CODE_DENIED`, a lost executor, the deadline, the rendered
+cap) leaves the side effects of earlier steps in place; the send still
+enqueues nothing.
 
 **Whose authority.** `CHILD` steps run on the TARGET's snapshot: its
 `rafiki/executor` (must be live), `rafiki/workspace` (may be empty) and cwd.
 `SENDER` steps run on the CALLER's, and only the output reaches the target.
-A `SENDER` step is refused `failed_precondition` when the caller has no
+A caller with a position in the agent tree is also held to its own tool
+allowlist for `CHILD` steps, so it cannot reach a tool through a descendant
+that it could not run itself; the operator is ungated. A `SENDER` step is refused `failed_precondition` when the caller has no
 position in the agent tree (the operator and MCP face have none), and
 `permission_denied` when the caller's own tool allowlist does not include the
 step's tool: a fundi child needs `read`/`bash`/`pymodule_run` admitted by its
@@ -937,7 +942,7 @@ child needs no tool restriction at all; a script never qualifies.
 |---|---|
 | steps per send | 16 |
 | `bash` timeout | default 30 s, at most 60 s |
-| per-step executor call | 60 s |
+| per-step executor call | 60 s (`bash`: its `timeout_ms` plus 5 s) |
 | whole send | 120 s |
 | per-step output | 32 KiB, kept from the front, marked `[truncated: showing N of M bytes]` |
 | rendered block | 128 KiB, refused `invalid_argument` naming the five largest steps |
