@@ -694,27 +694,73 @@ func TestImageOnlyUserBlockHasNoBlankTextRow(t *testing.T) {
 }
 
 // A tool result's image draws under the SAME gutter as the result's text —
-// gutters survive, per the design.
+// gutters survive, per the design — and AFTER the text: §5.1 orders a tool
+// result as its text, then its images.
 func TestImageInToolResultRendersUnderTheGutter(t *testing.T) {
+	c := assert.NewCollecting(t)
 	img := &rafikiv1.ImageBlock{MediaType: "image/png", Data: []byte{1, 2, 3}}
 	blocks := []session.Block{{
 		Kind: session.KindAssistant, Final: true,
 		ToolCalls: []session.ToolCall{{
-			Name: "bash", HasResult: true, Images: []*rafikiv1.ImageBlock{img},
+			Name: "bash", HasResult: true, Result: "exit 0",
+			Images: []*rafikiv1.ImageBlock{img},
 		}},
 	}}
 	joined := ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
-	assert.NewCollecting(t).StrContains(joined, "image/png", "the image was not rendered:\n")
-	var hit bool
-	for _, l := range strings.Split(joined, "\n") {
+	c.StrContains(joined, "image/png", "the image was not rendered:\n")
+
+	var textAt, imgAt int
+	found := false
+	for i, l := range strings.Split(joined, "\n") {
+		if strings.Contains(l, "exit 0") {
+			textAt = i
+		}
 		if strings.Contains(l, "image/png") {
-			hit = hit || strings.Contains(l, "│")
+			imgAt, found = i, true
 		}
 	}
-	assert.NewCollecting(t).True(hit, "no image row carries the result gutter:\n%s", joined)
+	c.Require().True(found, "no image row:\n%s", joined)
+	c.Require().True(textAt < imgAt, "the result text must render before its image: text at row %d, image at row %d:\n%s", textAt, imgAt, joined)
+	for _, l := range strings.Split(joined, "\n") {
+		if strings.Contains(l, "exit 0") || strings.Contains(l, "image/png") {
+			c.StrContains(l, "│", "each row must carry the result gutter: %q", l)
+		}
+	}
 }
 
-// An assistant block's images are named too, after its prose.
+// An assistant block's images are named too, and AFTER its prose (§5.1), under
+// the same solid bar the prose rows carry.
+func TestAssistantProseRendersBeforeItsImage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	img := &rafikiv1.ImageBlock{MediaType: "image/png", Data: []byte{1, 2, 3}}
+	blocks := []session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		Text: "the prose", Images: []*rafikiv1.ImageBlock{img},
+	}}
+	joined := ansi.Strip(strings.Join(newRenderer().Lines(blocks, 1, 100), "\n"))
+	c.StrContains(joined, "the prose", "missing prose:\n%s", joined)
+	c.StrContains(joined, "image/png", "the image was not rendered:\n%s", joined)
+
+	var proseAt, imgAt int
+	found := false
+	for i, l := range strings.Split(joined, "\n") {
+		if strings.Contains(l, "the prose") {
+			proseAt = i
+		}
+		if strings.Contains(l, "image/png") {
+			imgAt, found = i, true
+		}
+	}
+	c.Require().True(found, "no image row:\n%s", joined)
+	c.Require().True(proseAt < imgAt, "the prose must render before its image: prose at row %d, image at row %d:\n%s", proseAt, imgAt, joined)
+	for _, l := range strings.Split(joined, "\n") {
+		if strings.Contains(l, "image/png") {
+			c.StrContains(l, "▌", "the image row must carry the assistant bar: %q", l)
+		}
+	}
+}
+
+// An assistant block's images are named too.
 func TestImageInAssistantBlockIsNamed(t *testing.T) {
 	img := &rafikiv1.ImageBlock{MediaType: "image/png", Data: []byte{1, 2, 3}}
 	blocks := []session.Block{{
@@ -727,24 +773,37 @@ func TestImageInAssistantBlockIsNamed(t *testing.T) {
 
 // MediaType is data, so it is sanitized like any transcript text: an escape
 // sequence or a bare CR arriving inside a media type must not reach the
-// terminal.
+// terminal. The absence assertions run on the RAW rendered output — stripping
+// first would delete the ESC byte before the assertion could see it, and the
+// check could never fail.
 func TestImagePlaceholderLineIsSanitized(t *testing.T) {
 	c := assert.NewCollecting(t)
 	img := &rafikiv1.ImageBlock{MediaType: "image/png\x1b[2J\r", Data: []byte{1}}
 
 	r := newRenderer()
 	r.width = 80
-	userOut := ansi.Strip(r.renderBlock(session.Block{
+	userOut := r.renderBlock(session.Block{
 		Kind: session.KindUser, Images: []*rafikiv1.ImageBlock{img},
-	}))
+	})
 	c.StrContains(userOut, "image/png", "user block")
 	c.NotStrContains(userOut, "\x1b[2J", "user block must not leak the escape sequence:\n")
 	c.NotStrContains(userOut, "\r", "user block must not leak the carriage return:\n")
 
-	toolOut := render(session.ToolCall{
-		Name: "bash", HasResult: true, Images: []*rafikiv1.ImageBlock{img},
-	})
+	toolOut := strings.Join(newRenderer().Lines([]session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		ToolCalls: []session.ToolCall{{
+			Name: "bash", HasResult: true, Images: []*rafikiv1.ImageBlock{img},
+		}},
+	}}, 1, 100), "\n")
 	c.StrContains(toolOut, "image/png", "tool call")
 	c.NotStrContains(toolOut, "\x1b[2J", "tool call must not leak the escape sequence:\n")
 	c.NotStrContains(toolOut, "\r", "tool call must not leak the carriage return:\n")
+
+	assistantOut := strings.Join(newRenderer().Lines([]session.Block{{
+		Kind: session.KindAssistant, Final: true,
+		Images: []*rafikiv1.ImageBlock{img},
+	}}, 1, 100), "\n")
+	c.StrContains(assistantOut, "image/png", "assistant block")
+	c.NotStrContains(assistantOut, "\x1b[2J", "assistant block must not leak the escape sequence:\n")
+	c.NotStrContains(assistantOut, "\r", "assistant block must not leak the carriage return:\n")
 }
