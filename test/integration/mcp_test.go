@@ -77,7 +77,9 @@ var mcpToolNames = []string{
 // owner-dimensioned and there is no per-child memory namespace, so binding it
 // would hand the child read AND write on its owner's memories (see
 // newRecallBinding). The preset and pymodule authoring tools stay listed: they
-// refuse at call time now, and a listed refusal is one the model reads.
+// refuse at call time now, and a listed refusal is one the model reads. The
+// child surface also ADDS agent_report and agent_result: a child reports to
+// its own parent, which an operator session has no parent to do.
 var mcpChildToolNames = func() []string {
 	dropped := map[string]bool{
 		"recall": true, "recall_context": true,
@@ -89,7 +91,7 @@ var mcpChildToolNames = func() []string {
 			out = append(out, name)
 		}
 	}
-	return out
+	return append(out, "agent_report", "agent_result")
 }()
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
