@@ -655,9 +655,12 @@ authenticated profile (or relabel `owner=`) so the two agree.
 
 **The executor's environment.** launchd/systemd --user don't inherit a login
 shell, so `executor service install` captures the installing shell's
-environment into `<config dir>/executor.env` (0600) at install time — three
-classes are skipped (rafiki's own `RAFIKI_*`/provider keys, `PATH`, and
-stale session/GUI residue like `PWD`/`TERM*`/`DIRENV_*`). A second,
+environment into `<config dir>/executor.env` (0600) at install time — a
+few classes are skipped (rafiki's own `RAFIKI_*`/provider keys, `PATH`, and
+per-session residue: `PWD`/`TERM*`/`DIRENV_*`, `SSH_*` other than
+`SSH_AUTH_SOCK` — `SSH_CLIENT` makes bash source `~/.bashrc` in every tool
+shell — an enclosing Claude Code session's `CLAUDE_CODE_*`/`ANTHROPIC_*`
+routing, and zsh/zplug/starship interactive state). A second,
 hand-maintained file, `<config dir>/executor-overrides.env`, sets variables
 **unconditionally** — needed for anything the service manager itself seeds
 wrong, like launchd's per-session `SSH_AUTH_SOCK`. See `.env.example` and

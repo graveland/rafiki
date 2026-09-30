@@ -79,9 +79,28 @@ func TestCaptureExecutorEnvKeepsToolchainVarsAndDropsSessionOnes(t *testing.T) {
 		"__CFBundleIdentifier=com.googlecode.iterm2",
 		"TMPDIR=/var/folders/xx/T/",
 		"EMPTY=",
+		// Per-login-session state: SSH_CLIENT makes bash source ~/.bashrc.
+		"SSH_CLIENT=10.0.0.1 53434 22",
+		"SSH_CONNECTION=10.0.0.1 53434 10.0.0.2 22",
+		"SSH_TTY=/dev/ttys002",
+		"BASH_ENV=/Users/you/.bash_env",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_SESSION_ID=abc",
+		"CLAUDE_PID=6384",
+		"ANTHROPIC_CUSTOM_HEADERS=X-Rafiki-Session: c_x",
+		"ANTHROPIC_BASE_URL=https://rafiki.example.com",
+		"AI_AGENT=claude-code_agent",
+		"VSCODE_INJECTION=1",
+		"CLAUDE_CONFIG_DIR=/Users/you/.claude-personal",
+		"ZPLUG_HOME=/opt/homebrew/opt/zplug",
+		"_ZPLUG_VERSION=2.4.2",
+		"STARSHIP_CACHE=/Users/you/.starship/cache",
+		"FPATH=/usr/share/zsh/site-functions",
+		"HISTFILE=/Users/you/.zhistory",
+		"DISABLE_AUTOUPDATER=0",
 	}
 	got := captureExecutorEnv(environ)
-	for _, k := range []string{"GOPATH", "GITHUB_TOKEN", "http_proxy", "NIX_PATH", "SSH_AUTH_SOCK"} {
+	for _, k := range []string{"GOPATH", "GITHUB_TOKEN", "http_proxy", "NIX_PATH", "SSH_AUTH_SOCK", "CLAUDE_CONFIG_DIR"} {
 		_, ok := got[k]
 		c.True(ok, "captureExecutorEnv dropped %s; toolchain vars must survive", k)
 	}
@@ -90,6 +109,10 @@ func TestCaptureExecutorEnvKeepsToolchainVarsAndDropsSessionOnes(t *testing.T) {
 		"ITERM_PROFILE", "LC_TERMINAL", "DISPLAY", "SECURITYSESSIONID", "XPC_FLAGS",
 		"__CFBundleIdentifier", "TMPDIR", "PWD", "OLDPWD", "SHLVL", "_", "GPG_TTY",
 		"DIRENV_DIFF", "DIRENV_DIR", "EMPTY",
+		"SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY", "BASH_ENV", "CLAUDECODE",
+		"CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "ANTHROPIC_CUSTOM_HEADERS",
+		"ANTHROPIC_BASE_URL", "AI_AGENT", "VSCODE_INJECTION", "ZPLUG_HOME",
+		"_ZPLUG_VERSION", "STARSHIP_CACHE", "FPATH", "HISTFILE", "DISABLE_AUTOUPDATER",
 		// Reserved rafiki variables and provider keys.
 		"RAFIKI_DB", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "FUNDI_SOMETHING",
 	} {

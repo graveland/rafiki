@@ -432,6 +432,23 @@ func credFileExists(path string) bool {
 //     __CFBundleIdentifier, __CF_USER_TEXT_ENCODING, COMMAND_MODE,
 //     OSLogRateLimit, STARSHIP_SESSION_KEY.
 //
+// A fourth class is excluded by PATTERN (executorEnvExcludedPrefixes) because
+// the names are open-ended and every member is per-login-session state:
+//
+//   - SSH_* except SSH_AUTH_SOCK: SSH_CLIENT/SSH_CONNECTION/SSH_TTY describe
+//     one ssh login that is long gone, and SSH_CLIENT is actively harmful —
+//     bash treats it as "I was started by sshd" and sources ~/.bashrc even
+//     for a non-interactive `bash -c`, so every tool shell's PATH is rebuilt
+//     by the operator's interactive startup file.
+//   - Variables an enclosing Claude Code session injects into its children
+//     (CLAUDE_CODE_*, ANTHROPIC_CUSTOM_*, ...): installing from inside one
+//     would freeze that session's id, messaging socket and rafiki routing
+//     headers into the executor for every later child.
+//   - Terminal-emulator and editor-host identity (TERM_*, ITERM_*, LC_TERMINAL*,
+//     VSCODE_*).
+//   - Interactive-shell framework state (ZPLUG_*, STARSHIP_*) and zsh's own
+//     history/completion settings (FPATH, HIST*, SAVEHIST, ...).
+//
 // Everything else is captured, INCLUDING SSH_AUTH_SOCK despite being
 // session-scoped: operators deliberately configure fixed agent socket paths
 // precisely so they survive reboots, and ssh signing on an executor is a
@@ -473,7 +490,70 @@ var executorEnvExcluded = map[string]bool{
 	"__CF_USER_TEXT_ENCODING": true,
 	"COMMAND_MODE":            true,
 	"OSLogRateLimit":          true,
-	"STARSHIP_SESSION_KEY":    true,
+
+	// Shell startup injectors and prompt state: BASH_ENV/ENV make every
+	// non-interactive shell source an arbitrary file.
+	"BASH_ENV":       true,
+	"ENV":            true,
+	"PROMPT_COMMAND": true,
+	"PS1":            true,
+
+	// Interactive zsh state with no meaning to a headless tool shell.
+	"FPATH":                   true,
+	"HISTFILE":                true,
+	"HISTSIZE":                true,
+	"SAVEHIST":                true,
+	"REPORTTIME":              true,
+	"TIMEFMT":                 true,
+	"PERIOD":                  true,
+	"COMPLETION_WAITING_DOTS": true,
+
+	// Set by an enclosing Claude Code session (see the pattern list below for
+	// the prefixed ones). ANTHROPIC_BASE_URL is the rafiki proxy address that
+	// session was pointed at.
+	"CLAUDECODE":               true,
+	"CLAUDE_PID":               true,
+	"CLAUDE_EFFORT":            true,
+	"AI_AGENT":                 true,
+	"COREPACK_ENABLE_AUTO_PIN": true,
+	"DISABLE_AUTOUPDATER":      true,
+	"ANTHROPIC_BASE_URL":       true,
+}
+
+// executorEnvExcludedPrefixes are the open-ended families captureExecutorEnv
+// drops by name prefix; executorEnvKept carves out the exceptions.
+var executorEnvExcludedPrefixes = []string{
+	"SSH_",
+	"CLAUDE_CODE_",
+	"_CLAUDE_CODE_",
+	"ANTHROPIC_CUSTOM_",
+	"TERM_",
+	"ITERM_",
+	"LC_TERMINAL",
+	"VSCODE_",
+	"ZPLUG_",
+	"_ZPLUG_",
+	"STARSHIP_",
+}
+
+// executorEnvKept is the exception list to executorEnvExcludedPrefixes.
+var executorEnvKept = map[string]bool{
+	"SSH_AUTH_SOCK": true,
+}
+
+func executorEnvDropped(k string) bool {
+	if executorEnvKept[k] {
+		return false
+	}
+	if executorEnvExcluded[k] || paths.IsReservedEnvKey(k) {
+		return true
+	}
+	for _, p := range executorEnvExcludedPrefixes {
+		if strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // captureExecutorEnv returns environ minus the exclusions above. It does NOT
@@ -486,7 +566,7 @@ func captureExecutorEnv(environ []string) map[string]string {
 		if !ok || v == "" {
 			continue
 		}
-		if executorEnvExcluded[k] || paths.IsReservedEnvKey(k) {
+		if executorEnvDropped(k) {
 			continue
 		}
 		out[k] = v
