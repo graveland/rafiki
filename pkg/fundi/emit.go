@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/routing"
 )
 
@@ -105,14 +106,14 @@ func (e *Emitter) BatchWaitEnd() {
 
 // UserMessage emits the message_start/message_end pair for an accepted
 // prompt or steer, and accumulates the echoed user message for the eventual
-// agent_end frame.
-func (e *Emitter) UserMessage(text string) {
+// agent_end frame. Images ride the native event only; the pi frames stay text.
+func (e *Emitter) UserMessage(text string, images []llm.UserImage) {
 	ts := time.Now().UnixMilli()
 	msg := child.PiUserMessage{Role: "user", ID: fmt.Sprintf("user-%d", ts), Content: text, Timestamp: ts}
 	e.fe.Emit(child.PiUserMessageStart(msg))
 	e.fe.Emit(child.PiUserMessageEnd(msg))
 	e.accumulate(msg)
-	e.publishNative(&rafikiv1.UserMessage{Content: nativeText(text)})
+	e.publishNative(&rafikiv1.UserMessage{Content: nativeUserContent(text, images)})
 }
 
 // AssistantTurn maps resp into a PiAssistantMessage and emits
@@ -361,6 +362,32 @@ func streamingToolArgs(id, name string, input json.RawMessage) map[string]any {
 		slog.Warn("emit: tool_use input unmarshal failed", "tool", name, "id", id, "error", err)
 		return map[string]any{"_raw": string(input)}
 	}
+}
+
+// nativeUserContent mirrors llm.UserContent's block order: images first, then
+// the text, an empty text omitted and an empty image skipped. A text-only
+// prompt keeps nativeText's single block, empty text included.
+func nativeUserContent(text string, images []llm.UserImage) []*rafikiv1.ContentBlock {
+	var out []*rafikiv1.ContentBlock
+	for _, img := range images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		out = append(out, &rafikiv1.ContentBlock{
+			Index: int32(len(out)),
+			Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: img.MediaType, Data: img.Data}},
+		})
+	}
+	if len(out) == 0 {
+		return nativeText(text)
+	}
+	if text != "" {
+		out = append(out, &rafikiv1.ContentBlock{
+			Index: int32(len(out)),
+			Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+		})
+	}
+	return out
 }
 
 // MapAssistantMessage maps an Anthropic SDK response message onto the pi

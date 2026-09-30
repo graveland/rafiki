@@ -12,6 +12,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/fundi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/llm"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -29,7 +30,7 @@ func TestEmitterPublishesNativeUserMessage(t *testing.T) {
 	sink := &capturingSink{}
 	em.SetNativeSink(sink)
 
-	em.UserMessage("hello there")
+	em.UserMessage("hello there", nil)
 
 	c.Len(sink.events, 1, "got %d native events, want 1", len(sink.events))
 	um := sink.events[0].GetUserMessage()
@@ -45,9 +46,63 @@ func TestEmitterWithNoSinkDoesNotPanic(t *testing.T) {
 	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
 	em := fundi.NewEmitter(fe, "anthropic", nil)
 
-	em.UserMessage("hello there")
+	em.UserMessage("hello there", nil)
 
 	assert.NewAborting(t).NotEq(0, out.Len(), "pi frame output disappeared; the pi path must be unchanged")
+}
+
+// Images ride the native user_message event only, in llm.UserContent's order:
+// images first, the text last, and an image with no data skipped entirely.
+func TestEmitterUserMessageCarriesImages(t *testing.T) {
+	c := assert.NewAborting(t)
+	var out bytes.Buffer
+	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
+	em := fundi.NewEmitter(fe, "anthropic", nil)
+
+	sink := &capturingSink{}
+	em.SetNativeSink(sink)
+
+	em.UserMessage("look", []llm.UserImage{
+		{MediaType: "image/png", Data: []byte{1, 2, 3}},
+		{MediaType: "image/png"},
+		{MediaType: "image/jpeg", Data: []byte{4}},
+	})
+
+	c.Len(sink.events, 1, "got %d native events, want 1", len(sink.events))
+	um := sink.events[0].GetUserMessage()
+	c.NotNil(um, "event is not a user message")
+	c.Len(um.Content, 3, "got %d content blocks, want 3 (empty-Data image skipped)", len(um.Content))
+	img0 := um.Content[0].GetImage()
+	c.Require().NotNil(img0, "content[0] is not an image")
+	c.Eq("image/png", img0.MediaType, "content[0] media type")
+	c.EqDiff([]byte{1, 2, 3}, img0.Data, "content[0] data")
+	c.Eq(int32(0), um.Content[0].Index, "content[0] index")
+	img1 := um.Content[1].GetImage()
+	c.Require().NotNil(img1, "content[1] is not an image")
+	c.Eq("image/jpeg", img1.MediaType, "content[1] media type")
+	c.EqDiff([]byte{4}, img1.Data, "content[1] data")
+	c.Eq(int32(1), um.Content[1].Index, "content[1] index")
+	c.Eq("look", um.Content[2].GetText().GetText(), "content[2] text")
+	c.Eq(int32(2), um.Content[2].Index, "content[2] index")
+}
+
+// An image-only prompt has no text block at all — matching llm.UserContent,
+// which omits empty text rather than sending a content-free block.
+func TestEmitterImageOnlyPromptHasNoTextBlock(t *testing.T) {
+	c := assert.NewAborting(t)
+	var out bytes.Buffer
+	fe := fundi.NewFrontend(bytes.NewReader(nil), &out, nil)
+	em := fundi.NewEmitter(fe, "anthropic", nil)
+
+	sink := &capturingSink{}
+	em.SetNativeSink(sink)
+
+	em.UserMessage("", []llm.UserImage{{MediaType: "image/png", Data: []byte{1}}})
+
+	um := sink.events[0].GetUserMessage()
+	c.Require().NotNil(um, "event is not a user message")
+	c.Len(um.Content, 1, "got %d content blocks, want 1", len(um.Content))
+	c.NotNil(um.Content[0].GetImage(), "sole content block is not an image")
 }
 
 // A multi-call agentic turn must publish the FINAL call's usage on turn_end —

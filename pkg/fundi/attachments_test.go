@@ -9,6 +9,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/llm"
 
 	"github.com/multigres/testkit/assert"
@@ -129,4 +130,33 @@ func TestAttachmentFrameDispatchesToTheAttachmentHandler(t *testing.T) {
 	c.Require().Len(rec.imgs, 1, "images")
 	c.Eq("image/png", rec.imgs[0].MediaType, "media type")
 	c.Eq("hello", string(rec.imgs[0].Data), "decoded bytes")
+}
+
+// TestPromptWithAttachmentsEchoesTheImage pins the ECHO half of image
+// delivery: the native user_message the engine publishes for the cockpit
+// carries the image too, in the same order the wire gets it.
+func TestPromptWithAttachmentsEchoesTheImage(t *testing.T) {
+	c := assert.NewAborting(t)
+	sink := &recordingSink{}
+	eng, _ := newTestEngineWithConfig(t, fakeToolSet{}, newCapturingSender(t, sampleEndTurn), func(cfg *EngineConfig) {
+		cfg.NativeSink = sink
+	})
+	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
+	c.NoError(err, "decode fixture")
+	eng.HandlePromptWithAttachments("F1", "look", []llm.UserImage{{MediaType: "image/png", Data: png}})
+	eng.Wait()
+	var um *rafikiv1.UserMessage
+	for _, ev := range sink.events {
+		if u := ev.GetUserMessage(); u != nil {
+			um = u
+			break
+		}
+	}
+	c.Require().NotNil(um, "no native user_message published")
+	c.Require().Len(um.Content, 2, "got %d content blocks, want image then text", len(um.Content))
+	img := um.Content[0].GetImage()
+	c.Require().NotNil(img, "content[0] is not an image (runTurn passed nil instead of images)")
+	c.Eq("image/png", img.MediaType, "media type")
+	c.EqDiff(png, img.Data, "image bytes did not survive to the echo")
+	c.Eq("look", um.Content[1].GetText().GetText(), "content[1] text")
 }

@@ -784,7 +784,7 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	e.cancel = cancel
 	e.mu.Unlock()
 
-	e.em.UserMessage(text)
+	e.em.UserMessage(text, images)
 	e.em.AgentStart()
 
 	events, sendOpts := e.events()
@@ -1194,7 +1194,7 @@ func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
 	}
 	e.consume(ids)
 	for _, t := range texts {
-		e.em.UserMessage(t)
+		e.em.UserMessage(t, nil)
 	}
 	return llm.UserText(strings.Join(texts, "\n"))
 }
