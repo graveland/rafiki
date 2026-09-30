@@ -1,6 +1,7 @@
 package fundi
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -108,10 +109,18 @@ type attachmentRecorder struct {
 	text  string
 	imgs  []llm.UserImage
 	calls int
+	// steerCalls counts steer dispatches separately so a steer frame that
+	// fell through to the prompt path is caught rather than miscounted.
+	steerCalls int
 }
 
 func (h *attachmentRecorder) HandlePromptWithAttachments(id, text string, images []llm.UserImage) {
 	h.calls++
+	h.id, h.text, h.imgs = id, text, images
+}
+
+func (h *attachmentRecorder) HandleSteerWithAttachments(id, text string, images []llm.UserImage) {
+	h.steerCalls++
 	h.id, h.text, h.imgs = id, text, images
 }
 
@@ -159,4 +168,60 @@ func TestPromptWithAttachmentsEchoesTheImage(t *testing.T) {
 	c.Eq("image/png", img.MediaType, "media type")
 	c.EqDiff(png, img.Data, "image bytes did not survive to the echo")
 	c.Eq("look", um.Content[1].GetText().GetText(), "content[1] text")
+}
+
+// TestSteerFrameWithAttachmentsDispatchesToTheAttachmentHandler pins the steer
+// half of the frame parse: a steer is not a prompt, and used to drop its images.
+func TestSteerFrameWithAttachmentsDispatchesToTheAttachmentHandler(t *testing.T) {
+	c := assert.NewAborting(t)
+	rec := &attachmentRecorder{}
+	in := strings.NewReader(`{"type":"steer","id":"F2","message":"and this",` +
+		`"attachments":[{"media_type":"image/png","data":"aGVsbG8="}]}` + "\n")
+	c.NoError(NewFrontend(in, io.Discard, rec).Run(), "frontend run")
+	c.Eq(1, rec.steerCalls, "steer dispatch count")
+	c.Eq(0, rec.calls, "a steer must not take the prompt path")
+	c.Eq("F2", rec.id, "frame id")
+	c.Eq("and this", rec.text, "text")
+	c.Require().Len(rec.imgs, 1, "images")
+	c.Eq("hello", string(rec.imgs[0].Data), "decoded bytes")
+}
+
+// TestSteerWithAttachmentsMidTurnReachesTheWire pins the engine half: a steer
+// buffered while a tool runs is drained into the turn with its image, images
+// first, and the echo carries the image as well.
+func TestSteerWithAttachmentsMidTurnReachesTheWire(t *testing.T) {
+	c := assert.NewAborting(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ts := fakeToolSet{"bash": func(ctx context.Context, in json.RawMessage) (string, error) {
+		close(started)
+		<-release
+		return "file.txt", nil
+	}}
+	cs := newCapturingSender(t, sampleResp, sampleEndTurn)
+	sink := &recordingSink{}
+	eng, _ := newTestEngineWithConfig(t, ts, cs, func(cfg *EngineConfig) { cfg.NativeSink = sink })
+	png, err := base64.StdEncoding.DecodeString(png1x1Base64)
+	c.NoError(err, "decode fixture")
+
+	eng.HandlePromptID("F1", "go")
+	<-started
+	eng.HandleSteerWithAttachments("F2", "look", []llm.UserImage{{MediaType: "image/png", Data: png}})
+	close(release)
+	eng.Wait()
+
+	// The steer rides the user message that answers the tool call, after the
+	// tool_result: image then text is asserted on what follows it.
+	blocks := lastUserBlocks(t, cs.lastParams(t))
+	c.Require().Len(blocks, 3, "tool_result, image, text")
+	c.Eq("tool_result", blocks[0].Type, "tool_result leads")
+	assertImageThenText(t, blocks[1:])
+	var steerEcho *rafikiv1.UserMessage
+	for _, ev := range sink.events {
+		if u := ev.GetUserMessage(); u != nil && len(u.Content) == 2 {
+			steerEcho = u
+		}
+	}
+	c.Require().NotNil(steerEcho, "no user_message echo carried the steer's image")
+	c.EqDiff(png, steerEcho.Content[0].GetImage().GetData(), "echoed image bytes")
 }

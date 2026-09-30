@@ -419,14 +419,20 @@ func (e *Engine) enqueue(q queued) {
 // HandleSteerID buffers text for mid-turn injection when a turn is running,
 // and otherwise treats it as a plain prompt.
 func (e *Engine) HandleSteerID(id, text string) {
+	e.HandleSteerWithAttachments(id, text, nil)
+}
+
+// HandleSteerWithAttachments is HandleSteerID for a steer carrying images. A
+// steer that arrives between turns becomes a prompt, attachments included.
+func (e *Engine) HandleSteerWithAttachments(id, text string, images []llm.UserImage) {
 	e.mu.Lock()
 	if e.cancel != nil {
-		e.steerBuf = append(e.steerBuf, queued{ids: idSlice(id), text: text})
+		e.steerBuf = append(e.steerBuf, queued{ids: idSlice(id), text: text, attachments: images})
 		e.mu.Unlock()
 		return
 	}
 	e.mu.Unlock()
-	e.HandlePromptID(id, text)
+	e.HandlePromptWithAttachments(id, text, images)
 }
 
 // consume reports that ids have entered a turn and their inbox rows may be
@@ -850,16 +856,18 @@ func (e *Engine) runTurn(text string, images []llm.UserImage) {
 	// one extra turn, not one turn per buffered line.
 	if len(orphanedSteers) > 0 {
 		var texts, ids []string
+		var images []llm.UserImage
 		for _, q := range orphanedSteers {
 			texts = append(texts, q.text)
 			ids = append(ids, q.ids...)
+			images = append(images, q.attachments...)
 		}
 		// Requeued UNACKED, carrying every id from the join: this text has not
 		// entered a turn yet, and dropping the ids here would strand those
 		// inbox rows forever — nothing downstream can retire them once the
 		// text has moved on without them. Enqueued directly rather than
 		// through HandlePromptID, which carries only one id.
-		e.enqueue(queued{ids: ids, text: strings.Join(texts, "\n")})
+		e.enqueue(queued{ids: ids, text: strings.Join(texts, "\n"), attachments: images})
 	}
 }
 
@@ -1188,13 +1196,18 @@ func (e *Engine) drainSteers() []anthropic.ContentBlockParamUnion {
 		return nil
 	}
 	var texts, ids []string
+	var images []llm.UserImage
 	for _, q := range entries {
 		texts = append(texts, q.text)
 		ids = append(ids, q.ids...)
+		images = append(images, q.attachments...)
 	}
 	e.consume(ids)
-	for _, t := range texts {
-		e.em.UserMessage(t, nil)
+	for _, q := range entries {
+		e.em.UserMessage(q.text, q.attachments)
+	}
+	if len(images) > 0 {
+		return llm.UserContent(strings.Join(texts, "\n"), images)
 	}
 	return llm.UserText(strings.Join(texts, "\n"))
 }

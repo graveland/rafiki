@@ -64,6 +64,7 @@ type IDHandler interface {
 // the text and the attachments are reported as dropped rather than vanishing.
 type AttachmentHandler interface {
 	HandlePromptWithAttachments(id, text string, images []llm.UserImage)
+	HandleSteerWithAttachments(id, text string, images []llm.UserImage)
 }
 
 // StateData feeds the get_state response the daemon sniffs for session id +
@@ -182,9 +183,20 @@ func (f *Frontend) Run() error {
 				f.handler.HandlePrompt(hdr.Message)
 			}
 		case "steer":
-			if isID {
+			switch {
+			case len(hdr.Attachments) > 0 && ah != nil:
+				imgs := make([]llm.UserImage, 0, len(hdr.Attachments))
+				for _, a := range hdr.Attachments {
+					imgs = append(imgs, llm.UserImage{MediaType: a.MediaType, Data: a.Data})
+				}
+				ah.HandleSteerWithAttachments(hdr.ID, hdr.Message, imgs)
+			case isID:
+				if len(hdr.Attachments) > 0 {
+					slog.Warn("fundi: runtime cannot take attachments; delivering steer text only",
+						"count", len(hdr.Attachments))
+				}
 				idh.HandleSteerID(hdr.ID, hdr.Message)
-			} else {
+			default:
 				f.handler.HandleSteer(hdr.Message)
 			}
 		case "abort":
