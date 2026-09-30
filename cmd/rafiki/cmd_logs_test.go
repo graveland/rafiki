@@ -29,8 +29,9 @@ import (
 
 // ── the stub daemon ──────────────────────────────────────────────────────────
 
-// stubControl serves the Control RPCs the event commands use and records what
-// arrived. Unoverridden RPCs answer Unimplemented via the embed; the call
+// stubControl serves the Control RPCs the event commands use — plus Status,
+// for the version verb — and records what arrived. Unoverridden RPCs answer
+// Unimplemented via the embed; the call
 // counters let a test prove a verb dialled nothing.
 type stubControl struct {
 	rafikiv1connect.UnimplementedControlHandler
@@ -54,6 +55,10 @@ type stubControl struct {
 	streamCalls  int
 	sendCalls    int
 	listCalls    int
+	statusCalls  int
+
+	statusVersion string // Status's version field; empty renders "unknown" client-side
+	statusErr     error  // what Status returns instead of a response, when set
 
 	streamReqs []*rafikiv1.StreamEventsRequest // captured StreamEvents requests
 	sendFrames []*rafikiv1.SendFrameRequest    // captured SendFrame requests
@@ -168,6 +173,19 @@ func (s *stubControl) ListChildren(
 	defer s.mu.Unlock()
 	s.listCalls++
 	return connect.NewResponse(&rafikiv1.ListChildrenResponse{}), nil
+}
+
+func (s *stubControl) Status(
+	_ context.Context,
+	_ *connect.Request[rafikiv1.StatusRequest],
+) (*connect.Response[rafikiv1.StatusResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusCalls++
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
+	return connect.NewResponse(&rafikiv1.StatusResponse{Version: s.statusVersion}), nil
 }
 
 // serveStubControl isolates profiles, then serves stub on a profile's own

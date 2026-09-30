@@ -509,6 +509,12 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 | `rafikid` | the daemon. Runs `fundi`-kind children as goroutines inside itself; `claude` children route through daraja on an executor when one is configured for it, else run as local subprocesses. `rafikid fundi` is a standalone one-child-on-stdio mode |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
 
+`rafiki version` reports both halves — the client's own build, then the
+daemon's, fetched over the control plane from the profile's daemon — so a
+client/daemon build mismatch is one command away. It fails (still printing
+the client line) when the daemon is unreachable. `rafiki --version` prints
+the client's version alone and never dials.
+
 ## Recall and memory
 
 The daemon indexes what it captures into a searchable recall index: every

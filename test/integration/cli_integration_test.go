@@ -105,6 +105,29 @@ func cliCmdIn(t *testing.T, d *daemon, configDir string, args ...string) *exec.C
 	return cmd
 }
 
+// TestCLI_Version verifies `rafiki version` reports BOTH halves: the client's
+// own build and the daemon's, fetched over the control plane. TestMain builds
+// both binaries from the same tree with plain `go build` (no ldflags), so both
+// read the same VCS stamp — and equality is exactly the check the verb exists
+// for: a client/daemon build mismatch shows up as differing lines here.
+func TestCLI_Version(t *testing.T) {
+	t.Parallel()
+	c := assert.NewAborting(t)
+	d := bootDaemon(t)
+
+	out, err := cliCmd(t, d, "version").CombinedOutput()
+	c.NoError(err, "version failed: %v\noutput: %s", err, out)
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	c.Eq(2, len(lines), "version printed %d lines, want client+server: %s", len(lines), out)
+	client, ok := strings.CutPrefix(lines[0], "client: ")
+	c.Require().True(ok, "first line is not \"client: <ver>\": %s", out)
+	server, ok := strings.CutPrefix(lines[1], "server: ")
+	c.Require().True(ok, "second line is not \"server: <ver>\": %s", out)
+	c.NotEq("", client, "client version is empty: %s", out)
+	c.Eq(client, server, "client and server versions differ, but both binaries were built from the same tree")
+}
+
 // TestCLI_Status verifies that `rafiki status` returns a JSON object containing
 // a "version" field.
 func TestCLI_Status(t *testing.T) {
