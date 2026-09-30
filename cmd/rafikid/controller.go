@@ -2466,16 +2466,12 @@ func (c *Controller) Resume(ctx context.Context, childID string, apiKey string) 
 	return c.resumeInternal(ctx, childID, apiKey, false)
 }
 
-// resumeWithAutoRecovery is the auto-recovery version of Resume: it sets
-// AutoResume on the engine so the worker calls agentloop.Resume on startup
-// (finalising any incomplete previous turn) before accepting inbound prompts.
-func (c *Controller) resumeWithAutoRecovery(ctx context.Context, childID string) (protocol.SpawnResponseData, error) {
-	return c.resumeInternal(ctx, childID, "", true)
-}
-
-// resumeClaimedWithAutoRecovery is resumeWithAutoRecovery for a caller that
-// already holds childID's claim (recoverOne, which claims before it starts the
-// resume goroutine so the child never reads as plainly exited in between).
+// resumeClaimedWithAutoRecovery is the auto-recovery version of Resume: it
+// sets AutoResume on the engine so the worker calls agentloop.Resume on
+// startup (finalising any incomplete previous turn) before accepting inbound
+// prompts. The caller already holds childID's claim (recoverOne, which claims
+// before it starts the resume goroutine so the child never reads as plainly
+// exited in between).
 func (c *Controller) resumeClaimedWithAutoRecovery(ctx context.Context, childID string) (protocol.SpawnResponseData, error) {
 	return c.resumeClaimed(ctx, childID, "", true)
 }
