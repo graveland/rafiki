@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -225,6 +226,14 @@ func TestChild_InterruptSendsSIGINT(t *testing.T) {
 	// SIGINT terminates the shell but its INT trap does not run, while a
 	// self-sent one does). The graceful claude-interrupt behavior (the
 	// "[Request interrupted by user]" result) is covered by the live smoke test.
+	//
+	// A test binary started with SIGINT ignored (e.g. backgrounded by a
+	// non-job-control shell) passes SIG_IGN through exec to the fake child,
+	// which then survives the signal. Installing a handler makes exec reset
+	// SIGINT to its default disposition in the child.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	t.Cleanup(func() { signal.Stop(sigCh) })
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake.sh")
 	body := "#!/bin/bash\n" +
