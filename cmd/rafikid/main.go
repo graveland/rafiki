@@ -837,6 +837,15 @@ func runDaemon(opts runDaemonOpts) error {
 	// database still holds. The retired framed listener bound this same path
 	// only after loadChildren for exactly that reason — keep the invariant on
 	// the one surviving socket.
+	//
+	// The shutdown handler is installed before the first child can start, not
+	// where it is awaited: exec passes an ignored signal through to the child
+	// but resets a handled one to its default, so a daemon launched with
+	// SIGINT ignored (a non-job-control shell's `&`) would otherwise resume
+	// children that Child.Interrupt cannot reach. Anything signalled from here
+	// on is a graceful shutdown once startup finishes.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	ctrl.loadChildren(baseCtx)
 
 	if face != nil && face.Control != nil {
@@ -945,8 +954,6 @@ func runDaemon(opts runDaemonOpts) error {
 			"executorEnabled", execPool != nil)
 	}
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	sig := <-sigCh
 
 	slog.Info("shutting down", "signal", sig)
