@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -343,6 +344,8 @@ func contentSummary(blocks []*rafikiv1.ContentBlock) string {
 			parts = append(parts, "(thinking)")
 		case b.GetToolUse() != nil:
 			parts = append(parts, "(tool "+b.GetToolUse().GetName()+")")
+		case b.GetImage() != nil:
+			parts = append(parts, "(image "+cmp.Or(b.GetImage().GetMediaType(), "?")+")")
 		case b.GetToolResult() != nil:
 			parts = append(parts, "(result)")
 		}

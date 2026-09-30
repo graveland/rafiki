@@ -341,3 +341,17 @@ type stubbedChildSource struct {
 func (s stubbedChildSource) GetChild(ctx context.Context, req *connect.Request[rafikiv1.GetChildRequest]) (*connect.Response[rafikiv1.GetChildResponse], error) {
 	return s.getChild(ctx, req)
 }
+
+func TestContentSummaryNamesImage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	blocks := []*rafikiv1.ContentBlock{
+		{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{MediaType: "image/png"}}},
+		{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "look"}}},
+	}
+	c.Eq("(image image/png) look", contentSummary(blocks), "contentSummary with an image")
+
+	empty := []*rafikiv1.ContentBlock{
+		{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{}}},
+	}
+	c.StrContains(contentSummary(empty), "(image ?)", "unnamed media type")
+}

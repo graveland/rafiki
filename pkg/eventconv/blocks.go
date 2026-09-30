@@ -6,6 +6,7 @@
 package eventconv
 
 import (
+	"encoding/base64"
 	"encoding/json"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -44,10 +45,26 @@ func BlocksFromParam(p anthropic.MessageParam) []*rafikiv1.ContentBlock {
 			cb.Block = &rafikiv1.ContentBlock_ToolResult{
 				ToolResult: toolResult(blk.OfToolResult),
 			}
+		case blk.OfImage != nil:
+			cb.Block = &rafikiv1.ContentBlock_Image{Image: imageBlock(blk.OfImage)}
 		default:
 			continue
 		}
 		out = append(out, cb)
+	}
+	return out
+}
+
+// imageBlock converts a stored image into its proto form. Only a base64
+// source carries bytes; a URL source, or base64 that does not decode, still
+// yields a block, so the image is named downstream rather than dropped.
+func imageBlock(img *anthropic.ImageBlockParam) *rafikiv1.ImageBlock {
+	out := &rafikiv1.ImageBlock{}
+	if src := img.Source.OfBase64; src != nil {
+		out.MediaType = string(src.MediaType)
+		if data, err := base64.StdEncoding.DecodeString(src.Data); err == nil {
+			out.Data = data
+		}
 	}
 	return out
 }
@@ -58,15 +75,18 @@ func toolResult(tr *anthropic.ToolResultBlockParam) *rafikiv1.ToolResultBlock {
 		IsError:   tr.IsError.Or(false),
 	}
 	for i, c := range tr.Content {
-		if c.OfText == nil {
+		cb := &rafikiv1.ContentBlock{Index: int32(i)}
+		switch {
+		case c.OfText != nil:
+			cb.Block = &rafikiv1.ContentBlock_Text{
+				Text: &rafikiv1.TextBlock{Text: c.OfText.Text},
+			}
+		case c.OfImage != nil:
+			cb.Block = &rafikiv1.ContentBlock_Image{Image: imageBlock(c.OfImage)}
+		default:
 			continue
 		}
-		out.Content = append(out.Content, &rafikiv1.ContentBlock{
-			Index: int32(i),
-			Block: &rafikiv1.ContentBlock_Text{
-				Text: &rafikiv1.TextBlock{Text: c.OfText.Text},
-			},
-		})
+		out.Content = append(out.Content, cb)
 	}
 	return out
 }

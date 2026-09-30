@@ -980,7 +980,7 @@ Every event payload is classified into a tier:
 
 | Event | Tier | Purpose |
 |---|---|---|
-| `UserMessage` | durable | User prompt message |
+| `UserMessage` | durable | User prompt message; attached images ride as `ImageBlock` content ahead of the text, live and in `GetHistory` |
 | `AssistantMessage` | durable | Assistant response message |
 | `TurnStart` | durable | Start of an agent turn |
 | `TurnEnd` | durable | End of an agent turn |
