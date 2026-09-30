@@ -315,7 +315,12 @@ func (s *Server) Provision(
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	reg, lspMgr := registryFor(s.opts, workdir, s.tracker)
+	// Per-workspace options: the pinned env plus this child's agent markers
+	// (tools.AgentEnv), so tool shells on this executor can tell an agent is
+	// driving them and which child it is.
+	wsOpts := s.opts
+	wsOpts.Env = tools.AgentEnv(s.opts.Env, req.Msg.GetChildId())
+	reg, lspMgr := registryFor(wsOpts, workdir, s.tracker)
 	ws := &workspace{
 		id:      randomID(),
 		workdir: workdir,

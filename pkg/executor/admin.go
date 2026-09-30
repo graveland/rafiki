@@ -430,6 +430,11 @@ func (a *AdminServer) Launch(
 		if mcpToken := c.GetMcpToken(); mcpToken != "" {
 			envVars = append(envVars, "RAFIKI_MCP_TOKEN="+mcpToken)
 		}
+		// The claude child's own id, for `rafikid agent --ref` and anything
+		// else in its shells that wants to correlate. Scrubbed from the
+		// inherited environ so the executor's own copy never shadows it.
+		envVars = append(envVars, "RAFIKI_CHILD_ID="+childID)
+		scrubNames = append(scrubNames, "RAFIKI_CHILD_ID")
 	}
 
 	cmd := exec.Command(a.opts.SelfBinary, argv...)

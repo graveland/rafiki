@@ -274,3 +274,25 @@ func executeText(t *testing.T, client executorpbconnect.ExecutorServiceClient, c
 	t.Fatalf("%s returned no result: %v", tool, stream.Err())
 	return ""
 }
+
+// A workspace's tool shells carry the agent markers for THEIR child: AI_AGENT
+// says an agent is driving, RAFIKI_CHILD_ID names which one. Both are applied
+// last, so a stale copy in the executor's pinned environment cannot shadow
+// them, and two workspaces never see each other's id.
+func TestProvisionedToolShellsCarryAgentMarkers(t *testing.T) {
+	c := assert.NewAborting(t)
+	root := t.TempDir()
+	srv := executor.NewServer(executor.Options{
+		Root: root, Version: "test",
+		Env: append(os.Environ(), "AI_AGENT=stale", "RAFIKI_CHILD_ID=stale"),
+	})
+	client := newTestClient(t, srv)
+	ctx := context.Background()
+
+	show := `{"command":"echo \"$AI_AGENT $RAFIKI_CHILD_ID\""}`
+	for _, id := range []string{"c_first", "c_second"} {
+		prov, err := client.Provision(ctx, connect.NewRequest(&executorpb.ProvisionRequest{ChildId: id}))
+		c.Require().NoError(err)
+		c.Eq("rafiki "+id, strings.TrimSpace(executeText(t, client, ctx, prov.Msg.WorkspaceId, "bash", show)), "markers for "+id)
+	}
+}

@@ -598,7 +598,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 	// (nothing un-applies them), and silently replace what the operator's
 	// environment files deliberately set. Per-Command env keeps each child's
 	// view independent and the process's own environment untouched.
-	mergedEnv := childEnv(os.Environ(), opts.Env)
+	mergedEnv := tools.AgentEnv(childEnv(os.Environ(), opts.Env), opts.Ref)
 
 	spillDir := opts.SpillDir
 	if spillDir == "" {

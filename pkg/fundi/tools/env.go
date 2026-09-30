@@ -64,3 +64,22 @@ func MergeEnv(base, overlay []string) []string {
 	}
 	return append(out, overlay...)
 }
+
+// AgentEnv is the environment a child's tool subprocesses run under: base
+// (nil = the process environment, the same contract as ToolOpts.Env) with the
+// markers that say an agent is driving. AI_AGENT is the cross-tool convention
+// for "a program is running this, not a person at a terminal"; RAFIKI_CHILD_ID
+// is the child's own id, what `rafikid agent --ref` defaults from. Both are
+// applied LAST, so neither an inherited nor a caller-forwarded value can
+// shadow them. An empty childID omits RAFIKI_CHILD_ID rather than setting it
+// empty.
+func AgentEnv(base []string, childID string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
+	markers := []string{"AI_AGENT=rafiki"}
+	if childID != "" {
+		markers = append(markers, "RAFIKI_CHILD_ID="+childID)
+	}
+	return MergeEnv(base, markers)
+}

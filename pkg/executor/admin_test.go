@@ -1097,3 +1097,27 @@ func TestEnvironBaseNilFallsBackToProcess(t *testing.T) {
 	c.Eq("pinned", tools.EnvGet(o.environBase(), "ENVBASE_PROBE"), "pinned env wins")
 	c.Eq("process", tools.EnvGet(pinned.environBase(), "ENVBASE_PROBE"), "nil pinned env = process environment")
 }
+
+// A launched claude child's environ carries its own RAFIKI_CHILD_ID exactly
+// once, even when the executor's own environment holds a stale one.
+func TestLaunchCarriesTheChildIDForClaude(t *testing.T) {
+	c := assert.NewCollecting(t)
+	t.Setenv("RAFIKI_CHILD_ID", "c_stale")
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildEnvDumpStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	_, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c_fresh",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec:     &darajapb.ChildSpec{Kind: darajapb.Kind_KIND_CLAUDE, Claude: &darajapb.ClaudeParams{}},
+		Ticket:   "tk",
+	}))
+	c.Require().NoError(err, "Launch")
+	c.EqDeep([]string{"RAFIKI_CHILD_ID=c_fresh"}, countEnvLines(t, waitForStubEnvDump(t), "RAFIKI_CHILD_ID"), "one fresh entry")
+}

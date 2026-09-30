@@ -220,6 +220,12 @@ func runSubprocess(ctx context.Context, cwd string, waitDelay time.Duration, nam
 	cmd.Dir = cwd
 	if env != nil {
 		cmd.Env = env
+		// exec.Cmd sets PWD=Dir itself only when Env is nil; handing it an env
+		// leaves whatever PWD the pinned snapshot captured, which names the
+		// executor's own directory, not this tool's.
+		if cwd != "" {
+			cmd.Env = MergeEnv(env, []string{"PWD=" + cwd})
+		}
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

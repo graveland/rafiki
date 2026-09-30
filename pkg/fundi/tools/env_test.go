@@ -124,3 +124,24 @@ func countKey(env []string, key string) int {
 	}
 	return n
 }
+
+// TestAgentEnvMarkersWinAndBaseSurvives pins AgentEnv: the agent markers
+// override any inherited or forwarded value, everything else passes through,
+// a nil base means the process environment (never an env of only the
+// markers, which would strip PATH), and an empty child id sets no
+// RAFIKI_CHILD_ID at all.
+func TestAgentEnvMarkersWinAndBaseSurvives(t *testing.T) {
+	c := assert.NewCollecting(t)
+	got := AgentEnv([]string{"PATH=/p", "AI_AGENT=claude-code", "RAFIKI_CHILD_ID=other"}, "c_me")
+	env := envOf(got)
+	c.Eq("rafiki", env["AI_AGENT"], "AI_AGENT")
+	c.Eq("c_me", env["RAFIKI_CHILD_ID"], "RAFIKI_CHILD_ID")
+	c.Eq("/p", env["PATH"], "base passes through")
+	c.Eq(1, countKey(got, "AI_AGENT"), "AI_AGENT exactly once")
+
+	t.Setenv("AGENTENV_PROBE", "from-process")
+	c.Eq("from-process", envOf(AgentEnv(nil, "c_me"))["AGENTENV_PROBE"], "nil base = process environment")
+
+	_, has := envOf(AgentEnv([]string{"PATH=/p"}, ""))["RAFIKI_CHILD_ID"]
+	c.False(has, "empty child id must not set RAFIKI_CHILD_ID")
+}
