@@ -121,11 +121,11 @@ func (s *userSpawner) View(_ context.Context, childID string, limit int) (string
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, recentQuery{Limit: limit, Rendered: false})
+	res, err := s.c.GetRecent(childID, recentQuery{Rendered: false})
 	if err != nil {
 		return "", err
 	}
-	return renderTranscript(res.Events, viewMaxBytes), nil
+	return renderTranscript(res.Events, limit, viewMaxBytes), nil
 }
 
 func (s *userSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {

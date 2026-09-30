@@ -29,7 +29,12 @@ const (
 	agentSendDescription = "Send a message to an agent you spawned. Use it to steer a " +
 		"worker mid-flight (\"also cover the error path\"), to answer something it is " +
 		"blocked on, or to give it the next piece of work when it has settled. The " +
-		"message is queued and picked up on its next turn."
+		"message is queued and picked up on its next turn.\n\n" +
+		"`agent` is the target's id, `message` the prompt it receives. `steps` " +
+		"optionally runs reads, shell commands or pymodules at send time and appends " +
+		"their output to `message` — use it to hand over a report file or a git " +
+		"status instead of pasting it. The call returns one line per step (tool, " +
+		"where, outcome, bytes), plus the output of any step with echo set."
 
 	// agentSendStepsDescription is the `steps` property's description, verbatim
 	// from the send-steps design: it is the contract the model authors steps
@@ -134,7 +139,7 @@ func (AgentSendBlueprint) InputSchema() Schema {
 	return agentIDSchema(
 		SchemaProperty{
 			Name: "message", Type: "string",
-			Description: "The message to deliver.",
+			Description: "The prompt the agent receives. Step output, if any, is appended after it.",
 		},
 		SchemaProperty{
 			Name: "steps", Type: "array",
@@ -144,37 +149,49 @@ func (AgentSendBlueprint) InputSchema() Schema {
 				Properties: []SchemaProperty{
 					{
 						Name: "where", Type: "string",
-						Enum:        []string{"child", "sender"},
-						Description: "Which workspace runs this step: \"child\" (the agent's own) or \"sender\" (yours).",
+						Enum: []string{"child", "sender"},
+						Description: "Which workspace runs this step. \"child\" (default): the target agent's, " +
+							"from its cwd. \"sender\": yours, from your cwd, gated by your own tool " +
+							"allowlist — refused when you are not yourself a rafiki agent.",
 					},
 					{
 						Name: "echo", Type: "boolean",
-						Description: "Also return the first 2 KiB of this step's output to you.",
+						Description: "Also return the first 2 KiB of this step's output to you. The agent " +
+							"gets the output either way.",
 					},
 					{
 						Name: "read", Type: "object",
-						Description: "Read a file in the step's workspace.",
+						Description: "Read one file (not a glob) in the step's workspace.",
 						Properties: []SchemaProperty{
-							{Name: "path", Type: "string", Description: "File to read."},
-							{Name: "start", Type: "integer", Description: "First line (1-based)."},
-							{Name: "end", Type: "integer", Description: "Last line."},
+							{Name: "path", Type: "string", Description: "Required. A relative path " +
+								"resolves against the step's cwd (the agent's for where=child, yours " +
+								"for where=sender)."},
+							{Name: "start", Type: "integer", Description: "First line to include, " +
+								"1-based. Omit to start at line 1."},
+							{Name: "end", Type: "integer", Description: "Last line to include " +
+								"(inclusive). Omit to read to the end."},
 						},
 					},
 					{
 						Name: "bash", Type: "object",
 						Description: "Run one shell command in the step's workspace.",
 						Properties: []SchemaProperty{
-							{Name: "command", Type: "string", Description: "Command to run."},
-							{Name: "timeout_ms", Type: "integer", Description: "Kill the command after this many milliseconds."},
+							{Name: "command", Type: "string", Description: "Required. Run by the " +
+								"shell from the step's cwd (the agent's for where=child, yours for " +
+								"where=sender); its output is what the agent receives."},
+							{Name: "timeout_ms", Type: "integer", Description: "Kill the command " +
+								"after this many milliseconds. Default 30000, max 60000."},
 						},
 					},
 					{
 						Name: "pymodule_run", Type: "object",
 						Description: "Run a saved pymodule, with pymodule_run's inputs.",
 						Properties: []SchemaProperty{
-							{Name: "repo", Type: "string", Description: "Pymodule source: \"local\" or a registered git source's name."},
-							{Name: "script", Type: "string", Description: "Entry module, as saved."},
-							{Name: "cwd", Type: "string", Description: "Working directory for the run."},
+							{Name: "repo", Type: "string", Description: "Required. Pymodule source: " +
+								"\"local\" or a registered git source's name."},
+							{Name: "script", Type: "string", Description: "Required. Entry module, as saved."},
+							{Name: "cwd", Type: "string", Description: "Working directory for the run. " +
+								"Omit for the step's cwd; a relative path resolves against it."},
 							{Name: "modules", Type: "array", Items: &Schema{Type: "string"},
 								Description: "Further pymodules the script imports."},
 							{Name: "args", Type: "array", Items: &Schema{Type: "string"},

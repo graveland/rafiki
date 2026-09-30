@@ -275,11 +275,11 @@ func (s *controllerSpawner) View(ctx context.Context, childID string, limit int)
 	if limit <= 0 || limit > viewMaxEntries {
 		limit = viewDefaultEntries
 	}
-	res, err := s.c.GetRecent(childID, recentQuery{Limit: limit, Rendered: true})
+	res, err := s.c.GetRecent(childID, recentQuery{Rendered: true})
 	if err != nil {
 		return "", err
 	}
-	return renderTranscript(res.Events, viewMaxBytes), nil
+	return renderTranscript(res.Events, limit, viewMaxBytes), nil
 }
 
 func (s *controllerSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {
@@ -491,9 +491,12 @@ const (
 // and drops thinking blocks, which are long and rarely load-bearing to an
 // observer.
 //
-// Newest content is what matters, so the byte budget is applied from the END:
-// an over-budget transcript loses its oldest entries, not its most recent.
-func renderTranscript(events []json.RawMessage, maxBytes int) string {
+// Newest content is what matters, so both budgets are applied from the END:
+// maxEntries keeps the newest rendered entries and maxBytes then drops the
+// oldest of those, never the most recent. maxEntries counts rendered lines,
+// not frames — most frames (message_start, agent_end, …) render nothing, so a
+// frame limit would hand back fewer entries than asked for, or none.
+func renderTranscript(events []json.RawMessage, maxEntries, maxBytes int) string {
 	var lines []string
 	for _, raw := range events {
 		var env struct {
@@ -532,10 +535,13 @@ func renderTranscript(events []json.RawMessage, maxBytes int) string {
 		}
 	}
 
-	// Apply the budget from the end.
+	floor := 0
+	if maxEntries > 0 && len(lines) > maxEntries {
+		floor = len(lines) - maxEntries
+	}
 	total := 0
 	cut := len(lines)
-	for i := len(lines) - 1; i >= 0; i-- {
+	for i := len(lines) - 1; i >= floor; i-- {
 		if total+len(lines[i])+1 > maxBytes {
 			break
 		}

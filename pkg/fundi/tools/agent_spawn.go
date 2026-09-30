@@ -26,6 +26,12 @@ const agentSpawnDescription = "Spawn a subagent to do a piece of work in paralle
 	"your context and cannot ask you a follow-up question mid-turn. Pass `task` " +
 	"(a handle from your own task list, like \"2.1\") to hand it a specific unit of " +
 	"work — the task is assigned to it atomically, so agent_list and task_list agree.\n\n" +
+	"Pass `prefill` for files it should start having already read, instead of " +
+	"pasting their contents into `prompt`: file reads only, run on its own machine " +
+	"before its first turn. To hand it command output (a diff, a test log), follow " +
+	"the spawn with agent_send and a bash step. `cwd` sets where its tools start; " +
+	"`max_cost`, `max_depth` and `max_children` bound what it and its own " +
+	"subagents may spend and spawn.\n\n" +
 	"Use a subagent when the work is genuinely separable — a review, an independent " +
 	"implementation, an investigation you do not want in your own context. Do not " +
 	"spawn one for a step you could just do.\n\n" +
