@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -28,6 +29,15 @@ import (
 type userSpawner struct {
 	c     *Controller
 	owner users.Identity
+	// runner overrides the send-step runner; nil means the Controller's own.
+	runner connectapi.SendStepRunner
+}
+
+func (s *userSpawner) steps() connectapi.SendStepRunner {
+	if s.runner != nil {
+		return s.runner
+	}
+	return newSendStepRunner(s.c)
 }
 
 var _ tools.AgentSpawner = (*userSpawner)(nil)
@@ -118,7 +128,7 @@ func (s *userSpawner) View(_ context.Context, childID string, limit int) (string
 	return renderTranscript(res.Events, viewMaxBytes), nil
 }
 
-func (s *userSpawner) Send(_ context.Context, spec tools.SendSpec) (tools.SendResult, error) {
+func (s *userSpawner) Send(ctx context.Context, spec tools.SendSpec) (tools.SendResult, error) {
 	if spec.ChildID == "" {
 		return tools.SendResult{}, errors.New("agent id is required")
 	}
@@ -128,17 +138,14 @@ func (s *userSpawner) Send(_ context.Context, spec tools.SendSpec) (tools.SendRe
 	if _, ok := s.c.st.Get(spec.ChildID); !ok {
 		return tools.SendResult{}, fmt.Errorf("agent %s is not registered", spec.ChildID)
 	}
-	if len(spec.Steps) > 0 {
-		return tools.SendResult{}, errors.New("send steps are not wired yet")
-	}
-	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": spec.Message})
+	frame, result, err := buildSendFrame(ctx, s.steps(), "", spec)
 	if err != nil {
 		return tools.SendResult{}, err
 	}
 	if err := s.c.Send(spec.ChildID, frame); err != nil {
 		return tools.SendResult{}, err
 	}
-	return tools.SendResult{}, nil
+	return result, nil
 }
 
 // Kill shuts a child down and waits for the exit to be recorded.

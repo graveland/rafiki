@@ -29,6 +29,15 @@ import (
 type controllerSpawner struct {
 	c      *Controller
 	selfID string
+	// runner overrides the send-step runner; nil means the Controller's own.
+	runner connectapi.SendStepRunner
+}
+
+func (s *controllerSpawner) steps() connectapi.SendStepRunner {
+	if s.runner != nil {
+		return s.runner
+	}
+	return newSendStepRunner(s.c)
 }
 
 func newControllerSpawner(c *Controller, selfID string) *controllerSpawner {
@@ -280,17 +289,14 @@ func (s *controllerSpawner) Send(ctx context.Context, spec tools.SendSpec) (tool
 	if spec.Message == "" {
 		return tools.SendResult{}, errors.New("message is required")
 	}
-	if len(spec.Steps) > 0 {
-		return tools.SendResult{}, errors.New("send steps are not wired yet")
-	}
-	frame, err := json.Marshal(map[string]string{"type": "prompt", "message": spec.Message})
+	frame, result, err := buildSendFrame(ctx, s.steps(), s.selfID, spec)
 	if err != nil {
 		return tools.SendResult{}, err
 	}
 	if err := s.c.Send(spec.ChildID, frame); err != nil {
 		return tools.SendResult{}, err
 	}
-	return tools.SendResult{}, nil
+	return result, nil
 }
 
 func (s *controllerSpawner) Kill(ctx context.Context, childID string) error {

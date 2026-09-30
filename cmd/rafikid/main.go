@@ -734,6 +734,7 @@ func runDaemon(opts runDaemonOpts) error {
 			// wires are what makes the RPCs reachable (pinned end to end by
 			// TestConnectNewRPCsWired in test/integration).
 			face.Control.SetChildOps(connectChildOps{c: ctrl})
+			face.Control.SetSendStepRunner(newSendStepRunner(ctrl))
 			face.Control.SetExecutorAdmin(connectExecutorAdmin{c: ctrl})
 			face.Control.SetUserAdmin(connectUserAdmin{c: ctrl, loginConfigured: face.Control.LoginConfigured})
 			face.Control.SetRawChildIO(connectRawChildIO{c: ctrl})

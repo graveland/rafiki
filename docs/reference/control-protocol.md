@@ -912,7 +912,54 @@ the same way, because an abort carries no content. The response carries one
 flag — and NEVER a step's output, except the `echo` prefix a step asked for.
 The handler runs the steps through the wired `SendStepRunner`
 (`pkg/connectapi/send_steps.go`); until the daemon attaches one, a send with
-steps fails `unavailable` while a stepless send is unaffected.
+steps fails `unavailable` while a stepless send is unaffected. The daemon's
+runner is `cmd/rafikid/send_steps.go`, shared by the Connect `Send`, the
+child-bound `agent_send` tool (`controllerSpawner`) and the MCP face's
+(`userSpawner`).
+
+**Execution.** All steps are validated before the first one runs, so a
+refused send has no side effects; then they run sequentially in request order
+under one 120 s deadline. A refused or failed send enqueues nothing.
+
+**Whose authority.** `CHILD` steps run on the TARGET's snapshot: its
+`rafiki/executor` (must be live), `rafiki/workspace` (may be empty) and cwd.
+`SENDER` steps run on the CALLER's, and only the output reaches the target.
+A `SENDER` step is refused `failed_precondition` when the caller has no
+position in the agent tree (the operator and MCP face have none), and
+`permission_denied` when the caller's own tool allowlist does not include the
+step's tool: a fundi child needs `read`/`bash`/`pymodule_run` admitted by its
+`tools` (nil admits all, `no_tools`/`no_builtin_tools` admit none); a claude
+child needs no tool restriction at all; a script never qualifies.
+
+**Limits.**
+
+| Limit | Value |
+|---|---|
+| steps per send | 16 |
+| `bash` timeout | default 30 s, at most 60 s |
+| per-step executor call | 60 s |
+| whole send | 120 s |
+| per-step output | 32 KiB, kept from the front, marked `[truncated: showing N of M bytes]` |
+| rendered block | 128 KiB, refused `invalid_argument` naming the five largest steps |
+| `echo` | first 2 KiB of the (post-truncation) output |
+| header subject | 200 bytes |
+
+**Outcomes**, keyed on the executor's `Failure.Code` (never message text):
+
+| Result | Outcome |
+|---|---|
+| normal result | `ok` |
+| `CODE_TOOL_FAILED` | `error`; the message is rendered inline and the send continues |
+| `CODE_TIMEOUT` | `timeout`; rendered inline and the send continues |
+| `CODE_DENIED` | the whole send fails `permission_denied` |
+| `CODE_EXECUTOR_LOST`, `CODE_UNSPECIFIED`, a transport error or the deadline | the whole send fails `unavailable` |
+
+**Rendering.** The appended block opens with a line naming the snapshot
+nature of the content and a per-send random nonce (16 hex characters from
+`crypto/rand`); each result follows a header
+`=== <nonce> <index> <tool> (<where>): <subject> ===`, so content that
+imitates a header cannot be mistaken for one. A `SENDER` step is labelled as
+having run in the sender's environment.
 
 ### Event vocabulary
 
