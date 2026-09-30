@@ -19,6 +19,16 @@ func newProvidersCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "providers",
 		Short: "Exclude OpenRouter providers from routing at runtime",
+		Long: `Operator controls over which OpenRouter providers serve requests: ban a
+provider outright, or set per-model-line routing policy. Both reach running
+children — a ban or a row written now governs the daemon's next OpenRouter
+request, whoever sends it.
+
+Subcommands:
+  bans          what is excluded right now, and why
+  ban/unban     exclude a provider for every model, until lifted or --for
+  route         per-model-line specs: sort, quantization floor, provider
+                allowlist, data policy`,
 	}
 	cmd.AddCommand(newProvidersBansCmd(), newProvidersBanCmd(), newProvidersUnbanCmd(), newProvidersRouteCmd())
 	return cmd
@@ -40,7 +50,33 @@ it or extending it with "-" — "z-ai/glm-5.3" also governs "z-ai/glm-5.3-flash"
 and stamped releases — unlike the cache guard's stamp-exact model lines. A line
 names at most <model>/<id>: the provider segment is not part of a policy line,
 and the store refuses longer shapes. Reading the rows is open to any caller;
-writing one (set, delete) requires a user credential or the local socket.`,
+writing one (set, delete) requires a user credential or the local socket.
+
+The SPEC grammar (comma-separated, order-free):
+  sort=price|throughput|latency|balanced
+  quant=<floor>+           e.g. fp8+ — admit that tier and every tier above
+  quant=a|b|c              an explicit list instead; floors cannot join a list
+  only=slug|slug           serve only these providers
+  nodata, zdr              bare flags: no prompt-retaining hosts / ZDR only
+Resolution is per key: a spawn/preset spec beats a row key by key, and
+nodata/zdr are also merged monotonically — a row can tighten them but no
+spawn can loosen them.
+
+Example:
+  rafiki providers route set z-ai/glm-5.3-flash 'quant=fp8+'
+      Serve the model only at 8-bit weights or better: every 4-bit
+      quantization (int4, fp4, mxfp4, nvfp4) and fp6 is excluded, as are
+      hosts OpenRouter has not labelled. To keep 6-bit hosts too, spell the
+      list instead: 'quant=fp6|int8|fp8|mxfp8|fp16|bf16|fp32'.
+
+  rafiki providers route set '*' 'sort=price,nodata'
+      Global default: cheapest eligible provider first, and no provider
+      that may store or train on prompts. Quote "*" — the shell would
+      glob it.
+
+  rafiki providers route set deepseek/deepseek-v4 'only=fireworks|deepinfra'
+      Restrict a model line to named providers. Quote the spec: "|" is a
+      shell pipe.`,
 	}
 	cmd.AddCommand(newProvidersRouteSetCmd(), newProvidersRouteListCmd(), newProvidersRouteDeleteCmd())
 	return cmd
@@ -54,7 +90,12 @@ func newProvidersRouteSetCmd() *cobra.Command {
 for the line (a set is an append — the store keeps the history). SPEC is a
 routing spec in the model string's bracket grammar, e.g.
 "sort=price,quant=fp8+"; the empty string stores the zero spec (no opinion).
-The daemon validates SPEC and refuses what it cannot parse.`,
+The daemon validates SPEC and refuses what it cannot parse.
+
+Example:
+  rafiki providers route set z-ai/glm-5.3-flash 'quant=fp8+'
+  rafiki providers route set '*' 'sort=throughput'
+  rafiki providers route set z-ai/glm-5.3-flash ''   # clear back to no opinion`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, err := newConnectEndpoint(cmd)
@@ -81,7 +122,14 @@ func newProvidersRouteListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List the live routing-policy rows: each model line and its spec",
-		Args:  cobra.NoArgs,
+		Long: `List the live routing-policy rows — the newest row per model line, tombstoned
+ones hidden — with when each was written. This is the view the resolver
+serves from; rows are appended on write, never edited in place.
+
+Example:
+  rafiki providers route list
+  rafiki providers route list -J`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {
@@ -107,7 +155,10 @@ func newProvidersRouteDeleteCmd() *cobra.Command {
 		Short: "Remove the routing-policy row for a model line",
 		Long: `Remove the routing-policy row for a model line. The removal is appended as
 a tombstone — the history is kept, like every row in the log. Refused with
-not_found when the line has no live row (never set, or already deleted).`,
+not_found when the line has no live row (never set, or already deleted).
+
+Example:
+  rafiki providers route delete z-ai/glm-5.3-flash`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, err := newConnectEndpoint(cmd)
@@ -184,7 +235,15 @@ func newProvidersBansCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "bans",
 		Short: "List excluded providers: operator bans and the cache guard's ejections",
-		Args:  cobra.NoArgs,
+		Long: `List every provider currently excluded from routing: your bans (reason
+"operator") and the cache guard's automatic ejections (e.g. "no_cache" for a
+provider that stopped serving prompt-cache hits). An ejection expires on its
+own TTL and does not respond to ` + "`unban`" + `; only an operator ban does.
+
+Example:
+  rafiki providers bans
+  rafiki providers bans -J`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {
@@ -265,7 +324,11 @@ The provider is OpenRouter's slug ("fireworks", "open-inference") or its
 display name ("OpenInference"), as the daemon's upstream_provider log shows
 it; the daemon resolves either through OpenRouter's provider directory and
 refuses a provider it does not list. Requires an admin user credential, or
-the local socket.`,
+the local socket.
+
+Example:
+  rafiki providers ban open-inference                # until lifted
+  rafiki providers ban fireworks --for 6h --note '5xx storm'`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := &rafikiv1.BanProviderRequest{Provider: args[0], Note: note}
@@ -308,7 +371,13 @@ func newProvidersUnbanCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "unban <provider-slug>",
 		Short: "Lift an operator ban (the cache guard's own ejections expire on their own)",
-		Args:  cobra.ExactArgs(1),
+		Long: `Lift an operator ban. The cache guard's own ejections are not operator bans —
+they expire on their own, and unban is refused (not_found) for a provider with
+no live operator ban, including one ejected only by the guard.
+
+Example:
+  rafiki providers unban open-inference`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {
