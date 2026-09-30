@@ -511,6 +511,9 @@ func runDaemon(opts runDaemonOpts) error {
 	// here rather than inside the face so a face that fails to start does not
 	// take the children's bans down with it.
 	guard := buildProviderGuard(baseCtx, pool, slog.Default())
+	if routesViaOpenRouter(prov) {
+		guard.SetDirectory(routing.NewProviderDirectory(http.DefaultClient, slog.Default()))
+	}
 
 	face, err := startProxyFace(baseCtx, faceOptions{
 		Pool:         pool,

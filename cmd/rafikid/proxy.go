@@ -74,6 +74,23 @@ func buildProviderGuard(ctx context.Context, pool *pgxpool.Pool, logger *slog.Lo
 	return guard
 }
 
+// routesViaOpenRouter reports whether any configured provider sends requests
+// to OpenRouter (an anthropic-openrouter provider with a key). Only then does
+// the guard need OpenRouter's provider directory: a daemon without one never
+// sends a provider.ignore, so fetching the directory would be a pointless
+// call to a service it does not use.
+func routesViaOpenRouter(set *providers.Set) bool {
+	if set == nil {
+		set = providers.Default()
+	}
+	for _, name := range set.Names() {
+		if p, ok := set.Get(name); ok && p.Kind == providers.KindAnthropicOpenRouter && p.APIKey() != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // proxyFace is the daemon's own rafiki HTTP face: the same /v1/messages and
 // /v1/chat/completions handlers `rafiki serve` mounts, served in-process.
 //

@@ -13,6 +13,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/ejection"
 	"go.graveland.dev/rafiki/pkg/paths"
+	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/store"
 
@@ -76,4 +77,41 @@ func TestBuildProviderGuardDisabled(t *testing.T) {
 	}
 	t.Setenv(paths.ProviderGuard, "")
 	c.NotNil(buildProviderGuard(context.Background(), nil, slog.New(slog.DiscardHandler)), "guard = nil with no pool; want a working memory-only guard")
+}
+
+// TestRoutesViaOpenRouter pins when the daemon wires OpenRouter's provider
+// directory into the guard: only with an anthropic-openrouter provider that
+// has a key — a daemon that never calls OpenRouter must never fetch from it.
+func TestRoutesViaOpenRouter(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	const withOR = `
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "RAFIKI_TEST_ANTHROPIC_KEY"
+
+[providers.openrouter]
+kind = "anthropic-openrouter"
+api_key_env = "RAFIKI_TEST_OPENROUTER_KEY"
+`
+	const withoutOR = `
+default_provider = "anthropic"
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_env = "RAFIKI_TEST_ANTHROPIC_KEY"
+`
+	t.Setenv("RAFIKI_TEST_ANTHROPIC_KEY", "a")
+	parse := func(src string) *providers.Set {
+		set, err := providers.Parse([]byte(src))
+		ck.Require().NoError(err, "Parse")
+		return set
+	}
+
+	ck.False(routesViaOpenRouter(parse(withoutOR)), "no openrouter provider")
+	t.Setenv("RAFIKI_TEST_OPENROUTER_KEY", "")
+	ck.False(routesViaOpenRouter(parse(withOR)), "openrouter provider without a key")
+	t.Setenv("RAFIKI_TEST_OPENROUTER_KEY", "k")
+	ck.True(routesViaOpenRouter(parse(withOR)), "openrouter provider with a key")
 }

@@ -254,6 +254,15 @@ func (c *Client) ConversationCost(ctx context.Context, convID string) float64 {
 // Pass nil to disable; a nil guard is inert at every call site.
 func (c *Client) SetProviderGuard(g *routing.ProviderGuard) { c.guard = g }
 
+// ProviderSlug returns the OpenRouter routing slug for a provider display name
+// as ProviderOf reports it — the name `rafiki providers ban` takes. Nil-safe.
+func (c *Client) ProviderSlug(name string) string {
+	if c == nil {
+		return routing.GuessProviderSlug(name)
+	}
+	return c.guard.Slug(name)
+}
+
 // WithProviderGuard is SetProviderGuard as a construction option, for hosts
 // that assemble a ClientOption list (pkg/fundi's in-process children share the
 // daemon's one guard this way).

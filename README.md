@@ -266,7 +266,7 @@ rafiki providers unban open-inference
 A ban applies to every model line on the next OpenRouter request, including
 for children already running, and is written to the ejection log above
 (reason `operator`; a lift is a superseding `lift` row, never a delete), so it
-survives restarts. Bans are exempt from the guard's per-line cap. Banning and
+survives restarts. The daemon checks the provider against OpenRouter's provider directory, so a typo'd or display-name-guessed slug is refused rather than silently matching nothing. Bans are exempt from the guard's per-line cap. Banning and
 unbanning require an admin user credential or the local socket. The provider
 is OpenRouter's slug; a display name is lowercased with spaces turned into
 dashes. See `docs/reference/control-protocol.md` §"Provider bans".

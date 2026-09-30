@@ -1202,7 +1202,7 @@ func (p *MessagesProxy) streamAndCapture(w http.ResponseWriter, r *http.Request,
 	}
 	turnFields := []any{
 		"conversation", cr.convID, "user", user, "upstream", upstream, "model", model,
-		"upstream_provider", usage.Provider,
+		"upstream_provider", p.guard.Slug(usage.Provider),
 		"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens,
 		"cache_read_tokens", usage.CacheReadTokens, "cache_creation_tokens", usage.CacheCreationTokens,
 		"cache_pct", cachePct(usage),

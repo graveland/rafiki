@@ -1005,7 +1005,7 @@ func (e *Engine) events() (*agentloop.Events, []llm.SendOption) {
 				cachePct := cacheHitPct(resp.Usage)
 				slog.Info("agent: turn", "conversation", e.conv.ID, "name", e.state.SessionName,
 					"provider", upstreamLabel(e.state.Provider), "model", fullModel(e.state.Provider, e.state.ModelID), "iteration", iteration,
-					"upstream_provider", llm.ProviderOf(resp),
+					"upstream_provider", e.client.ProviderSlug(llm.ProviderOf(resp)),
 					"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens,
 					"cache_read_tokens", resp.Usage.CacheReadInputTokens, "cache_creation_tokens", resp.Usage.CacheCreationInputTokens,
 					"cache_pct", cachePct,

@@ -261,9 +261,11 @@ takes effect on the daemon's next OpenRouter request, including for children
 that are already running, and survives a daemon restart. Banning a provider
 that is already banned replaces its expiry and note.
 
-The provider is OpenRouter's slug ("fireworks", "open-inference"); a display
-name is lowercased with spaces turned into dashes. Requires an admin user
-credential, or the local socket.`,
+The provider is OpenRouter's slug ("fireworks", "open-inference") or its
+display name ("OpenInference"), as the daemon's upstream_provider log shows
+it; the daemon resolves either through OpenRouter's provider directory and
+refuses a provider it does not list. Requires an admin user credential, or
+the local socket.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := &rafikiv1.BanProviderRequest{Provider: args[0], Note: note}

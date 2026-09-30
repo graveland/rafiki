@@ -143,6 +143,7 @@ type ProviderGuard struct {
 	sink     EjectionSink
 	logger   *slog.Logger
 	onEject  func(provider, modelLine string, reason EjectReason)
+	dir      *ProviderDirectory
 }
 
 func NewProviderGuard(ttl time.Duration, logger *slog.Logger) *ProviderGuard {
@@ -157,6 +158,26 @@ func NewProviderGuard(ttl time.Duration, logger *slog.Logger) *ProviderGuard {
 		ttl:      ttl,
 		logger:   logger,
 	}
+}
+
+// SetDirectory attaches the provider directory the guard resolves slugs
+// through. Unset, every slug is guessSlug's guess. Call before serving.
+func (g *ProviderGuard) SetDirectory(d *ProviderDirectory) {
+	g.mu.Lock()
+	g.dir = d
+	g.mu.Unlock()
+}
+
+// Slug returns provider's OpenRouter routing slug, provider being a display
+// name as responses report it or a slug. Nil-safe: a nil guard guesses.
+func (g *ProviderGuard) Slug(provider string) string {
+	if g == nil {
+		return guessSlug(provider)
+	}
+	g.mu.Lock()
+	d := g.dir
+	g.mu.Unlock()
+	return d.Slug(provider)
 }
 
 // SetSink attaches the durable ejection log. Safe to leave unset.
@@ -244,7 +265,7 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 		return
 	}
 	rec, ok := g.ejectLocked(now, key, ReasonNoCache, streak, obs)
-	sink, onEject, logger := g.sink, g.onEject, g.logger
+	sink, onEject, logger, dir := g.sink, g.onEject, g.logger, g.dir
 	g.mu.Unlock()
 
 	if !ok {
@@ -252,7 +273,7 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 		// ejected it — and Debug for every repeat (the kept streak grows while
 		// a slot stays occupied), so a line parked at the cap under sustained
 		// traffic logs one line per provider, not one per miss.
-		attrs := []any{"provider", key.provider, "model_line", key.modelLine, "cap", maxEjectedPerModelLine}
+		attrs := []any{"provider", dir.Slug(key.provider), "model_line", key.modelLine, "cap", maxEjectedPerModelLine}
 		if streak == missStreakToEject {
 			logger.Info("routing: ejection declined at cap", attrs...)
 		} else {
@@ -261,7 +282,7 @@ func (g *ProviderGuard) Observe(now time.Time, obs Observation) {
 		return
 	}
 	logger.Warn("routing: provider ejected",
-		"provider", rec.Provider, "model_line", rec.ModelLine, "reason", string(rec.Reason),
+		"provider", dir.Slug(rec.Provider), "model_line", rec.ModelLine, "reason", string(rec.Reason),
 		"streak", streak, "expires_at", rec.ExpiresAt, "conversation", obs.Conversation)
 	if onEject != nil {
 		onEject(rec.Provider, rec.ModelLine, rec.Reason)
@@ -395,7 +416,7 @@ func (g *ProviderGuard) IgnoredFor(now time.Time, model string) []string {
 			continue
 		}
 		if k.modelLine == line || k.modelLine == AllModelLines {
-			seen[providerSlug(k.provider)] = struct{}{}
+			seen[g.dir.Slug(k.provider)] = struct{}{}
 		}
 	}
 	if len(seen) == 0 {
@@ -410,9 +431,13 @@ func (g *ProviderGuard) IgnoredFor(now time.Time, model string) []string {
 }
 
 // Ban excludes provider from routing for every model line, for ttl (zero =
-// until lifted). The provider is normalised to its OpenRouter slug, so "Open
-// Inference" and "open-inference" are one ban. Banning an already-banned
-// provider replaces the ban's expiry and note.
+// until lifted). The provider is resolved to its OpenRouter slug through the
+// directory, so "OpenInference" and "open-inference" are one ban, and a name
+// the directory does not list is refused (ErrInvalidBan wrapping
+// ErrUnknownProvider) — OpenRouter silently ignores an unknown slug, so such
+// a ban would exclude nothing. With the directory unreachable the slug is
+// guessed and the ban accepted. Banning an already-banned provider replaces
+// the ban's expiry and note.
 //
 // The durable log is written FIRST and its failure returned: unlike the
 // guard's own ejections, a ban is a request whose caller must learn whether
@@ -424,9 +449,20 @@ func (g *ProviderGuard) Ban(ctx context.Context, now time.Time, provider string,
 	if ttl < 0 {
 		return EjectionRecord{}, fmt.Errorf("%w: duration must not be negative, got %s", ErrInvalidBan, ttl)
 	}
-	slug, err := banSlug(provider)
+	g.mu.Lock()
+	dir := g.dir
+	g.mu.Unlock()
+	resolved, degraded, err := dir.Resolve(ctx, strings.TrimSpace(provider))
+	if err != nil {
+		return EjectionRecord{}, fmt.Errorf("%w: %w", ErrInvalidBan, err)
+	}
+	slug, err := banSlug(resolved)
 	if err != nil {
 		return EjectionRecord{}, err
+	}
+	if degraded && dir != nil {
+		g.logger.Warn("routing: provider directory unavailable; ban slug is a guess and may match nothing",
+			"provider", provider, "slug", slug)
 	}
 	rec := EjectionRecord{Provider: slug, ModelLine: AllModelLines, Reason: ReasonOperator, CreatedAt: now, Note: note}
 	if ttl > 0 {
@@ -459,24 +495,38 @@ func (g *ProviderGuard) Ban(ctx context.Context, now time.Time, provider string,
 // first (append-only: the ban row stays as history). It does not touch the
 // guard's own ejections of that provider on specific model lines — those have
 // their own cause and expiry. ErrNoBan when no operator ban is live.
+//
+// provider is matched against the stored ban key exactly first, then as its
+// directory slug, then as the guessed slug — so a ban stored under a slug
+// OpenRouter never had ("openinference") can still be lifted by that name
+// without the directory redirecting the lift onto the real one.
 func (g *ProviderGuard) Lift(ctx context.Context, now time.Time, provider string) error {
 	if g == nil {
 		return errors.New("provider guard is not configured")
 	}
-	slug, err := banSlug(provider)
-	if err != nil {
+	provider = strings.TrimSpace(provider)
+	if _, err := banSlug(provider); err != nil {
 		return err
 	}
-	key := providerKey{provider: slug, modelLine: AllModelLines}
 	g.opMu.Lock()
 	defer g.opMu.Unlock()
 	g.mu.Lock()
-	e, ok := g.ejected[key]
-	sink, logger := g.sink, g.logger
+	sink, logger, dir := g.sink, g.logger, g.dir
 	g.mu.Unlock()
-	if !ok || e.reason != ReasonOperator || !e.live(now) {
-		return fmt.Errorf("%w: %s", ErrNoBan, slug)
+	var slug string
+	for _, cand := range []string{provider, dir.Slug(provider), guessSlug(provider)} {
+		g.mu.Lock()
+		e, ok := g.ejected[providerKey{provider: cand, modelLine: AllModelLines}]
+		g.mu.Unlock()
+		if ok && e.reason == ReasonOperator && e.live(now) {
+			slug = cand
+			break
+		}
 	}
+	if slug == "" {
+		return fmt.Errorf("%w: %s", ErrNoBan, provider)
+	}
+	key := providerKey{provider: slug, modelLine: AllModelLines}
 	if sink != nil {
 		rec := EjectionRecord{Provider: slug, ModelLine: AllModelLines, Reason: ReasonLift, ExpiresAt: now}
 		if err := sink.Append(ctx, rec); err != nil {
@@ -491,7 +541,7 @@ func (g *ProviderGuard) Lift(ctx context.Context, now time.Time, provider string
 }
 
 func banSlug(provider string) (string, error) {
-	slug := providerSlug(strings.TrimSpace(provider))
+	slug := guessSlug(provider)
 	if slug == "" || slug == AllModelLines || strings.ContainsAny(slug, "\t\r\n\x00") {
 		return "", fmt.Errorf("%w: provider slug %q", ErrInvalidBan, provider)
 	}
@@ -585,11 +635,4 @@ func ModelLine(id string) string {
 		}
 	}
 	return id[:i]
-}
-
-// providerSlug converts OpenRouter's display name to the slug its routing
-// object expects: "CoreWeave" -> "coreweave", "Amazon Bedrock" ->
-// "amazon-bedrock".
-func providerSlug(name string) string {
-	return strings.ReplaceAll(strings.ToLower(name), " ", "-")
 }
