@@ -1,6 +1,7 @@
 package child
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -248,8 +249,8 @@ func (p *claudeProvider) SubagentFrame(line []byte) (SubagentObservation, bool) 
 }
 
 // claudeContentBlock is one assistant/user content block in claude's wire shape.
-// tool_result.content may be a string or an array of {type:text,text} blocks, so
-// it is captured as json.RawMessage and decoded by toolResultText.
+// tool_result.content may be a string or an array of text/image blocks, so
+// it is captured as json.RawMessage and decoded by decodeToolResult.
 type claudeContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -497,30 +498,71 @@ func claudeProviderAPI(_ string) (provider, api string) {
 }
 
 // toolResultText flattens a claude tool_result content value (string or array of
-// {type:text,text} blocks) into a plain string for the pi tool result.
+// content blocks) into a plain string for the pi tool result, whose vocabulary
+// is text-only; toolResultContent is the native path that keeps images.
 func toolResultText(raw json.RawMessage) string {
+	text, _ := decodeToolResult(raw)
+	return text
+}
+
+// toolResultContent builds a native tool result's content: the flattened text
+// block first (always present, so an empty result still completes the call),
+// then each image block in order.
+func toolResultContent(raw json.RawMessage) []*rafikiv1.ContentBlock {
+	text, images := decodeToolResult(raw)
+	content := []*rafikiv1.ContentBlock{{
+		Index: 0,
+		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
+	}}
+	for _, img := range images {
+		content = append(content, &rafikiv1.ContentBlock{
+			Index: int32(len(content)),
+			Block: &rafikiv1.ContentBlock_Image{Image: img},
+		})
+	}
+	return content
+}
+
+// decodeToolResult splits a claude tool_result content value into its
+// concatenated text and its base64 image blocks. An unknown shape comes back as
+// the raw JSON text so nothing is silently dropped.
+func decodeToolResult(raw json.RawMessage) (string, []*rafikiv1.ImageBlock) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return s, nil
 	}
 	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type   string `json:"type"`
+		Text   string `json:"text"`
+		Source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
 	}
-	if err := json.Unmarshal(raw, &blocks); err == nil {
-		var sb strings.Builder
-		for _, b := range blocks {
-			if b.Type == "text" {
-				sb.WriteString(b.Text)
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return string(raw), nil
+	}
+	var sb strings.Builder
+	var images []*rafikiv1.ImageBlock
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			sb.WriteString(b.Text)
+		case "image":
+			img := &rafikiv1.ImageBlock{MediaType: b.Source.MediaType}
+			if b.Source.Type == "base64" {
+				if data, err := base64.StdEncoding.DecodeString(b.Source.Data); err == nil {
+					img.Data = data
+				}
 			}
+			images = append(images, img)
 		}
-		return sb.String()
 	}
-	// Unknown shape — return the raw JSON so nothing is silently dropped.
-	return string(raw)
+	return sb.String(), images
 }
 
 // anyArgs coerces a nil input map to an empty map so tool_execution_start.args is
@@ -657,11 +699,8 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 				Index: idx,
 				Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
 					ToolUseId: b.ToolUseID,
-					Content: []*rafikiv1.ContentBlock{{
-						Index: 0,
-						Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: toolResultText(b.Content)}},
-					}},
-					IsError: b.IsError,
+					Content:   toolResultContent(b.Content),
+					IsError:   b.IsError,
 				}},
 			})
 			idx++
@@ -741,10 +780,7 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 					Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
 						ToolUseId: b.ToolUseID,
 						IsError:   b.IsError,
-						Content: []*rafikiv1.ContentBlock{{
-							Index: 0,
-							Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: toolResultText(b.Content)}},
-						}},
+						Content:   toolResultContent(b.Content),
 					}},
 				}},
 			}},

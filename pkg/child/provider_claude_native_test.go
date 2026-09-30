@@ -163,6 +163,32 @@ func TestNativeUserEmitsResultMessageForEmptyContent(t *testing.T) {
 	c.Eq("", tr.GetContent()[0].GetText().GetText(), "tool_result text")
 }
 
+// A tool_result carrying an image (Read on a PNG, an MCP screenshot) keeps it:
+// the flattened text block first, then each image in order, bytes decoded from
+// claude's base64 source. Dropping it left the cockpit an empty result.
+func TestNativeUserToolResultCarriesImages(t *testing.T) {
+	c := assert.NewAborting(t)
+	p := newClaudeProvider()
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[` +
+		`{"type":"text","text":"read shot.png"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"BAU="}}]}]}}`)
+
+	evs := p.BusFramesNative(line, 1000)
+
+	assertTypes(t, nativeTypeNames(evs), []string{"tool_execution_end", "user_message"})
+	content := evs[1].GetUserMessage().GetContent()[0].GetToolResult().GetContent()
+	c.Len(content, 3, "text then two images, got %d blocks", len(content))
+	c.Eq("read shot.png", content[0].GetText().GetText(), "text first")
+	c.Eq("image/png", content[1].GetImage().GetMediaType(), "first image media type")
+	c.EqDeep([]byte{1, 2, 3}, content[1].GetImage().GetData(), "first image bytes")
+	c.Eq("image/jpeg", content[2].GetImage().GetMediaType(), "second image media type")
+	c.EqDeep([]byte{4, 5}, content[2].GetImage().GetData(), "second image bytes")
+	for i, b := range content {
+		c.Eq(int32(i), b.GetIndex(), "block %d index", i)
+	}
+}
+
 // Guard the whole rule in one place: the native claude vocabulary is fundi's
 // vocabulary. Nothing in it may be a TurnStart or a ContentBlockDelta.
 func TestNativeVocabularyExcludesTurnStartAndDeltas(t *testing.T) {
