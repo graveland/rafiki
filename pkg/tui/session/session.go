@@ -41,6 +41,8 @@ type ToolCall struct {
 	Name   string
 	Input  string
 	Result string
+	// Images holds the image blocks the tool result carried, in order.
+	Images []*rafikiv1.ImageBlock
 	// HasResult records that a tool_result actually arrived, which is NOT the
 	// same as Result being non-empty: a tool can legitimately return nothing.
 	// Without it a call that never produced a result at all — interrupted, or
@@ -56,10 +58,12 @@ type ToolCall struct {
 
 // Block is one renderable unit in the transcript.
 type Block struct {
-	Kind       Kind
-	At         time.Time
-	Text       string // user/pending text or assistant plain-text fallback
-	Content    []*rafikiv1.ContentBlock
+	Kind    Kind
+	At      time.Time
+	Text    string // user/pending text or assistant plain-text fallback
+	Content []*rafikiv1.ContentBlock
+	// Images holds the block's own top-level image blocks, in order.
+	Images     []*rafikiv1.ImageBlock
 	ThinkText  string // accumulated thinking
 	ToolCalls  []ToolCall
 	StopReason string
@@ -78,6 +82,7 @@ func (b Block) Fingerprint() string {
 		sb.WriteString(tc.Name)
 		sb.WriteString(tc.Input)
 		sb.WriteString(tc.Result)
+		writeImages(&sb, tc.Images)
 		// HasResult, IsError and DurationMs all change what is drawn without
 		// changing Result -- a tool that succeeds returning nothing moves only
 		// HasResult, and the whole point of that flag is that it is not the
@@ -93,6 +98,7 @@ func (b Block) Fingerprint() string {
 			sb.WriteString("running")
 		}
 	}
+	writeImages(&sb, b.Images)
 	sb.WriteString(b.StopReason)
 	if b.Stream != "" {
 		sb.WriteString(b.Stream)
@@ -416,17 +422,19 @@ func (s *Session) applyUserMessage(um *rafikiv1.UserMessage) {
 	}
 
 	text := TextFromContent(um.GetContent())
-	if text == "" && results > 0 {
+	images := imagesFrom(um.GetContent())
+	if text == "" && len(images) == 0 && results > 0 {
 		// A results-only message appends no block, but it just answered tool
 		// calls -- which is exactly what unsticks the watermark.
 		s.recomputeFinalized()
 		return
 	}
 	s.Blocks = append(s.Blocks, Block{
-		Kind:  KindUser,
-		At:    time.Now(),
-		Text:  text,
-		Final: true,
+		Kind:   KindUser,
+		At:     time.Now(),
+		Text:   text,
+		Images: images,
+		Final:  true,
 	})
 	s.recomputeFinalized()
 }
@@ -446,6 +454,7 @@ func (s *Session) attachToolResult(tr *rafikiv1.ToolResultBlock) {
 			}
 			s.Blocks[i].ToolCalls[j].Result = TextFromContent(tr.GetContent())
 			s.Blocks[i].ToolCalls[j].HasResult = true
+			s.Blocks[i].ToolCalls[j].Images = imagesFrom(tr.GetContent())
 			// Never DOWNGRADE a failure. tool_execution_end may already have
 			// said this call failed, and it is the more direct witness — it
 			// carries the tool's own error. A stored tool_result block whose
@@ -481,13 +490,14 @@ func (s *Session) applyAssistantMessage(am *rafikiv1.AssistantMessage) {
 				Input: b.ToolUse.GetInputJson(),
 			})
 		case *rafikiv1.ContentBlock_Image:
-			block.Text += ImagePlaceholder(b.Image)
+			block.Images = append(block.Images, b.Image)
 		case *rafikiv1.ContentBlock_ToolResult:
 			for i := range block.ToolCalls {
 				if block.ToolCalls[i].ID == b.ToolResult.GetToolUseId() {
 					block.ToolCalls[i].IsError = b.ToolResult.GetIsError()
 					block.ToolCalls[i].Result = TextFromContent(b.ToolResult.GetContent())
 					block.ToolCalls[i].HasResult = true
+					block.ToolCalls[i].Images = imagesFrom(b.ToolResult.GetContent())
 				}
 			}
 		}
@@ -564,21 +574,38 @@ func (s *Session) applyToolEnd(te *rafikiv1.ToolExecutionEnd) {
 }
 
 // TextFromContent concatenates the text of every text block in content.
+// Images are carried separately (Block.Images, ToolCall.Images) and named by
+// the renderer, which never draws an image as nothing.
 func TextFromContent(content []*rafikiv1.ContentBlock) string {
 	var sb strings.Builder
 	for _, cb := range content {
-		switch b := cb.Block.(type) {
-		case *rafikiv1.ContentBlock_Text:
+		if b, ok := cb.Block.(*rafikiv1.ContentBlock_Text); ok {
 			sb.WriteString(b.Text.GetText())
-		case *rafikiv1.ContentBlock_Image:
-			// Named rather than dropped. The cockpit cannot draw pixels (see
-			// ImagePlaceholder), and an image block that renders as nothing at
-			// all is indistinguishable from a tool that returned nothing —
-			// which is the same false reassurance a swallowed error gives.
-			sb.WriteString(ImagePlaceholder(b.Image))
 		}
 	}
 	return sb.String()
+}
+
+// imagesFrom returns content's top-level image blocks, in order. It does not
+// descend into tool_result blocks: those images belong to the call.
+func imagesFrom(content []*rafikiv1.ContentBlock) []*rafikiv1.ImageBlock {
+	var out []*rafikiv1.ImageBlock
+	for _, cb := range content {
+		if img := cb.GetImage(); img != nil {
+			out = append(out, img)
+		}
+	}
+	return out
+}
+
+// writeImages adds an image's identity to a fingerprint: media type plus data
+// length, not a hash — Fingerprint runs on every live block every frame.
+func writeImages(sb *strings.Builder, imgs []*rafikiv1.ImageBlock) {
+	for _, img := range imgs {
+		sb.WriteString("img")
+		sb.WriteString(img.GetMediaType())
+		sb.WriteString(strconv.Itoa(len(img.GetData())))
+	}
 }
 
 // ImagePlaceholder names an image the transcript cannot draw.
@@ -595,8 +622,8 @@ func TextFromContent(content []*rafikiv1.ContentBlock) string {
 // column and image id), which pass through a cell renderer untouched because
 // they are just text. charmbracelet/crush does exactly that on this same
 // bubbletea version — see internal/ui/image/image.go — with an ANSI half-block
-// fallback where the terminal cannot. Until that is built here, say what the
-// image is.
+// fallback where the terminal cannot. Until that is built, the renderer draws
+// this line wherever an image sits.
 func ImagePlaceholder(img *rafikiv1.ImageBlock) string {
 	if img == nil {
 		return ""

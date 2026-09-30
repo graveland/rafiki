@@ -242,7 +242,8 @@ func TestAToolResultCannotDowngradeAKnownFailure(t *testing.T) {
 // An image block used to render as nothing at all, which is indistinguishable
 // from a tool that returned nothing. The cockpit cannot draw pixels — a
 // graphics escape written into a bubbletea View is parsed into ultraviolet's
-// cell grid, has nowhere to live, and is dropped — so name the image instead.
+// cell grid, has nowhere to live, and is dropped — so the image is carried as
+// data on the block and named by the renderer instead.
 func TestImageBlockIsNamedRatherThanDropped(t *testing.T) {
 	c := assert.NewCollecting(t)
 	// A real 1x1 PNG, so DecodeConfig has a header to read.
@@ -259,10 +260,110 @@ func TestImageBlockIsNamedRatherThanDropped(t *testing.T) {
 	}})
 
 	c.Require().Len(s.Blocks, 1, "got %d blocks, want the image to produce one", len(s.Blocks))
-	got := s.Blocks[0].Text
-	for _, want := range []string{"image/png", "1×1"} {
-		c.StrContains(got, want, "placeholder")
-	}
+	c.Require().Len(s.Blocks[0].Images, 1, "images on the block")
+	c.Eq("image/png", s.Blocks[0].Images[0].GetMediaType(), "image media type")
+	c.Eq("", s.Blocks[0].Text, "the image must not leak into the block's text")
+}
+
+// An image and its text are different data on the same block: the renderer
+// orders them (images before text for a user block), so flattening the image
+// into the text would draw it in the wrong place.
+func TestUserImageAndTextAreSeparate(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: []byte{1}}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "look"}}},
+		}},
+	}})
+
+	c.Require().Len(s.Blocks, 1, "blocks")
+	c.Eq("look", s.Blocks[0].Text, "text")
+	c.Require().Len(s.Blocks[0].Images, 1, "images")
+	c.Eq("image/png", s.Blocks[0].Images[0].GetMediaType(), "image media type")
+	c.NotStrContains(s.Blocks[0].Text, "\U0001f5bc", "the image must not be flattened into the text")
+}
+
+// A tool_result's images belong to the CALL it answers, not to a user block.
+func TestToolResultImagesLandOnTheCall(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_AssistantMessage{
+		AssistantMessage: &rafikiv1.AssistantMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+				Id: "tu_1", Name: "read"}},
+		}}},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: "tu_1",
+				Content: []*rafikiv1.ContentBlock{
+					{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "shot"}}},
+					{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+						MediaType: "image/png", Data: []byte{1}}}},
+				},
+			}}},
+		}},
+	}})
+
+	c.Require().Len(s.Blocks, 1, "a results-only message must add no user bubble")
+	c.Require().Len(s.Blocks[0].ToolCalls, 1, "tool calls")
+	call := s.Blocks[0].ToolCalls[0]
+	c.Eq("shot", call.Result, "result")
+	c.Require().Len(call.Images, 1, "images on the call")
+	c.Eq("image/png", call.Images[0].GetMediaType(), "image media type")
+}
+
+// A results-only message that ALSO carries a top-level image must still append
+// a block: the image has nowhere else to live, and dropping the len(images)
+// clause from the guard would swallow it along with the results.
+func TestResultsMessageWithTopLevelImageAppendsABlock(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := session.New("c_1")
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_AssistantMessage{
+		AssistantMessage: &rafikiv1.AssistantMessage{Content: []*rafikiv1.ContentBlock{{
+			Block: &rafikiv1.ContentBlock_ToolUse{ToolUse: &rafikiv1.ToolUseBlock{
+				Id: "tu_1", Name: "read"}},
+		}}},
+	}})
+	s.Apply(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_UserMessage{
+		UserMessage: &rafikiv1.UserMessage{Content: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_ToolResult{ToolResult: &rafikiv1.ToolResultBlock{
+				ToolUseId: "tu_1",
+				Content: []*rafikiv1.ContentBlock{{
+					Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "shot"}}},
+				}}}},
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: []byte{1}}}},
+		}},
+	}})
+
+	c.Require().Len(s.Blocks, 2, "blocks")
+	last := s.Blocks[1]
+	c.Eq(session.KindUser, last.Kind, "last block kind")
+	c.Require().Len(last.Images, 1, "images on the appended block")
+	c.Eq("image/png", last.Images[0].GetMediaType(), "image media type")
+}
+
+// Images are part of what a block draws, so they are part of its
+// fingerprint -- an image arriving on a live block must invalidate the cache.
+func TestFingerprintChangesWhenAnImageArrives(t *testing.T) {
+	c := assert.NewCollecting(t)
+	img := &rafikiv1.ImageBlock{MediaType: "image/png", Data: []byte{1}}
+
+	user := session.Block{Kind: session.KindUser, Text: "x"}
+	withImage := session.Block{Kind: session.KindUser, Text: "x",
+		Images: []*rafikiv1.ImageBlock{img}}
+	c.NotEq(user.Fingerprint(), withImage.Fingerprint(), "user block fingerprint")
+
+	plain := session.Block{Kind: session.KindAssistant,
+		ToolCalls: []session.ToolCall{{ID: "t"}}}
+	callImage := session.Block{Kind: session.KindAssistant,
+		ToolCalls: []session.ToolCall{{ID: "t", Images: []*rafikiv1.ImageBlock{img}}}}
+	c.NotEq(plain.Fingerprint(), callImage.Fingerprint(), "tool-call fingerprint")
 }
 
 // An undecodable or unknown image still gets named — the point is that

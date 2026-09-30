@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/session"
 )
 
@@ -150,6 +151,12 @@ func sanitizeControlChars(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// imageLine is the one-line stand-in for an image. MediaType is data, not
+// renderer output, so it is sanitized like any transcript text.
+func imageLine(img *rafikiv1.ImageBlock) string {
+	return sanitizeControlChars(session.ImagePlaceholder(img))
 }
 
 // headlineKey reports which argument toolArgSummary already put on the call
@@ -402,9 +409,16 @@ func (r *renderer) renderBlock(b session.Block) string {
 		// every wrapped continuation row -- and every logical line but the
 		// message's first -- with no colour at all.
 		var rows []string
-		for _, line := range strings.Split(b.Text, "\n") {
-			for _, row := range wrapTo("▌ ", line, r.width) {
+		for _, img := range b.Images {
+			for _, row := range wrapTo("▌ ", imageLine(img), r.width) {
 				rows = append(rows, styleUser.Render(row))
+			}
+		}
+		if b.Text != "" || len(b.Images) == 0 {
+			for _, line := range strings.Split(b.Text, "\n") {
+				for _, row := range wrapTo("▌ ", line, r.width) {
+					rows = append(rows, styleUser.Render(row))
+				}
 			}
 		}
 		return "\n" + strings.Join(rows, "\n")
@@ -502,7 +516,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs, budget) {
 				r.writeWrapped(&sb, styleToolResult.Render("    "), styleToolArg.Render(al))
 			}
-			if tc.Result != "" {
+			if tc.Result != "" || len(tc.Images) > 0 {
 				// Tool output is NOT markdown and must never be reflowed as
 				// prose. glamour joins consecutive newline-separated lines
 				// into one CommonMark paragraph, so "alpha\nbeta\ngamma"
@@ -527,29 +541,34 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// an escape sequence that once drove a tty cannot repaint the
 				// frame.
 				lines := strings.Split(strings.TrimRight(sanitizeControlChars(tc.Result), "\n"), "\n")
-				head, tail, elided := elide(lines)
 				gutter := styleToolResult.Render("    │ ")
 				text := styleToolResult
 				if tc.IsError {
 					gutter = styleFailBar.Render("  ▌ ") + styleToolResult.Render("│ ")
 					text = styleFailText
 				}
-				for _, line := range head {
-					r.writeWrapped(&sb, gutter, text.Render(line))
+				if tc.Result != "" {
+					head, tail, elided := elide(lines)
+					for _, line := range head {
+						r.writeWrapped(&sb, gutter, text.Render(line))
+					}
+					if elided > 0 {
+						sb.WriteString(gutter + styleMeta.Render(
+							" [omitted "+itoa(int64(elided))+" lines]"))
+						sb.WriteString("\n")
+					}
+					for _, line := range tail {
+						r.writeWrapped(&sb, gutter, text.Render(line))
+					}
 				}
-				if elided > 0 {
-					sb.WriteString(gutter + styleMeta.Render(
-						" [omitted "+itoa(int64(elided))+" lines]"))
-					sb.WriteString("\n")
-				}
-				for _, line := range tail {
-					r.writeWrapped(&sb, gutter, text.Render(line))
+				for _, img := range tc.Images {
+					r.writeWrapped(&sb, gutter, text.Render(imageLine(img)))
 				}
 			}
 		}
 	}
 
-	if b.Text != "" {
+	if b.Text != "" || len(b.Images) > 0 {
 		// The agent's own prose is the scarce thing on this screen. A bar on
 		// every text line alone was too quiet to find while scrolling, so the
 		// block is given room and the gutter is given HEIGHT: a blank line
@@ -566,14 +585,19 @@ func (r *renderer) renderAssistant(b session.Block) string {
 		// Prose is sanitized on the way IN — glamour's own styling is added on
 		// the way out and must survive; what must not survive is an escape
 		// sequence the model quoted out of a tool result.
-		rendered, err := r.md.Render(sanitizeControlChars(b.Text))
-		if err == nil {
-			rendered = strings.TrimSpace(rendered)
-			for _, line := range strings.Split(rendered, "\n") {
-				r.writeWrapped(&sb, bar, line)
+		if b.Text != "" {
+			rendered, err := r.md.Render(sanitizeControlChars(b.Text))
+			if err == nil {
+				rendered = strings.TrimSpace(rendered)
+				for _, line := range strings.Split(rendered, "\n") {
+					r.writeWrapped(&sb, bar, line)
+				}
+			} else {
+				r.writeWrapped(&sb, bar, b.Text)
 			}
-		} else {
-			r.writeWrapped(&sb, bar, b.Text)
+		}
+		for _, img := range b.Images {
+			r.writeWrapped(&sb, bar, imageLine(img))
 		}
 		sb.WriteString(edge + "\n")
 	}
