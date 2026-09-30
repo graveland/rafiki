@@ -453,11 +453,21 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		slog.Info("adopting child from a daemon whose lease has lapsed",
 			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
 	}
+	// The claim is taken HERE, before the goroutine starts, not inside the
+	// resume: the row was just stored exited, and the window between that
+	// write and a claim taken on another goroutine is one in which a send
+	// (a sibling's settle fragment) is rejected as "child has exited" — see
+	// validateSendTarget. The goroutine releases it.
+	if !c.spawnClaims.tryClaim(rec.ChildID) {
+		slog.Warn("resume already in progress; not auto-resuming", "childId", rec.ChildID)
+		return
+	}
 	slog.Info("auto-resuming fundi child", "childId", rec.ChildID)
 	go func(id string) {
+		defer c.spawnClaims.release(id)
 		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
 		defer cancel()
-		if _, err := c.resumeWithAutoRecovery(rctx, id); err != nil {
+		if _, err := c.resumeClaimedWithAutoRecovery(rctx, id); err != nil {
 			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
 			c.dropLease(id)
 			return

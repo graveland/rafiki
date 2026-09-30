@@ -2473,6 +2473,13 @@ func (c *Controller) resumeWithAutoRecovery(ctx context.Context, childID string)
 	return c.resumeInternal(ctx, childID, "", true)
 }
 
+// resumeClaimedWithAutoRecovery is resumeWithAutoRecovery for a caller that
+// already holds childID's claim (recoverOne, which claims before it starts the
+// resume goroutine so the child never reads as plainly exited in between).
+func (c *Controller) resumeClaimedWithAutoRecovery(ctx context.Context, childID string) (protocol.SpawnResponseData, error) {
+	return c.resumeClaimed(ctx, childID, "", true)
+}
+
 // resumeInternal is the shared implementation of Resume and auto-recovery resume.
 func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey string, autoResume bool) (protocol.SpawnResponseData, error) {
 	// Claim childID for the whole check-then-act window below: from before
@@ -2494,7 +2501,12 @@ func (c *Controller) resumeInternal(ctx context.Context, childID string, apiKey 
 		}
 	}
 	defer c.spawnClaims.release(childID)
+	return c.resumeClaimed(ctx, childID, apiKey, autoResume)
+}
 
+// resumeClaimed is resumeInternal's body for a caller that already holds
+// childID's spawnClaims claim; it does not release it.
+func (c *Controller) resumeClaimed(ctx context.Context, childID string, apiKey string, autoResume bool) (protocol.SpawnResponseData, error) {
 	snap, ok := c.st.Get(childID)
 	if !ok {
 		return protocol.SpawnResponseData{}, &connectapi.ControllerError{

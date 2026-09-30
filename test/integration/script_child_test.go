@@ -690,6 +690,11 @@ func TestScriptChildRestartSettlesFailed(t *testing.T) {
 		"RAFIKI_EVENTBUF_MAX_WAIT_MS=1500",
 	)...)...)
 	client2 := faceClient(t, d2, token)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("daemon 2 stderr:\n%s", d2.stderr.tail(12000))
+		}
+	})
 
 	// The victim reads exited, and its exit carries the settle reason: the
 	// parent's conversation names the daemon restart.
