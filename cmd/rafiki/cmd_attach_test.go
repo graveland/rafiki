@@ -102,3 +102,16 @@ func TestImagesFlagRefusesUnknownValues(t *testing.T) {
 	c.Error(err, "sixel is not a value --images accepts")
 	c.StrContains(err.Error(), "--images must be auto, kitty or off")
 }
+
+// TestRootDeclaresAttachFlags pins that a bare `rafiki`, which runs runAttach
+// on the root command, can resolve every flag runAttach reads.
+func TestRootDeclaresAttachFlags(t *testing.T) {
+	c := assert.NewCollecting(t)
+	root := newRootCmd()
+	for _, flag := range []string{"kill-on-exit", "keep-on-exit", "images"} {
+		c.NotNil(root.Flags().Lookup(flag), "root is missing the --%s flag", flag)
+	}
+	got, err := imagesFlag(root)
+	c.NoError(err, "imagesFlag on root")
+	c.Eq("auto", got, "root --images default")
+}

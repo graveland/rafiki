@@ -49,14 +49,21 @@ reattach any time.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runAttach,
 	}
-	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
-	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
-	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.3, ghostty, kitty), kitty (force), off")
+	addAttachFlags(cmd)
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, isAttachable), cobra.ShellCompDirectiveNoFileComp
 	}
 	return cmd
+}
+
+// addAttachFlags declares the flags runAttach reads. The root command runs
+// runAttach too, so it must declare them as well or a bare `rafiki` fails on
+// the first flag lookup.
+func addAttachFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
+	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
+	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
+	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.3, ghostty, kitty), kitty (force), off")
 }
 
 // isAttachable reports whether the cockpit can usefully focus on ch: it has

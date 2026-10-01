@@ -103,6 +103,8 @@ func newRootCmd() *cobra.Command {
 		RunE: runAttach,
 	}
 
+	addAttachFlags(root)
+
 	// Persistent, so every subcommand inherits them; the shorthands ride along
 	// too. -P names the daemon: --socket is gone, because a socket path with no
 	// credential beside it is exactly the split this replaced.
