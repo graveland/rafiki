@@ -231,9 +231,11 @@ func TestTermCapsCellSize(t *testing.T) {
 	ck.Eq(8, w, "a zero quotient keeps the default width")
 	ck.Eq(16, h, "a zero quotient keeps the default height")
 
-	// One zero quotient is enough to refuse the estimate.
+	// One zero quotient is enough to refuse the estimate: the pixel size
+	// itself is positive, so the estimate reaches the guard with width/200
+	// already zero.
 	halfDegenerate := newTermCaps("auto", env(nil))
-	halfDegenerate.observe(uv.PixelSizeEvent{Width: 0, Height: 900})
+	halfDegenerate.observe(uv.PixelSizeEvent{Width: 100, Height: 900})
 	halfDegenerate.observe(tea.WindowSizeMsg{Width: 200, Height: 50})
 	w, h = halfDegenerate.cellSize()
 	ck.Eq(8, w, "one zero quotient keeps the default width")
