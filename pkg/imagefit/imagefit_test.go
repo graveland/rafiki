@@ -307,6 +307,18 @@ func TestThumbnailAppliesJPEGOrientation(t *testing.T) {
 	c.Eq(64, got.Bounds().Dy())
 }
 
+// TestThumbnailAppliesOrientationWhenDownscaling pins the orientation inside
+// the downscale path: the orientation-6 source displays as 32×64, so a 16×16
+// box scales it by 0.25 to 8×16 — scaling the raw 64×32 instead would give
+// 16×8.
+func TestThumbnailAppliesOrientationWhenDownscaling(t *testing.T) {
+	c := assert.NewAborting(t)
+	got, err := Thumbnail(exifJPEG(t, redBlueHalves(), 6), Box{MaxWidth: 16, MaxHeight: 16})
+	c.NoError(err)
+	c.Eq(8, got.Bounds().Dx())
+	c.Eq(16, got.Bounds().Dy())
+}
+
 func TestThumbnailRefusesAPixelBomb(t *testing.T) {
 	c := assert.NewAborting(t)
 	_, err := Thumbnail(pixelBombPNG(10000, 10000), Box{MaxWidth: 96, MaxHeight: 96})
