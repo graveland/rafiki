@@ -170,6 +170,34 @@ func TestFitKeepsJPEGAsJPEG(t *testing.T) {
 	c.Eq(75, cfg.Height)
 }
 
+// gifOf builds a w×h GIF from a paletted two-colour checkerboard.
+func gifOf(t *testing.T, w, h int) []byte {
+	t.Helper()
+	pal := color.Palette{color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255}}
+	pm := image.NewPaletted(image.Rect(0, 0, w, h), pal)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			pm.SetColorIndex(x, y, uint8((x+y)%2))
+		}
+	}
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, pm, nil); err != nil {
+		t.Fatalf("gif.Encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestFitCorrectsAMislabelledGIF(t *testing.T) {
+	c := assert.NewAborting(t)
+	// The box is small enough that a GIF riding the PNG path would be
+	// resized; the gif-relabel arm must return it untouched as image/gif.
+	src := gifOf(t, 40, 40)
+	got, media, err := Fit(src, "image/png", Box{MaxWidth: 10, MaxHeight: 10})
+	c.NoError(err)
+	c.Eq("image/gif", media)
+	c.EqDeep(src, got)
+}
+
 func TestFitCorrectsAMislabelledImage(t *testing.T) {
 	c := assert.NewAborting(t)
 	src := jpegOf(t, nrgbaOf(400, 300))
@@ -194,13 +222,7 @@ func TestFitPassesOtherFormatsThrough(t *testing.T) {
 	c.Eq("image/webp", media)
 	c.EqDeep(webpBytes, got)
 
-	var buf bytes.Buffer
-	pal := color.Palette{color.RGBA{R: 255, A: 255}, color.RGBA{B: 255, A: 255}}
-	pm := image.NewPaletted(image.Rect(0, 0, 4, 4), pal)
-	if err := gif.Encode(&buf, pm, nil); err != nil {
-		t.Fatalf("gif.Encode: %v", err)
-	}
-	src := buf.Bytes()
+	src := gifOf(t, 4, 4)
 	got, media, err = Fit(src, "image/gif", Box{MaxWidth: 10, MaxHeight: 10})
 	c.NoError(err)
 	c.Eq("image/gif", media)
@@ -228,8 +250,9 @@ func TestOrientationReadsTheExifTag(t *testing.T) {
 	c.Eq(1, orientation([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x22, 'E', 'x', 'i', 'f'})) // APP1 cut off mid-TIFF
 }
 
-func TestFitAppliesJPEGOrientation(t *testing.T) {
-	c := assert.NewAborting(t)
+// redBlueHalves builds a 64×32 image whose left half is pure red and right
+// half pure blue — the fixture that makes an orientation visible in pixels.
+func redBlueHalves() *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, 64, 32))
 	for y := 0; y < 32; y++ {
 		for x := 0; x < 64; x++ {
@@ -240,6 +263,12 @@ func TestFitAppliesJPEGOrientation(t *testing.T) {
 			}
 		}
 	}
+	return img
+}
+
+func TestFitAppliesJPEGOrientation(t *testing.T) {
+	c := assert.NewAborting(t)
+	img := redBlueHalves()
 	got, media, err := Fit(exifJPEG(t, img, 6), "image/jpeg", Box{MaxWidth: 32, MaxHeight: 32})
 	c.NoError(err)
 	c.Eq("image/jpeg", media)
@@ -265,6 +294,23 @@ func TestThumbnailFitsTheBox(t *testing.T) {
 	c.NoError(err)
 	c.Eq(64, got.Bounds().Dx())
 	c.Eq(48, got.Bounds().Dy())
+}
+
+func TestThumbnailAppliesJPEGOrientation(t *testing.T) {
+	c := assert.NewAborting(t)
+	// Box {64,64,0} leaves the 32×64 display untouched, so what is under
+	// test is the orientation alone: the returned image is the oriented
+	// 32×64, never the raw 64×32.
+	got, err := Thumbnail(exifJPEG(t, redBlueHalves(), 6), Box{MaxWidth: 64, MaxHeight: 64})
+	c.NoError(err)
+	c.Eq(32, got.Bounds().Dx())
+	c.Eq(64, got.Bounds().Dy())
+}
+
+func TestThumbnailRefusesAPixelBomb(t *testing.T) {
+	c := assert.NewAborting(t)
+	_, err := Thumbnail(pixelBombPNG(10000, 10000), Box{MaxWidth: 96, MaxHeight: 96})
+	c.ErrorIs(err, ErrTooLarge)
 }
 
 func TestThumbnailRefusesUnsupportedFormats(t *testing.T) {
