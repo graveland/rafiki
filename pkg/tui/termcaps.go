@@ -162,21 +162,40 @@ func (t *termCaps) smallIDs() bool {
 	return t.profile != colorprofile.TrueColor && t.profile != colorprofile.Unknown
 }
 
-// version returns the XTVERSION name, for the startup log line.
-func (t *termCaps) version() string {
-	return t.termVersion
+// settled reports whether the verdict is final: an override and an auto mode
+// that may not probe have nothing to wait for, and a probing auto mode is
+// done once the DA1 sentinel arrives.
+func (t *termCaps) settled() bool {
+	return t.flag != "auto" || !t.probe || t.da1
+}
+
+// logAttrs names every input mode() judged, so the startup log line of a
+// terminal left on the placeholder says which check refused it.
+func (t *termCaps) logAttrs() []any {
+	mode := "placeholder"
+	if t.mode() == imageModeKitty {
+		mode = "kitty"
+	}
+	return []any{
+		"mode", mode,
+		"flag", t.flag,
+		"probe", t.probe,
+		"kitty_reply", t.kittyReply,
+		"terminal", t.termVersion,
+		"profile", t.profile.String(),
+	}
 }
 
 // versionAllowed reports whether an XTVERSION name names a terminal whose
 // graphics support is trusted. The match is case-insensitive; iTerm2 counts
-// only from the version where its Kitty graphics support became usable.
+// from 3.7.0, the oldest build seen drawing placeholder thumbnails.
 func versionAllowed(name string) bool {
 	n := strings.ToLower(name)
 	switch {
 	case strings.HasPrefix(n, "kitty"), strings.HasPrefix(n, "ghostty"):
 		return true
 	case strings.HasPrefix(n, "iterm2 "):
-		return versionGE(n[len("iterm2 "):], 3, 7, 3)
+		return versionGE(n[len("iterm2 "):], 3, 7, 0)
 	}
 	return false
 }

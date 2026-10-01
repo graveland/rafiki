@@ -475,7 +475,7 @@ type Cockpit struct {
 	// shared thumbnail store every pane's renderer draws from. imagesHidden
 	// is ^Y's toggle; imagesDirty records "a thumbnail arrived, every pane is
 	// stale", coalesced onto tickMsg; capsLogged keeps the startup log line to
-	// the first capability answer rather than one per query response.
+	// the settled verdict rather than one per query response.
 	caps         *termCaps
 	images       *imageStore
 	imagesHidden bool
@@ -593,20 +593,19 @@ func (c *Cockpit) retransmitCmd() tea.Cmd {
 
 // observeCaps folds one terminal-capability message into the resolver. A
 // mode change invalidates every pane and re-sends the backlog of thumbnails
-// readied before the capability resolved.
+// readied before the capability resolved. The verdict is logged once it
+// settles — including a settled placeholder, which no mode change announces —
+// and again on any later flip.
 func (c *Cockpit) observeCaps(msg tea.Msg) tea.Cmd {
-	if !c.caps.observe(msg) {
+	changed := c.caps.observe(msg)
+	if c.caps.settled() && (!c.capsLogged || changed) {
+		c.capsLogged = true
+		slog.Info("tui: terminal images", c.caps.logAttrs()...)
+	}
+	if !changed {
 		return nil
 	}
 	c.invalidatePanes()
-	if !c.capsLogged {
-		c.capsLogged = true
-		mode := "placeholder"
-		if c.caps.mode() == imageModeKitty {
-			mode = "kitty"
-		}
-		slog.Info("tui: terminal images", "mode", mode, "terminal", c.caps.version())
-	}
 	return c.retransmitCmd()
 }
 

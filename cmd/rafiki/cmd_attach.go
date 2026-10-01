@@ -63,7 +63,7 @@ func addAttachFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.3, ghostty, kitty), kitty (force), off")
+	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.0, ghostty, kitty), kitty (force), off")
 }
 
 // isAttachable reports whether the cockpit can usefully focus on ch: it has

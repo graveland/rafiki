@@ -92,7 +92,7 @@ Set these defaults on a profile, not an environment variable: see
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the session when the TUI quits (skips exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep the session running on exit (skips exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
-	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.3, ghostty, kitty), kitty (force), off")
+	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.0, ghostty, kitty), kitty (force), off")
 	cmd.Flags().StringP("preset", "p", "", "Apply a named preset from `rafiki preset list` (also settable via a profile's `preset` field)")
 	cmd.Flags().String("pymodule", "", "--kind script only: the pymodule to run as the child, as <repo>:<script> (e.g. local:driver); repo is \"local\" or a git source's name. Everything after -- is passed to the script as argv")
 	// The form has no script-spec field, and -i with --pymodule would otherwise

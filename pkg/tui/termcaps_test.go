@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -140,18 +142,19 @@ func TestTermCapsKittyReplyAfterSentinelIgnored(t *testing.T) {
 }
 
 // TestTermCapsITerm2Versions pins the allowlist: kitty and ghostty by prefix,
-// iTerm2 only from 3.7.3, everything else (and no name at all) refused.
+// iTerm2 only from 3.7.0, everything else (and no name at all) refused.
 func TestTermCapsITerm2Versions(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	for _, tc := range []struct {
 		name string
 		want imageMode
 	}{
+		{"iTerm2 3.7.0", imageModeKitty},
 		{"iTerm2 3.7.3", imageModeKitty},
 		{"iTerm2 3.7.10", imageModeKitty},
 		{"iTerm2 3.8", imageModeKitty},
-		{"iTerm2 3.7.2", imageModePlaceholder},
 		{"iTerm2 3.6.9", imageModePlaceholder},
+		{"iTerm2 3.6", imageModePlaceholder},
 		{"kitty(0.39.1)", imageModeKitty},
 		{"ghostty 1.2.0", imageModeKitty},
 		{"WezTerm 20240203", imageModePlaceholder},
@@ -193,7 +196,6 @@ func TestTermCapsObserveReportsModeChange(t *testing.T) {
 	c.observe(kittyOK())
 	c.observe(tea.TerminalVersionMsg{Name: "iTerm2 3.7.3"})
 	c.observe(tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
-	ck.Eq("iTerm2 3.7.3", c.version(), "version() returns the XTVERSION name, for the log line")
 	ck.True(c.observe(uv.PrimaryDeviceAttributesEvent{1}),
 		"the DA1 that completes the sequence must report the mode change")
 	ck.False(c.observe(uv.PrimaryDeviceAttributesEvent{1}), "a second DA1 changes nothing")
@@ -273,4 +275,48 @@ func TestTermCapsWrongKittyReplyIgnored(t *testing.T) {
 	wrongID.observe(uv.KittyGraphicsEvent{Options: kitty.Options{ID: 7}, Payload: []byte("OK")})
 	observeAuto(wrongID, "iTerm2 3.7.3", colorprofile.TrueColor)
 	ck.Eq(imageModePlaceholder, wrongID.mode(), "an OK from another image id is not support")
+}
+
+// TestTermCapsSettled pins when the verdict is final: at once for an override
+// or an auto mode that may not probe, and only at the DA1 sentinel otherwise.
+func TestTermCapsSettled(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	ck.True(newTermCaps("kitty", env(nil)).settled(), "a forced kitty has nothing to wait for")
+	ck.True(newTermCaps("off", env(nil)).settled(), "off has nothing to wait for")
+	ck.True(newTermCaps("auto", env(map[string]string{"TMUX": "/tmp/tmux"})).settled(),
+		"an auto mode that may not probe never gets an answer to wait for")
+
+	c := newTermCaps("auto", env(nil))
+	c.observe(kittyOK())
+	c.observe(tea.TerminalVersionMsg{Name: "iTerm2 3.6.9"})
+	ck.False(c.settled(), "answers before the sentinel do not settle a probing auto mode")
+	c.observe(uv.PrimaryDeviceAttributesEvent{1})
+	ck.True(c.settled(), "the DA1 sentinel settles it")
+}
+
+// TestCockpitLogsSettledPlaceholderVerdict pins the startup log line on the
+// path no mode change announces: auto detection that settles on the
+// placeholder must still log, naming the input that refused it, exactly once.
+func TestCockpitLogsSettledPlaceholderVerdict(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	t.Setenv("TMUX", "")
+	t.Setenv("TERM_PROGRAM", "")
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	c := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", Images: "auto"})
+	_, _ = c.Update(tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
+	_, _ = c.Update(kittyOK())
+	_, _ = c.Update(tea.TerminalVersionMsg{Name: "iTerm2 3.6.9"})
+	ck.Eq(0, strings.Count(buf.String(), "tui: terminal images"), "nothing is logged before the verdict settles")
+
+	_, _ = c.Update(uv.PrimaryDeviceAttributesEvent{1})
+	_, _ = c.Update(uv.CellSizeEvent{Width: 9, Height: 18})
+	out := buf.String()
+	ck.Eq(1, strings.Count(out, "tui: terminal images"), "the settled verdict is logged exactly once")
+	ck.True(strings.Contains(out, "mode=placeholder"), "the log names the verdict: %s", out)
+	ck.True(strings.Contains(out, `terminal="iTerm2 3.6.9"`), "the log names the refused terminal: %s", out)
+	ck.True(strings.Contains(out, "kitty_reply=true"), "the log names every input: %s", out)
 }
