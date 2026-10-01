@@ -7,6 +7,7 @@ import (
 	"context"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"testing"
 
@@ -56,6 +57,18 @@ func pngOf(t *testing.T, w, h int) []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatalf("png.Encode(%dx%d): %v", w, h, err)
+	}
+	return buf.Bytes()
+}
+
+// jpegOf encodes a w×h NRGBA image as JPEG, so a block can declare one media
+// type while its bytes sniff as another.
+func jpegOf(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatalf("jpeg.Encode(%dx%d): %v", w, h, err)
 	}
 	return buf.Bytes()
 }
@@ -125,12 +138,9 @@ func TestSendRejectsUnspecifiedMode(t *testing.T) {
 	assert.NewCollecting(t).Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
-// TestSendRejectsNonTextBlocks proves an image is refused rather than silently
-// dropped: Engine.HandlePrompt takes a string, so there is nowhere for image
-// bytes to go until that changes.
-// Send CARRIES images now — this used to assert they were refused. What has
-// not changed is that a block type with nowhere to go is refused rather than
-// skipped: silently dropping a payload looks to the sender like delivering it.
+// TestSendCarriesAnImageBlock proves an image block rides to the inbox as an
+// attachment next to the text — the text is not displaced, the bytes are not
+// dropped, and the declared media type travels with them.
 func TestSendCarriesAnImageBlock(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := connectapi.NewServer(nil)
@@ -181,6 +191,34 @@ func TestSendResizesAnOversizedImage(t *testing.T) {
 	c.LessOrEqual(1568, cfg.Height, "height")
 	c.LessOrEqual(1_150_000, cfg.Width*cfg.Height, "pixels")
 	c.GreaterOrEqual(1500, cfg.Width, "width")
+}
+
+// A mislabelled image is stored under the media type its bytes sniff as, not
+// the one the block declared: what is stored is what is echoed and sent to
+// the model, and the provider would refuse it mislabelled.
+func TestSendStoresTheCorrectedMediaType(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := connectapi.NewServer(nil)
+	acc := &fakeAccepter{}
+	s.SetInbox(acc)
+	jpg := jpegOf(t, 4, 4)
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1",
+		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+		Blocks: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: jpg,
+			}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
+		},
+	}))
+	c.Require().NoError(err, "Send with a mislabelled image")
+	c.Require().Eq(1, len(acc.got.Attachments), "got")
+	att := acc.got.Attachments[0]
+	c.Eq("image/jpeg", att.MediaType, "media type =")
+	_, format, err := image.DecodeConfig(bytes.NewReader(att.Data))
+	c.Require().NoError(err, "DecodeConfig of the accepted attachment")
+	c.Eq("jpeg", format, "decoded format =")
 }
 
 // Bytes that claim PNG/JPEG but do not decode are refused at ingest rather
