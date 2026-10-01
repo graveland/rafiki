@@ -164,7 +164,10 @@ func resolveChildConnect(ctx context.Context, ep connectEndpoint, c rafikiv1conn
 
 // imagesFlag reads --images, refusing anything but auto, kitty or off.
 func imagesFlag(cmd *cobra.Command) (string, error) {
-	v, _ := cmd.Flags().GetString("images")
+	v, err := cmd.Flags().GetString("images")
+	if err != nil {
+		return "", err
+	}
 	switch v {
 	case "auto", "kitty", "off":
 		return v, nil

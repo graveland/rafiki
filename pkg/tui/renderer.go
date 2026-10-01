@@ -138,11 +138,12 @@ func collapse(s string) string {
 //
 // Carriage returns fold to the newlines normalizeNewlines produces, which
 // turns a \r-refreshed progress bar into the separate lines the head/tail
-// elider already knows how to cap. Everything else below 0x20 (and DEL) is
-// dropped; \n and \t survive. Kitty's U+10EEEE placeholder maps to U+FFFD:
-// printed as ordinary transcript text it would draw a cell the terminal treats
-// as an image placeholder — with this renderer's grey (Color("8")) as its id,
-// which in the 256-colour id space names image 8.
+// elider already knows how to cap. Everything below 0x20 except \n and \t is
+// dropped, as are DEL and the C1 controls U+0080–U+009F — spelled in UTF-8,
+// they are control sequences all the same. Kitty's U+10EEEE placeholder maps
+// to U+FFFD: printed as ordinary transcript text it would draw a cell the
+// terminal treats as an image placeholder — with this renderer's grey
+// (Color("8")) as its id, which in the 256-colour id space names image 8.
 func sanitizeControlChars(s string) string {
 	s = normalizeNewlines(s)
 	s = ansi.Strip(s)
@@ -153,7 +154,7 @@ func sanitizeControlChars(s string) string {
 		if r == kitty.Placeholder {
 			return '\uFFFD'
 		}
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return -1
 		}
 		return r
@@ -433,7 +434,7 @@ var (
 func (r *renderer) renderBlock(b session.Block) string {
 	switch b.Kind {
 	case session.KindPendingUser:
-		return stylePending.Render("⏳ ") + stylePending.Render(b.Text)
+		return stylePending.Render("⏳ ") + stylePending.Render(sanitizeControlChars(b.Text))
 	case session.KindUser:
 		// A blank line ABOVE, so a prompt is separated from whatever the agent
 		// was doing before it. A solid bar, matching the weight the assistant
@@ -458,7 +459,7 @@ func (r *renderer) renderBlock(b session.Block) string {
 			}
 		}
 		if b.Text != "" || len(b.Images) == 0 {
-			for _, line := range strings.Split(b.Text, "\n") {
+			for _, line := range strings.Split(sanitizeControlChars(b.Text), "\n") {
 				for _, row := range wrapTo("▌ ", line, r.width) {
 					rows = append(rows, styleUser.Render(row))
 				}
@@ -466,7 +467,7 @@ func (r *renderer) renderBlock(b session.Block) string {
 		}
 		return "\n" + strings.Join(rows, "\n")
 	case session.KindSystem:
-		return styleMeta.Render("⚙  ") + styleMeta.Render(b.Text)
+		return styleMeta.Render("⚙  ") + styleMeta.Render(sanitizeControlChars(b.Text))
 	case session.KindScriptOutput:
 		// A script's output IS the transcript's content, not commentary: raw,
 		// never markdown (the glamour-joins-paragraphs trap), gutter weight
@@ -520,12 +521,16 @@ func (r *renderer) renderAssistant(b session.Block) string {
 
 	for _, tc := range b.ToolCalls {
 		budget := argBudget(r.width, tc.Name)
+		// The NAME is model-controlled text like any other transcript text; it
+		// is sanitized for display while the RAW name stays the lookup key for
+		// the argument summaries below.
+		name := sanitizeControlChars(tc.Name)
 		arg := toolArgSummary(tc.Name, tc.Input, budget)
 		if arg != "" {
 			arg = " " + arg
 		}
 		if tc.Running {
-			sb.WriteString(styleRunning.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+			sb.WriteString(styleRunning.Render("  ⚒ "+name) + styleToolArg.Render(arg) +
 				styleRunning.Render(" …"))
 			sb.WriteString("\n")
 			for _, al := range toolArgLines(tc.Name, tc.Input, r.expandArgs, budget) {
@@ -539,10 +544,10 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			var prefix string
 			if tc.IsError {
 				prefix = styleFailBar.Render("  ▌ ") +
-					styleFailText.Render("⚒ "+tc.Name) + styleToolArg.Render(arg) +
+					styleFailText.Render("⚒ "+name) + styleToolArg.Render(arg) +
 					dur + styleError.Render(" ✗")
 			} else if tc.HasResult {
-				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+				prefix = styleTool.Render("  ⚒ "+name) + styleToolArg.Render(arg) +
 					dur + styleMeta.Render(" ✓")
 			} else {
 				// Ended, but no result ever arrived — interrupted, or its turn
@@ -551,7 +556,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 				// alone is the marker: absence of a ✓ is already the signal and
 				// does not need words. ⋯ rather than ⊘, which the task box uses
 				// for a blocked task.
-				prefix = styleTool.Render("  ⚒ "+tc.Name) + styleToolArg.Render(arg) +
+				prefix = styleTool.Render("  ⚒ "+name) + styleToolArg.Render(arg) +
 					dur + styleWarn.Render(" ⋯")
 			}
 			sb.WriteString(prefix)
@@ -636,14 +641,17 @@ func (r *renderer) renderAssistant(b session.Block) string {
 		// the way out and must survive; what must not survive is an escape
 		// sequence the model quoted out of a tool result.
 		if b.Text != "" {
-			rendered, err := r.md.Render(sanitizeControlChars(b.Text))
+			text := sanitizeControlChars(b.Text)
+			rendered, err := r.md.Render(text)
 			if err == nil {
 				rendered = strings.TrimSpace(rendered)
 				for _, line := range strings.Split(rendered, "\n") {
 					r.writeWrapped(&sb, bar, line)
 				}
 			} else {
-				r.writeWrapped(&sb, bar, b.Text)
+				// The fallback draws the SAME sanitized text raw: glamour failed,
+				// not the sanitizing.
+				r.writeWrapped(&sb, bar, text)
 			}
 		}
 		for _, img := range b.Images {
@@ -665,7 +673,7 @@ func (r *renderer) renderAssistant(b session.Block) string {
 	// which is most blocks, competing with the content for attention while
 	// carrying none.
 	if b.Final && interestingStop(b.StopReason) {
-		sb.WriteString(styleMeta.Render("  ── " + b.StopReason))
+		sb.WriteString(styleMeta.Render("  ── " + sanitizeControlChars(b.StopReason)))
 		sb.WriteString("\n")
 	}
 

@@ -335,3 +335,85 @@ func TestCockpitImageCleanup(t *testing.T) {
 	c.StrContains(out, "a=d", "cleanup:\n%s", out)
 	c.StrContains(out, fmt.Sprintf("i=%d", th.id), "cleanup must name the thumb's id:\n%s", out)
 }
+
+// poisonText carries everything a transcript text path must not draw raw: a
+// Kitty placeholder rune (would forge a pixel cell of a real thumbnail), an
+// SGR escape, and a C1 control. After sanitizing the visible text is
+// "pre\uFFFDpost"; every raw byte the terminal would act on is gone.
+const poisonText = "pre\U0010EEEE\x1b[38;2;1;2;3mpost"
+
+// assertNoForgedCells pins F1 on one rendered block: the text survives (the
+// placeholder rune mapped to U+FFFD) but no pixel rune and no escape reaches
+// the terminal.
+func assertNoForgedCells(t *testing.T, out string) {
+	t.Helper()
+	c := assert.NewCollecting(t)
+	c.StrContains(ansi.Strip(out), "pre\uFFFDpost", "the sanitized text must still render:\n%s", out)
+	c.False(strings.ContainsRune(out, kitty.Placeholder), "a pixel rune must never be forged:\n%s", out)
+	c.NotStrContains(out, "38;2;1;2;3", "an escape sequence must never reach the terminal:\n%s", out)
+}
+
+// TestSanitizeCoversEveryTranscriptTextPath pins F1: every renderer path that
+// draws model- or tool-controlled TEXT — pending-user, user, system, a tool
+// call's NAME (in each of its four states) and a stop reason — passes through
+// sanitizeControlChars. imagePixels' rows are the ONE intentional bypass.
+func TestSanitizeCoversEveryTranscriptTextPath(t *testing.T) {
+	r := newRenderer()
+	r.width = 100
+
+	// User and pending-user and system text.
+	assertNoForgedCells(t, r.renderBlock(session.Block{Kind: session.KindPendingUser, Text: poisonText}))
+	assertNoForgedCells(t, r.renderBlock(session.Block{Kind: session.KindUser, Text: poisonText}))
+	assertNoForgedCells(t, r.renderBlock(session.Block{Kind: session.KindSystem, Text: poisonText}))
+
+	// A tool call's NAME, in each of its four states.
+	states := []session.ToolCall{
+		{Name: poisonText, Running: true},
+		{Name: poisonText, IsError: true, HasResult: true, Result: "boom"},
+		{Name: poisonText, HasResult: true, Result: "ok"},
+		{Name: poisonText},
+	}
+	for _, tc := range states {
+		out := r.renderBlock(session.Block{Kind: session.KindAssistant, Final: true,
+			ToolCalls: []session.ToolCall{tc}})
+		assertNoForgedCells(t, out)
+	}
+
+	// The stop reason.
+	assertNoForgedCells(t, r.renderBlock(session.Block{
+		Kind: session.KindAssistant, Final: true, StopReason: poisonText}))
+}
+
+// TestSanitizeDropsC1Controls pins F4: UTF-8-encoded C1 controls
+// (U+0080–U+009F) are control sequences like any ESC byte and must not reach
+// the terminal; U+00A0 and above are real text and must survive.
+func TestSanitizeDropsC1Controls(t *testing.T) {
+	c := assert.NewCollecting(t)
+	c.Eq("ab", sanitizeControlChars("a\u009bb"), "U+009B (CSI) dropped")
+	c.Eq("ab", sanitizeControlChars("a\u0085b"), "U+0085 (NEL) dropped")
+	c.Eq("a\u00a0b", sanitizeControlChars("a\u00a0b"), "U+00A0 is text, not control")
+}
+
+// TestCockpitImagesReadinessInvalidatesOnTick pins the coalescing contract:
+// a ready thumbnail only SETS imagesDirty (panes stay valid), and the next
+// tickMsg is what drains the queue, clears the flag and invalidates.
+func TestCockpitImagesReadinessInvalidatesOnTick(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ck := NewCockpit(Options{BaseURL: "http://127.0.0.1:1", Images: "kitty"})
+	img := &rafikiv1.ImageBlock{MediaType: "image/png", Data: pngOf(t, 400, 300)}
+	ck.images.lookup(img)
+	q := ck.images.takeQueued(false)
+	c.Require().Len(q, 1)
+	msg := runThumb(t, q[0])
+
+	p := ck.pane("c_1")
+	p.sigInit = true
+
+	_, _ = ck.Update(msg)
+	c.True(ck.imagesDirty, "a ready thumbnail marks the panes dirty")
+	c.True(p.sigInit, "readiness is coalesced: the ready message alone must not invalidate")
+
+	_, _ = ck.Update(tickMsg(time.Now()))
+	c.False(ck.imagesDirty, "the tick consumed the dirty flag")
+	c.False(p.sigInit, "the tick must invalidate every pane")
+}

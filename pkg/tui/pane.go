@@ -49,6 +49,7 @@ type paneSig struct {
 	height     int
 	expandArgs bool
 	drawImages bool
+	smallIDs   bool
 	liveFP     string
 }
 
@@ -67,9 +68,11 @@ func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, 
 		liveFP: session.LiveFingerprint(s.Blocks, s.Finalized),
 		// expandArgs changes every argument line the renderer draws, so it is
 		// part of the signature: without it the toggle flips a flag nothing reads.
-		// Same for drawImages — a mode change redraws every image row.
+		// Same for drawImages — a mode change redraws every image row — and
+		// smallIDs, which changes the id colour a ready image renders with.
 		expandArgs: expandArgs,
 		drawImages: drawImages,
+		smallIDs:   smallIDs,
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
