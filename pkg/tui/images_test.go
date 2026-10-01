@@ -336,15 +336,15 @@ func TestCockpitImageCleanup(t *testing.T) {
 	c.StrContains(out, fmt.Sprintf("i=%d", th.id), "cleanup must name the thumb's id:\n%s", out)
 }
 
-// poisonText carries everything a transcript text path must not draw raw: a
-// Kitty placeholder rune (would forge a pixel cell of a real thumbnail), an
-// SGR escape, and a C1 control. After sanitizing the visible text is
-// "pre\uFFFDpost"; every raw byte the terminal would act on is gone.
+// poisonText carries what a transcript text path must not draw raw: a Kitty
+// placeholder rune (would forge a pixel cell of a real thumbnail) and an SGR
+// escape. After sanitizing the visible text is "pre\uFFFDpost"; every raw
+// byte the terminal would act on is gone.
 const poisonText = "pre\U0010EEEE\x1b[38;2;1;2;3mpost"
 
-// assertNoForgedCells pins F1 on one rendered block: the text survives (the
-// placeholder rune mapped to U+FFFD) but no pixel rune and no escape reaches
-// the terminal.
+// assertNoForgedCells pins one rendered block's sanitization: the text
+// survives (the placeholder rune mapped to U+FFFD) but no pixel rune and no
+// escape reaches the terminal.
 func assertNoForgedCells(t *testing.T, out string) {
 	t.Helper()
 	c := assert.NewCollecting(t)
@@ -353,10 +353,11 @@ func assertNoForgedCells(t *testing.T, out string) {
 	c.NotStrContains(out, "38;2;1;2;3", "an escape sequence must never reach the terminal:\n%s", out)
 }
 
-// TestSanitizeCoversEveryTranscriptTextPath pins F1: every renderer path that
-// draws model- or tool-controlled TEXT — pending-user, user, system, a tool
-// call's NAME (in each of its four states) and a stop reason — passes through
-// sanitizeControlChars. imagePixels' rows are the ONE intentional bypass.
+// TestSanitizeCoversEveryTranscriptTextPath pins that every renderer path
+// that draws model- or tool-controlled TEXT — pending-user, user, system, a
+// tool call's NAME (in each of its four states) and a stop reason — passes
+// through sanitizeControlChars. imagePixels' rows are the ONE intentional
+// bypass.
 func TestSanitizeCoversEveryTranscriptTextPath(t *testing.T) {
 	r := newRenderer()
 	r.width = 100
@@ -384,7 +385,7 @@ func TestSanitizeCoversEveryTranscriptTextPath(t *testing.T) {
 		Kind: session.KindAssistant, Final: true, StopReason: poisonText}))
 }
 
-// TestSanitizeDropsC1Controls pins F4: UTF-8-encoded C1 controls
+// TestSanitizeDropsC1Controls pins that UTF-8-encoded C1 controls
 // (U+0080–U+009F) are control sequences like any ESC byte and must not reach
 // the terminal; U+00A0 and above are real text and must survive.
 func TestSanitizeDropsC1Controls(t *testing.T) {

@@ -222,6 +222,23 @@ func TestTermCapsCellSize(t *testing.T) {
 	ck.Eq(8, w, "pixel width / columns")
 	ck.Eq(18, h, "pixel height / rows")
 
+	// A pixel size smaller than the window size in cells divides to zero on
+	// both axes; the default must stand, or the thumbnail maths divides by it.
+	degenerate := newTermCaps("auto", env(nil))
+	degenerate.observe(uv.PixelSizeEvent{Width: 40, Height: 20})
+	degenerate.observe(tea.WindowSizeMsg{Width: 200, Height: 50})
+	w, h = degenerate.cellSize()
+	ck.Eq(8, w, "a zero quotient keeps the default width")
+	ck.Eq(16, h, "a zero quotient keeps the default height")
+
+	// One zero quotient is enough to refuse the estimate.
+	halfDegenerate := newTermCaps("auto", env(nil))
+	halfDegenerate.observe(uv.PixelSizeEvent{Width: 0, Height: 900})
+	halfDegenerate.observe(tea.WindowSizeMsg{Width: 200, Height: 50})
+	w, h = halfDegenerate.cellSize()
+	ck.Eq(8, w, "one zero quotient keeps the default width")
+	ck.Eq(16, h, "one zero quotient keeps the default height")
+
 	afterPixels := newTermCaps("auto", env(nil))
 	afterPixels.observe(uv.PixelSizeEvent{Width: 1600, Height: 900})
 	afterPixels.observe(tea.WindowSizeMsg{Width: 200, Height: 50})

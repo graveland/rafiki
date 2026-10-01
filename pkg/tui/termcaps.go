@@ -137,13 +137,17 @@ func (t *termCaps) observe(msg tea.Msg) bool {
 }
 
 // deriveCellSize estimates the cell size by dividing the pixel size by the
-// window size in cells, until a real CellSizeEvent arrives.
+// window size in cells, until a real CellSizeEvent arrives. A quotient that
+// rounds to zero — a reported pixel size smaller than the window size in
+// cells — is refused, and the 8×16 default stands.
 func (t *termCaps) deriveCellSize() {
 	if t.cellAnswered {
 		return
 	}
 	if t.pixelW > 0 && t.pixelH > 0 && t.cols > 0 && t.rows > 0 {
-		t.cellW, t.cellH = t.pixelW/t.cols, t.pixelH/t.rows
+		if w, h := t.pixelW/t.cols, t.pixelH/t.rows; w > 0 && h > 0 {
+			t.cellW, t.cellH = w, h
+		}
 	}
 }
 
