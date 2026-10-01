@@ -40,6 +40,16 @@ Three Swahili words, three roles:
   execution across a swarm of cheap OpenRouter subagents, and review with a
   third — plan with Opus, execute with a fleet of $0.10/Mtok workers while
   Sonnet coordinates, review with Fable — all watchable live in one cockpit.
+- **Script children (`--kind script`)** — a third child kind whose brain is a
+  saved pymodule process instead of an LLM: a workflow driver that gets the
+  whole child apparatus — lineage, labels, budget fence, inbox, cockpit row —
+  while costing nothing itself, coordinating the `fundi`/`claude` children it
+  spawns from Python. Hosted locally or on an executor under daraja; its exit
+  is its result, and its `cost_usd` is its subtree's spend.
+- **Batch transport rides on the model id** — a fundi child on a model id
+  ending `:batch` sends its first call through the OpenRouter Batch API
+  (parked, hours-scale work — the rail's `⧖` glyph) and goes live on the base
+  id for every later call. No flag, no verb: the id is the feature.
 - **A searchable model catalog, not a static list.** `agent_models` queries
   the live OpenRouter catalog (300+ entries) plus every locally-configured
   provider — price, context window, tool/vision support, benchmark scores
@@ -81,6 +91,12 @@ Three Swahili words, three roles:
   builds one shared venv for, so `pymodule_run` can run a repo's scripts
   against its own dependencies. Code written once in one
   conversation is still runnable in the next one, on another machine.
+- **A Python SDK (`sdk/python`).** A hand-written Connect JSON client over
+  `httpx` — no grpc, no protobuf runtime — whose message types are generated
+  from `control.proto` by `make proto`, so the SDK cannot lag the wire.
+  `Client.inside()` dials a script child's own socket (the socket is the
+  credential); `Client.from_profile()` connects anywhere else, shelling out
+  to `rafiki profile show -o json` so the SDK never parses profile files.
 - **Watch or drive the same conversation from anywhere.** A running agent
   isn't tied to one viewer: the cockpit (`rafiki attach`), `rafiki tail`,
   another agent's MCP tools (`agent_view`/`agent_send`), and a script hitting
@@ -94,6 +110,12 @@ Three Swahili words, three roles:
 - **Provider cache guard** — OpenRouter can silently move an unpinned model to
   a colder, more expensive provider mid-conversation. `routing.ProviderGuard`
   watches for the miss pattern and ejects the bad provider automatically.
+- **Declared routing, end to end.** An OpenRouter model id can carry a
+  bracketed spec (`[sort=price,quant=fp8+,only=…,nodata,zdr]`) that any caller
+  who can spawn may set; `rafiki providers route set` stores operator
+  defaults per model line; `rafiki providers ban` ejects a bad host by hand
+  at runtime. `nodata`/`zdr` are monotone — data policy cannot be routed
+  around by any of it.
 - **Model aliasing** — short names for long local/custom model ids, with a
   declared context window so Claude Code doesn't assume 200K against a
   16K-context local model and blow past it.
@@ -110,6 +132,11 @@ Three Swahili words, three roles:
   socket or remote TLS) by name, each with its own token and model defaults;
   agent presets (named seats: model, tools, prompt, budget) live in each
   daemon's database.
+- **Single sign-on** — `rafiki login` authenticates through the daemon's OIDC
+  identity provider: the verified email binds the identity once, the minted
+  token expires on the daemon's terms, and ownership — presets,
+  conversations, executors — follows the user instead of a shared bearer
+  token. Minted service tokens cover automation that can't walk the flow.
 
 ---
 
@@ -363,9 +390,8 @@ through `pkg/llm`/`pkg/agentloop` directly.
 
 The kinds have **different model universes**, and `--model` completion is
 scoped to the one you picked: `fundi` takes concrete Anthropic ids,
-`<family>-latest` aliases, and OpenRouter slash ids; `pi` resolves against
-its own `~/.pi/agent/models.json`, so an OpenRouter id means nothing to it —
-pick one and the child spawns, attaches, and never answers. `fundi` needs
+`<family>-latest` aliases, and OpenRouter slash ids; a script child takes no
+model at all. `fundi` needs
 `ANTHROPIC_API_KEY` in the **daemon-visible** environment (unconditionally),
 plus `OPENROUTER_API_KEY` for any non-`anthropic/` model — both reach a
 spawned child from the caller's shell via `rafiki create --forward-env`, on
@@ -511,12 +537,6 @@ The usual daemon/client split, as with `dockerd`/`docker`:
 |---|---|
 | `rafikid` | the daemon. Runs `fundi`-kind children as goroutines inside itself; `claude` children route through daraja on an executor when one is configured for it, else run as local subprocesses. `rafikid fundi` is a standalone one-child-on-stdio mode |
 | `rafiki` | the CLI client — the one you type. Also the executor, via `rafiki executor serve` |
-
-`rafiki version` reports both halves — the client's own build, then the
-daemon's, fetched over the control plane from the profile's daemon — so a
-client/daemon build mismatch is one command away. It fails (still printing
-the client line) when the daemon is unreachable. `rafiki --version` prints
-the client's version alone and never dials.
 
 ## Recall and memory
 
@@ -998,12 +1018,12 @@ ignored). `.env.example` documents each one in full.
 | `RAFIKI_HEARTBEAT_INTERVAL` | how often a continuously-working child's parent gets a coalesced check-in (Go duration, default 5m; `0` disables) |
 | `RAFIKI_CONTROL_LISTEN` | TCP address for the remote control plane. Unset = UDS only. Requires `RAFIKI_DB` |
 | `RAFIKI_CONTROL_TLS_CERT` / `RAFIKI_CONTROL_TLS_KEY` | PEM cert/key for the control plane TCP listener; mandatory when `RAFIKI_CONTROL_LISTEN` is set |
-| `RAFIKI_URL` / `RAFIKI_TOKEN` | **daemon-side only.** Points a `rafikid`-spawned `claude`/`pi` child at an external rafiki instance instead of the embedded proxy face, plus its bearer token. Client-side both names are hard errors (a profile names the daemon instead) except for `rafiki executor serve`/`service install`, which still derive `--connect` from `RAFIKI_URL` |
+| `RAFIKI_URL` / `RAFIKI_TOKEN` | **daemon-side only.** Points a `rafikid`-spawned `claude` child at an external rafiki instance instead of the embedded proxy face, plus its bearer token. Client-side both names are hard errors (a profile names the daemon instead) except for `rafiki executor serve`/`service install`, which still derive `--connect` from `RAFIKI_URL` |
 | `RAFIKI_DEFAULT_MODEL` | **daemon-side only** — the model the proxy face falls back to when a request names none |
 | `RAFIKI_TOOLS_WEB` | `1` enables the fundi `webfetch`/`websearch` tools (default off) |
 | `RAFIKI_BRAVE_API_KEY` | optional: use the Brave Search API for `websearch` instead of scraping DuckDuckGo Lite |
 | `RAFIKI_BASH_RTK` | route fundi's `bash` output through [rtk](https://github.com/rtk-ai/rtk): `auto` (default), `on`, `off` |
-| `RAFIKI_LOG_LEVEL` | daemon log verbosity: `debug`, `info` (default), `warn`, `error`. The daemon's `--log-level` flag overrides it. `debug` exposes per-request housekeeping lines; at `info` the OpenRouter broadcast webhook coalesces its success line to one per minute |
+| `RAFIKI_LOG_LEVEL` | daemon log verbosity: `debug`, `info` (default), `warn`, `error`. The daemon's `--log-level` flag overrides it. `debug` exposes per-request housekeeping lines |
 | `RAFIKI_EXECUTOR_SELECTOR` | client-side default label selector for `rafiki create --executor-selector` |
 | `RAFIKI_EXECUTORS_ENABLED` | daemon-side: `0`/`false` refuses executors outright. Defaults ON when `RAFIKI_CONTROL_LISTEN` is unset (UDS-only trust boundary), OFF once it's set |
 
@@ -1210,7 +1230,7 @@ make run                       # rafikid in the foreground, proxy face on :8035
 ```
 
 `rafikid` serves the proxy itself — `/v1/messages`, `/v1/chat/completions`,
-`/v1/messages/count_tokens`, and `HEAD /api/hello` — so pi and claude
+`/v1/messages/count_tokens`, and `HEAD /api/hello` — so claude
 children get capture, failover and model resolution with no second process.
 The fundi kind never uses the face; it reaches the library in-process.
 
