@@ -48,6 +48,7 @@ func TestTermCapsOffSendsNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTermCaps("off", env(nil))
 	ck.Eq("", c.queries(), "off must not send capability queries")
+	c.observe(kittyOK())
 	observeAuto(c, "iTerm2 3.7.3", colorprofile.TrueColor)
 	ck.Eq(imageModePlaceholder, c.mode(), "off must stay placeholder through a full kitty reply sequence")
 }
@@ -68,6 +69,7 @@ func TestTermCapsTmuxSendsNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTermCaps("auto", env(map[string]string{"TMUX": "/tmp/x"}))
 	ck.Eq("", c.queries(), "auto inside tmux must not query")
+	c.observe(kittyOK())
 	observeAuto(c, "iTerm2 3.7.3", colorprofile.TrueColor)
 	ck.Eq(imageModePlaceholder, c.mode(), "auto inside tmux stays placeholder")
 }
@@ -78,6 +80,7 @@ func TestTermCapsAppleTerminalSendsNothing(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	c := newTermCaps("auto", env(map[string]string{"TERM_PROGRAM": "Apple_Terminal"}))
 	ck.Eq("", c.queries(), "auto under Apple_Terminal must not query")
+	c.observe(kittyOK())
 	observeAuto(c, "iTerm2 3.7.3", colorprofile.TrueColor)
 	ck.Eq(imageModePlaceholder, c.mode(), "auto under Apple_Terminal stays placeholder")
 }
@@ -122,6 +125,8 @@ func TestTermCapsKittyReplyAfterSentinelIgnored(t *testing.T) {
 	ck := assert.NewCollecting(t)
 
 	c := newTermCaps("auto", env(nil))
+	c.observe(tea.TerminalVersionMsg{Name: "iTerm2 3.7.3"})
+	c.observe(tea.ColorProfileMsg{Profile: colorprofile.TrueColor})
 	c.observe(uv.PrimaryDeviceAttributesEvent{1})
 	c.observe(kittyOK())
 	ck.Eq(imageModePlaceholder, c.mode(), "a kitty reply after the sentinel does not count")
