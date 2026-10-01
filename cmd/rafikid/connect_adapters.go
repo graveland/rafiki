@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -293,6 +294,36 @@ func (c *Controller) costsFor(ctx context.Context, snaps []childstore.Snapshot) 
 // DescendantDepth satisfies eventlog.Lineage.
 func (c *Controller) DescendantDepth(ancestorID, candidateID string) int {
 	return c.st.DescendantDepth(ancestorID, candidateID)
+}
+
+// DescendantIDs satisfies connectapi.DescendantLister: the ids beneath childID,
+// deepest first, so a cascade ends each child before the parent that spawned
+// it. Ties break on id so the order is stable. Native thread children are left
+// out: they have no process of their own and already end and close with their
+// parent (exitNativeChildrenOf, closeNativeChildrenOf).
+func (c *Controller) DescendantIDs(childID string) []string {
+	type entry struct {
+		id    string
+		depth int
+	}
+	var entries []entry
+	for _, snap := range c.st.Descendants(childID) {
+		if snap.Native {
+			continue
+		}
+		entries = append(entries, entry{snap.ChildID, c.st.DescendantDepth(childID, snap.ChildID)})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].depth != entries[j].depth {
+			return entries[i].depth > entries[j].depth
+		}
+		return entries[i].id < entries[j].id
+	})
+	ids := make([]string, len(entries))
+	for i, e := range entries {
+		ids[i] = e.id
+	}
+	return ids
 }
 
 // Labels satisfies eventlog.Lineage.

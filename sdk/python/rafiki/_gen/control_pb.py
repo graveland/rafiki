@@ -1119,6 +1119,7 @@ class KillRequest:
     child_id: str = ""
     shutdown_timeout_ms: int = 0
     kill_timeout_ms: int = 0
+    include_descendants: bool = False
 
     def to_dict(self) -> dict:
         out = {}
@@ -1128,6 +1129,8 @@ class KillRequest:
             out["shutdownTimeoutMs"] = str(self.shutdown_timeout_ms)
         if self.kill_timeout_ms != 0:
             out["killTimeoutMs"] = str(self.kill_timeout_ms)
+        if self.include_descendants != False:
+            out["includeDescendants"] = self.include_descendants
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "KillRequest":
@@ -1141,6 +1144,9 @@ class KillRequest:
         _v = _d.get("killTimeoutMs")
         if _v is not None:
             obj.kill_timeout_ms = _int_in(_v)
+        _v = _d.get("includeDescendants")
+        if _v is not None:
+            obj.include_descendants = _v
         return obj
 
 @dataclasses.dataclass
@@ -1150,6 +1156,7 @@ class KillResponse:
     signal: str = ""
     duration_ms: int = 0
     escalated: bool = False
+    descendant_ids: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
@@ -1163,6 +1170,8 @@ class KillResponse:
             out["durationMs"] = str(self.duration_ms)
         if self.escalated != False:
             out["escalated"] = self.escalated
+        if self.descendant_ids:
+            out["descendantIds"] = [x for x in self.descendant_ids]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "KillResponse":
@@ -1182,16 +1191,22 @@ class KillResponse:
         _v = _d.get("escalated")
         if _v is not None:
             obj.escalated = _v
+        _v = _d.get("descendantIds")
+        if _v is not None:
+            obj.descendant_ids = [x for x in _v]
         return obj
 
 @dataclasses.dataclass
 class CloseRequest:
     child_id: str = ""
+    include_descendants: bool = False
 
     def to_dict(self) -> dict:
         out = {}
         if self.child_id != "":
             out["childId"] = self.child_id
+        if self.include_descendants != False:
+            out["includeDescendants"] = self.include_descendants
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CloseRequest":
@@ -1199,16 +1214,22 @@ class CloseRequest:
         _v = _d.get("childId")
         if _v is not None:
             obj.child_id = _v
+        _v = _d.get("includeDescendants")
+        if _v is not None:
+            obj.include_descendants = _v
         return obj
 
 @dataclasses.dataclass
 class CloseResponse:
     child_id: str = ""
+    descendant_ids: list[str] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {}
         if self.child_id != "":
             out["childId"] = self.child_id
+        if self.descendant_ids:
+            out["descendantIds"] = [x for x in self.descendant_ids]
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "CloseResponse":
@@ -1216,6 +1237,9 @@ class CloseResponse:
         _v = _d.get("childId")
         if _v is not None:
             obj.child_id = _v
+        _v = _d.get("descendantIds")
+        if _v is not None:
+            obj.descendant_ids = [x for x in _v]
         return obj
 
 @dataclasses.dataclass

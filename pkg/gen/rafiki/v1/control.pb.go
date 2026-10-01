@@ -2375,8 +2375,12 @@ type KillRequest struct {
 	ChildId           string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
 	ShutdownTimeoutMs int64                  `protobuf:"varint,2,opt,name=shutdown_timeout_ms,json=shutdownTimeoutMs,proto3" json:"shutdown_timeout_ms,omitempty"`
 	KillTimeoutMs     int64                  `protobuf:"varint,3,opt,name=kill_timeout_ms,json=killTimeoutMs,proto3" json:"kill_timeout_ms,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// include_descendants also kills every live descendant of child_id, deepest
+	// first, before child_id itself. Off (the default) it ends child_id alone and
+	// leaves its subtree running, exactly as before.
+	IncludeDescendants bool `protobuf:"varint,4,opt,name=include_descendants,json=includeDescendants,proto3" json:"include_descendants,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *KillRequest) Reset() {
@@ -2430,6 +2434,13 @@ func (x *KillRequest) GetKillTimeoutMs() int64 {
 	return 0
 }
 
+func (x *KillRequest) GetIncludeDescendants() bool {
+	if x != nil {
+		return x.IncludeDescendants
+	}
+	return false
+}
+
 // KillResponse mirrors protocol.KillResponseData, which is what
 // Controller.Kill actually returns. Note it carries NO status field — the
 // child's status is read separately via GetChild if a client wants it.
@@ -2437,10 +2448,13 @@ type KillResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
 	// exit_code is optional: a signalled child has none, and 0 means clean exit.
-	ExitCode      *int32 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
-	Signal        string `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
-	DurationMs    int64  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
-	Escalated     bool   `protobuf:"varint,5,opt,name=escalated,proto3" json:"escalated,omitempty"`
+	ExitCode   *int32 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	Signal     string `protobuf:"bytes,3,opt,name=signal,proto3" json:"signal,omitempty"`
+	DurationMs int64  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	Escalated  bool   `protobuf:"varint,5,opt,name=escalated,proto3" json:"escalated,omitempty"`
+	// descendant_ids are the descendants include_descendants ended, deepest
+	// first. Descendants that had already exited are not listed.
+	DescendantIds []string `protobuf:"bytes,6,rep,name=descendant_ids,json=descendantIds,proto3" json:"descendant_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2510,6 +2524,13 @@ func (x *KillResponse) GetEscalated() bool {
 	return false
 }
 
+func (x *KillResponse) GetDescendantIds() []string {
+	if x != nil {
+		return x.DescendantIds
+	}
+	return nil
+}
+
 // CloseRequest finalizes a conversation: the child leaves the daemon's store
 // and can never again be resumed, reattached or continued. Its transcript is
 // NOT deleted — no foreign key references conversations.child, so
@@ -2519,10 +2540,14 @@ func (x *KillResponse) GetEscalated() bool {
 // The child must already be exited; closing a live child is an error, not an
 // implicit kill.
 type CloseRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	// include_descendants also closes every descendant of child_id, deepest
+	// first, before child_id itself. Each must already be exited, as for
+	// child_id. Off (the default) it closes child_id alone.
+	IncludeDescendants bool `protobuf:"varint,2,opt,name=include_descendants,json=includeDescendants,proto3" json:"include_descendants,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *CloseRequest) Reset() {
@@ -2562,9 +2587,19 @@ func (x *CloseRequest) GetChildId() string {
 	return ""
 }
 
+func (x *CloseRequest) GetIncludeDescendants() bool {
+	if x != nil {
+		return x.IncludeDescendants
+	}
+	return false
+}
+
 type CloseResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChildId       string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	// descendant_ids are the descendants include_descendants closed, deepest
+	// first.
+	DescendantIds []string `protobuf:"bytes,2,rep,name=descendant_ids,json=descendantIds,proto3" json:"descendant_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2604,6 +2639,13 @@ func (x *CloseResponse) GetChildId() string {
 		return x.ChildId
 	}
 	return ""
+}
+
+func (x *CloseResponse) GetDescendantIds() []string {
+	if x != nil {
+		return x.DescendantIds
+	}
+	return nil
 }
 
 // SetBudgetRequest changes a child's MaxCost. From a user credential it is
@@ -13610,24 +13652,28 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\t_max_costB\x0f\n" +
 	"\r_max_children\"*\n" +
 	"\rSpawnResponse\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId\"\x80\x01\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\"\xb1\x01\n" +
 	"\vKillRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12.\n" +
 	"\x13shutdown_timeout_ms\x18\x02 \x01(\x03R\x11shutdownTimeoutMs\x12&\n" +
-	"\x0fkill_timeout_ms\x18\x03 \x01(\x03R\rkillTimeoutMs\"\xb0\x01\n" +
+	"\x0fkill_timeout_ms\x18\x03 \x01(\x03R\rkillTimeoutMs\x12/\n" +
+	"\x13include_descendants\x18\x04 \x01(\bR\x12includeDescendants\"\xd7\x01\n" +
 	"\fKillResponse\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12 \n" +
 	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x16\n" +
 	"\x06signal\x18\x03 \x01(\tR\x06signal\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
 	"durationMs\x12\x1c\n" +
-	"\tescalated\x18\x05 \x01(\bR\tescalatedB\f\n" +
+	"\tescalated\x18\x05 \x01(\bR\tescalated\x12%\n" +
+	"\x0edescendant_ids\x18\x06 \x03(\tR\rdescendantIdsB\f\n" +
 	"\n" +
-	"_exit_code\")\n" +
+	"_exit_code\"Z\n" +
 	"\fCloseRequest\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId\"*\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12/\n" +
+	"\x13include_descendants\x18\x02 \x01(\bR\x12includeDescendants\"Q\n" +
 	"\rCloseResponse\x12\x19\n" +
-	"\bchild_id\x18\x01 \x01(\tR\achildId\"H\n" +
+	"\bchild_id\x18\x01 \x01(\tR\achildId\x12%\n" +
+	"\x0edescendant_ids\x18\x02 \x03(\tR\rdescendantIds\"H\n" +
 	"\x10SetBudgetRequest\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x19\n" +
 	"\bmax_cost\x18\x02 \x01(\x01R\amaxCost\"I\n" +

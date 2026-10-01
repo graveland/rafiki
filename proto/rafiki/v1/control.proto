@@ -415,6 +415,10 @@ message KillRequest {
   string child_id = 1;
   int64 shutdown_timeout_ms = 2;
   int64 kill_timeout_ms = 3;
+  // include_descendants also kills every live descendant of child_id, deepest
+  // first, before child_id itself. Off (the default) it ends child_id alone and
+  // leaves its subtree running, exactly as before.
+  bool include_descendants = 4;
 }
 
 // KillResponse mirrors protocol.KillResponseData, which is what
@@ -427,6 +431,9 @@ message KillResponse {
   string signal = 3;
   int64 duration_ms = 4;
   bool escalated = 5;
+  // descendant_ids are the descendants include_descendants ended, deepest
+  // first. Descendants that had already exited are not listed.
+  repeated string descendant_ids = 6;
 }
 
 // CloseRequest finalizes a conversation: the child leaves the daemon's store
@@ -439,10 +446,17 @@ message KillResponse {
 // implicit kill.
 message CloseRequest {
   string child_id = 1;
+  // include_descendants also closes every descendant of child_id, deepest
+  // first, before child_id itself. Each must already be exited, as for
+  // child_id. Off (the default) it closes child_id alone.
+  bool include_descendants = 2;
 }
 
 message CloseResponse {
   string child_id = 1;
+  // descendant_ids are the descendants include_descendants closed, deepest
+  // first.
+  repeated string descendant_ids = 2;
 }
 
 // SetBudgetRequest changes a child's MaxCost. From a user credential it is

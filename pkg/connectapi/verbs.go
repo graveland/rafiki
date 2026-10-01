@@ -516,6 +516,15 @@ func (s *Server) Kill(
 		return nil, connect.NewError(connect.CodeUnavailable,
 			errors.New("child lifecycle not yet wired"))
 	}
+	var descendants []string
+	if req.Msg.GetIncludeDescendants() {
+		var err error
+		descendants, err = cascadeKill(ctx, *p, childID,
+			req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
+		if err != nil {
+			return nil, cascadeErr(err)
+		}
+	}
 	out, err := (*p).Kill(ctx, childID,
 		req.Msg.GetShutdownTimeoutMs(), req.Msg.GetKillTimeoutMs())
 	if err != nil {
@@ -531,6 +540,8 @@ func (s *Server) Kill(
 		Signal:     out.Signal,
 		DurationMs: out.DurationMs,
 		Escalated:  out.Escalated,
+
+		DescendantIds: descendants,
 	}
 	if out.ExitCode != nil {
 		code := int32(*out.ExitCode)
