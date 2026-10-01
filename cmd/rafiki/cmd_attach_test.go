@@ -79,3 +79,26 @@ func TestTUIVerbIsGone(t *testing.T) {
 		}
 	}
 }
+
+// TestImagesFlagRefusesUnknownValues pins --images' vocabulary: auto, kitty
+// and off are accepted as-is, anything else is refused before the alt screen
+// is entered — a bad value must fail on a clean terminal, not corrupt one.
+func TestImagesFlagRefusesUnknownValues(t *testing.T) {
+	c := assert.NewCollecting(t)
+	cmd := newAttachCmd()
+	for _, want := range []string{"auto", "kitty", "off"} {
+		if err := cmd.Flags().Set("images", want); err != nil {
+			t.Fatalf("set --images %s: %v", want, err)
+		}
+		got, err := imagesFlag(cmd)
+		c.NoError(err, "--images %s", want)
+		c.Eq(want, got, "--images %s", want)
+	}
+
+	if err := cmd.Flags().Set("images", "sixel"); err != nil {
+		t.Fatalf("set --images sixel: %v", err)
+	}
+	_, err := imagesFlag(cmd)
+	c.Error(err, "sixel is not a value --images accepts")
+	c.StrContains(err.Error(), "--images must be auto, kitty or off")
+}

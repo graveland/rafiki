@@ -11,6 +11,7 @@ package tui
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"connectrpc.com/connect"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"go.graveland.dev/rafiki/pkg/clientstate"
@@ -278,6 +280,10 @@ type Options struct {
 	// cmd/rafiki's profileIndicator applies to table output) -- it only knows
 	// what it is told.
 	ShowProfileBadge bool
+	// Images is how the transcript draws image attachments: "auto" (detect
+	// Kitty graphics support), "kitty" (force) or "off"; "" means auto. See
+	// `rafiki attach --images`.
+	Images string
 }
 
 // SpawnDefaults prefills the create form. Empty fields keep the form's own
@@ -462,6 +468,17 @@ type Cockpit struct {
 	// showProfileBadge names profileName in the footer. See
 	// Options.ShowProfileBadge.
 	showProfileBadge bool
+
+	// caps resolves this terminal's Kitty graphics support, and images is the
+	// shared thumbnail store every pane's renderer draws from. imagesHidden
+	// is ^Y's toggle; imagesDirty records "a thumbnail arrived, every pane is
+	// stale", coalesced onto tickMsg; capsLogged keeps the startup log line to
+	// the first capability answer rather than one per query response.
+	caps         *termCaps
+	images       *imageStore
+	imagesHidden bool
+	imagesDirty  bool
+	capsLogged   bool
 }
 
 // NewCockpit builds the cockpit. A non-empty opts.ChildID opens session-first on
@@ -517,6 +534,8 @@ func NewCockpit(opts Options) *Cockpit {
 		profileName:              opts.ProfileName,
 		showProfileBadge:         opts.ShowProfileBadge,
 		historyInFlight:          make(map[string]bool),
+		caps:                     newTermCaps(opts.Images, os.Getenv),
+		images:                   newImageStore(nil),
 	}
 	if opts.OpenCreate {
 		c.form = newSpawnForm()
@@ -540,6 +559,59 @@ func NewCockpit(opts Options) *Cockpit {
 }
 
 func (c *Cockpit) focused() string { return c.rail.Focus() }
+
+// drawImages reports whether the transcript should render Kitty placeholder
+// rows right now: the terminal resolved to kitty mode AND the user has not
+// toggled thumbnails off with ^Y.
+func (c *Cockpit) drawImages() bool {
+	return c.caps.mode() == imageModeKitty && !c.imagesHidden
+}
+
+// invalidatePanes marks every pane's cache stale — the whole loop, in one
+// place, because every image-mode change must reach every pane.
+func (c *Cockpit) invalidatePanes() {
+	for _, p := range c.panes {
+		p.invalidate()
+	}
+}
+
+// retransmitCmd re-sends every ready thumbnail's transmit sequence. It is the
+// backlog for a terminal whose kitty support resolved AFTER thumbnails were
+// readied, and the manual recovery ^L returns to a terminal that discarded
+// its images; nil when nothing is pending.
+func (c *Cockpit) retransmitCmd() tea.Cmd {
+	if c.caps.mode() != imageModeKitty {
+		return nil
+	}
+	if s := c.images.transmits(); s != "" {
+		return tea.Raw(s)
+	}
+	return nil
+}
+
+// observeCaps folds one terminal-capability message into the resolver. A
+// mode change invalidates every pane and re-sends the backlog of thumbnails
+// readied before the capability resolved.
+func (c *Cockpit) observeCaps(msg tea.Msg) tea.Cmd {
+	if !c.caps.observe(msg) {
+		return nil
+	}
+	c.invalidatePanes()
+	if !c.capsLogged {
+		c.capsLogged = true
+		mode := "placeholder"
+		if c.caps.mode() == imageModeKitty {
+			mode = "kitty"
+		}
+		slog.Info("tui: terminal images", "mode", mode, "terminal", c.caps.version())
+	}
+	return c.retransmitCmd()
+}
+
+// ImageCleanup returns the Kitty sequence deleting every image this cockpit
+// transmitted, or "" when it transmitted none. The caller writes it to the
+// terminal after the program exits, whichever way it exited.
+func (c *Cockpit) ImageCleanup() string { return c.images.cleanup() }
 
 // viewing is the child whose transcript the conversation pane renders: the
 // rail cursor while the rail holds focus, the committed agent otherwise.
@@ -567,6 +639,12 @@ func (c *Cockpit) setNotice(s string) {
 // Init seeds the rail from ListChildren and starts the event pump.
 func (c *Cockpit) Init() tea.Cmd {
 	cmds := []tea.Cmd{c.seedCmd(), waitForRailEvent(c.railCh), waitForEvent(c.focusCh), tick(), textarea.Blink, c.fetchQuotaCmd(), quotaTick()}
+	// The capability queries must go out before anything is drawn, or the
+	// answers — and with them this session's images — are guesses. Raw: these
+	// are queries for the terminal, not cells for the grid.
+	if q := c.caps.queries(); q != "" {
+		cmds = append(cmds, tea.Raw(q))
+	}
 	if c.form != nil {
 		// A form opened at CONSTRUCTION never saw the `n` keypress that
 		// normally starts the catalog fetch, so its typeahead would sit empty
@@ -707,6 +785,9 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.width, c.height = msg.Width, msg.Height
 		c.ta.SetWidth(msg.Width - 4)
 		c.ready = true
+		// The pixel-size fallback (cellSize from window/pixels) derives from
+		// this; do not return its value — a resize never changes image mode.
+		c.caps.observe(msg)
 		return c, nil
 
 	case tasksLoadedMsg:
@@ -901,7 +982,50 @@ func (c *Cockpit) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.notice = ""
 		}
 		c.frame++
-		return c, tick()
+		// Readiness is coalesced here on purpose: a history replay readies
+		// dozens of thumbnails in a burst, and each invalidation re-renders
+		// every transcript through glamour.
+		var cmds []tea.Cmd
+		if c.caps.mode() == imageModeKitty {
+			cw, ch := c.caps.cellSize()
+			for _, q := range c.images.takeQueued(c.caps.smallIDs()) {
+				cmds = append(cmds, thumbCmd(q, cw, ch))
+			}
+		}
+		if c.imagesDirty {
+			c.imagesDirty = false
+			c.invalidatePanes()
+		}
+		return c, tea.Batch(append([]tea.Cmd{tick()}, cmds...)...)
+
+	case thumbReadyMsg:
+		ok := c.images.ready(msg)
+		c.imagesDirty = true
+		if msg.err != nil {
+			slog.Warn("tui: image thumbnail failed", "error", msg.err)
+		}
+		if ok && c.caps.mode() == imageModeKitty {
+			return c, tea.Raw(msg.transmit)
+		}
+		return c, nil
+
+	case uv.KittyGraphicsEvent:
+		return c, c.observeCaps(msg)
+
+	case tea.TerminalVersionMsg:
+		return c, c.observeCaps(msg)
+
+	case uv.PrimaryDeviceAttributesEvent:
+		return c, c.observeCaps(msg)
+
+	case uv.CellSizeEvent:
+		return c, c.observeCaps(msg)
+
+	case uv.PixelSizeEvent:
+		return c, c.observeCaps(msg)
+
+	case tea.ColorProfileMsg:
+		return c, c.observeCaps(msg)
 
 	case previewTickMsg:
 		return c, c.previewSettle(msg.seq)
@@ -1209,13 +1333,27 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// paneSig alone is NOT enough. It makes linesFor call Lines again, but
 		// Lines reuses r.cached for every block below Finalized -- which is the
 		// whole visible transcript -- so the toggle reached only the live tail.
-		for _, p := range c.panes {
-			p.invalidate()
+		c.invalidatePanes()
+		return c, nil
+	case key.Matches(msg, k.ToggleImages):
+		if c.caps.mode() != imageModeKitty {
+			c.setNotice("this terminal cannot draw images; start with --images=kitty to force it")
+			return c, nil
+		}
+		c.imagesHidden = !c.imagesHidden
+		c.invalidatePanes()
+		if c.imagesHidden {
+			c.setNotice("images: placeholders")
+		} else {
+			c.setNotice("images: thumbnails")
 		}
 		return c, nil
 	case key.Matches(msg, k.Redraw):
-		for _, p := range c.panes {
-			p.invalidate()
+		c.invalidatePanes()
+		// Re-transmit what the screen just lost: ^L is also the manual recovery
+		// for a terminal that discarded its images.
+		if rt := c.retransmitCmd(); rt != nil {
+			return c, tea.Sequence(tea.ClearScreen, rt)
 		}
 		return c, tea.ClearScreen
 	}
@@ -2336,7 +2474,8 @@ func (c *Cockpit) helpLines(width int) []string {
 	k := c.keys
 	left := group("anywhere",
 		k.NextPane, k.PrevPane, k.NextAttention, k.PrevAttention,
-		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs, k.Redraw, k.Quit)
+		k.HopPrev, k.HopNext, k.ToggleRail, k.Help, k.ExpandArgs,
+		k.ToggleImages, k.Redraw, k.Quit)
 	right := group("input", k.Send, k.Newline, k.ClearInput, k.Steer, k.Abort)
 	right = append(right, group("agents",
 		k.SelectUp, k.SelectDown, k.Commit, k.NewAgent, k.EndAgent, k.Escape)...)
@@ -2408,7 +2547,7 @@ func (c *Cockpit) View() tea.View {
 	case c.sessions[f] != nil:
 		s := c.sessions[f]
 		p := c.pane(f)
-		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs)
+		lines := p.linesFor(s, convWidth, bodyHeight, c.expandArgs, c.drawImages(), c.caps.smallIDs())
 		// An empty transcript is a real, STEADY state -- a child whose event
 		// log holds nothing but its lifecycle events, which is every freshly
 		// created agent until it is asked something. The renderer used to

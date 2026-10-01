@@ -102,7 +102,10 @@ Three Swahili words, three roles:
   agent-control surface above — and can bill your own Claude subscription
   instead of the daemon's API key.
 - **The `rafiki` cockpit** — a bubbletea TUI built into the client binary for
-  watching and driving a tree of agents live, no separate build step.
+  watching and driving a tree of agents live, no separate build step. It draws
+  image thumbnails inline on terminals with Kitty Unicode-placeholder support
+  (iTerm2 ≥ 3.7.3, ghostty, kitty) and a one-line placeholder elsewhere;
+  `--images=auto|kitty|off` overrides detection, `^Y` toggles.
 - **Multi-daemon profiles** — one client resolves distinct daemons (local
   socket or remote TLS) by name, each with its own token and model defaults;
   agent presets (named seats: model, tools, prompt, budget) live in each

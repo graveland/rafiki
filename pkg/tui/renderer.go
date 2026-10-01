@@ -11,6 +11,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/kitty"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/tui/session"
@@ -138,13 +139,19 @@ func collapse(s string) string {
 // Carriage returns fold to the newlines normalizeNewlines produces, which
 // turns a \r-refreshed progress bar into the separate lines the head/tail
 // elider already knows how to cap. Everything else below 0x20 (and DEL) is
-// dropped; \n and \t survive.
+// dropped; \n and \t survive. Kitty's U+10EEEE placeholder maps to U+FFFD:
+// printed as ordinary transcript text it would draw a cell the terminal treats
+// as an image placeholder — with this renderer's grey (Color("8")) as its id,
+// which in the 256-colour id space names image 8.
 func sanitizeControlChars(s string) string {
 	s = normalizeNewlines(s)
 	s = ansi.Strip(s)
 	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' {
 			return r
+		}
+		if r == kitty.Placeholder {
+			return '\uFFFD'
 		}
 		if r < 0x20 || r == 0x7f {
 			return -1
@@ -157,6 +164,28 @@ func sanitizeControlChars(s string) string {
 // renderer output, so it is sanitized like any transcript text.
 func imageLine(img *rafikiv1.ImageBlock) string {
 	return sanitizeControlChars(session.ImagePlaceholder(img))
+}
+
+// imagePixels returns img's Kitty placeholder rows under gutter, or nil
+// when this pane draws the one-line placeholder instead: images off, the
+// thumbnail not ready (or failed), or gutter+cols wider than the pane.
+// The rows are built from a thumbnail id — never from model or tool text —
+// which is the only reason they skip sanitizeControlChars: sanitizing
+// would strip the colour carrying the id.
+func (r *renderer) imagePixels(gutter string, img *rafikiv1.ImageBlock) []string {
+	if !r.drawImages || r.images == nil {
+		return nil // placeholder mode never queues, so never decodes
+	}
+	t := r.images.lookup(img)
+	if t == nil || ansi.StringWidth(ansi.Strip(gutter))+t.cols > r.width {
+		return nil
+	}
+	rows := placeholderRows(t, r.smallIDs)
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = gutter + row
+	}
+	return out
 }
 
 // headlineKey reports which argument toolArgSummary already put on the call
@@ -337,6 +366,14 @@ type renderer struct {
 	// cache key via paneSig: flipping it must invalidate, or the toggle does
 	// nothing visible.
 	expandArgs bool
+
+	// images is the shared Kitty thumbnail store, or nil when this renderer
+	// must never draw pixels. drawImages and smallIDs are set per render by
+	// linesFor, exactly like expandArgs — and like expandArgs they are part of
+	// the cache key, so a mode change reaches only panes that rebuild.
+	images     *imageStore
+	drawImages bool
+	smallIDs   bool
 }
 
 func newRenderer() *renderer {
@@ -410,8 +447,14 @@ func (r *renderer) renderBlock(b session.Block) string {
 		// message's first -- with no colour at all.
 		var rows []string
 		for _, img := range b.Images {
-			for _, row := range wrapTo("▌ ", imageLine(img), r.width) {
-				rows = append(rows, styleUser.Render(row))
+			if pix := r.imagePixels(styleUser.Render("▌ "), img); pix != nil {
+				// As they are: lipgloss would restyle the cells and destroy the id
+				// colour the placeholder rows carry.
+				rows = append(rows, pix...)
+			} else {
+				for _, row := range wrapTo("▌ ", imageLine(img), r.width) {
+					rows = append(rows, styleUser.Render(row))
+				}
 			}
 		}
 		if b.Text != "" || len(b.Images) == 0 {
@@ -562,7 +605,14 @@ func (r *renderer) renderAssistant(b session.Block) string {
 					}
 				}
 				for _, img := range tc.Images {
-					r.writeWrapped(&sb, gutter, text.Render(imageLine(img)))
+					if pix := r.imagePixels(gutter, img); pix != nil {
+						for _, row := range pix {
+							sb.WriteString(row)
+							sb.WriteString("\n")
+						}
+					} else {
+						r.writeWrapped(&sb, gutter, text.Render(imageLine(img)))
+					}
 				}
 			}
 		}
@@ -597,7 +647,14 @@ func (r *renderer) renderAssistant(b session.Block) string {
 			}
 		}
 		for _, img := range b.Images {
-			r.writeWrapped(&sb, bar, imageLine(img))
+			if pix := r.imagePixels(bar, img); pix != nil {
+				for _, row := range pix {
+					sb.WriteString(row)
+					sb.WriteString("\n")
+				}
+			} else {
+				r.writeWrapped(&sb, bar, imageLine(img))
+			}
 		}
 		sb.WriteString(edge + "\n")
 	}

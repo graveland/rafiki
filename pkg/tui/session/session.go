@@ -620,10 +620,10 @@ func writeImages(sb *strings.Builder, imgs []*rafikiv1.ImageBlock) {
 // UNICODE PLACEHOLDER protocol transmits the image out of band and then places
 // it with ordinary printable runes (U+10EEEE plus diacritics encoding the row,
 // column and image id), which pass through a cell renderer untouched because
-// they are just text. charmbracelet/crush does exactly that on this same
-// bubbletea version — see internal/ui/image/image.go — with an ANSI half-block
-// fallback where the terminal cannot. Until that is built, the renderer draws
-// this line wherever an image sits.
+// they are just text. The renderer draws those rows where the terminal
+// supports them (pkg/tui/kittyimg.go) and this line everywhere else — in
+// placeholder mode, before a thumbnail is ready, when one failed, and when a
+// pane is too narrow.
 func ImagePlaceholder(img *rafikiv1.ImageBlock) string {
 	if img == nil {
 		return ""

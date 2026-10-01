@@ -94,6 +94,11 @@ func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest, noLocalExecuto
 	if err != nil {
 		return err
 	}
+	// Before installing TUI logging, so a bad value fails on a clean terminal.
+	images, err := imagesFlag(cmd)
+	if err != nil {
+		return err
+	}
 	ring, restoreLogging, err := installTUILogging(500)
 	if err != nil {
 		return err
@@ -128,10 +133,14 @@ func runCreateForm(cmd *cobra.Command, req protocol.SpawnRequest, noLocalExecuto
 		ExecutorSelectorFromFlag: req.ExecutorSelector != "",
 		ShowProfileBadge:         multipleProfilesConfigured(),
 		CreateDefaults:           createFormDefaults(req),
+		Images:                   images,
 	})
-	if _, runErr := tea.NewProgram(m).Run(); runErr != nil {
+	_, runErr := tea.NewProgram(m).Run()
+	if runErr != nil {
 		ring.Dump()
-		return fmt.Errorf("tui: %w", runErr)
+	}
+	if err := releaseTUIImages(m, runErr); err != nil {
+		return err
 	}
 	// The child set changed if anything was created, so a cached TAB answer is
 	// stale either way.

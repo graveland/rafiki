@@ -2505,10 +2505,10 @@ func TestRedrawInvalidatesThePaneCache(t *testing.T) {
 	s.Blocks = []session.Block{{Kind: session.KindUser, Text: "hello", Final: true}}
 	s.Finalized = 1
 
-	c.Require().NotNil(p.linesFor(s, 80, 24, false), "first render returned nil")
-	c.Require().Nil(p.linesFor(s, 80, 24, false), "second render should have been a cache hit")
+	c.Require().NotNil(p.linesFor(s, 80, 24, false, false, false), "first render returned nil")
+	c.Require().Nil(p.linesFor(s, 80, 24, false, false, false), "second render should have been a cache hit")
 	p.invalidate()
-	c.NotNil(p.linesFor(s, 80, 24, false), "invalidate did not force a rebuild")
+	c.NotNil(p.linesFor(s, 80, 24, false, false, false), "invalidate did not force a rebuild")
 }
 
 // No polling. The cockpit already sees every tool call, so a completed task

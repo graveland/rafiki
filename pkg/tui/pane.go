@@ -48,13 +48,14 @@ type paneSig struct {
 	width      int
 	height     int
 	expandArgs bool
+	drawImages bool
 	liveFP     string
 }
 
 // linesFor returns the rendered transcript, or NIL when the pane is already
 // showing it. A nil result means "nothing to do" and is distinct from an empty
 // one, which means "this transcript has no lines".
-func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs bool) []string {
+func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs, drawImages, smallIDs bool) []string {
 	sig := paneSig{
 		blocks:    len(s.Blocks),
 		finalized: s.Finalized,
@@ -66,13 +67,17 @@ func (p *paneState) linesFor(s *session.Session, width, height int, expandArgs b
 		liveFP: session.LiveFingerprint(s.Blocks, s.Finalized),
 		// expandArgs changes every argument line the renderer draws, so it is
 		// part of the signature: without it the toggle flips a flag nothing reads.
+		// Same for drawImages — a mode change redraws every image row.
 		expandArgs: expandArgs,
+		drawImages: drawImages,
 	}
 	if p.sigInit && sig == p.sig {
 		return nil
 	}
 	p.sig, p.sigInit = sig, true
 	p.renderer.expandArgs = expandArgs
+	p.renderer.drawImages = drawImages
+	p.renderer.smallIDs = smallIDs
 	return p.renderer.Lines(s.Blocks, s.Finalized, width)
 }
 
@@ -106,6 +111,9 @@ func (c *Cockpit) pane(childID string) *paneState {
 		// cached with the rest of the block and repeats the gutter on
 		// continuation rows, which soft wrap left bare.
 		p = &paneState{renderer: newRenderer(), vp: vp, atBottom: true}
+		// The renderer shares the cockpit's ONE image store, so the same bytes
+		// seen from two panes are thumbnailed once and share one Kitty id.
+		p.renderer.images = c.images
 		c.panes[childID] = p
 	}
 	return p

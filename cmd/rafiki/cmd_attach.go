@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -51,6 +52,7 @@ reattach any time.`,
 	cmd.Flags().Bool("kill-on-exit", false, "Terminate the focused session when the cockpit quits (skips the exit prompt)")
 	cmd.Flags().Bool("keep-on-exit", false, "Always keep sessions running on exit (skips the exit prompt)")
 	cmd.MarkFlagsMutuallyExclusive("kill-on-exit", "keep-on-exit")
+	cmd.Flags().String("images", "auto", "Inline image thumbnails: auto (Kitty graphics on iTerm2 ≥ 3.7.3, ghostty, kitty), kitty (force), off")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return completeChildrenByState(cmd, toComplete, isAttachable), cobra.ShellCompDirectiveNoFileComp
 	}
@@ -160,6 +162,40 @@ func resolveChildConnect(ctx context.Context, ep connectEndpoint, c rafikiv1conn
 	}
 }
 
+// imagesFlag reads --images, refusing anything but auto, kitty or off.
+func imagesFlag(cmd *cobra.Command) (string, error) {
+	v, _ := cmd.Flags().GetString("images")
+	switch v {
+	case "auto", "kitty", "off":
+		return v, nil
+	default:
+		return "", fmt.Errorf("--images must be auto, kitty or off")
+	}
+}
+
+// releaseTUIImages frees every Kitty image the cockpit transmitted and folds
+// any failure into runErr, the TUI's own outcome: the sequences are terminal
+// state that outlives the alt screen, so a TUI that failed must still release
+// what it sent, and a release that failed must not be silent either way.
+func releaseTUIImages(m *tui.Cockpit, runErr error) error {
+	var out error
+	if runErr != nil {
+		out = fmt.Errorf("tui: %w", runErr)
+	}
+	cleanup := m.ImageCleanup()
+	if cleanup == "" {
+		return out
+	}
+	if _, err := fmt.Fprint(os.Stdout, cleanup); err != nil {
+		rel := fmt.Errorf("tui: release terminal images: %w", err)
+		if out == nil {
+			return rel
+		}
+		return errors.Join(out, rel)
+	}
+	return out
+}
+
 // runTUIForChild runs the bubbletea program for one child.
 //
 // The capability pre-flight already ran in resolveChildConnect, BEFORE the alt
@@ -167,6 +203,11 @@ func resolveChildConnect(ctx context.Context, ep connectEndpoint, c rafikiv1conn
 // the TUI must produce a line on stderr, not a working-looking UI that answers
 // nothing. The predecessor logged a warning and continued.
 func runTUIForChild(cmd *cobra.Command, ep connectEndpoint, childID string) error {
+	// Before installing TUI logging, so a bad value fails on a clean terminal.
+	images, err := imagesFlag(cmd)
+	if err != nil {
+		return err
+	}
 	// Capture the process's own logs while the alt screen is up. Without this
 	// the session executor's join/park/reconnect messages go to the default
 	// handler -- stderr -- and corrupt the cockpit mid-draw.
@@ -182,15 +223,13 @@ func runTUIForChild(cmd *cobra.Command, ep connectEndpoint, childID string) erro
 		Subject:          subjectFor(childID),
 		ProfileName:      mustProfile(cmd).Name,
 		ShowProfileBadge: multipleProfilesConfigured(),
+		Images:           images,
 	})
-	// Run returns the final model too; the cockpit holds all state worth
-	// keeping, so it is discarded.
 	_, runErr := tea.NewProgram(m).Run()
 	if runErr != nil {
 		// After the alt screen is gone, not before. A dying executor that
 		// logged nowhere is worse than a corrupted screen.
 		ring.Dump()
-		return fmt.Errorf("tui: %w", runErr)
 	}
-	return nil
+	return releaseTUIImages(m, runErr)
 }

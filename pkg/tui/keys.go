@@ -47,7 +47,9 @@ type keyMap struct {
 	Help          key.Binding
 	ExpandArgs    key.Binding
 	Redraw        key.Binding
-	Abort         key.Binding
+	// ^Y is free: not in textareaKeys, and bound nowhere else in the cockpit.
+	ToggleImages key.Binding
+	Abort        key.Binding
 
 	// Input pane.
 	Send           key.Binding
@@ -108,6 +110,10 @@ func defaultKeyMap() keyMap {
 		// lands on the alt screen, not the primary defence -- see the ring
 		// handler in cmd/rafiki.
 		Redraw: key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("^L", "redraw")),
+		// ^Y hides and shows image thumbnails; nothing on a terminal without
+		// Kitty graphics support. ^Y is free: not in textareaKeys, and bound
+		// nowhere else in the cockpit.
+		ToggleImages: key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("^Y", "images")),
 		// esc first: it is what muscle memory reaches for to stop a running
 		// turn, and it is free in the input pane (the textarea ignores it,
 		// and the other two panes match their own Escape before this).
@@ -231,7 +237,8 @@ func (k keyMap) globalConflicts() []string {
 		"NextAttention": k.NextAttention, "PrevAttention": k.PrevAttention,
 		"HopPrev": k.HopPrev, "HopNext": k.HopNext,
 		"ToggleRail": k.ToggleRail, "Help": k.Help,
-		"ExpandArgs": k.ExpandArgs, "Redraw": k.Redraw, "Abort": k.Abort,
+		"ExpandArgs": k.ExpandArgs, "ToggleImages": k.ToggleImages,
+		"Redraw": k.Redraw, "Abort": k.Abort,
 	}
 	var out []string
 	for name, b := range globals {
