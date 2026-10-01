@@ -4,8 +4,11 @@ package main
 
 import (
 	"testing"
+	"time"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
+	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -17,6 +20,11 @@ import (
 func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	var _ connectapi.ChildLister = (*Controller)(nil)
 	var _ connectapi.ChildLifecycle = connectLifecycle{}
+	// DescendantLister is NOT part of ChildLifecycle: the cascade asserts it
+	// off the lifecycle at runtime, so the compiler stays silent if the
+	// adapter loses the method and every include_descendants request answers
+	// "unimplemented". This line is the pin.
+	var _ connectapi.DescendantLister = connectLifecycle{}
 	var _ connectapi.ConversationResolver = (*Controller)(nil)
 }
 
@@ -42,4 +50,24 @@ func TestBuildProtocolSpawnRequestCarriesFieldsThrough(t *testing.T) {
 	c.False(got.ParentChildID != "c_0" || got.ExecutorRef != "greyshift", "lineage/executor wrong: %+v", got)
 	c.Eq("a", got.Labels["team"], "labels wrong: %+v", got.Labels)
 	c.False(got.MaxDepth == nil || *got.MaxDepth != 2 || got.MaxCost == nil || *got.MaxCost != 1.5 || got.MaxChildren == nil || *got.MaxChildren != 3, "budgets wrong: %+v", got)
+}
+
+// TestConnectLifecycleForwardsDescendantIDs runs the seam above at runtime:
+// the compile-time line proves the adapter HAS DescendantIDs, this proves it
+// forwards to the Controller's list rather than answering empty. A parent and
+// one non-native subagent are enough to see the forwarding.
+func TestConnectLifecycleForwardsDescendantIDs(t *testing.T) {
+	c := assert.NewAborting(t)
+	st := childstore.New()
+	now := time.Now()
+	st.Insert(&childstore.Session{
+		ChildID: "a", Status: protocol.StatusIdle, StartedAt: now, Labels: map[string]string{},
+	})
+	st.Insert(&childstore.Session{
+		ChildID: "b", Status: protocol.StatusIdle, StartedAt: now,
+		Labels: map[string]string{childstore.LabelParent: "a", childstore.LabelRoot: "a"},
+	})
+
+	lc := connectLifecycle{c: &Controller{st: st}}
+	c.EqDeep([]string{"b"}, lc.DescendantIDs("a"), "adapter forwards to the Controller's descendants")
 }

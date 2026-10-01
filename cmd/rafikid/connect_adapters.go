@@ -568,6 +568,15 @@ func (l connectLifecycle) Close(_ context.Context, childID string) error {
 	return l.c.Close(childID)
 }
 
+// DescendantIDs satisfies connectapi.DescendantLister. Kill/Close's
+// include_descendants asserts that optional interface off the ChildLifecycle
+// value at runtime, and the value wired is this adapter, not *Controller —
+// the method must exist HERE, whatever the Controller implements, or every
+// include_descendants request is refused unimplemented.
+func (l connectLifecycle) DescendantIDs(childID string) []string {
+	return l.c.DescendantIDs(childID)
+}
+
 // spawnOwner maps the proxy face's authenticated identity onto the daemon's.
 // Two types for one concept, because pkg/server predates pkg/users and the
 // face's Identity is a pointer whose nil means "no user" — the case every
