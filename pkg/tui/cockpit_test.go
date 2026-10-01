@@ -2547,3 +2547,77 @@ func TestClosingARowKeepsTheCursorWhereTheRowWas(t *testing.T) {
 	c.applyClosed(closedMsg{childID: "c_d", name: "delta"})
 	ck.Eq("c_c", c.selected, "closing the bottom row lands on the new bottom row")
 }
+
+func childOf(id, name, parent string) *rafikiv1.ChildSummary {
+	s := summaryFor(id, name, 0)
+	s.Labels["rafiki/parent"] = parent
+	return s
+}
+
+func pressX(c *Cockpit) tea.Cmd {
+	_, cmd := c.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	return cmd
+}
+
+// x on an agent with subagents asks before acting: the second x poses the
+// question instead of ending anything, and only a/o answer it.
+func TestEndAgentWithSubagentsAsksFirst(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_a")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_a", "alpha", 0), childOf("c_b", "bravo", "c_a"), childOf("c_c", "charlie", "c_b"),
+		summaryFor("c_z", "zulu", 0),
+	})
+	c.focus = focusRail
+	c.selected = "c_a"
+
+	ck.Nil(pressX(c), "first x only arms")
+	ck.Nil(c.endAsk, "no question yet")
+	ck.Nil(pressX(c), "second x on a parent asks instead of acting")
+	ck.Require().NotNil(c.endAsk, "the question is pending")
+	ck.Eq(2, c.endAsk.kids, "both live descendants counted")
+
+	_, cmd := c.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	ck.Nil(cmd, "an unrelated key cancels without acting")
+	ck.Nil(c.endAsk, "cancelled")
+
+	pressX(c)
+	pressX(c)
+	ck.Require().NotNil(c.endAsk, "asked again")
+	_, cmd = c.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	ck.NotNil(cmd, "a includes them and acts")
+	ck.Nil(c.endAsk, "answered")
+}
+
+// A leaf, and a parent whose only subagent is a native Task subagent, end
+// straight away: nothing to decide.
+func TestEndAgentWithoutSubagentsDoesNotAsk(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_a")
+	native := childOf("c_n", "native", "c_a")
+	native.Labels[rail.NativeSubagentLabel] = "1"
+	c.rail.Seed([]*rafikiv1.ChildSummary{summaryFor("c_a", "alpha", 0), native})
+	c.focus = focusRail
+	c.selected = "c_a"
+
+	pressX(c)
+	ck.NotNil(pressX(c), "the second x acts")
+	ck.Nil(c.endAsk, "no question")
+}
+
+// A cascading close drops the whole subtree and leaves the cursor where the
+// parent was.
+func TestCascadingCloseForgetsTheSubtree(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	c := newTestCockpit("c_z")
+	c.rail.Seed([]*rafikiv1.ChildSummary{
+		summaryFor("c_a", "alpha", 0), childOf("c_b", "bravo", "c_a"), childOf("c_c", "charlie", "c_b"),
+		summaryFor("c_z", "zulu", 0),
+	})
+	c.selected = "c_a"
+	c.applyClosed(closedMsg{childID: "c_a", name: "alpha", descendants: []string{"c_c", "c_b"}})
+	_, gone := c.rail.Get("c_b")
+	ck.False(gone, "descendants leave the rail")
+	ck.Eq(1, c.rail.Len(), "only zulu remains")
+	ck.Eq("c_z", c.selected, "cursor lands on the row that took the subtree's place")
+}

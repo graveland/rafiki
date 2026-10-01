@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/rpcreason"
+	"go.graveland.dev/rafiki/pkg/tui/rail"
 )
 
 // lifecycleTimeout bounds a spawn/kill/close RPC.
@@ -42,16 +45,32 @@ type spawnedMsg struct {
 }
 
 type killedMsg struct {
-	childID string
-	name    string
-	forced  bool
-	err     error
+	childID     string
+	name        string
+	forced      bool
+	descendants int
+	err         error
 }
 
 type closedMsg struct {
 	childID string
 	name    string
-	err     error
+	// descendants are the rows a cascading close took with childID, deepest
+	// first.
+	descendants []string
+	err         error
+}
+
+// endAsk is the question `x` poses when the agent it is about to end has
+// subagents: take them along or end only this one. It is modal to the rail: the
+// next key answers it, and any key but the two answers cancels.
+type endAsk struct {
+	id   string
+	name string
+	// verb is what the unanswered action would have been: stop, force kill or
+	// close.
+	verb string
+	kids int
 }
 
 type budgetSetMsg struct {
@@ -152,34 +171,50 @@ func (c *Cockpit) spawnCmd(p spawnParams) tea.Cmd {
 
 // killCmd ends a child. force asks the daemon to escalate immediately instead
 // of waiting out its shutdown grace.
-func (c *Cockpit) killCmd(childID, name string, force bool) tea.Cmd {
+func (c *Cockpit) killCmd(childID, name string, force, include bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		req := &rafikiv1.KillRequest{ChildId: childID}
+		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 		if force {
 			req.ShutdownTimeoutMs = forceShutdownMs
 		}
-		if _, err := c.client.Kill(ctx, connect.NewRequest(req)); err != nil {
+		resp, err := c.client.Kill(ctx, connect.NewRequest(req))
+		if err != nil {
 			return killedMsg{childID: childID, name: name, forced: force, err: err}
 		}
-		return killedMsg{childID: childID, name: name, forced: force}
+		return killedMsg{childID: childID, name: name, forced: force, descendants: len(resp.Msg.GetDescendantIds())}
 	}
 }
 
 // closeCmd finalizes an exited child: it leaves the daemon's store and can
 // never be resumed again. The transcript survives -- nothing references
 // conversations.child -- so this ends resumption, not history.
-func (c *Cockpit) closeCmd(childID, name string) tea.Cmd {
+//
+// With include, still-running subagents are stopped first (a close refuses a
+// live child), and the target is stopped too if it is itself still up; an
+// already-exited target is the common case and not an error.
+func (c *Cockpit) closeCmd(childID, name string, include bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 		defer cancel()
 
-		_, err := c.client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
-			ChildId: childID,
+		if include {
+			_, err := c.client.Kill(ctx, connect.NewRequest(&rafikiv1.KillRequest{
+				ChildId: childID, IncludeDescendants: true,
+			}))
+			if err != nil && rpcreason.Reason(err) != protocol.ErrChildExited {
+				return closedMsg{childID: childID, name: name, err: err}
+			}
+		}
+		resp, err := c.client.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{
+			ChildId: childID, IncludeDescendants: include,
 		}))
-		return closedMsg{childID: childID, name: name, err: err}
+		if err != nil {
+			return closedMsg{childID: childID, name: name, err: err}
+		}
+		return closedMsg{childID: childID, name: name, descendants: resp.Msg.GetDescendantIds()}
 	}
 }
 
@@ -231,17 +266,86 @@ func (c *Cockpit) endSelected() tea.Cmd {
 	c.endArmed = time.Time{}
 	c.endArmedID = ""
 
-	switch {
-	case node.Exited:
+	if kids := len(c.subagentIDs(id, verb != "close")); kids > 0 {
+		c.endAsk = &endAsk{id: id, name: name, verb: verb, kids: kids}
+		c.setNotice(name + " has " + pluralSubagents(kids) + ": " +
+			endAskInclude + " = " + verb + " them too, " + endAskOnly + " = only " + name + ", any other key cancels")
+		return nil
+	}
+	return c.dispatchEnd(id, name, verb, false)
+}
+
+const (
+	endAskInclude = "a"
+	endAskOnly    = "o"
+)
+
+func pluralSubagents(n int) string {
+	if n == 1 {
+		return "1 subagent"
+	}
+	return strconv.Itoa(n) + " subagents"
+}
+
+// answerEndAsk consumes the key that answers the pending endAsk.
+func (c *Cockpit) answerEndAsk(key string) tea.Cmd {
+	ask := c.endAsk
+	c.endAsk = nil
+	switch key {
+	case endAskInclude:
+		return c.dispatchEnd(ask.id, ask.name, ask.verb, true)
+	case endAskOnly:
+		return c.dispatchEnd(ask.id, ask.name, ask.verb, false)
+	}
+	c.setNotice("cancelled")
+	return nil
+}
+
+// dispatchEnd runs the confirmed outcome for id.
+func (c *Cockpit) dispatchEnd(id, name, verb string, include bool) tea.Cmd {
+	switch verb {
+	case "close":
 		c.setNotice("closing " + name + "…")
-		return c.closeCmd(id, name)
-	case node.Status == statusShuttingDown:
+		return c.closeCmd(id, name, include)
+	case "force kill":
 		c.setNotice("force killing " + name + "…")
-		return c.killCmd(id, name, true)
+		return c.killCmd(id, name, true, include)
 	default:
 		c.setNotice("stopping " + name + "…")
-		return c.killCmd(id, name, false)
+		return c.killCmd(id, name, false, include)
 	}
+}
+
+// subagentIDs lists the rows beneath id in the rail, deepest first. Task
+// subagents the proxy synthesized are left out: they end and close with their
+// parent without being asked, so they are not a decision. onlyLive drops the
+// exited ones, which is what a stop cares about; a close cares about every
+// row, since closing a parent strands the rows beneath it.
+func (c *Cockpit) subagentIDs(id string, onlyLive bool) []string {
+	nodes := c.rail.Nodes()
+	byID := make(map[string]rail.Node, len(nodes))
+	for _, n := range nodes {
+		byID[n.ChildID] = n
+	}
+	var ids []string
+	for i := len(nodes) - 1; i >= 0; i-- {
+		n := nodes[i]
+		if n.Native || (onlyLive && n.Exited) {
+			continue
+		}
+		for cur, hops := n, 0; hops < len(nodes); hops++ {
+			if cur.ParentID == id {
+				ids = append(ids, n.ChildID)
+				break
+			}
+			p, ok := byID[cur.ParentID]
+			if !ok {
+				break
+			}
+			cur = p
+		}
+	}
+	return ids
 }
 
 // applyKilled reports the outcome of a kill.
@@ -255,11 +359,15 @@ func (c *Cockpit) applyKilled(m killedMsg) {
 		c.setNotice("could not stop " + m.name + ": " + trimRPCError(m.err))
 		return
 	}
+	verb := "stopped "
 	if m.forced {
-		c.setNotice("force killed " + m.name)
+		verb = "force killed "
+	}
+	if m.descendants > 0 {
+		c.setNotice(verb + m.name + " and " + pluralSubagents(m.descendants))
 		return
 	}
-	c.setNotice("stopped " + m.name)
+	c.setNotice(verb + m.name)
 }
 
 // applyClosed reports the outcome of a close and drops the row.
@@ -272,9 +380,17 @@ func (c *Cockpit) applyClosed(m closedMsg) tea.Cmd {
 		c.setNotice("could not close " + m.name + ": " + trimRPCError(m.err))
 		return nil
 	}
-	cmd := c.forgetChild(m.childID)
-	c.setNotice("closed " + m.name)
-	return cmd
+	var cmds []tea.Cmd
+	for _, id := range m.descendants {
+		cmds = append(cmds, c.forgetChild(id))
+	}
+	cmds = append(cmds, c.forgetChild(m.childID))
+	if len(m.descendants) > 0 {
+		c.setNotice("closed " + m.name + " and " + pluralSubagents(len(m.descendants)))
+	} else {
+		c.setNotice("closed " + m.name)
+	}
+	return tea.Batch(cmds...)
 }
 
 // trimRPCError strips connect-go's transport prefix so the daemon's own

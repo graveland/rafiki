@@ -129,7 +129,7 @@ func attachAndDecide(cmd *cobra.Command, ep connectEndpoint, childID string, kil
 	// New client: the TUI's connection has already closed when it exited.
 	// "Terminate" is close's semantics under a different name: stop the
 	// child if still running, then finalize it — unconditionally.
-	if err := closeChildConnect(cmdCtx(cmd), ep.control(), childID, 0, 0); err != nil {
+	if err := closeChildConnect(cmdCtx(cmd), ep.control(), childID, false, 0, 0); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
 	return nil

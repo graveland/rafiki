@@ -127,6 +127,21 @@ type reviewStubControl struct {
 	killCalls    []string
 	closeCalls   []string
 	allExitedReq []*rafikiv1.CloseAllExitedRequest
+
+	// children is ListChildren's answer; killReqs and closeReqs keep the whole
+	// request so a test can see include_descendants.
+	children  []*rafikiv1.ChildSummary
+	killReqs  []*rafikiv1.KillRequest
+	closeReqs []*rafikiv1.CloseRequest
+}
+
+func (s *reviewStubControl) ListChildren(
+	context.Context,
+	*connect.Request[rafikiv1.ListChildrenRequest],
+) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: s.children}), nil
 }
 
 func (s *reviewStubControl) GetChild(
@@ -151,6 +166,7 @@ func (s *reviewStubControl) Kill(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.killCalls = append(s.killCalls, req.Msg.GetChildId())
+	s.killReqs = append(s.killReqs, req.Msg)
 	if s.killErr != nil {
 		return nil, s.killErr
 	}
@@ -167,6 +183,7 @@ func (s *reviewStubControl) Close(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeCalls = append(s.closeCalls, req.Msg.GetChildId())
+	s.closeReqs = append(s.closeReqs, req.Msg)
 	if s.closeErr != nil {
 		return nil, s.closeErr
 	}
@@ -478,4 +495,55 @@ func TestCloseKillUnknownReasonFails(t *testing.T) {
 	cmd.SetArgs([]string{"c_1"})
 	c.Require().Error(cmd.Execute(), "an unreasoned kill failure must fail the close, got nil")
 	c.Empty(stub.closeCalls, "Close for")
+}
+
+// A target with subagents is refused until the caller says what to do with
+// them, and nothing is closed on the way to that refusal.
+func TestCloseRefusesATargetWithSubagentsUnlessToldWhatToDo(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "exited", false),
+		kid("c_2", "c_1", "exited", false),
+	}
+	stderr := captureStderr(t)
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"c_1"})
+	c.Error(cmd.Execute(), "close without --include-subagents")
+	c.StrContains(stderr(), "--include-subagents")
+	c.Empty(stub.closeReqs, "nothing may be closed before the refusal is answered")
+}
+
+func TestCloseIncludeSubagentsCascadesBothCalls(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "idle", false),
+		kid("c_2", "c_1", "idle", false),
+	}
+	stub.childStatus = map[string]string{"c_1": "idle"}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"--include-subagents=true", "c_1"})
+	c.Require().NoError(cmd.Execute(), "close")
+	c.Require().Len(stub.killReqs, 1, "kill requests")
+	c.True(stub.killReqs[0].GetIncludeDescendants(), "kill carries include_descendants")
+	c.Require().Len(stub.closeReqs, 1, "close requests")
+	c.True(stub.closeReqs[0].GetIncludeDescendants(), "close carries include_descendants")
+}
+
+func TestCloseIncludeSubagentsFalseClosesOnlyTheTarget(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := newReviewHarness(t)
+	stub.children = []*rafikiv1.ChildSummary{
+		kid("c_1", "", "exited", false),
+		kid("c_2", "c_1", "exited", false),
+	}
+
+	cmd := newCloseCmd()
+	cmd.SetArgs([]string{"--include-subagents=false", "c_1"})
+	c.Require().NoError(cmd.Execute(), "close")
+	c.Require().Len(stub.closeReqs, 1, "close requests")
+	c.False(stub.closeReqs[0].GetIncludeDescendants(), "include_descendants")
 }

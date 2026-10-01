@@ -39,6 +39,10 @@ conversation stays fully readable through 'rafiki history' and
 'rafiki conversations' after closing. What is reclaimed is the child's log dump
 directory and, for fundi children, its clipped-output spill directory.
 
+A target with subagents is refused until you say what to do with them:
+--include-subagents=true stops and closes them too (deepest first, before the
+target), --include-subagents=false closes only the target.
+
 With --all-exited, closes every already-exited child (optionally filtered by
 --older-than). --all-exited never stops a running child — only closing by
 id|name does that.
@@ -67,6 +71,7 @@ that pass a fixed flag set.`,
 	// no-op spelling of the default (design §5), so a script can pass a fixed
 	// flag set whether or not something else added --review.
 	cmd.Flags().Bool("no-review", false, "Explicitly skip the post-close review (the default)")
+	addIncludeSubagentsFlag(cmd, "close")
 	cmd.Flags().Duration("older-than", 0, "Only close exited children older than this")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout when a target must be stopped first (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout when a target must be stopped first (e.g. 30s)")
@@ -127,7 +132,13 @@ func runClose(cmd *cobra.Command, args []string) error {
 			failures++
 			continue
 		}
-		if err := closeChildConnect(ctx, ctrl, childID, st, kt); err != nil {
+		include, err := includeSubagents(ctx, cmd, ctrl, childID, arg, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
+			failures++
+			continue
+		}
+		if err := closeChildConnect(ctx, ctrl, childID, include, st, kt); err != nil {
 			fmt.Fprintf(os.Stderr, "error: close %q: %v\n", arg, err)
 			failures++
 			continue
@@ -230,13 +241,15 @@ func renderCloseAllExited(w io.Writer, resp *rafikiv1.CloseAllExitedResponse, mo
 //   - The kill error's own ErrChildExited reason covers the race between the
 //     pre-check and the kill. A kill failure carrying no reason is reported
 //     as the failure it is.
-func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, childID string, st, kt time.Duration) error {
+func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, childID string, include bool, st, kt time.Duration) error {
 	get, err := ctrl.GetChild(ctx, connect.NewRequest(&rafikiv1.GetChildRequest{ChildId: childID}))
 	if err != nil {
 		return fmt.Errorf("get child: %s", formatConnectErr(err))
 	}
-	if get.Msg.GetChild().GetStatus() != string(protocol.StatusExited) {
-		req := &rafikiv1.KillRequest{ChildId: childID}
+	// With include, the kill runs even for an exited target: its subagents may
+	// still be live, and the cascade ends them before the target is touched.
+	if include || get.Msg.GetChild().GetStatus() != string(protocol.StatusExited) {
+		req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 		if st > 0 {
 			req.ShutdownTimeoutMs = st.Milliseconds()
 		}
@@ -252,7 +265,7 @@ func closeChildConnect(ctx context.Context, ctrl rafikiv1connect.ControlClient, 
 		}
 	}
 
-	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID}))
+	_, err = ctrl.Close(ctx, connect.NewRequest(&rafikiv1.CloseRequest{ChildId: childID, IncludeDescendants: include}))
 	if err != nil {
 		return fmt.Errorf("close: %s", formatConnectErr(err))
 	}

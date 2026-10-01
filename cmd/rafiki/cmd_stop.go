@@ -30,10 +30,15 @@ func newStopCmd() *cobra.Command {
 stop only stops: it never closes or finalizes the child. A stopped child
 stays in 'rafiki list' with status=exited so its record can still be
 inspected (/tree navigation, disk artifacts). Use 'rafiki close' to stop AND
-finalize a child in one step.`,
+finalize a child in one step.
+
+A target with running subagents is refused until you say what to do with them:
+--include-subagents=true stops them too (deepest first, before the target),
+--include-subagents=false stops only the target.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runStop,
 	}
+	addIncludeSubagentsFlag(cmd, "stop")
 	cmd.Flags().Duration("shutdown-timeout", 0, "Override shutdown timeout (e.g. 180s)")
 	cmd.Flags().Duration("kill-timeout", 0, "Override kill timeout (e.g. 30s)")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -68,7 +73,7 @@ func runStop(cmd *cobra.Command, args []string) error {
 	results := make([]stopTargetResult, 0, len(args))
 	var failures int
 	for _, arg := range args {
-		childID, kr, err := stopOne(ctx, ctrl, profileName, arg, ep.describe, st, kt)
+		childID, kr, err := stopOne(ctx, cmd, ctrl, profileName, arg, ep.describe, st, kt)
 		results = append(results, stopTargetResult{Arg: arg, ChildID: childID, Kill: kr, Err: err})
 		if err != nil {
 			failures++
@@ -102,13 +107,18 @@ type stopTargetResult struct {
 
 // stopOne resolves arg and sends Kill for it. It does not close —
 // that composition lives in `rafiki close` now.
-func stopOne(ctx context.Context, ctrl rafikiv1connect.ControlClient, profileName, arg, describe string, st, kt time.Duration) (string, *rafikiv1.KillResponse, error) {
+func stopOne(ctx context.Context, cmd *cobra.Command, ctrl rafikiv1connect.ControlClient, profileName, arg, describe string, st, kt time.Duration) (string, *rafikiv1.KillResponse, error) {
 	childID, err := resolveTargetConnect(ctx, ctrl, profileName, arg, describe)
 	if err != nil {
 		return "", nil, err
 	}
 
-	req := &rafikiv1.KillRequest{ChildId: childID}
+	include, err := includeSubagents(ctx, cmd, ctrl, childID, arg, false)
+	if err != nil {
+		return childID, nil, err
+	}
+
+	req := &rafikiv1.KillRequest{ChildId: childID, IncludeDescendants: include}
 	if st > 0 {
 		req.ShutdownTimeoutMs = st.Milliseconds()
 	}

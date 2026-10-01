@@ -448,6 +448,8 @@ type Cockpit struct {
 	// different agent than the one the confirmation named.
 	endArmed   time.Time
 	endArmedID string
+	// endAsk is the pending "include subagents?" question, nil when none.
+	endAsk *endAsk
 
 	// currency is the display conversion loaded once at construction, the
 	// same way modelView is -- a `rafiki config set` takes effect on the
@@ -1251,6 +1253,11 @@ func (c *Cockpit) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if c.budgetForm != nil {
 		return c.handleBudgetFormKey(msg)
+	}
+
+	// A pending "include subagents?" question owns the next key outright.
+	if c.endAsk != nil {
+		return c, c.answerEndAsk(msg.String())
 	}
 
 	// Any keystroke that is not the repeat disarms the end confirmation, for
