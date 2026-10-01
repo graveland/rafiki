@@ -153,15 +153,31 @@ func (s *imageStore) nextSmallID() uint32 {
 	if s.nextSmall == 0 {
 		s.nextSmall = 1 + s.rng.Uint32N(255)
 	}
-	for range 255 {
-		id := s.nextSmall
-		s.nextSmall = id%255 + 1
-		if !s.used[id] {
-			return id
+	if !s.smallAllUsed() {
+		for range 255 {
+			id := s.nextSmall
+			s.nextSmall = id%255 + 1
+			if !s.used[id] {
+				return id
+			}
 		}
 	}
-	// All 255 small ids are handed out; a wrong image on screen is cosmetic.
-	return s.nextSmall
+	// All 255 small ids are handed out: keep cycling through them — advance
+	// the rotating next id and wrap 1→255 — rather than stalling on one. A
+	// wrong image on screen is cosmetic.
+	id := s.nextSmall
+	s.nextSmall = id%255 + 1
+	return id
+}
+
+// smallAllUsed reports whether every id in 1–255 has been handed out.
+func (s *imageStore) smallAllUsed() bool {
+	for id := uint32(1); id <= 255; id++ {
+		if !s.used[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // thumbCmd thumbnails one queued image off the UI goroutine and reports the

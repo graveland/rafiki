@@ -187,12 +187,23 @@ func TestKittyIDsAreUniqueAndInRange(t *testing.T) {
 	for i := range 300 {
 		small.lookup(&rafikiv1.ImageBlock{MediaType: "image/png", Data: pngOf(t, 4, 4, uint64(i)+1)})
 	}
-	smallIDs := map[uint32]bool{}
+	var ordered []uint32
 	for _, q := range small.takeQueued(true) {
 		c.True(q.id >= 1 && q.id <= 255, "small id %d outside [1, 255]", q.id)
-		smallIDs[q.id] = true
+		ordered = append(ordered, q.id)
 	}
-	c.Len(smallIDs, 255, "255 distinct small ids, then reuse")
+	distinct := map[uint32]bool{}
+	for _, id := range ordered {
+		distinct[id] = true
+	}
+	c.Len(distinct, 255, "255 distinct small ids, then reuse")
+	// Past 255 the store reuses ids by CYCLING, not by stalling on one: the
+	// overflow tail must contain more than one distinct value.
+	tail := map[uint32]bool{}
+	for _, id := range ordered[255:] {
+		tail[id] = true
+	}
+	c.GreaterOrEqual(2, len(tail), "overflow ids (256..300 of %d) cycle: %v", len(ordered), tail)
 }
 
 func TestKittyThumbCmdBuildsTransmitAndPlacement(t *testing.T) {
