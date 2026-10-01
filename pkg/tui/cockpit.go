@@ -2118,6 +2118,26 @@ func (c *Cockpit) neighbour(delta int) string {
 	return nodes[(idx+delta+len(nodes))%len(nodes)].ChildID
 }
 
+// successor is the row the cursor lands on when id leaves the rail: the one
+// that slides into its place, or the last row when id was at the bottom, so
+// closing a row never moves the cursor anywhere but where the row was.
+// neighbour is no substitute: it counts from the committed agent, not from id.
+func (c *Cockpit) successor(id string) string {
+	nodes := c.rail.Nodes()
+	for i, n := range nodes {
+		if n.ChildID != id {
+			continue
+		}
+		switch {
+		case i+1 < len(nodes):
+			return nodes[i+1].ChildID
+		case i > 0:
+			return nodes[i-1].ChildID
+		}
+	}
+	return ""
+}
+
 // shutdown stops both streams. Safe to call more than once.
 func (c *Cockpit) shutdown() {
 	// ^R and ^V/^T change the query without ever opening the panel, so exit is

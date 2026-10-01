@@ -2522,3 +2522,28 @@ func TestTaskToolsTriggerARefresh(t *testing.T) {
 		c.False(isTaskTool(name), "%s must not trigger a task refresh", name)
 	}
 }
+
+// TestClosingARowKeepsTheCursorWhereTheRowWas pins that the cursor lands on the
+// row that slides into the closed row's place, however far the committed agent
+// is from it.
+func TestClosingARowKeepsTheCursorWhereTheRowWas(t *testing.T) {
+	seed := func() *Cockpit {
+		c := newTestCockpit("c_a")
+		c.rail.Seed([]*rafikiv1.ChildSummary{
+			summaryFor("c_a", "alpha", 0), summaryFor("c_b", "bravo", 0),
+			summaryFor("c_c", "charlie", 0), summaryFor("c_d", "delta", 0),
+		})
+		return c
+	}
+
+	ck := assert.NewCollecting(t)
+	c := seed()
+	c.selected = "c_c"
+	c.applyClosed(closedMsg{childID: "c_c", name: "charlie"})
+	ck.Eq("c_d", c.selected, "cursor moves to the row that took the closed row's place")
+
+	c = seed()
+	c.selected = "c_d"
+	c.applyClosed(closedMsg{childID: "c_d", name: "delta"})
+	ck.Eq("c_c", c.selected, "closing the bottom row lands on the new bottom row")
+}

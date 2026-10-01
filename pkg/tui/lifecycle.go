@@ -298,10 +298,7 @@ func trimRPCError(err error) string {
 // exists makes the next `x` a no-op with no explanation.
 func (c *Cockpit) forgetChild(childID string) tea.Cmd {
 	if c.selected == childID {
-		c.selected = c.neighbour(+1)
-		if c.selected == childID {
-			c.selected = ""
-		}
+		c.selected = c.successor(childID)
 	}
 	wasFocused := c.focused() == childID
 
