@@ -8,7 +8,6 @@ import (
 	"time"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
-	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"google.golang.org/protobuf/proto"
@@ -337,12 +336,10 @@ func (c *Controller) deliverRateLimitResume(childID string, attempt int) {
 		}
 	}
 
-	frame, err := buildInjectionFrame(inbox.Batch{Mode: inbox.ModePrompt, Frags: []string{rateLimitResumeText}}, "")
-	if err != nil {
-		slog.Warn("auto-resume prompt build failed", "childId", childID, "error", err)
-		return
-	}
-	if err := c.Send(childID, frame); err != nil {
+	// The delivery half is shared with the restart auto-resume
+	// (pending_resume.go): a failed delivery leaves the row pending, and the
+	// next resume replays it.
+	if err := c.sendClaudeNudge(childID, rateLimitResumeText); err != nil {
 		slog.Warn("auto-resume prompt delivery failed", "childId", childID, "error", err)
 		return
 	}

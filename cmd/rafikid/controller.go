@@ -115,6 +115,15 @@ type Controller struct {
 	// be proven to belong to the same namespace before it is signalled.
 	nsToken string
 
+	// pendingResumes holds recovered children whose auto-resume waits for an
+	// executor to connect; the sweep fires on every executor connection. See
+	// pending_resume.go.
+	pendingResumes pendingResumes
+
+	// recoveryWalk gates the pending sweep on the boot walk's completion: an
+	// executor connecting DURING the walk must not sweep a half-filled set.
+	recoveryWalk recoveryGate
+
 	// heldLeases maps childID to the conversation lease this daemon holds for
 	// it. Guarded by heldLeasesMu.
 	heldLeasesMu sync.Mutex
@@ -2826,6 +2835,9 @@ func (c *Controller) Kill(ctx context.Context, childID string, shutdownTimeoutMs
 	// fake-pi and claude alike exit 0 on EOF). Also covers the native-child
 	// early return below, which never reaches the shutdown sequence.
 	c.rateWatch.drop(childID)
+	// A pending recovery resume must not fire for a child the operator killed
+	// while it waited for its executor.
+	c.dropPendingResume(childID)
 
 	// A synthetic thread child has no process, so every lookup below misses and
 	// this used to answer "child not found" for a child the operator could see
@@ -3090,6 +3102,9 @@ func (c *Controller) Close(childID string) error {
 	// its rate-limit watch goes with the row. CloseAllExited, the other
 	// forget site, drops the same way.
 	c.rateWatch.drop(childID)
+	// A pending recovery resume must not fire for a child that was closed
+	// while it waited for its executor.
+	c.dropPendingResume(childID)
 	// Its synthetic thread children go with it: they carry a parent label, so
 	// leaving them would strand them at the top of the rail pointing at a
 	// session that no longer exists. Their transcripts survive, exactly as this
@@ -3263,6 +3278,7 @@ func (c *Controller) CloseAllExited(olderThanMs int64) ([]string, error) {
 		if owns {
 			c.dropInboxForForgotten(s.ChildID, "child forgotten")
 			c.rateWatch.drop(s.ChildID)
+			c.dropPendingResume(s.ChildID)
 		}
 		if c.children != nil && owns {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3893,6 +3909,24 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	}
 	if ok && isWorkingStatus(newStatus) {
 		c.heartbeats.startWorking(childID)
+	}
+	// A graceful shutdown overwrites EVERY live child's status with
+	// shutting_down — idle and mid-turn alike — and status is recovery's only
+	// resume signal. Stamp what the child was doing BEFORE the overwrite so a
+	// restarted daemon can still tell "was working, cycle lost" from "was
+	// idle"; the claude continuation prompt keys off it. It gates a nudge,
+	// never a resume (status gates that), so the last_status-never-gates rule
+	// is untouched. The tail writeRecord below persists the label with the
+	// shutting_down status in one upsert.
+	if ok && newStatus == protocol.StatusShuttingDown && isWorkingStatus(prev) {
+		if err := c.st.Update(childID, func(s *childstore.Session) {
+			if s.Labels == nil {
+				s.Labels = map[string]string{}
+			}
+			s.Labels[preShutdownStatusLabel] = string(prev)
+		}); err != nil {
+			slog.Warn("stamp pre-shutdown status", "childId", childID, "error", err)
+		}
 	}
 	if err := c.writeRecord(childID); err != nil {
 		slog.Warn("write state record after status change", "childId", childID, "error", err)

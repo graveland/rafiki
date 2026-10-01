@@ -629,18 +629,35 @@ func (e *Engine) worker() {
 //
 // agentloop.Resume handles every recoverable state: a clean end_turn returns
 // immediately; a dangling tool_use fabricates synthetic is_error results and
-// Continues; a truncated max_tokens Continues. Failure (cap exceeded, empty
-// history) emits an agent_error frame and ends the child via fatal.
+// Continues; a truncated max_tokens Continues.
+//
+// A FAILED resume survives, exactly as a failed runTurn does — the error is
+// published, the turn ends, the child goes idle. It used to fatal, and the
+// asymmetry with runTurn orphaned whole fleets: restart the daemon while the
+// provider is down and every recovered child failed its re-issued turn after
+// continueWithRetry's ladder, exited, and persisted status=exited — which
+// every later boot reads as terminal, so the children stayed dead even after
+// the provider recovered. Surviving keeps the child alive (inspectable,
+// re-resumable) and leaves the cycle dangling for the NEXT restart's
+// auto-resume to re-submit. Only the structural case still fatals: the resume
+// cap exceeded marks the conversation failed durably, so re-attempting it on
+// every boot is noise, not recovery.
 func (e *Engine) startupResume() {
 	e.em.AgentStart()
 	events, sendOpts := e.events()
 	result, err := agentloop.Resume(context.Background(), e.conv, e.tools, events, sendOpts...)
 	switch {
-	case err != nil:
-		slog.Error("agent: startup resume failed; ending this child",
+	case errors.Is(err, agentloop.ErrResumeCapExceeded):
+		slog.Error("agent: startup resume exceeded its attempt cap; ending this child",
 			"conversation", e.conv.ID, "error", err)
 		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
 		e.fatal(err)
+	case err != nil:
+		slog.Error("agent: startup resume failed; the child stays live", "conversation", e.conv.ID, "error", err)
+		e.em.publishError(err)
+		e.fe.Emit(map[string]any{"type": "agent_error", "error": err.Error()})
+		e.turnEnded(TurnOutcome{Err: err})
+		e.em.AgentEnd()
 	case result.LimitReached:
 		slog.Info("agent: startup resume wrapped up by guardrail",
 			"conversation", e.conv.ID, "reason", result.LimitReason)

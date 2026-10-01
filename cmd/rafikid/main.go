@@ -675,8 +675,12 @@ func runDaemon(opts runDaemonOpts) error {
 	if execPool != nil {
 		// An executor that has just connected has an empty or stale tree, so
 		// push immediately. This callback runs on its own goroutine, outside
-		// Pool.mu.
+		// Pool.mu. Multiple executors are standard, not exceptional, so this
+		// fires per connection — which is also what resumes the recovered
+		// children waiting for THIS executor (pending_resume.go): the sweep
+		// runs on every connect and leaves still-unsatisfied children pended.
 		execPool.SetOnConnect(func(id string) {
+			ctrl.sweepPendingResumes()
 			if ctrl.skillPusher != nil {
 				if err := ctrl.skillPusher.pushIfEligible(baseCtx, id); err != nil {
 					slog.Warn("skill sync on connect failed", "executor", id, "error", err)

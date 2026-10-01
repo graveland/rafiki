@@ -1891,4 +1891,11 @@ pointer rewritten when the child's session changes; `lastStatus` rewritten on
 every transition; deleted on `Close`/`CloseAllExited` and when the grace
 window expires. On daemon startup every record is loaded with status
 `exited`, an orphan's process is signalled (dead pipes cannot be reattached),
-and **nothing auto-resumes** — `Resume` is always explicit.
+and the records that read ALIVE are auto-resumed: a fundi child's engine
+re-issues an interrupted turn, a claude child re-attaches its session
+(`--resume`) and gets a continuation prompt when the row says it was working,
+and a daraja-hosted claude child whose pinned executor has not reconnected yet
+waits for the executor-connection sweep instead of failing outright. A script
+child is settled `failed (daemon restarted)` rather than resumed — its exit is
+its result. Manual `Resume` stays explicit and interactive: it never
+re-submits an interrupted turn.

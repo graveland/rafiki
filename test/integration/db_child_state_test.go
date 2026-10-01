@@ -668,8 +668,10 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 		"RAFIKI_DAEMON_ID="+daemonID,
 	)
 	cmd.Env = append(cmd.Env, noRealCreds...)
+	stderr2 := &stderrBuf{}
+	cmd.Stderr = stderr2
 	c.NoError(cmd.Start(), "start second daemon")
-	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir}
+	d2 := &daemon{socketPath: d1.socketPath, proc: cmd, homeDir: d1.homeDir, stderr: stderr2}
 	t.Cleanup(func() {
 		_ = d2.proc.Process.Signal(syscall.SIGTERM)
 		_ = d2.proc.Wait()
@@ -710,6 +712,7 @@ func TestDBChildState_InboxReplaysUnconfirmedMessageAfterCrash(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
+			t.Logf("d2 stderr:\n%s", stderr2.tail(12000))
 			t.Fatalf("seeded row state = %q after restart, want 'consumed' — "+
 				"the recovery replay never redelivered the row into a turn", state)
 		}

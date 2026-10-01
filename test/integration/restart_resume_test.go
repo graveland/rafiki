@@ -26,6 +26,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -33,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -42,7 +44,9 @@ import (
 
 	"github.com/multigres/testkit/assert"
 
+	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
 
@@ -397,4 +401,115 @@ func truncateForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// ─── claude restart auto-resume ──────────────────────────────────────────────
+
+// insertScratchClaudeRow hand-inserts a claude child row, so the test can
+// control the status and session id the recovery walk sees (a spawned fake
+// claude never reports a session: it is silent by design). daemon_id carries
+// the booting daemon's id so dropDaemonRows sweeps it on cleanup.
+func insertScratchClaudeRow(t *testing.T, dsn, daemonID, childID, status string) {
+	t.Helper()
+	pool := openPool(t, dsn)
+	defer pool.Close()
+	configJSON, _ := json.Marshal(childstore.ChildConfig{})
+	labelsJSON, _ := json.Marshal(map[string]string{
+		"rafiki/daemon": daemonID,
+		"owner":         "brent",
+	})
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO conversations.child
+		    (child_id, kind, status, spawned_at, model, cwd, config_dir,
+		     session_id, config, labels, daemon_id)
+		VALUES ($1, $2, $3, now(), $4, '/tmp', '',
+		        $5, $6, $7, $8)`,
+		childID, "claude", status, "anthropic/sonnet-latest",
+		"sess-"+childID, configJSON, labelsJSON, daemonID)
+	assert.NewAborting(t).NoError(err, "insert claude child row %s", childID)
+}
+
+// claudeStdin reads the stdin half of a fake-claude dump: everything after the
+// ---STDIN--- marker, i.e. exactly what the daemon wrote to the child.
+func claudeStdin(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	assert.NewAborting(t).NoError(err, "read dump %s", path)
+	const marker = "---STDIN---\n"
+	i := strings.Index(string(raw), marker)
+	if i < 0 {
+		return ""
+	}
+	return string(raw[i+len(marker):])
+}
+
+// TestDBChildState_AutoResumesClaudeChildren pins the claude half of restart
+// recovery: rows that were working are relaunched WITH their session
+// (--resume) and get the restart continuation prompt through the durable
+// inbox; rows that were idle are relaunched with no prompt at all.
+//
+// The rows are hand-inserted (a spawned fake claude is silent, so it never
+// reports a session id for --resume to carry), with the fixture recording both
+// argv and stdin — the argv proves the relaunch re-attaches the session, the
+// stdin proves the nudge reaches exactly the child that was mid-turn.
+func TestDBChildState_AutoResumesClaudeChildren(t *testing.T) {
+	ck := assert.NewAborting(t)
+	dsn := os.Getenv("RAFIKI_TEST_DSN")
+	if dsn == "" {
+		t.Skip("RAFIKI_TEST_DSN not set")
+	}
+
+	dumps := t.TempDir()
+	id := nextDaemonID()
+	extra := append(noRealProviderEnv(),
+		"RAFIKI_EXECUTORS_ENABLED=0",
+		"CLAUDE_BINARY="+fakeClaudeBin(t),
+		"FAKE_CLAUDE_DIR="+dumps,
+	)
+	d1 := bootDaemonDB(t, id, extra...)
+
+	const workingID = "c_claude_working"
+	const idleID = "c_claude_idle"
+	insertScratchClaudeRow(t, dsn, id, workingID, "streaming")
+	insertScratchClaudeRow(t, dsn, id, idleID, "idle")
+
+	// Crash the daemon; the successor recovers both rows.
+	_ = d1.proc.Process.Signal(syscall.SIGKILL)
+	_ = d1.proc.Wait()
+	d2 := restartResumeDaemon(t, d1, id, "", extra...)
+
+	// Both children must be live again.
+	finalW := waitForStatusNoFail(t, d2, workingID, "idle", 60*time.Second)
+	if finalW == nil || finalW.GetStatus() != "idle" {
+		t.Logf("successor stderr:\n%s", d2.stderr.tail(14000))
+		t.Fatalf("working claude child ended %v instead of idle", finalW)
+	}
+	waitForStatus(t, d2, idleID, "idle", 60*time.Second)
+
+	// The relaunch re-attaches the stored session.
+	dworking := waitClaudeDump(t, d2, dumps, workingID)
+	ck.Contains(dworking.argv, "--resume", "the relaunched claude argv")
+	ck.Contains(dworking.argv, "sess-"+workingID, "the relaunched claude re-attaches its session")
+	didle := waitClaudeDump(t, d2, dumps, idleID)
+	ck.Contains(didle.argv, "--resume", "the idle child is relaunched with its session too")
+
+	// The continuation prompt reaches ONLY the child that was mid-turn. Both
+	// dumps come from the successor's launches; find each dump's own file to
+	// read its stdin half.
+	stdinOf := func(childID string) string {
+		matches, _ := filepath.Glob(filepath.Join(dumps, "claude-*.dump"))
+		for _, p := range matches {
+			d, ok := parseClaudeDump(t, p)
+			if ok && d.envValue(paths.ChildID) == childID {
+				return claudeStdin(t, p)
+			}
+		}
+		t.Fatalf("no dump file for %s", childID)
+		return ""
+	}
+	nudged := stdinOf(workingID)
+	ck.StrContains(nudged, "daemon restarted while your previous turn was in flight",
+		"the working child's stdin carries the continuation prompt; got:\n%s", nudged)
+	ck.Empty(strings.TrimSpace(stdinOf(idleID)),
+		"the idle child's relaunch must send no prompt")
 }

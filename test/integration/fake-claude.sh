@@ -20,6 +20,11 @@
 # into --append-system-prompt, and a caller may pass "$(cat file)"), and a
 # raw one-element-per-line dump cannot represent that — the value would split
 # into several phantom elements.
+#
+# Every stdin line is ALSO recorded, appended to the same dump after a
+# ---STDIN--- marker, one line per read. The restart auto-resume's
+# continuation prompt (cmd/rafikid/pending_resume.go) rides stdin, so the
+# tests that pin it need to see what arrived.
 
 set -u
 dir="${FAKE_CLAUDE_DIR:-/tmp/fake-claude-it}"
@@ -31,11 +36,10 @@ mkdir -p "$dir" || exit 1
   done
   printf '%s\n' '---ENV---'
   env
+  printf '%s\n' '---STDIN---'
 } > "$dir/claude-$$.dump"
 
-# Consume and ignore everything the daemon writes to stdin. No stdout: the
-# daemon's claude translator treats silence as "no events yet", never an error.
 while IFS= read -r line; do
-  :
+  printf '%s\n' "$line" >> "$dir/claude-$$.dump"
 done
 exit 0

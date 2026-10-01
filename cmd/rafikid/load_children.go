@@ -62,8 +62,8 @@ const (
 	planRebindUnbound
 )
 
-// shouldAutoResume reports whether a recovered record is a fundi child that
-// was ALIVE when this daemon stopped writing to it.
+// shouldAutoResume reports whether a recovered record is a child that was
+// ALIVE when this daemon stopped writing to it.
 //
 // The row's status is the whole question. "exited" means the child ENDED while
 // a daemon was alive to record it — an operator kill, a close, an engine
@@ -71,6 +71,12 @@ const (
 // first: a crash writes nothing, and the daemon's own graceful shutdown writes
 // nothing either (see c.stopping), so the row still says idle/streaming and
 // the child is picked up exactly where it stood. Idle resumes as idle.
+//
+// Both agent kinds take this: a fundi child's engine re-submits an incomplete
+// cycle itself (AutoResume); a claude child re-attaches its session and gets
+// the continuation prompt when the row says it was working (pending_resume.go).
+// Script rows never take it — a script's exit is its result, and recovery
+// settles them instead (scriptNeedsRestartSettle).
 //
 // "shutting_down" can still appear on rows written by an older daemon, which
 // persisted it mid-shutdown; it reads as "the daemon died while stopping me",
@@ -80,7 +86,7 @@ const (
 // it lingers stale through a resume via the upsert's COALESCE and must never
 // gate recovery — that was the bug that resurrected exited agents.
 func shouldAutoResume(rec childstore.ChildRecord) bool {
-	if rec.Kind != protocol.KindFundi {
+	if rec.Kind != protocol.KindFundi && rec.Kind != protocol.KindClaude {
 		return false
 	}
 	// An empty status is a degenerate row (spawn always writes one) and
@@ -316,6 +322,17 @@ func (c *Controller) loadChildren(ctx context.Context) {
 			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
 		c.notifySubagentSettled(rec.ChildID, "failed (daemon restarted)", "", "")
 	}
+
+	// The walk is complete: unblock the executor-connect sweeps, then sweep
+	// once here — an executor that reconnected DURING the walk (or was already
+	// live) makes every pended resume fire now instead of waiting for a connect
+	// that already happened.
+	c.recoveryWalk.markDone()
+	c.sweepPendingResumes()
+	if n := c.pendingCount(); n > 0 {
+		slog.Info("children waiting for their executor to auto-resume",
+			"count", n, "note", "the sweep fires on every executor connection")
+	}
 }
 
 // recoverOne loads a single record into the store and decides whether to resume.
@@ -453,59 +470,9 @@ func (c *Controller) recoverOne(ctx context.Context, rec childstore.ChildRecord,
 		slog.Info("adopting child from a daemon whose lease has lapsed",
 			"childId", rec.ChildID, "previousDaemonId", rec.DaemonID)
 	}
-	// The claim is taken HERE, before the goroutine starts, not inside the
-	// resume: the row was just stored exited, and the window between that
-	// write and a claim taken on another goroutine is one in which a send
-	// (a sibling's settle fragment) is rejected as "child has exited" — see
-	// validateSendTarget. The goroutine releases it.
-	if !c.spawnClaims.tryClaim(rec.ChildID) {
-		slog.Warn("resume already in progress; not auto-resuming", "childId", rec.ChildID)
-		return
-	}
-	slog.Info("auto-resuming fundi child", "childId", rec.ChildID)
-	go func(id string) {
-		defer c.spawnClaims.release(id)
-		rctx, cancel := context.WithTimeout(c.baseCtx, 60*time.Second)
-		defer cancel()
-		if _, err := c.resumeClaimedWithAutoRecovery(rctx, id); err != nil {
-			slog.Warn("auto-resume failed; child stays exited", "childId", id, "error", err)
-			c.dropLease(id)
-			return
-		}
-		// A success return does not prove THIS daemon owns the child: the
-		// in-process engine build runs on its own goroutine (Runner.Start
-		// returns before Build completes), and activateLiveChild's
-		// Idle-or-5s-timeout select cannot tell "became idle" apart from
-		// "the build already failed, including on a refused lease" — see
-		// holdsLease's doc comment. Every child row is visible to every
-		// daemon (loadChildren lists the whole table), so recoverOne WILL
-		// walk a row another live daemon already owns; without this check a
-		// lease refusal there still replays as though it succeeded, flipping
-		// the OTHER daemon's live child's 'sent' rows to 'pending' and
-		// stranding them.
-		//
-		// The gate applies only when leasing is actually in play — the same
-		// condition OnConversationResolved itself uses to decide whether to
-		// acquire at all (c.leases is guaranteed non-nil here; loadChildren
-		// already returned if c.children, set in the same pool!=nil block,
-		// were nil). A daemon with no identity (c.daemonID == "") never
-		// tracks a lease for anything and is already unfenced by design in
-		// that case (see NewController), so it has nothing to gate on.
-		if c.daemonID != "" && !c.holdsLease(id) {
-			slog.Warn("auto-resume reported success without holding this child's lease; "+
-				"not replaying its inbox", "childId", id)
-			return
-		}
-		// The child is live and its runtime is wired. Its unconfirmed rows
-		// were already reset to pending back when ownership was established
-		// (resetUnconfirmedOnOwnership, inside OnConversationResolved) —
-		// this call is the delivery half only, and mainly catches whatever
-		// the child's own idle-transition drain deliberately leaves alone
-		// (fragment-sourced rows; see replayInbox's doc comment). This is
-		// what stops a coordinator waiting forever for a settle that already
-		// happened.
-		c.replayInbox(rctx, id)
-	}(rec.ChildID)
+	// The resume launch — now, or pended for the executor-connect sweep — and
+	// the per-kind resume shape live in pending_resume.go.
+	c.launchRecoveryResume(rec, own)
 }
 
 // adoptOwnership transfers a foreign-lapsed row to this daemon.

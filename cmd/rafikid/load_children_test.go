@@ -41,8 +41,12 @@ func TestShouldAutoResume(t *testing.T) {
 		{"shutting_down fundi resumes (daemon died mid-stop)", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "shutting_down"}, true},
 		{"last_status never gates a resume", childstore.ChildRecord{Kind: protocol.KindFundi, LastStatus: "idle"}, false},
 		{"stale last_status does not block one", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "idle", LastStatus: "exited"}, true},
-		{"row with neither status does not", childstore.ChildRecord{Kind: protocol.KindFundi, Status: "", LastStatus: ""}, false},
-		{"idle claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "idle"}, false},
+		{"row with neither status does not", childstore.ChildRecord{Kind: "", Status: ""}, false},
+		{"idle claude resumes", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "idle"}, true},
+		{"streaming claude resumes", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "streaming"}, true},
+		{"shutting_down claude resumes", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "shutting_down"}, true},
+		{"exited claude does not", childstore.ChildRecord{Kind: protocol.KindClaude, Status: "exited"}, false},
+		{"script settles, never resumes", childstore.ChildRecord{Kind: protocol.KindScript, Status: "running"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -535,7 +539,7 @@ func captureLogs(t *testing.T) *lockedBuffer {
 // engine build, lease acquire and 60s goroutine per foreign child on every
 // single boot — loadChildren lists the whole table.
 //
-// "auto-resuming fundi child" is logged synchronously, immediately before the
+// "auto-resuming child" is logged synchronously, immediately before the
 // `go func`, so this check is deterministic and not a race against the
 // goroutine.
 //
@@ -573,7 +577,7 @@ func TestRecoverOneDoesNotAttemptToResumeAnotherDaemonsLiveChild(t *testing.T) {
 
 	c.recoverOne(ctx, rec, map[string]bool{conv: true})
 
-	ck.NotStrContains(logs.String(), "auto-resuming fundi child", "attempted to resume a child owned by another live daemon; log:\n")
+	ck.NotStrContains(logs.String(), "auto-resuming child", "attempted to resume a child owned by another live daemon; log:\n")
 
 	// It is still in the store, so `rafiki list` shows it. We are declining to
 	// RUN it, not hiding it.
@@ -659,7 +663,7 @@ func TestRecoverOneStampsOwnershipOnAnAdoptedRow(t *testing.T) {
 	ck.True(ok, "adopted child not loaded into the store")
 	ck.Eq("me", snap.Labels["rafiki/daemon"], "placeholder rafiki/daemon")
 	ck.Eq("c_root", snap.Labels["rafiki/parent"], "existing labels lost in the stamp: %v", snap.Labels)
-	ck.NotStrContains(logs.String(), "auto-resuming fundi child", "a terminal row must not be resumed; log:\n")
+	ck.NotStrContains(logs.String(), "auto-resuming child", "a terminal row must not be resumed; log:\n")
 }
 
 // TestRecoverOneDoesNotStampALiveForeignRow keeps the stamp from widening:
