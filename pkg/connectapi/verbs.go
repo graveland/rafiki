@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/imagefit"
 	"go.graveland.dev/rafiki/pkg/inbox"
 	"go.graveland.dev/rafiki/pkg/protocol"
 )
@@ -126,8 +127,16 @@ func (s *Server) Send(
 	return connect.NewResponse(&rafikiv1.SendResponse{MessageId: id, Steps: stepSummariesToWire(summaries)}), nil
 }
 
+// ingestImageBox is Anthropic's useful image ceiling: larger images are
+// downscaled by the API anyway, while billed at roughly (w×h)/750 tokens.
+// Every pasted image is resized to it before it is stored, echoed, sent
+// or drawn, so the conversation holds exactly what the model saw.
+var ingestImageBox = imagefit.Box{MaxWidth: 1568, MaxHeight: 1568, MaxPixels: 1_150_000}
+
 // contentFromBlocks splits content blocks into the text and the attachments the
-// inbox carries separately.
+// inbox carries separately. Images are resized into ingestImageBox here, before
+// the inbox, and one that does not decode is refused rather than left for the
+// provider to reject.
 //
 // A block type with nowhere to go is still REFUSED rather than skipped, which
 // is what the text-only version of this did for every non-text block: silently
@@ -144,9 +153,13 @@ func contentFromBlocks(blocks []*rafikiv1.ContentBlock) (string, []inbox.Attachm
 				return "", nil, connect.NewError(connect.CodeInvalidArgument,
 					errors.New("image block carries no data"))
 			}
+			data, media, err := imagefit.Fit(v.Image.GetData(), v.Image.GetMediaType(), ingestImageBox)
+			if err != nil {
+				return "", nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("image block: %w", err))
+			}
 			atts = append(atts, inbox.Attachment{
-				MediaType: v.Image.GetMediaType(),
-				Data:      v.Image.GetData(),
+				MediaType: media,
+				Data:      data,
 			})
 		default:
 			return "", nil, connect.NewError(connect.CodeUnimplemented,

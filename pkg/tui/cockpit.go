@@ -62,9 +62,11 @@ var imageExts = map[string]string{
 	".gif": "image/gif", ".webp": "image/webp",
 }
 
-// maxAttachmentBytes bounds what a paste can stage. Anthropic rejects images
-// over roughly 5 MB, and a bound with a message beats an opaque upstream 400.
-const maxAttachmentBytes = 5 << 20
+// maxAttachmentBytes bounds what a paste can stage. The daemon resizes images
+// on ingest (pkg/imagefit, called from connectapi's contentFromBlocks), so this
+// is no longer Anthropic's 5MB image limit; it bounds the upload and the
+// daemon's decode, and a 6K Retina screenshot PNG is around 20MB.
+const maxAttachmentBytes = 32 << 20
 
 // stagedAttachment is an image staged for the next prompt.
 type stagedAttachment struct {

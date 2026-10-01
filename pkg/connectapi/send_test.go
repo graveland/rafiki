@@ -3,7 +3,11 @@
 package connectapi_test
 
 import (
+	"bytes"
 	"context"
+	"image"
+	"image/color"
+	"image/png"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -37,6 +41,23 @@ func textBlocks(s string) []*rafikiv1.ContentBlock {
 		Index: 0,
 		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: s}},
 	}}
+}
+
+// pngOf encodes a w×h NRGBA image as PNG, so the send tests exercise image
+// bytes a decoder actually accepts.
+func pngOf(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x % 256), G: uint8(y % 256), B: 0x80, A: 0xff})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode(%dx%d): %v", w, h, err)
+	}
+	return buf.Bytes()
 }
 
 func TestSendRoutesPromptThroughInbox(t *testing.T) {
@@ -115,6 +136,60 @@ func TestSendCarriesAnImageBlock(t *testing.T) {
 	s := connectapi.NewServer(nil)
 	acc := &fakeAccepter{}
 	s.SetInbox(acc)
+	png := pngOf(t, 2, 2)
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1",
+		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+		Blocks: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: png,
+			}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
+		},
+	}))
+	c.Require().NoError(err, "Send with an image")
+	c.Eq("what is this?", acc.got.Text, "text")
+	c.Require().Eq(1, len(acc.got.Attachments), "got")
+	c.Eq("image/png", acc.got.Attachments[0].MediaType, "media type =")
+	c.EqDeep(png, acc.got.Attachments[0].Data, "image bytes did not survive: %d bytes", len(acc.got.Attachments[0].Data))
+}
+
+// An image larger than ingestImageBox is downscaled before it reaches the
+// inbox: what is stored, echoed and sent to the model is the resized image.
+func TestSendResizesAnOversizedImage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := connectapi.NewServer(nil)
+	acc := &fakeAccepter{}
+	s.SetInbox(acc)
+	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
+		ChildId: "c_1",
+		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
+		Blocks: []*rafikiv1.ContentBlock{
+			{Block: &rafikiv1.ContentBlock_Image{Image: &rafikiv1.ImageBlock{
+				MediaType: "image/png", Data: pngOf(t, 2000, 1000),
+			}}},
+			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
+		},
+	}))
+	c.Require().NoError(err, "Send with an oversized image")
+	c.Require().Eq(1, len(acc.got.Attachments), "got")
+	att := acc.got.Attachments[0]
+	c.Eq("image/png", att.MediaType, "media type =")
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(att.Data))
+	c.Require().NoError(err, "DecodeConfig of the accepted attachment")
+	c.LessOrEqual(1568, cfg.Width, "width")
+	c.LessOrEqual(1568, cfg.Height, "height")
+	c.LessOrEqual(1_150_000, cfg.Width*cfg.Height, "pixels")
+	c.GreaterOrEqual(1500, cfg.Width, "width")
+}
+
+// Bytes that claim PNG/JPEG but do not decode are refused at ingest rather
+// than left for the provider to reject, and nothing reaches the inbox.
+func TestSendRefusesAnUndecodableImage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	s := connectapi.NewServer(nil)
+	acc := &fakeAccepter{}
+	s.SetInbox(acc)
 	_, err := s.Send(context.Background(), connect.NewRequest(&rafikiv1.SendRequest{
 		ChildId: "c_1",
 		Mode:    rafikiv1.SendMode_SEND_MODE_PROMPT,
@@ -125,11 +200,8 @@ func TestSendCarriesAnImageBlock(t *testing.T) {
 			{Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: "what is this?"}}},
 		},
 	}))
-	c.Require().NoError(err, "Send with an image")
-	c.Eq("what is this?", acc.got.Text, "text")
-	c.Require().Eq(1, len(acc.got.Attachments), "got")
-	c.Eq("image/png", acc.got.Attachments[0].MediaType, "media type =")
-	c.Eq("\x89PNGfake", string(acc.got.Attachments[0].Data), "image bytes did not survive: %q", acc.got.Attachments[0].Data)
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.EqDeep(inbox.Inbound{}, acc.got, "the inbox accepted nothing")
 }
 
 // An image block with no bytes is a caller error, not something to pass on as
