@@ -33,7 +33,7 @@ const (
 	// policyUserOnly requires a real user credential (or a nil identity, the
 	// unix socket's local trust). It is the DEFAULT: anything that acts with
 	// operator authority — budgets, skills, pymodule git sources,
-	// memory writes, the daraja verbs — is here, and a new RPC that misses the
+	// the daraja verbs — is here, and a new RPC that misses the
 	// table lands here by the completeness test (TestControlPolicyTableCoversEveryProcedure).
 	policyUserOnly controlPolicy = iota
 
@@ -68,6 +68,15 @@ const (
 	// ProvenanceChildAttributed and the bare per-boot secret name no child
 	// with authority and stay refused here.
 	policyChildScoped
+
+	// policyOwnerScoped marks the verbs that answer from the caller's OWNER's
+	// data — Recall, RecallContext, GetMemory, MemoryTree, PutMemory,
+	// DeleteMemory. The gate admits a ProvenanceChildToken caller only (the
+	// other two child credentials name no owner and stay refused); the handler
+	// resolves the owner's NON-admin identity through recallOwner, so a child
+	// of an admin never reads daemon-wide. No subtree check: the surface is the
+	// owner's, exactly as the fundi recall tools give a fundi child.
+	policyOwnerScoped
 )
 
 // controlProcedurePrefix is the Connect procedure-path prefix of every
@@ -136,6 +145,15 @@ var controlPolicyTable = map[string]controlPolicy{
 	"Receive":   policyChildScoped,
 	"SetResult": policyChildScoped,
 
+	// owner-scoped recall and memory: a child reads and writes its OWNER's
+	// rows, never admin — the fundi recall tools' surface.
+	"Recall":        policyOwnerScoped,
+	"RecallContext": policyOwnerScoped,
+	"GetMemory":     policyOwnerScoped,
+	"MemoryTree":    policyOwnerScoped,
+	"PutMemory":     policyOwnerScoped,
+	"DeleteMemory":  policyOwnerScoped,
+
 	// anyCaller: the read-only, non-scoped verbs — see the classification
 	// rule above for all seven.
 	"ListModels":         policyAnyCaller,
@@ -159,12 +177,6 @@ var controlPolicyTable = map[string]controlPolicy{
 	"ListPymoduleGitSources":   policyUserOnly,
 	"RefreshPymoduleGitSource": policyUserOnly,
 	"RemovePymoduleGitSource":  policyUserOnly,
-	"Recall":                   policyUserOnly,
-	"RecallContext":            policyUserOnly,
-	"GetMemory":                policyUserOnly,
-	"MemoryTree":               policyUserOnly,
-	"PutMemory":                policyUserOnly,
-	"DeleteMemory":             policyUserOnly,
 	"RecallBackfill":           policyUserOnly,
 	"RecallStatus":             policyUserOnly,
 	"ConversationReview":       policyUserOnly,
@@ -286,11 +298,12 @@ func (controlPolicyGate) WrapStreamingHandler(next connect.StreamingHandlerFunc)
 // presented credential that is not a user credential — a per-child secret,
 // the per-boot secret with or without its session header, or anything else
 // that resolves to the zero identity — is a child credential: userOnly
-// procedures refuse it, anyCaller procedures admit it, and a childScoped
-// procedure admits ONLY the per-child secret, because only that credential
-// names a child with subtree authority. The admitted child caller is still
-// not an operator: each childScoped handler resolves the caller's subtree
-// through the wired ChildScopeSource and refuses every target outside it.
+// procedures refuse it, anyCaller procedures admit it, and a childScoped or
+// ownerScoped procedure admits ONLY the per-child secret, because only that
+// credential names a child with subtree (or owner) authority. The admitted
+// child caller is still not an operator: each childScoped handler resolves
+// the caller's subtree through the wired ChildScopeSource and refuses every
+// target outside it.
 func authorizeControlProcedure(ctx context.Context, procedure string) error {
 	id := server.IdentityFromContext(ctx)
 	if id == nil || id.IsUserCredential() {
@@ -300,7 +313,7 @@ func authorizeControlProcedure(ctx context.Context, procedure string) error {
 	if policy == policyAnyCaller {
 		return nil
 	}
-	if policy == policyChildScoped && id.Via == server.ProvenanceChildToken {
+	if (policy == policyChildScoped || policy == policyOwnerScoped) && id.Via == server.ProvenanceChildToken {
 		return nil
 	}
 	return connect.NewError(connect.CodePermissionDenied,

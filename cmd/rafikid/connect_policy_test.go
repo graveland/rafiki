@@ -313,7 +313,7 @@ func TestControlPolicyTableCoversEveryProcedure(t *testing.T) {
 			continue
 		}
 		switch policy {
-		case policyUserOnly, policyAnyCaller, policyChildScoped:
+		case policyUserOnly, policyAnyCaller, policyChildScoped, policyOwnerScoped:
 		default:
 			t.Errorf("Control.%s has an out-of-range policy %d", name, policy)
 		}
@@ -402,6 +402,68 @@ func TestAuthorizeControlProcedure(t *testing.T) {
 			}
 			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s, %s: %v, want", id.name, tc.procedure, err)
 			c.StrContains(err.Error(), tc.procedure, "%s, %s: refusal %q does not name the procedure", id.name, tc.procedure, err)
+		}
+	}
+}
+
+// TestControlPolicyOwnerScopedVerbs is the -run pattern's entry point for the
+// owner-scoped case (the verify command matches TestControlPolicy|…): the two
+// pinned bodies below carry the assertions, and this shim keeps them reachable
+// from that selection without renaming them.
+func TestControlPolicyOwnerScopedVerbs(t *testing.T) {
+	t.Run("admits only the per-child secret", TestOwnerScopedAdmitsOnlyPerChildSecret)
+	t.Run("backfill and status refuse every child", TestRecallBackfillAndStatusRefuseEveryChild)
+}
+
+// TestOwnerScopedAdmitsOnlyPerChildSecret proves the ownerScoped gate: a
+// per-child secret passes each of the six owner-scoped recall/memory verbs,
+// while the other two child credentials — which name no owner — are refused
+// with PermissionDenied. It also pins the fail-closed default: policyUserOnly
+// must stay the zero value, or a table miss would silently classify some other
+// policy.
+func TestOwnerScopedAdmitsOnlyPerChildSecret(t *testing.T) {
+	c := assert.NewCollecting(t)
+	c.Eq(controlPolicy(0), policyUserOnly, "policyUserOnly must stay the zero value (the fail-closed default)")
+
+	ownerScoped := []string{"Recall", "RecallContext", "GetMemory", "MemoryTree", "PutMemory", "DeleteMemory"}
+	cases := []struct {
+		name      string
+		id        *server.Identity
+		wantAdmit bool
+	}{
+		{"per-child secret", &server.Identity{UserID: "u1", ChildID: "c_child", Via: server.ProvenanceChildToken}, true},
+		{"per-boot + session", &server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed}, false},
+		{"bare per-boot (empty Identity{})", &server.Identity{}, false},
+	}
+	for _, name := range ownerScoped {
+		procedure := controlProcedurePrefix + name
+		for _, tc := range cases {
+			ctx := server.WithIdentity(context.Background(), tc.id)
+			err := authorizeControlProcedure(ctx, procedure)
+			if tc.wantAdmit {
+				c.NoError(err, "%s, %s: %v, want admitted", tc.name, procedure, err)
+				continue
+			}
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s, %s: %v, want", tc.name, procedure, err)
+		}
+	}
+}
+
+// TestRecallBackfillAndStatusRefuseEveryChild proves RecallBackfill and
+// RecallStatus stay userOnly: neither names a target the owner-scoped surface
+// could bound, so all three child credentials are refused.
+func TestRecallBackfillAndStatusRefuseEveryChild(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, name := range []string{"RecallBackfill", "RecallStatus"} {
+		procedure := controlProcedurePrefix + name
+		for _, id := range []*server.Identity{
+			{UserID: "u1", ChildID: "c_child", Via: server.ProvenanceChildToken},
+			{UserID: "u1", Via: server.ProvenanceChildAttributed},
+			{},
+		} {
+			ctx := server.WithIdentity(context.Background(), id)
+			err := authorizeControlProcedure(ctx, procedure)
+			c.Eq(connect.CodePermissionDenied, connect.CodeOf(err), "%s with a %s credential: %v, want", procedure, childCredentialKind(id), err)
 		}
 	}
 }
