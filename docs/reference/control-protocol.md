@@ -251,8 +251,8 @@ watch that row freeze.
 
 ### Verbs
 
-Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
-"Who may call what" below; each row names its own.
+Policy classes (`userOnly`/`anyCaller`/`childScoped`/`ownerScoped`) are
+defined under "Who may call what" below; each row names its own.
 
 | RPC | Kind | Purpose |
 |---|---|---|
@@ -287,12 +287,12 @@ Policy classes (`userOnly`/`anyCaller`/`childScoped`) are defined under
 | `GetPreset` | unary · anyCaller | One preset: the latest live version's row by default, every version live and deleted with `history`; `CodeNotFound` when no version exists |
 | `PutPreset` | unary · childScoped | Save a new version of a preset — insert-only, never an overwrite. The name must be `<name>` or `<group>:<role>` and the spec must validate (kind, thinking level off|low|medium|high|xhigh, budgets >= 0, known tool names, label keys mirroring the spawn path's rules — `[A-Za-z0-9_./-]` only, never `owner` or a `rafiki/`/`fundi/` key); a user credential, or the per-child secret of a TOP-LEVEL child (stamped as the writer); a parented child is refused `CodePermissionDenied` (`connectPresets.authoringChild`) and every other child shape by the provenance gate ("Who may call what") |
 | `DeletePreset` | unary · childScoped | Stamp `deleted_at` on every live version of one preset's name — the only mutation a preset row ever undergoes; the history keeps the rows. Admitted like `PutPreset` |
-| `Recall` | unary · userOnly | Hybrid search (BM25 + vector, RRF-fused) over memories, conversation summaries and windows. `query` is required (`CodeInvalidArgument` otherwise); `sources` filters to some of `memory`/`summary`/`window` (empty = all three, an unknown name `CodeInvalidArgument`); `under` is an ltree path prefix for memories, `repo` a basename filter for conversation sources; `since_unix`/`until_unix` are unix seconds, **0 = unbounded**; `limit` 0 means the default (10), clamped to 50. Hits carry `id` (`m:`/`s:`/`w:`-prefixed — the key `RecallContext` expands), `source`, `snippet`, `when` (RFC3339 UTC), conversation identity/repo/kind, ordinal span, memory path/name, summary title and the fused `score` |
-| `RecallContext` | unary · userOnly | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (the wire takes 0 as "the window's own span" — the 3-each default is the fundi `recall_context` tool's substitution, not this verb's); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text with **0 = uncapped** (the 8000 default is likewise the tool's substitution). An empty `id` is `CodeInvalidArgument`; a well-formed but unknown id is `CodeNotFound`; a malformed one (no `m:`/`s:`/`w:` prefix) falls through to `CodeInternal` |
-| `GetMemory` | unary · userOnly | One of the CALLER'S own memories by `(path, name)`, body and meta included. Memories are always owner-scoped to the caller's own user id — an admin gets no one else's |
-| `MemoryTree` | unary · userOnly | The caller's memories under `path`, to `depth` (0 = unlimited), ordered by path; the rendered tree is byte-budgeted (`recall.TreeMaxChars`) on the tool surface |
-| `PutMemory` | unary · userOnly | Save or replace a memory at `(path, name)` under the CALLER'S OWN user id — even for an admin. `path` must be dot-separated labels matching `[A-Za-z0-9_-]{1,256}` (`CodeInvalidArgument` otherwise), `meta_json` must parse as JSON (empty means `{}`) and an empty owner is `CodeInvalidArgument` (`recall.ErrNoOwner`). Replace is a new row; the old one is tombstoned, never deleted |
-| `DeleteMemory` | unary · userOnly | Tombstone (`deleted_at`) one of the caller's memories at `(path, name)`; an unknown name is `CodeNotFound`. Never a hard delete |
+| `Recall` | unary · ownerScoped | Hybrid search (BM25 + vector, RRF-fused) over memories, conversation summaries and windows. `query` is required (`CodeInvalidArgument` otherwise); `sources` filters to some of `memory`/`summary`/`window` (empty = all three, an unknown name `CodeInvalidArgument`); `under` is an ltree path prefix for memories, `repo` a basename filter for conversation sources; `since_unix`/`until_unix` are unix seconds, **0 = unbounded**; `limit` 0 means the default (10), clamped to 50. Hits carry `id` (`m:`/`s:`/`w:`-prefixed — the key `RecallContext` expands), `source`, `snippet`, `when` (RFC3339 UTC), conversation identity/repo/kind, ordinal span, memory path/name, summary title and the fused `score` |
+| `RecallContext` | unary · ownerScoped | Expand one hit id: a window (`w:`) renders its message span plus `before`/`after` neighbouring messages (the wire takes 0 as "the window's own span" — the 3-each default is the fundi `recall_context` tool's substitution, not this verb's); a summary (`s:`) renders title + summary with its conversation header; a memory (`m:`) renders its full body. `max_chars` caps the text with **0 = uncapped** (the 8000 default is likewise the tool's substitution). An empty `id` is `CodeInvalidArgument`; a well-formed but unknown id is `CodeNotFound`; a malformed one (no `m:`/`s:`/`w:` prefix) falls through to `CodeInternal` |
+| `GetMemory` | unary · ownerScoped | One of the CALLER'S own memories by `(path, name)`, body and meta included. Memories are always owner-scoped to the caller's own user id — an admin gets no one else's |
+| `MemoryTree` | unary · ownerScoped | The caller's memories under `path`, to `depth` (0 = unlimited), ordered by path; the rendered tree is byte-budgeted (`recall.TreeMaxChars`) on the tool surface |
+| `PutMemory` | unary · ownerScoped | Save or replace a memory at `(path, name)` under the CALLER'S OWN user id — even for an admin. `path` must be dot-separated labels matching `[A-Za-z0-9_-]{1,256}` (`CodeInvalidArgument` otherwise), `meta_json` must parse as JSON (empty means `{}`) and an empty owner is `CodeInvalidArgument` (`recall.ErrNoOwner`). Replace is a new row; the old one is tombstoned, never deleted |
+| `DeleteMemory` | unary · ownerScoped | Tombstone (`deleted_at`) one of the caller's memories at `(path, name)`; an unknown name is `CodeNotFound`. Never a hard delete |
 | `RecallBackfill` | unary · userOnly | Arm summarization of conversations whose last activity predates `summaries_enabled_at`: `since_unix` sets the cut-over (**0 = from the beginning**, unlike `Recall`'s 0 = unbounded), `max_cost_usd` is the spend ceiling after which backfill auto-disarms. A non-admin caller is refused with `CodePermissionDenied`; a non-positive `max_cost_usd` is refused with `CodeInvalidArgument` (`connectapi.ErrNoBackfillBudget` — a zero-value request can never arm an all-history, budgetless backfill) |
 | `RecallStatus` | unary · userOnly | The recall index's state: conversation/window/summary/memory counts, unembedded windows and pending summaries, cumulative summary cost, `backfill_since` (RFC3339, empty when backfill is off), its budget and spend, and the configured embedding and summary models |
 | `ConversationSearch` | unary · childScoped | Query the conversation corpus. The request carries caller-chosen FILTERS (since/until unix seconds, owner, persona, source, model, status, path, min_tokens, text, limit) — never a scope: the daemon derives scope server-side from the authenticated credential (`IsUserCredential` → the user's own rows, `IsAdmin` → all, anything else `CodePermissionDenied`) and ANDs it on top, so an `owner` filter can only ever narrow, never widen. `limit` 0 means the default (50) and is clamped to 500. Each row carries id/name/owner/persona/source/model/status/driven_by, created-at, turn and token aggregates, cache-hit ratio, total USD and the first user message snippet |
@@ -380,9 +380,10 @@ store and is refused.
 
 | Policy | Meaning | Procedures |
 |---|---|---|
-| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
+| `userOnly` (the default) | Requires a real user credential — or no identity at all (the unix socket's local trust) | `ListExecutors`, `ListSkills`, `GetSkill`, `UpsertSkill`, `DeleteSkill`, `SetSkillEnabled`, `AddPymoduleGitSource`, `ListPymoduleGitSources`, `RefreshPymoduleGitSource`, `RemovePymoduleGitSource`, `RecallBackfill`, `RecallStatus`, `ConversationReview`, `ConversationFindings`, `DarajaLaunch`, `DarajaSend`, `DarajaWatch`, `BanProvider`, `UnbanProvider`, `SetRoute`, `DeleteRoute`, `Resume`, `CloseAllExited`, `SetLabels`, `Status`, `Search`, `ShutdownDaemon`, `ModelInfo` (no — see `anyCaller`), `ConversationStats`, `EnrollExecutor`, `CreateExecutor`, `LabelExecutor`, `DisableExecutor`, `EnableExecutor`, `DeleteExecutor`, `ExecutorSession`, `CreateUser`, `ListUsers`, `RemoveUser`, `UpdateUser`, `MintToken`, `ListTokens`, `RevokeToken`, `GetStreams`, `SendFrame` |
 | `anyCaller` | Read-only, non-scoped; child credentials included | `ListModels`, `ListPresets`, `GetPreset`, `GetRateLimitStatus`, `ListProviderBans`, `ListRoutes`, `ModelInfo` |
 | `childScoped` | A per-child credential may call these on its own subtree: the gate admits `ProvenanceChildToken` only, and the handler bounds it — the stored parent chain via `childstore.IsDescendant` (`connectapi.Server.SetChildScopeSource`, implemented in `cmd/rafikid/connect_childscope.go`), the caller itself refused (a child is not a descendant of its own id), unknown ids refused with the same answer. `Spawn` forces `ParentChildID` to the caller's own id — the child-spawn admission, whose depth/children/budget checks read the parent's grant through it — and a credential that names no child cannot spawn at all, since an empty forced parent would be the top-level spawn shape. `ListChildren` answers only the subtree; `StreamEvents` refuses the `All` subject and any non-descendant subject; `ListTasks` only a conversation inside the caller's subtree. The other child shapes stay refused. The source never resolves nil (the operator path) for a child-shaped credential — the empty-ChildID and vanished-row shapes resolve an always-refusing scope — and the daemon wiring is pinned end to end by `TestConnectChildScopedOnTheConnectPlane` (`test/integration`). The three script-hub verbs (`Report`/`Receive`/`SetResult`) resolve the caller's position from the credential rather than authorizing a target, and `Report`/`SetResult` admit ANY child credential — script or LLM, the LLM kinds reaching them through the `agent_report`/`agent_result` tools: `Report` acts outward on the caller's own parent (a top-level child appends to its own event log), `Receive` and `SetResult` are strictly self-only — `Receive`'s `child_id` is an identity self-check, not a subtree call, and both verbs refuse any caller that resolves to no child scope (a user credential has no position in the tree for a self-position verb to act on). `SetBudget` from a per-child credential is NOT operator authority: after the subtree check it applies `agent_set_budget`'s rule (`Controller.SetChildBudget` — direct parentage, bounded by the caller's own remaining grant). The conversation reads `ConversationSearch`/`ConversationExport`/`ConversationQuery` answer a per-child credential from its own subtree (`insights.ScopeSubtree`, the MCP face's `conversation_*` boundary) — never its owner's corpus; a conversation outside it answers not-found. `ListPymodules`/`GetPymodule`/`PutPymodule`/`DeletePymodule` read and write the owner's corpus, exactly as the MCP face's pymodule tools do. `PutPreset`/`DeletePreset` admit only a TOP-LEVEL child (no parent — the operator's own session); a parented or unknown child is refused `CodePermissionDenied` by `connectPresets.authoringChild` | `GetHistory`, `StreamEvents`, `Send`, `ListChildren`, `GetChild`, `Spawn`, `Kill`, `Close`, `SetBudget`, `ListTasks`, `Report`, `Receive`, `SetResult`, `ConversationSearch`, `ConversationExport`, `ConversationQuery`, `ListPymodules`, `GetPymodule`, `PutPymodule`, `DeletePymodule`, `PutPreset`, `DeletePreset` |
+| `ownerScoped` | A per-child credential may call these as its OWNER: the gate admits `ProvenanceChildToken` only (the per-boot shapes stay refused); the handler resolves the owner's NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`), so conversation-derived reads cover only the owner's rows — never `Scope{All: true}`, even for an admin's child — and memories are the owner's own. The surface a fundi child's `recall`/`memory_*` tools already have, and what the MCP face gives a claude child. No subtree check | `Recall`, `RecallContext`, `GetMemory`, `MemoryTree`, `PutMemory`, `DeleteMemory` |
 
 The gate distinguishes three credential shapes:
 
@@ -394,8 +395,9 @@ The gate distinguishes three credential shapes:
   `ProvenanceChildToken` (a per-child secret), `ProvenanceChildAttributed`
   (the per-boot token plus `X-Rafiki-Session`), and the empty `Identity{}` a
   bare per-boot token resolves to. Refused with `CodePermissionDenied` on
-  every `userOnly` procedure, and on `childScoped` procedures for every shape
-  EXCEPT `ProvenanceChildToken` — whose subtree reach the handler layer then
+  every `userOnly` procedure, and on `childScoped` or `ownerScoped`
+  procedures for every shape EXCEPT `ProvenanceChildToken` — whose subtree
+  reach (childScoped) or owner's data (ownerScoped) the handler layer then
   bounds, per the table above. The refusal names the procedure and the
   credential kind, never the secret; without bounds, only the `anyCaller`
   reads admit a child credential.
@@ -407,11 +409,10 @@ and the conversation verbs checked provenance: one curl from inside any
 child could kill any sibling tree, lift any budget, or rewrite the presets,
 skills and pymodules every future agent loads. `scopeFor` (the conversation
 verbs' scope derivation) refuses a child credential itself. The MCP
-agent-control surface (§2.4) has its own entitlement gate, and wave 1 of the
-script-children plan scoped its per-child bindings too: conversation reads
-to the child's own subtree, the recall/memory surface refused outright, and
-preset authoring limited to top-level children — see `mcp_face.go`'s
-`getServer`.
+agent-control surface (§2.4) has its own entitlement gate, and its per-child
+bindings are scoped too: conversation reads to the child's own subtree, the
+recall/memory surface owner-scoped to the child's owner, and preset
+authoring limited to top-level children — see `mcp_face.go`'s `getServer`.
 
 Admin gates ride ON TOP of the policy table, in the handler: `CreateUser`,
 `UpdateUser`, `ListUsers`, `RemoveUser` and the provider-ban mutations
@@ -866,9 +867,12 @@ the daemon resolves it from the authenticated credential exactly as
 read under the credential's scope, so an **admin's hits cover the whole
 daemon's users** and a named user's cover only their own rows (an identity
 that is neither admits nothing, `CodePermissionDenied` via
-`recall.ErrInvalidScope`). **Memories are always the caller's own** — every
-memory method takes the caller's user id, never a scope, admin included: a
-saved memory is private to whoever saved it. An empty owner is
+`recall.ErrInvalidScope`). A per-child credential resolves to its OWNER's
+NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`): a child of an
+admin reads that admin's own rows, never the whole daemon, and a child's
+memory reads AND writes are its owner's. **Memories are always the caller's
+own** — every memory method takes the caller's user id, never a scope, admin
+included: a saved memory is private to whoever saved it. An empty owner is
 `CodeInvalidArgument` (`recall.ErrNoOwner`).
 
 Error mapping (`recallError`, `pkg/connectapi/recall.go`) over the store's
@@ -1425,12 +1429,12 @@ onto another caller's bound tools.
   prompt is injected into asking for. The task ledger is keyed by the caller's
   OWNER (the conversation the `/v1/messages` attribution path already
   resolves), so a child shares its owner's ledger, exactly as a fundi child
-  does. Wave 1 of the script-children plan narrowed the rest of the child's
-  tool set to the same boundary (review-0's F1 finding): `conversation_*` read
+  does. The rest of the child's
+  tool set is narrowed to the same boundary (review-0's F1 finding): `conversation_*` read
   the child's own SUBTREE — its conversation plus its descendants' — through
   `insights.ScopeSubtree`, never its owner's corpus; the recall and memory
-  tools are declined outright (both sides of that binding are owner-dimensioned
-  and there is no per-child memory namespace to bind instead); and preset
+  tools are bound to the child's OWNER's non-admin identity (`recallOwner`,
+  `cmd/rafikid/recall.go`); and preset
   authoring refuses at call time for a PARENTED child (`childPresetBinding`,
   chosen by `presetStoreForChild`) — a top-level child is the operator's own
   session and authors under its owner, stamped as the writer, while an
@@ -1496,7 +1500,7 @@ transport error, and never a successful result carrying the text.
 | `preset_get` | Read one preset — version stamp and full spec (kind, model, tools, prompts, budget) as JSON; `history` returns every past version, deleted ones included. What a spawn with that preset will get |
 | `preset_put` | Create a preset or save a new version of one — each save is a new version, nothing already saved is ever overwritten. The spec's fields fix what `agent_spawn`'s `preset` gives a spawned worker. Only the operator authors presets: a user credential or a TOP-LEVEL child (stamped as the writer); a parented child is refused, since it would shadow — latest-live-wins — what the operator's next spawn resolves |
 | `preset_delete` | Delete one preset by name — every live version is stamped deleted and the history is kept; a later `preset_put` under the same name starts a new version line |
-| `recall` | Search your past conversations AND your saved memories by keyword and meaning — one line per hit (`m:` memory, `s:` summary, `w:` window), never full text. Conversation results cover what your credential can see (an admin reads the whole daemon); memories are always your own. Declined, with the five below, when the daemon has no recall store — and declined for a child caller in every case: both sides of the binding are owner-dimensioned and there is no per-child memory namespace, so the tools never reach a child (wave 1) |
+| `recall` | Search your past conversations AND your saved memories by keyword and meaning — one line per hit (`m:` memory, `s:` summary, `w:` window), never full text. Conversation results cover what your credential can see (an admin reads the whole daemon); memories are always your own. Declined, with the five below, when the daemon has no recall store. A child caller gets the same six tools bound to its OWNER's non-admin identity (`recallOwner`): conversation results cover the owner's rows, never daemon-wide even for an admin owner, and memories are the owner's |
 | `recall_context` | Expand one recall hit: a window returns the surrounding messages (tool results collapsed to size markers), a summary its full text and conversation id, a memory its full body |
 | `memory_put` | Save or replace one of YOUR memories at `path/name` — tombstone-replace, one live version |
 | `memory_get` | Fetch one of your saved memories — full body, metadata, timestamps; a missing path/name is a tool error |
