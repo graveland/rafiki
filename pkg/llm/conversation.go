@@ -522,9 +522,16 @@ func randomID() string {
 // user rows into one user message (per-tool tool_result rows → the single
 // user message the API requires after an assistant tool_use turn). Block
 // order within the merge follows row ordinal order.
+//
+// Replaces tool_use blocks with empty names with explanatory text blocks —
+// a model hallucination that, if forwarded as-is, causes a 400 rejection
+// ("tool_calls[0].function.name must be a non-empty string"). The matching
+// tool_result blocks (is_error feedback from the agent loop) are kept so the
+// model sees the error and can self-correct.
 func mergeForRequest(history []store.Message) []Message {
 	out := make([]Message, 0, len(history))
 	for _, m := range history {
+		m.Param.Content = replaceEmptyToolUses(m.Param)
 		if m.Param.Role == anthropic.MessageParamRoleUser && len(out) > 0 &&
 			out[len(out)-1].Role == anthropic.MessageParamRoleUser {
 			last := &out[len(out)-1]
@@ -534,6 +541,36 @@ func mergeForRequest(history []store.Message) []Message {
 			continue
 		}
 		out = append(out, m.Param)
+	}
+	return out
+}
+
+// replaceEmptyToolUses replaces assistant tool_use blocks with empty names
+// with text blocks explaining the error. User messages pass through unchanged.
+func replaceEmptyToolUses(param anthropic.MessageParam) []anthropic.ContentBlockParamUnion {
+	if param.Role != anthropic.MessageParamRoleAssistant {
+		return param.Content
+	}
+	n := 0
+	for _, b := range param.Content {
+		if b.OfToolUse != nil && b.OfToolUse.Name == "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return param.Content
+	}
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(param.Content))
+	for _, b := range param.Content {
+		if b.OfToolUse != nil && b.OfToolUse.Name == "" {
+			out = append(out, anthropic.ContentBlockParamUnion{
+				OfText: &anthropic.TextBlockParam{
+					Text: "[model emitted a malformed tool call with empty name — see tool result for error]",
+				},
+			})
+			continue
+		}
+		out = append(out, b)
 	}
 	return out
 }

@@ -551,6 +551,11 @@ func firstText(content []anthropic.ContentBlockUnion) (string, bool) {
 // tool_result block per request IN REQUEST ORDER — order matters for
 // prompt-cache stability of the next turn. Failures are IsError results, not
 // loop errors, so the model can distinguish a failed tool from missing data.
+//
+// Tool calls with empty names are NEVER executed (no tool is registered with
+// an empty name, and forwarding them to the API would cause a 400 rejection).
+// Instead, an is_error result is fabricated so the model sees the error and can
+// self-correct.
 func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse) []anthropic.ContentBlockParamUnion {
 	results := make([]anthropic.ContentBlockParamUnion, len(uses))
 	var emitMu sync.Mutex // serializes host callbacks across goroutines
@@ -563,10 +568,17 @@ func executeBatch(ctx context.Context, tools ToolSet, ev *Events, uses []toolUse
 			ev.toolStart(use.id, use.name, use.input)
 			emitMu.Unlock()
 
-			tctx := toolmeta.WithToolCallID(gctx, use.id)
-			result, err := tools.Execute(tctx, use.name, use.input)
-			if err != nil && result == "" {
-				result = fmt.Sprintf("Error executing tool: %v", err)
+			var result string
+			var err error
+			if use.name == "" {
+				result = "tool call had an empty name — this was a model hallucination; re-issue the call with a valid tool name"
+				err = errors.New("empty tool name")
+			} else {
+				tctx := toolmeta.WithToolCallID(gctx, use.id)
+				result, err = tools.Execute(tctx, use.name, use.input)
+				if err != nil && result == "" {
+					result = fmt.Sprintf("Error executing tool: %v", err)
+				}
 			}
 			result = truncateToolResult(result, toolmeta.MaxToolResultSize)
 
