@@ -365,6 +365,68 @@ class Client:
         req = _gen.control_pb.PutPresetRequest(preset=row)
         return self._call("PutPreset", req, _gen.control_pb.PutPresetResponse).preset
 
+    # ── recall and memories ──────────────────────────────────────────────────
+
+    def recall(
+        self,
+        query: str,
+        *,
+        sources: "Iterable[str] | None" = None,
+        under: str = "",
+        repo: str = "",
+        since_unix: int = 0,
+        until_unix: int = 0,
+        limit: int = 0,
+    ) -> "list":
+        """Hybrid search over the caller's memories and its owner's captured
+        conversations. ``sources`` narrows to some of ``"memory"``,
+        ``"summary"``, ``"window"``; 0 for ``since_unix``/``until_unix`` is
+        unbounded and 0 for ``limit`` is the daemon default. A child
+        credential searches its OWNER's own rows, never other users'. Each
+        hit's ``id`` is the key ``recall_context`` expands."""
+        req = _gen.control_pb.RecallRequest(
+            query=query,
+            sources=list(sources or []),
+            under=under,
+            repo=repo,
+            since_unix=since_unix,
+            until_unix=until_unix,
+            limit=limit,
+        )
+        return self._call("Recall", req, _gen.control_pb.RecallResponse).hits
+
+    def recall_context(self, hit_id: str, *, before: int = 0, after: int = 0, max_chars: int = 0) -> str:
+        """Expand one ``recall`` hit id (``m:``/``s:``/``w:`` prefixed) to its
+        text. 0 for ``max_chars`` is uncapped."""
+        req = _gen.control_pb.RecallContextRequest(id=hit_id, before=before, after=after, max_chars=max_chars)
+        return self._call("RecallContext", req, _gen.control_pb.RecallContextResponse).text
+
+    def memory_get(self, path: str, name: str) -> _gen.control_pb.MemoryRow:
+        """One of the caller's saved memories; an unknown path/name raises
+        ConnectError not_found."""
+        req = _gen.control_pb.GetMemoryRequest(path=path, name=name)
+        return self._call("GetMemory", req, _gen.control_pb.GetMemoryResponse).memory
+
+    def memory_tree(self, path: str = "", *, depth: int = 0) -> "list":
+        """The caller's memories under ``path`` (dot-separated labels), to
+        ``depth`` levels; 0 is unlimited."""
+        req = _gen.control_pb.MemoryTreeRequest(path=path, depth=depth)
+        return self._call("MemoryTree", req, _gen.control_pb.MemoryTreeResponse).memories
+
+    def memory_put(self, path: str, name: str, body: str, meta=None) -> _gen.control_pb.MemoryRow:
+        """Save or replace a memory at ``(path, name)`` under the caller's
+        owner. ``meta`` is any JSON-serialisable object (default ``{}``).
+        Replacing tombstones the old row; nothing is deleted."""
+        req = _gen.control_pb.PutMemoryRequest(
+            path=path, name=name, body=body, meta_json="" if meta is None else json.dumps(meta)
+        )
+        return self._call("PutMemory", req, _gen.control_pb.PutMemoryResponse).memory
+
+    def memory_delete(self, path: str, name: str) -> None:
+        """Tombstone one of the caller's memories."""
+        req = _gen.control_pb.DeleteMemoryRequest(path=path, name=name)
+        self._call("DeleteMemory", req, _gen.control_pb.DeleteMemoryResponse)
+
     # ── routing policy rows ──────────────────────────────────────────────────
 
     def list_routes(self) -> "list":

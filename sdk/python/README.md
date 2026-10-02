@@ -69,6 +69,15 @@ seats = c.list_presets("review:")         # latest live row per name
 seat  = c.get_preset("review:reviewer")   # not_found raises ConnectError
 c.put_preset({"name": "review:reviewer", "kind": "fundi", "model": "...", "skills": []})
 
+# Recall and memories (owner-scoped: reads and writes act as the caller's
+# owner, and a child credential is bound to its owner's rows, never an admin's).
+hits = c.recall("what did we decide", sources=["memory", "summary"])  # owner's memories + conversations
+text = c.recall_context(hits[0].id)       # expand a "m:"/"s:"/"w:" hit id
+mem  = c.memory_get("infra", "notes")     # not_found raises ConnectError
+rows = c.memory_tree("infra", depth=2)    # memories under a path, 0 = unlimited
+row  = c.memory_put("infra", "notes", "body", meta={"tag": "x"})  # save/replace
+c.memory_delete("infra", "notes")         # tombstone, never a hard delete
+
 # Routing-policy rows (any caller may read; a user or the local socket may
 # write). A row's line is a "-" prefix family: it matches model ids equal to
 # it or extending it with "-", so "z-ai/glm-5.3" also governs
