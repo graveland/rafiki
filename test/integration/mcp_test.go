@@ -71,28 +71,15 @@ var mcpToolNames = []string{
 	"memory_delete",
 }
 
-// mcpChildToolNames is what a per-child credential's session lists: the same
-// surface MINUS the recall and memory tools. Wave 1 of the script-children
-// plan declined those six for a child caller — both sides of that binding are
-// owner-dimensioned and there is no per-child memory namespace, so binding it
-// would hand the child read AND write on its owner's memories (see
-// newRecallBinding). The preset and pymodule authoring tools stay listed: they
-// refuse at call time now, and a listed refusal is one the model reads. The
-// child surface also ADDS agent_report and agent_result: a child reports to
-// its own parent, which an operator session has no parent to do.
-var mcpChildToolNames = func() []string {
-	dropped := map[string]bool{
-		"recall": true, "recall_context": true,
-		"memory_put": true, "memory_get": true, "memory_tree": true, "memory_delete": true,
-	}
-	out := make([]string, 0, len(mcpToolNames))
-	for _, name := range mcpToolNames {
-		if !dropped[name] {
-			out = append(out, name)
-		}
-	}
-	return append(out, "agent_report", "agent_result")
-}()
+// mcpChildToolNames is what a per-child credential's session lists: exactly
+// mcpToolNames PLUS the two child→parent verbs. The child surface equals the
+// operator surface — recall and memory included — because a child's recall
+// identity is its OWNER's non-admin identity on every face: the six
+// recall/memory tools bind to the owner's own rows (see newRecallBinding /
+// recallOwner), never to a per-child namespace. The two extra verbs are the
+// child's alone: agent_report and agent_result, a child reporting to its own
+// parent, which an operator session has no parent to do.
+var mcpChildToolNames = append(slices.Clone(mcpToolNames), "agent_report", "agent_result")
 
 // ─── harness: daemon with a known proxy port ─────────────────────────────────
 

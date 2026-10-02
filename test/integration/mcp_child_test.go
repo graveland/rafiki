@@ -10,8 +10,9 @@ package integration_test
 // What only this file can prove, because everything below drives a REAL daemon
 // subprocess over real HTTP and a REAL child process:
 //   - the token a real spawn actually delivered to a real child authenticates
-//     a real MCP session, and tools/list is exactly the agent-control tool
-//     set mcpToolNames pins;
+//     a real MCP session, and tools/list is exactly the child tool set
+//     mcpChildToolNames pins (the operator set plus agent_report/agent_result,
+//     recall and memory included — bound to the child's owner);
 //   - that session binds a CONTROLLER spawner scoped to the child's own
 //     subtree, not a user spawner with daemon-wide scope (coordinator
 //     amendment A1) — the regression the unit tests cannot see;
@@ -306,9 +307,9 @@ func mcpDrain(t *testing.T, resp *http.Response) string {
 }
 
 // mcpAssertExactToolSet fails the test unless got is exactly the assertion of
-// record. A child credential asserts against the CHILD list — the user list
-// minus the six recall/memory tools wave 1 declined for children — so a
-// regression that rebinds the owner-dimensioned recall surface onto a child
+// record. A child credential asserts against the CHILD list — the operator
+// surface plus agent_report/agent_result, recall and memory included — so a
+// regression that drops the owner-dimensioned recall surface from a child
 // caller fails here on the real daemon, not just in the unit fixture.
 func mcpAssertExactToolSet(t *testing.T, where string, got []string) {
 	t.Helper()
@@ -364,7 +365,7 @@ func TestMCPChildTokenReachesTheAgentControlSurface(t *testing.T) {
 	c.Require().False(bootToken == "" || bootToken == mcpToken, "ANTHROPIC_AUTH_TOKEN = %q; the per-boot proxy bearer must be present and distinct from the per-child secret", bootToken)
 
 	// Headline: tools/list through the child-token session is exactly the
-	// tool set mcpToolNames pins — no more, no fewer.
+	// child tool set mcpChildToolNames pins — no more, no fewer.
 	sessA := mcpConnect(t, d.proxyURL, mcpToken)
 	tools, err := sessA.ListTools(context.Background(), nil)
 	c.Require().NoError(err, "child-token ListTools")
