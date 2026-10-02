@@ -277,16 +277,17 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 			opts.Presets = newPresetBinding(ctrl, owner.UserID, "")
 		}
 	}
-	// Recall + memory tools, bound to the caller the same way the conversation
-	// reader is: an admin's conversation-derived hits cover the whole daemon,
-	// everyone else's are scoped to their own rows, and memories are ALWAYS
-	// the caller's own. A per-child caller gets NOTHING here — there is no
-	// per-child memory namespace, so the owner-dimensioned binding would read
-	// and write the owner's — see newRecallBinding. Declines daemon-wide when
-	// recall is not wired; the guard lives here because newRecallBinding's
-	// decline is a nil INTERFACE (a typed-nil assignment would defeat the
-	// blueprints' decline).
-	if rb := newRecallBinding(ctrl, owner, isChild); rb != nil {
+	// Recall + memory tools, bound to the caller's owner the same way the
+	// conversation reader is: an admin's conversation-derived hits cover the
+	// whole daemon, but only for a real user credential; a named user's are
+	// scoped to their own rows, and memories are ALWAYS the caller's own. A
+	// per-child caller resolves to its OWNER's non-admin identity (recallOwner),
+	// so a child of an admin is bound to that admin's own rows, never
+	// Scope{All: true} — see newRecallBinding. Declines daemon-wide when recall
+	// is not wired; the guard lives here because newRecallBinding's decline is a
+	// nil INTERFACE (a typed-nil assignment would defeat the blueprints'
+	// decline).
+	if rb := newRecallBinding(ctrl, recallOwner(id)); rb != nil {
 		opts.Recall = rb
 	}
 	// The pymodule tools decline together, daemon-wide, when this daemon has

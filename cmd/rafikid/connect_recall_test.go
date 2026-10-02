@@ -171,3 +171,17 @@ func TestConnectRecallStatusCarriesModels(t *testing.T) {
 	ck.NoError(err, "status without embedder")
 	ck.False(st.EmbeddingModel != "" || st.SummaryModel != "sum-model", "status = %+v, want empty embedding model and sum-model", st)
 }
+
+// TestConnectRecallChildResolvesOwnerNonAdmin pins the Connect adapter's child
+// identity rule: a child credential resolves through recallOwner to its OWNER's
+// non-admin identity, so its recall and memory verbs act on the owner's own
+// rows, never an admin's daemon-wide scope.
+func TestConnectRecallChildResolvesOwnerNonAdmin(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ctx := server.WithIdentity(context.Background(), &server.Identity{
+		UserID: "u-owner", IsAdmin: true, Via: server.ProvenanceChildToken, ChildID: "c-1",
+	})
+	owner := recallIdentity(ctx)
+	ck.False(owner.IsAdmin, "a child credential must never resolve to admin")
+	ck.Eq("u-owner", owner.UserID, "child resolves to its owner's user id")
+}

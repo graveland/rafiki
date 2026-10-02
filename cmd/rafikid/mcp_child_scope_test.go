@@ -18,8 +18,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/presets"
 	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/server"
-	"go.graveland.dev/rafiki/pkg/users"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -129,16 +129,25 @@ func TestPresetStoreForChildAuthorsOnlyAtTopLevel(t *testing.T) {
 	}
 }
 
-// TestRecallBindingRefusesChildCaller pins the recall block's child rule:
-// every owner dimension of that binding is the OWNER's (scope and MemoryOwner
-// are user ids), and with no per-child namespace to bind instead the child
-// gets nil — the blueprints' decline — never an owner-scoped binding.
-func TestRecallBindingRefusesChildCaller(t *testing.T) {
+// TestChildRecallIdentityNeverAdmin pins the one recall identity rule: a
+// per-child credential resolves to its OWNER's non-admin identity
+// (recallOwner) — IsAdmin survives only for a real user credential — so a
+// child of an admin is bound to that admin's own rows, never Scope{All: true}.
+func TestChildRecallIdentityNeverAdmin(t *testing.T) {
 	ck := assert.NewAborting(t)
+
+	user := recallOwner(&server.Identity{UserID: "u-owner", IsAdmin: true, Via: server.ProvenanceUser})
+	ck.True(user.IsAdmin, "a real user credential keeps its admin bit")
+
+	child := &server.Identity{UserID: "u-owner", IsAdmin: true, Via: server.ProvenanceChildToken, ChildID: "c-1"}
+	owner := recallOwner(child)
+	ck.False(owner.IsAdmin, "a child credential must never be admin, even of an admin owner")
+	ck.Eq("u-owner", owner.UserID, "child resolves to its owner's user id")
+
 	c := &Controller{recall: &recallRuntime{st: &fakeRecallStore{}}}
-	ck.Nil(newRecallBinding(c, users.Identity{UserID: "u-owner"}, true), "child caller bound a recall binding, want nil")
-	// The user caller keeps its binding (owner == the caller).
-	ck.NotNil(newRecallBinding(c, users.Identity{UserID: "u-owner"}, false), "user caller lost its recall binding")
+	b := newRecallBinding(c, recallOwner(child)).(*recallBinding)
+	ck.EqDeep(recall.Scope{OwnerUserID: "u-owner"}, b.scope, "child binding scope must be owner-scoped, never All")
+	ck.Eq("u-owner", b.owner, "child binding memory owner")
 }
 
 // --- subtree conversation scope ---------------------------------------------

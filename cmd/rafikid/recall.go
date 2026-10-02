@@ -19,6 +19,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/recalldb"
+	"go.graveland.dev/rafiki/pkg/server"
 	"go.graveland.dev/rafiki/pkg/users"
 )
 
@@ -131,33 +132,26 @@ type recallBinding struct {
 
 var _ tools.RecallBinding = (*recallBinding)(nil)
 
+// recallOwner is the identity a recall binding is built for: the caller's
+// user id, and the admin bit only when the credential IS a real user
+// credential. A per-child credential carries its owner's UserID but is
+// never admin, so a child of an admin is bound to that admin's own rows,
+// not Scope{All: true}.
+func recallOwner(id *server.Identity) users.Identity {
+	return users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin && id.IsUserCredential()}
+}
+
 // newRecallBinding binds the recall tools to one caller. Scope follows
 // newMCPConversationReader exactly (admin → everything, a named user → their
 // own rows, an anonymous caller → the zero Scope that admits nothing); the
 // MEMORY owner is always the caller's own user id, admin included — a saved
-// memory is private to whoever saved it. nil when the daemon's recall
-// subsystem is not wired: the caller must assign the result to the
-// interface-typed option only when non-nil (a typed-nil in the interface
-// would defeat the blueprints' nil-decline).
-//
-// A per-child MCP caller binds NOTHING (nil, via childCredential): review-0's
-// F1 row. Both sides of this binding are owner-dimensioned — recall.Scope
-// admits an owner's rows, MemoryOwner is a user id — and there is no
-// per-child memory namespace, so a child caller previously read AND WROTE its
-// owner's memory namespace and searched its owner's conversation-derived
-// indexes. The flag is the CALLER SHAPE (Via == ProvenanceChildToken), not a
-// resolved child id: the empty-ChildID resolve that names the provenance but
-// no child must decline too, never fall through to the owner binding.
-// Scoping recall to a subtree the way the conversation reader now is would
-// mean a second Scope type and new SQL in pkg/recall; until that exists the
-// conservative default stands — the child gets no recall or memory tools at
-// all, and its designed memory surface (if any) is its own runtime, not its
-// owner's namespace.
-func newRecallBinding(c *Controller, owner users.Identity, childCredential bool) tools.RecallBinding {
+// memory is private to whoever saved it. A per-child caller binds its OWNER's
+// non-admin identity (recallOwner) — the same surface a fundi child gets.
+// nil when the daemon's recall subsystem is not wired: the caller must assign
+// the result to the interface-typed option only when non-nil (a typed-nil in
+// the interface would defeat the blueprints' nil-decline).
+func newRecallBinding(c *Controller, owner users.Identity) tools.RecallBinding {
 	if c.recall == nil {
-		return nil
-	}
-	if childCredential {
 		return nil
 	}
 	var scope recall.Scope

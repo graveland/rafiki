@@ -34,17 +34,15 @@ var _ connectapi.RecallManager = connectRecall{}
 
 // recallIdentity resolves the caller exactly as connectPresets does, keeping
 // IsAdmin — which spawnOwner drops and which the scope rule (admin → all) and
-// the backfill gate need. Since the wave-0 provenance gate (connect_policy.go)
-// every recall and memory verb here is userOnly, so the identity a request
-// carries below is always a real user credential — a child credential is
-// refused by the interceptor before any of these methods run, never mapped
-// through to its owner.
+// the backfill gate need. A child credential is admitted by the owner-scoped
+// policy and resolves to its OWNER's non-admin identity (recallOwner) — a
+// child of an admin is bound to that admin's own rows, never Scope{All: true}.
 func recallIdentity(ctx context.Context) users.Identity {
 	id := server.IdentityFromContext(ctx)
 	if id == nil {
 		return users.Identity{}
 	}
-	return users.Identity{UserID: id.UserID, Username: id.Username, IsAdmin: id.IsAdmin}
+	return recallOwner(id)
 }
 
 // recallScopeFor is newRecallBinding's rule: admin → everything, a named user
@@ -89,7 +87,7 @@ func (m connectRecall) RecallContext(ctx context.Context, id string, before, aft
 	if _, err := m.runtime(); err != nil {
 		return "", err
 	}
-	b := newRecallBinding(m.c, recallIdentity(ctx), false)
+	b := newRecallBinding(m.c, recallIdentity(ctx))
 	if b == nil {
 		return "", errRecallUnwired
 	}

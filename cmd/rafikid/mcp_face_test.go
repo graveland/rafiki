@@ -373,7 +373,7 @@ func TestMCPFaceMaterializesTheFullSetWhenAQuotaSourceExists(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-alice"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}, false); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-alice"}); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string
@@ -526,11 +526,10 @@ func TestMCPFacePresetToolsAbsentWithoutStore(t *testing.T) {
 
 // TestMCPFaceRecallToolsFollowRecallRuntime pins the recall block's gate: the
 // six decline on a daemon whose recall subsystem is not wired (nil
-// ctrl.recall — the DB-less posture), materialize for a user caller once it
-// is, and stay declined for a per-child caller — wave 1's F1 fix: the
-// owner-dimensioned binding would hand a child read AND write on its owner's
-// memory namespace, and there is no per-child namespace to bind instead, so
-// the child gets none of the six (see newRecallBinding).
+// ctrl.recall — the DB-less posture), and materialize once it is — for a user
+// caller and a per-child caller alike. A per-child caller resolves to its
+// OWNER's non-admin identity (recallOwner), so a child gets the owner's own
+// rows, never the daemon-wide all-scope (see newRecallBinding).
 func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	c := assert.NewCollecting(t)
 	face, _ := mcpFaceFixture(t)
@@ -553,19 +552,18 @@ func TestMCPFaceRecallToolsFollowRecallRuntime(t *testing.T) {
 	}))
 	names = mcpToolNames(t, mcpConnect(t, face.getServer(child)))
 	for _, name := range recallTools {
-		c.NotContains(names, name, "child request unexpectedly exposes")
+		c.Contains(names, name, "child request is missing")
 	}
 
-	// The EMPTY-ChildID child shape (provenance named, no child): the
-	// caller-shape flag declines too — it must never fall through to the
-	// owner binding (review-1 F2).
+	// The EMPTY-ChildID child shape (provenance named, no child) resolves to
+	// its owner's binding too — there is no child-id dimension left to gate on.
 	anonymous := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
 	anonymous = anonymous.WithContext(server.WithIdentity(anonymous.Context(), &server.Identity{
 		UserID: "u-alice", Via: server.ProvenanceChildToken,
 	}))
 	names = mcpToolNames(t, mcpConnect(t, face.getServer(anonymous)))
 	for _, name := range recallTools {
-		c.NotContains(names, name, "empty-ChildID child request unexpectedly exposes")
+		c.Contains(names, name, "empty-ChildID child request is missing")
 	}
 }
 
@@ -763,7 +761,7 @@ func TestChildTokenGetsTheUserToolSet(t *testing.T) {
 		Quota:         mcpStubQuota{},
 		Conversations: newMCPConversationReader(face.controller(), users.Identity{UserID: "u-owner"}),
 	}
-	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}, false); rb != nil {
+	if rb := newRecallBinding(face.controller(), users.Identity{UserID: "u-owner"}); rb != nil {
 		opts.Recall = rb
 	}
 	var names []string
