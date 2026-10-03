@@ -30,6 +30,7 @@ const (
 type Spec struct {
 	Sort   Sort
 	Quant  []string // as written: either a floor like "fp8+" (one element) or a list of OpenRouter quantizations
+	Prefer []string // provider slugs, tried first; fallbacks stay on
 	Only   []string // provider slugs
 	NoData bool
 	ZDR    bool
@@ -122,10 +123,10 @@ func ParseModel(s string) (base string, spec Spec, err error) {
 
 // ParseSpec parses the inside of the brackets — the same string a routing
 // policy row stores ("sort=price,quant=fp8+"). Items are comma-separated; the
-// valued keys are sort, quant and only (list values joined with "|"), the flags
-// nodata and zdr are bare. Any malformed or unknown item is an error naming it:
-// never ignored. The empty string is the zero Spec — a policy row stores ” to
-// mean "no spec".
+// valued keys are sort, quant, prefer and only (list values joined with "|"),
+// the flags nodata and zdr are bare. Any malformed or unknown item is an error
+// naming it: never ignored. The empty string is the zero Spec — a policy row
+// stores ” to mean "no spec".
 func ParseSpec(s string) (Spec, error) {
 	if s == "" {
 		return Spec{}, nil
@@ -138,7 +139,7 @@ func ParseSpec(s string) (Spec, error) {
 		}
 		key, val, hasVal := strings.Cut(item, "=")
 		switch key {
-		case "sort", "quant", "only":
+		case "sort", "quant", "prefer", "only":
 			if !hasVal || val == "" {
 				return Spec{}, fmt.Errorf("routing spec %q: item %q: %q needs a value", s, item, key)
 			}
@@ -166,6 +167,14 @@ func ParseSpec(s string) (Spec, error) {
 				return Spec{}, err
 			}
 			spec.Quant = quant
+		case "prefer":
+			slugs := strings.Split(val, "|")
+			for _, slug := range slugs {
+				if slug == "" {
+					return Spec{}, fmt.Errorf("routing spec %q: item %q: empty provider slug", s, item)
+				}
+			}
+			spec.Prefer = slugs
 		case "only":
 			slugs := strings.Split(val, "|")
 			for _, slug := range slugs {
@@ -230,8 +239,8 @@ func copyList(s []string) []string {
 
 // Merge combines two specs from the resolution chain, the receiver being the
 // more specific level (spawn over preset over policy row). Per key, the
-// receiver's value wins when set — Sort when non-empty, Quant and Only when
-// non-nil — else the lower level's fills in. NoData and ZDR are monotone
+// receiver's value wins when set — Sort when non-empty, Quant, Prefer and Only
+// when non-nil — else the lower level's fills in. NoData and ZDR are monotone
 // instead: set at ANY level they hold (confidentiality, not preference), so
 // they OR.
 func (s Spec) Merge(lower Spec) Spec {
@@ -246,6 +255,11 @@ func (s Spec) Merge(lower Spec) Spec {
 	} else if lower.Quant != nil {
 		merged.Quant = copyList(lower.Quant)
 	}
+	if s.Prefer != nil {
+		merged.Prefer = copyList(s.Prefer)
+	} else if lower.Prefer != nil {
+		merged.Prefer = copyList(lower.Prefer)
+	}
 	if s.Only != nil {
 		merged.Only = copyList(s.Only)
 	} else if lower.Only != nil {
@@ -256,11 +270,11 @@ func (s Spec) Merge(lower Spec) Spec {
 	return merged
 }
 
-// String renders the canonical form — keys in fixed order (sort, quant, only,
-// nodata, zdr), list values joined with "|", a floor kept as written ("fp8+"),
-// unset keys omitted. sort=balanced IS emitted: it is a decision, unlike the
-// zero Sort. ParseSpec(String()) returns an equal Spec, so a stored policy row
-// round-trips.
+// String renders the canonical form — keys in fixed order (sort, quant, prefer,
+// only, nodata, zdr), list values joined with "|", a floor kept as written
+// ("fp8+"), unset keys omitted. sort=balanced IS emitted: it is a decision,
+// unlike the zero Sort. ParseSpec(String()) returns an equal Spec, so a stored
+// policy row round-trips.
 func (s Spec) String() string {
 	var parts []string
 	if s.Sort != "" {
@@ -268,6 +282,9 @@ func (s Spec) String() string {
 	}
 	if len(s.Quant) > 0 {
 		parts = append(parts, "quant="+strings.Join(s.Quant, "|"))
+	}
+	if len(s.Prefer) > 0 {
+		parts = append(parts, "prefer="+strings.Join(s.Prefer, "|"))
 	}
 	if len(s.Only) > 0 {
 		parts = append(parts, "only="+strings.Join(s.Only, "|"))
@@ -283,7 +300,7 @@ func (s Spec) String() string {
 
 // IsZero reports whether the spec carries nothing at all.
 func (s Spec) IsZero() bool {
-	return s.Sort == "" && s.Quant == nil && s.Only == nil && !s.NoData && !s.ZDR
+	return s.Sort == "" && s.Quant == nil && s.Prefer == nil && s.Only == nil && !s.NoData && !s.ZDR
 }
 
 // Quantizations expands Quant for the wire: a floor ("fp8+") becomes every
@@ -321,6 +338,9 @@ func (s Spec) Quantizations() []string {
 //     the design), so ignore is dropped in that case.
 //   - Sort: sent for price/throughput/latency; omitted for SortInherit and for
 //     SortBalanced (balanced = deliberately send no sort).
+//   - Prefer: the spec's preferred slugs ride as Order, ALWAYS, independent of
+//     Only — Order is a try-first list and OpenRouter still falls back to the
+//     rest, so it neither bypasses nor drops bans and ejections.
 //   - DataCollection "deny" and ZDR ride along regardless of Only — data policy
 //     is the one boundary an only never bypasses; OpenRouter applies them
 //     jointly.
@@ -332,6 +352,7 @@ func (s Spec) Prefs(pinOnly, ignore []string) (ProviderPrefs, bool) {
 		prefs.Only = copyList(pinOnly)
 		prefs.Ignore = copyList(ignore)
 	}
+	prefs.Order = copyList(s.Prefer)
 	if s.Sort != SortInherit && s.Sort != SortBalanced {
 		prefs.Sort = string(s.Sort)
 	}
@@ -341,6 +362,7 @@ func (s Spec) Prefs(pinOnly, ignore []string) (ProviderPrefs, bool) {
 	}
 	prefs.ZDR = s.ZDR
 	sent := len(prefs.Only) > 0 || len(prefs.Ignore) > 0 || prefs.Sort != "" ||
+		len(prefs.Order) > 0 ||
 		len(prefs.Quantizations) > 0 || prefs.DataCollection != "" || prefs.ZDR
 	return prefs, sent
 }

@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/multigres/testkit/assert"
 )
 
 // TestParseModelSplitsBase pins the one syntax the whole routing-spec feature
@@ -359,4 +361,70 @@ func mustParseSpec(t *testing.T, s string) Spec {
 		t.Fatalf("ParseSpec(%q) = %v, want success", s, err)
 	}
 	return spec
+}
+
+// TestPreferParsesAndRoundTrips pins that prefer joins the valued keys: parsed
+// into Spec.Prefer, rendered in its canonical slot (after quant, before only),
+// and equal after a String/Parse round trip.
+func TestPreferParsesAndRoundTrips(t *testing.T) {
+	ck := assert.NewAborting(t)
+	spec, err := ParseSpec("sort=price,quant=fp8+,prefer=fireworks|together")
+	ck.NoError(err)
+	ck.EqDeep([]string{"fireworks", "together"}, spec.Prefer, "Prefer")
+	ck.Eq("sort=price,quant=fp8+,prefer=fireworks|together", spec.String(), "String()")
+	back, err := ParseSpec(spec.String())
+	ck.NoError(err)
+	ck.EqDeep(spec, back, "ParseSpec(String()) round trip")
+}
+
+// TestPreferRejectsEmptySlugAndRepeat pins prefer's item grammar: an empty slug
+// (prefer=a||b, prefer=|a) and a missing value are errors naming the item, and a
+// repeated key is refused like every other valued key.
+func TestPreferRejectsEmptySlugAndRepeat(t *testing.T) {
+	ck := assert.NewAborting(t)
+	for _, in := range []string{"prefer=a||b", "prefer=", "prefer", "prefer=a,prefer=b"} {
+		_, err := ParseSpec(in)
+		ck.Error(err, "ParseSpec(%q) must error", in)
+	}
+	_, err := ParseSpec("prefer=a||b")
+	ck.True(strings.Contains(err.Error(), "empty provider slug"),
+		"error %q must name the empty provider slug", err)
+}
+
+// TestPreferMergeReceiverWins pins prefer's per-key merge: the receiver's
+// non-nil Prefer wins, an unset receiver inherits the lower level, and a
+// non-nil EMPTY receiver stays empty (copyList's nil-vs-empty rule).
+func TestPreferMergeReceiverWins(t *testing.T) {
+	ck := assert.NewAborting(t)
+	ck.EqDeep([]string{"a"}, Spec{Prefer: []string{"a"}}.Merge(Spec{Prefer: []string{"b"}}).Prefer,
+		"receiver prefer wins")
+	ck.EqDeep([]string{"b"}, Spec{}.Merge(Spec{Prefer: []string{"b"}}).Prefer,
+		"unset receiver inherits the lower prefer")
+	empty := Spec{Prefer: []string{}}.Merge(Spec{Prefer: []string{"b"}}).Prefer
+	ck.True(empty != nil, "non-nil empty receiver prefer must stay non-nil")
+	ck.Eq(0, len(empty), "non-nil empty receiver prefer must stay empty")
+}
+
+// TestPreferIsNotZero pins that a spec carrying only Prefer is not the zero
+// Spec — IsZero must account for it.
+func TestPreferIsNotZero(t *testing.T) {
+	assert.NewAborting(t).False(Spec{Prefer: []string{"a"}}.IsZero(),
+		"Spec{Prefer: [a]}.IsZero() must be false")
+}
+
+// TestPreferPrefsEmitsOrderAndKeepsIgnore pins that prefer becomes the wire
+// Order ALWAYS and never drops bans — only a spec Only bypasses ignore. With a
+// spec Only, Ignore is dropped but Order still rides.
+func TestPreferPrefsEmitsOrderAndKeepsIgnore(t *testing.T) {
+	ck := assert.NewAborting(t)
+	prefs, ok := Spec{Prefer: []string{"fireworks"}}.Prefs(nil, []string{"openinference"})
+	ck.True(ok, "a prefer-only spec must send")
+	ck.EqDeep([]string{"fireworks"}, prefs.Order, "Order")
+	ck.EqDeep([]string{"openinference"}, prefs.Ignore, "prefer must NOT drop bans")
+
+	contrast, ok := Spec{Only: []string{"x"}, Prefer: []string{"fireworks"}}.Prefs(nil, []string{"openinference"})
+	ck.True(ok, "only+prefer must send")
+	ck.EqDeep([]string{"x"}, contrast.Only, "Only")
+	ck.Eq(0, len(contrast.Ignore), "a spec only drops ignore")
+	ck.EqDeep([]string{"fireworks"}, contrast.Order, "Order rides even under an only")
 }

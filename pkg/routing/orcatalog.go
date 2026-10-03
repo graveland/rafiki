@@ -74,6 +74,9 @@ type ProviderPrefs struct {
 	// by the static pins below — a provider is ignored because it misbehaved,
 	// not because of a policy judgement about its quantization or retention.
 	Ignore []string `json:"ignore,omitempty"`
+	// Order tries these provider slugs first; OpenRouter falls back to the rest
+	// (allow_fallbacks stays at its default of true).
+	Order []string `json:"order,omitempty"`
 	// Sort prefers providers by price, throughput or latency. Empty means no
 	// opinion — and so does an explicit spec decision of "balanced", which
 	// Spec.Prefs omits (it is a decision to send no sort, not a value).
