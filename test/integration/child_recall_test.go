@@ -195,7 +195,7 @@ func TestChildRecallOfAdminOwnerIsNotDaemonWide(t *testing.T) {
 	d, dumps := bootMCPChildDaemon(t)
 	pool := openPool(t, dsn)
 
-	_, adminToken := createRecallUser(t, pool, "recall-admin-"+nextDaemonID(), true)
+	adminID, adminToken := createRecallUser(t, pool, "recall-admin-"+nextDaemonID(), true)
 	otherID, _ := createRecallUser(t, pool, "recall-other-"+nextDaemonID(), false)
 
 	// The child: owned by the ADMIN, spawned through the admin's MCP session.
@@ -231,6 +231,19 @@ func TestChildRecallOfAdminOwnerIsNotDaemonWide(t *testing.T) {
 	})))
 	ck.NoError(err, "child Recall")
 	ck.Eq(0, len(childResp.Msg.GetHits()), "the admin-owned child's Recall returned another user's conversation hit; a child of an admin must be owner-scoped, never Scope{All:true}; hits = %v", recallHitNames(childResp.Msg.GetHits()))
+
+	// Positive control: a window owned by the CHILD'S OWN OWNER (the admin)
+	// MUST surface, so a child scope that admitted nothing could not pass the
+	// empty assertion above. A second per-run term keeps the daemon-wide
+	// control at one hit.
+	qOwn := "zqownwin" + strings.ReplaceAll(nextDaemonID(), "-", "")
+	seedRecallWindow(t, pool, adminID, qOwn+" the admin owner's captured conversation window")
+
+	ownResp, err := client.Recall(ctx, authorize(mcpToken, connect.NewRequest(&rafikiv1.RecallRequest{
+		Query: qOwn, Sources: []string{"window"},
+	})))
+	ck.NoError(err, "child Recall of its owner's window")
+	ck.Eq(1, len(ownResp.Msg.GetHits()), "the admin-owned child's Recall must return its OWNER's window; hits = %v", recallHitNames(ownResp.Msg.GetHits()))
 }
 
 // TestChildRecallWritesAreTheOwners: the child's PutMemory lands in its

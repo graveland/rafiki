@@ -870,8 +870,11 @@ that is neither admits nothing, `CodePermissionDenied` via
 `recall.ErrInvalidScope`). A per-child credential resolves to its OWNER's
 NON-admin identity (`recallOwner`, `cmd/rafikid/recall.go`): a child of an
 admin reads that admin's own rows, never the whole daemon, and a child's
-memory reads AND writes are its owner's. **Memories are always the caller's
-own** — every memory method takes the caller's user id, never a scope, admin
+memory reads AND writes are its owner's. That surface is WIDER than the
+child's `conversation_*` tools, whose reads are subtree-only
+(`insights.ScopeSubtree`): `recall` is scoped by OWNER, not by subtree, so a
+child reaches its owner's whole conversation-derived corpus. **Memories are
+always the caller's own** — every memory method takes the caller's user id, never a scope, admin
 included: a saved memory is private to whoever saved it. An empty owner is
 `CodeInvalidArgument` (`recall.ErrNoOwner`).
 
