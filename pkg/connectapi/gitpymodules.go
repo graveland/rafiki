@@ -155,6 +155,7 @@ func (s *Server) RefreshPymoduleGitSource(
 		return nil, gitSourceError(err)
 	}
 	out := &rafikiv1.RefreshPymoduleGitSourceResponse{
+		Name:      req.Msg.GetName(),
 		Scripts:   make([]*rafikiv1.GitSourceScript, 0, len(scripts)),
 		Packages:  make([]*rafikiv1.GitSourcePackage, 0, len(packages)),
 		VenvReady: venvReady,

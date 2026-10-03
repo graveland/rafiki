@@ -3,9 +3,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -100,27 +102,120 @@ func newPythonRepoListCmd() *cobra.Command {
 }
 
 func newPythonRepoRefreshCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "refresh <name>",
-		Short: "Re-pull one git-backed source on every eligible executor",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ep, err := newConnectEndpoint(cmd)
-			if err != nil {
-				return err
-			}
-			resp, err := ep.control().RefreshPymoduleGitSource(cmdCtx(cmd),
-				connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: args[0]}))
-			if err != nil {
-				return err
-			}
-			mode, _, err := outputOpts(cmd)
-			if err != nil {
-				return err
-			}
-			return emitGitSourceSummary(os.Stdout, fmt.Sprintf("refreshed %s", args[0]), resp.Msg, mode)
-		},
+	cmd := &cobra.Command{
+		Use:   "refresh [name...]",
+		Short: "Re-pull git-backed sources on every eligible executor (all of them when no name is given)",
+		Long: `Re-pull git-backed pymodule sources on every eligible executor.
+
+With no name, every source the caller has registered is refreshed, in list
+order; naming sources refreshes just those. Each source is its own Connect
+call, so a source that fails fails only its own line — the others still
+refresh — and the command exits non-zero if any did.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: runPythonRepoRefresh,
 	}
+	cmd.ValidArgsFunction = completePymoduleGitSourceNames
+	return cmd
+}
+
+// runPythonRepoRefresh refreshes the named sources, or every registered source
+// when none is named.
+func runPythonRepoRefresh(cmd *cobra.Command, args []string) error {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return err
+	}
+	// Resolve the mode before the first refresh: -j and -J together is a
+	// user-input error and must not re-pull anything first (the rule close
+	// applies to --all-exited).
+	mode, _, err := outputOpts(cmd)
+	if err != nil {
+		return err
+	}
+	ctx := cmdCtx(cmd)
+	names := args
+	if len(names) == 0 {
+		listed, err := ep.control().ListPymoduleGitSources(ctx,
+			connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
+		if err != nil {
+			return err
+		}
+		for _, row := range listed.Msg.GetRows() {
+			names = append(names, row.GetName())
+		}
+	}
+	var (
+		refreshed []*rafikiv1.RefreshPymoduleGitSourceResponse
+		failures  int
+	)
+	for _, name := range names {
+		resp, err := ep.control().RefreshPymoduleGitSource(ctx,
+			connect.NewRequest(&rafikiv1.RefreshPymoduleGitSourceRequest{Name: name}))
+		if err != nil {
+			// Per-source, to stderr, exactly as `close`/`stop` report a failed
+			// target: the other sources still refresh.
+			fmt.Fprintf(os.Stderr, "error: refresh %s: %v\n", name, err)
+			failures++
+			continue
+		}
+		refreshed = append(refreshed, resp.Msg)
+	}
+	if err := emitGitSourceRefresh(os.Stdout, refreshed, mode); err != nil {
+		return err
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d source(s) failed", failures)
+	}
+	return nil
+}
+
+// completePymoduleGitSourceNames completes the <name> arguments of
+// `python repo refresh`, which takes any number of them (none means every
+// source). It never exits, never prints, and cannot block past
+// completionDeadline: every failure degrades to "no candidates". A name already
+// given is still offered — cobra has no notion of "already used", and the same
+// shape completeChildren offers every child at every position.
+func completePymoduleGitSourceNames(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	ep, err := newConnectEndpoint(cmd)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	ctx, cancel := context.WithTimeout(cmdCtx(cmd), completionDeadline)
+	defer cancel()
+	resp, err := ep.control().ListPymoduleGitSources(ctx,
+		connect.NewRequest(&rafikiv1.ListPymoduleGitSourcesRequest{}))
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	names := make([]string, 0, len(resp.Msg.GetRows()))
+	for _, row := range resp.Msg.GetRows() {
+		if strings.HasPrefix(row.GetName(), toComplete) {
+			names = append(names, row.GetName())
+		}
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// emitGitSourceRefresh writes a refresh run's result in the resolved mode: one
+// `refreshed <name>: …` line per source in table mode, the canonical protojson
+// of the responses as one {"rows": […]} envelope in -j, one compact response
+// per line in -J. Every response carries its own name, so a multi-source run's
+// rows attribute themselves. A run with nothing to refresh says so in table
+// mode and emits an empty row set in JSON.
+func emitGitSourceRefresh(w io.Writer, resps []*rafikiv1.RefreshPymoduleGitSourceResponse, mode outputMode) error {
+	if mode == outputJSON || mode == outputJSONL {
+		return emitProtoRows(w, resps, mode)
+	}
+	if len(resps) == 0 {
+		_, err := fmt.Fprintln(w, "no git sources to refresh")
+		return err
+	}
+	for _, r := range resps {
+		if err := emitGitSourceSummary(w, fmt.Sprintf("refreshed %s", r.GetName()), r, mode); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newPythonRepoRemoveCmd() *cobra.Command {

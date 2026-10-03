@@ -1204,6 +1204,11 @@ message GitSourcePackage {
 }
 
 message RefreshPymoduleGitSourceResponse {
+  // name echoes the source this inventory belongs to. A caller refreshing
+  // several sources in turn (`rafiki python repo refresh` with no name
+  // refreshes them all) attributes each response by this field alone; without
+  // it a row of the multi-source JSON output names nothing.
+  string name = 5;
   repeated GitSourceScript scripts = 1;
   repeated GitSourcePackage packages = 2;
   bool venv_ready = 3;

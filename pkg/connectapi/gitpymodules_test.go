@@ -188,6 +188,9 @@ func TestGitPymoduleHandlersPassThroughToManager(t *testing.T) {
 	c.Eq(1, len(rresp.Msg.GetScripts()), "refresh returned")
 	c.Eq(1, len(rresp.Msg.GetPackages()), "refresh returned")
 	c.True(rresp.Msg.GetVenvReady(), "refresh response lost venvReady")
+	// The response names its own source: a caller refreshing several sources in
+	// turn attributes each by this field alone.
+	c.Eq("ops_tools", rresp.Msg.GetName(), "refresh response does not echo the source name")
 
 	// A venv failure stays in the response: the refresh itself succeeded.
 	s.SetGitSourceManager(&fakeGitSources{venvReady: false, venvError: "uv sync failed"})

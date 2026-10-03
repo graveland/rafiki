@@ -764,7 +764,7 @@ and works against a remote daemon exactly as against a local one.
 ```
 rafiki python repo add <name> <url> [--ref <ref>]   # register + first refresh (--ref main)
 rafiki python repo list                             # NAME, URL, REF
-rafiki python repo refresh <name>                   # re-pull on every eligible executor
+rafiki python repo refresh [name...]                # re-pull on every eligible executor (all sources)
 rafiki python repo remove <name>
 ```
 
@@ -776,11 +776,17 @@ rafiki python repo remove <name>
   inventory: script and package counts plus the venv state. Note the summary
   itself is a SECOND refresh call the CLI makes after registering; if that
   call fails, the source is still registered — rerun `python repo refresh`.
-- **`refresh`** re-pulls the source on every live executor of yours whose
-  `Describe` reports `pymodule_git_sync`, in parallel, and prints the same
-  summary. A failed venv build is printed as `venv build failed: …` and does
-  NOT fail the command — the refresh itself succeeded, and a broken build
-  only fails the runs that actually need the venv.
+- **`refresh`** re-pulls each named source on every live executor of yours
+  whose `Describe` reports `pymodule_git_sync`, in parallel, and prints the
+  same summary per source. With no name it refreshes EVERY source you have
+  registered, in list order; `<TAB>` completes source names. Each source is
+  its own call, so one that fails is reported on stderr (`error: refresh
+  <name>: …`) without stopping the others, and the command exits non-zero if
+  any failed. `-j`/`-J` emit the responses as canonical protojson — each
+  carries its own `name`, so a multi-source run's rows are self-describing. A
+  failed venv build is printed as `venv build failed: …` and does NOT fail the
+  command — the refresh itself succeeded, and a broken build only fails the
+  runs that actually need the venv.
 - **`remove`** deletes the registration; executors are never told, and the
   discovered inventory simply stops being reported.
 

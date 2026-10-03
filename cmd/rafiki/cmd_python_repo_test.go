@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,10 @@ type repoStubControl struct {
 	addResp     *rafikiv1.AddPymoduleGitSourceResponse
 	refreshResp *rafikiv1.RefreshPymoduleGitSourceResponse
 	listResp    *rafikiv1.ListPymoduleGitSourcesResponse
+
+	// refreshErr fails the named source only, so a multi-source run's
+	// partial-failure path is testable.
+	refreshErr map[string]error
 
 	mu           sync.Mutex
 	addCalls     []*rafikiv1.AddPymoduleGitSourceRequest
@@ -62,7 +67,19 @@ func (s *repoStubControl) RefreshPymoduleGitSource(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refreshCalls = append(s.refreshCalls, req.Msg)
-	return connect.NewResponse(s.refreshResp), nil
+	if err := s.refreshErr[req.Msg.GetName()]; err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	// Echo the request's name exactly as the daemon does, so a multi-source
+	// run's rows attribute themselves.
+	out := &rafikiv1.RefreshPymoduleGitSourceResponse{Name: req.Msg.GetName()}
+	if s.refreshResp != nil {
+		out.Scripts = s.refreshResp.GetScripts()
+		out.Packages = s.refreshResp.GetPackages()
+		out.VenvReady = s.refreshResp.GetVenvReady()
+		out.VenvError = s.refreshResp.GetVenvError()
+	}
+	return connect.NewResponse(out), nil
 }
 
 func (s *repoStubControl) RemovePymoduleGitSource(
@@ -236,15 +253,16 @@ func TestPythonRepoCommandTree(t *testing.T) {
 	}
 	c.Len(got, 4, "python repo subcommands")
 
-	// Arg contracts: add takes name+url, the name-verbs take exactly one, and
-	// list takes none — validation fails before any endpoint is touched, so
-	// these run without a harness.
+	// Arg contracts: add takes name+url, remove takes exactly one, and list
+	// takes none — validation fails before any endpoint is touched, so these
+	// run without a harness. `refresh` is deliberately ABSENT: it takes any
+	// number of names, and none means "every registered source", so neither a
+	// bare `refresh` nor `refresh a b` is an argument error any more (pinned by
+	// TestPythonRepoRefreshAllSources / TestPythonRepoRefreshNamedSources).
 	for _, args := range [][]string{
 		{"add"},                    // missing url
 		{"add", "only_name"},       // missing url
 		{"add", "a", "u", "extra"}, // too many
-		{"refresh"},                // missing name
-		{"refresh", "a", "b"},      // too many
 		{"remove"},                 // missing name
 		{"remove", "a", "b"},       // too many
 		{"list", "extra"},          // list takes none
@@ -351,4 +369,155 @@ func TestPythonRepoAddRejectsLocalNameBeforeDial(t *testing.T) {
 		}
 		c.Empty(stub.addCalls, "daemon called despite local refusals")
 	})
+}
+
+// TestPythonRepoRefreshAllSources pins the no-argument contract: `refresh`
+// with no names lists the caller's sources ONCE and refreshes every one of
+// them, in list order, naming each in the output.
+func TestPythonRepoRefreshAllSources(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		listResp: &rafikiv1.ListPymoduleGitSourcesResponse{Rows: []*rafikiv1.GitSourceRow{
+			{Name: "ops_tools", Url: "https://example.net/ops.git", Ref: "main"},
+			{Name: "shared_lib", Url: "https://example.net/lib.git", Ref: "main"},
+		}},
+	}
+	newRepoHarness(t, stub)
+
+	out := captureStdout(t, func() {
+		c.Require().NoError(runRepoCmd(t, "refresh"), "python repo refresh (no names)")
+	})
+	c.Eq(1, stub.listCalls, "ListPymoduleGitSources calls for a whole-catalogue refresh")
+	refreshes := stub.refreshes()
+	c.Require().Len(refreshes, 2, "RefreshPymoduleGitSource calls")
+	c.Eq("ops_tools", refreshes[0].GetName(), "first refreshed source")
+	c.Eq("shared_lib", refreshes[1].GetName(), "second refreshed source")
+	c.StrContains(out, "refreshed ops_tools", "refresh-all output missing the first source:\n")
+	c.StrContains(out, "refreshed shared_lib", "refresh-all output missing the second source:\n")
+}
+
+// TestPythonRepoRefreshNamedSources pins the other half: naming sources
+// refreshes exactly those and never consults the catalogue.
+func TestPythonRepoRefreshNamedSources(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{}
+	newRepoHarness(t, stub)
+
+	c.Require().NoError(runRepoCmd(t, "refresh", "shared_lib", "ops_tools"), "python repo refresh a b")
+	c.Eq(0, stub.listCalls, "ListPymoduleGitSources must not be called when names are given")
+	refreshes := stub.refreshes()
+	c.Require().Len(refreshes, 2, "RefreshPymoduleGitSource calls")
+	c.Eq("shared_lib", refreshes[0].GetName(), "names are refreshed in the order given")
+	c.Eq("ops_tools", refreshes[1].GetName(), "names are refreshed in the order given")
+}
+
+// TestPythonRepoRefreshNoSources pins the empty catalogue: nothing to do is
+// not an error, and no refresh is attempted.
+func TestPythonRepoRefreshNoSources(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{listResp: &rafikiv1.ListPymoduleGitSourcesResponse{}}
+	newRepoHarness(t, stub)
+
+	out := captureStdout(t, func() {
+		c.Require().NoError(runRepoCmd(t, "refresh"), "python repo refresh with nothing registered")
+	})
+	c.StrContains(out, "no git sources to refresh", "empty-refresh output:\n")
+	c.Empty(stub.refreshes(), "refreshed a source despite an empty catalogue")
+}
+
+// TestPythonRepoRefreshCollectsPerSourceFailures pins the partial-failure
+// contract: one source failing names itself on stderr, the others still
+// refresh, and the command exits non-zero.
+func TestPythonRepoRefreshCollectsPerSourceFailures(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		listResp: &rafikiv1.ListPymoduleGitSourcesResponse{Rows: []*rafikiv1.GitSourceRow{
+			{Name: "ops_tools"}, {Name: "broken"}, {Name: "shared_lib"},
+		}},
+		refreshErr: map[string]error{"broken": errors.New("clone failed")},
+	}
+	newRepoHarness(t, stub)
+
+	stderr := captureStderr(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = runRepoCmd(t, "refresh")
+	})
+	c.Require().Error(err, "a failed source must make the command exit non-zero")
+	c.StrContains(stderr(), "error: refresh broken", "stderr does not name the failed source:\n")
+	c.StrContains(out, "refreshed ops_tools", "a sibling source was not refreshed:\n")
+	c.StrContains(out, "refreshed shared_lib", "a sibling source was not refreshed:\n")
+	// All three were attempted, in order — a failure does not stop the run.
+	refreshes := stub.refreshes()
+	c.Require().Len(refreshes, 3, "every source is attempted")
+	c.Eq("broken", refreshes[1].GetName(), "sources are attempted in list order")
+}
+
+// TestPythonRepoRefreshJSONRowsAreNamed pins the -J contract for a
+// multi-source run: one compact, self-describing record per source — the
+// response carries its own name, so no client-side output struct is needed.
+func TestPythonRepoRefreshJSONRowsAreNamed(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		listResp: &rafikiv1.ListPymoduleGitSourcesResponse{Rows: []*rafikiv1.GitSourceRow{
+			{Name: "ops_tools"}, {Name: "shared_lib"},
+		}},
+		refreshResp: &rafikiv1.RefreshPymoduleGitSourceResponse{
+			Scripts:   []*rafikiv1.GitSourceScript{{Name: "rotate_keys"}},
+			VenvReady: true,
+		},
+	}
+	newRepoHarness(t, stub)
+
+	root := &cobra.Command{Use: "rafiki"}
+	root.PersistentFlags().StringP("profile", "P", "", "")
+	root.PersistentFlags().StringP("output", "o", "auto", "")
+	root.PersistentFlags().BoolP("json", "j", false, "")
+	root.PersistentFlags().BoolP("jsonl", "J", false, "")
+	root.AddCommand(newPythonCmd())
+	root.SetArgs([]string{"python", "repo", "refresh", "-J"})
+
+	out := captureStdout(t, func() {
+		c.Require().NoError(root.Execute(), "python repo refresh -J")
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	c.Require().Len(lines, 2, "refresh -J printed %d line(s), want one per source:\n%s", len(lines), out)
+	var names []string
+	for i, line := range lines {
+		var resp rafikiv1.RefreshPymoduleGitSourceResponse
+		c.Require().NoError(json.Unmarshal([]byte(line), &resp), "refresh -J line %d is not a bare record: %v", i, line)
+		names = append(names, resp.GetName())
+	}
+	c.EqDeep([]string{"ops_tools", "shared_lib"}, names, "refresh -J rows are not self-describing")
+}
+
+// TestPythonRepoRefreshCompletesSourceNames pins that the verb actually wires
+// a completion function and that it offers the registered source names.
+func TestPythonRepoRefreshCompletesSourceNames(t *testing.T) {
+	c := assert.NewCollecting(t)
+	stub := &repoStubControl{
+		listResp: &rafikiv1.ListPymoduleGitSourcesResponse{Rows: []*rafikiv1.GitSourceRow{
+			{Name: "ops_tools"}, {Name: "shared_lib"},
+		}},
+	}
+	newRepoHarness(t, stub)
+
+	var refresh *cobra.Command
+	for _, sub := range newPythonRepoCmd().Commands() {
+		if sub.Name() == "refresh" {
+			refresh = sub
+		}
+	}
+	c.Require().NotNil(refresh, "python repo refresh not found")
+	c.Require().NotNil(refresh.ValidArgsFunction, "refresh has no ValidArgsFunction — `rafiki python repo refresh <TAB>` completes nothing")
+	got, directive := refresh.ValidArgsFunction(refresh, nil, "")
+	c.EqDeep([]string{"ops_tools", "shared_lib"}, got, "refresh completion candidates")
+	c.Eq(cobra.ShellCompDirectiveNoFileComp, directive, "completion directive")
+
+	// A prefix narrows the candidates, and a second position keeps offering
+	// them (refresh takes any number of names).
+	got, _ = refresh.ValidArgsFunction(refresh, nil, "shared")
+	c.EqDeep([]string{"shared_lib"}, got, "prefix-filtered completion candidates")
+	got, _ = refresh.ValidArgsFunction(refresh, []string{"ops_tools"}, "")
+	c.EqDeep([]string{"ops_tools", "shared_lib"}, got, "completion after a first name")
 }

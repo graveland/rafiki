@@ -3471,6 +3471,7 @@ class GitSourcePackage:
 
 @dataclasses.dataclass
 class RefreshPymoduleGitSourceResponse:
+    name: str = ""
     scripts: list[GitSourceScript] = dataclasses.field(default_factory=list)
     packages: list[GitSourcePackage] = dataclasses.field(default_factory=list)
     venv_ready: bool = False
@@ -3478,6 +3479,8 @@ class RefreshPymoduleGitSourceResponse:
 
     def to_dict(self) -> dict:
         out = {}
+        if self.name != "":
+            out["name"] = self.name
         if self.scripts:
             out["scripts"] = [x.to_dict() for x in self.scripts]
         if self.packages:
@@ -3490,6 +3493,9 @@ class RefreshPymoduleGitSourceResponse:
     @classmethod
     def from_dict(cls, _d: dict) -> "RefreshPymoduleGitSourceResponse":
         obj = cls()
+        _v = _d.get("name")
+        if _v is not None:
+            obj.name = _v
         _v = _d.get("scripts")
         if _v is not None:
             obj.scripts = [GitSourceScript.from_dict(x) for x in _v]
