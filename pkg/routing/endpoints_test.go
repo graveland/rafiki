@@ -149,6 +149,57 @@ func TestEndpointCatalogServesStaleOnFetchFailure(t *testing.T) {
 	ck.True(stale, "stale")
 	ck.EqDeep(eps, got, "the stale entry is the last good one")
 	ck.Eq(int32(2), hits.Load(), "the refetch was attempted")
+
+	// A call within the failure backoff keeps serving the stale entry and makes
+	// no further request.
+	again, stale, err := c.Endpoints(context.Background(), "m")
+	ck.NoError(err, "a call within backoff still serves the stale entry")
+	ck.True(stale, "within backoff")
+	ck.EqDeep(eps, again, "still the last good entry")
+	ck.Eq(int32(2), hits.Load(), "a call within backoff must not refetch")
+}
+
+// TestEndpointCatalogBackoffIsPerModel proves the failure backoff is per model:
+// two failing calls for one model within fetchBackoff make a single request, and
+// a second model's fetch is unaffected by the first model's failure.
+func TestEndpointCatalogBackoffIsPerModel(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	var reqsA, reqsB atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a/model":
+			reqsA.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/b/model":
+			reqsB.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(endpointsJSON))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := NewEndpointCatalogForTest(srv.Client(), srv.URL+"/%s", slog.New(slog.DiscardHandler))
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	_, _, err := c.Endpoints(context.Background(), "a/model")
+	ck.Error(err, "the first a/model fetch fails")
+	now = now.Add(fetchBackoff / 2)
+	eps, stale, err := c.Endpoints(context.Background(), "a/model")
+	ck.Error(err, "a/model within backoff returns the cold error, not an empty list")
+	ck.Nil(eps, "no endpoints while backing off cold")
+	ck.False(stale, "nothing stale to serve")
+	ck.StrContains(err.Error(), "endpoints a/model: unavailable (last fetch failed)", "backoff error shape")
+	ck.Eq(int32(1), reqsA.Load(), "two failing calls within backoff make one request")
+
+	// b/model is a different model: its fetch must proceed and succeed even
+	// though a/model just failed.
+	beps, stale, err := c.Endpoints(context.Background(), "b/model")
+	ck.NoError(err, "b/model is unaffected by a/model's failure")
+	ck.False(stale, "b/model is fresh")
+	ck.Len(beps, 2, "b/model endpoints")
+	ck.Eq(int32(1), reqsB.Load(), "b/model fetched once")
 }
 
 // TestEndpointCatalogColdFailureIsAnError proves that with nothing cached and

@@ -38,16 +38,20 @@ type Endpoint struct {
 	Status          int      //
 }
 
-// endpointEntry is one model's cached endpoint list.
+// endpointEntry is one model's cached endpoint list and per-model fetch state.
+// Backoff is per entry so one model's outage never suppresses another's fetch.
 type endpointEntry struct {
-	eps     []Endpoint
-	fetched time.Time
+	eps      []Endpoint
+	fetched  time.Time
+	lastFail time.Time
 }
 
 // EndpointCatalog lists a model's hosting endpoints, fetched from OpenRouter's
 // /api/v1/models/{id}/endpoints. It is populated on demand: Endpoints loads
 // synchronously when the model is missing or its entry is past
-// endpointCatalogTTL, and serves the stale entry when a refetch fails. A nil
+// endpointCatalogTTL, and serves the last good entry when a refetch fails. A
+// failed fetch backs off PER MODEL for fetchBackoff; the backoff also covers the
+// cold path, so a model whose API is down is not refetched on every call. A nil
 // *EndpointCatalog is invalid.
 type EndpointCatalog struct {
 	http   *http.Client
@@ -57,57 +61,56 @@ type EndpointCatalog struct {
 
 	now func() time.Time // injectable clock for tests
 
-	mu       sync.RWMutex
-	cache    map[string]endpointEntry
-	lastFail time.Time
+	mu      sync.Mutex
+	entries map[string]*endpointEntry
 }
 
 func NewEndpointCatalog(httpClient *http.Client, logger *slog.Logger) *EndpointCatalog {
-	return &EndpointCatalog{http: httpClient, urlFmt: openRouterEndpointsURLFmt, logger: logger, now: time.Now}
+	return &EndpointCatalog{http: httpClient, urlFmt: openRouterEndpointsURLFmt, logger: logger, now: time.Now, entries: map[string]*endpointEntry{}}
 }
 
 // NewEndpointCatalogForTest returns a catalog that fetches from urlFmt, a
 // fmt format with one %s for the model id.
 func NewEndpointCatalogForTest(httpClient *http.Client, urlFmt string, logger *slog.Logger) *EndpointCatalog {
-	return &EndpointCatalog{http: httpClient, urlFmt: urlFmt, logger: logger, now: time.Now}
+	return &EndpointCatalog{http: httpClient, urlFmt: urlFmt, logger: logger, now: time.Now, entries: map[string]*endpointEntry{}}
 }
 
 // Endpoints returns the model's endpoints, loading synchronously when the
 // model is not cached or its entry is past endpointCatalogTTL. On a fetch
-// failure it returns the stale entry if one exists (err nil, stale true),
-// else the error. model is the OpenRouter id WITHOUT any "openrouter/" prefix
-// and without a routing bracket, e.g. "deepseek/deepseek-v4.1-flash".
+// failure it returns the stale entry if one exists (err nil, stale true), else
+// the error. Within fetchBackoff of that model's last failure no request is
+// made: a stale entry is served (stale true), or, cold, the error
+// `endpoints <model>: unavailable (last fetch failed)` is returned. model is the
+// OpenRouter id WITHOUT any "openrouter/" prefix and without a routing bracket,
+// e.g. "deepseek/deepseek-v4.1-flash".
 func (c *EndpointCatalog) Endpoints(ctx context.Context, model string) (eps []Endpoint, stale bool, err error) {
-	if eps, ok := c.cachedFresh(model); ok {
-		return eps, false, nil
+	if eps, fresh, ok := c.cached(model); ok {
+		return eps, !fresh, nil
 	}
 	v, err, _ := c.sf.Do(model, func() (any, error) {
-		if eps, ok := c.cachedFresh(model); ok {
-			return endpointResult{eps: eps}, nil
+		if eps, fresh, ok := c.cached(model); ok { // a caller queued behind a just-finished load needn't refetch
+			return endpointResult{eps: eps, stale: !fresh}, nil
 		}
-		// A stale entry is all we have: honour the failure backoff and, when a
-		// fetch does run and fails, serve the stale row rather than an error.
-		if old, ok := c.cached(model); ok {
-			if c.backingOff() {
-				return endpointResult{eps: old, stale: true}, nil
-			}
-			fresh, ferr := c.fetch(ctx, model)
-			if ferr != nil {
-				c.recordFailure()
-				c.logger.Warn("endpoint catalog: serving stale endpoints", "model", model, "error", ferr)
-				return endpointResult{eps: old, stale: true}, nil
-			}
-			c.store(model, fresh)
-			return endpointResult{eps: fresh}, nil
+		if c.backingOff(model) {
+			return nil, fmt.Errorf("endpoints %s: unavailable (last fetch failed)", model)
 		}
-		// Nothing cached: a failed fetch is the caller's error.
 		fresh, ferr := c.fetch(ctx, model)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		e := c.entries[model]
+		if e == nil {
+			e = &endpointEntry{}
+			c.entries[model] = e
+		}
 		if ferr != nil {
-			c.recordFailure()
-			c.logger.Warn("endpoint catalog: fetch failed", "model", model, "error", ferr)
+			e.lastFail = c.now()
+			if e.eps != nil {
+				c.logf("endpoint catalog: fetch failed (serving stale)", "model", model, "error", ferr)
+				return endpointResult{eps: e.eps, stale: true}, nil
+			}
 			return nil, ferr
 		}
-		c.store(model, fresh)
+		e.eps, e.fetched, e.lastFail = fresh, c.now(), time.Time{}
 		return endpointResult{eps: fresh}, nil
 	})
 	if err != nil {
@@ -117,53 +120,45 @@ func (c *EndpointCatalog) Endpoints(ctx context.Context, model string) (eps []En
 	return r.eps, r.stale, nil
 }
 
-// endpointResult carries a singleflight fetch outcome, including whether it is
+// endpointResult carries a singleflight load outcome, including whether it is
 // the stale entry kept after a failed refetch.
 type endpointResult struct {
 	eps   []Endpoint
 	stale bool
 }
 
-func (c *EndpointCatalog) cached(model string) ([]Endpoint, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.cache[model]
-	return e.eps, ok
-}
-
-// cachedFresh reports whether the model's entry exists and is within TTL.
-func (c *EndpointCatalog) cachedFresh(model string) ([]Endpoint, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.cache[model]
-	if !ok || c.now().Sub(e.fetched) >= endpointCatalogTTL {
-		return nil, false
-	}
-	return e.eps, true
-}
-
-// backingOff reports whether the last fetch failed within fetchBackoff, in
-// which case a refetch of a stale entry is suppressed.
-func (c *EndpointCatalog) backingOff() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return !c.lastFail.IsZero() && c.now().Sub(c.lastFail) < fetchBackoff
-}
-
-func (c *EndpointCatalog) recordFailure() {
+// cached reports whether model can answer without a fetch: fresh within the TTL,
+// or the last good list while within fetchBackoff of a failed refetch.
+func (c *EndpointCatalog) cached(model string) (eps []Endpoint, fresh bool, ok bool) {
 	c.mu.Lock()
-	c.lastFail = c.now()
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	e := c.entries[model]
+	if e == nil {
+		return nil, false, false
+	}
+	if !e.fetched.IsZero() && c.now().Sub(e.fetched) < endpointCatalogTTL {
+		return e.eps, true, true
+	}
+	if e.eps != nil && !e.lastFail.IsZero() && c.now().Sub(e.lastFail) < fetchBackoff {
+		return e.eps, false, true
+	}
+	return nil, false, false
 }
 
-func (c *EndpointCatalog) store(model string, eps []Endpoint) {
+// backingOff reports whether model's last fetch failed within fetchBackoff.
+func (c *EndpointCatalog) backingOff(model string) bool {
 	c.mu.Lock()
-	if c.cache == nil {
-		c.cache = make(map[string]endpointEntry)
+	defer c.mu.Unlock()
+	e := c.entries[model]
+	return e != nil && !e.lastFail.IsZero() && c.now().Sub(e.lastFail) < fetchBackoff
+}
+
+func (c *EndpointCatalog) logf(msg string, args ...any) {
+	logger := c.logger
+	if logger == nil {
+		logger = slog.Default()
 	}
-	c.cache[model] = endpointEntry{eps: eps, fetched: c.now()}
-	c.lastFail = time.Time{}
-	c.mu.Unlock()
+	logger.Warn(msg, args...)
 }
 
 // fetch loads a model's endpoints. It always returns a fresh, non-empty list
