@@ -233,37 +233,50 @@ func TestSetChildRoutingChildCanonicalizesSlug(t *testing.T) {
 	ck.Eq("prefer=fireworks,nodata", got, "canonical slug merged over stored")
 }
 
-// TestSetChildRoutingConcurrentOperatorFlagWriteIsNotLost is the N1
+// TestSetChildRoutingOperatorFlagSurvivesRacingChildSteer is the N1
 // regression: the child steer's read-modify-write must run inside
-// childstore.Store.Update, so a concurrent operator write of the monotone
-// `nodata` flag cannot be read-then-dropped by a child merge. It asserts the
-// invariant (nodata survives every interleaving) rather than a particular
-// schedule, so it cannot flake on ordering, only on the lost write -- which is
-// exactly the bug. Run under -race.
-func TestSetChildRoutingConcurrentOperatorFlagWriteIsNotLost(t *testing.T) {
+// childstore.Store.Update, so an operator write of the monotone `nodata` flag
+// racing a child merge can never be read-then-dropped. A lost update needs the
+// child write to land AFTER an operator `nodata` write, having read the stored
+// spec BEFORE it; racing one operator/child pair per round (with the spec reset
+// between rounds) gives each pair the widest window to interleave that way, and
+// asserting the flag after EVERY round makes the loss observable -- a later
+// operator write would otherwise re-add it. This detects the two-operation
+// steer (it lost 114/3000 rounds in the review); the in-lock steer loses none.
+// Run under -race.
+func TestSetChildRoutingOperatorFlagSurvivesRacingChildSteer(t *testing.T) {
 	ck := assert.NewAborting(t)
 	c := routingTree(t)
-	setStoredRouting(t, c, "c_leaf", "prefer=fireworks")
 
-	const writers = 64
-	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
+	const rounds = 3000
+	losses := 0
+	for round := 0; round < rounds; round++ {
+		setStoredRouting(t, c, "c_leaf", "")
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
+			<-start
 			_, _ = c.SetChildRoutingAsOperator(context.Background(), "c_leaf", "nodata")
 		}()
 		go func() {
 			defer wg.Done()
+			<-start
 			_, _ = c.SetChildRouting(context.Background(), "c_mid", "c_leaf", "prefer=deepinfra")
 		}()
-	}
-	wg.Wait()
+		close(start)
+		wg.Wait()
 
-	stored := storedRouting(t, c, "c_leaf")
-	spec, err := routing.ParseSpec(stored)
-	ck.NoError(err, "stored spec parses")
-	ck.True(spec.NoData, "the operator's monotone nodata flag survives concurrent child steers; stored spec %q", stored)
+		stored := storedRouting(t, c, "c_leaf")
+		spec, err := routing.ParseSpec(stored)
+		ck.NoError(err, "round %d: stored spec %q parses", round, stored)
+		if !spec.NoData {
+			losses++
+		}
+	}
+	ck.Eq(0, losses, "operator nodata lost in %d/%d rounds: the steer read-modify-write is not atomic", losses, rounds)
 }
 
 // TestControlPolicySetRoutingIsChildScoped pins the gate classification: a
