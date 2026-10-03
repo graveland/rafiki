@@ -500,6 +500,16 @@ func (r *Registry) Retain(keep []string) (missing []string) {
 	return missing
 }
 
+// Retains reports whether the named tool is currently registered, after any
+// Retain filter. Callers use it to decide whether text that names a tool is
+// worth emitting: a tool stripped by the allowlist must not be advertised.
+func (r *Registry) Retains(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.defs[name]
+	return ok
+}
+
 // Execute runs the named tool. An unknown name is a returned error, not a
 // panic — agentloop converts it to an is_error tool result the model can see.
 //

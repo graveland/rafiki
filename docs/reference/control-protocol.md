@@ -1553,7 +1553,7 @@ carries the MCP surface (the `--mcp-config=<path>` injection above; on the
 daraja path, iff `ProxyUrl` is set), and it shares the one file with any caller
 text (the flag is last-wins; two elements would drop one text). The
 system-prompt appendix and the MCP config ride staged files on every claude
-launch path, including the executor's `rafiki executor daraja serve` host
+launch path, including the executor's `rafiki daraja serve` host
 process (`pkg/executor/admin.go` stages the appendix and passes
 `--append-system-prompt-file <path>`, and `cmd/rafiki/cmd_daraja.go` reads it
 back into the child spec; the host restages the same content-addressed file for

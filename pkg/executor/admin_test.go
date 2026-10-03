@@ -641,6 +641,51 @@ func TestLaunchStagesTheSameFileTheHostWillRestage(t *testing.T) {
 	c.Eq(hex.EncodeToString(sum[:])+".md", filepath.Base(fields[i+1]), "staged file basename")
 }
 
+// A stage failure must release the launch claim. The appendix is staged BEFORE
+// cmd.Start, so a failed stage that swallowed the claim would poison the slot
+// and refuse every later Launch of the child with AlreadyExists. Point
+// XDG_STATE_HOME under a regular file so promptfile.Dir()'s MkdirAll fails,
+// then retry with a writable state dir and assert the retry is not refused.
+func TestStageFailureReleasesItsClaim(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	// A regular file where a directory is expected: MkdirAll(<file>/rafiki/prompts)
+	// fails with ENOTDIR, so the appendix cannot be staged.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	c.Require().NoError(os.WriteFile(blocker, []byte("x"), 0o600), "write blocker file")
+	t.Setenv("XDG_STATE_HOME", blocker)
+
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	newReq := func() *connect.Request[adminpb.LaunchRequest] {
+		return connect.NewRequest(&adminpb.LaunchRequest{
+			ChildId:  "c-stage-fail",
+			Cwd:      t.TempDir(),
+			DialAddr: "127.0.0.1:9999",
+			Spec: &darajapb.ChildSpec{
+				Kind:   darajapb.Kind_KIND_CLAUDE,
+				Claude: &darajapb.ClaudeParams{AppendSystemPrompt: "be terse"},
+			},
+		})
+	}
+
+	_, err := a.Launch(context.Background(), newReq())
+	c.Require().False(err == nil || connect.CodeOf(err) != connect.CodeInternal, "Launch with an unstageable prompt: err = %v, want Internal", err)
+
+	// The claim must be gone: a retry with a writable state dir must launch,
+	// not be refused AlreadyExists.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	resp, err := a.Launch(context.Background(), newReq())
+	c.Require().NoError(err, "retry Launch after a failed stage")
+	c.NotEq(0, resp.Msg.GetPid(), "retry Launch returned no pid")
+}
+
 // buildEnvDumpStub is buildSelfStub with one difference: the stub records its
 // own environment to a file before waiting to be signalled, so a test can
 // assert a secret arrived by ENVIRONMENT — the positive half

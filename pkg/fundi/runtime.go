@@ -786,7 +786,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		PrefillTools:           prefillTools,
 		ContextFiles:           contextFiles,
 		SkillsInventory:        skills.SkillsInventory(discovered),
-		Recall:                 opts.Recall != nil,
+		Recall:                 registry.Retains((tools.RecallBlueprint{}).Name()),
 		Cwd:                    opts.Cwd,
 		Workspace:              opts.Workspace,
 		Ref:                    opts.Ref,

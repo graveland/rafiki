@@ -686,3 +686,43 @@ func TestRecallSectionFromRuntimeOptions(t *testing.T) {
 	c.StrContains(withRecall, "## Recall", "a non-nil Recall binding must produce the recall section; got")
 	c.NotStrContains(withoutRecall, "## Recall", "a nil Recall binding must not produce the recall section; got")
 }
+
+// TestRecallSectionGatedOnFilteredToolSet pins that the recall nudge follows the
+// allowlist-FILTERED tool set, not the binding alone. The section names the
+// recall and memory tools, so a `tools` allowlist (or --no-builtin-tools) that
+// strips them must silence it even with a non-nil binding. Reverting the gate to
+// `opts.Recall != nil` makes the stripped case emit `## Recall` and fails here.
+func TestRecallSectionGatedOnFilteredToolSet(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+
+	systemText := func(toolAllowlist string) string {
+		sender := newCapturingSender(t, sampleEndTurn)
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.FakeTurns = ""
+		opts.Recall = fakeRecallBinding{}
+		opts.Tools = toolAllowlist
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
+
+		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+		c.Require().NoError(err, "BuildRuntime")
+		defer shutdown()
+
+		eng.HandlePrompt("hi")
+		eng.Wait()
+		c.Require().Len(sender.captured, 1, "expected exactly one API request")
+
+		var sb strings.Builder
+		for _, block := range sender.captured[0].System {
+			sb.WriteString(block.Text)
+		}
+		return sb.String()
+	}
+
+	allowed := systemText("")
+	stripped := systemText("read")
+
+	c.StrContains(allowed, "## Recall", "a non-nil binding with no allowlist must keep the recall section; got")
+	c.NotStrContains(stripped, "## Recall", "an allowlist that strips recall must silence the section; got")
+}
