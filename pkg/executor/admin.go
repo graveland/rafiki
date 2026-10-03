@@ -27,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/adminpb/adminpbconnect"
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/darajapb"
+	"go.graveland.dev/rafiki/pkg/promptfile"
 )
 
 // defaultReapGrace is the window between SIGTERM and SIGKILL, matching
@@ -353,7 +354,26 @@ func (a *AdminServer) Launch(
 			argv = append(argv, "--record-requests")
 		}
 		if c.GetAppendSystemPrompt() != "" {
-			argv = append(argv, "--append-system-prompt", c.GetAppendSystemPrompt())
+			// The appendix must never ride THIS host process's argv, which ps on
+			// the executor machine exposes world-readable: stage it to a
+			// content-addressed file and hand daraja serve the path. daraja serve
+			// reads the file back into its ChildSpec (cmd/rafiki/cmd_daraja.go)
+			// and the host restages the same bytes to the identical path for the
+			// claude grandchild, so the text stays off every argv here.
+			path, werr := promptfile.Write(promptfile.Dir(), ".md", c.GetAppendSystemPrompt())
+			if werr != nil {
+				// Release the claim taken above: a failed stage must not leave a
+				// slot that refuses every later Launch of this child with
+				// AlreadyExists.
+				a.mu.Lock()
+				if a.m[childID] == claim {
+					delete(a.m, childID)
+				}
+				a.mu.Unlock()
+				return nil, connect.NewError(connect.CodeInternal,
+					fmt.Errorf("executor: stage launch prompt: %w", werr))
+			}
+			argv = append(argv, "--append-system-prompt-file", path)
 		}
 		// ExtraArgs are the operator escape hatch and carry no serve-side flag of
 		// their own: they are appended verbatim after a bare "--" separator, which

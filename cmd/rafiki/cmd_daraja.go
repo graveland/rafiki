@@ -71,6 +71,8 @@ func newDarajaServeCmd() *cobra.Command {
 	cmd.Flags().String("resume", "", "session id to resume")
 	cmd.Flags().String("permission-mode", "", "child permission mode")
 	cmd.Flags().String("append-system-prompt", "", "system prompt to append to the child's own")
+	cmd.Flags().String("append-system-prompt-file", "", "file holding the system prompt to append to the child's own (staged by the executor so the text never rides ps)")
+	cmd.MarkFlagsMutuallyExclusive("append-system-prompt", "append-system-prompt-file")
 	cmd.Flags().String("proxy-url", "", "rafiki proxy URL to point the child at (empty: talk to Anthropic directly)")
 	cmd.Flags().Bool("passthrough", false, "omit ANTHROPIC_AUTH_TOKEN so the child's own Claude subscription bills instead of rafiki's proxy token")
 	cmd.Flags().Int("auto-compact-window", 0, "override Claude Code's assumed context window for a proxied model (0: leave its default)")
@@ -112,7 +114,12 @@ func runDarajaServe(cmd *cobra.Command, args []string) error {
 	model := mustGetString(cmd, "model")
 	resume := mustGetString(cmd, "resume")
 	permMode := mustGetString(cmd, "permission-mode")
-	appendPrompt := mustGetString(cmd, "append-system-prompt")
+	appendPrompt, err := resolveAppendPrompt(
+		mustGetString(cmd, "append-system-prompt"),
+		mustGetString(cmd, "append-system-prompt-file"))
+	if err != nil {
+		return err
+	}
 	proxyURL := mustGetString(cmd, "proxy-url")
 	passthrough, _ := cmd.Flags().GetBool("passthrough")
 	autoCompact, _ := cmd.Flags().GetInt("auto-compact-window")
@@ -434,6 +441,20 @@ func resolveDarajaConnectFlags(connect, connectSocket string) (string, string, e
 func mustGetString(cmd *cobra.Command, name string) string {
 	s, _ := cmd.Flags().GetString(name)
 	return s
+}
+
+// resolveAppendPrompt returns the system-prompt appendix from whichever of
+// the inline flag or the file flag was given. The two are mutually
+// exclusive at the flag layer; both empty yields "".
+func resolveAppendPrompt(inline, file string) (string, error) {
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("daraja serve: read --append-system-prompt-file %s: %w", file, err)
+		}
+		return string(b), nil
+	}
+	return inline, nil
 }
 
 // newDarajaLaunchCmd builds `rafiki daraja launch`. It resolves an executor,

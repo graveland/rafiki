@@ -1550,10 +1550,15 @@ children a **coordination prompt** (`claudeargv.CoordinationPrompt`) merged
 into the child's ONE `--append-system-prompt-file` — same preference, delivered
 where the client's own tool guidance lives. It is injected only when the child
 carries the MCP surface (the `--mcp-config=<path>` injection above; on the
-daraja path, iff `ProxyUrl` is set), it shares the one file with any caller
-text (the flag is last-wins; two elements would drop one text), and the file is
-staged on whichever machine runs the child. Interactive `rafiki claude`
-sessions get neither the prompt nor the gate (a human drives those).
+daraja path, iff `ProxyUrl` is set), and it shares the one file with any caller
+text (the flag is last-wins; two elements would drop one text). The
+system-prompt appendix and the MCP config ride staged files on every claude
+launch path, including the executor's `rafiki executor daraja serve` host
+process (`pkg/executor/admin.go` stages the appendix and passes
+`--append-system-prompt-file <path>`, and `cmd/rafiki/cmd_daraja.go` reads it
+back into the child spec; the host restages the same content-addressed file for
+the claude grandchild). Interactive `rafiki claude` sessions get neither the
+prompt nor the gate (a human drives those).
 
 **The task ledger.** The `task_*` tools scope by conversation id, and that
 column is a UUID, so a per-user ledger cannot be a synthetic string. Each user

@@ -1294,8 +1294,13 @@ expands at connect time — never in argv, which is world-readable via `ps`).
 The config JSON is staged to a file, not inlined, for the same reason.
 Daemon-spawned `--kind claude` children also get a short coordination prompt
 staged to a `--append-system-prompt-file`, steering them toward `agent_spawn`
-over the built-in `Task` tool. Both files are staged on whichever machine runs
-the child. Any other Anthropic-protocol client gets the same routing via
+over the built-in `Task` tool. The system-prompt appendix and the MCP config
+ride staged files on every claude launch path, including the executor's
+`rafiki executor daraja serve` host process (`pkg/executor/admin.go` stages the
+appendix and passes `--append-system-prompt-file <path>`, and
+`cmd/rafiki/cmd_daraja.go` reads it back into the child spec; the host restages
+the same content-addressed file for the claude grandchild). Any other
+Anthropic-protocol client gets the same routing via
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
 ### Billing your own subscription

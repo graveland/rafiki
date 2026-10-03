@@ -4,6 +4,8 @@ package executor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -521,14 +523,19 @@ func TestLaunchPassesProxyFieldsThroughArgvAndKeepsTokenOutOfIt(t *testing.T) {
 }
 
 // TestLaunchCarriesAppendSystemPromptAndExtraArgs pins the executor launch
-// path's two remaining argv-shaped fields: the appended system prompt as its
-// own --append-system-prompt pair, and the operator's ExtraArgs verbatim after
-// the "--" separator pflag treats as end-of-flags — the separator is what lets
-// a flag-shaped extra survive into the child's argv instead of being parsed as
-// a SERVE flag (mangling a mapped flag or dying on an unknown one). A spec
-// carrying neither must build neither.
+// path's two argv-shaped fields: the appended system prompt must ride a
+// STAGED FILE (its text never in argv — ps on the executor machine is
+// world-readable) as a --append-system-prompt-file <path> pair, and the
+// operator's ExtraArgs must ride verbatim after the "--" separator pflag
+// treats as end-of-flags — the separator is what lets a flag-shaped extra
+// survive into the child's argv instead of being parsed as a SERVE flag
+// (mangling a mapped flag or dying on an unknown one). A spec carrying
+// neither must build neither.
 func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 	c := assert.NewCollecting(t)
+	// promptfile stages under paths.StateDir()/prompts; isolate it so this test
+	// never writes into the developer's real ~/.local/state/rafiki.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	a := NewAdminServer(AdminOptions{
 		SelfBinary:  buildSelfStub(t),
 		ChildBinary: "/usr/bin/true",
@@ -555,14 +562,26 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
 	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
 	cmdline := string(out)
-	for _, want := range []string{
-		"--append-system-prompt be terse",
-		// The separator itself: extras must ride as POSITIONAL args after
-		// "--", not be parsed as serve flags.
-		" -- --foo bar",
-	} {
-		c.StrContains(cmdline, want, "cmdline")
-	}
+	fields := strings.Fields(cmdline)
+
+	// The appendix text must not appear on the command line at all, and the
+	// --append-system-prompt-file pair must name a file holding exactly it.
+	i := slices.Index(fields, "--append-system-prompt-file")
+	c.Require().True(i >= 0, "--append-system-prompt-file missing; cmdline:\n%s", cmdline)
+	c.Require().True(i+1 < len(fields), "--append-system-prompt-file has no path; cmdline:\n%s", cmdline)
+	staged := fields[i+1]
+	content, err := os.ReadFile(staged)
+	c.Require().NoError(err, "read staged appendix %s", staged)
+	c.Eq("be terse", string(content), "staged appendix content")
+	c.NotStrContains(cmdline, "be terse", "the appendix text must never reach argv")
+	// Element-wise: --append-system-prompt is a PREFIX of
+	// --append-system-prompt-file, so a substring check would misfire — assert
+	// no argv element IS the inline flag.
+	c.False(slices.Contains(fields, "--append-system-prompt"), "inline --append-system-prompt must not appear; cmdline:\n%s", cmdline)
+
+	// The separator: extras must ride as POSITIONAL args after "--", not be
+	// parsed as serve flags.
+	c.StrContains(cmdline, " -- --foo bar", "cmdline")
 
 	// The empty case: neither field may appear when the spec does not set it.
 	resp, err = a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
@@ -578,10 +597,48 @@ func TestLaunchCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 	pid = int(resp.Msg.GetPid())
 	out, err = exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
 	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
-	cmdline = string(out)
-	for _, unwanted := range []string{"--append-system-prompt", " -- "} {
-		c.NotStrContains(cmdline, unwanted, "empty spec: cmdline")
+	fields = strings.Fields(string(out))
+	for _, unwanted := range []string{"--append-system-prompt", "--append-system-prompt-file", "--"} {
+		c.False(slices.Contains(fields, unwanted), "empty spec: %q appeared; cmdline:\n%s", unwanted, out)
 	}
+}
+
+// TestLaunchStagesTheSameFileTheHostWillRestage pins the two hops agreeing on
+// ONE file: the executor stages the appendix with promptfile.Write, whose name
+// is the sha256 of the text, and daraja's host restages the same bytes via
+// daraja.ChildSpec.StagedArgv under that same name — so the grandchild's argv
+// carries a path that already exists rather than a second copy.
+func TestLaunchStagesTheSameFileTheHostWillRestage(t *testing.T) {
+	c := assert.NewCollecting(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	a := NewAdminServer(AdminOptions{
+		SelfBinary:  buildSelfStub(t),
+		ChildBinary: "/usr/bin/true",
+		LaunchKinds: []string{"claude"},
+		SocketDir:   t.TempDir(),
+	})
+	defer a.Close()
+
+	const appendix = "the coordination appendix the host will restage"
+	resp, err := a.Launch(context.Background(), connect.NewRequest(&adminpb.LaunchRequest{
+		ChildId:  "c-restage",
+		Cwd:      t.TempDir(),
+		DialAddr: "127.0.0.1:9999",
+		Spec: &darajapb.ChildSpec{
+			Kind:   darajapb.Kind_KIND_CLAUDE,
+			Claude: &darajapb.ClaudeParams{AppendSystemPrompt: appendix},
+		},
+	}))
+	c.Require().NoError(err, "Launch")
+
+	pid := int(resp.Msg.GetPid())
+	out, err := exec.Command("ps", "-o", "command=", "-p", fmt.Sprint(pid)).CombinedOutput()
+	c.Require().NoError(err, "ps -p %d: %v (output: %s)", pid, err, out)
+	fields := strings.Fields(string(out))
+	i := slices.Index(fields, "--append-system-prompt-file")
+	c.Require().True(i >= 0 && i+1 < len(fields), "--append-system-prompt-file missing; cmdline:\n%s", out)
+	sum := sha256.Sum256([]byte(appendix))
+	c.Eq(hex.EncodeToString(sum[:])+".md", filepath.Base(fields[i+1]), "staged file basename")
 }
 
 // buildEnvDumpStub is buildSelfStub with one difference: the stub records its
