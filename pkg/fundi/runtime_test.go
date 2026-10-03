@@ -2,6 +2,7 @@ package fundi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,8 +13,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
+	"go.graveland.dev/rafiki/pkg/llm"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
+	"go.graveland.dev/rafiki/pkg/recall"
 	"go.graveland.dev/rafiki/pkg/skills"
 
 	"github.com/multigres/testkit/assert"
@@ -616,4 +619,70 @@ func TestBuildRuntimeLeavesProcessEnvUntouched(t *testing.T) {
 			t.Errorf("process environ changed at %d: %q -> %q", i, before[i], after[i])
 		}
 	}
+}
+
+// fakeRecallBinding is a do-nothing tools.RecallBinding. BuildRuntime only
+// needs a non-nil binding to register the recall and memory tools; this test
+// never calls them.
+type fakeRecallBinding struct{}
+
+func (fakeRecallBinding) Recall(context.Context, tools.RecallQuery) (string, error) {
+	return "", nil
+}
+
+func (fakeRecallBinding) Context(context.Context, string, int, int, int) (string, error) {
+	return "", nil
+}
+
+func (fakeRecallBinding) MemoryPut(context.Context, string, string, string, json.RawMessage) (recall.Memory, error) {
+	return recall.Memory{}, nil
+}
+
+func (fakeRecallBinding) MemoryGet(context.Context, string, string) (recall.Memory, error) {
+	return recall.Memory{}, nil
+}
+
+func (fakeRecallBinding) MemoryTree(context.Context, string, int) (string, error) {
+	return "", nil
+}
+
+func (fakeRecallBinding) MemoryDelete(context.Context, string, string) error { return nil }
+
+// TestRecallSectionFromRuntimeOptions pins the RuntimeOptions -> Config ->
+// SysPromptConfig hop end to end: a non-nil Recall binding puts the recall
+// section in the request the model actually receives, and a nil one leaves it
+// out. The assembled prompt has no direct accessor, so this reads it off the
+// request captured by a sender injected for the child's provider.
+func TestRecallSectionFromRuntimeOptions(t *testing.T) {
+	c := assert.NewAborting(t)
+	silenceSlog(t)
+
+	systemText := func(binding tools.RecallBinding) string {
+		sender := newCapturingSender(t, sampleEndTurn)
+		opts := fakeRuntimeOptions(t, t.TempDir())
+		opts.FakeTurns = ""
+		opts.Recall = binding
+		opts.ProviderSenders = map[string]llm.Sender{"anthropic": sender}
+
+		fe := NewFrontend(strings.NewReader(""), io.Discard, nil)
+		eng, shutdown, err := BuildRuntime(context.Background(), fe, opts)
+		c.Require().NoError(err, "BuildRuntime")
+		defer shutdown()
+
+		eng.HandlePrompt("hi")
+		eng.Wait()
+		c.Require().Len(sender.captured, 1, "expected exactly one API request")
+
+		var sb strings.Builder
+		for _, block := range sender.captured[0].System {
+			sb.WriteString(block.Text)
+		}
+		return sb.String()
+	}
+
+	withRecall := systemText(fakeRecallBinding{})
+	withoutRecall := systemText(nil)
+
+	c.StrContains(withRecall, "## Recall", "a non-nil Recall binding must produce the recall section; got")
+	c.NotStrContains(withoutRecall, "## Recall", "a nil Recall binding must not produce the recall section; got")
 }

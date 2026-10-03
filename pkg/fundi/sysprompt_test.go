@@ -109,3 +109,38 @@ func TestDefaultBasePromptIsUnchanged(t *testing.T) {
 		strings.Contains(defaultBasePrompt, "workspace") ||
 		strings.Contains(defaultBasePrompt, "container"), "the executor grant leaked into defaultBasePrompt, which is paid on every request by every agent")
 }
+
+// The recall nudge is emitted only for a child that actually has the recall
+// and memory tools: a child without them must not pay for the text on every
+// request.
+func TestRecallSectionOnlyWhenEnabled(t *testing.T) {
+	on := BuildSystemPrompt(SysPromptConfig{Base: "base.", Recall: true, Cwd: "/w", ModelID: "m"})
+	off := BuildSystemPrompt(SysPromptConfig{Base: "base.", Cwd: "/w", ModelID: "m"})
+
+	c := assert.NewAborting(t)
+	c.StrContains(on, "## Recall", "recall section missing when Recall is set; got")
+	c.NotStrContains(off, "## Recall", "recall section present when Recall is unset; got")
+}
+
+// The recall section is static content, so it belongs after the append and
+// before the context files: anything that varies must come after the cacheable
+// prefix (see BuildSystemPrompt's cache-stability comment).
+func TestRecallSectionOrdering(t *testing.T) {
+	c := assert.NewAborting(t)
+	got := BuildSystemPrompt(SysPromptConfig{
+		Base:         "BASE_MARKER",
+		Append:       "APPEND_MARKER",
+		Recall:       true,
+		ContextFiles: "FILES_MARKER",
+		Cwd:          "/w",
+		ModelID:      "m",
+	})
+
+	recallIdx := strings.Index(got, "## Recall")
+	appendIdx := strings.Index(got, "APPEND_MARKER")
+	filesIdx := strings.Index(got, "FILES_MARKER")
+
+	c.Greater(-1, recallIdx, "recall section missing from %q", got)
+	c.Greater(appendIdx, recallIdx, "the recall section must come after the append; got %q", got)
+	c.Less(filesIdx, recallIdx, "the recall section must come before the context files; got %q", got)
+}

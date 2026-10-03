@@ -14,6 +14,12 @@ import (
 // (pi's TUI or another agent), so verbosity has a cost.
 const defaultBasePrompt = `You are fundi, a coding agent working directly against a real project checkout via file and shell tools. Make the requested change, verify it, and stop - don't narrate every intermediate step. Prefer the provided tools over asking the user to do something manually. Your output streams to a controller, not a human terminal: be concise.`
 
+// recallSection nudges a child that actually has the recall and memory tools
+// to use them. defaultBasePrompt is paid on every request by every agent, so
+// this lives in its own section, emitted only when SysPromptConfig.Recall is
+// true.
+const recallSection = "## Recall\n\nBefore non-trivial work, search past conversations and saved memories with recall, expand a promising hit with recall_context, and save durable facts with memory_put."
+
 // WorkspaceInfo describes where a child actually landed. Every field is
 // resolved by the daemon at spawn; none of it is asked of the model.
 type WorkspaceInfo struct {
@@ -32,7 +38,11 @@ type SysPromptConfig struct {
 	Base, Override, Append string
 	ContextFiles           string
 	SkillsInventory        string
-	Cwd, ModelID           string
+	// Recall, when true, emits the recall section: the child has the recall
+	// and memory tools. It is false for a child that does not, which must not
+	// pay for the nudge.
+	Recall       bool
+	Cwd, ModelID string
 	// Workspace, when non-nil and Isolation != "none", appends a per-child
 	// machine block to the environment section. It varies BETWEEN children, so
 	// it belongs at the end — after everything cacheable across children.
@@ -45,7 +55,7 @@ type SysPromptConfig struct {
 // files, skills) MUST precede anything that changes turn to turn, and the
 // per-turn environment block (which includes today's date) goes last:
 //
-//	base (Override if set, else Base) -> Append -> ContextFiles ->
+//	base (Override if set, else Base) -> Append -> Recall -> ContextFiles ->
 //	SkillsInventory -> environment block
 //
 // Empty optional sections are omitted entirely - no stray blank sections or
@@ -56,8 +66,14 @@ func BuildSystemPrompt(c SysPromptConfig) string {
 		base = c.Override
 	}
 
+	optional := []string{base, c.Append}
+	if c.Recall {
+		optional = append(optional, recallSection)
+	}
+	optional = append(optional, c.ContextFiles, c.SkillsInventory)
+
 	var sections []string
-	for _, s := range []string{base, c.Append, c.ContextFiles, c.SkillsInventory} {
+	for _, s := range optional {
 		if strings.TrimSpace(s) != "" {
 			sections = append(sections, s)
 		}

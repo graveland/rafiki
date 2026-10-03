@@ -80,6 +80,9 @@ type Config struct {
 	AppendSystemPrompt   string
 	ContextFiles         string
 	SkillsInventory      string
+	// Recall emits the recall section: the child has the recall and memory
+	// tools, so nudge it to use them.
+	Recall bool
 	// Cwd is reported in the system prompt's environment block.
 	Cwd string
 
@@ -295,6 +298,7 @@ func (c Config) BuildEngine(ctx context.Context, fe *Frontend) (*Engine, func(),
 			Append:          c.AppendSystemPrompt,
 			ContextFiles:    c.ContextFiles,
 			SkillsInventory: c.SkillsInventory,
+			Recall:          c.Recall,
 			Cwd:             c.Cwd,
 			ModelID:         c.Model,
 			Workspace:       c.Workspace,
