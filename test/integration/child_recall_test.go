@@ -20,6 +20,7 @@ package integration_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,12 @@ func createRecallUser(t *testing.T, pool *pgxpool.Pool, username string, admin b
 // ownerID, as the indexer would after sealing a segment. It is the cheap way
 // to give another user a row that the CONVERSATION sources (unlike memories)
 // would leak if a caller's scope were daemon-wide.
+//
+// It removes the row (and the bare conversation it inserted) on cleanup: the
+// whole suite shares one database that is not reset between runs, so a window
+// left behind is matched again by every later run of the same query and makes
+// a global hit count grow run over run. The window's FK to conversation does
+// not cascade, so the window goes first.
 func seedRecallWindow(t *testing.T, pool *pgxpool.Pool, ownerID, text string) {
 	t.Helper()
 	convID := insertTestConversation(t, pool)
@@ -96,6 +103,18 @@ func seedRecallWindow(t *testing.T, pool *pgxpool.Pool, ownerID, text string) {
 		VALUES ($1::uuid, $2::uuid, 1, 0, 1, $3, true, $4)`,
 		convID, ownerID, text, recall.ExtractorVersion)
 	assert.NewAborting(t).NoError(err, "insert conversation_window for %s", ownerID)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM conversations.conversation_window WHERE conversation_id = $1::uuid`, convID); err != nil {
+			t.Logf("delete conversation_window for %s: %v", convID, err)
+		}
+		if _, err := pool.Exec(ctx,
+			`DELETE FROM conversations.conversation WHERE id = $1::uuid`, convID); err != nil {
+			t.Logf("delete conversation %s: %v", convID, err)
+		}
+	})
 }
 
 // ─── the tests ───────────────────────────────────────────────────────────────
@@ -189,7 +208,12 @@ func TestChildRecallOfAdminOwnerIsNotDaemonWide(t *testing.T) {
 	defer cancel()
 	client := d.connectClient()
 
-	const q = "pineapple"
+	// A per-run query term. The seeded window is a raw insert the shared test
+	// database does not reset between runs, so a fixed term would accumulate
+	// matching rows and make the daemon-wide positive control below creep past
+	// one hit on a second run. nextDaemonID's hyphens are stripped so the term
+	// stays a single BM25 token in both the indexed text and the query.
+	q := "zqwinadmin" + strings.ReplaceAll(nextDaemonID(), "-", "")
 	seedRecallWindow(t, pool, otherID, q+" the other user's captured conversation window")
 
 	// Positive control: the admin's OWN credential is daemon-wide, so IT sees
