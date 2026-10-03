@@ -32,8 +32,17 @@ type fakeSpawner struct {
 	sendResult   SendResult
 	killErr      error
 	setBudgetErr error
-	viewErr      error
-	listErr      error
+	routed       []struct {
+		ChildID string
+		Spec    string
+	}
+	setRoutingErr error
+	// routingResult is what SetRouting reports as the canonical spec; empty
+	// means "echo the delta back", which is what a real spawner does when the
+	// delta simply replaces an unset spec.
+	routingResult string
+	viewErr       error
+	listErr       error
 }
 
 func (f *fakeSpawner) List(context.Context) ([]AgentInfo, error) {
@@ -92,6 +101,20 @@ func (f *fakeSpawner) SetBudget(_ context.Context, childID string, maxCost float
 	return nil
 }
 
+func (f *fakeSpawner) SetRouting(_ context.Context, childID, spec string) (string, error) {
+	if f.setRoutingErr != nil {
+		return "", f.setRoutingErr
+	}
+	f.routed = append(f.routed, struct {
+		ChildID string
+		Spec    string
+	}{childID, spec})
+	if f.routingResult != "" {
+		return f.routingResult, nil
+	}
+	return spec, nil
+}
+
 func newAgentTools(t *testing.T, sp AgentSpawner) (*Registry, context.Context) {
 	t.Helper()
 	reg := DefaultBlueprint.MaterializeAll(ToolOpts{
@@ -103,12 +126,12 @@ func newAgentTools(t *testing.T, sp AgentSpawner) (*Registry, context.Context) {
 	return reg, ctx
 }
 
-// A nil spawner must remove all six tools, not register ones that can only
-// answer "not configured". Same rule SkillBlueprint follows for zero skills.
+// A nil spawner must remove all the agent tools, not register ones that can
+// only answer "not configured". Same rule SkillBlueprint follows for zero skills.
 func TestAgentToolsDeclineWithoutSpawner(t *testing.T) {
 	reg := DefaultBlueprint.MaterializeAll(ToolOpts{Cwd: t.TempDir()})
 	for _, name := range []string{
-		"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill", "agent_models", "agent_set_budget",
+		"agent_spawn", "agent_list", "agent_view", "agent_send", "agent_kill", "agent_models", "agent_set_budget", "agent_route",
 	} {
 		if _, err := reg.Execute(context.Background(), name, json.RawMessage(`{}`)); err == nil {
 			t.Errorf("%s must not be registered without a spawner", name)

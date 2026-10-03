@@ -199,3 +199,17 @@ func (s *userSpawner) SetBudget(ctx context.Context, childID string, maxCost flo
 	}
 	return s.c.SetChildBudgetAsOperator(ctx, childID, maxCost)
 }
+
+// SetRouting steers any child's routing with OPERATOR authority: a user-bound
+// spawner answers to an authenticated user (or the socket's nil identity),
+// the same identity that reaches Controller.SetChildRoutingAsOperator through
+// the Connect SetRouting RPC. Unlike SetBudget there is no top-level
+// restriction — a steering spec is a global serving property, not the
+// spawning agent's, so an operator may re-route a child at any depth. The
+// empty-id guard matches every other steering verb.
+func (s *userSpawner) SetRouting(ctx context.Context, childID, spec string) (string, error) {
+	if childID == "" {
+		return "", errors.New("agent id is required")
+	}
+	return s.c.SetChildRoutingAsOperator(ctx, childID, spec)
+}

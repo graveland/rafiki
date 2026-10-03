@@ -36,6 +36,9 @@ func (s *recordingSpawner) Send(context.Context, tools.SendSpec) (tools.SendResu
 }
 func (s *recordingSpawner) Kill(context.Context, string) error               { return nil }
 func (s *recordingSpawner) SetBudget(context.Context, string, float64) error { return nil }
+func (s *recordingSpawner) SetRouting(context.Context, string, string) (string, error) {
+	return "", nil
+}
 
 // The gate mirrors pymodule_run's: nil PyModuleStarter declines, and the
 // materialized tool is bound to PyModuleStarter — never to Agents — so the

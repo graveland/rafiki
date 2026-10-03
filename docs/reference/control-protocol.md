@@ -1440,7 +1440,8 @@ onto another caller's bound tools.
   refactor away from being a tool argument the model can be prompt-injected
   into naming, the same rule the fundi-side binding enforces. There is **no
   per-user scoping of anything**: `agent_list` and the steering verbs
-  (`agent_view`, `agent_send`, `agent_kill`) see **every child on the daemon**,
+  (`agent_view`, `agent_send`, `agent_kill`, `agent_route`) see **every child
+  on the daemon**,
   not only the caller's, because rafiki has no per-user ownership filter and
   this surface does not invent one. That is the daemon's current
   single-operator posture, stated as what it is — not a guard.
@@ -1459,7 +1460,9 @@ onto another caller's bound tools.
   the child's own SUBTREE — its conversation plus its descendants' — through
   `insights.ScopeSubtree`, never its owner's corpus; the recall and memory
   tools are bound to the child's OWNER's non-admin identity (`recallOwner`,
-  `cmd/rafikid/recall.go`); and preset
+  `cmd/rafikid/recall.go`); `agent_route` steers only the child's own subtree
+  and only `prefer`/`sort`/`quant` — `only=` (which bypasses provider bans) is
+  refused to a child by `Controller.SetChildRouting`; and preset
   authoring refuses at call time for a PARENTED child (`childPresetBinding`,
   chosen by `presetStoreForChild`) — a top-level child is the operator's own
   session and authors under its owner, stamped as the writer, while an
@@ -1477,9 +1480,9 @@ the budget of the top-level agent that owns the subtree. A child caller's own
 spawns are already parented, so the same refusal reaches it from the other
 side.
 
-**Tools.** Thirty-one, materialized per caller: twenty-eight come from the same
+**Tools.** Thirty-two, materialized per caller: twenty-nine come from the same
 registered blueprints the fundi registry serves (`DefaultBlueprint` — a fundi
-child gets the same twenty-eight, subject to the same per-caller declines;
+child gets the same twenty-nine, subject to the same per-caller declines;
 `pymodule_start` is one of them, which a fundi child with a spawner
 materializes from its own registry), and three (`pymodule_list`,
 `pymodule_run`, and the face's own `pymodule_start` wrapper over that registry
@@ -1506,6 +1509,7 @@ transport error, and never a successful result carrying the text.
 | `agent_send` | Deliver a prompt to a running agent |
 | `agent_kill` | Shut an agent down and wait for the exit to be recorded |
 | `agent_set_budget` | Change a TOP-LEVEL agent's USD budget (the exception above) |
+| `agent_route` | Change where a child's model requests are served, on its next request: a bracket-free spec delta (`prefer=`, `sort=`, `quant=`) merged over the child's stored routing. A child caller steers only its own subtree and may not set `only=`; a user caller is an operator and may route any child at any depth |
 | `agent_models` | Query the daemon's model catalog with filter/sort; a bare call returns a summary, rows come from a narrowed query |
 | `task_add` | Add a task (imperative `content`, present-continuous `active_form`; optional `parent` handle to nest); returns the full list with handles |
 | `task_update` | Change task statuses (pending, in_progress, blocked, completed, failed), touching only the named handles |

@@ -140,6 +140,16 @@ type AgentSpawner interface {
 	// only top-level children. In both cases the answer is read from stored
 	// lineage, never trusted from the argument.
 	SetBudget(ctx context.Context, childID string, maxCost float64) error
+	// SetRouting merges a bracket-free routing-spec delta over childID's
+	// stored routing and returns the new canonical spec. Authority is a
+	// property of the binding, exactly as SetBudget's is: the child-bound
+	// implementation steers its own subtree with child authority (subtree
+	// membership and the child-provenance only= refusal are enforced by the
+	// daemon method it calls, never re-implemented here), and the user-bound
+	// implementation steers with operator authority. As with every method on
+	// this interface the caller identity is the binding's own, not an
+	// argument.
+	SetRouting(ctx context.Context, childID, spec string) (string, error)
 }
 
 const (

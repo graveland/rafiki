@@ -14,6 +14,7 @@ func init() {
 	DefaultBlueprint.Register(&AgentSendBlueprint{})
 	DefaultBlueprint.Register(&AgentKillBlueprint{})
 	DefaultBlueprint.Register(&AgentSetBudgetBlueprint{})
+	DefaultBlueprint.Register(&AgentRouteBlueprint{})
 }
 
 const (

@@ -398,6 +398,7 @@ var mcpBlueprints = []tools.Tool{
 	&tools.AgentSendBlueprint{},
 	&tools.AgentKillBlueprint{},
 	&tools.AgentSetBudgetBlueprint{},
+	&tools.AgentRouteBlueprint{},
 	&tools.AgentModelsBlueprint{},
 	&tools.AgentReportBlueprint{},
 	&tools.AgentResultBlueprint{},

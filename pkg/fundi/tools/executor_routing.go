@@ -85,6 +85,7 @@ var tierByTool = map[string]Tier{
 	"agent_kill":          TierDaemon,
 	"agent_models":        TierDaemon,
 	"agent_set_budget":    TierDaemon,
+	"agent_route":         TierDaemon,
 	"agent_report":        TierDaemon,
 	"agent_result":        TierDaemon,
 	"quota_status":        TierDaemon,

@@ -50,6 +50,7 @@ var mcpToolNames = []string{
 	"agent_send",
 	"agent_kill",
 	"agent_set_budget",
+	"agent_route",
 	"agent_models",
 	"task_add",
 	"task_update",

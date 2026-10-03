@@ -342,6 +342,21 @@ func (s *controllerSpawner) SetBudget(ctx context.Context, childID string, maxCo
 	return s.c.SetChildBudget(ctx, s.selfID, childID, maxCost)
 }
 
+// SetRouting steers childID's routing with CHILD authority: the caller is the
+// spawner's own selfID, and Controller.SetChildRouting — the single authority
+// point for steering a child's routing — enforces subtree membership and the
+// child-provenance only= refusal itself. This method deliberately duplicates
+// neither check, and never reaches SetChildRoutingAsOperator: that is a
+// control-plane verb for an operator identity, not this agent-facing tool. It
+// applies the same empty-id guard every other steering verb does, for the same
+// error-message quality (see errNotDescendant's sibling messages).
+func (s *controllerSpawner) SetRouting(ctx context.Context, childID, spec string) (string, error) {
+	if childID == "" {
+		return "", errors.New("agent id is required")
+	}
+	return s.c.SetChildRouting(ctx, s.selfID, childID, spec)
+}
+
 // spawnKind resolves a spec's child kind: the caller's choice, else the fundi
 // default. The default applies ONLY when no preset is named — with a preset
 // an empty kind stays empty so the controller's applyPreset takes the kind
