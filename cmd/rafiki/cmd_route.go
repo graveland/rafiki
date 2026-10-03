@@ -41,8 +41,9 @@ on the child's next OpenRouter request — no restart, no re-resolve of the
 spawn or preset policy. The daemon returns the canonical spec after the merge
 and that is what this verb prints.
 
-CHILD is the child to steer; the daemon looks it up by id. SPEC is a
-bracket-free routing spec — the same grammar a spawn, a preset or a model
+CHILD is a child id or name, resolved like every other child-target verb (the
+completion offers both). SPEC is a bracket-free routing spec — the same grammar
+a spawn, a preset or a model
 string's "[...]" bracket uses, without the brackets — comma-separated and
 order-free:
 
@@ -69,8 +70,8 @@ operator owns from a child credential is refused with permission_denied.
 Example:
   rafiki route set c_01HXABC 'prefer=fireworks|deepinfra'
       Try Fireworks first, then DeepInfra, and fall back to the rest.
-  rafiki route set c_01HXABC 'sort=throughput,nodata'
-      Fastest provider that will not retain the prompt.
+  rafiki route set web-researcher 'sort=throughput,nodata'
+      By name: fastest provider that will not retain the prompt.
   rafiki route set c_01HXABC 'only=fireworks'
       Pin the child to Fireworks alone (operator authority). Quote the
       spec: "|" is a shell pipe.
@@ -96,8 +97,20 @@ func runRouteSet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := ep.control().SetRouting(cmdCtx(cmd),
-		connect.NewRequest(&rafikiv1.SetRoutingRequest{ChildId: args[0], Delta: args[1]}))
+	ctrl := ep.control()
+	ctx := cmdCtx(cmd)
+
+	// Resolve the target exactly as every other child-target verb does: the
+	// argument names a child by id or by name, and the completion this verb
+	// shares with kill/close offers both, so the raw argument cannot go on the
+	// wire — SetRouting looks its target up by id alone.
+	childID, err := resolveTargetConnect(ctx, ctrl, mustProfile(cmd).Name, args[0], ep.describe)
+	if err != nil {
+		return err
+	}
+
+	resp, err := ctrl.SetRouting(ctx,
+		connect.NewRequest(&rafikiv1.SetRoutingRequest{ChildId: childID, Delta: args[1]}))
 	if err != nil {
 		return connectVerbErr(err, ep.describe)
 	}

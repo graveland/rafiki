@@ -28,10 +28,22 @@ type routeSetStubControl struct {
 	rafikiv1connect.UnimplementedControlHandler
 	mu       sync.Mutex
 	requests []*connect.Request[rafikiv1.SetRoutingRequest]
+	// children are what ListChildren returns, for resolving a name target.
+	children []*rafikiv1.ChildSummary
 	// routing is the canonical stored spec the stub reports back after the
 	// merge. Empty echoes the delta, which is the trivial fixed point.
 	routing string
 	setErr  error
+}
+
+// ListChildren backs resolveTargetConnect's name lookup: a name target is
+// resolved to its id through this list before SetRouting is ever called.
+func (s *routeSetStubControl) ListChildren(
+	_ context.Context, _ *connect.Request[rafikiv1.ListChildrenRequest],
+) (*connect.Response[rafikiv1.ListChildrenResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return connect.NewResponse(&rafikiv1.ListChildrenResponse{Children: s.children}), nil
 }
 
 func (s *routeSetStubControl) SetRouting(
@@ -83,8 +95,9 @@ func serveRouteSetScratch(t *testing.T, stub *routeSetStubControl) {
 }
 
 // TestRouteSetSendsChildAndDelta pins that the verb forwards its two
-// positionals verbatim — the child as child_id, the spec as delta — and
-// confirms with the child and the returned canonical spec.
+// positionals — the child as child_id, the spec as delta — and confirms with
+// the child and the returned canonical spec. A c_-prefixed child skips the
+// resolve round trip and reaches the daemon as-is.
 func TestRouteSetSendsChildAndDelta(t *testing.T) {
 	c := assert.NewAborting(t)
 	stub := &routeSetStubControl{}
@@ -98,6 +111,44 @@ func TestRouteSetSendsChildAndDelta(t *testing.T) {
 	c.Eq("c_01HXABC", req.Msg.GetChildId(), "child_id")
 	c.Eq("prefer=fireworks|deepinfra", req.Msg.GetDelta(), "delta")
 	c.StrContains(out.String(), "c_01HXABC  routing: prefer=fireworks|deepinfra", "set output:\n%s", out.String())
+}
+
+// TestRouteSetResolvesNameTarget pins the ruling on target handling: a child
+// NAME as the first positional is resolved to its id through ListChildren
+// (exactly as close/get/status do), and the SetRouting request carries the id,
+// not the name. The shared completion offers names, so the name must reach the
+// daemon as an id or TAB-then-run would 404.
+func TestRouteSetResolvesNameTarget(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &routeSetStubControl{children: []*rafikiv1.ChildSummary{
+		{ChildId: "c_01HXABC", Name: "web-researcher"},
+	}}
+	serveRouteSetScratch(t, stub)
+
+	root, out := userTestRoot(t, newRouteSetCmd(), "set", "web-researcher", "prefer=fireworks")
+	c.NoError(root.Execute(), "route set by name failed: %v\n%s", out.String())
+
+	req := stub.lastSet()
+	c.NotNil(req, "the stub never saw a SetRouting request")
+	c.Eq("c_01HXABC", req.Msg.GetChildId(), "the NAME reached the daemon instead of the resolved id")
+	c.Eq("prefer=fireworks", req.Msg.GetDelta(), "delta")
+	c.StrContains(out.String(), "c_01HXABC  routing: prefer=fireworks", "set output:\n%s", out.String())
+}
+
+// TestRouteSetUnresolvableTargetErrors pins that an argument matching no child
+// fails before any RPC, with the resolver's own message: the verb never puts a
+// raw name on the wire hoping the daemon will guess.
+func TestRouteSetUnresolvableTargetErrors(t *testing.T) {
+	c := assert.NewAborting(t)
+	stub := &routeSetStubControl{}
+	serveRouteSetScratch(t, stub)
+
+	root, out := userTestRoot(t, newRouteSetCmd(), "set", "ghost", "prefer=fireworks")
+	err := root.Execute()
+	c.Error(err, "route set accepted an unresolvable target")
+	c.StrContains(err.Error(), `no child matches "ghost"`, "error text: %v", err)
+	c.Nil(stub.lastSet(), "the CLI sent a SetRouting request for an unresolvable target")
+	c.NotStrContains(out.String(), "routing:", "a success line printed for an unresolvable target:\n%s", out.String())
 }
 
 // TestRouteSetRendersCanonicalSpec pins that the confirmation prints the
