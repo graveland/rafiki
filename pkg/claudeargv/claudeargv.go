@@ -13,6 +13,7 @@ package claudeargv
 import (
 	"strings"
 
+	"go.graveland.dev/rafiki/pkg/promptfile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
@@ -46,7 +47,10 @@ const CoordinationPrompt = "You are running under rafiki, which exposes its agen
 	"stoppable mid-flight, and it outlives this conversation. Spawn workers by preset " +
 	"(agent_spawn's preset, e.g. default:implementer; see preset_list) rather than choosing " +
 	"models yourself. Track delegated work with rafiki's task_* ledger and pass the " +
-	"handle to agent_spawn."
+	"handle to agent_spawn." +
+	" If recall tools (recall, recall_context, memory_get/memory_put) are listed, search your " +
+	"owner's past conversations and saved memories with recall before non-trivial work, expand " +
+	"a promising hit with recall_context, and save durable facts with memory_put."
 
 // WithCoordinationPrompt prepends CoordinationPrompt to s when the child
 // carries the MCP agent-control surface (mcpAgentControl), else returns s
@@ -88,6 +92,10 @@ type Params struct {
 	ResumeSession      string
 	PermissionMode     string
 	AppendSystemPrompt string
+	// AppendSystemPromptFile is the path of a file holding the system-prompt
+	// appendix; it wins over AppendSystemPrompt. Stage produces it; Build emits
+	// --append-system-prompt-file so the text stays off argv, where `ps` shows it.
+	AppendSystemPromptFile string
 	// DisallowedTools is appended alongside the always-disallowed
 	// AskUserQuestion (see Build's doc comment) — never in place of it.
 	DisallowedTools []string
@@ -105,6 +113,9 @@ type Params struct {
 	// The = form is required: the flag is variadic, so a two-element pair risks
 	// swallowing whatever follows it.
 	MCPConfig string
+	// MCPConfigFile is the path of a file holding the MCP config JSON; it wins
+	// over MCPConfig. Stage produces it; Build emits --mcp-config=<path>.
+	MCPConfigFile string
 
 	// ModelArgs, when non-empty, REPLACES the plain --model pair Model would
 	// otherwise emit. It carries the custom-model-option --model that matches
@@ -142,13 +153,17 @@ func Build(p Params) []string {
 	} else if p.Model != "" {
 		argv = append(argv, "--model", p.Model)
 	}
-	if p.MCPConfig != "" {
+	if p.MCPConfigFile != "" {
+		argv = append(argv, "--mcp-config="+p.MCPConfigFile)
+	} else if p.MCPConfig != "" {
 		argv = append(argv, "--mcp-config="+p.MCPConfig)
 	}
 	if p.ResumeSession != "" {
 		argv = append(argv, "--resume", p.ResumeSession)
 	}
-	if p.AppendSystemPrompt != "" {
+	if p.AppendSystemPromptFile != "" {
+		argv = append(argv, "--append-system-prompt-file", p.AppendSystemPromptFile)
+	} else if p.AppendSystemPrompt != "" {
 		argv = append(argv, "--append-system-prompt", p.AppendSystemPrompt)
 	}
 	if p.Mode == ModeHeadless {
@@ -204,4 +219,32 @@ func ParamsFromSpawnRequest(req protocol.SpawnRequest, vals proxyenv.Values) Par
 		MCPConfig:          vals.MCPConfig,
 		ModelArgs:          vals.ModelArgs,
 	}
+}
+
+// Stage moves p's inline system-prompt appendix and MCP config JSON into
+// files under dir and returns params that reference them, so neither text
+// rides argv where `ps` shows it. A param with nothing inline is returned
+// unchanged. Build stays free of I/O; every exec site calls Stage right
+// before it.
+//
+// Stage runs AFTER the coordination-prompt merge (WithCoordinationPrompt, in
+// ParamsFromSpawnRequest), so the merged text is what lands in one file and a
+// respawn — which re-merges from the stored caller prompt — does not
+// double-append.
+func Stage(p Params, dir string) (Params, error) {
+	if p.AppendSystemPrompt != "" {
+		path, err := promptfile.Write(dir, ".md", p.AppendSystemPrompt)
+		if err != nil {
+			return Params{}, err
+		}
+		p.AppendSystemPromptFile, p.AppendSystemPrompt = path, ""
+	}
+	if p.MCPConfig != "" {
+		path, err := promptfile.Write(dir, ".json", p.MCPConfig)
+		if err != nil {
+			return Params{}, err
+		}
+		p.MCPConfigFile, p.MCPConfig = path, ""
+	}
+	return p, nil
 }

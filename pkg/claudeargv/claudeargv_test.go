@@ -3,6 +3,10 @@
 package claudeargv
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -206,6 +210,137 @@ func TestBuildInteractiveOmitsHeadlessFlags(t *testing.T) {
 	} {
 		assert.NewCollecting(t).NotContains(got, unwanted, "Build(interactive)")
 	}
+}
+
+// The file forms win over the inline ones: when both are set, argv must carry
+// the paths and neither text may appear anywhere, which is the whole point of
+// staging them off argv.
+func TestBuildEmitsFileFormsWhenSet(t *testing.T) {
+	c := assert.NewCollecting(t)
+	argv := Build(Params{
+		AppendSystemPrompt:     "inline appendix text",
+		AppendSystemPromptFile: "/state/prompts/abc.md",
+		MCPConfig:              `{"inline":true}`,
+		MCPConfigFile:          "/state/prompts/def.json",
+	})
+	joined := strings.Join(argv, " ")
+	c.Contains(argv, "--append-system-prompt-file", "argv")
+	c.Contains(argv, "/state/prompts/abc.md", "argv")
+	c.Contains(argv, "--mcp-config=/state/prompts/def.json", "argv")
+	c.NotContains(argv, "--append-system-prompt", "argv")
+	c.NotStrContains(joined, "inline appendix text", "argv")
+	c.NotStrContains(joined, `{"inline":true}`, "argv")
+}
+
+// Stage is the only writer: it moves both inline texts into files and clears
+// the inline fields, and Build of the result carries neither text.
+func TestStageMovesTextToFiles(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	dir := t.TempDir()
+	const appendix = "caller's appendix"
+	const mcp = `{"mcpServers":{}}`
+
+	staged, err := Stage(Params{AppendSystemPrompt: appendix, MCPConfig: mcp}, dir)
+	c.Require().NoError(err, "Stage")
+
+	c.Eq("", staged.AppendSystemPrompt, "staged AppendSystemPrompt")
+	c.Eq("", staged.MCPConfig, "staged MCPConfig")
+	c.Require().NotEq("", staged.AppendSystemPromptFile, "staged AppendSystemPromptFile")
+	c.Require().NotEq("", staged.MCPConfigFile, "staged MCPConfigFile")
+	c.Eq(shaName(appendix, ".md"), filepath.Base(staged.AppendSystemPromptFile), "appendix basename")
+	c.Eq(shaName(mcp, ".json"), filepath.Base(staged.MCPConfigFile), "mcp basename")
+	assertFileEquals(t, staged.AppendSystemPromptFile, appendix)
+	assertFileEquals(t, staged.MCPConfigFile, mcp)
+
+	joined := strings.Join(Build(staged), " ")
+	c.NotStrContains(joined, appendix, "argv")
+	c.NotStrContains(joined, mcp, "argv")
+}
+
+// A param with nothing inline is returned byte-for-byte unchanged and writes
+// no file — the zero case must not create an empty launch file.
+func TestStageLeavesEmptyParamsAlone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	dir := t.TempDir()
+	in := Params{Model: "m", ResumeSession: "r"}
+
+	got, err := Stage(in, dir)
+	c.Require().NoError(err, "Stage")
+	c.EqDeep(in, got, "Stage(empty) = %v, want", got)
+
+	entries, err := os.ReadDir(dir)
+	c.Require().NoError(err, "ReadDir")
+	c.Empty(entries, "dir after Stage with nothing inline: want empty, got")
+}
+
+// The coordination prompt and the caller's appendix must land in ONE
+// --append-system-prompt-file element carrying both texts — a second element
+// would silently drop one (the flag is last-wins). This fails if Stage runs
+// before the merge, which would stage the caller's text alone.
+func TestStageKeepsOneAppendElementAfterTheCoordinationMerge(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	_, vals := proxyenv.ClaudeEnv(nil, proxyenv.ClaudeOptions{URL: "http://localhost:8035", Token: "tok"})
+	c.Require().NotEq("", vals.MCPConfig, "fixture: ClaudeEnv produced no MCP config for a proxied session")
+
+	staged, err := Stage(ParamsFromSpawnRequest(protocol.SpawnRequest{AppendSystemPrompt: "be terse"}, vals), t.TempDir())
+	c.Require().NoError(err, "Stage")
+
+	argv := Build(staged)
+	n := 0
+	for i, a := range argv {
+		if a != "--append-system-prompt-file" {
+			continue
+		}
+		n++
+		c.Require().Less(len(argv), i+1, "argv %v: --append-system-prompt-file has no value", argv)
+		content, err := os.ReadFile(argv[i+1])
+		c.Require().NoError(err, "ReadFile")
+		for _, want := range []string{CoordinationPrompt, "be terse"} {
+			c.StrContains(string(content), want, "staged appendix file")
+		}
+	}
+	c.Eq(1, n, "argv %v: want exactly one --append-system-prompt-file element, got", argv)
+	c.NotContains(argv, "--append-system-prompt", "argv")
+}
+
+// The MCP config file holds the ${RAFIKI_MCP_TOKEN} placeholder literally —
+// Claude Code expands it at connect time, so a staged file must never carry an
+// expanded token.
+func TestStageNeverWritesTheTokenPlaceholderExpanded(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	const mcp = `{"mcpServers":{"rafiki":{"headers":{"Authorization":"Bearer ${RAFIKI_MCP_TOKEN}"}}}}`
+
+	staged, err := Stage(Params{MCPConfig: mcp}, t.TempDir())
+	c.Require().NoError(err, "Stage")
+	content, err := os.ReadFile(staged.MCPConfigFile)
+	c.Require().NoError(err, "ReadFile")
+	c.StrContains(string(content), "${RAFIKI_MCP_TOKEN}", "staged MCP file")
+}
+
+// The recall nudge is the prompt's newest clause; the tools it names must stay
+// spelled the way the MCP face exposes them.
+func TestCoordinationPromptMentionsRecall(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, want := range []string{"recall", "memory_put"} {
+		c.StrContains(CoordinationPrompt, want, "CoordinationPrompt")
+	}
+}
+
+func shaName(text, ext string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:]) + ext
+}
+
+func assertFileEquals(t *testing.T, path, want string) {
+	t.Helper()
+	c := assert.NewCollecting(t)
+	got, err := os.ReadFile(path)
+	c.Require().NoError(err, "ReadFile(%s)", path)
+	c.Eq(want, string(got), "content of %s", path)
 }
 
 func assertPair(t *testing.T, argv []string, flag, value string) {
