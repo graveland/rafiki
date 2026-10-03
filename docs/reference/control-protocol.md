@@ -825,7 +825,11 @@ spec (`delta.Merge(stored)` — the delta is the more specific level, so a key i
 names wins and every stored key it leaves out survives); the result is written
 back in canonical form and persisted with the child's record, so it survives a
 daemon restart and governs the child's next `RoutingFor` / `resolveRouting`
-answer. The grammar cannot express "clear a stored key" — `prefer=` is a parse
+answer. For an in-process fundi child that next request is live: the daemon
+wires `fundi.Config.RoutingSource` (→ `llm.WithRoutingSource`), so the child's
+`llm.Client` re-reads its stored spec on every request instead of using the
+value frozen at spawn — a request already in flight keeps the spec it started
+with. The grammar cannot express "clear a stored key" — `prefer=` is a parse
 error — so a delta only ever sets. Every provider slug the merged spec names is
 resolved through the daemon's `ProviderDirectory` before the write; an unknown
 slug is `CodeInvalidArgument` and changes nothing, while a degraded directory

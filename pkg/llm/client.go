@@ -46,6 +46,11 @@ type Client struct {
 	breakerWindow time.Duration
 	defaultModel  string
 	routingSpec   routing.Spec
+	// routingSource, when non-nil, is read once per request INSTEAD of the
+	// frozen routingSpec: it is how a live steering write reaches a child's
+	// next request rather than being stuck at its spawn-time value. See
+	// WithRoutingSource and spec().
+	routingSource func() routing.Spec
 	modelGate     *ModelGate
 
 	rawTrace rawTraceRecorder       // nil when disabled
@@ -114,6 +119,34 @@ func WithDefaultModel(m string) ClientOption {
 // default) leaves every body byte-identical to the pre-spec client.
 func WithRouting(spec routing.Spec) ClientOption {
 	return func(c *Client) { c.routingSpec = spec }
+}
+
+// WithRoutingSource installs a live routing-spec source, evaluated once per
+// request, that takes precedence over WithRouting's static spec. It is how a
+// fundi child running in-process reads its CURRENT stored spec on every send:
+// an operator steer (Controller.SetChildRouting) rewrites the stored value and
+// the child's next request sees it — the request in flight keeps the spec it
+// started with, because spec() is called exactly once per request and the
+// result threaded through the body build. A nil fn is refused: the option is a
+// no-op, leaving the client on its static spec (and the zero spec by default).
+func WithRoutingSource(fn func() routing.Spec) ClientOption {
+	return func(c *Client) {
+		if fn != nil {
+			c.routingSource = fn
+		}
+	}
+}
+
+// spec resolves the routing spec for ONE request. It is the only reader of
+// routingSpec (or routingSource) in the request path: every send calls it once
+// at the top of prepareSend and threads the result through, so a steer landing
+// mid-request cannot make one request's provider object and its error
+// decoration disagree — it applies to the next request.
+func (c *Client) spec() routing.Spec {
+	if c.routingSource != nil {
+		return c.routingSource()
+	}
+	return c.routingSpec
 }
 
 // WithRecordRequests enables raw HTTP request/response capture to the debug
@@ -324,7 +357,7 @@ type SendMeta struct {
 // parks.**
 // The returned error is a resolution failure (unknown provider, empty model);
 // callers must abort the send on it.
-func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, []string, anthropic.MessageNewParams, error) {
+func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (context.Context, trace.Span, string, []string, []string, anthropic.MessageNewParams, routing.Spec, error) {
 	requested := string(params.Model)
 	if requested == "" {
 		requested = c.defaultModel
@@ -343,7 +376,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	batched := IsBatchModel(requested)
 	p, modelID, alias, err := c.set.Resolve(strings.TrimSuffix(requested, BatchSuffix))
 	if err != nil {
-		return ctx, nil, "", nil, nil, params, err
+		return ctx, nil, "", nil, nil, params, routing.Spec{}, err
 	}
 	batched = batched || IsBatchModel(modelID)
 	// baseID is the suffix-free id every arm builds from: an alias's raw ID
@@ -358,7 +391,7 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// sendStreamingAttempt and everything downstream rely on).
 	if batched {
 		if p.Kind != providers.KindAnthropicOpenRouter {
-			return ctx, nil, "", nil, nil, params, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
+			return ctx, nil, "", nil, nil, params, routing.Spec{}, fmt.Errorf("llm: model %q: %s models are served only by an anthropic-openrouter provider", requested, BatchSuffix)
 		}
 		if firstCall(params) {
 			modelID = baseID + BatchSuffix
@@ -379,7 +412,13 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	if meta.Primary != "" {
 		primary = meta.Primary
 	}
-	c.mutateParams(p, alias, &params)
+	// Resolve the routing spec ONCE for this request and thread the local
+	// through — the body build (mutateParams), the parked batch envelope's
+	// only-list, the tracing attribute and the no-eligible error decoration
+	// all read THIS value, so a steer landing mid-request applies to the NEXT
+	// request and never makes one request's body and error disagree.
+	spec := c.spec()
+	c.mutateParams(p, alias, &params, spec)
 
 	// The parked call's only-list, computed HERE while the alias is in hand —
 	// the same pinOnly rule applyProviderPrefs applies (spec Only > alias
@@ -387,21 +426,21 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 	// nil = no pin: the batch envelope carries no provider key at all.
 	var batchOnly []string
 	if batched {
-		batchOnly = batchOnlyList(c.routingSpec, alias, strings.TrimSuffix(modelID, BatchSuffix))
+		batchOnly = batchOnlyList(spec, alias, strings.TrimSuffix(modelID, BatchSuffix))
 	}
 
 	attrs := []attribute.KeyValue{
 		attribute.String("rafiki.model", string(params.Model)),
 		attribute.String("rafiki.primary", primary),
 	}
-	if !c.routingSpec.IsZero() {
-		attrs = append(attrs, attribute.String("rafiki.routing", c.routingSpec.String()))
+	if !spec.IsZero() {
+		attrs = append(attrs, attribute.String("rafiki.routing", spec.String()))
 	}
 	ctx, span := c.tracer.Start(ctx, "llm.send", trace.WithAttributes(attrs...))
 	if b := c.breakers[primary]; b != nil {
 		span.SetAttributes(attribute.Bool("rafiki.breaker.open", b.Open()))
 	}
-	return ctx, span, primary, fallbacks, batchOnly, params, nil
+	return ctx, span, primary, fallbacks, batchOnly, params, spec, nil
 }
 
 // mutateParams applies a kind's request-body mutation. Only
@@ -416,11 +455,11 @@ func (c *Client) prepareSend(ctx context.Context, meta SendMeta, params anthropi
 // providers.Set.Resolve; nil for the fallback path (callModel re-resolves the
 // model against the FALLBACK provider via the catalog, which knows nothing
 // about the primary's aliases) and for non-alias requests.
-func (c *Client) mutateParams(p providers.Provider, alias *providers.ModelAlias, params *anthropic.MessageNewParams) {
+func (c *Client) mutateParams(p providers.Provider, alias *providers.ModelAlias, params *anthropic.MessageNewParams, spec routing.Spec) {
 	if p.Kind != providers.KindAnthropicOpenRouter {
 		return
 	}
-	applyProviderPrefs(params, alias, c.guard, p.Extras, c.routingSpec)
+	applyProviderPrefs(params, alias, c.guard, p.Extras, spec)
 }
 
 // failTurn best-effort fails a captured turn; a no-op when capturing is
@@ -440,7 +479,7 @@ func (c *Client) failTurn(ctx context.Context, capturing bool, turnID string, tu
 // best-effort: a broken store degrades to pass-through, never blocks the
 // call. Every invocation inserts its own turn row and always resolves it.
 func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	ctx, span, primary, fallbacks, batchOnly, params, err := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, batchOnly, params, spec, err := c.prepareSend(ctx, meta, params)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +498,7 @@ func (c *Client) SendParams(ctx context.Context, meta SendMeta, params anthropic
 	ctx, hdrs := withRawTraceHeaders(ctx)
 
 	start := time.Now()
-	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params)
+	resp, servedBy, err := c.callModel(ctx, span, primary, fallbacks, params, spec)
 	latency := int(time.Since(start).Milliseconds())
 	span.SetAttributes(attribute.String("rafiki.upstream", servedBy))
 
@@ -624,7 +663,7 @@ func (c *Client) sendStreaming(ctx context.Context, meta SendMeta, params anthro
 }
 
 func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params anthropic.MessageNewParams, handler StreamHandler) (msg *anthropic.Message, attempted bool, delivered bool, err error) {
-	ctx, span, primary, fallbacks, _, params, err := c.prepareSend(ctx, meta, params)
+	ctx, span, primary, fallbacks, _, params, spec, err := c.prepareSend(ctx, meta, params)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -704,7 +743,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// or decision 6's "error naming the spec and the model" only ever fired
 		// for non-streamed sends. The trace and turn rows above keep the raw
 		// upstream error; the decoration is for the caller.
-		return nil, true, false, c.noEligibleError(string(params.Model), serr)
+		return nil, true, false, c.noEligibleError(spec, string(params.Model), serr)
 	}
 
 	acc := anthropic.Message{}
@@ -752,7 +791,7 @@ func (c *Client) sendStreamingAttempt(ctx context.Context, meta SendMeta, params
 		// the STREAM (NewStreaming returns (stream, nil); the error arrives on
 		// the first Next) — so THIS is where a no-eligible routing rejection
 		// decorates for streamed sends. The trace keeps the raw error.
-		return nil, true, delivered, c.noEligibleError(string(params.Model), serr)
+		return nil, true, delivered, c.noEligibleError(spec, string(params.Model), serr)
 	}
 
 	recordPrimaryResult(breaker, now, nil)
@@ -912,7 +951,7 @@ func (c *Client) recordModelResult(params anthropic.MessageNewParams, err error)
 // the breaker entirely (direct primary, mirroring the routing core's
 // fallback-less behavior) — per the design, an empty Fallback chain is how a
 // consumer opts out of being pinned.
-func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, params anthropic.MessageNewParams) (*anthropic.Message, string, error) {
+func (c *Client) callModel(ctx context.Context, span trace.Span, primary string, fallbacks []string, params anthropic.MessageNewParams, spec routing.Spec) (*anthropic.Message, string, error) {
 	sender := c.senders[primary]
 	if sender == nil {
 		return nil, primary, fmt.Errorf("llm: provider %q not configured", primary)
@@ -923,7 +962,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 	if breaker == nil {
 		resp, err := sender.New(ctx, params)
 		c.recordModelResult(params, err)
-		return resp, primary, c.noEligibleError(string(params.Model), err)
+		return resp, primary, c.noEligibleError(spec, string(params.Model), err)
 	}
 
 	if usePrimary {
@@ -937,7 +976,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 			// not failover-worthy: don't fail over or trip. The no-eligible
 			// wrap below is decoration only (%w), so this classification
 			// sees exactly the error the sender returned.
-			return nil, primary, c.noEligibleError(string(params.Model), err)
+			return nil, primary, c.noEligibleError(spec, string(params.Model), err)
 		}
 		span.AddEvent("failover", trace.WithAttributes(attribute.String("rafiki.error", err.Error())))
 		c.logger.Warn("primary failed; failing over", "primary", primary, "error", err)
@@ -966,7 +1005,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		// the FALLBACK provider via the catalog, which knows nothing about the
 		// primary's aliases, so nil means the fallback's own static pins and
 		// guard ejections apply, never a stale alias pin.
-		c.mutateParams(fbProvider, nil, &fbParams)
+		c.mutateParams(fbProvider, nil, &fbParams, spec)
 		resp, err := fbSender.New(ctx, fbParams)
 		if err == nil {
 			c.modelGate.recordSuccess(string(params.Model))
@@ -974,7 +1013,7 @@ func (c *Client) callModel(ctx context.Context, span trace.Span, primary string,
 		}
 		// Wrapped with the fallback's own (translated) model id, so the
 		// message names the id OpenRouter actually rejected.
-		lastErr = c.noEligibleError(string(fbParams.Model), err)
+		lastErr = c.noEligibleError(spec, string(fbParams.Model), err)
 	}
 	return nil, primary, lastErr
 }
@@ -1114,11 +1153,11 @@ func noEligibleUpstream(err error) bool {
 // reachable, so FailoverWorthy and every retry classifier see exactly what
 // they saw before (a 400/404 is not failover-worthy, and the fallback chain
 // is unchanged).
-func (c *Client) noEligibleError(model string, err error) error {
-	if err == nil || c.routingSpec.IsZero() || !noEligibleUpstream(err) {
+func (c *Client) noEligibleError(spec routing.Spec, model string, err error) error {
+	if err == nil || spec.IsZero() || !noEligibleUpstream(err) {
 		return err
 	}
-	return fmt.Errorf("no provider can serve %s under routing [%s]: %w", model, c.routingSpec.String(), err)
+	return fmt.Errorf("no provider can serve %s under routing [%s]: %w", model, spec.String(), err)
 }
 
 // ProviderOf extracts OpenRouter's non-standard top-level "provider" field

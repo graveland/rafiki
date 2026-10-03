@@ -143,6 +143,14 @@ type Config struct {
 	// provider-routing behaviour byte-for-byte.
 	Routing string
 
+	// RoutingSource, when non-nil, overrides Routing: clientOptions hands it to
+	// the engine's llm.Client via llm.WithRoutingSource, so the client resolves
+	// the spec LIVE on every request. The daemon sets it for in-process fundi
+	// children so an operator's steering write reaches the child's next request
+	// instead of being frozen at spawn. nil (standalone `rafikid fundi`, and
+	// any caller with only a static spec) keeps the once-parsed Routing.
+	RoutingSource func() routing.Spec
+
 	// Catalog is the shared model catalog handed to the engine's llm.Client
 	// via llm.WithCatalog — see RuntimeOptions.Catalog, whose doc comment
 	// carries the reasoning. nil means the client builds its own, which is
@@ -426,7 +434,13 @@ func (c Config) clientOptions() ([]llm.ClientOption, error) {
 	// error: the spec was canonical at spawn, so a spec that no longer parses
 	// means corrupted plumbing, which must fail loudly rather than start a
 	// child with silently-dropped routing.
-	if c.Routing != "" {
+	//
+	// A non-nil RoutingSource WINS over the static Routing: it is the daemon's
+	// live reader of the child's stored spec, so the child follows an operator
+	// steer from its next request on.
+	if c.RoutingSource != nil {
+		opts = append(opts, llm.WithRoutingSource(c.RoutingSource))
+	} else if c.Routing != "" {
 		spec, err := routing.ParseSpec(c.Routing)
 		if err != nil {
 			return nil, fmt.Errorf("agent: routing spec %q: %w", c.Routing, err)

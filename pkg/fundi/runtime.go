@@ -118,6 +118,13 @@ type RuntimeOptions struct {
 	// provider-routing behaviour.
 	Routing string
 
+	// RoutingSource, when non-nil, is carried into Config.RoutingSource and
+	// overrides Routing: the engine's llm.Client resolves the spec LIVE on
+	// every request (llm.WithRoutingSource), so an operator's steering write
+	// reaches the child's next request rather than being frozen at spawn. The
+	// daemon sets it for in-process fundi children; nil keeps Routing.
+	RoutingSource func() routing.Spec
+
 	// Catalog is the daemon's shared model catalog, passed to the child's
 	// llm.Client via llm.WithCatalog. nil = the client builds its own
 	// (standalone `rafikid fundi`, which has no daemon catalog to share).
@@ -788,6 +795,7 @@ func BuildRuntime(ctx context.Context, fe *Frontend, opts RuntimeOptions) (*Engi
 		Providers:              opts.Providers,
 		APIKeyOverride:         opts.APIKeyOverride,
 		Routing:                opts.Routing,
+		RoutingSource:          opts.RoutingSource,
 		ProviderSenders:        opts.ProviderSenders,
 		Catalog:                opts.Catalog,
 		Batcher:                opts.Batcher,

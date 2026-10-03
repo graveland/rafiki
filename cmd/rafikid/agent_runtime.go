@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,6 +27,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
+	"go.graveland.dev/rafiki/pkg/routing"
 	"go.graveland.dev/rafiki/pkg/skills"
 	"go.graveland.dev/rafiki/pkg/store"
 	"go.graveland.dev/rafiki/pkg/users"
@@ -332,6 +334,14 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 		}
 		return ro.MaxCost
 	}
+	// liveRoutingSource makes this child's llm.Client read its CURRENT stored
+	// routing spec on every request, so an operator's steering write
+	// (Controller.SetChildRouting) reaches the next request instead of being
+	// frozen at spawn. childID is closed over here, like CurrentMaxCost above,
+	// and not read from any argument. This is the single builder for spawn,
+	// resume AND startup recovery (see loadChildren), so all three get the live
+	// reader.
+	ro.RoutingSource = c.liveRoutingSource(childID, f.routing)
 	senders, err := providerSenders(ro.Providers, c.execPoolConn, ro.Model)
 	if err != nil {
 		return fundi.RuntimeOptions{}, fmt.Errorf("agent runtime options: %w", err)
@@ -671,7 +681,72 @@ func (c *Controller) agentRuntimeOptions(req protocol.SpawnRequest, childID stri
 	return ro, nil
 }
 
-// nativeSinkFunc adapts a plain func to fundi.NativeSink.
+// liveRoutingSource returns the closure a fundi child's llm.Client reads on
+// every request (fundi.Config.RoutingSource → llm.WithRoutingSource): it
+// resolves the child's CURRENT stored routing spec, which
+// Controller.SetChildRouting rewrites when an operator steers the child, and
+// falls back to the spawn-time spec spawnRouting when the row is gone, the
+// stored spec is empty, or it no longer parses. A steer therefore lands on the
+// child's NEXT request instead of being frozen at spawn.
+//
+// The string→Spec parse is cached, so an unchanged value is not re-parsed on
+// every request, and the fallback warnings are emitted once per failure mode,
+// never per request. The mutex makes concurrent reads (a retrying/streaming
+// client) and a racing steer safe.
+func (c *Controller) liveRoutingSource(childID, spawnRouting string) func() routing.Spec {
+	spawnSpec, spawnErr := routing.ParseSpec(spawnRouting)
+	if spawnErr != nil {
+		// spawnRouting is empty or unparseable: fall back to the zero spec. This
+		// is the same shape the once-parsed Routing would have had, and it is
+		// logged once here rather than on every request.
+		slog.Warn("child has no parseable spawn-time routing spec; using the default",
+			"child", childID, "spec", spawnRouting, "error", spawnErr)
+		spawnSpec = routing.Spec{}
+	}
+
+	var (
+		mu        sync.Mutex
+		lastStr   string
+		lastSpec  routing.Spec
+		warnedRow bool
+		warnedBad bool
+	)
+	return func() routing.Spec {
+		mu.Lock()
+		defer mu.Unlock()
+
+		snap, ok := c.st.Get(childID)
+		if !ok {
+			if !warnedRow {
+				warnedRow = true
+				slog.Warn("child row missing while resolving live routing; using the spawn-time spec",
+					"child", childID)
+			}
+			return spawnSpec
+		}
+		// An empty stored spec means the child has no spec: use the spawn-time
+		// one, matching the once-parsed Routing's empty-means-default behaviour.
+		if snap.Routing == "" {
+			return spawnSpec
+		}
+		if snap.Routing == lastStr {
+			return lastSpec
+		}
+		spec, err := routing.ParseSpec(snap.Routing)
+		if err != nil {
+			if !warnedBad {
+				warnedBad = true
+				slog.Warn("child's stored routing spec does not parse; using the spawn-time spec",
+					"child", childID, "spec", snap.Routing, "error", err)
+			}
+			return spawnSpec
+		}
+		lastStr = snap.Routing
+		lastSpec = spec
+		return spec
+	}
+}
+
 type nativeSinkFunc func(*rafikiv1.Event)
 
 func (f nativeSinkFunc) Publish(ev *rafikiv1.Event) { f(ev) }
@@ -738,6 +813,8 @@ func (f agentFlags) toRuntimeOptions(cwd string, pool *pgxpool.Pool, hasExecutor
 		NoBuiltinTools:       f.noBuiltinTools,
 		// The daemon's once-resolved routing spec, carried verbatim into
 		// RuntimeOptions.Routing (→ Config.Routing → llm.WithRouting).
+		// agentRuntimeOptions adds RuntimeOptions.RoutingSource, which overrides
+		// this static value with the child's live stored spec.
 		Routing:            f.routing,
 		NoContextFiles:     f.noContextFiles,
 		ContextFilesBudget: defaults.ContextFilesTokens,
