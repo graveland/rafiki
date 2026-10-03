@@ -483,6 +483,71 @@ func TestMCPFacePymoduleRunAbsentForUnboundChild(t *testing.T) {
 	c.NotContains(names, "pymodule_run", "unbound child request unexpectedly exposes pymodule_run")
 }
 
+// TestMCPFaceRoutesSetRoutingByProvenance pins the getServer switch that is the
+// real D4 authority seam for agent_route. A per-child credential must bind
+// CHILD authority (newControllerSpawner -> Controller.SetChildRouting: subtree
+// only, only= refused), and a user credential must bind OPERATOR authority
+// (newUserSpawner -> Controller.SetChildRoutingAsOperator). Swapping the two
+// cases leaves the rest of the suite green and would silently hand a child
+// token operator routing authority, so this is what pins them.
+//
+// The two entry points disagree on an UNKNOWN target, which is what makes the
+// choice observable through the tool: SetChildRouting runs the lineage guard
+// FIRST and answers PermissionDenied ("not in your subtree"), while
+// SetChildRoutingAsOperator skips the guard and reaches the store, answering
+// NotFound ("not registered"). Asserting each provenance's exact refusal pins
+// which entry point the resolved spawner used — a swap inverts both.
+func TestMCPFaceRoutesSetRoutingByProvenance(t *testing.T) {
+	ck := assert.NewAborting(t)
+	face, _ := mcpFaceFixture(t)
+
+	userSess := mcpConnect(t, face.getServer(mcpRequestFor("u-alice")))
+
+	childReq := httptest.NewRequest(http.MethodPost, mcpFacePath, nil)
+	childReq = childReq.WithContext(server.WithIdentity(childReq.Context(), &server.Identity{
+		UserID: "u-owner", ChildID: "c-child", Via: server.ProvenanceChildToken,
+	}))
+	childSess := mcpConnect(t, face.getServer(childReq))
+
+	callRoute := func(cs *mcp.ClientSession) *mcp.CallToolResult {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+			Name:      "agent_route",
+			Arguments: map[string]any{"agent_id": "c_ghost", "spec": "prefer=fireworks"},
+		})
+		ck.NoError(err, "agent_route over MCP")
+		return res
+	}
+
+	// A per-child credential: the lineage guard refuses before anything is read.
+	childRes := callRoute(childSess)
+	ck.True(childRes.IsError, "a child credential must be refused an unknown target")
+	childText := mcpToolResultText(t, childRes)
+	ck.StrContains(childText, "subtree", "child-token agent_route must use SetChildRouting's lineage guard; got %q", childText)
+
+	// A user credential: operator authority skips the guard and the store
+	// answers NotFound instead.
+	userRes := callRoute(userSess)
+	ck.True(userRes.IsError, "an operator is refused an unknown target by the store, not the guard")
+	userText := mcpToolResultText(t, userRes)
+	ck.StrContains(userText, "not registered", "user-credential agent_route must use SetChildRoutingAsOperator; got %q", userText)
+	ck.NotStrContains(userText, "subtree", "operator routing must not run the child lineage guard; got %q", userText)
+}
+
+// mcpResultText returns a result's first text block whether it is a success or
+// an error result — mcpCallText deliberately fatals on IsError.
+func mcpToolResultText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if len(res.Content) == 0 {
+		return ""
+	}
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content block is %T, want *mcp.TextContent", res.Content[0])
+	}
+	return tc.Text
+}
+
 // TestMCPFacePresetToolsForBothProvenances pins where the preset block sits in
 // getServer: OUTSIDE the claudeExecutorRouted pymodule block. Presets need
 // only the database, so both a user-token and a child-token caller list all
