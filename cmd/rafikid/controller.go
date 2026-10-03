@@ -50,6 +50,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/paths"
 	"go.graveland.dev/rafiki/pkg/persist"
 	"go.graveland.dev/rafiki/pkg/presets"
+	"go.graveland.dev/rafiki/pkg/promptfile"
 	"go.graveland.dev/rafiki/pkg/protocol"
 	"go.graveland.dev/rafiki/pkg/providers"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
@@ -4376,11 +4377,10 @@ func resolveClaudeBinaryIfNeeded(req protocol.SpawnRequest, runner child.Runner)
 // (excluding the binary itself) for stream-json bidirectional driving.
 // buildClaudeArgv is a thin wrapper over claudeargv.Build — the ONE claude
 // argv builder shared with the executor's AdminService and daraja's own
-// Restart/respawn path (see that package's doc comment). This is the
-// local-subprocess spawn path, used only when this daemon has no executor
-// pool configured at all (see claudeRunner in agent_runtime.go); every other
-// claude child builds its argv the exact same way, through this same
-// function, so the two paths cannot drift on flags again.
+// Restart/respawn path (see that package's doc comment). This is the pure
+// form: the exec path STAGES the launch files in resolveSpawnPlan (moving the
+// system-prompt appendix and MCP config off argv where `ps` shows them) and
+// this function is what tests build against directly.
 //
 // The req→Params mapping itself lives in claudeargv.ParamsFromSpawnRequest,
 // NOT here: it must be reachable from test/integration, whose
@@ -4422,7 +4422,16 @@ func resolveSpawnPlan(req protocol.SpawnRequest, childID, stateDir string, vals 
 		// to route it through daraja instead — bin/argv from here are
 		// discarded anyway once a non-nil Runner is returned (see the
 		// "if runner != nil" clearing at each call site).
-		return "", buildClaudeArgv(req, vals), child.ClaudeProvider{}, nil
+		//
+		// The launch files (system-prompt appendix, MCP config) are staged here,
+		// immediately before Build, so neither text rides argv where `ps` shows
+		// it. A respawn restages from the same held text (Stage is keyed by
+		// content hash, so it converges).
+		p, err := claudeargv.Stage(claudeargv.ParamsFromSpawnRequest(req, vals), promptfile.Dir())
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("claude launch files: %w", err)
+		}
+		return "", claudeargv.Build(p), child.ClaudeProvider{}, nil
 	case protocol.KindFundi:
 		// The fundi runtime is `rafikid fundi ...`: the daemon re-execs itself
 		// rather than shelling out to a separate binary. It speaks pi's rpc

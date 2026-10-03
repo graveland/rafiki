@@ -34,6 +34,11 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("XDG_CONFIG_HOME", dir)
+	// XDG_STATE_HOME too: the claude launch path stages the system-prompt
+	// appendix and MCP config under paths.StateDir()/prompts (pkg/promptfile),
+	// and without this a test that exercises resolveSpawnPlan writes launch
+	// files into the developer's real ~/.local/state/rafiki.
+	os.Setenv("XDG_STATE_HOME", dir)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

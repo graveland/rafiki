@@ -3,8 +3,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -418,16 +420,24 @@ func TestRunClaudeArgvHasNoHeadlessFlags(t *testing.T) {
 	}
 	// (a) the model pair it was given is still there...
 	assertArgvPair(t, argv, "--model", "claude-opus-5")
-	// ...and so is the MCP config, emitted as a single --mcp-config=<json>
-	// element (the variadic flag makes a two-element pair swallow the next one).
+	// ...and so is the MCP config, staged to a FILE: the interactive path runs
+	// the same Stage that moves the JSON off argv, whose ${RAFIKI_MCP_TOKEN}
+	// placeholder must never ride argv where `ps` exposes it. So the element is
+	// a single --mcp-config=<path> (the variadic flag makes a two-element pair
+	// swallow the next one) pointing at an existing JSON document.
 	mcpCount := 0
+	var mcpPath string
 	for _, a := range argv {
-		if strings.HasPrefix(a, "--mcp-config=") {
+		if v, ok := strings.CutPrefix(a, "--mcp-config="); ok {
 			mcpCount++
-			c.NotEq("--mcp-config=", a, "argv %v carries an empty --mcp-config=", argv)
+			mcpPath = v
 		}
 	}
 	c.Eq(1, mcpCount, "argv %v: want exactly one --mcp-config element, got", argv)
+	content, err := os.ReadFile(mcpPath)
+	c.Require().NoError(err, "read staged MCP config %s; the element must point at an existing file", mcpPath)
+	c.True(json.Valid(content), "staged MCP config %s is not valid JSON: %q", mcpPath, content)
+	c.NotStrContains(strings.Join(argv, " "), `"mcpServers"`, "interactive argv carries the inline MCP JSON")
 	// (b) the user's own args come last, after everything the builder emits.
 	c.EqDiff(userArgs, argv[len(argv)-len(userArgs):], "argv %v: want user args %v last, got tail", argv, userArgs)
 	c.NotContains(argv[:len(argv)-len(userArgs)], "--resume", "argv %v: a user arg leaked ahead of the user tail", argv)

@@ -18,6 +18,7 @@ import (
 
 	"go.graveland.dev/rafiki/pkg/child"
 	"go.graveland.dev/rafiki/pkg/claudeargv"
+	"go.graveland.dev/rafiki/pkg/promptfile"
 )
 
 // defaultGrace is how long Restart and Shutdown wait after the first signal
@@ -105,15 +106,7 @@ const (
 func (s ChildSpec) Argv(mcpConfig string, modelArgs []string) []string {
 	switch s.Kind {
 	case KindClaude:
-		return claudeargv.Build(claudeargv.Params{
-			Model:              s.Model,
-			ResumeSession:      s.ResumeSession,
-			PermissionMode:     s.PermissionMode,
-			AppendSystemPrompt: s.AppendSystemPrompt,
-			ExtraArgs:          s.ExtraArgs,
-			MCPConfig:          mcpConfig,
-			ModelArgs:          modelArgs,
-		})
+		return claudeargv.Build(s.params(mcpConfig, modelArgs))
 	case KindScript:
 		// A script's argv is RESOLVED BY THE EXECUTOR before daraja starts: the
 		// interpreter rides HostOptions.Binary, the script path and its args
@@ -126,6 +119,35 @@ func (s ChildSpec) Argv(mcpConfig string, modelArgs []string) []string {
 		return append(out, s.ExtraArgs...)
 	}
 	return nil
+}
+
+// params maps the spec and the launch-wide values onto claudeargv.Params.
+// Both Argv and StagedArgv build from it, so there is ONE field mapping: the
+// staged path cannot drift from the pure one on a flag again.
+func (s ChildSpec) params(mcpConfig string, modelArgs []string) claudeargv.Params {
+	return claudeargv.Params{
+		Model:              s.Model,
+		ResumeSession:      s.ResumeSession,
+		PermissionMode:     s.PermissionMode,
+		AppendSystemPrompt: s.AppendSystemPrompt,
+		ExtraArgs:          s.ExtraArgs,
+		MCPConfig:          mcpConfig,
+		ModelArgs:          modelArgs,
+	}
+}
+
+// StagedArgv is Argv with the system-prompt appendix and MCP config moved
+// into files under dir (claudeargv.Stage), so neither rides this host's
+// `ps`. Script and unknown kinds are returned exactly as Argv does.
+func (s ChildSpec) StagedArgv(mcpConfig string, modelArgs []string, dir string) ([]string, error) {
+	if s.Kind != KindClaude {
+		return s.Argv(mcpConfig, modelArgs), nil
+	}
+	p, err := claudeargv.Stage(s.params(mcpConfig, modelArgs), dir)
+	if err != nil {
+		return nil, err
+	}
+	return claudeargv.Build(p), nil
 }
 
 // HostOptions describes the process to host.
@@ -246,7 +268,10 @@ func (h *Host) startLocked(spec ChildSpec) (io.ReadCloser, chan struct{}, error)
 	if h.running {
 		return nil, nil, errors.New("daraja: already running")
 	}
-	argv := spec.Argv(h.opts.MCPConfig, h.opts.ModelArgs)
+	argv, err := spec.StagedArgv(h.opts.MCPConfig, h.opts.ModelArgs, promptfile.Dir())
+	if err != nil {
+		return nil, nil, fmt.Errorf("daraja: stage launch files: %w", err)
+	}
 	if argv == nil {
 		return nil, nil, fmt.Errorf("daraja: unsupported child kind %q", spec.Kind)
 	}

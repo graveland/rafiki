@@ -21,6 +21,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/claudeargv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/profile"
+	"go.graveland.dev/rafiki/pkg/promptfile"
 	"go.graveland.dev/rafiki/pkg/proxyenv"
 )
 
@@ -200,13 +201,21 @@ func runClaude(cmd *cobra.Command, args []string) error {
 	// --dangerously-skip-permissions and --disallowedTools: a human owns this
 	// TTY and answers permission prompts, and AskUserQuestion has a renderer
 	// here and must stay callable.
-	argv := claudeargv.Build(claudeargv.Params{
+	//
+	// The MCP config is staged to a file immediately before Build, so its JSON —
+	// which carries the ${RAFIKI_MCP_TOKEN} placeholder, never an expanded token
+	// — does not ride argv where `ps` shows it.
+	staged, err := claudeargv.Stage(claudeargv.Params{
 		Mode:      claudeargv.ModeInteractive,
 		Model:     model,
 		MCPConfig: vals.MCPConfig,
 		ModelArgs: vals.ModelArgs,
 		UserArgs:  args,
-	})
+	}, promptfile.Dir())
+	if err != nil {
+		return err
+	}
+	argv := claudeargv.Build(staged)
 	return execClaude(claudeInvocation{Env: env, Args: argv})
 }
 

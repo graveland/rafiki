@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -163,4 +164,56 @@ func TestResolveSpawnPlan_ClaudeNeverFailsOnMissingBinary(t *testing.T) {
 	c.Eq("", bin, "bin")
 	_, ok := prov.(child.ClaudeProvider)
 	c.True(ok, "provider = %T, want child.ClaudeProvider", prov)
+}
+
+// TestResolveSpawnPlanClaudeStagesFiles: the local exec path moves BOTH the
+// system-prompt appendix (coordination prompt merged in) and the MCP config
+// into files immediately before Build, so neither text rides argv where `ps`
+// shows it — and the MCP config file holds the ${RAFIKI_MCP_TOKEN} placeholder,
+// never an expanded token.
+func TestResolveSpawnPlanClaudeStagesFiles(t *testing.T) {
+	c := assert.NewCollecting(t)
+	req := protocol.SpawnRequest{Kind: protocol.KindClaude, AppendSystemPrompt: "be brief"}
+	vals := proxyenv.Values{MCPConfig: `{"mcpServers":{}}`}
+
+	_, argv, _, err := resolveSpawnPlan(req, "c1", t.TempDir(), vals)
+	c.Require().NoError(err, "resolveSpawnPlan")
+
+	joined := strings.Join(argv, " ")
+	c.NotStrContains(joined, "be brief", "argv still carries the appendix text")
+	c.NotContains(argv, "--append-system-prompt", "argv still carries the inline --append-system-prompt element")
+
+	// Exactly one --append-system-prompt-file pair pointing at a real file that
+	// holds the coordination prompt merged with the caller's own text (the flag
+	// is last-wins, so the merge must be ONE text in ONE file).
+	appendCount := 0
+	var path string
+	for i, a := range argv {
+		if a != "--append-system-prompt-file" {
+			continue
+		}
+		appendCount++
+		c.Require().Less(len(argv), i+1, "argv %v: --append-system-prompt-file has no value", argv)
+		path = argv[i+1]
+	}
+	c.Eq(1, appendCount, "argv %v: want exactly one --append-system-prompt-file element, got", argv)
+	content, err := os.ReadFile(path)
+	c.Require().NoError(err, "read staged appendix %s", path)
+	c.Eq(claudeargv.CoordinationPrompt+"\n\nbe brief", string(content), "staged appendix content")
+
+	// The MCP config is staged by the same Stage call: exactly one
+	// --mcp-config=<path> element whose file holds the bare JSON.
+	mcpCount := 0
+	var mcpPath string
+	for _, a := range argv {
+		if v, ok := strings.CutPrefix(a, "--mcp-config="); ok {
+			mcpCount++
+			mcpPath = v
+		}
+	}
+	c.Eq(1, mcpCount, "argv %v: want exactly one --mcp-config= element, got", argv)
+	mcpContent, err := os.ReadFile(mcpPath)
+	c.Require().NoError(err, "read staged MCP config %s", mcpPath)
+	c.Eq(`{"mcpServers":{}}`, string(mcpContent), "staged MCP config content")
+	c.NotStrContains(joined, `{"mcpServers"`, "argv still carries the inline MCP JSON")
 }

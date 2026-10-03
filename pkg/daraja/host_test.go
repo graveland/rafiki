@@ -117,16 +117,36 @@ func TestNoModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	c.StrContains(argv, "--model claude-sonnet-5", "argv")
 }
 
+// stagedFile extracts the file path a staged launch file's flag points at,
+// from a fake child's echoed argv. Handles both the pair form
+// (--append-system-prompt-file <path>) and the = form (--mcp-config=<path>).
+func stagedFile(t *testing.T, out, flag string) string {
+	t.Helper()
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if f == flag && i+1 < len(fields) {
+			return fields[i+1]
+		}
+		if v, ok := strings.CutPrefix(f, flag+"="); ok {
+			return v
+		}
+	}
+	t.Fatalf("argv %q has no %s value", out, flag)
+	return ""
+}
+
 // TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone is the case Wave 1
 // of the MCP-injection plan introduced: MCPConfig can be non-empty while
 // carrying NO --model (just the MCP config JSON), and that must not suppress
 // the plain --model claudeargv.Build would otherwise add.
 func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	c := assert.NewCollecting(t)
+	const mcp = `{"mcpServers":{}}`
 	h := NewHost(HostOptions{
 		Binary:    testEchoBinary(t),
 		Spec:      ChildSpec{Kind: KindClaude, Model: "claude-sonnet-5"},
-		MCPConfig: `{"mcpServers":{}}`,
+		MCPConfig: mcp,
 	})
 	c.Require().NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
@@ -134,24 +154,28 @@ func TestMCPConfigWithoutModelArgsLeavesPlainModelFlagAlone(t *testing.T) {
 	argv := collectStdout(t, h, "stream-json", 5*time.Second)
 	c.StrContains(argv, "--model claude-sonnet-5", "argv %q missing the plain --model; MCPConfig without a "+
 		"ModelArgs pair must not suppress it", argv)
-	c.StrContains(argv, "--mcp-config={\"mcpServers\":{}}", "argv %q missing the --mcp-config pair the MCPConfig value "+
-		"should have produced", argv)
+	got, err := os.ReadFile(stagedFile(t, argv, "--mcp-config"))
+	c.Require().NoError(err, "read staged MCP config")
+	c.Eq(mcp, string(got), "staged MCP config content")
 }
 
 // TestHostMCPConfigYieldsExactlyOneElementNotDoubled pins the standalone
 // daraja path's consumption of proxyenv.Values.MCPConfig through
 // HostOptions.MCPConfig: the value is BARE JSON and must render as EXACTLY ONE
-// --mcp-config= element in the child's argv. The pre-fix producer assigned the
+// --mcp-config= element in the child's argv, now pointing at the staged file
+// rather than carrying the JSON inline. The pre-fix producer assigned the
 // full rendered element, so this path — which feeds the value to
 // claudeargv.Params.MCPConfig verbatim — emitted --mcp-config=--mcp-config={...},
 // a live bug invisible to host-level fixtures that constructed bare JSON
 // directly.
 func TestHostMCPConfigYieldsExactlyOneElementNotDoubled(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	c := assert.NewAborting(t)
+	const mcp = `{"mcpServers":{"rafiki":{"type":"http","url":"http://127.0.0.1:8035/mcp"}}}`
 	h := NewHost(HostOptions{
 		Binary:    testEchoBinary(t),
 		Spec:      ChildSpec{Kind: KindClaude},
-		MCPConfig: `{"mcpServers":{"rafiki":{"type":"http","url":"http://127.0.0.1:8035/mcp"}}}`,
+		MCPConfig: mcp,
 	})
 	c.NoError(h.Start(), "Start")
 	defer func() { _, _, _ = h.Shutdown(time.Second) }()
@@ -160,7 +184,10 @@ func TestHostMCPConfigYieldsExactlyOneElementNotDoubled(t *testing.T) {
 	got := strings.Count(argv, "--mcp-config=")
 	c.Eq(1, got, "child argv %q carries %d --mcp-config= elements, want exactly 1 (a doubled prefix means the host was fed a rendered element instead of bare JSON)", argv, got)
 	c.NotStrContains(argv, "--mcp-config=--mcp-config=", "child argv")
-	c.StrContains(argv, `--mcp-config={"mcpServers"`, "child argv")
+	c.NotStrContains(argv, `{"mcpServers"`, "child argv still carries the inline MCP JSON; it must be staged to a file")
+	content, err := os.ReadFile(stagedFile(t, argv, "--mcp-config"))
+	c.Require().NoError(err, "read staged MCP config")
+	c.Eq(mcp, string(content), "staged MCP config content")
 }
 
 // A spec's AppendSystemPrompt and ExtraArgs must both reach the built argv:
@@ -173,6 +200,80 @@ func TestArgvCarriesAppendSystemPromptAndExtraArgs(t *testing.T) {
 	}.Argv("", nil)
 	assertPair(t, argv, "--append-system-prompt", "be terse")
 	assert.NewAborting(t).False(len(argv) < 2 || argv[len(argv)-2] != "--foo" || argv[len(argv)-1] != "bar", "want ExtraArgs last, got %v", argv)
+}
+
+// TestStagedArgvMatchesArgvModuloFiles: staged argv is plain argv with the
+// appendix pair and the MCP element swapped for file paths, and the files hold
+// exactly the texts the plain form put on argv. This is the pin that the two
+// producers cannot drift on a flag when one gains staging.
+func TestStagedArgvMatchesArgvModuloFiles(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	const appendix = "be terse"
+	const mcp = `{"mcpServers":{}}`
+	spec := ChildSpec{Kind: KindClaude, Model: "m", AppendSystemPrompt: appendix}
+
+	plain := spec.Argv(mcp, nil)
+	staged, err := spec.StagedArgv(mcp, nil, t.TempDir())
+	c.Require().NoError(err, "StagedArgv")
+
+	appendPath := stagedFile(t, strings.Join(staged, " "), "--append-system-prompt-file")
+	mcpPath := stagedFile(t, strings.Join(staged, " "), "--mcp-config")
+
+	var want []string
+	for i := 0; i < len(plain); {
+		switch a := plain[i]; {
+		case a == "--append-system-prompt":
+			want = append(want, "--append-system-prompt-file", appendPath)
+			i += 2
+		case strings.HasPrefix(a, "--mcp-config="):
+			want = append(want, "--mcp-config="+mcpPath)
+			i++
+		default:
+			want = append(want, a)
+			i++
+		}
+	}
+	c.EqDiff(want, staged, "StagedArgv = %v, want plain argv with the appendix pair and MCP element swapped for files", staged)
+
+	content, err := os.ReadFile(appendPath)
+	c.Require().NoError(err, "read staged appendix")
+	c.Eq(appendix, string(content), "staged appendix content")
+	mcpContent, err := os.ReadFile(mcpPath)
+	c.Require().NoError(err, "read staged MCP config")
+	c.Eq(mcp, string(mcpContent), "staged MCP config content")
+}
+
+// TestStartLockedStagesAndRestartRestages: a live launch stages the appendix
+// to a file, and a spec-less Restart restages the SAME held text — the file the
+// replacement process is pointed at holds the appendix the host still holds.
+func TestStartLockedStagesAndRestartRestages(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	c := assert.NewCollecting(t)
+	const appendix = "restart me"
+	h := NewHost(HostOptions{
+		Binary: testEchoBinary(t),
+		Spec:   ChildSpec{Kind: KindClaude, AppendSystemPrompt: appendix},
+	})
+	c.Require().NoError(h.Start(), "Start")
+	defer func() { _, _, _ = h.Shutdown(time.Second) }()
+
+	first := collectStdout(t, h, "--dangerously-skip-permissions", 5*time.Second)
+	c.NotStrContains(first, "--append-system-prompt ", "launch argv still carries the inline appendix")
+	assertStagedAppendix(t, first, appendix)
+
+	_, err := h.Restart(ChildSpec{}, time.Second)
+	c.Require().NoError(err, "Restart")
+	second := collectStdout(t, h, "--dangerously-skip-permissions", 5*time.Second)
+	assertStagedAppendix(t, second, appendix)
+}
+
+// assertStagedAppendix reads the file the echo'd argv points its
+// --append-system-prompt-file at and asserts it holds want.
+func assertStagedAppendix(t *testing.T, out, want string) {
+	t.Helper()
+	content, err := os.ReadFile(stagedFile(t, out, "--append-system-prompt-file"))
+	assert.NewAborting(t).False(err != nil || string(content) != want, "staged appendix = %q, %v; want %q", string(content), err, want)
 }
 
 // IsZero is the Restart reuse predicate. A struct comparison cannot be used:

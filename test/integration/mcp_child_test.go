@@ -557,23 +557,39 @@ func TestMCPChildArgvFlagsSurviveDaraja(t *testing.T) {
 	c.Require().NotEq("", childID, "spawn returned empty childId")
 
 	dump := waitClaudeDump(t, d, dumps, childID)
-	for _, want := range []string{"--append-system-prompt", "--foo", "bar"} {
+	for _, want := range []string{"--append-system-prompt-file", "--foo", "bar"} {
 		c.Contains(dump.argv, want, "claude argv")
 	}
-	// The caller's appendix rides the SAME element as the daemon's coordination
-	// prompt (--append-system-prompt is last-wins, so the merge must be one
-	// text; a second element would silently drop one of the two). The
-	// coordination prompt rides because this daemon serves the proxy face, so
-	// the child carries the MCP agent-control surface the prompt names.
-	appendValue := argvValue(dump.argv, "--append-system-prompt")
-	c.StrContains(appendValue, wantPrompt, "claude argv's --append-system-prompt value")
-	c.StrContains(appendValue, claudeargv.CoordinationPrompt, "claude argv's --append-system-prompt value")
+	c.NotContains(dump.argv, "--append-system-prompt", "claude argv: the appendix must ride --append-system-prompt-file, not the inline flag")
+	// The caller's appendix and the daemon's coordination prompt ride ONE
+	// staged FILE (--append-system-prompt is last-wins, so the merge must be one
+	// text; a second element would silently drop one of the two), which keeps
+	// the text off argv where `ps` shows it. The coordination prompt rides
+	// because this daemon serves the proxy face, so the child carries the MCP
+	// agent-control surface the prompt names.
+	appendPath := argvValue(dump.argv, "--append-system-prompt-file")
+	c.Require().NotEq("", appendPath, "claude argv has no --append-system-prompt-file value")
+	appendContent, err := os.ReadFile(appendPath)
+	c.Require().NoError(err, "read staged appendix %s", appendPath)
+	c.StrContains(string(appendContent), wantPrompt, "staged appendix")
+	c.StrContains(string(appendContent), claudeargv.CoordinationPrompt, "staged appendix")
 
 	// The same dump pins the security invariant on the real launch: the
 	// per-child secret travels by ENVIRONMENT only. It must appear in the env
-	// half and never in the argv half, whose --mcp-config carries only the
-	// ${RAFIKI_MCP_TOKEN} placeholder (ps renders argv world-readable).
+	// half and never in the argv half, whose --mcp-config points at a staged
+	// file carrying only the ${RAFIKI_MCP_TOKEN} placeholder (ps renders argv
+	// world-readable).
 	tok := dump.envValue("RAFIKI_MCP_TOKEN")
 	c.Require().NotEq("", tok, "the child's environment carries no RAFIKI_MCP_TOKEN")
 	c.NotContains(dump.argv, tok, "the per-child MCP secret appears in the child's argv")
+	var mcpPath string
+	for _, a := range dump.argv {
+		if v, ok := strings.CutPrefix(a, "--mcp-config="); ok {
+			mcpPath = v
+		}
+	}
+	c.Require().NotEq("", mcpPath, "claude argv has no --mcp-config= element")
+	mcpContent, err := os.ReadFile(mcpPath)
+	c.Require().NoError(err, "read staged MCP config %s", mcpPath)
+	c.StrContains(string(mcpContent), "${RAFIKI_MCP_TOKEN}", "staged MCP config")
 }
