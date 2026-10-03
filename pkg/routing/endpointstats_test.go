@@ -4,6 +4,7 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -176,6 +177,46 @@ func TestPageStatsNullPercentileIsAbsent(t *testing.T) {
 	ck.Eq(40.0, rows[0].P90Throughput, "a reported percentile survives")
 	ck.Eq(-1, rows[0].Requests, "a null count is absent")
 	ck.Eq(30, rows[0].WindowMinutes)
+}
+
+// TestPageStatsAdversarialBodyIsBounded proves the scan stays linear when a body
+// is a long run of stats markers with no endpoint head ahead of them (an
+// adversarial payload, or a head key that drifted). The head search must be
+// bounded to the region since the previous marker; if it rescans from offset 0
+// per marker this is quadratic — 20,000 markers took ~8 s and the 8 MB read cap
+// extrapolates to tens of minutes of a pegged core. Distinct ids so the bound,
+// not id dedupe, is what has to hold.
+func TestPageStatsAdversarialBodyIsBounded(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	var b strings.Builder
+	for i := range 20000 {
+		fmt.Fprintf(&b, `"stats":{"endpoint_id":"id%07d"`, i)
+	}
+	body := b.String()
+	ck.False(strings.Contains(body, endpointObjectMarker), "the adversarial body carries no endpoint head")
+
+	srv, _ := pageServer(t, &body)
+	p := NewPageStatsForTest(srv.Client(), srv.URL+"/%s", slog.New(slog.DiscardHandler))
+
+	start := time.Now()
+	_, err := p.Stats(context.Background(), "deepseek/deepseek-v4.1-flash")
+	elapsed := time.Since(start)
+	ck.ErrorContains(err, "no endpoint stats found", "a headless body yields no rows")
+	ck.Less(time.Second, elapsed, "a headless 20k-marker (~0.6 MB) body parsed in %s, want < 1s", elapsed)
+}
+
+// TestPageStatsRequiresExactHeadID proves a stats endpoint id is matched against
+// a head id exactly, not by prefix: stats for "abcd" must not be attributed to a
+// head whose id is "abcd1234".
+func TestPageStatsRequiresExactHeadID(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	body := `{"id":"abcd1234-full","provider_slug":"wrong","quantization":"fp8",` +
+		`"stats":{"endpoint_id":"abcd","p50_throughput":5,"window_minutes":30}}`
+	p, _ := testPageStats(t, body)
+
+	rows, err := p.Stats(context.Background(), "acme/model")
+	ck.ErrorContains(err, "no endpoint stats found", "a prefix id must not match the longer head")
+	ck.Empty(rows, "no row is produced from a mis-matched head")
 }
 
 func findStats(rows []EndpointStats, slug string) (EndpointStats, bool) {

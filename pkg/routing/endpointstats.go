@@ -198,7 +198,10 @@ func (p *PageStats) fetch(ctx context.Context, model string) ([]EndpointStats, e
 	if len(body) > pageStatsMaxBytes {
 		return nil, fmt.Errorf("model page for %s: response exceeds %d bytes", model, pageStatsMaxBytes)
 	}
-	stats := parseModelPage(string(body))
+	stats, err := parseModelPage(ctx, string(body))
+	if err != nil {
+		return nil, fmt.Errorf("model page for %s: %w", model, err)
+	}
 	if len(stats) == 0 {
 		p.logf("endpoint stats: model page yielded no endpoint stats (page format may have changed)", "model", model)
 		return nil, fmt.Errorf("model page for %s: no endpoint stats found (page format may have changed)", model)
@@ -206,17 +209,32 @@ func (p *PageStats) fetch(ctx context.Context, model string) ([]EndpointStats, e
 	return stats, nil
 }
 
+// statsObjectScanCap bounds the bytes handed to the JSON decoder for one stats
+// object. A real stats object is a few hundred bytes; the cap stops a malformed
+// object with a valid-looking prefix from scanning past its own object.
+const statsObjectScanCap = 4096
+
 // parseModelPage extracts the endpoint stats from an OpenRouter model page. The
 // page is a Next.js RSC stream whose JSON quotes are backslash-escaped; un-escape
 // once, then scan, rather than running a regexp over megabytes. Each endpoint
 // appears twice in the payload, so rows are deduped by endpoint id — provider
 // slug is not unique (two endpoints can share one with different quantization).
-func parseModelPage(body string) []EndpointStats {
+//
+// The scan is linear in the body: the backward search for an endpoint head is
+// bounded to the region since the previous stats marker (a head never spans an
+// earlier stats object), a failed id is recorded so a repeated one is never
+// re-scanned, and the JSON decode is capped. ctx is checked each iteration so an
+// adversarially long body still observes the caller's deadline.
+func parseModelPage(ctx context.Context, body string) ([]EndpointStats, error) {
 	text := strings.ReplaceAll(body, `\"`, `"`)
 	var out []EndpointStats
 	seen := make(map[string]bool)
+	prevMarker := 0
 	idx := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		rel := strings.Index(text[idx:], statsObjectMarker)
 		if rel < 0 {
 			break
@@ -229,21 +247,34 @@ func parseModelPage(body string) []EndpointStats {
 		}
 		endpointID := text[idStart : idStart+idEnd]
 		idx = idStart + idEnd // resume past this marker's id
+		headSearch := prevMarker
+		prevMarker = marker
 		if endpointID == "" || seen[endpointID] {
 			continue
 		}
+		// Record the attempt before any work: a repeated id is never scanned or
+		// decoded twice, whether it matched or not.
+		seen[endpointID] = true
 		// The endpoint object opens with {"id":"<endpoint_id>"; provider_slug
-		// and quantization live in its head, before the stats object.
-		objStart := strings.LastIndex(text[:marker], endpointObjectMarker)
-		if objStart < 0 || !strings.HasPrefix(text[objStart+len(endpointObjectMarker):], endpointID) {
+		// and quantization live in its head, before the stats object. Bounding
+		// the backward search to since the previous marker keeps it linear.
+		objStart := strings.LastIndex(text[headSearch:marker], endpointObjectMarker)
+		if objStart < 0 {
+			continue
+		}
+		objStart += headSearch
+		if !endpointIDMatches(text, objStart+len(endpointObjectMarker), endpointID) {
 			continue
 		}
 		head := text[objStart:marker]
-		st, ok := decodeEndpointStats(text[marker+len(statsPrefix):])
+		scanEnd := marker + len(statsPrefix) + statsObjectScanCap
+		if scanEnd > len(text) {
+			scanEnd = len(text)
+		}
+		st, ok := decodeEndpointStats(text[marker+len(statsPrefix) : scanEnd])
 		if !ok {
 			continue
 		}
-		seen[endpointID] = true
 		out = append(out, EndpointStats{
 			ProviderSlug:  jsonStringField(head, "provider_slug"),
 			Quantization:  jsonStringField(head, "quantization"),
@@ -254,7 +285,17 @@ func parseModelPage(body string) []EndpointStats {
 			WindowMinutes: statInt(st.WindowMinutes),
 		})
 	}
-	return out
+	return out, nil
+}
+
+// endpointIDMatches reports whether text[pos:] begins with exactly id followed
+// by the closing quote of the id string field — so id "ab" never matches a head
+// whose id is "abc" and stats are never mis-attributed.
+func endpointIDMatches(text string, pos int, id string) bool {
+	if pos < 0 || pos+len(id) >= len(text) {
+		return false
+	}
+	return text[pos:pos+len(id)] == id && text[pos+len(id)] == '"'
 }
 
 // rawEndpointStats is the subset of a stats object the scraper reads. Every
