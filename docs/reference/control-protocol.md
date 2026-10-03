@@ -1547,13 +1547,13 @@ fight, because the client's system prompt features its own tool far more
 heavily than any description can. Two channels carry the preference therefore:
 these descriptions (for any MCP client), and for daemon-spawned `--kind claude`
 children a **coordination prompt** (`claudeargv.CoordinationPrompt`) merged
-into the child's `--append-system-prompt` — same preference, delivered where
-the client's own tool guidance lives. It is injected only when the child
-carries the MCP surface (the `--mcp-config` injection above; on the daraja
-path, iff `ProxyUrl` is set), it shares the ONE `--append-system-prompt`
-element with any caller text (the flag is last-wins; two elements would drop
-one text), and interactive `rafiki claude` sessions get neither the prompt nor
-the gate (a human drives those).
+into the child's ONE `--append-system-prompt-file` — same preference, delivered
+where the client's own tool guidance lives. It is injected only when the child
+carries the MCP surface (the `--mcp-config=<path>` injection above; on the
+daraja path, iff `ProxyUrl` is set), it shares the one file with any caller
+text (the flag is last-wins; two elements would drop one text), and the file is
+staged on whichever machine runs the child. Interactive `rafiki claude`
+sessions get neither the prompt nor the gate (a human drives those).
 
 **The task ledger.** The `task_*` tools scope by conversation id, and that
 column is a UUID, so a per-user ledger cannot be a synthetic string. Each user

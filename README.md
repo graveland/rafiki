@@ -1288,13 +1288,15 @@ strips inherited `ANTHROPIC_*` variables so a nested launch can't land on the
 outer session's captured conversation.
 
 Every proxied session gets rafiki's MCP agent-control surface injected
-automatically (a `--mcp-config` pointing at the proxy's `/mcp` mount, with
-the credential carried as a `RAFIKI_MCP_TOKEN` env var Claude Code expands at
-connect time — never in argv, which is world-readable via `ps`). Daemon-
-spawned `--kind claude` children also get a short coordination prompt merged
-into `--append-system-prompt`, steering them toward `agent_spawn` over the
-built-in `Task` tool. Any other Anthropic-protocol client gets the same
-routing via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
+automatically (a `--mcp-config=<path>` pointing at the proxy's `/mcp` mount,
+with the credential carried as a `RAFIKI_MCP_TOKEN` env var Claude Code
+expands at connect time — never in argv, which is world-readable via `ps`).
+The config JSON is staged to a file, not inlined, for the same reason.
+Daemon-spawned `--kind claude` children also get a short coordination prompt
+staged to a `--append-system-prompt-file`, steering them toward `agent_spawn`
+over the built-in `Task` tool. Both files are staged on whichever machine runs
+the child. Any other Anthropic-protocol client gets the same routing via
+`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`.
 
 ### Billing your own subscription
 
