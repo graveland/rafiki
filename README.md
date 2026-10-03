@@ -111,11 +111,12 @@ Three Swahili words, three roles:
   a colder, more expensive provider mid-conversation. `routing.ProviderGuard`
   watches for the miss pattern and ejects the bad provider automatically.
 - **Declared routing, end to end.** An OpenRouter model id can carry a
-  bracketed spec (`[sort=price,quant=fp8+,only=…,nodata,zdr]`) that any caller
-  who can spawn may set; `rafiki providers route set` stores operator
-  defaults per model line; `rafiki providers ban` ejects a bad host by hand
-  at runtime. `nodata`/`zdr` are monotone — data policy cannot be routed
-  around by any of it.
+  bracketed spec (`[sort=price,quant=fp8+,prefer=…,only=…,nodata,zdr]`) that
+  any caller who can spawn may set; `rafiki models route` shows where a spec
+  would serve a model, `rafiki route set` steers a running child's spec, and
+  `rafiki providers route set` stores operator defaults per model line;
+  `rafiki providers ban` ejects a bad host by hand at runtime. `nodata`/`zdr`
+  are monotone — data policy cannot be routed around by any of it.
 - **Model aliasing** — short names for long local/custom model ids, with a
   declared context window so Claude Code doesn't assume 200K against a
   16K-context local model and blow past it.
@@ -177,7 +178,7 @@ Any OpenRouter model string may carry a **routing spec** — a bracketed tail
 after the id, e.g. `openrouter/z-ai/glm-5.3-flash[sort=price,quant=fp8+]` —
 that controls the OpenRouter `provider` routing object sent with the request
 (`routing.ParseModel`/`ParseSpec`, `pkg/routing/spec.go`). The same grammar is
-the stored form of a routing-policy row (below) and a preset's model. Five
+the stored form of a routing-policy row (below) and a preset's model. Six
 keys, comma-separated; a malformed or unknown item is a parse error, never
 silently ignored (a misread spec silently changes where requests are served):
 
@@ -190,6 +191,11 @@ silently ignored (a misread spec silently changes where requests are served):
   and everything above; `unknown` (a host OpenRouter hasn't labelled) is on
   no tier, so no floor admits it and `unknown+` is a parse error — a list
   may name it explicitly;
+- `prefer=slug|slug` — provider slugs to try FIRST, with fallback: sets the
+  OpenRouter `provider.order`. Unlike `only`, it is a preference, not a
+  restriction — the request may still be served by any other eligible host,
+  and it RESPECTS operator bans and the cache guard's ejections (`only`
+  bypasses them);
 - `only=slug|slug` — OpenRouter provider slugs the request may be served by;
 - `nodata` — sets `data_collection: "deny"`;
 - `zdr` — sets `zdr: true` (zero data retention).
@@ -203,6 +209,25 @@ on the child's session: `rafiki get <child>` reports it (`routing`), resume
 never re-resolves it, and a policy edit after the spawn never rewrites a
 running child. Everything downstream sees the base id plus the stored spec —
 brackets are never re-parsed.
+
+A spec is inspectable and steerable without a respawn:
+
+```
+rafiki models route 'deepseek/deepseek-v4.1-flash[sort=price,quant=fp8+]'
+rafiki route set <child> 'prefer=fireworks|deepinfra'
+```
+
+`rafiki models route '<model>[spec]'` lists every endpoint OpenRouter could
+serve a model from, marked eligible or excluded by the spec (each with price,
+quantization, measured throughput/latency and uptime); the server parses the
+bracket, `--all` includes excluded rows and `--sort` orders the table
+client-side, with a missing measurement sorting last. `rafiki route set
+<child> <spec>` merges a bracket-free delta over a running child's stored
+spec — per key, over what the child already carries — and the child obeys it
+on its next request. From an agent, the same steering is the `agent_route`
+tool (agent id + spec), bounded to the caller's own subtree; `only=` in a
+delta is operator-only, so a child may set `prefer`, `sort` and `quant` but
+never pin.
 
 Below every spec level sits a **pin** (a providers.toml alias's `only`, or
 the built-in per-line pins): used only when no spec level set `only`. A pin
@@ -836,6 +861,7 @@ tree:
 | `agent_list` | your subtree — id, name, model, status, assigned task |
 | `agent_view` | the tail of a descendant's transcript |
 | `agent_send` | steer a descendant mid-flight, or give it more work |
+| `agent_route` | steer a descendant's provider routing — `prefer`/`sort`/`quant`; `only` is operator-only |
 | `agent_kill` | stop a descendant and everything below it |
 | `agent_models` | the models you may spawn on |
 

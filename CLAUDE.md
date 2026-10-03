@@ -11,7 +11,7 @@
   - `.claude/skills/executor-plane/` — executor pool/health/selection/confinement, background jobs, workspace lifecycle, container isolation, the fundi tools framework.
   - `.claude/skills/daemon-state-and-recovery/` — capture, inbox, conversation leases, ordinal/compaction rebase, daemon ownership/restart recovery, Claude Code thread/subagent reconstruction.
   - `.claude/skills/cockpit-tui/` — the bubbletea cockpit: rendering, panes, rail, keybindings, event feeds, model picker UI.
-  - `.claude/skills/model-catalog-and-routing/` — `ModelCatalog`, the provider cache guard, `agent_models`, model aliasing, sender/failover behavior.
+  - `.claude/skills/model-catalog-and-routing/` — `ModelCatalog`/`EndpointCatalog`, the provider cache guard, routing-spec steering, `agent_models`/`agent_route`, model aliasing, sender/failover behavior.
   - `.claude/skills/claude-code-integration/` — the Claude Code binary's own quirks: OAuth gate, stream watchdog, tool search, argv/env launch contract, coordination prompt.
   - When you learn something new that fits one of these, add it there, not here — and check first whether an existing entry already covers it.
 
