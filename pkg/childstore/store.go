@@ -217,6 +217,14 @@ func (s *Store) SetMaxCost(id string, maxCost float64) error {
 	return s.Update(id, func(sess *Session) { sess.MaxCost = maxCost })
 }
 
+// SetRouting replaces id's stored routing spec with the canonical form after a
+// steering merge (routing.Spec.String()). Routing is not an indexed field, so
+// Update's lock-and-mutate is sufficient — the same shape as SetMaxCost. The
+// caller has already merged and validated the spec; the store only records it.
+func (s *Store) SetRouting(id, routing string) error {
+	return s.Update(id, func(sess *Session) { sess.Routing = routing })
+}
+
 // SetLabels atomically applies a set/remove mutation to the session's label map.
 // Set entries are merged, then Remove entries are deleted. Returns the full
 // post-mutation labels as a defensive copy, or ErrNotFound when id is absent.

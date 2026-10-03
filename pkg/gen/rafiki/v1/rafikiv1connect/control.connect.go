@@ -53,6 +53,8 @@ const (
 	ControlCloseProcedure = "/rafiki.v1.Control/Close"
 	// ControlSetBudgetProcedure is the fully-qualified name of the Control's SetBudget RPC.
 	ControlSetBudgetProcedure = "/rafiki.v1.Control/SetBudget"
+	// ControlSetRoutingProcedure is the fully-qualified name of the Control's SetRouting RPC.
+	ControlSetRoutingProcedure = "/rafiki.v1.Control/SetRouting"
 	// ControlListTasksProcedure is the fully-qualified name of the Control's ListTasks RPC.
 	ControlListTasksProcedure = "/rafiki.v1.Control/ListTasks"
 	// ControlListModelsProcedure is the fully-qualified name of the Control's ListModels RPC.
@@ -224,6 +226,7 @@ type ControlClient interface {
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error)
+	SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
@@ -383,6 +386,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			httpClient,
 			baseURL+ControlSetBudgetProcedure,
 			connect.WithSchema(controlMethods.ByName("SetBudget")),
+			connect.WithClientOptions(opts...),
+		),
+		setRouting: connect.NewClient[v1.SetRoutingRequest, v1.SetRoutingResponse](
+			httpClient,
+			baseURL+ControlSetRoutingProcedure,
+			connect.WithSchema(controlMethods.ByName("SetRouting")),
 			connect.WithClientOptions(opts...),
 		),
 		listTasks: connect.NewClient[v1.ListTasksRequest, v1.ListTasksResponse](
@@ -825,6 +834,7 @@ type controlClient struct {
 	kill                     *connect.Client[v1.KillRequest, v1.KillResponse]
 	close                    *connect.Client[v1.CloseRequest, v1.CloseResponse]
 	setBudget                *connect.Client[v1.SetBudgetRequest, v1.SetBudgetResponse]
+	setRouting               *connect.Client[v1.SetRoutingRequest, v1.SetRoutingResponse]
 	listTasks                *connect.Client[v1.ListTasksRequest, v1.ListTasksResponse]
 	listModels               *connect.Client[v1.ListModelsRequest, v1.ListModelsResponse]
 	listExecutors            *connect.Client[v1.ListExecutorsRequest, v1.ListExecutorsResponse]
@@ -941,6 +951,11 @@ func (c *controlClient) Close(ctx context.Context, req *connect.Request[v1.Close
 // SetBudget calls rafiki.v1.Control.SetBudget.
 func (c *controlClient) SetBudget(ctx context.Context, req *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error) {
 	return c.setBudget.CallUnary(ctx, req)
+}
+
+// SetRouting calls rafiki.v1.Control.SetRouting.
+func (c *controlClient) SetRouting(ctx context.Context, req *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error) {
+	return c.setRouting.CallUnary(ctx, req)
 }
 
 // ListTasks calls rafiki.v1.Control.ListTasks.
@@ -1309,6 +1324,7 @@ type ControlHandler interface {
 	Kill(context.Context, *connect.Request[v1.KillRequest]) (*connect.Response[v1.KillResponse], error)
 	Close(context.Context, *connect.Request[v1.CloseRequest]) (*connect.Response[v1.CloseResponse], error)
 	SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error)
+	SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error)
 	ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error)
 	ListModels(context.Context, *connect.Request[v1.ListModelsRequest]) (*connect.Response[v1.ListModelsResponse], error)
 	ListExecutors(context.Context, *connect.Request[v1.ListExecutorsRequest]) (*connect.Response[v1.ListExecutorsResponse], error)
@@ -1464,6 +1480,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		ControlSetBudgetProcedure,
 		svc.SetBudget,
 		connect.WithSchema(controlMethods.ByName("SetBudget")),
+		connect.WithHandlerOptions(opts...),
+	)
+	controlSetRoutingHandler := connect.NewUnaryHandler(
+		ControlSetRoutingProcedure,
+		svc.SetRouting,
+		connect.WithSchema(controlMethods.ByName("SetRouting")),
 		connect.WithHandlerOptions(opts...),
 	)
 	controlListTasksHandler := connect.NewUnaryHandler(
@@ -1912,6 +1934,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlCloseHandler.ServeHTTP(w, r)
 		case ControlSetBudgetProcedure:
 			controlSetBudgetHandler.ServeHTTP(w, r)
+		case ControlSetRoutingProcedure:
+			controlSetRoutingHandler.ServeHTTP(w, r)
 		case ControlListTasksProcedure:
 			controlListTasksHandler.ServeHTTP(w, r)
 		case ControlListModelsProcedure:
@@ -2097,6 +2121,10 @@ func (UnimplementedControlHandler) Close(context.Context, *connect.Request[v1.Cl
 
 func (UnimplementedControlHandler) SetBudget(context.Context, *connect.Request[v1.SetBudgetRequest]) (*connect.Response[v1.SetBudgetResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetBudget is not implemented"))
+}
+
+func (UnimplementedControlHandler) SetRouting(context.Context, *connect.Request[v1.SetRoutingRequest]) (*connect.Response[v1.SetRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.SetRouting is not implemented"))
 }
 
 func (UnimplementedControlHandler) ListTasks(context.Context, *connect.Request[v1.ListTasksRequest]) (*connect.Response[v1.ListTasksResponse], error) {

@@ -97,6 +97,10 @@ func (l *recordingLifecycle) SetBudget(_ context.Context, _ string, _ float64) e
 	return nil
 }
 
+func (l *recordingLifecycle) SetRouting(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
+
 type recordingInbox struct{ kids []string }
 
 func (i *recordingInbox) Accept(_ context.Context, in inbox.Inbound) (string, error) {

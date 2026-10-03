@@ -477,6 +477,24 @@ message SetBudgetResponse {
   double max_cost = 2;
 }
 
+// SetRouting merges a routing-spec delta over a child's stored routing spec,
+// effective on its next OpenRouter request. delta is the bracket-free spec
+// string ("prefer=fireworks", "sort=throughput,quant=fp8+"). The merge is
+// delta-over-stored per key (routing.Spec.Merge); an empty delta is rejected.
+// Authority: an operator (user credential or the local socket) may set any
+// key. A child credential is bounded to its own subtree (childScoped) AND may
+// set only prefer, sort and quant: it may not set or change only, and may not
+// clear an operator-set only, nodata or zdr (PermissionDenied).
+message SetRoutingRequest {
+  string child_id = 1;
+  string delta = 2;
+}
+
+message SetRoutingResponse {
+  string child_id = 1;
+  string routing = 2; // the stored canonical spec after the merge
+}
+
 // TaskRow is one row of the task ledger. Handle is the dotted ordinal path
 // ("2.1"), computed on read and never persisted -- an agent addresses tasks by
 // handle so it never has to carry a UUID across turns.
@@ -961,6 +979,7 @@ service Control {
   rpc Kill(KillRequest) returns (KillResponse);
   rpc Close(CloseRequest) returns (CloseResponse);
   rpc SetBudget(SetBudgetRequest) returns (SetBudgetResponse);
+  rpc SetRouting(SetRoutingRequest) returns (SetRoutingResponse);
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc ListExecutors(ListExecutorsRequest) returns (ListExecutorsResponse);

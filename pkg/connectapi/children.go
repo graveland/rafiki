@@ -145,6 +145,12 @@ type ChildLifecycle interface {
 	// Only a negative or non-finite cap is refused; 0 means unlimited and
 	// is an accepted, intentional value.
 	SetBudget(ctx context.Context, childID string, maxCost float64) error
+	// SetRouting merges a routing-spec delta over childID's stored routing
+	// spec and returns the canonical stored spec after the merge. Operator
+	// authority for a user credential (or the socket's nil identity); for a
+	// per-child credential it is bounded to the caller's subtree and may set
+	// only prefer/sort/quant — never only= (see SetRoutingRequest).
+	SetRouting(ctx context.Context, childID, delta string) (string, error)
 }
 
 // KillOutcome mirrors protocol.KillResponseData, which is what the daemon's

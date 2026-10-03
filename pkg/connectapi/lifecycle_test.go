@@ -29,6 +29,11 @@ type fakeLifecycle struct {
 	budgetChildID string
 	budgetMaxCost float64
 	budgetErr     error
+
+	routingChildID string
+	routingDelta   string
+	routingResult  string
+	routingErr     error
 }
 
 func (f *fakeLifecycle) Spawn(_ context.Context, p connectapi.SpawnParams) (string, error) {
@@ -58,6 +63,12 @@ func (f *fakeLifecycle) SetBudget(_ context.Context, childID string, maxCost flo
 	f.budgetChildID = childID
 	f.budgetMaxCost = maxCost
 	return f.budgetErr
+}
+
+func (f *fakeLifecycle) SetRouting(_ context.Context, childID, delta string) (string, error) {
+	f.routingChildID = childID
+	f.routingDelta = delta
+	return f.routingResult, f.routingErr
 }
 
 func TestSpawnPassesFieldsThrough(t *testing.T) {

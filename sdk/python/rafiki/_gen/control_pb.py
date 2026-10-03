@@ -1289,6 +1289,52 @@ class SetBudgetResponse:
         return obj
 
 @dataclasses.dataclass
+class SetRoutingRequest:
+    child_id: str = ""
+    delta: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.delta != "":
+            out["delta"] = self.delta
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRoutingRequest":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("delta")
+        if _v is not None:
+            obj.delta = _v
+        return obj
+
+@dataclasses.dataclass
+class SetRoutingResponse:
+    child_id: str = ""
+    routing: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.child_id != "":
+            out["childId"] = self.child_id
+        if self.routing != "":
+            out["routing"] = self.routing
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "SetRoutingResponse":
+        obj = cls()
+        _v = _d.get("childId")
+        if _v is not None:
+            obj.child_id = _v
+        _v = _d.get("routing")
+        if _v is not None:
+            obj.routing = _v
+        return obj
+
+@dataclasses.dataclass
 class TaskRow:
     handle: str = ""
     content: str = ""

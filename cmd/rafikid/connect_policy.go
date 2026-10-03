@@ -47,7 +47,8 @@ const (
 
 	// policyChildScoped marks the verbs a child credential with subtree
 	// authority may call — the agent-control verbs Spawn, Kill, Close, Send,
-	// SetBudget, GetHistory, StreamEvents, ListChildren, GetChild, ListTasks;
+	// SetBudget, SetRouting, GetHistory, StreamEvents, ListChildren, GetChild,
+	// ListTasks;
 	// the three script-child verbs Report, Receive, SetResult; the
 	// conversation reads ConversationSearch/Export/Query, answered through the
 	// caller's subtree (childConversationScope); the pymodule verbs, read
@@ -60,6 +61,8 @@ const (
 	// connectapi's ChildScopeSource (cmd/rafikid connect_childscope.go),
 	// which reads the stored parent chain via childstore.IsDescendant and
 	// refuses the caller's own id — a child is not a descendant of itself.
+	// SetRouting from a child is bounded to prefer/sort/quant: SetChildRouting
+	// refuses only= from child provenance.
 	// (Receive and SetResult never consult Authorize at all: they are
 	// self-only verbs, checked by identity, not by subtree.)
 	// The source never resolves nil — the operator path — for a child-shaped
@@ -123,6 +126,9 @@ var controlPolicyTable = map[string]controlPolicy{
 	// routes it to SetChildBudget (direct parentage, bounded by the caller's
 	// own remaining grant) — the agent_set_budget tool's rule.
 	"SetBudget": policyChildScoped,
+	// SetRouting from a child is subtree-scoped and refused only= — see
+	// SetChildRouting. It edits the stored spec, never re-resolves policy.
+	"SetRouting": policyChildScoped,
 	// Conversation reads a child may make on its own subtree, the MCP face's
 	// conversation_* tools' boundary (insights.ScopeSubtree). Review,
 	// Findings and Stats stay userOnly: nothing a child runs needs them.

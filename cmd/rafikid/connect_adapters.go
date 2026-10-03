@@ -432,6 +432,17 @@ func (l connectLifecycle) SetBudget(ctx context.Context, childID string, maxCost
 	return l.c.SetChildBudgetAsOperator(ctx, childID, maxCost)
 }
 
+// SetRouting is operator authority for a user credential (or the socket's nil
+// identity) and subtree authority for a per-child credential: SetChildRouting
+// bounds the target to the caller's subtree and refuses only= from a child, so
+// a child cannot pin providers past the daemon's bans.
+func (l connectLifecycle) SetRouting(ctx context.Context, childID, delta string) (string, error) {
+	if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken {
+		return l.c.SetChildRouting(ctx, id.ChildID, childID, delta)
+	}
+	return l.c.SetChildRoutingAsOperator(ctx, childID, delta)
+}
+
 // connectModels adapts *Controller to connectapi.ModelLister. A distinct type
 // for the same reason connectLifecycle is one: Controller.ListModels already
 // exists with a different signature, and renaming it would touch every

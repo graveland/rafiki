@@ -66,6 +66,8 @@ func (emptyLifecycle) Close(context.Context, string) error { return nil }
 
 func (emptyLifecycle) SetBudget(context.Context, string, float64) error { return nil }
 
+func (emptyLifecycle) SetRouting(context.Context, string, string) (string, error) { return "", nil }
+
 // TestSpawnWithEmptyChildIDRefused proves an unnamed-child credential cannot
 // spawn — not even top-level, which is what forcing ParentChildID "" would
 // mean.

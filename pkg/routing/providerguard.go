@@ -180,6 +180,22 @@ func (g *ProviderGuard) Slug(provider string) string {
 	return d.Slug(provider)
 }
 
+// Resolve returns provider's routing slug for an operator action, loading the
+// directory on demand — the same call Ban makes. degraded is true when the
+// directory could not be loaded and slug is merely a guess, so an OpenRouter
+// outage never blocks the action; err is ErrUnknownProvider for a name the
+// loaded directory does not list. Nil-safe: a nil guard (or no directory)
+// degrades every name.
+func (g *ProviderGuard) Resolve(ctx context.Context, provider string) (slug string, degraded bool, err error) {
+	if g == nil {
+		return (*ProviderDirectory)(nil).Resolve(ctx, provider)
+	}
+	g.mu.Lock()
+	d := g.dir
+	g.mu.Unlock()
+	return d.Resolve(ctx, provider)
+}
+
 // SetSink attaches the durable ejection log. Safe to leave unset.
 func (g *ProviderGuard) SetSink(s EjectionSink) {
 	if g == nil {
