@@ -71,6 +71,7 @@ type Server struct {
 	quota          atomic.Pointer[QuotaReader]
 	providerBans   atomic.Pointer[ProviderBanManager]
 	routes         atomic.Pointer[RouteManager]
+	routeExplainer atomic.Pointer[RouteExplainer]
 	conversations  atomic.Pointer[ConversationInsights]
 	reviewer       atomic.Pointer[ConversationReviewer]
 	findingsReader atomic.Pointer[ConversationFindingsReader]

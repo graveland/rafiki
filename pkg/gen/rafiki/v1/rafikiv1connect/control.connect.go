@@ -170,6 +170,8 @@ const (
 	ControlShutdownDaemonProcedure = "/rafiki.v1.Control/ShutdownDaemon"
 	// ControlModelInfoProcedure is the fully-qualified name of the Control's ModelInfo RPC.
 	ControlModelInfoProcedure = "/rafiki.v1.Control/ModelInfo"
+	// ControlModelRoutesProcedure is the fully-qualified name of the Control's ModelRoutes RPC.
+	ControlModelRoutesProcedure = "/rafiki.v1.Control/ModelRoutes"
 	// ControlConversationStatsProcedure is the fully-qualified name of the Control's ConversationStats
 	// RPC.
 	ControlConversationStatsProcedure = "/rafiki.v1.Control/ConversationStats"
@@ -291,6 +293,10 @@ type ControlClient interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
 	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
 	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	// ModelRoutes explains where a request for a model would go under a routing
+	// spec: every hosting endpoint with its price, quantization, uptime and
+	// measured throughput, marked eligible or excluded with the reason. Read-only.
+	ModelRoutes(context.Context, *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error)
 	ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error)
 	EnrollExecutor(context.Context, *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error)
 	CreateExecutor(context.Context, *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error)
@@ -697,6 +703,12 @@ func NewControlClient(httpClient connect.HTTPClient, baseURL string, opts ...con
 			connect.WithSchema(controlMethods.ByName("ModelInfo")),
 			connect.WithClientOptions(opts...),
 		),
+		modelRoutes: connect.NewClient[v1.ModelRoutesRequest, v1.ModelRoutesResponse](
+			httpClient,
+			baseURL+ControlModelRoutesProcedure,
+			connect.WithSchema(controlMethods.ByName("ModelRoutes")),
+			connect.WithClientOptions(opts...),
+		),
 		conversationStats: connect.NewClient[v1.ConversationStatsRequest, v1.ConversationStatsResponse](
 			httpClient,
 			baseURL+ControlConversationStatsProcedure,
@@ -866,6 +878,7 @@ type controlClient struct {
 	search                   *connect.Client[v1.SearchRequest, v1.SearchResponse]
 	shutdownDaemon           *connect.Client[v1.ShutdownDaemonRequest, v1.ShutdownDaemonResponse]
 	modelInfo                *connect.Client[v1.ModelInfoRequest, v1.ModelInfoResponse]
+	modelRoutes              *connect.Client[v1.ModelRoutesRequest, v1.ModelRoutesResponse]
 	conversationStats        *connect.Client[v1.ConversationStatsRequest, v1.ConversationStatsResponse]
 	enrollExecutor           *connect.Client[v1.EnrollExecutorRequest, v1.EnrollExecutorResponse]
 	createExecutor           *connect.Client[v1.CreateExecutorRequest, v1.CreateExecutorResponse]
@@ -1195,6 +1208,11 @@ func (c *controlClient) ModelInfo(ctx context.Context, req *connect.Request[v1.M
 	return c.modelInfo.CallUnary(ctx, req)
 }
 
+// ModelRoutes calls rafiki.v1.Control.ModelRoutes.
+func (c *controlClient) ModelRoutes(ctx context.Context, req *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error) {
+	return c.modelRoutes.CallUnary(ctx, req)
+}
+
 // ConversationStats calls rafiki.v1.Control.ConversationStats.
 func (c *controlClient) ConversationStats(ctx context.Context, req *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error) {
 	return c.conversationStats.CallUnary(ctx, req)
@@ -1360,6 +1378,10 @@ type ControlHandler interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
 	ShutdownDaemon(context.Context, *connect.Request[v1.ShutdownDaemonRequest]) (*connect.Response[v1.ShutdownDaemonResponse], error)
 	ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error)
+	// ModelRoutes explains where a request for a model would go under a routing
+	// spec: every hosting endpoint with its price, quantization, uptime and
+	// measured throughput, marked eligible or excluded with the reason. Read-only.
+	ModelRoutes(context.Context, *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error)
 	ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error)
 	EnrollExecutor(context.Context, *connect.Request[v1.EnrollExecutorRequest]) (*connect.Response[v1.EnrollExecutorResponse], error)
 	CreateExecutor(context.Context, *connect.Request[v1.CreateExecutorRequest]) (*connect.Response[v1.CreateExecutorResponse], error)
@@ -1762,6 +1784,12 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 		connect.WithSchema(controlMethods.ByName("ModelInfo")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlModelRoutesHandler := connect.NewUnaryHandler(
+		ControlModelRoutesProcedure,
+		svc.ModelRoutes,
+		connect.WithSchema(controlMethods.ByName("ModelRoutes")),
+		connect.WithHandlerOptions(opts...),
+	)
 	controlConversationStatsHandler := connect.NewUnaryHandler(
 		ControlConversationStatsProcedure,
 		svc.ConversationStats,
@@ -1990,6 +2018,8 @@ func NewControlHandler(svc ControlHandler, opts ...connect.HandlerOption) (strin
 			controlShutdownDaemonHandler.ServeHTTP(w, r)
 		case ControlModelInfoProcedure:
 			controlModelInfoHandler.ServeHTTP(w, r)
+		case ControlModelRoutesProcedure:
+			controlModelRoutesHandler.ServeHTTP(w, r)
 		case ControlConversationStatsProcedure:
 			controlConversationStatsHandler.ServeHTTP(w, r)
 		case ControlEnrollExecutorProcedure:
@@ -2279,6 +2309,10 @@ func (UnimplementedControlHandler) ShutdownDaemon(context.Context, *connect.Requ
 
 func (UnimplementedControlHandler) ModelInfo(context.Context, *connect.Request[v1.ModelInfoRequest]) (*connect.Response[v1.ModelInfoResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ModelInfo is not implemented"))
+}
+
+func (UnimplementedControlHandler) ModelRoutes(context.Context, *connect.Request[v1.ModelRoutesRequest]) (*connect.Response[v1.ModelRoutesResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("rafiki.v1.Control.ModelRoutes is not implemented"))
 }
 
 func (UnimplementedControlHandler) ConversationStats(context.Context, *connect.Request[v1.ConversationStatsRequest]) (*connect.Response[v1.ConversationStatsResponse], error) {

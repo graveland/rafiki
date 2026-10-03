@@ -41,7 +41,8 @@ const (
 	// the procedure is read-only and answers nothing scoped to a user beyond
 	// what the caller's own credential already names: ListModels,
 	// ListPresets, GetPreset, GetRateLimitStatus, ListProviderBans,
-	// ListRoutes, ModelInfo. Anything writable must never be listed here.
+	// ListRoutes, ModelInfo, ModelRoutes. Anything writable must never be
+	// listed here.
 	policyAnyCaller
 
 	// policyChildScoped marks the verbs a child credential with subtree
@@ -93,7 +94,7 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 // budget, write) or ANSWER AS the caller (conversations, recall, executors)?
 // Then it is userOnly unless wave 1 will scope it to the caller's subtree
 // (childScoped). Does it only READ daemon-wide, non-owned facts? anyCaller —
-// and only these seven, all read-only:
+// and only these eight, all read-only:
 //
 //	ListModels         the model catalog, no owner dimension
 //	ListPresets        preset names/metadata; a child may read, not write
@@ -103,6 +104,8 @@ const controlProcedurePrefix = "/rafiki.v1.Control/"
 //	ListProviderBans   the ban list names providers, not users
 //	ListRoutes         routing defaults name providers, not users
 //	ModelInfo          per-model catalog lookup, the twin of ListModels
+//	ModelRoutes        per-model endpoint prices/eligibility, the twin of
+//	                   ListRoutes and ModelInfo: providers, not users
 var controlPolicyTable = map[string]controlPolicy{
 	// childScoped: a per-child credential may call these on its own subtree;
 	// the per-verb subtree check lives in the handler behind
@@ -155,7 +158,7 @@ var controlPolicyTable = map[string]controlPolicy{
 	"DeleteMemory":  policyOwnerScoped,
 
 	// anyCaller: the read-only, non-scoped verbs — see the classification
-	// rule above for all seven.
+	// rule above for all eight.
 	"ListModels":         policyAnyCaller,
 	"ListPresets":        policyAnyCaller,
 	"GetPreset":          policyAnyCaller,
@@ -163,6 +166,10 @@ var controlPolicyTable = map[string]controlPolicy{
 	// ModelInfo is a read-only catalog lookup, the per-model twin of
 	// ListModels: same non-owned answer, same reasoning.
 	"ModelInfo": policyAnyCaller,
+	// ModelRoutes is a read-only routing explanation — endpoint prices,
+	// quantization and eligibility for one model line. It names providers and
+	// stats, never a user's data.
+	"ModelRoutes": policyAnyCaller,
 
 	// userOnly: everything that acts with operator authority or answers as
 	// the caller's identity. Listed explicitly so the completeness test can

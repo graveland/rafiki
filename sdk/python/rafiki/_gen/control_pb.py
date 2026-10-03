@@ -5114,6 +5114,177 @@ class ModelInfoResponse:
         return obj
 
 @dataclasses.dataclass
+class ModelRoutesRequest:
+    model: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model != "":
+            out["model"] = self.model
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ModelRoutesRequest":
+        obj = cls()
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        return obj
+
+@dataclasses.dataclass
+class RouteEndpoint:
+    provider: str = ""
+    slug: str = ""
+    tag: str = ""
+    quantization: str = ""
+    prompt_usd_per_mtok: Optional[float] = None
+    completion_usd_per_mtok: Optional[float] = None
+    context_length: int = 0
+    uptime_30m: Optional[float] = None
+    tools: bool = False
+    eligible: bool = False
+    excluded_reason: str = ""
+    rank: int = 0
+    preferred: bool = False
+    p50_tokens_per_sec: Optional[float] = None
+    p90_tokens_per_sec: Optional[float] = None
+    p50_latency_ms: Optional[float] = None
+    stats_requests: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.provider != "":
+            out["provider"] = self.provider
+        if self.slug != "":
+            out["slug"] = self.slug
+        if self.tag != "":
+            out["tag"] = self.tag
+        if self.quantization != "":
+            out["quantization"] = self.quantization
+        if self.prompt_usd_per_mtok is not None:
+            out["promptUsdPerMtok"] = _float_out(self.prompt_usd_per_mtok)
+        if self.completion_usd_per_mtok is not None:
+            out["completionUsdPerMtok"] = _float_out(self.completion_usd_per_mtok)
+        if self.context_length != 0:
+            out["contextLength"] = self.context_length
+        if self.uptime_30m is not None:
+            out["uptime30m"] = _float_out(self.uptime_30m)
+        if self.tools != False:
+            out["tools"] = self.tools
+        if self.eligible != False:
+            out["eligible"] = self.eligible
+        if self.excluded_reason != "":
+            out["excludedReason"] = self.excluded_reason
+        if self.rank != 0:
+            out["rank"] = self.rank
+        if self.preferred != False:
+            out["preferred"] = self.preferred
+        if self.p50_tokens_per_sec is not None:
+            out["p50TokensPerSec"] = _float_out(self.p50_tokens_per_sec)
+        if self.p90_tokens_per_sec is not None:
+            out["p90TokensPerSec"] = _float_out(self.p90_tokens_per_sec)
+        if self.p50_latency_ms is not None:
+            out["p50LatencyMs"] = _float_out(self.p50_latency_ms)
+        if self.stats_requests is not None:
+            out["statsRequests"] = self.stats_requests
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "RouteEndpoint":
+        obj = cls()
+        _v = _d.get("provider")
+        if _v is not None:
+            obj.provider = _v
+        _v = _d.get("slug")
+        if _v is not None:
+            obj.slug = _v
+        _v = _d.get("tag")
+        if _v is not None:
+            obj.tag = _v
+        _v = _d.get("quantization")
+        if _v is not None:
+            obj.quantization = _v
+        _v = _d.get("promptUsdPerMtok")
+        if _v is not None:
+            obj.prompt_usd_per_mtok = _float_in(_v)
+        _v = _d.get("completionUsdPerMtok")
+        if _v is not None:
+            obj.completion_usd_per_mtok = _float_in(_v)
+        _v = _d.get("contextLength")
+        if _v is not None:
+            obj.context_length = _int_in(_v)
+        _v = _d.get("uptime30m")
+        if _v is not None:
+            obj.uptime_30m = _float_in(_v)
+        _v = _d.get("tools")
+        if _v is not None:
+            obj.tools = _v
+        _v = _d.get("eligible")
+        if _v is not None:
+            obj.eligible = _v
+        _v = _d.get("excludedReason")
+        if _v is not None:
+            obj.excluded_reason = _v
+        _v = _d.get("rank")
+        if _v is not None:
+            obj.rank = _int_in(_v)
+        _v = _d.get("preferred")
+        if _v is not None:
+            obj.preferred = _v
+        _v = _d.get("p50TokensPerSec")
+        if _v is not None:
+            obj.p50_tokens_per_sec = _float_in(_v)
+        _v = _d.get("p90TokensPerSec")
+        if _v is not None:
+            obj.p90_tokens_per_sec = _float_in(_v)
+        _v = _d.get("p50LatencyMs")
+        if _v is not None:
+            obj.p50_latency_ms = _float_in(_v)
+        _v = _d.get("statsRequests")
+        if _v is not None:
+            obj.stats_requests = _int_in(_v)
+        return obj
+
+@dataclasses.dataclass
+class ModelRoutesResponse:
+    model: str = ""
+    routing: str = ""
+    endpoints: list[RouteEndpoint] = dataclasses.field(default_factory=list)
+    stale: bool = False
+    stats_note: str = ""
+
+    def to_dict(self) -> dict:
+        out = {}
+        if self.model != "":
+            out["model"] = self.model
+        if self.routing != "":
+            out["routing"] = self.routing
+        if self.endpoints:
+            out["endpoints"] = [x.to_dict() for x in self.endpoints]
+        if self.stale != False:
+            out["stale"] = self.stale
+        if self.stats_note != "":
+            out["statsNote"] = self.stats_note
+        return out
+    @classmethod
+    def from_dict(cls, _d: dict) -> "ModelRoutesResponse":
+        obj = cls()
+        _v = _d.get("model")
+        if _v is not None:
+            obj.model = _v
+        _v = _d.get("routing")
+        if _v is not None:
+            obj.routing = _v
+        _v = _d.get("endpoints")
+        if _v is not None:
+            obj.endpoints = [RouteEndpoint.from_dict(x) for x in _v]
+        _v = _d.get("stale")
+        if _v is not None:
+            obj.stale = _v
+        _v = _d.get("statsNote")
+        if _v is not None:
+            obj.stats_note = _v
+        return obj
+
+@dataclasses.dataclass
 class ConversationStatsRequest:
     conversation_id: str = ""
     since_unix: int = 0

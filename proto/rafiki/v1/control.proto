@@ -1030,6 +1030,10 @@ service Control {
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc ShutdownDaemon(ShutdownDaemonRequest) returns (ShutdownDaemonResponse);
   rpc ModelInfo(ModelInfoRequest) returns (ModelInfoResponse);
+  // ModelRoutes explains where a request for a model would go under a routing
+  // spec: every hosting endpoint with its price, quantization, uptime and
+  // measured throughput, marked eligible or excluded with the reason. Read-only.
+  rpc ModelRoutes(ModelRoutesRequest) returns (ModelRoutesResponse);
   rpc ConversationStats(ConversationStatsRequest) returns (ConversationStatsResponse);
   rpc EnrollExecutor(EnrollExecutorRequest) returns (EnrollExecutorResponse);
   rpc CreateExecutor(CreateExecutorRequest) returns (CreateExecutorResponse);
@@ -1518,6 +1522,42 @@ message ModelInfoResponse {
   int32 max_completion_tokens = 4;
   int32 auto_compact_window = 5;
   bool known = 6;
+}
+
+// ModelRoutes answers "where would a request for this model go under this
+// routing spec": every hosting endpoint with its price, quantization, uptime
+// and measured throughput, marked eligible or excluded with the reason.
+message ModelRoutesRequest {
+  // model is an OpenRouter model id, optionally with a routing bracket
+  // ("deepseek/deepseek-v4.1-flash[sort=price,quant=fp8+]"). A leading
+  // "openrouter/" is accepted and stripped.
+  string model = 1;
+}
+message RouteEndpoint {
+  string provider = 1;           // display name
+  string slug = 2;
+  string tag = 3;
+  string quantization = 4;
+  optional double prompt_usd_per_mtok = 5;      // absent when unknown
+  optional double completion_usd_per_mtok = 6;
+  int32 context_length = 7;
+  optional double uptime_30m = 8;
+  bool tools = 9;
+  bool eligible = 10;
+  string excluded_reason = 11;   // "", "quant", "not-in-only", "banned"
+  int32 rank = 12;               // 1-based among eligible; 0 when excluded
+  bool preferred = 13;
+  optional double p50_tokens_per_sec = 14;      // absent when no stats matched
+  optional double p90_tokens_per_sec = 15;
+  optional double p50_latency_ms = 16;
+  optional int32 stats_requests = 17;
+}
+message ModelRoutesResponse {
+  string model = 1;              // base id, bracket stripped
+  string routing = 2;            // canonical spec string ("" when none)
+  repeated RouteEndpoint endpoints = 3;
+  bool stale = 4;                // endpoint list served from an expired cache entry
+  string stats_note = 5;         // non-empty when stats are unavailable, e.g. the scrape failed
 }
 
 // ConversationStatsRequest mirrors protocol.ConversationStatsRequest: global

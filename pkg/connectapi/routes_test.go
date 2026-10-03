@@ -13,6 +13,8 @@ import (
 	"connectrpc.com/connect"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
+	"go.graveland.dev/rafiki/pkg/protocol"
+	"go.graveland.dev/rafiki/pkg/routing"
 
 	"github.com/multigres/testkit/assert"
 )
@@ -148,3 +150,67 @@ func TestRouteRowCreatedAtIsRFC3339UTC(t *testing.T) {
 // them (each calls the pinned body verbatim).
 func TestRouteSetRejectsBadSpec(t *testing.T)       { TestSetRouteRejectsBadSpec(t) }
 func TestRouteDeleteMissingIsNotFound(t *testing.T) { TestDeleteRouteMissingIsNotFound(t) }
+
+// fakeRouteExplainer stands in for the daemon's ModelRoutes backend. It
+// records the model string it was handed so a test can pin that the handler
+// passes the caller's value through (trimmed) rather than parsing it itself.
+type fakeRouteExplainer struct {
+	resp *rafikiv1.ModelRoutesResponse
+	err  error
+	got  string
+}
+
+func (f *fakeRouteExplainer) ExplainModelRoutes(_ context.Context, model string) (*rafikiv1.ModelRoutesResponse, error) {
+	f.got = model
+	return f.resp, f.err
+}
+
+func TestModelRoutesHandlerUnwiredIsUnavailable(t *testing.T) {
+	s := &Server{}
+	_, err := s.ModelRoutes(context.Background(),
+		connect.NewRequest(&rafikiv1.ModelRoutesRequest{Model: "deepseek/deepseek-v4.1-flash"}))
+	c := assert.NewAborting(t)
+	c.Eq(connect.CodeUnavailable, connect.CodeOf(err), "unwired ModelRoutes: code")
+	c.True(strings.Contains(err.Error(), "route explainer not wired"), "unwired message = %q", err)
+}
+
+func TestModelRoutesHandlerEmptyModelIsInvalidArgument(t *testing.T) {
+	c := assert.NewCollecting(t)
+	// An unwired server is deliberate: the empty-model check must run first,
+	// so a blank request is an argument error rather than Unavailable.
+	s := &Server{}
+	for _, model := range []string{"", "   "} {
+		_, err := s.ModelRoutes(context.Background(),
+			connect.NewRequest(&rafikiv1.ModelRoutesRequest{Model: model}))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "blank model %q: code", model)
+	}
+}
+
+func TestModelRoutesHandlerBadBracketIsInvalidArgument(t *testing.T) {
+	// Reproduce what the daemon adapter (cmd/rafikid/connect_routeexplainer.go)
+	// returns for a malformed line: a ControllerError carrying the parser's
+	// message with the ErrInvalidArgs code. The handler must render it
+	// InvalidArgument, not the Internal an unclassified error gets.
+	_, _, perr := routing.ParseModel("z-ai/glm-5.3[sort=nonsense]")
+	if perr == nil {
+		t.Fatal("routing.ParseModel accepted a bad sort")
+	}
+	f := &fakeRouteExplainer{err: &ControllerError{Code: protocol.ErrInvalidArgs, Message: perr.Error()}}
+	s := &Server{}
+	s.SetRouteExplainer(f)
+	_, err := s.ModelRoutes(context.Background(),
+		connect.NewRequest(&rafikiv1.ModelRoutesRequest{Model: " z-ai/glm-5.3[sort=nonsense] "}))
+	c := assert.NewAborting(t)
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "bad bracket: code")
+	c.True(strings.Contains(err.Error(), "unknown sort"), "refusal carries the parser's message, got %q", err)
+	c.Eq("z-ai/glm-5.3[sort=nonsense]", f.got, "the handler trims and forwards the model unchanged")
+}
+
+func TestSetRouteExplainerNilIsRefused(t *testing.T) {
+	s := &Server{}
+	s.SetRouteExplainer(nil)
+	assert.NewAborting(t).Nil(s.routeExplainer.Load(), "SetRouteExplainer(nil) stored a pointer")
+	_, err := s.ModelRoutes(context.Background(),
+		connect.NewRequest(&rafikiv1.ModelRoutesRequest{Model: "deepseek/deepseek-v4.1-flash"}))
+	assert.NewAborting(t).Eq(connect.CodeUnavailable, connect.CodeOf(err), "after SetRouteExplainer(nil): code")
+}

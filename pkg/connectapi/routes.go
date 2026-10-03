@@ -5,6 +5,7 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -147,4 +148,80 @@ func (s *Server) DeleteRoute(
 		return nil, routeError(err)
 	}
 	return connect.NewResponse(&rafikiv1.DeleteRouteResponse{}), nil
+}
+
+// RouteExplainer is the daemon-side backend behind ModelRoutes: it parses a
+// model line's routing bracket, joins the model's hosting endpoints to the
+// guard's bans/ejections and OpenRouter's measured stats, and predicts the
+// try order. Deliberately one method and no scoping: the answer names
+// providers, prices and stats, nothing owned by a user — the same non-owned
+// surface ListRoutes and ModelInfo expose.
+type RouteExplainer interface {
+	ExplainModelRoutes(ctx context.Context, model string) (*rafikiv1.ModelRoutesResponse, error)
+}
+
+// SetRouteExplainer attaches the ModelRoutes backend. A nil explainer is
+// refused rather than stored, the same rule as SetRouteManager: storing &m for
+// a nil interface would defeat routeExplainer's Unavailable path and nil-panic
+// the first handler call.
+func (s *Server) SetRouteExplainer(m RouteExplainer) {
+	if m == nil {
+		return
+	}
+	s.routeExplainer.Store(&m)
+}
+
+func (s *Server) routeExplain() (RouteExplainer, error) {
+	p := s.routeExplainer.Load()
+	if p == nil {
+		return nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("route explainer not wired"))
+	}
+	return *p, nil
+}
+
+// ModelRoutes answers where a request for a model would go under a routing
+// spec. The model argument carries the routing bracket; the explainer owns
+// parsing it, so a malformed line surfaces through it as InvalidArgument (see
+// modelRoutesError).
+//
+// The empty-model check runs BEFORE the unwired check so a blank request is
+// refused as an argument error even on a daemon that has no explainer.
+func (s *Server) ModelRoutes(
+	ctx context.Context, req *connect.Request[rafikiv1.ModelRoutesRequest],
+) (*connect.Response[rafikiv1.ModelRoutesResponse], error) {
+	model := strings.TrimSpace(req.Msg.GetModel())
+	if model == "" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("model is required"))
+	}
+	m, err := s.routeExplain()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.ExplainModelRoutes(ctx, model)
+	if err != nil {
+		return nil, modelRoutesError(err, model)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+// modelRoutesError classifies an explainer failure. A *ControllerError is the
+// code the daemon attached at the source (the adapter classifies a malformed
+// model line ErrInvalidArgs), so it goes through ConnectErr unchanged. A
+// *connect.Error the explainer already shaped (the endpoint catalog being
+// unavailable) is passed through as-is. Anything else is infrastructure text
+// this package cannot author, so its cause is logged here and ConnectErr
+// redacts it to a generic Internal.
+func modelRoutesError(err error, model string) error {
+	var ce *ControllerError
+	if errors.As(err, &ce) {
+		return ConnectErr(err)
+	}
+	var connErr *connect.Error
+	if errors.As(err, &connErr) {
+		return connErr
+	}
+	slog.Error("connect: model_routes failed", "model", model, "error", err)
+	return ConnectErr(err)
 }

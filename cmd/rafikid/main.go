@@ -511,8 +511,20 @@ func runDaemon(opts runDaemonOpts) error {
 	// here rather than inside the face so a face that fails to start does not
 	// take the children's bans down with it.
 	guard := buildProviderGuard(baseCtx, pool, slog.Default())
+	// The ModelRoutes explainer, built only when the daemon actually routes via
+	// OpenRouter — the same gate the provider directory sits behind, because a
+	// daemon that never sends there has nothing to explain. It reads the SAME
+	// guard the request paths consult (never a second one), so a ban it shows
+	// is the ban that would apply. Left nil otherwise: ModelRoutes then answers
+	// Unavailable rather than inventing an endpoint list.
+	var routeExplainer connectapi.RouteExplainer
 	if routesViaOpenRouter(prov) {
 		guard.SetDirectory(routing.NewProviderDirectory(http.DefaultClient, slog.Default()))
+		routeExplainer = connectRouteExplainer{
+			cat:   routing.NewEndpointCatalog(http.DefaultClient, slog.Default()),
+			stats: routing.NewPageStats(http.DefaultClient, slog.Default()),
+			guard: guard,
+		}
 	}
 
 	face, err := startProxyFace(baseCtx, faceOptions{
@@ -741,6 +753,9 @@ func runDaemon(opts runDaemonOpts) error {
 			// answer Unavailable rather than nil-panic on the store.
 			if routeStore != nil {
 				face.Control.SetRouteManager(newConnectRoutes(routeStore, routePolicy))
+			}
+			if routeExplainer != nil {
+				face.Control.SetRouteExplainer(routeExplainer)
 			}
 			// The new-seam backends: child ops, executor admin, user admin,
 			// raw child I/O and executor sessions. Each adapter is pure
