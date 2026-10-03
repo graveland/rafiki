@@ -49,9 +49,9 @@ func (c connectRouteExplainer) ExplainModelRoutes(ctx context.Context, model str
 
 	eps, stale, err := c.cat.Endpoints(ctx, base)
 	if err != nil {
-		// The catalog is an upstream dependency whose text is not ours to
-		// forward verbatim on the wire; Unavailable is the honest code, and a
-		// retry may help.
+		// The catalog is an upstream dependency; Unavailable is the honest
+		// code. connect.NewError forwards err.Error() in the wire message, so
+		// the caller sees the upstream fetch failure; a retry may help.
 		return nil, connect.NewError(connect.CodeUnavailable, err)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,7 +161,7 @@ func TestSetChildRoutingBadDeltaIsInvalidArgument(t *testing.T) {
 }
 
 // routingGuardWithDirectory builds the daemon's provider guard around a test
-// directory, the seam validateRoutingSlugs reads.
+// directory, the seam canonicalizeRoutingSlugs resolves through.
 func routingGuardWithDirectory(t *testing.T, client *http.Client, url string) *routing.ProviderGuard {
 	t.Helper()
 	g := routing.NewProviderGuard(0, slog.New(slog.DiscardHandler))
@@ -195,6 +196,74 @@ func TestSetChildRoutingDegradedDirectoryAcceptsSlug(t *testing.T) {
 	got, err := c.SetChildRoutingAsOperator(context.Background(), "c_leaf", "prefer=whatever")
 	ck.NoError(err, "a degraded directory must accept the slug")
 	ck.Eq("prefer=whatever", got, "merged spec")
+}
+
+// TestSetChildRoutingStoresCanonicalSlugNotDisplayName pins N5: a display-name
+// prefer must be persisted as the ProviderDirectory's canonical slug, not the
+// raw string OpenRouter would silently ignore.
+func TestSetChildRoutingStoresCanonicalSlugNotDisplayName(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := routingTree(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"name":"Fireworks AI","slug":"fireworks"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c.SetProviderGuard(routingGuardWithDirectory(t, srv.Client(), srv.URL))
+
+	got, err := c.SetChildRoutingAsOperator(context.Background(), "c_leaf", "prefer=Fireworks AI")
+	ck.NoError(err, "a display name resolves through the directory")
+	ck.Eq("prefer=fireworks", got, "canonical slug returned")
+	ck.Eq("prefer=fireworks", storedRouting(t, c, "c_leaf"), "canonical slug stored, not the raw display name")
+}
+
+// TestSetChildRoutingChildCanonicalizesSlug pins that the child path resolves
+// slugs too, not just the operator path.
+func TestSetChildRoutingChildCanonicalizesSlug(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := routingTree(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"name":"Fireworks AI","slug":"fireworks"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c.SetProviderGuard(routingGuardWithDirectory(t, srv.Client(), srv.URL))
+	setStoredRouting(t, c, "c_leaf", "nodata")
+
+	got, err := c.SetChildRouting(context.Background(), "c_mid", "c_leaf", "prefer=Fireworks AI")
+	ck.NoError(err, "child steer resolves slugs too")
+	ck.Eq("prefer=fireworks,nodata", got, "canonical slug merged over stored")
+}
+
+// TestSetChildRoutingConcurrentOperatorFlagWriteIsNotLost is the N1
+// regression: the child steer's read-modify-write must run inside
+// childstore.Store.Update, so a concurrent operator write of the monotone
+// `nodata` flag cannot be read-then-dropped by a child merge. It asserts the
+// invariant (nodata survives every interleaving) rather than a particular
+// schedule, so it cannot flake on ordering, only on the lost write -- which is
+// exactly the bug. Run under -race.
+func TestSetChildRoutingConcurrentOperatorFlagWriteIsNotLost(t *testing.T) {
+	ck := assert.NewAborting(t)
+	c := routingTree(t)
+	setStoredRouting(t, c, "c_leaf", "prefer=fireworks")
+
+	const writers = 64
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = c.SetChildRoutingAsOperator(context.Background(), "c_leaf", "nodata")
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = c.SetChildRouting(context.Background(), "c_mid", "c_leaf", "prefer=deepinfra")
+		}()
+	}
+	wg.Wait()
+
+	stored := storedRouting(t, c, "c_leaf")
+	spec, err := routing.ParseSpec(stored)
+	ck.NoError(err, "stored spec parses")
+	ck.True(spec.NoData, "the operator's monotone nodata flag survives concurrent child steers; stored spec %q", stored)
 }
 
 // TestControlPolicySetRoutingIsChildScoped pins the gate classification: a
