@@ -219,6 +219,26 @@ func TestPageStatsRequiresExactHeadID(t *testing.T) {
 	ck.Empty(rows, "no row is produced from a mis-matched head")
 }
 
+// TestPageStatsRecoversLaterDuplicateWithHead proves a first occurrence that
+// fails (here: a headless stats object) does not permanently drop a later, valid
+// occurrence of the same endpoint id.
+func TestPageStatsRecoversLaterDuplicateWithHead(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	body := `"stats":{"endpoint_id":"X1","p50_throughput":1,"window_minutes":30}` +
+		`{"id":"X1","provider_slug":"acme/fp8","quantization":"fp8",` +
+		`"stats":{"endpoint_id":"X1","p50_throughput":99,"window_minutes":30}}`
+	p, _ := testPageStats(t, body)
+
+	rows, err := p.Stats(context.Background(), "acme/model")
+	ck.NoError(err, "the later, valid occurrence is recovered")
+	ck.Len(rows, 1, "exactly one row for the endpoint id")
+	if len(rows) != 1 {
+		return
+	}
+	ck.Eq("acme/fp8", rows[0].ProviderSlug)
+	ck.Eq(99.0, rows[0].P50Throughput, "the row comes from the occurrence with a head")
+}
+
 func findStats(rows []EndpointStats, slug string) (EndpointStats, bool) {
 	for _, r := range rows {
 		if r.ProviderSlug == slug {

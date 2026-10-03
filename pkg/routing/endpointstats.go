@@ -222,9 +222,10 @@ const statsObjectScanCap = 4096
 //
 // The scan is linear in the body: the backward search for an endpoint head is
 // bounded to the region since the previous stats marker (a head never spans an
-// earlier stats object), a failed id is recorded so a repeated one is never
-// re-scanned, and the JSON decode is capped. ctx is checked each iteration so an
-// adversarially long body still observes the caller's deadline.
+// earlier stats object), and the JSON decode is capped. ctx is checked each
+// iteration so an adversarially long body still observes the caller's deadline.
+// Ids are deduped by the row actually produced, so a first occurrence that fails
+// (no head, or a malformed object) does not drop a later valid one.
 func parseModelPage(ctx context.Context, body string) ([]EndpointStats, error) {
 	text := strings.ReplaceAll(body, `\"`, `"`)
 	var out []EndpointStats
@@ -252,9 +253,6 @@ func parseModelPage(ctx context.Context, body string) ([]EndpointStats, error) {
 		if endpointID == "" || seen[endpointID] {
 			continue
 		}
-		// Record the attempt before any work: a repeated id is never scanned or
-		// decoded twice, whether it matched or not.
-		seen[endpointID] = true
 		// The endpoint object opens with {"id":"<endpoint_id>"; provider_slug
 		// and quantization live in its head, before the stats object. Bounding
 		// the backward search to since the previous marker keeps it linear.
@@ -275,6 +273,9 @@ func parseModelPage(ctx context.Context, body string) ([]EndpointStats, error) {
 		if !ok {
 			continue
 		}
+		// Mark only ids that actually produced a row, so a later, valid
+		// occurrence of a first-failed id is still recovered.
+		seen[endpointID] = true
 		out = append(out, EndpointStats{
 			ProviderSlug:  jsonStringField(head, "provider_slug"),
 			Quantization:  jsonStringField(head, "quantization"),
