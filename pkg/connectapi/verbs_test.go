@@ -74,12 +74,12 @@ const (
 
 // childAllowedFieldNumbers mirrors verbs.go's childAllowedSpawnFields (fields
 // 1-14 and 30: cwd through script, the three budget fields, and
-// skip_derived_index). It is kept
-// as its own copy, not an import of the unexported production set, because
-// this file is package connectapi_test -- and duplicating it here is the
-// point: TestSpawnRequestFieldsAreClassified fails the moment a field number
-// exists that this list and operatorOnlyFieldMin/Max don't between them
-// cover, forcing a conscious classification decision on both sides.
+// skip_derived_index). It is kept as its own copy, not an import of the
+// unexported production set, because this file is package connectapi_test --
+// and duplicating it here is the point: TestSpawnRequestFieldsAreClassified
+// fails the moment a field number exists that this list and
+// operatorOnlyFieldMin/Max don't between them cover, forcing a conscious
+// classification decision on both sides.
 var childAllowedFieldNumbers = map[protoreflect.FieldNumber]bool{
 	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
 	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,

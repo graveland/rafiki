@@ -404,6 +404,7 @@ the question for every kind in one vocabulary:
 | `--executor <ref>` | `$RAFIKI_EXECUTOR` | Target ONE specific executor by its machine name (e.g. `greyshift`) or raw id. Sent as `SpawnRequest.ExecutorRef`; resolved by the daemon against the same confinement checks any candidate must pass, so a pin bypasses search, never confinement. **Mutually exclusive with `--executor-selector`** — passing both is a usage error, not a silent precedence rule |
 | `--executor-selector <sel>` | `$RAFIKI_EXECUTOR_SELECTOR` | A label selector choosing from the daemon's pool (e.g. `owner=brent,env=home`). A selector matching several executors keeps the documented silent-first-match behavior |
 | `--no-local-executor` | — | Do not offer this machine as a workspace at all |
+| `--skip-derived-index` | — | Spawn with `SpawnRequest.skip_derived_index` (field 30, child-allowed) true: the recall indexer then does not embed or summarise this child's conversations or any descendant's, while windows and keyword (BM25) search still work. OR-inherited down the subtree at spawn and never clearable beneath a parent that set it; a resumed child keeps its stored value |
 
 Tab-completion: `--executor` completes machine names (ids for unlabeled
 executors) from the daemon's `ListExecutors` RPC, scoped to the resolved

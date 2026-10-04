@@ -570,9 +570,12 @@ captured conversation contributes **windows** — ~3200-char slices of dialogue
 with tool-call arguments compacted in — and, when a summaries model is
 configured, rolling **summaries**. Tool results are never indexed (they
 appear only as size markers in context expansion); neither are the daemon's
-own LLM conversations (`recall.ExcludedEntrypoints`). On top of the derived
-index sits the **memory tree**: dot-separated paths of small notes each user
-(or their agents) save explicitly, always private to the saver.
+own LLM conversations (`recall.ExcludedEntrypoints`). A spawned child may be
+flagged `skip_derived_index` (OR-inherited down its subtree), in which case
+its conversations still get windows and BM25 search but are never embedded
+or summarised. On top of the derived index sits the **memory tree**:
+dot-separated paths of small notes each user (or their agents) save
+explicitly, always private to the saver.
 
 Agents use six tools: `recall` (hybrid BM25 + vector search, RRF-fused over
 memory/summary/window), `recall_context` (expand one hit id), and the memory
