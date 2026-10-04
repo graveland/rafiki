@@ -83,6 +83,12 @@ type summarizerFakeStore struct {
 	deleted  []summarizerDeleteCall
 	failures []summarizerFailureCall
 	msgsFrom []summarizerMsgsFromCall
+
+	// MarkDerivedSkip: markErrConv errors for that conversation; marks records
+	// every probe. skipConv is reported derived_skip.
+	markErrConv string
+	skipConv    string
+	marks       []string
 }
 
 func (f *summarizerFakeStore) GetState(_ context.Context, key string) (string, bool, error) {
@@ -208,6 +214,14 @@ func (f *summarizerFakeStore) ExtractCursors(context.Context, []string, int) ([]
 func (f *summarizerFakeStore) WriteWindows(context.Context, string, []Window) error {
 	f.unused("WriteWindows")
 	return nil
+}
+
+func (f *summarizerFakeStore) MarkDerivedSkip(_ context.Context, conversationID string) (bool, error) {
+	f.marks = append(f.marks, conversationID)
+	if conversationID == f.markErrConv {
+		return false, errors.New("mark exploded")
+	}
+	return conversationID == f.skipConv, nil
 }
 
 func (f *summarizerFakeStore) PendingEmbeds(context.Context, string, int) ([]EmbedItem, error) {
@@ -637,5 +651,27 @@ func TestSummarizerParsesTitle(t *testing.T) {
 	c.False(title != strings.Repeat("x", 80) || body != long, "untitled parse = %q / %q", title, body)
 	if title, body = parseSummaryOutput(""); title != "" || body != "" {
 		t.Fatalf("empty parse = %q / %q", title, body)
+	}
+}
+
+func TestSummarizerFailsClosedWhenMarkErrors(t *testing.T) {
+	c := assert.NewAborting(t)
+	store := summarizerStore()
+	store.eligible = []ConversationMeta{summarizerConv("c1"), summarizerConv("c2")}
+	store.msgs = map[string][]Message{
+		"c1": {summarizerMsg("c1", 0, "user", "first conversation text")},
+		"c2": {summarizerMsg("c2", 0, "user", "second conversation text")},
+	}
+	store.markErrConv = "c1"
+	comp := summarizerCompleter("m", "TITLE: ok\n\nbody")
+	c.NoError(summarizerWith(SummarizerOptions{Store: store, Completer: comp}).Pass(context.Background()), "Pass")
+	// The candidate whose mark errored is skipped without summarising or
+	// recording a failure; the other candidate is summarised as usual.
+	c.EqDeep([]string{"c1", "c2"}, store.marks, "every candidate must be probed")
+	c.Empty(store.failures, "an errored mark must not record a summary failure")
+	c.Len(comp.calls, 1, "Complete calls = %d, want 1 (only c2)", len(comp.calls))
+	c.Len(store.upserts, 2, "upserts = %d, want 2 (c2's segment + conversation row)", len(store.upserts))
+	for _, up := range store.upserts {
+		c.Eq("c2", up.ConversationID, "the errored conversation must not be summarised: %+v", up)
 	}
 }

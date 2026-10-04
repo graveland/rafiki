@@ -1274,21 +1274,39 @@ func TestSkipDerivedIndexPendingQueryIsFast(t *testing.T) {
 	owner := insertUser(t, pool, "skip-perf")
 	uniq := time.Now().UnixNano()
 
-	flagged := insertConversation(t, pool, convFixture{Owner: owner, Name: "perf-flagged"})
-	_, err := pool.Exec(ctx, `INSERT INTO conversations.conversation_window
-			(conversation_id, owner_user_id, seq, ordinal_from, ordinal_to, text, sealed, extractor_version)
-		SELECT $1::uuid, $2::uuid, g, g, g, 'perf window ' || g::text, true, $3
-		FROM generate_series(0, 1999) g`, flagged, nullUUID(owner), recall.ExtractorVersion)
-	ck.Require().NoError(err, "seed flagged windows")
+	// N flagged conversations, each with its OWN flagged child and its own
+	// windows, the children linked by external_ref (the claude shape, so the
+	// removed anti-join fell back to a per-window LIKE scan of the child table
+	// rather than one indexed conversation_id lookup). A single conversation
+	// with many windows would let the anti-join answer with one lookup and pass
+	// regardless, so the shape here is what makes the removed anti-join fail.
+	const convs = 300
+	const windowsPerConv = 200
+	prefix := fmt.Sprintf("c_skippref%d_", uniq)
+
+	_, err := pool.Exec(ctx, `INSERT INTO conversations.conversation
+			(owner_user_id, origin_entrypoint, driven_by, name, external_ref)
+		SELECT $1::uuid, 'claude', 'server', 'perf-' || g, $2 || g
+		FROM generate_series(0, $3::int - 1) g`, owner, prefix, convs)
+	ck.Require().NoError(err, "seed flagged conversations")
 
 	_, err = pool.Exec(ctx, `INSERT INTO conversations.child
-			(child_id, conversation_id, kind, status, spawned_at, skip_derived_index)
-		SELECT 'c_skipmark' || $2::bigint || '_' || g, $1::uuid, 'claude', 'running', now(), true
-		FROM generate_series(0, 499) g`, flagged, uniq)
+			(child_id, kind, status, spawned_at, skip_derived_index)
+		SELECT $1 || g, 'claude', 'running', now(), true
+		FROM generate_series(0, $2::int - 1) g`, prefix, convs)
 	ck.Require().NoError(err, "seed flagged children")
 
-	_, err = pool.Exec(ctx, `UPDATE conversations.conversation SET derived_skip = true WHERE id = $1::uuid`, flagged)
-	ck.Require().NoError(err, "mark flagged conversation")
+	_, err = pool.Exec(ctx, `UPDATE conversations.conversation SET derived_skip = true
+		WHERE external_ref LIKE $1 || '%'`, prefix)
+	ck.Require().NoError(err, "mark flagged conversations")
+
+	_, err = pool.Exec(ctx, `INSERT INTO conversations.conversation_window
+			(conversation_id, owner_user_id, seq, ordinal_from, ordinal_to, text, sealed, extractor_version)
+		SELECT c.id, $1::uuid, g2, g2, g2, 'perf window ' || g2::text, true, $2
+		FROM conversations.conversation c
+		CROSS JOIN generate_series(0, $3::int - 1) g2
+		WHERE c.external_ref LIKE $4 || '%'`, owner, recall.ExtractorVersion, windowsPerConv, prefix)
+	ck.Require().NoError(err, "seed flagged windows")
 
 	control := insertConversation(t, pool, convFixture{Owner: owner, Name: "perf-control"})
 	insertWindow(t, pool, control, owner, 0, 0, 0, "perf control window", true)
@@ -1297,7 +1315,147 @@ func TestSkipDerivedIndexPendingQueryIsFast(t *testing.T) {
 	rows, err := st.pendingWindowEmbeds(ctx, "skip-model", 50)
 	elapsed := time.Since(start)
 	ck.Require().NoError(err, "pending window embeds")
-	ck.True(elapsed < time.Second, "pending-window query took %s over 2000 flagged windows", elapsed)
+	ck.True(elapsed < time.Second, "pending-window query took %s over %d flagged windows", elapsed, convs*windowsPerConv)
 	ck.Eq(1, len(rows), "only the control window must be pending")
 	ck.True(strings.Contains(rows[0].Text, "perf control window"), "control window must be the pending row")
+}
+
+// perfFakeCompleter drives a real summarizer pass in recalldb tests, recording
+// each user prompt so a test can assert which conversations were summarised.
+type perfFakeCompleter struct {
+	model string
+	calls []string
+}
+
+func (c *perfFakeCompleter) Model() string              { return c.model }
+func (c *perfFakeCompleter) ContextWindow() (int, bool) { return 200_000, true }
+
+func (c *perfFakeCompleter) Complete(_ context.Context, _, _, user string, _ int) (recall.Completion, error) {
+	c.calls = append(c.calls, user)
+	return recall.Completion{Text: "TITLE: t\n\nbody", Model: c.model, InputTokens: 10, OutputTokens: 5, CostUSD: 0.01}, nil
+}
+
+// TestSummarizerSkipsFlaggedConversationNotYetExtracted covers the second mark
+// site: extraction reaches at most 50 conversations per tick, newest-first by
+// updated_at, so an older flagged conversation can be a summary candidate
+// before anything has marked it. The summarizer itself must mark and skip it.
+func TestSummarizerSkipsFlaggedConversationNotYetExtracted(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-summarizer")
+	uniq := time.Now().UnixNano()
+	ck.Require().NoError(st.SetState(ctx, "summaries_enabled_at",
+		time.Now().UTC().Add(-3*time.Hour).Format(time.RFC3339)), "set enabled_at")
+
+	// The flagged conversation is NEWEST by last activity (so the summarizer,
+	// which takes the 5 newest eligible, sees it) but its updated_at is OLD, so
+	// extraction's newest-first ORDER BY c.updated_at LIMIT 50 never reaches it.
+	token := "flagtok" + fmt.Sprint(uniq)
+	flagged := insertConversation(t, pool, convFixture{Owner: owner, Name: "summary-flagged", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, flagged, 0, "user", token, ago(time.Minute))
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipsum%d", uniq), Status: "running", SkipDerivedIndex: true}, flagged)
+	_, err := pool.Exec(ctx, `UPDATE conversations.conversation SET updated_at = now() - interval '30 minutes' WHERE id = $1::uuid`, flagged)
+	ck.Require().NoError(err, "age the flagged conversation's updated_at")
+
+	// 60 unflagged conversations crowd the flagged one out of extraction's
+	// newest-50 window; their last activity is older so they rank below it for
+	// the summarizer.
+	for i := 0; i < 60; i++ {
+		un := insertConversation(t, pool, convFixture{Owner: owner, Name: fmt.Sprintf("summary-unflagged-%d", i), ClosedAt: ago(90 * time.Minute)})
+		insertMessage(t, pool, un, 0, "user", fmt.Sprintf("unflagtok-%d-%d", uniq, i), ago(2*time.Hour))
+	}
+
+	cursors, err := st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "extract cursors")
+	for _, cur := range cursors {
+		ck.False(cur.Conversation.ID == flagged, "extraction must not reach the older flagged conversation")
+	}
+	ck.False(derivedSkipOf(t, pool, flagged), "the flagged conversation must be unmarked before the pass")
+
+	comp := &perfFakeCompleter{model: "skip-model"}
+	s := recall.NewSummarizer(recall.SummarizerOptions{Store: st, Completer: comp,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	ck.Require().NoError(s.Pass(ctx), "summarizer pass")
+
+	ck.True(derivedSkipOf(t, pool, flagged), "the summarizer must mark the flagged conversation")
+	summarisedUnflagged := false
+	for _, call := range comp.calls {
+		ck.False(strings.Contains(call, token), "the flagged conversation must never be summarised")
+		if strings.Contains(call, fmt.Sprintf("unflagtok-%d-", uniq)) {
+			summarisedUnflagged = true
+		}
+	}
+	ck.True(summarisedUnflagged, "an unflagged conversation must still be summarised")
+}
+
+// TestMarkDerivedSkipNonexistentConversation pins the sentinel for a
+// conversation id that names no row: recall.ErrNotFound, so the summarizer
+// treats it as a failed check and skips the candidate (fail closed).
+func TestMarkDerivedSkipNonexistentConversation(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, _ := testStore(t)
+	got, err := st.MarkDerivedSkip(context.Background(), "00000000-0000-0000-0000-000000000000")
+	ck.Eq(false, got, "a missing conversation marks false")
+	ck.ErrorIs(err, recall.ErrNotFound, "a missing conversation is ErrNotFound")
+}
+
+// TestMarkDerivedSkipMatchesWriteWindowsMark pins the two mark sites to one
+// shared statement: for the same linkage shape, MarkDerivedSkip (the
+// summarizer's single-conversation probe) and WriteWindows (the extractor's
+// mark) must reach the same answer, across all three linkage arms.
+func TestMarkDerivedSkipMatchesWriteWindowsMark(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-marksame")
+	uniq := time.Now().UnixNano()
+
+	conv := func(name string) string {
+		return insertConversation(t, pool, convFixture{Owner: owner, Name: name})
+	}
+
+	// conversation_id link.
+	cIDMark, cIDWrite := conv("pair-id-mark"), conv("pair-id-write")
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_marksame%da_m", uniq), Status: "running", SkipDerivedIndex: true}, cIDMark)
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_marksame%da_w", uniq), Status: "running", SkipDerivedIndex: true}, cIDWrite)
+
+	// external_ref = child_id link (child_id carries an underscore).
+	refMark := fmt.Sprintf("c_marksame%dr_m", uniq)
+	refWrite := fmt.Sprintf("c_marksame%dr_w", uniq)
+	cRefMark := insertConversation(t, pool, convFixture{Owner: owner, Name: "pair-ref-mark", ExternalRef: refMark})
+	cRefWrite := insertConversation(t, pool, convFixture{Owner: owner, Name: "pair-ref-write", ExternalRef: refWrite})
+	insertChild(t, pool, childFixture{ID: refMark, Status: "running", SkipDerivedIndex: true}, "")
+	insertChild(t, pool, childFixture{ID: refWrite, Status: "running", SkipDerivedIndex: true}, "")
+
+	// external_ref = child_id:<thread> link.
+	thrMark := fmt.Sprintf("c_marksame%dt_m", uniq)
+	thrWrite := fmt.Sprintf("c_marksame%dt_w", uniq)
+	cThrMark := insertConversation(t, pool, convFixture{Owner: owner, Name: "pair-thread-mark", ExternalRef: thrMark + ":sub"})
+	cThrWrite := insertConversation(t, pool, convFixture{Owner: owner, Name: "pair-thread-write", ExternalRef: thrWrite + ":sub"})
+	insertChild(t, pool, childFixture{ID: thrMark, Status: "running", SkipDerivedIndex: true}, "")
+	insertChild(t, pool, childFixture{ID: thrWrite, Status: "running", SkipDerivedIndex: true}, "")
+
+	// control: an unflagged child links to each.
+	cCtlMark, cCtlWrite := conv("pair-ctl-mark"), conv("pair-ctl-write")
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_marksame%dc_m", uniq), Status: "running", SkipDerivedIndex: false}, cCtlMark)
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_marksame%dc_w", uniq), Status: "running", SkipDerivedIndex: false}, cCtlWrite)
+
+	cases := []struct {
+		label, mark, write string
+		want               bool
+	}{
+		{"conversation_id", cIDMark, cIDWrite, true},
+		{"external_ref = child_id", cRefMark, cRefWrite, true},
+		{"external_ref = child_id:<thread>", cThrMark, cThrWrite, true},
+		{"no flagged child", cCtlMark, cCtlWrite, false},
+	}
+	for _, tc := range cases {
+		got, err := st.MarkDerivedSkip(ctx, tc.mark)
+		ck.Require().NoError(err, "%s: MarkDerivedSkip", tc.label)
+		ck.Eq(tc.want, got, "%s: MarkDerivedSkip returned", tc.label)
+		ck.Require().NoError(st.WriteWindows(ctx, tc.write, nil), "%s: WriteWindows", tc.label)
+		ck.Eq(derivedSkipOf(t, pool, tc.write), got, "%s: WriteWindows and MarkDerivedSkip must agree", tc.label)
+		ck.Eq(tc.want, derivedSkipOf(t, pool, tc.mark), "%s: marked column", tc.label)
+	}
 }

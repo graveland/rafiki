@@ -84,6 +84,20 @@ func (s *Summarizer) Pass(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		skip, err := s.store.MarkDerivedSkip(ctx, conv.ID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Fail closed: a candidate whose derived-skip mark could not be
+			// checked is skipped this pass, not summarised.
+			s.logger.Warn("recall summaries: marking derived_skip failed; skipping candidate",
+				"conversation", conv.ID, "err", err)
+			continue
+		}
+		if skip {
+			continue
+		}
 		if err := s.summarizeConversation(ctx, enabledAt, conv); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()

@@ -100,6 +100,24 @@ const markDerivedSkipSQL = `UPDATE conversations.conversation c
 	                           WHERE (` + linkageSQL + `) AND ch.skip_derived_index)
 	WHERE c.id = $1::uuid`
 
+// MarkDerivedSkip runs markDerivedSkipSQL for one conversation and reports
+// the resulting derived_skip. The summarizer calls it for each candidate
+// immediately before summarising so a flagged conversation is skipped even
+// when extraction (which marks it) has not reached it yet. A conversation id
+// that names no row is recall.ErrNotFound.
+func (s *Store) MarkDerivedSkip(ctx context.Context, conversationID string) (bool, error) {
+	uid, ok := parseID(conversationID)
+	if !ok {
+		return false, recall.ErrNotFound
+	}
+	var skip bool
+	err := s.pool.QueryRow(ctx, markDerivedSkipSQL+` RETURNING c.derived_skip`, uid).Scan(&skip)
+	if err != nil {
+		return false, errNoRows(err)
+	}
+	return skip, nil
+}
+
 // excludedArg normalizes an exclusion list for `<> ALL(...)`: a nil slice
 // would bind as an untyped NULL and null out the whole predicate.
 func excludedArg(excluded []string) []string {

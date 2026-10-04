@@ -138,6 +138,7 @@ type Store interface {
 	ExtractCursors(ctx context.Context, excluded []string, limit int) ([]ExtractCursor, error)
 	MessagesFrom(ctx context.Context, conversationID string, fromOrdinal int) ([]Message, error)
 	WriteWindows(ctx context.Context, conversationID string, ws []Window) error
+	MarkDerivedSkip(ctx context.Context, conversationID string) (bool, error)
 	PendingEmbeds(ctx context.Context, model string, limit int) ([]EmbedItem, error)
 	SetEmbeddings(ctx context.Context, model string, items []EmbedItem, vecs [][]float32) error
 	EnsureVectorIndexes(ctx context.Context, model string, dims int) error
