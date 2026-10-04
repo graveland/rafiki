@@ -136,7 +136,8 @@ func (s *Store) MessagesFrom(ctx context.Context, conversationID string, fromOrd
 
 // WriteWindows upserts one conversation's windows in one transaction, keyed
 // on (conversation_id, seq). On update the embedding columns clear only when
-// the text changed; sealed, ordinals and updated_at are always stamped.
+// the text changed; sealed, ordinals and updated_at are always stamped. It also
+// stamps conversation.derived_skip, even when ws is empty.
 func (s *Store) WriteWindows(ctx context.Context, conversationID string, ws []recall.Window) error {
 	uid, ok := parseID(conversationID)
 	if !ok {

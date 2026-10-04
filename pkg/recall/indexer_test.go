@@ -263,7 +263,9 @@ func TestIndexerExtractKeepsTailWhenAllWindowsNil(t *testing.T) {
 		}
 		ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
 		c.Require().NoError(ix.Tick(context.Background()), "Tick")
-		c.Empty(store.writes, "WriteWindows calls = %d, want 0 (nil build keeps the existing tail)", len(store.writes))
+		c.Require().Len(store.writes, 1, "WriteWindows calls = %d, want 1 (empty build still marks)", len(store.writes))
+		c.Empty(store.writes[0].ws, "no window rows written; the existing tail stands")
+		c.Eq("c1", store.writes[0].conversationID, "marked conversation")
 	})
 	t.Run("sealed tail with only the overlap left", func(t *testing.T) {
 		c := assert.NewCollecting(t)
@@ -277,7 +279,8 @@ func TestIndexerExtractKeepsTailWhenAllWindowsNil(t *testing.T) {
 		}
 		ix := NewIndexer(IndexerOptions{Store: store, Logger: indexerTestLogger()})
 		c.Require().NoError(ix.Tick(context.Background()), "Tick")
-		c.Empty(store.writes, "WriteWindows calls = %d, want 0 (nothing past the overlap)", len(store.writes))
+		c.Require().Len(store.writes, 1, "WriteWindows calls = %d, want 1 (nothing past the overlap, still marks)", len(store.writes))
+		c.Empty(store.writes[0].ws, "no window rows written past the overlap")
 	})
 }
 

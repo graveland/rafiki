@@ -160,7 +160,8 @@ func (ix *Indexer) extractPass(ctx context.Context) error {
 // nil tail starts at ordinal 0, an unsealed tail is re-read from its first
 // message, a sealed tail is re-read from its last message (the overlap) and
 // new windows continue at Seq+1. When the build yields no windows the
-// existing tail stands and nothing is written.
+// existing tail stands and no window rows are written, but the conversation is
+// still handed to WriteWindows so it is marked (see WriteWindows).
 func (ix *Indexer) extractConversation(ctx context.Context, c ExtractCursor) error {
 	from := 0
 	switch {
@@ -175,9 +176,9 @@ func (ix *Indexer) extractConversation(ctx context.Context, c ExtractCursor) err
 		return err
 	}
 	ws := BuildWindows(c.Conversation.ID, c.Conversation.OwnerUserID, c.Tail, ExtractAll(msgs))
-	if len(ws) == 0 {
-		return nil
-	}
+	// Route the empty case through WriteWindows too: it writes no rows but
+	// still stamps derived_skip, so a flagged conversation whose messages
+	// build no windows is never summarised.
 	return ix.store.WriteWindows(ctx, c.Conversation.ID, ws)
 }
 

@@ -1193,6 +1193,55 @@ func TestMarkingHappensBeforeEmbedAndSummaryInTheSameTick(t *testing.T) {
 	ck.False(present[flagged], "the flagged conversation must not be summarizable")
 }
 
+func TestSkipDerivedIndexMarksConversationWithNoWindows(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-nowin")
+	ck.Require().NoError(st.SetState(ctx, "summaries_enabled_at", time.Now().UTC().Add(-2*time.Hour).Format(time.RFC3339)), "set enabled_at")
+
+	// flagged: closed, has only empty-text messages (no windows build), linked to
+	// a flagged child.
+	flagged := insertConversation(t, pool, convFixture{Owner: owner, Name: "nowin-flagged", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, flagged, 0, "user", "", ago(90*time.Minute))
+	insertMessage(t, pool, flagged, 1, "assistant", "", ago(90*time.Minute))
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipnowin%d", time.Now().UnixNano()), Status: "running", SkipDerivedIndex: true}, flagged)
+
+	// control: the same shape (no windows), no child, so it stays summarizable.
+	control := insertConversation(t, pool, convFixture{Owner: owner, Name: "nowin-control", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, control, 0, "user", "", ago(90*time.Minute))
+	insertMessage(t, pool, control, 1, "assistant", "", ago(90*time.Minute))
+
+	emb := &skipFakeEmbedder{model: "skip-model"}
+	sum := &skipFakeSummaryPass{store: st}
+	ix := recall.NewIndexer(recall.IndexerOptions{
+		Store: st, Embedder: emb, Summaries: sum,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	ck.Require().NoError(ix.Tick(ctx), "tick")
+
+	// The fixture builds no windows, so the extractor still marks the flagged
+	// conversation rather than returning early.
+	ck.Eq(int64(0), windowCountOf(t, pool, flagged), "the flagged fixture must build no windows")
+	ck.True(derivedSkipOf(t, pool, flagged), "extract must mark a flagged conversation that builds no windows")
+	ck.False(derivedSkipOf(t, pool, control), "the control stays unmarked")
+
+	present := map[string]bool{}
+	for _, id := range sum.eligible {
+		present[id] = true
+	}
+	ck.True(present[control], "the control must be summarizable in the same tick")
+	ck.False(present[flagged], "the flagged conversation must not be summarizable")
+}
+
+func windowCountOf(t *testing.T, pool *pgxpool.Pool, convID string) int64 {
+	t.Helper()
+	var n int64
+	assert.NewAborting(t).NoError(pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM conversations.conversation_window WHERE conversation_id = $1::uuid`, convID).Scan(&n), "count windows")
+	return n
+}
+
 func TestStatusDoesNotCountFlaggedWindowsAsUnembedded(t *testing.T) {
 	ck := assert.NewCollecting(t)
 	st, pool := testStore(t)
