@@ -172,6 +172,32 @@ func TestBuildSpawnRequest_SkillsDirAndMCPConfigOmittedByDefault(t *testing.T) {
 	c.Eq("", req.MCPConfig, "MCPConfig")
 }
 
+// TestCreateSkipDerivedIndexReachesTheRequest pins --skip-derived-index onto the
+// built request and the Connect wire message: true when the flag is passed,
+// false (the derive-as-today zero value) when it is not.
+func TestCreateSkipDerivedIndexReachesTheRequest(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	on := newTestCreateCmd()
+	isolateProfiles(t)
+	resetProfileCache()
+	c.Require().NoError(on.Flags().Set("cwd", "/tmp"))
+	c.Require().NoError(on.Flags().Set("skip-derived-index", "true"))
+	req, err := buildSpawnRequest(on, nil)
+	c.Require().NoError(err, "buildSpawnRequest")
+	c.True(req.SkipDerivedIndex, "req.SkipDerivedIndex with the flag")
+	c.True(connectSpawnRequest(req).GetSkipDerivedIndex(), "wire SkipDerivedIndex with the flag")
+
+	off := newTestCreateCmd()
+	isolateProfiles(t)
+	resetProfileCache()
+	c.Require().NoError(off.Flags().Set("cwd", "/tmp"))
+	req, err = buildSpawnRequest(off, nil)
+	c.Require().NoError(err, "buildSpawnRequest")
+	c.False(req.SkipDerivedIndex, "req.SkipDerivedIndex without the flag")
+	c.False(connectSpawnRequest(req).GetSkipDerivedIndex(), "wire SkipDerivedIndex without the flag")
+}
+
 func TestBuildSpawnRequest_NameFromArgs(t *testing.T) {
 	c := assert.NewCollecting(t)
 	cmd := newTestCreateCmd()
@@ -583,6 +609,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 		Env:                map[string]string{"K": "V"},
 		RecordRequests:     true,
 		PassthroughAuth:    "on",
+		SkipDerivedIndex:   true,
 		ExecutorSelector:   "env=home",
 		ExecutorRef:        "greyshift",
 		Preset:             "impl",
@@ -604,7 +631,7 @@ func TestConnectSpawnRequestCarriesEveryField(t *testing.T) {
 		!slices.Equal(out.GetSkillsDirs(), in.SkillsDirs) || out.GetMcpConfig() != in.MCPConfig ||
 		out.GetParentChildId() != in.ParentChildID || out.GetRecordRequests() != in.RecordRequests ||
 		out.GetPassthroughAuth() != in.PassthroughAuth || out.GetExecutorSelector() != in.ExecutorSelector ||
-		out.GetExecutorRef() != in.ExecutorRef, "a scalar field was lost on the wire: %+v", out)
+		out.GetExecutorRef() != in.ExecutorRef || out.GetSkipDerivedIndex() != in.SkipDerivedIndex, "a scalar field was lost on the wire: %+v", out)
 	if out.GetLabels()["env"] != "home" || out.GetEnv()["K"] != "V" {
 		t.Fatalf("a map field was lost: labels=%v env=%v", out.GetLabels(), out.GetEnv())
 	}

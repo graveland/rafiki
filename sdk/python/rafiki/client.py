@@ -219,6 +219,7 @@ class Client:
         max_cost: "float | None" = None,
         max_depth: "int | None" = None,
         max_children: "int | None" = None,
+        skip_derived_index: bool = False,
     ) -> str:
         """Spawn a child; returns its id. ``prompt``, when given, is sent as
         the child's first message (a spawn alone starts no work — fundi
@@ -233,6 +234,10 @@ class Client:
         parent under which to spawn (empty = top level). ``cwd`` defaults
         to the calling process's working directory — the daemon refuses an
         empty one.
+
+        ``skip_derived_index``: True means the recall indexer will not embed
+        or summarise this child's conversations or its descendants'; keyword
+        search still works; inherited by the subtree.
         """
         req = _gen.control_pb.SpawnRequest(
             cwd=cwd if cwd else os.getcwd(),
@@ -247,6 +252,7 @@ class Client:
             max_depth=max_depth,
             max_cost=max_cost,
             max_children=max_children,
+            skip_derived_index=skip_derived_index,
         )
         if script is not None:
             req.script = _script_spec(script)
