@@ -135,6 +135,13 @@ rafikid agent search --text "skill gap"
 All the `stats` filter flags, plus `--status`, `--min-tokens`, `--text`
 (full-text search over first messages), `--limit` (0 = backend default).
 
+The socket twin `rafiki conversations search` runs the same query and adds
+two flags: `--open` and `--closed` (mutually exclusive) narrow to
+conversations still open or already finished. Its table gains a `CLOSED`
+column — the finish time, `-` while open — and the JSON arm carries
+`closed_at` only for a finished row (never a zero time). `rafikid agent
+search` has neither the flags nor the column.
+
 ## `export`
 
 ```
