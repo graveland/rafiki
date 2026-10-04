@@ -1604,6 +1604,19 @@ func (c *Controller) ConversationFindings(ctx context.Context, scope insights.Sc
 	return findings, analysisRows, nil
 }
 
+// inheritSkipDerivedIndex ORs the parent's flag into a parented spawn: a child
+// can switch derived indexing off for its subtree and can never switch it back
+// on beneath a parent that has it off.
+func (c *Controller) inheritSkipDerivedIndex(req protocol.SpawnRequest) protocol.SpawnRequest {
+	if req.ParentChildID == "" {
+		return req
+	}
+	if parent, ok := c.st.Get(req.ParentChildID); ok && parent.SkipDerivedIndex {
+		req.SkipDerivedIndex = true
+	}
+	return req
+}
+
 func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner users.Identity) (protocol.SpawnResponseData, error) {
 	// The model the REQUEST named, captured before applyPreset can replace it
 	// with the preset's: resolveRouting parses both and merges spawn over
@@ -1728,6 +1741,10 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// resolveExecutor, the workspace provisioning check, and the selector
 	// stored on the new session.
 	req = c.inheritExecutorGrant(req)
+
+	// A child inherits its parent's derived-index suppression. Done in the same
+	// pre-read block as the executor grant, before anything reads req.
+	req = c.inheritSkipDerivedIndex(req)
 
 	// Computed before the executor-grant normalization and before agentRunner,
 	// rather than alongside the rest of initLabels below: the normalization's
@@ -1949,6 +1966,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 		ExtraArgs:          req.ExtraArgs,
 		RecordRequests:     req.RecordRequests,
 		ExecutorSelector:   req.ExecutorSelector,
+		SkipDerivedIndex:   req.SkipDerivedIndex,
 		WorkspaceMode:      req.WorkspaceMode,
 		MaxDepth:           grantedDepth(req, childDepthFor(c.st, req.ParentChildID), resolveAbsoluteDepthCeiling()),
 		MaxCost:            grantedCost(req),
@@ -2231,6 +2249,7 @@ func (c *Controller) activateLiveChild(
 		ExtraArgs:          snap.ExtraArgs,
 		RecordRequests:     snap.RecordRequests,
 		ExecutorSelector:   snap.ExecutorSelector,
+		SkipDerivedIndex:   snap.SkipDerivedIndex,
 		WorkspaceMode:      snap.WorkspaceMode,
 		MaxDepth:           snap.MaxDepth,
 		MaxCost:            snap.MaxCost,
@@ -2323,6 +2342,7 @@ func resumeRequestFromSnapshot(snap childstore.Snapshot, apiKey string) protocol
 		PiBinary:           snap.PiBinary,
 		ExtraArgs:          snap.ExtraArgs,
 		ExecutorSelector:   snap.ExecutorSelector,
+		SkipDerivedIndex:   snap.SkipDerivedIndex,
 		WorkspaceMode:      snap.WorkspaceMode,
 		RecordRequests:     snap.RecordRequests,
 		MaxDepth:           &snap.MaxDepth,
