@@ -637,6 +637,7 @@ message ConversationSearchRequest {
   int64  min_tokens = 9;
   string text       = 10;
   int32  limit      = 11; // 0 = default; server clamps to a max
+  string closed     = 12; // "" = any, "open", "closed"
 }
 
 message ConversationSummary {
@@ -656,6 +657,7 @@ message ConversationSummary {
   double cache_hit_ratio = 14;
   double total_cost_usd = 15;
   string first_message = 16;
+  optional int64 closed_at_unix = 17; // unset = not closed (conversation.closed_at)
 }
 
 message ConversationSearchResponse {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 
 	"connectrpc.com/connect"
 
@@ -19,6 +20,7 @@ type ConversationSearchFilter struct {
 	Owner, Persona, Source, Model, Status, Path string
 	MinTokens                                   int64
 	Text                                        string
+	Closed                                      string
 	Limit                                       int
 }
 
@@ -26,6 +28,7 @@ type ConversationSearchFilter struct {
 type ConversationSummaryRow struct {
 	ID, Name, Owner, Persona, Source, Model, Status, DrivenBy string
 	CreatedAtUnix                                             int64
+	ClosedAtUnix                                              *int64 // nil = still open (proto optional: unset, never 0)
 	Turns                                                     int
 	InputTokens, OutputTokens, CacheReadTokens                int64
 	CacheHitRatio, TotalCostUSD                               float64
@@ -113,11 +116,19 @@ func (s *Server) ConversationSearch(
 	if limit > maxConversationSearchLimit {
 		limit = maxConversationSearchLimit
 	}
+	// Reject an unknown closed value here, before the adapter, so every
+	// implementation agrees on the same InvalidArgument behaviour.
+	switch closed := req.Msg.GetClosed(); closed {
+	case "", "open", "closed":
+	default:
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("closed must be one of \"\", \"open\" or \"closed\", got "+strconv.Quote(closed)))
+	}
 	f := ConversationSearchFilter{
 		SinceUnix: req.Msg.GetSinceUnix(), UntilUnix: req.Msg.GetUntilUnix(),
 		Owner: req.Msg.GetOwner(), Persona: req.Msg.GetPersona(), Source: req.Msg.GetSource(),
 		Model: req.Msg.GetModel(), Status: req.Msg.GetStatus(), Path: req.Msg.GetPath(),
-		MinTokens: req.Msg.GetMinTokens(), Text: req.Msg.GetText(), Limit: limit,
+		MinTokens: req.Msg.GetMinTokens(), Text: req.Msg.GetText(), Closed: req.Msg.GetClosed(), Limit: limit,
 	}
 	rows, err := (*p).Search(ctx, f)
 	if err != nil {
@@ -128,7 +139,8 @@ func (s *Server) ConversationSearch(
 		out = append(out, &rafikiv1.ConversationSummary{
 			Id: r.ID, Name: r.Name, Owner: r.Owner, Persona: r.Persona, Source: r.Source,
 			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAtUnix: r.CreatedAtUnix,
-			Turns: int32(r.Turns), InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
+			ClosedAtUnix: r.ClosedAtUnix,
+			Turns:        int32(r.Turns), InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
 			CacheReadTokens: r.CacheReadTokens, CacheHitRatio: r.CacheHitRatio,
 			TotalCostUsd: r.TotalCostUSD, FirstMessage: r.FirstMessage,
 		})

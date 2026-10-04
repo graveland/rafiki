@@ -5,6 +5,8 @@ package insights
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -326,4 +328,107 @@ func TestSearchScopeZeroValueReturnsNoRows(t *testing.T) {
 	got, err := ins.Search(ctx, Scope{}, SearchFilter{})
 	c.NoError(err, "search with zero-value scope")
 	c.Empty(got, "zero-value scope returned %d rows, want 0 (the zero value denies)", len(got))
+}
+
+// closedFilterOwner is a per-run username, so a shared test DSN can never leave
+// another run's rows behind to be matched by name.
+func closedFilterOwner(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+// summaryIDs returns the ids of a search page, sorted so an EqDeep comparison
+// on a []string is order-stable.
+func summaryIDs(rows []ConversationSummary) []string {
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// TestSearchClosedFilter pins the closed filter against the two seeded ids:
+// the zero value matches both, "open" only the conversation with a NULL
+// closed_at, "closed" only the one stamped. Asserting on ids (never a count)
+// keeps a shared test DSN's leftover rows from flaking the test.
+func TestSearchClosedFilter(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := closedFilterOwner("closed-filter")
+	openID := seedConversation(t, pool, "client", owner)
+	closedID := seedConversation(t, pool, "client", owner)
+	stamped := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET closed_at = $2 WHERE id = $1::uuid`, closedID, stamped); err != nil {
+		t.Fatalf("stamp closed_at: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`, []string{openID, closedID})
+	})
+	ins := New(pool)
+
+	any, err := ins.Search(ctx, ScopeAll(), SearchFilter{Closed: "", Limit: 10})
+	c.Require().NoError(err, "search closed=any")
+	wantAny := []string{closedID, openID}
+	sort.Strings(wantAny)
+	c.EqDeep(wantAny, summaryIDs(any), "closed=\"\" must return both seeded conversations")
+
+	open, err := ins.Search(ctx, ScopeAll(), SearchFilter{Closed: "open", Limit: 10})
+	c.Require().NoError(err, "search closed=open")
+	c.EqDeep([]string{openID}, summaryIDs(open), "closed=open must return only the conversation with NULL closed_at")
+
+	closed, err := ins.Search(ctx, ScopeAll(), SearchFilter{Closed: "closed", Limit: 10})
+	c.Require().NoError(err, "search closed=closed")
+	c.EqDeep([]string{closedID}, summaryIDs(closed), "closed=closed must return only the stamped conversation")
+}
+
+// TestSearchSummaryCarriesClosedAt pins that a closed row reports ClosedAt set
+// to the stamped instant (within a second) and an open row leaves it nil.
+func TestSearchSummaryCarriesClosedAt(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	owner := closedFilterOwner("closed-at")
+	openID := seedConversation(t, pool, "client", owner)
+	closedID := seedConversation(t, pool, "client", owner)
+	stamped := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if _, err := pool.Exec(ctx,
+		`UPDATE conversations.conversation SET closed_at = $2 WHERE id = $1::uuid`, closedID, stamped); err != nil {
+		t.Fatalf("stamp closed_at: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM conversations.conversation WHERE id = ANY($1::uuid[])`, []string{openID, closedID})
+	})
+
+	rows, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Limit: 10})
+	c.Require().NoError(err, "search")
+	byID := map[string]ConversationSummary{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	c.Require().HasKey(byID, closedID, "the closed row must be returned")
+	c.Require().HasKey(byID, openID, "the open row must be returned")
+
+	gotClosed := byID[closedID].ClosedAt
+	c.Require().True(gotClosed != nil, "closed row ClosedAt = nil, want the stamped time")
+	c.True(gotClosed.Sub(stamped).Abs() < time.Second,
+		"closed row ClosedAt = %v, want within a second of %v", gotClosed, stamped)
+	c.True(byID[openID].ClosedAt == nil, "open row ClosedAt = %v, want nil", byID[openID].ClosedAt)
+}
+
+// TestSearchRejectsInvalidClosedValue pins that an unrecognised closed value is
+// rejected before any row is read, so a bad filter never silently widens.
+func TestSearchRejectsInvalidClosedValue(t *testing.T) {
+	c := assert.NewCollecting(t)
+	ctx := context.Background()
+	pool := newTestPool(t)
+	seedConversation(t, pool, "client", closedFilterOwner("closed-bad"))
+
+	rows, err := New(pool).Search(ctx, ScopeAll(), SearchFilter{Closed: "bogus"})
+	c.Require().Error(err, "search with an invalid closed value")
+	c.ErrorContains(err, "invalid closed filter", "invalid closed error")
+	c.Empty(rows, "invalid closed value returned %d rows, want none", len(rows))
 }

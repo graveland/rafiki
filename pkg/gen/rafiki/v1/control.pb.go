@@ -3462,7 +3462,8 @@ type ConversationSearchRequest struct {
 	Path          string                 `protobuf:"bytes,8,opt,name=path,proto3" json:"path,omitempty"` // "" | "proxy" | "direct"
 	MinTokens     int64                  `protobuf:"varint,9,opt,name=min_tokens,json=minTokens,proto3" json:"min_tokens,omitempty"`
 	Text          string                 `protobuf:"bytes,10,opt,name=text,proto3" json:"text,omitempty"`
-	Limit         int32                  `protobuf:"varint,11,opt,name=limit,proto3" json:"limit,omitempty"` // 0 = default; server clamps to a max
+	Limit         int32                  `protobuf:"varint,11,opt,name=limit,proto3" json:"limit,omitempty"`  // 0 = default; server clamps to a max
+	Closed        string                 `protobuf:"bytes,12,opt,name=closed,proto3" json:"closed,omitempty"` // "" = any, "open", "closed"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3574,6 +3575,13 @@ func (x *ConversationSearchRequest) GetLimit() int32 {
 	return 0
 }
 
+func (x *ConversationSearchRequest) GetClosed() string {
+	if x != nil {
+		return x.Closed
+	}
+	return ""
+}
+
 type ConversationSummary struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -3592,6 +3600,7 @@ type ConversationSummary struct {
 	CacheHitRatio   float64                `protobuf:"fixed64,14,opt,name=cache_hit_ratio,json=cacheHitRatio,proto3" json:"cache_hit_ratio,omitempty"`
 	TotalCostUsd    float64                `protobuf:"fixed64,15,opt,name=total_cost_usd,json=totalCostUsd,proto3" json:"total_cost_usd,omitempty"`
 	FirstMessage    string                 `protobuf:"bytes,16,opt,name=first_message,json=firstMessage,proto3" json:"first_message,omitempty"`
+	ClosedAtUnix    *int64                 `protobuf:"varint,17,opt,name=closed_at_unix,json=closedAtUnix,proto3,oneof" json:"closed_at_unix,omitempty"` // unset = not closed (conversation.closed_at)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -3736,6 +3745,13 @@ func (x *ConversationSummary) GetFirstMessage() string {
 		return x.FirstMessage
 	}
 	return ""
+}
+
+func (x *ConversationSummary) GetClosedAtUnix() int64 {
+	if x != nil && x.ClosedAtUnix != nil {
+		return *x.ClosedAtUnix
+	}
+	return 0
 }
 
 type ConversationSearchResponse struct {
@@ -14178,7 +14194,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
 	"\x12ListModelsResponse\x12+\n" +
-	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models\"\xd4\x02\n" +
+	"\x06models\x18\x01 \x03(\v2\x13.rafiki.v1.ModelRowR\x06models\"\xec\x02\n" +
 	"\x19ConversationSearchRequest\x12\"\n" +
 	"\n" +
 	"since_unix\x18\x01 \x01(\x03H\x00R\tsinceUnix\x88\x01\x01\x12\"\n" +
@@ -14194,9 +14210,10 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"min_tokens\x18\t \x01(\x03R\tminTokens\x12\x12\n" +
 	"\x04text\x18\n" +
 	" \x01(\tR\x04text\x12\x14\n" +
-	"\x05limit\x18\v \x01(\x05R\x05limitB\r\n" +
+	"\x05limit\x18\v \x01(\x05R\x05limit\x12\x16\n" +
+	"\x06closed\x18\f \x01(\tR\x06closedB\r\n" +
 	"\v_since_unixB\r\n" +
-	"\v_until_unix\"\xf1\x03\n" +
+	"\v_until_unix\"\xaf\x04\n" +
 	"\x13ConversationSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -14214,7 +14231,9 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x11cache_read_tokens\x18\r \x01(\x03R\x0fcacheReadTokens\x12&\n" +
 	"\x0fcache_hit_ratio\x18\x0e \x01(\x01R\rcacheHitRatio\x12$\n" +
 	"\x0etotal_cost_usd\x18\x0f \x01(\x01R\ftotalCostUsd\x12#\n" +
-	"\rfirst_message\x18\x10 \x01(\tR\ffirstMessage\"P\n" +
+	"\rfirst_message\x18\x10 \x01(\tR\ffirstMessage\x12)\n" +
+	"\x0eclosed_at_unix\x18\x11 \x01(\x03H\x00R\fclosedAtUnix\x88\x01\x01B\x11\n" +
+	"\x0f_closed_at_unix\"P\n" +
 	"\x1aConversationSearchResponse\x122\n" +
 	"\x04rows\x18\x01 \x03(\v2\x1e.rafiki.v1.ConversationSummaryR\x04rows\"D\n" +
 	"\x19ConversationExportRequest\x12'\n" +
@@ -15622,6 +15641,7 @@ func file_rafiki_v1_control_proto_init() {
 	file_rafiki_v1_control_proto_msgTypes[27].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[37].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[40].OneofWrappers = []any{}
+	file_rafiki_v1_control_proto_msgTypes[41].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[44].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[46].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[48].OneofWrappers = []any{

@@ -28,6 +28,7 @@ type SearchFilter struct {
 	Text              string // ILIKE substring match against the first user message snippet
 	Entrypoint        string // match conversations by origin_entrypoint
 	ExcludeEntrypoint string // drop conversations with this origin_entrypoint
+	Closed            string // "" = any, "open" = closed_at IS NULL, "closed" = closed_at IS NOT NULL
 	Limit             int    // defaults to 50 when <= 0
 }
 
@@ -43,8 +44,9 @@ type ConversationSummary struct {
 	Status   string `json:"status"`
 	DrivenBy string `json:"driven_by"`
 
-	CreatedAt time.Time `json:"created_at"`
-	Turns     int       `json:"turns"`
+	CreatedAt time.Time  `json:"created_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+	Turns     int        `json:"turns"`
 
 	InputTokens     int64 `json:"input_tokens"`
 	OutputTokens    int64 `json:"output_tokens"`
@@ -64,6 +66,11 @@ const defaultSearchLimit = 50
 func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]ConversationSummary, error) {
 	if err := f.Path.validate(); err != nil {
 		return nil, err
+	}
+	switch f.Closed {
+	case "", "open", "closed":
+	default:
+		return nil, fmt.Errorf("invalid closed filter %q: use %q, %q or %q", f.Closed, "", "open", "closed")
 	}
 	limit := f.Limit
 	if limit <= 0 {
@@ -104,6 +111,14 @@ func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]C
 	}
 	if f.ExcludeEntrypoint != "" {
 		convConds = append(convConds, "c.origin_entrypoint IS DISTINCT FROM "+a.next(f.ExcludeEntrypoint))
+	}
+	// Closed filters on the conversation column itself (conversation.closed_at),
+	// so it participates in the pre-lateral ordered LIMIT below.
+	switch f.Closed {
+	case "open":
+		convConds = append(convConds, "c.closed_at IS NULL")
+	case "closed":
+		convConds = append(convConds, "c.closed_at IS NOT NULL")
 	}
 	// Model, Source, and Since/Until filter on PER-TURN values via ONE shared
 	// EXISTS — a single turn must satisfy all of them, matching the population
@@ -154,7 +169,7 @@ func (i *Insights) Search(ctx context.Context, scope Scope, f SearchFilter) ([]C
 
 	query := `
 SELECT c.id::text, coalesce(c.name,''), coalesce(u.username,''), coalesce(c.persona,''),
-       coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at,
+       coalesce(t.source,''), coalesce(c.model,''), c.status, c.driven_by, c.created_at, c.closed_at,
        coalesce(t.turns,0), coalesce(t.in_tok,0), coalesce(t.out_tok,0), coalesce(t.cache_read,0),
        coalesce(tc.cost_usd, 0),
        coalesce(coalesce(t.cache_read,0) * 1.0 / nullif(coalesce(t.in_tok,0) + coalesce(t.cache_read,0), 0), 0),
@@ -206,7 +221,7 @@ LIMIT ` + limitArg
 	for rows.Next() {
 		var s ConversationSummary
 		if err := rows.Scan(&s.ID, &s.Name, &s.Owner, &s.Persona, &s.Source, &s.Model, &s.Status, &s.DrivenBy,
-			&s.CreatedAt, &s.Turns, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens,
+			&s.CreatedAt, &s.ClosedAt, &s.Turns, &s.InputTokens, &s.OutputTokens, &s.CacheReadTokens,
 			&s.TotalCostUSD, &s.CacheHitRatio, &s.FirstMessage); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}

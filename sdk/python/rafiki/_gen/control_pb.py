@@ -1635,6 +1635,7 @@ class ConversationSearchRequest:
     min_tokens: int = 0
     text: str = ""
     limit: int = 0
+    closed: str = ""
 
     def to_dict(self) -> dict:
         out = {}
@@ -1660,6 +1661,8 @@ class ConversationSearchRequest:
             out["text"] = self.text
         if self.limit != 0:
             out["limit"] = self.limit
+        if self.closed != "":
+            out["closed"] = self.closed
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ConversationSearchRequest":
@@ -1697,6 +1700,9 @@ class ConversationSearchRequest:
         _v = _d.get("limit")
         if _v is not None:
             obj.limit = _int_in(_v)
+        _v = _d.get("closed")
+        if _v is not None:
+            obj.closed = _v
         return obj
 
 @dataclasses.dataclass
@@ -1717,6 +1723,7 @@ class ConversationSummary:
     cache_hit_ratio: float = 0.0
     total_cost_usd: float = 0.0
     first_message: str = ""
+    closed_at_unix: Optional[int] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -1752,6 +1759,8 @@ class ConversationSummary:
             out["totalCostUsd"] = _float_out(self.total_cost_usd)
         if self.first_message != "":
             out["firstMessage"] = self.first_message
+        if self.closed_at_unix is not None:
+            out["closedAtUnix"] = str(self.closed_at_unix)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ConversationSummary":
@@ -1804,6 +1813,9 @@ class ConversationSummary:
         _v = _d.get("firstMessage")
         if _v is not None:
             obj.first_message = _v
+        _v = _d.get("closedAtUnix")
+        if _v is not None:
+            obj.closed_at_unix = _int_in(_v)
         return obj
 
 @dataclasses.dataclass

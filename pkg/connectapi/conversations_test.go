@@ -21,15 +21,17 @@ type fakeConversationInsights struct {
 	gotName   string
 	gotQuery  connectapi.CatalogueFilter
 
-	rows []connectapi.ConversationSummaryRow
-	tr   connectapi.TranscriptRow
-	ok   bool
-	err  error
+	searchCalled bool
+	rows         []connectapi.ConversationSummaryRow
+	tr           connectapi.TranscriptRow
+	ok           bool
+	err          error
 
 	result connectapi.CatalogueResult
 }
 
 func (f *fakeConversationInsights) Search(_ context.Context, flt connectapi.ConversationSearchFilter) ([]connectapi.ConversationSummaryRow, error) {
+	f.searchCalled = true
 	f.gotFilter = flt
 	return f.rows, f.err
 }
@@ -95,6 +97,42 @@ func TestConversationSearchClampsLimit(t *testing.T) {
 		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Limit: 100000}))
 	c.Require().NoError(err, "ConversationSearch")
 	c.Eq(500, f.gotFilter.Limit, "filter Limit")
+}
+
+// TestConversationSearchMapsClosedFilterAndRow pins the closed filter through
+// to the adapter AND the row's optional closed_at on the wire: a set value must
+// appear as closed_at_unix, an absent one must stay unset (never 0).
+func TestConversationSearchMapsClosedFilterAndRow(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeConversationInsights{rows: []connectapi.ConversationSummaryRow{
+		{ID: "closed", ClosedAtUnix: ptrInt64(1757000000)},
+		{ID: "open"},
+	}}
+	s := newConversationsServer(f)
+
+	resp, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Closed: "open"}))
+	c.Require().NoError(err, "ConversationSearch")
+	c.Eq("open", f.gotFilter.Closed, "filter Closed")
+
+	rows := resp.Msg.GetRows()
+	c.Require().Len(rows, 2, "rows = %d, want 2", len(rows))
+	c.Require().True(rows[0].ClosedAtUnix != nil, "closed row must set closed_at_unix on the wire")
+	c.Eq(int64(1757000000), rows[0].GetClosedAtUnix(), "closed_at_unix")
+	c.False(rows[1].ClosedAtUnix != nil, "open row must leave closed_at_unix unset, got %v", rows[1].GetClosedAtUnix())
+}
+
+// An unrecognised closed value is refused at the handler, before the adapter is
+// ever called, so every adapter implementation agrees.
+func TestConversationSearchRejectsInvalidClosedValue(t *testing.T) {
+	f := &fakeConversationInsights{}
+	s := newConversationsServer(f)
+
+	_, err := s.ConversationSearch(context.Background(),
+		connect.NewRequest(&rafikiv1.ConversationSearchRequest{Closed: "bogus"}))
+	c := assert.NewAborting(t)
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "invalid closed err = %v, want", err)
+	c.False(f.searchCalled, "the adapter must not be called for an invalid closed value")
 }
 
 func TestConversationSearchErrorFailsInternalAndRedacts(t *testing.T) {
