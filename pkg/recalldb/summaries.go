@@ -33,6 +33,7 @@ func (s *Store) EligibleForSummary(ctx context.Context, excluded []string, o rec
 			coalesce(` + stoppedSQL + `, false)
 		FROM conversations.conversation c
 		WHERE c.origin_entrypoint <> ALL(` + b.arg(excludedArg(excluded)) + `)
+		  AND ` + derivedIndexAllowedSQL + `
 		  AND (c.closed_at IS NOT NULL
 		       OR (NOT EXISTS (SELECT 1 FROM conversations.child ch
 		                       WHERE (` + linkageSQL + `) AND ch.closed_at IS NULL)

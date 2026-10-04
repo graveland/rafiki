@@ -91,6 +91,13 @@ func (s *Store) ExtractCursors(ctx context.Context, excluded []string, limit int
 	return out, rows.Err()
 }
 
+// derivedIndexAllowedSQL is true for a conversation c no flagged child links
+// to: the recall indexer embeds and summarises only these. It reuses
+// linkageSQL, so claude children (no conversation_id, linked by
+// external_ref) are covered like fundi ones.
+const derivedIndexAllowedSQL = `NOT EXISTS (SELECT 1 FROM conversations.child ch
+	WHERE (` + linkageSQL + `) AND ch.skip_derived_index)`
+
 // excludedArg normalizes an exclusion list for `<> ALL(...)`: a nil slice
 // would bind as an untyped NULL and null out the whole predicate.
 func excludedArg(excluded []string) []string {
@@ -220,6 +227,7 @@ func (s *Store) pendingSummaryEmbeds(ctx context.Context, model string, per int)
 		JOIN conversations.conversation c ON c.id = s.conversation_id
 		WHERE (s.embedding IS NULL OR s.embedding_model IS DISTINCT FROM $1)
 		  AND c.origin_entrypoint <> ALL($2)
+		  AND `+derivedIndexAllowedSQL+`
 		ORDER BY s.created_at
 		LIMIT $3`, model, recall.ExcludedEntrypoints, per)
 	if err != nil {
@@ -250,6 +258,7 @@ func (s *Store) pendingWindowEmbeds(ctx context.Context, model string, per int) 
 		WHERE (w.embedding IS NULL OR w.embedding_model IS DISTINCT FROM $1)
 		  AND c.origin_entrypoint <> ALL($2)
 		  AND (w.sealed OR coalesce(`+stoppedSQL+`, false))
+		  AND `+derivedIndexAllowedSQL+`
 		ORDER BY w.created_at
 		LIMIT $3`, model, recall.ExcludedEntrypoints, per)
 	if err != nil {

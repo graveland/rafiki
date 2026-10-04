@@ -101,16 +101,17 @@ func insertMessage(t *testing.T, pool *pgxpool.Pool, convID string, ordinal int,
 }
 
 type childFixture struct {
-	ID     string
-	Status string
+	ID               string
+	Status           string
+	SkipDerivedIndex bool
 }
 
 func insertChild(t *testing.T, pool *pgxpool.Pool, f childFixture, convID string) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `INSERT INTO conversations.child
-		(child_id, conversation_id, kind, status, spawned_at)
-		VALUES ($1, $2::uuid, 'claude', $3, now())`,
-		f.ID, nullUUID(convID), f.Status)
+		(child_id, conversation_id, kind, status, spawned_at, skip_derived_index)
+		VALUES ($1, $2::uuid, 'claude', $3, now(), $4)`,
+		f.ID, nullUUID(convID), f.Status, f.SkipDerivedIndex)
 	assert.NewAborting(t).NoError(err, "insert child %s", f.ID)
 }
 
@@ -892,4 +893,161 @@ func TestStoreTryLockExclusive(t *testing.T) {
 	release3, ok3, err := st.TryLock(ctx)
 	c.False(err != nil || !ok3, "TryLock after release: ok=%v err=%v, want true", ok3, err)
 	release3()
+}
+
+// --- skip_derived_index gates ---
+
+func TestSkipDerivedIndexGatesEmbedsAndSummaries(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-gates")
+	ck.Require().NoError(st.SetState(ctx, "summaries_enabled_at", time.Now().UTC().Add(-2*time.Hour).Format(time.RFC3339)), "set enabled_at")
+
+	flagged := insertConversation(t, pool, convFixture{Owner: owner, Name: "flagged", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, flagged, 0, "user", "flagged work", ago(90*time.Minute))
+	flaggedWin := insertWindow(t, pool, flagged, owner, 0, 0, 0, "flagged window text", true)
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipidx%d", time.Now().UnixNano()), Status: "running", SkipDerivedIndex: true}, flagged)
+
+	control := insertConversation(t, pool, convFixture{Owner: owner, Name: "control", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, control, 0, "user", "control work", ago(90*time.Minute))
+	controlWin := insertWindow(t, pool, control, owner, 0, 0, 0, "control window text", true)
+
+	rows, err := st.pendingWindowEmbeds(ctx, "skip-model", 50)
+	ck.Require().NoError(err, "pending window embeds")
+	seen := map[string]bool{}
+	for _, it := range rows {
+		seen[it.ID] = true
+	}
+	ck.True(seen[controlWin], "control window must still embed")
+	ck.False(seen[flaggedWin], "window of a skip-flagged conversation must not embed")
+
+	opts := recall.EligibleOpts{PromptVersion: recall.SummaryPromptVersion, Model: "sum-model", Limit: 50}
+	eligible, err := st.EligibleForSummary(ctx, recall.ExcludedEntrypoints, opts)
+	ck.Require().NoError(err, "eligible")
+	present := map[string]bool{}
+	for _, c := range eligible {
+		present[c.ID] = true
+	}
+	ck.True(present[control], "control conversation must still be summarizable")
+	ck.False(present[flagged], "conversation linked to a skip-flagged child must not be summarizable")
+}
+
+func TestSkipDerivedIndexCoversClaudeLinkage(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-claude")
+	ck.Require().NoError(st.SetState(ctx, "summaries_enabled_at", time.Now().UTC().Add(-2*time.Hour).Format(time.RFC3339)), "set enabled_at")
+
+	// A claude child has no conversation_id; its conversations link by
+	// external_ref = child_id and by external_ref = child_id:<thread>. The
+	// child id carries an underscore so the LIKE escape is exercised.
+	childID := fmt.Sprintf("c_skipidx%d", time.Now().UnixNano())
+	plain := insertConversation(t, pool, convFixture{Owner: owner, Name: "plain", ExternalRef: childID, ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, plain, 0, "user", "plain work", ago(90*time.Minute))
+	plainWin := insertWindow(t, pool, plain, owner, 0, 0, 0, "plain window", true)
+
+	threaded := insertConversation(t, pool, convFixture{Owner: owner, Name: "threaded", ExternalRef: childID + ":sub", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, threaded, 0, "user", "threaded work", ago(90*time.Minute))
+	threadedWin := insertWindow(t, pool, threaded, owner, 0, 0, 0, "threaded window", true)
+
+	insertChild(t, pool, childFixture{ID: childID, Status: "running", SkipDerivedIndex: true}, "")
+
+	control := insertConversation(t, pool, convFixture{Owner: owner, Name: "control", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, control, 0, "user", "control work", ago(90*time.Minute))
+	controlWin := insertWindow(t, pool, control, owner, 0, 0, 0, "control window", true)
+
+	rows, err := st.pendingWindowEmbeds(ctx, "skip-model", 50)
+	ck.Require().NoError(err, "pending window embeds")
+	seen := map[string]bool{}
+	for _, it := range rows {
+		seen[it.ID] = true
+	}
+	ck.True(seen[controlWin], "control window must still embed")
+	ck.False(seen[plainWin], "conversation linked by external_ref = child_id must not embed")
+	ck.False(seen[threadedWin], "conversation linked by external_ref = child_id:<thread> must not embed")
+
+	opts := recall.EligibleOpts{PromptVersion: recall.SummaryPromptVersion, Model: "sum-model", Limit: 50}
+	eligible, err := st.EligibleForSummary(ctx, recall.ExcludedEntrypoints, opts)
+	ck.Require().NoError(err, "eligible")
+	present := map[string]bool{}
+	for _, c := range eligible {
+		present[c.ID] = true
+	}
+	ck.True(present[control], "control conversation must still be summarizable")
+	ck.False(present[plain], "external_ref = child_id conversation must not be summarizable")
+	ck.False(present[threaded], "external_ref = child_id:<thread> conversation must not be summarizable")
+}
+
+func TestSkipDerivedIndexStillExtractsWindows(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-extract")
+
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "flagged"})
+	insertMessage(t, pool, conv, 0, "user", "needs a window", ago(time.Minute))
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipidx%d", time.Now().UnixNano()), Status: "running", SkipDerivedIndex: true}, conv)
+
+	// Windows are still built for flagged conversations: the gate must live
+	// only on the embed and summary queries.
+	cursors, err := st.ExtractCursors(ctx, recall.ExcludedEntrypoints, 50)
+	ck.Require().NoError(err, "extract cursors")
+	found := false
+	for _, cur := range cursors {
+		if cur.Conversation.ID == conv {
+			found = true
+		}
+	}
+	ck.True(found, "a skip-flagged conversation must still be extracted")
+}
+
+func TestSkipDerivedIndexLeavesExistingEmbeddingsAlone(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-existing")
+
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "flagged", ClosedAt: ago(90 * time.Minute)})
+	insertMessage(t, pool, conv, 0, "user", "already embedded", ago(90*time.Minute))
+	win := insertWindow(t, pool, conv, owner, 0, 0, 0, "existing window", true)
+	setEmbedding(t, pool, "conversations.conversation_window", win, "skip-model", "[1,2,3]")
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipidx%d", time.Now().UnixNano()), Status: "running", SkipDerivedIndex: true}, conv)
+
+	rows, err := st.pendingWindowEmbeds(ctx, "skip-model", 50)
+	ck.Require().NoError(err, "pending window embeds")
+	for _, it := range rows {
+		ck.False(it.ID == win, "an already-embedded flagged window must not reappear as pending")
+	}
+
+	var embeddingNull bool
+	var model string
+	ck.Require().NoError(pool.QueryRow(ctx, `SELECT embedding IS NULL, coalesce(embedding_model, '')
+		FROM conversations.conversation_window WHERE id = $1::uuid`, win).Scan(&embeddingNull, &model), "read embedding")
+	ck.False(embeddingNull, "the gate must not delete an existing embedding")
+	ck.Eq("skip-model", model, "existing embedding_model must be unchanged")
+}
+
+func TestSkipDerivedIndexDoesNotGateMemoryEmbeds(t *testing.T) {
+	ck := assert.NewCollecting(t)
+	st, pool := testStore(t)
+	ctx := context.Background()
+	owner := insertUser(t, pool, "skip-memory")
+
+	// Memory is source data, not conversation-derived: a flagged child must
+	// not stop a pending memory from embedding.
+	conv := insertConversation(t, pool, convFixture{Owner: owner, Name: "flagged"})
+	insertChild(t, pool, childFixture{ID: fmt.Sprintf("c_skipidx%d", time.Now().UnixNano()), Status: "running", SkipDerivedIndex: true}, conv)
+
+	memID := mustPut(t, st, owner, "proj.skipmem", "notes")
+	rows, err := st.pendingMemoryEmbeds(ctx, "skip-model", 50)
+	ck.Require().NoError(err, "pending memory embeds")
+	found := false
+	for _, it := range rows {
+		if it.ID == memID {
+			found = true
+		}
+	}
+	ck.True(found, "a pending memory must still embed while a flagged child exists")
 }
