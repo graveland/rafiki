@@ -31,8 +31,10 @@ func TestChildConversationScope(t *testing.T) {
 
 	got, err := childConversationScope(childTokenCtx("c_d0"), c)
 	ck.Require().NoError(err, "per-child secret")
-	ck.True(reflect.DeepEqual(insights.ScopeSubtree(c.subtreeSelector("c_d0")), got), "per-child secret scope = %+v", got)
-	ck.Contains(c.subtreeSelector("c_d0").ConversationIDs, "01a0-worker", "the subtree names the worker's conversation")
+	sel, err := c.subtreeSelector(context.Background(), "c_d0")
+	ck.Require().NoError(err, "subtree selector")
+	ck.True(reflect.DeepEqual(insights.ScopeSubtree(sel), got), "per-child secret scope = %+v", got)
+	ck.Contains(sel.ConversationIDs, "01a0-worker", "the subtree names the worker's conversation")
 
 	attributed := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u1", Via: server.ProvenanceChildAttributed})
@@ -54,9 +56,11 @@ func TestConnectConversationsReadsUseTheChildSubtree(t *testing.T) {
 	fb := &fakeInsightsBackend{}
 	c.insights = fb
 	a := connectConversations{c: c}
-	want := insights.ScopeSubtree(c.subtreeSelector("c_d0"))
+	wantSel, err := c.subtreeSelector(context.Background(), "c_d0")
+	ck.Require().NoError(err, "subtree selector")
+	want := insights.ScopeSubtree(wantSel)
 
-	_, err := a.RunQuery(childTokenCtx("c_d0"), "tools", connectapi.CatalogueFilter{})
+	_, err = a.RunQuery(childTokenCtx("c_d0"), "tools", connectapi.CatalogueFilter{})
 	ck.Require().NoError(err, "RunQuery")
 	ck.True(reflect.DeepEqual(want, fb.gotScope), "RunQuery scope = %+v", fb.gotScope)
 

@@ -278,29 +278,90 @@ const budgetQueryTimeout = 5 * time.Second
 // A real subagent's branch is named by BOTH its own ExternalRef and its
 // parent's prefix; the query ORs the three lists in one pass, so a row
 // matching twice is still one row.
-func (c *Controller) subtreeSelector(rootChildID string) insights.SubtreeSelector {
+//
+// Two sources are UNIONED. The LIVE in-memory set (c.st.Get and
+// c.st.Descendants — the same rows every live-state read uses) is the whole
+// answer when no lineage source is wired. When c.lineage is non-nil the
+// database's full lineage is added on top: it covers descendants that have
+// been CLOSED and so forgotten from the live set, which is the point — a
+// closed child must stay in its ancestors' subtree for spend and scope.
+//
+// The dedupe across both sources (and within each list) is load-bearing: a
+// child present in BOTH is named once, so a row matching through more than
+// one route stays one row.
+//
+// A lineage error is RETURNED, never swallowed, so each caller decides what
+// an unreadable lineage means for it: admission and budget mutation fail
+// CLOSED (a budget that cannot be checked is not enforced), the
+// child-credential scope path answers an error rather than an empty-and-
+// allowed scope, and a display path (a heartbeat's cost clause) degrades by
+// omitting the number. Returning an empty selector instead would fail OPEN on
+// every budget path — closing a child could LOWER an ancestor's spend.
+func (c *Controller) subtreeSelector(ctx context.Context, rootChildID string) (insights.SubtreeSelector, error) {
 	var sel insights.SubtreeSelector
-	add := func(snap childstore.Snapshot) {
-		if snap.SessionID != "" {
-			sel.ConversationIDs = append(sel.ConversationIDs, snap.SessionID)
+	add := func(childID string, convs ...string) {
+		for _, conv := range convs {
+			if conv != "" {
+				sel.ConversationIDs = append(sel.ConversationIDs, conv)
+			}
 		}
-		sel.ExternalRefs = append(sel.ExternalRefs, snap.ChildID)
-		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, snap.ChildID+threadRefSep)
+		sel.ExternalRefs = append(sel.ExternalRefs, childID)
+		sel.ExternalRefPrefixes = append(sel.ExternalRefPrefixes, childID+threadRefSep)
 	}
 	if snap, ok := c.st.Get(rootChildID); ok {
-		add(snap)
+		add(snap.ChildID, snap.SessionID)
 	}
 	for _, snap := range c.st.Descendants(rootChildID) {
-		add(snap)
+		add(snap.ChildID, snap.SessionID)
 	}
-	return sel
+	if c.lineage != nil {
+		members, err := c.lineage.Lineage(ctx, rootChildID)
+		if err != nil {
+			return insights.SubtreeSelector{}, fmt.Errorf("subtree lineage for %s: %w", rootChildID, err)
+		}
+		for _, m := range members {
+			add(m.ChildID, m.SessionID, m.ConversationID)
+		}
+	}
+	sel.ConversationIDs = dedupeStrings(sel.ConversationIDs)
+	sel.ExternalRefs = dedupeStrings(sel.ExternalRefs)
+	sel.ExternalRefPrefixes = dedupeStrings(sel.ExternalRefPrefixes)
+	return sel, nil
 }
 
+// dedupeStrings removes duplicates from in, preserving first-seen order. It is
+// the union step subtreeSelector needs: the live set and the lineage overlap by
+// design (every live child is also in the database), and a selector that named
+// a row twice would pass it to the query twice.
+func dedupeStrings(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0]
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// subtreeSpend prices rootChildID's whole subtree. It propagates both its own
+// "no cost source" error and subtreeSelector's lineage error, so an unreadable
+// lineage stays a fail-closed refusal at every budget caller rather than an
+// empty (cheap) selector.
 func (c *Controller) subtreeSpend(ctx context.Context, rootChildID string) (float64, error) {
 	if c.coster == nil {
 		return 0, errors.New("no cost source configured")
 	}
-	return c.coster.SubtreeCost(ctx, c.subtreeSelector(rootChildID))
+	sel, err := c.subtreeSelector(ctx, rootChildID)
+	if err != nil {
+		return 0, err
+	}
+	return c.coster.SubtreeCost(ctx, sel)
 }
 
 // childDepthFor is where a child of parentID would land. Kept separate from

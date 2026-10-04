@@ -672,7 +672,15 @@ func scopeFor(ctx context.Context) (insights.Scope, error) {
 // shapes stay refused here as they are at the gate.
 func childConversationScope(ctx context.Context, c *Controller) (insights.Scope, error) {
 	if id := server.IdentityFromContext(ctx); id != nil && id.Via == server.ProvenanceChildToken {
-		return insights.ScopeSubtree(c.subtreeSelector(id.ChildID)), nil
+		sel, err := c.subtreeSelector(ctx, id.ChildID)
+		if err != nil {
+			// Fail CLOSED, never empty-and-allowed: a lineage that cannot be read
+			// must not shrink the boundary to nothing (that would look like "no
+			// rows", i.e. no authority) NOR widen it to the owner's corpus. An
+			// error the verb answers is the only shape that is neither.
+			return insights.Scope{}, err
+		}
+		return insights.ScopeSubtree(sel), nil
 	}
 	return scopeFor(ctx)
 }
@@ -689,7 +697,7 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 		Since: unixToTimePtr(f.SinceUnix), Until: unixToTimePtr(f.UntilUnix),
 		Owner: f.Owner, Persona: f.Persona, Source: f.Source, Model: f.Model,
 		Status: f.Status, Path: insights.Path(f.Path), MinTokens: f.MinTokens,
-		Text: f.Text, Limit: f.Limit,
+		Text: f.Text, Limit: f.Limit, Closed: f.Closed,
 	})
 	if err != nil {
 		logIfUncoded("connect: conversation search failed", err)
@@ -697,13 +705,21 @@ func (a connectConversations) Search(ctx context.Context, f connectapi.Conversat
 	}
 	out := make([]connectapi.ConversationSummaryRow, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, connectapi.ConversationSummaryRow{
+		row := connectapi.ConversationSummaryRow{
 			ID: r.ID, Name: r.Name, Owner: r.Owner, Persona: r.Persona, Source: r.Source,
 			Model: r.Model, Status: r.Status, DrivenBy: r.DrivenBy, CreatedAtUnix: r.CreatedAt.Unix(),
 			Turns: r.Turns, InputTokens: r.InputTokens, OutputTokens: r.OutputTokens,
 			CacheReadTokens: r.CacheReadTokens, CacheHitRatio: r.CacheHitRatio, TotalCostUSD: r.TotalCostUSD,
 			FirstMessage: r.FirstMessage,
-		})
+		}
+		// ClosedAt is the ONLY signal a row was closed; ClosedAtUnix stays nil
+		// (proto optional unset) for an open conversation, never 0, so "closed at
+		// the epoch" and "still open" cannot collapse into each other.
+		if r.ClosedAt != nil {
+			unix := r.ClosedAt.Unix()
+			row.ClosedAtUnix = &unix
+		}
+		out = append(out, row)
 	}
 	return out, nil
 }

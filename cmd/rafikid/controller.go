@@ -94,6 +94,16 @@ type Controller struct {
 	// means children live in memory only and do not survive a restart.
 	children childstore.ChildStore
 
+	// lineage resolves an ancestor's FULL subtree for the reads that must cover
+	// closed descendants too — subtree spend (checkBudget, sweepBudgets,
+	// SetChildBudget) and a child credential's conversation scope. Unlike c.st,
+	// which is live-state only and forgets a child the moment it is closed, this
+	// source reads the database (tombstoned rows included). Wired once at
+	// startup via SetLineageSource from the Postgres child store — see
+	// wireLineageSource. Nil on a DB-less daemon or in a test, where
+	// subtreeSelector falls back to the live set alone.
+	lineage childstore.LineageSource
+
 	// stopping is set once the daemon's own shutdown sequence begins
 	// (ShutdownAllChildren). Child exits handled after that point skip the row
 	// persist on purpose: the process is dying and its children die with it,
@@ -544,6 +554,38 @@ func (c *Controller) SetProviderGuard(g *routing.ProviderGuard) {
 	c.providerGuard = g
 }
 
+// SetLineageSource records the daemon's lineage source: the child store's view
+// of an ancestor's full subtree, closed descendants included. Consulted by
+// subtreeSelector (limits.go) so subtree spend and a child credential's
+// conversation scope keep covering a child that has been closed. Wired once at
+// startup, before the socket accepts anything.
+//
+// A nil interface is REFUSED and leaves the field nil — the same discipline
+// SetRoutePolicy, SetBatcher and connectapi's Set*Manager setters apply. An
+// absent source must stay absent (subtreeSelector then falls back to the live
+// in-memory set), never be stored as a non-nil interface over a nil pointer
+// that nil-panics on the first Lineage call.
+func (c *Controller) SetLineageSource(src childstore.LineageSource) {
+	if src == nil {
+		return
+	}
+	c.lineage = src
+}
+
+// wireLineageSource gives ctrl the child store's lineage view when the store
+// can provide one. It is the production wiring path, extracted from
+// NewController so TestControllerSatisfiesConnectSeams can pin it with a stub:
+// the Controller's children field is typed as the narrower ChildStore, which
+// does NOT include Lineage, so a store that lost its Lineage method would
+// still satisfy that field and silently leave subtree spend and child scope
+// blind to closed children. The assertion is explicit at the wiring site for
+// exactly that reason.
+func wireLineageSource(ctrl *Controller, store childstore.ChildStore) {
+	if src, ok := store.(childstore.LineageSource); ok {
+		ctrl.SetLineageSource(src)
+	}
+}
+
 func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, dumper *persist.LogDumper, pool *pgxpool.Pool, rawTrace *rawtrace.RawTraceStore, rawTraceAll bool, baseCtx context.Context, execStore executors.Store, userStore users.Store, skillStore skills.Store, prov *providers.Set) *Controller {
 	gw := 7 * 24 * time.Hour
 	if h := paths.Get(paths.GraceHours); h != "" {
@@ -628,7 +670,12 @@ func NewController(st *childstore.Store, stateDir, logsDir, socketPath string, d
 	// with the catalog's Pricing so ListChildren can fill CostUSD.
 	if pool != nil {
 		c.coster = insights.New(pool)
-		c.children = childstoredb.New(pool)
+		childStore := childstoredb.New(pool)
+		c.children = childStore
+		// The same store also resolves an ancestor's full lineage (closed
+		// descendants included); wire it so subtree spend and child conversation
+		// scope keep covering closed children.
+		wireLineageSource(c, childStore)
 		c.leases = store.NewLeases(pool)
 		// The review verbs' read surface. Pricer-less like coster's initial
 		// value: RecentAnalyses reads cost off the stored analysis row, it

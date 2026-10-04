@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -26,6 +27,49 @@ func TestControllerSatisfiesConnectSeams(t *testing.T) {
 	// "unimplemented". This line is the pin.
 	var _ connectapi.DescendantLister = connectLifecycle{}
 	var _ connectapi.ConversationResolver = (*Controller)(nil)
+}
+
+// stubChildStore is a no-op childstore.ChildStore; stubLineageStore embeds it
+// and adds Lineage, so a test can hand wireLineageSource one store of each
+// kind and see the type assertion decide.
+type stubChildStore struct{}
+
+func (stubChildStore) Upsert(context.Context, childstore.ChildRecord) error   { return nil }
+func (stubChildStore) Delete(context.Context, string) error                   { return nil }
+func (stubChildStore) List(context.Context) ([]childstore.ChildRecord, error) { return nil, nil }
+func (stubChildStore) AdoptOwnership(context.Context, string, string) error   { return nil }
+
+type stubLineageStore struct{ stubChildStore }
+
+func (stubLineageStore) Lineage(context.Context, string) ([]childstore.LineageMember, error) {
+	return nil, nil
+}
+
+// TestControllerWiresLineageSourceFromChildStore pins the production wiring
+// path: NewController calls wireLineageSource with its Postgres child store,
+// which is what gives subtree spend and a child credential's conversation scope
+// a view of closed children. The Controller's children field is the narrower
+// childstore.ChildStore, which does NOT include Lineage — so the compiler stays
+// silent if the wired store stops implementing LineageSource, and this runtime
+// pin is the only thing that catches it (same reasoning as the DescendantLister
+// line above).
+func TestControllerWiresLineageSourceFromChildStore(t *testing.T) {
+	c := assert.NewAborting(t)
+
+	wired := &Controller{}
+	wireLineageSource(wired, stubLineageStore{})
+	c.True(wired.lineage != nil, "a store implementing childstore.LineageSource must be wired as the lineage source")
+
+	// A store that is only a ChildStore leaves the field nil, so subtreeSelector
+	// takes the documented live-set fallback rather than panicking on Lineage.
+	barren := &Controller{}
+	wireLineageSource(barren, stubChildStore{})
+	c.True(barren.lineage == nil, "a store without Lineage must leave the source nil")
+
+	// SetLineageSource refuses nil, the discipline the other Set* setters apply.
+	refused := &Controller{}
+	refused.SetLineageSource(nil)
+	c.True(refused.lineage == nil, "SetLineageSource must refuse a nil interface")
 }
 
 // buildProtocolSpawnRequest must carry every Connect-plane param onto the

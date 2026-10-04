@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
@@ -60,8 +61,18 @@ func newMCPConversationReader(ctrl *Controller, owner users.Identity) *conversat
 // The selector is built from childstore state only. A child whose row has
 // gone yields an (empty) selector that denies every row — a vanished child
 // reads as nothing visible, never as the owner's corpus.
-func newMCPChildConversationReader(ctrl *Controller, childID string) *conversationReader {
-	return &conversationReader{ctrl: ctrl, scope: insights.ScopeSubtree(ctrl.subtreeSelector(childID))}
+//
+// A lineage error FAILS CLOSED to the same empty selector: the reader denies
+// every row and logs the child id (never the owner's corpus, never the error
+// text's payload). This is the deny shape the doc above documents, applied to
+// the one other way the selector can fail to resolve.
+func newMCPChildConversationReader(ctx context.Context, ctrl *Controller, childID string) *conversationReader {
+	sel, err := ctrl.subtreeSelector(ctx, childID)
+	if err != nil {
+		slog.Warn("mcp: child conversation scope unavailable; denying all rows", "child", childID, "error", err)
+		return &conversationReader{ctrl: ctrl, scope: insights.ScopeSubtree(insights.SubtreeSelector{})}
+	}
+	return &conversationReader{ctrl: ctrl, scope: insights.ScopeSubtree(sel)}
 }
 
 func (r *conversationReader) ConversationSearch(ctx context.Context, q tools.ConversationQuery) ([]tools.ConversationSummaryRow, error) {

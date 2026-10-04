@@ -198,7 +198,7 @@ func TestMCPChildConversationReaderScopeIsSubtree(t *testing.T) {
 		Labels: map[string]string{childstore.LabelParent: uniq + "root", childstore.LabelRoot: uniq + "root"},
 	})
 
-	r := newMCPChildConversationReader(ctrl, caller)
+	r := newMCPChildConversationReader(ctx, ctrl, caller)
 
 	rows, err := r.ConversationSearch(ctx, tools.ConversationQuery{Limit: 50})
 	c.NoError(err, "search")

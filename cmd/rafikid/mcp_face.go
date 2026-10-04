@@ -249,7 +249,7 @@ func (f *mcpFace) getServer(r *http.Request) *mcp.Server {
 	// newMCPChildConversationReader).
 	conversations := newMCPConversationReader(ctrl, owner)
 	if isChild {
-		conversations = newMCPChildConversationReader(ctrl, id.ChildID)
+		conversations = newMCPChildConversationReader(r.Context(), ctrl, id.ChildID)
 	}
 	opts := tools.ToolOpts{
 		Agents:        spawner,
