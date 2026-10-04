@@ -489,9 +489,13 @@ func (s *Store) Status(ctx context.Context) (recall.Status, error) {
 	err := s.pool.QueryRow(ctx, `SELECT
 			(SELECT count(*) FROM conversations.conversation c WHERE c.origin_entrypoint <> ALL($1)),
 			(SELECT count(*) FROM conversations.conversation_window),
-			(SELECT count(*) FROM conversations.conversation_window WHERE embedding IS NULL),
+			(SELECT count(*) FROM conversations.conversation_window w
+			   JOIN conversations.conversation c ON c.id = w.conversation_id
+			   WHERE w.embedding IS NULL AND NOT c.derived_skip),
 			(SELECT count(*) FROM conversations.conversation_summary),
-			(SELECT count(*) FROM conversations.conversation_summary WHERE embedding IS NULL),
+			(SELECT count(*) FROM conversations.conversation_summary s
+			   JOIN conversations.conversation c ON c.id = s.conversation_id
+			   WHERE s.embedding IS NULL AND NOT c.derived_skip),
 			(SELECT count(*) FROM conversations.memory WHERE deleted_at IS NULL),
 			(SELECT coalesce(sum(total_cost_usd), 0) FROM conversations.conversation_summary),
 			(SELECT value FROM conversations.recall_state WHERE key = 'backfill_since')`,
