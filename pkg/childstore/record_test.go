@@ -67,6 +67,7 @@ func TestRecordRoundTrip(t *testing.T) {
 		ExtraArgs:        []string{"--flag"},
 		RecordRequests:   true,
 		ExecutorSelector: "env=prod",
+		SkipDerivedIndex: true,
 		WorkspaceMode:    "ephemeral",
 		MaxDepth:         5,
 		MaxCost:          12.5,
@@ -98,6 +99,22 @@ func TestRecordFromSnapshotSetsLastStatusEmpty(t *testing.T) {
 	rec := RecordFromSnapshot(s.Snapshot())
 	c.Eq("", rec.LastStatus, "LastStatus")
 	c.Eq(string(protocol.StatusIdle), rec.Status, "Status = %q, want %q", rec.Status, protocol.StatusIdle)
+}
+
+// TestSkipDerivedIndexSurvivesSessionSnapshotRecordRoundTrip pins the flag
+// through the two conversions a resumed session traverses: Session -> Snapshot
+// -> ChildRecord -> Session. A field forgotten in any mapper is dropped, and the
+// child silently reverts to deriving.
+func TestSkipDerivedIndexSurvivesSessionSnapshotRecordRoundTrip(t *testing.T) {
+	c := assert.NewCollecting(t)
+
+	on := &Session{ChildID: "c_1", Kind: protocol.KindFundi, SkipDerivedIndex: true}
+	gotOn := SessionFromRecord(RecordFromSnapshot(on.Snapshot()))
+	c.True(gotOn.Snapshot().SkipDerivedIndex, "SkipDerivedIndex true was not carried through the round trip")
+
+	off := &Session{ChildID: "c_2", Kind: protocol.KindFundi}
+	gotOff := SessionFromRecord(RecordFromSnapshot(off.Snapshot()))
+	c.False(gotOff.Snapshot().SkipDerivedIndex, "the zero session round-tripped to true")
 }
 
 // TestSessionFromRecordDoesNotRestoreRings pins design §1.3: the exit-time ring

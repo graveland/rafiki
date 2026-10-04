@@ -32,12 +32,12 @@ INSERT INTO conversations.child
      pid, daemon_id, ns_token, provider, model, thinking, session_file, session_dir,
      session_id, no_session, status, last_status, spawned_at, last_activity,
      exited_at, exit_code, exit_signal, executor_selector, workspace_mode,
-     max_depth, max_cost, max_children, config, labels, result)
+     max_depth, max_cost, max_children, config, labels, result, skip_derived_index)
 VALUES ($1, $2::uuid, $3::uuid, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13, $14, $15,
         $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26,
-        $27, $28, $29, $30, $31, $32)
+        $27, $28, $29, $30, $31, $32, $33)
 ON CONFLICT (child_id) DO UPDATE SET
     status            = EXCLUDED.status,
     last_status       = COALESCE(EXCLUDED.last_status, conversations.child.last_status),
@@ -68,6 +68,7 @@ ON CONFLICT (child_id) DO UPDATE SET
     config            = EXCLUDED.config,
     labels            = EXCLUDED.labels,
     result            = EXCLUDED.result,
+    skip_derived_index = EXCLUDED.skip_derived_index,
     closed_at         = NULL,
     updated_at        = now()`
 
@@ -108,7 +109,7 @@ func (s *Store) Upsert(ctx context.Context, rec childstore.ChildRecord) error {
 		rec.ExitCode, rec.ExitSignal,
 		rec.ExecutorSelector, rec.WorkspaceMode,
 		rec.MaxDepth, rec.MaxCost, rec.MaxChildren,
-		config, labelsJSON, nullString(rec.Result))
+		config, labelsJSON, nullString(rec.Result), rec.SkipDerivedIndex)
 	if err != nil {
 		return fmt.Errorf("childstoredb: upsert %s: %w", rec.ChildID, err)
 	}
@@ -183,7 +184,7 @@ SELECT child_id, COALESCE(conversation_id::text, ''), COALESCE(owner_user_id::te
        COALESCE(session_file,''), COALESCE(session_dir,''), COALESCE(session_id,''),
        no_session, status, COALESCE(last_status,''),
        spawned_at, last_activity, exited_at, exit_code, COALESCE(exit_signal,''),
-       COALESCE(executor_selector,''), COALESCE(workspace_mode,''),
+       COALESCE(executor_selector,''), COALESCE(workspace_mode,''), skip_derived_index,
        max_depth, max_cost, max_children, config, labels, COALESCE(result, ''), updated_at
   FROM conversations.child
  WHERE closed_at IS NULL`
@@ -221,7 +222,7 @@ func (s *Store) List(ctx context.Context) ([]childstore.ChildRecord, error) {
 			&rec.SessionFile, &rec.SessionDir, &rec.SessionID,
 			&rec.NoSession, &rec.Status, &rec.LastStatus,
 			&rec.SpawnedAt, &lastActivity, &exitedAt, &rec.ExitCode, &rec.ExitSignal,
-			&rec.ExecutorSelector, &rec.WorkspaceMode,
+			&rec.ExecutorSelector, &rec.WorkspaceMode, &rec.SkipDerivedIndex,
 			&rec.MaxDepth, &rec.MaxCost, &rec.MaxChildren,
 			&configJSON, &labelsJSON, &rec.Result, &rec.UpdatedAt,
 		); err != nil {

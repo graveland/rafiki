@@ -126,6 +126,11 @@ type Session struct {
 	// parent's set intersected with what IT asked for.
 	ExecutorSelector string
 
+	// SkipDerivedIndex is true when this child's conversations are not embedded
+	// or summarised by the recall indexer; resolved once at spawn (OR of the
+	// request and the parent) and never re-resolved on resume.
+	SkipDerivedIndex bool
+
 	// WorkspaceMode is "ephemeral" or "pinned" as requested at spawn.
 	// Empty means the default (pinned). Persisted for the same reason.
 	WorkspaceMode string
@@ -242,6 +247,9 @@ type Snapshot struct {
 	// ExecutorSelector is the label selector this child was spawned with.
 	ExecutorSelector string
 
+	// SkipDerivedIndex mirrors Session.SkipDerivedIndex — see its doc comment.
+	SkipDerivedIndex bool
+
 	// WorkspaceMode is "ephemeral" or "pinned".
 	WorkspaceMode string
 
@@ -324,6 +332,7 @@ func (s *Session) Snapshot() Snapshot {
 		RecordRequests: s.RecordRequests,
 
 		ExecutorSelector: s.ExecutorSelector,
+		SkipDerivedIndex: s.SkipDerivedIndex,
 		WorkspaceMode:    s.WorkspaceMode,
 
 		MaxDepth: s.MaxDepth, MaxCost: s.MaxCost, MaxChildren: s.MaxChildren,

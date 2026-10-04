@@ -199,6 +199,42 @@ func TestStoreDeleteStampsClosedAt(t *testing.T) {
 	c.False(ok, "List returned a closed row — the closed_at filter is missing")
 }
 
+// TestUpsertAndListCarrySkipDerivedIndex pins the flag on both halves of the
+// round trip: it must be in the upsert's INSERT and UPDATE lists AND in the
+// List scan, or a later upsert clears it or a resume reads it back false.
+func TestUpsertAndListCarrySkipDerivedIndex(t *testing.T) {
+	c := assert.NewCollecting(t)
+	pool := testPool(t)
+	s := New(pool)
+	ctx := context.Background()
+
+	idOn := "c_skipderived_on_" + time.Now().Format("150405.000000")
+	idOff := "c_skipderived_off_" + time.Now().Format("150405.000000")
+	t.Cleanup(func() { _ = s.Delete(ctx, idOn); _ = s.Delete(ctx, idOff) })
+
+	on := childstore.ChildRecord{
+		ChildID: idOn, Kind: protocol.KindFundi,
+		Status: string(protocol.StatusIdle), SpawnedAt: time.Now(),
+		SkipDerivedIndex: true,
+	}
+	c.Require().NoError(s.Upsert(ctx, on), "Upsert on")
+	c.True(findRecord(t, s, idOn).SkipDerivedIndex, "SkipDerivedIndex true did not survive upsert+list")
+
+	off := childstore.ChildRecord{
+		ChildID: idOff, Kind: protocol.KindFundi,
+		Status: string(protocol.StatusIdle), SpawnedAt: time.Now(),
+	}
+	c.Require().NoError(s.Upsert(ctx, off), "Upsert off")
+	c.False(findRecord(t, s, idOff).SkipDerivedIndex, "SkipDerivedIndex defaulted true")
+
+	// A later upsert that changes an unrelated field must not clear the flag —
+	// the column is missing from the DO UPDATE SET list if this fails.
+	on.Name = "renamed"
+	on.Status = string(protocol.StatusExited)
+	c.Require().NoError(s.Upsert(ctx, on), "second Upsert on")
+	c.True(findRecord(t, s, idOn).SkipDerivedIndex, "SkipDerivedIndex was cleared by a later upsert")
+}
+
 func findRecord(t *testing.T, s *Store, id string) childstore.ChildRecord {
 	t.Helper()
 	rec, ok := lookup(t, s, id)

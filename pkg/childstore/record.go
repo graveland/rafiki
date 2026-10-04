@@ -61,6 +61,10 @@ type ChildRecord struct {
 	ExecutorSelector string
 	WorkspaceMode    string
 
+	// SkipDerivedIndex gates recall indexing (embeddings and summaries) for this
+	// child's conversations. See childstore.Session.SkipDerivedIndex.
+	SkipDerivedIndex bool
+
 	MaxDepth    int
 	MaxCost     float64
 	MaxChildren int
@@ -158,6 +162,7 @@ func RecordFromSnapshot(snap Snapshot) ChildRecord {
 		ExitSignal:   snap.ExitSignal,
 
 		ExecutorSelector: snap.ExecutorSelector,
+		SkipDerivedIndex: snap.SkipDerivedIndex,
 		WorkspaceMode:    snap.WorkspaceMode,
 
 		MaxDepth:    snap.MaxDepth,
@@ -230,6 +235,7 @@ func SessionFromRecord(rec ChildRecord) *Session {
 		ExitSignal:   rec.ExitSignal,
 
 		ExecutorSelector: rec.ExecutorSelector,
+		SkipDerivedIndex: rec.SkipDerivedIndex,
 		WorkspaceMode:    rec.WorkspaceMode,
 
 		MaxDepth:    rec.MaxDepth,
