@@ -433,7 +433,7 @@ is no caller to default to.
 
 #### Spawn's operator-only fields (15–29)
 
-`SpawnRequest` fields 1–14 are the child-ALLOWED set
+`SpawnRequest` fields 1–14 and 30 are the child-ALLOWED set
 (`childAllowedSpawnFields`, `pkg/connectapi/verbs.go`): a caller with child
 provenance may set them, and `Spawn` forces `parent_child_id` to the caller's
 own id. Fields 15–29 (`config_dir`, `append_system_prompt`, `thinking`,
@@ -442,6 +442,14 @@ own id. Fields 15–29 (`config_dir`, `append_system_prompt`, `thinking`,
 `env`, `record_requests`, `passthrough_auth`) are **operator-only**: a caller
 with child provenance naming any of them is refused with
 `CodePermissionDenied`.
+
+Field 30 (`skip_derived_index`) is child-ALLOWED despite sitting above that
+operator-only range: it skips embedding and summarising this child's
+conversations, and every descendant's — windows and BM25 search still work.
+It is inherited down the subtree and never clearable beneath a parent that set
+it, so it only reduces spend. `Spawn` ORs the request's value with the
+parent's own (`inheritSkipDerivedIndex`, `cmd/rafikid/controller.go`); the
+flag is stored on the child, so a resumed child keeps its stored value.
 
 The guard is enforced as the child-allowed SET, not a literal list of 15 —
 so a NEW `SpawnRequest` field is operator-only by default. Adding one

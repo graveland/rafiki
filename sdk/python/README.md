@@ -47,6 +47,11 @@ Every method maps to one Connect RPC of `rafiki.v1.Control` — see
 child = c.spawn("one turn, please", kind="fundi", labels={"team": "infra"})
 #                 └ prompt: spawn alone starts no work; this is sent
 #                   as the child's first message (an inbox row)
+# `skip_derived_index=True` makes the recall indexer skip embedding and
+# summarising this child's conversations — and every descendant's; keyword
+# (BM25) search and window extraction still work. It is inherited down the
+# subtree and never clearable beneath a parent that set it.
+quiet = c.spawn("audit this", kind="fundi", skip_derived_index=True)
 
 c.send(child, "and a second turn")        # prompt (queues), "steer", "abort"
 kids = c.list(labels={"team": "infra"})   # status-filtered server-side,
