@@ -905,6 +905,7 @@ class SpawnRequest:
     env: dict[str, str] = dataclasses.field(default_factory=dict)
     record_requests: bool = False
     passthrough_auth: str = ""
+    skip_derived_index: bool = False
     max_depth: Optional[int] = None
     max_cost: Optional[float] = None
     max_children: Optional[int] = None
@@ -963,6 +964,8 @@ class SpawnRequest:
             out["recordRequests"] = self.record_requests
         if self.passthrough_auth != "":
             out["passthroughAuth"] = self.passthrough_auth
+        if self.skip_derived_index != False:
+            out["skipDerivedIndex"] = self.skip_derived_index
         if self.max_depth is not None:
             out["maxDepth"] = self.max_depth
         if self.max_cost is not None:
@@ -1051,6 +1054,9 @@ class SpawnRequest:
         _v = _d.get("passthroughAuth")
         if _v is not None:
             obj.passthrough_auth = _v
+        _v = _d.get("skipDerivedIndex")
+        if _v is not None:
+            obj.skip_derived_index = _v
         _v = _d.get("maxDepth")
         if _v is not None:
             obj.max_depth = _int_in(_v)

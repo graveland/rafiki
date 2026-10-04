@@ -397,6 +397,12 @@ message SpawnRequest {
   // "on" or "off" — a string, never a bool.
   string passthrough_auth = 29;
 
+  // Skip embedding and summarising this child's conversations, and every
+  // descendant's: windows and BM25 search still work. Inherited down the
+  // subtree and never clearable beneath a parent that set it. Child-allowed:
+  // it only reduces spend.
+  bool skip_derived_index = 30;
+
   // The three budgets are optional because zero and unset differ, in OPPOSITE
   // directions per field: unset max_depth means 1 and zero means "may not
   // spawn"; unset max_cost means UNLIMITED and zero means "spend nothing";

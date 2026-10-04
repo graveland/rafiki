@@ -371,6 +371,11 @@ type SpawnRequest struct {
 	// "ephemeral" (reschedulable) or "pinned" (existing tree).
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
 
+	// SkipDerivedIndex, when true, skips embedding and summarising this child's
+	// conversations and every descendant's; windows and BM25 search still work.
+	// Child-allowed: it only reduces spend.
+	SkipDerivedIndex bool `json:"skipDerivedIndex,omitempty"`
+
 	// ─── Resource grants (phase 05) ───
 	//
 	// All three are POINTERS so "unset" is distinguishable from "zero". The

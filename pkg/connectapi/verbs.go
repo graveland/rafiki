@@ -293,8 +293,8 @@ func (s *Server) GetChild(
 }
 
 // childAllowedSpawnFields is the set of SpawnRequest field numbers a caller
-// with child provenance may set (fields 1-14, the child-reachable shape of
-// SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any other set
+// with child provenance may set (fields 1-14 and 30, the child-reachable shape
+// of SpawnRequest that predates the Wave 1 OPERATOR-ONLY range). Any other set
 // field — including one added in the future — is refused to a child
 // credential by default: firstOperatorOnlySet fails CLOSED on everything not
 // in this set, rather than open on a literal operator-only list that a new
@@ -304,6 +304,7 @@ func (s *Server) GetChild(
 var childAllowedSpawnFields = map[protoreflect.FieldNumber]bool{
 	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
 	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
+	30: true,
 }
 
 // firstOperatorOnlySet returns the wire name of the lowest-numbered field req
@@ -422,6 +423,7 @@ func connectapiSpawnParams(m *rafikiv1.SpawnRequest) SpawnParams {
 		Script:           scriptFromProto(m.GetScript()),
 		ParentChildID:    m.GetParentChildId(),
 		ExecutorSelector: m.GetExecutorSelector(),
+		SkipDerivedIndex: m.GetSkipDerivedIndex(),
 		ExecutorRef:      m.GetExecutorRef(),
 		Labels:           m.GetLabels(),
 

@@ -91,6 +91,8 @@ type SpawnParams struct {
 	Preset           string
 	ParentChildID    string
 	ExecutorSelector string
+	// SkipDerivedIndex: see SpawnRequest.skip_derived_index; child-allowed.
+	SkipDerivedIndex bool
 	ExecutorRef      string
 	Labels           map[string]string
 

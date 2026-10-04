@@ -73,7 +73,8 @@ const (
 )
 
 // childAllowedFieldNumbers mirrors verbs.go's childAllowedSpawnFields (fields
-// 1-14: cwd through script, including the three budget fields). It is kept
+// 1-14 and 30: cwd through script, the three budget fields, and
+// skip_derived_index). It is kept
 // as its own copy, not an import of the unexported production set, because
 // this file is package connectapi_test -- and duplicating it here is the
 // point: TestSpawnRequestFieldsAreClassified fails the moment a field number
@@ -82,6 +83,7 @@ const (
 var childAllowedFieldNumbers = map[protoreflect.FieldNumber]bool{
 	1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
 	8: true, 9: true, 10: true, 11: true, 12: true, 13: true, 14: true,
+	30: true,
 }
 
 // TestSpawnRefusesEveryOperatorOnlyFieldToAChildCaller walks SpawnRequest's
@@ -151,6 +153,22 @@ func TestSpawnRequestFieldsAreClassified(t *testing.T) {
 		}
 	}
 	c.Eq(fields.Len(), classified, "classified")
+}
+
+// TestSpawnAdmitsSkipDerivedIndexFromAChild pins field 30 as child-allowed: a
+// child caller may set ONLY skip_derived_index, and the value must reach the
+// lifecycle's SpawnParams. It dies if 30 is dropped from childAllowedSpawnFields
+// (the refusal fires) or from the proto->SpawnParams mapping (the param stays
+// false).
+func TestSpawnAdmitsSkipDerivedIndexFromAChild(t *testing.T) {
+	c := assert.NewAborting(t)
+	f := &fakeLifecycle{}
+	s := childScopedServer(f)
+
+	req := &rafikiv1.SpawnRequest{Cwd: "/tmp", SkipDerivedIndex: true}
+	_, err := s.Spawn(context.Background(), connect.NewRequest(req))
+	c.Require().NoError(err, "child Spawn with only skip_derived_index refused")
+	c.Eq(true, f.got.SkipDerivedIndex, "skip_derived_index did not reach SpawnParams: %+v", f.got)
 }
 
 // TestSpawnAdmitsAUserCallerWithEveryOperatorOnlyFieldSet is the positive
