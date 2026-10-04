@@ -369,13 +369,17 @@ class Client:
         since_unix: "int | None" = None,
         until_unix: "int | None" = None,
         limit: int = 0,
+        closed: str = "",
     ) -> "list":
         """Captured conversations matching the filters, newest first, as
         ``ConversationSummary`` rows (id, name, source, model, status, turns,
-        token and cost totals, ``first_message``). 0 for ``limit`` is the
-        daemon default (the server clamps to a maximum). A user credential
-        searches every conversation it may read; a child credential answers
-        from its own subtree only."""
+        token and cost totals, ``first_message``, and ``closed_at`` when the
+        conversation has finished). 0 for ``limit`` is the daemon default (the
+        server clamps to a maximum). ``closed`` is ``""`` (any), ``"open"``
+        (only running conversations) or ``"closed"`` (only finished ones); any
+        other value raises ``invalid_argument``. A user credential searches
+        every conversation it may read; a child credential answers from its own
+        subtree only."""
         req = _gen.control_pb.ConversationSearchRequest(
             since_unix=since_unix,
             until_unix=until_unix,
@@ -388,6 +392,7 @@ class Client:
             min_tokens=min_tokens,
             text=text,
             limit=limit,
+            closed=closed,
         )
         return self._call("ConversationSearch", req, _gen.control_pb.ConversationSearchResponse).rows
 

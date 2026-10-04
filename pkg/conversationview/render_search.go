@@ -13,8 +13,9 @@ import (
 )
 
 // RenderSearch renders search results as a single-line table: a count line,
-// then identity columns, per-conversation turn/token aggregates, cache hit
-// ratio, total cost, and the first message snippet.
+// then identity columns (including the closed time when the conversation has
+// finished), per-conversation turn/token aggregates, cache hit ratio, total
+// cost, and the first message snippet.
 func RenderSearch(w io.Writer, rows []insightstypes.ConversationSummary) error {
 	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "no conversations found")
@@ -27,11 +28,15 @@ func RenderSearch(w io.Writer, rows []insightstypes.ConversationSummary) error {
 	ew.printf("Conversations (%d)\n", len(rows))
 
 	t := table.New(ew, table.Options{})
-	t.Header("ID", "NAME", "CREATED AT", "OWNER", "PERSONA", "SOURCE", "MODEL", "DRIVEN BY",
+	t.Header("ID", "NAME", "CREATED AT", "CLOSED", "OWNER", "PERSONA", "SOURCE", "MODEL", "DRIVEN BY",
 		"STATUS", "TURNS", "INPUT TOKENS", "OUTPUT TOKENS", "CACHE %", "COST", "FIRST MESSAGE")
 	for _, r := range rows {
+		closed := "-"
+		if r.ClosedAt != nil {
+			closed = r.ClosedAt.Local().Format("2006-01-02 15:04")
+		}
 		t.Row(
-			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), r.Owner, r.Persona, r.Source, r.Model,
+			r.ID, r.Name, r.CreatedAt.Local().Format("2006-01-02 15:04"), closed, r.Owner, r.Persona, r.Source, r.Model,
 			r.DrivenBy, r.Status, insightstypes.CompactTokens(int64(r.Turns)),
 			insightstypes.CompactTokens(r.InputTokens), insightstypes.CompactTokens(r.OutputTokens),
 			pct(r.CacheHitRatio), costfmt.Format(r.TotalCostUSD, cur),

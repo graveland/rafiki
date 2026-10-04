@@ -40,8 +40,9 @@ type ConversationSummary struct {
 	Status   string `json:"status"`
 	DrivenBy string `json:"driven_by"`
 
-	CreatedAt time.Time `json:"created_at"`
-	Turns     int       `json:"turns"`
+	CreatedAt time.Time  `json:"created_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+	Turns     int        `json:"turns"`
 
 	InputTokens     int64 `json:"input_tokens"`
 	OutputTokens    int64 `json:"output_tokens"`

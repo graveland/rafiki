@@ -542,6 +542,55 @@ func TestConversationsSearchLimitBeyondInt32(t *testing.T) {
 	c.Empty(stub.searched(), "a rejected request must not reach the wire, got %d calls", len(stub.searched()))
 }
 
+// --open and --closed map onto the wire's closed filter verbatim; neither
+// leaves it empty (any); setting both is rejected before any dial.
+func TestConversationsSearchClosedFlagsReachTheRequest(t *testing.T) {
+	c := assert.NewCollecting(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"--open", []string{"--open"}, "open"},
+		{"--closed", []string{"--closed"}, "closed"},
+		{"neither", nil, ""},
+	} {
+		stub := newConversationsHarness(t)
+		stub.searchResp = searchResponse(sampleProtoSummaries())
+
+		cmd := newConversationsSearchCmd()
+		cmd.SetArgs(tc.args)
+		c.Require().NoError(cmd.Execute(), "%s: conversations search", tc.name)
+
+		calls := stub.searched()
+		c.Require().Len(calls, 1, "%s: got %d ConversationSearch calls, want 1", tc.name, len(calls))
+		c.Eq(tc.want, calls[0].GetClosed(), "%s: Closed", tc.name)
+	}
+
+	stub := newConversationsHarness(t)
+	stub.searchResp = searchResponse(sampleProtoSummaries())
+	cmd := newConversationsSearchCmd()
+	cmd.SetArgs([]string{"--open", "--closed"})
+	c.Require().Error(cmd.Execute(), "expected --open and --closed together to error")
+	c.Empty(stub.searched(), "a rejected request must not reach the wire, got %d calls", len(stub.searched()))
+}
+
+// closed_at_unix is optional: present means the conversation was closed (at
+// that moment), absent means it is still open and must map to a nil ClosedAt,
+// never a zero time.
+func TestSummaryFromProtoMapsClosedAt(t *testing.T) {
+	c := assert.NewCollecting(t)
+	want := time.Unix(1716003600, 0).UTC()
+	got := summaryFromProto(&rafikiv1.ConversationSummary{
+		Id: "conv-closed", CreatedAtUnix: 1716000000, ClosedAtUnix: int64Ptr(1716003600),
+	})
+	c.Require().NotNil(got.ClosedAt, "ClosedAt")
+	c.True(got.ClosedAt.Equal(want), "ClosedAt = %v, want %v", got.ClosedAt, want)
+
+	open := summaryFromProto(&rafikiv1.ConversationSummary{Id: "conv-open", CreatedAtUnix: 1716000000})
+	c.Nil(open.ClosedAt, "an unset closed_at_unix must map to a nil ClosedAt")
+}
+
 // ─── export ─────────────────────────────────────────────────────────────────
 
 func sampleProtoExport() *rafikiv1.ConversationExportResponse {

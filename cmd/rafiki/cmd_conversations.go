@@ -208,6 +208,10 @@ func newConversationsSearchCmd() *cobra.Command {
 	cmd.Flags().Int64("min-tokens", 0, "minimum total tokens")
 	cmd.Flags().String("text", "", "full-text search over first messages")
 	cmd.Flags().Int("limit", 0, "max results (0 = default)")
+	// --open/--closed narrow by conversation.closed_at; neither means any.
+	cmd.Flags().Bool("open", false, "only conversations still open")
+	cmd.Flags().Bool("closed", false, "only finished conversations")
+	cmd.MarkFlagsMutuallyExclusive("open", "closed")
 	return cmd
 }
 
@@ -231,6 +235,18 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--limit must be at most %d", int32(math.MaxInt32))
 	}
 
+	// --open/--closed map onto the wire's closed filter; neither leaves it
+	// empty (any), cobra already rejects setting both.
+	open, _ := cmd.Flags().GetBool("open")
+	closed, _ := cmd.Flags().GetBool("closed")
+	closedFilter := ""
+	switch {
+	case open:
+		closedFilter = "open"
+	case closed:
+		closedFilter = "closed"
+	}
+
 	// Since/Until ride the proto's optional int64: absent means unbounded, so
 	// a resolved nil stays absent rather than being sent as a present zero.
 	req := &rafikiv1.ConversationSearchRequest{
@@ -245,6 +261,7 @@ func runConversationsSearch(cmd *cobra.Command, _ []string) error {
 		MinTokens: f.MinTokens,
 		Text:      f.Text,
 		Limit:     int32(f.Limit),
+		Closed:    closedFilter,
 	}
 
 	resp, err := ep.control().ConversationSearch(cmdCtx(cmd), connect.NewRequest(req))
@@ -276,8 +293,10 @@ func renderSearchResponse(w io.Writer, m conversationview.Mode, resp *rafikiv1.C
 // conversationview renders. CreatedAt is rebuilt from the wire's Unix seconds
 // in UTC so the JSON rendering does not depend on the client machine's
 // timezone; the table renderer Local()s it, so both surfaces are stable.
+// ClosedAt is present only when the wire field is set (optional int64): unset
+// means the conversation is still open, never a zero time.
 func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.ConversationSummary {
-	return insightstypes.ConversationSummary{
+	s := insightstypes.ConversationSummary{
 		ID: r.GetId(), Name: r.GetName(), Owner: r.GetOwner(), Persona: r.GetPersona(),
 		Source: r.GetSource(), Model: r.GetModel(), Status: r.GetStatus(), DrivenBy: r.GetDrivenBy(),
 		CreatedAt: time.Unix(r.GetCreatedAtUnix(), 0).UTC(),
@@ -292,6 +311,11 @@ func summaryFromProto(r *rafikiv1.ConversationSummary) insightstypes.Conversatio
 
 		FirstMessage: r.GetFirstMessage(),
 	}
+	if r.ClosedAtUnix != nil {
+		closed := time.Unix(*r.ClosedAtUnix, 0).UTC()
+		s.ClosedAt = &closed
+	}
+	return s
 }
 
 // ─── export ─────────────────────────────────────────────────────────────────

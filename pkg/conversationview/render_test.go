@@ -4,6 +4,7 @@ package conversationview
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -107,6 +108,87 @@ func TestRenderSearchKeepsContentAndStructure(t *testing.T) {
 		c.StrContains(out, want, "search output missing")
 	}
 	c.True(hasOwnLine(out, "Conversations (1)"), "expected the count line standalone above the table:\n%s", out)
+}
+
+// A finished conversation shows its closed time in the CLOSED column; an open
+// one shows the dash placeholder (never a zero time).
+func TestSearchTableShowsClosedColumn(t *testing.T) {
+	c := assert.NewCollecting(t)
+	closed := time.Unix(1716003600, 0)
+	rows := []insightstypes.ConversationSummary{
+		{ID: "c-closed", Status: "completed", CreatedAt: time.Unix(1716000000, 0), ClosedAt: &closed},
+		{ID: "c-open", Status: "running", CreatedAt: time.Unix(1716000000, 0)},
+	}
+	out := renderToString(t, func(w *bytes.Buffer) { _ = RenderSearch(w, rows) })
+
+	col := tableColumnIndex(t, out, "CLOSED")
+	c.Eq(closed.Local().Format("2006-01-02 15:04"), tableCells(t, out, "c-closed")[col],
+		"closed row's CLOSED cell")
+	c.Eq("-", tableCells(t, out, "c-open")[col], "open row's CLOSED cell")
+}
+
+// The JSON arm carries closed_at only for the finished conversation: omitempty
+// keeps an open row from growing a zero timestamp.
+func TestSearchJSONOmitsClosedAtWhenOpen(t *testing.T) {
+	c := assert.NewCollecting(t)
+	closed := time.Unix(1716003600, 0)
+	rows := []insightstypes.ConversationSummary{
+		{ID: "c-closed", CreatedAt: time.Unix(1716000000, 0), ClosedAt: &closed},
+		{ID: "c-open", CreatedAt: time.Unix(1716000000, 0)},
+	}
+	var b bytes.Buffer
+	c.Require().NoError(RenderJSON(&b, rows, true))
+
+	var back []map[string]any
+	c.Require().NoError(json.Unmarshal(b.Bytes(), &back), "not valid JSON:\n%s", b.String())
+	c.Require().Len(back, 2, "rows")
+	_, closedHas := back[0]["closed_at"]
+	c.True(closedHas, "the closed row must carry closed_at")
+	_, openHas := back[1]["closed_at"]
+	c.False(openHas, "an open row must omit closed_at, got %v", back[1]["closed_at"])
+}
+
+// tableColumnIndex returns the index of the column whose header equals header.
+func tableColumnIndex(t *testing.T, out, header string) int {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		cells := splitTableCells(line)
+		for i, cell := range cells {
+			if cell == header {
+				return i
+			}
+		}
+	}
+	t.Fatalf("no column %q in:\n%s", header, out)
+	return -1
+}
+
+// tableCells splits the data row containing id into its trimmed cells.
+func tableCells(t *testing.T, out, id string) []string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, id) {
+			return splitTableCells(line)
+		}
+	}
+	t.Fatalf("no row containing %q in:\n%s", id, out)
+	return nil
+}
+
+// splitTableCells splits a rendered table line on the column separator and
+// trims the empty fragments outside the bordered cells.
+func splitTableCells(line string) []string {
+	cells := strings.Split(line, "│")
+	if len(cells) > 0 && strings.TrimSpace(cells[0]) == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && strings.TrimSpace(cells[len(cells)-1]) == "" {
+		cells = cells[:len(cells)-1]
+	}
+	for i := range cells {
+		cells[i] = strings.TrimSpace(cells[i])
+	}
+	return cells
 }
 
 func TestRenderEmptyInputsUnchanged(t *testing.T) {
