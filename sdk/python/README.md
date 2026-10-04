@@ -63,6 +63,13 @@ for settle in c.settled([child]):         # yields Settle(child_id, state)
 states = c.wait([child], timeout=120)     # {"c_...": "idle"} once all settle
 
 transcript = c.export(child)              # the child's decomposed transcript
+transcript = c.export_conversation(conv)  # any readable conversation, by its id
+rows = c.conversation_search(text="x", source="claude", limit=50)
+                                          # conversations (id, name, turns, cost,
+                                          # first_message); a user credential
+                                          # reads all of its owner's, a child
+                                          # credential only its own subtree
+ver  = c.status().version                 # daemon version (user credential only)
 c.stop(child)                             # graceful, then the kill ladder;
                                           # carries a per-call read timeout of
                                           # shutdown+kill windows + 30s slack

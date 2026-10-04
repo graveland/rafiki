@@ -344,8 +344,58 @@ class Client:
                 "child %s has no conversation to export (its session id is empty — "
                 "claude and script children have none)" % child_id,
             )
-        req = _gen.control_pb.ConversationExportRequest(conversation_id=session)
+        return self.export_conversation(session)
+
+    def export_conversation(self, conversation_id: str) -> _gen.control_pb.ConversationExportResponse:
+        """One conversation's decomposed transcript, by conversation id (the
+        ``id`` of a ``conversation_search`` row, or a recall hit's
+        ``conversation_id``). A user credential reads any of its owner's
+        conversations; a child credential only its own subtree's, and a
+        conversation outside it is not_found."""
+        req = _gen.control_pb.ConversationExportRequest(conversation_id=conversation_id)
         return self._call("ConversationExport", req, _gen.control_pb.ConversationExportResponse)
+
+    def conversation_search(
+        self,
+        *,
+        text: str = "",
+        owner: str = "",
+        persona: str = "",
+        source: str = "",
+        model: str = "",
+        status: str = "",
+        path: str = "",
+        min_tokens: int = 0,
+        since_unix: "int | None" = None,
+        until_unix: "int | None" = None,
+        limit: int = 0,
+    ) -> "list":
+        """Captured conversations matching the filters, newest first, as
+        ``ConversationSummary`` rows (id, name, source, model, status, turns,
+        token and cost totals, ``first_message``). 0 for ``limit`` is the
+        daemon default (the server clamps to a maximum). A user credential
+        searches every conversation it may read; a child credential answers
+        from its own subtree only."""
+        req = _gen.control_pb.ConversationSearchRequest(
+            since_unix=since_unix,
+            until_unix=until_unix,
+            owner=owner,
+            persona=persona,
+            source=source,
+            model=model,
+            status=status,
+            path=path,
+            min_tokens=min_tokens,
+            text=text,
+            limit=limit,
+        )
+        return self._call("ConversationSearch", req, _gen.control_pb.ConversationSearchResponse).rows
+
+    def status(self) -> _gen.control_pb.StatusResponse:
+        """The daemon's status: ``version``, ``started_at`` (unix ms), child
+        counts. A user credential only: a child credential is refused
+        permission_denied (callers recording a build tolerate that)."""
+        return self._call("Status", _gen.control_pb.StatusRequest(), _gen.control_pb.StatusResponse)
 
     # ── presets ──────────────────────────────────────────────────────────────
 
