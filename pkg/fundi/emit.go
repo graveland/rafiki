@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/child"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -223,9 +224,9 @@ func (e *Emitter) ToolEnd(id, name, result string, isErr bool) {
 		delete(e.toolStarts, id)
 	}
 	e.publishNative(&rafikiv1.ToolExecutionEnd{
-		ToolUseId:  id,
-		DurationMs: durationMs,
-		IsError:    isErr,
+		ToolUseId: id,
+		Duration:  durationpb.New(time.Duration(durationMs) * time.Millisecond),
+		IsError:   isErr,
 	})
 	// ...and the output itself, which ToolExecutionEnd has no room for.
 	e.publishToolResult(id, result, isErr)

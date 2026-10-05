@@ -27,7 +27,7 @@ const eventSummaryMaxCols = 100
 // renderer for `logs` and `tail` — chosen by event type, never by command.
 //
 // It is deliberately pure (a clock is passed in), and it prefers an event's
-// own ts_unix_ms over the render clock: replayed history then shows the
+// own ts over the render clock: replayed history then shows the
 // original event times, and durations folded from a replay carry the real
 // state-to-state gaps rather than the gap since the replay arrived.
 type eventRenderer struct {
@@ -130,8 +130,8 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 	}
 	id := ev.GetChildId()
 	t := now
-	if ts := ev.GetTsUnixMs(); ts > 0 {
-		t = time.UnixMilli(ts)
+	if ev.Ts != nil && ev.GetTs().AsTime().Unix() > 0 {
+		t = ev.GetTs().AsTime().Local()
 	}
 
 	var detail string
@@ -194,8 +194,8 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		// The schedule instant renders in the viewer's local zone: the
 		// producing daemon's clock zone is arbitrary (a container is UTC),
 		// so it never embeds a formatted time in reason.
-		if p.Retry.ResumeAtUnixMs != nil {
-			detail += " resumes " + time.UnixMilli(p.Retry.GetResumeAtUnixMs()).Format("15:04:05")
+		if p.Retry.ResumeAt != nil {
+			detail += " resumes " + p.Retry.GetResumeAt().AsTime().Local().Format("15:04:05")
 		}
 		if reason := p.Retry.GetReason(); reason != "" {
 			detail += " " + reason
@@ -219,7 +219,7 @@ func (r *eventRenderer) observe(ev *rafikiv1.Event, now time.Time) string {
 		if name != "" {
 			detail = " " + name
 		}
-		detail += " " + fmtDur(time.Duration(p.ToolExecutionEnd.GetDurationMs())*time.Millisecond)
+		detail += " " + fmtDur(p.ToolExecutionEnd.GetDuration().AsDuration())
 		if p.ToolExecutionEnd.GetIsError() {
 			detail += " error"
 		}

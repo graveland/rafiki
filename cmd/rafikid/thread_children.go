@@ -12,6 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/childstore"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // labelNativeSubagent marks a child the proxy synthesized from a captured
@@ -107,6 +109,7 @@ func (c *Controller) EnsureThreadChild(parentChildID, threadID, conversationID s
 	// queries fresh) already saw it.
 	c.publishEvent(id, &rafikiv1.Event{
 		ChildId: id,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
 			ChildId:  id,
 			ParentId: parentChildID,
@@ -211,6 +214,7 @@ func (c *Controller) exitNativeChild(childID string) bool {
 	var code int32
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
 			ChildId:  childID,
 			ExitCode: &code,

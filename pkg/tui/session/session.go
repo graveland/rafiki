@@ -373,18 +373,18 @@ func scriptReportText(sr *rafikiv1.ScriptReport) string {
 }
 
 // retryScheduleText renders the will_retry=true schedule line. The fire
-// instant travels as resume_at_unix_ms — the producing daemon's clock zone is
+// instant travels as resume_at — the producing daemon's clock zone is
 // arbitrary (a container runs UTC), so a wall-clock it embedded in reason
 // would show a stranger's midnight — and is rendered here in the viewer's
-// local zone (time.UnixMilli is Local). An event with no instant (a producer
-// that names none, or a row written before the field existed) falls back to
-// the reason text verbatim.
+// local zone (.Local()). An event with no instant (a producer that names none,
+// or a row written before the field existed) falls back to the reason text
+// verbatim.
 func retryScheduleText(r *rafikiv1.Retry) string {
-	if r.ResumeAtUnixMs == nil {
+	if r.ResumeAt == nil {
 		return r.GetReason()
 	}
 	text := fmt.Sprintf("%s; auto-resume scheduled for %s",
-		r.GetReason(), time.UnixMilli(r.GetResumeAtUnixMs()).Format("15:04:05"))
+		r.GetReason(), r.GetResumeAt().AsTime().Local().Format("15:04:05"))
 	if max := r.GetMaxAttempts(); max > 0 {
 		return fmt.Sprintf("%s (attempt %d/%d)", text, r.GetAttempt(), max)
 	}
@@ -567,7 +567,7 @@ func (s *Session) applyToolEnd(te *rafikiv1.ToolExecutionEnd) {
 	for i := range last.ToolCalls {
 		if last.ToolCalls[i].ID == te.GetToolUseId() {
 			last.ToolCalls[i].Running = false
-			last.ToolCalls[i].DurationMs = te.GetDurationMs()
+			last.ToolCalls[i].DurationMs = te.GetDuration().AsDuration().Milliseconds()
 			last.ToolCalls[i].IsError = te.GetIsError()
 		}
 	}

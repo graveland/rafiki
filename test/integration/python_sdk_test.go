@@ -184,7 +184,7 @@ func runSDKScript(t *testing.T, py, source string, env []string, args ...string)
 // agent_status events, and the generated codec's contract (oneof guards,
 // 64-bit ints as strings on the wire, presence fields).
 const sdkTransportDriver = `
-import json, struct, sys, threading, time, traceback
+import datetime, json, struct, sys, threading, time, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, "%SDKDIR%")
@@ -261,10 +261,10 @@ class H(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/connect+json")
                 self.end_headers()
                 if cursor < 7:
-                    env(self.wfile, {"childId": "c_2", "ordinal": 7, "tsUnixMs": "1727", "agentStatus": {"state": "idle"}})
+                    env(self.wfile, {"childId": "c_2", "ordinal": 7, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "idle"}})
                 else:
-                    env(self.wfile, {"childId": "c_2", "ordinal": 8, "tsUnixMs": "1728", "agentStatus": {"state": "streaming"}})
-                    env(self.wfile, {"childId": "c_2", "ordinal": 9, "tsUnixMs": "1729", "agentStatus": {"state": "idle"}})
+                    env(self.wfile, {"childId": "c_2", "ordinal": 8, "ts": "2026-09-26T15:04:06Z", "agentStatus": {"state": "streaming"}})
+                    env(self.wfile, {"childId": "c_2", "ordinal": 9, "ts": "2026-09-26T15:04:07Z", "agentStatus": {"state": "idle"}})
                 env(self.wfile, {"error": None}, end=True)
                 return
             if STATE["stream_503s"] > 0:
@@ -274,8 +274,8 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/connect+json")
             self.end_headers()
-            env(self.wfile, {"childId": "c_1", "ordinal": 7, "tsUnixMs": "1727", "agentStatus": {"state": "streaming"}})
-            env(self.wfile, {"childId": "c_1", "ordinal": 8, "tsUnixMs": "1728", "agentStatus": {"state": "exited"}})
+            env(self.wfile, {"childId": "c_1", "ordinal": 7, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "streaming"}})
+            env(self.wfile, {"childId": "c_1", "ordinal": 8, "ts": "2026-09-26T15:04:06Z", "agentStatus": {"state": "exited"}})
             env(self.wfile, {"error": None}, end=True)
             return
         if self.path.endswith("/GetChild"):
@@ -378,8 +378,8 @@ def run():
         assert req.to_dict() == {"kind": "fundi", "maxCost": 0.0}, req.to_dict()
         back = control_pb.SpawnRequest.from_dict({"kind": "script", "maxCost": 0})
         assert back.max_cost == 0.0 and back.kind == "script"
-        ev = event_pb.Event.from_dict({"childId": "c_1", "ordinal": 3, "tsUnixMs": "1727", "agentStatus": {"state": "idle"}})
-        assert ev.ts_unix_ms == 1727 and ev.to_dict()["tsUnixMs"] == "1727"
+        ev = event_pb.Event.from_dict({"childId": "c_1", "ordinal": 3, "ts": "2026-09-26T15:04:05Z", "agentStatus": {"state": "idle"}})
+        assert ev.ts == datetime.datetime(2026, 9, 26, 15, 4, 5, tzinfo=datetime.timezone.utc) and ev.to_dict()["ts"] == "2026-09-26T15:04:05Z"
         try:
             control_pb.ScriptMessage(text=control_pb.ScriptMessage.Text(text="x"),
                                      stop=control_pb.ScriptMessage.Stop()).to_dict()

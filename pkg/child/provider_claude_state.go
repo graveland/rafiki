@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -157,8 +160,8 @@ func (p *claudeProvider) OutboundEchoNative(frame []byte, ts int64) []*rafikiv1.
 		Block: &rafikiv1.ContentBlock_Text{Text: &rafikiv1.TextBlock{Text: text}},
 	})
 	return []*rafikiv1.Event{{
-		TsUnixMs: ts,
-		Payload:  &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{Content: blocks}},
+		Ts:      timestamppb.New(time.UnixMilli(ts)),
+		Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{Content: blocks}},
 	}}
 }
 
@@ -615,7 +618,7 @@ func (p *claudeProvider) BusFramesNative(line []byte, ts int64) []*rafikiv1.Even
 			pre := int32(f.CompactMetadata.PreTokens)
 			post := int32(f.CompactMetadata.PostTokens)
 			return []*rafikiv1.Event{{
-				TsUnixMs: ts,
+				Ts: timestamppb.New(time.UnixMilli(ts)),
 				Payload: &rafikiv1.Event_CompactionBoundary{
 					CompactionBoundary: &rafikiv1.CompactionBoundary{
 						Trigger:    f.CompactMetadata.Trigger,
@@ -709,7 +712,7 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 
 	if len(content) > 0 {
 		out = append(out, &rafikiv1.Event{
-			TsUnixMs: ts,
+			Ts: timestamppb.New(time.UnixMilli(ts)),
 			Payload: &rafikiv1.Event_AssistantMessage{
 				AssistantMessage: &rafikiv1.AssistantMessage{
 					Content:    content,
@@ -723,7 +726,7 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 	for _, b := range blocks {
 		if b.Type == "tool_use" {
 			out = append(out, &rafikiv1.Event{
-				TsUnixMs: ts,
+				Ts: timestamppb.New(time.UnixMilli(ts)),
 				Payload: &rafikiv1.Event_ToolExecutionStart{
 					ToolExecutionStart: &rafikiv1.ToolExecutionStart{
 						ToolUseId: b.ID,
@@ -736,7 +739,7 @@ func (p *claudeProvider) nativeAssistant(blocks []claudeContentBlock, frameModel
 	for _, b := range blocks {
 		if b.Type == "tool_result" {
 			out = append(out, &rafikiv1.Event{
-				TsUnixMs: ts,
+				Ts: timestamppb.New(time.UnixMilli(ts)),
 				Payload: &rafikiv1.Event_ToolExecutionEnd{
 					ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
 						ToolUseId: b.ToolUseID,
@@ -758,7 +761,7 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 			continue
 		}
 		out = append(out, &rafikiv1.Event{
-			TsUnixMs: ts,
+			Ts: timestamppb.New(time.UnixMilli(ts)),
 			Payload: &rafikiv1.Event_ToolExecutionEnd{
 				ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
 					ToolUseId: b.ToolUseID,
@@ -773,7 +776,7 @@ func (p *claudeProvider) nativeUser(blocks []claudeContentBlock, ts int64) []*ra
 		// renders "⋯ no result" forever. Emitted even when the text flattens to "":
 		// a call that ran and returned nothing is still a completed call.
 		out = append(out, &rafikiv1.Event{
-			TsUnixMs: ts,
+			Ts: timestamppb.New(time.UnixMilli(ts)),
 			Payload: &rafikiv1.Event_UserMessage{UserMessage: &rafikiv1.UserMessage{
 				Content: []*rafikiv1.ContentBlock{{
 					Index: 0,
@@ -807,7 +810,7 @@ func (p *claudeProvider) nativeResult(f claudeStreamFrame, ts int64) []*rafikiv1
 		costUSD = &v
 	}
 	return []*rafikiv1.Event{{
-		TsUnixMs: ts,
+		Ts: timestamppb.New(time.UnixMilli(ts)),
 		Payload: &rafikiv1.Event_TurnEnd{
 			TurnEnd: &rafikiv1.TurnEnd{
 				Usage:   usage,

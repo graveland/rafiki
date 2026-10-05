@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -534,6 +535,7 @@ func (c *Controller) dropInboxForForgotten(childID, reason string) {
 	slog.Warn("inbox: dropped undelivered messages", "childId", childID, "count", n, "reason", reason)
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_Error{Error: &rafikiv1.ErrorEvent{
 			Code:    "inbox_dropped",
 			Message: fmt.Sprintf("%d undelivered message(s) dropped: %s", n, reason),

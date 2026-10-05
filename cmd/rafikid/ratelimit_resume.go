@@ -10,7 +10,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
 
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // This file implements the claude rate-limit auto-resume: when a
@@ -266,7 +266,7 @@ func (c *Controller) scheduleRateLimitResumeLocked(childID string, st *rateLimit
 	fireAt := time.Now().Add(delay)
 	attempt := st.attempts
 	st.timer = time.AfterFunc(delay, func() { c.fireRateLimitResume(childID, attempt) })
-	// The fire instant travels as resume_at_unix_ms, not formatted into the
+	// The fire instant travels as resume_at, not formatted into the
 	// reason: this daemon's clock zone is arbitrary (a container runs UTC),
 	// and the viewer renders its own local zone.
 	c.publishRateLimitNotice(childID, true, attempt, "rate limited (HTTP 429)", fireAt)
@@ -351,7 +351,7 @@ func (c *Controller) deliverRateLimitResume(childID string, attempt int) {
 // will_retry=true shows the rail's ⟳ and appends a system notice to the
 // transcript with the scheduled time; will_retry=false clears the glyph.
 // resumeAt is the schedule's fire instant — set only for will_retry=true —
-// and rides the event as resume_at_unix_ms (epoch ms), never as a formatted
+// and rides the event as resume_at, never as a formatted
 // time in reason: this daemon's clock zone is arbitrary, so the client owns
 // the rendering. maxAttempts rides along on every event so a client can
 // render "attempt 1/3" without parsing text.
@@ -366,11 +366,11 @@ func (c *Controller) publishRateLimitNotice(childID string, willRetry bool, atte
 		MaxAttempts: int32(maxRateLimitResumes),
 	}
 	if !resumeAt.IsZero() {
-		retry.ResumeAtUnixMs = proto.Int64(resumeAt.UnixMilli())
+		retry.ResumeAt = timestamppb.New(resumeAt)
 	}
 	c.publishEvent(childID, &rafikiv1.Event{
-		ChildId:  childID,
-		TsUnixMs: time.Now().UnixMilli(),
-		Payload:  &rafikiv1.Event_Retry{Retry: retry},
+		ChildId: childID,
+		Ts:      timestamppb.Now(),
+		Payload: &rafikiv1.Event_Retry{Retry: retry},
 	})
 }

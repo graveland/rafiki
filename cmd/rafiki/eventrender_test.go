@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -45,7 +47,7 @@ func turnEndForCost(id string, cost float64) *rafikiv1.Event {
 
 func atClock(h, m int, sec float64) time.Time {
 	// Local, not UTC: the renderer formats event times the way a terminal
-	// wants them — in the process's zone — and time.UnixMilli returns local.
+	// wants them — in the process's zone — and a Timestamp renders .Local().
 	base := time.Date(2026, 9, 26, h, m, 0, 0, time.Local)
 	return base.Add(time.Duration(sec * float64(time.Second)))
 }
@@ -54,7 +56,7 @@ func atClock(h, m int, sec float64) time.Time {
 
 // The two lines the event commands must produce for a status transition and a
 // turn end, byte for byte — cmd_watch.go's line format carried over whole.
-// The events carry their own ts_unix_ms: replayed history renders with the
+// The events carry their own ts: replayed history renders with the
 // original event times, which is what makes the durations here real.
 func TestEventRendererGoldenStatusAndTurnLines(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -110,7 +112,7 @@ func TestEventRendererPrefixIsStableAcrossTypes(t *testing.T) {
 			"09:00:03  turn_start c_prefix  impl model=m1 turn=t_1"},
 		{"tool start", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_ToolExecutionStart{ToolExecutionStart: &rafikiv1.ToolExecutionStart{ToolUseId: "tu_1", Name: "bash"}}}, atClock(9, 0, 4.0)),
 			"09:00:04  tool_execution_start c_prefix  impl bash"},
-		{"tool end", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_1", DurationMs: 1200, IsError: true}}}, atClock(9, 0, 5.2)),
+		{"tool end", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_1", Duration: durationpb.New(1200 * time.Millisecond), IsError: true}}}, atClock(9, 0, 5.2)),
 			"09:00:05  tool_execution_end c_prefix  impl bash 1.2s error"},
 		{"compaction", withTS(&rafikiv1.Event{ChildId: id, Payload: &rafikiv1.Event_CompactionBoundary{CompactionBoundary: &rafikiv1.CompactionBoundary{Trigger: "auto", PreTokens: proto32(12000), PostTokens: proto32(4000)}}}, atClock(9, 0, 6.0)),
 			"09:00:06  compaction_boundary c_prefix  impl trigger=auto pre=12000 post=4000"},
@@ -130,7 +132,7 @@ func TestEventRendererPrefixIsStableAcrossTypes(t *testing.T) {
 // still renders its duration.
 func TestEventRendererToolEndWithoutStart(t *testing.T) {
 	r := newEventRenderer()
-	got := r.observe(withTS(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_late", DurationMs: 2500}}}, atClock(9, 1, 0.0)), atClock(9, 1, 0.0))
+	got := r.observe(withTS(&rafikiv1.Event{ChildId: "c_1", Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_late", Duration: durationpb.New(2500 * time.Millisecond)}}}, atClock(9, 1, 0.0)), atClock(9, 1, 0.0))
 	assert.NewCollecting(t).False(!strings.Contains(got, "2.5s") || strings.Contains(got, "bash"), "late tool end = %q, want a duration and no invented name", got)
 }
 
@@ -271,7 +273,7 @@ func TestEventRendererIgnoresEmptyAndNilEvents(t *testing.T) {
 
 // The retry schedule instant renders in the viewer's local zone — the
 // producing daemon's clock zone is arbitrary (a container runs UTC), which is
-// why it travels as resume_at_unix_ms rather than inside reason — next to a
+// why it travels as resume_at rather than inside reason — next to a
 // line prefix that is local for the same reason.
 func TestEventRendererRetryScheduleLineIsViewerLocal(t *testing.T) {
 	c := assert.NewCollecting(t)
@@ -280,11 +282,10 @@ func TestEventRendererRetryScheduleLineIsViewerLocal(t *testing.T) {
 	r := newEventRenderer()
 	_ = r.observe(spawnedFor(id, "impl-auth", ""), atClock(12, 0, 0.0))
 
-	ms := atClock(19, 10, 30.0).UnixMilli()
 	ev := &rafikiv1.Event{ChildId: id,
 		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
 			Attempt: 1, WillRetry: true, Reason: "rate limited (HTTP 429)",
-			MaxAttempts: 3, ResumeAtUnixMs: &ms,
+			MaxAttempts: 3, ResumeAt: timestamppb.New(atClock(19, 10, 30.0)),
 		}}}
 	got := r.observe(withTS(ev, atClock(19, 9, 58.0)), atClock(19, 9, 58.0))
 	want := "19:09:58  retry  c_01M3F2M6AMA3W09HD7R6Z58Q8B  impl-auth attempt=1 will-retry resumes 19:10:30 rate limited (HTTP 429)"
@@ -318,7 +319,7 @@ func TestFmtDur(t *testing.T) {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func withTS(ev *rafikiv1.Event, t time.Time) *rafikiv1.Event {
-	ev.TsUnixMs = t.UnixMilli()
+	ev.Ts = timestamppb.New(t)
 	return ev
 }
 

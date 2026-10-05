@@ -62,7 +62,7 @@ func TestToolEndPublishesNativeExecutionEndWithDuration(t *testing.T) {
 	c.Eq("tu_1", found.GetToolUseId(), "ToolUseId")
 	c.False(found.GetIsError(), "IsError = true, want false")
 	// Duration is wall-clock, so assert only that it was measured, never a value.
-	c.GreaterOrEqual(0, found.GetDurationMs(), "DurationMs")
+	c.GreaterOrEqual(0, found.GetDuration().AsDuration().Milliseconds(), "duration")
 }
 
 // TestToolEndWithoutStartStillPublishes guards the case where a turn is resumed
@@ -84,7 +84,7 @@ func TestToolEndWithoutStartStillPublishes(t *testing.T) {
 	}
 	c.Require().NotNil(found, "no ToolExecutionEnd event published for an unstarted tool")
 	c.True(found.GetIsError(), "IsError = false, want true")
-	c.Eq(0, found.GetDurationMs(), "DurationMs")
+	c.Eq(int64(0), found.GetDuration().AsDuration().Milliseconds(), "duration")
 }
 
 // TestNilSinkToolPathIsNoOp proves the additive-only property: an Emitter with

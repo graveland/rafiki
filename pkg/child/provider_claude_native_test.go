@@ -275,7 +275,7 @@ func TestBusFramesNativeEmitsCompactionBoundary(t *testing.T) {
 	// both presence and value — the pointers must be set, not bare zeroes.
 	c.Eq(182000, cb.GetPreTokens(), "pre_tokens")
 	c.Eq(45000, cb.GetPostTokens(), "post_tokens")
-	c.Eq(1000, evs[0].TsUnixMs, "TsUnixMs")
+	c.Eq(int64(1000), evs[0].GetTs().AsTime().UnixMilli(), "ts")
 }
 
 // microcompact_boundary is a different subtype string entirely: it matches

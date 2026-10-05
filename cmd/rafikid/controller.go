@@ -24,6 +24,7 @@ import (
 	"connectrpc.com/connect"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/agentcli"
 	"go.graveland.dev/rafiki/pkg/agentcli/local"
@@ -2061,6 +2062,7 @@ func (c *Controller) Spawn(ctx context.Context, req protocol.SpawnRequest, owner
 	// stays free of a lifecycle special case.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
 			ChildId:  childID,
 			ParentId: req.ParentChildID,
@@ -2341,6 +2343,7 @@ func (c *Controller) activateLiveChild(
 	// subject predicate stays free of a lifecycle special case.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ChildSpawned{ChildSpawned: &rafikiv1.ChildSpawned{
 			ChildId:  childID,
 			ParentId: snap.Labels[childstore.LabelParent],
@@ -4021,9 +4024,9 @@ func (c *Controller) handleStatusChange(childID string, newStatus, prev protocol
 	// the rest of the attachment, no matter which kind of child it was.
 	if ok && storePrev != newStatus {
 		c.publishEvent(childID, &rafikiv1.Event{
-			ChildId:  childID,
-			TsUnixMs: now.UnixMilli(),
-			Payload:  &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: string(newStatus)}},
+			ChildId: childID,
+			Ts:      timestamppb.New(now),
+			Payload: &rafikiv1.Event_AgentStatus{AgentStatus: &rafikiv1.AgentStatus{State: string(newStatus)}},
 		})
 	}
 	// An LLM child settles every turn, so a result set by an EARLIER turn would
@@ -4264,6 +4267,7 @@ func (c *Controller) handleChildExit(childID string, ch *child.Child) {
 	// before MarkExited made "exited" visible.
 	c.publishEvent(childID, &rafikiv1.Event{
 		ChildId: childID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ChildExited{ChildExited: &rafikiv1.ChildExited{
 			ChildId:  childID,
 			ExitCode: exitCodePtr,

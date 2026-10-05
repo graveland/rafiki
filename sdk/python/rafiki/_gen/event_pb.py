@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
+import datetime
 import math
 from typing import Optional
 
@@ -460,17 +461,17 @@ class ToolExecutionStart:
 @dataclasses.dataclass
 class ToolExecutionEnd:
     tool_use_id: str = ""
-    duration_ms: int = 0
     is_error: bool = False
+    duration: Optional[datetime.timedelta] = None
 
     def to_dict(self) -> dict:
         out = {}
         if self.tool_use_id != "":
             out["toolUseId"] = self.tool_use_id
-        if self.duration_ms != 0:
-            out["durationMs"] = str(self.duration_ms)
         if self.is_error != False:
             out["isError"] = self.is_error
+        if self.duration is not None:
+            out["duration"] = _dur_out(self.duration)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "ToolExecutionEnd":
@@ -478,12 +479,12 @@ class ToolExecutionEnd:
         _v = _d.get("toolUseId")
         if _v is not None:
             obj.tool_use_id = _v
-        _v = _d.get("durationMs")
-        if _v is not None:
-            obj.duration_ms = _int_in(_v)
         _v = _d.get("isError")
         if _v is not None:
             obj.is_error = _v
+        _v = _d.get("duration")
+        if _v is not None:
+            obj.duration = _dur_in(_v, "duration")
         return obj
 
 @dataclasses.dataclass
@@ -491,7 +492,7 @@ class Retry:
     attempt: int = 0
     will_retry: bool = False
     reason: str = ""
-    resume_at_unix_ms: Optional[int] = None
+    resume_at: Optional[datetime.datetime] = None
     max_attempts: int = 0
 
     def to_dict(self) -> dict:
@@ -502,8 +503,8 @@ class Retry:
             out["willRetry"] = self.will_retry
         if self.reason != "":
             out["reason"] = self.reason
-        if self.resume_at_unix_ms is not None:
-            out["resumeAtUnixMs"] = str(self.resume_at_unix_ms)
+        if self.resume_at is not None:
+            out["resumeAt"] = _ts_out(self.resume_at)
         if self.max_attempts != 0:
             out["maxAttempts"] = self.max_attempts
         return out
@@ -519,9 +520,9 @@ class Retry:
         _v = _d.get("reason")
         if _v is not None:
             obj.reason = _v
-        _v = _d.get("resumeAtUnixMs")
+        _v = _d.get("resumeAt")
         if _v is not None:
-            obj.resume_at_unix_ms = _int_in(_v)
+            obj.resume_at = _ts_in(_v, "resumeAt")
         _v = _d.get("maxAttempts")
         if _v is not None:
             obj.max_attempts = _int_in(_v)
@@ -664,7 +665,7 @@ class ScriptOutput:
 class Event:
     child_id: str = ""
     ordinal: Optional[int] = None
-    ts_unix_ms: int = 0
+    ts: Optional[datetime.datetime] = None
     user_message: Optional[UserMessage] = None
     assistant_message: Optional[AssistantMessage] = None
     turn_start: Optional[TurnStart] = None
@@ -687,8 +688,8 @@ class Event:
             out["childId"] = self.child_id
         if self.ordinal is not None:
             out["ordinal"] = self.ordinal
-        if self.ts_unix_ms != 0:
-            out["tsUnixMs"] = str(self.ts_unix_ms)
+        if self.ts is not None:
+            out["ts"] = _ts_out(self.ts)
         _set_payload = [x for x in (self.user_message, self.assistant_message, self.turn_start, self.content_block_delta, self.turn_end, self.agent_status, self.error, self.tool_execution_start, self.tool_execution_end, self.retry, self.child_spawned, self.child_exited, self.compaction_boundary, self.script_report, self.script_output) if x is not None]
         if len(_set_payload) > 1:
             raise ValueError("Event: at most one arm of oneof 'payload' may be set")
@@ -732,9 +733,9 @@ class Event:
         _v = _d.get("ordinal")
         if _v is not None:
             obj.ordinal = _int_in(_v)
-        _v = _d.get("tsUnixMs")
+        _v = _d.get("ts")
         if _v is not None:
-            obj.ts_unix_ms = _int_in(_v)
+            obj.ts = _ts_in(_v, "ts")
         _v = _d.get("userMessage")
         if _v is not None:
             obj.user_message = UserMessage.from_dict(_v)
@@ -843,3 +844,70 @@ def _float_in(value) -> float:
             return -math.inf
         return float(value)
     raise TypeError("expected a number (or non-finite string) on the wire")
+
+
+def _ts_out(value: datetime.datetime) -> str:
+    """datetime → protojson Timestamp: RFC3339 in UTC with the fractional
+    seconds omitted when zero. A naive value is taken as UTC; an aware one is
+    converted to it."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    else:
+        value = value.astimezone(datetime.timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _ts_in(value, field: str) -> datetime.datetime:
+    """protojson Timestamp → tz-aware UTC datetime, nanoseconds truncated to
+    microseconds. 'field' names the offending field in the error, never the
+    offending content."""
+    if not isinstance(value, str):
+        raise ValueError("invalid Timestamp for field %r" % field)
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    # datetime.fromisoformat accepts only 3 or 6 fractional digits before
+    # Python 3.11, while protojson emits up to 9 (nanoseconds); rewrite the
+    # fraction to exactly 6 digits, truncating nanoseconds to microseconds.
+    dot = text.find(".")
+    if dot != -1:
+        end = len(text)
+        for i in range(dot + 1, len(text)):
+            if text[i] in "+-Zz":
+                end = i
+                break
+        text = text[:dot + 1] + (text[dot + 1:end] + "000000")[:6] + text[end:]
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("invalid Timestamp for field %r" % field) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _dur_out(value: datetime.timedelta) -> str:
+    """timedelta → protojson Duration: seconds with up to six fractional digits
+    (trailing zeros dropped) and an 's' suffix."""
+    micros = value // datetime.timedelta(microseconds=1)
+    sign = "-" if micros < 0 else ""
+    micros = abs(micros)
+    whole, frac = divmod(micros, 1000000)
+    if frac:
+        return "%s%d.%ss" % (sign, whole, ("%06d" % frac).rstrip("0"))
+    return "%s%ds" % (sign, whole)
+
+
+def _dur_in(value, field: str) -> datetime.timedelta:
+    """protojson Duration → timedelta, nanoseconds truncated to microseconds
+    with the sign preserved. 'field' names the offending field in the error."""
+    if not isinstance(value, str) or not value.endswith("s"):
+        raise ValueError("invalid Duration for field %r" % field)
+    body = value[:-1]
+    negative = body.startswith("-")
+    if negative:
+        body = body[1:]
+    whole, _, frac = body.partition(".")
+    if not whole.isdigit() or (frac and not frac.isdigit()):
+        raise ValueError("invalid Duration for field %r" % field)
+    nanos = int(whole) * 1000000000 + int((frac + "000000000")[:9])
+    micros = nanos // 1000
+    return datetime.timedelta(microseconds=-micros if negative else micros)

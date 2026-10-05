@@ -3,10 +3,9 @@
 package fundi
 
 import (
-	"time"
-
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/eventconv"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -167,7 +166,7 @@ func (e *Emitter) publishNative(payload any) {
 	if e.native == nil {
 		return
 	}
-	ev := &rafikiv1.Event{TsUnixMs: time.Now().UnixMilli()}
+	ev := &rafikiv1.Event{Ts: timestamppb.Now()}
 	switch p := payload.(type) {
 	case *rafikiv1.UserMessage:
 		ev.Payload = &rafikiv1.Event_UserMessage{UserMessage: p}

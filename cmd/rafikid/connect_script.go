@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/childstore"
 	"go.graveland.dev/rafiki/pkg/connectapi"
@@ -93,8 +94,8 @@ func (h scriptHub) Report(ctx context.Context, callerID, kind, dataJSON string) 
 		return nil
 	}
 	h.c.publishEvent(callerID, &rafikiv1.Event{
-		ChildId:  callerID,
-		TsUnixMs: time.Now().UnixMilli(),
+		ChildId: callerID,
+		Ts:      timestamppb.Now(),
 		Payload: &rafikiv1.Event_ScriptReport{ScriptReport: &rafikiv1.ScriptReport{
 			Kind:     kind,
 			DataJson: dataJSON,

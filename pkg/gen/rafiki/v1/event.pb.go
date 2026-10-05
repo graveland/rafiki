@@ -9,6 +9,8 @@ package rafikiv1
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -1129,10 +1131,12 @@ func (x *ToolExecutionStart) GetName() string {
 }
 
 type ToolExecutionEnd struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ToolUseId     string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
-	DurationMs    int64                  `protobuf:"varint,2,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
-	IsError       bool                   `protobuf:"varint,3,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ToolUseId string                 `protobuf:"bytes,1,opt,name=tool_use_id,json=toolUseId,proto3" json:"tool_use_id,omitempty"`
+	IsError   bool                   `protobuf:"varint,3,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	// duration is how long execution took. A zero value means the start was
+	// never seen (a turn resumed mid-tool), exactly as the old duration_ms=0 did.
+	Duration      *durationpb.Duration `protobuf:"bytes,4,opt,name=duration,proto3" json:"duration,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1174,13 +1178,6 @@ func (x *ToolExecutionEnd) GetToolUseId() string {
 	return ""
 }
 
-func (x *ToolExecutionEnd) GetDurationMs() int64 {
-	if x != nil {
-		return x.DurationMs
-	}
-	return 0
-}
-
 func (x *ToolExecutionEnd) GetIsError() bool {
 	if x != nil {
 		return x.IsError
@@ -1188,27 +1185,30 @@ func (x *ToolExecutionEnd) GetIsError() bool {
 	return false
 }
 
+func (x *ToolExecutionEnd) GetDuration() *durationpb.Duration {
+	if x != nil {
+		return x.Duration
+	}
+	return nil
+}
+
 // Retry reports a turn-level retry attempt, so a supervisor can see an agent
 // looping rather than silently stalling. The daemon's rate-limit auto-resume
 // (cmd/rafikid's ratelimit_resume.go) is today's only producer: will_retry
 // true announces a scheduled resume (reason is the cause; the fire instant is
-// resume_at_unix_ms), false resolves the earlier announcement (fired, cleared
+// resume_at), false resolves the earlier announcement (fired, cleared
 // by a success, or attempts exhausted; reason carries the human sentence).
 //
 // Wall-clock times are never embedded in reason: the producing daemon's clock
 // zone is arbitrary (a container typically runs UTC), so a time it formats is
-// never the viewer's local time. Anything time-shaped travels as an epoch-ms
-// field and the client renders it in its own zone.
+// never the viewer's local time. Anything time-shaped travels as a Timestamp
+// and the client renders it in its own zone.
 type Retry struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Attempt   int32                  `protobuf:"varint,1,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	WillRetry bool                   `protobuf:"varint,2,opt,name=will_retry,json=willRetry,proto3" json:"will_retry,omitempty"`
 	Reason    string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	// The instant a will_retry=true schedule fires, epoch ms. Optional because
-	// absence is meaningful: resolution events (will_retry=false) name no
-	// schedule, and event rows written before the field existed have none.
-	// Clients render it in the viewer's local zone.
-	ResumeAtUnixMs *int64 `protobuf:"varint,4,opt,name=resume_at_unix_ms,json=resumeAtUnixMs,proto3,oneof" json:"resume_at_unix_ms,omitempty"`
+	ResumeAt  *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=resume_at,json=resumeAt,proto3" json:"resume_at,omitempty"`
 	// The producer's attempt cap, so a client can render "attempt 1/3" without
 	// parsing reason. 0 means not reported.
 	MaxAttempts   int32 `protobuf:"varint,5,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
@@ -1267,11 +1267,11 @@ func (x *Retry) GetReason() string {
 	return ""
 }
 
-func (x *Retry) GetResumeAtUnixMs() int64 {
-	if x != nil && x.ResumeAtUnixMs != nil {
-		return *x.ResumeAtUnixMs
+func (x *Retry) GetResumeAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ResumeAt
 	}
-	return 0
+	return nil
 }
 
 func (x *Retry) GetMaxAttempts() int32 {
@@ -1610,10 +1610,13 @@ func (x *ScriptOutput) GetText() string {
 // deliberately best-effort: on failure it logs at warn and publishes anyway,
 // because a log write must never stop a turn.
 type Event struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	ChildId  string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
-	Ordinal  *int32                 `protobuf:"varint,2,opt,name=ordinal,proto3,oneof" json:"ordinal,omitempty"`
-	TsUnixMs int64                  `protobuf:"varint,3,opt,name=ts_unix_ms,json=tsUnixMs,proto3" json:"ts_unix_ms,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChildId string                 `protobuf:"bytes,1,opt,name=child_id,json=childId,proto3" json:"child_id,omitempty"`
+	Ordinal *int32                 `protobuf:"varint,2,opt,name=ordinal,proto3,oneof" json:"ordinal,omitempty"`
+	// ts is when the event was produced. Unset on events decoded from rows
+	// written before this field was a Timestamp; the reader falls back to the
+	// row's created_at.
+	Ts *timestamppb.Timestamp `protobuf:"bytes,25,opt,name=ts,proto3" json:"ts,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*Event_UserMessage
@@ -1680,11 +1683,11 @@ func (x *Event) GetOrdinal() int32 {
 	return 0
 }
 
-func (x *Event) GetTsUnixMs() int64 {
+func (x *Event) GetTs() *timestamppb.Timestamp {
 	if x != nil {
-		return x.TsUnixMs
+		return x.Ts
 	}
-	return 0
+	return nil
 }
 
 func (x *Event) GetPayload() isEvent_Payload {
@@ -1927,7 +1930,7 @@ var File_rafiki_v1_event_proto protoreflect.FileDescriptor
 
 const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\n" +
-	"\x15rafiki/v1/event.proto\x12\trafiki.v1\"\xd2\x02\n" +
+	"\x15rafiki/v1/event.proto\x12\trafiki.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd2\x02\n" +
 	"\x05Usage\x12&\n" +
 	"\finput_tokens\x18\x01 \x01(\x03H\x00R\vinputTokens\x88\x01\x01\x12(\n" +
 	"\routput_tokens\x18\x02 \x01(\x03H\x01R\foutputTokens\x88\x01\x01\x12/\n" +
@@ -2003,20 +2006,18 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"H\n" +
 	"\x12ToolExecutionStart\x12\x1e\n" +
 	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"n\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"\x97\x01\n" +
 	"\x10ToolExecutionEnd\x12\x1e\n" +
-	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x1f\n" +
-	"\vduration_ms\x18\x02 \x01(\x03R\n" +
-	"durationMs\x12\x19\n" +
-	"\bis_error\x18\x03 \x01(\bR\aisError\"\xc1\x01\n" +
+	"\vtool_use_id\x18\x01 \x01(\tR\ttoolUseId\x12\x19\n" +
+	"\bis_error\x18\x03 \x01(\bR\aisError\x125\n" +
+	"\bduration\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\bdurationJ\x04\b\x02\x10\x03R\vduration_ms\"\xcd\x01\n" +
 	"\x05Retry\x12\x18\n" +
 	"\aattempt\x18\x01 \x01(\x05R\aattempt\x12\x1d\n" +
 	"\n" +
 	"will_retry\x18\x02 \x01(\bR\twillRetry\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\x12.\n" +
-	"\x11resume_at_unix_ms\x18\x04 \x01(\x03H\x00R\x0eresumeAtUnixMs\x88\x01\x01\x12!\n" +
-	"\fmax_attempts\x18\x05 \x01(\x05R\vmaxAttemptsB\x14\n" +
-	"\x12_resume_at_unix_ms\"Z\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x127\n" +
+	"\tresume_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\bresumeAt\x12!\n" +
+	"\fmax_attempts\x18\x05 \x01(\x05R\vmaxAttemptsJ\x04\b\x04\x10\x05R\x11resume_at_unix_ms\"Z\n" +
 	"\fChildSpawned\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1b\n" +
 	"\tparent_id\x18\x02 \x01(\tR\bparentId\x12\x12\n" +
@@ -2040,12 +2041,11 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\tdata_json\x18\x02 \x01(\tR\bdataJson\":\n" +
 	"\fScriptOutput\x12\x16\n" +
 	"\x06stream\x18\x01 \x01(\tR\x06stream\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\"\xbc\b\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\"\xdc\b\n" +
 	"\x05Event\x12\x19\n" +
 	"\bchild_id\x18\x01 \x01(\tR\achildId\x12\x1d\n" +
-	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12\x1c\n" +
-	"\n" +
-	"ts_unix_ms\x18\x03 \x01(\x03R\btsUnixMs\x12;\n" +
+	"\aordinal\x18\x02 \x01(\x05H\x01R\aordinal\x88\x01\x01\x12*\n" +
+	"\x02ts\x18\x19 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12;\n" +
 	"\fuser_message\x18\n" +
 	" \x01(\v2\x16.rafiki.v1.UserMessageH\x00R\vuserMessage\x12J\n" +
 	"\x11assistant_message\x18\v \x01(\v2\x1b.rafiki.v1.AssistantMessageH\x00R\x10assistantMessage\x125\n" +
@@ -2065,7 +2065,8 @@ const file_rafiki_v1_event_proto_rawDesc = "" +
 	"\rscript_output\x18\x18 \x01(\v2\x17.rafiki.v1.ScriptOutputH\x00R\fscriptOutputB\t\n" +
 	"\apayloadB\n" +
 	"\n" +
-	"\b_ordinal*\xc8\x01\n" +
+	"\b_ordinalJ\x04\b\x03\x10\x04R\n" +
+	"ts_unix_ms*\xc8\x01\n" +
 	"\n" +
 	"StopReason\x12\x1b\n" +
 	"\x17STOP_REASON_UNSPECIFIED\x10\x00\x12\x18\n" +
@@ -2091,30 +2092,32 @@ func file_rafiki_v1_event_proto_rawDescGZIP() []byte {
 var file_rafiki_v1_event_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_rafiki_v1_event_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_rafiki_v1_event_proto_goTypes = []any{
-	(StopReason)(0),            // 0: rafiki.v1.StopReason
-	(*Usage)(nil),              // 1: rafiki.v1.Usage
-	(*TextBlock)(nil),          // 2: rafiki.v1.TextBlock
-	(*ThinkingBlock)(nil),      // 3: rafiki.v1.ThinkingBlock
-	(*ToolUseBlock)(nil),       // 4: rafiki.v1.ToolUseBlock
-	(*ImageBlock)(nil),         // 5: rafiki.v1.ImageBlock
-	(*ToolResultBlock)(nil),    // 6: rafiki.v1.ToolResultBlock
-	(*ContentBlock)(nil),       // 7: rafiki.v1.ContentBlock
-	(*UserMessage)(nil),        // 8: rafiki.v1.UserMessage
-	(*AssistantMessage)(nil),   // 9: rafiki.v1.AssistantMessage
-	(*TurnStart)(nil),          // 10: rafiki.v1.TurnStart
-	(*TurnEnd)(nil),            // 11: rafiki.v1.TurnEnd
-	(*ContentBlockDelta)(nil),  // 12: rafiki.v1.ContentBlockDelta
-	(*AgentStatus)(nil),        // 13: rafiki.v1.AgentStatus
-	(*ErrorEvent)(nil),         // 14: rafiki.v1.ErrorEvent
-	(*ToolExecutionStart)(nil), // 15: rafiki.v1.ToolExecutionStart
-	(*ToolExecutionEnd)(nil),   // 16: rafiki.v1.ToolExecutionEnd
-	(*Retry)(nil),              // 17: rafiki.v1.Retry
-	(*ChildSpawned)(nil),       // 18: rafiki.v1.ChildSpawned
-	(*ChildExited)(nil),        // 19: rafiki.v1.ChildExited
-	(*CompactionBoundary)(nil), // 20: rafiki.v1.CompactionBoundary
-	(*ScriptReport)(nil),       // 21: rafiki.v1.ScriptReport
-	(*ScriptOutput)(nil),       // 22: rafiki.v1.ScriptOutput
-	(*Event)(nil),              // 23: rafiki.v1.Event
+	(StopReason)(0),               // 0: rafiki.v1.StopReason
+	(*Usage)(nil),                 // 1: rafiki.v1.Usage
+	(*TextBlock)(nil),             // 2: rafiki.v1.TextBlock
+	(*ThinkingBlock)(nil),         // 3: rafiki.v1.ThinkingBlock
+	(*ToolUseBlock)(nil),          // 4: rafiki.v1.ToolUseBlock
+	(*ImageBlock)(nil),            // 5: rafiki.v1.ImageBlock
+	(*ToolResultBlock)(nil),       // 6: rafiki.v1.ToolResultBlock
+	(*ContentBlock)(nil),          // 7: rafiki.v1.ContentBlock
+	(*UserMessage)(nil),           // 8: rafiki.v1.UserMessage
+	(*AssistantMessage)(nil),      // 9: rafiki.v1.AssistantMessage
+	(*TurnStart)(nil),             // 10: rafiki.v1.TurnStart
+	(*TurnEnd)(nil),               // 11: rafiki.v1.TurnEnd
+	(*ContentBlockDelta)(nil),     // 12: rafiki.v1.ContentBlockDelta
+	(*AgentStatus)(nil),           // 13: rafiki.v1.AgentStatus
+	(*ErrorEvent)(nil),            // 14: rafiki.v1.ErrorEvent
+	(*ToolExecutionStart)(nil),    // 15: rafiki.v1.ToolExecutionStart
+	(*ToolExecutionEnd)(nil),      // 16: rafiki.v1.ToolExecutionEnd
+	(*Retry)(nil),                 // 17: rafiki.v1.Retry
+	(*ChildSpawned)(nil),          // 18: rafiki.v1.ChildSpawned
+	(*ChildExited)(nil),           // 19: rafiki.v1.ChildExited
+	(*CompactionBoundary)(nil),    // 20: rafiki.v1.CompactionBoundary
+	(*ScriptReport)(nil),          // 21: rafiki.v1.ScriptReport
+	(*ScriptOutput)(nil),          // 22: rafiki.v1.ScriptOutput
+	(*Event)(nil),                 // 23: rafiki.v1.Event
+	(*durationpb.Duration)(nil),   // 24: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
 }
 var file_rafiki_v1_event_proto_depIdxs = []int32{
 	7,  // 0: rafiki.v1.ToolResultBlock.content:type_name -> rafiki.v1.ContentBlock
@@ -2128,26 +2131,29 @@ var file_rafiki_v1_event_proto_depIdxs = []int32{
 	0,  // 8: rafiki.v1.AssistantMessage.stop_reason:type_name -> rafiki.v1.StopReason
 	0,  // 9: rafiki.v1.TurnEnd.stop_reason:type_name -> rafiki.v1.StopReason
 	1,  // 10: rafiki.v1.TurnEnd.usage:type_name -> rafiki.v1.Usage
-	8,  // 11: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
-	9,  // 12: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
-	10, // 13: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
-	12, // 14: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
-	11, // 15: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
-	13, // 16: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
-	14, // 17: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
-	15, // 18: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
-	16, // 19: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
-	17, // 20: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
-	18, // 21: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
-	19, // 22: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
-	20, // 23: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
-	21, // 24: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
-	22, // 25: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
-	26, // [26:26] is the sub-list for method output_type
-	26, // [26:26] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	24, // 11: rafiki.v1.ToolExecutionEnd.duration:type_name -> google.protobuf.Duration
+	25, // 12: rafiki.v1.Retry.resume_at:type_name -> google.protobuf.Timestamp
+	25, // 13: rafiki.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	8,  // 14: rafiki.v1.Event.user_message:type_name -> rafiki.v1.UserMessage
+	9,  // 15: rafiki.v1.Event.assistant_message:type_name -> rafiki.v1.AssistantMessage
+	10, // 16: rafiki.v1.Event.turn_start:type_name -> rafiki.v1.TurnStart
+	12, // 17: rafiki.v1.Event.content_block_delta:type_name -> rafiki.v1.ContentBlockDelta
+	11, // 18: rafiki.v1.Event.turn_end:type_name -> rafiki.v1.TurnEnd
+	13, // 19: rafiki.v1.Event.agent_status:type_name -> rafiki.v1.AgentStatus
+	14, // 20: rafiki.v1.Event.error:type_name -> rafiki.v1.ErrorEvent
+	15, // 21: rafiki.v1.Event.tool_execution_start:type_name -> rafiki.v1.ToolExecutionStart
+	16, // 22: rafiki.v1.Event.tool_execution_end:type_name -> rafiki.v1.ToolExecutionEnd
+	17, // 23: rafiki.v1.Event.retry:type_name -> rafiki.v1.Retry
+	18, // 24: rafiki.v1.Event.child_spawned:type_name -> rafiki.v1.ChildSpawned
+	19, // 25: rafiki.v1.Event.child_exited:type_name -> rafiki.v1.ChildExited
+	20, // 26: rafiki.v1.Event.compaction_boundary:type_name -> rafiki.v1.CompactionBoundary
+	21, // 27: rafiki.v1.Event.script_report:type_name -> rafiki.v1.ScriptReport
+	22, // 28: rafiki.v1.Event.script_output:type_name -> rafiki.v1.ScriptOutput
+	29, // [29:29] is the sub-list for method output_type
+	29, // [29:29] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_event_proto_init() }
@@ -2170,7 +2176,6 @@ func file_rafiki_v1_event_proto_init() {
 		(*ContentBlockDelta_Thinking)(nil),
 		(*ContentBlockDelta_InputJson)(nil),
 	}
-	file_rafiki_v1_event_proto_msgTypes[16].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[18].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[19].OneofWrappers = []any{}
 	file_rafiki_v1_event_proto_msgTypes[22].OneofWrappers = []any{

@@ -12,7 +12,8 @@ import (
 	"go.graveland.dev/rafiki/pkg/tui/session"
 
 	"github.com/multigres/testkit/assert"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func textEvent(childID, text string) *rafikiv1.Event {
@@ -92,7 +93,7 @@ func TestToolExecution(t *testing.T) {
 
 	s.Apply(&rafikiv1.Event{ChildId: "c_test",
 		Payload: &rafikiv1.Event_ToolExecutionEnd{ToolExecutionEnd: &rafikiv1.ToolExecutionEnd{
-			ToolUseId: "tu_1", DurationMs: 1500,
+			ToolUseId: "tu_1", Duration: durationpb.New(1500 * time.Millisecond),
 		}}})
 	last = s.LastAssistant()
 	if last.ToolCalls[0].Running || last.ToolCalls[0].DurationMs != 1500 {
@@ -578,17 +579,17 @@ func retryEvent(childID string, willRetry bool, attempt int32, reason string) *r
 
 // scheduleEvent is the will_retry=true half as the live daemon publishes it:
 // the cause rides in reason, the fire instant structurally in
-// resume_at_unix_ms. Anchored to time.Local because the session renders the
+// resume_at. Anchored to time.Local because the session renders the
 // instant in the viewer's zone — the same digits assert on any machine.
 func scheduleEvent(childID string, resumeAt time.Time) *rafikiv1.Event {
 	return &rafikiv1.Event{
 		ChildId: childID,
 		Payload: &rafikiv1.Event_Retry{Retry: &rafikiv1.Retry{
-			Attempt:        1,
-			WillRetry:      true,
-			Reason:         "rate limited (HTTP 429)",
-			ResumeAtUnixMs: proto.Int64(resumeAt.UnixMilli()),
-			MaxAttempts:    3,
+			Attempt:     1,
+			WillRetry:   true,
+			Reason:      "rate limited (HTTP 429)",
+			ResumeAt:    timestamppb.New(resumeAt),
+			MaxAttempts: 3,
 		}},
 	}
 }
@@ -612,7 +613,7 @@ func TestRetryNoticeAppendsSystemBlock(t *testing.T) {
 }
 
 // A schedule event with no fire instant — a producer that names none, or a
-// row written before resume_at_unix_ms existed — falls back to the reason
+// row written before resume_at existed — falls back to the reason
 // text verbatim rather than rendering a bogus zero time.
 func TestRetryScheduleWithoutInstantFallsBackToReason(t *testing.T) {
 	c := assert.NewCollecting(t)

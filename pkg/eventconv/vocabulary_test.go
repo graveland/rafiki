@@ -4,6 +4,9 @@ package eventconv_test
 
 import (
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -26,8 +29,8 @@ func TestNewVocabularyMessagesExist(t *testing.T) {
 	}
 	c.Eq("bash", ev.GetToolExecutionStart().GetName(), "ToolExecutionStart.Name")
 
-	end := &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_1", DurationMs: 1500, IsError: true}
-	c.False(end.GetDurationMs() != 1500 || !end.GetIsError(), "ToolExecutionEnd round-trip failed: %+v", end)
+	end := &rafikiv1.ToolExecutionEnd{ToolUseId: "tu_1", Duration: durationpb.New(1500 * time.Millisecond), IsError: true}
+	c.False(end.GetDuration().AsDuration() != 1500*time.Millisecond || !end.GetIsError(), "ToolExecutionEnd round-trip failed: %+v", end)
 
 	retry := &rafikiv1.Retry{Attempt: 2, WillRetry: true, Reason: "overloaded"}
 	c.False(retry.GetAttempt() != 2 || !retry.GetWillRetry() || retry.GetReason() != "overloaded", "Retry round-trip failed: %+v", retry)

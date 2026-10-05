@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.graveland.dev/rafiki/pkg/eventlog"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -187,15 +186,15 @@ func (s *Server) replay(
 				if !floorTime.IsZero() && rec.CreatedAt.Before(floorTime) {
 					continue
 				}
-				var ev rafikiv1.Event
-				if err := protojson.Unmarshal(rec.Payload, &ev); err != nil {
-					return connect.NewError(connect.CodeInternal, fmt.Errorf("unmarshal event %s:%d: %w", cid, rec.Ordinal, err))
+				ev, err := rec.Decode()
+				if err != nil {
+					return connect.NewError(connect.CodeInternal, fmt.Errorf("replay event %s:%d: %w", cid, rec.Ordinal, err))
 				}
 				ev.Ordinal = &rec.Ordinal
-				if !filter.Match(&ev, ln) {
+				if !filter.Match(ev, ln) {
 					continue
 				}
-				if err := stream.Send(&ev); err != nil {
+				if err := stream.Send(ev); err != nil {
 					return err
 				}
 			}

@@ -8,6 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
@@ -513,8 +515,8 @@ func (s *scriptOutputCoalescer) takeAllLocked() []scriptOutChunk {
 func (s *scriptOutputCoalescer) publish(ch scriptOutChunk) {
 	now := s.clock.Now()
 	s.c.publishEvent(s.childID, &rafikiv1.Event{
-		ChildId:  s.childID,
-		TsUnixMs: now.UnixMilli(),
+		ChildId: s.childID,
+		Ts:      timestamppb.New(now),
 		Payload: &rafikiv1.Event_ScriptOutput{ScriptOutput: &rafikiv1.ScriptOutput{
 			Stream: ch.stream,
 			Text:   ch.text,
