@@ -110,6 +110,10 @@ func TestGeneratesTimestampAndDurationFields(t *testing.T) {
 	assert.StrContains(mod, "_dur_out(self.d)")
 	assert.StrContains(mod, "_ts_in(_v, \"ts\")")
 	assert.StrContains(mod, "def _dur_in(")
+	// The emitted decoder must normalise the fraction to 6 digits before
+	// fromisoformat: Python 3.9/3.10 accept only 3 or 6 fractional digits, while
+	// protojson emits up to 9 (nanoseconds).
+	assert.StrContains(mod, `(text[dot + 1:end] + "000000")[:6]`)
 }
 
 func TestWellKnownDependencyIsNotRendered(t *testing.T) {

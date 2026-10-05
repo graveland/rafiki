@@ -205,6 +205,17 @@ def _ts_in(value, field: str) -> datetime.datetime:
     if not isinstance(value, str):
         raise ValueError("invalid Timestamp for field %r" % field)
     text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    # datetime.fromisoformat accepts only 3 or 6 fractional digits before
+    # Python 3.11, while protojson emits up to 9 (nanoseconds); rewrite the
+    # fraction to exactly 6 digits, truncating nanoseconds to microseconds.
+    dot = text.find(".")
+    if dot != -1:
+        end = len(text)
+        for i in range(dot + 1, len(text)):
+            if text[i] in "+-Zz":
+                end = i
+                break
+        text = text[:dot + 1] + (text[dot + 1:end] + "000000")[:6] + text[end:]
     try:
         parsed = datetime.datetime.fromisoformat(text)
     except ValueError as exc:

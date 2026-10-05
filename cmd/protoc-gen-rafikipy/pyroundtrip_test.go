@@ -86,6 +86,31 @@ func TestPythonRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 not on PATH")
 	}
+	runPythonDriver(t, python)
+}
+
+// TestPythonRoundTripPython310 pins the codec against the oldest Python the SDK
+// declares support for (pyproject requires-python >=3.9): 3.10's fromisoformat
+// accepts only 3 or 6 fractional digits, so a 9-digit nanosecond Timestamp must
+// be normalised by the generated code, not by the interpreter.
+func TestPythonRoundTripPython310(t *testing.T) {
+	python := ""
+	for _, candidate := range []string{"python3.10", "/opt/homebrew/bin/python3.10"} {
+		if p, err := exec.LookPath(candidate); err == nil {
+			python = p
+			break
+		}
+	}
+	if python == "" {
+		t.Skip("python3.10 not available")
+	}
+	runPythonDriver(t, python)
+}
+
+// runPythonDriver renders the sample proto, writes the module and the driver
+// into a fresh temp dir, and executes the driver under the named interpreter.
+func runPythonDriver(t *testing.T, python string) {
+	t.Helper()
 	assert := assert.NewAborting(t)
 
 	resp, err := generate(sampleRequest())
@@ -99,6 +124,6 @@ func TestPythonRoundTrip(t *testing.T) {
 	cmd := exec.Command(python, "driver.py")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
-	assert.NoError(err, "python3 driver failed:\n%s", out)
-	t.Logf("driver output:\n%s", out)
+	assert.NoError(err, "%s driver failed:\n%s", python, out)
+	t.Logf("%s driver output:\n%s", python, out)
 }
