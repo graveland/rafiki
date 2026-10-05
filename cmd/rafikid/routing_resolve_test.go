@@ -212,7 +212,7 @@ func TestRoutingResumeKeepsStoredRouting(t *testing.T) {
 
 	// Kill and wait for the exited row the resume reads.
 	kctx, kcancel := context.WithTimeout(context.Background(), 20*time.Second)
-	_, err := c.Kill(kctx, id, 1000, 1000)
+	_, err := c.Kill(kctx, id, 1*time.Second, 1*time.Second)
 	kcancel()
 	ck.Require().NoError(err, "Kill")
 	waitForExited(t, c.st, id, 10*time.Second)

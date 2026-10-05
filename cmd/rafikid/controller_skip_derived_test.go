@@ -111,7 +111,7 @@ func TestSkipDerivedIndexSurvivesResumeSnapshot(t *testing.T) {
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = ctrl.Kill(killCtx, res.ChildID, 2000, 500)
+	_, err = ctrl.Kill(killCtx, res.ChildID, 2*time.Second, 500*time.Millisecond)
 	ck.Require().NoError(err, "kill")
 	waitForExited(t, ctrl.st, res.ChildID, 5*time.Second)
 

@@ -196,7 +196,7 @@ func TestAgentKillOfASignallingChildStillSuppresses(t *testing.T) {
 	ctrl.selfKilled.set(workerID, killMark{parent: true})
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
-	killRes, err := ctrl.Kill(ctx2, workerID, 250, 250)
+	killRes, err := ctrl.Kill(ctx2, workerID, 250*time.Millisecond, 250*time.Millisecond)
 	c.NoError(err, "Kill")
 	c.False(!killRes.Escalated || killRes.Signal == "", "the ladder must have escalated to a signal for this fixture to exercise the rung: %+v", killRes)
 

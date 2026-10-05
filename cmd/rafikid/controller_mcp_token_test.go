@@ -69,7 +69,7 @@ func TestChildMCPTokenIsPerChildAndForgotten(t *testing.T) {
 	// forget is deterministic by the time Kill returns.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := c.Kill(ctx, childID, 2000, 2000)
+	_, err := c.Kill(ctx, childID, 2*time.Second, 2*time.Second)
 	ck.NoError(err, "Kill")
 	if _, _, ok := c.ChildForMCPToken(tok); ok {
 		t.Fatal("a dead child's MCP secret must stop resolving once the exit hook ran")

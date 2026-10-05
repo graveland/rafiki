@@ -3635,7 +3635,7 @@ func (c *Controller) handleInterceptedSend(childID string, decision interceptDec
 	}
 
 	// Gracefully shut down the current child.
-	if _, err := c.Kill(context.Background(), childID, 3000, 500); err != nil {
+	if _, err := c.Kill(context.Background(), childID, respawnShutdownGrace, respawnKillGrace); err != nil {
 		var ce *connectapi.ControllerError
 		if !errors.As(err, &ce) ||
 			(ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
@@ -3751,7 +3751,7 @@ func (c *Controller) handleClaudeAbort(childID string) error {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if !exited {
-		if _, err := c.Kill(context.Background(), childID, 1000, 500); err != nil {
+		if _, err := c.Kill(context.Background(), childID, abortShutdownGrace, abortKillGrace); err != nil {
 			var ce *connectapi.ControllerError
 			if !errors.As(err, &ce) || (ce.Code != protocol.ErrChildExited && ce.Code != protocol.ErrChildShuttingDown) {
 				return fmt.Errorf("claude abort kill: %w", err)
@@ -4976,6 +4976,20 @@ func durOrDefault(d time.Duration, def time.Duration) time.Duration {
 	}
 	return d
 }
+
+// The kill ladder's production grace periods. Each is a named time.Duration so
+// a bare millisecond literal can never silently become nanoseconds at a
+// Controller.Kill call site (the wave that made the timeouts Durations).
+const (
+	respawnShutdownGrace   = 3 * time.Second
+	respawnKillGrace       = 500 * time.Millisecond
+	abortShutdownGrace     = time.Second
+	abortKillGrace         = 500 * time.Millisecond
+	leaseLossShutdownGrace = 5 * time.Second
+	leaseLossKillGrace     = 5 * time.Second
+	failChildShutdownGrace = 5 * time.Second
+	failChildKillGrace     = time.Second
+)
 
 func framePassesTypeFilter(frame []byte, include, exclude []string) bool {
 	if len(include) == 0 && len(exclude) == 0 {

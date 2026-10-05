@@ -185,7 +185,7 @@ func (c *Controller) onLeaseLost(childID string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := c.Kill(ctx, childID, 5000, 5000); err != nil {
+	if _, err := c.Kill(ctx, childID, leaseLossShutdownGrace, leaseLossKillGrace); err != nil {
 		slog.Error("stopping a child after lease loss failed", "childId", childID, "error", err)
 	}
 }

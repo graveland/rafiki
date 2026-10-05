@@ -330,7 +330,7 @@ func TestExitDropsTheChildsBoundExecutor(t *testing.T) {
 
 	killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := ctrl.Kill(killCtx, childID, 2000, 500)
+	_, err := ctrl.Kill(killCtx, childID, 2*time.Second, 500*time.Millisecond)
 	c.NoError(err, "kill")
 	waitForExited(t, ctrl.st, childID, 5*time.Second)
 

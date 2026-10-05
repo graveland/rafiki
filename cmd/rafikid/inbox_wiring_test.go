@@ -652,7 +652,7 @@ func TestHandleChildExitResetsTheInbox(t *testing.T) {
 	c.NoError(err, "Accept")
 	c.NoError(st.MarkSent(ctx, []string{row.ID}), "MarkSent")
 
-	if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
+	if _, err := ctrl.Kill(context.Background(), childID, 1*time.Second, 500*time.Millisecond); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 
@@ -705,7 +705,7 @@ func TestHandleChildExitResetsInboxWithNoDatabase(t *testing.T) {
 	c.NoError(err, "Accept")
 	c.NoError(st.MarkSent(ctx, []string{row.ID}), "MarkSent")
 
-	if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
+	if _, err := ctrl.Kill(context.Background(), childID, 1*time.Second, 500*time.Millisecond); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 
@@ -797,7 +797,7 @@ func TestForgetPathsDropTheQueue(t *testing.T) {
 			st := inbox.NewMemory()
 			ctrl.inbox = ctrl.newInboxQueue(st)
 
-			if _, err := ctrl.Kill(context.Background(), childID, 1000, 500); err != nil {
+			if _, err := ctrl.Kill(context.Background(), childID, 1*time.Second, 500*time.Millisecond); err != nil {
 				t.Fatalf("Kill: %v", err)
 			}
 

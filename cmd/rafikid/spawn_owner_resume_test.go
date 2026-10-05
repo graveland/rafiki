@@ -35,7 +35,7 @@ func TestSpawnOwnerSurvivesResume(t *testing.T) {
 
 	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer killCancel()
-	if _, err := ctrl.Kill(killCtx, childID, 2000, 500); err != nil {
+	if _, err := ctrl.Kill(killCtx, childID, 2*time.Second, 500*time.Millisecond); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	waitForExited(t, ctrl.st, childID, 5*time.Second)

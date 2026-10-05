@@ -294,7 +294,7 @@ func (c *Controller) failChild(childID, reason string) {
 	// Best-effort: the steer tells the child it's done.
 	// Force-kill after a short grace period.
 	time.AfterFunc(10*time.Second, func() {
-		if _, err := c.Kill(context.Background(), childID, 5000, 1000); err != nil {
+		if _, err := c.Kill(context.Background(), childID, failChildShutdownGrace, failChildKillGrace); err != nil {
 			slog.Warn("failChild force-kill failed", "childId", childID, "error", err)
 		}
 	})

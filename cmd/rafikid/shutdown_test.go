@@ -263,7 +263,7 @@ func TestKillPersistsExitedRow(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := ctrl.Kill(ctx, id, 5_000, 2_000)
+	_, err := ctrl.Kill(ctx, id, 5*time.Second, 2*time.Second)
 	c.Require().NoError(err, "Kill")
 	// Kill already waits on cm.Remove; this is belt and braces for the reader.
 	waitForRemoval(t, ctrl.cm, id, 5*time.Second)

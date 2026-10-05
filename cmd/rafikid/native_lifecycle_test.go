@@ -79,7 +79,7 @@ func TestParentExitEndsItsNativeChildren(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_, err := c.Kill(ctx, parent, 5000, 2000)
+	_, err := c.Kill(ctx, parent, 5*time.Second, 2*time.Second)
 	ck.NoError(err, "Kill parent")
 	waitForExited(t, c.st, parent, 5*time.Second)
 	waitForExited(t, c.st, id, 5*time.Second)
