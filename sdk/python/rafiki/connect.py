@@ -209,7 +209,9 @@ class ConnectClient:
 
         ``body`` is the already-read error body for a streamed non-200; for a
         unary response it is read here. A 200 stream is checked on its
-        response headers alone — reading it would consume the stream.
+        response headers alone — reading it would consume the stream — and the
+        response is closed before the refusal is raised so the connection is
+        never leaked.
         """
         got = resp.headers.get(EPOCH_HEADER)
         if got == EPOCH:
@@ -222,6 +224,11 @@ class ConnectClient:
         if body and b"protocol_mismatch" in body:
             return
         peer = got if got else "none"
+        # Release the response BEFORE raising: on the streaming path this resp
+        # still holds the connection open, and raising without closing it would
+        # leak it. close() is idempotent, so the non-200 stream branch — which
+        # already read and closed — is unaffected, as is a consumed unary resp.
+        resp.close()
         raise ConnectError(
             CODE_FAILED_PRECONDITION,
             "daemon speaks rafiki protocol %s; this client speaks %s — upgrade the daemon"
