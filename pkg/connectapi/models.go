@@ -5,8 +5,10 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -40,13 +42,13 @@ type ModelRow struct {
 	// That means UNKNOWN, never "accepts nothing" — a text-only model reports
 	// ["text"].
 	InputModalities []string
-	// Created is OpenRouter's listing date (unix seconds); nil when unknown.
-	Created *int64
+	// Created is OpenRouter's listing date; nil when unknown.
+	Created *time.Time
 	// SupportedParameters is nil for UNKNOWN, never empty-for-none. "tools" is
 	// the entry that decides whether a model can be an agent at all.
 	SupportedParameters []string
-	// ExpiresAt is a forward removal date (YYYY-MM-DD), empty when none.
-	ExpiresAt string
+	// ExpiresAt is a forward removal date, nil when none.
+	ExpiresAt *time.Time
 	// KnowledgeCutoff is YYYY-MM-DD, empty when unreported.
 	KnowledgeCutoff string
 	// The three artificial_analysis scores; nil when absent, which must never
@@ -100,8 +102,10 @@ func ToProtoModel(r ModelRow) *rafikiv1.ModelRow {
 		Source:              r.Source,
 		InputModalities:     r.InputModalities,
 		SupportedParameters: r.SupportedParameters,
-		ExpiresAt:           r.ExpiresAt,
 		KnowledgeCutoff:     r.KnowledgeCutoff,
+	}
+	if r.ExpiresAt != nil {
+		out.ExpiresAt = timestamppb.New(*r.ExpiresAt)
 	}
 	if r.AgenticIndex != nil {
 		v := *r.AgenticIndex
@@ -116,8 +120,7 @@ func ToProtoModel(r ModelRow) *rafikiv1.ModelRow {
 		out.CodingIndex = &v
 	}
 	if r.Created != nil {
-		v := *r.Created
-		out.Created = &v
+		out.Created = timestamppb.New(*r.Created)
 	}
 	if r.ContextWindow != nil {
 		v := int32(*r.ContextWindow)

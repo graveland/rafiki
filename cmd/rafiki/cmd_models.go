@@ -6,9 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/modelquery"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -405,7 +405,7 @@ func renderModelRowsWidth(w io.Writer, rows []*rafikiv1.ModelRow, q modelsQuery,
 			cells = append(cells,
 				r.GetId(), perMillion(r.CacheReadUsd), optInt(r.MaxCompletionTokens),
 				optFloat(r.IntelligenceIndex), supportCell(modelquery.Tools(r)),
-				createdCell(r.Created), dashWhen(r.KnowledgeCutoff), dashWhen(r.ExpiresAt),
+				createdCell(r.Created), dashWhen(r.KnowledgeCutoff), expiryCell(r.ExpiresAt),
 			)
 		}
 		tb.Row(cells...)
@@ -446,13 +446,21 @@ func supportCell(s modelquery.Support) string {
 	return "?"
 }
 
-// createdCell renders OpenRouter's listing date (unix seconds). Absent — nil
-// or a literal 0 — is an em dash, matching every other sparse cell.
-func createdCell(v *int64) string {
-	if v == nil || *v <= 0 {
+// createdCell renders OpenRouter's listing date. Absent — nil or the epoch —
+// is an em dash, matching every other sparse cell.
+func createdCell(v *timestamppb.Timestamp) string {
+	if v == nil || v.AsTime().Unix() <= 0 {
 		return "—"
 	}
-	return time.Unix(*v, 0).UTC().Format("2006-01-02")
+	return v.AsTime().UTC().Format("2006-01-02")
+}
+
+// expiryCell renders OpenRouter's removal date (date only) or an em dash.
+func expiryCell(v *timestamppb.Timestamp) string {
+	if v == nil {
+		return "—"
+	}
+	return v.AsTime().UTC().Format("2006-01-02")
 }
 
 // dashWhen renders an empty string as an em dash, matching optInt/optFloat's

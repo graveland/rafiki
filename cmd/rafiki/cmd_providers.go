@@ -10,6 +10,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -194,15 +196,13 @@ func emitProviderRoutes(w io.Writer, resp *rafikiv1.ListRoutesResponse, mode out
 	}
 }
 
-// routeSince renders a row's created_at — an RFC3339 string on the wire — the
-// way the bans table renders its stamps: local, date+time. Anything that does
-// not parse is passed through untouched rather than blanked.
-func routeSince(raw string) string {
-	t, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return raw
+// routeSince renders a row's created_at the way the bans table renders its
+// stamps: local, date+time. Absent is "-".
+func routeSince(ts *timestamppb.Timestamp) string {
+	if ts == nil || ts.AsTime().IsZero() {
+		return "-"
 	}
-	return t.Local().Format(time.DateTime)
+	return ts.AsTime().Local().Format(time.DateTime)
 }
 
 // providerBanView is a ban as the CLI prints it in JSON: absolute times, and
@@ -221,11 +221,11 @@ func providerBanViewOf(b *rafikiv1.ProviderBan) providerBanView {
 		Provider:  b.GetProvider(),
 		ModelLine: b.GetModelLine(),
 		Reason:    b.GetReason(),
-		CreatedAt: time.Unix(b.GetCreatedAt(), 0),
+		CreatedAt: b.GetCreatedAt().AsTime(),
 		Note:      b.GetNote(),
 	}
 	if b.ExpiresAt != nil {
-		t := time.Unix(b.GetExpiresAt(), 0)
+		t := b.GetExpiresAt().AsTime()
 		v.ExpiresAt = &t
 	}
 	return v
@@ -336,8 +336,7 @@ Example:
 				if dur < time.Second {
 					return fmt.Errorf("--for must be at least 1s, got %s (omit it to ban until lifted)", dur)
 				}
-				secs := int64(dur / time.Second)
-				req.DurationSeconds = &secs
+				req.Duration = durationpb.New(dur)
 			}
 			ep, err := newConnectEndpoint(cmd)
 			if err != nil {

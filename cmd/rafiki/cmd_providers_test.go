@@ -11,6 +11,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // TestEmitProviderBansJSONLOmitsUnboundedExpiry pins the JSON shape: a ban
@@ -18,10 +19,10 @@ import (
 // a script would read as "already expired".
 func TestEmitProviderBansJSONLOmitsUnboundedExpiry(t *testing.T) {
 	c := assert.NewCollecting(t)
-	exp := int64(2000)
+	exp := time.Unix(2000, 0).UTC()
 	bans := []*rafikiv1.ProviderBan{
-		{Provider: "open-inference", ModelLine: "*", Reason: "operator", CreatedAt: 1000, Note: "spinning"},
-		{Provider: "CoreWeave", ModelLine: "deepseek/deepseek-v4-pro", Reason: "no_cache", CreatedAt: 1000, ExpiresAt: &exp},
+		{Provider: "open-inference", ModelLine: "*", Reason: "operator", CreatedAt: timestamppb.New(time.Unix(1000, 0)), Note: "spinning"},
+		{Provider: "CoreWeave", ModelLine: "deepseek/deepseek-v4-pro", Reason: "no_cache", CreatedAt: timestamppb.New(time.Unix(1000, 0)), ExpiresAt: timestamppb.New(exp)},
 	}
 	var buf bytes.Buffer
 	c.Require().NoError(emitProviderBans(&buf, bans, outputJSONL, false, time.Unix(1500, 0)))
@@ -34,7 +35,7 @@ func TestEmitProviderBansJSONLOmitsUnboundedExpiry(t *testing.T) {
 func TestEmitProviderBansTable(t *testing.T) {
 	c := assert.NewCollecting(t)
 	bans := []*rafikiv1.ProviderBan{
-		{Provider: "open-inference", ModelLine: "*", Reason: "operator", CreatedAt: 1000},
+		{Provider: "open-inference", ModelLine: "*", Reason: "operator", CreatedAt: timestamppb.New(time.Unix(1000, 0))},
 	}
 	var buf bytes.Buffer
 	c.Require().NoError(emitProviderBans(&buf, bans, outputAuto, false, time.Unix(1500, 0)))

@@ -206,7 +206,7 @@ func newMemoryBackfillCmd() *cobra.Command {
 			}
 			_, err = ep.control().RecallBackfill(cmdCtx(cmd),
 				connect.NewRequest(&rafikiv1.RecallBackfillRequest{
-					SinceUnix:  unixOrZero(since),
+					Since:      timeTS(since),
 					MaxCostUsd: maxCost,
 				}))
 			if err != nil {
@@ -269,7 +269,7 @@ func memoryStatusCells(m *rafikiv1.RecallStatusResponse) [][2]string {
 		{"summaries_pending", strconv.FormatInt(m.GetSummariesPending(), 10)},
 		{"memories", strconv.FormatInt(m.GetMemories(), 10)},
 		{"summary_cost_usd", fmt.Sprintf("$%.4f", m.GetSummaryCostUsd())},
-		{"backfill_since", defaultDash(m.GetBackfillSince())},
+		{"backfill_since", formatTimestamp(m.GetBackfillSince())},
 		{"backfill_budget_usd", fmt.Sprintf("$%.2f", m.GetBackfillBudgetUsd())},
 		{"backfill_spent_usd", fmt.Sprintf("$%.4f", m.GetBackfillSpentUsd())},
 		{"embedding_model", defaultDash(m.GetEmbeddingModel())},

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -68,22 +68,36 @@ func TestBanProviderDurationIsTriState(t *testing.T) {
 
 	resp, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{Provider: "openinference"}))
 	c.Require().NoError(err)
-	c.Nil(resp.Msg.GetBan().ExpiresAt, "an unbounded ban carries expires_at %d", resp.Msg.GetBan().GetExpiresAt())
+	c.Nil(resp.Msg.GetBan().ExpiresAt, "an unbounded ban must carry no expires_at")
 
 	if _, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{
-		Provider: "openinference", DurationSeconds: proto.Int64(3600),
+		Provider: "openinference", Duration: durationpb.New(time.Hour),
 	})); err != nil {
 		t.Fatal(err)
 	}
 	want := []time.Duration{0, time.Hour}
 	c.Eq(fmt.Sprint(want), fmt.Sprint(f.bannedFor), "manager saw durations %v, want %v", f.bannedFor, want)
 
-	for _, secs := range []int64{0, -5} {
+	for _, dur := range []time.Duration{0, -5 * time.Second} {
 		_, err := s.BanProvider(ctx, connect.NewRequest(&rafikiv1.BanProviderRequest{
-			Provider: "openinference", DurationSeconds: proto.Int64(secs),
+			Provider: "openinference", Duration: durationpb.New(dur),
 		}))
-		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "duration %d: code %v, want InvalidArgument", secs, connect.CodeOf(err))
+		c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "duration %s: code %v, want InvalidArgument", dur, connect.CodeOf(err))
 	}
+}
+
+// TestBanProviderOutOfRangeDurationRefused pins CheckValid on the received
+// Duration: a span past the representable range is the caller's fault.
+func TestBanProviderOutOfRangeDurationRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeProviderBans{}
+	s := &Server{}
+	s.SetProviderBanManager(f)
+	_, err := s.BanProvider(context.Background(), connect.NewRequest(&rafikiv1.BanProviderRequest{
+		Provider: "openinference", Duration: &durationpb.Duration{Seconds: 400000000000},
+	}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
+	c.Empty(f.bannedFor, "manager reached despite the rejection")
 }
 
 func TestProviderBanErrorMapping(t *testing.T) {

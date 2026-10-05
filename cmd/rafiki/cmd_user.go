@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -266,7 +265,7 @@ func emitUserList(w io.Writer, rows []*rafikiv1.UserRow, mode outputMode, useCol
 		tb.Header(dimHeader(useColor, "ID", "USER", "EMAIL", "ADMIN", "CREATED", "REMOVED")...)
 		for _, r := range rows {
 			tb.Row(r.GetId(), r.GetUsername(), defaultDash(r.GetEmail()), adminCell(r.GetIsAdmin()),
-				unixDateCell(r.GetCreatedAtUnix()), removedCell(r.DeletedAtUnix))
+				formatTimestamp(r.GetCreatedAt()), formatTimestamp(r.GetDeletedAt()))
 		}
 		return tb.Render()
 	}
@@ -277,24 +276,6 @@ func adminCell(admin bool) string {
 		return "yes"
 	}
 	return "-"
-}
-
-// unixDateCell renders an int64 unix-seconds timestamp the way the list
-// table's STARTED column renders its millisecond one, or "-" when unset.
-func unixDateCell(sec int64) string {
-	if sec <= 0 {
-		return "-"
-	}
-	return time.Unix(sec, 0).Local().Format("2006-01-02 15:04")
-}
-
-// removedCell renders the tombstone timestamp; a nil pointer is an active
-// user, which reads as "-" rather than as a zero date.
-func removedCell(deletedAt *int64) string {
-	if deletedAt == nil {
-		return "-"
-	}
-	return unixDateCell(*deletedAt)
 }
 
 func newUserRmCmd() *cobra.Command {

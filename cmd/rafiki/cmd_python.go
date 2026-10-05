@@ -8,10 +8,10 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -108,19 +108,13 @@ func formatVersion(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
 
-// formatSavedAt renders a row's RFC3339 createdAt the way the other list
-// tables render a timestamp (minutes are enough for a save time): "-" when
-// absent, the raw string when it does not parse — an unparseable daemon
-// timestamp is displayed, not silently blanked.
-func formatSavedAt(s string) string {
-	if s == "" {
+// formatSavedAt renders a row's wire createdAt the way the other list tables
+// render a timestamp (minutes are enough for a save time): "-" when absent.
+func formatSavedAt(ts *timestamppb.Timestamp) string {
+	if ts == nil || ts.AsTime().IsZero() {
 		return "-"
 	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return s
-	}
-	return t.Format("2006-01-02 15:04")
+	return ts.AsTime().Format("2006-01-02 15:04")
 }
 
 // pymoduleJSONLRows adapts a PymoduleRow slice to writeJSONL's []any.

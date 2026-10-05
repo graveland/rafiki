@@ -3,7 +3,7 @@
 package presets
 
 import (
-	"time"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -11,7 +11,7 @@ import (
 // ToProto converts a Record to its wire form. A nil slice becomes a nil
 // *StringList; a non-nil slice (even empty, meaning "none") becomes a
 // non-nil *StringList — collapsing the two would turn "all tools" into
-// "no tools". Times are RFC3339 UTC; a nil DeletedAt is "".
+// "no tools". A nil DeletedAt stays unset.
 func ToProto(r Record) *rafikiv1.PresetRow {
 	p := &rafikiv1.PresetRow{
 		Version:            r.ID,
@@ -33,18 +33,18 @@ func ToProto(r Record) *rafikiv1.PresetRow {
 		MaxDepth:           int32Ptr(r.MaxDepth),
 		MaxChildren:        int32Ptr(r.MaxChildren),
 		WrittenByChild:     r.WrittenByChild,
-		CreatedAt:          r.CreatedAt.UTC().Format(time.RFC3339),
+		CreatedAt:          timestamppb.New(r.CreatedAt),
 	}
 	if r.DeletedAt != nil {
-		p.DeletedAt = r.DeletedAt.UTC().Format(time.RFC3339)
+		p.DeletedAt = timestamppb.New(*r.DeletedAt)
 	}
 	return p
 }
 
 // FromProto is the inverse of ToProto. A nil *StringList becomes a nil slice
 // (the kind's default); a non-nil one becomes a NON-NIL slice, even when its
-// Items are empty ("none" survives the wire). version maps to ID.
-// Unparseable created_at/deleted_at are left zero/nil.
+// Items are empty ("none" survives the wire). version maps to ID. An unset
+// created_at/deleted_at leaves the Record field zero/nil.
 func FromProto(p *rafikiv1.PresetRow) Record {
 	if p == nil {
 		return Record{}
@@ -70,13 +70,12 @@ func FromProto(p *rafikiv1.PresetRow) Record {
 		MaxChildren:        intPtr(p.MaxChildren),
 		WrittenByChild:     p.GetWrittenByChild(),
 	}
-	if t, err := time.Parse(time.RFC3339, p.GetCreatedAt()); err == nil {
-		r.CreatedAt = t
+	if t := p.GetCreatedAt(); t != nil {
+		r.CreatedAt = t.AsTime()
 	}
-	if s := p.GetDeletedAt(); s != "" {
-		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			r.DeletedAt = &t
-		}
+	if t := p.GetDeletedAt(); t != nil {
+		v := t.AsTime()
+		r.DeletedAt = &v
 	}
 	return r
 }

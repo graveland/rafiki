@@ -12,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/table"
@@ -143,7 +144,7 @@ func renderModelRoutesTable(w io.Writer, resp *rafikiv1.ModelRoutesResponse, key
 			dashWhen(e.GetQuantization()),
 			routeIntCell(e.P50TokensPerSec),
 			routeIntCell(e.P90TokensPerSec),
-			routeIntCell(e.P50LatencyMs),
+			routeLatencyCell(e.P50Latency),
 			routePriceCell(e.PromptUsdPerMtok),
 			routePriceCell(e.CompletionUsdPerMtok),
 			routeUptimeCell(e.Uptime_30M),
@@ -161,13 +162,22 @@ func renderModelRoutesTable(w io.Writer, resp *rafikiv1.ModelRoutesResponse, key
 }
 
 // routeIntCell renders an optional measured value as an integer — throughput in
-// tokens/sec, latency in ms. Absent is an em dash, never a 0 that would read as
-// a measured stall.
+// tokens/sec. Absent is an em dash, never a 0 that would read as a measured
+// stall.
 func routeIntCell(v *float64) string {
 	if v == nil {
 		return "—"
 	}
 	return strconv.Itoa(int(math.Round(*v)))
+}
+
+// routeLatencyCell renders the optional p50 latency as whole milliseconds.
+// Absent is an em dash, never a 0 that would read as a measured stall.
+func routeLatencyCell(v *durationpb.Duration) string {
+	if v == nil {
+		return "—"
+	}
+	return strconv.Itoa(int(math.Round(v.AsDuration().Seconds() * 1000)))
 }
 
 // routePriceCell renders a USD-per-million price. The wire already carries
@@ -227,7 +237,10 @@ const (
 func (f modelsRouteSortField) value(e *rafikiv1.RouteEndpoint) (float64, bool) {
 	switch f {
 	case routeSortLatency:
-		return e.GetP50LatencyMs(), e.P50LatencyMs != nil
+		if e.P50Latency == nil {
+			return 0, false
+		}
+		return e.P50Latency.AsDuration().Seconds() * 1000, true
 	case routeSortPrice:
 		return e.GetPromptUsdPerMtok(), e.PromptUsdPerMtok != nil
 	case routeSortUptime:

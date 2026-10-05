@@ -10,18 +10,19 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestRenderRateLimitStatus(t *testing.T) {
 	c := assert.NewCollecting(t)
 	util5 := 0.42
-	reset5 := time.Now().Add(2 * time.Hour).Unix()
+	reset5 := time.Now().Add(2 * time.Hour)
 	st := &rafikiv1.GetRateLimitStatusResponse{
 		OrganizationId: "org_123",
-		FiveH:          &rafikiv1.RateLimitWindow{Utilization: &util5, ResetAt: &reset5, Status: "allowed"},
+		FiveH:          &rafikiv1.RateLimitWindow{Utilization: &util5, ResetAt: timestamppb.New(reset5), Status: "allowed"},
 		SevenD:         &rafikiv1.RateLimitWindow{Status: "allowed_warning"}, // no utilization/reset reported
 		OverallStatus:  "allowed_warning",
-		UpdatedAt:      time.Now().Unix(),
+		UpdatedAt:      timestamppb.New(time.Now()),
 	}
 
 	var sb strings.Builder

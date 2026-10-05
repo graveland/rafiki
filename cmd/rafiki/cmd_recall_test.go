@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -119,8 +120,8 @@ func TestCmdMemoryPutReadsStdin(t *testing.T) {
 func TestCmdRecallTableRendersHits(t *testing.T) {
 	c := assert.NewCollecting(t)
 	hits := []*rafikiv1.RecallHit{
-		{Id: "m:1", Source: "memory", When: "2026-01-02T03:04:05Z", Path: "proj/notes", Name: "pin"},
-		{Id: "w:2", Source: "window", When: "2026-01-03T03:04:05Z", Repo: "rafiki", ConversationName: "fix bug", Snippet: "needle"},
+		{Id: "m:1", Source: "memory", When: timestamppb.New(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), Path: "proj/notes", Name: "pin"},
+		{Id: "w:2", Source: "window", When: timestamppb.New(time.Date(2026, 1, 3, 3, 4, 5, 0, time.UTC)), Repo: "rafiki", ConversationName: "fix bug", Snippet: "needle"},
 	}
 	var buf bytes.Buffer
 	c.Require().NoError(emitRecallHits(&buf, hits, outputTable, false), "table")

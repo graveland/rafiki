@@ -118,17 +118,19 @@ func TestRecallToolPassesQuery(t *testing.T) {
 
 	res, err := tool.Execute(context.Background(), ToolInput(
 		`{"query":"dial timeout","sources":["memory","window"],"under":"projects.rafiki",`+
-			`"repo":"rafiki","since_unix":100,"until_unix":200}`))
+			`"repo":"rafiki","since":"1970-01-01T00:01:40Z","until":"1970-01-01T00:03:20Z"}`))
 	c.Require().NoError(err, "Execute")
 	c.Eq("m:abc  saved fact", res.Text, "result text")
+	since := time.Unix(100, 0).UTC()
+	until := time.Unix(200, 0).UTC()
 	want := RecallQuery{
-		Query:     "dial timeout",
-		Sources:   []string{"memory", "window"},
-		Under:     "projects.rafiki",
-		Repo:      "rafiki",
-		SinceUnix: 100,
-		UntilUnix: 200,
-		Limit:     recall.RecallDefaultLimit,
+		Query:   "dial timeout",
+		Sources: []string{"memory", "window"},
+		Under:   "projects.rafiki",
+		Repo:    "rafiki",
+		Since:   &since,
+		Until:   &until,
+		Limit:   recall.RecallDefaultLimit,
 	}
 	if !reflect.DeepEqual(fake.recallQ, want) || len(fake.recallQ.Sources) != 2 {
 		t.Errorf("query forwarded = %+v\n        want %+v", fake.recallQ, want)
@@ -148,6 +150,32 @@ func TestRecallToolPassesQuery(t *testing.T) {
 		}
 		c.Eq(tc.limit, fake.recallQ.Limit, "Execute(%s): limit = %d, want", tc.in, fake.recallQ.Limit)
 	}
+}
+
+// A blanked or absent since/until is UNSET (unbounded), the way the proto's
+// absent Timestamp reads; a genuinely malformed value still fails loudly
+// rather than being silently dropped.
+func TestRecallToolBlankSinceUntilIsUnbounded(t *testing.T) {
+	c := assert.NewCollecting(t)
+	fake := &fakeRecallBinding{}
+	tool, err := RecallBlueprint{}.Materialize(ToolOpts{Recall: fake})
+	c.Require().False(err != nil || tool == nil, "Materialize: tool=%v err=%v", tool, err)
+
+	for _, in := range []string{
+		`{"query":"x"}`,
+		`{"query":"x","since":"","until":""}`,
+		`{"query":"x","since":null,"until":null}`,
+	} {
+		if _, err := tool.Execute(context.Background(), ToolInput(in)); err != nil {
+			t.Fatalf("Execute(%s): %v", in, err)
+		}
+		c.False(fake.recallQ.Since != nil || fake.recallQ.Until != nil,
+			"Execute(%s): since/until = %v/%v, want both unset", in, fake.recallQ.Since, fake.recallQ.Until)
+	}
+
+	_, err = tool.Execute(context.Background(), ToolInput(`{"query":"x","since":"not-a-time"}`))
+	c.Require().Error(err, "Execute with a malformed since: accepted")
+	c.StrContains(err.Error(), "time", "malformed since error")
 }
 
 func TestRecallToolRequiresQuery(t *testing.T) {

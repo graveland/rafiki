@@ -447,23 +447,23 @@ class Client:
         sources: "Iterable[str] | None" = None,
         under: str = "",
         repo: str = "",
-        since_unix: int = 0,
-        until_unix: int = 0,
+        since: "datetime.datetime | None" = None,
+        until: "datetime.datetime | None" = None,
         limit: int = 0,
     ) -> "list":
         """Hybrid search over the caller's memories and its owner's captured
         conversations. ``sources`` narrows to some of ``"memory"``,
-        ``"summary"``, ``"window"``; 0 for ``since_unix``/``until_unix`` is
-        unbounded and 0 for ``limit`` is the daemon default. A child
-        credential searches its OWNER's own rows, never other users'. Each
-        hit's ``id`` is the key ``recall_context`` expands."""
+        ``"summary"``, ``"window"``; ``since``/``until`` bound activity by an
+        aware ``datetime`` (``None`` = unbounded) and 0 for ``limit`` is the
+        daemon default. A child credential searches its OWNER's own rows, never
+        other users'. Each hit's ``id`` is the key ``recall_context`` expands."""
         req = _gen.control_pb.RecallRequest(
             query=query,
             sources=list(sources or []),
             under=under,
             repo=repo,
-            since_unix=since_unix,
-            until_unix=until_unix,
+            since=since,
+            until=until,
             limit=limit,
         )
         return self._call("Recall", req, _gen.control_pb.RecallResponse).hits

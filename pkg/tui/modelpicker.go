@@ -273,32 +273,33 @@ func toolsKind(r *rafikiv1.ModelRow) toolState {
 // ("2098-12-31") that means "no planned removal" -- warning on those would put
 // a notice next to models that are in no danger at all.
 func expiryWarning(r *rafikiv1.ModelRow, now time.Time) string {
-	raw := r.GetExpiresAt()
-	if raw == "" {
+	at := r.GetExpiresAt()
+	if at == nil {
 		return ""
 	}
-	at, err := time.Parse("2006-01-02", raw)
-	if err != nil {
-		return ""
-	}
-	days := int(at.Sub(now).Hours() / 24)
+	t := at.AsTime()
+	days := int(t.Sub(now).Hours() / 24)
 	if days < 0 || days > 365 {
 		return ""
 	}
 	if days == 0 {
 		return "removed today"
 	}
-	return fmt.Sprintf("removed %s (%dd)", raw, days)
+	return fmt.Sprintf("removed %s (%dd)", t.UTC().Format("2006-01-02"), days)
 }
 
 // ageCell renders how long ago a model was listed. Absent is an em dash, and
 // the unit is coarse on purpose: the question is which generation it belongs
 // to, not the exact day.
 func ageCell(r *rafikiv1.ModelRow, now time.Time) string {
-	if r.Created == nil || *r.Created <= 0 {
+	if r.Created == nil {
 		return "—"
 	}
-	d := now.Sub(time.Unix(*r.Created, 0))
+	created := r.Created.AsTime()
+	if created.Unix() <= 0 {
+		return "—"
+	}
+	d := now.Sub(created)
 	switch days := int(d.Hours() / 24); {
 	case days < 1:
 		return "today"

@@ -589,11 +589,14 @@ message ModelRow {
   // silently hides every locally-served model.
   repeated string input_modalities = 12;
 
-  // created is OpenRouter's LISTING date (unix seconds), not the model's
-  // release date. They track closely enough to order by; the distinction
-  // matters only if a client renders it as "released". Optional because a
-  // locally-served model has no catalog entry and 0 is a legal timestamp.
-  optional int64 created = 13;
+  // created is OpenRouter's LISTING date, not the model's release date. They
+  // track closely enough to order by; the distinction matters only if a
+  // client renders it as "released". Unset when a locally-served model has no
+  // catalog entry (an epoch Timestamp is a legal value and is not treated as
+  // absent).
+  google.protobuf.Timestamp created = 20;
+
+  reserved 13;
 
   // supported_parameters is what the model accepts on a request. "tools" is
   // the one that decides whether it can be an agent at all.
@@ -603,12 +606,14 @@ message ModelRow {
   // must keep unknowns, or it hides every locally-served model.
   repeated string supported_parameters = 14;
 
-  // expires_at is OpenRouter's expiration_date verbatim (YYYY-MM-DD), empty
-  // when none. It is a FORWARD warning: OpenRouter delists a model rather than
-  // leaving it listed and expired, so a date here is always in the future.
-  // Some entries carry a far-future sentinel meaning "no planned removal", so
-  // a renderer must bound how far ahead it warns.
-  string expires_at = 15;
+  // expires_at is OpenRouter's expiration_date. Unset when none. It is a
+  // FORWARD warning: OpenRouter delists a model rather than leaving it listed
+  // and expired, so a time here is always in the future. Some entries carry a
+  // far-future sentinel meaning "no planned removal", so a renderer must
+  // bound how far ahead it warns.
+  google.protobuf.Timestamp expires_at = 21;
+
+  reserved 15;
 
   // knowledge_cutoff is when the model's training data ends (YYYY-MM-DD),
   // empty when the catalog does not report it (57% of entries, and every
@@ -1005,8 +1010,10 @@ message DarajaProcessExited {
 // or a real timestamp.
 message RateLimitWindow {
   optional double utilization = 1; // Anthropic's own units, passed through verbatim
-  optional int64 reset_at = 2;     // unix seconds
+  google.protobuf.Timestamp reset_at = 4; // unset = not reported
   string status = 3;               // "" = not reported
+
+  reserved 2;
 }
 
 message GetRateLimitStatusRequest {}
@@ -1021,7 +1028,9 @@ message GetRateLimitStatusResponse {
   RateLimitWindow five_h = 2;
   RateLimitWindow seven_d = 3;
   string overall_status = 4;
-  int64 updated_at = 5; // unix seconds
+  google.protobuf.Timestamp updated_at = 6;
+
+  reserved 5;
 }
 
 service Control {
@@ -1140,9 +1149,11 @@ message SkillRow {
   string source = 4;
   bool enabled = 5;
   string shadowed_core_version = 6;
-  string updated_at = 7;
+  google.protobuf.Timestamp updated_at = 9;
   // body is populated only by GetSkill.
   string body = 8;
+
+  reserved 7;
 }
 
 message ListSkillsRequest {
@@ -1190,7 +1201,7 @@ message PymoduleRow {
   int64 version = 1;     // the row id: two saves under one name are two versions
   string name = 2;
   string description = 3;
-  string created_at = 4; // RFC3339
+  google.protobuf.Timestamp created_at = 7;
   // code is populated only by GetPymodule and PutPymodule; list responses
   // omit it -- an inventory is not a document.
   string code = 5;
@@ -1198,6 +1209,8 @@ message PymoduleRow {
   // (every row that predates git sources), otherwise the name of the git
   // source the module was discovered in.
   string repo = 6;
+
+  reserved 4;
 }
 
 message ListPymodulesRequest {
@@ -1299,8 +1312,11 @@ message PresetRow {
   optional int32 max_depth = 17;
   optional int32 max_children = 18;
   string written_by_child = 19;
-  string created_at = 20; // RFC3339
-  string deleted_at = 21; // RFC3339; empty when live
+  google.protobuf.Timestamp created_at = 22;
+  // deleted_at is unset while the preset is live.
+  google.protobuf.Timestamp deleted_at = 23;
+
+  reserved 20, 21;
 }
 
 message ListPresetsRequest { string prefix = 1; }
@@ -1314,13 +1330,14 @@ message DeletePresetResponse {}
 
 message RecallHit {
   string id = 1; string source = 2; string snippet = 3;
-  // when is RFC3339 (UTC).
-  string when = 4;
+  google.protobuf.Timestamp when = 15;
   string conversation_id = 5; string conversation_name = 6;
   string repo = 7; string kind = 8;
   int32 ordinal_from = 9; int32 ordinal_to = 10;
   string path = 11; string name = 12;
   string title = 13; double score = 14;
+
+  reserved 4;
 }
 
 message RecallRequest {
@@ -1330,9 +1347,13 @@ message RecallRequest {
   repeated string sources = 2;
   string under = 3;   // ltree path prefix for memories; "" = all
   string repo = 4;    // basename match for conversation sources; "" = all
-  int64 since_unix = 5;  // unix seconds; 0 = unbounded
-  int64 until_unix = 6;  // unix seconds; 0 = unbounded
+  // since/until are unset (or the epoch) for unbounded.
+  google.protobuf.Timestamp since = 8;
+  google.protobuf.Timestamp until = 9;
   int32 limit = 7;    // 0 = default (10), clamped to 50
+
+  reserved 5, 6;
+  reserved "since_unix", "until_unix";
 }
 message RecallResponse { repeated RecallHit hits = 1; }
 
@@ -1350,8 +1371,10 @@ message MemoryRow {
   string name = 3;
   string body = 4;
   string meta_json = 5;
-  string created_at = 6; // RFC3339 (UTC)
-  string updated_at = 7; // RFC3339 (UTC)
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+
+  reserved 6, 7;
 }
 message GetMemoryRequest {
   string path = 1;
@@ -1377,8 +1400,13 @@ message DeleteMemoryRequest {
 message DeleteMemoryResponse {}
 
 message RecallBackfillRequest {
-  int64 since_unix = 1; // unix seconds
+  // since unset means "from the beginning": a backfill with no lower bound
+  // starts at the earliest indexed conversation.
+  google.protobuf.Timestamp since = 3;
   double max_cost_usd = 2;
+
+  reserved 1;
+  reserved "since_unix";
 }
 message RecallBackfillResponse {}
 
@@ -1391,11 +1419,14 @@ message RecallStatusResponse {
   int64 summaries_pending = 5;
   int64 memories = 6;
   double summary_cost_usd = 7;
-  string backfill_since = 8; // RFC3339 (UTC); empty when backfill is off
+  // backfill_since is unset when backfill is off.
+  google.protobuf.Timestamp backfill_since = 13;
   double backfill_budget_usd = 9;
   double backfill_spent_usd = 10;
   string embedding_model = 11;
   string summary_model = 12;
+
+  reserved 8;
 }
 
 // ProviderBan is one live exclusion of an OpenRouter provider from routing:
@@ -1405,9 +1436,12 @@ message ProviderBan {
   string provider = 1;           // OpenRouter slug ("openinference"); a guard ejection may carry the display name
   string model_line = 2;
   string reason = 3;
-  int64 created_at = 4;          // unix seconds
-  optional int64 expires_at = 5; // unix seconds; absent = until lifted
+  google.protobuf.Timestamp created_at = 7;
+  // expires_at unset = until lifted.
+  google.protobuf.Timestamp expires_at = 8;
   string note = 6;
+
+  reserved 4, 5;
 }
 
 message ListProviderBansRequest {}
@@ -1424,8 +1458,11 @@ message BanProviderRequest {
   string provider = 1;
   // Absent = until lifted. Present must be > 0: a zero-length ban is a
   // mistake, not a request.
-  optional int64 duration_seconds = 2;
+  google.protobuf.Duration duration = 4;
   string note = 3;
+
+  reserved 2;
+  reserved "duration_seconds";
 }
 message BanProviderResponse {
   ProviderBan ban = 1;
@@ -1444,7 +1481,9 @@ message UnbanProviderResponse {}
 message RouteRow {
   string model_line = 1;
   string spec = 2;
-  string created_at = 3;
+  google.protobuf.Timestamp created_at = 4;
+
+  reserved 3;
 }
 
 message ListRoutesRequest {}
@@ -1641,8 +1680,12 @@ message RouteEndpoint {
   bool preferred = 13;
   optional double p50_tokens_per_sec = 14;      // absent when no stats matched
   optional double p90_tokens_per_sec = 15;
-  optional double p50_latency_ms = 16;
+  // p50_latency is unset when no stats matched.
+  google.protobuf.Duration p50_latency = 18;
   optional int32 stats_requests = 17;
+
+  reserved 16;
+  reserved "p50_latency_ms";
 }
 message ModelRoutesResponse {
   string model = 1;              // base id, bracket stripped
@@ -1827,13 +1870,16 @@ message CreateUserResponse {
   string username = 2;
   // empty when no token was minted; see token_reason.
   string token = 3;
-  int64 created_at_unix = 4;
+  google.protobuf.Timestamp created_at = 7;
   // "requested" (mint_token true), "oidc not configured" (absent, no OIDC),
   // "" (no token: "not requested" is implied by an empty token).
   string token_reason = 5;
   // whether this daemon has OIDC login configured, so the client can word
   // its hint.
   bool login_configured = 6;
+
+  reserved 4;
+  reserved "created_at_unix";
 }
 
 // ListUsersRequest mirrors protocol.UserListRequest. Tokens are never
@@ -1857,9 +1903,13 @@ message UserRow {
   string id = 1;
   string username = 2;
   bool is_admin = 3;
-  int64 created_at_unix = 4;
-  optional int64 deleted_at_unix = 5;
+  google.protobuf.Timestamp created_at = 7;
+  // deleted_at unset = live.
+  google.protobuf.Timestamp deleted_at = 8;
   string email = 6;
+
+  reserved 4, 5;
+  reserved "created_at_unix", "deleted_at_unix";
 }
 
 // RemoveUserRequest tombstones a user: the token stops working, history
@@ -1877,7 +1927,13 @@ message UpdateUserResponse { UserRow user = 1; }
 // TokenRow is one credential, never its secret.
 message TokenRow {
   string id = 1; string username = 2; string name = 3; string origin = 4;
-  int64 created_at_unix = 5; optional int64 expires_at_unix = 6; optional int64 revoked_at_unix = 7;
+  google.protobuf.Timestamp created_at = 8;
+  // expires_at unset = never expires; revoked_at unset = live.
+  google.protobuf.Timestamp expires_at = 9;
+  google.protobuf.Timestamp revoked_at = 10;
+
+  reserved 5, 6, 7;
+  reserved "created_at_unix", "expires_at_unix", "revoked_at_unix";
 }
 // MintTokenRequest mints a service token. username empty = the caller.
 // ttl_seconds 0 = never expires.

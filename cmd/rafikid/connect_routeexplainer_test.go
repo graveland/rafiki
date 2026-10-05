@@ -130,8 +130,8 @@ func TestConnectRoutesUnitConversion(t *testing.T) {
 	c.InDelta(42.5, *deepinfra.P50TokensPerSec, 1e-9, "p50 throughput")
 	c.Require().NotNil(deepinfra.P90TokensPerSec, "p90 throughput present")
 	c.InDelta(51.25, *deepinfra.P90TokensPerSec, 1e-9, "p90 throughput")
-	c.Require().NotNil(deepinfra.P50LatencyMs, "p50 latency present")
-	c.InDelta(120.5, *deepinfra.P50LatencyMs, 1e-9, "p50 latency")
+	c.Require().NotNil(deepinfra.P50Latency, "p50 latency present")
+	c.InDelta(120.5, deepinfra.P50Latency.AsDuration().Seconds()*1000, 1e-9, "p50 latency")
 	c.Require().NotNil(deepinfra.StatsRequests, "request count present")
 	c.Eq(int32(1234), *deepinfra.StatsRequests, "stats_requests")
 

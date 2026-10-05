@@ -11,8 +11,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -123,7 +125,7 @@ func TestConnectRecallBackfillAdminOnly(t *testing.T) {
 	user := server.WithIdentity(context.Background(),
 		&server.Identity{UserID: "u-bob", Via: server.ProvenanceUser})
 	_, err := s.RecallBackfill(user, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
-		SinceUnix: 1700000000, MaxCostUsd: 5,
+		Since: timestamppb.New(time.Unix(1700000000, 0)), MaxCostUsd: 5,
 	}))
 	c.Require().Eq(connect.CodePermissionDenied, connect.CodeOf(err), "non-admin backfill: got code")
 	c.Require().Empty(fs.states, "refused backfill wrote state")
@@ -132,7 +134,7 @@ func TestConnectRecallBackfillAdminOnly(t *testing.T) {
 		&server.Identity{UserID: "u-admin", Username: "brent", Via: server.ProvenanceUser, IsAdmin: true})
 	for _, cost := range []float64{0, -1} {
 		_, err := s.RecallBackfill(admin, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
-			SinceUnix: 1700000000, MaxCostUsd: cost,
+			Since: timestamppb.New(time.Unix(1700000000, 0)), MaxCostUsd: cost,
 		}))
 		c.Require().Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "backfill with max_cost_usd %v: got code %v, want InvalidArgument", cost, connect.CodeOf(err))
 		c.Require().ErrorIs(err, connectapi.ErrNoBackfillBudget, "budget refusal does not wrap ErrNoBackfillBudget")
@@ -144,7 +146,7 @@ func TestConnectRecallBackfillAdminOnly(t *testing.T) {
 	c.Require().Empty(fs.states, "refused backfill wrote state")
 
 	_, err = s.RecallBackfill(admin, connect.NewRequest(&rafikiv1.RecallBackfillRequest{
-		SinceUnix: 1700000000, MaxCostUsd: 2.5,
+		Since: timestamppb.New(time.Unix(1700000000, 0)), MaxCostUsd: 2.5,
 	}))
 	c.Require().NoError(err, "admin backfill")
 	want := map[string]string{

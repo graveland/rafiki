@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"sort"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/models"
@@ -191,19 +192,32 @@ func decorateRows(spine []models.Model, cat map[string]catalogFacts) []connectap
 			row.CacheWriteUSD = f.cacheWriteUSD
 			row.InputModalities = f.inputModalities
 			row.SupportedParameters = f.supportedParams
-			row.ExpiresAt = f.expiresAt
+			row.ExpiresAt = parseCatalogDate(f.expiresAt)
 			row.KnowledgeCutoff = f.knowledgeCutoff
 			row.AgenticIndex = f.agenticIndex
 			row.IntelligenceIndex = f.intelIndex
 			row.CodingIndex = f.codingIndex
 			if f.created > 0 {
-				v := f.created
-				row.Created = &v
+				t := time.Unix(f.created, 0).UTC()
+				row.Created = &t
 			}
 		}
 		out = append(out, row)
 	}
 	return out
+}
+
+// parseCatalogDate converts OpenRouter's YYYY-MM-DD expiration_date into a
+// time; an empty or unparseable value is absent.
+func parseCatalogDate(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 // filterByProvider drops rows whose provider does not match. An empty provider

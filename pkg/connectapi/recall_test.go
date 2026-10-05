@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/recall"
@@ -38,6 +39,8 @@ type fakeRecall struct {
 	gotPut   recall.Memory
 	recalls  int
 	puts     int
+
+	gotBackfillSince time.Time
 }
 
 func (f *fakeRecall) Recall(_ context.Context, q recall.SearchQuery, limit int) ([]recall.Hit, error) {
@@ -78,7 +81,8 @@ func (f *fakeRecall) PutMemory(_ context.Context, m recall.Memory) (recall.Memor
 
 func (f *fakeRecall) DeleteMemory(_ context.Context, _, _ string) error { return f.delErr }
 
-func (f *fakeRecall) Backfill(_ context.Context, _ time.Time, _ float64) error {
+func (f *fakeRecall) Backfill(_ context.Context, since time.Time, _ float64) error {
+	f.gotBackfillSince = since
 	return f.backfillErr
 }
 
@@ -252,9 +256,9 @@ func TestRecallLimitClamp(t *testing.T) {
 }
 
 // TestRecallMapsRequestToSearchQuery pins the wire conversion: query, source
-// filter, path/repo filters and unix-second bounds land on the SearchQuery the
+// filter, path/repo filters and time bounds land on the SearchQuery the
 // manager receives (Scope/MemoryOwner left for the adapter), and hits come
-// back with RFC3339 UTC timestamps.
+// back with Timestamp whens.
 func TestRecallMapsRequestToSearchQuery(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := &Server{}
@@ -272,15 +276,15 @@ func TestRecallMapsRequestToSearchQuery(t *testing.T) {
 	}}}
 	s.SetRecallManager(f)
 
-	since := int64(1700000000)
-	until := int64(1700001000)
+	since := time.Unix(1700000000, 0).UTC()
+	until := time.Unix(1700001000, 0).UTC()
 	resp, err := s.Recall(context.Background(), connect.NewRequest(&rafikiv1.RecallRequest{
-		Query:     "needle",
-		Sources:   []string{"memory", "window"},
-		Under:     "projects",
-		Repo:      "rafiki",
-		SinceUnix: since,
-		UntilUnix: until,
+		Query:   "needle",
+		Sources: []string{"memory", "window"},
+		Under:   "projects",
+		Repo:    "rafiki",
+		Since:   timestamppb.New(since),
+		Until:   timestamppb.New(until),
 	}))
 	c.Require().NoError(err, "recall")
 
@@ -288,19 +292,94 @@ func TestRecallMapsRequestToSearchQuery(t *testing.T) {
 	c.False(q.Text != "needle" || q.Under != "projects" || q.Repo != "rafiki", "search query text/under/repo = %q/%q/%q", q.Text, q.Under, q.Repo)
 	c.False(len(q.Sources) != 2 || q.Sources[0] != recall.SourceMemory || q.Sources[1] != recall.SourceWindow, "sources = %v, want [memory window]", q.Sources)
 	c.False(q.Scope != (recall.Scope{}) || q.MemoryOwner != "", "scope/owner resolved by handler: %+v/%q, want zero (adapter's job)", q.Scope, q.MemoryOwner)
-	c.False(q.Since == nil || !q.Since.Equal(time.Unix(since, 0).UTC()), "since = %v, want unix %d", q.Since, since)
-	c.False(q.Until == nil || !q.Until.Equal(time.Unix(until, 0).UTC()), "until = %v, want unix %d", q.Until, until)
+	c.False(q.Since == nil || !q.Since.Equal(since), "since = %v, want %v", q.Since, since)
+	c.False(q.Until == nil || !q.Until.Equal(until), "until = %v, want %v", q.Until, until)
 
 	c.Require().Len(resp.Msg.Hits, 1, "got %d hits, want 1", len(resp.Msg.Hits))
 	h := resp.Msg.Hits[0]
 	if h.GetId() != "s:abc" || h.GetSource() != "summary" || h.GetSnippet() != "snip" {
 		t.Errorf("hit id/source/snippet = %q/%q/%q", h.GetId(), h.GetSource(), h.GetSnippet())
 	}
-	c.Eq("2026-01-02T03:04:05Z", h.GetWhen(), "when")
+	c.Eq(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), h.GetWhen().AsTime(), "when")
 	c.False(h.GetConversationId() != "conv" || h.GetConversationName() != "name" ||
 		h.GetRepo() != "rafiki" || h.GetKind() != "fundi" ||
 		h.GetOrdinalFrom() != 3 || h.GetOrdinalTo() != 9 ||
 		h.GetTitle() != "t" || h.GetScore() != 0.42, "hit fields drifted: %+v", h)
+}
+
+// TestRecallBoundsUnsetOrEpochAreUnbounded pins the old unix field's zero
+// semantics surviving the type change: an absent since/until, and an explicit
+// epoch, both mean unbounded.
+func TestRecallBoundsUnsetOrEpochAreUnbounded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.RecallRequest
+	}{
+		{"unset", &rafikiv1.RecallRequest{Query: "q"}},
+		{"epoch", &rafikiv1.RecallRequest{Query: "q", Since: &timestamppb.Timestamp{}, Until: &timestamppb.Timestamp{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			f := &fakeRecall{}
+			s := &Server{}
+			s.SetRecallManager(f)
+			if _, err := s.Recall(context.Background(), connect.NewRequest(tc.req)); err != nil {
+				t.Fatalf("Recall: %v", err)
+			}
+			c.False(f.gotQuery.Since != nil || f.gotQuery.Until != nil,
+				"since/until = %v/%v, want both nil (unbounded)", f.gotQuery.Since, f.gotQuery.Until)
+		})
+	}
+}
+
+// TestRecallOutOfRangeBoundsRefused pins CheckValid: an out-of-range Timestamp
+// is the caller's fault, refused InvalidArgument before the manager runs.
+func TestRecallOutOfRangeBoundsRefused(t *testing.T) {
+	out := &timestamppb.Timestamp{Seconds: 253402300800} // year 10000, past the valid range
+	for _, tc := range []struct {
+		name string
+		req  *rafikiv1.RecallRequest
+	}{
+		{"since", &rafikiv1.RecallRequest{Query: "q", Since: out}},
+		{"until", &rafikiv1.RecallRequest{Query: "q", Until: out}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := assert.NewCollecting(t)
+			f := &fakeRecall{}
+			s := &Server{}
+			s.SetRecallManager(f)
+			_, err := s.Recall(context.Background(), connect.NewRequest(tc.req))
+			c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "%s: code", tc.name)
+			c.Eq(0, f.recalls, "%s: manager reached", tc.name)
+		})
+	}
+}
+
+// TestRecallBackfillSinceUnsetIsFromTheBeginning pins this message's OWN zero
+// meaning: unlike Recall's unbounded, an unset backfill since is the epoch
+// ("from the beginning"), exactly what the old since_unix 0 spelled.
+func TestRecallBackfillSinceUnsetIsFromTheBeginning(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeRecall{}
+	s := &Server{}
+	s.SetRecallManager(f)
+	if _, err := s.RecallBackfill(context.Background(), connect.NewRequest(&rafikiv1.RecallBackfillRequest{MaxCostUsd: 1})); err != nil {
+		t.Fatalf("RecallBackfill: %v", err)
+	}
+	c.Eq(time.Unix(0, 0).UTC(), f.gotBackfillSince, "backfill since")
+}
+
+// TestRecallBackfillOutOfRangeSinceRefused pins CheckValid on the backfill's
+// received Timestamp.
+func TestRecallBackfillOutOfRangeSinceRefused(t *testing.T) {
+	c := assert.NewCollecting(t)
+	f := &fakeRecall{}
+	s := &Server{}
+	s.SetRecallManager(f)
+	_, err := s.RecallBackfill(context.Background(), connect.NewRequest(&rafikiv1.RecallBackfillRequest{
+		Since: &timestamppb.Timestamp{Seconds: 253402300800}, MaxCostUsd: 1,
+	}))
+	c.Eq(connect.CodeInvalidArgument, connect.CodeOf(err), "code")
 }
 
 // TestRecallUnknownSourceRejected pins the source filter validation: an
@@ -376,7 +455,7 @@ func TestRecallStatusMapsFields(t *testing.T) {
 	c.False(m.GetConversations() != 3 || m.GetWindows() != 7 || m.GetWindowsUnembedded() != 2 ||
 		m.GetSummaries() != 5 || m.GetSummariesPending() != 1 || m.GetMemories() != 9, "counts drifted: %+v", m)
 	c.False(m.GetSummaryCostUsd() != 0.25 || m.GetBackfillBudgetUsd() != 2 || m.GetBackfillSpentUsd() != 0.5, "costs drifted: %+v", m)
-	c.Eq("2023-11-14T22:13:20Z", m.GetBackfillSince(), "backfill_since")
+	c.Eq(since, m.GetBackfillSince().AsTime(), "backfill_since")
 	if m.GetEmbeddingModel() != "emb" || m.GetSummaryModel() != "sum" {
 		t.Errorf("models drifted: %q/%q", m.GetEmbeddingModel(), m.GetSummaryModel())
 	}
@@ -385,5 +464,5 @@ func TestRecallStatusMapsFields(t *testing.T) {
 	s.SetRecallManager(&fakeRecall{})
 	resp, err = s.RecallStatus(context.Background(), connect.NewRequest(&rafikiv1.RecallStatusRequest{}))
 	c.Require().NoError(err, "status without backfill")
-	c.Eq("", resp.Msg.GetBackfillSince(), "backfill_since with no backfill")
+	c.Nil(resp.Msg.GetBackfillSince(), "backfill_since with no backfill")
 }

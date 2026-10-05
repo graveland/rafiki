@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/recall"
@@ -99,13 +100,21 @@ func (s *Server) Recall(
 	if err != nil {
 		return nil, err
 	}
+	since, err := recallBound(req.Msg.GetSince(), "since")
+	if err != nil {
+		return nil, err
+	}
+	until, err := recallBound(req.Msg.GetUntil(), "until")
+	if err != nil {
+		return nil, err
+	}
 	q := recall.SearchQuery{
 		Text:    req.Msg.GetQuery(),
 		Sources: sources,
 		Under:   req.Msg.GetUnder(),
 		Repo:    req.Msg.GetRepo(),
-		Since:   unixTime(req.Msg.GetSinceUnix()),
-		Until:   unixTime(req.Msg.GetUntilUnix()),
+		Since:   since,
+		Until:   until,
 	}
 	hits, err := m.Recall(ctx, q, clampRecallLimit(int(req.Msg.GetLimit())))
 	if err != nil {
@@ -150,17 +159,22 @@ func clampRecallLimit(limit int) int {
 	return limit
 }
 
-// unixTime converts a unix-seconds wire field; 0 means unbounded.
-func unixTime(unix int64) *time.Time {
-	if unix == 0 {
-		return nil
+// recallBound converts a recall time bound: unset OR the epoch is unbounded
+// (the old unix field's 0), and an out-of-range timestamp is refused.
+func recallBound(ts *timestamppb.Timestamp, field string) (*time.Time, error) {
+	if ts == nil {
+		return nil, nil
 	}
-	t := time.Unix(unix, 0).UTC()
-	return &t
+	if err := ts.CheckValid(); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("%s: %w", field, err))
+	}
+	if ts.Seconds == 0 && ts.Nanos == 0 {
+		return nil, nil
+	}
+	t := ts.AsTime()
+	return &t, nil
 }
-
-// rfc3339 renders t for the wire: RFC3339 in UTC.
-func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 func (s *Server) RecallContext(
 	ctx context.Context, req *connect.Request[rafikiv1.RecallContextRequest],
@@ -258,11 +272,30 @@ func (s *Server) RecallBackfill(
 	if err != nil {
 		return nil, err
 	}
-	if err := m.Backfill(ctx, time.Unix(req.Msg.GetSinceUnix(), 0).UTC(),
+	since, err := backfillSince(req.Msg.GetSince())
+	if err != nil {
+		return nil, err
+	}
+	if err := m.Backfill(ctx, since,
 		req.Msg.GetMaxCostUsd()); err != nil {
 		return nil, recallError(err)
 	}
 	return connect.NewResponse(&rafikiv1.RecallBackfillResponse{}), nil
+}
+
+// backfillSince maps the wire bound to the manager's since: an unset bound is
+// the epoch, the deliberate "from the beginning" spelling, and an
+// out-of-range timestamp is refused.
+func backfillSince(ts *timestamppb.Timestamp) (time.Time, error) {
+	base := time.Unix(0, 0).UTC()
+	if ts == nil {
+		return base, nil
+	}
+	if err := ts.CheckValid(); err != nil {
+		return time.Time{}, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("since: %w", err))
+	}
+	return ts.AsTime(), nil
 }
 
 func (s *Server) RecallStatus(
@@ -290,18 +323,18 @@ func (s *Server) RecallStatus(
 		SummaryModel:      st.SummaryModel,
 	}
 	if st.BackfillSince != nil {
-		resp.BackfillSince = rfc3339(*st.BackfillSince)
+		resp.BackfillSince = timestamppb.New(*st.BackfillSince)
 	}
 	return connect.NewResponse(resp), nil
 }
 
-// recallHit converts one fused hit for the wire. When is RFC3339 UTC.
+// recallHit converts one fused hit for the wire.
 func recallHit(h recall.Hit) *rafikiv1.RecallHit {
 	return &rafikiv1.RecallHit{
 		Id:               h.ID,
 		Source:           string(h.Source),
 		Snippet:          h.Snippet,
-		When:             rfc3339(h.When),
+		When:             timestamppb.New(h.When),
 		ConversationId:   h.ConversationID,
 		ConversationName: h.ConversationName,
 		Repo:             h.Repo,
@@ -328,7 +361,7 @@ func memoryRow(m recall.Memory) *rafikiv1.MemoryRow {
 		Name:      m.Name,
 		Body:      m.Body,
 		MetaJson:  string(meta),
-		CreatedAt: rfc3339(m.CreatedAt),
-		UpdatedAt: rfc3339(m.UpdatedAt),
+		CreatedAt: timestamppb.New(m.CreatedAt),
+		UpdatedAt: timestamppb.New(m.UpdatedAt),
 	}
 }

@@ -9,18 +9,20 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
 
 func sampleTokenRows() []*rafikiv1.TokenRow {
-	expires := int64(1800003600)
-	revoked := int64(1800000600)
+	expires := time.Unix(1800003600, 0).UTC()
+	revoked := time.Unix(1800000600, 0).UTC()
 	return []*rafikiv1.TokenRow{
-		{Id: "tok_1", Username: "alice", Name: "ci laptop", Origin: "service", CreatedAtUnix: 1800000000},
-		{Id: "tok_2", Username: "alice", Name: "oidc session", Origin: "oidc", CreatedAtUnix: 1800000050, ExpiresAtUnix: &expires, RevokedAtUnix: &revoked},
+		{Id: "tok_1", Username: "alice", Name: "ci laptop", Origin: "service", CreatedAt: timestamppb.New(time.Unix(1800000000, 0))},
+		{Id: "tok_2", Username: "alice", Name: "oidc session", Origin: "oidc", CreatedAt: timestamppb.New(time.Unix(1800000050, 0)), ExpiresAt: timestamppb.New(expires), RevokedAt: timestamppb.New(revoked)},
 	}
 }
 

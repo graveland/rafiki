@@ -113,10 +113,14 @@ func (f Field) Value(r *rafikiv1.ModelRow) (float64, bool) {
 		}
 		return float64(*r.MaxCompletionTokens), true
 	case FieldAge:
-		if r.Created == nil || *r.Created <= 0 {
+		if r.Created == nil {
 			return 0, false
 		}
-		return float64(*r.Created), true
+		unix := r.Created.AsTime().Unix()
+		if unix <= 0 {
+			return 0, false
+		}
+		return float64(unix), true
 	case FieldIntelligence:
 		if r.IntelligenceIndex == nil {
 			return 0, false

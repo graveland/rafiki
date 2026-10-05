@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -58,7 +59,7 @@ func (s *routeStubControl) SetRoute(
 	return connect.NewResponse(&rafikiv1.SetRouteResponse{Row: &rafikiv1.RouteRow{
 		ModelLine: req.Msg.GetModelLine(),
 		Spec:      req.Msg.GetSpec(),
-		CreatedAt: "2026-09-28T10:00:00Z",
+		CreatedAt: timestamppb.New(time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)),
 	}}), nil
 }
 
@@ -143,7 +144,7 @@ func TestProvidersRouteSetListDelete(t *testing.T) {
 
 	// list: the table carries the stub's row with the stamp rendered local
 	// date+time (the RFC3339 wire string parsed, never echoed raw).
-	row := &rafikiv1.RouteRow{ModelLine: "z-ai/glm-5.3", Spec: "sort=price,quant=fp8+", CreatedAt: "2026-09-28T10:00:00Z"}
+	row := &rafikiv1.RouteRow{ModelLine: "z-ai/glm-5.3", Spec: "sort=price,quant=fp8+", CreatedAt: timestamppb.New(time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC))}
 	stub.setRows([]*rafikiv1.RouteRow{row})
 	root, out = userTestRoot(t, newProvidersRouteListCmd(), "list")
 	c.NoError(root.Execute(), "route list failed: %v\n%s", out.String())
@@ -151,8 +152,7 @@ func TestProvidersRouteSetListDelete(t *testing.T) {
 	for _, want := range []string{"MODEL LINE", "SPEC", "SINCE", "z-ai/glm-5.3", "sort=price,quant=fp8+"} {
 		c.StrContains(table, want, "route list table missing")
 	}
-	stamp, err := time.Parse(time.RFC3339, row.GetCreatedAt())
-	c.Require().NoError(err, "parse the stub's stamp")
+	stamp := row.GetCreatedAt().AsTime()
 	c.StrContains(table, stamp.Local().Format(time.DateTime), "SINCE column missing the local stamp:\n%s", table)
 
 	// -j: the canonical protojson of the whole response — the rows envelope.

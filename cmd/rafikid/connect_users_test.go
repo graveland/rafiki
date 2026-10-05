@@ -499,9 +499,9 @@ func TestListTokensAuthority(t *testing.T) {
 		ck.Eq("u1", st.listTokUserID, "target")
 		ck.Eq(2, len(out), "rows")
 		ck.Eq("service", out[0].GetOrigin(), "origin")
-		ck.Nil(out[0].RevokedAtUnix, "an active token has no revoked_at")
-		ck.NotNil(out[1].RevokedAtUnix, "a revoked token carries its timestamp")
-		ck.NotNil(out[1].ExpiresAtUnix, "an expiring token carries its expiry")
+		ck.Nil(out[0].RevokedAt, "an active token has no revoked_at")
+		ck.NotNil(out[1].RevokedAt, "a revoked token carries its timestamp")
+		ck.NotNil(out[1].ExpiresAt, "an expiring token carries its expiry")
 		ck.Eq("oidc", out[1].GetOrigin(), "origin")
 	})
 	t.Run("all_users refused to non-admin", func(t *testing.T) {
@@ -578,7 +578,7 @@ func TestRevokeTokenAuthority(t *testing.T) {
 		if len(st.revokedIDs) != 1 || st.revokedIDs[0] != "tok_1" {
 			t.Fatalf("revoked = %v, want [tok_1]", st.revokedIDs)
 		}
-		ck.NotNil(row.RevokedAtUnix, "revoked_at on the row")
+		ck.NotNil(row.RevokedAt, "revoked_at on the row")
 	})
 	t.Run("admin and nil identity revoke anything", func(t *testing.T) {
 		for name, ctx := range map[string]context.Context{

@@ -21,9 +21,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/gen/rafiki/v1/rafikiv1connect"
@@ -108,10 +110,10 @@ func TestUserCreateWritesTheProfilesTokenNotAGlobalOne(t *testing.T) {
 
 func sampleCreateResponse() *rafikiv1.CreateUserResponse {
 	return &rafikiv1.CreateUserResponse{
-		Id:            "usr_1",
-		Username:      "alice",
-		Token:         "rfk_only_copy_ever",
-		CreatedAtUnix: 1800000000,
+		Id:        "usr_1",
+		Username:  "alice",
+		Token:     "rfk_only_copy_ever",
+		CreatedAt: timestamppb.New(time.Unix(1800000000, 0)),
 	}
 }
 
@@ -182,13 +184,13 @@ func TestRenderUserCreate_PrintsCanonicalProtojsonInEveryMode(t *testing.T) {
 			c.NoError(renderUserCreate(&stdout, &stderr, sampleCreateResponse(), "/does/not/matter", false, func(string, string) error { return nil }, tc.mode), "renderUserCreate")
 			out := stdout.String()
 			c.StrContains(out, "rfk_only_copy_ever", "token missing from stdout in mode %v", tc.mode)
-			// protojson renders int64 as a string; the canonical name is
-			// camelCase createdAtUnix.
+			// protojson renders a Timestamp as an RFC3339 string; the canonical
+			// name is camelCase createdAt.
 			var got map[string]any
 			err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got)
 			c.NoError(err, "output is not JSON in mode %v: %v\n%s", tc.mode, err, out)
-			if got["createdAtUnix"] != "1800000000" {
-				t.Fatalf("createdAtUnix = %v, want the string \"1800000000\" (protojson's int64 form)", got["createdAtUnix"])
+			if got["createdAt"] != "2027-01-15T08:00:00Z" {
+				t.Fatalf("createdAt = %v, want the RFC3339 string \"2027-01-15T08:00:00Z\"", got["createdAt"])
 			}
 			c.False(got["id"] != "usr_1" || got["username"] != "alice", "unexpected fields: %v", got)
 			c.False(tc.compact && strings.Contains(out, "\n") && strings.Count(out, "\n") > 1, "JSONL create output is not one line: %q", out)
@@ -199,10 +201,10 @@ func TestRenderUserCreate_PrintsCanonicalProtojsonInEveryMode(t *testing.T) {
 // ─── emitUserList ───────────────────────────────────────────────────────────
 
 func sampleUserRows() []*rafikiv1.UserRow {
-	removed := int64(1800000100)
+	removed := time.Unix(1800000100, 0).UTC()
 	return []*rafikiv1.UserRow{
-		{Id: "usr_1", Username: "alice", IsAdmin: true, Email: "alice@x.dev", CreatedAtUnix: 1800000000},
-		{Id: "usr_2", Username: "bob", CreatedAtUnix: 1800000050, DeletedAtUnix: &removed},
+		{Id: "usr_1", Username: "alice", IsAdmin: true, Email: "alice@x.dev", CreatedAt: timestamppb.New(time.Unix(1800000000, 0))},
+		{Id: "usr_2", Username: "bob", CreatedAt: timestamppb.New(time.Unix(1800000050, 0)), DeletedAt: timestamppb.New(removed)},
 	}
 }
 
@@ -253,7 +255,7 @@ func tableRowFor(t *testing.T, out, id string) []string {
 // TestEmitUserList_JSONIsTheCanonicalProtojson pins -j and -J against the
 // emitProtoRows contract: -j is the {"rows":[...]} envelope, -J is one
 // compact row per line with NO envelope, and both carry protojson's camelCase
-// names with int64 rendered as a string. A UserRow has no token field, so the
+// names (a Timestamp renders as an RFC3339 string). A UserRow has no token field, so the
 // rendered output cannot leak one.
 func TestEmitUserList_JSONIsTheCanonicalProtojson(t *testing.T) {
 	t.Run("json envelope", func(t *testing.T) {
@@ -266,11 +268,11 @@ func TestEmitUserList_JSONIsTheCanonicalProtojson(t *testing.T) {
 		err := json.Unmarshal(out.Bytes(), &got)
 		c.NoError(err, "output is not the rows envelope: %v\n%s", err, out.String())
 		c.Len(got.Rows, 2, "got %d rows, want 2: %s", len(got.Rows), out.String())
-		if got.Rows[0]["createdAtUnix"] != "1800000000" {
-			t.Fatalf("createdAtUnix = %v, want the string protojson form", got.Rows[0]["createdAtUnix"])
+		if got.Rows[0]["createdAt"] != "2027-01-15T08:00:00Z" {
+			t.Fatalf("createdAt = %v, want the RFC3339 string form", got.Rows[0]["createdAt"])
 		}
-		if got.Rows[1]["deletedAtUnix"] != "1800000100" {
-			t.Fatalf("deletedAtUnix = %v, want the string protojson form", got.Rows[1]["deletedAtUnix"])
+		if got.Rows[1]["deletedAt"] != "2027-01-15T08:01:40Z" {
+			t.Fatalf("deletedAt = %v, want the RFC3339 string form", got.Rows[1]["deletedAt"])
 		}
 		if _, ok := got.Rows[0]["is_admin"]; ok {
 			t.Fatalf("snake_case field name survived: %s", out.String())
@@ -365,7 +367,7 @@ func (s *userStubControl) CreateUser(
 	if resp == nil {
 		resp = &rafikiv1.CreateUserResponse{
 			Id: "usr_1", Username: req.Msg.GetUsername(),
-			Token: "rfk_new_minted", CreatedAtUnix: 1800000000,
+			Token: "rfk_new_minted", CreatedAt: timestamppb.New(time.Unix(1800000000, 0)),
 		}
 	}
 	return connect.NewResponse(resp), nil
@@ -380,7 +382,7 @@ func (s *userStubControl) UpdateUser(
 	s.updateReqs = append(s.updateReqs, req)
 	row := s.updated
 	if row == nil {
-		row = &rafikiv1.UserRow{Id: "usr_1", Username: req.Msg.GetUsername(), Email: req.Msg.GetEmail(), CreatedAtUnix: 1800000000}
+		row = &rafikiv1.UserRow{Id: "usr_1", Username: req.Msg.GetUsername(), Email: req.Msg.GetEmail(), CreatedAt: timestamppb.New(time.Unix(1800000000, 0))}
 	}
 	return connect.NewResponse(&rafikiv1.UpdateUserResponse{User: row}), nil
 }

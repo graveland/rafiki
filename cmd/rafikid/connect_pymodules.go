@@ -6,7 +6,6 @@ import (
 	"context"
 	"maps"
 	"slices"
-	"time"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -29,7 +28,7 @@ func connectPymoduleRow(rec pymodules.Record) connectapi.PymoduleRow {
 		Version:     rec.ID,
 		Name:        rec.Name,
 		Description: rec.Description,
-		CreatedAt:   rec.CreatedAt.UTC().Format(time.RFC3339),
+		CreatedAt:   rec.CreatedAt,
 		Code:        rec.Code,
 	}
 }

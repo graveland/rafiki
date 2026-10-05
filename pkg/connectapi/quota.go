@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -68,7 +69,7 @@ func (s *Server) GetRateLimitStatus(
 		FiveH:          toProtoWindow(st.FiveH),
 		SevenD:         toProtoWindow(st.SevenD),
 		OverallStatus:  st.OverallStatus,
-		UpdatedAt:      st.UpdatedAt.Unix(),
+		UpdatedAt:      timestamppb.New(st.UpdatedAt),
 	}), nil
 }
 
@@ -79,8 +80,7 @@ func toProtoWindow(w RateLimitWindow) *rafikiv1.RateLimitWindow {
 		out.Utilization = &v
 	}
 	if w.ResetAt != nil {
-		v := w.ResetAt.Unix()
-		out.ResetAt = &v
+		out.ResetAt = timestamppb.New(*w.ResetAt)
 	}
 	return out
 }

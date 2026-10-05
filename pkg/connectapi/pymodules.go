@@ -5,8 +5,10 @@ package connectapi
 import (
 	"context"
 	"errors"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/pymodules"
@@ -20,7 +22,7 @@ type PymoduleRow struct {
 	Version     int64
 	Name        string
 	Description string
-	CreatedAt   string
+	CreatedAt   time.Time
 	Code        string
 	Repo        string
 }
@@ -76,7 +78,7 @@ func toProtoPymodule(r PymoduleRow) *rafikiv1.PymoduleRow {
 		Version:     r.Version,
 		Name:        r.Name,
 		Description: r.Description,
-		CreatedAt:   r.CreatedAt,
+		CreatedAt:   timestamppb.New(r.CreatedAt),
 		Code:        r.Code,
 		Repo:        r.Repo,
 	}

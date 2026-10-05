@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/modelquery"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
@@ -48,9 +50,9 @@ func TestModelCompletionOnAnUnreachableDaemonIsEmpty(t *testing.T) {
 
 // ─── fixtures ──────────────────────────────────────────────────────────────
 
-func fp64(v float64) *float64 { return &v }
-func ip32(v int32) *int32     { return &v }
-func ip64(v int64) *int64     { return &v }
+func fp64(v float64) *float64                { return &v }
+func ip32(v int32) *int32                    { return &v }
+func ts64(unix int64) *timestamppb.Timestamp { return timestamppb.New(time.Unix(unix, 0)) }
 
 func modelTestRows() []*rafikiv1.ModelRow {
 	zero := int32(0)
@@ -172,7 +174,7 @@ func TestModelsFlagsMapToModelquery(t *testing.T) {
 		Name: "Claude Opus 5", Source: "openrouter",
 		ContextWindow: ip32(200_000), MaxCompletionTokens: ip32(64_000),
 		PromptUsd: fp64(0.000003), CompletionUsd: fp64(0.000015), CacheReadUsd: fp64(0.0000003),
-		Created:             ip64(1735689600),
+		Created:             ts64(1735689600),
 		SupportedParameters: []string{"tools", "reasoning"},
 		InputModalities:     []string{"text", "image"},
 		IntelligenceIndex:   fp64(59.5), CodingIndex: fp64(40.2), AgenticIndex: fp64(55.1),
@@ -407,8 +409,8 @@ func TestModelsVerboseColumns(t *testing.T) {
 			Name: "Claude Opus 5", Source: "openrouter",
 			ContextWindow: ip32(200_000), MaxCompletionTokens: ip32(64_000),
 			PromptUsd: fp64(0.000003), CompletionUsd: fp64(0.000015), CacheReadUsd: fp64(0.0000007),
-			Created:         ip64(1735689600),
-			KnowledgeCutoff: "2025-03-01", ExpiresAt: "2098-12-31",
+			Created:         ts64(1735689600),
+			KnowledgeCutoff: "2025-03-01", ExpiresAt: timestamppb.New(time.Date(2098, 12, 31, 0, 0, 0, 0, time.UTC)),
 			SupportedParameters: []string{"tools"}, InputModalities: []string{"text", "image"},
 			IntelligenceIndex: fp64(59.5), CodingIndex: fp64(40.2), AgenticIndex: fp64(55.1),
 		},

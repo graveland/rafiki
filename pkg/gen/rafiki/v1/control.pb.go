@@ -3157,11 +3157,12 @@ type ModelRow struct {
 	// filtering on vision must surface unknowns rather than hide them, or it
 	// silently hides every locally-served model.
 	InputModalities []string `protobuf:"bytes,12,rep,name=input_modalities,json=inputModalities,proto3" json:"input_modalities,omitempty"`
-	// created is OpenRouter's LISTING date (unix seconds), not the model's
-	// release date. They track closely enough to order by; the distinction
-	// matters only if a client renders it as "released". Optional because a
-	// locally-served model has no catalog entry and 0 is a legal timestamp.
-	Created *int64 `protobuf:"varint,13,opt,name=created,proto3,oneof" json:"created,omitempty"`
+	// created is OpenRouter's LISTING date, not the model's release date. They
+	// track closely enough to order by; the distinction matters only if a
+	// client renders it as "released". Unset when a locally-served model has no
+	// catalog entry (an epoch Timestamp is a legal value and is not treated as
+	// absent).
+	Created *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=created,proto3" json:"created,omitempty"`
 	// supported_parameters is what the model accepts on a request. "tools" is
 	// the one that decides whether it can be an agent at all.
 	//
@@ -3169,12 +3170,12 @@ type ModelRow struct {
 	// the same rule input_modalities follows. A client filtering on tool support
 	// must keep unknowns, or it hides every locally-served model.
 	SupportedParameters []string `protobuf:"bytes,14,rep,name=supported_parameters,json=supportedParameters,proto3" json:"supported_parameters,omitempty"`
-	// expires_at is OpenRouter's expiration_date verbatim (YYYY-MM-DD), empty
-	// when none. It is a FORWARD warning: OpenRouter delists a model rather than
-	// leaving it listed and expired, so a date here is always in the future.
-	// Some entries carry a far-future sentinel meaning "no planned removal", so
-	// a renderer must bound how far ahead it warns.
-	ExpiresAt string `protobuf:"bytes,15,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// expires_at is OpenRouter's expiration_date. Unset when none. It is a
+	// FORWARD warning: OpenRouter delists a model rather than leaving it listed
+	// and expired, so a time here is always in the future. Some entries carry a
+	// far-future sentinel meaning "no planned removal", so a renderer must
+	// bound how far ahead it warns.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	// knowledge_cutoff is when the model's training data ends (YYYY-MM-DD),
 	// empty when the catalog does not report it (57% of entries, and every
 	// locally-served model). A DIFFERENT axis from created: a model listed last
@@ -3309,11 +3310,11 @@ func (x *ModelRow) GetInputModalities() []string {
 	return nil
 }
 
-func (x *ModelRow) GetCreated() int64 {
-	if x != nil && x.Created != nil {
-		return *x.Created
+func (x *ModelRow) GetCreated() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Created
 	}
-	return 0
+	return nil
 }
 
 func (x *ModelRow) GetSupportedParameters() []string {
@@ -3323,11 +3324,11 @@ func (x *ModelRow) GetSupportedParameters() []string {
 	return nil
 }
 
-func (x *ModelRow) GetExpiresAt() string {
+func (x *ModelRow) GetExpiresAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ExpiresAt
 	}
-	return ""
+	return nil
 }
 
 func (x *ModelRow) GetKnowledgeCutoff() string {
@@ -5767,9 +5768,9 @@ func (x *DarajaProcessExited) GetSignal() string {
 // or a real timestamp.
 type RateLimitWindow struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Utilization   *float64               `protobuf:"fixed64,1,opt,name=utilization,proto3,oneof" json:"utilization,omitempty"`       // Anthropic's own units, passed through verbatim
-	ResetAt       *int64                 `protobuf:"varint,2,opt,name=reset_at,json=resetAt,proto3,oneof" json:"reset_at,omitempty"` // unix seconds
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`                         // "" = not reported
+	Utilization   *float64               `protobuf:"fixed64,1,opt,name=utilization,proto3,oneof" json:"utilization,omitempty"` // Anthropic's own units, passed through verbatim
+	ResetAt       *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=reset_at,json=resetAt,proto3" json:"reset_at,omitempty"`  // unset = not reported
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`                   // "" = not reported
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5811,11 +5812,11 @@ func (x *RateLimitWindow) GetUtilization() float64 {
 	return 0
 }
 
-func (x *RateLimitWindow) GetResetAt() int64 {
-	if x != nil && x.ResetAt != nil {
-		return *x.ResetAt
+func (x *RateLimitWindow) GetResetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ResetAt
 	}
-	return 0
+	return nil
 }
 
 func (x *RateLimitWindow) GetStatus() string {
@@ -5872,7 +5873,7 @@ type GetRateLimitStatusResponse struct {
 	FiveH          *RateLimitWindow       `protobuf:"bytes,2,opt,name=five_h,json=fiveH,proto3" json:"five_h,omitempty"`
 	SevenD         *RateLimitWindow       `protobuf:"bytes,3,opt,name=seven_d,json=sevenD,proto3" json:"seven_d,omitempty"`
 	OverallStatus  string                 `protobuf:"bytes,4,opt,name=overall_status,json=overallStatus,proto3" json:"overall_status,omitempty"`
-	UpdatedAt      int64                  `protobuf:"varint,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // unix seconds
+	UpdatedAt      *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -5935,11 +5936,11 @@ func (x *GetRateLimitStatusResponse) GetOverallStatus() string {
 	return ""
 }
 
-func (x *GetRateLimitStatusResponse) GetUpdatedAt() int64 {
+func (x *GetRateLimitStatusResponse) GetUpdatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.UpdatedAt
 	}
-	return 0
+	return nil
 }
 
 // SkillRow is one row of conversations.skills. body is omitted from list
@@ -5952,7 +5953,7 @@ type SkillRow struct {
 	Source              string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
 	Enabled             bool                   `protobuf:"varint,5,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	ShadowedCoreVersion string                 `protobuf:"bytes,6,opt,name=shadowed_core_version,json=shadowedCoreVersion,proto3" json:"shadowed_core_version,omitempty"`
-	UpdatedAt           string                 `protobuf:"bytes,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	UpdatedAt           *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// body is populated only by GetSkill.
 	Body          string `protobuf:"bytes,8,opt,name=body,proto3" json:"body,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -6031,11 +6032,11 @@ func (x *SkillRow) GetShadowedCoreVersion() string {
 	return ""
 }
 
-func (x *SkillRow) GetUpdatedAt() string {
+func (x *SkillRow) GetUpdatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.UpdatedAt
 	}
-	return ""
+	return nil
 }
 
 func (x *SkillRow) GetBody() string {
@@ -6553,7 +6554,7 @@ type PymoduleRow struct {
 	Version     int64                  `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"` // the row id: two saves under one name are two versions
 	Name        string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Description string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
-	CreatedAt   string                 `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339
+	CreatedAt   *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// code is populated only by GetPymodule and PutPymodule; list responses
 	// omit it -- an inventory is not a document.
 	Code string `protobuf:"bytes,5,opt,name=code,proto3" json:"code,omitempty"`
@@ -6616,11 +6617,11 @@ func (x *PymoduleRow) GetDescription() string {
 	return ""
 }
 
-func (x *PymoduleRow) GetCreatedAt() string {
+func (x *PymoduleRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
-	return ""
+	return nil
 }
 
 func (x *PymoduleRow) GetCode() string {
@@ -7631,10 +7632,11 @@ type PresetRow struct {
 	MaxDepth           *int32                 `protobuf:"varint,17,opt,name=max_depth,json=maxDepth,proto3,oneof" json:"max_depth,omitempty"`
 	MaxChildren        *int32                 `protobuf:"varint,18,opt,name=max_children,json=maxChildren,proto3,oneof" json:"max_children,omitempty"`
 	WrittenByChild     string                 `protobuf:"bytes,19,opt,name=written_by_child,json=writtenByChild,proto3" json:"written_by_child,omitempty"`
-	CreatedAt          string                 `protobuf:"bytes,20,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339
-	DeletedAt          string                 `protobuf:"bytes,21,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"` // RFC3339; empty when live
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	CreatedAt          *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// deleted_at is unset while the preset is live.
+	DeletedAt     *timestamppb.Timestamp `protobuf:"bytes,23,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PresetRow) Reset() {
@@ -7800,18 +7802,18 @@ func (x *PresetRow) GetWrittenByChild() string {
 	return ""
 }
 
-func (x *PresetRow) GetCreatedAt() string {
+func (x *PresetRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
-	return ""
+	return nil
 }
 
-func (x *PresetRow) GetDeletedAt() string {
+func (x *PresetRow) GetDeletedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.DeletedAt
 	}
-	return ""
+	return nil
 }
 
 type ListPresetsRequest struct {
@@ -8167,22 +8169,21 @@ func (*DeletePresetResponse) Descriptor() ([]byte, []int) {
 }
 
 type RecallHit struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	Id      string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Source  string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
-	Snippet string                 `protobuf:"bytes,3,opt,name=snippet,proto3" json:"snippet,omitempty"`
-	// when is RFC3339 (UTC).
-	When             string  `protobuf:"bytes,4,opt,name=when,proto3" json:"when,omitempty"`
-	ConversationId   string  `protobuf:"bytes,5,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
-	ConversationName string  `protobuf:"bytes,6,opt,name=conversation_name,json=conversationName,proto3" json:"conversation_name,omitempty"`
-	Repo             string  `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`
-	Kind             string  `protobuf:"bytes,8,opt,name=kind,proto3" json:"kind,omitempty"`
-	OrdinalFrom      int32   `protobuf:"varint,9,opt,name=ordinal_from,json=ordinalFrom,proto3" json:"ordinal_from,omitempty"`
-	OrdinalTo        int32   `protobuf:"varint,10,opt,name=ordinal_to,json=ordinalTo,proto3" json:"ordinal_to,omitempty"`
-	Path             string  `protobuf:"bytes,11,opt,name=path,proto3" json:"path,omitempty"`
-	Name             string  `protobuf:"bytes,12,opt,name=name,proto3" json:"name,omitempty"`
-	Title            string  `protobuf:"bytes,13,opt,name=title,proto3" json:"title,omitempty"`
-	Score            float64 `protobuf:"fixed64,14,opt,name=score,proto3" json:"score,omitempty"`
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Id               string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Source           string                 `protobuf:"bytes,2,opt,name=source,proto3" json:"source,omitempty"`
+	Snippet          string                 `protobuf:"bytes,3,opt,name=snippet,proto3" json:"snippet,omitempty"`
+	When             *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=when,proto3" json:"when,omitempty"`
+	ConversationId   string                 `protobuf:"bytes,5,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	ConversationName string                 `protobuf:"bytes,6,opt,name=conversation_name,json=conversationName,proto3" json:"conversation_name,omitempty"`
+	Repo             string                 `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`
+	Kind             string                 `protobuf:"bytes,8,opt,name=kind,proto3" json:"kind,omitempty"`
+	OrdinalFrom      int32                  `protobuf:"varint,9,opt,name=ordinal_from,json=ordinalFrom,proto3" json:"ordinal_from,omitempty"`
+	OrdinalTo        int32                  `protobuf:"varint,10,opt,name=ordinal_to,json=ordinalTo,proto3" json:"ordinal_to,omitempty"`
+	Path             string                 `protobuf:"bytes,11,opt,name=path,proto3" json:"path,omitempty"`
+	Name             string                 `protobuf:"bytes,12,opt,name=name,proto3" json:"name,omitempty"`
+	Title            string                 `protobuf:"bytes,13,opt,name=title,proto3" json:"title,omitempty"`
+	Score            float64                `protobuf:"fixed64,14,opt,name=score,proto3" json:"score,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -8238,11 +8239,11 @@ func (x *RecallHit) GetSnippet() string {
 	return ""
 }
 
-func (x *RecallHit) GetWhen() string {
+func (x *RecallHit) GetWhen() *timestamppb.Timestamp {
 	if x != nil {
 		return x.When
 	}
-	return ""
+	return nil
 }
 
 func (x *RecallHit) GetConversationId() string {
@@ -8320,12 +8321,13 @@ type RecallRequest struct {
 	Query string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
 	// sources filters the indexes searched: "memory", "summary", "window";
 	// empty means all three.
-	Sources       []string `protobuf:"bytes,2,rep,name=sources,proto3" json:"sources,omitempty"`
-	Under         string   `protobuf:"bytes,3,opt,name=under,proto3" json:"under,omitempty"`                           // ltree path prefix for memories; "" = all
-	Repo          string   `protobuf:"bytes,4,opt,name=repo,proto3" json:"repo,omitempty"`                             // basename match for conversation sources; "" = all
-	SinceUnix     int64    `protobuf:"varint,5,opt,name=since_unix,json=sinceUnix,proto3" json:"since_unix,omitempty"` // unix seconds; 0 = unbounded
-	UntilUnix     int64    `protobuf:"varint,6,opt,name=until_unix,json=untilUnix,proto3" json:"until_unix,omitempty"` // unix seconds; 0 = unbounded
-	Limit         int32    `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"`                          // 0 = default (10), clamped to 50
+	Sources []string `protobuf:"bytes,2,rep,name=sources,proto3" json:"sources,omitempty"`
+	Under   string   `protobuf:"bytes,3,opt,name=under,proto3" json:"under,omitempty"` // ltree path prefix for memories; "" = all
+	Repo    string   `protobuf:"bytes,4,opt,name=repo,proto3" json:"repo,omitempty"`   // basename match for conversation sources; "" = all
+	// since/until are unset (or the epoch) for unbounded.
+	Since         *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=since,proto3" json:"since,omitempty"`
+	Until         *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=until,proto3" json:"until,omitempty"`
+	Limit         int32                  `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"` // 0 = default (10), clamped to 50
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8388,18 +8390,18 @@ func (x *RecallRequest) GetRepo() string {
 	return ""
 }
 
-func (x *RecallRequest) GetSinceUnix() int64 {
+func (x *RecallRequest) GetSince() *timestamppb.Timestamp {
 	if x != nil {
-		return x.SinceUnix
+		return x.Since
 	}
-	return 0
+	return nil
 }
 
-func (x *RecallRequest) GetUntilUnix() int64 {
+func (x *RecallRequest) GetUntil() *timestamppb.Timestamp {
 	if x != nil {
-		return x.UntilUnix
+		return x.Until
 	}
-	return 0
+	return nil
 }
 
 func (x *RecallRequest) GetLimit() int32 {
@@ -8572,8 +8574,8 @@ type MemoryRow struct {
 	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
 	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
 	MetaJson      string                 `protobuf:"bytes,5,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC3339 (UTC)
-	UpdatedAt     string                 `protobuf:"bytes,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // RFC3339 (UTC)
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8643,18 +8645,18 @@ func (x *MemoryRow) GetMetaJson() string {
 	return ""
 }
 
-func (x *MemoryRow) GetCreatedAt() string {
+func (x *MemoryRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
-	return ""
+	return nil
 }
 
-func (x *MemoryRow) GetUpdatedAt() string {
+func (x *MemoryRow) GetUpdatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.UpdatedAt
 	}
-	return ""
+	return nil
 }
 
 type GetMemoryRequest struct {
@@ -9050,8 +9052,10 @@ func (*DeleteMemoryResponse) Descriptor() ([]byte, []int) {
 }
 
 type RecallBackfillRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SinceUnix     int64                  `protobuf:"varint,1,opt,name=since_unix,json=sinceUnix,proto3" json:"since_unix,omitempty"` // unix seconds
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// since unset means "from the beginning": a backfill with no lower bound
+	// starts at the earliest indexed conversation.
+	Since         *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=since,proto3" json:"since,omitempty"`
 	MaxCostUsd    float64                `protobuf:"fixed64,2,opt,name=max_cost_usd,json=maxCostUsd,proto3" json:"max_cost_usd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -9087,11 +9091,11 @@ func (*RecallBackfillRequest) Descriptor() ([]byte, []int) {
 	return file_rafiki_v1_control_proto_rawDescGZIP(), []int{127}
 }
 
-func (x *RecallBackfillRequest) GetSinceUnix() int64 {
+func (x *RecallBackfillRequest) GetSince() *timestamppb.Timestamp {
 	if x != nil {
-		return x.SinceUnix
+		return x.Since
 	}
-	return 0
+	return nil
 }
 
 func (x *RecallBackfillRequest) GetMaxCostUsd() float64 {
@@ -9182,7 +9186,8 @@ type RecallStatusResponse struct {
 	SummariesPending  int64                  `protobuf:"varint,5,opt,name=summaries_pending,json=summariesPending,proto3" json:"summaries_pending,omitempty"`
 	Memories          int64                  `protobuf:"varint,6,opt,name=memories,proto3" json:"memories,omitempty"`
 	SummaryCostUsd    float64                `protobuf:"fixed64,7,opt,name=summary_cost_usd,json=summaryCostUsd,proto3" json:"summary_cost_usd,omitempty"`
-	BackfillSince     string                 `protobuf:"bytes,8,opt,name=backfill_since,json=backfillSince,proto3" json:"backfill_since,omitempty"` // RFC3339 (UTC); empty when backfill is off
+	// backfill_since is unset when backfill is off.
+	BackfillSince     *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=backfill_since,json=backfillSince,proto3" json:"backfill_since,omitempty"`
 	BackfillBudgetUsd float64                `protobuf:"fixed64,9,opt,name=backfill_budget_usd,json=backfillBudgetUsd,proto3" json:"backfill_budget_usd,omitempty"`
 	BackfillSpentUsd  float64                `protobuf:"fixed64,10,opt,name=backfill_spent_usd,json=backfillSpentUsd,proto3" json:"backfill_spent_usd,omitempty"`
 	EmbeddingModel    string                 `protobuf:"bytes,11,opt,name=embedding_model,json=embeddingModel,proto3" json:"embedding_model,omitempty"`
@@ -9270,11 +9275,11 @@ func (x *RecallStatusResponse) GetSummaryCostUsd() float64 {
 	return 0
 }
 
-func (x *RecallStatusResponse) GetBackfillSince() string {
+func (x *RecallStatusResponse) GetBackfillSince() *timestamppb.Timestamp {
 	if x != nil {
 		return x.BackfillSince
 	}
-	return ""
+	return nil
 }
 
 func (x *RecallStatusResponse) GetBackfillBudgetUsd() float64 {
@@ -9309,12 +9314,13 @@ func (x *RecallStatusResponse) GetSummaryModel() string {
 // an operator ban (reason "operator", model_line "*" = every model line) or a
 // cache-guard ejection (reason "no_cache", scoped to one model line).
 type ProviderBan struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Provider      string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"` // OpenRouter slug ("openinference"); a guard ejection may carry the display name
-	ModelLine     string                 `protobuf:"bytes,2,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
-	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	CreatedAt     int64                  `protobuf:"varint,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`       // unix seconds
-	ExpiresAt     *int64                 `protobuf:"varint,5,opt,name=expires_at,json=expiresAt,proto3,oneof" json:"expires_at,omitempty"` // unix seconds; absent = until lifted
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Provider  string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"` // OpenRouter slug ("openinference"); a guard ejection may carry the display name
+	ModelLine string                 `protobuf:"bytes,2,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
+	Reason    string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// expires_at unset = until lifted.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	Note          string                 `protobuf:"bytes,6,opt,name=note,proto3" json:"note,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -9371,18 +9377,18 @@ func (x *ProviderBan) GetReason() string {
 	return ""
 }
 
-func (x *ProviderBan) GetCreatedAt() int64 {
+func (x *ProviderBan) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
-	return 0
+	return nil
 }
 
-func (x *ProviderBan) GetExpiresAt() int64 {
-	if x != nil && x.ExpiresAt != nil {
-		return *x.ExpiresAt
+func (x *ProviderBan) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
 	}
-	return 0
+	return nil
 }
 
 func (x *ProviderBan) GetNote() string {
@@ -9489,10 +9495,10 @@ type BanProviderRequest struct {
 	Provider string                 `protobuf:"bytes,1,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Absent = until lifted. Present must be > 0: a zero-length ban is a
 	// mistake, not a request.
-	DurationSeconds *int64 `protobuf:"varint,2,opt,name=duration_seconds,json=durationSeconds,proto3,oneof" json:"duration_seconds,omitempty"`
-	Note            string `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	Duration      *durationpb.Duration `protobuf:"bytes,4,opt,name=duration,proto3" json:"duration,omitempty"`
+	Note          string               `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BanProviderRequest) Reset() {
@@ -9532,11 +9538,11 @@ func (x *BanProviderRequest) GetProvider() string {
 	return ""
 }
 
-func (x *BanProviderRequest) GetDurationSeconds() int64 {
-	if x != nil && x.DurationSeconds != nil {
-		return *x.DurationSeconds
+func (x *BanProviderRequest) GetDuration() *durationpb.Duration {
+	if x != nil {
+		return x.Duration
 	}
-	return 0
+	return nil
 }
 
 func (x *BanProviderRequest) GetNote() string {
@@ -9688,7 +9694,7 @@ type RouteRow struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ModelLine     string                 `protobuf:"bytes,1,opt,name=model_line,json=modelLine,proto3" json:"model_line,omitempty"`
 	Spec          string                 `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -9737,11 +9743,11 @@ func (x *RouteRow) GetSpec() string {
 	return ""
 }
 
-func (x *RouteRow) GetCreatedAt() string {
+func (x *RouteRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
-	return ""
+	return nil
 }
 
 type ListRoutesRequest struct {
@@ -10849,10 +10855,11 @@ type RouteEndpoint struct {
 	Preferred            bool                   `protobuf:"varint,13,opt,name=preferred,proto3" json:"preferred,omitempty"`
 	P50TokensPerSec      *float64               `protobuf:"fixed64,14,opt,name=p50_tokens_per_sec,json=p50TokensPerSec,proto3,oneof" json:"p50_tokens_per_sec,omitempty"` // absent when no stats matched
 	P90TokensPerSec      *float64               `protobuf:"fixed64,15,opt,name=p90_tokens_per_sec,json=p90TokensPerSec,proto3,oneof" json:"p90_tokens_per_sec,omitempty"`
-	P50LatencyMs         *float64               `protobuf:"fixed64,16,opt,name=p50_latency_ms,json=p50LatencyMs,proto3,oneof" json:"p50_latency_ms,omitempty"`
-	StatsRequests        *int32                 `protobuf:"varint,17,opt,name=stats_requests,json=statsRequests,proto3,oneof" json:"stats_requests,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// p50_latency is unset when no stats matched.
+	P50Latency    *durationpb.Duration `protobuf:"bytes,18,opt,name=p50_latency,json=p50Latency,proto3" json:"p50_latency,omitempty"`
+	StatsRequests *int32               `protobuf:"varint,17,opt,name=stats_requests,json=statsRequests,proto3,oneof" json:"stats_requests,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RouteEndpoint) Reset() {
@@ -10990,11 +10997,11 @@ func (x *RouteEndpoint) GetP90TokensPerSec() float64 {
 	return 0
 }
 
-func (x *RouteEndpoint) GetP50LatencyMs() float64 {
-	if x != nil && x.P50LatencyMs != nil {
-		return *x.P50LatencyMs
+func (x *RouteEndpoint) GetP50Latency() *durationpb.Duration {
+	if x != nil {
+		return x.P50Latency
 	}
-	return 0
+	return nil
 }
 
 func (x *RouteEndpoint) GetStatsRequests() int32 {
@@ -12165,8 +12172,8 @@ type CreateUserResponse struct {
 	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Username string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
 	// empty when no token was minted; see token_reason.
-	Token         string `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
-	CreatedAtUnix int64  `protobuf:"varint,4,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
+	Token     string                 `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// "requested" (mint_token true), "oidc not configured" (absent, no OIDC),
 	// "" (no token: "not requested" is implied by an empty token).
 	TokenReason string `protobuf:"bytes,5,opt,name=token_reason,json=tokenReason,proto3" json:"token_reason,omitempty"`
@@ -12228,11 +12235,11 @@ func (x *CreateUserResponse) GetToken() string {
 	return ""
 }
 
-func (x *CreateUserResponse) GetCreatedAtUnix() int64 {
+func (x *CreateUserResponse) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
-		return x.CreatedAtUnix
+		return x.CreatedAt
 	}
-	return 0
+	return nil
 }
 
 func (x *CreateUserResponse) GetTokenReason() string {
@@ -12354,12 +12361,13 @@ func (x *ListUsersResponse) GetUsers() []*UserRow {
 // (users.HashToken) — a token is transmitted exactly once, at mint
 // (CreateUserResponse.token), and only its digest is stored server-side.
 type UserRow struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
-	IsAdmin       bool                   `protobuf:"varint,3,opt,name=is_admin,json=isAdmin,proto3" json:"is_admin,omitempty"`
-	CreatedAtUnix int64                  `protobuf:"varint,4,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
-	DeletedAtUnix *int64                 `protobuf:"varint,5,opt,name=deleted_at_unix,json=deletedAtUnix,proto3,oneof" json:"deleted_at_unix,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Username  string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	IsAdmin   bool                   `protobuf:"varint,3,opt,name=is_admin,json=isAdmin,proto3" json:"is_admin,omitempty"`
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// deleted_at unset = live.
+	DeletedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=deleted_at,json=deletedAt,proto3" json:"deleted_at,omitempty"`
 	Email         string                 `protobuf:"bytes,6,opt,name=email,proto3" json:"email,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -12416,18 +12424,18 @@ func (x *UserRow) GetIsAdmin() bool {
 	return false
 }
 
-func (x *UserRow) GetCreatedAtUnix() int64 {
+func (x *UserRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
-		return x.CreatedAtUnix
+		return x.CreatedAt
 	}
-	return 0
+	return nil
 }
 
-func (x *UserRow) GetDeletedAtUnix() int64 {
-	if x != nil && x.DeletedAtUnix != nil {
-		return *x.DeletedAtUnix
+func (x *UserRow) GetDeletedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.DeletedAt
 	}
-	return 0
+	return nil
 }
 
 func (x *UserRow) GetEmail() string {
@@ -12619,14 +12627,15 @@ func (x *UpdateUserResponse) GetUser() *UserRow {
 
 // TokenRow is one credential, never its secret.
 type TokenRow struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	Origin        string                 `protobuf:"bytes,4,opt,name=origin,proto3" json:"origin,omitempty"`
-	CreatedAtUnix int64                  `protobuf:"varint,5,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
-	ExpiresAtUnix *int64                 `protobuf:"varint,6,opt,name=expires_at_unix,json=expiresAtUnix,proto3,oneof" json:"expires_at_unix,omitempty"`
-	RevokedAtUnix *int64                 `protobuf:"varint,7,opt,name=revoked_at_unix,json=revokedAtUnix,proto3,oneof" json:"revoked_at_unix,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Username  string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	Name      string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Origin    string                 `protobuf:"bytes,4,opt,name=origin,proto3" json:"origin,omitempty"`
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// expires_at unset = never expires; revoked_at unset = live.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	RevokedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=revoked_at,json=revokedAt,proto3" json:"revoked_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12689,25 +12698,25 @@ func (x *TokenRow) GetOrigin() string {
 	return ""
 }
 
-func (x *TokenRow) GetCreatedAtUnix() int64 {
+func (x *TokenRow) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
-		return x.CreatedAtUnix
+		return x.CreatedAt
 	}
-	return 0
+	return nil
 }
 
-func (x *TokenRow) GetExpiresAtUnix() int64 {
-	if x != nil && x.ExpiresAtUnix != nil {
-		return *x.ExpiresAtUnix
+func (x *TokenRow) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
 	}
-	return 0
+	return nil
 }
 
-func (x *TokenRow) GetRevokedAtUnix() int64 {
-	if x != nil && x.RevokedAtUnix != nil {
-		return *x.RevokedAtUnix
+func (x *TokenRow) GetRevokedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RevokedAt
 	}
-	return 0
+	return nil
 }
 
 // MintTokenRequest mints a service token. username empty = the caller.
@@ -14170,7 +14179,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05limit\x18\x05 \x01(\x05R\x05limit\x12\x10\n" +
 	"\x03all\x18\x06 \x01(\bR\x03all\"=\n" +
 	"\x11ListTasksResponse\x12(\n" +
-	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\x8e\a\n" +
+	"\x05tasks\x18\x01 \x03(\v2\x12.rafiki.v1.TaskRowR\x05tasks\"\xc1\a\n" +
 	"\bModelRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
@@ -14185,26 +14194,24 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x0ecache_read_usd\x18\n" +
 	" \x01(\x01H\x04R\fcacheReadUsd\x88\x01\x01\x12+\n" +
 	"\x0fcache_write_usd\x18\v \x01(\x01H\x05R\rcacheWriteUsd\x88\x01\x01\x12)\n" +
-	"\x10input_modalities\x18\f \x03(\tR\x0finputModalities\x12\x1d\n" +
-	"\acreated\x18\r \x01(\x03H\x06R\acreated\x88\x01\x01\x121\n" +
-	"\x14supported_parameters\x18\x0e \x03(\tR\x13supportedParameters\x12\x1d\n" +
+	"\x10input_modalities\x18\f \x03(\tR\x0finputModalities\x124\n" +
+	"\acreated\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x121\n" +
+	"\x14supported_parameters\x18\x0e \x03(\tR\x13supportedParameters\x129\n" +
 	"\n" +
-	"expires_at\x18\x0f \x01(\tR\texpiresAt\x12)\n" +
+	"expires_at\x18\x15 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12)\n" +
 	"\x10knowledge_cutoff\x18\x10 \x01(\tR\x0fknowledgeCutoff\x12(\n" +
-	"\ragentic_index\x18\x11 \x01(\x01H\aR\fagenticIndex\x88\x01\x01\x122\n" +
-	"\x12intelligence_index\x18\x12 \x01(\x01H\bR\x11intelligenceIndex\x88\x01\x01\x12&\n" +
-	"\fcoding_index\x18\x13 \x01(\x01H\tR\vcodingIndex\x88\x01\x01B\x11\n" +
+	"\ragentic_index\x18\x11 \x01(\x01H\x06R\fagenticIndex\x88\x01\x01\x122\n" +
+	"\x12intelligence_index\x18\x12 \x01(\x01H\aR\x11intelligenceIndex\x88\x01\x01\x12&\n" +
+	"\fcoding_index\x18\x13 \x01(\x01H\bR\vcodingIndex\x88\x01\x01B\x11\n" +
 	"\x0f_context_windowB\x18\n" +
 	"\x16_max_completion_tokensB\r\n" +
 	"\v_prompt_usdB\x11\n" +
 	"\x0f_completion_usdB\x11\n" +
 	"\x0f_cache_read_usdB\x12\n" +
-	"\x10_cache_write_usdB\n" +
-	"\n" +
-	"\b_createdB\x10\n" +
+	"\x10_cache_write_usdB\x10\n" +
 	"\x0e_agentic_indexB\x15\n" +
 	"\x13_intelligence_indexB\x0f\n" +
-	"\r_coding_index\"C\n" +
+	"\r_coding_indexJ\x04\b\r\x10\x0eJ\x04\b\x0f\x10\x10\"C\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\"A\n" +
@@ -14412,31 +14419,30 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x03pid\x18\x01 \x01(\x05R\x03pid\"J\n" +
 	"\x13DarajaProcessExited\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
-	"\x06signal\x18\x02 \x01(\tR\x06signal\"\x8d\x01\n" +
+	"\x06signal\x18\x02 \x01(\tR\x06signal\"\x9d\x01\n" +
 	"\x0fRateLimitWindow\x12%\n" +
-	"\vutilization\x18\x01 \x01(\x01H\x00R\vutilization\x88\x01\x01\x12\x1e\n" +
-	"\breset_at\x18\x02 \x01(\x03H\x01R\aresetAt\x88\x01\x01\x12\x16\n" +
+	"\vutilization\x18\x01 \x01(\x01H\x00R\vutilization\x88\x01\x01\x125\n" +
+	"\breset_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\aresetAt\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06statusB\x0e\n" +
-	"\f_utilizationB\v\n" +
-	"\t_reset_at\"\x1b\n" +
-	"\x19GetRateLimitStatusRequest\"\xf3\x01\n" +
+	"\f_utilizationJ\x04\b\x02\x10\x03\"\x1b\n" +
+	"\x19GetRateLimitStatusRequest\"\x95\x02\n" +
 	"\x1aGetRateLimitStatusResponse\x12'\n" +
 	"\x0forganization_id\x18\x01 \x01(\tR\x0eorganizationId\x121\n" +
 	"\x06five_h\x18\x02 \x01(\v2\x1a.rafiki.v1.RateLimitWindowR\x05fiveH\x123\n" +
 	"\aseven_d\x18\x03 \x01(\v2\x1a.rafiki.v1.RateLimitWindowR\x06sevenD\x12%\n" +
-	"\x0eoverall_status\x18\x04 \x01(\tR\roverallStatus\x12\x1d\n" +
+	"\x0eoverall_status\x18\x04 \x01(\tR\roverallStatus\x129\n" +
 	"\n" +
-	"updated_at\x18\x05 \x01(\x03R\tupdatedAt\"\xf7\x01\n" +
+	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtJ\x04\b\x05\x10\x06\"\x99\x02\n" +
 	"\bSkillRow\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x16\n" +
 	"\x06source\x18\x04 \x01(\tR\x06source\x12\x18\n" +
 	"\aenabled\x18\x05 \x01(\bR\aenabled\x122\n" +
-	"\x15shadowed_core_version\x18\x06 \x01(\tR\x13shadowedCoreVersion\x12\x1d\n" +
+	"\x15shadowed_core_version\x18\x06 \x01(\tR\x13shadowedCoreVersion\x129\n" +
 	"\n" +
-	"updated_at\x18\a \x01(\tR\tupdatedAt\x12\x12\n" +
-	"\x04body\x18\b \x01(\tR\x04body\">\n" +
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x12\n" +
+	"\x04body\x18\b \x01(\tR\x04bodyJ\x04\b\a\x10\b\">\n" +
 	"\x11ListSkillsRequest\x12)\n" +
 	"\x10include_disabled\x18\x01 \x01(\bR\x0fincludeDisabled\"=\n" +
 	"\x12ListSkillsResponse\x12'\n" +
@@ -14463,15 +14469,15 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
 	"\aenabled\x18\x03 \x01(\bR\aenabled\"\x19\n" +
-	"\x17SetSkillEnabledResponse\"\xa4\x01\n" +
+	"\x17SetSkillEnabledResponse\"\xc6\x01\n" +
 	"\vPymoduleRow\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x1d\n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x129\n" +
 	"\n" +
-	"created_at\x18\x04 \x01(\tR\tcreatedAt\x12\x12\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x12\n" +
 	"\x04code\x18\x05 \x01(\tR\x04code\x12\x12\n" +
-	"\x04repo\x18\x06 \x01(\tR\x04repo\"*\n" +
+	"\x04repo\x18\x06 \x01(\tR\x04repoJ\x04\b\x04\x10\x05\"*\n" +
 	"\x14ListPymodulesRequest\x12\x12\n" +
 	"\x04repo\x18\x01 \x01(\tR\x04repo\"C\n" +
 	"\x15ListPymodulesResponse\x12*\n" +
@@ -14523,7 +14529,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x1fRemovePymoduleGitSourceResponse\"\"\n" +
 	"\n" +
 	"StringList\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\tR\x05items\"\xf3\x06\n" +
+	"\x05items\x18\x01 \x03(\tR\x05items\"\xb7\a\n" +
 	"\tPresetRow\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x03R\aversion\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -14545,11 +14551,11 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\bmax_cost\x18\x10 \x01(\x01H\x01R\amaxCost\x88\x01\x01\x12 \n" +
 	"\tmax_depth\x18\x11 \x01(\x05H\x02R\bmaxDepth\x88\x01\x01\x12&\n" +
 	"\fmax_children\x18\x12 \x01(\x05H\x03R\vmaxChildren\x88\x01\x01\x12(\n" +
-	"\x10written_by_child\x18\x13 \x01(\tR\x0ewrittenByChild\x12\x1d\n" +
+	"\x10written_by_child\x18\x13 \x01(\tR\x0ewrittenByChild\x129\n" +
 	"\n" +
-	"created_at\x18\x14 \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"created_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"deleted_at\x18\x15 \x01(\tR\tdeletedAt\x1a9\n" +
+	"deleted_at\x18\x17 \x01(\v2\x1a.google.protobuf.TimestampR\tdeletedAt\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x10\n" +
@@ -14557,7 +14563,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\t_max_costB\f\n" +
 	"\n" +
 	"_max_depthB\x0f\n" +
-	"\r_max_children\",\n" +
+	"\r_max_childrenJ\x04\b\x14\x10\x15J\x04\b\x15\x10\x16\",\n" +
 	"\x12ListPresetsRequest\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\"?\n" +
 	"\x13ListPresetsResponse\x12(\n" +
@@ -14573,12 +14579,12 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x06preset\x18\x01 \x01(\v2\x14.rafiki.v1.PresetRowR\x06preset\")\n" +
 	"\x13DeletePresetRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x16\n" +
-	"\x14DeletePresetResponse\"\xf5\x02\n" +
+	"\x14DeletePresetResponse\"\x97\x03\n" +
 	"\tRecallHit\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06source\x18\x02 \x01(\tR\x06source\x12\x18\n" +
-	"\asnippet\x18\x03 \x01(\tR\asnippet\x12\x12\n" +
-	"\x04when\x18\x04 \x01(\tR\x04when\x12'\n" +
+	"\asnippet\x18\x03 \x01(\tR\asnippet\x12.\n" +
+	"\x04when\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\x04when\x12'\n" +
 	"\x0fconversation_id\x18\x05 \x01(\tR\x0econversationId\x12+\n" +
 	"\x11conversation_name\x18\x06 \x01(\tR\x10conversationName\x12\x12\n" +
 	"\x04repo\x18\a \x01(\tR\x04repo\x12\x12\n" +
@@ -14590,17 +14596,17 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x04path\x18\v \x01(\tR\x04path\x12\x12\n" +
 	"\x04name\x18\f \x01(\tR\x04name\x12\x14\n" +
 	"\x05title\x18\r \x01(\tR\x05title\x12\x14\n" +
-	"\x05score\x18\x0e \x01(\x01R\x05score\"\xbd\x01\n" +
+	"\x05score\x18\x0e \x01(\x01R\x05scoreJ\x04\b\x04\x10\x05\"\x87\x02\n" +
 	"\rRecallRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x18\n" +
 	"\asources\x18\x02 \x03(\tR\asources\x12\x14\n" +
 	"\x05under\x18\x03 \x01(\tR\x05under\x12\x12\n" +
-	"\x04repo\x18\x04 \x01(\tR\x04repo\x12\x1d\n" +
-	"\n" +
-	"since_unix\x18\x05 \x01(\x03R\tsinceUnix\x12\x1d\n" +
-	"\n" +
-	"until_unix\x18\x06 \x01(\x03R\tuntilUnix\x12\x14\n" +
-	"\x05limit\x18\a \x01(\x05R\x05limit\":\n" +
+	"\x04repo\x18\x04 \x01(\tR\x04repo\x120\n" +
+	"\x05since\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x120\n" +
+	"\x05until\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x05until\x12\x14\n" +
+	"\x05limit\x18\a \x01(\x05R\x05limitJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\n" +
+	"since_unixR\n" +
+	"until_unix\":\n" +
 	"\x0eRecallResponse\x12(\n" +
 	"\x04hits\x18\x01 \x03(\v2\x14.rafiki.v1.RecallHitR\x04hits\"q\n" +
 	"\x14RecallContextRequest\x12\x0e\n" +
@@ -14609,17 +14615,17 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05after\x18\x03 \x01(\x05R\x05after\x12\x1b\n" +
 	"\tmax_chars\x18\x04 \x01(\x05R\bmaxChars\"+\n" +
 	"\x15RecallContextResponse\x12\x12\n" +
-	"\x04text\x18\x01 \x01(\tR\x04text\"\xb2\x01\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\xf6\x01\n" +
 	"\tMemoryRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\tR\x04body\x12\x1b\n" +
-	"\tmeta_json\x18\x05 \x01(\tR\bmetaJson\x12\x1d\n" +
+	"\tmeta_json\x18\x05 \x01(\tR\bmetaJson\x129\n" +
 	"\n" +
-	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\a \x01(\tR\tupdatedAt\":\n" +
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtJ\x04\b\x06\x10\aJ\x04\b\a\x10\b\":\n" +
 	"\x10GetMemoryRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"A\n" +
@@ -14640,14 +14646,14 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x13DeleteMemoryRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"\x16\n" +
-	"\x14DeleteMemoryResponse\"X\n" +
-	"\x15RecallBackfillRequest\x12\x1d\n" +
-	"\n" +
-	"since_unix\x18\x01 \x01(\x03R\tsinceUnix\x12 \n" +
+	"\x14DeleteMemoryResponse\"}\n" +
+	"\x15RecallBackfillRequest\x120\n" +
+	"\x05since\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x05since\x12 \n" +
 	"\fmax_cost_usd\x18\x02 \x01(\x01R\n" +
-	"maxCostUsd\"\x18\n" +
+	"maxCostUsdJ\x04\b\x01\x10\x02R\n" +
+	"since_unix\"\x18\n" +
 	"\x16RecallBackfillResponse\"\x15\n" +
-	"\x13RecallStatusRequest\"\xe9\x03\n" +
+	"\x13RecallStatusRequest\"\x8b\x04\n" +
 	"\x14RecallStatusResponse\x12$\n" +
 	"\rconversations\x18\x01 \x01(\x03R\rconversations\x12\x18\n" +
 	"\awindows\x18\x02 \x01(\x03R\awindows\x12-\n" +
@@ -14655,35 +14661,33 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\tsummaries\x18\x04 \x01(\x03R\tsummaries\x12+\n" +
 	"\x11summaries_pending\x18\x05 \x01(\x03R\x10summariesPending\x12\x1a\n" +
 	"\bmemories\x18\x06 \x01(\x03R\bmemories\x12(\n" +
-	"\x10summary_cost_usd\x18\a \x01(\x01R\x0esummaryCostUsd\x12%\n" +
-	"\x0ebackfill_since\x18\b \x01(\tR\rbackfillSince\x12.\n" +
+	"\x10summary_cost_usd\x18\a \x01(\x01R\x0esummaryCostUsd\x12A\n" +
+	"\x0ebackfill_since\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\rbackfillSince\x12.\n" +
 	"\x13backfill_budget_usd\x18\t \x01(\x01R\x11backfillBudgetUsd\x12,\n" +
 	"\x12backfill_spent_usd\x18\n" +
 	" \x01(\x01R\x10backfillSpentUsd\x12'\n" +
 	"\x0fembedding_model\x18\v \x01(\tR\x0eembeddingModel\x12#\n" +
-	"\rsummary_model\x18\f \x01(\tR\fsummaryModel\"\xc6\x01\n" +
+	"\rsummary_model\x18\f \x01(\tR\fsummaryModelJ\x04\b\b\x10\t\"\xf6\x01\n" +
 	"\vProviderBan\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x1d\n" +
 	"\n" +
 	"model_line\x18\x02 \x01(\tR\tmodelLine\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x1d\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x129\n" +
 	"\n" +
-	"created_at\x18\x04 \x01(\x03R\tcreatedAt\x12\"\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"expires_at\x18\x05 \x01(\x03H\x00R\texpiresAt\x88\x01\x01\x12\x12\n" +
-	"\x04note\x18\x06 \x01(\tR\x04noteB\r\n" +
-	"\v_expires_at\"\x19\n" +
+	"expires_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x12\n" +
+	"\x04note\x18\x06 \x01(\tR\x04noteJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"\x19\n" +
 	"\x17ListProviderBansRequest\"f\n" +
 	"\x18ListProviderBansResponse\x12*\n" +
 	"\x04bans\x18\x01 \x03(\v2\x16.rafiki.v1.ProviderBanR\x04bans\x12\x1e\n" +
 	"\n" +
 	"persistent\x18\x02 \x01(\bR\n" +
-	"persistent\"\x89\x01\n" +
+	"persistent\"\x93\x01\n" +
 	"\x12BanProviderRequest\x12\x1a\n" +
-	"\bprovider\x18\x01 \x01(\tR\bprovider\x12.\n" +
-	"\x10duration_seconds\x18\x02 \x01(\x03H\x00R\x0fdurationSeconds\x88\x01\x01\x12\x12\n" +
-	"\x04note\x18\x03 \x01(\tR\x04noteB\x13\n" +
-	"\x11_duration_seconds\"_\n" +
+	"\bprovider\x18\x01 \x01(\tR\bprovider\x125\n" +
+	"\bduration\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\bduration\x12\x12\n" +
+	"\x04note\x18\x03 \x01(\tR\x04noteJ\x04\b\x02\x10\x03R\x10duration_seconds\"_\n" +
 	"\x13BanProviderResponse\x12(\n" +
 	"\x03ban\x18\x01 \x01(\v2\x16.rafiki.v1.ProviderBanR\x03ban\x12\x1e\n" +
 	"\n" +
@@ -14691,13 +14695,13 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"persistent\"2\n" +
 	"\x14UnbanProviderRequest\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\"\x17\n" +
-	"\x15UnbanProviderResponse\"\\\n" +
+	"\x15UnbanProviderResponse\"~\n" +
 	"\bRouteRow\x12\x1d\n" +
 	"\n" +
 	"model_line\x18\x01 \x01(\tR\tmodelLine\x12\x12\n" +
-	"\x04spec\x18\x02 \x01(\tR\x04spec\x12\x1d\n" +
+	"\x04spec\x18\x02 \x01(\tR\x04spec\x129\n" +
 	"\n" +
-	"created_at\x18\x03 \x01(\tR\tcreatedAt\"\x13\n" +
+	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAtJ\x04\b\x03\x10\x04\"\x13\n" +
 	"\x11ListRoutesRequest\"=\n" +
 	"\x12ListRoutesResponse\x12'\n" +
 	"\x04rows\x18\x01 \x03(\v2\x13.rafiki.v1.RouteRowR\x04rows\"D\n" +
@@ -14793,7 +14797,7 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x13auto_compact_window\x18\x05 \x01(\x05R\x11autoCompactWindow\x12\x14\n" +
 	"\x05known\x18\x06 \x01(\bR\x05known\"*\n" +
 	"\x12ModelRoutesRequest\x12\x14\n" +
-	"\x05model\x18\x01 \x01(\tR\x05model\"\x8f\x06\n" +
+	"\x05model\x18\x01 \x01(\tR\x05model\"\xa3\x06\n" +
 	"\rRouteEndpoint\x12\x1a\n" +
 	"\bprovider\x18\x01 \x01(\tR\bprovider\x12\x12\n" +
 	"\x04slug\x18\x02 \x01(\tR\x04slug\x12\x10\n" +
@@ -14811,16 +14815,16 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x04rank\x18\f \x01(\x05R\x04rank\x12\x1c\n" +
 	"\tpreferred\x18\r \x01(\bR\tpreferred\x120\n" +
 	"\x12p50_tokens_per_sec\x18\x0e \x01(\x01H\x03R\x0fp50TokensPerSec\x88\x01\x01\x120\n" +
-	"\x12p90_tokens_per_sec\x18\x0f \x01(\x01H\x04R\x0fp90TokensPerSec\x88\x01\x01\x12)\n" +
-	"\x0ep50_latency_ms\x18\x10 \x01(\x01H\x05R\fp50LatencyMs\x88\x01\x01\x12*\n" +
-	"\x0estats_requests\x18\x11 \x01(\x05H\x06R\rstatsRequests\x88\x01\x01B\x16\n" +
+	"\x12p90_tokens_per_sec\x18\x0f \x01(\x01H\x04R\x0fp90TokensPerSec\x88\x01\x01\x12:\n" +
+	"\vp50_latency\x18\x12 \x01(\v2\x19.google.protobuf.DurationR\n" +
+	"p50Latency\x12*\n" +
+	"\x0estats_requests\x18\x11 \x01(\x05H\x05R\rstatsRequests\x88\x01\x01B\x16\n" +
 	"\x14_prompt_usd_per_mtokB\x1a\n" +
 	"\x18_completion_usd_per_mtokB\r\n" +
 	"\v_uptime_30mB\x15\n" +
 	"\x13_p50_tokens_per_secB\x15\n" +
 	"\x13_p90_tokens_per_secB\x11\n" +
-	"\x0f_p50_latency_msB\x11\n" +
-	"\x0f_stats_requests\"\xb2\x01\n" +
+	"\x0f_stats_requestsJ\x04\b\x10\x10\x11R\x0ep50_latency_ms\"\xb2\x01\n" +
 	"\x13ModelRoutesResponse\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12\x18\n" +
 	"\arouting\x18\x02 \x01(\tR\arouting\x126\n" +
@@ -14911,27 +14915,29 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12\"\n" +
 	"\n" +
 	"mint_token\x18\x03 \x01(\bH\x00R\tmintToken\x88\x01\x01B\r\n" +
-	"\v_mint_token\"\xcc\x01\n" +
+	"\v_mint_token\"\xf6\x01\n" +
 	"\x12CreateUserResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x14\n" +
-	"\x05token\x18\x03 \x01(\tR\x05token\x12&\n" +
-	"\x0fcreated_at_unix\x18\x04 \x01(\x03R\rcreatedAtUnix\x12!\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\x129\n" +
+	"\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12!\n" +
 	"\ftoken_reason\x18\x05 \x01(\tR\vtokenReason\x12)\n" +
-	"\x10login_configured\x18\x06 \x01(\bR\x0floginConfigured\"Q\n" +
+	"\x10login_configured\x18\x06 \x01(\bR\x0floginConfiguredJ\x04\b\x04\x10\x05R\x0fcreated_at_unix\"Q\n" +
 	"\x10ListUsersRequest\x12'\n" +
 	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\"=\n" +
 	"\x11ListUsersResponse\x12(\n" +
-	"\x05users\x18\x01 \x03(\v2\x12.rafiki.v1.UserRowR\x05users\"\xcf\x01\n" +
+	"\x05users\x18\x01 \x03(\v2\x12.rafiki.v1.UserRowR\x05users\"\x8a\x02\n" +
 	"\aUserRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x19\n" +
-	"\bis_admin\x18\x03 \x01(\bR\aisAdmin\x12&\n" +
-	"\x0fcreated_at_unix\x18\x04 \x01(\x03R\rcreatedAtUnix\x12+\n" +
-	"\x0fdeleted_at_unix\x18\x05 \x01(\x03H\x00R\rdeletedAtUnix\x88\x01\x01\x12\x14\n" +
-	"\x05email\x18\x06 \x01(\tR\x05emailB\x12\n" +
-	"\x10_deleted_at_unix\"/\n" +
+	"\bis_admin\x18\x03 \x01(\bR\aisAdmin\x129\n" +
+	"\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"deleted_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tdeletedAt\x12\x14\n" +
+	"\x05email\x18\x06 \x01(\tR\x05emailJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06R\x0fcreated_at_unixR\x0fdeleted_at_unix\"/\n" +
 	"\x11RemoveUserRequest\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\"\x14\n" +
 	"\x12RemoveUserResponse\"T\n" +
@@ -14940,17 +14946,19 @@ const file_rafiki_v1_control_proto_rawDesc = "" +
 	"\x05email\x18\x02 \x01(\tH\x00R\x05email\x88\x01\x01B\b\n" +
 	"\x06_email\"<\n" +
 	"\x12UpdateUserResponse\x12&\n" +
-	"\x04user\x18\x01 \x01(\v2\x12.rafiki.v1.UserRowR\x04user\"\x8c\x02\n" +
+	"\x04user\x18\x01 \x01(\v2\x12.rafiki.v1.UserRowR\x04user\"\xd8\x02\n" +
 	"\bTokenRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x16\n" +
-	"\x06origin\x18\x04 \x01(\tR\x06origin\x12&\n" +
-	"\x0fcreated_at_unix\x18\x05 \x01(\x03R\rcreatedAtUnix\x12+\n" +
-	"\x0fexpires_at_unix\x18\x06 \x01(\x03H\x00R\rexpiresAtUnix\x88\x01\x01\x12+\n" +
-	"\x0frevoked_at_unix\x18\a \x01(\x03H\x01R\rrevokedAtUnix\x88\x01\x01B\x12\n" +
-	"\x10_expires_at_unixB\x12\n" +
-	"\x10_revoked_at_unix\"c\n" +
+	"\x06origin\x18\x04 \x01(\tR\x06origin\x129\n" +
+	"\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"expires_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x129\n" +
+	"\n" +
+	"revoked_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\trevokedAtJ\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x0fcreated_at_unixR\x0fexpires_at_unixR\x0frevoked_at_unix\"c\n" +
 	"\x10MintTokenRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
 	"\vttl_seconds\x18\x02 \x01(\x03R\n" +
@@ -15399,259 +15407,285 @@ var file_rafiki_v1_control_proto_depIdxs = []int32{
 	230, // 29: rafiki.v1.KillRequest.kill_timeout:type_name -> google.protobuf.Duration
 	230, // 30: rafiki.v1.KillResponse.duration:type_name -> google.protobuf.Duration
 	39,  // 31: rafiki.v1.ListTasksResponse.tasks:type_name -> rafiki.v1.TaskRow
-	42,  // 32: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
-	228, // 33: rafiki.v1.ConversationSearchRequest.since:type_name -> google.protobuf.Timestamp
-	228, // 34: rafiki.v1.ConversationSearchRequest.until:type_name -> google.protobuf.Timestamp
-	228, // 35: rafiki.v1.ConversationSummary.created_at:type_name -> google.protobuf.Timestamp
-	228, // 36: rafiki.v1.ConversationSummary.closed_at:type_name -> google.protobuf.Timestamp
-	46,  // 37: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
-	230, // 38: rafiki.v1.TranscriptTurn.latency:type_name -> google.protobuf.Duration
-	49,  // 39: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
-	228, // 40: rafiki.v1.ConversationQueryRequest.since:type_name -> google.protobuf.Timestamp
-	228, // 41: rafiki.v1.ConversationQueryRequest.until:type_name -> google.protobuf.Timestamp
-	53,  // 42: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
-	52,  // 43: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
-	54,  // 44: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
-	3,   // 45: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
-	4,   // 46: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
-	57,  // 47: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
-	228, // 48: rafiki.v1.ReviewAnalysis.created_at:type_name -> google.protobuf.Timestamp
-	60,  // 49: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
-	61,  // 50: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
-	216, // 51: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
-	228, // 52: rafiki.v1.ExecutorRow.connected_at:type_name -> google.protobuf.Timestamp
-	228, // 53: rafiki.v1.ExecutorRow.last_seen:type_name -> google.protobuf.Timestamp
-	63,  // 54: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
-	231, // 55: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
-	228, // 56: rafiki.v1.DarajaLaunchResponse.connected_at:type_name -> google.protobuf.Timestamp
-	72,  // 57: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
-	73,  // 58: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
-	74,  // 59: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
-	74,  // 60: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
-	77,  // 61: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
-	77,  // 62: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
-	77,  // 63: rafiki.v1.UpsertSkillResponse.row:type_name -> rafiki.v1.SkillRow
-	88,  // 64: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
-	88,  // 65: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	88,  // 66: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
-	97,  // 67: rafiki.v1.AddPymoduleGitSourceResponse.row:type_name -> rafiki.v1.GitSourceRow
-	97,  // 68: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
-	103, // 69: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
-	104, // 70: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
-	217, // 71: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
-	108, // 72: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
-	108, // 73: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
-	108, // 74: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
-	109, // 75: rafiki.v1.ListPresetsResponse.rows:type_name -> rafiki.v1.PresetRow
-	109, // 76: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
-	109, // 77: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
-	109, // 78: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
-	118, // 79: rafiki.v1.RecallResponse.hits:type_name -> rafiki.v1.RecallHit
-	123, // 80: rafiki.v1.GetMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
-	123, // 81: rafiki.v1.MemoryTreeResponse.memories:type_name -> rafiki.v1.MemoryRow
-	123, // 82: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
-	136, // 83: rafiki.v1.ListProviderBansResponse.bans:type_name -> rafiki.v1.ProviderBan
-	136, // 84: rafiki.v1.BanProviderResponse.ban:type_name -> rafiki.v1.ProviderBan
-	143, // 85: rafiki.v1.ListRoutesResponse.rows:type_name -> rafiki.v1.RouteRow
-	143, // 86: rafiki.v1.SetRouteResponse.row:type_name -> rafiki.v1.RouteRow
-	230, // 87: rafiki.v1.CloseAllExitedRequest.older_than:type_name -> google.protobuf.Duration
-	218, // 88: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
-	219, // 89: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
-	228, // 90: rafiki.v1.StatusResponse.started_at:type_name -> google.protobuf.Timestamp
-	220, // 91: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
-	221, // 92: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
-	223, // 93: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
-	230, // 94: rafiki.v1.SearchResponse.elapsed:type_name -> google.protobuf.Duration
-	165, // 95: rafiki.v1.ModelRoutesResponse.endpoints:type_name -> rafiki.v1.RouteEndpoint
-	228, // 96: rafiki.v1.ConversationStatsRequest.since:type_name -> google.protobuf.Timestamp
-	228, // 97: rafiki.v1.ConversationStatsRequest.until:type_name -> google.protobuf.Timestamp
-	224, // 98: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
-	230, // 99: rafiki.v1.EnrollExecutorRequest.ttl:type_name -> google.protobuf.Duration
-	225, // 100: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
-	226, // 101: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
-	63,  // 102: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
-	183, // 103: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
-	188, // 104: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
-	188, // 105: rafiki.v1.UpdateUserResponse.user:type_name -> rafiki.v1.UserRow
-	193, // 106: rafiki.v1.MintTokenResponse.info:type_name -> rafiki.v1.TokenRow
-	193, // 107: rafiki.v1.ListTokensResponse.tokens:type_name -> rafiki.v1.TokenRow
-	193, // 108: rafiki.v1.RevokeTokenResponse.info:type_name -> rafiki.v1.TokenRow
-	1,   // 109: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
-	232, // 110: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
-	228, // 111: rafiki.v1.SearchRequest.SearchSessionFilter.since:type_name -> google.protobuf.Timestamp
-	222, // 112: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
-	228, // 113: rafiki.v1.SearchResponse.SearchHit.timestamp:type_name -> google.protobuf.Timestamp
-	5,   // 114: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
-	9,   // 115: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
-	15,  // 116: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
-	24,  // 117: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
-	26,  // 118: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
-	29,  // 119: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
-	31,  // 120: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
-	33,  // 121: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
-	35,  // 122: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
-	37,  // 123: rafiki.v1.Control.SetRouting:input_type -> rafiki.v1.SetRoutingRequest
-	40,  // 124: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
-	43,  // 125: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
-	64,  // 126: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
-	75,  // 127: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
-	78,  // 128: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
-	80,  // 129: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
-	82,  // 130: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
-	84,  // 131: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
-	86,  // 132: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
-	89,  // 133: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
-	91,  // 134: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
-	93,  // 135: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
-	95,  // 136: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
-	98,  // 137: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
-	100, // 138: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
-	102, // 139: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
-	106, // 140: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
-	110, // 141: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
-	112, // 142: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
-	114, // 143: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
-	116, // 144: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
-	119, // 145: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
-	121, // 146: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
-	124, // 147: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
-	126, // 148: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
-	128, // 149: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
-	130, // 150: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
-	132, // 151: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
-	134, // 152: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
-	45,  // 153: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
-	48,  // 154: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
-	51,  // 155: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
-	56,  // 156: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
-	59,  // 157: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
-	66,  // 158: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
-	68,  // 159: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
-	70,  // 160: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
-	137, // 161: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
-	139, // 162: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
-	141, // 163: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
-	144, // 164: rafiki.v1.Control.ListRoutes:input_type -> rafiki.v1.ListRoutesRequest
-	146, // 165: rafiki.v1.Control.SetRoute:input_type -> rafiki.v1.SetRouteRequest
-	148, // 166: rafiki.v1.Control.DeleteRoute:input_type -> rafiki.v1.DeleteRouteRequest
-	17,  // 167: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
-	19,  // 168: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
-	21,  // 169: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
-	150, // 170: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
-	152, // 171: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
-	154, // 172: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
-	156, // 173: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
-	158, // 174: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
-	160, // 175: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
-	162, // 176: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
-	164, // 177: rafiki.v1.Control.ModelRoutes:input_type -> rafiki.v1.ModelRoutesRequest
-	167, // 178: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
-	169, // 179: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
-	171, // 180: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
-	173, // 181: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
-	175, // 182: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
-	177, // 183: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
-	179, // 184: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
-	181, // 185: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
-	184, // 186: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
-	186, // 187: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
-	189, // 188: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
-	191, // 189: rafiki.v1.Control.UpdateUser:input_type -> rafiki.v1.UpdateUserRequest
-	194, // 190: rafiki.v1.Control.MintToken:input_type -> rafiki.v1.MintTokenRequest
-	196, // 191: rafiki.v1.Control.ListTokens:input_type -> rafiki.v1.ListTokensRequest
-	198, // 192: rafiki.v1.Control.RevokeToken:input_type -> rafiki.v1.RevokeTokenRequest
-	204, // 193: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
-	206, // 194: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
-	200, // 195: rafiki.v1.Login.BeginLogin:input_type -> rafiki.v1.BeginLoginRequest
-	202, // 196: rafiki.v1.Login.CompleteLogin:input_type -> rafiki.v1.CompleteLoginRequest
-	6,   // 197: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
-	227, // 198: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
-	16,  // 199: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
-	25,  // 200: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
-	27,  // 201: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
-	30,  // 202: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
-	32,  // 203: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
-	34,  // 204: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
-	36,  // 205: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
-	38,  // 206: rafiki.v1.Control.SetRouting:output_type -> rafiki.v1.SetRoutingResponse
-	41,  // 207: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
-	44,  // 208: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
-	65,  // 209: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
-	76,  // 210: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
-	79,  // 211: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
-	81,  // 212: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
-	83,  // 213: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
-	85,  // 214: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
-	87,  // 215: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
-	90,  // 216: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
-	92,  // 217: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
-	94,  // 218: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
-	96,  // 219: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
-	99,  // 220: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
-	101, // 221: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
-	105, // 222: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
-	107, // 223: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
-	111, // 224: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
-	113, // 225: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
-	115, // 226: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
-	117, // 227: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
-	120, // 228: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
-	122, // 229: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
-	125, // 230: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
-	127, // 231: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
-	129, // 232: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
-	131, // 233: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
-	133, // 234: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
-	135, // 235: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
-	47,  // 236: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
-	50,  // 237: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
-	55,  // 238: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
-	58,  // 239: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
-	62,  // 240: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
-	67,  // 241: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
-	69,  // 242: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
-	71,  // 243: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
-	138, // 244: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
-	140, // 245: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
-	142, // 246: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
-	145, // 247: rafiki.v1.Control.ListRoutes:output_type -> rafiki.v1.ListRoutesResponse
-	147, // 248: rafiki.v1.Control.SetRoute:output_type -> rafiki.v1.SetRouteResponse
-	149, // 249: rafiki.v1.Control.DeleteRoute:output_type -> rafiki.v1.DeleteRouteResponse
-	18,  // 250: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
-	20,  // 251: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
-	22,  // 252: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
-	151, // 253: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
-	153, // 254: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
-	155, // 255: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
-	157, // 256: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
-	159, // 257: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
-	161, // 258: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
-	163, // 259: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
-	166, // 260: rafiki.v1.Control.ModelRoutes:output_type -> rafiki.v1.ModelRoutesResponse
-	168, // 261: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
-	170, // 262: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
-	172, // 263: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
-	174, // 264: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
-	176, // 265: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
-	178, // 266: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
-	180, // 267: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
-	182, // 268: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
-	185, // 269: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
-	187, // 270: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
-	190, // 271: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
-	192, // 272: rafiki.v1.Control.UpdateUser:output_type -> rafiki.v1.UpdateUserResponse
-	195, // 273: rafiki.v1.Control.MintToken:output_type -> rafiki.v1.MintTokenResponse
-	197, // 274: rafiki.v1.Control.ListTokens:output_type -> rafiki.v1.ListTokensResponse
-	199, // 275: rafiki.v1.Control.RevokeToken:output_type -> rafiki.v1.RevokeTokenResponse
-	205, // 276: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
-	207, // 277: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
-	201, // 278: rafiki.v1.Login.BeginLogin:output_type -> rafiki.v1.BeginLoginResponse
-	203, // 279: rafiki.v1.Login.CompleteLogin:output_type -> rafiki.v1.CompleteLoginResponse
-	197, // [197:280] is the sub-list for method output_type
-	114, // [114:197] is the sub-list for method input_type
-	114, // [114:114] is the sub-list for extension type_name
-	114, // [114:114] is the sub-list for extension extendee
-	0,   // [0:114] is the sub-list for field type_name
+	228, // 32: rafiki.v1.ModelRow.created:type_name -> google.protobuf.Timestamp
+	228, // 33: rafiki.v1.ModelRow.expires_at:type_name -> google.protobuf.Timestamp
+	42,  // 34: rafiki.v1.ListModelsResponse.models:type_name -> rafiki.v1.ModelRow
+	228, // 35: rafiki.v1.ConversationSearchRequest.since:type_name -> google.protobuf.Timestamp
+	228, // 36: rafiki.v1.ConversationSearchRequest.until:type_name -> google.protobuf.Timestamp
+	228, // 37: rafiki.v1.ConversationSummary.created_at:type_name -> google.protobuf.Timestamp
+	228, // 38: rafiki.v1.ConversationSummary.closed_at:type_name -> google.protobuf.Timestamp
+	46,  // 39: rafiki.v1.ConversationSearchResponse.rows:type_name -> rafiki.v1.ConversationSummary
+	230, // 40: rafiki.v1.TranscriptTurn.latency:type_name -> google.protobuf.Duration
+	49,  // 41: rafiki.v1.ConversationExportResponse.turns:type_name -> rafiki.v1.TranscriptTurn
+	228, // 42: rafiki.v1.ConversationQueryRequest.since:type_name -> google.protobuf.Timestamp
+	228, // 43: rafiki.v1.ConversationQueryRequest.until:type_name -> google.protobuf.Timestamp
+	53,  // 44: rafiki.v1.QueryRow.cells:type_name -> rafiki.v1.QueryValue
+	52,  // 45: rafiki.v1.ConversationQueryResponse.columns:type_name -> rafiki.v1.QueryColumn
+	54,  // 46: rafiki.v1.ConversationQueryResponse.rows:type_name -> rafiki.v1.QueryRow
+	3,   // 47: rafiki.v1.ConversationReviewRequest.stage:type_name -> rafiki.v1.ReviewStage
+	4,   // 48: rafiki.v1.ConversationReviewAccept.status:type_name -> rafiki.v1.ReviewAcceptStatus
+	57,  // 49: rafiki.v1.ConversationReviewResponse.accepted:type_name -> rafiki.v1.ConversationReviewAccept
+	228, // 50: rafiki.v1.ReviewAnalysis.created_at:type_name -> google.protobuf.Timestamp
+	60,  // 51: rafiki.v1.ConversationFindingsResponse.findings:type_name -> rafiki.v1.ReviewFinding
+	61,  // 52: rafiki.v1.ConversationFindingsResponse.analyses:type_name -> rafiki.v1.ReviewAnalysis
+	216, // 53: rafiki.v1.ExecutorRow.labels:type_name -> rafiki.v1.ExecutorRow.LabelsEntry
+	228, // 54: rafiki.v1.ExecutorRow.connected_at:type_name -> google.protobuf.Timestamp
+	228, // 55: rafiki.v1.ExecutorRow.last_seen:type_name -> google.protobuf.Timestamp
+	63,  // 56: rafiki.v1.ListExecutorsResponse.rows:type_name -> rafiki.v1.ExecutorRow
+	231, // 57: rafiki.v1.DarajaLaunchRequest.spec:type_name -> rafiki.daraja.v1.ChildSpec
+	228, // 58: rafiki.v1.DarajaLaunchResponse.connected_at:type_name -> google.protobuf.Timestamp
+	72,  // 59: rafiki.v1.DarajaWatchResponse.restarted:type_name -> rafiki.v1.DarajaProcessRestarted
+	73,  // 60: rafiki.v1.DarajaWatchResponse.exited:type_name -> rafiki.v1.DarajaProcessExited
+	228, // 61: rafiki.v1.RateLimitWindow.reset_at:type_name -> google.protobuf.Timestamp
+	74,  // 62: rafiki.v1.GetRateLimitStatusResponse.five_h:type_name -> rafiki.v1.RateLimitWindow
+	74,  // 63: rafiki.v1.GetRateLimitStatusResponse.seven_d:type_name -> rafiki.v1.RateLimitWindow
+	228, // 64: rafiki.v1.GetRateLimitStatusResponse.updated_at:type_name -> google.protobuf.Timestamp
+	228, // 65: rafiki.v1.SkillRow.updated_at:type_name -> google.protobuf.Timestamp
+	77,  // 66: rafiki.v1.ListSkillsResponse.rows:type_name -> rafiki.v1.SkillRow
+	77,  // 67: rafiki.v1.GetSkillResponse.row:type_name -> rafiki.v1.SkillRow
+	77,  // 68: rafiki.v1.UpsertSkillResponse.row:type_name -> rafiki.v1.SkillRow
+	228, // 69: rafiki.v1.PymoduleRow.created_at:type_name -> google.protobuf.Timestamp
+	88,  // 70: rafiki.v1.ListPymodulesResponse.rows:type_name -> rafiki.v1.PymoduleRow
+	88,  // 71: rafiki.v1.GetPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	88,  // 72: rafiki.v1.PutPymoduleResponse.row:type_name -> rafiki.v1.PymoduleRow
+	97,  // 73: rafiki.v1.AddPymoduleGitSourceResponse.row:type_name -> rafiki.v1.GitSourceRow
+	97,  // 74: rafiki.v1.ListPymoduleGitSourcesResponse.rows:type_name -> rafiki.v1.GitSourceRow
+	103, // 75: rafiki.v1.RefreshPymoduleGitSourceResponse.scripts:type_name -> rafiki.v1.GitSourceScript
+	104, // 76: rafiki.v1.RefreshPymoduleGitSourceResponse.packages:type_name -> rafiki.v1.GitSourcePackage
+	217, // 77: rafiki.v1.PresetRow.labels:type_name -> rafiki.v1.PresetRow.LabelsEntry
+	108, // 78: rafiki.v1.PresetRow.tools:type_name -> rafiki.v1.StringList
+	108, // 79: rafiki.v1.PresetRow.skills:type_name -> rafiki.v1.StringList
+	108, // 80: rafiki.v1.PresetRow.mcp_servers:type_name -> rafiki.v1.StringList
+	228, // 81: rafiki.v1.PresetRow.created_at:type_name -> google.protobuf.Timestamp
+	228, // 82: rafiki.v1.PresetRow.deleted_at:type_name -> google.protobuf.Timestamp
+	109, // 83: rafiki.v1.ListPresetsResponse.rows:type_name -> rafiki.v1.PresetRow
+	109, // 84: rafiki.v1.GetPresetResponse.rows:type_name -> rafiki.v1.PresetRow
+	109, // 85: rafiki.v1.PutPresetRequest.preset:type_name -> rafiki.v1.PresetRow
+	109, // 86: rafiki.v1.PutPresetResponse.preset:type_name -> rafiki.v1.PresetRow
+	228, // 87: rafiki.v1.RecallHit.when:type_name -> google.protobuf.Timestamp
+	228, // 88: rafiki.v1.RecallRequest.since:type_name -> google.protobuf.Timestamp
+	228, // 89: rafiki.v1.RecallRequest.until:type_name -> google.protobuf.Timestamp
+	118, // 90: rafiki.v1.RecallResponse.hits:type_name -> rafiki.v1.RecallHit
+	228, // 91: rafiki.v1.MemoryRow.created_at:type_name -> google.protobuf.Timestamp
+	228, // 92: rafiki.v1.MemoryRow.updated_at:type_name -> google.protobuf.Timestamp
+	123, // 93: rafiki.v1.GetMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	123, // 94: rafiki.v1.MemoryTreeResponse.memories:type_name -> rafiki.v1.MemoryRow
+	123, // 95: rafiki.v1.PutMemoryResponse.memory:type_name -> rafiki.v1.MemoryRow
+	228, // 96: rafiki.v1.RecallBackfillRequest.since:type_name -> google.protobuf.Timestamp
+	228, // 97: rafiki.v1.RecallStatusResponse.backfill_since:type_name -> google.protobuf.Timestamp
+	228, // 98: rafiki.v1.ProviderBan.created_at:type_name -> google.protobuf.Timestamp
+	228, // 99: rafiki.v1.ProviderBan.expires_at:type_name -> google.protobuf.Timestamp
+	136, // 100: rafiki.v1.ListProviderBansResponse.bans:type_name -> rafiki.v1.ProviderBan
+	230, // 101: rafiki.v1.BanProviderRequest.duration:type_name -> google.protobuf.Duration
+	136, // 102: rafiki.v1.BanProviderResponse.ban:type_name -> rafiki.v1.ProviderBan
+	228, // 103: rafiki.v1.RouteRow.created_at:type_name -> google.protobuf.Timestamp
+	143, // 104: rafiki.v1.ListRoutesResponse.rows:type_name -> rafiki.v1.RouteRow
+	143, // 105: rafiki.v1.SetRouteResponse.row:type_name -> rafiki.v1.RouteRow
+	230, // 106: rafiki.v1.CloseAllExitedRequest.older_than:type_name -> google.protobuf.Duration
+	218, // 107: rafiki.v1.SetLabelsRequest.set:type_name -> rafiki.v1.SetLabelsRequest.SetEntry
+	219, // 108: rafiki.v1.SetLabelsResponse.labels:type_name -> rafiki.v1.SetLabelsResponse.LabelsEntry
+	228, // 109: rafiki.v1.StatusResponse.started_at:type_name -> google.protobuf.Timestamp
+	220, // 110: rafiki.v1.StatusResponse.children:type_name -> rafiki.v1.StatusResponse.ChildCounts
+	221, // 111: rafiki.v1.SearchRequest.session_filter:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter
+	223, // 112: rafiki.v1.SearchResponse.hits:type_name -> rafiki.v1.SearchResponse.SearchHit
+	230, // 113: rafiki.v1.SearchResponse.elapsed:type_name -> google.protobuf.Duration
+	230, // 114: rafiki.v1.RouteEndpoint.p50_latency:type_name -> google.protobuf.Duration
+	165, // 115: rafiki.v1.ModelRoutesResponse.endpoints:type_name -> rafiki.v1.RouteEndpoint
+	228, // 116: rafiki.v1.ConversationStatsRequest.since:type_name -> google.protobuf.Timestamp
+	228, // 117: rafiki.v1.ConversationStatsRequest.until:type_name -> google.protobuf.Timestamp
+	224, // 118: rafiki.v1.EnrollExecutorRequest.labels:type_name -> rafiki.v1.EnrollExecutorRequest.LabelsEntry
+	230, // 119: rafiki.v1.EnrollExecutorRequest.ttl:type_name -> google.protobuf.Duration
+	225, // 120: rafiki.v1.CreateExecutorRequest.labels:type_name -> rafiki.v1.CreateExecutorRequest.LabelsEntry
+	226, // 121: rafiki.v1.LabelExecutorRequest.set:type_name -> rafiki.v1.LabelExecutorRequest.SetEntry
+	63,  // 122: rafiki.v1.LabelExecutorResponse.executor:type_name -> rafiki.v1.ExecutorRow
+	183, // 123: rafiki.v1.ExecutorSessionEvent.ready:type_name -> rafiki.v1.ExecutorSessionReady
+	228, // 124: rafiki.v1.CreateUserResponse.created_at:type_name -> google.protobuf.Timestamp
+	188, // 125: rafiki.v1.ListUsersResponse.users:type_name -> rafiki.v1.UserRow
+	228, // 126: rafiki.v1.UserRow.created_at:type_name -> google.protobuf.Timestamp
+	228, // 127: rafiki.v1.UserRow.deleted_at:type_name -> google.protobuf.Timestamp
+	188, // 128: rafiki.v1.UpdateUserResponse.user:type_name -> rafiki.v1.UserRow
+	228, // 129: rafiki.v1.TokenRow.created_at:type_name -> google.protobuf.Timestamp
+	228, // 130: rafiki.v1.TokenRow.expires_at:type_name -> google.protobuf.Timestamp
+	228, // 131: rafiki.v1.TokenRow.revoked_at:type_name -> google.protobuf.Timestamp
+	193, // 132: rafiki.v1.MintTokenResponse.info:type_name -> rafiki.v1.TokenRow
+	193, // 133: rafiki.v1.ListTokensResponse.tokens:type_name -> rafiki.v1.TokenRow
+	193, // 134: rafiki.v1.RevokeTokenResponse.info:type_name -> rafiki.v1.TokenRow
+	1,   // 135: rafiki.v1.ScriptMessage.Text.mode:type_name -> rafiki.v1.SendMode
+	232, // 136: rafiki.v1.ScriptMessage.Text.attachments:type_name -> rafiki.v1.ImageBlock
+	228, // 137: rafiki.v1.SearchRequest.SearchSessionFilter.since:type_name -> google.protobuf.Timestamp
+	222, // 138: rafiki.v1.SearchRequest.SearchSessionFilter.labels:type_name -> rafiki.v1.SearchRequest.SearchSessionFilter.LabelsEntry
+	228, // 139: rafiki.v1.SearchResponse.SearchHit.timestamp:type_name -> google.protobuf.Timestamp
+	5,   // 140: rafiki.v1.Control.GetHistory:input_type -> rafiki.v1.GetHistoryRequest
+	9,   // 141: rafiki.v1.Control.StreamEvents:input_type -> rafiki.v1.StreamEventsRequest
+	15,  // 142: rafiki.v1.Control.Send:input_type -> rafiki.v1.SendRequest
+	24,  // 143: rafiki.v1.Control.ListChildren:input_type -> rafiki.v1.ListChildrenRequest
+	26,  // 144: rafiki.v1.Control.GetChild:input_type -> rafiki.v1.GetChildRequest
+	29,  // 145: rafiki.v1.Control.Spawn:input_type -> rafiki.v1.SpawnRequest
+	31,  // 146: rafiki.v1.Control.Kill:input_type -> rafiki.v1.KillRequest
+	33,  // 147: rafiki.v1.Control.Close:input_type -> rafiki.v1.CloseRequest
+	35,  // 148: rafiki.v1.Control.SetBudget:input_type -> rafiki.v1.SetBudgetRequest
+	37,  // 149: rafiki.v1.Control.SetRouting:input_type -> rafiki.v1.SetRoutingRequest
+	40,  // 150: rafiki.v1.Control.ListTasks:input_type -> rafiki.v1.ListTasksRequest
+	43,  // 151: rafiki.v1.Control.ListModels:input_type -> rafiki.v1.ListModelsRequest
+	64,  // 152: rafiki.v1.Control.ListExecutors:input_type -> rafiki.v1.ListExecutorsRequest
+	75,  // 153: rafiki.v1.Control.GetRateLimitStatus:input_type -> rafiki.v1.GetRateLimitStatusRequest
+	78,  // 154: rafiki.v1.Control.ListSkills:input_type -> rafiki.v1.ListSkillsRequest
+	80,  // 155: rafiki.v1.Control.GetSkill:input_type -> rafiki.v1.GetSkillRequest
+	82,  // 156: rafiki.v1.Control.UpsertSkill:input_type -> rafiki.v1.UpsertSkillRequest
+	84,  // 157: rafiki.v1.Control.DeleteSkill:input_type -> rafiki.v1.DeleteSkillRequest
+	86,  // 158: rafiki.v1.Control.SetSkillEnabled:input_type -> rafiki.v1.SetSkillEnabledRequest
+	89,  // 159: rafiki.v1.Control.ListPymodules:input_type -> rafiki.v1.ListPymodulesRequest
+	91,  // 160: rafiki.v1.Control.GetPymodule:input_type -> rafiki.v1.GetPymoduleRequest
+	93,  // 161: rafiki.v1.Control.PutPymodule:input_type -> rafiki.v1.PutPymoduleRequest
+	95,  // 162: rafiki.v1.Control.DeletePymodule:input_type -> rafiki.v1.DeletePymoduleRequest
+	98,  // 163: rafiki.v1.Control.AddPymoduleGitSource:input_type -> rafiki.v1.AddPymoduleGitSourceRequest
+	100, // 164: rafiki.v1.Control.ListPymoduleGitSources:input_type -> rafiki.v1.ListPymoduleGitSourcesRequest
+	102, // 165: rafiki.v1.Control.RefreshPymoduleGitSource:input_type -> rafiki.v1.RefreshPymoduleGitSourceRequest
+	106, // 166: rafiki.v1.Control.RemovePymoduleGitSource:input_type -> rafiki.v1.RemovePymoduleGitSourceRequest
+	110, // 167: rafiki.v1.Control.ListPresets:input_type -> rafiki.v1.ListPresetsRequest
+	112, // 168: rafiki.v1.Control.GetPreset:input_type -> rafiki.v1.GetPresetRequest
+	114, // 169: rafiki.v1.Control.PutPreset:input_type -> rafiki.v1.PutPresetRequest
+	116, // 170: rafiki.v1.Control.DeletePreset:input_type -> rafiki.v1.DeletePresetRequest
+	119, // 171: rafiki.v1.Control.Recall:input_type -> rafiki.v1.RecallRequest
+	121, // 172: rafiki.v1.Control.RecallContext:input_type -> rafiki.v1.RecallContextRequest
+	124, // 173: rafiki.v1.Control.GetMemory:input_type -> rafiki.v1.GetMemoryRequest
+	126, // 174: rafiki.v1.Control.MemoryTree:input_type -> rafiki.v1.MemoryTreeRequest
+	128, // 175: rafiki.v1.Control.PutMemory:input_type -> rafiki.v1.PutMemoryRequest
+	130, // 176: rafiki.v1.Control.DeleteMemory:input_type -> rafiki.v1.DeleteMemoryRequest
+	132, // 177: rafiki.v1.Control.RecallBackfill:input_type -> rafiki.v1.RecallBackfillRequest
+	134, // 178: rafiki.v1.Control.RecallStatus:input_type -> rafiki.v1.RecallStatusRequest
+	45,  // 179: rafiki.v1.Control.ConversationSearch:input_type -> rafiki.v1.ConversationSearchRequest
+	48,  // 180: rafiki.v1.Control.ConversationExport:input_type -> rafiki.v1.ConversationExportRequest
+	51,  // 181: rafiki.v1.Control.ConversationQuery:input_type -> rafiki.v1.ConversationQueryRequest
+	56,  // 182: rafiki.v1.Control.ConversationReview:input_type -> rafiki.v1.ConversationReviewRequest
+	59,  // 183: rafiki.v1.Control.ConversationFindings:input_type -> rafiki.v1.ConversationFindingsRequest
+	66,  // 184: rafiki.v1.Control.DarajaLaunch:input_type -> rafiki.v1.DarajaLaunchRequest
+	68,  // 185: rafiki.v1.Control.DarajaSend:input_type -> rafiki.v1.DarajaSendRequest
+	70,  // 186: rafiki.v1.Control.DarajaWatch:input_type -> rafiki.v1.DarajaWatchRequest
+	137, // 187: rafiki.v1.Control.ListProviderBans:input_type -> rafiki.v1.ListProviderBansRequest
+	139, // 188: rafiki.v1.Control.BanProvider:input_type -> rafiki.v1.BanProviderRequest
+	141, // 189: rafiki.v1.Control.UnbanProvider:input_type -> rafiki.v1.UnbanProviderRequest
+	144, // 190: rafiki.v1.Control.ListRoutes:input_type -> rafiki.v1.ListRoutesRequest
+	146, // 191: rafiki.v1.Control.SetRoute:input_type -> rafiki.v1.SetRouteRequest
+	148, // 192: rafiki.v1.Control.DeleteRoute:input_type -> rafiki.v1.DeleteRouteRequest
+	17,  // 193: rafiki.v1.Control.Report:input_type -> rafiki.v1.ReportRequest
+	19,  // 194: rafiki.v1.Control.Receive:input_type -> rafiki.v1.ReceiveRequest
+	21,  // 195: rafiki.v1.Control.SetResult:input_type -> rafiki.v1.SetResultRequest
+	150, // 196: rafiki.v1.Control.Resume:input_type -> rafiki.v1.ResumeRequest
+	152, // 197: rafiki.v1.Control.CloseAllExited:input_type -> rafiki.v1.CloseAllExitedRequest
+	154, // 198: rafiki.v1.Control.SetLabels:input_type -> rafiki.v1.SetLabelsRequest
+	156, // 199: rafiki.v1.Control.Status:input_type -> rafiki.v1.StatusRequest
+	158, // 200: rafiki.v1.Control.Search:input_type -> rafiki.v1.SearchRequest
+	160, // 201: rafiki.v1.Control.ShutdownDaemon:input_type -> rafiki.v1.ShutdownDaemonRequest
+	162, // 202: rafiki.v1.Control.ModelInfo:input_type -> rafiki.v1.ModelInfoRequest
+	164, // 203: rafiki.v1.Control.ModelRoutes:input_type -> rafiki.v1.ModelRoutesRequest
+	167, // 204: rafiki.v1.Control.ConversationStats:input_type -> rafiki.v1.ConversationStatsRequest
+	169, // 205: rafiki.v1.Control.EnrollExecutor:input_type -> rafiki.v1.EnrollExecutorRequest
+	171, // 206: rafiki.v1.Control.CreateExecutor:input_type -> rafiki.v1.CreateExecutorRequest
+	173, // 207: rafiki.v1.Control.LabelExecutor:input_type -> rafiki.v1.LabelExecutorRequest
+	175, // 208: rafiki.v1.Control.DisableExecutor:input_type -> rafiki.v1.DisableExecutorRequest
+	177, // 209: rafiki.v1.Control.EnableExecutor:input_type -> rafiki.v1.EnableExecutorRequest
+	179, // 210: rafiki.v1.Control.DeleteExecutor:input_type -> rafiki.v1.DeleteExecutorRequest
+	181, // 211: rafiki.v1.Control.ExecutorSession:input_type -> rafiki.v1.ExecutorSessionRequest
+	184, // 212: rafiki.v1.Control.CreateUser:input_type -> rafiki.v1.CreateUserRequest
+	186, // 213: rafiki.v1.Control.ListUsers:input_type -> rafiki.v1.ListUsersRequest
+	189, // 214: rafiki.v1.Control.RemoveUser:input_type -> rafiki.v1.RemoveUserRequest
+	191, // 215: rafiki.v1.Control.UpdateUser:input_type -> rafiki.v1.UpdateUserRequest
+	194, // 216: rafiki.v1.Control.MintToken:input_type -> rafiki.v1.MintTokenRequest
+	196, // 217: rafiki.v1.Control.ListTokens:input_type -> rafiki.v1.ListTokensRequest
+	198, // 218: rafiki.v1.Control.RevokeToken:input_type -> rafiki.v1.RevokeTokenRequest
+	204, // 219: rafiki.v1.Control.GetStreams:input_type -> rafiki.v1.GetStreamsRequest
+	206, // 220: rafiki.v1.Control.SendFrame:input_type -> rafiki.v1.SendFrameRequest
+	200, // 221: rafiki.v1.Login.BeginLogin:input_type -> rafiki.v1.BeginLoginRequest
+	202, // 222: rafiki.v1.Login.CompleteLogin:input_type -> rafiki.v1.CompleteLoginRequest
+	6,   // 223: rafiki.v1.Control.GetHistory:output_type -> rafiki.v1.GetHistoryResponse
+	227, // 224: rafiki.v1.Control.StreamEvents:output_type -> rafiki.v1.Event
+	16,  // 225: rafiki.v1.Control.Send:output_type -> rafiki.v1.SendResponse
+	25,  // 226: rafiki.v1.Control.ListChildren:output_type -> rafiki.v1.ListChildrenResponse
+	27,  // 227: rafiki.v1.Control.GetChild:output_type -> rafiki.v1.GetChildResponse
+	30,  // 228: rafiki.v1.Control.Spawn:output_type -> rafiki.v1.SpawnResponse
+	32,  // 229: rafiki.v1.Control.Kill:output_type -> rafiki.v1.KillResponse
+	34,  // 230: rafiki.v1.Control.Close:output_type -> rafiki.v1.CloseResponse
+	36,  // 231: rafiki.v1.Control.SetBudget:output_type -> rafiki.v1.SetBudgetResponse
+	38,  // 232: rafiki.v1.Control.SetRouting:output_type -> rafiki.v1.SetRoutingResponse
+	41,  // 233: rafiki.v1.Control.ListTasks:output_type -> rafiki.v1.ListTasksResponse
+	44,  // 234: rafiki.v1.Control.ListModels:output_type -> rafiki.v1.ListModelsResponse
+	65,  // 235: rafiki.v1.Control.ListExecutors:output_type -> rafiki.v1.ListExecutorsResponse
+	76,  // 236: rafiki.v1.Control.GetRateLimitStatus:output_type -> rafiki.v1.GetRateLimitStatusResponse
+	79,  // 237: rafiki.v1.Control.ListSkills:output_type -> rafiki.v1.ListSkillsResponse
+	81,  // 238: rafiki.v1.Control.GetSkill:output_type -> rafiki.v1.GetSkillResponse
+	83,  // 239: rafiki.v1.Control.UpsertSkill:output_type -> rafiki.v1.UpsertSkillResponse
+	85,  // 240: rafiki.v1.Control.DeleteSkill:output_type -> rafiki.v1.DeleteSkillResponse
+	87,  // 241: rafiki.v1.Control.SetSkillEnabled:output_type -> rafiki.v1.SetSkillEnabledResponse
+	90,  // 242: rafiki.v1.Control.ListPymodules:output_type -> rafiki.v1.ListPymodulesResponse
+	92,  // 243: rafiki.v1.Control.GetPymodule:output_type -> rafiki.v1.GetPymoduleResponse
+	94,  // 244: rafiki.v1.Control.PutPymodule:output_type -> rafiki.v1.PutPymoduleResponse
+	96,  // 245: rafiki.v1.Control.DeletePymodule:output_type -> rafiki.v1.DeletePymoduleResponse
+	99,  // 246: rafiki.v1.Control.AddPymoduleGitSource:output_type -> rafiki.v1.AddPymoduleGitSourceResponse
+	101, // 247: rafiki.v1.Control.ListPymoduleGitSources:output_type -> rafiki.v1.ListPymoduleGitSourcesResponse
+	105, // 248: rafiki.v1.Control.RefreshPymoduleGitSource:output_type -> rafiki.v1.RefreshPymoduleGitSourceResponse
+	107, // 249: rafiki.v1.Control.RemovePymoduleGitSource:output_type -> rafiki.v1.RemovePymoduleGitSourceResponse
+	111, // 250: rafiki.v1.Control.ListPresets:output_type -> rafiki.v1.ListPresetsResponse
+	113, // 251: rafiki.v1.Control.GetPreset:output_type -> rafiki.v1.GetPresetResponse
+	115, // 252: rafiki.v1.Control.PutPreset:output_type -> rafiki.v1.PutPresetResponse
+	117, // 253: rafiki.v1.Control.DeletePreset:output_type -> rafiki.v1.DeletePresetResponse
+	120, // 254: rafiki.v1.Control.Recall:output_type -> rafiki.v1.RecallResponse
+	122, // 255: rafiki.v1.Control.RecallContext:output_type -> rafiki.v1.RecallContextResponse
+	125, // 256: rafiki.v1.Control.GetMemory:output_type -> rafiki.v1.GetMemoryResponse
+	127, // 257: rafiki.v1.Control.MemoryTree:output_type -> rafiki.v1.MemoryTreeResponse
+	129, // 258: rafiki.v1.Control.PutMemory:output_type -> rafiki.v1.PutMemoryResponse
+	131, // 259: rafiki.v1.Control.DeleteMemory:output_type -> rafiki.v1.DeleteMemoryResponse
+	133, // 260: rafiki.v1.Control.RecallBackfill:output_type -> rafiki.v1.RecallBackfillResponse
+	135, // 261: rafiki.v1.Control.RecallStatus:output_type -> rafiki.v1.RecallStatusResponse
+	47,  // 262: rafiki.v1.Control.ConversationSearch:output_type -> rafiki.v1.ConversationSearchResponse
+	50,  // 263: rafiki.v1.Control.ConversationExport:output_type -> rafiki.v1.ConversationExportResponse
+	55,  // 264: rafiki.v1.Control.ConversationQuery:output_type -> rafiki.v1.ConversationQueryResponse
+	58,  // 265: rafiki.v1.Control.ConversationReview:output_type -> rafiki.v1.ConversationReviewResponse
+	62,  // 266: rafiki.v1.Control.ConversationFindings:output_type -> rafiki.v1.ConversationFindingsResponse
+	67,  // 267: rafiki.v1.Control.DarajaLaunch:output_type -> rafiki.v1.DarajaLaunchResponse
+	69,  // 268: rafiki.v1.Control.DarajaSend:output_type -> rafiki.v1.DarajaSendResponse
+	71,  // 269: rafiki.v1.Control.DarajaWatch:output_type -> rafiki.v1.DarajaWatchResponse
+	138, // 270: rafiki.v1.Control.ListProviderBans:output_type -> rafiki.v1.ListProviderBansResponse
+	140, // 271: rafiki.v1.Control.BanProvider:output_type -> rafiki.v1.BanProviderResponse
+	142, // 272: rafiki.v1.Control.UnbanProvider:output_type -> rafiki.v1.UnbanProviderResponse
+	145, // 273: rafiki.v1.Control.ListRoutes:output_type -> rafiki.v1.ListRoutesResponse
+	147, // 274: rafiki.v1.Control.SetRoute:output_type -> rafiki.v1.SetRouteResponse
+	149, // 275: rafiki.v1.Control.DeleteRoute:output_type -> rafiki.v1.DeleteRouteResponse
+	18,  // 276: rafiki.v1.Control.Report:output_type -> rafiki.v1.ReportResponse
+	20,  // 277: rafiki.v1.Control.Receive:output_type -> rafiki.v1.ScriptMessage
+	22,  // 278: rafiki.v1.Control.SetResult:output_type -> rafiki.v1.SetResultResponse
+	151, // 279: rafiki.v1.Control.Resume:output_type -> rafiki.v1.ResumeResponse
+	153, // 280: rafiki.v1.Control.CloseAllExited:output_type -> rafiki.v1.CloseAllExitedResponse
+	155, // 281: rafiki.v1.Control.SetLabels:output_type -> rafiki.v1.SetLabelsResponse
+	157, // 282: rafiki.v1.Control.Status:output_type -> rafiki.v1.StatusResponse
+	159, // 283: rafiki.v1.Control.Search:output_type -> rafiki.v1.SearchResponse
+	161, // 284: rafiki.v1.Control.ShutdownDaemon:output_type -> rafiki.v1.ShutdownDaemonResponse
+	163, // 285: rafiki.v1.Control.ModelInfo:output_type -> rafiki.v1.ModelInfoResponse
+	166, // 286: rafiki.v1.Control.ModelRoutes:output_type -> rafiki.v1.ModelRoutesResponse
+	168, // 287: rafiki.v1.Control.ConversationStats:output_type -> rafiki.v1.ConversationStatsResponse
+	170, // 288: rafiki.v1.Control.EnrollExecutor:output_type -> rafiki.v1.EnrollExecutorResponse
+	172, // 289: rafiki.v1.Control.CreateExecutor:output_type -> rafiki.v1.CreateExecutorResponse
+	174, // 290: rafiki.v1.Control.LabelExecutor:output_type -> rafiki.v1.LabelExecutorResponse
+	176, // 291: rafiki.v1.Control.DisableExecutor:output_type -> rafiki.v1.DisableExecutorResponse
+	178, // 292: rafiki.v1.Control.EnableExecutor:output_type -> rafiki.v1.EnableExecutorResponse
+	180, // 293: rafiki.v1.Control.DeleteExecutor:output_type -> rafiki.v1.DeleteExecutorResponse
+	182, // 294: rafiki.v1.Control.ExecutorSession:output_type -> rafiki.v1.ExecutorSessionEvent
+	185, // 295: rafiki.v1.Control.CreateUser:output_type -> rafiki.v1.CreateUserResponse
+	187, // 296: rafiki.v1.Control.ListUsers:output_type -> rafiki.v1.ListUsersResponse
+	190, // 297: rafiki.v1.Control.RemoveUser:output_type -> rafiki.v1.RemoveUserResponse
+	192, // 298: rafiki.v1.Control.UpdateUser:output_type -> rafiki.v1.UpdateUserResponse
+	195, // 299: rafiki.v1.Control.MintToken:output_type -> rafiki.v1.MintTokenResponse
+	197, // 300: rafiki.v1.Control.ListTokens:output_type -> rafiki.v1.ListTokensResponse
+	199, // 301: rafiki.v1.Control.RevokeToken:output_type -> rafiki.v1.RevokeTokenResponse
+	205, // 302: rafiki.v1.Control.GetStreams:output_type -> rafiki.v1.GetStreamsResponse
+	207, // 303: rafiki.v1.Control.SendFrame:output_type -> rafiki.v1.SendFrameResponse
+	201, // 304: rafiki.v1.Login.BeginLogin:output_type -> rafiki.v1.BeginLoginResponse
+	203, // 305: rafiki.v1.Login.CompleteLogin:output_type -> rafiki.v1.CompleteLoginResponse
+	223, // [223:306] is the sub-list for method output_type
+	140, // [140:223] is the sub-list for method input_type
+	140, // [140:140] is the sub-list for extension type_name
+	140, // [140:140] is the sub-list for extension extendee
+	0,   // [0:140] is the sub-list for field type_name
 }
 
 func init() { file_rafiki_v1_control_proto_init() }
@@ -15695,16 +15729,12 @@ func file_rafiki_v1_control_proto_init() {
 	}
 	file_rafiki_v1_control_proto_msgTypes[69].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[104].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[131].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[134].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[160].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[177].OneofWrappers = []any{
 		(*ExecutorSessionEvent_Ready)(nil),
 	}
 	file_rafiki_v1_control_proto_msgTypes[179].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[183].OneofWrappers = []any{}
 	file_rafiki_v1_control_proto_msgTypes[186].OneofWrappers = []any{}
-	file_rafiki_v1_control_proto_msgTypes[188].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

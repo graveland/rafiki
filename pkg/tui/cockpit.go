@@ -2835,10 +2835,10 @@ func (c *Cockpit) fetchQuotaCmd() tea.Cmd {
 // last good snapshot is stale enough that showing it would mislead rather
 // than inform.
 func (c *Cockpit) quotaReadout() string {
-	if c.quota == nil || c.quota.GetUpdatedAt() == 0 {
+	if c.quota == nil || c.quota.GetUpdatedAt() == nil {
 		return ""
 	}
-	if time.Since(time.Unix(c.quota.GetUpdatedAt(), 0)) > quotaStaleAfter {
+	if time.Since(c.quota.GetUpdatedAt().AsTime()) > quotaStaleAfter {
 		return ""
 	}
 	return quotaWindowReadout("5h", c.quota.GetFiveH()) + " " + quotaWindowReadout("7d", c.quota.GetSevenD())

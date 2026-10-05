@@ -1472,9 +1472,9 @@ class ModelRow:
     cache_read_usd: Optional[float] = None
     cache_write_usd: Optional[float] = None
     input_modalities: list[str] = dataclasses.field(default_factory=list)
-    created: Optional[int] = None
+    created: Optional[datetime.datetime] = None
     supported_parameters: list[str] = dataclasses.field(default_factory=list)
-    expires_at: str = ""
+    expires_at: Optional[datetime.datetime] = None
     knowledge_cutoff: str = ""
     agentic_index: Optional[float] = None
     intelligence_index: Optional[float] = None
@@ -1507,11 +1507,11 @@ class ModelRow:
         if self.input_modalities:
             out["inputModalities"] = [x for x in self.input_modalities]
         if self.created is not None:
-            out["created"] = str(self.created)
+            out["created"] = _ts_out(self.created)
         if self.supported_parameters:
             out["supportedParameters"] = [x for x in self.supported_parameters]
-        if self.expires_at != "":
-            out["expiresAt"] = self.expires_at
+        if self.expires_at is not None:
+            out["expiresAt"] = _ts_out(self.expires_at)
         if self.knowledge_cutoff != "":
             out["knowledgeCutoff"] = self.knowledge_cutoff
         if self.agentic_index is not None:
@@ -1562,13 +1562,13 @@ class ModelRow:
             obj.input_modalities = [x for x in _v]
         _v = _d.get("created")
         if _v is not None:
-            obj.created = _int_in(_v)
+            obj.created = _ts_in(_v, "created")
         _v = _d.get("supportedParameters")
         if _v is not None:
             obj.supported_parameters = [x for x in _v]
         _v = _d.get("expiresAt")
         if _v is not None:
-            obj.expires_at = _v
+            obj.expires_at = _ts_in(_v, "expiresAt")
         _v = _d.get("knowledgeCutoff")
         if _v is not None:
             obj.knowledge_cutoff = _v
@@ -2773,7 +2773,7 @@ class DarajaProcessExited:
 @dataclasses.dataclass
 class RateLimitWindow:
     utilization: Optional[float] = None
-    reset_at: Optional[int] = None
+    reset_at: Optional[datetime.datetime] = None
     status: str = ""
 
     def to_dict(self) -> dict:
@@ -2781,7 +2781,7 @@ class RateLimitWindow:
         if self.utilization is not None:
             out["utilization"] = _float_out(self.utilization)
         if self.reset_at is not None:
-            out["resetAt"] = str(self.reset_at)
+            out["resetAt"] = _ts_out(self.reset_at)
         if self.status != "":
             out["status"] = self.status
         return out
@@ -2793,7 +2793,7 @@ class RateLimitWindow:
             obj.utilization = _float_in(_v)
         _v = _d.get("resetAt")
         if _v is not None:
-            obj.reset_at = _int_in(_v)
+            obj.reset_at = _ts_in(_v, "resetAt")
         _v = _d.get("status")
         if _v is not None:
             obj.status = _v
@@ -2817,7 +2817,7 @@ class GetRateLimitStatusResponse:
     five_h: Optional[RateLimitWindow] = None
     seven_d: Optional[RateLimitWindow] = None
     overall_status: str = ""
-    updated_at: int = 0
+    updated_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -2829,8 +2829,8 @@ class GetRateLimitStatusResponse:
             out["sevenD"] = self.seven_d.to_dict()
         if self.overall_status != "":
             out["overallStatus"] = self.overall_status
-        if self.updated_at != 0:
-            out["updatedAt"] = str(self.updated_at)
+        if self.updated_at is not None:
+            out["updatedAt"] = _ts_out(self.updated_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "GetRateLimitStatusResponse":
@@ -2849,7 +2849,7 @@ class GetRateLimitStatusResponse:
             obj.overall_status = _v
         _v = _d.get("updatedAt")
         if _v is not None:
-            obj.updated_at = _int_in(_v)
+            obj.updated_at = _ts_in(_v, "updatedAt")
         return obj
 
 @dataclasses.dataclass
@@ -2860,7 +2860,7 @@ class SkillRow:
     source: str = ""
     enabled: bool = False
     shadowed_core_version: str = ""
-    updated_at: str = ""
+    updated_at: Optional[datetime.datetime] = None
     body: str = ""
 
     def to_dict(self) -> dict:
@@ -2877,8 +2877,8 @@ class SkillRow:
             out["enabled"] = self.enabled
         if self.shadowed_core_version != "":
             out["shadowedCoreVersion"] = self.shadowed_core_version
-        if self.updated_at != "":
-            out["updatedAt"] = self.updated_at
+        if self.updated_at is not None:
+            out["updatedAt"] = _ts_out(self.updated_at)
         if self.body != "":
             out["body"] = self.body
         return out
@@ -2905,7 +2905,7 @@ class SkillRow:
             obj.shadowed_core_version = _v
         _v = _d.get("updatedAt")
         if _v is not None:
-            obj.updated_at = _v
+            obj.updated_at = _ts_in(_v, "updatedAt")
         _v = _d.get("body")
         if _v is not None:
             obj.body = _v
@@ -3130,7 +3130,7 @@ class PymoduleRow:
     version: int = 0
     name: str = ""
     description: str = ""
-    created_at: str = ""
+    created_at: Optional[datetime.datetime] = None
     code: str = ""
     repo: str = ""
 
@@ -3142,8 +3142,8 @@ class PymoduleRow:
             out["name"] = self.name
         if self.description != "":
             out["description"] = self.description
-        if self.created_at != "":
-            out["createdAt"] = self.created_at
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         if self.code != "":
             out["code"] = self.code
         if self.repo != "":
@@ -3163,7 +3163,7 @@ class PymoduleRow:
             obj.description = _v
         _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at = _v
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("code")
         if _v is not None:
             obj.code = _v
@@ -3590,8 +3590,8 @@ class PresetRow:
     max_depth: Optional[int] = None
     max_children: Optional[int] = None
     written_by_child: str = ""
-    created_at: str = ""
-    deleted_at: str = ""
+    created_at: Optional[datetime.datetime] = None
+    deleted_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -3633,10 +3633,10 @@ class PresetRow:
             out["maxChildren"] = self.max_children
         if self.written_by_child != "":
             out["writtenByChild"] = self.written_by_child
-        if self.created_at != "":
-            out["createdAt"] = self.created_at
-        if self.deleted_at != "":
-            out["deletedAt"] = self.deleted_at
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.deleted_at is not None:
+            out["deletedAt"] = _ts_out(self.deleted_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "PresetRow":
@@ -3700,10 +3700,10 @@ class PresetRow:
             obj.written_by_child = _v
         _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at = _v
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("deletedAt")
         if _v is not None:
-            obj.deleted_at = _v
+            obj.deleted_at = _ts_in(_v, "deletedAt")
         return obj
 
 @dataclasses.dataclass
@@ -3848,7 +3848,7 @@ class RecallHit:
     id: str = ""
     source: str = ""
     snippet: str = ""
-    when: str = ""
+    when: Optional[datetime.datetime] = None
     conversation_id: str = ""
     conversation_name: str = ""
     repo: str = ""
@@ -3868,8 +3868,8 @@ class RecallHit:
             out["source"] = self.source
         if self.snippet != "":
             out["snippet"] = self.snippet
-        if self.when != "":
-            out["when"] = self.when
+        if self.when is not None:
+            out["when"] = _ts_out(self.when)
         if self.conversation_id != "":
             out["conversationId"] = self.conversation_id
         if self.conversation_name != "":
@@ -3905,7 +3905,7 @@ class RecallHit:
             obj.snippet = _v
         _v = _d.get("when")
         if _v is not None:
-            obj.when = _v
+            obj.when = _ts_in(_v, "when")
         _v = _d.get("conversationId")
         if _v is not None:
             obj.conversation_id = _v
@@ -3944,8 +3944,8 @@ class RecallRequest:
     sources: list[str] = dataclasses.field(default_factory=list)
     under: str = ""
     repo: str = ""
-    since_unix: int = 0
-    until_unix: int = 0
+    since: Optional[datetime.datetime] = None
+    until: Optional[datetime.datetime] = None
     limit: int = 0
 
     def to_dict(self) -> dict:
@@ -3958,10 +3958,10 @@ class RecallRequest:
             out["under"] = self.under
         if self.repo != "":
             out["repo"] = self.repo
-        if self.since_unix != 0:
-            out["sinceUnix"] = str(self.since_unix)
-        if self.until_unix != 0:
-            out["untilUnix"] = str(self.until_unix)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
+        if self.until is not None:
+            out["until"] = _ts_out(self.until)
         if self.limit != 0:
             out["limit"] = self.limit
         return out
@@ -3980,12 +3980,12 @@ class RecallRequest:
         _v = _d.get("repo")
         if _v is not None:
             obj.repo = _v
-        _v = _d.get("sinceUnix")
+        _v = _d.get("since")
         if _v is not None:
-            obj.since_unix = _int_in(_v)
-        _v = _d.get("untilUnix")
+            obj.since = _ts_in(_v, "since")
+        _v = _d.get("until")
         if _v is not None:
-            obj.until_unix = _int_in(_v)
+            obj.until = _ts_in(_v, "until")
         _v = _d.get("limit")
         if _v is not None:
             obj.limit = _int_in(_v)
@@ -4067,8 +4067,8 @@ class MemoryRow:
     name: str = ""
     body: str = ""
     meta_json: str = ""
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: Optional[datetime.datetime] = None
+    updated_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -4082,10 +4082,10 @@ class MemoryRow:
             out["body"] = self.body
         if self.meta_json != "":
             out["metaJson"] = self.meta_json
-        if self.created_at != "":
-            out["createdAt"] = self.created_at
-        if self.updated_at != "":
-            out["updatedAt"] = self.updated_at
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.updated_at is not None:
+            out["updatedAt"] = _ts_out(self.updated_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "MemoryRow":
@@ -4107,10 +4107,10 @@ class MemoryRow:
             obj.meta_json = _v
         _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at = _v
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("updatedAt")
         if _v is not None:
-            obj.updated_at = _v
+            obj.updated_at = _ts_in(_v, "updatedAt")
         return obj
 
 @dataclasses.dataclass
@@ -4282,22 +4282,22 @@ class DeleteMemoryResponse:
 
 @dataclasses.dataclass
 class RecallBackfillRequest:
-    since_unix: int = 0
+    since: Optional[datetime.datetime] = None
     max_cost_usd: float = 0.0
 
     def to_dict(self) -> dict:
         out = {}
-        if self.since_unix != 0:
-            out["sinceUnix"] = str(self.since_unix)
+        if self.since is not None:
+            out["since"] = _ts_out(self.since)
         if self.max_cost_usd != 0.0:
             out["maxCostUsd"] = _float_out(self.max_cost_usd)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "RecallBackfillRequest":
         obj = cls()
-        _v = _d.get("sinceUnix")
+        _v = _d.get("since")
         if _v is not None:
-            obj.since_unix = _int_in(_v)
+            obj.since = _ts_in(_v, "since")
         _v = _d.get("maxCostUsd")
         if _v is not None:
             obj.max_cost_usd = _float_in(_v)
@@ -4336,7 +4336,7 @@ class RecallStatusResponse:
     summaries_pending: int = 0
     memories: int = 0
     summary_cost_usd: float = 0.0
-    backfill_since: str = ""
+    backfill_since: Optional[datetime.datetime] = None
     backfill_budget_usd: float = 0.0
     backfill_spent_usd: float = 0.0
     embedding_model: str = ""
@@ -4358,8 +4358,8 @@ class RecallStatusResponse:
             out["memories"] = str(self.memories)
         if self.summary_cost_usd != 0.0:
             out["summaryCostUsd"] = _float_out(self.summary_cost_usd)
-        if self.backfill_since != "":
-            out["backfillSince"] = self.backfill_since
+        if self.backfill_since is not None:
+            out["backfillSince"] = _ts_out(self.backfill_since)
         if self.backfill_budget_usd != 0.0:
             out["backfillBudgetUsd"] = _float_out(self.backfill_budget_usd)
         if self.backfill_spent_usd != 0.0:
@@ -4395,7 +4395,7 @@ class RecallStatusResponse:
             obj.summary_cost_usd = _float_in(_v)
         _v = _d.get("backfillSince")
         if _v is not None:
-            obj.backfill_since = _v
+            obj.backfill_since = _ts_in(_v, "backfillSince")
         _v = _d.get("backfillBudgetUsd")
         if _v is not None:
             obj.backfill_budget_usd = _float_in(_v)
@@ -4415,8 +4415,8 @@ class ProviderBan:
     provider: str = ""
     model_line: str = ""
     reason: str = ""
-    created_at: int = 0
-    expires_at: Optional[int] = None
+    created_at: Optional[datetime.datetime] = None
+    expires_at: Optional[datetime.datetime] = None
     note: str = ""
 
     def to_dict(self) -> dict:
@@ -4427,10 +4427,10 @@ class ProviderBan:
             out["modelLine"] = self.model_line
         if self.reason != "":
             out["reason"] = self.reason
-        if self.created_at != 0:
-            out["createdAt"] = str(self.created_at)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         if self.expires_at is not None:
-            out["expiresAt"] = str(self.expires_at)
+            out["expiresAt"] = _ts_out(self.expires_at)
         if self.note != "":
             out["note"] = self.note
         return out
@@ -4448,10 +4448,10 @@ class ProviderBan:
             obj.reason = _v
         _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at = _int_in(_v)
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("expiresAt")
         if _v is not None:
-            obj.expires_at = _int_in(_v)
+            obj.expires_at = _ts_in(_v, "expiresAt")
         _v = _d.get("note")
         if _v is not None:
             obj.note = _v
@@ -4495,15 +4495,15 @@ class ListProviderBansResponse:
 @dataclasses.dataclass
 class BanProviderRequest:
     provider: str = ""
-    duration_seconds: Optional[int] = None
+    duration: Optional[datetime.timedelta] = None
     note: str = ""
 
     def to_dict(self) -> dict:
         out = {}
         if self.provider != "":
             out["provider"] = self.provider
-        if self.duration_seconds is not None:
-            out["durationSeconds"] = str(self.duration_seconds)
+        if self.duration is not None:
+            out["duration"] = _dur_out(self.duration)
         if self.note != "":
             out["note"] = self.note
         return out
@@ -4513,9 +4513,9 @@ class BanProviderRequest:
         _v = _d.get("provider")
         if _v is not None:
             obj.provider = _v
-        _v = _d.get("durationSeconds")
+        _v = _d.get("duration")
         if _v is not None:
-            obj.duration_seconds = _int_in(_v)
+            obj.duration = _dur_in(_v, "duration")
         _v = _d.get("note")
         if _v is not None:
             obj.note = _v
@@ -4577,7 +4577,7 @@ class UnbanProviderResponse:
 class RouteRow:
     model_line: str = ""
     spec: str = ""
-    created_at: str = ""
+    created_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -4585,8 +4585,8 @@ class RouteRow:
             out["modelLine"] = self.model_line
         if self.spec != "":
             out["spec"] = self.spec
-        if self.created_at != "":
-            out["createdAt"] = self.created_at
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "RouteRow":
@@ -4599,7 +4599,7 @@ class RouteRow:
             obj.spec = _v
         _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at = _v
+            obj.created_at = _ts_in(_v, "createdAt")
         return obj
 
 @dataclasses.dataclass
@@ -5212,7 +5212,7 @@ class RouteEndpoint:
     preferred: bool = False
     p50_tokens_per_sec: Optional[float] = None
     p90_tokens_per_sec: Optional[float] = None
-    p50_latency_ms: Optional[float] = None
+    p50_latency: Optional[datetime.timedelta] = None
     stats_requests: Optional[int] = None
 
     def to_dict(self) -> dict:
@@ -5247,8 +5247,8 @@ class RouteEndpoint:
             out["p50TokensPerSec"] = _float_out(self.p50_tokens_per_sec)
         if self.p90_tokens_per_sec is not None:
             out["p90TokensPerSec"] = _float_out(self.p90_tokens_per_sec)
-        if self.p50_latency_ms is not None:
-            out["p50LatencyMs"] = _float_out(self.p50_latency_ms)
+        if self.p50_latency is not None:
+            out["p50Latency"] = _dur_out(self.p50_latency)
         if self.stats_requests is not None:
             out["statsRequests"] = self.stats_requests
         return out
@@ -5300,9 +5300,9 @@ class RouteEndpoint:
         _v = _d.get("p90TokensPerSec")
         if _v is not None:
             obj.p90_tokens_per_sec = _float_in(_v)
-        _v = _d.get("p50LatencyMs")
+        _v = _d.get("p50Latency")
         if _v is not None:
-            obj.p50_latency_ms = _float_in(_v)
+            obj.p50_latency = _dur_in(_v, "p50Latency")
         _v = _d.get("statsRequests")
         if _v is not None:
             obj.stats_requests = _int_in(_v)
@@ -5810,7 +5810,7 @@ class CreateUserResponse:
     id: str = ""
     username: str = ""
     token: str = ""
-    created_at_unix: int = 0
+    created_at: Optional[datetime.datetime] = None
     token_reason: str = ""
     login_configured: bool = False
 
@@ -5822,8 +5822,8 @@ class CreateUserResponse:
             out["username"] = self.username
         if self.token != "":
             out["token"] = self.token
-        if self.created_at_unix != 0:
-            out["createdAtUnix"] = str(self.created_at_unix)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
         if self.token_reason != "":
             out["tokenReason"] = self.token_reason
         if self.login_configured != False:
@@ -5841,9 +5841,9 @@ class CreateUserResponse:
         _v = _d.get("token")
         if _v is not None:
             obj.token = _v
-        _v = _d.get("createdAtUnix")
+        _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at_unix = _int_in(_v)
+            obj.created_at = _ts_in(_v, "createdAt")
         _v = _d.get("tokenReason")
         if _v is not None:
             obj.token_reason = _v
@@ -5897,8 +5897,8 @@ class UserRow:
     id: str = ""
     username: str = ""
     is_admin: bool = False
-    created_at_unix: int = 0
-    deleted_at_unix: Optional[int] = None
+    created_at: Optional[datetime.datetime] = None
+    deleted_at: Optional[datetime.datetime] = None
     email: str = ""
 
     def to_dict(self) -> dict:
@@ -5909,10 +5909,10 @@ class UserRow:
             out["username"] = self.username
         if self.is_admin != False:
             out["isAdmin"] = self.is_admin
-        if self.created_at_unix != 0:
-            out["createdAtUnix"] = str(self.created_at_unix)
-        if self.deleted_at_unix is not None:
-            out["deletedAtUnix"] = str(self.deleted_at_unix)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.deleted_at is not None:
+            out["deletedAt"] = _ts_out(self.deleted_at)
         if self.email != "":
             out["email"] = self.email
         return out
@@ -5928,12 +5928,12 @@ class UserRow:
         _v = _d.get("isAdmin")
         if _v is not None:
             obj.is_admin = _v
-        _v = _d.get("createdAtUnix")
+        _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at_unix = _int_in(_v)
-        _v = _d.get("deletedAtUnix")
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("deletedAt")
         if _v is not None:
-            obj.deleted_at_unix = _int_in(_v)
+            obj.deleted_at = _ts_in(_v, "deletedAt")
         _v = _d.get("email")
         if _v is not None:
             obj.email = _v
@@ -6014,9 +6014,9 @@ class TokenRow:
     username: str = ""
     name: str = ""
     origin: str = ""
-    created_at_unix: int = 0
-    expires_at_unix: Optional[int] = None
-    revoked_at_unix: Optional[int] = None
+    created_at: Optional[datetime.datetime] = None
+    expires_at: Optional[datetime.datetime] = None
+    revoked_at: Optional[datetime.datetime] = None
 
     def to_dict(self) -> dict:
         out = {}
@@ -6028,12 +6028,12 @@ class TokenRow:
             out["name"] = self.name
         if self.origin != "":
             out["origin"] = self.origin
-        if self.created_at_unix != 0:
-            out["createdAtUnix"] = str(self.created_at_unix)
-        if self.expires_at_unix is not None:
-            out["expiresAtUnix"] = str(self.expires_at_unix)
-        if self.revoked_at_unix is not None:
-            out["revokedAtUnix"] = str(self.revoked_at_unix)
+        if self.created_at is not None:
+            out["createdAt"] = _ts_out(self.created_at)
+        if self.expires_at is not None:
+            out["expiresAt"] = _ts_out(self.expires_at)
+        if self.revoked_at is not None:
+            out["revokedAt"] = _ts_out(self.revoked_at)
         return out
     @classmethod
     def from_dict(cls, _d: dict) -> "TokenRow":
@@ -6050,15 +6050,15 @@ class TokenRow:
         _v = _d.get("origin")
         if _v is not None:
             obj.origin = _v
-        _v = _d.get("createdAtUnix")
+        _v = _d.get("createdAt")
         if _v is not None:
-            obj.created_at_unix = _int_in(_v)
-        _v = _d.get("expiresAtUnix")
+            obj.created_at = _ts_in(_v, "createdAt")
+        _v = _d.get("expiresAt")
         if _v is not None:
-            obj.expires_at_unix = _int_in(_v)
-        _v = _d.get("revokedAtUnix")
+            obj.expires_at = _ts_in(_v, "expiresAt")
+        _v = _d.get("revokedAt")
         if _v is not None:
-            obj.revoked_at_unix = _int_in(_v)
+            obj.revoked_at = _ts_in(_v, "revokedAt")
         return obj
 
 @dataclasses.dataclass

@@ -173,6 +173,8 @@ func (b *recallBinding) Recall(ctx context.Context, q tools.RecallQuery) (string
 		Text:        q.Query,
 		Under:       q.Under,
 		Repo:        q.Repo,
+		Since:       q.Since,
+		Until:       q.Until,
 		Limit:       q.Limit,
 	}
 	// Sources arrive as NAMES and the tool layer does not validate them: an
@@ -183,12 +185,6 @@ func (b *recallBinding) Recall(ctx context.Context, q tools.RecallQuery) (string
 			return "", err
 		}
 		sq.Sources = append(sq.Sources, src)
-	}
-	if t := unixSecPtr(q.SinceUnix); t != nil {
-		sq.Since = t
-	}
-	if t := unixSecPtr(q.UntilUnix); t != nil {
-		sq.Until = t
 	}
 	hits, err := recall.Search(ctx, b.st, b.emb, sq, q.Limit)
 	if err != nil {

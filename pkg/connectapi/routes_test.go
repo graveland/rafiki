@@ -117,10 +117,10 @@ func TestDeleteRouteMissingIsNotFound(t *testing.T) {
 	c.Eq(connect.CodeInternal, connect.CodeOf(err), "unrelated failure: code")
 }
 
-// TestRouteRowCreatedAtIsRFC3339UTC pins the read path's rendering and the
-// write path's pass-through: created_at renders as RFC3339 UTC regardless of
-// the source timezone, and the trimmed line and spec reach the manager.
-func TestRouteRowCreatedAtIsRFC3339UTC(t *testing.T) {
+// TestRouteRowCreatedAtIsUTC pins the read path's rendering and the write
+// path's pass-through: created_at is a Timestamp in UTC regardless of the
+// source timezone, and the trimmed line and spec reach the manager.
+func TestRouteRowCreatedAtIsUTC(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeRoutes{rows: []RouteRow{{
 		ModelLine: "z-ai/glm-5.3", Spec: "sort=price",
@@ -132,7 +132,7 @@ func TestRouteRowCreatedAtIsRFC3339UTC(t *testing.T) {
 
 	resp, err := s.ListRoutes(ctx, connect.NewRequest(&rafikiv1.ListRoutesRequest{}))
 	c.Require().NoError(err)
-	c.Eq("2026-01-02T01:04:05Z", resp.Msg.GetRows()[0].GetCreatedAt(), "created_at rendering")
+	c.Eq(time.Date(2026, 1, 2, 1, 4, 5, 0, time.UTC), resp.Msg.GetRows()[0].GetCreatedAt().AsTime(), "created_at rendering")
 
 	if _, err := s.SetRoute(ctx, connect.NewRequest(&rafikiv1.SetRouteRequest{
 		ModelLine: "  z-ai/glm-5.3  ", Spec: "  sort=price  ",

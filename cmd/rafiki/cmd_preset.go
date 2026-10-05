@@ -219,7 +219,7 @@ func emitPresetHistory(w io.Writer, rows []*rafikiv1.PresetRow, mode outputMode,
 		tb.Header(dimHeader(useColor, "VERSION", "CREATED", "DELETED", "WRITTEN BY", "MODEL")...)
 		for _, r := range rows {
 			deleted := "-"
-			if r.GetDeletedAt() != "" {
+			if r.GetDeletedAt() != nil {
 				deleted = formatSavedAt(r.GetDeletedAt())
 			}
 			tb.Row(

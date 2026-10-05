@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -40,7 +42,7 @@ type SkillRow struct {
 	Source              string
 	ShadowedCoreVersion string
 	Enabled             bool
-	UpdatedAt           string
+	UpdatedAt           time.Time
 }
 
 // SkillManager is the narrow slice of the daemon needed to manage skills.
@@ -106,7 +108,7 @@ func toProtoSkill(r SkillRow) *rafikiv1.SkillRow {
 		Source:              r.Source,
 		Enabled:             r.Enabled,
 		ShadowedCoreVersion: r.ShadowedCoreVersion,
-		UpdatedAt:           r.UpdatedAt,
+		UpdatedAt:           timestamppb.New(r.UpdatedAt),
 		Body:                r.Body,
 	}
 }

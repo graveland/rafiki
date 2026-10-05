@@ -8,13 +8,20 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
 )
+
+// savedAt builds the wire Timestamp the fixture rows carry.
+func savedAt(y, mo, d, h, mi, s int) *timestamppb.Timestamp {
+	return timestamppb.New(time.Date(y, time.Month(mo), d, h, mi, s, 0, time.UTC))
+}
 
 // The tree contract: `python` sits under the root with the alias `py`, and
 // carries exactly the four blob verbs plus the `repo` group that manages git
@@ -136,7 +143,7 @@ func writeFileForTest(path, content string) error {
 // inventory row must render rather than blanks.
 func TestPythonListCells(t *testing.T) {
 	c := assert.NewCollecting(t)
-	row := func(name, repo string, version int64, createdAt, description string) *rafikiv1.PymoduleRow {
+	row := func(name, repo string, version int64, createdAt *timestamppb.Timestamp, description string) *rafikiv1.PymoduleRow {
 		return &rafikiv1.PymoduleRow{
 			Name:        name,
 			Repo:        repo,
@@ -146,15 +153,12 @@ func TestPythonListCells(t *testing.T) {
 		}
 	}
 	name, repo, version, saved, description := pymoduleCells(
-		row("helper", "local", 7, "2026-09-18T12:34:56Z", ""))
+		row("helper", "local", 7, savedAt(2026, 9, 18, 12, 34, 56), ""))
 	c.False(name != "helper" || repo != "local" || version != "7" || saved != "2026-09-18 12:34" || description != "-", "pymoduleCells = (%q,%q,%q,%q,%q), want (helper,local,7,2026-09-18 12:34,-)", name, repo, version, saved, description)
 
-	if got := formatSavedAt(""); got != "-" {
-		t.Errorf("formatSavedAt(\"\") = %q, want \"-\"", got)
+	if got := formatSavedAt(nil); got != "-" {
+		t.Errorf("formatSavedAt(nil) = %q, want \"-\"", got)
 	}
-	// A timestamp that does not parse is displayed, not blanked: a daemon
-	// clock this daemon wrote must stay visible even when malformed.
-	c.Eq("not-a-timestamp", formatSavedAt("not-a-timestamp"), "formatSavedAt(unparseable)")
 
 	// The version's absent marker mirrors the timestamp's: a git-sourced row
 	// has no version, and 0 is the wire's way of saying "none".
@@ -167,7 +171,7 @@ func TestPythonListCells(t *testing.T) {
 	// The rendered table names the five columns and never prints CODE.
 	var buf bytes.Buffer
 	c.Require().NoError(renderPymoduleList(&buf, []*rafikiv1.PymoduleRow{
-		row("helper", "local", 7, "2026-09-18T12:34:56Z", "reusable helpers"),
+		row("helper", "local", 7, savedAt(2026, 9, 18, 12, 34, 56), "reusable helpers"),
 	}, false))
 	out := buf.String()
 	for _, want := range []string{"NAME", "REPO", "VERSION", "SAVED", "DESCRIPTION", "helper", "local", "7", "2026-09-18 12:34", "reusable helpers"} {
@@ -184,7 +188,7 @@ func TestPythonListCells(t *testing.T) {
 func TestPythonListRepoColumnRendersLocalAndGitRows(t *testing.T) {
 	c := assert.NewCollecting(t)
 	rows := []*rafikiv1.PymoduleRow{
-		{Name: "helper", Repo: "local", Version: 7, CreatedAt: "2026-09-18T12:34:56Z", Description: "saved here"},
+		{Name: "helper", Repo: "local", Version: 7, CreatedAt: savedAt(2026, 9, 18, 12, 34, 56), Description: "saved here"},
 		{Name: "rotate_keys", Repo: "ops_tools", Description: "rotates keys"},
 	}
 	var buf bytes.Buffer
@@ -222,7 +226,7 @@ func TestPythonJSONShapes(t *testing.T) {
 		// objects entirely.
 		return &rafikiv1.PymoduleRow{
 			Name: "helper", Version: 7, Description: "d",
-			CreatedAt: "2026-09-18T12:34:56Z", Code: "x = 1",
+			CreatedAt: savedAt(2026, 9, 18, 12, 34, 56), Code: "x = 1",
 		}
 	}
 

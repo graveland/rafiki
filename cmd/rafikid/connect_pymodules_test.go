@@ -173,7 +173,7 @@ func TestConnectPyModulesListSpansGitSources(t *testing.T) {
 	// carrying neither version nor save time nor code.
 	for _, want := range []struct{ name, description string }{{"rotate_keys", "rotates keys"}, {"opslib", "ops helpers"}} {
 		r := byName[want.name]
-		c.False(r.Repo != "ops_tools" || r.Version != 0 || r.CreatedAt != "" || r.Code != "" || r.Description != want.description, "%s = %+v, want Repo ops_tools, zero version/createdAt/code, description %q", want.name, r, want.description)
+		c.False(r.Repo != "ops_tools" || r.Version != 0 || !r.CreatedAt.IsZero() || r.Code != "" || r.Description != want.description, "%s = %+v, want Repo ops_tools, zero version/createdAt/code, description %q", want.name, r, want.description)
 	}
 	// shared_lib's script, under its own source's name.
 	if r := byName["compile_helpers"]; r.Repo != "shared_lib" || r.Version != 0 || r.Code != "" {

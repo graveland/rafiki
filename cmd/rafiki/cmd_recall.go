@@ -58,12 +58,12 @@ func runRecall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	resp, err := ep.control().Recall(cmdCtx(cmd), connect.NewRequest(&rafikiv1.RecallRequest{
-		Query:     strings.Join(args, " "),
-		Sources:   sources,
-		Under:     under,
-		Repo:      repo,
-		SinceUnix: unixOrZero(since),
-		Limit:     int32(limit),
+		Query:   strings.Join(args, " "),
+		Sources: sources,
+		Under:   under,
+		Repo:    repo,
+		Since:   timeTS(since),
+		Limit:   int32(limit),
 	}))
 	if err != nil {
 		return diagnoseConnectError(err, ep.describe)

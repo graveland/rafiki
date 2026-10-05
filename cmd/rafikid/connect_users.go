@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -128,7 +129,7 @@ func (a connectUserAdmin) Create(ctx context.Context, username, email string, mi
 		Id:              u.ID,
 		Username:        u.Username,
 		Token:           token,
-		CreatedAtUnix:   u.CreatedAt.Unix(),
+		CreatedAt:       timestamppb.New(u.CreatedAt),
 		TokenReason:     reason,
 		LoginConfigured: loginConfigured,
 	}, nil
@@ -376,15 +377,14 @@ func userSentinelErr(err error, username string) error {
 // newUserRow converts a store user to its wire row.
 func newUserRow(u users.User) *rafikiv1.UserRow {
 	row := &rafikiv1.UserRow{
-		Id:            u.ID,
-		Username:      u.Username,
-		IsAdmin:       u.IsAdmin,
-		Email:         u.Email,
-		CreatedAtUnix: u.CreatedAt.Unix(),
+		Id:        u.ID,
+		Username:  u.Username,
+		IsAdmin:   u.IsAdmin,
+		Email:     u.Email,
+		CreatedAt: timestamppb.New(u.CreatedAt),
 	}
 	if u.DeletedAt != nil {
-		deletedAt := u.DeletedAt.Unix()
-		row.DeletedAtUnix = &deletedAt
+		row.DeletedAt = timestamppb.New(*u.DeletedAt)
 	}
 	return row
 }
@@ -393,19 +393,17 @@ func newUserRow(u users.User) *rafikiv1.UserRow {
 // a field: TokenRow is metadata only.
 func newTokenRow(t users.Token) *rafikiv1.TokenRow {
 	row := &rafikiv1.TokenRow{
-		Id:            t.ID,
-		Username:      t.Username,
-		Name:          t.Name,
-		Origin:        string(t.Origin),
-		CreatedAtUnix: t.CreatedAt.Unix(),
+		Id:        t.ID,
+		Username:  t.Username,
+		Name:      t.Name,
+		Origin:    string(t.Origin),
+		CreatedAt: timestamppb.New(t.CreatedAt),
 	}
 	if t.ExpiresAt != nil {
-		expiresAt := t.ExpiresAt.Unix()
-		row.ExpiresAtUnix = &expiresAt
+		row.ExpiresAt = timestamppb.New(*t.ExpiresAt)
 	}
 	if t.RevokedAt != nil {
-		revokedAt := t.RevokedAt.Unix()
-		row.RevokedAtUnix = &revokedAt
+		row.RevokedAt = timestamppb.New(*t.RevokedAt)
 	}
 	return row
 }

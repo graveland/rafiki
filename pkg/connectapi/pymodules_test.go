@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -46,7 +47,7 @@ func (f *fakePymodules) GetPymodule(_ context.Context, name string) (PymoduleRow
 	if f.getErr != nil {
 		return PymoduleRow{}, f.getErr
 	}
-	return PymoduleRow{Version: 7, Name: name, Description: "d", CreatedAt: "2026-01-01T00:00:00Z", Code: "x = 1"}, nil
+	return PymoduleRow{Version: 7, Name: name, Description: "d", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Code: "x = 1"}, nil
 }
 
 func (f *fakePymodules) PutPymodule(_ context.Context, name, code, description string) (PymoduleRow, error) {
@@ -54,7 +55,7 @@ func (f *fakePymodules) PutPymodule(_ context.Context, name, code, description s
 		return PymoduleRow{}, f.putErr
 	}
 	f.puts = append(f.puts, recordedPut{name: name, code: code, description: description})
-	return PymoduleRow{Version: 8, Name: name, Description: description, CreatedAt: "2026-01-01T00:00:00Z", Code: code}, nil
+	return PymoduleRow{Version: 8, Name: name, Description: description, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Code: code}, nil
 }
 
 func (f *fakePymodules) DeletePymodule(_ context.Context, name string) error {
@@ -69,8 +70,8 @@ func TestListPymodulesOmitsCode(t *testing.T) {
 	c := assert.NewCollecting(t)
 	s := &Server{}
 	f := &fakePymodules{rows: []PymoduleRow{
-		{Version: 2, Name: "alpha", Description: "first", CreatedAt: "2026-01-01T00:00:00Z", Code: "a = 1"},
-		{Version: 1, Name: "beta", CreatedAt: "2026-01-02T00:00:00Z", Code: "b = 2"},
+		{Version: 2, Name: "alpha", Description: "first", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Code: "a = 1"},
+		{Version: 1, Name: "beta", CreatedAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), Code: "b = 2"},
 	}}
 	s.SetPymoduleManager(f)
 

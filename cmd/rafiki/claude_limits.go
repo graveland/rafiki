@@ -43,7 +43,7 @@ func runClaudeLimits(cmd *cobra.Command) error {
 // renderRateLimitStatus writes st as plain text. Separated from the command
 // so it can be tested without a server.
 func renderRateLimitStatus(w io.Writer, st *rafikiv1.GetRateLimitStatusResponse) {
-	updated := time.Unix(st.GetUpdatedAt(), 0)
+	updated := st.GetUpdatedAt().AsTime()
 	fmt.Fprintf(w, "Anthropic subscription rate limits (org %s, updated %s ago)\n",
 		orDash(st.GetOrganizationId()), time.Since(updated).Round(time.Second))
 	renderRateLimitWindow(w, "5h ", st.GetFiveH())
@@ -56,7 +56,7 @@ func renderRateLimitWindow(w io.Writer, label string, win *rafikiv1.RateLimitWin
 	util := quotafmt.Utilization(win.Utilization)
 	reset := "—"
 	if win.ResetAt != nil {
-		reset = time.Unix(win.GetResetAt(), 0).Format(time.RFC3339)
+		reset = win.GetResetAt().AsTime().Format(time.RFC3339)
 	}
 	fmt.Fprintf(w, "  %s: %s used, resets %s, status %s\n", label, util, reset, orDash(win.GetStatus()))
 }

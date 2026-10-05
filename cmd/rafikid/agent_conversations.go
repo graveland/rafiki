@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"go.graveland.dev/rafiki/pkg/fundi/tools"
 	"go.graveland.dev/rafiki/pkg/insights"
@@ -167,14 +166,4 @@ func catalogueResult(res insights.QueryResult) (tools.CatalogueResult, error) {
 		rows = append(rows, row)
 	}
 	return tools.CatalogueResult{Columns: cols, Rows: rows}, nil
-}
-
-// unixSecPtr maps a 0 (unset) Unix-seconds field onto a nil *time.Time; any
-// other value becomes the second boundary. Used by the still-unix recall tool.
-func unixSecPtr(sec int64) *time.Time {
-	if sec == 0 {
-		return nil
-	}
-	t := time.Unix(sec, 0)
-	return &t
 }

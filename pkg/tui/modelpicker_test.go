@@ -16,6 +16,7 @@ import (
 	"go.graveland.dev/rafiki/pkg/protocol"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func i32p(v int32) *int32   { return &v }
@@ -643,12 +644,12 @@ func TestChangingTheViewClearsTheHighlight(t *testing.T) {
 }
 
 func toolRows() []*rafikiv1.ModelRow {
-	day := int64(24 * 60 * 60)
-	now := time.Now().Unix()
+	day := 24 * time.Hour
+	now := time.Now()
 	return []*rafikiv1.ModelRow{
-		{Id: "a/agentic", Created: &[]int64{now - 5*day}[0],
+		{Id: "a/agentic", Created: timestamppb.New(now.Add(-5 * day)),
 			SupportedParameters: []string{"tools", "reasoning"}},
-		{Id: "b/chat-only", Created: &[]int64{now - 400*day}[0],
+		{Id: "b/chat-only", Created: timestamppb.New(now.Add(-400 * day)),
 			SupportedParameters: []string{"temperature"}},
 		{Id: "c/unknown"}, // no catalog entry at all
 	}
@@ -737,19 +738,18 @@ func TestExtraColumnsAreCappedAtTwo(t *testing.T) {
 func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
 	c := assert.NewCollecting(t)
 	now := time.Now()
-	day := int64(24 * 60 * 60)
-	mk := func(off int64) *rafikiv1.ModelRow {
-		v := now.Unix() - off
-		return &rafikiv1.ModelRow{Created: &v}
+	day := 24 * time.Hour
+	mk := func(off time.Duration) *rafikiv1.ModelRow {
+		return &rafikiv1.ModelRow{Created: timestamppb.New(now.Add(-off))}
 	}
 	for _, tc := range []struct {
-		off  int64
+		off  time.Duration
 		want string
 	}{
 		{0, "today"}, {5 * day, "5d"}, {90 * day, "3mo"}, {800 * day, "2.2y"},
 	} {
 		got := ageCell(mk(tc.off), now)
-		c.Eq(tc.want, got, "ageCell(%dd) = %q, want", tc.off/day, got)
+		c.Eq(tc.want, got, "ageCell(%v) = %q, want", tc.off, got)
 	}
 	c.Eq("—", ageCell(&rafikiv1.ModelRow{}, now), "ageCell(absent)")
 }
@@ -758,17 +758,16 @@ func TestAgeCellIsCoarseAndAbsenceIsADash(t *testing.T) {
 func TestExpiryWarnsOnlyWithinAYear(t *testing.T) {
 	c := assert.NewCollecting(t)
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
-	soon := &rafikiv1.ModelRow{ExpiresAt: "2026-09-08"}
+	soon := &rafikiv1.ModelRow{ExpiresAt: timestamppb.New(time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC))}
 	if got := expiryWarning(soon, now); !strings.Contains(got, "6d") ||
 		!strings.Contains(got, "2026-09-08") {
 		t.Errorf("expiryWarning(soon) = %q, want the date and the countdown", got)
 	}
 	// "2098-12-31" means "no planned removal"; warning on it would put a
 	// notice next to models in no danger at all.
-	sentinel := &rafikiv1.ModelRow{ExpiresAt: "2098-12-31"}
+	sentinel := &rafikiv1.ModelRow{ExpiresAt: timestamppb.New(time.Date(2098, 12, 31, 0, 0, 0, 0, time.UTC))}
 	c.Eq("", expiryWarning(sentinel, now), "expiryWarning(sentinel)")
 	c.Eq("", expiryWarning(&rafikiv1.ModelRow{}, now), "expiryWarning(none)")
-	c.Eq("", expiryWarning(&rafikiv1.ModelRow{ExpiresAt: "not-a-date"}, now), "expiryWarning(garbage)")
 }
 
 // The detail block is where the sparse facts live, so they cost width on one
@@ -831,7 +830,7 @@ func TestDetailBlockFlagsANoToolsModel(t *testing.T) {
 // The expiry warning rides the block rather than a column of its own.
 func TestDetailBlockCarriesTheExpiryWarning(t *testing.T) {
 	now := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
-	row := &rafikiv1.ModelRow{Id: "a/b", ExpiresAt: "2026-09-08"}
+	row := &rafikiv1.ModelRow{Id: "a/b", ExpiresAt: timestamppb.New(time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC))}
 	body := ansi.Strip(strings.Join(modelDetail(row, now, 140), " "))
 	assert.NewCollecting(t).StrContains(body, "removed 2026-09-08 (6d)", "no expiry warning in the detail block:\n")
 }
@@ -923,8 +922,8 @@ func TestDetailBlockCarriesCutoffAndAgenticScore(t *testing.T) {
 // week can have a cutoff from a year before that.
 func TestCutoffAndAgeAreSeparateFields(t *testing.T) {
 	c := assert.NewCollecting(t)
-	created := time.Now().AddDate(0, 0, -7).Unix()
-	row := &rafikiv1.ModelRow{Id: "x/y", Created: &created, KnowledgeCutoff: "2025-01-31"}
+	created := time.Now().AddDate(0, 0, -7)
+	row := &rafikiv1.ModelRow{Id: "x/y", Created: timestamppb.New(created), KnowledgeCutoff: "2025-01-31"}
 	body := ansi.Strip(strings.Join(modelDetail(row, time.Now(), 140), " "))
 	c.StrContains(body, "age 7d", "age missing or wrong:\n")
 	c.StrContains(body, "cutoff 2025-01-31", "cutoff missing:\n")

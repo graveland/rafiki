@@ -87,6 +87,7 @@ c.put_preset({"name": "review:reviewer", "kind": "fundi", "model": "...", "skill
 # Recall and memories (owner-scoped: reads and writes act as the caller's
 # owner, and a child credential is bound to its owner's rows, never an admin's).
 hits = c.recall("what did we decide", sources=["memory", "summary"])  # owner's memories + conversations
+hits = c.recall("when did we ship", since=dt, until=dt)  # datetime bounds; None = unbounded
 text = c.recall_context(hits[0].id)       # expand a "m:"/"s:"/"w:" hit id
 mem  = c.memory_get("infra", "notes")     # not_found raises ConnectError
 rows = c.memory_tree("infra", depth=2)    # memories under a path, 0 = unlimited

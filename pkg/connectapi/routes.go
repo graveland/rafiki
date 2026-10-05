@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"go.graveland.dev/rafiki/pkg/routing"
 
@@ -80,13 +81,12 @@ func routeError(err error) error {
 	return connect.NewError(connect.CodeInternal, err)
 }
 
-// toProtoRouteRow renders created_at as RFC3339 UTC: the wire field is a
-// string, and a stable timestamp format is what a client re-parses.
+// toProtoRouteRow renders the row's creation time as a Timestamp.
 func toProtoRouteRow(r RouteRow) *rafikiv1.RouteRow {
 	return &rafikiv1.RouteRow{
 		ModelLine: r.ModelLine,
 		Spec:      r.Spec,
-		CreatedAt: r.CreatedAt.UTC().Format(time.RFC3339),
+		CreatedAt: timestamppb.New(r.CreatedAt),
 	}
 }
 

@@ -493,7 +493,7 @@ func skillRowFrom(r skills.Record) connectapi.SkillRow {
 		Source:              r.Source,
 		ShadowedCoreVersion: r.ShadowedCoreVersion,
 		Enabled:             r.Enabled,
-		UpdatedAt:           r.UpdatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:           r.UpdatedAt,
 	}
 }
 

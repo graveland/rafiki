@@ -159,20 +159,10 @@ func emitTokenList(w io.Writer, rows []*rafikiv1.TokenRow, mode outputMode, useC
 		tb.Header(dimHeader(useColor, "ID", "USER", "NAME", "ORIGIN", "CREATED", "EXPIRES", "REVOKED")...)
 		for _, r := range rows {
 			tb.Row(r.GetId(), r.GetUsername(), defaultDash(r.GetName()), defaultDash(r.GetOrigin()),
-				unixDateCell(r.GetCreatedAtUnix()), unixDatePtrCell(r.ExpiresAtUnix), unixDatePtrCell(r.RevokedAtUnix))
+				formatTimestamp(r.GetCreatedAt()), formatTimestamp(r.GetExpiresAt()), formatTimestamp(r.GetRevokedAt()))
 		}
 		return tb.Render()
 	}
-}
-
-// unixDatePtrCell renders an optional unix-seconds timestamp; a nil pointer
-// means "never" (expiry) or "not revoked", which reads as "-" rather than as
-// a zero date.
-func unixDatePtrCell(sec *int64) string {
-	if sec == nil {
-		return "-"
-	}
-	return unixDateCell(*sec)
 }
 
 func newTokenRevokeCmd() *cobra.Command {

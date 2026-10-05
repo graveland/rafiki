@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"go.graveland.dev/rafiki/pkg/connectapi"
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
@@ -108,7 +109,9 @@ func toProtoRouteEndpoint(r routing.ExplainRow) *rafikiv1.RouteEndpoint {
 	if r.Stats != nil {
 		out.P50TokensPerSec = statOrNil(r.Stats.P50Throughput)
 		out.P90TokensPerSec = statOrNil(r.Stats.P90Throughput)
-		out.P50LatencyMs = statOrNil(r.Stats.P50LatencyMs)
+		if r.Stats.P50LatencyMs >= 0 {
+			out.P50Latency = durationpb.New(time.Duration(r.Stats.P50LatencyMs * float64(time.Millisecond)))
+		}
 		if r.Stats.Requests >= 0 {
 			v := int32(r.Stats.Requests)
 			out.StatsRequests = &v

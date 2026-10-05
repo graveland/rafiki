@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 	"go.graveland.dev/rafiki/pkg/protocol"
@@ -122,12 +124,12 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 	c := assert.NewAborting(t)
 	created := int64(1800000100)
 	f := &fakeUserAdmin{
-		createResp: &rafikiv1.CreateUserResponse{Id: "u1", Username: "alice", Token: "rfk_x", CreatedAtUnix: 100},
-		listRows:   []*rafikiv1.UserRow{{Id: "u1", Username: "alice", CreatedAtUnix: 100}},
-		updateRow:  &rafikiv1.UserRow{Id: "u1", Username: "alice", Email: "alice@x.dev", CreatedAtUnix: 100},
+		createResp: &rafikiv1.CreateUserResponse{Id: "u1", Username: "alice", Token: "rfk_x", CreatedAt: timestamppb.New(time.Unix(100, 0))},
+		listRows:   []*rafikiv1.UserRow{{Id: "u1", Username: "alice", CreatedAt: timestamppb.New(time.Unix(100, 0))}},
+		updateRow:  &rafikiv1.UserRow{Id: "u1", Username: "alice", Email: "alice@x.dev", CreatedAt: timestamppb.New(time.Unix(100, 0))},
 		mintResp:   &rafikiv1.MintTokenResponse{Info: &rafikiv1.TokenRow{Id: "t1", Username: "alice", Name: "n"}, Token: "rfk_y"},
 		tokenRows:  []*rafikiv1.TokenRow{{Id: "t1", Username: "alice"}, {Id: "t2", Username: "bob"}},
-		revokeRow:  &rafikiv1.TokenRow{Id: "t1", RevokedAtUnix: &created},
+		revokeRow:  &rafikiv1.TokenRow{Id: "t1", RevokedAt: timestamppb.New(time.Unix(created, 0))},
 	}
 	s := &Server{}
 	s.SetUserAdmin(f)
@@ -136,7 +138,7 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 	mintTrue := true
 	createResp, err := s.CreateUser(ctx, connect.NewRequest(&rafikiv1.CreateUserRequest{Username: "alice", Email: "a@x.dev", MintToken: &mintTrue}))
 	c.NoError(err, "CreateUser")
-	if createResp.Msg.GetUsername() != "alice" || createResp.Msg.GetToken() != "rfk_x" || createResp.Msg.GetCreatedAtUnix() != 100 {
+	if createResp.Msg.GetUsername() != "alice" || createResp.Msg.GetToken() != "rfk_x" || createResp.Msg.GetCreatedAt().AsTime().Unix() != 100 {
 		t.Fatalf("CreateUser response = %+v", createResp.Msg)
 	}
 	if f.gotCreate[0] != "alice" || f.gotCreate[1] != "a@x.dev" {
@@ -187,7 +189,7 @@ func TestUserRPCsRoundTrip(t *testing.T) {
 
 	revokeResp, err := s.RevokeToken(ctx, connect.NewRequest(&rafikiv1.RevokeTokenRequest{Id: "t1"}))
 	c.NoError(err, "RevokeToken")
-	if revokeResp.Msg.GetInfo().GetId() != "t1" || revokeResp.Msg.GetInfo().RevokedAtUnix == nil {
+	if revokeResp.Msg.GetInfo().GetId() != "t1" || revokeResp.Msg.GetInfo().RevokedAt == nil {
 		t.Fatalf("RevokeToken response = %+v", revokeResp.Msg)
 	}
 	c.Eq("t1", f.gotRevokeID, "RevokeToken saw id")

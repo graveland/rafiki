@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -118,10 +119,11 @@ func TestListModelsErrorBecomesInternal(t *testing.T) {
 // Tool support, listing date and expiry ride the wire, and absence survives.
 func TestListModelsCarriesToolSupportAgeAndExpiry(t *testing.T) {
 	c := assert.NewCollecting(t)
-	created := int64(1750000000)
+	created := time.Unix(1750000000, 0).UTC()
+	expires := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
 	f := &fakeModelLister{rows: []connectapi.ModelRow{
 		{
-			ID: "a/agentic", Created: &created, ExpiresAt: "2026-09-08",
+			ID: "a/agentic", Created: &created, ExpiresAt: &expires,
 			SupportedParameters: []string{"tools", "temperature"},
 		},
 		{ID: "ollama/llama3"}, // no catalog entry at all
@@ -134,15 +136,15 @@ func TestListModelsCarriesToolSupportAgeAndExpiry(t *testing.T) {
 	c.Require().NoError(err, "ListModels")
 	got := resp.Msg.GetModels()
 
-	c.Eq(created, got[0].GetCreated(), "Created")
-	c.Eq("2026-09-08", got[0].GetExpiresAt(), "ExpiresAt")
+	c.Eq(created, got[0].GetCreated().AsTime(), "Created")
+	c.Eq(expires, got[0].GetExpiresAt().AsTime(), "ExpiresAt")
 	c.Len(got[0].GetSupportedParameters(), 2, "SupportedParameters")
 
 	// A model with no catalog entry must arrive UNKNOWN on all three, never as
 	// "supports nothing" or "created at the epoch".
 	c.Nil(got[1].Created, "Created")
 	c.Empty(got[1].GetSupportedParameters(), "SupportedParameters")
-	c.Eq("", got[1].GetExpiresAt(), "ExpiresAt")
+	c.Nil(got[1].ExpiresAt, "ExpiresAt")
 }
 
 func TestListModelsCarriesCutoffAndAgenticScore(t *testing.T) {

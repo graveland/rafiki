@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.graveland.dev/rafiki/pkg/recall"
 )
@@ -26,13 +27,15 @@ type RecallBinding interface {
 // RecallQuery is one recall search. The daemon maps it onto recall.SearchQuery:
 // the conversation sources read under the caller's scope, memories under the
 // caller's own owner id. Sources are source names, not recall.Source values.
+// Since/Until are RFC3339-time bounds; nil means unbounded.
 type RecallQuery struct {
-	Query                string
-	Sources              []string
-	Under                string
-	Repo                 string
-	SinceUnix, UntilUnix int64
-	Limit                int
+	Query   string
+	Sources []string
+	Under   string
+	Repo    string
+	Since   *time.Time
+	Until   *time.Time
+	Limit   int
 }
 
 const recallDescription = "Search your past conversations and saved memories by keyword " +
@@ -59,10 +62,10 @@ func (RecallBlueprint) InputSchema() Schema {
 				Description: "Memory path prefix (e.g. projects.rafiki); only memory hits under it."},
 			{Name: "repo", Type: "string",
 				Description: "Repo directory basename; only conversation hits from conversations in that repo."},
-			{Name: "since_unix", Type: "integer",
-				Description: "Unix seconds; only hits with activity at or after this time."},
-			{Name: "until_unix", Type: "integer",
-				Description: "Unix seconds; only hits with activity before this time."},
+			{Name: "since", Type: "string",
+				Description: "RFC3339 time; only hits with activity at or after this time."},
+			{Name: "until", Type: "string",
+				Description: "RFC3339 time; only hits with activity before this time."},
 			{Name: "limit", Type: "integer",
 				Description: "Max hits per source (default 10, max 50)."},
 		},
@@ -85,13 +88,13 @@ type recallTool struct {
 }
 
 type recallInput struct {
-	Query     string   `json:"query"`
-	Sources   []string `json:"sources"`
-	Under     string   `json:"under"`
-	Repo      string   `json:"repo"`
-	SinceUnix int64    `json:"since_unix"`
-	UntilUnix int64    `json:"until_unix"`
-	Limit     int      `json:"limit"`
+	Query   string      `json:"query"`
+	Sources []string    `json:"sources"`
+	Under   string      `json:"under"`
+	Repo    string      `json:"repo"`
+	Since   rfc3339Time `json:"since"`
+	Until   rfc3339Time `json:"until"`
+	Limit   int         `json:"limit"`
 }
 
 func (t *recallTool) Execute(ctx context.Context, input ToolInput) (ToolResult, error) {
@@ -113,13 +116,13 @@ func (t *recallTool) Execute(ctx context.Context, input ToolInput) (ToolResult, 
 		limit = recall.RecallMaxLimit
 	}
 	text, err := t.recall.Recall(ctx, RecallQuery{
-		Query:     in.Query,
-		Sources:   in.Sources,
-		Under:     in.Under,
-		Repo:      in.Repo,
-		SinceUnix: in.SinceUnix,
-		UntilUnix: in.UntilUnix,
-		Limit:     limit,
+		Query:   in.Query,
+		Sources: in.Sources,
+		Under:   in.Under,
+		Repo:    in.Repo,
+		Since:   in.Since.Time,
+		Until:   in.Until.Time,
+		Limit:   limit,
 	})
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("recall: %w", err)

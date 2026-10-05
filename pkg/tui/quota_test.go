@@ -10,6 +10,7 @@ import (
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 
 	"github.com/multigres/testkit/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestQuotaReadoutEmptyWithNoPoll(t *testing.T) {
@@ -24,7 +25,7 @@ func TestQuotaReadoutShowsFreshData(t *testing.T) {
 	c.quota = &rafikiv1.GetRateLimitStatusResponse{
 		FiveH:     &rafikiv1.RateLimitWindow{Utilization: &util},
 		SevenD:    &rafikiv1.RateLimitWindow{},
-		UpdatedAt: time.Now().Unix(),
+		UpdatedAt: timestamppb.New(time.Now()),
 	}
 	got := c.quotaReadout()
 	ck.StrContains(got, "42%", "quotaReadout() = %q, want it to contain 42%%", got)
@@ -36,7 +37,7 @@ func TestQuotaReadoutHidesStaleData(t *testing.T) {
 	util := 0.42
 	c.quota = &rafikiv1.GetRateLimitStatusResponse{
 		FiveH:     &rafikiv1.RateLimitWindow{Utilization: &util},
-		UpdatedAt: time.Now().Add(-1 * time.Hour).Unix(), // well past quotaStaleAfter
+		UpdatedAt: timestamppb.New(time.Now().Add(-1 * time.Hour)), // well past quotaStaleAfter
 	}
 	assert.NewCollecting(t).Eq("", c.quotaReadout(), "quotaReadout() with a stale snapshot")
 }

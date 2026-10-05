@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	rafikiv1 "go.graveland.dev/rafiki/pkg/gen/rafiki/v1"
 )
@@ -86,12 +87,11 @@ func toProtoProviderBan(r ProviderBanRow) *rafikiv1.ProviderBan {
 		Provider:  r.Provider,
 		ModelLine: r.ModelLine,
 		Reason:    r.Reason,
-		CreatedAt: r.CreatedAt.Unix(),
+		CreatedAt: timestamppb.New(r.CreatedAt),
 		Note:      r.Note,
 	}
 	if !r.ExpiresAt.IsZero() {
-		v := r.ExpiresAt.Unix()
-		out.ExpiresAt = &v
+		out.ExpiresAt = timestamppb.New(r.ExpiresAt)
 	}
 	return out
 }
@@ -126,13 +126,16 @@ func (s *Server) BanProvider(
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("provider is required"))
 	}
 	var d time.Duration
-	if req.Msg.DurationSeconds != nil {
-		secs := req.Msg.GetDurationSeconds()
-		if secs <= 0 {
+	if req.Msg.Duration != nil {
+		if err := req.Msg.Duration.CheckValid(); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
-				fmt.Errorf("duration_seconds must be positive when set, got %d (omit it to ban until lifted)", secs))
+				fmt.Errorf("duration: %w", err))
 		}
-		d = time.Duration(secs) * time.Second
+		d = req.Msg.Duration.AsDuration()
+		if d <= 0 {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("duration must be positive when set, got %s (omit it to ban until lifted)", d))
+		}
 	}
 	row, persistent, err := m.BanProvider(ctx, provider, d, req.Msg.GetNote())
 	if err != nil {
